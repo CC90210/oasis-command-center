@@ -193,3 +193,30 @@ export function isDaemonScope(pairing: Pick<ResolvedPairing, "scope">): boolean 
 export function pairingCanClaim(pairing: Pick<ResolvedPairing, "claimEnabledAt" | "pairedVia">): boolean {
   return pairing.pairedVia !== "signup_secret" && Boolean(pairing.claimEnabledAt);
 }
+
+/**
+ * A FRESH read of pairing `pairingId`'s live state, for a re-check right
+ * before work is handed over -- never the `pairing` object a route resolved
+ * at request start (Codex review, O4, 2026-10-11, [P1]). The claim route's
+ * own request-start checks (resolvePairingFromBearer, pairingCanClaim) run
+ * ONCE, before a long-poll that can run for up to 20 seconds; this is the
+ * same pairingCanClaim gate, re-applied against the CURRENT row, for the
+ * idempotent-retry path (store.ts findClaimedComputerRun), which never goes
+ * through claimComputerRun's own atomic pairing-liveness subquery at all.
+ * Fails CLOSED: no row, or a read that could not finish, is never "still live".
+ */
+export async function pairingLiveForClaim(pairingId: string): Promise<boolean> {
+  if (!pairingId) return false;
+  try {
+    const db = getServiceSupabase();
+    const { data, error } = await db.from("bridge_pairings").select("revoked_at, claim_enabled_at, paired_via").eq("id", pairingId).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return false;
+    const row = data as { revoked_at: string | null; claim_enabled_at: string | null; paired_via: string | null };
+    if (row.revoked_at) return false;
+    return pairingCanClaim({ claimEnabledAt: row.claim_enabled_at, pairedVia: normalizePairedVia(row.paired_via) });
+  } catch (err) {
+    console.error("[bridge.pairing-auth.liveForClaim]", { pairingId, error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
+}

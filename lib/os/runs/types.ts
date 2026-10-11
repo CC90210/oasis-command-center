@@ -53,10 +53,29 @@ export const PRODUCER_SEQ_BASE = 100;
 /** A re-attach stream lives this long, then ends; the browser asks again with the last seq it saw. */
 export const TAIL_WINDOW_MS = 25_000;
 
+/** A computer-claimed run's token lifetime: the longest an MCP or run token may outlive (O4 security rule 7). */
+export const COMPUTER_CLAIM_DEADLINE_MS = 20 * 60_000;
+/**
+ * The three clocks that keep a computer-dispatched chat run from waiting
+ * forever (O4 "OFFLINE AND HONEST"), all measured from the moment the run
+ * becomes FIRST IN ITS CONVERSATION with nothing running ahead of it, not
+ * from when it was sent -- a follow-up waiting behind a long reply in the
+ * same conversation is never penalised for that wait.
+ */
+export const COMPUTER_NOT_ANSWERING_MS = 20_000;
+export const COMPUTER_BUSY_TIMEOUT_MS = 5 * 60_000;
+/** The absolute cap, regardless of why: still queued this long and it fails, whatever the computer last reported. */
+export const COMPUTER_MAX_QUEUED_MS = 10 * 60_000;
+
 /**
  * Who drives a run and writes its events:
  *   worker      the department chat's driver in the Worker (the default);
- *   producer    the paired computer's bridge, posting events with a run token;
+ *   producer    a paired computer's bridge, posting events with a run token --
+ *               either the legacy push path's handoff (attachProducer, a
+ *               Worker-started run handed over mid-reply) or O4's pull
+ *               dispatch (claimComputerRun sets source='producer' in the SAME
+ *               statement that claims the run, so both paths write events
+ *               through the identical door: ./producer.ts ingestBatch);
  *   automation  a department task's run (lib/automations), driven only by the
  *               automation driver (executor.ts driveAutomationRun) that claims
  *               it BY ID. No chat driver ever claims one (store.ts claimNextRun),
@@ -65,6 +84,38 @@ export const TAIL_WINDOW_MS = 25_000;
  * A worker or automation run is stale after RUN_STALE_MS of silence.
  */
 export type RunSource = "worker" | "producer" | "automation";
+
+/**
+ * Who may claim a run (O4, migration bravo__213):
+ *   worker    the Worker's own chat driver (claimNextRun) -- the default, and
+ *             every run ever enqueued before this column existed;
+ *   computer  claimed ONLY by the claim route's compare-and-swap
+ *             (claimComputerRun), for a person whose effective engine is
+ *             their own paired computer. claimNextRun explicitly excludes
+ *             executor='computer', so a chat Worker driver can never run one
+ *             on the workspace's API account -- the one fallback O4 must
+ *             never have (Adon, 2026-10-11: NO KEY FALLBACK, ever).
+ */
+export const RUN_EXECUTORS = ["worker", "computer"] as const;
+export type RunExecutor = (typeof RUN_EXECUTORS)[number];
+
+export function isRunExecutor(value: unknown): value is RunExecutor {
+  return typeof value === "string" && (RUN_EXECUTORS as readonly string[]).includes(value);
+}
+
+/**
+ * Why a run was queued (O4, also read by O5's automations): a chat message
+ * goes before a "Run now" test, which goes before a scheduled automation --
+ * the claim route's compare-and-swap orders by this, so a person waiting on
+ * an answer is never queued behind work that merely happened to be enqueued
+ * first. O4 itself only ever writes 'chat'.
+ */
+export const RUN_ORIGINS = ["chat", "automation", "test"] as const;
+export type RunOrigin = (typeof RUN_ORIGINS)[number];
+
+export function isRunOrigin(value: unknown): value is RunOrigin {
+  return typeof value === "string" && (RUN_ORIGINS as readonly string[]).includes(value);
+}
 
 /**
  * Why an automation run failed, beyond the channel's own failure codes

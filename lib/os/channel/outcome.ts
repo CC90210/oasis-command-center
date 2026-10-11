@@ -63,6 +63,23 @@ export const TURN_FAILURE_CODES = [
   "cli_empty_output", //       the app ran and returned nothing
   "cli_nonzero_exit", //       the app exited with an error
   "cli_timeout", //            the app did not finish in time
+  // O4: a department turn pull-dispatched to a person's own paired computer
+  // (lib/os/runs/computer-turn.ts, the claim route, the events route). Each
+  // keeps its own sentence end to end -- never collapsed into cli_failed
+  // (the classifier below still does that for anything it does not know).
+  "subscription_limit", //        the connector's plan hit its limit mid-run
+  "mcp_unreachable", //            the oasis MCP server was not connected at the Claude Code init event
+  "cli_max_turns", //              the run hit its --max-turns cap before finishing
+  "department_profile_unsafe", //  the init event, or a tool call, broke the locked-down profile
+  "computer_not_answering", //     first in line with no live claimer past the clock, or still queued past the absolute cap
+  "computer_busy_timeout", //      first in line behind a busy computer past 5 minutes
+  "computer_offline", //           the computer stopped making claim calls
+  "seat_removed", //               the person's seat ended between send and claim, or mid-run
+  // The computer's own claim_blocked_reason (bravo__212_pairing_scope_claim.sql),
+  // read at SEND time, before a run is ever queued (session.ts NO KEY FALLBACK):
+  "subscription_auth_failure", // the app on that computer is signed out
+  "department_profile_unsupported", // the computer's preflight could not confirm its locked-down profile
+  "claude_account_changed", // the signed-in Claude account no longer matches the one approved for this computer
 ] as const;
 
 export type TurnFailureCode = (typeof TURN_FAILURE_CODES)[number];
@@ -418,7 +435,78 @@ const COPY: Record<TurnFailureCode, { sentence: string; short: string; fix: Fail
     short: "the AI app on the paired computer did not answer in time",
     fix: OPEN_ENGINE_SETTINGS,
   },
+  // O4: a department turn dispatched to the person's OWN paired computer.
+  // Never OPEN_ENGINE_SETTINGS (that card is the workspace-wide bridge
+  // engine): the fix for each of these is in Settings > Computers, for this
+  // person only, so no `fix` link names a page the viewer may not have.
+  subscription_limit: {
+    sentence: "Your Claude plan hit its limit while this reply was in progress. Try again once it resets.",
+    short: "your Claude plan hit its limit",
+    fix: null,
+  },
+  mcp_unreachable: {
+    sentence: "Your computer could not reach OASIS's workspace tools for this reply. Try again in a moment.",
+    short: "your computer could not reach the workspace tools",
+    fix: null,
+  },
+  cli_max_turns: {
+    sentence: "This reply needed more steps than it is allowed to take and was stopped. Try asking it more directly.",
+    short: "the reply needed too many steps and was stopped",
+    fix: null,
+  },
+  department_profile_unsafe: {
+    sentence: "Your computer's connector reported it could not run this safely and stopped. Try again in a moment.",
+    short: "the computer's connector could not run this safely",
+    fix: null,
+  },
+  computer_not_answering: {
+    sentence: "Your computer did not answer. Check it is on and connected in Settings > Computers, then try again.",
+    short: "your computer did not answer",
+    fix: null,
+  },
+  computer_busy_timeout: {
+    sentence: "Your computer stayed busy with other replies for too long. Try again in a moment.",
+    short: "your computer stayed busy for too long",
+    fix: null,
+  },
+  computer_offline: {
+    sentence: "Your computer is offline. Check it is on and connected in Settings > Computers, then try again.",
+    short: "your computer is offline",
+    fix: null,
+  },
+  seat_removed: {
+    sentence: "This person's access to the workspace ended while this reply was in progress.",
+    short: "this person's access ended mid-reply",
+    fix: null,
+  },
+  subscription_auth_failure: {
+    sentence: "The app on your paired computer is signed out. Sign in to it on that computer, then try again.",
+    short: "the app on your computer is signed out",
+    fix: null,
+  },
+  department_profile_unsupported: {
+    sentence: "Your computer could not confirm it can run department chats safely. Try again once it has.",
+    short: "your computer could not confirm it can run this safely",
+    fix: null,
+  },
+  claude_account_changed: {
+    sentence: "The Claude account signed in on your computer has changed. Re-approve it in Settings > Computers.",
+    short: "the signed-in Claude account changed",
+    fix: null,
+  },
 };
+
+/**
+ * One of this computer's claim_blocked_reason values (bravo__212_pairing_scope_claim.sql),
+ * reduced to its own TurnFailureCode -- used at SEND time, before a run is
+ * ever queued (session.ts NO KEY FALLBACK), and by the claim route's
+ * "a blocked computer fails at once" rule. An unrecognised reason (a future
+ * connector value this build does not know yet) reads as computer_offline:
+ * never silently treated as answerable.
+ */
+export function blockedReasonCode(reason: string): TurnFailureCode {
+  return isTurnFailureCode(reason) ? reason : "computer_offline";
+}
 
 const UNKNOWN: FailureCopy = {
   sentence: "Something went wrong sending that. Try again.",

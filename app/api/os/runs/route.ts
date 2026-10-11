@@ -79,6 +79,7 @@ export async function POST(req: NextRequest) {
         conversationId: typeof body.conversation_id === "string" ? body.conversation_id.trim() : "",
         chatMode: body.chat_mode === "plan" ? "plan" : "build",
       },
+      computerDispatch: session.computerDispatch,
     });
   } catch (err) {
     if (err instanceof RunsUnavailableError) return json(503, { ok: false, error: "chat_history_unavailable" });

@@ -29,6 +29,10 @@ import { DESK_TOOLS, type DeskToolName } from "@/lib/os/desk/catalog";
 import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/secret-redaction";
 import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { wrapUntrusted } from "@/lib/llm-input-boundary";
+import { getTursoClient } from "@/lib/turso";
+import { getRunForProducer } from "@/lib/os/runs/store";
+import { liveSeat } from "@/lib/os/seat";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import type { McpProfile, McpTokenClaims } from "./bearer";
 
 /** The member and department a verified bearer stands for, re-checked this call. */
@@ -38,17 +42,87 @@ export type McpSession = {
   prof: McpProfile;
 };
 
-export type McpSessionRefusal = { ok: false; code: "seat_gone" | "department_closed" | "unavailable"; message: string };
+export type McpSessionRefusal = { ok: false; code: "seat_gone" | "department_closed" | "unavailable" | "run_gone"; message: string };
+
+const RUN_GONE: McpSessionRefusal = { ok: false, code: "run_gone", message: "This run has finished, or is no longer claimed by this computer." };
+
+/**
+ * Whether the pairing `pairingId` is blocked: revoked, not found, or
+ * unreadable. Fails CLOSED -- a read it could not finish is never "still
+ * live": disconnecting a computer (or a database hiccup) must stop its MCP
+ * calls, never let them through on the strength of a stale bearer. Exported:
+ * the events route (app/api/os/runs/[id]/events) runs the SAME check for a
+ * computer-executor run's producer door.
+ */
+export async function pairingBlocked(pairingId: string): Promise<boolean> {
+  if (!pairingId) return true;
+  try {
+    const { data, error } = await getServiceSupabase().from("bridge_pairings").select("revoked_at").eq("id", pairingId).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return true;
+    return Boolean((data as { revoked_at: string | null }).revoked_at);
+  } catch (err) {
+    console.error("[mcp.tools.pairing]", { pairingId, error: err instanceof Error ? err.message : String(err) });
+    return true;
+  }
+}
 
 /**
  * Fresh seat check, EVERY call: the member must still hold a seat in the
  * bearer's workspace, and the department's page must still open for them (the
  * rail's own gate, so a downgraded role loses the department at once).
+ *
+ * O4 (claims.rid set -- a pull-dispatched bearer, never the legacy push
+ * path): FIRST, with one indexed read, that the named run is still running
+ * on a computer, still belongs to this (tenant, user), and is still claimed
+ * by THIS pairing (claims.pid), which is not revoked. THEN the seat, with
+ * the bearer's own session_version (claims.sv) when it carries one -- a
+ * password change or removal between mint and this call invalidates it, the
+ * same way a stale cookie is invalidated. Disconnecting a computer (which
+ * revokes its pairing) therefore stops its MCP calls on the very next call,
+ * not at token expiry.
  */
 export async function resolveMcpSession(
   claims: McpTokenClaims,
-  deps: { resolveViewer?: typeof resolveOsViewerFor } = {},
+  deps: { resolveViewer?: typeof resolveOsViewerFor; getRun?: typeof getRunForProducer; pairingBlocked?: typeof pairingBlocked; liveSeat?: typeof liveSeat } = {},
 ): Promise<({ ok: true } & McpSession) | McpSessionRefusal> {
+  if (claims.rid) {
+    const getRun = deps.getRun ?? getRunForProducer;
+    let run: Awaited<ReturnType<typeof getRunForProducer>>;
+    try {
+      run = await getRun(getTursoClient(), claims.rid);
+    } catch (err) {
+      console.error("[mcp.tools.run]", { runId: claims.rid, error: err instanceof Error ? err.message : String(err) });
+      return { ok: false, code: "unavailable", message: "This run could not be checked right now. Try again in a moment." };
+    }
+    if (
+      !run ||
+      run.tenantId !== claims.tid ||
+      run.userId !== claims.uid ||
+      run.executor !== "computer" ||
+      run.status !== "running" ||
+      !claims.pid ||
+      run.claimedPairingId !== claims.pid
+    ) {
+      return RUN_GONE;
+    }
+    if (await (deps.pairingBlocked ?? pairingBlocked)(claims.pid)) return RUN_GONE;
+  } else if (claims.pid) {
+    // A computer-bound bearer with no run (the O4 canary): the computer that
+    // asked for it must still be connected on every call, so disconnecting it
+    // ends the bearer at once, not at expiry (security review, O4).
+    if (await (deps.pairingBlocked ?? pairingBlocked)(claims.pid)) return RUN_GONE;
+  }
+
+  if (claims.sv !== undefined) {
+    const seat = await (deps.liveSeat ?? liveSeat)(claims.tid, claims.uid, claims.sv);
+    if (!seat.live) {
+      return seat.reason === "unavailable"
+        ? { ok: false, code: "unavailable", message: "The workspace could not be read right now. Try again in a moment." }
+        : { ok: false, code: "seat_gone", message: "This session no longer has access to the workspace." };
+    }
+  }
+
   const viewer = await (deps.resolveViewer ?? resolveOsViewerFor)(claims.tid, claims.uid);
   if (!viewer.ok) {
     return viewer.reason === "degraded"

@@ -5,21 +5,40 @@
  *   omcp1.<base64url payload>.<base64url HMAC-SHA256 of "omcp1.<payload>">
  *
  * Payload: { aud:"oasis-mcp", kid, tid, uid, dept, prof:"read"|"propose", sid,
- * iat, exp }, exp - iat <= 60 minutes.
+ * iat, exp, rid?, pid?, sv?, orig? }, exp - iat <= 60 minutes.
+ *
+ *   rid   (O4) the run this bearer was minted for, pull-dispatched to a
+ *         person's own paired computer. Absent on the legacy push path (the
+ *         workspace tunnel, B2's interim branch), which names no run.
+ *   pid   (O4) the pairing (computer) the bearer was minted for.
+ *   sv    (O4) the auth user's session_version at mint time: a password
+ *         change or deactivation bumps it, which invalidates every bearer
+ *         minted before (lib/os/seat.ts liveSeat).
+ *   orig  (O4) the run's origin ('chat' | 'automation' | 'test'), so a tool
+ *         can tell an unattended automation turn from a live chat turn.
  *
  * The bearer is a CLAIM, not a permission: the server re-reads the member's seat
  * on every call (components/os/department/viewer.ts resolveOsViewerFor), so a
- * removed seat or a lowered role bites at once. Stateless on purpose (no table):
- * revoking everything is rotating the key id - unset the old
- * OASIS_MCP_TOKEN_KEY_<kid> secret and every bearer signed with it stops
- * verifying.
+ * removed seat or a lowered role bites at once. For an O4 bearer (rid set) it
+ * ALSO re-checks, on every call, that the named run is still running on a
+ * computer, still belongs to this person, and is still claimed by THIS
+ * pairing, unrevoked (lib/mcp/tools.ts resolveMcpSession) -- disconnecting
+ * that computer must stop its MCP calls at once, not at token expiry.
  *
- * Keys: Worker secret OASIS_MCP_TOKEN_KEY_<kid> per key id; OASIS_MCP_TOKEN_KID
- * names the id new bearers are minted under. A kid is 1-16 letters or digits.
- * A missing or short key is "unknown kid": nothing verifies, nothing mints.
+ * Keys: an explicit Worker secret, OASIS_MCP_TOKEN_KEY_<kid>, wins when it is
+ * set with at least MCP_TOKEN_MIN_KEY_CHARS characters. Otherwise, for kid ==
+ * MCP_DERIVED_KID ('d1') only, and only while OASIS_MCP_DERIVED_KID_DISABLED
+ * is unset, the key is derived from AUTH_SESSION_SECRET
+ * (lib/crypto/derived-keys.ts) -- O4 ships with no new Cloudflare secret.
+ * mintMcpToken mints under OASIS_MCP_TOKEN_KID when set, else MCP_DERIVED_KID.
+ * A kid is 1-16 letters or digits. No usable key at all is "unknown kid":
+ * nothing verifies, nothing mints.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { deriveKey, derivedKidDisabled, DERIVED_KEY_LABELS, MCP_DERIVED_KID } from "@/lib/crypto/derived-keys";
+
+export { MCP_DERIVED_KID };
 
 export const MCP_TOKEN_PREFIX = "omcp1";
 export const MCP_TOKEN_AUD = "oasis-mcp";
@@ -47,6 +66,14 @@ export type McpTokenClaims = {
   sid: string;
   iat: number;
   exp: number;
+  /** O4: the run this bearer was minted for (pull dispatch). Absent on the legacy push path. */
+  rid?: string;
+  /** O4: the pairing (computer) that claimed `rid`. */
+  pid?: string;
+  /** O4: the auth user's session_version at mint time. */
+  sv?: number;
+  /** O4: the run's origin. */
+  orig?: "chat" | "automation" | "test";
 };
 
 export type McpTokenFailure = "malformed" | "unknown_kid" | "bad_signature" | "wrong_aud" | "expired" | "not_yet_valid" | "bad_claims";
@@ -64,6 +91,11 @@ export type MintInput = {
   /** For tests: the clock (ms) and the env. */
   nowMs?: number;
   env?: McpTokenEnv;
+  /** O4 claims; see McpTokenClaims. */
+  rid?: string;
+  pid?: string;
+  sv?: number;
+  orig?: "chat" | "automation" | "test";
 };
 
 export class McpTokenConfigError extends Error {
@@ -73,10 +105,24 @@ export class McpTokenConfigError extends Error {
   }
 }
 
-function keyFor(kid: string, env: McpTokenEnv): string | null {
+/**
+ * The signing key for `kid`: an explicit Worker secret
+ * (OASIS_MCP_TOKEN_KEY_<kid>) always wins when it is long enough. Otherwise,
+ * ONLY for kid === MCP_DERIVED_KID ('d1'), and only while
+ * OASIS_MCP_DERIVED_KID_DISABLED is unset, the key is derived from
+ * AUTH_SESSION_SECRET under the 'mcp' label (lib/crypto/derived-keys.ts). Any
+ * other kid with no explicit key is "unknown kid": nothing verifies.
+ */
+async function keyFor(kid: string, env: McpTokenEnv): Promise<string | null> {
   if (!KID_RE.test(kid)) return null;
-  const key = (env[`OASIS_MCP_TOKEN_KEY_${kid}`] || "").trim();
-  return key.length >= MCP_TOKEN_MIN_KEY_CHARS ? key : null;
+  const explicit = (env[`OASIS_MCP_TOKEN_KEY_${kid}`] || "").trim();
+  if (explicit.length >= MCP_TOKEN_MIN_KEY_CHARS) return explicit;
+  if (kid !== MCP_DERIVED_KID || derivedKidDisabled(env)) return null;
+  try {
+    return await deriveKey(DERIVED_KEY_LABELS.mcp, { env });
+  } catch {
+    return null;
+  }
 }
 
 const b64u = (buf: Buffer) => buf.toString("base64url");
@@ -86,10 +132,10 @@ function sign(key: string, signingInput: string): Buffer {
 }
 
 /** Mint a bearer for a verified member. Throws McpTokenConfigError when no signing key is configured. */
-export function mintMcpToken(input: MintInput): { token: string; exp: number; kid: string } {
+export async function mintMcpToken(input: MintInput): Promise<{ token: string; exp: number; kid: string }> {
   const env = input.env ?? process.env;
-  const kid = (env.OASIS_MCP_TOKEN_KID || "").trim();
-  const key = keyFor(kid, env);
+  const kid = (env.OASIS_MCP_TOKEN_KID || "").trim() || MCP_DERIVED_KID;
+  const key = await keyFor(kid, env);
   if (!key) throw new McpTokenConfigError("oasis_mcp_not_configured");
   if (!input.tid || !input.uid || !input.dept || !input.sid) throw new McpTokenConfigError("mcp_token_claims_missing");
   if (input.prof !== "read" && input.prof !== "propose") throw new McpTokenConfigError("mcp_token_profile_invalid");
@@ -105,6 +151,10 @@ export function mintMcpToken(input: MintInput): { token: string; exp: number; ki
     sid: input.sid,
     iat,
     exp: iat + ttl,
+    ...(input.rid ? { rid: input.rid } : {}),
+    ...(input.pid ? { pid: input.pid } : {}),
+    ...(input.sv !== undefined ? { sv: input.sv } : {}),
+    ...(input.orig ? { orig: input.orig } : {}),
   };
   const signingInput = `${MCP_TOKEN_PREFIX}.${b64u(Buffer.from(JSON.stringify(claims), "utf8"))}`;
   return { token: `${signingInput}.${b64u(sign(key, signingInput))}`, exp: claims.exp, kid };
@@ -119,7 +169,7 @@ const str = (v: unknown) => (typeof v === "string" && v.length > 0 && v.length <
  * payload is trusted until the signature over it checks out, except `kid`,
  * which is read only to choose WHICH key to check with.
  */
-export function verifyMcpToken(token: string, opts: { nowMs?: number; env?: McpTokenEnv } = {}): VerifyResult {
+export async function verifyMcpToken(token: string, opts: { nowMs?: number; env?: McpTokenEnv } = {}): Promise<VerifyResult> {
   const env = opts.env ?? process.env;
   const parts = typeof token === "string" ? token.split(".") : [];
   if (parts.length !== 3 || parts[0] !== MCP_TOKEN_PREFIX || !B64URL_RE.test(parts[1]) || !B64URL_RE.test(parts[2])) {
@@ -135,7 +185,7 @@ export function verifyMcpToken(token: string, opts: { nowMs?: number; env?: McpT
   const p = raw as Record<string, unknown>;
 
   const kid = typeof p.kid === "string" ? p.kid : "";
-  const key = keyFor(kid, env);
+  const key = await keyFor(kid, env);
   if (!key) return { ok: false, reason: "unknown_kid" };
 
   const given = Buffer.from(parts[2], "base64url");
@@ -159,5 +209,15 @@ export function verifyMcpToken(token: string, opts: { nowMs?: number; env?: McpT
   const dept = str(p.dept);
   const sid = str(p.sid);
   if (!tid || !uid || !dept || !sid || (p.prof !== "read" && p.prof !== "propose")) return { ok: false, reason: "bad_claims" };
-  return { ok: true, claims: { aud: MCP_TOKEN_AUD, kid, tid, uid, dept, prof: p.prof, sid, iat, exp } };
+  // O4 claims: optional, and validated loosely -- a malformed one is simply
+  // dropped (treated as absent), never a reason to refuse an otherwise-valid
+  // legacy (push-path) bearer that carries none of them.
+  const rid = str(p.rid) ?? undefined;
+  const pid = str(p.pid) ?? undefined;
+  const sv = typeof p.sv === "number" && Number.isFinite(p.sv) ? p.sv : undefined;
+  const orig = p.orig === "chat" || p.orig === "automation" || p.orig === "test" ? p.orig : undefined;
+  return {
+    ok: true,
+    claims: { aud: MCP_TOKEN_AUD, kid, tid, uid, dept, prof: p.prof, sid, iat, exp, ...(rid ? { rid } : {}), ...(pid ? { pid } : {}), ...(sv !== undefined ? { sv } : {}), ...(orig ? { orig } : {}) },
+  };
 }

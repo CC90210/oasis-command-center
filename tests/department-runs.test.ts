@@ -148,13 +148,33 @@ console.error = (...args: unknown[]) => void logged.push(args);
 
 async function main() {
   const db: Client = createClient({ url: `file:${dbFile}` });
-  for (const file of ["bravo__192_ai_usage.sql", "bravo__207_department_chat_runs.sql"]) {
+  for (const file of ["bravo__192_ai_usage.sql", "bravo__207_department_chat_runs.sql", "bravo__213_dept_runs_computer.sql"]) {
     for (const stmt of splitStatements(readFileSync(join(ROOT, "database", "turso", file), "utf8"))) await db.execute(stmt);
   }
   await db.executeMultiple(`
     CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
       service TEXT, field_key TEXT, encrypted_value TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE user_profiles (id TEXT PRIMARY KEY, tenant_id TEXT, auth_user_id TEXT, email TEXT, team_role TEXT,
+      is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, deactivated_at TEXT, onboarding_completed_at TEXT, updated_at TEXT);
+    CREATE TABLE _supabase_auth_users (id TEXT PRIMARY KEY, banned_until TEXT, deleted_at TEXT, session_version INTEGER DEFAULT 0);
+    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT, revoked_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT, paired_via TEXT);
   `);
+  // O4's seat/pairing checks (liveSeat, pairingBlocked) read these through
+  // getServiceSupabase() -- the same Turso-backed shim, the same file. The
+  // rest of this suite never touched them; O4 is the first to.
+  for (const [id, tenantId, userId] of [
+    ["profile-ann-acme", ACME, ANN],
+    ["profile-ben-acme", ACME, BEN],
+    ["profile-ann-zeta", ZETA, ANN],
+  ]) {
+    await db.execute({
+      sql: `INSERT INTO user_profiles (id, tenant_id, auth_user_id, email, team_role, is_owner, admin_access, updated_at) VALUES (?, ?, ?, ?, 'owner', 1, 1, ?)`,
+      args: [id, tenantId, userId, `${userId}@test.oasis`, new Date().toISOString()],
+    });
+  }
+  for (const userId of [ANN, BEN]) {
+    await db.execute({ sql: `INSERT INTO _supabase_auth_users (id, session_version) VALUES (?, 0)`, args: [userId] });
+  }
 
   const store = await import("../lib/os/runs/store");
   const exec = await import("../lib/os/runs/executor");
@@ -711,6 +731,86 @@ async function main() {
     assert.equal(isPublic("/api/os/runs/0e000000-0000-4000-8000-00000000abcd/events"), true);
     for (const p of ["/api/os/runs", "/api/os/runs/0e000000-0000-4000-8000-00000000abcd/stream", "/api/os/runs/0e000000-0000-4000-8000-00000000abcd/stop", "/api/os/runs/x/events", "/api/os/runs/0e000000-0000-4000-8000-00000000abcd/events/extra", "/api/os/conversations"]) {
       assert.equal(isPublic(p), false, `${p} must stay behind the session`);
+    }
+  });
+
+  console.log("O4: the producer door, pull-dispatched (claimComputerRun, never attachProducer)");
+  const PAIRING_O4 = { tenantId: ACME, userId: ANN, pairingId: "pairing-o4-ann" };
+  await db.execute({
+    sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, revoked_at, claim_enabled_at, claim_enabled_by, paired_via) VALUES (?, ?, ?, 'Ann''s laptop', NULL, ?, 'test', 'pair_code')`,
+    args: [PAIRING_O4.pairingId, PAIRING_O4.tenantId, PAIRING_O4.userId, new Date().toISOString()],
+  });
+  async function computerProducerRun() {
+    const conv = await store.createConversation(db, scopeA, { department: "sales", agentSlug: "sdr", now: now() });
+    const q = await store.enqueueRun(db, scopeA, { conversationId: conv.id, text: "from the computer", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
+    assert.ok(q.ok);
+    const claimed = await store.claimComputerRun(db, PAIRING_O4, `claim-${Math.random().toString(36).slice(2)}`, now());
+    assert.ok(claimed);
+    assert.equal(claimed!.source, "producer", "claiming hands the run to the producer in the same statement");
+    return { run: claimed!, conv };
+  }
+  await check("a computer-executor run's door is NOT bothered by liveSeat/pairing checks when nothing about its person or computer changed", async () => {
+    const { run } = await computerProducerRun();
+    const good = bearer(await credential(run.id, ACME));
+    const r = await post(run.id, { events: [{ seq: 1, type: "delta", text: "hello from the computer" }] }, good);
+    assert.equal(r.status, 200);
+  });
+  await check("disconnecting the computer (its pairing revoked) stops its run's events door at once, mid-reply", async () => {
+    const { run } = await computerProducerRun();
+    const good = bearer(await credential(run.id, ACME));
+    assert.equal((await post(run.id, { events: [{ seq: 1, type: "delta", text: "first" }] }, good)).status, 200);
+    await db.execute({ sql: `UPDATE bridge_pairings SET revoked_at = ? WHERE id = ?`, args: [new Date().toISOString(), PAIRING_O4.pairingId] });
+    try {
+      const r = await post(run.id, { events: [{ seq: 2, type: "delta", text: "second, after disconnect" }] }, good);
+      assert.equal(r.status, 403);
+      assert.deepEqual(
+        (await store.readEvents(db, scopeA, run.id, 0)).filter((e) => e.kind === "delta").map((e) => (e.data as { text: string }).text),
+        ["first"],
+        "the post after revocation never landed",
+      );
+    } finally {
+      // Restore for the checks after this one: revoked_at back to live, not deleted.
+      await db.execute({ sql: `UPDATE bridge_pairings SET revoked_at = NULL WHERE id = ?`, args: [PAIRING_O4.pairingId] });
+    }
+  });
+  await check("a removed seat stops a computer-executor run's events door, even mid-reply with an unexpired run token", async () => {
+    const { run } = await computerProducerRun();
+    const good = bearer(await credential(run.id, ACME));
+    assert.equal((await post(run.id, { events: [{ seq: 1, type: "delta", text: "first" }] }, good)).status, 200);
+    const removed = (await db.execute({ sql: `SELECT * FROM user_profiles WHERE auth_user_id = ? AND tenant_id = ?`, args: [ANN, ACME] })).rows[0];
+    await db.execute({ sql: `DELETE FROM user_profiles WHERE auth_user_id = ? AND tenant_id = ?`, args: [ANN, ACME] });
+    try {
+      const r = await post(run.id, { events: [{ seq: 2, type: "delta", text: "second" }] }, good);
+      assert.equal(r.status, 403);
+    } finally {
+      await db.execute({
+        sql: `INSERT INTO user_profiles (id, tenant_id, auth_user_id, email, team_role, is_owner, admin_access) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [removed.id, ACME, ANN, removed.email, removed.team_role, removed.is_owner, removed.admin_access],
+      });
+    }
+  });
+  await check("a worker-driven run (executor 'worker') never runs the computer-only revoked-pairing / seat check: unaffected by O4", async () => {
+    const worker = await producerRun({ source: "worker" });
+    assert.equal(worker.run.executor, "worker");
+    // Claim it to a producer the way O1's interim push branch does (attachProducer), with no claimed_pairing_id at all.
+    await store.attachProducer(db, scopeA, worker.run.id, worker.run.leaseId ?? "", now());
+  });
+  await check("an EMPTY batch (heartbeat-only) skips the vault entirely: it succeeds even while the SAME workspace's vault is genuinely broken", async () => {
+    const { run } = await computerProducerRun();
+    const good = bearer(await credential(run.id, ACME));
+    await db.execute({
+      sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value, created_at, updated_at) VALUES (?, 'custom', 'broken_key_o4', 'not-a-ciphertext', ?, ?)",
+      args: [ACME, new Date().toISOString(), new Date().toISOString()],
+    });
+    try {
+      const heartbeat = await post(run.id, { events: [] }, good);
+      assert.equal(heartbeat.status, 200, "an empty batch must succeed as a pure heartbeat, with no vault read at all");
+      // The same broken vault DOES refuse a batch that actually carries text:
+      // proof the skip is real (not a vault that happens to work here).
+      const withText = await post(run.id, { events: [{ seq: 1, type: "delta", text: "now with text" }] }, good);
+      assert.deepEqual([withText.status, withText.json.error], [503, "scrub_unavailable"]);
+    } finally {
+      await db.execute("DELETE FROM tenant_integration_credentials WHERE field_key = 'broken_key_o4'");
     }
   });
 

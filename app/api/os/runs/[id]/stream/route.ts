@@ -29,6 +29,7 @@ import { executorDepsFor } from "@/lib/os/runs/turn-starter";
 import { driveConversation } from "@/lib/os/runs/executor";
 import { keepAlive } from "@/lib/os/runs/keepalive";
 import { followRun } from "@/lib/os/runs/follow";
+import { computerStateFor } from "@/lib/os/runs/send";
 import { sseResponse } from "@/lib/os/runs/sse";
 import { TAIL_WINDOW_MS } from "@/lib/os/runs/types";
 
@@ -61,6 +62,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       afterSeq: after,
       windowMs: () => (driving ? MAX_DRIVE_MS : TAIL_WINDOW_MS),
       gone: () => gone,
+      // O4: a re-attach to a still-queued computer-executor run must read
+      // this person's real computer state, or follow.ts's clock would see
+      // no hook at all and treat it as "no live claimer" after 20 s even
+      // when the computer is perfectly reachable.
+      computerState: computerStateFor(scoped.scope),
       needDriver: async () => {
         // An automation's run is never driven from a follower (see above).
         if (run.source === "automation") return;

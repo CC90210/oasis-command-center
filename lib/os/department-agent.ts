@@ -129,6 +129,16 @@ export type AgentTurnRequest = {
    * read — never answered by a fallback key (PAUSE, NOT FALLBACK).
    */
   bridge?: (() => Promise<BridgeCaller | BridgeUnavailable | BridgeRefused | null>) | null;
+  /**
+   * O4: this turn is pull-dispatched to the PERSON's own paired computer
+   * (lib/os/runs/computer-turn.ts buildComputerTurn), never the workspace's
+   * shared tunnel. When set, prepareAgentTurn resolves the department/agent
+   * binding and the system prompt exactly as every other caller, then skips
+   * the account read, key decrypt, bridge/fallback resolution and the
+   * monthly budget check entirely -- a computer turn spends no API credits
+   * and calls no hosted model from the Worker, so none of that applies.
+   */
+  engineInput?: { kind: "computer"; label: string } | null;
 };
 
 /**
@@ -145,6 +155,7 @@ export type AgentTurnRequest = {
  */
 export type TurnEngine =
   | { kind: "api"; runsOn: string; spend: EngineSpend; fellBackFrom: string | null; notUsedFor: string | null }
+  | { kind: "computer"; runsOn: string; spend: EngineSpend; fellBackFrom: null; notUsedFor: null; label: string }
   | (BridgeEngine & {
       runsOn: string;
       spend: EngineSpend;
@@ -282,6 +293,68 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
 
   const channelKey = dept ? departmentChannelKey(dept.key) : agentChannelKey(agent.slug);
   const binding = manifest.agents.find((a) => a.slug === agent.slug);
+
+  // O4: a turn pull-dispatched to the person's OWN paired computer. Every
+  // check above (the manifest, the department/agent binding, agent
+  // visibility) already ran, so this turn is grounded in the SAME workspace
+  // rules as every other channel; everything below this point (the account
+  // read, the key, the bridge/fallback resolution, the monthly budget) is
+  // for a HOSTED model call this turn never makes, and is skipped entirely.
+  if (req.engineInput?.kind === "computer") {
+    const displayName = dept ? dept.label : binding?.display_name || agent.name;
+    const interpolated = interpolate(dept ? departmentPrompt(agent.base_prompt, dept.label) : agent.base_prompt, {
+      "tenant.brand.name": manifest.brand.name,
+      "tenant.brand.subtitle": manifest.brand.subtitle,
+      "tenant.industry": manifest.onboarding_industry || "custom",
+      "tenant.slug": tenantSlug,
+      "operator.name": req.operator.name,
+      "operator.email": req.operator.email,
+      "agent.name": displayName,
+    });
+    const overlay = binding?.prompt_overlay?.trim();
+    const baseSystem =
+      (overlay ? `${interpolated}\n\nTENANT OVERLAY:\n${overlay}` : interpolated) +
+      (dept ? departmentIdentityLock(dept.label) : IDENTITY_LOCK_OVERLAY);
+    const { composeSystemPrompt, normalizeMode } = await import("@/lib/chat-modes/plan-mode");
+    const system = composeSystemPrompt(baseSystem, normalizeMode(req.chatMode));
+    const label = req.engineInput.label;
+    const billing = billingForBridge({ kind: "cli" });
+    const meter = modelCallMeter({
+      tenantId,
+      surface: req.surface ?? "agents.chat",
+      ...billing,
+      departmentKey: dept?.key ?? null,
+      teammateId: agent.slug,
+      userId: req.userId,
+      jobId: req.jobId ?? null,
+    });
+    const engine: TurnEngine = { kind: "computer", runsOn: `${label} · Claude Code`, spend: spendFor({ kind: "cli", cli: "claude" }), fellBackFrom: null, notUsedFor: null, label };
+    return {
+      ok: true,
+      turn: {
+        tenantId,
+        agentSlug: agent.slug,
+        channelKey,
+        department: dept,
+        displayName,
+        provider: "anthropic",
+        // Nominal only: this turn sends no hosted model call, so nothing here
+        // is ever matched against lib/ai/model-registry.ts. "claude" (not
+        // "claude-code") on purpose -- the model-literal scan
+        // (tests/model-registry.checks.ts) matches `claude-<word>` shapes as
+        // a real provider model id and would otherwise flag this as unknown.
+        model: "claude",
+        swap: null,
+        apiKey: "",
+        keySource: "tenant",
+        system,
+        meter,
+        revealModel: req.revealModel,
+        localModelAllowed: false,
+        engine,
+      },
+    };
+  }
 
   // The workspace's AI account (lib/ai/workspace-account.ts): the account the
   // owner connected for the whole team, whatever teammates the workspace has.
@@ -634,6 +707,16 @@ export function streamAgentTurn(
   /** Stop: ends a turn on the paired computer. A hosted provider stream ends at its next event. */
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
+  // O4: a turn pull-dispatched to the person's OWN paired computer never
+  // streams through the Worker at all (lib/os/runs/computer-turn.ts builds
+  // its system prompt and MCP/run tokens, and the computer runs Claude Code
+  // itself). Calling this with one is a caller bug, not a thing to paper
+  // over as a local-model stream -- fail loud, never silently mis-route to
+  // 'local' (turn.engine has no `model` field to read there, which is
+  // exactly the shape-mismatch this guard exists to catch before it happens).
+  if (turn.engine.kind === "computer") {
+    throw new Error("streamAgentTurn: a computer-dispatched turn must never stream through the Worker's model-call path");
+  }
   // The paired computer (lib/ai/bridge-turn.ts): the same SSE shape, no key.
   // No hosted model is called, but the turn still leaves its one ledger row,
   // or a broken CLI turn would be invisible to the department-chat health check.
