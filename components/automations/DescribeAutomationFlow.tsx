@@ -80,6 +80,15 @@ export function describeBridgeWriteError(
       return "the paired computer's bridge could not be reached";
     case "bridge_not_configured":
       return "no computer bridge is set up for this workspace yet";
+    // O1: neutral, not an outage — this account is not the workspace's
+    // computer owner, so writing the script file through its bridge is not
+    // available to it.
+    case "not_your_computer":
+      return "this runs on another team member's computer, so only they can use it";
+    case "agents_owner_not_set":
+      return "no one has been set as this workspace's computer owner yet";
+    case "agents_owner_unavailable":
+      return "couldn't confirm this workspace's computer owner just now — try again in a moment";
     case "tool_disallowed_for_role":
       return "your account role can't write automation files";
     case "rate_limited":

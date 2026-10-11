@@ -226,6 +226,12 @@ async function main() {
   // with the current models' prices (bravo__204: the probe's model is one).
   await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__192_ai_usage.sql"), "utf8"));
   await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__204_model_prices_current.sql"), "utf8"));
+  // O1: OASIS's default engine is an app on the paired computer (claude), so
+  // every OASIS department turn here asks authorizeBridgeRequest, which now
+  // also gates on the workspace's agents owner (lib/agents-owner.ts). CC
+  // must be named here or his "verified operator" checks below would fail
+  // on the NEW gate instead of proving what this file exists to prove.
+  await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__210_workspace_agents_owner.sql"), "utf8"));
   const { encryptField } = await import("../lib/field-encryption");
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (id: string, user: U, tenant: string, role: string, owner: 0 | 1, updated: string) => ({
@@ -240,6 +246,7 @@ async function main() {
       // "suga" is a seed manifest slug, so the client workspace needs no stored manifest row.
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'suga', 'Client Co')", args: [CLIENT] },
       profile("p-cc", USERS.cc, OASIS, "owner", 1, stamp),
+      { sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, 'test', ?)", args: [OASIS, USERS.cc.id, stamp] },
       profile("p-partner", USERS.partner, OASIS, "owner", 1, stamp),
       profile("p-client", USERS.client, CLIENT, "owner", 1, stamp),
       // Two seats: the newer owner seat in the client workspace is the active one.

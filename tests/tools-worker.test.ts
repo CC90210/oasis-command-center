@@ -356,11 +356,14 @@ async function main() {
   });
 
   await check("modelBudgetMs: never more than the model's own cap, shrinks with elapsed time, floors at 0 (pure)", () => {
-    const start = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000);
-    assert.equal(modelBudgetMs(start(0)), 55_000, "nothing elapsed: the full 55 s cap");
-    assert.equal(modelBudgetMs(start(10)), 45_000, "10 s already spent: 60 - 10 - 5 reserve");
-    assert.equal(modelBudgetMs(start(56)), 0, "almost the whole 60 s request budget already spent: no time left");
-    assert.equal(modelBudgetMs(start(999)), 0, "floors at 0, never negative");
+    // One fixed clock for both sides: reading Date.now() twice let a slow CI
+    // runner tick a millisecond between them (54999 !== 55000, PR #583).
+    const now = Date.parse("2026-10-11T04:00:00Z");
+    const start = (secondsAgo: number) => new Date(now - secondsAgo * 1000);
+    assert.equal(modelBudgetMs(start(0), now), 55_000, "nothing elapsed: the full 55 s cap");
+    assert.equal(modelBudgetMs(start(10), now), 45_000, "10 s already spent: 60 - 10 - 5 reserve");
+    assert.equal(modelBudgetMs(start(56), now), 0, "almost the whole 60 s request budget already spent: no time left");
+    assert.equal(modelBudgetMs(start(999), now), 0, "floors at 0, never negative");
   });
 
   await check(

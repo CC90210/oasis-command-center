@@ -197,6 +197,11 @@ async function main() {
   `);
   await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__192_ai_usage.sql"), "utf8"));
   await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__191_agent_turn_outcomes.sql"), "utf8"));
+  // O1: authorizeBridgeRequest now also gates on the workspace's agents
+  // owner (lib/agents-owner.ts). CC must be named here or every "CC reaches
+  // his paired computer" check below would fail on the NEW gate instead of
+  // proving what this file exists to prove.
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__210_workspace_agents_owner.sql"), "utf8"));
 
   const { encryptField, decryptField } = await import("../lib/field-encryption");
   const { SUGA_SEED } = await import("../lib/manifest/seeds");
@@ -220,6 +225,7 @@ async function main() {
         args: [ALPHA, manifest("alpha-co"), stamp, stamp],
       },
       profile("p-cc", USERS.cc, OASIS, "owner", 1),
+      { sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, 'test', ?)", args: [OASIS, USERS.cc.id, stamp] },
       profile("p-alpha", USERS.alpha, ALPHA, "owner", 1),
       profile("p-alpha-rep", USERS.alphaRep, ALPHA, "closer", 0),
       // Alpha's AI account (Anthropic), the teammate row a connect stamped with

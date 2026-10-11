@@ -185,10 +185,20 @@ export async function startCliSignIn(
 
 export function LocalCliProvidersCard({
   serverBridgeOnline,
+  isAgentsOwner,
 }: {
   /** null = the tenant heartbeat could not be read. "Offline" needs both the
    *  browser probe AND the heartbeat down, so an unread heartbeat is never it. */
   serverBridgeOnline: boolean | null;
+  /**
+   * O1: this card's Connect/Reconnect starts a sign-in on the workspace's
+   * PAIRED COMPUTER (app/api/bridge/cli-auth), which only its agents owner
+   * may do — the route fails closed on its own either way, but a button
+   * that would always 403 is worth not showing. false for everyone else
+   * (including a verified operator who is not the owner, since #576 made
+   * every OASIS founder an operator).
+   */
+  isAgentsOwner: boolean;
 }) {
   const [state, setState] = useState<ProbeState>({ kind: "loading" });
   const [busy, setBusy] = useState<Busy>({ kind: "idle" });
@@ -315,6 +325,20 @@ export function LocalCliProvidersCard({
     void refresh();
 
   }, []);
+
+  // O1: every hook above still runs (Rules of Hooks), but a non-owner sees
+  // this plain note instead of the live card — the route this card's
+  // buttons call fails closed on its own; this just stops showing a button
+  // that would always 403.
+  if (!isAgentsOwner) {
+    return (
+      <Card title="AI apps on your paired computer" subtitle={LOCAL_CLI_SCOPE}>
+        <p className="text-xs text-fg-muted leading-relaxed">
+          This runs on another team member&apos;s computer, so only they can use it.
+        </p>
+      </Card>
+    );
+  }
 
   return (
     <Card
