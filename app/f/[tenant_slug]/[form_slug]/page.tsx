@@ -41,6 +41,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { OfferPage } from "@/components/offer-pages/OfferPage";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
+import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -264,6 +265,16 @@ export default async function AnonymousFormPage({
     notFound();
   }
 
+  // Resolved ONCE here and passed verbatim into every FormPublicClient
+  // instance below (the plain form AND the offer-page's embedded form) so
+  // what the visitor is shown and what the submit route hashes always agree
+  // — the same tenant resolves to the same identity on both sides of the
+  // request, never computed twice from potentially-drifted logic.
+  const consentIdentity = resolveConsentIdentity({
+    tenantId: result.form.tenant_id,
+    tenantSlug: result.tenant_slug,
+  }).identity;
+
   const offer = await loadOfferView(result, sp.offer_preview === "1");
   if (offer) {
     const tenantId = result.form.tenant_id;
@@ -294,6 +305,7 @@ export default async function AnonymousFormPage({
                 redirectUrl: result.form.redirect_url,
                 token: null,
                 brand: consentBrandForTenant(result.tenant_slug, result.form.slug),
+                consentIdentity,
                 submissionSource: source,
                 submissionPath: `/f/${result.tenant_slug}/${result.form.slug}`,
                 anonymousInit: {
@@ -320,6 +332,7 @@ export default async function AnonymousFormPage({
       // actually shown. No Bluerise-hosted form exists yet, so this resolves to
       // SunBiz today; the slug check means standing one up needs no code change.
       brand={consentBrandForTenant(result.tenant_slug, result.form.slug)}
+      consentIdentity={consentIdentity}
       // Channel on EVERY submit, not only inside anonymous_init.
       //
       // Codex review 2026-08-24 (P2, confirmed): a form whose step 0 is a

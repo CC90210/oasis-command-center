@@ -91,6 +91,9 @@ import {
   matchWorkspaceSupportDesk,
 } from "@/lib/delivery/support-intake";
 import { createHash } from "node:crypto";
+import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
+import { recordConsentEvents, type ConsentDecision } from "@/lib/consent/ledger";
+import { consentDecisionsForStep } from "@/lib/consent/ledger-disclosure";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -129,6 +132,19 @@ type SubmitBody = {
     disclosure_version?: string;
     retention_expires_at?: string | null;
     reason?: string;
+  };
+  // THE CONSENT LEDGER (consent_events, every workspace, V0 2026-10-11) —
+  // separate from `consent` above, which is the SunBiz/Bluerise Opt-in Vault
+  // receipt and is unchanged. This is only which boxes THIS client says it
+  // ticked, true/false per channel. Nothing else here is trusted: the server
+  // decides, from the step's OWN field definitions, which channels actually
+  // had a disclosure rendered, and renders + hashes that disclosure itself
+  // (lib/consent/ledger.ts). A channel named here that the step did not
+  // render is ignored; a true/false for a channel the step DID render is the
+  // one thing this object is trusted for.
+  consent_ledger?: {
+    email?: boolean;
+    sms?: boolean;
   };
   anonymous_init?: {
     tenant_slug?: string;
@@ -966,6 +982,57 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
   const submissionId = (insertRes.data as { id: string }).id;
+
+  // ---------------------------------------------------------------------
+  // CONSENT LEDGER (consent_events, V0 2026-10-11). Runs for every workspace's
+  // every public form, not only SunBiz/Bluerise's Opt-in Vault path above.
+  //
+  // THE SERVER DECIDES WHAT WAS SHOWN. A channel is recorded only when the
+  // step JUST SUBMITTED declares a visible field of that channel's type —
+  // read from `currentStep` (this form's OWN definition), never from
+  // anything body.consent_ledger claims. A forged extra channel in the body
+  // (one this step never rendered) is silently never looked at; a channel
+  // the step DOES render gets exactly the true/false the body sent, nothing
+  // else client-supplied is trusted — the disclosure text, its hash and its
+  // version are all computed here from the server's own template and the
+  // server's own resolved business identity (lib/consent/ledger.ts).
+  //
+  // Best-effort: a ledger write failure never fails the submission (the lead
+  // is kept, the enquiry is answered) — it simply leaves no ticked row, which
+  // is the exact state that makes marketing refuse the channel below. See
+  // the module doc on recordConsentEvents.
+  const renderedConsentDecisions: ConsentDecision[] = consentDecisionsForStep(
+    currentStep,
+    mergedAnswers,
+    body.consent_ledger || {},
+  );
+  if (renderedConsentDecisions.length > 0) {
+    const { identity, source: identitySource } = resolveConsentIdentity({
+      tenantId: form.tenant_id,
+      tenantSlug: link.tenant,
+    });
+    const pageUrl = body.submission_path
+      ? `${req.nextUrl.origin}${body.submission_path}`
+      : `${req.nextUrl.origin}/f/${link.tenant}/${form.slug}`;
+    const ledgerResult = await recordConsentEvents(db, {
+      tenantId: form.tenant_id,
+      leadId: link.lead_id,
+      formId: form.id,
+      decisions: renderedConsentDecisions,
+      identity,
+      identitySource,
+      ipAddress: ipHeader,
+      userAgent,
+      pageUrl,
+    });
+    if (!ledgerResult.ok) {
+      console.error("[forms.submit.consent_ledger] one or more channels failed to record", {
+        lead_id: link.lead_id,
+        form_id: form.id,
+        failed: ledgerResult.failed,
+      });
+    }
+  }
 
   // ---------------------------------------------------------------------
   // Channel of THIS submission (Adon 2026-08-24: "so we could easily see if

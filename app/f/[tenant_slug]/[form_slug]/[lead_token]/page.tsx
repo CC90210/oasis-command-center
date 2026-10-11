@@ -20,6 +20,7 @@ import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
 import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
+import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -307,6 +308,9 @@ export default async function PublicFormPage({
       // a Bluerise merchant's consent under SunBiz's site key and disclosure —
       // an evidence record stating they were shown wording they never saw.
       brand={consentBrandForTenant(result.tenant_slug, result.form.slug)}
+      consentIdentity={
+        resolveConsentIdentity({ tenantId: result.form.tenant_id, tenantSlug: result.tenant_slug }).identity
+      }
     />
   );
 }

@@ -18,7 +18,7 @@
  * bank-statement step gets first-class treatment.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
@@ -26,6 +26,12 @@ import { isFieldVisible } from "@/lib/forms/visibility";
 import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 import { captureConsent, disclosureFor, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
+import {
+  consentDisclosureText,
+  renderedChannelsForStep,
+  type ConsentChannel,
+  type ConsentIdentity,
+} from "@/lib/consent/ledger-disclosure";
 import { SafeLogo } from "@/components/brand/SafeLogo";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
@@ -38,6 +44,17 @@ type Props = {
   /** Sending brand this form belongs to, resolved server-side. Drives which
    *  capture site and disclosure the consent evidence is sealed under. */
   brand?: string | null;
+  /**
+   * The business name/address the CONSENT LEDGER's checkboxes name — resolved
+   * server-side (lib/consent/ledger-identity.ts resolveConsentIdentity) from
+   * the SAME tenant the submit route will resolve it from. REQUIRED, not
+   * optional with a client-side default: a default computed here could never
+   * be guaranteed to match what the server hashes, and a mismatch between
+   * what a visitor was shown and what the ledger asserts they were shown is
+   * the exact failure this whole feature exists to prevent. Separate from
+   * `brand` above, which only ever covers SunBiz/Bluerise.
+   */
+  consentIdentity: ConsentIdentity;
   formId: string;
   formName: string;
   branding: FormBranding;
@@ -230,6 +247,7 @@ export function FormPublicClient({
   submissionPath,
   prefill,
   brand,
+  consentIdentity,
   chrome = "page",
   onStepSubmitted,
 }: Props) {
@@ -369,6 +387,21 @@ export function FormPublicClient({
     () => Object.assign({}, ...Object.values(stepValues)),
     [stepValues],
   );
+
+  // CONSENT LEDGER. Which box(es) the CURRENT step renders — derived from its
+  // own fields via renderedChannelsForStep (lib/consent/ledger-disclosure.ts),
+  // the SAME function the submit route calls, so the two can never disagree
+  // about which boxes exist — and whether each is ticked right now.
+  // Per-step, not per-form: a form whose email and phone fields sit on
+  // different steps renders each box on the step that actually asks for
+  // that channel. Unticked by default on every render, including a step
+  // revisited via Back — a consent box must never arrive pre-checked.
+  const ledgerChannels = useMemo(() => renderedChannelsForStep(step, mergedValues), [step, mergedValues]);
+  const [ledgerTicked, setLedgerTicked] = useState<Record<ConsentChannel, boolean>>({
+    email: false,
+    sms: false,
+  });
+  const ledgerIdBase = useId();
 
   const setFieldValue = useCallback(
     (name: string, value: unknown) => {
@@ -648,6 +681,20 @@ export function FormPublicClient({
       // they first landed. Anonymous links carry it in anonymous_init instead.
       if (submissionSource) submitBody.submission_source = submissionSource;
       if (submissionPath) submitBody.submission_path = submissionPath;
+
+      // CONSENT LEDGER. Only which box(es) THIS step rendered, and whether
+      // each was ticked right now — nothing else is sent, because nothing
+      // else is trusted: the server independently derives which channels
+      // step `stepAtStart` actually declares and ignores anything here that
+      // disagrees (app/api/forms/submit/route.ts). ledgerChannels at submit
+      // time, not a stale closure — `submit` is recreated every render, same
+      // as every other value it reads from component scope.
+      if (ledgerChannels.length > 0) {
+        submitBody.consent_ledger = {
+          email: ledgerChannels.includes("email") ? ledgerTicked.email : undefined,
+          sms: ledgerChannels.includes("sms") ? ledgerTicked.sms : undefined,
+        };
+      }
 
       // CONSENT EVIDENCE. Sealed from the BROWSER, because the evidence is only
       // worth having if it records the merchant's own IP — a call from our API
@@ -993,6 +1040,42 @@ export function FormPublicClient({
                 uploadToken={token}
                 ensureUploadToken={ensureUploadToken}
                 onAddressResolvingChange={setAddressResolving}
+                belowFields={
+                  ledgerChannels.length > 0 ? (
+                    // THE CONSENT LEDGER'S OWN BOXES. Separate, unticked, one per
+                    // channel this step actually collects — never pre-checked,
+                    // never combined into one "I agree to everything" box (CASL
+                    // requires express consent PER channel). Each is a real
+                    // <label>/<input> pair, not a styled div: a screen reader
+                    // announces it as a checkbox with this exact text, and Tab
+                    // + Space operate it with no mouse. Recorded whether ticked
+                    // or not — see lib/consent/ledger.ts.
+                    <div className="space-y-3 rounded-lg border border-bg-border bg-bg-elev/30 p-3">
+                      {ledgerChannels.map((channel) => {
+                        const inputId = `${ledgerIdBase}-consent-${channel}`;
+                        return (
+                          <div key={channel} className="flex items-start gap-3 py-1">
+                            <input
+                              id={inputId}
+                              type="checkbox"
+                              checked={ledgerTicked[channel]}
+                              onChange={(e) =>
+                                setLedgerTicked((prev) => ({ ...prev, [channel]: e.target.checked }))
+                              }
+                              className="mt-0.5 h-4 w-4 shrink-0 rounded border-bg-border"
+                            />
+                            <label
+                              htmlFor={inputId}
+                              className="text-[12px] leading-relaxed text-fg-muted"
+                            >
+                              {consentDisclosureText(channel, consentIdentity)}
+                            </label>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null
+                }
               />
               {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
                   Rendered on the final step, immediately by the submit control,

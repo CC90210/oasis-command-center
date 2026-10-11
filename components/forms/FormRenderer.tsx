@@ -52,6 +52,13 @@ type Props = {
    *  cleared, so a merchant cannot be rejected for a ZIP that is still in
    *  flight — the select→Continue race that PR #426 named but did not close. */
   onAddressResolvingChange?: (fieldName: string, resolving: boolean) => void;
+  /** Extra content rendered after the step's own fields and before the
+   *  Back/Continue row — the consent-ledger checkboxes (FormPublicClient),
+   *  so they sit where a visitor reads them before pressing submit, never
+   *  below it. Null on every surface that has none (builder preview, the
+   *  SunBiz/Bluerise Opt-in Vault disclosure, which renders its own text
+   *  separately). */
+  belowFields?: React.ReactNode;
 };
 
 export function FormRenderer({
@@ -69,6 +76,7 @@ export function FormRenderer({
   uploadToken,
   ensureUploadToken,
   onAddressResolvingChange,
+  belowFields,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
 
@@ -148,6 +156,8 @@ export function FormRenderer({
             />
           ))}
       </div>
+
+      {belowFields}
 
       <div className="flex items-center gap-3 pt-2">
         {showBack && onBack && (
