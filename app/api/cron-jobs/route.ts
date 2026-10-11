@@ -16,7 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext } from "@/lib/team";
 import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-helpers";
-import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import { isPlatformOperatorForAuthUser, OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
 import {
   DEPARTMENT_TASK,
   isScriptActionType,
@@ -140,6 +140,16 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   // by auth id): the email alone was registrable by anyone. A failed membership
   // lookup answers false — and the verdict on the wire says so, as above.
   const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
+  // The non-empty Empire-lane contract (below, requireEmpireRows) only means
+  // something in OASIS's own workspace: cron_jobs is tenant-scoped (migration
+  // 084), so an operator whose ACTIVE profile stands in a CLIENT tenant queries
+  // THAT tenant's empire rows, and a client ordinarily has none at all. Zero
+  // there is the correct, boring answer, not the 4/41 outage this contract
+  // exists to catch — demanding non-empty for every operator turned a client's
+  // empty list into a false 503. OASIS itself keeps the fail-loud 503: that is
+  // the one tenant where "empty Empire lane" really did mean the schedules
+  // vanished.
+  const isOasisOperatorTenant = tenantId === OASIS_OPERATOR_TENANT_ID;
   let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
   if (isOperator) {
     const empireQuery = await db
@@ -211,7 +221,7 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
       tenantJobs,
       empireJobs,
       empireQueried: isOperator,
-      requireEmpireRows: isOperator,
+      requireEmpireRows: isOperator && isOasisOperatorTenant,
       isOperator,
     });
     return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], inventory });

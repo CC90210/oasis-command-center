@@ -43,6 +43,29 @@ export function scriptAccessFrom(check: PlatformOperatorCheck | null | undefined
   return check.reason === "lookup_failed" ? "unknown" : "not_allowed";
 }
 
+/**
+ * The full verdict a mount needs before offering create controls: the verified
+ * operator check AND the viewer's ACTIVE workspace seat can manage the team —
+ * the exact two gates gateScriptAutomationCreate enforces (canManageTeam is
+ * checked there before the operator question is even asked). scriptAccessFrom
+ * alone answers only the first half, so a verified operator whose active seat
+ * is a plain member in some workspace read "allowed" and saw create controls
+ * every one of the three create routes then answered 403 to.
+ *
+ * "unknown" on a failed operator lookup is unchanged — that is scriptAccessFrom's
+ * call. A missing or non-managing active seat resolves to "not_allowed", same as
+ * the routes would answer; it is never promoted to "unknown" because there is no
+ * failure to report, just an ordinary no.
+ */
+export async function resolveScriptAutomationAccess(
+  check: PlatformOperatorCheck | null | undefined,
+): Promise<ScriptAutomationAccess> {
+  const operatorVerdict = scriptAccessFrom(check);
+  if (operatorVerdict !== "allowed") return operatorVerdict;
+  const ctx = await getSessionContext();
+  return ctx && canManageTeam(ctx.teamRole, ctx.adminAccess) ? "allowed" : "not_allowed";
+}
+
 export type ScriptCreateGate =
   | { ok: true; ctx: SessionContext; email: string | null }
   | { ok: false; response: NextResponse };

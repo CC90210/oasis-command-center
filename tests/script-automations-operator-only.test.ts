@@ -116,6 +116,11 @@ const USERS = {
   cc: u(1, "conaugh@oasisai.work"), // verified operator: alias + OASIS owner seat
   owner: u(2, "owner@clientco.test"), // a client workspace's owner
   member: u(3, "member@clientco.test"), // a plain member there
+  // Verified operator (an owner/admin seat in OASIS, alias email) whose SECOND,
+  // ACTIVE seat is a plain member of a client workspace — CodeRabbit PR #580:
+  // scriptAccessFrom alone answered "allowed" for any verified operator, with
+  // no look at the active seat the create routes actually gate on.
+  dual: u(4, "conaugh@oasisai.work"),
 } as const;
 
 async function login(user: U | null) {
@@ -200,6 +205,23 @@ async function main() {
       profile("cc", OASIS, "owner", 1),
       profile("owner", CLIENT, "owner", 1),
       profile("member", CLIENT, "member", 0),
+      // dual's OASIS seat: what isPlatformOperatorForAuthUser checks (scoped to
+      // that tenant alone — onboarding is irrelevant there). Left un-onboarded
+      // so the ACTIVE-profile pick across every tenant (tier: owner+onboarded >
+      // onboarded > owner-only > neither) prefers the onboarded member seat
+      // below instead of this one.
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner,
+                full_name, agents_enabled, updated_at, joined_at) VALUES (?, ?, ?, ?, 'owner', 1, 'Dual Seat', '[]', ?, ?)`,
+        args: ["p-dual-oasis", USERS.dual.id, USERS.dual.email, OASIS, stamp, stamp],
+      },
+      // dual's ACTIVE seat: a plain, onboarded member of the client workspace —
+      // canManageTeam('member', false) is false, so the create routes refuse it.
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at,
+                full_name, agents_enabled, updated_at, joined_at) VALUES (?, ?, ?, ?, 'member', 0, ?, 'Dual Seat', '[]', ?, ?)`,
+        args: ["p-dual-client", USERS.dual.id, USERS.dual.email, CLIENT, stamp, stamp, stamp],
+      },
     ],
     "write",
   );
@@ -396,6 +418,20 @@ async function main() {
       await restoreOperatorRead();
     }
     assert.equal(((await TenantAutomations({ tenantSlug: "clientco", tenantId: null })) as { props: { scriptAccess: string } }).props.scriptAccess, "not_allowed");
+  });
+
+  await check("a verified operator whose ACTIVE seat is a plain member sees no create controls, matching the 403 the routes give", async () => {
+    await login(USERS.dual);
+    // dual's OASIS seat still makes it an operator in the narrow sense — the
+    // bug was never in that half, only in skipping the active-seat question.
+    const tenantMount = (await TenantAutomations({ tenantSlug: "clientco", tenantId: CLIENT })) as { props: { scriptAccess: string } };
+    assert.equal(tenantMount.props.scriptAccess, "not_allowed", "the active (client, member) seat cannot manage the team");
+    const page = (await AutomationsPage()) as { props: { scriptAccess: string } };
+    assert.equal(page.props.scriptAccess, "not_allowed", "the top-level page must agree with the tenant mount");
+    // The route itself still 403s this exact seat — the UI verdict now matches it.
+    const created = await post(cronRoute, "/api/cron-jobs", cronBody("Dual seat job"));
+    assert.equal(created.status, 403, JSON.stringify(created.body));
+    assert.equal(created.body.error, "forbidden", "a plain member is refused before the operator question is even asked");
   });
 
   await check("the operator-only /automations page offers the controls; anyone else gets its 404", async () => {

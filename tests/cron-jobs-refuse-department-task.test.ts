@@ -72,7 +72,14 @@ let sessionCookie: string | undefined;
 
 const TENANT = "2c2c2c2c-0000-4000-8000-00000000002c";
 const OTHER = "2d2d2d2d-0000-4000-8000-00000000002d";
+const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452"; // OASIS_OPERATOR_TENANT_ID
 const OWNER = { id: "2e000000-0000-4000-8000-000000000001", email: "owner@acme.test" };
+// Verified platform operators (CodeRabbit PR #580, Empire-lane tenant scoping):
+// conaugh@oasisai.work is the canonical operator alias (isOperatorEmail), live
+// even with OPERATOR_EMAIL/ADMIN_EMAILS unset below, same as every other test
+// in this suite that signs in as an operator.
+const OPERATOR_OASIS = { id: "2f000000-0000-4000-8000-000000000001", email: "conaugh@oasisai.work" };
+const OPERATOR_CLIENT = { id: "2f000000-0000-4000-8000-000000000002", email: "conaugh@oasisai.work" };
 const STAMP = "2026-09-01T00:00:00Z";
 
 let failures = 0;
@@ -111,6 +118,13 @@ async function main() {
       actor_user_id TEXT, actor_email TEXT, action_type TEXT NOT NULL,
       target_table TEXT, target_id TEXT, before TEXT, after TEXT
     );
+    CREATE TABLE cron_jobs (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT,
+      schedule TEXT NOT NULL, action_type TEXT NOT NULL, action_config TEXT NOT NULL DEFAULT '{}',
+      owner_agent_key TEXT, is_active INTEGER NOT NULL DEFAULT 1, last_run_at TEXT,
+      last_result TEXT, next_run_at TEXT, run_count INTEGER NOT NULL DEFAULT 0,
+      fail_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+    );
   `);
   const job = (id: string, tenant: string, actionType: string, enabled: 0 | 1, name: string) => ({
     sql: `INSERT INTO tenant_cron_jobs (id, tenant_id, agent_key, name, description, schedule, action_type, action_payload, enabled, created_at)
@@ -120,8 +134,34 @@ async function main() {
   await db.batch(
     [
       { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [OWNER.id, OWNER.email] },
+      { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [OPERATOR_OASIS.id, OPERATOR_OASIS.email] },
+      { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [OPERATOR_CLIENT.id, OPERATOR_CLIENT.email] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'acme', 'Acme')", args: [TENANT] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'beta', 'Beta')", args: [OTHER] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] },
+      // A verified operator whose ONLY seat is OASIS: its own active workspace,
+      // trivially (chooseActiveProfile never has a second row to weigh).
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, full_name, agents_enabled, updated_at, joined_at)
+              VALUES ('p-operator-oasis', ?, ?, ?, 'owner', 1, ?, 'OASIS Operator', '[]', ?, ?)`,
+        args: [OPERATOR_OASIS.id, OPERATOR_OASIS.email, OASIS, STAMP, STAMP, STAMP],
+      },
+      // A verified operator with TWO seats: an owner/admin row in OASIS (what
+      // isPlatformOperatorForAuthUser checks — scoped to that tenant alone, so
+      // onboarding here is irrelevant), left un-onboarded on purpose so the
+      // overall ACTIVE-profile pick (every tenant, tier: owner+onboarded >
+      // onboarded > owner-only > neither) prefers the onboarded Acme seat
+      // below. This is the "operator standing in a client workspace" case.
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, full_name, agents_enabled, updated_at, joined_at)
+              VALUES ('p-operator-client-oasis-seat', ?, ?, ?, 'owner', 1, 'Client-Seat Operator', '[]', ?, ?)`,
+        args: [OPERATOR_CLIENT.id, OPERATOR_CLIENT.email, OASIS, STAMP, STAMP],
+      },
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, full_name, agents_enabled, updated_at, joined_at)
+              VALUES ('p-operator-client-active-seat', ?, ?, ?, 'owner', 1, ?, 'Client-Seat Operator', '[]', ?, ?)`,
+        args: [OPERATOR_CLIENT.id, OPERATOR_CLIENT.email, TENANT, STAMP, STAMP, STAMP],
+      },
       // The ACTIVE seat: onboarded owner here, with the session's own email.
       {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, full_name, agents_enabled, updated_at, joined_at)
@@ -235,6 +275,33 @@ async function main() {
     const ids = (body.jobs || []).map((j) => j.id).sort();
     assert.deepEqual(ids, ["sc1"], `listed: ${ids.join(", ")}`);
     assert.ok(!(body.jobs || []).some((j) => j.action_type === "department_task"));
+  });
+
+  await check("GET still requires a non-empty Empire lane for an operator in OASIS's own tenant: zero cron_jobs rows is still 503", async () => {
+    sessionCookie = signSession({
+      sub: OPERATOR_OASIS.id,
+      email: OPERATOR_OASIS.email,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      ver: 0,
+    });
+    const res = await list.GET();
+    const body = (await res.json()) as Body;
+    assert.equal(res.status, 503, JSON.stringify(body));
+    assert.equal(body.error, "incomplete_automation_inventory", JSON.stringify(body));
+  });
+
+  await check("GET answers 200 with the client's list for an operator whose ACTIVE profile is a client workspace with zero cron_jobs rows", async () => {
+    sessionCookie = signSession({
+      sub: OPERATOR_CLIENT.id,
+      email: OPERATOR_CLIENT.email,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      ver: 0,
+    });
+    const res = await list.GET();
+    const body = (await res.json()) as Body;
+    assert.equal(res.status, 200, JSON.stringify(body));
+    const ids = (body.jobs || []).map((j) => j.id).sort();
+    assert.deepEqual(ids, ["sc1"], `listed: ${ids.join(", ")}`);
   });
 
   await check("GET resolves the workspace through getSessionContext, not its own profile read", async () => {
