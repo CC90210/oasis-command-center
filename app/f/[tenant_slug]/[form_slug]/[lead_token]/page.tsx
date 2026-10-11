@@ -18,6 +18,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { verifyFormLink } from "@/lib/form-links";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
+import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
@@ -209,6 +210,11 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
       tenantSlug: tenantRow.slug,
     });
     if (mark) branding = { ...branding, logo_url: mark };
+  }
+  // The address the logo is DRAWN from, as on the anonymous route
+  // (lib/tenant/logo-url.ts): an uploaded logo is served through our own route.
+  if (branding.logo_url != null) {
+    branding = { ...branding, logo_url: displayLogoUrl(branding.logo_url) ?? undefined };
   }
 
   // Cross-form pre-fill (2026-06-20): load the lead's existing data so the full
