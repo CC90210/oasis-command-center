@@ -144,6 +144,32 @@ async function main() {
     assert.equal(r.profile.adminAccess, false);
   });
 
+  await check(
+    "a stale, never-onboarded owner duplicate must NOT outrank a live, onboarded member row for the same person (Codex review)",
+    async () => {
+      await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-dup-owner', 'dup@test')`);
+      // The stale duplicate: is_owner, but never finished onboarding — an
+      // abandoned signup, exactly the shape team-activation.ts's own dedup
+      // (canonicalizeTenantMembers) already refuses to let outrank a live row.
+      await db.execute({
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+              VALUES ('p-dup-stale-owner', 'auth-dup-owner', 'dup@test', ?, 'owner', 1, NULL, '2026-01-01T00:00:00.000Z')`,
+        args: [TENANT_A],
+      });
+      await db.execute({
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+              VALUES ('p-dup-live-member', 'auth-dup-owner', 'dup@test', ?, 'member', 0, ?, ?)`,
+        args: [TENANT_A, stamp, stamp],
+      });
+      const r = await liveSeat(TENANT_A, "auth-dup-owner");
+      assert.equal(r.live, true);
+      if (!r.live) return;
+      assert.equal(r.profile.id, "p-dup-live-member", "the onboarded, live row wins — never the stale owner duplicate");
+      assert.equal(r.profile.teamRole, "member");
+      assert.equal(r.profile.isOwner, false);
+    },
+  );
+
   await check("a profile with deactivated_at set: live is false, reason deactivated", async () => {
     await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-gone', 'gone@test')`);
     await db.execute({

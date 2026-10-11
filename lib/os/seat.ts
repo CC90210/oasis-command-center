@@ -25,6 +25,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { dbBool } from "@/lib/db-bool";
+import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
 
 export type LiveProfile = {
   id: string;
@@ -53,6 +54,8 @@ type ProfileRow = {
   is_owner: unknown;
   admin_access: unknown;
   deactivated_at: string | null;
+  onboarding_completed_at: string | null;
+  updated_at: string | null;
 };
 
 type AuthRow = {
@@ -79,7 +82,7 @@ export async function liveSeat(
     const db = getServiceSupabase();
     const profileRead = await db
       .from("user_profiles")
-      .select("id, email, team_role, is_owner, admin_access, deactivated_at")
+      .select("id, email, team_role, is_owner, admin_access, deactivated_at, onboarding_completed_at, updated_at")
       .eq("auth_user_id", authUserId)
       .eq("tenant_id", tenantId)
       .limit(20);
@@ -88,10 +91,13 @@ export async function liveSeat(
     if (rows.length === 0) return { live: false, reason: "no_profile" };
     const active = rows.filter((r) => !r.deactivated_at);
     if (active.length === 0) return { live: false, reason: "deactivated" };
-    // A duplicate-row tenant (legacy data) prefers the owner row, same
-    // precedence lib/active-profile-resolver.ts chooseActiveProfile gives an
-    // onboarded-owner row over a plain member row.
-    const row = active.find((r) => dbBool(r.is_owner)) || active[0];
+    // A duplicate-row tenant (legacy data) uses the SAME canonical pick every
+    // other seat resolver uses (lib/active-profile-resolver.ts
+    // chooseActiveProfile: onboarded-owner > onboarded > owner > plain,
+    // newest updated_at, then id, as the tiebreakers) — not just "any owner
+    // row": an unfinished, never-onboarded owner duplicate must never outrank
+    // a live, onboarded member row (Codex review, O3a).
+    const row = chooseActiveProfile(active as unknown as ActiveUserProfile[], null);
 
     const authRead = await db
       .from("_supabase_auth_users")

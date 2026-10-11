@@ -278,6 +278,30 @@ async function main() {
     assert.equal(newWorks.ok, true);
   });
 
+  await check("only the CURRENT token may rotate — a stale-but-in-grace token cannot mint a second fresh token", async () => {
+    await pairing({ id: "bp-rotate3", userId: OWNER_ID, label: "Rotator3", token: "t-gen1", scope: "daemon", pairedVia: "hmac" });
+    const first = await jsonOf(await rotateRoute.POST(bearerReq("t-gen1")));
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const gen2 = String(first.body.token);
+
+    // t-gen1 is now the PRIOR token, still inside its 60s grace — it still
+    // answers ping/poll, but rotating again with it must be refused: that
+    // would mint a THIRD token off a credential that was already replaced.
+    const second = await jsonOf(await rotateRoute.POST(bearerReq("t-gen1")));
+    assert.equal(second.status, 409, JSON.stringify(second.body));
+    assert.equal(second.body.token, undefined, "no new token is handed out for a stale bearer");
+
+    // The legitimate holder of gen2 is unaffected: it still rotates cleanly.
+    const third = await jsonOf(await rotateRoute.POST(bearerReq(gen2)));
+    assert.equal(third.status, 200, JSON.stringify(third.body));
+    const gen3 = String(third.body.token);
+    assert.notEqual(gen3, gen2);
+
+    const row = await db.execute({ sql: "SELECT bridge_token_hash, previous_token_hash FROM bridge_pairings WHERE id = 'bp-rotate3'" });
+    assert.equal(row.rows[0].bridge_token_hash, sha256(gen3));
+    assert.equal(row.rows[0].previous_token_hash, sha256(gen2), "gen1 never became a recorded previous token a second time");
+  });
+
   await check("using the PRIOR token after the grace revokes the pairing and raises an attention item", async () => {
     await pairing({ id: "bp-rotate2", userId: OWNER_ID, label: "Rotator2", token: "t-old2", scope: "daemon", pairedVia: "hmac" });
     await rotateRoute.POST(bearerReq("t-old2"));

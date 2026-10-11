@@ -442,11 +442,16 @@ export async function deactivateMember(args: {
       .in("user_id", person.authUserIds)
       .is("revoked_at", null)
       .select("id");
+    // FAIL CLOSED (Codex review): this cascade is a security guarantee, not
+    // a best-effort cleanup. A write that errors here must stop the whole
+    // deactivation — logging it and reporting success anyway (the previous
+    // shape) would let the roster/login steps above report "done" while a
+    // revoked-in-name-only computer or a still-enabled automation keeps
+    // answering for a person who was just removed.
     if (pairings.error) {
-      console.error("[team-activation] pairing revoke failed", pairings.error.message);
-    } else {
-      pairingsRevoked = (pairings.data || []).length;
+      throw new ActivationError(`pairing_revoke_failed: ${pairings.error.message}`, 500);
     }
+    pairingsRevoked = (pairings.data || []).length;
 
     const automations = await svc
       .from("tenant_cron_jobs")
@@ -456,10 +461,9 @@ export async function deactivateMember(args: {
       .eq("enabled", true)
       .select("id");
     if (automations.error) {
-      console.error("[team-activation] automation disable failed", automations.error.message);
-    } else {
-      automationsDisabled = (automations.data || []).length;
+      throw new ActivationError(`automation_disable_failed: ${automations.error.message}`, 500);
     }
+    automationsDisabled = (automations.data || []).length;
 
     const runs = await svc
       .from("dept_chat_runs")
@@ -469,10 +473,9 @@ export async function deactivateMember(args: {
       .eq("status", "queued")
       .select("id");
     if (runs.error) {
-      console.error("[team-activation] queued run cancel failed", runs.error.message);
-    } else {
-      runsCancelled = (runs.data || []).length;
+      throw new ActivationError(`queued_run_cancel_failed: ${runs.error.message}`, 500);
     }
+    runsCancelled = (runs.data || []).length;
   }
 
   // 3. Leads.

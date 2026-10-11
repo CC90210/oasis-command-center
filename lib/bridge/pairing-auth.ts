@@ -39,8 +39,17 @@ export type ResolvedPairing = {
   pairedVia: PairedVia;
   claimEnabledAt: string | null;
   claimEnabledBy: string | null;
-  /** The row's CURRENT bearer hash — rotate needs it for its CAS update. */
+  /** The row's CURRENT bearer hash as stored right now. Do NOT use this for
+   *  a rotate CAS: during the 60s grace this resolves via the PRIOR hash, so
+   *  `tokenHash` here is the row's live value, not what the caller sent —
+   *  CAS-ing against it would let a stale, already-replaced token rotate
+   *  again. Use `presentedTokenHash` for that. */
   tokenHash: string;
+  /** sha256 of the bearer the caller ACTUALLY sent, whichever of the two
+   *  hashes (current or prior-in-grace) it matched. The one safe value for
+   *  a rotate's compare-and-swap: a stale token never matches the row's
+   *  live hash, so a second rotation off it affects zero rows. */
+  presentedTokenHash: string;
 };
 
 export type PairingRefusal =
@@ -79,7 +88,7 @@ function normalizePairedVia(raw: unknown): PairedVia {
   return raw === "pair_code" || raw === "hmac" || raw === "signup_secret" ? raw : null;
 }
 
-function toResolved(row: PairingRow): ResolvedPairing {
+function toResolved(row: PairingRow, presentedTokenHash: string): ResolvedPairing {
   return {
     pairingId: row.id,
     tenantId: row.tenant_id,
@@ -90,6 +99,7 @@ function toResolved(row: PairingRow): ResolvedPairing {
     claimEnabledAt: row.claim_enabled_at,
     claimEnabledBy: row.claim_enabled_by,
     tokenHash: row.bridge_token_hash,
+    presentedTokenHash,
   };
 }
 
@@ -144,7 +154,7 @@ export async function resolvePairingFromBearer(
     // records all answered 403 for this before resolvePairingFromBearer
     // unified them, and that distinction is load-bearing for their callers.
     if (row.revoked_at) return { ok: false, status: 403, error: "pairing_revoked" };
-    return { ok: true, pairing: toResolved(row) };
+    return { ok: true, pairing: toResolved(row, tokenHash) };
   }
 
   // Not the live token. It may be the PRIOR one, still inside its rotation
@@ -160,7 +170,7 @@ export async function resolvePairingFromBearer(
 
   const rotatedAtMs = Date.parse(String(priorRow.token_rotated_at || ""));
   const withinGrace = Number.isFinite(rotatedAtMs) && Date.now() - rotatedAtMs <= TOKEN_ROTATION_GRACE_MS;
-  if (withinGrace) return { ok: true, pairing: toResolved(priorRow) };
+  if (withinGrace) return { ok: true, pairing: toResolved(priorRow, tokenHash) };
 
   const nowIso = new Date().toISOString();
   const revoke = await db.from("bridge_pairings").update({ revoked_at: nowIso }).eq("id", priorRow.id).is("revoked_at", null);

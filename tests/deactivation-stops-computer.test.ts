@@ -205,6 +205,27 @@ async function main() {
 
   console.log("deactivation-stops-computer:");
 
+  await check(
+    "a failed automation-disable write FAILS THE WHOLE DEACTIVATION (fail closed), never a logged-and-ignored error (Codex review)",
+    async () => {
+      // Simulates exactly the real-world gap the review found: a database
+      // that has not yet applied the migration tenant_cron_jobs.owner_user_id
+      // depends on. The write must stop the operation, not report success
+      // while the automation keeps running under a departed person's name.
+      await db.execute("ALTER TABLE tenant_cron_jobs RENAME TO tenant_cron_jobs_missing");
+      try {
+        await assert.rejects(
+          deactivateMember({ tenantId: TENANT, targetProfileId: "p-rep", actor, reason: "test" }),
+          (err: unknown) => err instanceof Error && /automation_disable_failed/.test(err.message),
+        );
+        const pairing = await db.execute({ sql: "SELECT revoked_at FROM bridge_pairings WHERE id = 'bp-rep'" });
+        assert.ok(pairing.rows[0].revoked_at, "the pairing write that ran before the failure is still visible");
+      } finally {
+        await db.execute("ALTER TABLE tenant_cron_jobs_missing RENAME TO tenant_cron_jobs");
+      }
+    },
+  );
+
   await check("deactivateMember revokes the pairing, disables the automation and cancels the queued run — in the same call", async () => {
     const result = await deactivateMember({ tenantId: TENANT, targetProfileId: "p-rep", actor, reason: "test" });
     assert.equal(result.pairingsRevoked, 1);
