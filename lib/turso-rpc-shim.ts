@@ -2896,7 +2896,13 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
           'FROM bridge_pair_codes bpc WHERE bpc.code = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ? ' +
           'ON CONFLICT (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL DO UPDATE SET ' +
           'bridge_token_hash = excluded.bridge_token_hash, label = excluded.label, last_seen_at = excluded.last_seen_at, ' +
-          'scope = excluded.scope, paired_via = excluded.paired_via ' +
+          'scope = excluded.scope, paired_via = excluded.paired_via, ' +
+          // A re-pair starts a fresh token history and a fresh approval (Codex,
+          // O3a P1): an in-grace previous token must never answer with the new
+          // scope, nor revoke the new pairing later, and a connector's approval
+          // never carries over to a daemon re-pair.
+          'previous_token_hash = NULL, token_rotated_at = NULL, ' +
+          'claim_enabled_at = NULL, claim_enabled_by = NULL, claude_account_hash = NULL ' +
           'WHERE bridge_pairings.user_id = excluded.user_id',
         args: [freshPairingId, label, p_token_hash, p_fingerprint, nowIso, PAIRED_VIA, p_code, nowIso],
       }

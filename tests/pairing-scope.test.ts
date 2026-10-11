@@ -328,6 +328,53 @@ async function main() {
     assert.equal(after.rows[0].tool_capabilities, before.rows[0].tool_capabilities, "a connector's reported tools never land");
   });
 
+  // Codex review (O3a P1): the workspace's bridge status (and so /api/chat's
+  // tool palette) must answer from daemon pairings only. A fresh connector
+  // heartbeat must not make an offline daemon read as online.
+  await check("the workspace bridge status ignores a fresher connector heartbeat: daemon offline stays offline", async () => {
+    const { getTenantBridgeStatus } = await import("../lib/queries");
+    await pairingRow({ id: "bp-status-daemon", userId: OWNER_ID, label: "Owner desktop", token: "status-daemon-token", scope: "daemon", fingerprint: "status-daemon-fp" });
+    await pairingRow({ id: "bp-status-connector", userId: OWNER_ID, label: "Connector box", token: "status-connector-token", scope: "connector", fingerprint: "status-connector-fp" });
+    await db.execute({ sql: "UPDATE bridge_pairings SET last_seen_at = ? WHERE id = 'bp-status-daemon'", args: ["2020-01-01T00:00:00.000Z"] });
+    await db.execute({ sql: "UPDATE bridge_pairings SET last_seen_at = ? WHERE id = 'bp-status-connector'", args: [new Date().toISOString()] });
+    assert.equal((await getTenantBridgeStatus(TENANT)).online, false, "a connector's heartbeat never stands in for the daemon");
+    await db.execute({ sql: "UPDATE bridge_pairings SET last_seen_at = ? WHERE id = 'bp-status-daemon'", args: [new Date().toISOString()] });
+    assert.equal((await getTenantBridgeStatus(TENANT)).online, true, "the daemon's own heartbeat still counts");
+  });
+
+  // Codex review (O3a P1): a re-pair starts a fresh token history and a fresh
+  // approval. A connector token replaced just before the re-pair must not
+  // answer for the new daemon pairing (nor revoke it later).
+  await check("re-pairing a computer clears the previous token and the approval: the old in-grace token answers nothing", async () => {
+    const { sha256 } = await import("../lib/api-helpers");
+    const fp = "repair-fp";
+    await login(OWNER_ID, "owner@client-x.test");
+    const first = (await jsonOf(await mintRoute.POST(mintReq({ purpose: "connector" })))).body as { code: string };
+    logout();
+    const r1 = await jsonOf(await redeemRoute.POST(redeemReq(first.code, fp)));
+    assert.equal(r1.status, 200, JSON.stringify(r1.body));
+    const pairingId = (r1.body.bridge as { pairing_id: string }).pairing_id;
+    const nowIso = new Date().toISOString();
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET previous_token_hash = ?, token_rotated_at = ?, claim_enabled_at = ?, claim_enabled_by = ? WHERE id = ?",
+      args: [sha256("old-connector-token"), nowIso, nowIso, OWNER_ID, pairingId],
+    });
+    await login(OWNER_ID, "owner@client-x.test");
+    const second = (await jsonOf(await mintRoute.POST(mintReq()))).body as { code: string };
+    logout();
+    const r2 = await jsonOf(await redeemRoute.POST(redeemReq(second.code, fp)));
+    assert.equal(r2.status, 200, JSON.stringify(r2.body));
+    const row = (await db.execute({ sql: "SELECT scope, previous_token_hash, token_rotated_at, claim_enabled_at, revoked_at FROM bridge_pairings WHERE id = ?", args: [pairingId] })).rows[0];
+    assert.equal(row.scope, "daemon");
+    assert.equal(row.previous_token_hash, null, "the replaced token is forgotten on re-pair");
+    assert.equal(row.token_rotated_at, null);
+    assert.equal(row.claim_enabled_at, null, "an approval never carries over to a re-pair");
+    const oldPoll = await pollRoute.GET(pollGet("old-connector-token"));
+    assert.equal(oldPoll.status, 401, "the old connector token answers nothing");
+    const after = (await db.execute({ sql: "SELECT revoked_at FROM bridge_pairings WHERE id = ?", args: [pairingId] })).rows[0];
+    assert.equal(after.revoked_at, null, "and presenting it does not revoke the new pairing");
+  });
+
   if (failures > 0) {
     console.log(`pairing-scope: ${failures} failure(s)`);
     process.exit(1);

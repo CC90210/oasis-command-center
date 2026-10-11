@@ -566,6 +566,15 @@ export async function POST(req: NextRequest) {
         last_seen_at: nowIso,
         label,
         paired_via: pairedVia,
+        // A re-pair starts a fresh token history and a fresh approval (Codex,
+        // O3a P1): a still-in-grace previous token must never answer for the
+        // new pairing, nor revoke it later, and an approval given to the old
+        // pairing never carries over to the new one.
+        previous_token_hash: null,
+        token_rotated_at: null,
+        claim_enabled_at: null,
+        claim_enabled_by: null,
+        claude_account_hash: null,
       })
       .eq("tenant_id", profileRow.tenant_id)
       .eq("machine_fingerprint", fingerprint)

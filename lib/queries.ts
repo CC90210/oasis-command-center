@@ -129,21 +129,28 @@ export async function getTenantBridgeStatus(tenantId: string | null): Promise<{
 }> {
   if (!tenantId) return { online: false, tools: null };
   const db = getServiceSupabase();
+  // `select("*")` and the scope test in code, not a named `scope` filter: a
+  // workspace has a handful of pairings, and a deployment (or fixture) whose
+  // table predates the scope column (bravo__212) then reads every row as the
+  // legacy daemon it is, instead of failing the whole status read.
   const r = await db
     .from("bridge_pairings")
-    .select("last_seen_at, tool_capabilities")
+    .select("*")
     .eq("tenant_id", tenantId)
     .is("revoked_at", null)
     .order("last_seen_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(50);
   if (r.error) throw new Error(`getTenantBridgeStatus: bridge_pairings read failed: ${r.error.message}`);
-  const row = r.data as
-    | {
-        last_seen_at?: string | null;
-        tool_capabilities?: string[] | null;
-      }
-    | null;
+  const rows = (r.data ?? []) as Array<{
+    last_seen_at?: string | null;
+    tool_capabilities?: string[] | null;
+    scope?: string | null;
+  }>;
+  // Daemon pairings only (legacy NULL scope reads as daemon). A connector's
+  // heartbeat carries no tool list, and `tools: null` here means "use the
+  // full default palette" to /api/chat, so a connector must never be the
+  // row this answers from (Codex, O3a P1).
+  const row = rows.find((p) => p.scope == null || p.scope === "daemon") ?? null;
   if (!row?.last_seen_at) return { online: false, tools: null };
   // The one online rule every screen uses (lib/devices/presence.ts).
   const online = isOnline(row.last_seen_at, Date.now());
