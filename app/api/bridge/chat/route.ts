@@ -61,7 +61,11 @@ type IncomingBody = {
   // tenant_id / team_role / user_id / disallowed_tools, if present, are
   // IGNORED — we always derive them server-side and let the server fields
   // win in the forwarded body.
-  [k: string]: unknown;
+  //
+  // No catch-all index signature here on purpose (O1, security_rules #14):
+  // this type is the allow-list. A client-supplied field this type does not
+  // name (a `department` block, say) must fail TO TYPE-CHECK if anyone ever
+  // tries to read it off `clientBody`, not silently pass through a spread.
 };
 
 export async function POST(req: NextRequest) {
@@ -150,12 +154,21 @@ export async function POST(req: NextRequest) {
   );
 
   // ---- HOP 3: forward to the VPS bridge ------------------------------------
-  // Server fields WIN in the spread — any tenant_id/team_role/user_id/
-  // disallowed_tools the browser tried to inject is overwritten here.
+  // ALLOW-LISTED, never a spread of clientBody (O1, security_rules #14: the
+  // bridge decodes a `department` block the proxy never verifies). Every key
+  // below is one this route already validated or derives itself; an unknown
+  // client-supplied key (a `department` block, or anything else) is dropped
+  // here, not forwarded to a trust boundary that does not check it. Server
+  // fields (agent, cli_provider, tenant_id, user_id, team_role,
+  // disallowed_tools) are this route's own values, never the client's.
   const forwardBody = {
-    ...clientBody,
     agent, // pinned
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    session_id: clientBody.session_id,
+    tab_id: clientBody.tab_id,
     cli_provider: effectiveCliProvider, // forced to claude for non-owner/admin
+    chat_mode: clientBody.chat_mode,
+    attachments: attachments.map((a) => ({ id: a.id })),
     tenant_id: auth.tenantId,
     user_id: auth.userId,
     team_role: auth.teamRole,
