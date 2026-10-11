@@ -72,6 +72,22 @@ function stillBanned(bannedUntil: string | null | undefined, nowMs: number): boo
   return !Number.isFinite(ms) || ms > nowMs;
 }
 
+/**
+ * The auth user's current session_version, for an MCP bearer's `sv` claim
+ * (claimed-run bearers and the O4 canary alike). null when it cannot be read:
+ * a caller either refuses to mint, or mints a value liveSeat then refuses, so
+ * a failed read never yields a bearer that survives a password change.
+ */
+export async function currentSessionVersion(userId: string): Promise<number | null> {
+  try {
+    const { data } = await getServiceSupabase().from("_supabase_auth_users").select("session_version").eq("id", userId).maybeSingle();
+    const v = (data as { session_version?: unknown } | null)?.session_version;
+    return typeof v === "number" && Number.isSafeInteger(v) ? v : Number.isFinite(Number(v)) ? Number(v) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function liveSeat(
   tenantId: string,
   authUserId: string,

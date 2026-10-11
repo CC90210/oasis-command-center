@@ -47,7 +47,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { isDaemonScope, pairingCanClaim, pairingLiveForClaim, resolvePairingFromBearer, type ResolvedPairing } from "@/lib/bridge/pairing-auth";
 import { isAgentsOwner } from "@/lib/agents-owner";
-import { liveSeat } from "@/lib/os/seat";
+import { currentSessionVersion, liveSeat } from "@/lib/os/seat";
 import { resolveOsViewerFor } from "@/components/os/department/viewer";
 import { departmentGate } from "@/components/os/department/gate";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
@@ -105,17 +105,6 @@ async function operatorIdentityFor(tenantId: string, userId: string): Promise<{ 
     return { name: row?.display_name || row?.full_name || "Operator", email: row?.email || "" };
   } catch {
     return { name: "Operator", email: "" };
-  }
-}
-
-/** The auth user's current session_version, for the MCP bearer's `sv` claim. null when it cannot be read (fails closed downstream: liveSeat refuses an `sv` that does not match). */
-async function currentSessionVersion(userId: string): Promise<number | null> {
-  try {
-    const { data } = await getServiceSupabase().from("_supabase_auth_users").select("session_version").eq("id", userId).maybeSingle();
-    const v = (data as { session_version?: unknown } | null)?.session_version;
-    return typeof v === "number" && Number.isSafeInteger(v) ? v : Number.isFinite(Number(v)) ? Number(v) : null;
-  } catch {
-    return null;
   }
 }
 

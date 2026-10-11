@@ -17,7 +17,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { isDaemonScope, pairingCanClaim, resolvePairingFromBearer } from "@/lib/bridge/pairing-auth";
 import { isAgentsOwner } from "@/lib/agents-owner";
-import { liveSeat } from "@/lib/os/seat";
+import { currentSessionVersion, liveSeat } from "@/lib/os/seat";
 import { resolveOsViewerFor } from "@/components/os/department/viewer";
 import { departmentGate } from "@/components/os/department/gate";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
@@ -49,6 +49,12 @@ export async function POST(req: NextRequest) {
   const dept = OS_DEPARTMENTS.find((d) => departmentGate(d.slug, viewer.navInput) !== null);
   if (!dept) return bad(409, "no_department_open");
 
+  // The bearer carries the CURRENT session_version (independent review, O4),
+  // like a claimed-run bearer, so a password change ends it at once. A version
+  // that cannot be read means no bearer at all, never one without `sv`.
+  const sv = await currentSessionVersion(pairing.userId);
+  if (sv === null) return bad(503, "seat_unavailable");
+
   let mcp: { token: string; exp: number };
   try {
     mcp = await mintMcpToken({
@@ -61,6 +67,7 @@ export async function POST(req: NextRequest) {
       // Bound to the computer that asked (security review, O4):
       // resolveMcpSession refuses it the moment this pairing is revoked.
       pid: pairing.pairingId,
+      sv,
       orig: "test",
     });
   } catch {

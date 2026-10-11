@@ -39,6 +39,17 @@ check("the canary route mints its bearer bound to the asking computer", () => {
   assert.match(src("app/api/bridge/runs/canary/route.ts"), /pid: pairing\.pairingId/);
 });
 
+// Independent review (O4): the canary bearer also carries the current
+// session_version, so a password change ends it at once, and a version that
+// cannot be read refuses the canary instead of minting without one.
+check("the canary bearer carries sv, and an unreadable session version refuses the canary", () => {
+  const route = src("app/api/bridge/runs/canary/route.ts");
+  assert.match(route, /const sv = await currentSessionVersion\(pairing\.userId\);/);
+  assert.match(route, /if \(sv === null\) return bad\(503, "seat_unavailable"\);/);
+  assert.match(route, /\n\s+sv,\n/);
+  assert.match(src("lib/os/seat.ts"), /export async function currentSessionVersion\(/);
+});
+
 if (failures > 0) {
   console.log(`mcp-canary-binding: ${failures} failure(s)`);
   process.exit(1);
