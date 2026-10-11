@@ -314,12 +314,18 @@ export async function undoUnsavedClaim(
     if (undone) return;
     console.error("[connections.connect] claim could not be undone; marking it error", { tenantId, connectionId });
   }
-  await markConnectionError(deps.db, {
+  const errored = await markConnectionError(deps.db, {
     tenantId,
     connectionId,
     code: "credential_missing",
     detail: "OASIS could not save the new key. Paste it again.",
     now: deps.now(),
+    // Fenced on THIS claim's own version: if this cleanup runs late (after a
+    // completely different, later reconnect has already claimed AND saved),
+    // the row has moved past this version and the error-mark (and any
+    // principal restore) must not land on top of that newer, consistent
+    // state (Codex review, PR #574).
+    expectedTokenVersion: claim.connection.token_version,
     // A reconnect (same account, possibly a DIFFERENT vendor user) already
     // overwrote vendor_principal_id before this token save failed; the row's
     // STORED tokens are still the ones from claim.previous's owner, so the
@@ -328,6 +334,12 @@ export async function undoUnsavedClaim(
     // was never wrong, so the key is omitted rather than passed as null.
     ...(claim.previous ? { restorePreviousVendorPrincipalId: { value: claim.previous.vendor_principal_id } } : {}),
   });
+  if (!errored) {
+    // Fenced out, not failed: a newer write (a completed reconnect, or a
+    // Disconnect) already moved this row past this claim's version. That
+    // newer state is the real one — leave it alone, log once, never retry.
+    console.error("[connections.connect] claim's error-mark was fenced out by a newer write; leaving the newer row alone", { tenantId, connectionId });
+  }
 }
 
 // ── Test again ────────────────────────────────────────────────────────────

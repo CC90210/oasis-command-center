@@ -540,6 +540,7 @@ async function main() {
   const tokenStore = await import("../lib/connections/token-store");
   const oauthConnect = await import("../lib/connections/oauth-connect");
   const rules = await import("../lib/connections/rules");
+  const service = await import("../lib/connections/service");
   const health = await import("../lib/connections/health");
   const popup = await import("../lib/connections/popup");
   const { setTenantIntegrationValue, getTenantIntegrationBundle } = await import("../lib/tenant-integration-store");
@@ -1548,6 +1549,71 @@ async function main() {
         await db.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE service = ?", args: [rules.credentialServiceFor(id)] });
         await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = ?", args: [id] });
       }
+    }
+  });
+
+  await check("undoUnsavedClaim's error-mark (and any principal restore) is fenced on the ABANDONED claim's own token_version: a cleanup that lands late, after a completely different later reconnect has already claimed AND saved, leaves that newer, consistent row alone (Codex review, PR #574)", async () => {
+    const provider = registry.providerById("whatsapp")!;
+    const base = {
+      tenantId: ALPHA,
+      provider: "whatsapp",
+      authKind: provider.authKind,
+      scopeKind: provider.scopeKind,
+      userId: null,
+      externalAccountId: "fence-test-waba",
+      externalAccountLabel: "Fence Test WABA",
+      environment: null,
+      grantedScopes: [],
+      scopeSetVersion: 1,
+      connectedBy: USERS.ownerA.id,
+    } as const;
+    const baseline = await store.claimConnection(db, { ...base, vendorPrincipalId: "meta-user-1", now: new Date() });
+    assert.equal(baseline.ok, true);
+    if (!baseline.ok) throw new Error("unreachable");
+    const rowId = baseline.connection.id;
+    try {
+      const savedBaseline = await tokenStore.saveConnectionTokensFenced(db, {
+        tenantId: ALPHA,
+        connectionId: rowId,
+        version: baseline.connection.token_version,
+        tokens: { access_token: "tok-0-access", refresh_token: "tok-0-refresh", expires_at: Date.now() + 3600_000 },
+        now: new Date(),
+      });
+      assert.equal(savedBaseline, true);
+
+      // Claim A: a reconnect by a DIFFERENT vendor user, abandoned before its
+      // own token save ever runs.
+      const claimA = await store.claimConnection(db, { ...base, vendorPrincipalId: "meta-user-2", now: new Date() });
+      assert.equal(claimA.ok, true);
+      if (!claimA.ok) throw new Error("unreachable");
+      assert.equal(claimA.previous?.vendor_principal_id, "meta-user-1");
+
+      // Claim B: a completely separate, LATER reconnect of the SAME row
+      // completes in full — claim AND a successful save — before A's
+      // cleanup ever runs.
+      const claimB = await store.claimConnection(db, { ...base, vendorPrincipalId: "meta-user-3", now: new Date() });
+      assert.equal(claimB.ok, true);
+      if (!claimB.ok) throw new Error("unreachable");
+      const savedB = await tokenStore.saveConnectionTokensFenced(db, {
+        tenantId: ALPHA,
+        connectionId: rowId,
+        version: claimB.connection.token_version,
+        tokens: { access_token: "tok-B-access", refresh_token: "tok-B-refresh", expires_at: Date.now() + 3600_000 },
+        now: new Date(),
+      });
+      assert.equal(savedB, true);
+
+      // A's cleanup FINALLY runs, late, after B is already live and consistent.
+      await service.undoUnsavedClaim({ db, now: () => new Date() }, ALPHA, claimA);
+
+      const rowAfter = (await store.getConnection(db, ALPHA, rowId))!;
+      assert.notEqual(rowAfter.status, "error", "B's live connection must not be marked error by A's stale, late cleanup");
+      assert.equal(rowAfter.vendor_principal_id, "meta-user-3", "B's principal must survive A's late, fenced-out cleanup");
+      const tokensAfter = await getTenantIntegrationBundle(ALPHA, rules.credentialServiceFor(rowId), { allowEnvFallback: false });
+      assert.equal(tokensAfter.access_token, "tok-B-access", "B's tokens must survive A's late, fenced-out cleanup");
+    } finally {
+      await db.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE service = ?", args: [rules.credentialServiceFor(rowId)] });
+      await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = ?", args: [rowId] });
     }
   });
 

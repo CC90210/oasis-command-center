@@ -544,6 +544,16 @@ export async function restoreRevokedClaim(
  * instruction to restore null, not "leave it alone" — only passing nothing
  * leaves the column untouched (a brand-new claim has no previous principal
  * to restore, and its own id was never wrong).
+ *
+ * FENCED on `expectedTokenVersion` — the abandoned claim's OWN version, from
+ * claimConnection's RETURNING. Without it, a LATE-arriving cleanup for claim
+ * A can land after a completely different, later reconnect (claim B) has
+ * already claimed AND saved: revoked_at IS NULL is still true for B's row,
+ * so A's stale write would overwrite B's current, consistent principal (and
+ * mark B's live connection "error") even though B's tokens are fine (Codex
+ * review, PR #574). A version mismatch means a newer write already moved
+ * this row past what this call is allowed to touch: 0 rows affected, never
+ * a second attempt — the caller fences out, exactly like a fenced token save.
  */
 export async function markConnectionError(
   db: Client,
@@ -553,6 +563,7 @@ export async function markConnectionError(
     code: ProbeErrorCode;
     detail: string;
     now: Date;
+    expectedTokenVersion: number;
     restorePreviousVendorPrincipalId?: { value: string | null };
   },
 ): Promise<boolean> {
@@ -560,12 +571,12 @@ export async function markConnectionError(
   const rs = await db.execute({
     sql: restore
       ? `UPDATE tenant_connections SET status = 'error', last_health_code = ?, last_health_detail = ?, vendor_principal_id = ?, updated_at = ?
-          WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`
+          WHERE id = ? AND tenant_id = ? AND token_version = ? AND revoked_at IS NULL`
       : `UPDATE tenant_connections SET status = 'error', last_health_code = ?, last_health_detail = ?, updated_at = ?
-          WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`,
+          WHERE id = ? AND tenant_id = ? AND token_version = ? AND revoked_at IS NULL`,
     args: restore
-      ? [input.code, input.detail.slice(0, 500), restore.value, input.now.toISOString(), input.connectionId, input.tenantId]
-      : [input.code, input.detail.slice(0, 500), input.now.toISOString(), input.connectionId, input.tenantId],
+      ? [input.code, input.detail.slice(0, 500), restore.value, input.now.toISOString(), input.connectionId, input.tenantId, input.expectedTokenVersion]
+      : [input.code, input.detail.slice(0, 500), input.now.toISOString(), input.connectionId, input.tenantId, input.expectedTokenVersion],
   });
   return rs.rowsAffected === 1;
 }
