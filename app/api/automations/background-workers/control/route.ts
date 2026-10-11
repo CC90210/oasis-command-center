@@ -68,6 +68,8 @@ import { controllableOasisWorker } from "@/lib/automations/oasis-workers";
 import { logTenantAudit } from "@/lib/audit/activity-feed";
 import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { isAgentsOwner } from "@/lib/agents-owner";
+import { OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -126,7 +128,17 @@ export async function POST(req: Request) {
   // logs and is queryable on the same Settings/Operations audit surface as
   // everything else. Best-effort: a failed audit write never blocks the
   // gate decision itself.
-  const actorSide: "cc" | "adon" = auth.isOperator ? "cc" : "adon";
+  //
+  // O1 (2026-10-10): `auth.isOperator` used to mean "is CC" because CC was
+  // the only verified operator. Since PR #576 Adon is ALSO a verified
+  // operator (platform_operators), so `isOperator` would attribute every one
+  // of Adon's SunBiz actions to CC's side here, exactly the hole this gate
+  // exists to close. The agents-owner row is keyed by tenant, and only ONE
+  // exists (OASIS, ef8d389e), naming CC; checking it against the OASIS
+  // tenant id, not `auth.tenantId` (this request is in the SunBiz tenant),
+  // answers "is this literally CC" regardless of which workspace the request
+  // is standing in, which is what "cc" side means here.
+  const actorSide: "cc" | "adon" = (await isAgentsOwner(OASIS_OPERATOR_TENANT_ID, auth.userId)) ? "cc" : "adon";
   const ownerMatches = worker.owner === "shared" || worker.owner === actorSide;
   // ONLY the empire operator (CC) may cross the owner boundary. A SunBiz
   // tenant is_owner (Adon, teamRole==="owner") is NOT a valid override here —
