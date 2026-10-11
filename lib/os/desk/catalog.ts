@@ -214,6 +214,22 @@ export const DESK_TOOLS: Readonly<Record<DeskToolName, DeskTool>> = {
 };
 
 /**
+ * department_numbers as an AUTOMATION is offered it (./tools.ts deskToolset
+ * with `only`): its own department's page, with the Needs-you items as one
+ * count, which is exactly what execute() runs for an automation. The chat's
+ * description offers Chief of Staff's reach into other departments' pages; an
+ * automation does not have it (its owner chose what it reads), so it is never
+ * told it does.
+ */
+export const AUTOMATION_DEPARTMENT_NUMBERS: DeskTool = {
+  ...DESK_TOOLS.department_numbers,
+  summary: "Read the numbers this department's page shows right now, and how many items wait in Needs you",
+  description:
+    "Read the live numbers this department's page shows right now (the same figures the person sees on that page) and how many items are waiting in Needs you. It reads this department's page only. Use it to refresh the summary you were given. A number that could not be read comes back as unknown: say so, never guess.",
+  input_schema: OBJECT(),
+};
+
+/**
  * Each department's palette, in the order the model is told about it. A tool
  * that the viewer may not use (a ticket desk they cannot open, company money
  * they may not see) still answers, with "not available to you", rather than

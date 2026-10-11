@@ -7,6 +7,16 @@
  * offer is not the boundary: `execute` refuses any name outside THIS turn's
  * palette, whatever a model, a replayed stream or a future caller asks for.
  *
+ * AN AUTOMATION IS NARROWER. A department task's run (lib/automations) passes
+ * `only`, the lookups its owner chose: the palette offers only those and
+ * execute() refuses the rest, and its drafts follow ./proposals.ts
+ * proposeAutomationEmail (a test run files nothing). Its department_numbers
+ * reads its OWN department's page and nothing else (automationDepartment):
+ * Chief of Staff's reach into other pages is the chat's, and through it an
+ * automation would read figures (Finance's company money, another page's
+ * counts) its owner never chose. Which tools a person may use at all is
+ * deskToolAvailability, the same predicate run() asks first.
+ *
  * THE TENANT IS THE VIEWER'S. Every read takes `viewer.surface.tenantId`
  * (the session's active workspace, checked against the route's tenant before
  * the toolset is built, ./turn.ts). A tenant key the model writes into an input
@@ -33,9 +43,16 @@ import { listCalendars, listEvents } from "@/lib/calendar/store";
 import { expandOccurrences } from "@/lib/calendar/recurrence";
 import { loadThreadMessages } from "@/lib/lead-interactions-queries";
 import { stripModelSuppliedTenant, type InjectedToolset, type ToolResultBlock } from "@/lib/cloud-tool-runner";
-import { deskApprovals, mayProposeFrom, proposeDeskEmail, ProposalRefused } from "./proposals";
-import { DESK_TOOLS, deskPalette, type DeskTool, type DeskToolName } from "./catalog";
-import { followUpsFrom, leadLine, openLead, readPipeline, searchLeads } from "./reads";
+import {
+  deskApprovals,
+  mayProposeFrom,
+  proposeAutomationEmail,
+  proposeDeskEmail,
+  ProposalRefused,
+  type AutomationProposalPolicy,
+} from "./proposals";
+import { AUTOMATION_DEPARTMENT_NUMBERS, DESK_TOOLS, deskPalette, type DeskTool, type DeskToolName } from "./catalog";
+import { followUpsFrom, leadLine, openLead, pipelineScope, readPipeline, searchLeads } from "./reads";
 import { deskDeliveryViewer, loadDeskConnections } from "./state";
 
 export const RESULT_MAX_CHARS = 12_000;
@@ -46,6 +63,18 @@ export type DeskToolContext = {
   /** The department's agent: the approval card's requester (propose_email). */
   agentSlug: string;
   planMode?: boolean;
+  /**
+   * An automation's allowlist (lib/automations): only these tools are offered,
+   * and execute() refuses every other one, even one the department has. Absent:
+   * the department's whole palette (a chat). An empty list offers nothing.
+   */
+  only?: readonly DeskToolName[];
+  /**
+   * An automation's proposal rules (./proposals.ts proposeAutomationEmail).
+   * With an allowlist (`only`), propose_email runs only under these rules; an
+   * allowlist without them never offers it.
+   */
+  proposal?: AutomationProposalPolicy;
   /** For tests: the clock. */
   nowMs?: () => number;
 };
@@ -60,6 +89,45 @@ class NotAvailable extends Error {
   constructor(reason: string) {
     super(reason);
     this.name = "NotAvailable";
+  }
+}
+
+export type DeskToolAvailability = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Whether this person may use this tool at all, by the gate of the page behind
+ * it. THE predicate run() enforces (run() asks it first), exported so a screen
+ * that offers tools (the automation setup) offers exactly what would run.
+ * A tool that is available can still fail to read; that is said separately.
+ */
+export function deskToolAvailability(name: DeskToolName, viewer: OsViewer): DeskToolAvailability {
+  switch (name) {
+    case "pipeline_summary":
+    case "leads_search":
+    case "lead_timeline":
+      return pipelineScope(viewer) ? { ok: true } : { ok: false, reason: "no_access_to_leads" };
+    case "tickets_list":
+      return deskDeliveryViewer(viewer).ok ? { ok: true } : { ok: false, reason: "no_access_to_tickets" };
+    case "projects_list":
+      return deskDeliveryViewer(viewer).ok ? { ok: true } : { ok: false, reason: "no_access_to_projects" };
+    case "routines_status":
+      // Routines are the Operations page's data: its gate (owners and admins),
+      // whichever department asks (Chief of Staff is open to members).
+      return mayOpenOperations(viewer) ? { ok: true } : { ok: false, reason: "routines_not_available_to_you" };
+    case "finance_get_metric":
+      // The Finance page's own two locks (numbers.ts financeNumbers).
+      return viewer.oasis && viewer.surface.capabilities.canSeeCompanyFinancials ? { ok: true } : { ok: false, reason: "company_money_not_available_to_you" };
+    case "propose_email":
+      return mayProposeFrom(viewer) ? { ok: true } : { ok: false, reason: "read_only_member_cannot_propose" };
+    case "department_numbers":
+    case "approvals_list":
+    case "calendar_upcoming":
+    case "connections_status":
+      return { ok: true };
+    default: {
+      const unknown: never = name;
+      return { ok: false, reason: `unknown_tool:${String(unknown)}` };
+    }
   }
 }
 
@@ -79,7 +147,13 @@ function refused(name: string, error: string): ToolResultBlock {
   return { content: JSON.stringify({ error, tool: name }), is_error: true, summary: `${name} refused: ${error}` };
 }
 
-/** The department a department_numbers / approvals_list call may read. */
+/**
+ * The department a department_numbers / approvals_list call may read in a
+ * CHAT. An automation's department_numbers never comes here
+ * (automationDepartment). Its approvals_list may: Chief of Staff's approvals
+ * are every department's already (deskApprovals with no department), so
+ * naming one only narrows what its owner chose to let it read.
+ */
 function targetDepartment(ctx: DeskToolContext, raw: unknown): OsDepartment {
   const key = text(raw);
   if (!key || key === ctx.dept.key) return ctx.dept;
@@ -91,13 +165,34 @@ function targetDepartment(ctx: DeskToolContext, raw: unknown): OsDepartment {
   return d;
 }
 
-async function run(name: DeskToolName, input: Record<string, unknown>, ctx: DeskToolContext): Promise<ToolResultBlock> {
+/**
+ * The page an AUTOMATION's department_numbers reads: its own department's,
+ * the "Always included" numbers its owner was shown, whatever department the
+ * model names (Chief of Staff included).
+ */
+function automationDepartment(ctx: DeskToolContext, raw: unknown): OsDepartment {
+  const key = text(raw);
+  if (key && key !== ctx.dept.key) throw new NotAvailable("automation_reads_its_own_department_only");
+  return ctx.dept;
+}
+
+type RunState = { proposed: number };
+
+async function run(name: DeskToolName, input: Record<string, unknown>, ctx: DeskToolContext, state: RunState): Promise<ToolResultBlock> {
   const v = ctx.viewer;
   const nowMs = (ctx.nowMs ?? Date.now)();
+  // The page gate, asked first and in one place (deskToolAvailability).
+  const available = deskToolAvailability(name, v);
+  if (!available.ok) throw new NotAvailable(available.reason);
   switch (name) {
     case "department_numbers": {
-      const d = targetDepartment(ctx, input.department);
+      // An automation: its own page only (automationDepartment). A chat: Chief
+      // of Staff may read another page its rail opens (targetDepartment).
+      const d = ctx.only ? automationDepartment(ctx, input.department) : targetDepartment(ctx, input.department);
       const n = await loadDepartmentNumbers(d, v, await loadTenantRoutines(v.surface.tenantId));
+      // An automation gets the page's COUNTS: a Needs-you line can carry a
+      // title (an alert, a reply's subject) it was not given to read.
+      const waiting = n.attention.reduce((sum, a) => sum + a.count, 0);
       return result(name, {
         department: d.label,
         numbers: n.tiles.map((t) => ({
@@ -106,7 +201,7 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
           state: t.status === "live" ? "known" : t.status === "error" ? "could_not_be_read" : t.emptyText || t.status,
           hint: t.hint ?? null,
         })),
-        needs_you: n.attention.map((a) => ({ item: a.label, count: a.count })),
+        ...(ctx.only ? { needs_you_count: waiting } : { needs_you: n.attention.map((a) => ({ item: a.label, count: a.count })) }),
       }, `${d.label}, ${n.tiles.length} numbers`);
     }
     case "pipeline_summary": {
@@ -186,9 +281,7 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
       }, `${active.length} active`);
     }
     case "routines_status": {
-      // Routines are the Operations page's data: its gate (owners and
-      // admins), whichever department asks (Chief of Staff is open to members).
-      if (!mayOpenOperations(v)) throw new NotAvailable("routines_not_available_to_you");
+      // The Operations gate was asked above (deskToolAvailability).
       const r = await loadTenantRoutines(v.surface.tenantId);
       if (!r.ok) throw new Error("routines_could_not_be_read");
       const h = routineHealth(r.value, nowMs);
@@ -212,8 +305,7 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
       }, `${r.total} waiting`);
     }
     case "finance_get_metric": {
-      // The Finance page's own two locks (numbers.ts financeNumbers).
-      if (!v.oasis || !v.surface.capabilities.canSeeCompanyFinancials) throw new NotAvailable("company_money_not_available_to_you");
+      // The Finance page's own two locks were asked above (deskToolAvailability).
       const metric = text(input.metric) || "all";
       const m = await loadOasisMoney(v.surface.tenantId, "os.desk.finance");
       const usd = (c: number | null | undefined) => (typeof c === "number" ? Math.round(c) / 100 : null);
@@ -264,6 +356,11 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
     case "propose_email": {
       // One approvals card under THIS department, owned by the person asking;
       // nothing is sent (./proposals.ts).
+      if (ctx.proposal) {
+        // An automation's draft: its own rules, and a test run files nothing.
+        const out = await proposeAutomationEmail(v, ctx.dept, ctx.agentSlug, input, new Date(nowMs), ctx.proposal, state);
+        return result(name, out, ctx.proposal.mode === "preview" ? "Would have drafted it (test run, nothing filed)" : "waiting in Needs you");
+      }
       const out = await proposeDeskEmail(v, ctx.dept, ctx.agentSlug, input, new Date(nowMs));
       return result(name, out, "waiting in Needs you");
     }
@@ -284,8 +381,18 @@ export function deskToolset(ctx: DeskToolContext): InjectedToolset & { palette: 
   // Routines only for someone the Operations page opens for (Chief of Staff
   // lists them for owners and admins, not for members).
   const routines = mayOpenOperations(ctx.viewer);
-  const palette = deskPalette(ctx.dept.key, { planMode: ctx.planMode, canAct }).filter((t) => routines || t.name !== "routines_status");
-  const allowed = new Set<string>(palette.map((t) => t.name));
+  const departmentPalette = deskPalette(ctx.dept.key, { planMode: ctx.planMode, canAct }).filter((t) => routines || t.name !== "routines_status");
+  const allowed = new Set<string>(departmentPalette.map((t) => t.name));
+  // An automation's allowlist narrows the department's palette; a proposal
+  // needs the automation's proposal rules as well (fail closed without them).
+  const automation = ctx.only ? new Set<string>(ctx.only.filter((n) => DESK_TOOLS[n]?.kind !== "proposal" || !!ctx.proposal)) : null;
+  // An automation is told what runs for it: department_numbers reads its own
+  // page only (run(): automationDepartment), so it is offered that version.
+  const palette = automation
+    ? departmentPalette.filter((t) => automation.has(t.name)).map((t) => (t.name === "department_numbers" ? AUTOMATION_DEPARTMENT_NUMBERS : t))
+    : departmentPalette;
+  // Proposals this run made (an automation's cap per run, ./proposals.ts).
+  const state: RunState = { proposed: 0 };
   return {
     palette,
     tools: palette.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
@@ -294,13 +401,18 @@ export function deskToolset(ctx: DeskToolContext): InjectedToolset & { palette: 
         console.error("[os.desk.tools] refused a tool outside the department palette", { tool: name, department: ctx.dept.key, tenantId: ctx.viewer.surface.tenantId });
         return refused(name, "tool_not_in_this_department");
       }
+      // Enforced here, not only by the offer: an automation runs only what its owner chose.
+      if (automation && !automation.has(name)) {
+        console.error("[os.desk.tools] refused a tool outside the automation's allowlist", { tool: name, department: ctx.dept.key, tenantId: ctx.viewer.surface.tenantId });
+        return refused(name, "tool_not_allowed_for_this_automation");
+      }
       // Enforced again here, not only by the offer: a proposal needs a member who may act.
       if (DESK_TOOLS[name as DeskToolName].kind === "proposal" && !mayProposeFrom(ctx.viewer)) {
         return refused(name, "read_only_member_cannot_propose");
       }
       const input = stripModelSuppliedTenant(rawInput && typeof rawInput === "object" ? rawInput : {});
       try {
-        return await run(name as DeskToolName, input, ctx);
+        return await run(name as DeskToolName, input, ctx, state);
       } catch (err) {
         if (err instanceof NotAvailable || err instanceof ProposalRefused) return refused(name, err.message);
         console.error("[os.desk.tools] tool failed", { tool: name, department: ctx.dept.key, error: err instanceof Error ? err.message : String(err) });

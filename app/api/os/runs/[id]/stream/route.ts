@@ -12,6 +12,13 @@
  * (the tab that sent it closed) gets a driver here, so the message still runs.
  * That follower then stays until the run ends, because a driver must keep its
  * connection open.
+ *
+ * NEVER for an automation's run (source 'automation'). A driver started here
+ * would run it under the VIEWER's session, the viewer's paired computer and the
+ * operator's platform key, with the chat's lookups and no time limit. An
+ * automation run is driven only by the automation driver, which claims it by
+ * id with the automation's own limits (lib/os/runs/executor.ts
+ * driveAutomationRun); here it is only followed.
  */
 import { type NextRequest } from "next/server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
@@ -55,6 +62,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       windowMs: () => (driving ? MAX_DRIVE_MS : TAIL_WINDOW_MS),
       gone: () => gone,
       needDriver: async () => {
+        // An automation's run is never driven from a follower (see above).
+        if (run.source === "automation") return;
         // The full session is needed only to START a turn; resolved here, in the request.
         const resolved = await resolveRunSession({ department: run.department });
         if (!resolved.ok) return;

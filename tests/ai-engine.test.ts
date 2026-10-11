@@ -806,6 +806,59 @@ async function main() {
     assert.ok(r.latency_ms !== null && Number(r.latency_ms) >= 0, "latency runs from the start of the turn");
   });
 
+  await check("an automation's department turn writes its rows under automations.run with its job id: the answered turn and a refusal", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const prepared = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: dept("sales"),
+      operator: { name: "CC", email: USERS.cc.email },
+      platformFallback: null,
+      revealModel: false,
+      userId: USERS.cc.id,
+      bridge: async () => ccCaller,
+      surface: "automations.run",
+      jobId: "auto-run-0042",
+    });
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    if (!prepared.ok) return;
+    answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Pipeline is healthy.") : new Response("no provider call expected", { status: 599 }));
+    await drainTurn(prepared.turn);
+    // A refusal before any model is asked is filed the same way.
+    await db.execute({ sql: "UPDATE agent_model_config SET encrypted_api_key = 'not-a-cipher' WHERE tenant_id = ? AND agent_key = '__workspace__'", args: [ALPHA] });
+    try {
+      const refused = await prepareAgentTurn({
+        tenantId: ALPHA,
+        tenantSlug: "alpha-co",
+        agentSlug: "sdr",
+        department: sales,
+        operator: { name: "Owner", email: USERS.alpha.email },
+        platformFallback: null,
+        revealModel: false,
+        userId: USERS.alpha.id,
+        bridge: null,
+        surface: "automations.run",
+        jobId: "auto-run-0043",
+      });
+      assert.ok(!refused.ok && refused.error === "key_unreadable", JSON.stringify(refused));
+    } finally {
+      await db.execute({ sql: "UPDATE agent_model_config SET encrypted_api_key = ? WHERE tenant_id = ? AND agent_key = '__workspace__'", args: [anthCipher, ALPHA] });
+    }
+    const rows = await usageRows();
+    assert.deepEqual(
+      rows.map((r) => [r.tenant_id, r.surface, r.job_id, r.outcome, r.error_code]),
+      [
+        [OASIS, "automations.run", "auto-run-0042", "ok", null],
+        [ALPHA, "automations.run", "auto-run-0043", "error", "key_unreadable"],
+      ],
+    );
+    // A chat turn (no surface) is still agents.chat.
+    await db.execute("DELETE FROM ai_usage_events");
+    await drainTurn(await bridgeTurnFor());
+    assert.deepEqual((await usageRows()).map((r) => [r.surface, r.job_id]), [["agents.chat", null]]);
+  });
+
   await check("the bridge's own token counts are recorded when it reports them; a local model is named and billed local", async () => {
     await db.execute("DELETE FROM ai_usage_events");
     await store.saveAgentEngine(OASIS, { kind: "local", model: "llama3.3" });

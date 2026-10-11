@@ -708,6 +708,242 @@ async function main() {
     assert.equal(JSON.parse(r.content).error, "routines_not_available_to_you");
   });
 
+  console.log("Automations: what a run may use");
+  const tools = await import("../lib/os/desk/tools");
+  await check("the 'only' allowlist narrows the palette, and execute() refuses an excluded tool even when the department has it", async () => {
+    const t = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["leads_search", "department_numbers", "finance_get_metric"] });
+    // The department's order, the department's tools only (Finance is not Sales').
+    assert.deepEqual(t.palette.map((x) => x.name), ["department_numbers", "leads_search"]);
+    assert.deepEqual(t.tools.map((x) => x.name), ["department_numbers", "leads_search"]);
+    const excluded = await t.execute("pipeline_summary", {});
+    assert.equal(excluded.is_error, true);
+    assert.equal(JSON.parse(excluded.content).error, "tool_not_allowed_for_this_automation");
+    assert.doesNotMatch(excluded.content, /Harbor Bakery/);
+    assert.equal(JSON.parse((await t.execute("finance_get_metric", {})).content).error, "tool_not_in_this_department");
+    const allowed = await t.execute("leads_search", { query: "Harbor" });
+    assert.equal(allowed.is_error, false, allowed.content);
+    // A proposal needs the automation's proposal rules: without them it is never offered and never runs.
+    const bare = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["leads_search", "propose_email"] });
+    assert.ok(!bare.palette.some((x) => x.name === "propose_email"));
+    assert.equal(JSON.parse((await bare.execute("propose_email", draft({ subject: "No rules" }))).content).error, "tool_not_allowed_for_this_automation");
+    // An empty allowlist is an empty palette, never "everything".
+    assert.deepEqual(deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: [] }).palette, []);
+  });
+  await check("an automation reads only its OWN department's numbers: Chief of Staff's reach into other pages stays the chat's, and the tool it is offered says so", async () => {
+    // OASIS's founder: the rail opens every department page, Finance (company money) included.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const base = viewerFor(OASIS, "oasis-ai-cc", "founder", OWNER, "OASIS") as any;
+    const oasisFounder = { ...base, oasis: true, navInput: { ...base.navInput, isOasisTenant: true, founders: { content: true, finances: true } } };
+    const read = async (t: ReturnType<typeof deskToolset>, input: Record<string, unknown>) => {
+      const r = await t.execute("department_numbers", input);
+      return { r, body: JSON.parse(r.content) as { error?: string; department?: string; needs_you_count?: number } };
+    };
+    // Anti-vacuity: the CHAT reads other pages from Chief of Staff, Finance's money tiles included.
+    const chat = deskToolset({ viewer: oasisFounder, dept: dept("chief_of_staff"), agentSlug: "cos" });
+    const chatFinance = await read(chat, { department: "finance" });
+    assert.equal(chatFinance.r.is_error, false, chatFinance.r.content);
+    assert.equal(chatFinance.body.department, "Finance");
+    assert.match(chatFinance.r.content, /Collected 7d/);
+    assert.equal((await read(chat, { department: "sales" })).body.department, "Sales");
+    // The automation: its own page only, whatever department the model names.
+    const cases: Array<[string, unknown, string[]]> = [
+      ["OASIS", oasisFounder, ["finance", "sales", "marketing", "operations", "client_success"]],
+      ["a client workspace", acmeOwner, ["sales", "marketing", "operations", "client_success"]],
+    ];
+    for (const [where, viewer, others] of cases) {
+      const t = deskToolset({ viewer: viewer as typeof acmeOwner, dept: dept("chief_of_staff"), agentSlug: "cos", only: ["department_numbers"] });
+      for (const key of others) {
+        const { r, body } = await read(t, { department: key });
+        assert.equal(r.is_error, true, `${where}: a Chief of Staff automation read the ${key} page: ${r.content}`);
+        assert.equal(body.error, "automation_reads_its_own_department_only");
+        assert.doesNotMatch(r.content, /Collected|MRR|Goal pace|"department":/);
+      }
+      // ...and still answers its own page, named or not, with the Needs-you COUNT.
+      for (const input of [{}, { department: "chief_of_staff" }]) {
+        const own = await read(t, input);
+        assert.equal(own.r.is_error, false, `${where}: ${own.r.content}`);
+        assert.equal(own.body.department, "Chief of Staff");
+        assert.equal(typeof own.body.needs_you_count, "number");
+      }
+    }
+    // Another department's automation: its own page only, as its chat already is.
+    const sales = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["department_numbers"] });
+    assert.equal((await read(sales, { department: "marketing" })).body.error, "automation_reads_its_own_department_only");
+    assert.equal((await read(sales, {})).body.department, "Sales");
+    // What the model is told is what runs: no other department's page on offer, and no department to pick.
+    const offered = deskToolset({ viewer: oasisFounder, dept: dept("chief_of_staff"), agentSlug: "cos", only: ["department_numbers"] });
+    const tool = offered.tools.find((x) => x.name === "department_numbers")!;
+    assert.doesNotMatch(tool.description, /another department/);
+    assert.deepEqual(Object.keys((tool.input_schema as { properties?: Record<string, unknown> }).properties ?? {}), []);
+    assert.doesNotMatch(offered.palette.find((x) => x.name === "department_numbers")!.summary, /\ba department page\b/);
+    // The chat keeps its reach, and says so.
+    assert.match(chat.tools.find((x) => x.name === "department_numbers")!.description, /another department's page/);
+  });
+  await check("deskToolAvailability is the predicate run() enforces: finance, tickets and routines agree for every viewer", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oasisOwner = { ...(viewerFor(OASIS, "oasis-ai-cc", "founder", OWNER, "OASIS") as any), oasis: true };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oasisRep = { ...(viewerFor(OASIS, "oasis-ai-cc", "sales", REP, "OASIS") as any), oasis: true };
+    const viewers = { owner: acmeOwner, rep: acmeRep, readOnly: acmeReadOnly, oasisOwner, oasisRep };
+    const cases: Array<[import("../lib/os/desk/catalog").DeskToolName, string]> = [
+      ["finance_get_metric", "finance"],
+      ["tickets_list", "client_success"],
+      ["routines_status", "operations"],
+    ];
+    const reasons = new Set(["company_money_not_available_to_you", "no_access_to_tickets", "routines_not_available_to_you", "tool_not_in_this_department"]);
+    const seen: Record<string, Set<boolean>> = {};
+    for (const [tool, d] of cases) {
+      for (const [who, v] of Object.entries(viewers)) {
+        const a = tools.deskToolAvailability(tool, v);
+        (seen[tool] ??= new Set()).add(a.ok);
+        const r = await deskToolset({ viewer: v, dept: dept(d), agentSlug: "x" }).execute(tool, {});
+        const err = r.is_error ? String(JSON.parse(r.content).error) : null;
+        if (!a.ok) {
+          assert.equal(r.is_error, true, `${tool} ran for ${who} although it is unavailable`);
+          assert.ok(err === a.reason || err === "tool_not_in_this_department", `${tool} for ${who}: ${err} vs ${a.reason}`);
+        } else {
+          assert.ok(!reasons.has(String(err)), `${tool} for ${who} is available but run() refused it: ${err}`);
+        }
+      }
+    }
+    // Anti-vacuity: each tool is available to someone and unavailable to someone.
+    for (const [tool] of cases) assert.deepEqual([...seen[tool]].sort(), [false, true], `${tool} never varied`);
+    assert.deepEqual(tools.deskToolAvailability("propose_email", acmeReadOnly), { ok: false, reason: "read_only_member_cannot_propose" });
+    assert.deepEqual(tools.deskToolAvailability("department_numbers", acmeReadOnly), { ok: true });
+  });
+  await check("stateAllow=[]: the prompt has the always-included facts and no lead names, ticket titles, approval titles or routine names", async () => {
+    const turnFor = (key: string) => ({ ...baseTurn("google"), department: dept(key) });
+    const leaky = /Harbor Bakery|Northwind|Morning lead sweep|Following up|Email to lee@harbor/;
+    // Anti-vacuity: without an allowlist the same turns do carry them.
+    const open = [
+      await groundDepartmentTurn({ turn: turnFor("chief_of_staff"), viewer: acmeOwner, maxTokens: 256, plainStream }),
+      await groundDepartmentTurn({ turn: turnFor("operations"), viewer: acmeOwner, maxTokens: 256, plainStream }),
+    ].map((g) => String(g?.system)).join("\n");
+    assert.match(open, /Harbor Bakery/);
+    assert.match(open, /Morning lead sweep/);
+    assert.match(open, /Following up/);
+    for (const key of ["chief_of_staff", "sales", "operations", "client_success"]) {
+      const g = await groundDepartmentTurn({ turn: turnFor(key), viewer: acmeOwner, maxTokens: 256, plainStream, only: [], stateAllow: [] });
+      const system = String(g?.system);
+      assert.doesNotMatch(system, leaky, `${key}: ${system.match(leaky)?.[0]} reached an automation that may read nothing`);
+      // Always included: the page's numbers, the business, the apps.
+      assert.match(system, /Business: Acme Roofing/);
+      assert.match(system, new RegExp(`Numbers on the ${dept(key).label} page:`));
+      assert.match(system, /Apps the .* department works through/);
+      assert.match(system, /not given to this automation/);
+    }
+    // A section the automation may read is there; the others are not.
+    const pipelineOnly = await groundDepartmentTurn({ turn: turnFor("sales"), viewer: acmeOwner, maxTokens: 256, plainStream, only: ["pipeline_summary"], stateAllow: ["pipeline_summary"] });
+    assert.match(String(pipelineOnly?.system), /Harbor Bakery/);
+    assert.doesNotMatch(String(pipelineOnly?.system), /Following up|Email to lee@harbor/);
+  });
+  await check("automation drafts: only to the lead's own email, no cc, no revising, 3 a run, a labelled card under the owner's key", async () => {
+    const AUTOMATION = "5f0e7a52-1c2b-4d3e-8f9a-0b1c2d3e4f50";
+    const tag = `a.${AUTOMATION.replace(/-/g, "").slice(0, 26)}`;
+    await db.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data, created_at, updated_at) VALUES ('lead-acme-mail', ?, 'lead', ?, ?, ?)",
+      args: [ACME, JSON.stringify({ name: "Maple Dental", company: "Maple Dental", email: "Front@MapleDental.test", stage: "contacted" }), now, now],
+    });
+    const policy = { mode: "live" as const, automationId: AUTOMATION, automationName: "Morning follow-ups" };
+    const t = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["leads_search", "propose_email"], proposal: policy });
+    assert.ok(t.palette.some((x) => x.name === "propose_email"));
+    const mail = (extra: Record<string, unknown> = {}) => ({ to: "front@mapledental.test", lead_id: "lead-acme-mail", subject: "Checking in", body: "Hi, checking in.", ...extra });
+    const errorOf = async (input: Record<string, unknown>) => {
+      const r = await t.execute("propose_email", input);
+      return r.is_error ? String(JSON.parse(r.content).error) : null;
+    };
+    const before = (await pendingCards()).length;
+    assert.equal(await errorOf(mail({ revises_approval_id: repCardId })), "automation_cannot_revise");
+    assert.equal(await errorOf(mail({ to: "someone@else.test" })), "recipient_is_not_the_leads_email");
+    assert.equal(await errorOf(mail({ lead_id: undefined })), "automation_draft_needs_a_lead");
+    assert.equal(await errorOf(mail({ lead_id: "lead-zeta-1", to: "x@quill.test" })), "lead_not_found");
+    assert.equal(await errorOf(mail({ cc: "boss@mapledental.test" })), "automation_cannot_cc");
+    assert.equal((await pendingCards()).length, before, "a refused draft filed a card");
+    for (const n of [1, 2, 3]) assert.equal(await errorOf(mail({ subject: `Checking in ${n}` })), null, `draft ${n} was refused`);
+    assert.equal(await errorOf(mail({ subject: "Checking in 4" })), "automation_draft_limit_per_run");
+    const cards = (await db.execute({ sql: "SELECT title, idempotency_key, status FROM approvals WHERE idempotency_key LIKE ? ORDER BY created_at", args: [`desk:${OWNER}:${tag}:%`] })).rows;
+    assert.equal(cards.length, 3);
+    for (const c of cards) {
+      assert.match(String(c.title), /^Automation Morning follow-ups: Email to front@mapledental\.test: Checking in \d$/);
+      assert.match(String(c.idempotency_key), new RegExp(`^desk:${OWNER}:${tag}:\\d{4}-\\d{2}-\\d{2}:new:[0-9a-f]+$`));
+      assert.equal(c.status, "pending");
+    }
+  });
+  await check("automation drafts: a test run previews and files nothing; 10 a day per automation, counted from the cards", async () => {
+    const AUTOMATION = "6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const tag = `a.${AUTOMATION.replace(/-/g, "").slice(0, 26)}`;
+    const mail = (subject: string) => ({ to: "front@mapledental.test", lead_id: "lead-acme-mail", subject, body: "Hi." });
+    const preview = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["propose_email"], proposal: { mode: "preview", automationId: AUTOMATION, automationName: "Daily check" } });
+    const before = (await pendingCards()).length;
+    const p = await preview.execute("propose_email", mail("Preview only"));
+    assert.equal(p.is_error, false, p.content);
+    const body = JSON.parse(p.content);
+    assert.deepEqual([body.sent, body.filed, body.test_run], [false, false, true]);
+    assert.match(p.summary, /Would have drafted/);
+    assert.equal((await pendingCards()).length, before, "a test run filed a card");
+    // A preview is still checked like a real one.
+    assert.equal(JSON.parse((await preview.execute("propose_email", { ...mail("x"), to: "a@b.test" })).content).error, "recipient_is_not_the_leads_email");
+    // 10 live cards in a day, across runs; the 11th is refused, live or preview.
+    const live = () => deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["propose_email"], proposal: { mode: "live", automationId: AUTOMATION, automationName: "Daily check" } });
+    let filed = 0;
+    for (let runN = 0; runN < 4 && filed < 10; runN++) {
+      const run = live();
+      for (let i = 0; i < 3 && filed < 10; i++) {
+        const r = await run.execute("propose_email", mail(`Day draft ${filed + 1}`));
+        assert.equal(r.is_error, false, r.content);
+        filed += 1;
+      }
+    }
+    assert.equal(filed, 10);
+    assert.equal(JSON.parse((await live().execute("propose_email", mail("Eleventh"))).content).error, "automation_draft_limit_per_day");
+    const preview2 = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["propose_email"], proposal: { mode: "preview", automationId: AUTOMATION, automationName: "Daily check" } });
+    assert.equal(JSON.parse((await preview2.execute("propose_email", mail("Eleventh preview"))).content).error, "automation_draft_limit_per_day");
+    const n = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM approvals WHERE idempotency_key LIKE ?", args: [`desk:${OWNER}:${tag}:%`] })).rows[0].n);
+    assert.equal(n, 10);
+  });
+  await check("automation drafts: a preview counts drafts it already accepted THIS preview toward the simulated daily cap, so it matches what a live run would do", async () => {
+    const AUTOMATION = "7b2c3d4e-5f6a-4b7c-9d8e-0f1a2b3c4d5e";
+    const tag = `a.${AUTOMATION.replace(/-/g, "").slice(0, 26)}`;
+    const mail = (subject: string) => ({ to: "front@mapledental.test", lead_id: "lead-acme-mail", subject, body: "Hi." });
+    const live = () => deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["propose_email"], proposal: { mode: "live", automationId: AUTOMATION, automationName: "Nine already filed" } });
+    const countFor = async () => Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM approvals WHERE idempotency_key LIKE ?", args: [`desk:${OWNER}:${tag}:%`] })).rows[0].n);
+    // 9 cards filed today already, 3 per run (the per-run cap), across 3 runs.
+    for (let runN = 0; runN < 3; runN++) {
+      const run = live();
+      for (let i = 0; i < 3; i++) {
+        const r = await run.execute("propose_email", mail(`Earlier today ${runN}-${i}`));
+        assert.equal(r.is_error, false, r.content);
+      }
+    }
+    assert.equal(await countFor(), 9);
+
+    // A preview of 3 distinct drafts against a 10-a-day cap with 9 already
+    // filed: a live run would accept only the first (the 10th card) and
+    // refuse the other two. The preview must match it - each check in a
+    // preview reads the same persisted count, so a draft THIS SAME preview
+    // already accepted has to be added back in by hand or the preview
+    // undercounts and accepts more than a live run would.
+    const preview = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["propose_email"], proposal: { mode: "preview", automationId: AUTOMATION, automationName: "Nine already filed" } });
+    const previewResults: string[] = [];
+    for (const subject of ["Preview A", "Preview B", "Preview C"]) {
+      const r = await preview.execute("propose_email", mail(subject));
+      previewResults.push(r.is_error ? JSON.parse(r.content).error : "ok");
+    }
+    assert.deepEqual(previewResults, ["ok", "automation_draft_limit_per_day", "automation_draft_limit_per_day"]);
+    assert.equal(await countFor(), 9, "a preview filed a card");
+
+    // The equivalent live run: same automation, same 9 persisted, a fresh
+    // per-run state - exactly one of the three is accepted, same as preview.
+    const liveRun = live();
+    const liveResults: string[] = [];
+    for (const subject of ["Live A", "Live B", "Live C"]) {
+      const r = await liveRun.execute("propose_email", mail(subject));
+      liveResults.push(r.is_error ? JSON.parse(r.content).error : "ok");
+    }
+    assert.deepEqual(liveResults, ["ok", "automation_draft_limit_per_day", "automation_draft_limit_per_day"]);
+    assert.equal(await countFor(), 10);
+  });
+
   console.log("Wiring");
   await check("the chat route grounds department turns from the session viewer and relays lookups as plain labels", () => {
     const src = readFileSync(join(process.cwd(), "app/api/agents/chat/route.ts"), "utf8");
