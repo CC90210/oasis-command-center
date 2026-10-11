@@ -8,10 +8,19 @@
  * a second copy for departments could drift, and the drift would be a way
  * around the no-shell wall.
  *
- *   - Owners and admins: the app they chose, every tool.
- *   - Everyone else: Claude Code, with the role's mutating tools disallowed.
- *     Claude Code is the ONLY app whose --disallowed-tools spawn flag enforces
- *     that wall; Codex and Gemini CLI have no equivalent (Codex audit P1), and
+ *   - The coding harness (an owner or admin's own console): the app they
+ *     chose, every tool. Everyone else there: Claude Code, with the role's
+ *     mutating tools disallowed.
+ *   - A DEPARTMENT turn (O3b security rule, "Codex and Gemini are refused for
+ *     departments at three layers"): Claude Code ALWAYS, for every role,
+ *     including an owner or admin. Codex can read the whole disk (it has no
+ *     --disallowed-tools equivalent, Codex audit P1) and a department reply
+ *     is never the place for that; Gemini CLI cannot run on a personal
+ *     sign-in at all (lib/bridge-cli-status.ts CLI_UNSUPPORTED_DETAIL).
+ *     lib/ai/bridge-turn.ts, the ONLY caller that runs department turns,
+ *     always asks with `department: true`.
+ *   - Claude Code is the ONLY app whose --disallowed-tools spawn flag enforces
+ *     the mutating-tools wall; Codex and Gemini CLI have no equivalent, and
  *     the bridge itself pins a restricted turn to Claude Code too.
  *
  * PURE.
@@ -33,9 +42,10 @@ export function isPrivilegedBridgeRole(teamRole: string | null | undefined): boo
 export function bridgeCliPolicy(
   teamRole: string | null | undefined,
   requested: BridgeCliProvider,
+  opts: { department?: boolean } = {},
 ): { cliProvider: BridgeCliProvider; disallowedTools: string[] } {
   return {
-    cliProvider: isPrivilegedBridgeRole(teamRole) ? requested : "claude",
+    cliProvider: opts.department || !isPrivilegedBridgeRole(teamRole) ? "claude" : requested,
     disallowedTools: bridgeDisallowedToolsForRole(teamRole),
   };
 }

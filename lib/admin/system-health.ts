@@ -52,6 +52,7 @@ import {
   type AdminDb,
   type AttentionEvent,
   type AttentionSummary,
+  type AttentionViewer,
   type CronFailure,
   type PairedMachine,
   type WorkerHealth,
@@ -302,6 +303,16 @@ export type SystemHealthDeps = {
   now?: number;
   /** The Command Center's probe of the bridge; the page uses probeCloudReach. */
   probeCloud?: () => Promise<CloudReach>;
+  /**
+   * O3b: who is looking. Omitted, this is the pre-O3b behaviour -- every
+   * pairing in the tenant answers the machine card and verdict, and the
+   * fleet reporter/workers show for everyone. Passed, the machine card and
+   * verdict describe THIS PERSON's own computer only (CC sees CCPC, Adon
+   * sees his own), and the fleet reporter + background workers -- CC's House
+   * agents' own process table -- show only for the agents owner, same rule
+   * O2 already applies to the Automations tab.
+   */
+  viewer?: AttentionViewer;
 };
 
 /**
@@ -312,8 +323,9 @@ export type SystemHealthDeps = {
 export async function loadSystemHealth(tenantId: string, deps: SystemHealthDeps = {}): Promise<SystemHealth> {
   const db = deps.db ?? getServiceSupabase();
   const now = deps.now ?? Date.now();
+  const viewer = deps.viewer;
   const [machines, cloud, guardRow, workerRows, cron, events, coldLeads] = await Promise.all([
-    safe("system_health.machines", loadMachines(db, tenantId, now), null),
+    safe("system_health.machines", loadMachines(db, tenantId, now, viewer), null),
     safe("system_health.cloud_reach", (deps.probeCloud ?? probeCloudReach)(), null),
     // Wrapped so "no report" (null) and "the read failed" (safe's null) differ.
     safe("system_health.guards", loadGuardRow(db, tenantId).then((row) => ({ row })), null),
@@ -323,7 +335,7 @@ export async function loadSystemHealth(tenantId: string, deps: SystemHealthDeps 
     safe("system_health.cold_leads", countColdLeads(db, tenantId, now), null),
   ]);
   const guards = guardRow === null ? null : describeGuards(guardRow.row, now);
-  const background = describeBackground(workerRows, machines, now);
+  const background = describeBackground(workerRows, machines, now, viewer);
   return {
     generatedAt: new Date(now).toISOString(),
     verdict: describeVerdict({ machines, guards, now }),

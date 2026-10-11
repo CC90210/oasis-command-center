@@ -79,7 +79,9 @@ async function createSchema() {
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       tool_capabilities TEXT NOT NULL DEFAULT '[]',
       scope TEXT, paired_via TEXT, claim_protocols TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
-      claude_account_hash TEXT, previous_token_hash TEXT, token_rotated_at TEXT);
+      claude_account_hash TEXT, claim_state_at TEXT, claim_capacity INTEGER, claim_in_flight INTEGER,
+      claim_blocked_reason TEXT, last_claim_ip TEXT, previous_token_hash TEXT, token_rotated_at TEXT,
+      last_poll_ok_at TEXT);
     CREATE TABLE agent_events (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
       event_type TEXT, publisher_agent TEXT, severity TEXT, payload TEXT, correlation_id TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));

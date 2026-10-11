@@ -27,6 +27,21 @@
  * at once.
  *
  * A failed read THROWS: "couldn't check" is never "not saved".
+ *
+ * PER-PERSON ENGINE (O3b, "your engine and your computer's status are
+ * yours"). The workspace row above answers for everyone who has not chosen
+ * for themselves. A person may save their OWN row instead -- agent_model_config,
+ * the SAME agent_key ("__engine__"), but user_id = their own auth user id
+ * (the partial unique index idx_agent_model_config_engine_per_user,
+ * bravo__212, is one row per tenant+user+agent_key). Its vocabulary is
+ * smaller than the workspace row's: 'computer' (Claude Code on MY OWN paired
+ * computer, O3a's bridge_pairings -- never the workspace's shared tunnel) or
+ * 'api' (the workspace API key). EFFECTIVE ENGINE precedence: the person's
+ * own row, else the workspace row (readAgentEngine, unchanged, O1's pause
+ * included), else the OASIS default inside it. NO KEY FALLBACK (Adon,
+ * 2026-10-11): an explicit 'computer' choice is never silently answered on an
+ * API key when the computer cannot be reached -- it is refused, with the
+ * reason (lib/os/runs/session.ts).
  */
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -141,6 +156,84 @@ export async function saveAgentEngine(tenantId: string, choice: AgentEngineChoic
       " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = NULL, updated_at = excluded.updated_at",
     args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, new Date().toISOString()],
   });
+}
+
+/** A person's own engine choice (O3b): their own paired computer, or the workspace API key. */
+export type PersonEngineChoice = { kind: "computer" } | { kind: "api" };
+
+/** The person's choice precedes the workspace row; 'workspace' means nobody chose for themselves. */
+export type EffectiveEngine = { source: "person"; kind: PersonEngineChoice["kind"] } | { source: "workspace"; engine: AgentEngineChoice };
+
+export function isPersonEngineChoice(v: unknown): v is PersonEngineChoice["kind"] {
+  return v === "computer" || v === "api";
+}
+
+/** A request body's choice ({kind:"computer"} / {kind:"api"}, or the bare string), or null when it is neither. */
+export function parsePersonEngineChoice(raw: unknown): PersonEngineChoice | null {
+  const kind = typeof raw === "string" ? raw : raw && typeof raw === "object" ? (raw as Record<string, unknown>).kind : null;
+  return isPersonEngineChoice(kind) ? { kind } : null;
+}
+
+function personEngineRow(choice: PersonEngineChoice): { provider: string; model: string } {
+  return { provider: choice.kind, model: "-" };
+}
+
+function personEngineFromRow(row: { provider?: unknown } | null | undefined): PersonEngineChoice | null {
+  return isPersonEngineChoice(row?.provider) ? { kind: row!.provider as PersonEngineChoice["kind"] } : null;
+}
+
+/** This person's own engine row; null when they have not chosen (the workspace row answers instead). Throws when the read fails. */
+export async function readPersonEngine(tenantId: string, userId: string): Promise<PersonEngineChoice | null> {
+  const { data, error } = await getServiceSupabase()
+    .from("agent_model_config")
+    .select("provider")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .eq("agent_key", ENGINE_AGENT_KEY)
+    .maybeSingle();
+  if (error) throw new Error(`person engine: agent_model_config read failed: ${error.message}`);
+  return personEngineFromRow(data as { provider?: unknown } | null);
+}
+
+/**
+ * Save THIS PERSON's own engine choice (one upsert on their own row; never
+ * touches the workspace row). `userId` must be the SIGNED-IN person's own id
+ * — the route this backs (app/api/agent-config/person-engine) is self-only,
+ * never accepts a body-supplied user id (O0's lesson: the request body must
+ * never pick who a write is for). Throws when the write fails.
+ */
+export async function savePersonEngine(tenantId: string, userId: string, choice: PersonEngineChoice): Promise<void> {
+  const row = personEngineRow(choice);
+  await writeClient().execute({
+    sql:
+      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
+      " VALUES (?, ?, ?, ?, ?, NULL, 1, ?)" +
+      " ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL AND agent_key = '__engine__'" +
+      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = NULL, updated_at = excluded.updated_at",
+    args: [tenantId, userId, ENGINE_AGENT_KEY, row.provider, row.model, new Date().toISOString()],
+  });
+}
+
+/** Clear this person's own engine row, so the workspace default answers for them again. Throws when the write fails. */
+export async function clearPersonEngine(tenantId: string, userId: string): Promise<void> {
+  await writeClient().execute({
+    sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND user_id = ? AND agent_key = ?",
+    args: [tenantId, userId, ENGINE_AGENT_KEY],
+  });
+}
+
+/**
+ * EFFECTIVE ENGINE (O3b): this person's own choice if they made one, else the
+ * workspace's (readAgentEngine, unchanged -- O1's pause for a 'cli'/'local'
+ * workspace default is NOT reproduced here; it stays exactly where it already
+ * runs, in lib/os/runs/session.ts, so a person with no choice of their own
+ * sees NO behaviour change). `userId` absent (no session) reads as no
+ * person choice. Throws when either read fails.
+ */
+export async function readEffectiveEngine(tenantId: string, userId: string | null | undefined): Promise<EffectiveEngine> {
+  const person = userId ? await readPersonEngine(tenantId, userId) : null;
+  if (person) return { source: "person", kind: person.kind };
+  return { source: "workspace", engine: await readAgentEngine(tenantId) };
 }
 
 type KeyRow = { agent_key: string; provider: string; model: string; encrypted_api_key: string | null; enabled: unknown };

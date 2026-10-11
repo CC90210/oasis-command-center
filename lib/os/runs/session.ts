@@ -24,8 +24,11 @@ import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { operatorNameOverride } from "@/lib/operator-name";
 import { isAdminProfile } from "@/lib/lead-scope";
 import { OS_DEPARTMENTS, type OsDepartment } from "@/lib/os/departments";
-import { readAgentEngine } from "@/lib/ai/agent-engine-store";
+import { readEffectiveEngine, type EffectiveEngine } from "@/lib/ai/agent-engine-store";
+import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { BRIDGE_REFUSAL_ERROR, bridgeResolutionForSession, type BridgeCaller, type BridgeRefused, type BridgeUnavailable } from "@/lib/ai/bridge-turn";
+import { getOwnComputers } from "@/lib/queries";
+import { personComputerRefusal } from "@/lib/devices/presence";
 import { resolveOsViewer } from "@/components/os/department/viewer";
 import type { OsViewerResult } from "@/components/os/department/viewer";
 import type { RunScope } from "./store";
@@ -67,10 +70,35 @@ export async function resolveRunSession(input: { department: string }): Promise<
   const operatorName =
     operatorNameOverride({ authUserId: user.id, email: user.email }) || profile.display_name || profile.full_name || "Operator";
 
-  // Asked only when the workspace's engine is an app on the paired computer,
-  // and answered here, with the cookies still in reach.
-  const engine = await readAgentEngine(tenantId).catch((): null => null);
-  const bridge = engine && engine.kind !== "api" ? await bridgeResolutionForSession(tenantId) : null;
+  // O3b: EFFECTIVE ENGINE -- this person's own choice, if they made one
+  // (agent_model_config, user_id = them), else the workspace's (readAgentEngine
+  // inside this, unchanged: O1's pause below still covers it exactly as before,
+  // so a person who never chose for themselves sees NO behaviour change).
+  const effective = await readEffectiveEngine(tenantId, user.id).catch(
+    (): EffectiveEngine => ({ source: "workspace", engine: { kind: "api" } }),
+  );
+
+  // The person explicitly chose THEIR OWN paired computer (O3a's pairing --
+  // never the workspace's shared tunnel bridgeResolutionForSession answers
+  // below). NO KEY FALLBACK (Adon, 2026-10-11): every state that is not a real
+  // answer is refused here, before a run is ever queued -- "refused, not
+  // queued, not saved, not failed", the same shape O1 uses just below for the
+  // workspace engine. 'can_answer' is refused too, honestly: nothing
+  // downstream of this function (prepareAgentTurn, the driver) yet knows how
+  // to run a turn ON a person's own computer -- that is O4's pull dispatch.
+  // Letting the run through here would either hang waiting for a claim that
+  // never comes, or fall through to whatever the WORKSPACE engine happens to
+  // be, which is exactly the silent-fallback this rule exists to prevent.
+  if (effective.source === "person" && effective.kind === "computer") {
+    const computers = await getOwnComputers(tenantId, user.id);
+    return { ok: false, status: 409, error: personComputerRefusal(computers, Date.now()) };
+  }
+
+  // The person explicitly chose the workspace API key: no bridge lookup at
+  // all, so there is no O1 pause risk for them -- exactly like a workspace
+  // default of 'api' today.
+  const engine: AgentEngineChoice = effective.source === "person" ? { kind: "api" } : effective.engine;
+  const bridge = engine.kind !== "api" ? await bridgeResolutionForSession(tenantId) : null;
 
   // O1: PAUSE, NOT FALLBACK. prepareAgentTurn (called later, inside
   // sendMessage -> executeRun, via turnStarterFor) would refuse this the same

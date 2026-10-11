@@ -38,3 +38,105 @@ export function machineState(lastSeenAt: string | null | undefined, nowMs: numbe
 export function isOnline(lastSeenAt: string | null | undefined, nowMs: number): boolean {
   return machineState(lastSeenAt, nowMs) === "online";
 }
+
+/**
+ * computerAnswerState (O3b) - whether ONE paired computer can take department
+ * work right now, for every screen that says so (Settings > Computers, the
+ * department composer banner, Automations' "Runs on" line, /health). A
+ * HEARTBEAT (bridge_pairings.last_seen_at / the ping every HEARTBEAT_S) is
+ * never enough on its own: a computer that pings but has not called the claim
+ * route (O4) recently may be asleep, stuck, or running an old build that
+ * cannot claim at all. The gate below reads ONLY the claim columns
+ * (bravo__212_pairing_scope_claim.sql): claim_enabled_at (the owner's
+ * approval), claim_state_at (the last claim call, O4's own freshness clock),
+ * claim_blocked_reason, and claim_capacity.
+ *
+ *   'can_answer'    approved, claimed inside CLAIM_FRESH_MS, no blocked
+ *                   reason, capacity above 0.
+ *   'busy'          the same, but capacity is 0 (every slot has a run in it).
+ *   'blocked:<r>'   the computer itself reported it cannot answer right now
+ *                   (signed out, over its plan limit, an unsafe profile, ...),
+ *                   as of its last FRESH claim call.
+ *   'offline'       approved, but no claim call inside CLAIM_FRESH_MS. This is
+ *                   the state a heartbeat-only computer sits in forever: a
+ *                   ping is not a claim, so it can never read 'can_answer'.
+ *   'not_approved'  no claim_enabled_at: the owner has not approved this
+ *                   computer for work yet (or it is a signup_secret pairing,
+ *                   which can never be approved).
+ *
+ * PURE AND CLIENT-SAFE, like the rest of this module: Settings > Computers
+ * computes this in the browser from what GET /api/devices already returns.
+ */
+export const CLAIM_FRESH_MS = 90_000;
+
+export type ComputerAnswerState = "can_answer" | "busy" | `blocked:${string}` | "offline" | "not_approved";
+
+export type ComputerClaimFacts = {
+  claimEnabledAt: string | null | undefined;
+  claimStateAt: string | null | undefined;
+  claimBlockedReason: string | null | undefined;
+  claimCapacity: number | null | undefined;
+};
+
+export function computerAnswerState(facts: ComputerClaimFacts, nowMs: number): ComputerAnswerState {
+  if (!facts.claimEnabledAt) return "not_approved";
+  const claimedAt = facts.claimStateAt ? Date.parse(facts.claimStateAt) : NaN;
+  const claimFresh = Number.isFinite(claimedAt) && nowMs - claimedAt < CLAIM_FRESH_MS;
+  if (!claimFresh) return "offline";
+  const reason = (facts.claimBlockedReason || "").trim();
+  if (reason) return `blocked:${reason}`;
+  const capacity = typeof facts.claimCapacity === "number" && Number.isFinite(facts.claimCapacity) ? facts.claimCapacity : 0;
+  return capacity > 0 ? "can_answer" : "busy";
+}
+
+/**
+ * One state for several of a person's own computers: the best one answers for
+ * all of them (a person with two computers is never refused because the OTHER
+ * one is offline). Order: can_answer beats busy beats a blocked reason beats
+ * offline beats not_approved. Empty input is 'not_approved' (nothing to connect to).
+ */
+export function bestComputerAnswerState(states: readonly ComputerAnswerState[]): ComputerAnswerState {
+  const rank = (s: ComputerAnswerState): number =>
+    s === "can_answer" ? 0 : s === "busy" ? 1 : s.startsWith("blocked:") ? 2 : s === "offline" ? 3 : 4;
+  let best: ComputerAnswerState = "not_approved";
+  let bestRank = 4;
+  for (const s of states) {
+    const r = rank(s);
+    if (r < bestRank) {
+      bestRank = r;
+      best = s;
+    }
+  }
+  return best;
+}
+
+/**
+ * PURE. The refusal code for a person whose EFFECTIVE engine is their own
+ * paired computer (lib/os/runs/session.ts), from that person's own pairings
+ * (lib/queries.ts getOwnComputers). NO KEY FALLBACK (Adon, 2026-10-11):
+ * every return is a refusal code, never null/undefined for "proceed" --
+ * 'can_answer' refuses too, honestly, until O4's pull dispatch exists to
+ * actually run a turn on a person's own computer. Letting a run through here
+ * would either hang waiting for a claim that never comes, or silently
+ * answer on whatever the WORKSPACE engine happens to be -- exactly the
+ * fallback this rule exists to prevent.
+ */
+export function personComputerRefusal(computers: ReadonlyArray<ComputerClaimFacts>, now: number): string {
+  if (computers.length === 0) return "computer_not_connected";
+  const state = bestComputerAnswerState(computers.map((c) => computerAnswerState(c, now)));
+  if (state === "not_approved") return "computer_not_approved";
+  if (state === "offline") return "computer_offline";
+  if (state === "busy") return "computer_busy";
+  if (state.startsWith("blocked:")) return "computer_blocked";
+  // state === "can_answer": real dispatch to a person's own computer is O4's.
+  return "computer_dispatch_not_ready";
+}
+
+/** Plain words for one state, used by every screen that renders it. */
+export function computerAnswerSentence(state: ComputerAnswerState, label: string): string {
+  if (state === "can_answer") return `${label} is ready for department work.`;
+  if (state === "busy") return `${label} is finishing another reply. Yours is next.`;
+  if (state === "not_approved") return `${label} connected. Waiting for your approval.`;
+  if (state === "offline") return `${label} is offline.`;
+  return `${label} connected, can't answer: ${state.slice("blocked:".length)}.`;
+}
