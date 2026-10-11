@@ -179,8 +179,8 @@ function OwnerOnlyInstallNotice() {
       <p className="text-sm text-fg-muted leading-relaxed max-w-xl">
         Connecting your own computer would let your agents use its files,
         tools and scheduled jobs. That runs through the OASIS connector app,
-        which is rolling out. If you already have it, paste a connector code
-        into it, get one from Settings &gt; Connect your computer. If you do
+        which is rolling out. If you already have it, get a connector code
+        from Settings &gt; Connect your computer and paste it into the app. If you do
         not have it yet, there is nothing to install today. Until a computer
         is connected and approved, your department chats pause instead of
         running on someone else&apos;s computer.

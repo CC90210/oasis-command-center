@@ -261,6 +261,15 @@ async function main() {
     assert.match(card, /\(state\.phase === "idle" \|\| state\.phase === "minting" \|\| state\.phase === "error"\) && \(/, "the retry button never renders for forbidden");
   });
 
+  // -- 7: the new-pairing check compares server time with server time ------
+  console.log("7. pairing detection never compares a server timestamp with the browser clock");
+  await check("a new pairing is detected against the server's mint time (expiry minus life), not Date.now()", () => {
+    const card = read("components/settings/YourComputersCard.tsx");
+    assert.match(card, /const serverMintedAtMs = new Date\(j\.expires_at\)\.getTime\(\) - ttl \* 60_000;/);
+    assert.match(card, /new Date\(d\.created_at\)\.getTime\(\) > serverMintedAtMs/);
+    assert.doesNotMatch(card, /new Date\(d\.created_at\)\.getTime\(\) > mintedAtMs/);
+  });
+
   console.log(`\n${passed} passed, ${failures} failed`);
   if (failures) process.exit(1);
 }

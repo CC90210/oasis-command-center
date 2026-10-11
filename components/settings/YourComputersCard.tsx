@@ -286,7 +286,8 @@ type ConnectState =
   | { phase: "error"; message: string }
   /** The workspace does not let this person connect a computer (403): permanent, never "try again". */
   | { phase: "forbidden" }
-  | { phase: "code"; code: string; expiresAt: string; mintedAtMs: number }
+  /** mintedAtMs identifies this code (browser clock); serverMintedAtMs is the server's mint time, the only baseline compared with server timestamps. */
+  | { phase: "code"; code: string; expiresAt: string; mintedAtMs: number; serverMintedAtMs: number }
   | { phase: "expired" }
   | { phase: "found"; pairingId: string; label: string; approving: boolean; approveError: string | null }
   | { phase: "approved"; label: string };
@@ -328,8 +329,13 @@ export function ConnectYourComputerCard() {
         setState({ phase: "error", message: j.error || `http_${r.status}` });
         return;
       }
-      setState({ phase: "code", code: j.code, expiresAt: j.expires_at, mintedAtMs: Date.now() });
       const ttl = typeof j.ttl_minutes === "number" ? j.ttl_minutes : 5;
+      // The server's own mint time (its expiry minus the code's life), so a new
+      // pairing's created_at is compared clock-to-clock on the server side: a
+      // browser clock running ahead would otherwise hide a successful pairing
+      // (CodeRabbit, PR #590).
+      const serverMintedAtMs = new Date(j.expires_at).getTime() - ttl * 60_000;
+      setState({ phase: "code", code: j.code, expiresAt: j.expires_at, mintedAtMs: Date.now(), serverMintedAtMs });
       setAnnouncement(`Connector code ${j.code}. Expires in ${ttl} minute${ttl === 1 ? "" : "s"}.`);
     } catch (e) {
       setState({ phase: "error", message: e instanceof Error ? e.message : "code_failed" });
@@ -361,7 +367,7 @@ export function ConnectYourComputerCard() {
   // created after this code was minted.
   useEffect(() => {
     if (state.phase !== "code") return;
-    const { mintedAtMs } = state;
+    const { serverMintedAtMs } = state;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -369,7 +375,7 @@ export function ConnectYourComputerCard() {
         const j = await r.json();
         if (cancelled || !j.ok || !Array.isArray(j.devices)) return;
         const fresh = (j.devices as ConnectorDeviceRow[]).find(
-          (d) => d.mine && !d.revoked_at && new Date(d.created_at).getTime() > mintedAtMs,
+          (d) => d.mine && !d.revoked_at && new Date(d.created_at).getTime() > serverMintedAtMs,
         );
         if (!fresh) return;
         const label = fresh.label || "Your computer";
