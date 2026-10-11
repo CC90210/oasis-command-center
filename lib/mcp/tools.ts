@@ -107,6 +107,11 @@ export async function resolveMcpSession(
       return RUN_GONE;
     }
     if (await (deps.pairingBlocked ?? pairingBlocked)(claims.pid)) return RUN_GONE;
+  } else if (claims.pid) {
+    // A computer-bound bearer with no run (the O4 canary): the computer that
+    // asked for it must still be connected on every call, so disconnecting it
+    // ends the bearer at once, not at expiry (security review, O4).
+    if (await (deps.pairingBlocked ?? pairingBlocked)(claims.pid)) return RUN_GONE;
   }
 
   if (claims.sv !== undefined) {

@@ -58,6 +58,10 @@ export async function POST(req: NextRequest) {
       prof: "read",
       sid: `canary-${crypto.randomUUID()}`,
       ttlSeconds: CANARY_TTL_SECONDS,
+      // Bound to the computer that asked (security review, O4):
+      // resolveMcpSession refuses it the moment this pairing is revoked.
+      pid: pairing.pairingId,
+      orig: "test",
     });
   } catch {
     return bad(503, "oasis_mcp_not_configured");
