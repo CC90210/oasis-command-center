@@ -11,27 +11,30 @@
  *      types decide which channels exist; a forged extra channel in the
  *      caller's "requested" map is never looked at; a missing/non-true
  *      value for a channel the step DOES render reads as unticked, never
- *      as a default "yes".
+ *      as a default "yes"; each decision carries the normalised destination
+ *      the step's OWN field held.
  *   3. recordConsentEvents: one row per rendered channel, the IP recorded
  *      is EXACTLY the caller's ipAddress argument (the submit route's only
  *      source for that argument is Cloudflare's header, never the body —
  *      pinned separately as a source check on the route), disclosure_hash
- *      is sha256 of the server's own rendered text, never anything a
- *      caller supplies (the function signature has no text/hash parameter
- *      at all).
+ *      is sha256 of the server's own rendered text, subject_hash binds the
+ *      row to its destination. consentPageUrl never stores a signed token.
  *   4. No update or delete path: the migration's two triggers exist and
  *      abort any attempt; lib/consent/ledger.ts never chains .update(/
  *      .delete( off a consent_events access.
- *   5. hasTickedConsent / marketingSendAllowed: no row refuses; the most
- *      RECENT row wins (a later decline overrides an earlier tick); a read
- *      error refuses (fail closed) rather than throwing or defaulting to
- *      allow.
- *   6. Workspace isolation: the same lead id under two different tenants
- *      never sees the other tenant's consent.
- *   7. Transactional sends (the ai-audit welcome email) do not import or
- *      call the consent gate at all — a source check, because a gate a
- *      transactional reply is routed through would refuse to answer an
- *      enquiry over a marketing preference, which the design forbids.
+ *   5. hasTickedConsent / marketingSendAllowed: keyed on the DESTINATION,
+ *      never the lead (consent for one number never authorises another on
+ *      the same lead); no row refuses; the most RECENT row wins across
+ *      leads; an exact time tie resolves to the decline; a blank-field
+ *      row never authorises; a read error refuses (fail closed).
+ *   6. unrecordedWithdrawal: a failed decline that leaves an earlier tick
+ *      standing (or cannot be checked) is reported, and the submit route
+ *      refuses the submission on it, BEFORE the submission row is written.
+ *   7. Workspace isolation: the same destination under two different
+ *      tenants never sees the other tenant's consent.
+ *   8. Transactional sends (the ai-audit welcome email) do not import or
+ *      call the consent gate at all.
+ *   9. The public page resets the boxes to unticked on every step change.
  *
  * Run: node --conditions=react-server --import tsx tests/consent-ledger.test.ts
  */
@@ -47,13 +50,40 @@ const CONSENT_MIGRATION_PATH = join(ROOT, "database", "turso", "bravo__214_conse
 const TENANT_A = "cccccccc-0000-4000-8000-0000000000a1";
 const TENANT_B = "cccccccc-0000-4000-8000-0000000000b2";
 const LEAD_SHARED = "lead-shared-0001"; // deliberately reused across tenants below
+const EMAIL_A = "owner@client-a.test";
+const PHONE_A = "+1 (514) 555-0101";
+
+/** A fake client whose read answers with `answer` (or throws when it is an Error). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function readStub(answer: unknown): any {
+  return {
+    from() {
+      return {
+        select() {
+          return this;
+        },
+        eq() {
+          return this;
+        },
+        order() {
+          return this;
+        },
+        limit() {
+          return this;
+        },
+        async maybeSingle() {
+          if (answer instanceof Error) throw answer;
+          return answer;
+        },
+      };
+    },
+  };
+}
 
 async function main() {
   const db = await setupDatabase();
   // consent_events is not part of the shared delivery harness — apply the
-  // real migration file, statement by statement including its triggers,
-  // the same way bravo__190_ledger_core.sql (which also has multi-line
-  // trigger bodies) is already applied in this harness.
+  // real migration file, statement by statement including its triggers.
   await db.executeMultiple(readFileSync(CONSENT_MIGRATION_PATH, "utf8"));
   await db.execute({
     sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-a', 'Client A')",
@@ -70,9 +100,18 @@ async function main() {
     consentDisclosureText,
     renderedChannelsForStep,
     consentDecisionsForStep,
+    normalizeConsentSubject,
     CONSENT_DISCLOSURE_VERSION,
   } = await import("../lib/consent/ledger-disclosure");
-  const { recordConsentEvents, hasTickedConsent, sha256Hex } = await import("../lib/consent/ledger");
+  const {
+    recordConsentEvents,
+    hasTickedConsent,
+    latestConsentState,
+    unrecordedWithdrawal,
+    consentPageUrl,
+    consentSubjectHash,
+    sha256Hex,
+  } = await import("../lib/consent/ledger");
   const { marketingSendAllowed } = await import("../lib/consent/marketing-send-gate");
   const { getBrand } = await import("../lib/email/brands");
 
@@ -119,7 +158,7 @@ async function main() {
     assert.equal(identity.address, oasis.postalAddress);
   });
 
-  // ── 2. Channel derivation + forged-channel / tampered-claim resistance ──
+  // ── 2. Channel derivation, forged-channel resistance, destination binding ──
   const stepBoth = {
     key: "identity",
     title: "Who am I talking to?",
@@ -147,34 +186,55 @@ async function main() {
   });
 
   await check("consentDecisionsForStep: a forged extra channel (sms) the step never rendered is ignored", () => {
-    const decisions = consentDecisionsForStep(stepEmailOnly, {}, { email: true, sms: true });
-    assert.deepEqual(decisions, [{ channel: "email", ticked: true }]);
+    const decisions = consentDecisionsForStep(stepEmailOnly, { email: EMAIL_A }, { email: true, sms: true });
+    assert.deepEqual(decisions, [{ channel: "email", ticked: true, subject: EMAIL_A }]);
     assert.ok(!decisions.some((d) => d.channel === "sms"), "a channel this step did not render must never be recorded");
   });
 
   await check("consentDecisionsForStep: a missing or non-true claim for a rendered channel reads as unticked, never a default yes", () => {
     assert.deepEqual(consentDecisionsForStep(stepBoth, {}, {}), [
-      { channel: "email", ticked: false },
-      { channel: "sms", ticked: false },
+      { channel: "email", ticked: false, subject: null },
+      { channel: "sms", ticked: false, subject: null },
     ]);
     assert.deepEqual(consentDecisionsForStep(stepBoth, {}, { email: "yes" }), [
-      { channel: "email", ticked: false },
-      { channel: "sms", ticked: false },
+      { channel: "email", ticked: false, subject: null },
+      { channel: "sms", ticked: false, subject: null },
     ]);
   });
 
-  // ── 3. recordConsentEvents: one row per channel; server-computed hash; IP is exactly the caller's argument ──
+  await check("consentDecisionsForStep: each decision carries the normalised destination the step's OWN field held", () => {
+    const decisions = consentDecisionsForStep(
+      stepBoth,
+      { email: "  Owner@Client-A.TEST ", phone: PHONE_A },
+      { email: true, sms: true },
+    );
+    assert.deepEqual(decisions, [
+      { channel: "email", ticked: true, subject: EMAIL_A },
+      { channel: "sms", ticked: true, subject: "5145550101" },
+    ]);
+  });
+
+  await check("normalizeConsentSubject: email lowercased and trimmed, phone digits with a leading NANP 1 dropped, junk is null", () => {
+    assert.equal(normalizeConsentSubject("email", " A@B.Test "), "a@b.test");
+    assert.equal(normalizeConsentSubject("email", "not-an-email"), null);
+    assert.equal(normalizeConsentSubject("sms", "+1 514-555-0101"), "5145550101");
+    assert.equal(normalizeConsentSubject("sms", "514.555.0101"), "5145550101");
+    assert.equal(normalizeConsentSubject("sms", "12"), null);
+    assert.equal(normalizeConsentSubject("sms", 5145550101), null);
+  });
+
+  // ── 3. recordConsentEvents + page address ──
   const dbClient = getServiceSupabase();
   const identity = { businessName: "Test Co", address: "9 Test Ave", privacyUrl: "https://test.example/privacy" };
 
-  await check("recordConsentEvents inserts one row per decision, with the server-rendered text and its own hash, and the caller's IP verbatim", async () => {
+  await check("recordConsentEvents inserts one row per decision, with the server-rendered text, its own hash, the subject hash, and the caller's IP verbatim", async () => {
     const result = await recordConsentEvents(dbClient, {
       tenantId: TENANT_A,
       leadId: LEAD_SHARED,
       formId: "form-1",
       decisions: [
-        { channel: "email", ticked: true },
-        { channel: "sms", ticked: false },
+        { channel: "email", ticked: true, subject: EMAIL_A },
+        { channel: "sms", ticked: false, subject: "5145550101" },
       ],
       identity,
       identitySource: "brand",
@@ -187,7 +247,7 @@ async function main() {
 
     const rows = await dbClient
       .from("consent_events")
-      .select("channel, ticked, ip_address, user_agent, page_url, disclosure_text, disclosure_hash, disclosure_version")
+      .select("channel, ticked, subject_hash, ip_address, user_agent, page_url, disclosure_text, disclosure_hash, disclosure_version")
       .eq("tenant_id", TENANT_A)
       .eq("lead_id", LEAD_SHARED)
       .eq("form_id", "form-1");
@@ -205,25 +265,53 @@ async function main() {
       assert.equal(row.ip_address, "203.0.113.9", "the body's own ip must never override the caller-supplied header IP");
       assert.equal(row.user_agent, "test-agent/1.0");
       assert.equal(row.page_url, "https://test.example/f/a/form-1");
-      const expectTicked = channel === "email" ? 1 : 0;
-      assert.equal(row.ticked, expectTicked);
+      const expectSubject = channel === "email" ? EMAIL_A : "5145550101";
+      assert.equal(row.subject_hash, consentSubjectHash(channel, expectSubject));
+      assert.ok(!String(row.subject_hash).includes(expectSubject), "the raw destination is never stored on the row");
+      assert.equal(row.ticked, channel === "email" ? 1 : 0);
     }
   });
 
-  // ── 3b. Source pin: the route's ONLY source for ipAddress is the header-
-  // derived variable, never anything read off the request body ──
-  await check("the submit route's consent-ledger call passes the header-derived IP, never a body field", () => {
-    const src = readFileSync(join(ROOT, "app", "api", "forms", "submit", "route.ts"), "utf8");
-    const anchor = src.indexOf("recordConsentEvents(db, {");
+  await check("consentPageUrl: a signed form link never reaches the ledger; queries and fragments are dropped; junk falls back", () => {
+    const origin = "https://oasisai.work";
+    const signed = consentPageUrl(origin, "/f/oasis-ai-cc/ai-audit/eyJhbGciOi.SIGNED.TOKEN?x=1", "/f/oasis-ai-cc/ai-audit");
+    assert.equal(signed, "https://oasisai.work/f/oasis-ai-cc/ai-audit/[signed-link]");
+    assert.ok(!signed.includes("SIGNED"), "the signed token must not survive");
+    assert.equal(
+      consentPageUrl(origin, "/o/offer-page?t=secret#frag", "/f/a/b"),
+      "https://oasisai.work/o/offer-page",
+    );
+    assert.equal(consentPageUrl(origin, "https://evil.test/x", "/f/a/b"), "https://oasisai.work/f/a/b");
+    assert.equal(consentPageUrl(origin, "//evil.test/x", "/f/a/b"), "https://oasisai.work/f/a/b");
+    assert.equal(consentPageUrl(origin, undefined, "/f/a/b"), "https://oasisai.work/f/a/b");
+  });
+
+  // ── 3b. Source pins on the submit route ──
+  const routeSrc = readFileSync(join(ROOT, "app", "api", "forms", "submit", "route.ts"), "utf8");
+
+  await check("the submit route's consent-ledger call passes the header-derived IP and a token-free page address", () => {
+    const anchor = routeSrc.indexOf("recordConsentEvents(db, {");
     assert.ok(anchor >= 0, "recordConsentEvents call not found in the submit route");
-    const block = src.slice(anchor, anchor + 400);
+    const block = routeSrc.slice(anchor, anchor + 500);
     assert.ok(/ipAddress:\s*ipHeader\b/.test(block), `expected ipAddress: ipHeader in:\n${block}`);
     assert.ok(!/body\.ip\b|body\["ip"\]|body\.ip_address/.test(block), "the ledger write must never read an IP off the request body");
-    // ipHeader itself must trace to the header-reading helper, not the body —
-    // getClientIp(req) reads the request's headers (cf-connecting-ip),
-    // confirmed in lib/api-helpers.ts; it is never passed `body`.
-    assert.ok(/const resolvedIp = getClientIp\(req\);/.test(src));
-    assert.ok(/const ipHeader = resolvedIp === "unknown" \? null : resolvedIp;/.test(src));
+    assert.ok(/pageUrl:\s*consentPageUrl\(/.test(block), "page_url must go through consentPageUrl, never the raw submission_path");
+    assert.ok(/const resolvedIp = getClientIp\(req\);/.test(routeSrc));
+    assert.ok(/const ipHeader = resolvedIp === "unknown" \? null : resolvedIp;/.test(routeSrc));
+  });
+
+  await check("the submit route records consent BEFORE the submission row, refuses 503 on an unrecorded withdrawal, and never logs a destination", () => {
+    const ledgerAt = routeSrc.indexOf("recordConsentEvents(db, {");
+    const insertAt = routeSrc.indexOf('.from("form_submissions")\n    .insert(');
+    const insertAtCrlf = routeSrc.indexOf('.from("form_submissions")\r\n    .insert(');
+    const submissionInsert = insertAt >= 0 ? insertAt : insertAtCrlf;
+    assert.ok(submissionInsert > 0, "form_submissions insert not found");
+    assert.ok(ledgerAt < submissionInsert, "the consent ledger must run before the submission row is written");
+    const block = routeSrc.slice(ledgerAt, ledgerAt + 1400);
+    assert.ok(/unrecordedWithdrawal\(db, form\.tenant_id, ledgerResult\)/.test(block));
+    assert.ok(/consent_record_unavailable/.test(block) && /status: 503/.test(block));
+    assert.ok(/failed: ledgerResult\.failed\.map\(\(f\) => \(\{ channel: f\.channel, ticked: f\.ticked \}\)\)/.test(block),
+      "the failure log must carry channel and tick only, never the visitor's email/number");
   });
 
   // ── 4. No update/delete path ──
@@ -238,14 +326,14 @@ async function main() {
 
   await check("lib/consent/ledger.ts never chains .update(/.delete( off a consent_events access", () => {
     const src = readFileSync(join(ROOT, "lib", "consent", "ledger.ts"), "utf8");
-    const re = /\.from\(\s*["']consent_events["']\s*\)([^;]{0,120})/g;
+    const re = /\.from\(\s*["']consent_events["']\s*\)([^;]{0,160})/g;
     let m: RegExpExecArray | null;
     let found = 0;
     while ((m = re.exec(src))) {
       found += 1;
       assert.ok(!/\.update\(|\.delete\(/.test(m[1]), `consent_events access followed by a mutation: ${m[1].slice(0, 80)}`);
     }
-    assert.ok(found >= 2, "expected at least the insert (recordConsentEvents) and select (hasTickedConsent) accesses");
+    assert.ok(found >= 2, "expected at least the insert (recordConsentEvents) and select (latestConsentState) accesses");
   });
 
   await check("the DB itself refuses an UPDATE and a DELETE on consent_events (functional, not just source)", async () => {
@@ -255,47 +343,69 @@ async function main() {
     await assert.rejects(() => db.execute({ sql: "DELETE FROM consent_events WHERE tenant_id = ?", args: [TENANT_A] }));
   });
 
-  // ── 5. hasTickedConsent / marketingSendAllowed: no row refuses, latest row wins, read error refuses ──
-  await check("hasTickedConsent: no row for this lead/channel refuses", async () => {
-    const allowed = await hasTickedConsent(dbClient, { tenantId: TENANT_A, leadId: "lead-never-asked", channel: "email" });
-    assert.equal(allowed, false);
+  // ── 5. The gate: destination-keyed, latest wins, fail closed ──
+  await check("hasTickedConsent: a destination never asked refuses", async () => {
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "email", destination: "never@asked.test" }), false);
   });
 
-  await check("hasTickedConsent: a ticked row allows; marketingSendAllowed agrees", async () => {
-    const allowed = await hasTickedConsent(dbClient, { tenantId: TENANT_A, leadId: LEAD_SHARED, channel: "email" });
-    assert.equal(allowed, true);
-    const verdict = await marketingSendAllowed(dbClient, { tenantId: TENANT_A, leadId: LEAD_SHARED, channel: "email" });
-    assert.deepEqual(verdict, { allow: true });
+  await check("hasTickedConsent: a ticked destination allows, matched after normalisation; marketingSendAllowed agrees", async () => {
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "email", destination: " OWNER@client-a.test" }), true);
+    assert.deepEqual(
+      await marketingSendAllowed(dbClient, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }),
+      { allow: true },
+    );
   });
 
   await check("hasTickedConsent: sms was declined on the same submission; marketingSendAllowed refuses it", async () => {
-    const allowed = await hasTickedConsent(dbClient, { tenantId: TENANT_A, leadId: LEAD_SHARED, channel: "sms" });
-    assert.equal(allowed, false);
-    const verdict = await marketingSendAllowed(dbClient, { tenantId: TENANT_A, leadId: LEAD_SHARED, channel: "sms" });
-    assert.deepEqual(verdict, { allow: false, reason: "no_ticked_consent" });
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "sms", destination: PHONE_A }), false);
+    assert.deepEqual(
+      await marketingSendAllowed(dbClient, { tenantId: TENANT_A, channel: "sms", destination: PHONE_A }),
+      { allow: false, reason: "no_ticked_consent" },
+    );
   });
 
-  await check("hasTickedConsent: the MOST RECENT row wins — a later decline overrides an earlier tick", async () => {
+  await check("consent for one number on a lead never authorises a DIFFERENT number on that same lead", async () => {
+    // The forgery shape: an anonymous visitor merged into an existing lead
+    // (smart-match by business name) ticks SMS for THEIR number. The lead's
+    // real number must stay refused.
     await recordConsentEvents(dbClient, {
       tenantId: TENANT_A,
-      leadId: "lead-flip-flop",
+      leadId: "lead-merged",
+      formId: "form-3",
+      decisions: [{ channel: "sms", ticked: true, subject: "4385550199" }],
+      identity,
+      identitySource: "brand",
+      ipAddress: "198.51.100.7",
+      userAgent: null,
+      pageUrl: null,
+    });
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "sms", destination: "4385550199" }), true);
+    assert.equal(
+      await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "sms", destination: "5145550177" }),
+      false,
+      "the stranger's tick must not reach the real customer's number",
+    );
+  });
+
+  await check("the MOST RECENT decision for a destination wins, even when it was recorded on a different lead", async () => {
+    await recordConsentEvents(dbClient, {
+      tenantId: TENANT_A,
+      leadId: "lead-flip-1",
       formId: "form-2",
-      decisions: [{ channel: "email", ticked: true }],
+      decisions: [{ channel: "email", ticked: true, subject: "flip@client-a.test" }],
       identity,
       identitySource: "brand",
       ipAddress: "203.0.113.10",
       userAgent: null,
       pageUrl: null,
     });
-    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, leadId: "lead-flip-flop", channel: "email" }), true);
-    // created_at is second-resolution ISO; force the second row strictly later
-    // so "most recent" is unambiguous regardless of how fast this runs.
-    await new Promise((r) => setTimeout(r, 1100));
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "email", destination: "flip@client-a.test" }), true);
+    await new Promise((r) => setTimeout(r, 20));
     await recordConsentEvents(dbClient, {
       tenantId: TENANT_A,
-      leadId: "lead-flip-flop",
+      leadId: "lead-flip-2-duplicate",
       formId: "form-2",
-      decisions: [{ channel: "email", ticked: false }],
+      decisions: [{ channel: "email", ticked: false, subject: "flip@client-a.test" }],
       identity,
       identitySource: "brand",
       ipAddress: "203.0.113.11",
@@ -303,80 +413,100 @@ async function main() {
       pageUrl: null,
     });
     assert.equal(
-      await hasTickedConsent(dbClient, { tenantId: TENANT_A, leadId: "lead-flip-flop", channel: "email" }),
+      await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "email", destination: "flip@client-a.test" }),
       false,
-      "a later decline must override an earlier tick",
+      "a later decline must override an earlier tick, whichever lead record it landed on",
     );
   });
 
-  await check("hasTickedConsent: a read error refuses (fail closed), never throws, never defaults to allow", async () => {
-    const throwingDb = {
-      from() {
-        return {
-          select() {
-            return this;
-          },
-          eq() {
-            return this;
-          },
-          order() {
-            return this;
-          },
-          limit() {
-            return this;
-          },
-          async maybeSingle() {
-            throw new Error("simulated connection failure");
-          },
-        };
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any;
-    const allowed = await hasTickedConsent(throwingDb, { tenantId: TENANT_A, leadId: LEAD_SHARED, channel: "email" });
-    assert.equal(allowed, false);
-    const verdict = await marketingSendAllowed(throwingDb, { tenantId: TENANT_A, leadId: LEAD_SHARED, channel: "email" });
-    assert.deepEqual(verdict, { allow: false, reason: "no_ticked_consent" });
+  await check("an exact created_at tie between a tick and a decline resolves to the decline", async () => {
+    const at = "2026-10-11T12:00:00.000Z";
+    const hash = consentSubjectHash("email", "tie@client-a.test");
+    for (const [id, ticked] of [["tie-1", 1], ["tie-2", 0]] as const) {
+      await db.execute({
+        sql: `INSERT INTO consent_events (id, tenant_id, lead_id, form_id, channel, ticked, subject_hash,
+              disclosure_hash, disclosure_version, disclosure_text, identity_source, created_at)
+              VALUES (?, ?, 'lead-tie', 'form-tie', 'email', ?, ?, 'h', 'v', 't', 'brand', ?)`,
+        args: [id, TENANT_A, ticked, hash, at],
+      });
+    }
+    assert.equal(await latestConsentState(dbClient, { tenantId: TENANT_A, channel: "email", destination: "tie@client-a.test" }), "declined");
+  });
+
+  await check("a tick recorded with a blank field (null subject) never authorises anything", async () => {
+    await recordConsentEvents(dbClient, {
+      tenantId: TENANT_A,
+      leadId: "lead-blank",
+      formId: "form-4",
+      decisions: [{ channel: "sms", ticked: true, subject: null }],
+      identity,
+      identitySource: "brand",
+      ipAddress: null,
+      userAgent: null,
+      pageUrl: null,
+    });
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "sms", destination: "" }), false);
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "sms", destination: null }), false);
+  });
+
+  await check("hasTickedConsent: a read that throws refuses (fail closed), never throws, never defaults to allow", async () => {
+    const throwingDb = readStub(new Error("simulated connection failure"));
+    assert.equal(await hasTickedConsent(throwingDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), false);
+    assert.equal(await latestConsentState(throwingDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), "unknown");
+    assert.deepEqual(
+      await marketingSendAllowed(throwingDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }),
+      { allow: false, reason: "no_ticked_consent" },
+    );
   });
 
   await check("hasTickedConsent: a query that answers an ERROR object (not a throw) also refuses", async () => {
-    const erroringDb = {
-      from() {
-        return {
-          select() {
-            return this;
-          },
-          eq() {
-            return this;
-          },
-          order() {
-            return this;
-          },
-          limit() {
-            return this;
-          },
-          async maybeSingle() {
-            return { data: null, error: { message: "relation does not exist" } };
-          },
-        };
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any;
-    const allowed = await hasTickedConsent(erroringDb, { tenantId: TENANT_A, leadId: LEAD_SHARED, channel: "email" });
-    assert.equal(allowed, false);
+    const erroringDb = readStub({ data: null, error: { message: "relation does not exist" } });
+    assert.equal(await hasTickedConsent(erroringDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), false);
+    assert.equal(await latestConsentState(erroringDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), "unknown");
   });
 
-  // ── 6. Workspace isolation ──
-  await check("workspace isolation: the SAME lead id under a DIFFERENT tenant never sees tenant A's consent", async () => {
-    // TENANT_B never recorded anything for LEAD_SHARED — only TENANT_A did,
-    // above. A lead id is not globally unique across tenants by construction
-    // of this test; the gate must still isolate correctly.
-    const allowedB = await hasTickedConsent(dbClient, { tenantId: TENANT_B, leadId: LEAD_SHARED, channel: "email" });
-    assert.equal(allowedB, false, "tenant B must not inherit tenant A's consent for the same lead id");
-    const allowedA = await hasTickedConsent(dbClient, { tenantId: TENANT_A, leadId: LEAD_SHARED, channel: "email" });
-    assert.equal(allowedA, true, "tenant A's own consent is unaffected by the isolation check");
+  // ── 6. A failed withdrawal is never silently lost ──
+  const failedDecline = (subject: string | null) => ({
+    ok: false,
+    recorded: [],
+    failed: [{ channel: "email" as const, ticked: false, subject, reason: "simulated write failure" }],
   });
 
-  // ── 7. Transactional sends are never gated ──
+  await check("unrecordedWithdrawal: a failed decline for a destination whose latest answer is still a tick is reported", async () => {
+    // EMAIL_A was ticked in section 3 and nothing since has declined it.
+    assert.equal(await unrecordedWithdrawal(dbClient, TENANT_A, failedDecline(EMAIL_A)), true);
+  });
+
+  await check("unrecordedWithdrawal: a failed decline with no earlier tick, or with a blank field, is not", async () => {
+    assert.equal(await unrecordedWithdrawal(dbClient, TENANT_A, failedDecline("first-time@client-a.test")), false);
+    assert.equal(await unrecordedWithdrawal(dbClient, TENANT_A, failedDecline(null)), false);
+  });
+
+  await check("unrecordedWithdrawal: a failed TICK is never a withdrawal", async () => {
+    const failedTick = {
+      ok: false,
+      recorded: [],
+      failed: [{ channel: "email" as const, ticked: true, subject: EMAIL_A, reason: "simulated write failure" }],
+    };
+    assert.equal(await unrecordedWithdrawal(dbClient, TENANT_A, failedTick), false);
+  });
+
+  await check("unrecordedWithdrawal: when the earlier answer cannot be read, it assumes the worst and reports", async () => {
+    const throwingDb = readStub(new Error("simulated connection failure"));
+    assert.equal(await unrecordedWithdrawal(throwingDb, TENANT_A, failedDecline(EMAIL_A)), true);
+  });
+
+  // ── 7. Workspace isolation ──
+  await check("workspace isolation: the SAME destination under a DIFFERENT tenant never sees tenant A's consent", async () => {
+    assert.equal(
+      await hasTickedConsent(dbClient, { tenantId: TENANT_B, channel: "email", destination: EMAIL_A }),
+      false,
+      "tenant B must not inherit tenant A's consent for the same address",
+    );
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), true);
+  });
+
+  // ── 8. Transactional sends are never gated ──
   await check("the ai-audit transactional welcome email does not import or call the consent gate", () => {
     const src = readFileSync(join(ROOT, "lib", "forms", "oasis-funnel-email.ts"), "utf8");
     assert.ok(!src.includes("consent/ledger"), "a transactional reply must never be refused for lack of a ticked marketing box");
@@ -388,6 +518,17 @@ async function main() {
     const src = readFileSync(join(ROOT, "lib", "forms", "maybe-queue-resume.ts"), "utf8");
     assert.ok(!src.includes("consent/ledger"));
     assert.ok(!src.includes("marketingSendAllowed"));
+  });
+
+  // ── 9. The public page never carries a tick across steps ──
+  await check("FormPublicClient resets both boxes to unticked whenever the step changes", () => {
+    const src = readFileSync(join(ROOT, "components", "forms", "FormPublicClient.tsx"), "utf8");
+    assert.ok(/const \[ledgerStep, setLedgerStep\] = useState\(currentStep\);/.test(src));
+    assert.ok(
+      /if \(ledgerStep !== currentStep\) \{\s*setLedgerStep\(currentStep\);\s*setLedgerTicked\(\{ email: false, sms: false \}\);/.test(src),
+      "a step change must reset both consent boxes",
+    );
+    assert.ok(/consent_record_unavailable:/.test(src), "the visitor sees plain words, not the 503 code");
   });
 
   finish("consent-ledger");

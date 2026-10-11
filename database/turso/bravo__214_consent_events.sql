@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS consent_events (
   form_id            TEXT NOT NULL,
   channel            TEXT NOT NULL,
   ticked             INTEGER NOT NULL,
+  subject_hash       TEXT,
   disclosure_hash    TEXT NOT NULL,
   disclosure_version TEXT NOT NULL,
   disclosure_text    TEXT NOT NULL,
@@ -69,9 +70,18 @@ CREATE TABLE IF NOT EXISTS consent_events (
   created_at         TEXT NOT NULL
 );
 
--- hasTickedConsent (lib/consent/ledger.ts): the marketing-send gate's hot path
--- -- "has THIS lead ticked THIS channel, on any form, ever". tenant_id leads so
--- a cross-tenant query is structurally impossible, not merely unlikely.
+-- latestConsentState / hasTickedConsent (lib/consent/ledger.ts): the
+-- marketing-send gate's hot path -- "what did THIS destination last decide on
+-- THIS channel, in this workspace". Keyed on subject_hash (sha256 of channel
+-- plus the normalised email/number the step's own field held), never on the
+-- lead: consent is given for a destination, and an anonymous submission can
+-- merge into an existing lead by business name alone. NULL subject_hash (the
+-- field was blank) can never match a send. tenant_id leads so a cross-tenant
+-- query is structurally impossible, not merely unlikely.
+CREATE INDEX IF NOT EXISTS ix_consent_events_subject
+  ON consent_events (tenant_id, channel, subject_hash, created_at);
+
+-- Per-lead review (an operator asking "what did this lead decide").
 CREATE INDEX IF NOT EXISTS ix_consent_events_lead_channel
   ON consent_events (tenant_id, lead_id, channel, created_at);
 

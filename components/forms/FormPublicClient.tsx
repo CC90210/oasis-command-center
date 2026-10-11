@@ -208,6 +208,8 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
 
   // Nothing the merchant did. Say so, and do not make them re-type anything.
   server_error: "Something went wrong on our end. Please try submitting again.",
+  consent_record_unavailable:
+    "We couldn't save your contact preferences just now. Please try submitting again.",
   form_corrupt: "This form is temporarily unavailable. We have been notified, please try again shortly.",
   form_definition_corrupt:
     "This form is temporarily unavailable. We have been notified, please try again shortly.",
@@ -401,6 +403,16 @@ export function FormPublicClient({
     email: false,
     sms: false,
   });
+  // Every step change, forward or Back, presents the disclosure afresh, so
+  // the boxes go back to unticked: a tick carried over from an earlier view
+  // would record a "yes" the visitor never gave on this one. Reset during
+  // render (React's pattern for resetting state when an input changes), not
+  // in an effect, so the stale tick is never painted even for one frame.
+  const [ledgerStep, setLedgerStep] = useState(currentStep);
+  if (ledgerStep !== currentStep) {
+    setLedgerStep(currentStep);
+    setLedgerTicked({ email: false, sms: false });
+  }
   const ledgerIdBase = useId();
 
   const setFieldValue = useCallback(

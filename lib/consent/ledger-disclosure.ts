@@ -91,6 +91,40 @@ export function renderedChannelsForStep(step: FormStep, values: Record<string, u
 }
 
 /**
+ * The canonical form of an email address or mobile number, so a consent
+ * decision binds to the exact destination it was given for and the send gate
+ * can match it. Email: trimmed + lowercased. SMS: digits only, a leading
+ * North American "1" dropped from an 11-digit number. Anything that does not
+ * look like a usable destination answers null — and a null subject can never
+ * authorise a send (lib/consent/ledger.ts).
+ */
+export function normalizeConsentSubject(channel: ConsentChannel, raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  if (channel === "email") {
+    const email = raw.trim().toLowerCase();
+    return email.includes("@") && email.length <= 320 ? email : null;
+  }
+  let digits = raw.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) digits = digits.slice(1);
+  return digits.length >= 7 && digits.length <= 15 ? digits : null;
+}
+
+/** The value the step's own visible field of this channel's type holds. */
+function stepSubjectFor(
+  step: FormStep,
+  values: Record<string, unknown>,
+  channel: ConsentChannel,
+): string | null {
+  const fieldType = channel === "email" ? "email" : "phone";
+  for (const f of step.fields) {
+    if (f.type !== fieldType || !isFieldVisible(f, values)) continue;
+    const subject = normalizeConsentSubject(channel, values[f.name]);
+    if (subject) return subject;
+  }
+  return null;
+}
+
+/**
  * Combine `renderedChannelsForStep` with a caller's claimed tick state into
  * the decisions actually worth recording.
  *
@@ -101,14 +135,23 @@ export function renderedChannelsForStep(step: FormStep, values: Record<string, u
  * DOES render gets exactly the boolean `requested` supplied for it (missing
  * or non-`true` means unticked, never a throw and never a default to
  * "ticked" — an absent/malformed claim must read as "did not consent").
+ *
+ * EACH DECISION BINDS TO THE DESTINATION ON THAT STEP. `subject` is the
+ * normalised email/number the step's own field holds — the address the
+ * visitor was agreeing about. Consent is never a property of the LEAD: an
+ * anonymous submission can smart-match an existing lead by business name
+ * alone (app/api/forms/submit/route.ts initAnonymousLead), so a lead-keyed
+ * tick would let a stranger's "yes" authorise texts to the real customer's
+ * number. The send gate matches on subject, never on lead.
  */
 export function consentDecisionsForStep(
   step: FormStep,
   values: Record<string, unknown>,
   requested: Partial<Record<ConsentChannel, unknown>>,
-): Array<{ channel: ConsentChannel; ticked: boolean }> {
+): Array<{ channel: ConsentChannel; ticked: boolean; subject: string | null }> {
   return renderedChannelsForStep(step, values).map((channel) => ({
     channel,
     ticked: requested[channel] === true,
+    subject: stepSubjectFor(step, values, channel),
   }));
 }

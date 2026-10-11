@@ -46,7 +46,12 @@ export type MarketingSendVerdict =
   | { allow: false; reason: "no_ticked_consent" };
 
 /**
- * May a MARKETING send reach this lead on this channel?
+ * May a MARKETING send reach this destination on this channel?
+ *
+ * `destination` is the exact email address or number the send is about to
+ * use, never a lead id: consent was given for a destination, and a lead's
+ * contact details can change or be merged after the fact. Pass the raw value;
+ * normalisation happens inside.
  *
  * Thin by design: hasTickedConsent already fails closed on a read error
  * (lib/consent/ledger.ts) and already treats "no row" the same as an
@@ -57,7 +62,7 @@ export type MarketingSendVerdict =
  */
 export async function marketingSendAllowed(
   db: SupabaseClient,
-  args: { tenantId: string; leadId: string; channel: ConsentChannel },
+  args: { tenantId: string; channel: ConsentChannel; destination: unknown },
 ): Promise<MarketingSendVerdict> {
   const ticked = await hasTickedConsent(db, args);
   return ticked ? { allow: true } : { allow: false, reason: "no_ticked_consent" };
