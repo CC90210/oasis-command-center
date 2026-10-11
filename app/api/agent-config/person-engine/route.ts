@@ -30,6 +30,7 @@ import { getOwnComputers } from "@/lib/queries";
 import {
   clearPersonEngine,
   parsePersonEngineChoice,
+  readAgentEngine,
   readEffectiveEngine,
   readPersonEngine,
   savePersonEngine,
@@ -49,14 +50,17 @@ export async function GET() {
   if (!ctx) return fail(401, "unauthorized", SIGNED_OUT);
   const { tenantId, authUserId } = ctx;
   try {
-    const [choice, effective, computers, apiChoiceAllowed] = await Promise.all([
+    // The workspace's own engine, read on its own: once a person has chosen,
+    // `effective` is theirs, and the card still needs the workspace default
+    // (its label, and whether the API option is offered) (Codex review, O3b).
+    const [choice, effective, computers, workspaceEngine] = await Promise.all([
       readPersonEngine(tenantId, authUserId),
       readEffectiveEngine(tenantId, authUserId),
       getOwnComputers(tenantId, authUserId),
-      workspaceAllowsPersonApiChoice(tenantId),
+      readAgentEngine(tenantId),
     ]);
     const hasApprovedComputer = computers.some((c) => Boolean(c.claimEnabledAt));
-    const workspaceEngine = effective.source === "workspace" ? effective.engine : null;
+    const apiChoiceAllowed = workspaceEngine.kind === "api";
     return NextResponse.json(
       {
         ok: true,
@@ -64,7 +68,7 @@ export async function GET() {
         effective,
         hasApprovedComputer,
         apiChoiceAllowed,
-        workspaceDefault: workspaceEngine ? agentsEngineLine(workspaceEngine) : null,
+        workspaceDefault: agentsEngineLine(workspaceEngine),
       },
       { headers: { "cache-control": "no-store" } },
     );

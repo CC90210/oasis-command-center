@@ -86,6 +86,7 @@ export function YourComputersCard() {
   const [notice, setNotice] = useState<string | null>(null);
 
   async function load() {
+    setError(null);
     try {
       const [dr, cr] = await Promise.all([
         fetch("/api/devices").then((r) => r.json()),
@@ -125,6 +126,19 @@ export function YourComputersCard() {
     } finally {
       setBusyId(null);
     }
+  }
+
+  // A first load that failed shows the error and a way to retry, never an
+  // endless spinner (Codex review, O3b).
+  if (devices === null && error) {
+    return (
+      <div className="text-sm flex items-center gap-3" role="alert">
+        <span className="text-fg-dim">Couldn&apos;t load your computers just now.</span>
+        <button onClick={load} className="text-fg-dim hover:text-accent text-xs inline-flex items-center gap-1">
+          <RefreshCw className="w-3 h-3" /> Try again
+        </button>
+      </div>
+    );
   }
 
   if (devices === null) {

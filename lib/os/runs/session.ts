@@ -74,9 +74,16 @@ export async function resolveRunSession(input: { department: string }): Promise<
   // (agent_model_config, user_id = them), else the workspace's (readAgentEngine
   // inside this, unchanged: O1's pause below still covers it exactly as before,
   // so a person who never chose for themselves sees NO behaviour change).
-  const effective = await readEffectiveEngine(tenantId, user.id).catch(
-    (): EffectiveEngine => ({ source: "workspace", engine: { kind: "api" } }),
-  );
+  // A failed read is "we could not confirm how you chose to run", never an
+  // invented API choice: a person who chose their own computer must not be
+  // answered on a key because the read blipped (Codex review, O3b P1).
+  let effective: EffectiveEngine;
+  try {
+    effective = await readEffectiveEngine(tenantId, user.id);
+  } catch (err) {
+    console.error("[os.runs.session.engine]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return { ok: false, status: 503, error: "config_unavailable" };
+  }
 
   // The person explicitly chose THEIR OWN paired computer (O3a's pairing --
   // never the workspace's shared tunnel bridgeResolutionForSession answers

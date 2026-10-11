@@ -12,7 +12,7 @@
  * Run: node --conditions=react-server --import tsx tests/person-engine.test.ts
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient, type Client } from "@libsql/client";
@@ -312,6 +312,31 @@ async function main() {
     assert.deepEqual(bridgeCliPolicy("owner", "codex"), { cliProvider: "codex", disallowedTools: [] });
     assert.deepEqual(bridgeCliPolicy("owner", "gemini"), { cliProvider: "gemini", disallowedTools: [] });
     assert.equal(bridgeCliPolicy("member", "codex").cliProvider, "claude", "a non-privileged role is Claude-only regardless");
+  });
+
+  // Codex review (O3b), pinned in source.
+  const ROOT_DIR = join(__dirname, "..");
+  const src = (p: string) => readFileSync(join(ROOT_DIR, p), "utf8");
+
+  await check("P1: a failed engine read refuses the send (503 config_unavailable), never an invented API choice", () => {
+    const s = src("lib/os/runs/session.ts");
+    assert.doesNotMatch(s, /readEffectiveEngine\([^)]*\)\.catch\(/, "no .catch that turns a failed read into a choice");
+    assert.match(s, /status: 503, error: "config_unavailable"/);
+  });
+
+  await check("P2: the person-engine GET reads the workspace default on its own, whatever the person chose", () => {
+    const r = src("app/api/agent-config/person-engine/route.ts");
+    assert.match(r, /readAgentEngine\(tenantId\)/);
+    assert.match(r, /workspaceDefault: agentsEngineLine\(workspaceEngine\)/);
+    assert.doesNotMatch(r, /effective\.source === "workspace" \? effective\.engine : null/);
+  });
+
+  await check("P2: a failed first load of Your computers shows the error and a retry, never an endless spinner", () => {
+    const c = src("components/settings/YourComputersCard.tsx");
+    const errorBranch = c.indexOf("if (devices === null && error)");
+    const spinner = c.indexOf("if (devices === null) {");
+    assert.ok(errorBranch > 0, "an error branch for the first load exists");
+    assert.ok(errorBranch < spinner, "and it comes before the loading spinner");
   });
 
   if (failures > 0) {
