@@ -11,6 +11,8 @@
     "start": "next start --port 3100",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "qa:crawl": "node --conditions=react-server --import tsx scripts/qa/crawl.mjs",
+    "test:qa": "node --conditions=react-server --import tsx tests/qa-crawl.test.ts",
     "test:sunbiz": "node tests/_suite.mjs",
     "test:web-leads": "node tests/_suite-web-leads.mjs",
     "test:lead-advancements": "node --conditions=react-server --import tsx tests/lead-declined-transfer.test.ts && node --conditions=react-server --import tsx tests/lead-drawer-layout.test.ts",
