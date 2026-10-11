@@ -2856,44 +2856,107 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
   const pairingId = crypto.randomUUID();
   const label = p_label ?? 'Local install'; // COALESCE: only NULL falls back, '' does not
 
-  // Atomic compare-and-swap replacing FOR UPDATE + same-transaction INSERT/UPDATE.
-  // libsql batch('write') is a single transaction: the INSERT fires only if the
-  // code row is still unconsumed and unexpired AT TRANSACTION TIME; the UPDATE
-  // consumes the code only if the INSERT fired. The client therefore sees one of:
-  //   * success: code consumed AND pairing exists
-  //   * failure: code untouched AND no pairing
-  // INSERT precedes UPDATE so the consumed_by_pairing_id FK is satisfiable.
-  const results = await client.batch(
-    [
-      {
-        sql:
-          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at) ' +
-          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, ?, ? ' +
-          'FROM bridge_pair_codes bpc ' +
-          'WHERE bpc.id = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ?',
-        args: [pairingId, label, p_token_hash, p_fingerprint, nowIso, codeId, nowIso],
-      },
-      {
-        sql:
-          'UPDATE bridge_pair_codes ' +
-          'SET consumed_at = ?, consumed_by_pairing_id = ? ' +
-          'WHERE id = ? AND consumed_at IS NULL ' +
-          'AND EXISTS (SELECT 1 FROM bridge_pairings WHERE id = ?)',
-        args: [nowIso, pairingId, codeId, pairingId],
-      },
-    ],
-    'write'
-  );
+  // O0 correctness review (MEDIUM): redeem_pair_code only ever INSERTed, so
+  // redeeming a code from a machine that already has a LIVE pairing in this
+  // tenant (idx_bridge_pairings_unique_live_machine) threw a raw
+  // SQLITE_CONSTRAINT and surfaced as a 500 — the code stayed unconsumed and
+  // an already-paired operator (e.g. one who lost ~/.oasis/bridge_token) had
+  // no way to re-pair with a code at all. Pre-read the conflicting row (the
+  // same index backs this lookup) so the write below can either ROTATE that
+  // row, when it is this same person's own, or fail with a named, non-500
+  // error when it is not.
+  let rotateRowId: string | null = null;
+  if (p_fingerprint) {
+    const live = await client.execute({
+      sql: 'SELECT id, user_id FROM bridge_pairings WHERE tenant_id = ? AND machine_fingerprint = ? AND revoked_at IS NULL LIMIT 1',
+      args: [tenantId, p_fingerprint],
+    });
+    const liveRow = live.rows[0] as unknown as Record<string, unknown> | undefined;
+    if (liveRow) {
+      if (liveRow.user_id === authUserId) {
+        rotateRowId = String(liveRow.id);
+      } else {
+        // Someone else's live computer, or a legacy row with no recorded
+        // owner — either way this code must not be burned on a write that
+        // can never succeed.
+        throw new Error('PCODE_MACHINE_CONFLICT');
+      }
+    }
+  }
 
-  if ((results[1]?.rowsAffected ?? 0) !== 1) {
+  // Atomic compare-and-swap replacing FOR UPDATE + same-transaction INSERT/UPDATE.
+  // libsql batch('write') is a single transaction: the INSERT (or, when
+  // rotateRowId is set, the UPDATE) fires only if the code row is still
+  // unconsumed and unexpired AT TRANSACTION TIME; the second statement
+  // consumes the code only if the first one fired. The client therefore sees
+  // one of:
+  //   * success: code consumed AND pairing exists (inserted or rotated)
+  //   * failure: code untouched AND no pairing change
+  // INSERT precedes UPDATE so the consumed_by_pairing_id FK is satisfiable.
+  let results: Awaited<ReturnType<typeof client.batch>>;
+  try {
+    results = await client.batch(
+      rotateRowId
+        ? [
+            {
+              sql:
+                'UPDATE bridge_pairings SET bridge_token_hash = ?, label = ?, last_seen_at = ? ' +
+                'WHERE id = ? AND tenant_id = ? AND user_id = ? AND revoked_at IS NULL',
+              args: [p_token_hash, label, nowIso, rotateRowId, tenantId, authUserId],
+            },
+            {
+              sql:
+                'UPDATE bridge_pair_codes ' +
+                'SET consumed_at = ?, consumed_by_pairing_id = ? ' +
+                'WHERE id = ? AND consumed_at IS NULL ' +
+                'AND EXISTS (SELECT 1 FROM bridge_pairings WHERE id = ? AND user_id = ? AND revoked_at IS NULL)',
+              args: [nowIso, rotateRowId, codeId, rotateRowId, authUserId],
+            },
+          ]
+        : [
+            {
+              sql:
+                'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at) ' +
+                'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, ?, ? ' +
+                'FROM bridge_pair_codes bpc ' +
+                'WHERE bpc.id = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ?',
+              args: [pairingId, label, p_token_hash, p_fingerprint, nowIso, codeId, nowIso],
+            },
+            {
+              sql:
+                'UPDATE bridge_pair_codes ' +
+                'SET consumed_at = ?, consumed_by_pairing_id = ? ' +
+                'WHERE id = ? AND consumed_at IS NULL ' +
+                'AND EXISTS (SELECT 1 FROM bridge_pairings WHERE id = ?)',
+              args: [nowIso, pairingId, codeId, pairingId],
+            },
+          ],
+      'write'
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/UNIQUE constraint failed|SQLITE_CONSTRAINT/i.test(msg)) {
+      // Lost a race against a concurrent pair/redeem for the same machine
+      // between the pre-flight read above and this write.
+      throw new Error('PCODE_MACHINE_CONFLICT');
+    }
+    throw e;
+  }
+
+  const finalPairingId = rotateRowId ?? pairingId;
+  const firstOk = rotateRowId ? (results[0]?.rowsAffected ?? 0) === 1 : true;
+  if (!firstOk || (results[1]?.rowsAffected ?? 0) !== 1) {
     // Lost a race between the pre-flight read and the batch (a concurrent
-    // redeemer consumed the code, or it expired in the gap). Re-read committed
-    // state and raise the same error the Postgres FOR UPDATE path would raise.
+    // redeemer consumed the code, it expired in the gap, or — rotate path
+    // only — the row was revoked/reassigned underneath us). Re-read
+    // committed state and raise the same error the Postgres FOR UPDATE path
+    // would raise.
     const post = await client.execute({
       sql: 'SELECT id, consumed_at, expires_at FROM bridge_pair_codes WHERE id = ? LIMIT 1',
       args: [codeId],
     });
     assertRedeemable(post.rows[0] as unknown as Record<string, unknown> | undefined);
+    if (!firstOk) throw new Error('PCODE_MACHINE_CONFLICT');
     // Unreachable unless the row mutated in a way the CAS predicates exclude.
     throw new Error('redeem_pair_code: conditional consume failed');
   }
@@ -2908,7 +2971,7 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
   // RETURNS TABLE(...) with one RETURN QUERY row -> supabase-js data is an array of rows.
   return [
     {
-      pairing_id: pairingId,
+      pairing_id: finalPairingId,
       tenant_id: tenantId,
       auth_user_id: authUserId,
       profile_id: profileId,

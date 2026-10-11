@@ -19,11 +19,22 @@
  *   - the bridge's own self-pair body (machine details only, CEO-Agent
  *     bravo_cli/bridge_chat_server.py _self_pair_if_needed) still pairs its own
  *     profile, and pairing the same machine again rotates its own row;
- *   - a machine fingerprint that is a teammate's live computer, or a live
- *     computer with no recorded owner, is refused with 409
- *     machine_paired_to_another_person, and that computer keeps its token
- *     (the fingerprint is self-reported, so it cannot pick the row either);
- *   - a proven profile with no workspace is refused before anything is written.
+ *   - a machine fingerprint that is a teammate's live computer is refused with
+ *     409 machine_paired_to_another_person, and keeps its token (the
+ *     fingerprint is self-reported, so it cannot pick the row either); a live
+ *     computer with no recorded owner gets its own 409
+ *     machine_pairing_has_no_owner, not the same "another person" wording;
+ *   - a proven profile with no workspace is refused before anything is written;
+ *   - a DEACTIVATED member's still-live HMAC secret is refused (403
+ *     seat_inactive) and writes nothing (O0 review, HIGH);
+ *   - an HMAC-proven profile that is not an owner or admin is refused (403
+ *     admin_required) when it sends api_keys, and the workspace's keys are
+ *     unchanged; the same call with no api_keys still succeeds (O0 review,
+ *     MEDIUM);
+ *   - an HMAC-proven profile with NO sign-in account (auth_user_id NULL) is
+ *     refused up front (412 profile_has_no_sign_in) on every attempt, never
+ *     creates an unowned row, and never hits the 409 "another person" re-pair
+ *     trap (O0 review, LOW).
  *   CLI_SIGNUP_SECRET
  *   - an established account gets 403 use_a_pair_code and nothing is written,
  *     api_keys included. Each condition is pinned on its own: onboarding
@@ -31,7 +42,11 @@
  *     (a brand-new member of an established workspace), and the hour itself
  *     (55 minutes pairs, 65 does not);
  *   - an account the installer provisioned within the hour pairs as before, and
- *     its keys are seeded into its own new workspace only.
+ *     its keys are seeded into its own new workspace only;
+ *   - an owner-claim invite accepted minutes ago into an operator-provisioned
+ *     workspace (redeem_tenant_invite's invited_by, not signup_tenant's) is
+ *     refused the same way, even though both the profile and its workspace
+ *     are within the hour (O0 review, MEDIUM).
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -88,7 +103,8 @@ const TN = "c0000000-0000-4000-8000-0000000000c1"; // provisioned 55 minutes ago
 const TO = "d0000000-0000-4000-8000-0000000000d1"; // provisioned 65 minutes ago
 const TP = "e0000000-0000-4000-8000-0000000000e1"; // created minutes ago, for an older profile
 const TQ = "f0000000-0000-4000-8000-0000000000f1"; // created minutes ago, already onboarded
-const ALL_TENANTS = [TA, TB, TN, TO, TP, TQ];
+const TX = "99000000-0000-4000-8000-000000000099"; // a client workspace an operator provisioned 20 minutes ago
+const ALL_TENANTS = [TA, TB, TN, TO, TP, TQ, TX];
 
 type Person = {
   profileId: string;
@@ -114,12 +130,22 @@ const P: Person = { profileId: "e1111111-1111-4111-8111-111111111111", authId: "
 const Q: Person = { profileId: "f1111111-1111-4111-8111-111111111111", authId: "auth-q", email: "q@done.test", tenant: TQ, createdMinutesAgo: 5, onboarded: true };
 // An HMAC-holding profile that never got a workspace.
 const T: Person = { profileId: "a4444444-4444-4444-8444-444444444444", authId: "auth-t", email: "t@nowhere.test", tenant: null, createdMinutesAgo: null, onboarded: false };
-const PEOPLE = [A, B, C, N, M, O, P, Q, T];
-const TENANT_AGE_MINUTES: Record<string, number | null> = { [TA]: null, [TB]: null, [TN]: 55, [TO]: 65, [TP]: 5, [TQ]: 5 };
+// A member of A's workspace, removed 30 minutes ago; its HMAC secret is still live.
+const D: Person = { profileId: "a5555555-5555-4555-8555-555555555555", authId: "auth-d", email: "d@ws-a.test", tenant: TA, createdMinutesAgo: null, onboarded: true };
+// An HMAC-holding profile in A's workspace with no sign-in account at all.
+const H: Person = { profileId: "a6666666-6666-4666-8666-666666666666", authId: null, email: "h@ws-a.test", tenant: TA, createdMinutesAgo: null, onboarded: true };
+// Accepted an operator's owner-claim invite into TX 5 minutes ago (redeem_tenant_invite:
+// invited_by set, is_owner 1, not onboarded) — not an account the setup CLI provisioned.
+const X: Person = { profileId: "99999999-9999-4999-8999-999999999999", authId: "auth-x", email: "owner@client-x.test", tenant: TX, createdMinutesAgo: 5, onboarded: false };
+const PEOPLE = [A, B, C, N, M, O, P, Q, T, D, H, X];
+const TENANT_AGE_MINUTES: Record<string, number | null> = { [TA]: null, [TB]: null, [TN]: 55, [TO]: 65, [TP]: 5, [TQ]: 5, [TX]: 20 };
 
 const HMAC_A = "hmac-secret-for-profile-a-0001";
 const HMAC_B = "hmac-secret-for-profile-b-0001";
 const HMAC_T = "hmac-secret-for-profile-t-0001";
+const HMAC_C = "hmac-secret-for-profile-c-0001";
+const HMAC_D = "hmac-secret-for-profile-d-0001";
+const HMAC_H = "hmac-secret-for-profile-h-0001";
 const LEGACY_FINGERPRINT = "1e9ac71e9ac71e9ac71e9ac71e9ac700"; // a pairing from before owners were recorded
 const LEGACY_TOKEN_HASH = "legacy-original-token-hash";
 const C_FINGERPRINT = "c0ffee00c0ffee00c0ffee00c0ffee00"; // C's live computer
@@ -149,7 +175,8 @@ async function createSchema() {
       agents_enabled TEXT NOT NULL DEFAULT '[]', prospect_focus TEXT NOT NULL DEFAULT '[]',
       mrr_target_usd INTEGER, mrr_current_usd INTEGER, mrr_target_date TEXT, manifesto TEXT,
       tenant_id TEXT, onboarding_completed_at TEXT, team_role TEXT NOT NULL DEFAULT 'member',
-      is_owner INTEGER NOT NULL DEFAULT 0, deactivated_at TEXT,
+      is_owner INTEGER NOT NULL DEFAULT 0, admin_access INTEGER NOT NULL DEFAULT 0, invited_by TEXT,
+      deactivated_at TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
@@ -209,12 +236,25 @@ async function seed() {
         p.onboarded ? createdAt : null, createdAt, createdAt, createdAt],
     });
   }
-  for (const [profileId, secret] of [[A.profileId, HMAC_A], [B.profileId, HMAC_B], [T.profileId, HMAC_T]]) {
+  for (const [profileId, secret] of [
+    [A.profileId, HMAC_A], [B.profileId, HMAC_B], [T.profileId, HMAC_T],
+    [C.profileId, HMAC_C], [D.profileId, HMAC_D], [H.profileId, HMAC_H],
+  ]) {
     await db.execute({
       sql: "INSERT INTO n8n_webhook_secrets (profile_id, secret_hash) VALUES (?, ?)",
       args: [profileId, sha256(secret)],
     });
   }
+  // A is TA's owner (so the existing steeringBody() checks below, which all
+  // send api_keys, still seed TA's keys under the O0 admin-required gate).
+  await db.execute({ sql: "UPDATE user_profiles SET is_owner = 1, team_role = 'owner' WHERE id = ?", args: [A.profileId] });
+  // D was removed from TA 30 minutes ago; its HMAC secret must not survive that.
+  await db.execute({ sql: "UPDATE user_profiles SET deactivated_at = ? WHERE id = ?", args: [minutesAgo(30), D.profileId] });
+  // X accepted an owner-claim invite — redeem_tenant_invite's shape, not signup_tenant's.
+  await db.execute({
+    sql: "UPDATE user_profiles SET is_owner = 1, team_role = 'owner', invited_by = ? WHERE id = ?",
+    args: ["auth-oasis-operator", X.profileId],
+  });
   // Live computers: C's in A's workspace, B's in B's workspace.
   await db.execute({
     sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at)
@@ -412,17 +452,82 @@ async function main() {
     assert.equal(cRow.label, "C laptop (Windows)");
   });
 
-  await check("a live computer with no recorded owner is not taken over by sending its fingerprint either", async () => {
+  await check("a live computer with no recorded owner is refused with its own code, not 'another person'", async () => {
     const res = await POST(
       pairRequest(hmacHeaders(A.profileId, HMAC_A), { machine: { label: "Mine now", fingerprint: LEGACY_FINGERPRINT } }),
     );
     const body = await res.json();
     assert.equal(res.status, 409, JSON.stringify(body));
-    assert.match(String(body.error), /^machine_paired_to_another_person\b/);
+    assert.match(String(body.error), /^machine_pairing_has_no_owner\b/, "there is no person to blame, so the message must not say there is");
     const legacy = (await livePairings(TA)).find((p) => p.id === "bp-legacy");
     assert.ok(legacy);
     assert.equal(legacy.user_id, null, "the row is not claimed");
     assert.equal(legacy.bridge_token_hash, LEGACY_TOKEN_HASH, "its token still works");
+  });
+
+  await check("a deactivated member's HMAC secret is refused and writes nothing (profile, keys, pairings)", async () => {
+    const before = await workspaceState(TA);
+    const res = await POST(
+      pairRequest(hmacHeaders(D.profileId, HMAC_D), steeringBody({ machine: { label: "Removed member laptop", fingerprint: "removed-member-fp-00000000000001" } })),
+    );
+    const body = await res.json();
+    assert.equal(res.status, 403, JSON.stringify(body));
+    assert.match(String(body.error), /^seat_inactive\b/);
+    assert.equal(body.bridge, undefined, "no token is handed out");
+    assert.equal(await workspaceState(TA), before, "a deactivated member's HMAC pair changes nothing in its own workspace");
+  });
+
+  await check("a plain member's HMAC pair with api_keys gets 403 and the workspace keys are unchanged", async () => {
+    const res = await POST(
+      pairRequest(hmacHeaders(C.profileId, HMAC_C), {
+        api_keys: { openrouter: "sk-or-member-c-attempt" },
+        machine: { label: "C's second PC", fingerprint: "c-second-fp-000000000000000001" },
+      }),
+    );
+    const body = await res.json();
+    assert.equal(res.status, 403, JSON.stringify(body));
+    assert.match(String(body.error), /^admin_required\b/);
+    assert.deepEqual(await workspaceKeys(TA), agentKeys.map(() => A_ORIGINAL_KEY), "the workspace keeps its owner's key, not C's");
+    const rows = await db.execute({ sql: "SELECT count(*) AS n FROM bridge_pairings WHERE machine_fingerprint = ?", args: ["c-second-fp-000000000000000001"] });
+    assert.equal(Number(rows.rows[0].n), 0, "the refused call also mints no computer");
+  });
+
+  await check("a plain member's HMAC pair with no api_keys still succeeds (only setting keys needs admin)", async () => {
+    const res = await POST(
+      pairRequest(hmacHeaders(C.profileId, HMAC_C), { machine: { label: "C's second PC", fingerprint: "c-second-fp-000000000000000002" } }),
+    );
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.profile_id, C.profileId);
+  });
+
+  await check("an HMAC profile with no sign-in account is refused up front (412), not a 409 'another person' re-pair trap", async () => {
+    const fp = "no-sign-in-fp-00000000000000000001";
+    const res = await POST(pairRequest(hmacHeaders(H.profileId, HMAC_H), { machine: { label: "No-login box", fingerprint: fp } }));
+    const body = await res.json();
+    assert.equal(res.status, 412, JSON.stringify(body));
+    assert.match(String(body.error), /^profile_has_no_sign_in\b/);
+    assert.equal(body.bridge, undefined);
+    const rows = await db.execute({ sql: "SELECT count(*) AS n FROM bridge_pairings WHERE tenant_id = ? AND machine_fingerprint = ?", args: [TA, fp] });
+    assert.equal(Number(rows.rows[0].n), 0, "no unowned row is ever created");
+
+    // Re-pairing (token lost, Bravo's bridge self-pairs again) gets the SAME
+    // refusal every time, never the 409 "paired to another person" trap.
+    const res2 = await POST(pairRequest(hmacHeaders(H.profileId, HMAC_H), { machine: { label: "No-login box", fingerprint: fp } }));
+    assert.equal(res2.status, 412, JSON.stringify(await res2.json()));
+  });
+
+  await check("the signup secret cannot pair an owner-claim invite accepted minutes ago into an operator-provisioned workspace", async () => {
+    const res = await POST(
+      pairRequest(SIGNUP_BEARER, steeringBody({ email: X.email, machine: { label: "Another client's PC", fingerprint: "other-client-fp-00000000000001" } })),
+    );
+    const body = await res.json();
+    assert.equal(res.status, 403, JSON.stringify(body));
+    assert.match(String(body.error), /^use_a_pair_code\b/);
+    assert.equal(body.bridge, undefined);
+    assert.deepEqual(await workspaceKeys(TX), [], "no attacker key lands in the just-provisioned client workspace");
+    const pairings = await db.execute({ sql: "SELECT count(*) AS n FROM bridge_pairings WHERE tenant_id = ?", args: [TX] });
+    assert.equal(Number(pairings.rows[0].n), 0);
   });
 
   await check("a proven profile with no workspace is refused (412) before its profile is written", async () => {
