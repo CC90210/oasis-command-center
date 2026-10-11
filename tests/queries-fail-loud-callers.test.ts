@@ -215,6 +215,8 @@ async function seedIdentity(db: Client) {
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, agents_enabled TEXT,
       primary_agent TEXT, updated_at TEXT, deactivated_at TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT, lifecycle TEXT);
+    CREATE TABLE workspace_agents_owner (tenant_id TEXT PRIMARY KEY, auth_user_id TEXT NOT NULL,
+      set_by TEXT NOT NULL, set_at TEXT NOT NULL, note TEXT, revoked_at TEXT);
   `);
   const stamp = "2026-09-01T00:00:00Z";
   await db.batch(
@@ -226,6 +228,12 @@ async function seedIdentity(db: Client) {
                 onboarding_completed_at, agents_enabled, primary_agent, updated_at)
               VALUES ('p-cc', ?, ?, ?, 'owner', 1, ?, '["bravo"]', 'bravo', ?)`,
         args: [CC.id, CC.email, OASIS, stamp, stamp],
+      },
+      // O2: /operations scopes house (cron_jobs) failures to the workspace's
+      // AGENTS OWNER (lib/agents-owner.ts) — CC, here, matching production.
+      {
+        sql: `INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, ?, ?)`,
+        args: [OASIS, CC.id, CC.id, stamp],
       },
     ],
     "write",

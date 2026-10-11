@@ -192,8 +192,12 @@ const MIGRATED: Array<[string, RegExp]> = [
   ["app/api/inbox/post/route.ts", /if \(!\(await isPlatformOperatorForAuthUser\(user\.id, user\.email\)\)\)/],
   ["app/api/inbox/mark-read/route.ts", /if \(!\(await isPlatformOperatorForAuthUser\(user\.id, user\.email\)\)\)/],
   ["app/api/event-feed/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);/],
-  ["app/api/cron-jobs/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);/],
-  ["app/api/cron-jobs/[id]/route.ts", /source === "empire" && !\(await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\)\)/],
+  // app/api/cron-jobs/route.ts and app/api/cron-jobs/[id]/route.ts graduated
+  // PAST the verified-operator check (O2, 2026-10-11): the house (Empire)
+  // lane now gates on the workspace's AGENTS OWNER (lib/agents-owner.ts),
+  // narrower than "a verified platform operator" — PR #576 made Adon one too.
+  // Pinned instead by tests/automation-inventory-contract.test.ts and
+  // tests/automations-owner-scope.test.ts.
   // Read once: the same verdict gates the platform key and the model id in the
   // stream (clients never see which model answered).
   ["app/api/agents/chat/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);[\s\S]*const fallback = isOperator \? operatorPlatformFallback\(\) : null;/],

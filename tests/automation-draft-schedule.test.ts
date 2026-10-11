@@ -204,8 +204,12 @@ async function main() {
       agent_key TEXT NOT NULL DEFAULT 'bravo', name TEXT NOT NULL, description TEXT,
       schedule TEXT NOT NULL, action_type TEXT NOT NULL, action_payload TEXT NOT NULL DEFAULT '{}',
       enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, last_run_status TEXT, last_run_output TEXT,
-      last_run_error TEXT, run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT,
+      last_run_error TEXT, run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT
+    );
+    CREATE TABLE workspace_agents_owner (
+      tenant_id TEXT PRIMARY KEY, auth_user_id TEXT NOT NULL, set_by TEXT NOT NULL,
+      set_at TEXT NOT NULL, note TEXT, revoked_at TEXT
     );
   `);
   const stamp = "2026-09-01T00:00:00Z";
@@ -217,6 +221,12 @@ async function main() {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at,
                 full_name, agents_enabled, updated_at, joined_at) VALUES ('p-cc', ?, ?, ?, 'owner', 1, ?, 'Test Person', '[]', ?, ?)`,
         args: [CC.id, CC.email, OASIS, stamp, stamp, stamp],
+      },
+      // O2: script-automation creation gates on the workspace's AGENTS OWNER
+      // (lib/agents-owner.ts) — CC, here, matching production.
+      {
+        sql: `INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, ?, ?)`,
+        args: [OASIS, CC.id, CC.id, stamp],
       },
     ],
     "write",

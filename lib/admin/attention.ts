@@ -60,6 +60,22 @@ export const COLD_LEAD_MS = 14 * 24 * 60 * 60 * 1000;
 /** Display cap for the lists. Counts are always COUNT(*), never a list length. */
 export const ATTENTION_LIST_LIMIT = 50;
 
+/**
+ * O2 (2026-10-11): who is asking. House (cron_jobs) failures, workers down
+ * and untenanted agent events are CC's alone — Adon is a verified platform
+ * operator (PR #576) but is not CCPC's owner, so counting them for him would
+ * repeat the exact leak O2 closes on the Automations tab itself. A workspace
+ * automation's (tenant_cron_jobs) failure counts for ITS OWNER, same
+ * grandfather rule GET /api/cron-jobs uses: a legacy row with no recorded
+ * owner is everyone's to see, same as before O2.
+ *
+ * OPTIONAL and additive: every function below defaults to its PRE-O2
+ * behaviour when `viewer` is omitted, so existing callers (lib/admin/
+ * system-health.ts, /health) are unchanged until they are updated to pass
+ * one — omission is not a silent narrowing.
+ */
+export type AttentionViewer = { authUserId: string | null; isAgentsOwner: boolean };
+
 /** A JSON column as an object, or null. A string that is not JSON is logged, not guessed at. */
 export function metadataObject(raw: unknown): Record<string, unknown> | null {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
@@ -167,12 +183,19 @@ export async function loadWorkerRows(db: AdminDb, tenantId: string): Promise<Map
  * PURE. The workers, the fleet reporter's verdict, and how many are down. A
  * reporter that says it cannot read the process table makes every tile under
  * it unknown, so the down count is unknown too.
+ *
+ * `viewer` (O2): omitted, this is the pre-O2 behaviour. Passed and not the
+ * agents owner, these are CC's OASIS workers, not "unknown" (that reads as a
+ * read failure) and not a fault — zero known problems, for a question that
+ * simply is not the viewer's to ask.
  */
 export function describeBackground(
   workerRows: Map<string, HealthRow> | null,
   machines: PairedMachine[] | null,
   now: number,
+  viewer?: AttentionViewer,
 ): { workers: WorkerHealth[] | null; reporter: StatusReporter | null; workersDown: number | null } {
+  if (viewer && !viewer.isAgentsOwner) return { workers: [], reporter: null, workersDown: 0 };
   if (workerRows === null) return { workers: null, reporter: null, workersDown: null };
   const pc = machines?.[0] ?? null;
   const reporterRow = workerRows.get(FLEET_REPORTER_SERVICE);
@@ -243,23 +266,39 @@ export function whatToDoForCronFailure(result: unknown): string {
  * /automations and "Nothing needs you" here. The shapes can't be filtered in
  * SQL, so this reads the tenant's jobs that ran in the window (a few dozen at
  * most) and counts in code.
+ *
+ * `viewer` (O2): omitted, this is the pre-O2 behaviour (every tenant failure
+ * counts, the platform/house lane always queried). Passed: the platform
+ * (house, cron_jobs) lane is queried only for the agents owner — skipped
+ * entirely otherwise, the same "query only for the owner" rule GET
+ * /api/cron-jobs follows — and a workspace (tenant_cron_jobs) failure counts
+ * only for its owner, or for everyone when it has no recorded owner (a
+ * legacy row, same grandfather rule as the API).
  */
 export async function loadCronFailures(
   db: AdminDb,
   tenantId: string,
   now: number,
+  viewer?: AttentionViewer,
 ): Promise<{ count: number; rows: CronFailure[] }> {
   const since = new Date(now - ATTENTION_WINDOW_MS).toISOString();
+  const queryPlatform = !viewer || viewer.isAgentsOwner;
   const [platform, workspace] = await Promise.all([
-    db
-      .from("cron_jobs")
-      .select("id, name, schedule, action_type, owner_agent_key, last_run_at, last_result, fail_count")
-      .eq("tenant_id", tenantId)
-      .gte("last_run_at", since)
-      .order("last_run_at", { ascending: false }),
+    queryPlatform
+      ? db
+          .from("cron_jobs")
+          .select("id, name, schedule, action_type, owner_agent_key, last_run_at, last_result, fail_count")
+          .eq("tenant_id", tenantId)
+          .gte("last_run_at", since)
+          .order("last_run_at", { ascending: false })
+      : Promise.resolve({ data: [] as EmpireCronRow[], error: null }),
+    // `select("*")`, not a named column list: owner_user_id is a column
+    // bravo__211_automation_owner.sql adds, and a workspace whose migration
+    // has not landed yet must still answer with every failure, not
+    // "no such column" — the pre-O2 rule for a table with no owner concept.
     db
       .from("tenant_cron_jobs")
-      .select("id, name, schedule, last_run_at, last_run_error", { count: "exact" })
+      .select("*", { count: "exact" })
       .eq("tenant_id", tenantId)
       .eq("last_run_status", "error")
       .gte("last_run_at", since)
@@ -270,10 +309,22 @@ export async function loadCronFailures(
   if (workspace.error) throw new Error(`tenant_cron_jobs read failed: ${workspace.error.message}`);
   // Declared as strings; the shim decodes JSON text into objects, so every
   // text value is coerced before a string method touches it.
-  type WorkspaceRow = { id: string; name: unknown; schedule: unknown; last_run_at: string | null; last_run_error: unknown };
+  type WorkspaceRow = {
+    id: string;
+    name: unknown;
+    schedule: unknown;
+    last_run_at: string | null;
+    last_run_error: unknown;
+    owner_user_id?: string | null;
+  };
   const platformFailed = ((platform.data || []) as EmpireCronRow[])
     .map((row) => normalizeEmpireRow(row))
     .filter((job) => job.last_run_status === "error");
+  const ownedWorkspaceRows = ((workspace.data || []) as WorkspaceRow[]).filter((row) => {
+    if (!viewer) return true;
+    const ownerUserId = typeof row.owner_user_id === "string" && row.owner_user_id ? row.owner_user_id : null;
+    return !ownerUserId || ownerUserId === viewer.authUserId;
+  });
   const rows: CronFailure[] = [
     ...platformFailed.map((job) => ({
       id: String(job.id),
@@ -284,7 +335,7 @@ export async function loadCronFailures(
       source: "platform" as const,
       whatToDo: whatToDoForCronFailure(job.last_run_error),
     })),
-    ...((workspace.data || []) as WorkspaceRow[]).map((c) => {
+    ...ownedWorkspaceRows.map((c) => {
       const error = c.last_run_error == null ? null : coerceInferResultText(c.last_run_error);
       return {
         id: String(c.id),
@@ -299,7 +350,14 @@ export async function loadCronFailures(
   ]
     .sort((a, b) => (Date.parse(b.lastRunAt || "") || 0) - (Date.parse(a.lastRunAt || "") || 0))
     .slice(0, ATTENTION_LIST_LIMIT);
-  return { count: platformFailed.length + Number(workspace.count ?? 0), rows };
+  // Without a viewer, the DB's exact count (every matching row, not just the
+  // capped list) is the true total. With one, the owner filter ran in JS
+  // against the (already capped) rows, so the count is the filtered list's
+  // length — an approximation only if a single tenant has more than
+  // ATTENTION_LIST_LIMIT failures in 24h, which "a few dozen at most" above
+  // says does not happen in practice.
+  const workspaceFailureCount = viewer ? ownedWorkspaceRows.length : Number(workspace.count ?? 0);
+  return { count: platformFailed.length + workspaceFailureCount, rows };
 }
 
 // ── Error and warning events ──────────────────────────────────────────────
@@ -339,16 +397,25 @@ export function attentionSeverity(raw: unknown): AttentionEvent["severity"] {
 /**
  * Errors and warnings in the window: exact counts per severity, plus the newest
  * rows for display. Throws on a failed read.
+ *
+ * `viewer` (O2): omitted, this is the pre-O2 behaviour — this tenant's events
+ * plus the platform's own untenanted ones. Passed and not the agents owner,
+ * the untenanted half is dropped: those are the house's own events (no
+ * tenant to scope them to), not this person's to see.
  */
 export async function loadAttentionEvents(
   db: AdminDb,
   tenantId: string,
   now: number,
+  viewer?: AttentionViewer,
 ): Promise<{ errors: number; warnings: number; rows: AttentionEvent[] }> {
   // The id is spliced into the or() grammar below; only a uuid may go there.
   if (!UUID.test(tenantId)) throw new Error("attention events: the tenant id is not a uuid");
   const since = new Date(now - ATTENTION_WINDOW_MS).toISOString();
-  const thisTenant = `correlation_id.eq.${tenantId},correlation_id.is.null`;
+  const includeUntenanted = !viewer || viewer.isAgentsOwner;
+  const thisTenant = includeUntenanted
+    ? `correlation_id.eq.${tenantId},correlation_id.is.null`
+    : `correlation_id.eq.${tenantId}`;
   const [errors, warnings, rows] = await Promise.all([
     db
       .from("agent_events")
@@ -414,7 +481,54 @@ export type AttentionSummary = {
   cronFailures: number | null;
   workersDown: number | null;
   coldLeads: number | null;
+  /** O2: present only for the agents owner (undefined for everyone else —
+   *  there is no house scheduler item to show a non-owner, not even a null
+   *  "couldn't check" one). See loadHouseSchedulerStatus. */
+  houseScheduler?: HouseSchedulerStatus;
 };
+
+/** How stale is too stale for the house scheduler's poll. The bridge polls
+ *  roughly every 60 s, so 15 minutes is about 15 missed polls in a row —
+ *  long enough that a single network blip or restart never pages, short
+ *  enough that a scheduler that has actually stopped is caught same-session. */
+export const HOUSE_SCHEDULER_STALE_MS = 15 * 60 * 1000;
+
+/** null = not the agents owner (nothing to report), or the read itself failed
+ *  (logged, never read as "fine"). */
+export type HouseSchedulerStatus = { stalled: boolean; lastPollOkAt: string | null } | null;
+
+/**
+ * The agents-owner-only attention item: "House scheduler has not fetched
+ * jobs for N minutes", from bridge_pairings.last_poll_ok_at (O2, the cron
+ * poll route stamps it on every 200). Reads the OWNER's own pairings — same
+ * "whose computer" scoping as everywhere else in O2, not the newest pairing
+ * in the workspace. Never a row at all (no pairing, or last_poll_ok_at
+ * missing because the migration or a never-polling bridge) reads as stalled:
+ * a silent house scheduler must show here even before it has ever reported
+ * once.
+ */
+export async function loadHouseSchedulerStatus(
+  db: AdminDb,
+  tenantId: string,
+  now: number,
+  viewer: AttentionViewer,
+): Promise<HouseSchedulerStatus> {
+  if (!viewer.isAgentsOwner) return null;
+  const r = await db
+    .from("bridge_pairings")
+    .select("last_poll_ok_at")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", viewer.authUserId)
+    .is("revoked_at", null)
+    .order("last_poll_ok_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (r.error) throw new Error(`bridge_pairings last_poll_ok_at read failed: ${r.error.message}`);
+  const lastPollOkAt = (r.data as { last_poll_ok_at?: string | null } | null)?.last_poll_ok_at ?? null;
+  const age = lastPollOkAt ? now - Date.parse(lastPollOkAt) : NaN;
+  const stalled = !Number.isFinite(age) || age > HOUSE_SCHEDULER_STALE_MS;
+  return { stalled, lastPollOkAt };
+}
 
 /**
  * The outcome checks a workspace's "needs you" counts (lib/health/
@@ -464,25 +578,41 @@ export function nothingNeedsYou(s: AttentionSummary, outcome: Pick<OutcomeCheckD
   return needsYouCount(s, outcome) === 0;
 }
 
-/** The attention tiles for /operations: the same reads and rules /health uses. Never throws. */
+/**
+ * The attention tiles for /operations: the same reads and rules /health uses.
+ * Never throws.
+ *
+ * `viewer` (O2): omitted, every read keeps its pre-O2, unscoped behaviour —
+ * existing callers (system-health.ts builds its own AttentionSummary by
+ * calling the readers above directly, not this function) are unaffected.
+ * Passed, house (platform) failures/workers/untenanted events are the agents
+ * owner's alone, a workspace failure counts for its owner, and
+ * `houseScheduler` is populated for the owner only.
+ */
 export async function loadAttentionSummary(
   tenantId: string,
-  deps: { db?: AdminDb; now?: number } = {},
+  deps: { db?: AdminDb; now?: number; viewer?: AttentionViewer } = {},
 ): Promise<AttentionSummary> {
   const db = deps.db ?? getServiceSupabase();
   const now = deps.now ?? Date.now();
-  const [machines, workerRows, cron, events, coldLeads] = await Promise.all([
+  const viewer = deps.viewer;
+  const [machines, workerRows, cron, events, coldLeads, houseScheduler] = await Promise.all([
     safe("attention.machines", loadMachines(db, tenantId, now), null),
     safe("attention.workers", loadWorkerRows(db, tenantId), null),
-    safe("attention.cron_failures", loadCronFailures(db, tenantId, now), null),
-    safe("attention.events", loadAttentionEvents(db, tenantId, now), null),
+    safe("attention.cron_failures", loadCronFailures(db, tenantId, now, viewer), null),
+    safe("attention.events", loadAttentionEvents(db, tenantId, now, viewer), null),
     safe("attention.cold_leads", countColdLeads(db, tenantId, now), null),
+    viewer ? safe("attention.house_scheduler", loadHouseSchedulerStatus(db, tenantId, now, viewer), null) : Promise.resolve(undefined),
   ]);
   return {
     errors: events?.errors ?? null,
     warnings: events?.warnings ?? null,
     cronFailures: cron?.count ?? null,
-    workersDown: describeBackground(workerRows, machines, now).workersDown,
+    workersDown: describeBackground(workerRows, machines, now, viewer).workersDown,
     coldLeads,
+    // Omitted entirely (not even `undefined`) when no viewer was given, so a
+    // caller that builds its OWN AttentionSummary without this field (lib/
+    // admin/system-health.ts) stays deepEqual-comparable to this one.
+    ...(viewer ? { houseScheduler } : {}),
   };
 }

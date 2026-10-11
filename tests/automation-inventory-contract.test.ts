@@ -43,20 +43,22 @@ assert.match(listRoute, /inventory[^}]*\}/,
 // armed by one predicate, so an identity it does not cover disarms all three at
 // once and returns a plausible tenant-only 200. Evaluated once, and the verdict
 // travels on the wire so the omission cannot be read as an inventory.
-// The predicate is the VERIFIED operator check (alias AND owner/admin OASIS
-// membership by auth id, 2026-09-28) — the bare email check let anyone who
-// registered an unclaimed alias read and toggle the Empire lane.
-assert.match(listRoute, /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\)/,
-  "the operator verdict must be bound once, not re-derived per use");
+// O2 (2026-10-11): the predicate tightened again, from the VERIFIED operator
+// check (alias AND owner/admin OASIS membership by auth id, 2026-09-28) to the
+// workspace's AGENTS OWNER (lib/agents-owner.ts) — PR #576 made Adon a
+// verified operator too, so the 2026-09-28 predicate alone would have handed
+// him CC's house lane the moment it covered him.
+assert.match(listRoute, /const isAgentsOwner = ownerLookup\.state === "set" && ownerLookup\.authUserId === authUserId;/,
+  "the agents-owner verdict must be bound once, not re-derived per use");
 assert.equal(
-  (listRoute.match(/isPlatformOperatorForAuthUser\(/g) || []).length,
+  (listRoute.match(/readAgentsOwner\(/g) || []).length,
   1,
-  "one call site only — three copies of the predicate are three chances to drift apart",
+  "one call site only — multiple copies of the predicate are multiple chances to drift apart",
 );
-assert.doesNotMatch(listRoute, /isOperatorEmail/,
-  "the Empire lane must not be armed by an email string alone");
-assert.match(listRoute, /requireEmpireRows: isOperator && isOasisOperatorTenant,\s*\n\s*isOperator,/,
-  "GET must report the operator verdict alongside the lane counts, and must only " +
+assert.doesNotMatch(listRoute, /isOperatorEmail|isPlatformOperatorForAuthUser/,
+  "the Empire lane must not be armed by an email string or the platform-operator check — only the agents owner");
+assert.match(listRoute, /requireEmpireRows: isAgentsOwner && isOasisOperatorTenant,\s*\n\s*isAgentsOwner,/,
+  "GET must report the agents-owner verdict alongside the lane counts, and must only " +
     "demand a non-empty Empire lane in OASIS's own tenant");
 assert.doesNotMatch(listRoute, /VALID_ACTION_TYPES[^\n]*agent_prompt/,
   "create API must not advertise agent_prompt until a runner supports it");
