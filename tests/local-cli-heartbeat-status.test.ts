@@ -105,7 +105,9 @@ const pingRoute = readFileSync(
   "utf8",
 );
 assert.ok(
-  pingRoute.includes('.eq("tenant_id", pairing.data.tenant_id)'),
+  // O3a: the pairing comes from the shared resolver (lib/bridge/pairing-auth.ts)
+  // as `pairing.tenantId`; the rule is unchanged.
+  pingRoute.includes('.eq("tenant_id", pairing.tenantId)'),
   "heartbeat profile resolution must stay inside the pairing tenant so another workspace cannot receive its CLI inventory",
 );
 assert.ok(

@@ -216,7 +216,10 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
     setBusy(id);
     setError(null);
     try {
-      const r = await fetch(`/api/devices?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      // confirm=true: the person just said yes in the dialog above. The API
+      // requires it to disconnect someone else's computer (O3a), and a
+      // missing flag used to make that Revoke answer 409 with nothing done.
+      const r = await fetch(`/api/devices?id=${encodeURIComponent(id)}&confirm=true`, { method: "DELETE" });
       const j = await r.json();
       if (!j.ok) {
         setError(j.error || `http_${r.status}`);

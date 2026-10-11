@@ -2880,25 +2880,40 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
     if (typeof row.expires_at === 'string' && row.expires_at < nowIso) throw new Error('PCODE_EXPIRED');
   };
 
+  // O3a: scope and paired_via copy from the code row that authorized this
+  // redeem. scope was decided at MINT time (bridge_pair_codes.scope, set by
+  // POST /api/auth/pair-code from the code's purpose + the minter's role),
+  // never re-derived here; paired_via is always the literal 'pair_code' —
+  // this IS the pair-code method. A code row predating this column (NULL
+  // scope) copies through as NULL, which every reader treats as legacy
+  // 'daemon' (lib/bridge/pairing-auth.ts).
+  const PAIRED_VIA = 'pair_code';
   const pairStmt = p_fingerprint
     ? {
         sql:
-          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at) ' +
-          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, ?, ? ' +
+          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at, scope, paired_via) ' +
+          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, ?, ?, bpc.scope, ? ' +
           'FROM bridge_pair_codes bpc WHERE bpc.code = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ? ' +
           'ON CONFLICT (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL DO UPDATE SET ' +
-          'bridge_token_hash = excluded.bridge_token_hash, label = excluded.label, last_seen_at = excluded.last_seen_at ' +
+          'bridge_token_hash = excluded.bridge_token_hash, label = excluded.label, last_seen_at = excluded.last_seen_at, ' +
+          'scope = excluded.scope, paired_via = excluded.paired_via, ' +
+          // A re-pair starts a fresh token history and a fresh approval (Codex,
+          // O3a P1): an in-grace previous token must never answer with the new
+          // scope, nor revoke the new pairing later, and a connector's approval
+          // never carries over to a daemon re-pair.
+          'previous_token_hash = NULL, token_rotated_at = NULL, ' +
+          'claim_enabled_at = NULL, claim_enabled_by = NULL, claude_account_hash = NULL ' +
           'WHERE bridge_pairings.user_id = excluded.user_id',
-        args: [freshPairingId, label, p_token_hash, p_fingerprint, nowIso, p_code, nowIso],
+        args: [freshPairingId, label, p_token_hash, p_fingerprint, nowIso, PAIRED_VIA, p_code, nowIso],
       }
     : {
         // No fingerprint, no uniqueness concept (NULL never collides in the
         // partial index) — a plain insert, same as before this fix.
         sql:
-          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at) ' +
-          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, NULL, ? ' +
+          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at, scope, paired_via) ' +
+          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, NULL, ?, bpc.scope, ? ' +
           'FROM bridge_pair_codes bpc WHERE bpc.code = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ?',
-        args: [freshPairingId, label, p_token_hash, nowIso, p_code, nowIso],
+        args: [freshPairingId, label, p_token_hash, nowIso, PAIRED_VIA, p_code, nowIso],
       };
 
   const consumeStmt = p_fingerprint
@@ -2953,13 +2968,16 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
   }
 
   const final = await client.execute({
-    sql: 'SELECT tenant_id, auth_user_id, consumed_by_pairing_id FROM bridge_pair_codes WHERE code = ? LIMIT 1',
+    sql: 'SELECT tenant_id, auth_user_id, consumed_by_pairing_id, purpose FROM bridge_pair_codes WHERE code = ? LIMIT 1',
     args: [p_code],
   });
   const row = final.rows[0] as unknown as Record<string, unknown> | undefined;
   const tenantId = String(row?.tenant_id ?? '');
   const authUserId = String(row?.auth_user_id ?? '');
   const pairingId = String(row?.consumed_by_pairing_id ?? '');
+  // NULL on a code minted before this column (pre-O3a) reads as 'desktop',
+  // the behavior every caller had before 'connector' existed.
+  const purpose = row?.purpose === 'connector' ? 'connector' : 'desktop';
 
   // Resolve profile_id for response shape parity with /api/auth/pair.
   const prof = await client.execute({
@@ -2975,6 +2993,7 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
       tenant_id: tenantId,
       auth_user_id: authUserId,
       profile_id: profileId,
+      purpose,
     },
   ];
 }

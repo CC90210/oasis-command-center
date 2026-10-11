@@ -129,21 +129,28 @@ export async function getTenantBridgeStatus(tenantId: string | null): Promise<{
 }> {
   if (!tenantId) return { online: false, tools: null };
   const db = getServiceSupabase();
+  // `select("*")` and the scope test in code, not a named `scope` filter: a
+  // workspace has a handful of pairings, and a deployment (or fixture) whose
+  // table predates the scope column (bravo__212) then reads every row as the
+  // legacy daemon it is, instead of failing the whole status read.
   const r = await db
     .from("bridge_pairings")
-    .select("last_seen_at, tool_capabilities")
+    .select("*")
     .eq("tenant_id", tenantId)
     .is("revoked_at", null)
     .order("last_seen_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(50);
   if (r.error) throw new Error(`getTenantBridgeStatus: bridge_pairings read failed: ${r.error.message}`);
-  const row = r.data as
-    | {
-        last_seen_at?: string | null;
-        tool_capabilities?: string[] | null;
-      }
-    | null;
+  const rows = (r.data ?? []) as Array<{
+    last_seen_at?: string | null;
+    tool_capabilities?: string[] | null;
+    scope?: string | null;
+  }>;
+  // Daemon pairings only (legacy NULL scope reads as daemon). A connector's
+  // heartbeat carries no tool list, and `tools: null` here means "use the
+  // full default palette" to /api/chat, so a connector must never be the
+  // row this answers from (Codex, O3a P1).
+  const row = rows.find((p) => p.scope == null || p.scope === "daemon") ?? null;
   if (!row?.last_seen_at) return { online: false, tools: null };
   // The one online rule every screen uses (lib/devices/presence.ts).
   const online = isOnline(row.last_seen_at, Date.now());
@@ -221,15 +228,20 @@ export async function getOnlineBridgeComputerLabels(
   const db = getServiceSupabase();
   let query = db
     .from("bridge_pairings")
-    .select("label, last_seen_at")
+    .select("*")
     .eq("tenant_id", tenantId)
     .is("revoked_at", null);
   if (authUserId) query = query.eq("user_id", authUserId);
   const r = await query;
   if (r.error) throw new Error(`getOnlineBridgeComputerLabels: bridge_pairings read failed: ${r.error.message}`);
-  const rows = (r.data || []) as Array<{ label?: string | null; last_seen_at?: string | null }>;
+  const rows = (r.data || []) as Array<{ label?: string | null; last_seen_at?: string | null; scope?: string | null }>;
   const now = Date.now();
-  return rows.filter((row) => isOnline(row.last_seen_at ?? null, now)).map((row) => row.label || "");
+  // Daemon pairings only, like getTenantBridgeStatus: these labels back the
+  // "<computer> is connected" line on Automations, and a connector does not
+  // run automations (independent review, PR #587). Legacy NULL scope counts.
+  return rows
+    .filter((row) => (row.scope == null || row.scope === "daemon") && isOnline(row.last_seen_at ?? null, now))
+    .map((row) => row.label || "");
 }
 
 // getTodayPlan and getPlanTemplates are gone (2026-09-29): nothing called

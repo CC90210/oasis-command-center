@@ -192,7 +192,9 @@ async function createSchema() {
     CREATE TABLE bridge_pairings (
       id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY,
       tenant_id TEXT NOT NULL, user_id TEXT, label TEXT NOT NULL, bridge_token_hash TEXT NOT NULL,
-      machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT,
+      machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT, paired_via TEXT, scope TEXT,
+      previous_token_hash TEXT, token_rotated_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
+      claude_account_hash TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX idx_bridge_pairings_unique_live_machine
       ON bridge_pairings (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL;
@@ -501,6 +503,21 @@ async function main() {
     assert.equal(body.profile_id, C.profileId);
   });
 
+  // O3a (CodeRabbit PR #587): a pairing made here records its scope from the
+  // PROVEN role and is never left NULL, because NULL reads as the legacy
+  // daemon. The HMAC secret sits in any teammate's agents file, so a plain
+  // member must get a connector, never a daemon.
+  await check("an HMAC pairing records its scope from the proven role: owner daemon, plain member connector, never NULL", async () => {
+    const scopeOf = async (fp: string) =>
+      (await db.execute({ sql: "SELECT scope FROM bridge_pairings WHERE machine_fingerprint = ? AND revoked_at IS NULL", args: [fp] })).rows[0]?.scope;
+    const member = await POST(pairRequest(hmacHeaders(C.profileId, HMAC_C), { machine: { label: "C scope PC", fingerprint: "c-scope-fp-00000000000000000003" } }));
+    assert.equal(member.status, 200, JSON.stringify(await member.clone().json()));
+    assert.equal(await scopeOf("c-scope-fp-00000000000000000003"), "connector", "a plain member's HMAC pairing is a connector");
+    const owner = await POST(pairRequest(hmacHeaders(A.profileId, HMAC_A), { machine: { label: "A scope PC", fingerprint: "a-scope-fp-00000000000000000003" } }));
+    assert.equal(owner.status, 200, JSON.stringify(await owner.clone().json()));
+    assert.equal(await scopeOf("a-scope-fp-00000000000000000003"), "daemon", "an owner's HMAC pairing is a daemon");
+  });
+
   await check("an HMAC profile with no sign-in account is refused up front (412), not a 409 'another person' re-pair trap", async () => {
     const fp = "no-sign-in-fp-00000000000000000001";
     const res = await POST(pairRequest(hmacHeaders(H.profileId, HMAC_H), { machine: { label: "No-login box", fingerprint: fp } }));
@@ -619,6 +636,8 @@ async function main() {
     assert.equal(live.length, 1);
     assert.equal(live[0].user_id, N.authId);
     assert.equal(live[0].bridge_token_hash, sha256(body.bridge.token));
+    const scope = await db.execute({ sql: "SELECT scope FROM bridge_pairings WHERE machine_fingerprint = ? AND revoked_at IS NULL", args: ["Windows|AMD64|NEWPC"] });
+    assert.equal(scope.rows[0].scope, "connector", "a signup-secret pairing is always a connector (never approvable for work)");
     const profile = await db.execute({ sql: "SELECT full_name, brand FROM user_profiles WHERE id = ?", args: [N.profileId] });
     assert.equal(profile.rows[0].full_name, "New Operator");
     assert.equal(profile.rows[0].brand, "New Co");

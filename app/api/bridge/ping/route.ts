@@ -20,9 +20,20 @@
  *     tool_capabilities?: string[]
  *   }
  *
+ * Auth (O3a): resolvePairingFromBearer (lib/bridge/pairing-auth.ts), the one
+ * bearer check ping, poll and records share. A reused, already-rotated
+ * token is refused and revokes the computer. The pairing's owner, if it has
+ * one, must still be a LIVE seat (lib/os/seat.ts liveSeat) — a deactivated
+ * member's still-valid token no longer heartbeats.
+ *
  * Effect:
  *   - Bumps bridge_pairings.last_seen_at + last_seen_ip for the active token.
- *   - Stamps bridge_pairings.tool_capabilities when present in the body.
+ *   - Stamps bridge_pairings.claim_protocols when the body names any — its
+ *     OWN column, never folded into tool_capabilities (O3a).
+ *   - Stamps bridge_pairings.tool_capabilities when present in the body, but
+ *     NEVER for a 'connector'-scope pairing: that column feeds the operator
+ *     chat's bridge tool palette, and a connector computer (Settings >
+ *     Computers, no shell) must never be able to widen it.
  *   - Upserts each service into integrations_health for the resolved tenant.
  *     A report that only says a key NAME is on the computer (metadata.via
  *     "env_key_present" / "local_install", lib/integrations/presence-heartbeat.ts)
@@ -42,8 +53,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
-import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
+import { bad, getClientIp } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
+import { resolvePairingFromBearer } from "@/lib/bridge/pairing-auth";
+import { liveSeat } from "@/lib/os/seat";
 import { CLI_INVENTORY_SERVICE, buildCliMachinePatch, type CliMachinePatch } from "@/lib/bridge-cli-status";
 import {
   BRIDGE_REPORT_KEY,
@@ -78,30 +91,28 @@ export async function POST(req: NextRequest) {
       { status: 429 },
     );
   }
-  const auth = req.headers.get("authorization") || "";
-  if (!auth.toLowerCase().startsWith("bearer ")) {
-    return bad(401, "Bearer bridge token required");
-  }
-  const tokenPlain = auth.slice(7).trim();
-  const tokenHash = sha256(tokenPlain);
+  const resolved = await resolvePairingFromBearer(req);
+  if (!resolved.ok) return bad(resolved.status, resolved.error);
+  const pairing = resolved.pairing;
 
   const db = getServiceSupabase();
-  const pairing = await db
-    .from("bridge_pairings")
-    .select("id, tenant_id, user_id, revoked_at, label")
-    .eq("bridge_token_hash", tokenHash)
-    .maybeSingle();
-  if (pairing.error || !pairing.data) return bad(401, "unknown bridge token");
-  if (pairing.data.revoked_at) return bad(403, "bridge pairing revoked");
+
+  // A pairing with a recorded owner must still be a LIVE seat — a
+  // deactivated member's token stops heartbeating at once, not when it is
+  // separately revoked (O3a security rule 6).
+  if (pairing.userId) {
+    const seat = await liveSeat(pairing.tenantId, pairing.userId);
+    if (!seat.live) return bad(403, `seat_inactive: ${seat.reason}`);
+  }
 
   // Resolve profile_id (integrations_health is keyed on profile_id, service)
   let profileId: string | null = null;
-  if (pairing.data.user_id) {
+  if (pairing.userId) {
     const pf = await db
       .from("user_profiles")
       .select("id")
-      .eq("auth_user_id", pairing.data.user_id)
-      .eq("tenant_id", pairing.data.tenant_id)
+      .eq("auth_user_id", pairing.userId)
+      .eq("tenant_id", pairing.tenantId)
       .maybeSingle();
     profileId = pf.data?.id || null;
   }
@@ -119,6 +130,7 @@ export async function POST(req: NextRequest) {
   let body: {
     services?: Record<string, ServiceReport>;
     tool_capabilities?: string[];
+    claim_protocols?: string[];
   };
   try {
     body = await req.json();
@@ -128,14 +140,17 @@ export async function POST(req: NextRequest) {
 
   // Touch the pairing's heartbeat. If the bridge included a tool_capabilities
   // list, stamp it on the pairing too — dashboard reads this when filtering
-  // TOOL_DEFINITIONS for the /api/chat tool palette.
+  // TOOL_DEFINITIONS for the /api/chat tool palette. NEVER for a
+  // 'connector'-scope pairing (Settings > Computers, no shell): that column
+  // feeds the operator chat's bridge tool list, and a connector must never
+  // be able to widen it (O3a).
   const recordedIp = getClientIp(req);
   const pairingUpdate: Record<string, unknown> = {
     last_seen_at: new Date().toISOString(),
     last_seen_ip: recordedIp === "unknown" ? null : recordedIp,
   };
   let toolCapsRecorded = false;
-  if (Array.isArray(body.tool_capabilities)) {
+  if (Array.isArray(body.tool_capabilities) && pairing.scope !== "connector") {
     // Defensive — refuse anything that isn't a list of plain strings.
     const cleaned = body.tool_capabilities
       .filter((t): t is string => typeof t === "string" && t.length > 0)
@@ -143,13 +158,22 @@ export async function POST(req: NextRequest) {
     pairingUpdate.tool_capabilities = cleaned;
     toolCapsRecorded = true;
   }
+  // claim_protocols lives in its own column — never merged into
+  // tool_capabilities, and recorded for every scope (a connector computer
+  // still needs to tell the server which claim protocols it speaks).
+  if (Array.isArray(body.claim_protocols)) {
+    const cleanedProtocols = body.claim_protocols.filter(
+      (t): t is string => typeof t === "string" && t.length > 0,
+    );
+    pairingUpdate.claim_protocols = JSON.stringify(cleanedProtocols);
+  }
   await db
     .from("bridge_pairings")
     .update(pairingUpdate)
-    .eq("id", pairing.data.id);
+    .eq("id", pairing.pairingId);
 
   // Upsert per-service health rows, tenant-scoped
-  const tenantId = pairing.data.tenant_id;
+  const tenantId = pairing.tenantId;
   const services = body.services || {};
   let recorded = 0;
   let realResultsKept = 0;
@@ -175,8 +199,8 @@ export async function POST(req: NextRequest) {
     // (recordCliMachine), so two paired computers never replace each other.
     if (service === CLI_INVENTORY_SERVICE) {
       const patch = buildCliMachinePatch(
-        pairing.data.id as string,
-        (pairing.data as { label?: string | null }).label,
+        pairing.pairingId,
+        pairing.label,
         reported,
         payload.last_ping_at as string,
       );
@@ -222,7 +246,7 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     ok: true,
-    pairing_id: pairing.data.id,
+    pairing_id: pairing.pairingId,
     services_recorded: recorded,
     real_results_kept: realResultsKept,
     tool_capabilities_recorded: toolCapsRecorded,

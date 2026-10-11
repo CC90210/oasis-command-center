@@ -1,22 +1,37 @@
 /**
  * POST /api/auth/pair-code
  *
- * Mints a one-time, 15-minute pair code that the operator pastes into
- * `bravo setup` on a new machine to bridge it without copy-pasting tokens.
+ * Mints a one-time pair code that either `bravo setup` on a new machine
+ * (purpose 'desktop', the Devices button, today's default) or the OASIS
+ * Connector (purpose 'connector', Settings > Computers) redeems to bridge a
+ * computer without copy-pasting tokens.
  *
  * Auth: session — only the logged-in dashboard user can issue codes for
  * their own tenant.
  *
+ * Body (optional): { purpose?: "desktop" | "connector" }. Defaults to
+ * "desktop" — every caller that predates this field keeps today's 15-minute,
+ * sign-in-link-bearing code.
+ *
+ * SCOPE (O3a), decided at mint, never at redeem:
+ *   - purpose 'connector' always yields scope 'connector' — the redeem
+ *     answer mints no sign-in link, and the code lives 5 minutes, not 15.
+ *   - purpose 'desktop' yields scope 'daemon' only when the minter is an
+ *     owner or admin; everyone else minting a desktop code gets 'connector'.
+ *     Before this, ANY member of a client workspace could mint a code whose
+ *     resulting token could write any record and read every job with its
+ *     payload (pair-code/route.ts:49 + cron-jobs/poll — O3a security rule 3).
+ *
  * Returns:
- *   { ok: true, code: "ABC-DEF-GHJ", expires_at: "<iso8601>" }
+ *   { ok: true, code: "ABC-DEF-GHJ", expires_at: "<iso8601>", purpose, scope }
  *
  * The code is shown to the user once (in the dashboard) and consumed once
  * (by the redeem endpoint). Single-use, short-lived. Stored plaintext in
- * the table because we have to look it up by code; the 15-min window +
+ * the table because we have to look it up by code; the short window +
  * single-use semantics keep the leak window tight.
  */
 
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad } from "@/lib/api-helpers";
@@ -27,6 +42,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const CODE_TTL_MIN = 15;
+const CONNECTOR_CODE_TTL_MIN = 5;
 
 // Alphabet excludes ambiguous chars (0/O, 1/I/L) so the operator can read
 // it off the screen and type it without errors.
@@ -43,24 +59,39 @@ function mintCode(): string {
   return `${chars.slice(0, 3).join("")}-${chars.slice(3, 6).join("")}-${chars.slice(6, 9).join("")}`;
 }
 
-export async function POST() {
+export async function POST(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok || !session.email) return bad(401, "unauthorized");
   if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
+
+  let body: { purpose?: unknown } = {};
+  try {
+    body = await req.json();
+  } catch {
+    body = {};
+  }
+  const purpose = body.purpose === "connector" ? "connector" : "desktop";
+  // Daemon scope is reserved for a desktop code minted by an owner or
+  // admin — a connector code is always 'connector', by construction.
+  const scope = purpose === "connector" ? "connector" : session.isAdmin ? "daemon" : "connector";
+  const ttlMinutes = purpose === "connector" ? CONNECTOR_CODE_TTL_MIN : CODE_TTL_MIN;
+
   const db = getServiceSupabase();
 
   // Revoke any unconsumed prior codes from this user before minting a
   // fresh one. Without this, every "Generate code" click leaves the old
-  // code valid until natural expiry (15 min) and grows the active-code
-  // lookup set unboundedly. Spec is "one live code per user at a time"
-  // — clicking Generate is the explicit-revoke action for the previous.
-  // Codes that have already been consumed are NOT touched (they're audit
-  // trail of past pairings).
+  // code valid until natural expiry and grows the active-code lookup set
+  // unboundedly. Spec is "one live code per user at a time" — clicking
+  // Generate is the explicit-revoke action for the previous. Codes that
+  // have already been consumed are NOT touched (they're audit trail of
+  // past pairings). Scoped to the same purpose: minting a connector code
+  // must not silently burn a still-live desktop code and vice versa.
   await db
     .from("bridge_pair_codes")
     .delete()
     .eq("tenant_id", session.tenantId)
     .eq("auth_user_id", session.userId)
+    .eq("purpose", purpose)
     .is("consumed_at", null);
 
   // Try a few times in case of unique-constraint collision (≈1 in 10^13).
@@ -68,13 +99,15 @@ export async function POST() {
   let expiresAt = "";
   for (let attempt = 0; attempt < 4; attempt++) {
     code = mintCode();
-    expiresAt = new Date(Date.now() + CODE_TTL_MIN * 60_000).toISOString();
+    expiresAt = new Date(Date.now() + ttlMinutes * 60_000).toISOString();
     const ins = await db.from("bridge_pair_codes").insert({
       code,
       tenant_id: session.tenantId,
       auth_user_id: session.userId,
       email: session.email,
       expires_at: expiresAt,
+      purpose,
+      scope,
     });
     if (!ins.error) break;
     if (attempt === 3) {
@@ -86,6 +119,8 @@ export async function POST() {
     ok: true,
     code,
     expires_at: expiresAt,
-    ttl_minutes: CODE_TTL_MIN,
+    ttl_minutes: ttlMinutes,
+    purpose,
+    scope,
   });
 }

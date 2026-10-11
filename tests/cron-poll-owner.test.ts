@@ -82,7 +82,8 @@ async function main() {
   await db.executeMultiple(`
     CREATE TABLE bridge_pairings (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT, user_id TEXT,
-      bridge_token_hash TEXT, revoked_at TEXT, last_poll_ok_at TEXT
+      bridge_token_hash TEXT, revoked_at TEXT, last_poll_ok_at TEXT,
+      scope TEXT, paired_via TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT
     );
     CREATE TABLE tenant_cron_jobs (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, agent_key TEXT NOT NULL DEFAULT 'bravo',
@@ -92,10 +93,25 @@ async function main() {
       run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT,
       created_at TEXT NOT NULL, updated_at TEXT
     );
+    -- O3a: the poll also requires the pairing owner's live seat (lib/os/seat.ts).
+    CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, tenant_id TEXT, email TEXT,
+      team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, deactivated_at TEXT,
+      onboarding_completed_at TEXT, updated_at TEXT);
+    CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT, banned_until TEXT,
+      deleted_at TEXT, session_version INTEGER NOT NULL DEFAULT 0);
   `);
   const { sha256 } = await import("../lib/api-helpers");
+  const seat = (id: string, user: string, tenant: string, role: string) => ({
+    sql: `INSERT INTO user_profiles (id, auth_user_id, tenant_id, email, team_role, is_owner, onboarding_completed_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, user, tenant, `${id}@test`, role, role === "owner" ? 1 : 0, STAMP, STAMP],
+  });
   await db.batch(
     [
+      { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, 'cc@test'), (?, 'adon@test')`, args: [CC_USER, ADON_USER] },
+      seat("p-cc", CC_USER, TENANT, "owner"),
+      seat("p-adon", ADON_USER, TENANT, "admin"),
+      seat("p-cc-oasis", CC_USER, "ef8d389e-3f15-43f2-ae00-3660f69a1452", "owner"),
       {
         sql: `INSERT INTO bridge_pairings (id, tenant_id, label, user_id, bridge_token_hash) VALUES ('pair-cc', ?, 'CCPC', ?, ?)`,
         args: [TENANT, CC_USER, sha256(CC_TOKEN)],
@@ -193,11 +209,15 @@ async function main() {
     }
   });
 
-  await check("a revoked pairing is still 401, unrelated to ownership", async () => {
+  // O3a: the shared resolver (lib/bridge/pairing-auth.ts) answers a revoked
+  // pairing 403 pairing_revoked on ping, poll and records alike; ping already
+  // did (it was the poll's bare 401 that differed).
+  await check("a revoked pairing is refused (403 pairing_revoked), unrelated to ownership", async () => {
     await db.execute({ sql: "UPDATE bridge_pairings SET revoked_at = ? WHERE id = 'pair-cc'", args: [STAMP] });
     try {
       const res = await get(CC_TOKEN);
-      assert.equal(res.status, 401);
+      assert.equal(res.status, 403);
+      assert.equal(((await res.json()) as { error?: string }).error, "pairing_revoked");
     } finally {
       await db.execute({ sql: "UPDATE bridge_pairings SET revoked_at = NULL WHERE id = 'pair-cc'", args: [] });
     }

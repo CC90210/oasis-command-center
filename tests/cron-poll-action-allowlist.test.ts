@@ -77,7 +77,9 @@ async function main() {
   const db = createClient({ url: `file:${dbFile}` });
   await db.executeMultiple(`
     CREATE TABLE bridge_pairings (
-      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT, bridge_token_hash TEXT, revoked_at TEXT
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT, bridge_token_hash TEXT, revoked_at TEXT,
+      scope TEXT, paired_via TEXT, claim_protocols TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
+      previous_token_hash TEXT, token_rotated_at TEXT
     );
     CREATE TABLE tenant_cron_jobs (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, agent_key TEXT NOT NULL DEFAULT 'bravo',

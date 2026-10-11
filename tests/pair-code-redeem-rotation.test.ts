@@ -99,7 +99,9 @@ async function createSchema() {
     CREATE TABLE bridge_pairings (
       id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY,
       tenant_id TEXT NOT NULL, user_id TEXT, label TEXT NOT NULL, bridge_token_hash TEXT NOT NULL,
-      machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT,
+      machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT, scope TEXT, paired_via TEXT,
+      previous_token_hash TEXT, token_rotated_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
+      claude_account_hash TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX idx_bridge_pairings_unique_live_machine
       ON bridge_pairings (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL;
@@ -107,6 +109,7 @@ async function createSchema() {
       id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY,
       code TEXT NOT NULL, tenant_id TEXT NOT NULL, auth_user_id TEXT NOT NULL,
       expires_at TEXT NOT NULL, consumed_at TEXT, consumed_by_pairing_id TEXT,
+      purpose TEXT NOT NULL DEFAULT 'desktop', scope TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX idx_bridge_pair_codes_code ON bridge_pair_codes (code);
     CREATE TRIGGER force_fail_on_consume
