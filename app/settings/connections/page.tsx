@@ -47,7 +47,8 @@ export default async function SettingsConnectionsPage({ searchParams }: { search
 
   // The same loader as the onboarding connections step and AI brain, so an app
   // set up in any of them reads the same here (lib/os/connectors.ts resolver).
-  const statuses = await loadConnectorStatuses({ tenantId: viewer.tenantId, userId: viewer.userId });
+  // Worker secret names only for a verified platform operator.
+  const statuses = await loadConnectorStatuses({ tenantId: viewer.tenantId, userId: viewer.userId, viewerIsOperator: viewer.access.isOperator });
   const sp = await searchParams;
   // Google's sign-in returns here with ?gmail_oauth=…; its drawer shows the result.
   // A sign-in popup that had to fall back to a full-window navigation (popup

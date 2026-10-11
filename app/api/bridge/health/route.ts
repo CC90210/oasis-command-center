@@ -69,6 +69,12 @@ const REASON_DETAIL: Record<BridgeHealthReason, string | null> = {
     "This tenant doesn't have bridge access. Operator-only by default.",
   bridge_not_configured:
     `BRIDGE_VPS_URL and/or BRIDGE_BEARER_TOKEN are unset in the ${hostedRuntime}. Set both as production secrets, then redeploy.`,
+  // O1: neutral by design — the computer is fine, this account is not its
+  // owner. Plain words, no "VPS"/"bridge" jargon: this detail reaches the
+  // same client surfaces non-operator teammates see.
+  not_your_computer: "This runs on another team member's computer, so only they can use it.",
+  agents_owner_not_set: "No one has been set as this workspace's computer owner yet.",
+  agents_owner_unavailable: "Could not confirm this workspace's computer owner just now. Try again in a moment.",
   vps_timeout:
     "VPS didn't answer the proxy in 1500ms. Check the tunnel, then open Settings → Devices or run `oasis bridge status` on the paired host.",
   vps_unauthorized:

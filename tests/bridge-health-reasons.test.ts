@@ -22,6 +22,16 @@ const AUTH_REQUEST_ERROR_STRINGS = [
   "no_tenant",                // line 102
   "tenant_lookup_failed",     // line 115
   "bridge_not_enabled_for_tenant", // line 118
+  // O1 (2026-10-10): the agents-owner gate, after the tenant gate above —
+  // this person is not the workspace's agents owner, or OASIS has no owner
+  // set, or the owner row could not be read. NEUTRAL reasons: the computer
+  // is fine, this account just is not its owner. Full behavioral proof
+  // (HTTP 200, the plain-words detail, the cloud probe skipped) lives in
+  // tests/bridge-owner-gate.test.ts; this file pins only that the type
+  // round-trips, same as every other authorizeBridgeRequest error string.
+  "not_your_computer",
+  "agents_owner_not_set",
+  "agents_owner_unavailable",
   "bridge_not_configured",    // line 122
 ];
 

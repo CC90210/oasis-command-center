@@ -173,6 +173,11 @@ async function main() {
       publisher_agent TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'info', payload TEXT NOT NULL DEFAULT '{}',
       correlation_id TEXT, published_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
   `);
+  // O1: authorizeBridgeRequest now also gates on the workspace's agents
+  // owner (lib/agents-owner.ts). CC must be named here or every "the
+  // operator reaches the bridge" check below would fail on the NEW gate
+  // instead of proving what this file exists to prove.
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__210_workspace_agents_owner.sql"), "utf8"));
   const profile = (user: { id: string; email: string }, tenant: string, role: string, owner = 0) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, agents_enabled, primary_agent, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, '["bravo","atlas","maven","aura"]', 'aura', ?)`,
@@ -185,6 +190,7 @@ async function main() {
       { sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'client-co', 'Client Co', '{}')", args: [CLIENT] },
       { sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'submissions', 'SunBiz', '{}')", args: [SUNBIZ] },
       profile(CC, OASIS, "owner", 1),
+      { sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, 'test', ?)", args: [OASIS, CC.id, stamp] },
       profile(CLIENT_OWNER, CLIENT, "owner", 1),
       profile(CLOSER, OASIS, "closer"),
       profile(SUNBIZ_REP, SUNBIZ, "owner", 1),

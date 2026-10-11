@@ -103,7 +103,7 @@ export function SignatureField({ value, onChange }: Props) {
       </div>
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-fg-dim">
-          Draw your signature above — use your finger on a phone or your mouse on a computer.
+          Draw your signature above. Use your finger on a phone or your mouse on a computer.
         </span>
         <button
           type="button"

@@ -178,6 +178,28 @@ async function main() {
     assert.equal(repurpose.validate({ post: "A post that is long enough to repurpose." }).ok, true);
   });
 
+  await check("Repurpose a post: a post that is only a link is refused as link_only, with its own line, on the card and the server alike", async () => {
+    const { inputRefusalLine } = await import("../lib/tools/registry");
+    const repurpose = toolByKey("repurpose_post")!;
+    for (const post of [
+      "https://www.instagram.com/reels/DeP8Ju0p13h/",
+      "www.tiktok.com/@someone/video/123",
+      "instagram.com/reel/abc",
+      "https://a.example/1 https://b.example/2",
+      "x.co/a",
+    ]) {
+      assert.deepEqual(repurpose.validate({ post }), { ok: false, field: "post", code: "link_only" }, post);
+    }
+    for (const post of ["Read this before you hire: https://oasisai.work/ai-audit", "e.g. we answered every lead in a minute"]) {
+      assert.equal(repurpose.validate({ post }).ok, true, post);
+    }
+    assert.equal(inputRefusalLine("link_only"), "Paste the post's text. Grabbing a post from a link is coming next.");
+    assert.equal(inputRefusalLine("too_short"), null);
+    // The card draws that line under the Post box (the same validator runs there).
+    const grid = (await import("node:fs")).readFileSync("components/tools/ToolGrid.tsx", "utf8");
+    assert.match(grid, /f\.kind === "url" \? urlFieldLine\(tool\.key, refused\) : inputRefusalLine\(refused\)/);
+  });
+
   await check("Score a hook is gone: no registry entry, no key a run or a claim can ever accept", () => {
     assert.equal(toolByKey("score_hook"), null, "removed from the registry (2026-10-10)");
     assert.equal(TOOL_REGISTRY.some((t) => t.key === "score_hook"), false);

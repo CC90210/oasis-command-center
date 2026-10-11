@@ -58,7 +58,9 @@ const settings = readFileSync(
   "utf8",
 );
 assert.ok(
-  settings.includes("<LocalCliProvidersCard serverBridgeOnline={bridgeOnline} />"),
+  // O1: the card also takes isAgentsOwner (lib/agents-owner.ts) — the
+  // heartbeat prop itself is unchanged, which is what this pins.
+  settings.includes("<LocalCliProvidersCard serverBridgeOnline={bridgeOnline} isAgentsOwner={agentsOwner} />"),
   "Settings must pass the same tenant-scoped heartbeat used by its other bridge indicators",
 );
 

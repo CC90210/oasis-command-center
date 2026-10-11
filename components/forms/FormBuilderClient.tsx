@@ -37,6 +37,8 @@ import {
   type FormStep,
 } from "@/lib/forms/types";
 import { formThemesForTenant, inferActiveThemeId } from "@/lib/forms/themes";
+import { SafeLogo } from "@/components/brand/SafeLogo";
+import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import {
   formStageGroupsForTenant,
   isSunbizFormsTenant,
@@ -525,14 +527,9 @@ export function FormBuilderClient({ initialForm, profileSlug }: Props) {
 
           {(branding.headline || branding.subheadline) && (
             <div className="text-center pb-3 border-b border-bg-border">
-              {branding.logo_url && (
-                /* eslint-disable-next-line @next/next/no-img-element */
-                <img
-                  src={branding.logo_url}
-                  alt="Brand logo"
-                  className="mx-auto h-10 mb-3"
-                />
-              )}
+              {/* Drawn from the address the public page uses
+                  (lib/tenant/logo-url.ts); one that cannot load draws nothing. */}
+              <SafeLogo src={displayLogoUrl(branding.logo_url)} alt="Brand logo" className="mx-auto h-10 mb-3" />
               {branding.headline && (
                 <h2 className="text-lg font-bold text-fg">{branding.headline}</h2>
               )}

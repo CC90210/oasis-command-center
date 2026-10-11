@@ -99,6 +99,7 @@ export async function runRepurposePost(
   );
   if (!r.ok) return r;
   const variants = parseVariants(r.text);
-  if (!variants) return { ok: false, code: "ai_failed" };
+  // The model DID answer, just not the three versions: not "didn't answer".
+  if (!variants) return { ok: false, code: "ai_unusable_answer" };
   return { ok: true, result: { variants, provider: r.provider, model: r.model } };
 }

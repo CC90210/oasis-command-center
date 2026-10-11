@@ -357,6 +357,11 @@ async function behaviouralChecks() {
       provider TEXT, model TEXT, encrypted_api_key TEXT, system_prompt_override TEXT,
       display_name_override TEXT, enabled INTEGER DEFAULT 1);
   `);
+  // O1: authorizeBridgeRequest now also gates on the workspace's agents
+  // owner (lib/agents-owner.ts). CC must be named here or every "operator
+  // still reaches the bridge" check below would fail on the NEW gate instead
+  // of proving what this file exists to prove.
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__210_workspace_agents_owner.sql"), "utf8"));
   const stamp = "2026-09-01T00:00:00Z";
   const now = new Date().toISOString();
   const profile = (id: string, user: { id: string | null; email: string }, tenant: string, role: string, owner: 0 | 1) => ({
@@ -378,6 +383,7 @@ async function behaviouralChecks() {
       { sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'spoof-co', 'Spoof Co', '{}')", args: [SPOOF_TENANT] },
       { sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'client-co', 'Client Co', '{}')", args: [CLIENT] },
       profile("p-cc", USERS.cc, OASIS, "owner", 1),
+      { sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, 'test', ?)", args: [OASIS, USERS.cc.id, stamp] },
       // What signup + provision hands anyone who registers an alias: the owner
       // seat of a brand-new workspace of their own. Never a row in OASIS.
       profile("p-squatter", USERS.squatter, SQUAT_TENANT, "owner", 1),

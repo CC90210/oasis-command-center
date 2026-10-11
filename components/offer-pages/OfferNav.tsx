@@ -3,10 +3,12 @@
  * workspace's mark, the pinned sections that are actually drawn, and the Book
  * button. Phones keep the mark and the button; the anchors are hidden there.
  *
- * Plain anchors, no client code: in-page links work without JavaScript, and
- * Section's scroll-mt keeps a heading clear of this bar.
+ * Plain anchors: in-page links work without JavaScript, and Section's scroll-mt
+ * keeps a heading clear of this bar. The mark is the one client piece
+ * (SafeLogo), only so a mark that fails to load is hidden.
  */
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
+import { SafeLogo } from "@/components/brand/SafeLogo";
 import type { DrawnPage } from "@/lib/offer-pages/visibility";
 
 export function OfferNav({
@@ -24,10 +26,9 @@ export function OfferNav({
     <header className="sticky top-0 z-50 border-b border-ops-line bg-ops-void/85 backdrop-blur-md">
       <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between gap-6 px-5 sm:px-8">
         <a href="#top" className="flex min-w-0 items-center gap-3" aria-label={`${name}, top of the page`}>
-          {logoUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element -- the workspace's own mark, any host
-            <img src={logoUrl} alt="" height={32} className="h-8 w-auto max-w-[9rem] object-contain" />
-          ) : null}
+          {/* The workspace's own mark, any host; one that fails to load draws
+              nothing (the name beside it stays), never a broken-image icon. */}
+          <SafeLogo src={logoUrl} alt="" height={32} className="h-8 w-auto max-w-[9rem] object-contain" />
           <span className="truncate font-display text-[17px] font-bold tracking-[0.01em] text-fg">{name}</span>
         </a>
         {nav.length ? (

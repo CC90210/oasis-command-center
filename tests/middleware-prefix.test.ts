@@ -26,6 +26,12 @@ assert.equal(isPublic("/api/forms/abc/mint-link"), false, "operator link minting
 assert.equal(isPublic("/oasis-loop/index.html"), true, "OASIS Loop diagram is public static HTML");
 assert.equal(isPublic("/oasis-loop/playbook.html"), true, "OASIS Loop playbook is public static HTML");
 assert.equal(isPublic("/oasis-looping/index.html"), false, "OASIS Loop public prefix does not over-match");
+// A workspace's uploaded logo, drawn on public pages for visitors with no
+// session (2026-10-11). An upload's name may carry no image extension, so the
+// extension rule cannot be what lets it through: the prefix must.
+assert.equal(isPublic("/api/tenant-assets/ef8d389e-3f15-43f2-ae00-3660f69a1452/1791314337685_logo"), true, "tenant logo route is public");
+assert.equal(isPublic("/api/tenant/logo"), false, "the logo UPLOAD route stays session-gated");
+assert.equal(isPublic("/api/tenant-assetsX/x"), false, "the tenant-assets prefix does not over-match");
 
 // ── Marketing site (2026-07-31) ────────────────────────────────────────
 //

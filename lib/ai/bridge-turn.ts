@@ -181,12 +181,41 @@ type BridgeGate = () => Promise<import("@/lib/bridge-proxy").BridgeAuthResult>;
 export type BridgeUnavailable = { unavailable: "not_set_up" | "gate_error" };
 
 /**
+ * O1: the gate refused because this person is not the workspace's AGENTS
+ * OWNER (lib/agents-owner.ts), not because the engine is merely unreachable.
+ * Kept apart from BridgeUnavailable on purpose: an unreachable computer falls
+ * back to the API account and SAYS so (a real outage); a refused person gets
+ * NO fallback at all — PAUSE, NOT FALLBACK (Adon, O1) — because answering them
+ * on the workspace key or the platform key would still be borrowing the
+ * owner's computer by another name. "not_your_computer" is someone else's
+ * workspace computer; "agents_owner_not_set" / "agents_owner_unavailable" are
+ * OASIS faults (no owner named yet, or the owner row could not be read) that
+ * must refuse rather than silently default to answering on a key — including
+ * for the owner CC himself, whose own unreadable owner row must not quietly
+ * route to a key either.
+ */
+export type BridgeRefused = { refused: "not_your_computer" | "agents_owner_not_set" | "agents_owner_unavailable" };
+
+/**
+ * The route error each refusal answers with; lib/os/channel/outcome.ts
+ * ROUTE_ERRORS holds each one's sentence. Kept distinct because the client
+ * shows only the code's sentence: a missing or unreadable owner row must not
+ * read as "yours isn't connected yet" (CodeRabbit, PR #583).
+ */
+export const BRIDGE_REFUSAL_ERROR: Record<BridgeRefused["refused"], string> = {
+  not_your_computer: "computer_not_yours",
+  agents_owner_not_set: "computer_owner_not_set",
+  agents_owner_unavailable: "computer_owner_unavailable",
+};
+
+/**
  * bridgeCallerForSession with the reason kept. null is the gate saying NO by
  * design (a teammate who may not use the computer, another workspace's
  * session): the API account answering them is the rule, not a fault. A
- * BridgeUnavailable is a person who may use the computer and cannot.
+ * BridgeUnavailable is a person who may use the computer and cannot. A
+ * BridgeRefused is O1's owner gate: never answered on a fallback key.
  */
-export async function bridgeResolutionForSession(tenantId: string, authorize?: BridgeGate): Promise<BridgeCaller | BridgeUnavailable | null> {
+export async function bridgeResolutionForSession(tenantId: string, authorize?: BridgeGate): Promise<BridgeCaller | BridgeUnavailable | BridgeRefused | null> {
   try {
     // `authorize` is a test seam; the default is the coding harness's own gate.
     const authorizeBridgeRequest = authorize ?? (await import("@/lib/bridge-proxy")).authorizeBridgeRequest;
@@ -194,6 +223,9 @@ export async function bridgeResolutionForSession(tenantId: string, authorize?: B
     if (auth.ok) {
       if (auth.tenantId !== tenantId) return null;
       return { target: auth.target, tenantId: auth.tenantId, userId: auth.userId, teamRole: auth.teamRole };
+    }
+    if (auth.error === "not_your_computer" || auth.error === "agents_owner_not_set" || auth.error === "agents_owner_unavailable") {
+      return { refused: auth.error };
     }
     // bridge_not_configured is only ever answered to a caller who passed the tenant gate.
     return auth.error === "bridge_not_configured" ? { unavailable: "not_set_up" } : null;

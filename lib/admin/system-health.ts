@@ -88,6 +88,11 @@ const CLOUD_REACH_SENTENCE: Record<string, string> = {
   vps_upstream_error: "Your computer's bridge answered with an error, so it is running but unhealthy.",
   bridge_not_configured: "No bridge address or token is set for this workspace, so the Command Center can't reach your computer.",
   bridge_not_enabled_for_tenant: "This workspace isn't allowed to use the bridge.",
+  // O1: neutral, not an outage — this account is not the workspace's agents
+  // owner, so the Command Center does not even probe the computer for it.
+  not_your_computer: "This account is not this workspace's computer owner, so the Command Center did not check it on this account's behalf.",
+  agents_owner_not_set: "No one has been set as this workspace's computer owner yet, so the Command Center has no one to check it for.",
+  agents_owner_unavailable: "Could not confirm this workspace's computer owner just now, so the Command Center did not check it.",
 };
 
 export function describeCloudReach(reason: string): CloudReach {

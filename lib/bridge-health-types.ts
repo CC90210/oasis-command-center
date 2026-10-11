@@ -24,6 +24,14 @@ export const BRIDGE_HEALTH_REASONS = [
   "tenant_lookup_failed",
   "bridge_not_enabled_for_tenant",
   "bridge_not_configured",
+  // O1: this person is not the workspace's agents owner (lib/agents-owner.ts).
+  // A NEUTRAL reason, never an outage — the paired computer is fine, this
+  // account just isn't the one it is paired to. The route skips the cloud
+  // probe entirely for these three (authorizeBridgeRequest already answered
+  // ok:false, so /health never reaches the fetch to the computer).
+  "not_your_computer",
+  "agents_owner_not_set",
+  "agents_owner_unavailable",
   "vps_timeout",
   "vps_unauthorized",
   "vps_upstream_error",

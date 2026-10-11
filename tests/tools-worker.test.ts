@@ -266,10 +266,70 @@ async function main() {
     }
   });
 
-  await check("a model answer that is not the three versions fails the run as ai_failed", async () => {
+  await check("a model answer that is not the three versions fails the run as ai_unusable_answer, never 'didn't answer'", async () => {
     const ai = fakeAi("Sure! Here are your posts...");
     const j = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps)));
-    assert.deepEqual([j.status, j.error_code, j.error_message], ["failed", "ai_failed", "The AI account didn't answer. Try again."]);
+    assert.deepEqual(
+      [j.status, j.error_code, j.error_message],
+      ["failed", "ai_unusable_answer", "The AI answered, but not in a form this tool can use; nothing was saved. Try again."],
+    );
+  });
+
+  // -- The only Repurpose run in production (tool_jobs 67b30884, 2026-10-10 02:31Z) --
+  // Its input was an Instagram reel URL; its model call (google, gemini-3.8-flash)
+  // ended http_524 after 132 s; the card said "The AI account didn't answer".
+  await check("a post that is only a link is refused up front with a plain line: no run, no model call, no usage row", async () => {
+    const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" }));
+    const jobsBefore = Number(await scalar(db, "SELECT COUNT(*) FROM tool_jobs"));
+    const usageBefore = Number(await scalar(db, "SELECT COUNT(*) FROM ai_usage_events"));
+    for (const post of ["https://www.instagram.com/reels/DeP8Ju0p13h/", "  instagram.com/reel/abc  https://tiktok.com/t/xyz ", "x.co/a"]) {
+      const a = await run("repurpose_post", { post }, deps(ai.deps));
+      assert.equal(a.status, 422, post);
+      assert.deepEqual(
+        [a.body.error, a.body.field, a.body.code, a.body.message],
+        ["invalid_input", "post", "link_only", "Paste the post's text. Grabbing a post from a link is coming next."],
+        post,
+      );
+    }
+    assert.equal(ai.seen.calls.length, 0, "the model was never asked to rewrite a URL");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM tool_jobs")), jobsBefore, "no run was recorded");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ai_usage_events")), usageBefore, "no usage row");
+    // A post that carries a link among its words is still a post.
+    const ok = jobOf(await run("repurpose_post", { post: `${POST} https://oasisai.work/ai-audit` }, deps(ai.deps)));
+    assert.equal(ok.status, "done");
+  });
+
+  /** An account whose provider refuses with `message` (lib/providers.ts's error event shapes). */
+  function refusingAi(message: string) {
+    return {
+      readAccount: async () => ACCOUNT,
+      decrypt: () => "test-key",
+      usageDb: db,
+      stream: async function* (): AsyncGenerator<StreamEvent> {
+        yield { type: "error", message };
+      },
+    };
+  }
+
+  await check("the provider's own refusal is named: down/timed out, key, model, quota, filter; only an unreadable failure is ai_failed", async () => {
+    const cases: Array<[string, string, RegExp]> = [
+      ["provider_temporarily_unavailable:google_524", "ai_provider_down", /didn't answer \(it was busy or timed out\)/],
+      ["provider_temporarily_unavailable:google_503", "ai_provider_down", /busy or timed out/],
+      ["google_400:API key not valid. Please pass a valid API key.", "ai_key_refused", /owner or admin needs to check its key and billing in Settings > AI brain/],
+      ["anthropic_401:invalid x-api-key", "ai_key_refused", /Settings > AI brain/],
+      ["openrouter_402:Insufficient credits", "ai_key_refused", /billing/],
+      ["google_404:models/gemini-x is not found", "ai_model_not_found", /pick another model there/],
+      ["provider_temporarily_unavailable:openai_429", "ai_rate_limited", /rate-limited or out of quota/],
+      ["empty_reply:blocked", "ai_blocked", /safety filter/],
+      ["something nobody wrote down", "ai_failed", /^The AI account didn't answer\. Try again\.$/],
+    ];
+    for (const [message, code, line] of cases) {
+      const j = jobOf(await run("repurpose_post", { post: POST }, deps(refusingAi(message))));
+      assert.equal(j.status, "failed", message);
+      assert.equal(j.error_code, code, message);
+      assert.match(String(j.error_message), line, message);
+      assert.doesNotMatch(String(j.error_message), /—/, "no em dash in a line a person reads");
+    }
   });
 
   await check("a model call that never answers times out at the bound: honest message, nothing saved, no ai_failed", async () => {
@@ -296,11 +356,14 @@ async function main() {
   });
 
   await check("modelBudgetMs: never more than the model's own cap, shrinks with elapsed time, floors at 0 (pure)", () => {
-    const start = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000);
-    assert.equal(modelBudgetMs(start(0)), 55_000, "nothing elapsed: the full 55 s cap");
-    assert.equal(modelBudgetMs(start(10)), 45_000, "10 s already spent: 60 - 10 - 5 reserve");
-    assert.equal(modelBudgetMs(start(56)), 0, "almost the whole 60 s request budget already spent: no time left");
-    assert.equal(modelBudgetMs(start(999)), 0, "floors at 0, never negative");
+    // One fixed clock for both sides: reading Date.now() twice let a slow CI
+    // runner tick a millisecond between them (54999 !== 55000, PR #583).
+    const now = Date.parse("2026-10-11T04:00:00Z");
+    const start = (secondsAgo: number) => new Date(now - secondsAgo * 1000);
+    assert.equal(modelBudgetMs(start(0), now), 55_000, "nothing elapsed: the full 55 s cap");
+    assert.equal(modelBudgetMs(start(10), now), 45_000, "10 s already spent: 60 - 10 - 5 reserve");
+    assert.equal(modelBudgetMs(start(56), now), 0, "almost the whole 60 s request budget already spent: no time left");
+    assert.equal(modelBudgetMs(start(999), now), 0, "floors at 0, never negative");
   });
 
   await check(
