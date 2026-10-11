@@ -123,9 +123,10 @@ export async function GET(req: NextRequest) {
   if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
     // 200 with an empty list, not an error: the machine is paired and healthy,
     // it is simply not this tenant's executor. An error would make its daemon
-    // retry-spin; an empty list makes it idle politely. Still a real,
-    // successful poll by a real computer, so it still stamps.
-    await stampLastPollOk(db, bridge.pairingId);
+    // retry-spin; an empty list makes it idle politely. It does NOT stamp
+    // last_poll_ok_at: that stamp means "the house scheduler fetched its jobs",
+    // and another of the owner's computers polling must never hide the
+    // executor being down (Codex review, O2).
     return NextResponse.json({ ok: true, jobs: [], polled_at: new Date().toISOString() });
   }
 

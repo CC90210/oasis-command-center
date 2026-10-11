@@ -203,6 +203,22 @@ async function main() {
     }
   });
 
+  // Codex review (O2): last_poll_ok_at means "the house scheduler fetched its
+  // jobs". Another of the owner's computers polling (here CC's Mac, in the
+  // OASIS workspace whose executor is CCPC) must not refresh it, or it would
+  // hide CCPC being down indefinitely.
+  await check("a non-executor computer gets an empty 200 and does NOT stamp last_poll_ok_at", async () => {
+    const MAC_TOKEN = "oab_test_mac_not_the_executor";
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings (id, tenant_id, label, user_id, bridge_token_hash) VALUES ('pair-mac', 'ef8d389e-3f15-43f2-ae00-3660f69a1452', 'Conaughs-Mac (Mac)', ?, ?)`,
+      args: [CC_USER, sha256(MAC_TOKEN)],
+    });
+    const res = await get(MAC_TOKEN);
+    assert.equal(res.status, 200);
+    assert.deepEqual(((await res.json()) as PollBody).jobs, []);
+    assert.equal(await lastPollOkAt("pair-mac"), null, "a computer that is not the executor never stamps the scheduler's health");
+  });
+
   if (failures > 0) {
     console.log(`cron-poll-owner: ${failures} failing`);
     process.exit(1);

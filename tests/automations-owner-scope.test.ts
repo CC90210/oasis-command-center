@@ -251,6 +251,20 @@ async function main() {
     }
   });
 
+  // Codex review (O2): the Operations "all clear" must count the house
+  // scheduler. Stalled is one thing needing the owner; an unreadable status
+  // for the owner is unknown (null), never all clear; a non-owner has no item.
+  await check("all clear counts the house scheduler: stalled is 1, an unreadable status is unknown, a non-owner has no item", async () => {
+    const { needsYouCount, nothingNeedsYou } = await import("../lib/admin/attention");
+    const base = { errors: 0, warnings: 0, cronFailures: 0, workersDown: 0, coldLeads: 0 };
+    assert.equal(needsYouCount({ ...base }, null), 0, "no scheduler item (non-owner): unchanged");
+    assert.equal(needsYouCount({ ...base, houseScheduler: { stalled: false, lastPollOkAt: "2026-10-11T05:00:00Z" } }, null), 0);
+    assert.equal(needsYouCount({ ...base, houseScheduler: { stalled: true, lastPollOkAt: null } }, null), 1);
+    assert.equal(nothingNeedsYou({ ...base, houseScheduler: { stalled: true, lastPollOkAt: null } }, null), false);
+    assert.equal(needsYouCount({ ...base, houseScheduler: null }, null), null, "the owner's read failed: unknown");
+    assert.equal(nothingNeedsYou({ ...base, houseScheduler: null }, null), false);
+  });
+
   if (failures > 0) {
     console.log(`automations-owner-scope: ${failures} failing`);
     process.exit(1);

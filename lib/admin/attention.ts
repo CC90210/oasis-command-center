@@ -514,6 +514,16 @@ export async function loadHouseSchedulerStatus(
   viewer: AttentionViewer,
 ): Promise<HouseSchedulerStatus> {
   if (!viewer.isAgentsOwner) return null;
+  // A scheduler with nothing switched on to fetch cannot be stalled in a way
+  // that needs anyone: the item applies only while enabled house jobs exist.
+  // A read error throws (the caller's safe() turns it into "unknown").
+  const active = await db
+    .from("cron_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("tenant_id", tenantId)
+    .eq("is_active", 1);
+  if (active.error) throw new Error(`cron_jobs active count failed: ${active.error.message}`);
+  if ((active.count ?? 0) === 0) return { stalled: false, lastPollOkAt: null };
   const r = await db
     .from("bridge_pairings")
     .select("last_poll_ok_at")
@@ -570,7 +580,11 @@ export async function loadWorkspaceOutcome(
 export function needsYouCount(s: AttentionSummary, outcome: Pick<OutcomeCheckData, "signalCount"> | null): number | null {
   const alarms = [s.errors, s.cronFailures, s.workersDown];
   if (alarms.some((n) => n === null)) return null;
-  return alarms.reduce<number>((sum, n) => sum + (n ?? 0), 0) + (outcome?.signalCount ?? 0);
+  // O2 (Codex review): the house scheduler counts too. Its read failing for
+  // the owner is "unknown", never all clear; stalled is one thing needing you.
+  if (s.houseScheduler === null) return null;
+  const scheduler = s.houseScheduler?.stalled ? 1 : 0;
+  return alarms.reduce<number>((sum, n) => sum + (n ?? 0), 0) + scheduler + (outcome?.signalCount ?? 0);
 }
 
 /** "Nothing needs you": every alarm count read and zero, and no outcome signal. */
@@ -602,7 +616,9 @@ export async function loadAttentionSummary(
     safe("attention.cron_failures", loadCronFailures(db, tenantId, now, viewer), null),
     safe("attention.events", loadAttentionEvents(db, tenantId, now, viewer), null),
     safe("attention.cold_leads", countColdLeads(db, tenantId, now), null),
-    viewer ? safe("attention.house_scheduler", loadHouseSchedulerStatus(db, tenantId, now, viewer), null) : Promise.resolve(undefined),
+    // Only the agents owner gets the item: undefined for everyone else, so a
+    // null here means one thing only, "the owner's read failed" (Codex, O2).
+    viewer?.isAgentsOwner ? safe("attention.house_scheduler", loadHouseSchedulerStatus(db, tenantId, now, viewer), null) : Promise.resolve(undefined),
   ]);
   return {
     errors: events?.errors ?? null,

@@ -382,7 +382,8 @@ async function main() {
     const tile = async () => (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text;
     await db.execute(
       `CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, action_type TEXT, owner_agent_key TEXT,
-         last_run_at TEXT, last_result TEXT, fail_count INTEGER DEFAULT 0, tenant_id TEXT NOT NULL)`,
+         last_run_at TEXT, last_result TEXT, fail_count INTEGER DEFAULT 0, tenant_id TEXT NOT NULL,
+         is_active INTEGER NOT NULL DEFAULT 1)`,
     );
     assert.match(await tile(), /Failed automations Couldn't check/, "tenant_cron_jobs unread, cron_jobs readable");
     await db.execute("ALTER TABLE cron_jobs RENAME TO cron_jobs_parked");
