@@ -50,6 +50,39 @@ stub("next/headers", {
   headers: async () => new Headers(),
   draftMode: async () => ({ isEnabled: false }),
 });
+stub("next/navigation", {
+  notFound: () => {
+    throw new Error("NEXT_HTTP_ERROR_FALLBACK;404");
+  },
+  redirect: (url: string) => {
+    throw new Error(`NEXT_REDIRECT;${url}`);
+  },
+});
+
+// The follow route (GET /api/os/runs/<id>/stream) resolves the person from the
+// session; here the scope is set by the test, and every attempt to resolve a
+// full session (the first step of starting a driver) is recorded. Everything
+// else in both modules is the real one.
+let routeScope: { ok: true; scope: { tenantId: string; userId: string } } | { ok: false; status: number; error: string } = {
+  ok: false,
+  status: 401,
+  error: "unauthorized",
+};
+const sessionAsked: string[] = [];
+{
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const realScope = require("../lib/os/runs/scope") as Record<string, unknown>;
+  stub("../lib/os/runs/scope", { ...realScope, resolveRunScope: async () => routeScope });
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const realSession = require("../lib/os/runs/session") as Record<string, unknown>;
+  stub("../lib/os/runs/session", {
+    ...realSession,
+    resolveRunSession: async (input: { department: string }) => {
+      sessionAsked.push(input.department);
+      return { ok: false, status: 401, error: "unauthorized" };
+    },
+  });
+}
 
 const ACME = "a1a1a1a1-0000-4000-8000-0000000000a1";
 const ZETA = "b2b2b2b2-0000-4000-8000-0000000000b2";
@@ -679,6 +712,201 @@ async function main() {
     for (const p of ["/api/os/runs", "/api/os/runs/0e000000-0000-4000-8000-00000000abcd/stream", "/api/os/runs/0e000000-0000-4000-8000-00000000abcd/stop", "/api/os/runs/x/events", "/api/os/runs/0e000000-0000-4000-8000-00000000abcd/events/extra", "/api/os/conversations"]) {
       assert.equal(isPublic(p), false, `${p} must stay behind the session`);
     }
+  });
+
+  console.log("Automation runs are fenced from chat");
+  const outcomeCopy = await import("../lib/os/channel/outcome");
+  const autoId = () => crypto.randomUUID();
+  async function automationRun(scope = scopeA, conversationId?: string, text = "Run the morning check") {
+    const convId = conversationId ?? (await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", title: "Automation: Morning check (Oct 2026)", now: now() })).id;
+    const id = autoId();
+    const q = await store.enqueueRun(db, scope, { conversationId: convId, text, chatMode: "build", showThinking: false, now: now(), id, source: "automation" });
+    assert.ok(q.ok, "the automation run was not queued");
+    assert.equal(q.ok && q.run.id, id, "the run did not keep the id the automation chose");
+    assert.equal(q.ok && q.run.source, "automation");
+    return { convId, runId: id };
+  }
+  await check("a chat driver never claims an automation run; the automation driver claims exactly the run it names", async () => {
+    const a1 = await automationRun();
+    const a2 = await automationRun(scopeA, a1.convId, "second");
+    assert.equal(await store.claimNextRun(db, scopeA, a1.convId, "chat-lease", now()), null, "a chat driver claimed an automation run");
+    assert.deepEqual((await store.listRuns(db, scopeA, a1.convId)).map((r) => r.status), ["queued", "queued"]);
+    // The later run, by its id, although an earlier one is queued.
+    const got = await store.claimAutomationRun(db, scopeA, a1.convId, a2.runId, "auto-lease", now());
+    assert.equal(got?.id, a2.runId);
+    assert.equal(got?.status, "running");
+    assert.equal((await store.getRun(db, scopeA, a1.runId))?.status, "queued", "another automation run was claimed with it");
+    // One run at a time in a conversation.
+    assert.equal(await store.claimAutomationRun(db, scopeA, a1.convId, a1.runId, "auto-lease-2", now()), null);
+    // Never a chat run, never another person's or workspace's run.
+    const chat = await store.createConversation(db, scopeA, { department: "sales", agentSlug: "sdr", now: now() });
+    const chatRun = await store.enqueueRun(db, scopeA, { conversationId: chat.id, text: "hello", chatMode: "build", showThinking: false, now: now() });
+    assert.ok(chatRun.ok);
+    assert.equal(await store.claimAutomationRun(db, scopeA, chat.id, chatRun.ok ? chatRun.run.id : "", "auto-lease-3", now()), null, "the automation driver claimed a chat run");
+    const other = await automationRun(scopeA);
+    for (const stranger of [scopeB, scopeZ]) {
+      assert.equal(await store.claimAutomationRun(db, stranger, other.convId, other.runId, "auto-lease-4", now()), null, "a stranger claimed the run");
+    }
+    // Which conversations hold an automation's runs.
+    assert.equal(await store.hasAutomationRun(db, scopeA, a1.convId), true);
+    assert.equal(await store.hasAutomationRun(db, scopeA, chat.id), false);
+    assert.equal(await store.hasAutomationRun(db, scopeB, a1.convId), false, "another person's conversation answered");
+    // A running automation run is never handed to the paired computer.
+    assert.equal(await store.attachProducer(db, scopeA, a2.runId, "auto-lease", now()), false);
+    assert.equal((await store.getRun(db, scopeA, a2.runId))?.source, "automation");
+    // An id the automation did not mint is refused loudly, never stored.
+    await assert.rejects(
+      store.enqueueRun(db, scopeA, { conversationId: a1.convId, text: "x", chatMode: "build", showThinking: false, now: now(), id: "'; DROP TABLE x;--", source: "automation" }),
+      /run id/,
+    );
+  });
+  await check("the follow route never starts a driver for an automation run (it does for a chat run whose driver is gone)", async () => {
+    const streamRoute = await import("../app/api/os/runs/[id]/stream/route");
+    const { NextRequest } = await import("next/server");
+    routeScope = { ok: true, scope: scopeA };
+    async function followFor(runId: string, ms: number, stopWhen: () => boolean = () => false) {
+      const res = await streamRoute.GET(new NextRequest(`http://localhost/api/os/runs/${runId}/stream?after=0`), { params: Promise.resolve({ id: runId }) });
+      assert.equal(res.status, 200);
+      const reader = res.body!.getReader();
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms && !stopWhen()) {
+        await Promise.race([reader.read(), sleep(100)]);
+      }
+      await reader.cancel();
+    }
+    try {
+      // Anti-vacuity: a chat run queued with no driver gets one from its follower.
+      const chat = await store.createConversation(db, scopeA, { department: "sales", agentSlug: "sdr", now: now() });
+      const chatRun = await store.enqueueRun(db, scopeA, { conversationId: chat.id, text: "orphaned", chatMode: "build", showThinking: false, now: now() });
+      assert.ok(chatRun.ok);
+      sessionAsked.length = 0;
+      const t0 = Date.now();
+      await followFor(chatRun.ok ? chatRun.run.id : "", 6000, () => sessionAsked.length > 0);
+      assert.deepEqual(sessionAsked, ["sales"], "the follower of an orphaned chat run did not try to start its driver");
+      const tookMs = Date.now() - t0;
+      // The same wait, and longer, for an automation run: no driver, not even a session.
+      const auto = await automationRun();
+      sessionAsked.length = 0;
+      await followFor(auto.runId, Math.max(tookMs * 2, 2500));
+      assert.deepEqual(sessionAsked, [], "the follow route tried to drive an automation run");
+      assert.equal((await store.getRun(db, scopeA, auto.runId))?.status, "queued", "an automation run was started by its follower");
+    } finally {
+      routeScope = { ok: false, status: 401, error: "unauthorized" };
+    }
+  });
+  await check("no message can be sent into a conversation that holds an automation's runs", async () => {
+    const auto = await automationRun();
+    const before = (await store.listRuns(db, scopeA, auto.convId)).length;
+    const res = await send.sendMessage({
+      db,
+      deps: depsFor(),
+      showThinking: false,
+      input: { department: "sales", agentSlug: "sdr", text: "Can I ask here?", conversationId: auto.convId, chatMode: "build" },
+      keep,
+      pollMs: () => 10,
+    });
+    assert.equal(res.status, 409);
+    assert.deepEqual(await res.json(), { ok: false, error: "automation_conversation" });
+    assert.equal((await store.listRuns(db, scopeA, auto.convId)).length, before, "a message was queued into the automation's conversation");
+    assert.match(outcomeCopy.failureCopy("automation_conversation", { canManageAi: false }).sentence, /automation's record/);
+  });
+  await check("an automation run past its deadline ends failed run_timeout, its model call's ledger row says cancelled, and no channel verdict is recorded", async () => {
+    await resetLedger();
+    script = [{ type: "delta", text: "Starting. " }, { wait: 5000 }, { type: "delta", text: "never" }, { type: "done", inputTokens: 1, outputTokens: 1 }];
+    const auto = await automationRun();
+    const t0 = Date.now();
+    const end = await exec.driveAutomationRun(depsFor(scopeA, { deadlineMs: 200 }), auto.convId, auto.runId);
+    assert.ok(Date.now() - t0 < 3000, `the deadline did not stop the run (${Date.now() - t0} ms)`);
+    assert.equal(end, "failed");
+    const run = await store.getRun(db, scopeA, auto.runId);
+    assert.deepEqual([run?.status, run?.errorCode], ["failed", "run_timeout"]);
+    assert.equal(run?.finalText?.trim(), "Starting.", "the partial answer is kept");
+    assert.deepEqual((await ledger()).map((r) => r.outcome), ["cancelled"], "the model call's row was not closed as cancelled");
+    const evs = await store.readEvents(db, scopeA, auto.runId, 0);
+    const err = evs.find((e) => e.kind === "error");
+    assert.equal(err?.data.code, "run_timeout");
+    assert.equal(err?.data.message, outcomeCopy.failureCopy("run_timeout", { canManageAi: false }).sentence);
+    assert.equal(evs[evs.length - 1].kind, "done");
+    assert.deepEqual(outcomes, [], "a run's time limit is not a verdict on the department chat");
+    // An automation driver with no deadline is refused before it claims anything.
+    const unbounded = await automationRun();
+    await assert.rejects(exec.driveAutomationRun(depsFor(), unbounded.convId, unbounded.runId), /deadline/);
+    assert.equal((await store.getRun(db, scopeA, unbounded.runId))?.status, "queued");
+  });
+  await check("an automation run sees no earlier turns of its conversation (history none), and a chat driver still does", async () => {
+    await resetLedger();
+    scriptFor = (run) => [{ type: "delta", text: `answer to ${run.userText}` }, { type: "done", inputTokens: 1, outputTokens: 1 }];
+    const first = await automationRun(scopeA, undefined, "first check");
+    assert.equal(await exec.driveAutomationRun(depsFor(scopeA, { deadlineMs: 5000 }), first.convId, first.runId), "done");
+    const second = await automationRun(scopeA, first.convId, "second check");
+    // Even deps that ask for the conversation's history get none on an automation run.
+    assert.equal(await exec.driveAutomationRun(depsFor(scopeA, { deadlineMs: 5000, history: "conversation" }), first.convId, second.runId), "done");
+    assert.deepEqual(histories[histories.length - 1], ["user: second check"], "an automation run was shown earlier turns");
+    // A chat conversation keeps its history.
+    const chat = await store.createConversation(db, scopeA, { department: "sales", agentSlug: "sdr", now: now() });
+    for (const t of ["one", "two"]) await store.enqueueRun(db, scopeA, { conversationId: chat.id, text: t, chatMode: "build", showThinking: false, now: now() });
+    await exec.driveConversation(depsFor(), chat.id);
+    assert.deepEqual(histories[histories.length - 1], ["user: one", "assistant: answer to one", "user: two"]);
+    // history "none" on chat deps sends only the message itself.
+    await store.enqueueRun(db, scopeA, { conversationId: chat.id, text: "three", chatMode: "build", showThinking: false, now: now() });
+    await exec.driveConversation(depsFor(scopeA, { history: "none" }), chat.id);
+    assert.deepEqual(histories[histories.length - 1], ["user: three"]);
+    scriptFor = null;
+  });
+  await check("a run that cannot read its sources fails sources_unavailable before any model is asked, in plain words, and records no channel verdict", async () => {
+    await resetLedger();
+    const auto = await automationRun();
+    const end = await exec.driveAutomationRun(
+      depsFor(scopeA, { deadlineMs: 5000, startTurn: async () => ({ ok: false, status: 503, error: "sources_unavailable", channelKey: "department:sales", agentSlug: "sdr" }) }),
+      auto.convId,
+      auto.runId,
+    );
+    assert.equal(end, "failed");
+    const run = await store.getRun(db, scopeA, auto.runId);
+    assert.deepEqual([run?.status, run?.errorCode], ["failed", "sources_unavailable"]);
+    assert.deepEqual(await ledger(), [], "a model was asked");
+    const err = (await store.readEvents(db, scopeA, auto.runId, 0)).find((e) => e.kind === "error");
+    assert.equal(err?.data.message, outcomeCopy.failureCopy("sources_unavailable", { canManageAi: false }).sentence);
+    assert.deepEqual(outcomes, []);
+  });
+  await check("the run failure codes each have their own sentence, name no persona, and are never channel failure codes", () => {
+    assert.deepEqual([...outcomeCopy.RUN_FAILURE_COPY_CODES].sort(), [...types.RUN_FAILURE_CODES].sort());
+    const generic = outcomeCopy.failureCopy("???", { canManageAi: false }).sentence;
+    for (const code of types.RUN_FAILURE_CODES) {
+      const c = outcomeCopy.failureCopy(code, { canManageAi: true });
+      assert.notEqual(c.sentence, generic, `${code} has no sentence of its own`);
+      assert.ok(!identity.namesPersona(`${c.sentence} ${c.short}`));
+      assert.ok(!c.sentence.includes(String.fromCharCode(0x2014)), "an em dash in run copy");
+      assert.equal(outcomeCopy.isTurnFailureCode(code), false, `${code} would be recorded as a channel's last turn`);
+    }
+  });
+  await check("a conversation longer than 200 runs shows its NEWEST 200, in order, with their trails", async () => {
+    const conv = await store.createConversation(db, scopeA, { department: "sales", agentSlug: "sdr", now: now() });
+    const at = now().toISOString();
+    const ids: string[] = [];
+    const stmts = [];
+    for (let seq = 1; seq <= 201; seq++) {
+      const id = crypto.randomUUID();
+      ids.push(id);
+      stmts.push({
+        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, final_text, created_at, finished_at)
+              VALUES (?, ?, ?, ?, 'sales', 'sdr', ?, 'done', ?, ?, ?, ?)`,
+        args: [id, ACME, ANN, conv.id, seq, `message ${seq}`, `answer ${seq}`, at, at],
+      });
+    }
+    await db.batch(stmts, "write");
+    await store.appendEvents(db, scopeA, ids[0], [{ seq: 1, kind: "tool", data: { id: "t", phase: "done", label: "Looking up Pipeline", ok: true } }], now());
+    await store.appendEvents(db, scopeA, ids[200], [{ seq: 1, kind: "tool", data: { id: "t", phase: "done", label: "Looking up Leads", ok: true } }], now());
+    const t = await transcript.buildTranscript(db, scopeA, conv.id);
+    assert.equal(t?.runs.length, 200);
+    assert.equal(t?.runs[t.runs.length - 1].seq, 201, "the newest message is missing from a long conversation");
+    assert.equal(t?.runs[0].seq, 2);
+    assert.deepEqual(t?.runs.map((r) => r.seq), [...t!.runs.map((r) => r.seq)].sort((a, b) => a - b), "not in order");
+    assert.equal(t?.runs[t.runs.length - 1].events[0]?.data.label, "Looking up Leads", "the newest run's trail is missing");
+    assert.equal(t?.runs.some((r) => r.id === ids[0]), false);
+    // listRuns keeps its order: oldest of the newest first.
+    const listed = await store.listRuns(db, scopeA, conv.id, 3);
+    assert.deepEqual(listed.map((r) => r.seq), [199, 200, 201]);
   });
 
   console.log("Registered in CI");

@@ -195,6 +195,43 @@ async function main() {
     );
   });
 
+  await check("a deadline (deadlineMs): a slow model call returns ai_timeout at once, its stream is closed, and its row says cancelled under its surface and job", async () => {
+    const { runToolModelCall } = await import("../lib/tools/worker/ai");
+    let closed = false;
+    const slow = {
+      readAccount: async () => ACCOUNT,
+      decrypt: () => "test-key",
+      usageDb: db,
+      stream: async function* (req: ChatRequest): AsyncGenerator<StreamEvent> {
+        const call = await req.meter.begin({ provider: req.provider, model: req.model, maxOutputTokens: req.maxTokens ?? 0, promptBytes: 1 });
+        let end: Parameters<typeof call.finish>[0] | null = null;
+        try {
+          yield { type: "delta", text: "partial" };
+          await new Promise((r) => setTimeout(r, 400));
+          yield { type: "delta", text: " and the rest" };
+          end = { outcome: "ok", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+          yield { type: "done", inputTokens: 1, outputTokens: 1 };
+        } finally {
+          closed = true;
+          await call.finish(end ?? { outcome: "cancelled", usage: null });
+        }
+      },
+    };
+    const call = (jobId: string, deadlineMs?: number) =>
+      runToolModelCall({ tenantId: OASIS, userId: USERS.cc.id, jobId, surface: "automations.draft", system: "s", prompt: "p", maxTokens: 100, ...(deadlineMs ? { deadlineMs } : {}) }, slow);
+    const t0 = Date.now();
+    assert.deepEqual(await call("draft-deadline-1", 100), { ok: false, code: "ai_timeout" });
+    assert.ok(Date.now() - t0 < 350, `the deadline did not answer at once (${Date.now() - t0} ms)`);
+    for (let i = 0; i < 100 && !closed; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(closed, true, "the timed-out stream was never closed");
+    const row = (await db.execute({ sql: "SELECT surface, outcome, job_id FROM ai_usage_events WHERE job_id = 'draft-deadline-1'", args: [] })).rows;
+    assert.deepEqual(row.map((r) => [r.surface, r.outcome, r.job_id]), [["automations.draft", "cancelled", "draft-deadline-1"]]);
+    // Without a deadline the same call finishes.
+    closed = false;
+    const full = await call("draft-deadline-2");
+    assert.ok(full.ok && full.text === "partial and the rest", JSON.stringify(full));
+  });
+
   await check("a saved model the registry knows is gone is sent as its replacement, and the run and the usage row say so", async () => {
     const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" }), { ...ACCOUNT, model: "gemini-2.5-pro" });
     const j = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps)));

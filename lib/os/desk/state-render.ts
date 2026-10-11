@@ -21,7 +21,7 @@
  */
 
 import { INJECTION_GUARD, wrapUntrusted } from "@/lib/llm-input-boundary";
-import { DEPARTMENT_PALETTES, DESK_TOOLS, type DeskTool } from "./catalog";
+import { DEPARTMENT_PALETTES, DESK_TOOLS, type DeskTool, type DeskToolName } from "./catalog";
 import type { DepartmentKey } from "@/lib/os/types";
 
 export const STATE_MAX_CHARS = 7000;
@@ -47,8 +47,8 @@ export type DeskStateFacts = {
   tiles: readonly DeskTile[] | null;
   /** The page's Needs-you lines; null when they could not be read. */
   attention: ReadonlyArray<{ label: string; count: number }> | null;
-  /** Approval cards waiting for this person; null when they could not be read. */
-  approvals: { total: number; own?: boolean; items: ReadonlyArray<{ title: string; department: string | null }> } | null;
+  /** Approval cards waiting for this person; null when they could not be read; absent when not given (an automation). */
+  approvals?: { total: number; own?: boolean; items: ReadonlyArray<{ title: string; department: string | null }> } | null;
   /** Sales and Chief of Staff. Absent: not this department. Null: could not be read. Undefined scope: none. */
   pipeline?:
     | {
@@ -69,7 +69,66 @@ export type DeskStateFacts = {
   routines?: ReadonlyArray<{ name: string; enabled: boolean; schedule: string; lastRunStatus: string | null; lastRunAt: string | null }> | null;
   /** The apps this department works through; null when they could not be read. */
   connections: readonly DeskConnection[] | null;
+  /**
+   * Set for an automation (restrictDepartmentState): the sections it was not
+   * given, by their plain names. The block says so, so the model never reads
+   * a left-out section as "none".
+   */
+  withheld?: readonly string[];
 };
+
+/**
+ * The DEPARTMENT STATE sections an automation may be given, each by the
+ * lookup that reads the same data: a run that may not look up the pipeline is
+ * not shown it either. Always included (no lookup needed): the page's numbers
+ * (counts), the business profile, the departments, the apps.
+ */
+export const STATE_SECTIONS = [
+  { section: "pipeline", tool: "pipeline_summary", label: "the pipeline and follow-ups" },
+  { section: "tickets", tool: "tickets_list", label: "tickets" },
+  { section: "routines", tool: "routines_status", label: "routines" },
+  { section: "approvals", tool: "approvals_list", label: "approvals waiting" },
+] as const satisfies ReadonlyArray<{ section: keyof DeskStateFacts; tool: DeskToolName; label: string }>;
+
+export type StateSection = (typeof STATE_SECTIONS)[number]["section"];
+
+/** Whether a department's page (and so its DEPARTMENT STATE) has this section at all. */
+export function departmentHasSection(departmentKey: string, section: StateSection): boolean {
+  switch (section) {
+    case "approvals":
+      return true;
+    case "pipeline":
+      return departmentKey === "sales" || departmentKey === "chief_of_staff";
+    case "tickets":
+      return departmentKey === "client_success";
+    case "routines":
+      return departmentKey === "operations";
+  }
+}
+
+/**
+ * The facts an automation may be shown: only the sections its allowlist reads
+ * (STATE_SECTIONS), the page's Needs-you lines as a count (a line can carry
+ * the title of an alert or a reply), and the list of what was left out. Pure,
+ * and applied to whatever loaded the facts, so no loader can widen it.
+ */
+export function restrictDepartmentState(f: DeskStateFacts, allow: readonly DeskToolName[]): DeskStateFacts {
+  const allowed = new Set<string>(allow);
+  const out: DeskStateFacts = { ...f };
+  const withheld: string[] = [];
+  for (const s of STATE_SECTIONS) {
+    if (allowed.has(s.tool)) continue;
+    // Only a section this department's page has is worth naming as left out.
+    if (departmentHasSection(f.department.key, s.section)) withheld.push(s.label);
+    delete out[s.section];
+  }
+  if (f.attention) {
+    const waiting = f.attention.reduce((sum, a) => sum + a.count, 0);
+    out.attention = waiting > 0 ? [{ label: "Items waiting for a person on this page (titles not given to this automation)", count: waiting }] : [];
+  }
+  out.withheld = withheld;
+  return out;
+}
 
 export type DeskToolsInfo = { on: true; tools: readonly DeskTool[] } | { on: false; reason: string; tools: readonly DeskTool[] };
 
@@ -118,7 +177,7 @@ export function stateDataLines(f: DeskStateFacts): string[] {
   else for (const a of f.attention.slice(0, LIST_MAX)) lines.push(`- ${cut(a.label)}${a.count > 1 ? ` (${a.count})` : ""}`);
 
   if (f.approvals === null) lines.push("Approvals waiting: could not be read this turn");
-  else {
+  else if (f.approvals !== undefined) {
     lines.push(f.approvals.own ? `Drafts this person proposed, still waiting: ${f.approvals.total}` : `Approvals waiting for this person: ${f.approvals.total}`);
     for (const a of f.approvals.items.slice(0, 5)) lines.push(`- ${cut(a.title)}${a.department ? ` (${a.department})` : ""}`);
   }
@@ -176,6 +235,10 @@ export function stateDataLines(f: DeskStateFacts): string[] {
       lines.push(`- ${c.name}: ${cut(status, 80)}. Gives: ${c.reads.slice(0, 2).map((r) => cut(r, 90)).join("; ") || "nothing listed"}`);
     }
   }
+  if (f.withheld && f.withheld.length > 0) {
+    lines.push("");
+    lines.push(`Left out of this summary (not given to this automation, so not read): ${f.withheld.join(", ")}. Do not describe them as empty.`);
+  }
   return lines;
 }
 
@@ -204,7 +267,11 @@ export function capabilityLines(f: DeskStateFacts, tools: DeskToolsInfo): string
   }
   const departmentProposes = (DEPARTMENT_PALETTES[f.department.key as DepartmentKey] ?? []).some((n) => DESK_TOOLS[n].kind === "proposal");
   if (tools.on && departmentProposes && !tools.tools.some((t) => t.kind === "proposal")) {
-    lines.push("You cannot propose drafts in this chat: this person's role is read-only, or the channel is in plan mode.");
+    lines.push(
+      f.withheld !== undefined
+        ? "You cannot propose drafts in this run: this automation was not set up to draft emails, or its owner's role is read-only."
+        : "You cannot propose drafts in this chat: this person's role is read-only, or the channel is in plan mode.",
+    );
   }
   lines.push("You cannot send anything, change or delete a record, move money or run a routine from this chat.");
   return lines;

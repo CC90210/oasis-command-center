@@ -254,12 +254,16 @@ function parseObject(raw: unknown): Record<string, unknown> | null {
   }
 }
 
+function sourceOf(raw: unknown): RunSource {
+  return raw === "producer" ? "producer" : raw === "automation" ? "automation" : "worker";
+}
+
 function runOf(r: Record<string, unknown>): Run {
   return {
     id: s(r.id),
     tenantId: s(r.tenant_id),
     userId: s(r.user_id),
-    source: r.source === "producer" ? "producer" : "worker",
+    source: sourceOf(r.source),
     showThinking: Number(r.show_thinking ?? 0) === 1,
     conversationId: s(r.conversation_id),
     department: s(r.department_key),
@@ -291,13 +295,30 @@ export async function getRun(db: Client, scope: RunScope, runId: string): Promis
   return r ? runOf(r) : null;
 }
 
+/**
+ * The conversation's NEWEST `limit` runs, oldest of them first (the order a
+ * transcript reads). A conversation longer than the limit shows its latest
+ * messages, never its first ones.
+ */
 export async function listRuns(db: Client, scope: RunScope, conversationId: string, limit = 200): Promise<Run[]> {
   const rs = await exec(db, {
-    sql: `SELECT * FROM dept_chat_runs WHERE conversation_id = ? AND tenant_id = ? AND user_id = ? ORDER BY seq ASC LIMIT ?`,
+    sql: `SELECT * FROM dept_chat_runs WHERE conversation_id = ? AND tenant_id = ? AND user_id = ? ORDER BY seq DESC LIMIT ?`,
     args: [conversationId, scope.tenantId, scope.userId, Math.max(1, Math.min(limit, 500))],
   });
-  return rows(rs).map(runOf);
+  return rows(rs).map(runOf).reverse();
 }
+
+/** Whether the conversation holds a department task's run: it is then that automation's record, not a chat. */
+export async function hasAutomationRun(db: Client, scope: RunScope, conversationId: string): Promise<boolean> {
+  const rs = await exec(db, {
+    sql: `SELECT 1 AS x FROM dept_chat_runs WHERE conversation_id = ? AND tenant_id = ? AND user_id = ? AND source = 'automation' LIMIT 1`,
+    args: [conversationId, scope.tenantId, scope.userId],
+  });
+  return rs.rows.length > 0;
+}
+
+/** A run id minted by the caller (crypto.randomUUID): checked before it is stored, never trusted. */
+const RUN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export type EnqueueResult = { ok: true; run: Run } | { ok: false; reason: "no_conversation" | "queue_full" };
 
@@ -307,26 +328,41 @@ export type EnqueueResult = { ok: true; run: Run } | { ok: false; reason: "no_co
  * the unique (conversation, seq) index settles two messages sent at once (one
  * retry takes the next place). A queued run that never runs writes nothing to
  * the AI usage ledger: only a run a driver starts calls a model.
+ *
+ * `id` and `source` are for a department task's run (lib/automations): the
+ * automation records the run id before it enqueues, so a crash in between can
+ * be reconciled, and source 'automation' keeps every chat driver off it.
  */
 export async function enqueueRun(
   db: Client,
   scope: RunScope,
-  input: { conversationId: string; text: string; chatMode: "plan" | "build"; showThinking: boolean; now: Date },
+  input: {
+    conversationId: string;
+    text: string;
+    chatMode: "plan" | "build";
+    showThinking: boolean;
+    now: Date;
+    id?: string;
+    source?: "automation";
+  },
 ): Promise<EnqueueResult> {
-  const id = newId();
+  if (input.id !== undefined && !RUN_ID_RE.test(input.id)) throw new Error("os.runs.enqueue: the run id is not a lowercase UUID");
+  if (input.source !== undefined && input.source !== "automation") throw new Error("os.runs.enqueue: unknown run source");
+  const id = input.id ?? newId();
+  const source: RunSource = input.source ?? "worker";
   const at = iso(input.now);
   for (let attempt = 0; attempt < 3; attempt++) {
     let affected = 0;
     try {
       const rs = await db.execute({
-        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, chat_mode, show_thinking, created_at)
+        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, chat_mode, source, show_thinking, created_at)
               SELECT ?, c.tenant_id, c.user_id, c.id, c.department_key, c.agent_slug,
                      COALESCE((SELECT MAX(r.seq) FROM dept_chat_runs r WHERE r.conversation_id = c.id), 0) + 1,
-                     'queued', ?, ?, ?, ?
+                     'queued', ?, ?, ?, ?, ?
               FROM dept_chat_conversations c
               WHERE c.id = ? AND c.tenant_id = ? AND c.user_id = ?
                 AND (SELECT COUNT(*) FROM dept_chat_runs q WHERE q.conversation_id = c.id AND q.status = 'queued') < ?`,
-        args: [id, input.text, input.chatMode, input.showThinking ? 1 : 0, at, input.conversationId, scope.tenantId, scope.userId, MAX_QUEUED_RUNS],
+        args: [id, input.text, input.chatMode, source, input.showThinking ? 1 : 0, at, input.conversationId, scope.tenantId, scope.userId, MAX_QUEUED_RUNS],
       });
       affected = rs.rowsAffected;
     } catch (err) {
@@ -354,26 +390,61 @@ export async function enqueueRun(
  * Claim the conversation's next queued run, if nothing in it is running. One
  * UPDATE: the earliest queued run becomes `running` under `leaseId` only when
  * no run in the conversation is running, so two drivers cannot both start one.
+ *
+ * A CHAT driver's claim: it never takes an automation's run (source
+ * 'automation'). Those run as their owner with the automation's own limits
+ * (lookups, proposals, time), which only the automation driver carries
+ * (claimAutomationRun); a chat driver would run one with the chat's.
  */
 export async function claimNextRun(db: Client, scope: RunScope, conversationId: string, leaseId: string, now: Date): Promise<Run | null> {
   const at = iso(now);
   const rs = await exec(db, {
     sql: `UPDATE dept_chat_runs
           SET status = 'running', lease_id = ?, started_at = ?, heartbeat_at = ?
-          WHERE tenant_id = ? AND user_id = ? AND conversation_id = ? AND status = 'queued'
+          WHERE tenant_id = ? AND user_id = ? AND conversation_id = ? AND status = 'queued' AND source <> 'automation'
             AND id = (SELECT q.id FROM dept_chat_runs q
-                      WHERE q.conversation_id = ? AND q.tenant_id = ? AND q.user_id = ? AND q.status = 'queued'
+                      WHERE q.conversation_id = ? AND q.tenant_id = ? AND q.user_id = ? AND q.status = 'queued' AND q.source <> 'automation'
                       ORDER BY q.seq ASC LIMIT 1)
             AND NOT EXISTS (SELECT 1 FROM dept_chat_runs x WHERE x.conversation_id = ? AND x.tenant_id = ? AND x.status = 'running')`,
     args: [leaseId, at, at, scope.tenantId, scope.userId, conversationId, conversationId, scope.tenantId, scope.userId, conversationId, scope.tenantId],
   });
   if (rs.rowsAffected === 0) return null;
+  return claimedBy(db, scope, conversationId, leaseId);
+}
+
+async function claimedBy(db: Client, scope: RunScope, conversationId: string, leaseId: string): Promise<Run | null> {
   const got = await exec(db, {
     sql: `SELECT * FROM dept_chat_runs WHERE lease_id = ? AND conversation_id = ? AND tenant_id = ? AND user_id = ? AND status = 'running'`,
     args: [leaseId, conversationId, scope.tenantId, scope.userId],
   });
   const r = rows(got)[0];
   return r ? runOf(r) : null;
+}
+
+/**
+ * The automation driver's claim: exactly the run it names, only when that run
+ * is an automation's, still queued, and nothing in its conversation is running.
+ * One UPDATE, so two drivers (a dispatcher tick and its retry) cannot both
+ * start it.
+ */
+export async function claimAutomationRun(
+  db: Client,
+  scope: RunScope,
+  conversationId: string,
+  runId: string,
+  leaseId: string,
+  now: Date,
+): Promise<Run | null> {
+  const at = iso(now);
+  const rs = await exec(db, {
+    sql: `UPDATE dept_chat_runs
+          SET status = 'running', lease_id = ?, started_at = ?, heartbeat_at = ?
+          WHERE id = ? AND tenant_id = ? AND user_id = ? AND conversation_id = ? AND source = 'automation' AND status = 'queued'
+            AND NOT EXISTS (SELECT 1 FROM dept_chat_runs x WHERE x.conversation_id = ? AND x.tenant_id = ? AND x.status = 'running')`,
+    args: [leaseId, at, at, runId, scope.tenantId, scope.userId, conversationId, conversationId, scope.tenantId],
+  });
+  if (rs.rowsAffected === 0) return null;
+  return claimedBy(db, scope, conversationId, leaseId);
 }
 
 /** Whether the conversation has a run whose driver is alive (or one that is queued with none). */
@@ -491,12 +562,13 @@ export async function getRunForProducer(db: Client, runId: string): Promise<Run 
 /**
  * The driver hands its running run to a producer (the bridge posts the events
  * from here on). Guarded by the driver's lease; from now on the run goes stale
- * after RUN_STALE_PRODUCER_MS of silence.
+ * after RUN_STALE_PRODUCER_MS of silence. Never an automation's run: it runs in
+ * the Worker only, and would lose its mark (source) if handed over.
  */
 export async function attachProducer(db: Client, scope: RunScope, runId: string, leaseId: string, now: Date): Promise<boolean> {
   const rs = await exec(db, {
     sql: `UPDATE dept_chat_runs SET source = 'producer', heartbeat_at = ?
-          WHERE id = ? AND tenant_id = ? AND user_id = ? AND lease_id = ? AND status = 'running'`,
+          WHERE id = ? AND tenant_id = ? AND user_id = ? AND lease_id = ? AND status = 'running' AND source <> 'automation'`,
     args: [iso(now), runId, scope.tenantId, scope.userId, leaseId],
   });
   return rs.rowsAffected > 0;
@@ -678,15 +750,21 @@ export async function nextActiveRun(db: Client, scope: RunScope, conversationId:
   return r ? runOf(r) : null;
 }
 
-/** Saved trail events (everything but reply text) of a conversation's FINISHED runs, by run id. */
-export async function readTrails(db: Client, scope: RunScope, conversationId: string): Promise<Map<string, RunEvent[]>> {
+/**
+ * Saved trail events (everything but reply text) of a conversation's FINISHED
+ * runs, by run id. `fromSeq` limits it to the runs a transcript shows (the
+ * newest ones, listRuns), so a long conversation does not read every trail it
+ * ever had.
+ */
+export async function readTrails(db: Client, scope: RunScope, conversationId: string, opts: { fromSeq?: number } = {}): Promise<Map<string, RunEvent[]>> {
+  const fromSeq = Number.isInteger(opts.fromSeq) ? Number(opts.fromSeq) : 0;
   const rs = await exec(db, {
     sql: `SELECT e.run_id, e.seq, e.kind, e.data_json
           FROM dept_chat_run_events e JOIN dept_chat_runs r ON r.id = e.run_id
-          WHERE r.conversation_id = ? AND r.tenant_id = ? AND r.user_id = ? AND e.tenant_id = ?
+          WHERE r.conversation_id = ? AND r.tenant_id = ? AND r.user_id = ? AND e.tenant_id = ? AND r.seq >= ?
             AND r.status NOT IN ('queued','running') AND e.kind NOT IN ${TRANSIENT_KINDS}
           ORDER BY r.seq ASC, e.seq ASC`,
-    args: [conversationId, scope.tenantId, scope.userId, scope.tenantId],
+    args: [conversationId, scope.tenantId, scope.userId, scope.tenantId, fromSeq],
   });
   const by = new Map<string, RunEvent[]>();
   for (const r of rows(rs)) {

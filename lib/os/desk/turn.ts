@@ -40,11 +40,12 @@ import {
 import type { InjectedToolset } from "@/lib/cloud-tool-runner";
 import { redactAll, redactTenantVaultSecrets, StreamingRedactor, type VaultSecret } from "@/lib/secret-redaction";
 import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
-import { deskToolLabel, deskToolSupport } from "./catalog";
+import { deskToolLabel, deskToolSupport, type DeskToolName } from "./catalog";
 import { loadDepartmentState } from "./state";
 import { INJECTION_GUARD } from "@/lib/llm-input-boundary";
-import { renderDepartmentState, type DeskStateFacts, type DeskToolsInfo } from "./state-render";
+import { renderDepartmentState, restrictDepartmentState, type DeskStateFacts, type DeskToolsInfo } from "./state-render";
 import { deskToolset } from "./tools";
+import type { AutomationProposalPolicy } from "./proposals";
 import { streamGeminiWithTools } from "./gemini-loop";
 
 /** The prepared turn's fields this module reads (lib/os/department-agent.ts PreparedTurn). */
@@ -93,6 +94,16 @@ export type GroundArgs = {
   loadState?: typeof loadDepartmentState;
   /** Tests inject the workspace vault read (lib/chat-persistence.ts). */
   loadVault?: (tenantId: string) => Promise<VaultSecret[]>;
+  /**
+   * An automation's limits (lib/automations). `only`: the lookups it may make
+   * (./tools.ts: the palette AND execute()). `stateAllow`: the DEPARTMENT STATE
+   * sections it may be shown, by the lookup that reads each
+   * (./state-render.ts restrictDepartmentState). `proposal`: its draft rules.
+   * Absent: a chat turn, the department's whole palette and page.
+   */
+  only?: readonly DeskToolName[];
+  stateAllow?: readonly DeskToolName[];
+  proposal?: AutomationProposalPolicy;
 };
 
 function sentence(reason: string): string {
@@ -205,7 +216,7 @@ export async function groundDepartmentTurn(args: GroundArgs): Promise<DeskGround
   let vault: VaultSecret[];
   try {
     [facts, vault] = await Promise.all([
-      (args.loadState ?? loadDepartmentState)(viewer, dept),
+      (args.loadState ?? loadDepartmentState)(viewer, dept, Date.now(), args.stateAllow ? { allow: args.stateAllow } : {}),
       // COMPLETE or nothing: an entry that cannot be decrypted fails the read,
       // so no summary goes out scrubbed of only some secrets.
       (args.loadVault ?? ((id: string) => fetchTenantVaultSecretsForRedaction(id, { requireComplete: true })))(viewer.surface.tenantId),
@@ -222,8 +233,10 @@ export async function groundDepartmentTurn(args: GroundArgs): Promise<DeskGround
   // other chat path applies: a key pasted into a lead's notes, a ticket or a
   // routine name is replaced before the request is built.
   const scrub = (text: string) => redactTenantVaultSecrets(redactAll(text), vault);
+  // Whatever loaded them, an automation's facts are cut to what it may read.
+  if (args.stateAllow) facts = restrictDepartmentState(facts, args.stateAllow);
 
-  const toolset = deskToolset({ viewer, dept, agentSlug: turn.agentSlug, planMode });
+  const toolset = deskToolset({ viewer, dept, agentSlug: turn.agentSlug, planMode, only: args.only, proposal: args.proposal });
   const palette = toolset.palette;
   const info: DeskToolsInfo = support.on ? { on: true, tools: palette } : { on: false, reason: support.reason, tools: palette };
   const system = turn.system + scrub(renderDepartmentState(facts, info));
