@@ -26,6 +26,13 @@ function head(h: RunHead): Record<string, unknown> {
     final_text: h.finalText,
     error_code: h.errorCode,
     source: h.source,
+    // DV1: the browser's deferred status line ("Waiting for {label} to pick
+    // this up" / "{label} is busy with another reply" / "{label} · Claude
+    // Code") needs to know this run is executor 'computer', not just that its
+    // SOURCE is a producer (a worker-started run handed over mid-reply is
+    // also source 'producer' with executor 'worker'). RunHead already carried
+    // it (follow.ts headOf); it was never put on the wire until now.
+    executor: h.executor,
   };
 }
 

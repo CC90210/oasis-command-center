@@ -22,7 +22,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { AlertCircle, Check, Loader2, Monitor, RefreshCw } from "lucide-react";
+import { AlertCircle, Check, Clock, Copy, Loader2, Monitor, RefreshCw } from "lucide-react";
 import {
   bestComputerAnswerState,
   computerAnswerState,
@@ -250,3 +250,283 @@ export function YourComputersCard() {
 
 /** Exported for tests: the one state several of a person's computers reduce to. */
 export { bestComputerAnswerState };
+
+// ─────────────────────────────────────────────────────────────────────────
+// ConnectYourComputerCard (DV1) — mint a connector code, for every signed-in
+// person in the workspace, not only this workspace's computer owner.
+//
+// WHY A SEPARATE CARD FROM THE LIST ABOVE. YourComputersCard (and "Devices
+// (advanced)" beside it) stay behind SettingsContent's VERIFIED-operator
+// gate: that was a deliberate OASIS-only choice (O3b) pending J2's client
+// installer, and this task is not J2 — it is giving every workspace member a
+// way to use the connector program (J1) that O3a's server side has already
+// supported since the 'connector' purpose/scope landed. So this card asks for
+// nothing the gated list needs: it mints its own code, watches for the
+// pairing the connector creates, and lets the person approve THAT pairing
+// right here — the owner-of-that-computer rule (POST /api/devices/[id]/
+// approve) already allows any person to approve a pairing they themselves
+// hold, operator or not.
+//
+// Never the old full-install one-liner, never the private harness repo's
+// name: this is the connector app's path, not the harness clone (DV0).
+// ─────────────────────────────────────────────────────────────────────────
+
+type ConnectorDeviceRow = {
+  id: string;
+  label: string | null;
+  mine: boolean;
+  revoked_at: string | null;
+  created_at: string;
+  claim_enabled_at: string | null;
+};
+
+type ConnectState =
+  | { phase: "idle" }
+  | { phase: "minting" }
+  | { phase: "error"; message: string }
+  /** The workspace does not let this person connect a computer (403): permanent, never "try again". */
+  | { phase: "forbidden" }
+  /** mintedAtMs identifies this code (browser clock); serverMintedAtMs is the server's mint time, the only baseline compared with server timestamps. */
+  | { phase: "code"; code: string; expiresAt: string; mintedAtMs: number; serverMintedAtMs: number }
+  | { phase: "expired" }
+  | { phase: "found"; pairingId: string; label: string; approving: boolean; approveError: string | null }
+  | { phase: "approved"; label: string };
+
+/** Seconds left on a minted code's TTL, never negative. */
+function secondsUntil(iso: string, nowMs: number): number {
+  return Math.max(0, Math.floor((new Date(iso).getTime() - nowMs) / 1000));
+}
+
+function mmss(secondsLeft: number): string {
+  const mm = Math.floor(secondsLeft / 60).toString().padStart(2, "0");
+  const ss = (secondsLeft % 60).toString().padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+export function ConnectYourComputerCard() {
+  const [state, setState] = useState<ConnectState>({ phase: "idle" });
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [copied, setCopied] = useState(false);
+  const [announcement, setAnnouncement] = useState("");
+
+  async function mint() {
+    setState({ phase: "minting" });
+    setCopied(false);
+    try {
+      const r = await fetch("/api/auth/pair-code", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ purpose: "connector" }),
+      });
+      // 403: this workspace only lets owners and admins connect a computer
+      // (independent review, DV1). Say so; a retry can never succeed.
+      if (r.status === 403) {
+        setState({ phase: "forbidden" });
+        return;
+      }
+      const j = await r.json();
+      if (!j.ok || typeof j.code !== "string" || typeof j.expires_at !== "string") {
+        setState({ phase: "error", message: j.error || `http_${r.status}` });
+        return;
+      }
+      const ttl = typeof j.ttl_minutes === "number" ? j.ttl_minutes : 5;
+      // The server's own mint time (its expiry minus the code's life), so a new
+      // pairing's created_at is compared clock-to-clock on the server side: a
+      // browser clock running ahead would otherwise hide a successful pairing
+      // (CodeRabbit, PR #590).
+      const serverMintedAtMs = new Date(j.expires_at).getTime() - ttl * 60_000;
+      setState({ phase: "code", code: j.code, expiresAt: j.expires_at, mintedAtMs: Date.now(), serverMintedAtMs });
+      setAnnouncement(`Connector code ${j.code}. Expires in ${ttl} minute${ttl === 1 ? "" : "s"}.`);
+    } catch (e) {
+      setState({ phase: "error", message: e instanceof Error ? e.message : "code_failed" });
+    }
+  }
+
+  // The countdown, while a code is live.
+  useEffect(() => {
+    if (state.phase !== "code") return;
+    const { expiresAt, mintedAtMs } = state;
+    let announcedExpiry = false;
+    const tick = () => {
+      const left = secondsUntil(expiresAt, Date.now());
+      setSecondsLeft(left);
+      if (left === 0 && !announcedExpiry) {
+        announcedExpiry = true;
+        setAnnouncement("This code expired. Get a new one below.");
+        setState((s) => (s.phase === "code" && s.mintedAtMs === mintedAtMs ? { phase: "expired" } : s));
+      }
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [state]);
+
+  // Watch for the pairing the connector creates once someone pastes the
+  // code in on the other computer — a new, unrevoked row of this person's
+  // own (GET /api/devices already scopes "mine" to the signed-in user)
+  // created after this code was minted.
+  useEffect(() => {
+    if (state.phase !== "code") return;
+    const { serverMintedAtMs } = state;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const r = await fetch("/api/devices");
+        const j = await r.json();
+        if (cancelled || !j.ok || !Array.isArray(j.devices)) return;
+        const fresh = (j.devices as ConnectorDeviceRow[]).find(
+          (d) => d.mine && !d.revoked_at && new Date(d.created_at).getTime() > serverMintedAtMs,
+        );
+        if (!fresh) return;
+        const label = fresh.label || "Your computer";
+        if (fresh.claim_enabled_at) {
+          setAnnouncement(`${label} is connected.`);
+          setState({ phase: "approved", label });
+        } else {
+          setAnnouncement(`${label} connected. Approve it to let it take department work.`);
+          setState({ phase: "found", pairingId: fresh.id, label, approving: false, approveError: null });
+        }
+      } catch {
+        // Transient — keep polling until the code's own countdown ends it.
+      }
+    };
+    void poll();
+    const t = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [state]);
+
+  async function approvePairing() {
+    if (state.phase !== "found") return;
+    const { pairingId, label } = state;
+    setState({ phase: "found", pairingId, label, approving: true, approveError: null });
+    try {
+      const r = await fetch(`/api/devices/${encodeURIComponent(pairingId)}/approve`, { method: "POST" });
+      const j = await r.json();
+      if (!j.ok) {
+        setState({
+          phase: "found",
+          pairingId,
+          label,
+          approving: false,
+          approveError: j.message || j.error || "Could not approve this computer. Try again.",
+        });
+        return;
+      }
+      setAnnouncement(`${label} is connected.`);
+      setState({ phase: "approved", label });
+    } catch (e) {
+      setState({ phase: "found", pairingId, label, approving: false, approveError: e instanceof Error ? e.message : "approve_failed" });
+    }
+  }
+
+  function handleCopy() {
+    if (state.phase !== "code" || typeof navigator === "undefined" || !navigator.clipboard) return;
+    navigator.clipboard.writeText(state.code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Announced once per change (mint, expiry, found, approved) — never on every tick of the clock below. */}
+      <span className="sr-only" role="status" aria-live="polite">
+        {announcement}
+      </span>
+      <p className="text-sm text-fg-muted leading-relaxed max-w-xl">
+        Connecting a computer runs through the OASIS connector app. Get a code below, then open the connector on that computer and paste it in.
+      </p>
+      {state.phase === "error" && (
+        <div role="alert" className="rounded-md border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-status-warm flex items-center gap-2">
+          <AlertCircle className="w-4 h-4" aria-hidden="true" />
+          <span>Could not get a code just now. Try again.</span>
+        </div>
+      )}
+      {state.phase === "forbidden" && (
+        <div role="status" className="rounded-md border border-border p-3 text-sm text-fg-muted flex items-center gap-2">
+          <AlertCircle className="w-4 h-4" aria-hidden="true" />
+          <span>Only an owner or admin can connect a computer in this workspace. Ask one of them if you need yours connected.</span>
+        </div>
+      )}
+      {(state.phase === "idle" || state.phase === "minting" || state.phase === "error") && (
+        <button type="button" onClick={mint} disabled={state.phase === "minting"} className="btn-primary inline-flex items-center gap-2">
+          {state.phase === "minting" ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> : <Monitor className="w-4 h-4" aria-hidden="true" />}
+          {state.phase === "minting" ? "Getting a code..." : state.phase === "error" ? "Try again" : "Get a connector code"}
+        </button>
+      )}
+      {state.phase === "expired" && (
+        <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4 space-y-2">
+          <div className="text-sm text-fg">This code expired.</div>
+          <button type="button" onClick={mint} className="btn-primary inline-flex items-center gap-2">
+            <Monitor className="w-4 h-4" aria-hidden="true" />
+            Get a new code
+          </button>
+        </div>
+      )}
+      {state.phase === "code" && (
+        <div className="rounded-lg border border-accent/40 bg-accent/5 p-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="text-[11px] uppercase tracking-wider font-bold text-accent">Your connector code</div>
+            <div className="text-[11px] text-fg-dim font-mono tabular-nums inline-flex items-center gap-1">
+              <Clock className="w-3 h-3" aria-hidden="true" /> expires in {mmss(secondsLeft)}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-2xl font-black tracking-[0.2em] tabular-nums text-fg text-center bg-bg-deep rounded-md px-3 py-2.5 select-all">
+              {state.code}
+            </code>
+            <button type="button" onClick={handleCopy} aria-live="polite" className="btn-secondary inline-flex items-center gap-1 shrink-0">
+              {copied ? <Check className="w-3 h-3 text-status-engaged" aria-hidden="true" /> : <Copy className="w-3 h-3" aria-hidden="true" />}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <ol className="text-xs text-fg-muted leading-relaxed list-decimal list-inside space-y-1">
+            <li>On the computer you want to connect, open the OASIS connector and paste this code.</li>
+            <li>Confirm the workspace and account it shows.</li>
+            <li>Come back here and click Approve on that computer.</li>
+          </ol>
+          <button type="button" onClick={mint} className="text-[11px] text-fg-dim hover:text-fg-muted underline">
+            Get a new code
+          </button>
+        </div>
+      )}
+      {state.phase === "found" && (
+        <div className="rounded-lg border border-accent/40 bg-accent/5 p-4 space-y-3">
+          <div className="flex items-start gap-3">
+            <Monitor className="w-4 h-4 mt-0.5 text-accent" aria-hidden="true" />
+            <div className="min-w-0">
+              <div className="text-sm text-fg">{state.label} connected.</div>
+              <div className="text-xs text-fg-muted mt-0.5">Waiting for your approval before it can take department work.</div>
+            </div>
+          </div>
+          {state.approveError && (
+            <div role="alert" className="text-xs text-status-warm">
+              {state.approveError}
+            </div>
+          )}
+          <button type="button" onClick={approvePairing} disabled={state.approving} className="btn-primary inline-flex items-center gap-2">
+            {state.approving ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> : <Check className="w-4 h-4" aria-hidden="true" />}
+            Approve
+          </button>
+        </div>
+      )}
+      {state.phase === "approved" && (
+        <div className="rounded-lg border border-status-engaged/40 bg-status-engaged/10 p-4 flex items-start gap-3">
+          <Check className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" aria-hidden="true" />
+          <div>
+            <div className="font-bold text-fg">{state.label} is connected.</div>
+            <div className="text-sm text-fg-muted mt-1">
+              It can take department work once it is online.{" "}
+              <button type="button" onClick={() => setState({ phase: "idle" })} className="underline hover:text-fg">
+                Connect another computer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

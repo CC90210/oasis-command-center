@@ -8,7 +8,7 @@ import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
 import { failureCopy } from "@/lib/os/channel/outcome";
 import { deskToolsNote } from "@/lib/os/desk/catalog";
 import { CHAT_LIST_CLASS, CHAT_VIA_CLASS, chatBubbleClass, chatRowClass } from "./chat-layout";
-import { PLAN_MODE_STORAGE_KEY, chatCommands, chatHelp, runFailureSentence, unavailableCommandCopy } from "./chat-shared";
+import { PLAN_MODE_STORAGE_KEY, chatCommands, chatHelp, computerStatusLine, runFailureSentence, unavailableCommandCopy } from "./chat-shared";
 import { ChannelHeader } from "./ChannelHeader";
 import { ActivityTrail } from "./ActivityTrail";
 import { ConversationRail } from "./ConversationRail";
@@ -73,6 +73,11 @@ export function DepartmentChat({
   const { items } = state;
   const working = items.find((i) => i.status === "running");
   const waiting = items.filter((i) => i.status === "queued" || i.status === "sending").length;
+  // O4: a queued message dispatched to this person's own computer is "busy"
+  // (behind another reply, same chat) whenever anything else here is
+  // already running — a conversation only ever drives one run at a time
+  // (lib/os/runs/send.ts activity.live), so there is never more than one.
+  const computerBusy = items.some((i) => i.status === "running");
   const latest = [...items].reverse().find((i) => i.view.agent);
   const toolsNote = latest ? deskToolsNote((latest.view.agent as { tools?: unknown }).tools) : null;
   const modelLabel = latest && typeof latest.view.agent?.model === "string" ? latest.view.agent.model : null;
@@ -217,7 +222,13 @@ export function DepartmentChat({
             </div>
           )}
           {items.map((item) => (
-            <Message key={item.key} item={item} canManageAi={canManageAi} onStop={() => item.runId && void stopRun(department, item.runId)} />
+            <Message
+              key={item.key}
+              item={item}
+              canManageAi={canManageAi}
+              onStop={() => item.runId && void stopRun(department, item.runId)}
+              computerStatus={computerStatusLine({ executor: item.executor, status: item.status, label: state.computerLabel, busy: computerBusy })}
+            />
           ))}
           {notes.map((n, i) => (
             <div key={`note-${i}`} className={chatRowClass("system")}>
@@ -300,7 +311,24 @@ export function DepartmentChat({
 }
 
 /** One message and its reply: your words, then what the department did and what it said. */
-export function Message({ item, canManageAi, onStop }: { item: ChatItem; canManageAi: boolean; onStop: () => void }) {
+export function Message({
+  item,
+  canManageAi,
+  onStop,
+  computerStatus = null,
+}: {
+  item: ChatItem;
+  canManageAi: boolean;
+  onStop: () => void;
+  /**
+   * O4: "Waiting for {label} to pick this up" / "{label} is busy with another
+   * reply" (while queued) or "{label} · Claude Code" (while running) — null
+   * for any run not dispatched to this person's own paired computer
+   * (chat-shared.ts computerStatusLine). Replaces the generic queued copy;
+   * never a house-agent name.
+   */
+  computerStatus?: string | null;
+}) {
   const running = item.status === "running";
   const waitingTurn = item.status === "queued" || item.status === "sending";
   const copy = item.failure ? failureCopy(item.failure.code, { canManageAi, model: item.failure.model }) : null;
@@ -323,7 +351,7 @@ export function Message({ item, canManageAi, onStop }: { item: ChatItem; canMana
               </>
             ) : (
               <>
-                Queued - goes next
+                {computerStatus || "Queued - goes next"}
                 <button type="button" onClick={onStop} aria-label="Remove this queued message" className="rounded p-0.5 hover:bg-bg-elev hover:text-fg">
                   <X className="h-3 w-3" />
                 </button>
@@ -334,6 +362,7 @@ export function Message({ item, canManageAi, onStop }: { item: ChatItem; canMana
       </div>
       {!waitingTurn && (
         <div className={chatRowClass("assistant")}>
+          {computerStatus && <div className={CHAT_VIA_CLASS}>{computerStatus}</div>}
           <ActivityTrail view={item.view} running={running} />
           {shown && <div className={chatBubbleClass("assistant")}>{reply}</div>}
           {item.status === "cancelled" && <div className={CHAT_VIA_CLASS}>{shown ? "Stopped. This is as far as it got." : "Stopped."}</div>}
