@@ -16,6 +16,7 @@ import {
   conversationActivity,
   createConversation,
   enqueueRun,
+  ensureConversation,
   getConversation,
   hasAutomationRun,
   type Conversation,
@@ -155,6 +156,11 @@ export async function sendMessage(args: {
   /** Test seam: how fast the follower polls. */
   pollMs?: (elapsedMs: number) => number;
   /**
+   * Server-minted durable retry identity. Used by signed background jobs that
+   * may outlive one HTTP request; browser calls never supply it.
+   */
+  idempotency?: { conversationId: string; runId: string };
+  /**
    * O4: set when this person's effective engine is their OWN paired
    * computer and it can take work right now (lib/os/runs/session.ts
    * RunSession.computerDispatch). The message enqueues as executor
@@ -197,11 +203,21 @@ export async function sendMessage(args: {
 
   let conversation: Conversation | null;
   if (input.conversationId) {
+    if (args.idempotency && args.idempotency.conversationId !== input.conversationId) {
+      throw new Error("os.runs.send: idempotency conversation mismatch");
+    }
     conversation = await getConversation(db, scope, input.conversationId);
     if (!conversation || conversation.department !== input.department) return json(404, { ok: false, error: "conversation_not_found" });
     // An automation's conversation is its record: a chat message there would
     // run with the chat's rights next to the automation's runs.
     if (await hasAutomationRun(db, scope, conversation.id)) return json(409, { ok: false, error: "automation_conversation" });
+  } else if (args.idempotency) {
+    conversation = await ensureConversation(db, scope, {
+      id: args.idempotency.conversationId,
+      department: input.department,
+      agentSlug: input.agentSlug,
+      now: now(),
+    });
   } else {
     conversation = await createConversation(db, scope, { department: input.department, agentSlug: input.agentSlug, now: now() });
   }
@@ -212,6 +228,7 @@ export async function sendMessage(args: {
     chatMode: input.chatMode,
     showThinking: args.showThinking,
     now: now(),
+    ...(args.idempotency ? { id: args.idempotency.runId, idempotent: true } : {}),
     ...(computerDispatch
       ? {
           executor: "computer" as const,
@@ -251,7 +268,7 @@ export async function sendMessage(args: {
   // Another driver (or, for a computer run, another queued/running message in
   // this conversation) has the conversation: it runs this message next.
   const activity = await conversationActivity(db, scope, conversation.id, now());
-  if (activity.live) {
+  if (activity.live && queued.created) {
     return json(202, { ok: true, mode: "queued", conversation_id: conversation.id, run: headOf(run) });
   }
 

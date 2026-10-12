@@ -720,7 +720,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
           <button
             type="button"
             onClick={() => void testSelection()}
-            disabled={!canEdit || activity !== null || !selectedDevice || rolloutBlocked || (draft.mode === "local" && !draft.modelRef)}
+            disabled={!canEdit || activity !== null || !selectedDevice || !selectedDevice.agentClaimEligible || rolloutBlocked || (draft.mode === "local" && !draft.modelRef)}
             className="rounded-md border border-hairline px-3 py-2 text-xs font-semibold text-fg hover:border-bg-border-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
           >
             {activity === "testing" ? "Testing…" : "Test"}

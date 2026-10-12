@@ -25,6 +25,7 @@
 
 import { NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import {
   streamChat,
   type ChatMessage,
@@ -88,12 +89,14 @@ import { sseErrorFrame } from "@/lib/ai/usage-codes";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
 import { meterWithFallbackReason } from "@/lib/ai/model-registry";
 import {
+  canonicalCloudDispatchError,
   ENGINE_FALLBACK_SIGNATURE_HEADER,
   ENGINE_FALLBACK_STATE_HEADER,
   engineFallbackAuditReason,
   engineFallbackReplyLabel,
   verifyEngineFallbackDispatch,
 } from "@/lib/ai/engine-fallback-dispatch";
+import { readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -179,6 +182,39 @@ export async function POST(req: NextRequest) {
   if (hasFallbackHeaders && !fallbackDispatch) {
     return jsonError(403, "invalid_engine_fallback");
   }
+
+  // `/api/chat` is the cloud executor. Resolve the canonical engine before
+  // resolving or decrypting an API key so a direct browser request can never
+  // bypass a saved subscription/local choice. Device engines reach cloud only
+  // through the server-signed, explicitly opted-in fallback minted by the
+  // exact-pairing `/api/bridge/chat` path.
+  const service = getServiceSupabase();
+  const activeProfile = await resolveActiveProfileForUser(user);
+  if (activeProfile.error) {
+    console.error("[chat.engine-profile]", activeProfile.error);
+    return jsonError(503, "engine_config_unavailable", "engine_config_unavailable");
+  }
+  const engineTenantId = activeProfile.profile?.tenant_id ?? null;
+  if (!engineTenantId) return jsonError(403, "no_tenant", "no_tenant");
+  if (fallbackDispatch && fallbackDispatch.tenant_id !== engineTenantId) {
+    return jsonError(403, "engine_fallback_tenant_mismatch", "engine_fallback_tenant_mismatch");
+  }
+  let effectiveEngine: Awaited<ReturnType<typeof readEffectiveAgentEngine>>;
+  try {
+    effectiveEngine = await readEffectiveAgentEngine(engineTenantId, user.id);
+  } catch (error) {
+    console.error("[chat.canonical-engine]", error instanceof Error ? error.message : String(error));
+    return jsonError(503, "engine_config_unavailable", "engine_config_unavailable");
+  }
+  const dispatchError = canonicalCloudDispatchError(effectiveEngine.engine, fallbackDispatch);
+  if (dispatchError) {
+    const message = dispatchError === "engine_requires_device_route"
+      ? "This chat is set to use the selected computer. Send it through that computer, or choose API key in Settings > AI brain. No API credits were used."
+      : dispatchError === "workspace_api_fallback_not_enabled"
+        ? "Workspace API fallback is not enabled for this computer engine. No API credits were used."
+        : "The saved computer engine changed before fallback started. Retry from the current chat setup. No API credits were used.";
+    return jsonError(409, message, dispatchError);
+  }
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
   if (!lastUserMsg) return jsonError(400, "no_user_message");
@@ -189,7 +225,14 @@ export async function POST(req: NextRequest) {
   const ctxResult = await resolveChatContext(
     { id: user.id, email: user.email },
     agentKey,
-    fallbackDispatch ? { accountPolicy: "workspace_only" } : undefined,
+    {
+      // `agent_model_config.__engine__` is the routing authority. Once it
+      // selects API mode, the workspace account is the only account that may
+      // answer; a hidden per-person/per-agent key must not silently replace
+      // that canonical choice. Signed computer fallback has the same rule.
+      accountPolicy: "workspace_only",
+      trustedTenantId: engineTenantId,
+    },
   );
   if (!ctxResult.ok) {
     // Pass both the human-readable detail AND the stable code so the client
@@ -197,8 +240,15 @@ export async function POST(req: NextRequest) {
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
   const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope, keySource } = ctxResult;
-  if (fallbackDispatch && fallbackDispatch.tenant_id !== tenantId) {
-    return jsonError(403, "engine_fallback_tenant_mismatch");
+  if (tenantId !== engineTenantId) {
+    return jsonError(403, "chat_tenant_mismatch", "chat_tenant_mismatch");
+  }
+  if (!fallbackDispatch && effectiveEngine.engine.kind === "api" && effectiveEngine.engine.provider && effectiveEngine.engine.provider !== provider) {
+    return jsonError(
+      409,
+      "The saved API provider no longer matches the connected AI account. Refresh Settings > AI brain and reconnect it before retrying. No API credits were used.",
+      "engine_api_provider_mismatch",
+    );
   }
 
   // Manifest-aware agent validation. A tenant's manifest can declare custom
@@ -209,7 +259,6 @@ export async function POST(req: NextRequest) {
   if (!(await isTenantChatAgent(tenantId, agentKey))) {
     return jsonError(400, `invalid_agent:${agentKey}`);
   }
-  const service = getServiceSupabase();
   const attachmentIds = Array.isArray(payload.attachments)
     ? payload.attachments
         .map((a) => (a && typeof a.id === "string" ? a.id : ""))
@@ -782,7 +831,21 @@ export async function POST(req: NextRequest) {
               turnTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
               // The state names this turn's session, signed with the rest:
               // /api/chat/resume files the resumed half under it.
-              const issued: ResumeState = { ...ev.resume_state, sessionId: turnSessionId };
+              const issued: ResumeState = {
+                ...ev.resume_state,
+                sessionId: turnSessionId,
+                engineDispatch: fallbackDispatch
+                  ? {
+                      mode: "workspace_api",
+                      pairingId: fallbackDispatch.pairing_id,
+                      engineKind: fallbackDispatch.engine_kind,
+                      engineName: fallbackDispatch.engine_name,
+                    }
+                  : {
+                      mode: "api",
+                      provider: effectiveEngine.engine.kind === "api" ? effectiveEngine.engine.provider ?? null : null,
+                    },
+              };
               const sig = signResumeState(issued, {
                 tenant_id: tenantId,
                 user_id: user.id,

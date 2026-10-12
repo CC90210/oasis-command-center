@@ -115,6 +115,8 @@ function newId(): string {
   return crypto.randomUUID();
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 // -- Conversations -------------------------------------------------------------
 
 export type Conversation = {
@@ -171,6 +173,37 @@ export async function createConversation(
     args: [id, scope.tenantId, scope.userId, input.department, input.agentSlug, title, at, at, at],
   });
   return { id, department: input.department, agentSlug: input.agentSlug, title, titleSource: "auto", createdAt: at, updatedAt: at, lastMessageAt: at, activeRuns: 0 };
+}
+
+/**
+ * Create the one conversation named by a trusted, deterministic idempotency
+ * key, or return the matching conversation another retry already created.
+ * This is intentionally not exposed to browser input: Slack's signed queue
+ * job uses it so a serverless timeout can re-follow the same durable run
+ * instead of enqueueing a second model call.
+ */
+export async function ensureConversation(
+  db: Client,
+  scope: RunScope,
+  input: { id: string; department: string; agentSlug: string; title?: string; now: Date },
+): Promise<Conversation> {
+  if (!UUID_RE.test(input.id)) throw new Error("os.runs.ensure_conversation: the id is not a lowercase UUID");
+  const at = iso(input.now);
+  const title = cleanTitle(input.title);
+  try {
+    await db.execute({
+      sql: `INSERT OR IGNORE INTO dept_chat_conversations (id, tenant_id, user_id, department_key, agent_slug, title, title_source, created_at, updated_at, last_message_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'auto', ?, ?, ?)`,
+      args: [input.id, scope.tenantId, scope.userId, input.department, input.agentSlug, title, at, at, at],
+    });
+  } catch (err) {
+    return guard(err);
+  }
+  const existing = await getConversation(db, scope, input.id);
+  if (!existing || existing.department !== input.department || existing.agentSlug !== input.agentSlug) {
+    throw new Error("os.runs.ensure_conversation: deterministic id collision");
+  }
+  return existing;
 }
 
 export async function getConversation(db: Client, scope: RunScope, id: string): Promise<Conversation | null> {
@@ -368,9 +401,9 @@ export async function hasAutomationRun(db: Client, scope: RunScope, conversation
 }
 
 /** A run id minted by the caller (crypto.randomUUID): checked before it is stored, never trusted. */
-const RUN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const RUN_ID_RE = UUID_RE;
 
-export type EnqueueResult = { ok: true; run: Run } | { ok: false; reason: "no_conversation" | "queue_full" };
+export type EnqueueResult = { ok: true; run: Run; created: boolean } | { ok: false; reason: "no_conversation" | "queue_full" };
 
 /**
  * Add a message to a conversation as a QUEUED run. One statement computes its
@@ -410,9 +443,12 @@ export async function enqueueRun(
     runtimeFallbackPolicy?: "none" | "workspace_api";
     runtimeFallbackReason?: WorkspaceApiFallbackReason;
     runtimeApiSnapshot?: RunApiSnapshot;
+    /** Trusted retry key. A duplicate id reuses only an exactly matching run. */
+    idempotent?: boolean;
   },
 ): Promise<EnqueueResult> {
   if (input.id !== undefined && !RUN_ID_RE.test(input.id)) throw new Error("os.runs.enqueue: the run id is not a lowercase UUID");
+  if (input.idempotent && input.id === undefined) throw new Error("os.runs.enqueue: idempotent enqueue requires a run id");
   if (input.source !== undefined && input.source !== "automation") throw new Error("os.runs.enqueue: unknown run source");
   if (input.executor !== undefined && !isRunExecutor(input.executor)) throw new Error("os.runs.enqueue: unknown executor");
   if (input.origin !== undefined && !isRunOrigin(input.origin)) throw new Error("os.runs.enqueue: unknown origin");
@@ -483,6 +519,28 @@ export async function enqueueRun(
   const executor: RunExecutor = input.executor ?? "worker";
   const origin: RunOrigin = input.origin ?? "chat";
   const at = iso(input.now);
+  const matchesRetry = (run: Run): boolean =>
+    run.conversationId === input.conversationId &&
+    run.userText === input.text &&
+    run.chatMode === input.chatMode &&
+    run.showThinking === input.showThinking &&
+    run.source === source &&
+    run.executor === executor &&
+    run.origin === origin &&
+    run.targetPairingId === (input.targetPairingId ?? null) &&
+    run.runtimeEngineKind === (input.runtimeEngineKind ?? null) &&
+    run.runtimeEngineName === (input.runtimeEngineName ?? null) &&
+    run.runtimeFallbackPolicy === (input.runtimeFallbackPolicy ?? (hasRuntimeSnapshot ? "none" : null)) &&
+    run.runtimeFallbackReason === (input.runtimeFallbackReason ?? null) &&
+    run.runtimeApiProvider === (input.runtimeApiSnapshot?.provider ?? null) &&
+    run.runtimeApiModel === (input.runtimeApiSnapshot?.model.trim() ?? null);
+  if (input.idempotent) {
+    const existing = await getRun(db, scope, id);
+    if (existing) {
+      if (!matchesRetry(existing)) throw new Error("os.runs.enqueue: idempotency key reused with different input");
+      return { ok: true, run: existing, created: false };
+    }
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
     let affected = 0;
     try {
@@ -518,6 +576,11 @@ export async function enqueueRun(
       });
       affected = rs.rowsAffected;
     } catch (err) {
+      if (input.idempotent && /UNIQUE constraint failed:\s*dept_chat_runs\.id/i.test(err instanceof Error ? err.message : String(err))) {
+        const existing = await getRun(db, scope, id);
+        if (existing && matchesRetry(existing)) return { ok: true, run: existing, created: false };
+        throw new Error("os.runs.enqueue: idempotency key collision");
+      }
       if (/UNIQUE constraint failed: dept_chat_runs\.conversation_id/i.test(err instanceof Error ? err.message : String(err))) continue;
       return guard(err);
     }
@@ -533,7 +596,7 @@ export async function enqueueRun(
     });
     const run = await getRun(db, scope, id);
     if (!run) throw new Error("os.runs.enqueue: the run just written cannot be read");
-    return { ok: true, run };
+    return { ok: true, run, created: true };
   }
   throw new Error("os.runs.enqueue: could not take a place in the order after 3 tries");
 }

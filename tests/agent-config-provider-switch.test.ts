@@ -144,17 +144,14 @@ async function main() {
 
   // ── The chat's /model picker is pinned the same way ───────────────────────
   const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
-  assert.match(widget, /function modelPickerProvider\(configs: AgentConfig\[\], agentKey: string\): string \| null/);
-  assert.match(widget, /return row\?\.has_key \? row\.provider : null;/, "a row with a key pins the picker to its provider");
-  // ... against the rows /model will WRITE: workspace rows for an admin, the
-  // operator's own overrides otherwise (CodeRabbit on #504: a personal OpenAI
-  // key must not be refused by the workspace's Anthropic one).
-  assert.match(widget, /const pinConfigs = isAdmin \? configs : userConfigs;/, "the pin reads the write scope's rows");
-  assert.match(widget, /fetch\("\/api\/agent-config\?scope=user"\)/, "the operator's own rows are loaded for the pin");
-  assert.match(widget, /const pinned = modelPickerProvider\(pinConfigs, agent\);\s+const configuredProviders = new Set\(pinConfigs/, "the picker's candidates are pinned to the same rows");
-  assert.equal((widget.match(/modelPickerProvider\(pinConfigs, agent\)/g) ?? []).length, 2, "both the candidates and /model <id> pin from the same rows");
-  assert.doesNotMatch(widget, /modelPickerProvider\(configs, agent\)/, "nothing pins from the tenant rows alone");
-  assert.match(widget, /if \(pinned && provider !== pinned\) \{/, "/model <id> refuses another provider's model");
+  assert.match(widget, /case "model": \{[\s\S]*?router\.push\(ENGINE_SETTINGS_HREF\);/, "/model opens the canonical configurator");
+  assert.match(widget, /Models now follow your canonical AI Brain setup/, "/model explains the single source of truth");
+  assert.doesNotMatch(widget, /modelPickerProvider|pinConfigs/, "no legacy per-agent model picker remains");
+  assert.doesNotMatch(widget, /fetch\(`\/api\/usage\?agent=/, "the canonical header never displays legacy-key usage");
+  assert.match(widget, /const buildModeAvailable = Boolean\(/, "Execute is gated by the canonical runtime");
+  assert.match(widget, /Plan mode active .* writes and execution are hard-blocked/, "Plan copy matches the server's hard gate");
+  assert.match(widget, /if \(!buildModeAvailable\) \{[\s\S]*?appendSystem\(buildModeUnavailableNotice\);/, "/build fails closed on Claude, Gemini and local runtimes");
+  assert.match(widget, /Codex may write only inside the selected agent repository/, "Codex Execute names its repo-scoped boundary");
   // A narrowed candidate list resets the selection, and Enter never reads past it.
   assert.match(widget, /setSlashArgSelectedIdx\(0\);\s+\}, \[argCandidates\]\);/, "the selection restarts when the candidates change");
   assert.match(widget, /const pick = argMatches\[slashArgSelectedIdx\] \?\? argMatches\[0\];\s+if \(pick\) \{/, "Enter guards the index");

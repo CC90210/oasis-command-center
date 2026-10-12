@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { signResumeState, verifyResumeState } from "@/lib/resume-hmac";
 import {
   isWorkspaceApiFallbackReason,
@@ -33,6 +34,38 @@ export type MintedEngineFallbackDispatch = {
   stateHeader: string;
   signature: string;
 };
+
+export type CanonicalCloudDispatchError =
+  | "engine_requires_device_route"
+  | "workspace_api_fallback_not_enabled"
+  | "engine_selection_stale";
+
+/**
+ * `/api/chat` is a cloud executor, not an alternate router. A browser may use
+ * it directly only while the effective canonical engine is API mode. A saved
+ * computer engine may enter it only through the short-lived server-signed
+ * fallback instruction minted by `/api/bridge/chat`, and that instruction
+ * must still match the exact current pairing/runtime and opt-in policy.
+ */
+export function canonicalCloudDispatchError(
+  engine: AgentEngineChoice,
+  dispatch: EngineFallbackDispatch | null,
+): CanonicalCloudDispatchError | null {
+  if (!dispatch) return engine.kind === "api" ? null : "engine_requires_device_route";
+  if (engine.kind === "api") return "engine_selection_stale";
+  if ((engine.fallback ?? "none") !== "workspace_api") return "workspace_api_fallback_not_enabled";
+  const engineKind = engine.kind === "cli" ? "subscription" : "local";
+  const engineName = engine.kind === "cli" ? engine.cli : engine.model;
+  if (
+    !engine.pairingId ||
+    engine.pairingId !== dispatch.pairing_id ||
+    engineKind !== dispatch.engine_kind ||
+    engineName !== dispatch.engine_name
+  ) {
+    return "engine_selection_stale";
+  }
+  return null;
+}
 
 function binding(state: EngineFallbackDispatch) {
   return {

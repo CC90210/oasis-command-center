@@ -34,9 +34,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad } from "@/lib/api-helpers";
+import { bad, clientIpFromHeaders } from "@/lib/api-helpers";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,6 +79,26 @@ export async function POST(req: NextRequest) {
   if (purpose !== "connector" && !(await canAccessSharedTenantResource(session))) {
     return bad(403, "forbidden");
   }
+  // Minting deletes the caller's prior live code and inserts a new credential,
+  // so rate-limit it as a mutation by both authenticated identity and source
+  // address. Neither bucket key contains the code itself.
+  const userLimit = rateLimit({
+    key: `pair-code-mint:user:${session.tenantId}:${session.userId}`,
+    capacity: 6,
+    refillPerSec: 6 / 900,
+  });
+  const ipLimit = rateLimit({
+    key: `pair-code-mint:ip:${clientIpFromHeaders(req.headers)}`,
+    capacity: 20,
+    refillPerSec: 20 / 900,
+  });
+  if (!userLimit.allowed || !ipLimit.allowed) {
+    const retryIn = Math.max(userLimit.resetIn, ipLimit.resetIn);
+    return NextResponse.json(
+      { ok: false, error: "rate_limited", retry_in_sec: retryIn },
+      { status: 429, headers: { "retry-after": String(retryIn) } },
+    );
+  }
   // Daemon scope is reserved for a desktop code minted by an owner or
   // admin — a connector code is always 'connector', by construction.
   const scope = purpose === "connector" ? "connector" : session.isAdmin ? "daemon" : "connector";
@@ -93,13 +114,22 @@ export async function POST(req: NextRequest) {
   // have already been consumed are NOT touched (they're audit trail of
   // past pairings). Scoped to the same purpose: minting a connector code
   // must not silently burn a still-live desktop code and vice versa.
-  await db
+  const cleanup = await db
     .from("bridge_pair_codes")
     .delete()
     .eq("tenant_id", session.tenantId)
     .eq("auth_user_id", session.userId)
     .eq("purpose", purpose)
     .is("consumed_at", null);
+  if (cleanup.error) {
+    console.error("[auth.pair-code.mint.cleanup]", {
+      tenantId: session.tenantId,
+      userId: session.userId,
+      purpose,
+      error: cleanup.error.message,
+    });
+    return bad(503, "pair_code_mint_unavailable");
+  }
 
   // Try a few times in case of unique-constraint collision (≈1 in 10^13).
   let code = "";
@@ -118,7 +148,13 @@ export async function POST(req: NextRequest) {
     });
     if (!ins.error) break;
     if (attempt === 3) {
-      return bad(500, `mint_failed: ${ins.error.message}`);
+      console.error("[auth.pair-code.mint.insert]", {
+        tenantId: session.tenantId,
+        userId: session.userId,
+        purpose,
+        error: ins.error.message,
+      });
+      return bad(503, "pair_code_mint_unavailable");
     }
   }
 

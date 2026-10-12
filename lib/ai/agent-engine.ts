@@ -320,6 +320,13 @@ export function engineFallbackReason(choice: Exclude<AgentEngineChoice, { kind: 
   return `${ENGINE_FALLBACK_PREFIX}${choice.kind === "cli" ? choice.cli : "local"}`;
 }
 
+/** Visible prefix for any reply that spent workspace API credits in place of
+ * the exact saved computer engine. This is reply content, not optional admin
+ * metadata, so every recipient can see that fallback happened. */
+export function workspaceApiFallbackReplyLabel(engineLine: string): string {
+  return `Workspace API fallback - ${engineLine} could not answer. This reply uses workspace API credits; no other computer was used.\n\n`;
+}
+
 /** "Agents: ..." in the coding harness header: the choice in a few words. */
 export function agentsEngineLine(choice: AgentEngineChoice): string {
   return choice.kind === "api" ? "your AI account (API credits)" : bridgeEngineLine(choice);

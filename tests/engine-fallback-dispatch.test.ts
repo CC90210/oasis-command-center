@@ -91,11 +91,65 @@ async function main() {
     assert.equal(fallback.mintEngineFallbackDispatch({ ...base, conversationId: "not-a-uuid" }), null);
   });
 
+  await check("direct cloud chat accepts API mode and refuses every device engine", () => {
+    assert.equal(fallback.canonicalCloudDispatchError({ kind: "api", provider: "openai" }, null), null);
+    assert.equal(
+      fallback.canonicalCloudDispatchError(
+        { kind: "cli", cli: "codex", pairingId: base.pairingId, fallback: "none" },
+        null,
+      ),
+      "engine_requires_device_route",
+    );
+    assert.equal(
+      fallback.canonicalCloudDispatchError(
+        { kind: "local", model: "ollama/llama3.3", pairingId: base.pairingId, fallback: "workspace_api" },
+        null,
+      ),
+      "engine_requires_device_route",
+    );
+  });
+
+  await check("a signed fallback must still match the exact saved engine and explicit opt-in", () => {
+    const minted = fallback.mintEngineFallbackDispatch(base);
+    assert.ok(minted);
+    assert.equal(
+      fallback.canonicalCloudDispatchError(
+        { kind: "cli", cli: "codex", pairingId: base.pairingId, fallback: "workspace_api" },
+        minted.state,
+      ),
+      null,
+    );
+    assert.equal(
+      fallback.canonicalCloudDispatchError(
+        { kind: "cli", cli: "codex", pairingId: base.pairingId, fallback: "none" },
+        minted.state,
+      ),
+      "workspace_api_fallback_not_enabled",
+    );
+    assert.equal(
+      fallback.canonicalCloudDispatchError(
+        { kind: "cli", cli: "codex", pairingId: "pairing-b", fallback: "workspace_api" },
+        minted.state,
+      ),
+      "engine_selection_stale",
+    );
+    assert.equal(
+      fallback.canonicalCloudDispatchError({ kind: "api", provider: "openai" }, minted.state),
+      "engine_selection_stale",
+    );
+  });
+
   await check("the cloud route forces workspace-only accounting, cloud-only tools and a truthful persisted label", () => {
     const route = readFileSync(join(process.cwd(), "app", "api", "chat", "route.ts"), "utf8");
     const auth = readFileSync(join(process.cwd(), "lib", "chat-auth.ts"), "utf8");
     const widget = readFileSync(join(process.cwd(), "components", "ChatWidget.tsx"), "utf8");
     assert.match(route, /accountPolicy: "workspace_only"/);
+    assert.match(route, /readEffectiveAgentEngine\(engineTenantId, user\.id\)/);
+    assert.match(route, /canonicalCloudDispatchError\(effectiveEngine\.engine, fallbackDispatch\)/);
+    assert.ok(
+      route.indexOf("canonicalCloudDispatchError(effectiveEngine.engine, fallbackDispatch)") < route.indexOf("resolveChatContext("),
+      "the canonical engine gate must run before any cloud account is resolved",
+    );
     assert.match(route, /fallbackDispatch \|\| payload\.tool_routing === "cloud_only"/);
     assert.match(route, /meterWithFallbackReason/);
     assert.match(route, /let assistantText = fallbackReplyLabel/);
@@ -104,6 +158,22 @@ async function main() {
     assert.match(auth, /workspaceOnly \|\| !userOverride\.data\?\.encrypted_api_key/);
     assert.match(route, /ownedChatSessionId\(requestedSessionId, tenantId, user\.id, agentKey\)/, "a fallback cannot append under another agent's session");
     assert.match(widget, /setTabId\(mintTabId\(\)\);\s*setMessages\(seedMessagesForAgent\(agent, welcomeMessages\)\)/, "switching agents mints a new bridge conversation id");
+  });
+
+  await check("direct custom teammates never turn ordinary chat into a repo-writing coding task", () => {
+    const route = readFileSync(join(process.cwd(), "app", "api", "agents", "chat", "route.ts"), "utf8");
+    const slack = readFileSync(join(process.cwd(), "lib", "slack", "jobs.ts"), "utf8");
+    const session = readFileSync(join(process.cwd(), "lib", "os", "runs", "session.ts"), "utf8");
+    const copy = readFileSync(join(process.cwd(), "lib", "os", "channel", "outcome.ts"), "utf8");
+    assert.match(route, /return refuse\(ctx, 409, "direct_agent_device_unsupported"/);
+    assert.doesNotMatch(route, /api\/bridge\/chat|coding_harness_task_v1|new NextRequest/);
+    assert.match(route, /platformFallback: null/);
+    assert.match(route, /engineChoice: effective\.engine/);
+    assert.match(slack, /platformFallback: null/);
+    assert.match(slack, /engineChoice: canonical\.engine/);
+    assert.doesNotMatch(session, /operatorPlatformFallback/);
+    assert.match(session, /Canonical runs never borrow the OASIS platform key[\s\S]{0,180}fallback: null/);
+    assert.match(copy, /direct_agent_device_unsupported:[\s\S]{0,260}Nothing was sent and no API credits were used/);
   });
 
   console.log(`engine-fallback-dispatch: ${passed} passed, ${failed} failed`);

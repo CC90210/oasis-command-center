@@ -82,6 +82,7 @@ stub("next/navigation", {
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CC = { id: "0d000000-0000-4000-8000-000000000001", email: "conaugh@oasisai.work" };
+const MEMBER = { id: "0d000000-0000-4000-8000-000000000002", email: "member@oasisai.work" };
 
 async function login(user: { id: string; email: string }) {
   const { signSession } = await import("../lib/turso-auth");
@@ -113,7 +114,7 @@ async function main() {
       provider TEXT, model TEXT, computer_pairing_id TEXT, fallback_policy TEXT, updated_at TEXT,
       runtime_probe_job_id TEXT, runtime_probe_pairing_id TEXT, runtime_probe_engine_kind TEXT,
       runtime_probe_engine_name TEXT, runtime_probe_engine_version TEXT, runtime_probe_verified_at TEXT);
-    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT, machine_fingerprint TEXT,
+    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT, machine_fingerprint TEXT, scope TEXT,
       last_seen_at TEXT, revoked_at TEXT, claim_enabled_at TEXT, paired_via TEXT, claim_protocols TEXT, claim_runtime_state TEXT,
       claim_state_at TEXT, claim_capacity INTEGER, claim_in_flight INTEGER, claim_blocked_reason TEXT);
     CREATE TABLE bridge_runtime_jobs (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
@@ -131,11 +132,17 @@ async function main() {
   await db.batch(
     [
       { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [CC.id, CC.email] },
+      { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [MEMBER.id, MEMBER.email] },
       { sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'oasis-ai-cc', 'OASIS AI', ?)", args: [OASIS, JSON.stringify({ bridge_url: "https://bridge.test" })] },
       {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
               VALUES ('p-cc', ?, ?, ?, 'owner', 1, ?, ?)`,
         args: [CC.id, CC.email, OASIS, stamp, stamp],
+      },
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+              VALUES ('p-member', ?, ?, ?, 'member', 0, ?, ?)`,
+        args: [MEMBER.id, MEMBER.email, OASIS, stamp, stamp],
       },
       { sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, 'test', ?)", args: [OASIS, CC.id, stamp] },
       {
@@ -143,7 +150,7 @@ async function main() {
         args: [OASIS, stamp, stamp, stamp],
       },
       {
-        sql: "INSERT INTO bridge_pairings (id, tenant_id, user_id, label, machine_fingerprint, last_seen_at, claim_enabled_at, paired_via, claim_protocols, claim_runtime_state, claim_state_at, claim_capacity, claim_in_flight) VALUES ('pair-ccpc', ?, ?, 'CCPC', 'fp-ccpc', ?, ?, 'pair_code', ?, ?, ?, 1, 0)",
+        sql: "INSERT INTO bridge_pairings (id, tenant_id, user_id, label, machine_fingerprint, scope, last_seen_at, claim_enabled_at, paired_via, claim_protocols, claim_runtime_state, claim_state_at, claim_capacity, claim_in_flight) VALUES ('pair-ccpc', ?, ?, 'CCPC', 'fp-ccpc', 'daemon', ?, ?, 'pair_code', ?, ?, ?, 1, 0)",
         args: [
           OASIS,
           CC.id,
@@ -202,6 +209,22 @@ async function main() {
     assert.equal(calls.length, 0, "the exact-pairing pull lane called the retired bridge URL");
     return job;
   };
+
+  await check("a daemon pairing is accepted only while it belongs to the workspace agents owner", async () => {
+    const ownerJob = await postAndClaim({ agent: "bravo", messages: [{ role: "user", content: "owner" }] });
+    assert.equal(ownerJob.pairingId, "pair-ccpc");
+
+    await db.execute({ sql: "UPDATE bridge_pairings SET user_id = ? WHERE id = 'pair-ccpc'", args: [MEMBER.id] });
+    await login(MEMBER);
+    calls = [];
+    const rejected = await post({ agent: "bravo", messages: [{ role: "user", content: "member" }] });
+    assert.equal(rejected.status, 409);
+    assert.equal(((await rejected.json()) as { error?: string }).error, "agents_owner_only");
+    assert.equal(calls.length, 0, "an ineligible daemon pairing must fail before any work is queued");
+
+    await db.execute({ sql: "UPDATE bridge_pairings SET user_id = ? WHERE id = 'pair-ccpc'", args: [CC.id] });
+    await login(CC);
+  });
 
   await check("a client-supplied `department` block is dropped, never forwarded", async () => {
     const job = await postAndClaim({

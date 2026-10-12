@@ -9,16 +9,15 @@
  * resolved before the response goes out, and the driver gets values.
  *
  * The rules are the channel route's (app/api/agents/chat/route.ts), unchanged:
- * the workspace is the session's ACTIVE one, a body `tenant_slug` is honoured
- * only for a slug the caller owns, the model id and the platform key are the
- * verified operator's only. This module restates none of them: it calls the
- * same functions.
+ * the workspace is the session's ACTIVE one and a body `tenant_slug` is
+ * honoured only for a slug the caller owns. Canonical runs use only the exact
+ * saved workspace API account; the platform key is never substituted.
  */
 import "server-only";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
-import { operatorPlatformFallback, type OperatorFallback } from "@/lib/operator-credentials";
+import type { OperatorFallback } from "@/lib/operator-credentials";
 import { manifestExists } from "@/lib/manifest/loader";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { operatorNameOverride } from "@/lib/operator-name";
@@ -95,6 +94,25 @@ export type RunSession = {
 };
 
 export type SessionRefusal = { ok: false; status: number; error: string };
+
+/** A server-side channel (Slack/queue) can resolve the same run session after
+ * it has authenticated an exact workspace member itself. `engineUserId: null`
+ * deliberately selects the workspace default; a browser uses the signed-in
+ * person's effective choice. */
+export type RunSessionActor = {
+  tenantId: string;
+  user: { id: string; email: string | null };
+  profile: {
+    display_name?: string | null;
+    full_name?: string | null;
+    team_role?: string | null;
+    is_owner?: boolean | null;
+    admin_access?: boolean | null;
+  };
+  viewer: OsViewerResult;
+  engineUserId: string | null;
+  operatorName?: string | null;
+};
 
 type ExactComputer = OwnComputer & {
   userId: string | null;
@@ -274,6 +292,26 @@ export async function validateQueuedFallbackAuthorization(
   }
   if (!computer.userId) return { ok: false, status: 409, error: "computer_owner_unavailable" };
 
+  // Claim routes reserve daemon/legacy-daemon pairings for the workspace's
+  // agents owner. Re-apply that gate before an already queued fallback can
+  // spend API credits, including when the requester owns the pairing.
+  if (computer.scope !== "connector") {
+    let agentsOwner: AgentsOwnerLookup;
+    try {
+      agentsOwner = await deps.readOwner(input.tenantId);
+    } catch (error) {
+      console.error("[os.runs.session.fallback-daemon-owner]", {
+        tenantId: input.tenantId,
+        pairingId: input.targetPairingId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { ok: false, status: 503, error: "computer_owner_unavailable" };
+    }
+    if (agentsOwner.state !== "set" || agentsOwner.authUserId !== computer.userId) {
+      return { ok: false, status: 409, error: "agents_owner_only" };
+    }
+  }
+
   if (computer.userId !== input.userId) {
     let owner: AgentsOwnerLookup;
     try {
@@ -319,24 +357,30 @@ export async function resolveRunSession(input: {
   department: string;
   /** Server-read run snapshot used only after the guarded queued fallback CAS. */
   queuedFallback?: QueuedFallbackSnapshot;
+  /** Trusted server-resolved actor for channels without a browser cookie. */
+  actor?: RunSessionActor;
 }): Promise<{ ok: true; session: RunSession } | SessionRefusal> {
-  const user = await getSessionUser();
+  const user = input.actor?.user ?? await getSessionUser();
   if (!user) return { ok: false, status: 401, error: "unauthorized" };
   const dept = OS_DEPARTMENTS.find((d) => d.key === input.department) ?? null;
   if (!dept) return { ok: false, status: 400, error: "unknown_department" };
 
-  const resolved = await resolveActiveProfileForUser(user);
-  if (resolved.error) return { ok: false, status: 503, error: "profile_unavailable" };
-  const profile = resolved.profile;
-  if (!profile?.tenant_id) return { ok: false, status: 403, error: "no_tenant" };
-  const tenantId = profile.tenant_id;
+  const resolved = input.actor ? null : await resolveActiveProfileForUser(user);
+  if (resolved?.error) return { ok: false, status: 503, error: "profile_unavailable" };
+  const profile = input.actor?.profile ?? resolved?.profile;
+  const tenantId = input.actor?.tenantId ?? resolved?.profile?.tenant_id ?? null;
+  if (!profile || !tenantId) return { ok: false, status: 403, error: "no_tenant" };
 
   const tenantSlug = ((await resolveOwnedSlug(tenantId)) || "").toLowerCase() || null;
   if (!tenantSlug || !(await manifestExists(tenantSlug))) return { ok: false, status: 400, error: "unknown_tenant" };
 
   const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   const operatorName =
-    operatorNameOverride({ authUserId: user.id, email: user.email }) || profile.display_name || profile.full_name || "Operator";
+    input.actor?.operatorName ||
+    operatorNameOverride({ authUserId: user.id, email: user.email }) ||
+    profile.display_name ||
+    profile.full_name ||
+    "Operator";
 
   // O3b: EFFECTIVE ENGINE -- this person's own choice, if they made one
   // (agent_model_config, user_id = them), else the workspace's (readAgentEngine
@@ -350,7 +394,10 @@ export async function resolveRunSession(input: {
   let effective: EffectiveAgentEngineWithProof | null = null;
   if (!queuedFallback) {
     try {
-      effective = await readEffectiveAgentEngineWithProof(tenantId, user.id);
+      effective = await readEffectiveAgentEngineWithProof(
+        tenantId,
+        input.actor ? input.actor.engineUserId : user.id,
+      );
     } catch (err) {
       console.error("[os.runs.session.engine]", { tenantId, error: err instanceof Error ? err.message : String(err) });
       return { ok: false, status: 503, error: "config_unavailable" };
@@ -377,7 +424,6 @@ export async function resolveRunSession(input: {
   // those operational readiness failures into a labelled workspace-API run.
   let computerDispatch: RunSession["computerDispatch"] = null;
   const selectedEngine = queuedFallback?.engine ?? effective!.engine;
-  const operatorFallback = isOperator ? operatorPlatformFallback() : null;
   let apiAccountSnapshot: RunApiSnapshot | null = null;
   if (selectedEngine.kind === "api" || selectedEngine.fallback === "workspace_api") {
     try {
@@ -393,9 +439,6 @@ export async function resolveRunSession(input: {
       selectedEngine.provider !== apiAccountSnapshot.provider
     ) {
       return { ok: false, status: 409, error: "engine_snapshot_unavailable" };
-    }
-    if (!apiAccountSnapshot && selectedEngine.kind === "api" && operatorFallback && isApiEngineProvider(operatorFallback.provider)) {
-      apiAccountSnapshot = { provider: operatorFallback.provider, model: operatorFallback.model };
     }
     // Every hosted run, including an opted-in future fallback, needs an exact
     // queue-time identity. Do not queue a fallback promise that cannot be
@@ -447,6 +490,12 @@ export async function resolveRunSession(input: {
         const owner = await readAgentsOwner(tenantId);
         if (owner.state !== "set" || computer.userId !== owner.authUserId) {
           return { ok: false, status: 409, error: owner.state === "unavailable" ? "computer_owner_unavailable" : "computer_owner_not_set" };
+        }
+      }
+      if (computer.scope !== "connector") {
+        const owner = await readAgentsOwner(tenantId);
+        if (owner.state !== "set" || computer.userId !== owner.authUserId) {
+          return { ok: false, status: 409, error: "agents_owner_only" };
         }
       }
       let probeReceipt: RuntimeProbeReceipt | undefined;
@@ -582,8 +631,10 @@ export async function resolveRunSession(input: {
       operatorName,
       isOperator,
       canManageAi: isAdminProfile(profile),
-      fallback: operatorFallback,
-      viewer: await resolveOsViewer(),
+      // Canonical runs never borrow the OASIS platform key. This remains a
+      // field only for compatibility with the existing turn starter shape.
+      fallback: null,
+      viewer: input.actor?.viewer ?? await resolveOsViewer(),
       bridge,
       computerDispatch,
       apiEngineChoice,

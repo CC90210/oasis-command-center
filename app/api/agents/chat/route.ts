@@ -44,8 +44,8 @@
  * Slack mention runs, so the web channel and Slack follow one set of rules.
  *
  * Provider: the WORKSPACE's own AI account (lib/ai/workspace-account.ts; a
- * teammate's personal key never answers a shared channel), or the platform key
- * for the verified operator only.
+ * teammate's personal key and the OASIS platform key never answer a canonical
+ * workspace engine selection).
  *
  * Every turn that reaches a key has its outcome (ok, or a failure code from
  * lib/os/channel/outcome.ts) recorded as its channel's last turn
@@ -53,7 +53,7 @@
  * to try) is not. Every failure is logged with the tenant, the department or
  * agent, and the code (never message content, never a key).
  *
- * Response: text/event-stream SSE
+ * API-engine response: the original text/event-stream SSE
  *   event: agent       data: { display_name, agent_slug | department, model?,
  *                              runs_on?, spend?, fell_back_from?, engine_not_used? }
  *                      (model only for the verified operator; runs_on/spend,
@@ -65,6 +65,12 @@
  *   event: usage       data: { input_tokens, output_tokens }
  *   event: done        data: {}
  *   event: error       data: { code, message }   (message: one plain sentence)
+ *
+ * A device-backed department uses the durable department_task_v2 stream:
+ * conversation/run/ev/end. The `ev` frame nests the same agent/delta/tool/
+ * error data, and `end.final_text` is authoritative. Its conversation id may
+ * be returned as `conversation_id` on the next request. Current department
+ * pages use /api/os/runs directly; this dual reader preserves legacy callers.
  */
 
 import { type NextRequest } from "next/server";
@@ -72,7 +78,6 @@ import { getSessionUser } from "@/lib/supabase-server";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import type { ChatMessage } from "@/lib/providers";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
-import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { redactAll } from "@/lib/secret-redaction";
 import { manifestExists } from "@/lib/manifest/loader";
 import { ownsSlug, resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
@@ -85,10 +90,16 @@ import type { AiBudgetCode } from "@/lib/ai/usage";
 import { modelFactsForCopy } from "@/lib/ai/model-registry";
 import { isAdminProfile } from "@/lib/lead-scope";
 import { prepareAgentTurn, streamAgentTurn } from "@/lib/os/department-agent";
-import { bridgeResolutionForSession } from "@/lib/ai/bridge-turn";
+import { workspaceApiFallbackReplyLabel } from "@/lib/ai/agent-engine";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 import { groundDepartmentTurn } from "@/lib/os/desk/turn";
 import { resolveOsViewer } from "@/components/os/department/viewer";
+import { readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
+import { resolveRunSession, mayWatchThinking, sessionForQueuedFallback } from "@/lib/os/runs/session";
+import { executorDepsFor } from "@/lib/os/runs/turn-starter";
+import { sendMessage } from "@/lib/os/runs/send";
+import { RunsUnavailableError } from "@/lib/os/runs/store";
+import { MAX_MESSAGE_CHARS } from "@/lib/os/runs/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -99,6 +110,9 @@ type Body = {
   agent_slug?: string;
   department?: string;
   messages?: ChatMessage[];
+  /** Legacy callers that still use this endpoint for a department may keep
+   * the durable v2 conversation by returning its id on the next turn. */
+  conversation_id?: string;
   /** Plan vs Build mode parity with /api/chat. "plan" appends the OpenCode-
    *  style plan overlay to the system prompt so the agent stays in
    *  research-and-propose mode until the operator types /build. Default
@@ -217,15 +231,13 @@ export async function POST(req: NextRequest) {
     if (!dept) return refuse(ctx, 400, "unknown_department");
   }
 
-  // The model id is operator detail, and the platform key bills OASIS: both
-  // for the verified operator only (lib/platform-operator.ts). Read once.
-  // One exception, below: a model the provider says was not found is named to
-  // the people who can pick another one (PR #555 review).
+  // The model id remains operator detail. Canonical agent turns never use the
+  // operator platform key: the selected API provider must have a matching
+  // workspace account.
   const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   // An owner or admin (lib/lead-scope.ts isAdminProfile: the founder persona,
   // the rule the channel's AI settings link follows) may change the model.
   const canManageAi = isAdminProfile(profile);
-  const fallback = isOperator ? operatorPlatformFallback() : null;
   // Hardwired per-account override (lib/operator-name.ts) wins, e.g. the Matt
   // account's operator.name resolves to "Uri".
   const operatorName =
@@ -233,6 +245,77 @@ export async function POST(req: NextRequest) {
     profile.display_name ||
     profile.full_name ||
     "Operator";
+
+  // Resolve the canonical choice before any model/key path. Department turns
+  // use the durable department_task_v2 queue. A direct custom-teammate page
+  // cannot use the coding harness: that protocol resolves only installed
+  // repo-backed agents and treats Build as permission for repo writes. Until a
+  // generic signed persona protocol exists, direct device turns fail closed;
+  // they never borrow the workspace API account behind the user's back.
+  let effective: Awaited<ReturnType<typeof readEffectiveAgentEngine>>;
+  try {
+    effective = await readEffectiveAgentEngine(tenantId, user.id);
+  } catch (err) {
+    console.error("[agents.chat.engine]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return refuse(ctx, 503, "config_unavailable");
+  }
+  if (effective.engine.kind !== "api") {
+    if (dept) {
+      if (lastUser.content.length > MAX_MESSAGE_CHARS) return refuse(ctx, 413, "message_too_long");
+      const viewer = await resolveOsViewer();
+      const runSession = await resolveRunSession({
+        department: dept.key,
+        actor: {
+          tenantId,
+          user: { id: user.id, email: user.email ?? null },
+          profile,
+          viewer,
+          engineUserId: user.id,
+          operatorName,
+        },
+      });
+      if (!runSession.ok) return refuse(ctx, runSession.status, runSession.error);
+      try {
+        const db = getTursoClient();
+        const session = runSession.session;
+        const response = await sendMessage({
+          db,
+          deps: executorDepsFor(session, db),
+          showThinking: mayWatchThinking(session),
+          input: {
+            department: dept.key,
+            agentSlug,
+            text: lastUser.content.trim(),
+            conversationId: typeof body.conversation_id === "string" ? body.conversation_id.trim() : "",
+            chatMode: body.chat_mode === "plan" ? "plan" : "build",
+          },
+          computerDispatch: session.computerDispatch,
+          apiAccountSnapshot: session.apiAccountSnapshot,
+          fallbackFrom: session.fallbackFrom,
+          fallbackReason: session.fallbackReason,
+          computerFallbackDeps: (reason) => {
+            const fallbackSession = sessionForQueuedFallback(session, reason);
+            return fallbackSession ? executorDepsFor(fallbackSession, db) : null;
+          },
+        });
+        response.headers.set("x-oasis-stream-protocol", "department_task_v2");
+        return response;
+      } catch (err) {
+        if (err instanceof RunsUnavailableError) return refuse(ctx, 503, "chat_history_unavailable");
+        console.error("[agents.chat.device-run]", {
+          tenantId,
+          department: dept.key,
+          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        });
+        return refuse(ctx, 500, "send_failed");
+      }
+    }
+
+    return refuse(ctx, 409, "direct_agent_device_unsupported", {
+      message:
+        "This custom teammate cannot run through a paired computer yet. Use it from a department channel, or select API key in Settings > AI brain.",
+    });
+  }
 
   // The turn itself (binding, agent, key, budget, prompt, meter) is the same
   // session-less function a Slack mention runs (lib/os/department-agent.ts).
@@ -242,15 +325,17 @@ export async function POST(req: NextRequest) {
     agentSlug,
     department: dept,
     operator: { name: operatorName, email: user.email || "" },
-    platformFallback: fallback,
+    platformFallback: null,
     revealModel: isOperator,
     // A local model account answers for the verified operator only.
     localModelAllowed: isOperator,
     userId: user.id,
     chatMode: body.chat_mode,
-    // What powers your agents may be an AI app on the paired computer: reached
-    // by the coding harness's own gate, asked only when that is the choice.
-    bridge: () => bridgeResolutionForSession(tenantId),
+    engineChoice: effective.engine,
+    // This legacy streaming endpoint cannot hand a task to one exact pairing.
+    // Device choices must use the v2 department-run lane; only a saved,
+    // explicit workspace_api policy may spend credits here instead.
+    failClosedWithoutComputerDispatch: true,
   });
   if (!prepared.ok) {
     // A refusal that is a verdict on the workspace's AI account (an unreadable
@@ -299,7 +384,7 @@ export async function POST(req: NextRequest) {
         // What answered and whose credits or plan it used, in plain words
         // (lib/ai/agent-engine.ts), for owners, admins and the operator: the
         // people who choose it in Settings > AI brain.
-        ...(t.revealModel || canManageAi
+        ...(t.revealModel || canManageAi || t.engine.fellBackFrom
           ? {
               runs_on: t.engine.runsOn,
               spend: t.engine.spend,
@@ -308,6 +393,9 @@ export async function POST(req: NextRequest) {
             }
           : {}),
       });
+      if (t.engine.kind === "api" && t.engine.fellBackFrom) {
+        send("delta", { text: workspaceApiFallbackReplyLabel(t.engine.fellBackFrom) });
+      }
 
       // One code per failed turn. The client gets the code and one plain
       // sentence; the provider's own error body is never forwarded. A model

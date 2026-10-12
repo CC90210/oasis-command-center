@@ -332,6 +332,52 @@ async function main() {
     await store.enqueueRun(db, scopeA, { conversationId: conv.id, text: "second", chatMode: "build", showThinking: false, now: now() });
     assert.equal((await store.getConversation(db, scopeA, conv.id))?.title, "Mine");
   });
+  await check("a signed background retry reuses one deterministic conversation and run", async () => {
+    const conversationId = "11111111-1111-5111-8111-111111111111";
+    const runId = "22222222-2222-5222-8222-222222222222";
+    const firstConversation = await store.ensureConversation(db, scopeA, {
+      id: conversationId,
+      department: "sales",
+      agentSlug: "sdr",
+      now: now(),
+    });
+    const retryConversation = await store.ensureConversation(db, scopeA, {
+      id: conversationId,
+      department: "sales",
+      agentSlug: "sdr",
+      now: now(),
+    });
+    assert.equal(retryConversation.id, firstConversation.id);
+    const input = {
+      conversationId,
+      text: "one signed Slack event",
+      chatMode: "build" as const,
+      showThinking: false,
+      now: now(),
+      id: runId,
+      idempotent: true,
+      executor: "computer" as const,
+      origin: "chat" as const,
+      targetPairingId: "pair-slack-exact",
+      runtimeEngineKind: "cli" as const,
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "none" as const,
+    };
+    const first = await store.enqueueRun(db, scopeA, input);
+    const retry = await store.enqueueRun(db, scopeA, { ...input, now: new Date(now().getTime() + 1_000) });
+    assert.ok(first.ok && retry.ok);
+    assert.equal(first.ok && first.created, true);
+    assert.equal(retry.ok && retry.created, false);
+    assert.equal(retry.ok && retry.run.id, runId);
+    assert.equal(
+      (await db.execute({ sql: "SELECT COUNT(*) AS n FROM dept_chat_runs WHERE id = ?", args: [runId] })).rows[0].n,
+      1,
+    );
+    await assert.rejects(
+      store.enqueueRun(db, scopeA, { ...input, text: "changed input" }),
+      /idempotency key reused with different input/,
+    );
+  });
 
   console.log("A run outlives the page");
   await check("the browser leaving does not stop the run: it finishes, is saved, and a page that comes back replays it in order", async () => {

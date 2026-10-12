@@ -233,7 +233,7 @@ export async function POST(req: NextRequest) {
   // file is not readiness: the exact runtime must have passed its probe.
   const { data: pairingData, error: pairingError } = await getServiceSupabase()
     .from("bridge_pairings")
-    .select("id, user_id, last_seen_at, claim_enabled_at, paired_via, claim_protocols, claim_runtime_state")
+    .select("id, user_id, last_seen_at, claim_enabled_at, paired_via, scope, claim_protocols, claim_runtime_state")
     .eq("tenant_id", auth.tenantId)
     .eq("id", savedRoute.pairingId)
     .is("revoked_at", null)
@@ -248,6 +248,7 @@ export async function POST(req: NextRequest) {
     last_seen_at?: string | null;
     claim_enabled_at?: string | null;
     paired_via?: string | null;
+    scope?: string | null;
     claim_protocols?: unknown;
     claim_runtime_state?: unknown;
   } | null;
@@ -259,12 +260,18 @@ export async function POST(req: NextRequest) {
     return jsonError(409, "pairing_not_approved");
   }
   if (!stringList(pairing.claim_protocols).includes(HARNESS_PROTOCOL)) return jsonError(409, "connector_update_required");
-  let pairingOwnerId = auth.userId;
-  if (engineSource === "workspace") {
+  const pairingScope = pairing.scope === "connector" ? "connector" : "daemon";
+  let workspaceOwnerId: string | null = null;
+  if (engineSource === "workspace" || pairingScope === "daemon") {
     const owner = await readAgentsOwner(auth.tenantId);
-    if (owner.state !== "set") return jsonError(409, "workspace_agents_owner_unavailable");
-    pairingOwnerId = owner.authUserId;
+    if (owner.state === "unavailable") return jsonError(503, "workspace_agents_owner_unavailable");
+    if (engineSource === "workspace" && owner.state !== "set") return jsonError(409, "workspace_agents_owner_unavailable");
+    workspaceOwnerId = owner.state === "set" ? owner.authUserId : null;
   }
+  if (pairingScope === "daemon" && (!workspaceOwnerId || pairing.user_id !== workspaceOwnerId)) {
+    return jsonError(409, "agents_owner_only");
+  }
+  const pairingOwnerId = engineSource === "workspace" ? workspaceOwnerId! : auth.userId;
   if (pairing.user_id !== pairingOwnerId) return jsonError(403, "engine_pairing_owner_mismatch");
   // ---- Per-tenant rate limit (same shape as /api/chat) ---------------------
   const limit = rateLimit({ key: `bridge-chat:${auth.tenantId}`, capacity: 30, refillPerSec: 1 / 15 });
@@ -334,7 +341,7 @@ export async function POST(req: NextRequest) {
     }
     const { data: livePairing, error: livePairingError } = await getServiceSupabase()
       .from("bridge_pairings")
-      .select("id, user_id, claim_enabled_at, paired_via")
+      .select("id, user_id, claim_enabled_at, paired_via, scope")
       .eq("tenant_id", auth.tenantId)
       .eq("id", savedRoute.pairingId)
       .is("revoked_at", null)
@@ -343,13 +350,25 @@ export async function POST(req: NextRequest) {
       console.error("[bridge.chat.fallback-pairing]", livePairingError.message);
       return jsonError(503, "pairing_check_unavailable");
     }
-    const live = livePairing as { user_id?: string | null; claim_enabled_at?: string | null; paired_via?: string | null } | null;
+    const live = livePairing as {
+      user_id?: string | null;
+      claim_enabled_at?: string | null;
+      paired_via?: string | null;
+      scope?: string | null;
+    } | null;
     const livePairedVia: PairedVia =
       live?.paired_via === "pair_code" || live?.paired_via === "hmac" || live?.paired_via === "signup_secret"
         ? live.paired_via
         : null;
     if (!live || live.user_id !== pairingOwnerId || !pairingCanClaim({ claimEnabledAt: live.claim_enabled_at ?? null, pairedVia: livePairedVia })) {
       return jsonError(409, "pairing_no_longer_approved");
+    }
+    if (live.scope !== "connector") {
+      const currentOwner = await readAgentsOwner(auth.tenantId);
+      if (currentOwner.state === "unavailable") return jsonError(503, "workspace_agents_owner_unavailable");
+      if (currentOwner.state !== "set" || currentOwner.authUserId !== live.user_id) {
+        return jsonError(409, "agents_owner_only");
+      }
     }
     const conversationId = typeof clientBody.tab_id === "string" ? clientBody.tab_id : "";
     const dispatch = mintEngineFallbackDispatch({

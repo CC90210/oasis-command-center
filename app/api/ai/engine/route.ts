@@ -86,7 +86,13 @@ type PairingRow = {
   claim_protocols: unknown;
   claim_runtime_state: unknown;
   machine_fingerprint: string | null;
+  /** NULL is a legacy daemon pairing (lib/bridge/pairing-auth.ts). */
+  scope: string | null;
 };
+
+function isDaemonPairing(pairing: Pick<PairingRow, "scope">): boolean {
+  return pairing.scope !== "connector";
+}
 
 function object(value: unknown): Record<string, unknown> | null {
   if (typeof value === "string") {
@@ -159,12 +165,40 @@ function runtimeInfo(
   savedProof?: SavedRuntimeProbeProof | null,
   requireSavedProof = false,
 ) {
-  const state = object(root[provider]) ?? {};
+  const currentState = object(root[provider]);
+  const state = currentState ?? {};
   const code = typeof state.state === "string" ? state.state : null;
   const inv = inventory?.[provider];
-  const installed = state.installed === true || inv?.installed === true;
-  const signedIn = state.authenticated === true || inv?.authenticated === true;
-  const unsupported = code === "unsupported";
+  const explicitlyNotInstalled = code === "not_installed" || code === "cli_not_found";
+  const explicitlyNeedsSignIn = new Set([
+    "needs_sign_in",
+    "auth_required",
+    "authentication_failed",
+    "cli_auth_required",
+    "auth_process_failed",
+    "auth_start_failed",
+    "auth_timeout",
+    "manual_auth_required",
+    "cli_nonzero_exit",
+    "not_authenticated",
+    "auth_failed",
+    "auth_cancelled",
+    "account_identity_unavailable",
+  ]).has(code ?? "");
+  const unsupported = state.unsupported === true || code === "unsupported" || code === "account_unsupported";
+  // Current claim state is authoritative whenever it supplies a boolean or a
+  // blocking code. Older inventory is only a fallback for fields the current
+  // heartbeat omitted; it may never turn an explicit failure back into green.
+  const installed = explicitlyNotInstalled
+    ? false
+    : typeof state.installed === "boolean"
+      ? state.installed
+      : inv?.installed === true;
+  const signedIn = explicitlyNotInstalled || explicitlyNeedsSignIn || unsupported
+    ? false
+    : typeof state.authenticated === "boolean"
+      ? state.authenticated
+      : inv?.authenticated === true;
   const proven = requireSavedProof
     ? savedRuntimeProbeProofReady(savedProof, receipt?.pairingId ?? savedProof?.pairingId ?? "", { kind: "cli", name: provider }, receipt)
     : isFreshRuntimeProbeReceipt(receipt);
@@ -178,7 +212,7 @@ function runtimeInfo(
     unsupported,
     version: inv?.version ?? null,
     lastTestedAt: receipt?.ready ? receipt.finishedAt : null,
-    code: code === "unsupported" ? "unsupported_personal_sign_in" : code,
+    code: code === "unsupported" || code === "account_unsupported" ? "unsupported_personal_sign_in" : code,
   };
 }
 
@@ -223,6 +257,7 @@ function effectiveRuntimeSummary(
   inventory: ReadonlyMap<string, CliStatusSnapshot>,
   receipts: ReadonlyMap<string, RuntimeProbeReceipt>,
   savedProof: SavedRuntimeProbeProof | null,
+  agentsOwnerId: string | null,
   nowMs: number,
 ): EffectiveRuntimeSummary {
   if (choice.kind === "api") return { pairingId: null, codingHarnessReady: true, status: "ready" };
@@ -230,6 +265,9 @@ function effectiveRuntimeSummary(
   if (!pairingId) return { pairingId: null, codingHarnessReady: false, status: "computer_choice_required" };
   const pairing = pairings.find((item) => item.id === pairingId);
   if (!pairing) return { pairingId, codingHarnessReady: false, status: "pairing_not_found" };
+  if (isDaemonPairing(pairing) && pairing.user_id !== agentsOwnerId) {
+    return { pairingId, codingHarnessReady: false, status: "agents_owner_only" };
+  }
   if (!pairingCanClaim({ claimEnabledAt: pairing.claim_enabled_at, pairedVia: pairing.paired_via })) {
     return { pairingId, codingHarnessReady: false, status: "approval_needed" };
   }
@@ -294,7 +332,7 @@ async function readPairings(tenantId: string): Promise<PairingRow[]> {
   const { data, error } = await getServiceSupabase()
     .from("bridge_pairings")
     .select(
-      "id, user_id, label, last_seen_at, claim_enabled_at, paired_via, claim_state_at, claim_capacity, claim_blocked_reason, claim_protocols, claim_runtime_state, machine_fingerprint",
+      "id, user_id, label, last_seen_at, claim_enabled_at, paired_via, claim_state_at, claim_capacity, claim_blocked_reason, claim_protocols, claim_runtime_state, machine_fingerprint, scope",
     )
     .eq("tenant_id", tenantId)
     .is("revoked_at", null)
@@ -349,7 +387,7 @@ async function pairingForSelection(input: {
   const { data, error } = await getServiceSupabase()
     .from("bridge_pairings")
     .select(
-      "id, user_id, label, last_seen_at, claim_enabled_at, paired_via, claim_state_at, claim_capacity, claim_blocked_reason, claim_protocols, claim_runtime_state, machine_fingerprint",
+      "id, user_id, label, last_seen_at, claim_enabled_at, paired_via, claim_state_at, claim_capacity, claim_blocked_reason, claim_protocols, claim_runtime_state, machine_fingerprint, scope",
     )
     .eq("tenant_id", input.tenantId)
     .eq("id", input.selection.pairingId)
@@ -365,6 +403,17 @@ async function pairingForSelection(input: {
     const owner = await readAgentsOwner(input.tenantId);
     if (owner.state !== "set" || pairing.user_id !== owner.authUserId) {
       return { ok: false, status: 409, error: "agents_owner_pairing_required", message: "Choose an approved computer owned by this workspace's agents owner." };
+    }
+  }
+  if (isDaemonPairing(pairing)) {
+    const owner = await readAgentsOwner(input.tenantId);
+    if (owner.state !== "set" || pairing.user_id !== owner.authUserId) {
+      return {
+        ok: false,
+        status: 409,
+        error: "agents_owner_only",
+        message: "This legacy full-access computer can run agents only for the workspace agents owner. Re-pair it as a Connector for My setup, or choose the agents owner's computer.",
+      };
     }
   }
   if (!pairingCanClaim({ claimEnabledAt: pairing.claim_enabled_at, pairedVia: pairing.paired_via })) {
@@ -450,6 +499,8 @@ export async function GET() {
         ownerName: pairing.user_id ? names.get(pairing.user_id) ?? null : null,
         ownedByViewer: pairing.user_id === ctx.authUserId,
         workspaceEligible: agentsOwner.state === "set" && pairing.user_id === agentsOwner.authUserId,
+        agentClaimEligible:
+          !isDaemonPairing(pairing) || (agentsOwner.state === "set" && pairing.user_id === agentsOwner.authUserId),
         os: pairing.machine_fingerprint?.match(/windows|mac|linux/i)?.[0] ?? null,
         lastSeenAt,
         approved: pairingCanClaim({ claimEnabledAt: pairing.claim_enabled_at, pairedVia: pairing.paired_via }),
@@ -479,7 +530,15 @@ export async function GET() {
           ? { provider: brain.provider, providerLabel: brain.providerLabel, model: brain.savedModel ?? brain.model, modelLabel: brain.modelLabel }
           : null,
         savedProviders,
-        effectiveRuntime: effectiveRuntimeSummary(effectiveChoice, pairings, inventory, probeReceipts, effectiveEngine.probeProof, Date.now()),
+        effectiveRuntime: effectiveRuntimeSummary(
+          effectiveChoice,
+          pairings,
+          inventory,
+          probeReceipts,
+          effectiveEngine.probeProof,
+          agentsOwner.state === "set" ? agentsOwner.authUserId : null,
+          Date.now(),
+        ),
         bridge: { reachable: devices.some((device) => device.online) },
         workspace: oasis ? "oasis" : "client",
         canManage,

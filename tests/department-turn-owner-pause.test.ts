@@ -336,6 +336,41 @@ async function main() {
     assert.equal(prepared.turn.keySource, "tenant", "the workspace account, not the platform key, answers");
   });
 
+  await check("a canonical API choice refuses a different workspace provider instead of spending another key", async () => {
+    const refused = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: CC.email },
+      platformFallback: unmistakableFallback,
+      revealModel: true,
+      userId: CC.id,
+      engineChoice: { kind: "api", provider: "openai" },
+    });
+    assert.ok(!refused.ok && refused.error === "engine_snapshot_unavailable", JSON.stringify(refused));
+  });
+
+  await check("a canonical API choice with no workspace account never borrows the operator platform key", async () => {
+    await db.execute("UPDATE agent_model_config SET enabled = 0 WHERE tenant_id = ? AND agent_key = 'bravo'", [OASIS]);
+    try {
+      const refused = await prepareAgentTurn({
+        tenantId: OASIS,
+        tenantSlug: "oasis-ai-cc",
+        agentSlug: "sdr",
+        department: sales,
+        operator: { name: "CC", email: CC.email },
+        platformFallback: unmistakableFallback,
+        revealModel: true,
+        userId: CC.id,
+        engineChoice: { kind: "api", provider: "anthropic" },
+      });
+      assert.ok(!refused.ok && refused.error === "agent_not_configured", JSON.stringify(refused));
+    } finally {
+      await db.execute("UPDATE agent_model_config SET enabled = 1 WHERE tenant_id = ? AND agent_key = 'bravo'", [OASIS]);
+    }
+  });
+
   await check("a queued API A snapshot fails closed after the workspace switches to API B", async () => {
     await db.execute({
       sql: "UPDATE agent_model_config SET provider = 'openai', model = 'gpt-5.2' WHERE tenant_id = ? AND agent_key = 'bravo'",

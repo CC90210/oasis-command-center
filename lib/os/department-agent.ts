@@ -63,7 +63,7 @@ import {
 import { meterWithFallbackReason, resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
-import { readAgentEngine } from "@/lib/ai/agent-engine-store";
+import { readAgentEngine, readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
 import {
   bridgeEngineLine,
   CLI_ENGINE_LABEL,
@@ -115,11 +115,10 @@ export type AgentTurnRequest = {
   localModelAllowed?: boolean;
   /**
    * The paired computer, reachable for this person: the caller's resolver runs
-   * the coding harness's own bridge gate (lib/bridge-proxy.ts
-   * authorizeBridgeRequest) for this workspace, only when an engine there is
-   * chosen. Absent, or answering null (a Slack mention, a person the gate
-   * refuses, no bridge set up): an engine on the paired computer cannot answer, and the
-   * workspace's API account answers instead, saying so (TurnEngine.fellBackFrom).
+   * the coding harness's legacy bridge gate (lib/bridge-proxy.ts
+   * authorizeBridgeRequest). Canonical entry points set
+   * failClosedWithoutComputerDispatch and never use this shared target in
+   * place of the engine row's exact pairing.
    *
    * null is the gate saying NO by design (a teammate who may not use the
    * computer): the API account answering is the rule, not a fault. A
@@ -157,6 +156,13 @@ export type AgentTurnRequest = {
    * Its identity is carried into reply metadata and the usage ledger.
    */
   fallbackFrom?: Exclude<AgentEngineChoice, { kind: "api" }> | null;
+  /**
+   * This caller has no synchronous exact-pairing dispatch lane. Device-backed
+   * selections therefore fail closed unless their saved policy explicitly
+   * permits the workspace API account. A caller that already pull-dispatched
+   * the run supplies engineInput instead and returns before this gate.
+   */
+  failClosedWithoutComputerDispatch?: boolean;
 };
 
 /**
@@ -402,7 +408,11 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   try {
     [cfg, chosen] = await Promise.all([
       readWorkspaceAiAccount(tenantId),
-      req.engineChoice ? Promise.resolve(req.engineChoice) : readAgentEngine(tenantId),
+      req.engineChoice
+        ? Promise.resolve(req.engineChoice)
+        : req.userId
+          ? readEffectiveAgentEngine(tenantId, req.userId).then((effective) => effective.engine)
+          : readAgentEngine(tenantId),
     ]);
   } catch (err) {
     // A failed read is not "no key": answering 412 would send the owner to
@@ -420,20 +430,74 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // verdict; for anyone else (and for every Slack mention) it is no usable
   // account, so no request to its address is ever made (Codex review, PR #535).
   const localModelAllowed = req.localModelAllowed === true;
+  // A canonical API selection names a provider, not merely "some hosted
+  // model". Require that exact provider's saved workspace account before any
+  // fallback logic can consider a platform key. This closes both missing-key
+  // hidden spend and the settings-change race between route and execution.
+  if (chosen.kind === "api") {
+    if (!hasUsableKey(cfg) || cfg.provider === LOCAL_MODEL_PROVIDER) {
+      return {
+        ok: false,
+        status: 412,
+        error: "agent_not_configured",
+        extra: {
+          hint: chosen.provider
+            ? `Connect a ${chosen.provider} workspace account in Settings > AI brain before chatting here.`
+            : "Connect a workspace API account in Settings > AI brain before chatting here.",
+        },
+      };
+    }
+    if (chosen.provider && cfg.provider !== chosen.provider) {
+      return {
+        ok: false,
+        status: 409,
+        error: "engine_snapshot_unavailable",
+        agentSlug: agent.slug,
+        channelKey,
+      };
+    }
+  }
   // WHAT POWERS YOUR AGENTS (lib/ai/agent-engine.ts): an AI app or local model
-  // on the paired computer answers when the caller can reach it for this
-  // person; then no key, no API credits and no budget are involved. Otherwise
-  // the API account below answers, and the reply says what was chosen instead.
+  // on the paired computer answers only through a caller that can honor the
+  // saved route. Canonical synchronous callers fail closed here unless the
+  // saved choice explicitly opted into workspace_api fallback.
   const bridgeEngine: BridgeEngine | null = chosen.kind === "api" ? null : chosen;
-  // The harness path is OASIS's department channels only, until client
-  // harness packs exist: anyone else on a CLI engine is answered by the API
-  // account (in-app desk agent), and the turn says so.
+  const directDeviceFallback =
+    req.failClosedWithoutComputerDispatch &&
+    bridgeEngine?.pairingId &&
+    (bridgeEngine.fallback ?? "none") === "workspace_api"
+      ? bridgeEngine
+      : null;
+  if (req.failClosedWithoutComputerDispatch && bridgeEngine && !req.fallbackFrom) {
+    if (!bridgeEngine.pairingId) {
+      return {
+        ok: false,
+        status: 409,
+        error: "computer_choice_needs_pairing",
+        extra: { hint: "Choose a computer in Settings > AI brain, test it, and save before trying again. Nothing was sent and no API credits were used." },
+      };
+    }
+    if (!directDeviceFallback) {
+      return {
+        ok: false,
+        status: 409,
+        error: "engine_dispatch_unavailable",
+        extra: {
+          hint: "This chat cannot send work to the exact selected computer. Use the department channel, choose API key, or explicitly enable Workspace API fallback in Settings > AI brain. Nothing was sent and no API credits were used.",
+        },
+      };
+    }
+  }
+  // The legacy shared-bridge harness path is OASIS-only. Canonical callers do
+  // not use it as a substitute for an engine row's exact pairing.
   const target = dept && oasisWorkspace ? harnessForDepartment(dept.key) : null;
   const harness = target && dept ? { agent: target.agent, department: dept.label, label: target.departments } : null;
   // Asked only when an engine on the paired computer is chosen; a gate that
   // throws is "can't be reached", never a crash of the turn.
   const resolved: BridgeCaller | BridgeUnavailable | BridgeRefused | null =
-    bridgeEngine && harness && req.bridge ? await req.bridge().catch((): BridgeUnavailable => ({ unavailable: "gate_error" })) : null;
+    bridgeEngine && !directDeviceFallback && harness && req.bridge
+      ? await req.bridge().catch((): BridgeUnavailable => ({ unavailable: "gate_error" }))
+      : null;
   // O1: PAUSE, NOT FALLBACK (Adon). A BridgeRefused means this person is not
   // the workspace's agents owner (or OASIS has no owner set, or the owner row
   // could not be read) — never answered on the workspace key or the platform
@@ -462,7 +526,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // WHY the chosen engine is not answering decides what is said and recorded.
   // Only a person the gate admits, for whom the computer cannot be used, is a
   // FALLBACK (a fault). Everyone else is answered by the API account by design.
-  const explicitFallback = req.fallbackFrom ?? null;
+  const explicitFallback = req.fallbackFrom ?? directDeviceFallback;
   const engineLine = bridgeEngine ? bridgeEngineLine(bridgeEngine) : null;
   const unreachable = Boolean(bridgeEngine && !viaBridge && resolved && "unavailable" in resolved);
   const fallbackChoice = explicitFallback ?? (unreachable ? bridgeEngine : null);
@@ -497,7 +561,10 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
     // Named for the logs and the operator's model detail; no key is sent.
     provider = hasUsableKey(cfg) ? cfg.provider : "anthropic";
     model = bridgeEngineLine(viaBridge.engine);
-  } else if (hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)) {
+  } else if (
+    hasUsableKey(cfg) &&
+    (fallbackChoice ? cfg.provider !== LOCAL_MODEL_PROVIDER : cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)
+  ) {
     // ONE SOURCE (CC, 2026-10-09): the provider AND the model are the workspace
     // AI account's, as Settings > AI brain shows and switches them. A manifest
     // binding's model_override used to win here, a second place choosing a
@@ -607,9 +674,8 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // resolve; its one row is written by streamAgentTurn (meteredBridgeTurn). A
   // turn that fell back from the chosen engine records that on every call it
   // opens, INSIDE the model-swap wrapper so both reasons survive. Only a real
-  // fallback: an API turn that is the rule (Slack, a teammate the gate does not
-  // admit, a chat with no harness) records none, or the health check would page
-  // on turns that are working as designed.
+  // fallback: an explicit workspace_api substitution is always recorded. The
+  // compatibility bridge path still distinguishes a by-design API turn.
   const apiMeter = fallbackChoice ? meterWithFallbackReason(meter, engineFallbackReason(fallbackChoice)) : meter;
   const picked = viaBridge ? { model, swap: null, meter } : resolveCall(provider, model, apiMeter);
   const brain = keySource === "tenant" && hasUsableKey(cfg) ? departmentBrain({ provider, model: picked.model }) : null;

@@ -32,6 +32,8 @@ import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { rateLimit } from "@/lib/rate-limit";
 import { billingForKey, budgetRefusalResponse, isAiBudgetCode, modelCallMeter } from "@/lib/ai/usage";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
+import { readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -99,11 +101,33 @@ export async function POST(req: NextRequest) {
     return jsonError(400, "nothing_to_compact");
   }
 
-  const ctxResult = await resolveChatContext({ id: user.id, email: user.email }, agentKey);
+  const activeProfile = await resolveActiveProfileForUser(user);
+  if (activeProfile.error) return jsonError(503, "engine_config_unavailable", "engine_config_unavailable");
+  const engineTenantId = activeProfile.profile?.tenant_id ?? null;
+  if (!engineTenantId) return jsonError(403, "no_tenant", "no_tenant");
+  let effectiveEngine: Awaited<ReturnType<typeof readEffectiveAgentEngine>>;
+  try {
+    effectiveEngine = await readEffectiveAgentEngine(engineTenantId, user.id);
+  } catch (error) {
+    console.error("[chat/compact.canonical-engine]", error instanceof Error ? error.message : String(error));
+    return jsonError(503, "engine_config_unavailable", "engine_config_unavailable");
+  }
+  if (effectiveEngine.engine.kind !== "api") {
+    return jsonError(409, "This chat is set to use the selected computer. Nothing was sent and no API credits were used.", "engine_requires_device_route");
+  }
+  const ctxResult = await resolveChatContext(
+    { id: user.id, email: user.email },
+    agentKey,
+    { accountPolicy: "workspace_only", trustedTenantId: engineTenantId },
+  );
   if (!ctxResult.ok) {
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
   const { tenantId, provider, model, apiKey, keySource } = ctxResult;
+  if (tenantId !== engineTenantId) return jsonError(403, "chat_tenant_mismatch", "chat_tenant_mismatch");
+  if (effectiveEngine.engine.provider && effectiveEngine.engine.provider !== provider) {
+    return jsonError(409, "engine_api_provider_mismatch", "engine_api_provider_mismatch");
+  }
 
   if (!(await isTenantChatAgent(tenantId, agentKey))) {
     return jsonError(400, `invalid_agent:${agentKey}`);

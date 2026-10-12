@@ -107,17 +107,26 @@ export type ChatAccountPolicy = "normal" | "workspace_only";
 export async function resolveChatContext(
   user: { id: string; email: string | null | undefined },
   agentKey: string,
-  options: { accountPolicy?: ChatAccountPolicy } = {},
+  options: {
+    accountPolicy?: ChatAccountPolicy;
+    /** Tenant already resolved from this authenticated user by a server-only
+     * active-profile resolver. This prevents a second `.maybeSingle()` from
+     * breaking legitimate multi-workspace/legacy-duplicate profiles. */
+    trustedTenantId?: string;
+  } = {},
 ): Promise<ChatAuthResult> {
   const service = getServiceSupabase();
   const workspaceOnly = options.accountPolicy === "workspace_only";
 
-  const { data: profileRow } = await service
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profileRow as { tenant_id: string | null } | null)?.tenant_id ?? null;
+  let tenantId = options.trustedTenantId?.trim() || null;
+  if (!tenantId) {
+    const { data: profileRow } = await service
+      .from("user_profiles")
+      .select("tenant_id")
+      .eq("auth_user_id", user.id)
+      .maybeSingle();
+    tenantId = (profileRow as { tenant_id: string | null } | null)?.tenant_id ?? null;
+  }
   if (!tenantId) {
     return { ok: false, status: 403, code: "no_tenant" };
   }

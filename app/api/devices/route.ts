@@ -35,7 +35,10 @@ export async function GET() {
     )
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
-  if (error) return bad(500, error.message);
+  if (error) {
+    console.error("[devices.GET.list]", { tenantId, userId: session.userId, error: error.message });
+    return bad(503, "devices_unavailable");
+  }
   const rows = (data || []) as Array<{ user_id: string | null } & Record<string, unknown>>;
   // Everyone sees their own; an owner or admin also sees the team's.
   const devices = session.isAdmin ? rows : rows.filter((r) => r.user_id === session.userId);
@@ -102,7 +105,10 @@ export async function DELETE(req: NextRequest) {
     .eq("id", id)
     .eq("tenant_id", tenantId)
     .maybeSingle();
-  if (row.error) return bad(500, row.error.message);
+  if (row.error) {
+    console.error("[devices.DELETE.lookup]", { tenantId, userId: session.userId, pairingId: id, error: row.error.message });
+    return bad(503, "device_lookup_unavailable");
+  }
   if (!row.data) return bad(404, "pairing_not_found");
   const pairing = row.data as { id: string; user_id: string | null; label: string | null; revoked_at: string | null };
 
@@ -128,7 +134,10 @@ export async function DELETE(req: NextRequest) {
     .update({ revoked_at: new Date().toISOString() })
     .eq("id", id)
     .eq("tenant_id", tenantId);
-  if (error) return bad(500, error.message);
+  if (error) {
+    console.error("[devices.DELETE.revoke]", { tenantId, userId: session.userId, pairingId: id, error: error.message });
+    return bad(503, "device_disconnect_unavailable");
+  }
 
   if (!isMine) {
     const audit = await db.rpc("log_tenant_event", {

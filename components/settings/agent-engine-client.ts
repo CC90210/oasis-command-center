@@ -41,6 +41,9 @@ export type EngineDevice = {
   ownedByViewer: boolean;
   /** True only when this pairing belongs to the workspace's configured agents owner. */
   workspaceEligible: boolean;
+  /** False when a legacy daemon-scoped pairing is owned by somebody other
+   * than the workspace agents owner; claim routes reject it. */
+  agentClaimEligible: boolean;
   os: string | null;
   lastSeenAt: string | null;
   approved: boolean;
@@ -224,6 +227,11 @@ function device(raw: unknown): EngineDevice | null {
     ownerName: nonEmpty(value.ownerName) ?? nonEmpty(value.owner_name),
     ownedByViewer: value.ownedByViewer === true || value.owned_by_viewer === true,
     workspaceEligible: value.workspaceEligible === true || value.workspace_eligible === true,
+    agentClaimEligible:
+      !Object.prototype.hasOwnProperty.call(value, "agentClaimEligible") &&
+      !Object.prototype.hasOwnProperty.call(value, "agent_claim_eligible")
+        ? true
+        : value.agentClaimEligible === true || value.agent_claim_eligible === true,
     os: nonEmpty(value.os),
     lastSeenAt: nonEmpty(value.lastSeenAt) ?? nonEmpty(value.last_seen_at),
     approved: value.approved === true,
@@ -552,15 +560,58 @@ export function connectorRestartCommand(platform: string | null | undefined): st
 
 /** One truthful status sentence. A heartbeat/sign-in alone is deliberately never called ready. */
 export function describeRuntime(
-  target: Pick<EngineDevice, "label" | "os" | "approved" | "online" | "busy" | "protocols" | "runtimes">,
+  target: Pick<EngineDevice, "label" | "os" | "approved" | "online" | "busy" | "protocols" | "runtimes" | "agentClaimEligible">,
   provider: CliEngine,
 ): { label: string; verified: boolean; repair: string | null } {
   const state = target.runtimes[provider];
   const name = CLI_LABEL[provider];
+  const code = state.code?.toLowerCase() ?? null;
+  const notInstalledCodes = new Set(["not_installed", "cli_not_found"]);
+  const unsupportedCodes = new Set(["unsupported", "unsupported_personal_sign_in", "account_unsupported"]);
+  const signInCodes = new Set([
+    "needs_sign_in",
+    "auth_required",
+    "authentication_failed",
+    "cli_auth_required",
+    "auth_process_failed",
+    "auth_start_failed",
+    "auth_timeout",
+    "manual_auth_required",
+    "not_authenticated",
+    "auth_failed",
+    "auth_cancelled",
+    "account_identity_unavailable",
+  ]);
+  if (!target.agentClaimEligible) {
+    return {
+      label: "Approval needed",
+      verified: false,
+      repair: "This legacy full-access computer can run agents only for the workspace agents owner. Re-pair it as a Connector for My setup.",
+    };
+  }
   if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
   if (!target.online) return { label: "Offline", verified: false, repair: `On ${target.label}, run: ${connectorRestartCommand(target.os)}` };
-  if (state.unsupported || (provider === "gemini" && state.installed && !state.signedIn)) {
+  if (notInstalledCodes.has(code ?? "")) {
+    return { label: "Not installed", verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
+  }
+  if (state.unsupported || unsupportedCodes.has(code ?? "") || (provider === "gemini" && state.installed && !state.signedIn)) {
     return { label: "Unsupported", verified: false, repair: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead." };
+  }
+  if (code === "account_identity_unavailable" && provider === "claude") {
+    return {
+      label: "Sign-in needed",
+      verified: false,
+      repair: `Open Claude Code once on ${target.label}, sign in so OASIS can identify the account, restart the OASIS connector, then Test again.`,
+    };
+  }
+  if (signInCodes.has(code ?? "")) {
+    return {
+      label: provider === "gemini" ? "Unsupported" : "Sign-in needed",
+      verified: false,
+      repair: provider === "gemini"
+        ? "Gemini CLI personal sign-in is not supported. Choose a Google API key instead."
+        : `On ${target.label}, run: ${CLI_LOGIN[provider]}`,
+    };
   }
   if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
   if (
@@ -572,22 +623,22 @@ export function describeRuntime(
   }
   if (!state.installed) return { label: "Not installed", verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
   if (!state.signedIn) return { label: "Sign-in needed", verified: false, repair: `On ${target.label}, run: ${CLI_LOGIN[provider]}` };
-  if (state.code === "account_identity_unavailable") {
-    return {
-      label: "Sign-in needed",
-      verified: false,
-      repair: `Open Claude Code once on ${target.label}, sign in so OASIS can identify the account, restart the OASIS connector, then Test again.`,
-    };
-  }
   if (!state.executionReady) return { label: "Needs test", verified: false, repair: `Test ${name} on ${target.label} before using it for agents.` };
   return { label: "Ready for agents", verified: true, repair: null };
 }
 
 /** A detected model is usable only after the selected connector has run a real probe. */
 export function describeLocalModel(
-  target: Pick<EngineDevice, "label" | "os" | "approved" | "online" | "busy" | "protocols">,
+  target: Pick<EngineDevice, "label" | "os" | "approved" | "online" | "busy" | "protocols" | "agentClaimEligible">,
   model: EngineDevice["localModels"][number] | undefined,
 ): { label: string; verified: boolean; repair: string | null } {
+  if (!target.agentClaimEligible) {
+    return {
+      label: "Approval needed",
+      verified: false,
+      repair: "This legacy full-access computer can run agents only for the workspace agents owner. Re-pair it as a Connector for My setup.",
+    };
+  }
   if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
   if (!target.online) return { label: "Offline", verified: false, repair: `Start Ollama or LM Studio and restart the OASIS connector on ${target.label}.` };
   if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
@@ -623,6 +674,8 @@ export function repairForCode(
       return "Pair this computer in Settings > Devices, then return here and Test again.";
     case "pairing_not_approved":
       return "Approve this computer in Settings > Devices, then Test again.";
+    case "agents_owner_only":
+      return "This legacy full-access computer can run agents only for the workspace agents owner. Re-pair it as a Connector for My setup.";
     case "connector_offline":
     case "bridge_unavailable":
     case "runtime_unavailable":
@@ -637,12 +690,34 @@ export function repairForCode(
     case "not_authenticated":
     case "auth_failed":
     case "auth_cancelled":
+    case "account_identity_unavailable":
+    case "auth_process_failed":
+    case "auth_start_failed":
+    case "auth_timeout":
+    case "cli_auth_required":
+    case "manual_auth_required":
       if (provider === "gemini") return "Gemini CLI personal sign-in is not supported. Choose a Google API key instead.";
       return provider
         ? `On ${deviceLabel ?? "the selected computer"}, run: ${CLI_LOGIN[provider]}`
         : `Sign in to the selected app${where}, then Test again.`;
+    case "account_unsupported":
     case "unsupported_personal_sign_in":
       return "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.";
+    case "runtime_engine_not_allowed":
+      return "That runtime cannot perform this action. Choose a supported subscription app or API key, then Test again.";
+    case "cli_empty_output":
+    case "cli_nonzero_exit":
+    case "runtime_action_failed":
+    case "runtime_probe_failed":
+    case "status_check_failed":
+      return `The selected runtime could not finish the check. Restart the connector${where} with: ${connectorRestartCommand(deviceOS)}, then Test again.`;
+    case "pairing_approval_lost":
+      return "Approval was removed while this action was running. Approve the computer again in Settings > Devices, then Test again.";
+    case "pairing_revoked":
+      return "This computer pairing was revoked. Pair the computer again in Settings > Devices, then Test again.";
+    case "requester_seat_inactive":
+      return "Your workspace access changed while this action was running. Sign in again; if access is still blocked, ask a workspace owner or admin to restore it.";
+    case "cli_timeout":
     case "runtime_job_timeout":
     case "timeout":
     case "queue_expired":

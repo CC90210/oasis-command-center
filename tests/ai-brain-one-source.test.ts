@@ -368,7 +368,8 @@ async function main() {
     assert.match(settings, /readWorkspaceAiAccount\(profile\.tenant_id\)\.then\(\(a\) => \(hasUsableKey\(a\) \? departmentBrain\(a\) : null\)\)/);
     assert.match(settings, /brain=\{aiBrain\}/);
     const card = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
-    assert.match(card, /Your departments use <span className="font-bold">\{brainLine\(brain\)\}<\/span>\./);
+    assert.match(card, /The workspace default API account is <span className="font-bold">\{brainLine\(brain\)\}<\/span>/);
+    assert.match(card, /A member&apos;s My[\s\S]*setup can still override it/);
     // A change from anywhere restarts the picker on the model really saved.
     assert.match(card, /key=\{`\$\{brain\.provider\}:\$\{brain\.savedModel \?\? brain\.model\}`\}/);
     // The local CLI choice is not read by anything that powers a department.

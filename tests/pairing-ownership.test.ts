@@ -215,6 +215,26 @@ async function main() {
     assert.equal(desktop.status, 403, JSON.stringify(desktop.body));
   });
 
+  await check("pair-code minting is rate-limited per signed-in user before it can churn codes", async () => {
+    await login(OTHER_ID, "other@client-y.test");
+    const statuses: number[] = [];
+    for (let i = 0; i < 7; i += 1) {
+      const response = await pairCodeRoute.POST(
+        new NextRequest("https://oasisai.work/api/auth/pair-code", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.44" },
+          body: JSON.stringify({ purpose: "connector" }),
+        }),
+      );
+      statuses.push(response.status);
+      if (i === 6) {
+        const body = (await response.json()) as Record<string, unknown>;
+        assert.equal(body.error, "rate_limited");
+      }
+    }
+    assert.deepEqual(statuses, [200, 200, 200, 200, 200, 200, 429]);
+  });
+
   await check("pair-code status correlates a re-paired computer by consumed_by_pairing_id, never created_at", async () => {
     await pairing({ id: "bp-member-connector", userId: MEMBER_ID, label: "Member laptop", token: "t-member-connector", scope: "connector", pairedVia: "pair_code" });
     await db.execute({

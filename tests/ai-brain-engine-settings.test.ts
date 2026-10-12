@@ -23,6 +23,7 @@ async function check(name: string, work: () => void | Promise<void>) {
 async function main() {
   const client = await import("../components/settings/agent-engine-client");
   const rollout = await import("../lib/ai/engine-rollout");
+  const runtimeTypes = await import("../lib/bridge/runtime-jobs/types");
   const settings = await import("../components/settings/settings-sections");
   const { startCliSignIn } = await import("../components/settings/LocalCliProvidersCard");
 
@@ -48,6 +49,8 @@ async function main() {
     assert.match(route, /readLatestRuntimeProbeReceipts/, "readiness is derived from completed probe receipts");
     assert.doesNotMatch(route, /lastTestedAt:[^\n]*lastSeenAt/, "a heartbeat timestamp must never be reported as a test timestamp");
     assert.match(route, /code === null \|\| code === "ready" \|\| code === "probe_required"/, "a fresh receipt cannot override an explicit heartbeat failure");
+    assert.match(route, /typeof state\.installed === "boolean"[\s\S]*?state\.installed[\s\S]*?inv\?\.installed === true/, "current runtime installation state wins over stale inventory");
+    assert.match(route, /explicitlyNeedsSignIn \|\| unsupported[\s\S]*?typeof state\.authenticated === "boolean"/, "explicit auth failures win over stale signed-in inventory");
     assert.match(route, /requestObject\(decoded, \["engine", "scope"\]\)/, "probe requests reject primitives and unknown fields");
     assert.match(route, /apiSwitchRateLimit\(req, ctx\.tenantId, ctx\.authUserId\)/, "paid provider tests are limited by authenticated user and client IP");
     assert.match(panel, /addEventListener\("oasis:agent-configs-changed"/, "connecting a key below refreshes the engine panel immediately");
@@ -108,6 +111,7 @@ async function main() {
     ownerName: "CC",
     ownedByViewer: true,
     workspaceEligible: true,
+    agentClaimEligible: true,
     os: "windows",
     lastSeenAt: "2026-10-12T06:00:00.000Z",
     approved: true,
@@ -202,6 +206,22 @@ async function main() {
     assert.match(client.repairForCode("engine_not_found", "CCPC") ?? "", /Start Ollama or LM Studio/);
     assert.match(client.repairForCode("not_authenticated", "CCPC", "claude") ?? "", /claude\n\/login/);
     assert.match(client.repairForCode("not_authenticated", "CCPC", "gemini") ?? "", /Google API key/);
+    assert.match(client.repairForCode("cli_auth_required", "CCPC", "codex") ?? "", /codex login/);
+    assert.match(client.repairForCode("auth_process_failed", "CCPC", "codex") ?? "", /codex login/);
+    assert.match(client.repairForCode("auth_timeout", "Mac", "claude") ?? "", /claude\n\/login/);
+    assert.match(client.repairForCode("account_unsupported", "Mac", "gemini") ?? "", /Google API key/);
+    assert.match(client.repairForCode("cli_not_found", "CCPC", "codex") ?? "", /@openai\/codex/);
+    assert.match(client.repairForCode("cli_timeout", "CCPC", "codex") ?? "", /did not finish in time/);
+    const nonzeroRepair = client.repairForCode("cli_nonzero_exit", "CCPC", "codex", "Windows") ?? "";
+    assert.match(nonzeroRepair, /restart the connector/i);
+    assert.doesNotMatch(nonzeroRepair, /codex login/, "a generic non-zero probe is not proof that authentication failed");
+    assert.match(client.repairForCode("pairing_approval_lost", "CCPC") ?? "", /Approve the computer again/);
+    assert.match(client.repairForCode("pairing_revoked", "CCPC") ?? "", /Pair the computer again/);
+    assert.match(client.repairForCode("requester_seat_inactive", "CCPC") ?? "", /workspace owner or admin/);
+    for (const code of runtimeTypes.RUNTIME_FAILURE_CODES) {
+      const provider = code === "account_unsupported" ? "gemini" : "codex";
+      assert.ok(client.repairForCode(code, "CCPC", provider, "Windows"), `missing repair for runtime terminal code: ${code}`);
+    }
     assert.equal(client.describeRuntime({ ...DEVICE, approved: false }, "codex").label, "Approval needed");
     assert.equal(client.describeRuntime({ ...DEVICE, online: false }, "codex").label, "Offline");
     assert.equal(client.describeRuntime({ ...DEVICE, busy: true }, "codex").label, "Busy");
@@ -219,6 +239,29 @@ async function main() {
       ).label,
       "Sign-in needed",
     );
+    const staleSignedInInventory = client.describeRuntime(
+      {
+        ...DEVICE,
+        runtimes: {
+          ...DEVICE.runtimes,
+          codex: { ...DEVICE.runtimes.codex, signedIn: true, executionReady: false, code: "cli_auth_required" },
+        },
+      },
+      "codex",
+    );
+    assert.equal(staleSignedInInventory.label, "Sign-in needed", "an explicit auth failure wins over stale signed-in inventory");
+    assert.match(staleSignedInInventory.repair ?? "", /codex login/);
+    const staleInstalledInventory = client.describeRuntime(
+      {
+        ...DEVICE,
+        runtimes: {
+          ...DEVICE.runtimes,
+          codex: { ...DEVICE.runtimes.codex, installed: true, executionReady: false, code: "not_installed" },
+        },
+      },
+      "codex",
+    );
+    assert.equal(staleInstalledInventory.label, "Not installed", "an explicit missing runtime wins over stale installed inventory");
     const unidentifiedClaude = client.describeRuntime(
       {
         ...DEVICE,

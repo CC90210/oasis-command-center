@@ -575,6 +575,9 @@ async function main() {
     assert.match(source, /readLatestRuntimeProbeReceipts/);
     assert.match(source, /readEffectiveAgentEngineWithProof/);
     assert.match(source, /savedRuntimeProbeProofReady\(savedProbeProof, savedRoute\.pairingId, runtimeEngine, receipt\)/);
+    assert.match(source, /select\("id, user_id, last_seen_at, claim_enabled_at, paired_via, scope, claim_protocols, claim_runtime_state"\)/);
+    assert.match(source, /pairingScope === "daemon"/);
+    assert.match(source, /jsonError\(409, "agents_owner_only"\)/);
     assert.match(source, /cancelHarnessJob/);
     assert.match(source, /if \(!selected \|\| typeof selected !== "object" \|\| Array\.isArray\(selected\)\) return \{ ok: false, error: "model_not_found" \}/);
     assert.ok(
@@ -584,6 +587,10 @@ async function main() {
     assert.ok(
       source.indexOf("const receipts = await readLatestRuntimeProbeReceipts") < source.indexOf("const queued = await enqueueHarnessJob"),
       "the saved version-bound probe gate must run before enqueue",
+    );
+    assert.ok(
+      source.indexOf('pairingScope === "daemon"') < source.indexOf("const queued = await enqueueHarnessJob"),
+      "a daemon pairing must pass the agents-owner gate before enqueue",
     );
     assert.doesNotMatch(source, /fetch\(`\$\{auth\.target\.baseUrl\}/);
     assert.doesNotMatch(source, /const useExactPairingPull/);

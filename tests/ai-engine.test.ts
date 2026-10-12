@@ -214,6 +214,15 @@ async function main() {
   `);
   await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__192_ai_usage.sql"), "utf8"));
   await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__191_agent_turn_outcomes.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__207_department_chat_runs.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__213_dept_runs_computer.sql"), "utf8"));
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_policy TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_reason TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_provider TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_model TEXT");
   // O1: authorizeBridgeRequest now also gates on the workspace's agents
   // owner (lib/agents-owner.ts). CC must be named here or every "CC reaches
   // his paired computer" check below would fail on the NEW gate instead of
@@ -643,15 +652,45 @@ async function main() {
     assert.ok(threw.ok && threw.turn.engine.kind === "api" && threw.turn.engine.fellBackFrom === "Codex on your paired computer");
   });
 
-  await check("an API turn that is the RULE is not a fallback and never says 'could not be reached': a Slack mention, a teammate the gate refuses", async () => {
-    // Slack never passes a resolver; bridgeCallerForSession answers null for a teammate it does not admit.
-    for (const bridge of [null, async () => null]) {
-      const prepared = await oasisTurn("sales", "sdr", bridge);
-      assert.ok(prepared.ok, JSON.stringify(prepared));
-      if (!prepared.ok || prepared.turn.engine.kind !== "api") return assert.fail("not an API turn");
-      assert.equal(prepared.turn.engine.fellBackFrom, null, "by design is not a fault");
-      assert.equal(prepared.turn.engine.notUsedFor, "Codex on your paired computer");
-    }
+  await check("Slack-style synchronous turns fail closed on a saved computer engine unless workspace_api fallback was explicitly saved", async () => {
+    let bridgeAsked = 0;
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex", pairingId: "pair-ccpc", fallback: "none" });
+    const refused = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: USERS.cc.email },
+      platformFallback: null,
+      revealModel: false,
+      userId: null,
+      bridge: async () => {
+        bridgeAsked += 1;
+        return ccCaller;
+      },
+      failClosedWithoutComputerDispatch: true,
+    });
+    assert.ok(!refused.ok && refused.error === "engine_dispatch_unavailable", JSON.stringify(refused));
+    assert.match(String(!refused.ok && refused.extra?.hint), /no API credits were used/i);
+    assert.equal(bridgeAsked, 0, "the legacy shared bridge was never asked instead of the exact saved pairing");
+
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex", pairingId: "pair-ccpc", fallback: "workspace_api" });
+    const fallback = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: USERS.cc.email },
+      platformFallback: null,
+      revealModel: false,
+      userId: null,
+      failClosedWithoutComputerDispatch: true,
+    });
+    assert.ok(fallback.ok, JSON.stringify(fallback));
+    if (!fallback.ok || fallback.turn.engine.kind !== "api") return assert.fail("not an explicit API fallback");
+    assert.equal(fallback.turn.engine.fellBackFrom, "Codex on your paired computer");
+    assert.equal(fallback.turn.engine.spend, "api_credits");
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
   });
 
   await check("the harness path is OASIS-only: a client workspace on an app engine is answered by its API account, even with a reachable bridge", async () => {
@@ -668,20 +707,59 @@ async function main() {
     assert.equal(asked, 0, "the bridge is not even asked for a client workspace");
   });
 
-  await check("the chat route tells the owner what answered and whose credits it spent (agent event)", async () => {
+  await check("the legacy agent chat route never bypasses an exact computer; explicit fallback is visible in reply metadata, reply text and audit", async () => {
     await login(USERS.alpha);
+    await db.execute({
+      sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, 'test', ?)",
+      args: [ALPHA, USERS.alpha.id, stamp],
+    });
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings
+        (id, tenant_id, user_id, label, bridge_token_hash, last_seen_at, created_at, scope, paired_via,
+         claim_enabled_at, claim_enabled_by, claim_state_at, claim_capacity, claim_protocols, claim_runtime_state)
+        VALUES ('pair-alpha', ?, ?, 'Alpha laptop', 'hash-alpha', ?, ?, 'connector', 'pair_code', ?, ?, ?, 1, ?, ?)`,
+      args: [
+        ALPHA,
+        USERS.alpha.id,
+        stamp,
+        stamp,
+        stamp,
+        USERS.alpha.id,
+        stamp,
+        JSON.stringify(["runtime_action_v1", "department_task_v2", "coding_harness_task_v1"]),
+        JSON.stringify({ claude: { installed: true, authenticated: true, state: "ready" } }),
+      ],
+    });
+    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "claude", pairingId: "pair-alpha", fallback: "none" });
+    sent = [];
+    const refused = await jsonOf(await chat.POST(req("/api/agents/chat", "POST", { agent_slug: "sdr", department: "sales", messages: [{ role: "user", content: "hi" }] })));
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    assert.equal(refused.body.error, "computer_offline");
+    assert.equal(sent.length, 0, "no paired computer and no hosted provider was contacted");
+
+    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "claude", pairingId: "pair-alpha", fallback: "workspace_api" });
+    await db.execute("DELETE FROM ai_usage_events");
     answer = (s) => (s.url.includes("anthropic.com") ? anthropicOk("Hi.") : new Response("x", { status: 599 }));
+    sent = [];
     const res = await chat.POST(req("/api/agents/chat", "POST", { agent_slug: "sdr", department: "sales", messages: [{ role: "user", content: "hi" }] }));
     assert.equal(res.status, 200);
     const evs = parseSse(await res.text());
-    const agentEv = evs.find((e) => e.event === "agent");
+    const agentEv = evs.find((e) => e.event === "ev" && e.data.kind === "agent");
     assert.ok(agentEv, JSON.stringify(evs));
-    assert.equal(agentEv.data.spend, "api_credits");
-    assert.match(String(agentEv.data.runs_on), /\(API\)$/);
-    assert.equal(agentEv.data.fell_back_from, undefined, "a client workspace has no harness yet: the app was never going to answer, so nothing 'could not be reached'");
-    assert.equal(agentEv.data.engine_not_used, "Claude Code on your paired computer");
-    assert.equal(agentEv.data.model, undefined, "the model id stays operator detail");
+    const agentData = agentEv.data.data as Record<string, unknown>;
+    assert.equal(agentData.spend, "api_credits");
+    assert.match(String(agentData.runs_on), /\(API\)$/);
+    assert.equal(agentData.fell_back_from, "Claude Code on your paired computer");
+    assert.equal(agentData.engine_not_used, undefined);
+    assert.equal(agentData.model, undefined, "the model id stays operator detail");
+    const finalText = String(evs.find((event) => event.event === "end")?.data.final_text ?? "");
+    assert.match(finalText, /^Workspace API fallback - Claude Code on your paired computer could not answer\./);
+    assert.match(finalText, /This reply uses workspace API credits/);
+    const usage = (await db.execute("SELECT fallback_reason FROM ai_usage_events ORDER BY occurred_at DESC LIMIT 1")).rows[0];
+    assert.equal(usage?.fallback_reason, "engine_unreachable:claude");
     await store.saveAgentEngine(ALPHA, { kind: "api" });
+    await db.execute("DELETE FROM bridge_pairings WHERE id = 'pair-alpha'");
+    await db.execute({ sql: "DELETE FROM workspace_agents_owner WHERE tenant_id = ?", args: [ALPHA] });
   });
 
   await check("bridge errors become two plain failure codes, never raw text", async () => {
@@ -770,7 +848,7 @@ async function main() {
     await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
   });
 
-  await check("FALSE-POSITIVE GUARD: a Slack mention, a teammate the gate refuses, and a client workspace on an app engine record NO fallback", async () => {
+  await check("legacy bridge compatibility calls still distinguish by-design API turns from real fallback", async () => {
     await db.execute("DELETE FROM ai_usage_events");
     for (const bridge of [null, async () => null]) {
       const prepared = await oasisTurn("sales", "sdr", bridge);
@@ -1125,6 +1203,20 @@ async function main() {
     }
   });
 
+  await check("the chat header, readiness and /model command use only the canonical AI Brain response", () => {
+    const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
+    assert.match(widget, /const \[engineAccount, setEngineAccount\] = useState<EngineAccountState \| null>\(null\)/);
+    assert.match(widget, /agentsEngine\?\.kind === "api"[\s\S]{0,180}engineAccount\.provider === agentsEngine\.provider/);
+    assert.match(widget, /engineAccount\.providerLabel[\s\S]{0,120}engineAccount\.modelLabel[\s\S]{0,80}workspace API/);
+    assert.doesNotMatch(widget, /cfg\?\.has_key|cfg\?\.provider|cfg\?\.model|platformKey|modelPickerProvider/);
+    assert.match(widget, /case "model": \{[\s\S]{0,300}router\.push\(ENGINE_SETTINGS_HREF\)/);
+    assert.doesNotMatch(widget, /case "model": \{[\s\S]{0,1500}fetch\("\/api\/agent-config"/);
+    assert.match(widget, /className=\{`hover:underline underline-offset-2 \$\{desktopBridgeActive/);
+    const providerCard = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
+    assert.doesNotMatch(providerCard, /whenever the paired computer can(?:'|&apos;)t be reached|answers only when your paired/);
+    assert.match(providerCard, /Workspace API fallback is explicitly enabled/);
+  });
+
   await check("Connect / Reconnect: auth is queued on one exact pairing with the vendor's real command", async () => {
     assert.equal(cliStatus.CLI_SIGN_IN.claude.command, "claude");
     assert.match(cliStatus.CLI_SIGN_IN.claude.instructions, /then enter `\/login`/);
@@ -1154,8 +1246,9 @@ async function main() {
     const timeout = Object.assign(new Error("signal timed out"), { name: "TimeoutError" });
     assert.equal(readiness.agentConfigReadFailure(timeout), "Couldn't read your agent settings: the server didn't answer within 15 seconds. Refresh to try again.");
     const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
-    assert.match(widget, /fetch\("\/api\/agent-config", \{ signal: AbortSignal\.timeout\(CONFIG_READ_TIMEOUT_MS\) \}\)/);
-    assert.match(widget, /if \(configsError\) \{/);
+    assert.match(widget, /fetch\("\/api\/ai\/engine", \{ cache: "no-store", signal: AbortSignal\.timeout\(15_000\) \}\)/);
+    assert.match(widget, /if \(engineError\) \{/);
+    assert.doesNotMatch(widget, /fetch\("\/api\/agent-config"/, "legacy per-agent rows must not gate canonical engine readiness");
     const header = await import("../components/admin/RunnerStatusHeader");
     const hung = await header.readRunner("/api/bridge/warm-status", async () => {
       throw timeout;
@@ -1199,6 +1292,7 @@ async function main() {
       approved: true,
       online: true,
       busy: false,
+      agentClaimEligible: true,
       protocols: ["department_task_v2", "runtime_action_v1", "coding_harness_task_v1"],
       runtimes: {
         claude: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "2.1.270", lastTestedAt: null, code: null },

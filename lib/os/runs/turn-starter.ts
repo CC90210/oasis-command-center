@@ -27,8 +27,8 @@ import type { Client } from "@libsql/client";
 import type { ExecutorDeps, TurnStart } from "./executor";
 import { validateQueuedFallbackAuthorization, type RunSession } from "./session";
 import type { Run, RunApiSnapshot } from "./store";
-import type { ChatMessage } from "@/lib/providers";
-import { isApiEngineProvider, isCliEngine, isLocalModelName } from "@/lib/ai/agent-engine";
+import type { ChatMessage, StreamEvent } from "@/lib/providers";
+import { isApiEngineProvider, isCliEngine, isLocalModelName, workspaceApiFallbackReplyLabel } from "@/lib/ai/agent-engine";
 import { isWorkspaceApiFallbackReason } from "./types";
 
 type QueuedSessionResult = { ok: true; session: RunSession } | { ok: false; error: string };
@@ -38,6 +38,14 @@ function storedApiSnapshot(run: Run): RunApiSnapshot | null {
   return isApiEngineProvider(run.runtimeApiProvider) && model
     ? { provider: run.runtimeApiProvider, model }
     : null;
+}
+
+async function* withWorkspaceFallbackLabel(
+  stream: AsyncGenerator<StreamEvent>,
+  fellBackFrom: string | null,
+): AsyncGenerator<StreamEvent> {
+  if (fellBackFrom) yield { type: "delta", text: workspaceApiFallbackReplyLabel(fellBackFrom) };
+  yield* stream;
 }
 
 /**
@@ -213,8 +221,9 @@ export function turnStarterFor(session: RunSession) {
           chatMode: run.chatMode,
           maxTokens: DEPARTMENT_REPLY_MAX_TOKENS,
           plainStream: (dt, msgs, maxTokens) => streamAgentTurn({ ...t, system: dt.system }, msgs, maxTokens, signal),
-        })
+      })
       : null;
+    const answerStream = desk ? desk.stream(messages) : streamAgentTurn(t, messages, DEPARTMENT_REPLY_MAX_TOKENS, signal);
     return {
       ok: true,
       agent: {
@@ -228,7 +237,13 @@ export function turnStarterFor(session: RunSession) {
       channelKey: t.channelKey,
       agentSlug: t.agentSlug,
       failureModel: () => (runSession.canManageAi || t.revealModel ? modelFactsForCopy(t.provider, t.model) : null),
-      stream: desk ? desk.stream(messages) : streamAgentTurn(t, messages, DEPARTMENT_REPLY_MAX_TOKENS, signal),
+      // Disclosure is part of the durable reply, not optional UI metadata:
+      // every browser, Slack approval and replay sees that API credits were
+      // spent because the exact selected computer could not answer.
+      stream: withWorkspaceFallbackLabel(
+        answerStream,
+        t.engine.kind === "api" ? t.engine.fellBackFrom : null,
+      ),
     };
   };
 }

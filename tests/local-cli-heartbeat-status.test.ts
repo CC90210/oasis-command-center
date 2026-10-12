@@ -133,6 +133,8 @@ const deviceFromHeartbeat = (executionReady: boolean): EngineDevice => ({
   label: "CCPC (Windows)",
   ownerName: "CC",
   ownedByViewer: true,
+  workspaceEligible: true,
+  agentClaimEligible: true,
   os: "windows",
   lastSeenAt: "2026-08-25T16:29:00.000Z",
   approved: true,

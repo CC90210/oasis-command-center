@@ -30,7 +30,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import {
   ExternalLink,
   Check,
@@ -207,8 +206,8 @@ export function ProviderAccountsCard({
                 names (it used to promise "Claude-Code-class capability" to
                 client owners whose chats have no tools). */}
             <p className="text-xs text-fg-muted mt-1 leading-relaxed">
-              Paste a key once. Your teammates answer every department chat
-              and Slack mention with the team-wide account.
+              Paste a key once. It is available when API key is selected, or
+              when an explicit Workspace API fallback runs.
             </p>
           </div>
         </div>
@@ -319,8 +318,8 @@ export function ProviderAccountsCard({
               {connected && (
                 <p className="text-[11px] text-fg-muted leading-relaxed mb-3">
                   {accountIsTheEngine
-                    ? "Every department chat and Slack mention uses this key."
-                    : "Slack mentions, and your departments whenever the paired computer can't be reached, use this key."}
+                    ? "This workspace API account is selected as the workspace default. A member's My setup can still override it."
+                    : "This workspace API account is connected. It is used only when API key is selected or Workspace API fallback is explicitly enabled."}
                 </p>
               )}
               {personalOnly && (
@@ -711,7 +710,7 @@ export function ConnectProviderDialog({
             <h2 className="text-base font-bold text-fg">Connect {reg.label}</h2>
             <p className="text-xs text-fg-muted mt-0.5">
               {scope === "tenant"
-                ? "Every department chat and Slack mention will use this key. We test it with one short message before saving."
+                ? "Available when API key is selected, or when an explicit Workspace API fallback runs. We test it with one short message before saving."
                 : "Saved for you only: department chats and Slack mentions won't use it. We test it with one short message before saving."}
             </p>
           </div>
@@ -813,7 +812,7 @@ export function ConnectProviderDialog({
               ))}
             </select>
             <div className="text-[11px] text-fg-dim mt-1.5">
-              Every department uses this model. You can switch it later here, without pasting the key again.
+              This account uses this model when selected. You can switch it later here, without pasting the key again.
             </div>
           </div>
 
@@ -1021,7 +1020,7 @@ export function DepartmentBrainPanel({
   brain: DepartmentBrain;
   canManageTeam: boolean;
   onSwitched: () => void;
-  /** false: an app on the paired computer powers your agents; this account is its fallback. */
+  /** false: another engine is selected; the account remains connected but is not implicitly a fallback. */
   accountIsTheEngine?: boolean;
 }) {
   const saved = brain.savedModel ?? brain.model;
@@ -1037,7 +1036,7 @@ export function DepartmentBrainPanel({
     const r = await switchWorkspaceModel(model);
     setBusy(false);
     if (r.ok) {
-      setResult({ ok: true, text: `Your departments now use ${r.label}.` });
+      setResult({ ok: true, text: `Workspace API account model updated to ${r.label}.` });
       onSwitched();
     } else {
       setResult({ ok: false, text: r.message });
@@ -1049,12 +1048,13 @@ export function DepartmentBrainPanel({
       <div className="text-sm text-fg">
         {accountIsTheEngine ? (
           <>
-            Your departments use <span className="font-bold">{brainLine(brain)}</span>.
+            The workspace default API account is <span className="font-bold">{brainLine(brain)}</span>. A member&apos;s My
+            setup can still override it.
           </>
         ) : (
           <>
-            Your AI account is <span className="font-bold">{brainLine(brain)}</span>. It answers only when your paired
-            computer can&apos;t be reached (What powers your agents, above).
+            Your connected workspace API account is <span className="font-bold">{brainLine(brain)}</span>. It is used only
+            when API key is selected or Workspace API fallback is explicitly enabled.
           </>
         )}
       </div>

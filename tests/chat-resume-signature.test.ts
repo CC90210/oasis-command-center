@@ -28,7 +28,7 @@
  * Run: node --conditions=react-server --import tsx tests/chat-resume-signature.test.ts
  */
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -333,7 +333,8 @@ async function main() {
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
       provider TEXT, model TEXT, encrypted_api_key TEXT, enabled INTEGER, system_prompt_override TEXT,
-      display_name_override TEXT, last_used_at TEXT, updated_at TEXT);
+      display_name_override TEXT, last_used_at TEXT, updated_at TEXT,
+      computer_pairing_id TEXT, fallback_policy TEXT);
     CREATE TABLE chat_sessions (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT NOT NULL,
       user_id TEXT, agent_key TEXT, provider TEXT, model TEXT, title TEXT,
       total_input_tokens INTEGER NOT NULL DEFAULT 0, total_output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -366,6 +367,11 @@ async function main() {
       profile("p-other-owner", USERS.otherOwner, OTHER),
       config("c-oasis", OASIS, "sk-ant-oasis-0001"),
       config("c-other", OTHER, "sk-ant-other-0001"),
+      // These checks exercise the cloud/resume lane, so select the matching
+      // canonical API provider explicitly instead of inheriting OASIS's
+      // subscription-app rollout default.
+      { sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES ('e-oasis', ?, NULL, '__engine__', 'api', 'anthropic', NULL, 1, ?)", args: [OASIS, stamp] },
+      { sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES ('e-other', ?, NULL, '__engine__', 'api', 'anthropic', NULL, 1, ?)", args: [OTHER, stamp] },
       // OASIS's paired machine is online, so its chat is offered the bridge tools (send_email among them).
       { sql: "INSERT INTO bridge_pairings (id, tenant_id, last_seen_at) VALUES ('bp-oasis', ?, ?)", args: [OASIS, new Date().toISOString()] },
     ],
@@ -376,8 +382,12 @@ async function main() {
   const resumeRoute = await import("../app/api/chat/resume/route");
   const { NextRequest } = await import("next/server");
   /** The browser's POST: the body is JSON.stringify'd, as ChatWidget does. */
-  const post = (path: string, body: Record<string, unknown>) =>
-    new NextRequest(`http://localhost${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const post = (path: string, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
+    new NextRequest(`http://localhost${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
   const count = async (sql: string, args: (string | number)[] = []) => Number((await db.execute({ sql, args })).rows[0]?.n ?? 0);
   const session = async (id: string) =>
     (await db.execute({ sql: "SELECT total_input_tokens, total_output_tokens, estimated_cost_usd, updated_at FROM chat_sessions WHERE id = ?", args: [id] })).rows[0];
@@ -391,10 +401,16 @@ async function main() {
   };
 
   /** One /api/chat turn that pauses on send_email; waits for its writes (the key's last_used_at is the last one). */
-  const pausedTurn = async (text: string, extra: Record<string, unknown> = {}) => {
+  const pausedTurn = async (
+    text: string,
+    extra: Record<string, unknown> = {},
+    headers: Record<string, string> = {},
+  ) => {
     await db.execute("UPDATE agent_model_config SET last_used_at = NULL WHERE id = 'c-oasis'");
     provider = () => anthropicToolUse("tu_send", "send_email", 1000, 200);
-    const res = await chatRoute.POST(post("/api/chat", { agent_key: "bravo", cloud_tools: "tools", messages: [{ role: "user", content: text }], ...extra }));
+    const res = await chatRoute.POST(
+      post("/api/chat", { agent_key: "bravo", cloud_tools: "tools", messages: [{ role: "user", content: text }], ...extra }, headers),
+    );
     const body = await res.text();
     assert.equal(res.status, 200, body);
     for (let i = 0; i < 200; i += 1) {
@@ -507,6 +523,66 @@ async function main() {
     assert.deepEqual(done.events.find((e) => e.event === "usage")?.data, { input_tokens: 1050, output_tokens: 205 });
     // 1000/200 at the first pause, +30/3 at the second, +20/2 at the end.
     assertTotals(await totals(paused.sessionId), [1050, 205, 0.006 + 0.000135 + 0.00009]);
+  });
+
+  await check("a second pause preserves the exact workspace-API fallback grant", async () => {
+    await login(USERS.oasisOwner);
+    const fallbackSessionId = randomUUID();
+    const dispatch = {
+      mode: "workspace_api" as const,
+      pairingId: "bp-oasis",
+      engineKind: "subscription" as const,
+      engineName: "codex",
+    };
+    await db.batch(
+      [
+        {
+          sql: "UPDATE agent_model_config SET provider = 'cli', model = 'codex', computer_pairing_id = 'bp-oasis', fallback_policy = 'workspace_api' WHERE id = 'e-oasis'",
+          args: [],
+        },
+        {
+          sql: "INSERT INTO chat_sessions (id, tenant_id, user_id, agent_key, provider, model, title) VALUES (?, ?, ?, 'bravo', 'anthropic', 'claude-sonnet-4-6', 'Fallback chain')",
+          args: [fallbackSessionId, OASIS, USERS.oasisOwner.id],
+        },
+      ],
+      "write",
+    );
+    try {
+      const state = {
+        ...overTheWire(loopState()),
+        sessionId: fallbackSessionId,
+        engineDispatch: dispatch,
+      };
+      const sig = signResumeState(state, binding);
+      assert.ok(sig, "fallback resume state was not signed");
+
+      provider = () => anthropicToolUse("tu_fallback_2", "send_email", 30, 3);
+      const pausedAgain = await resumeAs(
+        { resume_state: state, resume_signature: sig, tool_use_id: "tu_1" },
+        fallbackSessionId,
+      );
+      assert.equal(pausedAgain.status, 200, pausedAgain.text);
+      const pending = pausedAgain.events.find((e) => e.event === "tool_use_pending")?.data as
+        | { tool_use_id: string; resume_state: Record<string, unknown>; resume_signature: string }
+        | undefined;
+      assert.ok(pending, JSON.stringify(pausedAgain.events));
+      assert.deepEqual(pending.resume_state.engineDispatch, dispatch);
+
+      provider = () => anthropicOk("Fallback chain complete.", 20, 2);
+      const done = await resumeAs(
+        {
+          resume_state: pending.resume_state,
+          resume_signature: pending.resume_signature,
+          tool_use_id: pending.tool_use_id,
+        },
+        fallbackSessionId,
+      );
+      assert.equal(done.status, 200, done.text);
+      assert.ok(done.events.some((e) => e.event === "delta" && e.data.text === "Fallback chain complete."), JSON.stringify(done.events));
+      assert.ok(!done.events.some((e) => e.event === "error"), JSON.stringify(done.events));
+    } finally {
+      await db.execute("UPDATE agent_model_config SET provider = 'api', model = 'anthropic', computer_pairing_id = NULL, fallback_policy = NULL WHERE id = 'e-oasis'");
+    }
   });
 
   await check("the resumed half is filed under the session the state names, never under a session id from the body", async () => {
