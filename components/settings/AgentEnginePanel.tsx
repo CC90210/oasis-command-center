@@ -35,6 +35,7 @@ import {
   type RuntimeJob,
 } from "@/components/settings/agent-engine-client";
 import { startCliSignIn } from "@/components/settings/LocalCliProvidersCard";
+import { OPEN_AI_PROVIDER_ACCOUNT_EVENT } from "@/components/settings/ProviderAccountsCard";
 import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
 
 const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "gemini"];
@@ -227,7 +228,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const apiConnected =
     draft.mode === "api" && (state.savedProviders.includes(draft.provider) || state.account?.provider === draft.provider);
   const apiProviderOptions = state.canManage
-    ? API_PROVIDERS.filter((provider) => state.account?.provider === provider || state.savedProviders.includes(provider))
+    ? API_PROVIDERS
     : state.account
       ? [state.account.provider]
       : [];
@@ -242,6 +243,10 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     setProbeReceipt(null);
     setJob(null);
     setNotice(null);
+  }
+
+  function openProviderAccount(provider: ApiEngineProvider) {
+    window.dispatchEvent(new CustomEvent(OPEN_AI_PROVIDER_ACCOUNT_EVENT, { detail: { provider } }));
   }
 
   function changeScope(next: EngineScope) {
@@ -534,6 +539,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                   ? describeRuntime(selectedDevice, provider)
                   : null;
               const unsupported = status?.label === "Unsupported";
+              const subscriptionLimited = runtime?.code === "rate_limited";
               const selected = draft.provider === provider;
               return (
                 <div key={provider} className={`rounded-lg border p-3 ${selected ? "border-accent/60 bg-accent-soft" : "border-hairline bg-bg-deep/40"}`}>
@@ -554,6 +560,8 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       {provider === "gemini" ? (
                         <span className="text-[11px] text-fg-muted">Managed Gemini CLI account detected. Test it here; sign-in is managed on the computer.</span>
+                      ) : subscriptionLimited ? (
+                        <span className="text-[11px] text-fg-muted">Still signed in. Wait for the subscription usage window to reset, then Test again; no reconnect is needed.</span>
                       ) : selectedDevice.ownedByViewer ? (
                         <button
                           type="button"
@@ -647,14 +655,38 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
               </option>
             )}
             {apiProviderOptions.map((provider) => (
-              <option key={provider} value={provider}>{PROVIDER_LABEL[provider]}{state.account?.provider === provider ? " · active" : " · saved"}</option>
+              <option key={provider} value={provider}>
+                {PROVIDER_LABEL[provider]}
+                {state.account?.provider === provider
+                  ? " · active key"
+                  : state.savedProviders.includes(provider)
+                    ? " · saved key"
+                    : " · connect key"}
+              </option>
             ))}
           </select>
-          <p className="text-[11px] text-fg-muted">
-            {state.canManage
-              ? "Connect and test provider accounts below. Choosing a saved key makes it the workspace account when you press Use."
-              : "The workspace owner manages this API account. You can use the active provider or choose a computer-backed setup."}
-          </p>
+          {state.canManage ? (
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
+              <span>
+                {apiConnected
+                  ? state.account?.provider === draft.provider
+                    ? "A workspace key is saved for this provider. Test or replace it at any time."
+                    : "A saved key is ready to be tested before OASIS switches the workspace account."
+                  : "No workspace key is saved for this provider yet."}
+              </span>
+              <button
+                type="button"
+                onClick={() => openProviderAccount(draft.provider)}
+                className="font-semibold text-accent underline underline-offset-2 hover:text-accent-bright focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                {apiConnected ? `Replace ${PROVIDER_LABEL[draft.provider]} key` : `Connect ${PROVIDER_LABEL[draft.provider]} key`}
+              </button>
+            </div>
+          ) : (
+            <p className="text-[11px] text-fg-muted">
+              The workspace owner manages this API account. You can use the active provider or choose a computer-backed setup.
+            </p>
+          )}
         </div>
       )}
 

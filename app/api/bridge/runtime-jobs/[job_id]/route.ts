@@ -37,6 +37,7 @@ function publicMessage(job: RuntimeJobRow, status: PublicStatus): string {
       cli_not_found: "That AI app is not installed on the selected computer.",
       cli_timeout: "The selected AI app did not answer in time.",
       manual_auth_required: "Continue sign-in on the selected computer.",
+      runtime_rate_limited: "The selected app is signed in, but its subscription limit has been reached.",
       runtime_action_failed: "The selected computer could not finish the runtime action.",
       runtime_engine_not_allowed: "That runtime is not allowed for this action.",
       runtime_probe_failed: "The selected runtime did not answer the test.",

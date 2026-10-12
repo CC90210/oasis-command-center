@@ -1024,6 +1024,32 @@ async function main() {
     assert.equal(publicFailed.body.job.errorCode, "account_identity_unavailable");
     assert.match(publicFailed.body.job.message, /cannot identify/i);
 
+    const rateLimited = await runtime.enqueueRuntimeJob({
+      tenantId: TENANT,
+      userId: USER,
+      pairingId: pairing.id,
+      action: "probe",
+      engine: { kind: "cli", name: "claude" },
+    });
+    assert.equal(rateLimited.ok, true);
+    const rateLimitedClaim = await json(await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", pairing.token, {
+      protocol: "runtime_action_v1",
+      claim_id: "rate-limited-probe-claim",
+      capabilities: [{ action: "probe", engine: { kind: "cli", name: "claude" } }],
+      wait_ms: 0,
+    })));
+    const rateLimitedJobId = rateLimitedClaim.body.job.job_id as string;
+    const rateLimitedLeaseId = rateLimitedClaim.body.job.lease_id as string;
+    const rateLimitedCtx = { params: Promise.resolve({ job_id: rateLimitedJobId }) };
+    const rateLimitedFailure = await json(await failRoute.POST(machineRequest(`/api/bridge/runtime-jobs/${rateLimitedJobId}/fail`, pairing.token, {
+      lease_id: rateLimitedLeaseId,
+      error: { code: "runtime_rate_limited", retryable: true },
+    }), rateLimitedCtx));
+    assert.equal(rateLimitedFailure.status, 200);
+    const publicRateLimited = await json(await statusRoute.GET(new NextRequest(`https://oasisai.work/api/bridge/runtime-jobs/${rateLimitedJobId}`), rateLimitedCtx));
+    assert.equal(publicRateLimited.body.job.errorCode, "runtime_rate_limited");
+    assert.match(publicRateLimited.body.job.message, /signed in.*subscription limit/i);
+
     const expiring = await runtime.enqueueRuntimeJob({
       tenantId: TENANT,
       userId: USER,

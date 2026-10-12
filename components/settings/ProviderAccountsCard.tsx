@@ -83,6 +83,7 @@ type Props = {
 // — it has no "account" to connect; the local-model path is wired through
 // the bridge + AgentConfigEditor and shouldn't pretend it's an account.
 const CARD_PROVIDERS: Provider[] = ["anthropic", "openrouter", "openai", "google"];
+export const OPEN_AI_PROVIDER_ACCOUNT_EVENT = "oasis:open-ai-provider-account";
 
 /** This page's own connects and removals, and the server answer they were made on. */
 type Overlay = { on: Set<string> | null | undefined; changes: ReadonlyMap<string, boolean> };
@@ -146,6 +147,17 @@ export function ProviderAccountsCard({
     latestServices.current = initialServices;
     latestPersonal.current = personalServices;
   });
+  useLayoutEffect(() => {
+    if (typeof window === "undefined") return;
+    const openProvider = (event: Event) => {
+      const provider = (event as CustomEvent<{ provider?: unknown }>).detail?.provider;
+      if (typeof provider === "string" && CARD_PROVIDERS.includes(provider as Provider)) {
+        setActiveProvider(provider as Provider);
+      }
+    };
+    window.addEventListener(OPEN_AI_PROVIDER_ACCOUNT_EVENT, openProvider);
+    return () => window.removeEventListener(OPEN_AI_PROVIDER_ACCOUNT_EVENT, openProvider);
+  }, []);
   const change = (scope: "tenant" | "user", svc: string, now: boolean | null) => {
     const latest = scope === "user" ? latestPersonal.current : latestServices.current;
     const apply = (prev: Overlay): Overlay => {

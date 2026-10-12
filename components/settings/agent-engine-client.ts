@@ -597,6 +597,13 @@ export function describeRuntime(
   if (state.unsupported || unsupportedCodes.has(code ?? "") || (provider === "gemini" && state.installed && !state.signedIn)) {
     return { label: "Unsupported", verified: false, repair: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead." };
   }
+  if (code === "rate_limited") {
+    return {
+      label: "Subscription limit reached",
+      verified: false,
+      repair: `${name} is still signed in on ${target.label}. Wait for the provider's usage window to reset, then Test again; reconnecting will not help.`,
+    };
+  }
   if (code === "account_identity_unavailable" && provider === "claude") {
     return {
       label: "Sign-in needed",
@@ -700,6 +707,8 @@ export function repairForCode(
       return provider
         ? `On ${deviceLabel ?? "the selected computer"}, run: ${CLI_LOGIN[provider]}`
         : `Sign in to the selected app${where}, then Test again.`;
+    case "runtime_rate_limited":
+      return `The selected app is still signed in${where}, but its subscription usage limit is reached. Wait for the provider's usage window to reset, then Test again; reconnecting will not help.`;
     case "account_unsupported":
     case "unsupported_personal_sign_in":
       return "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.";

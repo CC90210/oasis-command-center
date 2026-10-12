@@ -42,7 +42,12 @@ async function main() {
     }
     assert.doesNotMatch(panel, />\s*(?:An app on your paired computer|An AI account \(fallback\)|A local model)\s*</);
     assert.match(panel, /fallback/i, "the no-silent-fallback control is visible in the one panel");
-    assert.match(panel, /state\.canManage\s*\?\s*API_PROVIDERS\.filter/, "only managers can choose among saved API providers");
+    assert.match(panel, /state\.canManage\s*\?\s*API_PROVIDERS\s*:/, "managers can choose every API provider without being trapped on the active one");
+    assert.match(panel, /OPEN_AI_PROVIDER_ACCOUNT_EVENT/, "an unsaved provider opens its connection flow inside the engine panel");
+    assert.match(panel, /Connect \$\{PROVIDER_LABEL\[draft\.provider\]\} key/, "the selected unsaved provider has one direct repair action");
+    assert.match(panel, /Replace \$\{PROVIDER_LABEL\[draft\.provider\]\} key/, "the active provider key can be replaced without leaving the engine picker");
+    const accounts = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
+    assert.match(accounts, /addEventListener\(OPEN_AI_PROVIDER_ACCOUNT_EVENT/, "the provider account card receives the engine panel's requested provider");
     assert.doesNotMatch(panel, /await switchProvider\(/, "the browser must not switch the API account before the engine CAS");
     const route = readFileSync(join(ROOT, "app/api/ai/engine/route.ts"), "utf8");
     assert.match(route, /connectWorkspaceAccountAndEngineInOneStep/, "provider activation and the engine CAS use one server transaction");
@@ -57,6 +62,7 @@ async function main() {
     assert.match(panel, /status\?\.label === "Unsupported"/, "an unsupported Gemini account disables reconnect and offers the API path");
     assert.match(panel, /provider === "gemini" \?/, "Gemini never renders the unsupported CLI auth action");
     assert.match(panel, /Managed Gemini CLI account detected/, "a connector-detected managed Gemini account keeps Test without a fake reconnect");
+    assert.match(panel, /subscriptionLimited[\s\S]*no reconnect is needed/, "a signed-in rate-limited runtime never starts a pointless reconnect loop");
     assert.match(panel, /Choose a computer to finish upgrading this saved setup\./, "legacy unbound rows explain the one required upgrade action");
     const connectFlow = panel.slice(panel.indexOf("async function connect"), panel.indexOf("const modeOption"));
     assert.match(connectFlow, /await pollRuntimeJob\(/, "the dashboard stays open and polls the selected computer's auth job");
@@ -209,6 +215,8 @@ async function main() {
     assert.match(client.repairForCode("cli_auth_required", "CCPC", "codex") ?? "", /codex login/);
     assert.match(client.repairForCode("auth_process_failed", "CCPC", "codex") ?? "", /codex login/);
     assert.match(client.repairForCode("auth_timeout", "Mac", "claude") ?? "", /claude\n\/login/);
+    assert.match(client.repairForCode("runtime_rate_limited", "CCPC", "claude") ?? "", /still signed in/);
+    assert.match(client.repairForCode("runtime_rate_limited", "CCPC", "claude") ?? "", /reconnecting will not help/);
     assert.match(client.repairForCode("account_unsupported", "Mac", "gemini") ?? "", /Google API key/);
     assert.match(client.repairForCode("cli_not_found", "CCPC", "codex") ?? "", /@openai\/codex/);
     assert.match(client.repairForCode("cli_timeout", "CCPC", "codex") ?? "", /did not finish in time/);
@@ -225,6 +233,16 @@ async function main() {
     assert.equal(client.describeRuntime({ ...DEVICE, approved: false }, "codex").label, "Approval needed");
     assert.equal(client.describeRuntime({ ...DEVICE, online: false }, "codex").label, "Offline");
     assert.equal(client.describeRuntime({ ...DEVICE, busy: true }, "codex").label, "Busy");
+    const limitedClaude = client.describeRuntime({
+      ...DEVICE,
+      runtimes: {
+        ...DEVICE.runtimes,
+        claude: { ...DEVICE.runtimes.claude, signedIn: true, executionReady: false, code: "rate_limited" },
+      },
+    }, "claude");
+    assert.equal(limitedClaude.label, "Subscription limit reached");
+    assert.match(limitedClaude.repair ?? "", /still signed in/);
+    assert.match(limitedClaude.repair ?? "", /reconnecting will not help/);
     assert.equal(
       client.describeRuntime(
         { ...DEVICE, runtimes: { ...DEVICE.runtimes, codex: { ...DEVICE.runtimes.codex, installed: false, executionReady: false } } },
