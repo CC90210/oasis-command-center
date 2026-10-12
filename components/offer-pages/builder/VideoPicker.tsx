@@ -19,17 +19,17 @@
  * Nothing attaches without the tick "I have the right to show this video
  * publicly"; the server records who ticked it and when.
  */
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Film, Link2, Loader2, Upload, X } from "lucide-react";
 import type { Aspect, UploadKind, UploadVideoRef, VideoRef } from "@/lib/offer-pages/types";
-import { ASPECTS, MAX_UPLOAD_BYTES, UPLOAD_MIME } from "@/lib/offer-pages/types";
+import { ASPECTS, MAX_UPLOAD_BYTES, isAllowedUploadMime } from "@/lib/offer-pages/types";
 import { formatDuration } from "@/lib/offer-pages/providers";
 import { SmallButton, Tick, pendingConfirmation } from "./fields";
 
 type UploadedObject = { path: string; bytes: number; mime: string | null };
 
-/** "12.4 MB" - MAX_UPLOAD_BYTES.video is large enough that bytes or KB would be unreadable. */
-function formatBytes(bytes: number): string {
+/** "12.4 MB" - MAX_UPLOAD_BYTES.video is large enough that bytes or KB would be unreadable. The ONE place any size is turned into words, so a size-limit message can never disagree with the real cap (CodeRabbit, PR #597: a separate ad hoc `Math.round(...) || 1` rounded a sub-1-MB cap up to a lying "1 MB"). */
+export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${bytes} B`;
@@ -46,15 +46,21 @@ function resolvedMime(kind: UploadKind, file: File): string {
   return "";
 }
 
-/** The plain-language reason a file is refused before any request is made, or null when it is fine to upload. */
-function clientUploadError(kind: UploadKind, file: File): string | null {
+/**
+ * The plain-language reason a file is refused before any request is made, or
+ * null when it is fine to upload. isAllowedUploadMime (not a bare `mime in
+ * UPLOAD_MIME[kind]`) is an Object.hasOwn check: a plain `in` lookup also
+ * walks the prototype chain, so a crafted file.type like "constructor" would
+ * otherwise read as allowed (CodeRabbit, PR #597).
+ */
+export function clientUploadError(kind: UploadKind, file: File): string | null {
   const mime = resolvedMime(kind, file);
-  if (!mime || !(mime in UPLOAD_MIME[kind])) {
+  if (!mime || !isAllowedUploadMime(kind, mime)) {
     const names = kind === "video" ? "MP4, WebM or MOV" : kind === "poster" ? "PNG, JPEG or WebP" : "a WebVTT (.vtt) file";
     return `Only ${names}.`;
   }
   const cap = MAX_UPLOAD_BYTES[kind];
-  if (file.size > cap) return `That file is larger than ${Math.round(cap / (1024 * 1024)) || 1} MB.`;
+  if (file.size > cap) return `That file is larger than ${formatBytes(cap)}.`;
   if (file.size <= 0) return "That file is empty.";
   return null;
 }
@@ -71,8 +77,15 @@ function clientUploadError(kind: UploadKind, file: File): string | null {
  * XHR, and the browser always sends the body's real byte count, which is
  * exactly what makes the signed cap hold against a client that lies about it.
  */
-function putWithProgress(url: string, file: File, contentType: string, onProgress: (pct: number) => void): Promise<void> {
+/** Thrown when `signal` is already aborted, or becomes aborted mid-request; pickUpload treats this as silent (never shown as an error - the attempt was deliberately superseded, not a failure). */
+export class UploadAbortedError extends Error {}
+
+function putWithProgress(url: string, file: File, contentType: string, onProgress: (pct: number) => void, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new UploadAbortedError("upload superseded"));
+      return;
+    }
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url);
     xhr.setRequestHeader("content-type", contentType);
@@ -81,27 +94,42 @@ function putWithProgress(url: string, file: File, contentType: string, onProgres
     };
     xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error("That upload failed. Try again.")));
     xhr.onerror = () => reject(new Error("That upload failed. Try again."));
+    const onAbort = () => {
+      xhr.abort();
+      reject(new UploadAbortedError("upload superseded"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    xhr.onloadend = () => signal.removeEventListener("abort", onAbort);
     xhr.send(file);
   });
 }
 
-/** Mint a presigned PUT, upload the file, then confirm it landed. Throws a plain-language message on any failure. */
-async function uploadOne(formId: string, kind: UploadKind, file: File, onProgress: (pct: number) => void): Promise<UploadedObject> {
+/**
+ * Mint a presigned PUT, upload the file, then confirm it landed. Throws a
+ * plain-language message on any failure, or UploadAbortedError when `signal`
+ * fires mid-flight (Cancel, or picking a different file - pickUpload's own
+ * per-attempt token is still the authority on whether a RESOLVED result gets
+ * applied; aborting here mainly stops the browser doing pointless network
+ * work for an attempt nothing will use).
+ */
+async function uploadOne(formId: string, kind: UploadKind, file: File, onProgress: (pct: number) => void, signal: AbortSignal): Promise<UploadedObject> {
   const mimeType = resolvedMime(kind, file);
   const initRes = await fetch(`/api/forms/${formId}/offer/video-upload`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ kind, filename: file.name, mime_type: mimeType, size_bytes: file.size }),
+    signal,
   });
   const init = (await initRes.json().catch(() => ({}))) as { ok?: boolean; message?: string; signed_url?: string; upload_token?: string };
   if (!initRes.ok || !init.ok || !init.signed_url || !init.upload_token) {
     throw new Error(init.message || "That upload couldn't start. Try again.");
   }
-  await putWithProgress(init.signed_url, file, mimeType, onProgress);
+  await putWithProgress(init.signed_url, file, mimeType, onProgress, signal);
   const confirmRes = await fetch(`/api/forms/${formId}/offer/video-upload/confirm`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ upload_token: init.upload_token }),
+    signal,
   });
   const confirmed = (await confirmRes.json().catch(() => ({}))) as { ok?: boolean; path?: string; bytes?: number; mime?: string | null };
   if (!confirmRes.ok || !confirmed.ok || !confirmed.path || typeof confirmed.bytes !== "number") {
@@ -163,7 +191,25 @@ export function VideoPicker({
   const [posterUpload, setPosterUpload] = useState<UploadedObject | null>(null);
   const [captionUpload, setCaptionUpload] = useState<UploadedObject | null>(null);
 
+  // A stale in-flight upload/confirm must never land after Cancel or after
+  // choosing a different video (CodeRabbit, PR #597): pickUpload's own
+  // request is wrapped in an AbortController AND stamped with a per-attempt
+  // number, checked again once the request settles. Either guard alone would
+  // do (the token check catches a result that resolves anyway; the abort
+  // stops pointless network work) - both together, because aborting a
+  // request already in flight is never instant or guaranteed.
+  const uploadAttempt = useRef(0);
+  const uploadAbort = useRef<AbortController | null>(null);
+
+  /** Supersedes whatever upload/confirm is in flight: the NEXT settle of an older attempt is discarded, and the browser is told to stop trying. Called on Cancel (the X), on Replace, and on leaving upload mode for a different source. */
+  function invalidatePendingUpload() {
+    uploadAttempt.current += 1;
+    uploadAbort.current?.abort();
+    uploadAbort.current = null;
+  }
+
   function resetUpload() {
+    invalidatePendingUpload();
     setUploadPct(0);
     setVideoUpload(null);
     setPosterUpload(null);
@@ -179,13 +225,19 @@ export function VideoPicker({
     setError(null);
     setBusy(true);
     if (kind === "video") setUploadPct(0);
+    uploadAttempt.current += 1;
+    const myAttempt = uploadAttempt.current;
+    const controller = new AbortController();
+    uploadAbort.current = controller;
     try {
-      const up = await uploadOne(formId, kind, file, kind === "video" ? setUploadPct : () => undefined);
+      const up = await uploadOne(formId, kind, file, kind === "video" ? setUploadPct : () => undefined, controller.signal);
+      if (myAttempt !== uploadAttempt.current) return; // superseded while this was in flight: discard, never apply
       onDone(up);
     } catch (err) {
+      if (myAttempt !== uploadAttempt.current) return; // a superseded attempt's own failure (including its abort) is not shown
       setError(err instanceof Error ? err.message : "That upload failed. Try again.");
     } finally {
-      setBusy(false);
+      if (myAttempt === uploadAttempt.current) setBusy(false);
     }
   }
 
@@ -301,14 +353,14 @@ export function VideoPicker({
     <div className="space-y-3 rounded-lg border border-dashed border-bg-border p-3" data-picker-instance={instanceId}>
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-[13px] font-semibold text-fg">{label}</span>
-        <SmallButton tone="primary" onClick={() => setMode("link")}>
+        <SmallButton tone="primary" onClick={() => { invalidatePendingUpload(); setMode("link"); }}>
           <span className="inline-flex items-center gap-1">
             <Link2 className="h-3 w-3" />
             Paste a link
           </span>
         </SmallButton>
         {libraryAvailable ? (
-          <SmallButton tone="primary" onClick={openLibrary}>
+          <SmallButton tone="primary" onClick={() => { invalidatePendingUpload(); void openLibrary(); }}>
             <span className="inline-flex items-center gap-1">
               <Film className="h-3 w-3" />
               Choose from Library
@@ -382,7 +434,7 @@ export function VideoPicker({
           {!videoUpload ? (
             <div className="space-y-1">
               <label className="block text-[12px] text-fg-muted" htmlFor={fileInputId}>
-                Video file (MP4, WebM or MOV, up to {Math.round(MAX_UPLOAD_BYTES.video / (1024 * 1024))} MB)
+                Video file (MP4, WebM or MOV, up to {formatBytes(MAX_UPLOAD_BYTES.video)})
               </label>
               <input
                 id={fileInputId}
@@ -408,7 +460,7 @@ export function VideoPicker({
               <div className="flex items-center gap-2 text-[13px] text-fg">
                 <Upload className="h-4 w-4 text-accent" aria-hidden="true" />
                 <span>Video uploaded ({formatBytes(videoUpload.bytes)}).</span>
-                <SmallButton onClick={() => setVideoUpload(null)}>Replace</SmallButton>
+                <SmallButton onClick={() => { invalidatePendingUpload(); setVideoUpload(null); }}>Replace</SmallButton>
               </div>
               <div className="space-y-1">
                 <label className="block text-[12px] text-fg-muted" htmlFor={posterInputId}>

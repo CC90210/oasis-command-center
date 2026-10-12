@@ -17,7 +17,7 @@ import { formsSession } from "@/lib/forms/access";
 import { offerPagesDb } from "@/lib/offer-pages/store";
 import { editableForm } from "@/lib/offer-pages/operator";
 import { mintOfferUpload, offerUploadStorage } from "@/lib/offer-pages/upload";
-import { MAX_UPLOAD_BYTES, UPLOAD_MIME, type UploadKind } from "@/lib/offer-pages/types";
+import { MAX_UPLOAD_BYTES, UPLOAD_MIME, isAllowedUploadMime, type UploadKind } from "@/lib/offer-pages/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +45,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
   const mimeType = typeof body.mime_type === "string" ? body.mime_type.trim().toLowerCase() : "";
   const sizeBytes = typeof body.size_bytes === "number" ? body.size_bytes : NaN;
-  if (!mimeType || !(mimeType in UPLOAD_MIME[body.kind])) {
+  if (!mimeType || !isAllowedUploadMime(body.kind, mimeType)) {
     const names = Object.keys(UPLOAD_MIME[body.kind]).join(", ");
     return NextResponse.json({ ok: false, error: "unsupported_type", message: `That file type isn't allowed. Use ${names}.` }, { status: 400 });
   }

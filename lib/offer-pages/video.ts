@@ -30,7 +30,7 @@ import { pathBelongsToTenant } from "@/lib/storage-helpers";
 import {
   MAX_UPLOAD_BYTES,
   OFFER_UPLOAD_BUCKET,
-  UPLOAD_MIME,
+  isAllowedUploadMime,
   uploadPathKind,
   type ImageRef,
   type LibraryVideoRef,
@@ -319,7 +319,7 @@ export async function verifyUploadObject(input: { tenantId: string; path: unknow
   if (!head) return { ok: false, error: "not_found" };
   if (!Number.isFinite(head.size) || head.size <= 0 || head.size > MAX_UPLOAD_BYTES[kind]) return { ok: false, error: "too_large" };
   const mime = normalizedMime(head.contentType);
-  if (mime && mime !== "application/octet-stream" && !(mime in UPLOAD_MIME[kind])) return { ok: false, error: "wrong_type" };
+  if (mime && mime !== "application/octet-stream" && !isAllowedUploadMime(kind, mime)) return { ok: false, error: "wrong_type" };
   return { ok: true, upload: { kind, path: input.path, bytes: head.size, mime: mime || null } };
 }
 

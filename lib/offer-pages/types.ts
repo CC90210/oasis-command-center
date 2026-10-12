@@ -151,6 +151,24 @@ export const UPLOAD_MIME: Readonly<Record<UploadKind, Readonly<Record<string, st
   caption: { "text/vtt": "vtt" },
 };
 
+/**
+ * Is `mime` one of `kind`'s own allowed content types? `mime` is an
+ * attacker-controlled string everywhere this matters (a declared
+ * Content-Type at mint, or a real one read back from storage) - `mime in
+ * UPLOAD_MIME[kind]` or a bare `UPLOAD_MIME[kind][mime]` lookup also walks
+ * the prototype chain, so a value like "constructor", "toString" or
+ * "__proto__" resolves to an inherited Object.prototype member instead of
+ * undefined (CodeRabbit, PR #597). Object.hasOwn is the one true check.
+ */
+export function isAllowedUploadMime(kind: UploadKind, mime: string): boolean {
+  return Object.hasOwn(UPLOAD_MIME[kind], mime);
+}
+
+/** The extension `mime` maps to for `kind`, or undefined when it is not one of that kind's OWN allowed types (see isAllowedUploadMime - the same prototype-pollution guard). */
+export function extensionForUploadMime(kind: UploadKind, mime: string): string | undefined {
+  return Object.hasOwn(UPLOAD_MIME[kind], mime) ? UPLOAD_MIME[kind][mime] : undefined;
+}
+
 /** The size cap enforced at mint (declared) AND again at confirm (the real object's HEAD size). */
 export const MAX_UPLOAD_BYTES: Readonly<Record<UploadKind, number>> = {
   video: 500 * 1024 * 1024,

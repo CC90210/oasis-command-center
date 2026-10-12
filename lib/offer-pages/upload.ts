@@ -79,7 +79,7 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Client } from "@libsql/client";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { DERIVED_KEY_LABELS, deriveKey } from "@/lib/crypto/derived-keys";
-import { MAX_UPLOAD_BYTES, OFFER_UPLOAD_BUCKET, UPLOAD_MIME, uploadSubdirOf, type UploadKind } from "./types";
+import { MAX_UPLOAD_BYTES, OFFER_UPLOAD_BUCKET, extensionForUploadMime, isAllowedUploadMime, uploadSubdirOf, type UploadKind } from "./types";
 // verifyUploadObject and OfferUploadStorage live in ./video, NOT here: video.ts
 // carries no "server-only" (by design - lib/offer-pages/render.ts's render
 // path runs in a child process that strips the react-server condition for
@@ -276,7 +276,7 @@ export async function mintOfferUpload(input: {
   sizeBytes: number;
   storage: OfferUploadStorage | null;
 }): Promise<MintResult> {
-  const ext = UPLOAD_MIME[input.kind][input.mimeType];
+  const ext = extensionForUploadMime(input.kind, input.mimeType);
   if (!ext) return { ok: false, error: "unsupported_type" };
   if (!Number.isFinite(input.sizeBytes) || input.sizeBytes <= 0 || input.sizeBytes > MAX_UPLOAD_BYTES[input.kind]) {
     return { ok: false, error: "too_large" };
@@ -421,7 +421,7 @@ export async function confirmOfferUpload(input: {
     return { ok: false, error: "too_large" };
   }
   const mime = normalizedMime(head.contentType);
-  if (mime && mime !== "application/octet-stream" && !(mime in UPLOAD_MIME[kind])) {
+  if (mime && mime !== "application/octet-stream" && !isAllowedUploadMime(kind, mime)) {
     await deleteClaim(input.db, nonce);
     return { ok: false, error: "wrong_type" };
   }
@@ -450,7 +450,7 @@ export async function confirmOfferUpload(input: {
     return { ok: false, error: "swapped" };
   }
   const finalMime = normalizedMime(finalHead.contentType);
-  if (finalMime && finalMime !== "application/octet-stream" && !(finalMime in UPLOAD_MIME[kind])) {
+  if (finalMime && finalMime !== "application/octet-stream" && !isAllowedUploadMime(kind, finalMime)) {
     await deleteClaim(input.db, nonce);
     return { ok: false, error: "wrong_type" };
   }

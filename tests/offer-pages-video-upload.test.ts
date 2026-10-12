@@ -135,6 +135,17 @@ async function main() {
     assert.deepEqual(fake.signed, [], "a refused mint still signed a PUT URL");
   });
 
+  await step("mint refuses a prototype-chain mime_type (CodeRabbit, PR #597): 'constructor', '__proto__' and 'toString' are not own properties of the allowlist", async () => {
+    await login(USERS.cc);
+    fake.signed.length = 0;
+    for (const mimeType of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      const r = await json(await init(FORM, { kind: "video", filename: "x.mp4", mime_type: mimeType, size_bytes: 1000 }));
+      assert.equal(r.status, 400, `mime_type ${mimeType}`);
+      assert.equal(r.body.error, "unsupported_type", `mime_type ${mimeType}`);
+    }
+    assert.deepEqual(fake.signed, [], "a prototype-chain mime_type still signed a PUT URL");
+  });
+
   let videoToken = "";
   let videoStagingPath = "";
   let videoFinalPath = "";
