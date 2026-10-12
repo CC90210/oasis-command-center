@@ -26,6 +26,19 @@ export const AUDIT_ATTRIBUTION_FIELDS = [
   "cat",
 ] as const;
 
+/**
+ * Non-PII signal that the homepage already submitted step 0 before following
+ * the freshly minted personalized link. The token page accepts this handoff
+ * only for OASIS's ai-audit form; every other personalized link still opens
+ * on its first step.
+ */
+export const AUDIT_FORM_HANDOFF = {
+  markerParam: "handoff",
+  markerValue: "homepage-audit-step-0",
+  stepParam: "step",
+  nextStep: 1,
+} as const;
+
 export type AuditFormField = (typeof AUDIT_FORM_FIELDS)[number];
 export type AuditAttributionField = (typeof AUDIT_ATTRIBUTION_FIELDS)[number];
 export type AuditAttribution = Partial<Record<AuditAttributionField, string>>;
@@ -90,6 +103,8 @@ export function auditFormContinuationPath(path: string, context: AuditFormContex
   return appendPreservedParams(path, {
     ...context.attribution,
     v: context.visitId ?? undefined,
+    [AUDIT_FORM_HANDOFF.markerParam]: AUDIT_FORM_HANDOFF.markerValue,
+    [AUDIT_FORM_HANDOFF.stepParam]: String(AUDIT_FORM_HANDOFF.nextStep),
   });
 }
 

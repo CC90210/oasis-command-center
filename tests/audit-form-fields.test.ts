@@ -6,6 +6,7 @@ import {
   AUDIT_ATTRIBUTION_FIELDS,
   AUDIT_CONSENT_FIELDS,
   AUDIT_FORM_FIELDS,
+  AUDIT_FORM_HANDOFF,
   AUDIT_FORM_REQUIRED,
   auditAttributionFromSearch,
   auditFormBody,
@@ -101,8 +102,13 @@ assert.deepEqual(
 );
 assert.equal(
   auditFormContinuationPath(`/f/${AI_AUDIT_TENANT_SLUG}/${AI_AUDIT_SLUG}/signed-token`, context),
-  "/f/oasis-ai-cc/ai-audit/signed-token?utm_source=google&utm_medium=paid-search&utm_campaign=fleet-launch&kw=ai+agents&cat=p2&v=visit-123",
-  "the personalized continuation keeps campaign and visit attribution, but no contact fields",
+  "/f/oasis-ai-cc/ai-audit/signed-token?utm_source=google&utm_medium=paid-search&utm_campaign=fleet-launch&kw=ai+agents&cat=p2&v=visit-123&handoff=homepage-audit-step-0&step=1",
+  "the personalized continuation keeps campaign/visit attribution and a non-PII step handoff, but no contact fields",
+);
+assert.deepEqual(
+  AUDIT_FORM_HANDOFF,
+  { markerParam: "handoff", markerValue: "homepage-audit-step-0", stepParam: "step", nextStep: 1 },
+  "the handoff marker and destination step stay explicit and non-PII",
 );
 
 // 3. The component sends exactly that body and builds no other.
@@ -115,6 +121,28 @@ assert.match(source, /auditAttributionFromSearch\(window\.location\.search\)/, "
 assert.match(source, /submissionPath: window\.location\.pathname/, "the exact public landing path is recorded");
 assert.match(source, /visitId: getOrCreateVisitId\(\)/, "the established per-tab visit id is submitted");
 assert.match(source, /auditFormContinuationPath\(nextPath, context\)/, "the same attribution context survives the personalized hop");
+
+// 3a. The personalized page accepts the handoff only for the canonical OASIS
+// ai-audit form, and the reusable form client clamps the requested index.
+const tokenPageSource = readFileSync(join(root, "app/f/[tenant_slug]/[form_slug]/[lead_token]/page.tsx"), "utf8");
+assert.match(
+  tokenPageSource,
+  /result\.tenant_slug === AI_AUDIT_TENANT_SLUG\s*&&\s*result\.form\.slug === AI_AUDIT_SLUG/,
+  "a handoff marker on another tenant or form must not skip its first step",
+);
+assert.match(
+  tokenPageSource,
+  /sp\[AUDIT_FORM_HANDOFF\.markerParam\] === AUDIT_FORM_HANDOFF\.markerValue[\s\S]*sp\[AUDIT_FORM_HANDOFF\.stepParam\] === String\(AUDIT_FORM_HANDOFF\.nextStep\)/,
+  "both the exact marker and requested step are required",
+);
+assert.match(tokenPageSource, /initialStep=\{initialStep\}/, "the validated step reaches the form client");
+const publicClientSource = readFileSync(join(root, "components/forms/FormPublicClient.tsx"), "utf8");
+assert.match(publicClientSource, /if \(!Number\.isInteger\(initialStep\)\) return 0;/, "missing or fractional initial steps fall back to step 0");
+assert.match(
+  publicClientSource,
+  /Math\.min\(Math\.max\(initialStep \?\? 0, 0\), Math\.max\(steps\.length - 1, 0\)\)/,
+  "the initial step is clamped to the live form definition",
+);
 
 // 3b. No JavaScript may degrade into the browser's default GET, which would
 // put name/email/phone in the address bar and server logs.

@@ -22,6 +22,8 @@ import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
 import { SUPPORT_FORM_SLUG } from "@/lib/delivery/support-form";
+import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
+import { AUDIT_FORM_HANDOFF } from "@/components/marketing/audit-form-body";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -273,7 +275,7 @@ export default async function PublicFormPage({
   // every emailed application was attributed to nothing. Untrusted: normalized
   // server-side on submit, where a bad value becomes "unknown" and never
   // rejects the application.
-  searchParams?: Promise<{ source?: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const resolved = await params;
   const sp = (await searchParams) || {};
@@ -291,12 +293,25 @@ export default async function PublicFormPage({
     return <FormErrorPage reason={result.reason} detail={result.detail} />;
   }
 
+  // The homepage has already submitted ai-audit step 0 before it receives the
+  // personalized token. Honour that narrow, non-PII handoff only for this one
+  // canonical form. A marker copied onto another form or a plain personalized
+  // link is ignored, and the submit route still enforces sequential steps.
+  const initialStep =
+    result.tenant_slug === AI_AUDIT_TENANT_SLUG &&
+    result.form.slug === AI_AUDIT_SLUG &&
+    sp[AUDIT_FORM_HANDOFF.markerParam] === AUDIT_FORM_HANDOFF.markerValue &&
+    sp[AUDIT_FORM_HANDOFF.stepParam] === String(AUDIT_FORM_HANDOFF.nextStep)
+      ? AUDIT_FORM_HANDOFF.nextStep
+      : undefined;
+
   return (
     <FormPublicClient
       formId={result.form.id}
       formName={result.form.name}
       branding={result.form.branding}
       steps={result.form.steps}
+      initialStep={initialStep}
       redirectUrl={result.form.redirect_url}
       token={result.token}
       prefill={result.prefill}
