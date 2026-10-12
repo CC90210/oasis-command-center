@@ -1,0 +1,177 @@
+{
+  "slug": "protocol",
+  "pillar": "PROTOCOL",
+  "community_link": {
+    "label": "Not ready? Join the free community",
+    "href": "/go/community?form=protocol&t=oasis-ai-cc"
+  },
+  "work_steps": [
+    { "title": "Pick the pack that matches where you are", "body": "Quick wins if you are starting out, blueprints if you build your own systems, the full suite if you run an agency." },
+    { "title": "Follow it step by step", "body": "Each SOP and blueprint is written to be followed in order, with the prompts used exactly as written." },
+    { "title": "Move up when you want it running without you", "body": "When you are ready for software that runs the system for you, apply for OS DIY on the COMMAND page." }
+  ],
+  "form": {
+    "name": "PROTOCOL: SOPs, prompts and blueprints",
+    "slug": "protocol",
+    "description": "OASIS offer page draft (PROTOCOL, cat=p1). Collects contact details and the pack picked; checkout links are sent by the OASIS team until Stripe Payment Links exist.",
+    "branding": {
+      "primary_color": "#e8c547",
+      "accent_color": "#faf9f5",
+      "headline": "Pick your PROTOCOL pack",
+      "subheadline": "The SOPs, prompts and blueprints OASIS runs on. Tell us where to send your checkout link.",
+      "thanks_message": "Thanks, we have your pick. A member of the OASIS team will email you a secure checkout link. Not ready to buy? Join the free community: https://oasisai.work/go/community?form=protocol&t=oasis-ai-cc"
+    },
+    "on_complete_stage": "researched",
+    "step_outcomes": {},
+    "steps": [
+      {
+        "key": "contact",
+        "title": "Where should we send your checkout link?",
+        "description": "Takes about twenty seconds.",
+        "cta_label": "Next",
+        "fields": [
+          { "name": "name", "label": "Your name", "type": "text", "required": true, "placeholder": "First and last" },
+          { "name": "email", "label": "Email", "type": "email", "required": true, "placeholder": "you@company.com", "help": "Your checkout link goes here." },
+          { "name": "phone", "label": "Mobile number", "type": "phone", "help": "Optional." },
+          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "protocol" }
+        ]
+      },
+      {
+        "key": "pack",
+        "title": "Which pack do you want?",
+        "description": "Not sure? Pick the closest one and say so below.",
+        "cta_label": "Send my checkout link",
+        "fields": [
+          {
+            "name": "pack",
+            "label": "Your pack",
+            "type": "select",
+            "required": true,
+            "options": [
+              { "value": "1a", "label": "Quick-win SOPs and prompt packs ($17 to $47)" },
+              { "value": "1b", "label": "System blueprints and workflows ($97 to $197)" },
+              { "value": "1c", "label": "Master protocol suite ($297)" },
+              { "value": "1d", "label": "Mystery digital vault ($97 to $395)" },
+              { "value": "not_sure", "label": "Not sure yet, help me pick" }
+            ]
+          },
+          {
+            "name": "add_prompt_pack",
+            "label": "Add the extra prompt pack for $27?",
+            "type": "select",
+            "options": [
+              { "value": "yes", "label": "Yes, add it" },
+              { "value": "no", "label": "No, thanks" }
+            ],
+            "show_if": { "field": "pack", "equals": "1a" }
+          },
+          {
+            "name": "add_video_vault",
+            "label": "Add the video vault for $47?",
+            "type": "select",
+            "options": [
+              { "value": "yes", "label": "Yes, add it" },
+              { "value": "no", "label": "No, thanks" }
+            ],
+            "show_if": { "field": "pack", "equals": "1b" }
+          },
+          {
+            "name": "payment_plan",
+            "label": "How would you like to pay?",
+            "type": "select",
+            "options": [
+              { "value": "full", "label": "In one payment" },
+              { "value": "two_pay", "label": "Two payments of $59" }
+            ],
+            "show_if": { "field": "pack", "equals": "1b" }
+          },
+          {
+            "name": "first_build",
+            "label": "What do you want to set up first?",
+            "type": "textarea",
+            "maxLength": 1000,
+            "placeholder": "e.g. answering enquiries, writing proposals, my weekly content",
+            "help": "Optional. It helps us point you to the right part of the pack."
+          }
+        ]
+      }
+    ]
+  },
+  "offer_page": {
+    "v": 1,
+    "template": "book_call",
+    "theme": { "canvas": "dark", "logo": "workspace" },
+    "nav": { "pinned": ["obstacles", "what_you_get", "faq"], "cta_label": "Pick your pack" },
+    "hero": {
+      "eyebrow": "PROTOCOL, for solo operators and DIY builders",
+      "headline": "Run your business on the same SOPs and prompts OASIS runs on",
+      "subheadline": "The exact procedures, prompt packs and system blueprints we use, packaged so you can set them up yourself this week. Pick the pack that fits where you are, from a quick win to the full suite.",
+      "cta_label": "Pick your pack",
+      "video": null,
+      "show_transcript": false,
+      "vsl_script": {
+        "source": "cc",
+        "text": "PROTOCOL VSL. Target length 3 to 6 minutes. Adon or CC on camera, landscape, eye level, quiet room. Oasis Studio adds captions, b-roll, the screen recordings named below and the OASIS end card.\nRule for the whole video: say no number, result or client story that is not on the page. Prices are said exactly as the page shows them.\n\n[BEAT 1. HOOK, 0:00 to 0:20]\nOn camera: It is Sunday night. You saved another AI thread this week, and on Monday you will still be doing everything by hand. Here is exactly what we use. Copy it this week.\n\n[BEAT 2. WHO THIS IS FOR, AND WHO IT IS NOT FOR]\nOn camera: This is for you if you run the business on your own, or you like building your own systems. You want the steps, not a retainer.\nIt is not for you if you want someone to set it all up for you. If that is you, look at COMMAND. And if you are not ready to spend anything yet, the free community is linked below this video.\n\n[BEAT 3. WHY IT KEEPS HAPPENING]\nOn camera: The problem is not that you need more AI. It is that every tutorial starts from zero. You collect ideas, not a process. Without a written procedure, a prompt that worked last week drifts, and you are back to doing it yourself.\n\n[BEAT 4. WHAT WE DO ABOUT IT]\nScreen recording: the PROTOCOL library inside the OASIS Command Center.\nVoice over: It works in three steps. First, pick the pack that matches where you are. Second, follow the SOP or blueprint step by step, using the prompts exactly as written. Third, when you want it running without you, move up to OS DIY.\n\n[BEAT 5. WHAT YOU GET, PRICES SAID OUT LOUD]\nOn camera, matching the page word for word:\nQuick-win SOPs and prompt packs, $17 to $47. Add an extra prompt pack for $27 if you want it.\nSystem blueprints and workflows, $97 to $197, or two payments of $59. Add the video vault for $47.\nThe master protocol suite, $297.\nThe mystery digital vault for advanced builders, $97 to $395.\nNote for the recording: once Adon picks one number for each range, say that number, and update this script and the page together.\n\n[BEAT 6. PROOF]\nNo permissioned examples are confirmed yet, so show the product instead: screen-record one SOP being followed from start to finish. Use synthetic data only, never a real customer's details.\n\n[BEAT 7. CALL TO ACTION]\nOn camera: Pick your pack below and we will send you a secure checkout link. Not ready? The free community is linked right below this video."
+      }
+    },
+    "sections": [
+      {
+        "key": "obstacles",
+        "eyebrow": "Sound familiar?",
+        "title": "You are building it yourself, without a map",
+        "items": [
+          { "title": "You are the whole team", "body": "Sales, delivery, admin and follow-up all wait on you, so the work that grows the business is the work that slips." },
+          { "title": "Every AI tutorial starts from zero", "body": "You have watched the videos and saved the threads. What you do not have is a tested process you can follow on a Monday morning." },
+          { "title": "Prompts that work once, then drift", "body": "A prompt that worked last week gives you something different today, and you cannot tell why." },
+          { "title": "You do not want an agency yet", "body": "You want to build it yourself, with a map from people who already run it, not a retainer." }
+        ]
+      },
+      {
+        "key": "what_you_get",
+        "eyebrow": "The packs",
+        "title": "Pick the pack that fits where you are",
+        "lede": "Each pack is the written procedure, the prompts and the blueprints, ready to follow.",
+        "items": [
+          { "title": "Quick-win SOPs and prompt packs: $17 to $47", "body": "Short, copy-ready procedures and prompts for one job at a time. Built for people just starting. Optional add-on: an extra prompt pack for $27." },
+          { "title": "System blueprints and workflows: $97 to $197", "body": "The blueprints and workflows behind a full system, for DIY builders, with private template access. Prefer to split it? Two payments of $59. Optional add-on: the video vault for $47." },
+          { "title": "Master protocol suite: $297", "body": "Every protocol in one suite, for agency owners who want the whole library." },
+          { "title": "Mystery digital vault: $97 to $395", "body": "Advanced builds for experienced builders. You find out what is inside when you open it." }
+        ]
+      },
+      {
+        "key": "faq",
+        "title": "Questions",
+        "items": [
+          { "q": "Which pack should I start with?", "a": "If you are new to this, start with the quick-win packs and get one job off your plate. If you already build your own systems, the blueprints are for you. If you run an agency and want everything, take the master suite. The mystery vault is for experienced builders who want the advanced material." },
+          { "q": "How does it work?", "a": "First, pick the pack that matches where you are. Then follow the SOP or blueprint step by step, using the prompts exactly as written. When you want the system running without you, apply for OS DIY on the COMMAND page." },
+          { "q": "Do I need to be technical?", "a": "The quick-win packs are written for people just starting. The blueprints and the suite assume you are comfortable setting up tools yourself." },
+          { "q": "How do I pay?", "a": "Leave your details below and pick your pack. A member of the OASIS team will email you a secure checkout link." },
+          { "q": "Is this a subscription?", "a": "No. Each pack is a one-time purchase. Nothing renews." },
+          { "q": "What if I want it done for me?", "a": "Then PROTOCOL is not the right fit. Look at COMMAND, where we set up the OASIS Command Center for your business." },
+          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside us, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=protocol&t=oasis-ai-cc" }
+        ]
+      }
+    ],
+    "book": {
+      "eyebrow": "Get your pack",
+      "title": "Tell us where to send your checkout link",
+      "lede": "Your details, then the pack you want.",
+      "mode": "form",
+      "qualify": "after"
+    },
+    "seo": {
+      "title": "PROTOCOL: the SOPs and prompts OASIS runs on",
+      "description": "Copy-ready SOPs, prompt packs and system blueprints from OASIS, for solo operators and DIY builders who want to set it up themselves.",
+      "indexable": false
+    },
+    "brief": {
+      "audience": "Solopreneurs and DIY builders (funnel doc PROTOCOL, cat=p1, keyword PROTOCOL).",
+      "promise": "The exact SOPs, prompts and blueprints OASIS runs on, so you can set it up yourself this week (HANDOVER section 4).",
+      "included": "1A Quick-win SOPs + prompt packs (beginners). 1B System blueprints + workflows (DIY builders, private template access). 1C Master protocol suite (agency owners, lifetime library key per funnel doc, not stated on the page until delivery is confirmed). 1D Mystery digital vault (advanced builders, instant vault key in OCC per funnel doc, not stated on the page: delivery is not built).",
+      "proof_available": "None confirmed. No results, testimonials or numbers on the page until there are permissioned ones.",
+      "price": "As the funnel doc states: 1A $17-47 (bump +$27 prompt pack), 1B $97-197 (2-pay $59 x 2, bump +$47 video vault), 1C $297 (downsell 1B at $147), 1D $97-395 (downsell 1A at $47). Currency unconfirmed. Ranges need one number each before publish.",
+      "bonuses": "None named for PROTOCOL.",
+      "guarantee": "None confirmed. Section omitted."
+    }
+  }
+}
