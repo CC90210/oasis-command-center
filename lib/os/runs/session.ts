@@ -8,10 +8,11 @@
  * workspace, the department page's viewer, the paired computer's gate) is
  * resolved before the response goes out, and the driver gets values.
  *
- * The rules are the channel route's (app/api/agents/chat/route.ts), unchanged:
- * the workspace is the session's ACTIVE one and a body `tenant_slug` is
- * honoured only for a slug the caller owns. Canonical runs use only the exact
- * saved workspace API account; the platform key is never substituted.
+ * This is the canonical gate for /api/os/runs and the compatibility department
+ * branch in /api/agents/chat: the workspace is the session's ACTIVE one and a
+ * body `tenant_slug` is honoured only for a slug the caller owns. Canonical
+ * runs use only the selected exact runtime or matching saved workspace API
+ * account; the platform key is never substituted.
  */
 import "server-only";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
@@ -58,7 +59,8 @@ export type RunSession = {
   tenantSlug: string;
   dept: OsDepartment;
   operatorName: string;
-  /** The verified platform operator: sees the model id, may use the platform key and a local model. */
+  /** The verified platform operator: sees the model id and may use a local model.
+   * Canonical department runs never borrow a platform API key. */
   isOperator: boolean;
   /** Owner or admin: may change the AI settings, and sees the model's reasoning. */
   canManageAi: boolean;
@@ -87,6 +89,9 @@ export type RunSession = {
   apiEngineChoice: Extract<AgentEngineChoice, { kind: "api" }> | null;
   /** Exact provider/model that a queued worker run is allowed to spend. */
   apiAccountSnapshot: RunApiSnapshot | null;
+  /** The selected canonical engine row's version. Readiness uses this to
+   * retire failures from an engine that is no longer selected. */
+  engineChangedAt?: string | null;
   /** The exact opted-in device engine that could not execute and was replaced by the workspace API account. */
   fallbackFrom: Exclude<AgentEngineChoice, { kind: "api" }> | null;
   /** The queue-time availability failure that activated explicit API fallback. */
@@ -355,6 +360,9 @@ export async function validateQueuedFallbackAuthorization(
 
 export async function resolveRunSession(input: {
   department: string;
+  /** Read-only readiness inspection. It runs every canonical gate but does
+   * not persist the one-time legacy pairing upgrade. */
+  inspectOnly?: boolean;
   /** Server-read run snapshot used only after the guarded queued fallback CAS. */
   queuedFallback?: QueuedFallbackSnapshot;
   /** Trusted server-resolved actor for channels without a browser cookie. */
@@ -567,27 +575,29 @@ export async function resolveRunSession(input: {
       if (!candidate) return { ok: false, status: 409, error: "computer_choice_needs_pairing" };
       const candidateReceipt = probeReceipts.get(runtimeProbeReceiptKey(candidate.id, { kind: engineKind, name: engineName }));
       if (!candidateReceipt?.jobId) return { ok: false, status: 409, error: "computer_choice_needs_pairing" };
-      let persisted = false;
-      try {
-        persisted = await bindLegacyEngineIfUnchanged({
-          tenantId,
-          userId: effective?.source === "person" ? user.id : null,
-          engine: selectedEngine,
-          pairingId: candidate.id,
-          probeProof: {
-            jobId: candidateReceipt.jobId,
+      let persisted = input.inspectOnly === true;
+      if (!input.inspectOnly) {
+        try {
+          persisted = await bindLegacyEngineIfUnchanged({
+            tenantId,
+            userId: effective?.source === "person" ? user.id : null,
+            engine: selectedEngine,
             pairingId: candidate.id,
-            engine: { kind: engineKind, name: engineName },
-            verifiedAt: candidateReceipt.finishedAt,
-          },
-        });
-      } catch (err) {
-        console.error("[os.runs.session.legacy-bind]", {
-          tenantId,
-          pairingId: candidate.id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return { ok: false, status: 503, error: "config_unavailable" };
+            probeProof: {
+              jobId: candidateReceipt.jobId,
+              pairingId: candidate.id,
+              engine: { kind: engineKind, name: engineName },
+              verifiedAt: candidateReceipt.finishedAt,
+            },
+          });
+        } catch (err) {
+          console.error("[os.runs.session.legacy-bind]", {
+            tenantId,
+            pairingId: candidate.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return { ok: false, status: 503, error: "config_unavailable" };
+        }
       }
       if (!persisted) return { ok: false, status: 409, error: "computer_choice_needs_pairing" };
       computerDispatch = {
@@ -639,6 +649,7 @@ export async function resolveRunSession(input: {
       computerDispatch,
       apiEngineChoice,
       apiAccountSnapshot,
+      engineChangedAt: effective?.version ?? null,
       fallbackFrom,
       fallbackReason,
     },
@@ -729,6 +740,7 @@ export async function resolveStoredFallbackSession(input: {
       computerDispatch: null,
       apiEngineChoice: { kind: "api" },
       apiAccountSnapshot,
+      engineChangedAt: null,
       fallbackFrom: queuedFallback.engine,
       fallbackReason: queuedFallback.reason,
     },

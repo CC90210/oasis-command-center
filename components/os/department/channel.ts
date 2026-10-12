@@ -1,22 +1,20 @@
 /**
  * components/os/department/channel.ts — can this department's channel answer?
  *
- * The channel is components/agents/AgentChat.tsx posting to /api/agents/chat.
- * That route refuses a turn for three reasons it only reports AFTER the owner
- * has typed a message: a workspace it cannot resolve (400), an agent it cannot
- * find (404), or no AI provider — no workspace key and not an operator (412).
- * This asks the same three questions up front, with the route's own rules, so
- * the header can say "Not connected" and the owner is told what to connect
- * instead of typing into a box that will fail. A question it could not ask (the
- * AI settings read failed) is "Couldn't check", never "Not connected".
+ * DepartmentChannel posts to /api/os/runs. Both this header and that route use
+ * resolveRunSession, so personal inheritance, provider matching, the exact
+ * paired computer, approval, claim protocol/capacity, probe proof and explicit
+ * API fallback consent are one decision. The header cannot say Ready for a run
+ * that the execution path will refuse. A question it could not ask (a settings
+ * or runtime read failed) is "Couldn't check", never "Not connected".
  *
  * A key that answers is not the same as a key on file. So a ready channel also
  * carries its LAST TURN (lib/os/channel/turns.ts, recorded by the route): when
  * the provider refused it, the header says "Not working: …" in the same words
  * the channel used (lib/os/channel/outcome.ts), until a turn succeeds again.
  *
- * Mirrors app/api/agents/chat/route.ts; if that route's provider rule changes,
- * change it here too.
+ * Custom teammates still use /api/agents/chat, which supports primary API
+ * engines only; workspaceChatReadiness exposes that answer separately.
  */
 
 import "server-only";
@@ -25,17 +23,14 @@ import type { DepartmentKey } from "@/lib/os/types";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { manifestExists } from "@/lib/manifest/loader";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
-import { operatorPlatformFallback } from "@/lib/operator-credentials";
-import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { AI_SETTINGS_HREF, channelFailure, departmentChannelKey } from "@/lib/os/channel/outcome";
 import { readTurnOutcomes, type TurnOutcomesRead } from "@/lib/os/channel/turns";
-import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAccountChangedAt, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import { readWorkspaceAccountChangedAt } from "@/lib/ai/workspace-account";
 import { brainLine, departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
-import { readAgentEngine } from "@/lib/ai/agent-engine-store";
 import { bridgeEngineLine, harnessEngineLine, spendFor, type AgentEngineChoice, type EngineLabel, type EngineSpend } from "@/lib/ai/agent-engine";
 import { harnessForDepartment } from "@/lib/admin/harness-targets";
-import { bridgeCallerForSession } from "@/lib/ai/bridge-turn";
+import { resolveRunSession } from "@/lib/os/runs/session";
 import { departmentChannelFor } from "./config";
 import type { OsViewer } from "./viewer";
 
@@ -61,8 +56,8 @@ export type ChannelState =
        * What answers in this channel: the workspace AI account's provider and
        * model, as Settings > AI brain shows and switches them
        * (lib/ai/department-brain.ts). Owners and admins only, the people who
-       * choose it there; null for anyone else, or when the platform key (the
-       * verified operator's fallback) answers instead of an account.
+       * choose it there; null for anyone else, or when the selected paired
+       * runtime answers instead of an API account.
        */
       brain?: DepartmentBrain | null;
       /**
@@ -87,10 +82,10 @@ export type ChannelState =
     };
 
 /**
- * The workspace's AI provider, as the route would find it:
- *   ready    a key the route would use
- *   none     no such key (a known answer: the route answers 412)
- *   unknown  the read failed (the route answers 503 config_unavailable)
+ * Whether the canonical route can execute the selected exact runtime/API:
+ *   ready    the selected engine passed every execution gate
+ *   none     a known pairing/runtime/account gate refused it
+ *   unknown  a required read failed, so readiness cannot be claimed
  */
 export type ProviderReadiness = "ready" | "none" | "unknown";
 
@@ -111,72 +106,149 @@ export async function workspaceChatSlug(tenantId: string): Promise<string | null
   }
 }
 
-/**
- * The route's provider rule, exactly:
- *   - the workspace's AI account (lib/ai/workspace-account.ts, the one row
- *     lib/os/department-agent.ts reads; never a teammate's personal key),
- *     enabled, with a key; a local model account counts only for the verified
- *     operator, as the route only lets it answer for them; or
- *   - the verified operator (isPlatformOperatorForAuthUser: alias AND an OASIS
- *     owner/admin profile by auth id) WHEN a platform key is configured. Being
- *     the operator is not a key: with no platform key the route answers 412,
- *     so the channel is not ready either.
- * A failed read is `unknown`, never "none": the route answers it with 503
- * config_unavailable, not 412, and the header must agree with the route.
- */
+/** The effective canonical choice and whether its exact paired runtime, rather
+ * than an API fallback, will answer. */
 type EngineRead = { chosen: AgentEngineChoice; reachable: boolean } | null;
+type NotReadyKind = "account" | "runtime" | null;
+
+function latestChangedAt(...values: Array<string | null | undefined>): string | null {
+  let latest: { value: string; time: number } | null = null;
+  for (const value of values) {
+    if (!value) continue;
+    const time = Date.parse(value);
+    if (Number.isFinite(time) && (!latest || time > latest.time)) latest = { value, time };
+  }
+  return latest?.value ?? null;
+}
 
 async function providerReady(
-  tenantId: string,
-  authUserId: string | null,
-  email: string | null,
-  oasis: boolean,
+  viewer: OsViewer,
+  department: DepartmentKey,
 ): Promise<{
   readiness: ProviderReadiness;
   brain: DepartmentBrain | null;
   accountChangedAt: string | null;
   engine: ChannelEngine | null;
   engineRead: EngineRead;
+  directAgentReadiness: ProviderReadiness;
+  notReadyKind: NotReadyKind;
 }> {
-  let changedAt: string | null = null;
-  let chosen: AgentEngineChoice;
-  let brain: DepartmentBrain | null = null;
+  const tenantId = viewer.surface.tenantId;
+  const authUserId = viewer.authUserId;
+  if (!authUserId) {
+    return {
+      readiness: "unknown",
+      brain: null,
+      accountChangedAt: null,
+      engine: null,
+      engineRead: null,
+      directAgentReadiness: "unknown",
+      notReadyKind: null,
+    };
+  }
+
+  let resolved: Awaited<ReturnType<typeof resolveRunSession>>;
   try {
-    // When the account last changed never fails the read (null = unknown).
-    const [account, at, engine] = await Promise.all([
-      readWorkspaceAiAccount(tenantId),
-      readWorkspaceAccountChangedAt(tenantId),
-      readAgentEngine(tenantId),
-    ]);
-    changedAt = at;
-    chosen = engine;
-    if (
-      hasUsableKey(account) &&
-      (account.provider !== LOCAL_MODEL_PROVIDER || (await isPlatformOperatorForAuthUser(authUserId, email)))
-    ) {
-      brain = departmentBrain(account);
-    }
+    // This is the execution resolver in read-only mode: personal inheritance,
+    // provider matching, exact pairing ownership, approval, protocol, busy /
+    // offline state, runtime heartbeat, durable probe and explicit fallback
+    // consent are therefore identical to a real send. It never enqueues work.
+    resolved = await resolveRunSession({
+      department,
+      inspectOnly: true,
+      actor: {
+        tenantId,
+        user: { id: authUserId, email: viewer.email },
+        profile: {
+          team_role: viewer.surface.teamRole,
+          is_owner: viewer.surface.persona === "founder",
+          admin_access: viewer.surface.persona === "founder",
+        },
+        viewer,
+        engineUserId: authUserId,
+        operatorName: null,
+      },
+    });
   } catch (err) {
     console.error("[os.channel.provider]", err);
-    return { readiness: "unknown", brain: null, accountChangedAt: null, engine: null, engineRead: null };
+    return {
+      readiness: "unknown",
+      brain: null,
+      accountChangedAt: null,
+      engine: null,
+      engineRead: null,
+      directAgentReadiness: "unknown",
+      notReadyKind: null,
+    };
   }
-  // An AI app or local model on the paired computer answers when this person
-  // can reach it (the route asks the same gate, lib/ai/bridge-turn.ts), and
-  // only in OASIS's own workspace (the department harnesses are OASIS's);
-  // else the API account answers in its place, and the header says so.
-  const onComputer = chosen.kind === "api" || !oasis ? null : chosen;
-  const reachable = onComputer ? (await bridgeCallerForSession(tenantId)) !== null : false;
-  const engineRead: EngineRead = { chosen, reachable };
-  const engine = channelEngine(chosen, reachable, brain);
-  if (reachable || brain) return { readiness: "ready", brain, accountChangedAt: changedAt, engine, engineRead };
-  const readiness: ProviderReadiness =
-    operatorPlatformFallback() !== null && (await isPlatformOperatorForAuthUser(authUserId, email)) ? "ready" : "none";
+  if (!resolved.ok) {
+    const unavailable = resolved.status >= 500;
+    const accountFailure = resolved.error === "agent_not_configured" || resolved.error === "engine_snapshot_unavailable";
+    return {
+      readiness: unavailable ? "unknown" : "none",
+      brain: null,
+      accountChangedAt: null,
+      engine: null,
+      engineRead: null,
+      directAgentReadiness: unavailable ? "unknown" : "none",
+      notReadyKind: unavailable ? null : accountFailure ? "account" : "runtime",
+    };
+  }
+
+  const session = resolved.session;
+  // An armed workspace_api fallback sets both apiEngineChoice and
+  // computerDispatch while the computer is healthy. The exact computer is
+  // authoritative until fallbackReason says fallback actually activated.
+  if (session.computerDispatch) {
+    const dispatch = session.computerDispatch;
+    const chosen: AgentEngineChoice = dispatch.engineKind === "cli"
+      ? { kind: "cli", cli: dispatch.engineName as "claude" | "codex" | "gemini", pairingId: dispatch.pairingId, fallback: dispatch.fallback }
+      : { kind: "local", model: dispatch.engineName, pairingId: dispatch.pairingId, fallback: dispatch.fallback };
+    return {
+      readiness: "ready",
+      brain: null,
+      accountChangedAt: session.engineChangedAt ?? null,
+      engine: channelEngine(chosen, true, null),
+      engineRead: { chosen, reachable: true },
+      directAgentReadiness: "none",
+      notReadyKind: null,
+    };
+  }
+
+  const brain = session.apiAccountSnapshot ? departmentBrain(session.apiAccountSnapshot) : null;
+  const fallbackActive = session.fallbackReason !== null && session.fallbackFrom !== null;
+  if (fallbackActive && brain) {
+    const changedAt = latestChangedAt(session.engineChangedAt, await readWorkspaceAccountChangedAt(tenantId));
+    return {
+      readiness: "ready",
+      brain,
+      accountChangedAt: changedAt,
+      engine: channelEngine(session.fallbackFrom!, false, brain),
+      engineRead: { chosen: session.fallbackFrom!, reachable: false },
+      directAgentReadiness: "none",
+      notReadyKind: null,
+    };
+  }
+  if (session.apiEngineChoice && brain) {
+    const changedAt = latestChangedAt(session.engineChangedAt, await readWorkspaceAccountChangedAt(tenantId));
+    return {
+      readiness: "ready",
+      brain,
+      accountChangedAt: changedAt,
+      engine: channelEngine(session.apiEngineChoice, false, brain),
+      engineRead: { chosen: session.apiEngineChoice, reachable: false },
+      directAgentReadiness: "ready",
+      notReadyKind: null,
+    };
+  }
   return {
-    readiness,
+    readiness: "none",
     brain: null,
-    accountChangedAt: changedAt,
-    engine: readiness === "ready" ? channelEngine(chosen, false, null) : engine,
-    engineRead,
+    accountChangedAt: session.engineChangedAt ?? null,
+    engine: null,
+    engineRead: null,
+    directAgentReadiness: "none",
+    notReadyKind: "runtime",
   };
 }
 
@@ -196,13 +268,13 @@ export function channelEngine(
   if (chosen.kind !== "api" && reachable) {
     return { line: harnessLabel ? harnessEngineLine(chosen, harnessLabel) : bridgeEngineLine(chosen), spend: spendFor(chosen), note: null };
   }
-  const apiLine = brain ? brainLine(brain) : "the OASIS platform key";
-  const spend: EngineSpend = brain ? "api_credits" : "platform";
+  const apiLine = brain ? brainLine(brain) : "the selected workspace API account";
+  const spend: EngineSpend = "api_credits";
   if (chosen.kind !== "api") {
     return {
       line: apiLine,
       spend,
-      note: `${bridgeEngineLine(chosen)} is chosen, but the computer can't be reached right now, so ${brain ? "your AI account" : "the platform key"} answers.`,
+      note: `${bridgeEngineLine(chosen)} could not answer, so your explicitly enabled workspace API fallback answers.`,
     };
   }
   return { line: apiLine, spend, note: null };
@@ -212,12 +284,16 @@ export type ChannelEngine = EngineLabel;
 
 /**
  * The two workspace-wide halves of "can a channel answer": a slug the chat
- * route accepts, and an AI provider. One read for every channel on a page (the
- * AI Team roster asks once for all departments). `brain` is what answers (the
- * account's provider and model, lib/ai/department-brain.ts); `accountChangedAt`
- * is when that account last changed, which retires older failures (lastTurnOn).
+ * route accepts, and a canonical engine that can execute. One read for every
+ * channel on a page (the AI Team roster asks once for all departments).
+ * `brain` is what answers (the account's provider and model,
+ * lib/ai/department-brain.ts).
+ * `directAgentProvider` is deliberately separate because custom direct chats
+ * cannot execute device engines yet. `accountChangedAt` is the latest selected
+ * engine/account change and retires failures for a configuration no longer in
+ * use (lastTurnOn).
  */
-export async function workspaceChatReadiness(viewer: OsViewer): Promise<{
+export async function workspaceChatReadiness(viewer: OsViewer, department: DepartmentKey = "chief_of_staff"): Promise<{
   slug: string | null;
   provider: ProviderReadiness;
   brain: DepartmentBrain | null;
@@ -225,10 +301,13 @@ export async function workspaceChatReadiness(viewer: OsViewer): Promise<{
   engine: ChannelEngine | null;
   /** The choice and whether the paired computer answers this person (null: not read). */
   engineRead: EngineRead;
+  /** Readiness for /agents/<slug>, which supports only a primary API engine. */
+  directAgentProvider: ProviderReadiness;
+  notReadyKind: NotReadyKind;
 }> {
   const [slug, ready] = await Promise.all([
     workspaceChatSlug(viewer.surface.tenantId),
-    providerReady(viewer.surface.tenantId, viewer.authUserId, viewer.email, viewer.oasis),
+    providerReady(viewer, department),
   ]);
   return {
     slug,
@@ -237,6 +316,8 @@ export async function workspaceChatReadiness(viewer: OsViewer): Promise<{
     accountChangedAt: ready.accountChangedAt,
     engine: ready.engine,
     engineRead: ready.engineRead,
+    directAgentProvider: ready.directAgentReadiness,
+    notReadyKind: ready.notReadyKind,
   };
 }
 
@@ -253,11 +334,11 @@ export async function readWorkspaceTurns(tenantId: string): Promise<TurnOutcomes
  * A channel's last turn, by the key the route records it under
  * (departmentChannelKey, or agentChannelKey for a direct agent chat), judged
  * against the whole workspace's (lib/os/channel/outcome.ts channelFailure,
- * which leaves "no AI account connected" to providerReady). A table not yet
+ * which leaves current engine readiness to providerReady). A table not yet
  * migrated reads as "nothing recorded"; any other failed read is `unknown`,
- * never "ok". A failure recorded before the AI account last changed
- * (`accountChangedAt`) is about an account or model the channels no longer
- * send, and is not shown (channelFailure).
+ * never "ok". A failure recorded before the selected engine or API account
+ * last changed (`accountChangedAt`) is about a configuration the channels no
+ * longer use, and is not shown (channelFailure).
  */
 export function lastTurnOn(read: TurnOutcomesRead, channelKey: string, accountChangedAt: string | null = null): LastTurn {
   if (!read.ok) return read.reason === "table_missing" ? { kind: "ok" } : { kind: "unknown" };
@@ -278,8 +359,8 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
   }
   const owner = viewer.surface.persona === "founder";
   const tenantId = viewer.surface.tenantId;
-  const [{ slug, provider, brain, accountChangedAt, engine: workspaceEngine, engineRead }, agent, turns] = await Promise.all([
-    workspaceChatReadiness(viewer),
+  const [{ slug, provider, brain, accountChangedAt, engine: workspaceEngine, engineRead, notReadyKind }, agent, turns] = await Promise.all([
+    workspaceChatReadiness(viewer, dept.key),
     getAgentBySlug(binding.agentSlug, tenantId),
     readWorkspaceTurns(tenantId),
   ]);
@@ -304,12 +385,19 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
     };
   }
   if (provider === "none") {
+    const runtime = notReadyKind === "runtime";
     return {
       kind: "not_connected",
-      reason: owner
-        ? "No AI account is connected for this workspace yet. Connect one and every department channel can answer."
-        : "No AI account is connected for this workspace yet. An owner or admin can connect one in Settings.",
-      action: owner ? { href: AI_SETTINGS_HREF, label: "Connect an AI account" } : null,
+      reason: runtime
+        ? owner
+          ? "The selected computer runtime is not ready for agents. Repair or test it in AI brain."
+          : "The selected computer runtime is not ready for agents. An owner or admin can repair it in Settings."
+        : owner
+          ? "The selected workspace API account is not connected or does not match this engine. Connect the matching account in AI brain."
+          : "The selected workspace API account is not connected or does not match this engine. An owner or admin can fix it in Settings.",
+      action: owner
+        ? { href: AI_SETTINGS_HREF, label: runtime ? "Open AI brain" : "Connect an AI account" }
+        : null,
     };
   }
   return {

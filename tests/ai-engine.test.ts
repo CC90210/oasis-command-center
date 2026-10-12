@@ -1157,7 +1157,7 @@ async function main() {
     });
     const fell = channelEngine({ kind: "cli", cli: "codex" }, false, brain, "Marketing");
     assert.equal(fell.spend, "api_credits");
-    assert.match(String(fell.note), /^Codex on your paired computer is chosen, but the computer can't be reached right now, so your AI account answers\.$/);
+    assert.match(String(fell.note), /^Codex on your paired computer could not answer, so your explicitly enabled workspace API fallback answers\.$/);
     assert.deepEqual(channelEngine({ kind: "api" }, false, brain).note, null);
   });
 

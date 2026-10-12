@@ -356,12 +356,18 @@ async function main() {
     assert.match(agent, /provider = cfg\.provider;\s*model = cfg\.model;/);
     assert.doesNotMatch(agent, /binding\?\.model_override \|\|/, "a manifest model_override chooses a department model again");
     const channel = readFileSync(join(ROOT, "components/os/department/channel.ts"), "utf8");
-    // fix/ai-brain-engine: the header names what powers the channel (the
-    // account, or an app on the paired computer: lib/ai/agent-engine.ts),
-    // still from the account's brain when the account is what answers.
-    assert.match(channel, /brain = departmentBrain\(account\);/);
-    assert.match(channel, /if \(reachable \|\| brain\) return \{ readiness: "ready", brain, accountChangedAt: changedAt, engine, engineRead \};/);
+    // Readiness runs the same canonical resolver as execution without mutating
+    // a legacy row, and cannot reintroduce the generic bridge/platform fallbacks.
+    assert.match(channel, /import \{ resolveRunSession \} from "@\/lib\/os\/runs\/session";/);
+    assert.match(channel, /resolveRunSession\(\{[\s\S]*?inspectOnly: true,/);
+    assert.match(channel, /if \(session\.computerDispatch\)/);
+    assert.match(channel, /session\.fallbackReason !== null && session\.fallbackFrom !== null/);
+    assert.match(channel, /session\.apiAccountSnapshot \? departmentBrain\(session\.apiAccountSnapshot\) : null/);
+    assert.doesNotMatch(channel, /bridgeCallerForSession|operatorPlatformFallback|readAgentEngine/);
     assert.match(channel, /brain: owner \? brain : null,/);
+    const roster = readFileSync(join(ROOT, "components/os/aiteam/roster.ts"), "utf8");
+    assert.match(roster, /readiness\.directAgentProvider === "ready"/);
+    assert.match(roster, /webOn\(directAgentWeb, \[agentChannelKey\(c\.slug\)\]\)/);
     const deptChannel = readFileSync(join(ROOT, "components/os/department/DepartmentChannel.tsx"), "utf8");
     assert.match(deptChannel, /state\.engine \?\? \(state\.brain \? \{ line: brainLine\(state\.brain\), spend: "api_credits", note: null \} : null\)/);
     const settings = readFileSync(join(ROOT, "components/settings/SettingsContent.tsx"), "utf8");

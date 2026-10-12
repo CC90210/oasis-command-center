@@ -703,7 +703,7 @@ async function main() {
     const viewer = await viewerFor(USERS.solo);
     const state = await resolveChannelState(dept("sales"), viewer);
     assert.equal(state.kind, "not_connected", JSON.stringify(state));
-    if (state.kind === "not_connected") assert.match(state.reason, /No AI account is connected for this workspace yet/);
+    if (state.kind === "not_connected") assert.match(state.reason, /selected workspace API account is not connected or does not match/i);
     // The turn itself (web and Slack).
     const turn = await slackTurn(SOLO, "solo-co", "sales", "sdr");
     assert.equal(turn.ok ? "ok" : turn.status, 412);
@@ -916,8 +916,8 @@ async function main() {
     }
   });
 
-  // -- 3. OASIS keeps answering on its legacy row; the account row wins once saved
-  await check("the legacy bravo workspace row still answers for OASIS, exactly as before", async () => {
+  // -- 3. Legacy API rows remain readable but never bypass the canonical engine
+  await check("the legacy bravo row can answer Slack but cannot silently replace OASIS's unbound subscription engine", async () => {
     const acct = await account.readWorkspaceAiAccount(OASIS);
     assert.equal(acct?.source, "legacy");
     assert.deepEqual([...(await q.aiServicesWithKey(OASIS))], ["anthropic"]);
@@ -925,7 +925,9 @@ async function main() {
     assert.ok(turn.ok, JSON.stringify(turn));
     if (turn.ok) assert.equal(turn.turn.apiKey, KEY_OASIS);
     const viewer = await viewerFor(USERS.partner);
-    assert.equal((await resolveChannelState(dept("chief-of-staff"), viewer)).kind, "ready");
+    const state = await resolveChannelState(dept("chief-of-staff"), viewer);
+    assert.equal(state.kind, "not_connected");
+    if (state.kind === "not_connected") assert.match(state.reason, /selected computer runtime is not ready/i);
     // No account row was written for OASIS by anything above.
     assert.ok(!(await rows(OASIS)).some((r) => r.agent_key === account.WORKSPACE_AI_AGENT_KEY));
   });
