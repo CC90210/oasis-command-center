@@ -593,6 +593,7 @@ async function main() {
 
   await check("the public chat route always pulls the exact pairing and rechecks rollout/readiness", () => {
     const source = readFileSync(join(ROOT, "app", "api", "bridge", "chat", "route.ts"), "utf8");
+    const runtimeAvailabilitySource = readFileSync(join(ROOT, "lib", "bridge", "runtime-availability.ts"), "utf8");
     assert.match(source, /authorizeBridgePullActor\(\)/);
     assert.match(source, /parseHarnessChatMode\(clientBody\.chat_mode\)/);
     assert.match(source, /jsonError\(400, parsedChatMode\.code\)/);
@@ -605,7 +606,11 @@ async function main() {
     assert.match(source, /pairingScope === "daemon"/);
     assert.match(source, /jsonError\(409, "agents_owner_only"\)/);
     assert.match(source, /cancelHarnessJob/);
-    assert.match(source, /if \(!selected \|\| typeof selected !== "object" \|\| Array\.isArray\(selected\)\) return \{ ok: false, error: "model_not_found" \}/);
+    assert.match(
+      runtimeAvailabilitySource,
+      /if \(!selected \|\| typeof selected !== "object" \|\| Array\.isArray\(selected\)\) return \{ ok: false, error: "model_not_found" \}/,
+      "the shared runtime availability gate must fail closed when the selected local model is absent",
+    );
     assert.ok(
       source.indexOf("const runtimeCheck = runtimeAvailability") < source.indexOf("const queued = await enqueueHarnessJob"),
       "an explicit missing local model must fail before any harness row is enqueued",
