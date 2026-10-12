@@ -554,7 +554,9 @@ check("the client's pair-only card names the OASIS bridge", () => {
 });
 check("the unified engine panel offers a connector repair without exposing a raw bridge response", () => {
   const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
-  assert.match(panel, /oasis bridge restart/);
+  const client = readFileSync(join(ROOT, "components/settings/agent-engine-client.ts"), "utf8");
+  assert.match(panel, /connectorRestartCommand\(device\.os\)/);
+  assert.match(client, /"oasis bridge restart"/);
   assert.doesNotMatch(panel, /bridge returned/i);
 });
 check("the Whispr card describes where the clean-up goes for every route, not a sign-in", () => {

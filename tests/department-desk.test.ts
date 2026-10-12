@@ -954,8 +954,11 @@ async function main() {
   await check("the channel shows why lookups are off, and nothing when they are on", async () => {
     const { deskToolsNote } = catalog;
     const chat = readFileSync(join(process.cwd(), "components/agents/AgentChat.tsx"), "utf8");
-    assert.match(chat, /setToolsNote\(deskToolsNote\(\(payload as \{ tools\?: unknown \}\)\.tools\)\)/);
-    assert.match(chat, /eventName === "tool"/);
+    const departmentChat = readFileSync(join(process.cwd(), "components/agents/DepartmentChat.tsx"), "utf8");
+    const stream = readFileSync(join(process.cwd(), "components/agents/sse-client.ts"), "utf8");
+    assert.match(chat, /setToolsNote\(deskToolsNote\(event\.agent\.tools\)\)/);
+    assert.match(departmentChat, /const toolsNote = latest \? deskToolsNote\(\(latest\.view\.agent as \{ tools\?: unknown \}\)\.tools\) : null/);
+    assert.match(stream, /frame\.event === "tool"/);
     assert.equal(deskToolsNote({ on: true, labels: ["Leads"], note: null }), null);
     assert.equal(deskToolsNote({ on: false, labels: [], note: "Looking things up is off: x." }), "Looking things up is off: x.");
     assert.equal(deskToolsNote(undefined), null);
