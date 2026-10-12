@@ -115,11 +115,17 @@ function timeAgo(iso: string | null): string {
  * read). Never a dead button, never the repository name.
  *
  * Updated (DV1): the server side of the connector program (O3a's 'connector'
- * pair-code purpose and scope) is live; the installer that would make this
- * notice obsolete is J2, not shipped yet. So this stays honest instead of
- * promising an install that does not exist, and points this viewer at the
- * one place every signed-in person (this one included) can already get a
- * connector code: Settings > Connect your computer.
+ * pair-code purpose and scope) is live; the one-click installer that would
+ * make this notice obsolete is J2, not shipped yet. So this stays honest
+ * instead of promising an install that does not exist, and points this
+ * viewer at the one place every signed-in person (this one included) can
+ * already get a connector code: Settings > Connect your computer.
+ *
+ * Updated (D0, 2026-10-12): the old copy flattened "no one-click installer
+ * exists yet for a non-team computer" down to a plain claim that there was
+ * no install step at all for anyone — false, since the connector already
+ * runs on OASIS's own team computers today. Said plainly instead, still
+ * never a button that cannot work.
  */
 function OwnerOnlyConnectNotice() {
   return (
@@ -131,11 +137,13 @@ function OwnerOnlyConnectNotice() {
       <p className="text-xs text-fg-muted leading-relaxed">
         Connecting your own computer would let your agents use its files,
         tools and scheduled jobs. That runs through the OASIS connector app,
-        which is rolling out. If you already have it, get a connector code
-        from Settings &gt; Connect your computer and paste it into the app. If you do
-        not have it yet, there is nothing to install today. Until a computer
-        is connected and approved, your department chats pause instead of
-        running on someone else&apos;s computer.
+        which runs today on OASIS&apos;s own team computers. If you already
+        have it, get a connector code from Settings &gt; Connect your
+        computer and paste it into the app. If you do not have it yet,
+        there is no button here to install it: a one-click installer for
+        every other computer is coming, but it is not out yet. Until a
+        computer is connected and approved, your department chats pause
+        instead of running on someone else&apos;s computer.
       </p>
     </div>
   );

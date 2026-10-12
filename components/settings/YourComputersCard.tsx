@@ -26,6 +26,7 @@ import { AlertCircle, Check, Clock, Copy, Loader2, Monitor, RefreshCw } from "lu
 import {
   bestComputerAnswerState,
   computerAnswerState,
+  machineState,
   type ComputerAnswerState,
 } from "@/lib/devices/presence";
 import { departmentInventoryLine, type CliProvider, type CliStatusInfo } from "@/lib/bridge-cli-status";
@@ -43,6 +44,9 @@ type DeviceRow = {
   claim_blocked_reason: string | null;
   claim_capacity: number | null;
   mine: boolean;
+  /** The pairing's owner display name, for a Team computers row only (API
+   * leaves this null for the viewer's own rows, which never need it). */
+  owner_name: string | null;
 };
 
 type MachineInventory = { id: string | null; label: string | null; data: Record<CliProvider, CliStatusInfo> };
@@ -74,6 +78,33 @@ function rowLine(label: string, state: ComputerAnswerState, claimStateAt: string
   if (state === "can_answer") return `${label} · Ready for department work, checked ${timeAgo(claimStateAt)}`;
   if (state === "busy") return `${label} · Finishing a reply`;
   if (state === "not_approved") return `${label} · Waiting for your approval`;
+  if (state === "offline") return `${label} · Offline since ${timeAgo(lastSeenAt)}`;
+  return `${label} · Connected, can't answer: ${blockedWords(state.slice("blocked:".length))}`;
+}
+
+/**
+ * The Team computers row line (fixes: these rows were reusing rowLine's
+ * "Waiting for your approval", which told CC's Mac and CCPC that THEY were
+ * waiting on Adon's own approval -- never true for a computer that is not
+ * his). Names the owner, never says "your" or "you". The online/offline word
+ * comes from the plain heartbeat (lib/devices/presence.ts machineState), not
+ * computerAnswerState's claim-freshness rule -- a teammate's machine can be
+ * genuinely online and simply not yet approved, and that is worth showing.
+ */
+function teamRowLine(
+  label: string,
+  ownerName: string,
+  state: ComputerAnswerState,
+  claimStateAt: string | null,
+  lastSeenAt: string | null,
+  nowMs: number,
+): string {
+  if (state === "can_answer") return `${label} · Ready for department work, checked ${timeAgo(claimStateAt)}`;
+  if (state === "busy") return `${label} · Finishing a reply`;
+  if (state === "not_approved") {
+    const presence = machineState(lastSeenAt, nowMs) === "offline" ? `Offline since ${timeAgo(lastSeenAt)}` : "Online";
+    return `${label} · ${presence} · not yet approved by ${ownerName} for department work`;
+  }
   if (state === "offline") return `${label} · Offline since ${timeAgo(lastSeenAt)}`;
   return `${label} · Connected, can't answer: ${blockedWords(state.slice("blocked:".length))}`;
 }
@@ -235,9 +266,11 @@ export function YourComputersCard() {
                 },
                 now,
               );
+              const ownerName = d.owner_name || "a teammate";
+              const label = d.label || "A teammate's computer";
               return (
                 <li key={d.id} className="py-2 text-fg-muted">
-                  {rowLine(d.label || "Unnamed computer", state, d.claim_state_at, d.last_seen_at)}
+                  {teamRowLine(label, ownerName, state, d.claim_state_at, d.last_seen_at, now)}
                 </li>
               );
             })}
@@ -250,6 +283,8 @@ export function YourComputersCard() {
 
 /** Exported for tests: the one state several of a person's computers reduce to. */
 export { bestComputerAnswerState };
+/** Exported for tests: the Team computers row line (D0 — never "your approval"). */
+export { teamRowLine };
 
 // ─────────────────────────────────────────────────────────────────────────
 // ConnectYourComputerCard (DV1) — mint a connector code, for every signed-in

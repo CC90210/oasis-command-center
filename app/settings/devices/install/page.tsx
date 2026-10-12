@@ -157,17 +157,24 @@ export default async function BridgeInstallPage() {
 /**
  * A verified operator who is not this workspace's computer owner (DV0,
  * 2026-10-11). Plain words only: what connecting a computer would do, that it
- * runs through the OASIS connector app, that nothing needs installing today,
- * and that department chats pause for the same reason they already do in
- * chat (O1: every department chat runs on the owner's computer alone). Never
- * the private repository's name, never a button that cannot work.
+ * runs through the OASIS connector app, that the connector runs TODAY on
+ * OASIS's own team computers and a one-click installer for everyone else is
+ * still coming, and that department chats pause for the same reason they
+ * already do in chat (O1: every department chat runs on the owner's computer
+ * alone). Never the private repository's name, never a button that cannot
+ * work.
+ *
+ * Updated (D0, 2026-10-12): the old copy flattened "no one-click installer
+ * exists yet for a non-team computer" down to a plain claim that there was
+ * no install step at all for anyone — false, since the connector already
+ * runs on OASIS's own team computers today. Said plainly instead.
  *
  * Updated (DV1), matching components/settings/DevicesEditor.tsx's
  * OwnerOnlyConnectNotice: the connector program's server side (O3a) is live,
- * the installer that would make this notice obsolete is J2 and not shipped
- * yet, so this points the viewer at the one place every signed-in person
- * (this one included) can already get a connector code: Settings > Connect
- * your computer.
+ * the one-click installer that would make this notice obsolete is J2 and not
+ * shipped yet, so this points the viewer at the one place every signed-in
+ * person (this one included) can already get a connector code: Settings >
+ * Connect your computer.
  */
 function OwnerOnlyInstallNotice() {
   return (
@@ -179,11 +186,13 @@ function OwnerOnlyInstallNotice() {
       <p className="text-sm text-fg-muted leading-relaxed max-w-xl">
         Connecting your own computer would let your agents use its files,
         tools and scheduled jobs. That runs through the OASIS connector app,
-        which is rolling out. If you already have it, get a connector code
-        from Settings &gt; Connect your computer and paste it into the app. If you do
-        not have it yet, there is nothing to install today. Until a computer
-        is connected and approved, your department chats pause instead of
-        running on someone else&apos;s computer.
+        which runs today on OASIS&apos;s own team computers. If you already
+        have it, get a connector code from Settings &gt; Connect your
+        computer and paste it into the app. If you do not have it yet,
+        there is no button here to install it: a one-click installer for
+        every other computer is coming, but it is not out yet. Until a
+        computer is connected and approved, your department chats pause
+        instead of running on someone else&apos;s computer.
       </p>
     </div>
   );

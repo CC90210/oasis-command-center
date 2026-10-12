@@ -41,9 +41,48 @@ export async function GET() {
   const rows = (data || []) as Array<{ user_id: string | null } & Record<string, unknown>>;
   // Everyone sees their own; an owner or admin also sees the team's.
   const devices = session.isAdmin ? rows : rows.filter((r) => r.user_id === session.userId);
+
+  // Owner display names, for "Team computers" rows only (never for the
+  // viewer's own, which already say "your"). Read only the distinct owners
+  // actually present on someone else's row, so a non-admin (who only ever
+  // sees their own rows) never pays this read.
+  const otherOwnerIds = Array.from(
+    new Set(
+      devices
+        .filter((r) => r.user_id !== session.userId)
+        .map((r) => r.user_id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+  const ownerNameById = new Map<string, string>();
+  if (otherOwnerIds.length > 0) {
+    const owners = await db
+      .from("user_profiles")
+      .select("auth_user_id, display_name, full_name, email")
+      .eq("tenant_id", tenantId)
+      .in("auth_user_id", otherOwnerIds);
+    if (!owners.error) {
+      for (const row of (owners.data || []) as Array<{
+        auth_user_id: string | null;
+        display_name: string | null;
+        full_name: string | null;
+        email: string | null;
+      }>) {
+        if (row.auth_user_id) {
+          const name = row.display_name || row.full_name || row.email;
+          if (name) ownerNameById.set(row.auth_user_id, name);
+        }
+      }
+    }
+  }
+
   return NextResponse.json({
     ok: true,
-    devices: devices.map((r) => ({ ...r, mine: r.user_id === session.userId })),
+    devices: devices.map((r) => ({
+      ...r,
+      mine: r.user_id === session.userId,
+      owner_name: r.user_id && r.user_id !== session.userId ? ownerNameById.get(r.user_id) || null : null,
+    })),
   });
 }
 
