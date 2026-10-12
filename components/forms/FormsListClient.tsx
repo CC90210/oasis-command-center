@@ -44,6 +44,7 @@ import { OFFER_TEMPLATES, starterStepsForTemplate } from "@/lib/offer-pages/temp
 import type { TemplateKey } from "@/lib/offer-pages/types";
 import { OffersCardsGrid, type OfferCardEntry } from "./OffersCardsClient";
 import type { OfferCardViewModel } from "./OfferCard";
+import { offerCreateSlug, slugTakenMessage, ROUTER_SLUG } from "@/lib/offers/router-create";
 
 type FormRow = {
   id: string;
@@ -125,7 +126,10 @@ export function FormsListClient({
   const [rows, setRows] = useState(initialRows);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [picker, setPicker] = useState(false);
+  // false = closed; "offer" = the ordinary New offer picker; "router" = the
+  // same picker, but Create must land on slug "vsl" (the Start here card's
+  // empty state, OffersCardsClient.tsx).
+  const [picker, setPicker] = useState<false | "offer" | "router">(false);
 
   const offerRows = useMemo(() => rows.filter((r) => offers && offers[r.id]), [rows, offers]);
   const intakeRows = useMemo(() => rows.filter((r) => !(offers && offers[r.id])), [rows, offers]);
@@ -297,8 +301,16 @@ export function FormsListClient({
     </button>
   );
 
-  /** An offer card's Preview: the public path with ?offer_preview=1, open to the workspace's own owner only (the route itself gates it). */
+  /**
+   * An offer card's Preview: the public path with ?offer_preview=1. Rendered
+   * ONLY for an editor on an enabled form (Codex review, PR #596):
+   * resolvePublicForm 404s a switched-off form before preview authorization
+   * ever runs, and the public route only honours offer_preview=1 for someone
+   * canEdit - a read-only viewer who followed it would see the real public
+   * page (live submission controls), never a draft preview.
+   */
   const previewLink = (r: FormRow) => {
+    if (!canEdit || !r.enabled) return null;
     const path = publicFormPath(r.slug);
     if (!path) return null;
     return (
@@ -388,7 +400,7 @@ export function FormsListClient({
             </button>
             <button
               type="button"
-              onClick={() => setPicker(true)}
+              onClick={() => setPicker("offer")}
               disabled={offers === null}
               title={offers === null ? "Offers aren't switched on in this workspace yet." : undefined}
               className="inline-flex items-center gap-2 rounded-lg bg-accent text-bg-deep px-4 py-2 text-sm font-bold hover:bg-accent-bright disabled:opacity-50"
@@ -424,7 +436,7 @@ export function FormsListClient({
           cards={offerCards}
           canEdit={canEdit}
           offersEnabled={offers !== null}
-          onCreateRouter={() => setPicker(true)}
+          onCreateRouter={() => setPicker("router")}
         />
       </section>
 
@@ -492,6 +504,7 @@ export function FormsListClient({
 
       {picker ? (
         <NewOfferPicker
+          routerMode={picker === "router"}
           profileSlug={profileSlug}
           tenantName={tenantName}
           tenantLogoUrl={tenantLogoUrl}
@@ -593,14 +606,30 @@ function ShareMenu({
   );
 }
 
-/** New offer: a template (structure only), the offer's name, its link name. */
+/**
+ * New offer: a template (structure only), the offer's name, its link name.
+ *
+ * ROUTER MODE (Codex review, PR #596). Opened from the "Start here" empty
+ * state, this same picker must land on slug "vsl" exactly - the one slug
+ * OffersCardsGrid recognises as the router card. The ordinary flow derives
+ * the link name from the typed offer name, which essentially never spells
+ * "vsl", so completing it used to create another regular offer and leave the
+ * empty state showing. In router mode the link name is fixed, shown as
+ * read-only text rather than an input the visitor could still change, and
+ * `offerCreateSlug`/`slugTakenMessage` (lib/offers/router-create.ts) are the
+ * only two places that decide what gets submitted and what a collision
+ * means - kept out of this component so the rule is unit-testable without a
+ * browser.
+ */
 function NewOfferPicker({
+  routerMode,
   profileSlug,
   tenantName,
   tenantLogoUrl,
   onClose,
   onCreated,
 }: {
+  routerMode: boolean;
   profileSlug: string | null;
   tenantName: string | null;
   tenantLogoUrl: string | null;
@@ -608,12 +637,13 @@ function NewOfferPicker({
   onCreated: (id: string) => void;
 }) {
   const [template, setTemplate] = useState<TemplateKey>("book_call");
-  const [name, setName] = useState("");
+  const [name, setName] = useState(routerMode ? "Start here" : "");
   const [slug, setSlug] = useState("");
   const [slugTouched, setSlugTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const linkName = slugTouched ? slug : slugify(name);
+  const typedSlug = slugTouched ? slug : slugify(name);
+  const linkName = offerCreateSlug(routerMode, typedSlug);
 
   async function create() {
     setError(null);
@@ -641,11 +671,7 @@ function NewOfferPicker({
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; form?: { id: string }; error?: string; message?: string };
       if (!data.ok || !data.form) {
-        setError(
-          data.error === "slug_taken"
-            ? "That link name is taken in this workspace. Pick another."
-            : data.message || "Couldn't create the offer. Try again in a moment.",
-        );
+        setError(data.error === "slug_taken" ? slugTakenMessage(routerMode) : data.message || "Couldn't create the offer. Try again in a moment.");
         return;
       }
       const page = await fetch(`/api/forms/${data.form.id}/offer`, {
@@ -667,13 +693,20 @@ function NewOfferPicker({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="New offer">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={routerMode ? "New start-here page" : "New offer"}
+    >
       <div className="w-full max-w-2xl rounded-2xl border border-bg-border bg-bg-panel p-6 shadow-elev">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-lg font-bold text-fg">New offer</h2>
+            <h2 className="text-lg font-bold text-fg">{routerMode ? "New start-here page" : "New offer"}</h2>
             <p className="mt-1 text-sm text-fg-muted">
-              A full page with your form inside. Templates set the sections only; every word is yours to write.
+              {routerMode
+                ? `This is the first page a new visitor sees, before they land on one of your offers. Its link is fixed at /${ROUTER_SLUG} so it can be pinned above Offers.`
+                : "A full page with your form inside. Templates set the sections only; every word is yours to write."}
             </p>
           </div>
           <button type="button" onClick={onClose} aria-label="Close" className="text-fg-dim hover:text-fg">
@@ -700,21 +733,30 @@ function NewOfferPicker({
 
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <label className="block text-xs text-fg-muted">
-            Offer name (only your team sees it)
+            {routerMode ? "Page name (only your team sees it)" : "Offer name (only your team sees it)"}
             <input value={name} onChange={(e) => setName(e.target.value)} className="input mt-1 w-full" maxLength={120} />
           </label>
-          <label className="block text-xs text-fg-muted">
-            Link name (can&apos;t be changed later)
-            <input
-              value={linkName}
-              onChange={(e) => {
-                setSlugTouched(true);
-                setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 63));
-              }}
-              className="input mt-1 w-full font-mono"
-              maxLength={63}
-            />
-          </label>
+          {routerMode ? (
+            <div className="block text-xs text-fg-muted">
+              Link name (fixed)
+              <div className="input mt-1 flex w-full items-center font-mono text-fg-dim" aria-readonly="true">
+                /{ROUTER_SLUG}
+              </div>
+            </div>
+          ) : (
+            <label className="block text-xs text-fg-muted">
+              Link name (can&apos;t be changed later)
+              <input
+                value={linkName}
+                onChange={(e) => {
+                  setSlugTouched(true);
+                  setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 63));
+                }}
+                className="input mt-1 w-full font-mono"
+                maxLength={63}
+              />
+            </label>
+          )}
         </div>
 
         {error ? <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-400">{error}</div> : null}
@@ -730,7 +772,7 @@ function NewOfferPicker({
             className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-bold text-bg-deep hover:bg-accent-bright disabled:opacity-50"
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            Create the offer
+            {routerMode ? "Create the start-here page" : "Create the offer"}
           </button>
         </div>
         <p className="mt-3 text-[11px] text-fg-dim">

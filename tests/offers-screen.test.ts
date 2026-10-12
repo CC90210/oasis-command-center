@@ -9,8 +9,19 @@
  *      NEVER a 0 - only leads has real tracking today.
  *   3. The "Start here" router card appears only when a form at slug "vsl"
  *      exists; otherwise a quiet empty state with Create.
+ *   4. Preview is drawn only for canEdit && enabled (Codex review, PR #596):
+ *      the public route 404s a disabled form before preview authorization
+ *      runs, and only honours ?offer_preview=1 for an editor.
+ *   5. The router's Create action always submits slug "vsl", never one
+ *      derived from the typed name (Codex review, PR #596) - proved as a
+ *      pure function (offerCreateSlug) rather than by simulating a click and
+ *      a fetch, since this suite has no DOM/fetch-mocking harness. Chained
+ *      with (3) above - a form AT slug "vsl" pins as the router card - this
+ *      proves end to end that completing the router flow yields the router
+ *      card: the only thing the flow controls is which slug gets submitted,
+ *      and that is fixed to "vsl" here.
  *
- * (1) and (3) render FormsListClient the same way
+ * (1), (3) and (4) render FormsListClient the same way
  * tests/offer-pages-public.test.ts does: spawned as plain `node --import tsx`
  * (react-dom/server does not resolve under this suite's
  * --conditions=react-server), reusing tests/offer-pages-public.render.ts
@@ -23,14 +34,15 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { ROOT, done, step } from "./_offer-pages-harness";
 import { funnelCell } from "../lib/offers/funnel-strip";
+import { offerCreateSlug, slugTakenMessage, ROUTER_SLUG } from "../lib/offers/router-create";
 
 const AT = "2026-10-08T12:00:00.000Z";
-const row = (id: string, slug: string, name: string) => ({
+const row = (id: string, slug: string, name: string, enabled = true) => ({
   id,
   slug,
   name,
   description: null,
-  enabled: true,
+  enabled,
   created_at: AT,
   updated_at: AT,
 });
@@ -130,6 +142,49 @@ async function main() {
         recentLeads: { "offer-2": 0 },
       },
     },
+    // -- 4. Preview: canEdit && enabled only --------------------------------
+    previewEditorEnabled: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-3", "gamma", "Gamma Offer", true)],
+        tenantLogoUrl: null,
+        tenantSlug: "acme",
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-3": 0 },
+        offers: { "offer-3": { status: "draft", publishedVersion: 0 } },
+        recentLeads: { "offer-3": 0 },
+      },
+    },
+    previewEditorDisabled: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-4", "delta", "Delta Offer", false)],
+        tenantLogoUrl: null,
+        tenantSlug: "acme",
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-4": 0 },
+        offers: { "offer-4": { status: "draft", publishedVersion: 0 } },
+        recentLeads: { "offer-4": 0 },
+      },
+    },
+    previewReadOnlyViewer: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-5", "epsilon", "Epsilon Offer", true)],
+        tenantLogoUrl: null,
+        tenantSlug: "acme",
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: false,
+        responseCounts: { "offer-5": 0 },
+        offers: { "offer-5": { status: "draft", publishedVersion: 0 } },
+        recentLeads: { "offer-5": 0 },
+      },
+    },
   });
 
   await step("offers render as cards; intake forms stay a table", () => {
@@ -167,6 +222,41 @@ async function main() {
     assert.ok(h.includes("No start-here page yet"), "the empty state is missing");
     assert.ok(h.includes(">Create<"), "the Create action is missing");
     assert.ok(!h.includes("Which one is you"), "a router card appeared with no vsl form");
+  });
+
+  await step("Preview is drawn for an editor on an enabled offer", () => {
+    const h = html.previewEditorEnabled;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(h.includes(">Preview<"), "Preview is missing for an editor on an enabled offer");
+  });
+  await step("Preview is withheld for a switched-off offer, even for an editor", () => {
+    const h = html.previewEditorDisabled;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(!h.includes(">Preview<"), "Preview is drawn for a disabled offer, which 404s the preview route");
+  });
+  await step("Preview is withheld for a read-only viewer, even on an enabled offer", () => {
+    const h = html.previewReadOnlyViewer;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(!h.includes(">Preview<"), "Preview is drawn for a viewer who may not edit, who the route does not authorize to see a draft");
+  });
+
+  // -- 5. offerCreateSlug / slugTakenMessage: the router Create fix ---------
+  await step("router mode always submits slug 'vsl', whatever the typed name or slug says", () => {
+    assert.equal(offerCreateSlug(true, ""), ROUTER_SLUG);
+    assert.equal(offerCreateSlug(true, "whatever-the-visitor-typed"), ROUTER_SLUG);
+    assert.equal(offerCreateSlug(true, "totally-different"), "vsl");
+  });
+  await step("the ordinary flow still submits the typed/derived slug, unchanged", () => {
+    assert.equal(offerCreateSlug(false, "my-offer"), "my-offer");
+    assert.equal(offerCreateSlug(false, ""), "");
+  });
+  await step("a taken slug names 'vsl' and suggests refreshing in router mode; the ordinary message is generic", () => {
+    const routerMsg = slugTakenMessage(true);
+    assert.match(routerMsg, /vsl/);
+    assert.doesNotMatch(routerMsg, /—/);
+    const ordinaryMsg = slugTakenMessage(false);
+    assert.doesNotMatch(ordinaryMsg, /vsl/);
+    assert.notEqual(routerMsg, ordinaryMsg);
   });
 
   done("offers-screen");
