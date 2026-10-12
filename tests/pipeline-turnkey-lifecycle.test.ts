@@ -141,7 +141,9 @@ const boardFilterModule = readFileSync("lib/oasis-lead-create.ts", "utf8");
 assert(
   claimOps.includes("claimPatch") &&
     pipelinePage.includes("oasisBoardProgramFilter(tenantSlug)") &&
-    pipelinePage.includes("salesMotion: boardFilter.salesMotion") &&
+    pipelinePage.includes(
+      "salesMotion: warmInbound ? OASIS_INBOUND_WARM_MOTION : boardFilter.salesMotion",
+    ) &&
     /salesMotion: isWebsiteSalesTenantSlug\(tenantSlug\) \? OASIS_COLD_OUTBOUND_MOTION : null/.test(
       boardFilterModule,
     ) &&
