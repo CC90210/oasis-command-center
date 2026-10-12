@@ -527,8 +527,11 @@ export function FormPublicClient({
   // The consent boxes, for the same reason: they stay clickable during the
   // address wait, so a visitor can untick one after pressing Continue. Read
   // in the old closure, the tick they just took back would be sent as a "yes".
-  const ledgerRef = useRef({ channels: ledgerChannels, ticked: ledgerTicked });
-  ledgerRef.current = { channels: ledgerChannels, ticked: ledgerTicked };
+  // `step` says which step these boxes belong to: a Back click during a wait
+  // re-points the ref at the PREVIOUS step's boxes, which must never be sent
+  // as the answer to the step being submitted.
+  const ledgerRef = useRef({ step: currentStep, channels: ledgerChannels, ticked: ledgerTicked });
+  ledgerRef.current = { step: currentStep, channels: ledgerChannels, ticked: ledgerTicked };
   /** Claimed before the first await in `submit()` so a second click cannot
    *  start a second submission while the first is waiting. */
   const submitGuard = useRef(false);
@@ -806,8 +809,11 @@ export function FormPublicClient({
       // never the closure, and HERE, immediately before the request: both the
       // address wait and the vault capture above can take seconds while the
       // boxes stay clickable, and the visitor's last answer is the one sent.
+      // If they navigated to another step during a wait, the boxes they can
+      // see are not this step's: nothing is sent, so nothing is recorded,
+      // which can only ever refuse a send.
       const ledgerNow = ledgerRef.current;
-      if (ledgerNow.channels.length > 0) {
+      if (ledgerNow.step === stepAtStart && ledgerNow.channels.length > 0) {
         submitBody.consent_ledger = {
           email: ledgerNow.channels.includes("email") ? ledgerNow.ticked.email : undefined,
           sms: ledgerNow.channels.includes("sms") ? ledgerNow.ticked.sms : undefined,

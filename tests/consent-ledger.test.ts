@@ -595,8 +595,12 @@ async function main() {
   await check("FormPublicClient sends the visitor's LAST answer, read after the address wait, never a stale tick", () => {
     const src = readFileSync(join(ROOT, "components", "forms", "FormPublicClient.tsx"), "utf8");
     assert.ok(
-      /ledgerRef\.current = \{ channels: ledgerChannels, ticked: ledgerTicked \};/.test(src),
-      "the ref must be re-pointed on every render",
+      /ledgerRef\.current = \{ step: currentStep, channels: ledgerChannels, ticked: ledgerTicked \};/.test(src),
+      "the ref must be re-pointed on every render, carrying the step its boxes belong to",
+    );
+    assert.ok(
+      /if \(ledgerNow\.step === stepAtStart && ledgerNow\.channels\.length > 0\) \{/.test(src),
+      "a Back click during a wait must never send the previous step's boxes as this step's answer",
     );
     const at = src.indexOf("submitBody.consent_ledger = {");
     assert.ok(at > 0, "consent_ledger body not found");
