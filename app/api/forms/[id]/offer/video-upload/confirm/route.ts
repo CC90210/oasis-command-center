@@ -32,7 +32,6 @@ const STATUS: Record<string, number> = {
   too_large: 400,
   wrong_type: 400,
   swapped: 409,
-  already_confirmed: 409,
   storage_unavailable: 503,
   key_unavailable: 503,
 };

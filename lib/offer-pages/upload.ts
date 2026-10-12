@@ -7,7 +7,8 @@
  * real HEAD (size, content-type) is read back whenever trust in it matters.
  *
  * TWO NAMESPACES, so a verified object can never be swapped afterward
- * (TOCTOU, Codex security review 2026-10-12):
+ * (TOCTOU, Codex security review 2026-10-12, with a race-condition follow-up
+ * on 2026-10-12's own first fix):
  *   STAGING  <tenant>/offer-pages/_staging/<kind>/<uuid>.<ext>  a presigned
  *            PUT is minted here, and ONLY here. Content-Length and
  *            Content-Type are SIGNED into that PUT (lib/r2-storage.ts
@@ -15,13 +16,20 @@
  *            of a different size or a different declared type - the cap
  *            holds even against a client that ignores it, not only a
  *            server-side check after the fact. The presign is short-lived
- *            (OFFER_UPLOAD_PUT_TTL_SEC, minutes).
- *   FINAL    <tenant>/offer-pages/<kind-subdir>/<uuid>.<ext>  the ONLY shape
- *            ever named in a page doc or served to a visitor. No presigned
- *            PUT is EVER minted for a final key: the only way one is written
- *            is the server-side conditional copy below. uploadPathKind's
- *            regex (types.ts) cannot even match a staging path, so the
- *            parser refuses one on sight if it ever reached a request body.
+ *            (OFFER_UPLOAD_PUT_TTL_SEC, minutes). NEVER deleted by confirm
+ *            (see below); belongs under an R2 lifecycle rule to expire it
+ *            after a short TTL - not configured here, no live R2 in this
+ *            sandbox to apply it against.
+ *   FINAL    <tenant>/offer-pages/<kind-subdir>/<form id>/<uuid>.<ext>  the
+ *            ONLY shape ever named in a page doc or served to a visitor. No
+ *            presigned PUT is EVER minted for a final key: the only way one
+ *            is written is the server-side conditional copy below, and its
+ *            <uuid> is a FRESH crypto.randomUUID() generated AT CONFIRM TIME
+ *            (finalPathFor) - never derived from the token, the staging
+ *            path, or anything else a caller could cause to repeat.
+ *            uploadPathKind's regex (types.ts) cannot even match a staging
+ *            path, so the parser refuses one on sight if it ever reached a
+ *            request body.
  *
  *   mintOfferUpload     an owner/admin asks for a presigned, SIZE-AND-TYPE-
  *                       CONSTRAINED PUT to one new, random STAGING object
@@ -33,15 +41,30 @@
  *   confirmOfferUpload  verifies the token (tenant AND form bound), HEADs the
  *                       staging object, re-checks its REAL size and type
  *                       against the kind's cap (never the declared ones),
- *                       then COPIES it to its FINAL key conditional on the
- *                       ETag just read (x-amz-copy-source-if-match): if the
- *                       staging object changed in between (a swap), R2
- *                       refuses the copy instead of promoting different
- *                       bytes. The FINAL object's own size/type are checked
- *                       again straight after the copy, independent of
- *                       whether R2 actually enforced the condition - belt and
- *                       suspenders. The staging object is then removed
- *                       (best effort; never served either way).
+ *                       then COPIES it to a FRESH, call-specific FINAL key
+ *                       (finalPathFor) conditional on the ETag just read
+ *                       (x-amz-copy-source-if-match): if the staging object
+ *                       changed in between (a swap), R2 refuses the copy
+ *                       instead of promoting different bytes. The FINAL
+ *                       object's own size/type are checked again straight
+ *                       after the copy, independent of whether R2 actually
+ *                       enforced the condition - belt and suspenders.
+ *
+ *                       EVERY confirm call for the same token - a sequential
+ *                       replay, or two truly concurrent requests - mints its
+ *                       OWN final key here, so none of them can ever target
+ *                       the one another has already written (or will write):
+ *                       the race is removed by construction, not by a "does
+ *                       it already exist" check (which itself races: two
+ *                       concurrent HEADs can both see "no" before either
+ *                       copies, and R2's if-none-match on a CopyObject
+ *                       request is unverified in this sandbox - kept as a
+ *                       harmless extra condition on the copy, never relied
+ *                       on alone). A replay or a race can at most leave an
+ *                       extra, never-referenced object behind; the one a
+ *                       draft save or a published page already points at
+ *                       can never change without a new save and publish
+ *                       (its own rights-tick gate).
  *   verifyUploadObject  (lib/offer-pages/video.ts, not here - see that
  *                       module's header) the read-only check for an
  *                       UNTRUSTED final path from a request body or a
@@ -79,21 +102,30 @@ function stagingPathFor(tenantId: string, kind: UploadKind, ext: string): string
 }
 
 /**
- * The FINAL key a token promotes to: the staging path's own tenant/kind/
- * extension, but named by the TOKEN's nonce, not the staging path's own
- * (mint-time) uuid. This is what makes a replayed token write-once (Codex
- * security review, confirm-replay-overwrite finding): every confirm call for
- * the SAME token derives the SAME final path, so confirmOfferUpload's
- * destination-must-not-exist check below refuses a replay outright - it can
- * never land on a DIFFERENT final path and never touches the one a first,
- * legitimate confirm already promoted (which is what let a replay silently
- * swap already-published media). A fresh mint always gets a fresh nonce, so
- * a genuinely new upload attempt always gets a fresh final key.
+ * The FINAL key THIS CONFIRM CALL promotes to: the staging path's own
+ * tenant/kind/extension, the token's own form id, and a FRESH
+ * crypto.randomUUID() generated right here, at confirm time - never derived
+ * from anything in the token itself.
+ *
+ * Codex security review of e99e9a90's fix (deterministic-from-nonce) still
+ * had a TOCTOU window: two concurrent replays of one token could both pass
+ * a "does the final key already exist" HEAD check before either copied, and
+ * R2's if-none-match on a CopyObject request is unverified, so the shared
+ * destination could still be written twice. This removes the race BY
+ * CONSTRUCTION instead of checking for it: every confirm call - a
+ * legitimate one, a sequential replay, or two truly concurrent ones - gets
+ * its OWN final key, so no two confirmations can ever target the same one,
+ * and the HEAD "already exists" pre-check this replaced is no longer
+ * meaningful (a freshly random key is never already in storage) and has
+ * been dropped. A replay or a race can at most create an extra, never-
+ * referenced object; the one a draft save or a published page already
+ * points at can never be overwritten. Changing the video still requires a
+ * new draft save and publish (its own rights-tick gate).
  */
-function finalPathForToken(stagingPath: string, nonce: string): string {
+function finalPathFor(stagingPath: string, formId: string): string {
   const m = /^(.+\/offer-pages\/)_staging\/([^/]+)\/[0-9a-f-]+(\.[a-z0-9]+)$/.exec(stagingPath);
   if (!m) throw new Error("not a staging path"); // stagingPath is always ours (stagingPathFor); never attacker input.
-  return `${m[1]}${m[2]}/${nonce}${m[3]}`;
+  return `${m[1]}${m[2]}/${formId}/${randomUUID()}${m[3]}`;
 }
 
 export function offerUploadStorageConfigured(): boolean {
@@ -257,31 +289,29 @@ export async function mintOfferUpload(input: {
 // re-verify the copy, remove the staging object.
 // ---------------------------------------------------------------------------
 
-export type ConfirmResult = VerifyResult | { ok: false; error: "invalid_token" | "token_expired" | "key_unavailable" | "already_confirmed" };
+export type ConfirmResult = VerifyResult | { ok: false; error: "invalid_token" | "token_expired" | "key_unavailable" };
 
 /**
  * The token-gated confirm step. Trusts nothing about the staging object but
  * its real HEAD; closes the TOCTOU window (confirm checks the object, but the
  * presigned PUT stays valid until it expires, so the object could otherwise
- * be replaced after confirm) by copying it to the FINAL key conditional on
- * the ETag just verified - a swap between the HEAD and the copy fails the
- * copy's own precondition instead of promoting different bytes - and then
- * re-checking the FINAL object's own size and type regardless of whether R2
- * actually enforced that precondition. The staging object is removed after
- * (best effort); only the FINAL path is ever returned, and it is the only
- * path a page doc may ever carry.
+ * be replaced after confirm) by copying it to a FRESH, call-specific FINAL
+ * key (finalPathFor) conditional on the ETag just verified - a swap between
+ * the HEAD and the copy fails the copy's own precondition instead of
+ * promoting different bytes - and then re-checking the FINAL object's own
+ * size and type regardless of whether R2 actually enforced that precondition.
+ * The staging object is removed after (best effort); only the FINAL path is
+ * ever returned, and it is the only path a page doc may ever carry.
  *
- * WRITE-ONCE (Codex security review 2026-10-12, confirm-replay-overwrite):
- * the final path is derived from the TOKEN's own nonce (finalPathForToken),
- * so every confirm call for the SAME token lands on the SAME final path -
- * and `already_confirmed` below refuses outright once that path exists.
- * Before this, an editor could confirm, then (within the PUT's own 5-minute
- * window) upload different same-size, same-type bytes to the SAME staging
- * key and replay the SAME confirm token: the source-only ETag condition does
- * not protect the destination, so the second confirm silently overwrote
- * already-published media with no new save, publish or rights confirmation.
- * A genuinely new upload attempt always mints a fresh token with a fresh
- * nonce, so it is never blocked by this check.
+ * NO SHARED DESTINATION, SO NO RACE (Codex security review 2026-10-12,
+ * confirm-replay-overwrite then its own TOCTOU follow-up): a sequential
+ * replay and two truly concurrent confirms of the SAME token each mint
+ * their OWN final key here, so none of them can ever land on the SAME
+ * object another one (or an earlier, legitimate confirm) already wrote -
+ * there is no "does it already exist" question left to race on. A replay or
+ * a race can at most leave an extra, never-referenced object behind; the one
+ * a draft save or a published page already points at can never change
+ * without a new save and publish (its own rights-tick gate).
  */
 export async function confirmOfferUpload(input: {
   tenantId: string;
@@ -301,19 +331,8 @@ export async function confirmOfferUpload(input: {
     return { ok: false, error: "not_found" };
   }
   if (!input.storage) return { ok: false, error: "storage_unavailable" };
-  const { kind, staging_path: stagingPath, nonce } = verified.payload;
-  const finalPath = finalPathForToken(stagingPath, nonce);
-
-  // Write-once, checked BEFORE anything is read or written for this attempt:
-  // a token already consumed by an earlier confirm (this one or a concurrent
-  // one that got there first) is refused outright, never re-promoted.
-  let already: { size: number; contentType: string | null } | null;
-  try {
-    already = await input.storage.info(finalPath);
-  } catch {
-    return { ok: false, error: "storage_unavailable" };
-  }
-  if (already) return { ok: false, error: "already_confirmed" };
+  const { kind, staging_path: stagingPath } = verified.payload;
+  const finalPath = finalPathFor(stagingPath, input.formId);
 
   let head: { size: number; contentType: string | null; etag: string | null } | null;
   try {
@@ -342,11 +361,15 @@ export async function confirmOfferUpload(input: {
   const finalMime = normalizedMime(finalHead.contentType);
   if (finalMime && finalMime !== "application/octet-stream" && !(finalMime in UPLOAD_MIME[kind])) return { ok: false, error: "wrong_type" };
 
-  try {
-    await input.storage.remove(stagingPath);
-  } catch (err) {
-    console.error("[offer-pages.upload] staging cleanup failed (non-fatal)", { path: stagingPath, error: err instanceof Error ? err.message : String(err) });
-  }
-
+  // The staging object is deliberately NOT deleted here. Each confirm now
+  // promotes to its OWN fresh final key (finalPathFor), so a second
+  // confirm of the same token - sequential or truly concurrent - reads the
+  // SAME still-present staging object and independently succeeds with its
+  // own copy, rather than racing to delete a source the other one still
+  // needs. Staging objects are ephemeral by construction (their presign and
+  // this feature's own token both expire in minutes) and belong under an R2
+  // lifecycle rule that expires the `_staging/` prefix after a short TTL -
+  // NOT configured here; this sandbox has no live R2 to apply it against,
+  // and it is called out as a NOT VERIFIED follow-up in the PR.
   return { ok: true, upload: { kind, path: finalPath, bytes: finalHead.size, mime: finalMime || null } };
 }

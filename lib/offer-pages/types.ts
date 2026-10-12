@@ -162,9 +162,16 @@ export const MAX_UPLOAD_BYTES: Readonly<Record<UploadKind, number>> = {
 const UPLOAD_SUBDIR: Readonly<Record<UploadKind, string>> = { video: "video", poster: "poster", caption: "captions" };
 const SUBDIR_TO_KIND: Readonly<Record<string, UploadKind>> = { video: "video", poster: "poster", captions: "caption" };
 
-/** `<tenant>/offer-pages/<video|poster|captions>/<uuid>.<ext>` - the only shape an upload path may ever have. */
+/**
+ * `<tenant>/offer-pages/<video|poster|captions>/<form id>/<uuid>.<ext>` - the
+ * only shape an upload path may ever have. The form-id segment (added
+ * alongside the write-once fix, Codex security review 2026-10-12) is the
+ * token's own form id at confirm time, carried into the key for operator
+ * legibility; it plays no role in authorization, which is still the tenant
+ * prefix (pathBelongsToTenant) and the real HEAD at resolve/serve time.
+ */
 const UPLOAD_PATH_RE =
-  /^([A-Za-z0-9-]{1,64})\/offer-pages\/(video|poster|captions)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([a-z0-9]{2,5})$/;
+  /^([A-Za-z0-9-]{1,64})\/offer-pages\/(video|poster|captions)\/[A-Za-z0-9-]{8,64}\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([a-z0-9]{2,5})$/;
 
 export function uploadSubdirOf(kind: UploadKind): string {
   return UPLOAD_SUBDIR[kind];
