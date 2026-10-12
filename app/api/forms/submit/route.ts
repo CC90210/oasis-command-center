@@ -99,6 +99,8 @@ import {
   type ConsentDecision,
 } from "@/lib/consent/ledger";
 import { consentDecisionsForStep } from "@/lib/consent/ledger-disclosure";
+import { parseFormRouting } from "@/lib/forms/routing";
+import { resolveRouterDestination } from "@/lib/forms/routing-destination";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
 
@@ -1834,11 +1836,71 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
 
+  // V2 ROUTER ROUTING (HANDOVER 2026-10-12 section 4). Only on the LAST step,
+  // and only when this form actually carries rules — every other form's
+  // behavior is byte-for-byte unchanged (routeTo stays null, redirect_url
+  // falls back to form.redirect_url exactly as it always has).
+  //
+  // A malformed `routing` value never fails this submission: the parser
+  // throws locally, caught here, logged, and treated as "no rules" — the
+  // same rule corrupt `steps`/`branding` elsewhere in this route does NOT
+  // follow (those 500), because routing is additive behavior on top of an
+  // otherwise-complete submission, not a prerequisite for accepting it.
+  let routeTo: string | null = null;
+  if (isLastStep) {
+    // Read `routing` through its OWN, ISOLATED query — never added to the
+    // critical form-lookup select above. forms.routing is migration
+    // bravo__220; this route must keep accepting every submission exactly as
+    // it does today on a database where that migration has not landed yet,
+    // and a single `error` from a missing-column select would otherwise have
+    // failed the ENTIRE select (every other column too), turning every
+    // submission into form_not_found until the migration applies. A failure
+    // here costs nothing but the routing feature itself.
+    let routingRules: ReturnType<typeof parseFormRouting> = [];
+    try {
+      const routingRow = await db.from("forms").select("routing").eq("id", form.id).maybeSingle();
+      if (!routingRow.error && routingRow.data) {
+        routingRules = parseFormRouting((routingRow.data as { routing?: unknown }).routing);
+      }
+    } catch (err) {
+      console.error("[forms.submit.routing] forms.routing unreadable or unparsable; treating as no rules", {
+        form_id: form.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (routingRules.length > 0) {
+      try {
+        routeTo = await resolveRouterDestination(db, {
+          tenantId: form.tenant_id,
+          tenantSlug: link.tenant,
+          routerFormSlug: form.slug,
+          rules: routingRules,
+          answers: mergedAnswers,
+        });
+      } catch (err) {
+        // Fail closed on the DESTINATION only — never let a routing lookup
+        // failure turn an accepted, already-written submission into a 500.
+        console.error("[forms.submit.routing] destination resolution failed; falling back to the form's own redirect", {
+          form_id: form.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        routeTo = null;
+      }
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     submission_id: submissionId,
     next_step: isLastStep ? null : stepIndex + 1,
     lead_stage: appliedStage,
+    // V2 router routing: a RELATIVE path only (lib/forms/routing-destination.ts
+    // builds it from validated slugs), present only on the router form's final
+    // step with a resolved destination. FormPublicClient prefers this over
+    // redirect_url and appends the visitor's own kw/cat/utm/visit params onto
+    // it before navigating (lib/offers/preserve-query.ts) so attribution
+    // survives the hop to another of this workspace's own pages.
+    route_to: routeTo,
     redirect_url: isLastStep ? form.redirect_url : null,
     // Personalized continue-now links (interest form completion only) — the
     // public form's thank-you screen renders these as buttons. Null for every

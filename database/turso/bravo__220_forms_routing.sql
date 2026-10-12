@@ -1,0 +1,42 @@
+-- bravo__220_forms_routing.sql - per-answer routing rules for the "Start
+-- here" router form slice (V2, HANDOVER 2026-10-12 section 4), stored on the
+-- form itself rather than a new table: CC/Adon tune routing the same way
+-- they already tune a form's steps/branding, through the form's own JSON,
+-- and the submit route already loads the form row on every request.
+--
+-- WHAT THIS IS. One JSON array column, forms.routing, default '[]' (no
+-- routing = an ordinary form, unchanged behaviour). Each element:
+--   { "go": "<form slug>" | "community_link",
+--     "when_any": [ { "<field>": ["<value>", ...], ... }, ... ] }
+-- "when_any" entries OR together; the fields inside one entry AND together.
+-- "go":"community_link" is the literal marker for the /go/community save
+-- basin (lib/offers/community-link.ts) -- distinct from an actual tenant
+-- form that happens to be named "community" (OASIS's own COMMUNITY pillar
+-- page), which is why the marker is not simply "community".
+--
+-- Evaluated SERVER-SIDE ONLY (lib/forms/routing.ts), on the router form's own
+-- final step, against the SAME merged-answers context show_if already uses
+-- (lib/forms/visibility.ts buildAnswerContext) -- never trusted from the
+-- request body. "go" is validated against this SAME tenant's OWN enabled
+-- forms (lib/forms/public-resolver.ts resolvePublicForm, keyed off the
+-- verified token's own tenant slug) or the literal "community_link" marker
+-- (only routes anywhere when that tenant has a community URL configured) --
+-- never an arbitrary URL. A rule naming a disabled form, another tenant's
+-- form, or anything that fails to resolve is skipped in favour of the next
+-- rule, then the community route, then the form's own ordinary thank-you
+-- behaviour (lib/forms/routing-destination.ts resolveRouterDestination).
+--
+-- No CHECK constraint on the JSON shape: the shape lives once, in
+-- lib/forms/routing.ts's parser, and tests/offer-router-routing.test.ts pins
+-- it. A malformed value never crashes a submission -- the parser throws
+-- locally, the submit route logs it and treats the form as having no rules.
+--
+-- Apply first, verify the column is free with
+--   node scripts/turso_sql.mjs --db bravo-empire --json
+--     "SELECT sql FROM sqlite_master WHERE tbl_name='forms'"
+-- THEN deploy the code that reads it. NOT applied by this PR - APEX applies
+-- migrations; this file is dry-run only against a scratch libSQL file
+-- (scripts/turso_sql.mjs's own splitSqlStatements, twice), never against
+-- bravo-empire.
+
+ALTER TABLE forms ADD COLUMN routing TEXT NOT NULL DEFAULT '[]';
