@@ -2894,7 +2894,11 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
           'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at, scope, paired_via) ' +
           'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, ?, ?, bpc.scope, ? ' +
           'FROM bridge_pair_codes bpc WHERE bpc.code = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ? ' +
-          'ON CONFLICT (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL DO UPDATE SET ' +
+          // The target's WHERE must match production's partial index
+          // (idx_bridge_pairings_unique_live_machine) exactly, BOTH terms: with
+          // only `revoked_at IS NULL` SQLite finds no matching constraint and
+          // every fingerprinted redeem failed in production (2026-10-12).
+          'ON CONFLICT (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL AND machine_fingerprint IS NOT NULL DO UPDATE SET ' +
           'bridge_token_hash = excluded.bridge_token_hash, label = excluded.label, last_seen_at = excluded.last_seen_at, ' +
           'scope = excluded.scope, paired_via = excluded.paired_via, ' +
           // A re-pair starts a fresh token history and a fresh approval (Codex,
