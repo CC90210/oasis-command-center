@@ -453,17 +453,26 @@ function bucketApi(bucket: string) {
      * on the SOURCE object's ETag at copy time via x-amz-copy-source-if-match:
      * if the source changed since that ETag was read (a TOCTOU swap between a
      * caller's own HEAD check and this copy), R2 answers 412 and nothing is
-     * copied. Lets a caller promote a verified upload to an immutable
-     * destination key that no presigned URL was ever minted for, so nothing
-     * already checked can be swapped out from under it afterward.
+     * copied. ALSO conditional on the DESTINATION not already existing
+     * (if-none-match: "*", the standard conditional-write header, applied
+     * here to the copy's own target): a caller's own pre-copy existence
+     * check is the primary, testable write-once guard (confirm-replay-
+     * overwrite finding), and this is the belt-and-suspenders version of
+     * the SAME guard for the narrow window between that check and this
+     * call. Either condition failing is reported the same way: nothing is
+     * copied either way, and the caller must not treat it as success.
+     * Lets a caller promote a verified upload to an immutable destination
+     * key that no presigned URL was ever minted for, so nothing already
+     * checked can be swapped out, or overwritten by a replay, afterward.
      */
     async copyIfMatch(sourcePath: string, destPath: string, etag: string) {
       try {
         const res = await signedFetch("PUT", bucket, destPath, undefined, undefined, {
           "x-amz-copy-source": `/${cfg().bucket}/${encodePath(objectKey(bucket, sourcePath))}`,
           "x-amz-copy-source-if-match": etag,
+          "if-none-match": "*",
         });
-        if (res.status === 412) return fail("precondition failed: the source object changed", 412);
+        if (res.status === 412 || res.status === 409) return fail("precondition failed: the source changed or the destination already exists", res.status);
         if (!res.ok) {
           const text = await res.text().catch(() => "");
           return fail(`R2 copy failed (${res.status}): ${text.slice(0, 200)}`, res.status);

@@ -65,6 +65,20 @@ const FORM_B = "f0de0000-0000-4000-8000-000000000012";
 const FORM_A2 = "f0de0000-0000-4000-8000-000000000013";
 const OK = { by: "u-1", at: "2026-10-08T12:00:00.000Z" };
 
+/** Reads an upload_token's own payload (no signature check - the test has no legitimate way to hold the HKDF-derived key, and does not need to: it only needs to predict the SAME final path confirmOfferUpload's finalPathForToken derives, to assert nothing landed there). */
+function decodeUploadToken(token: string): { nonce: string; staging_path: string } {
+  const [body] = token.split(".");
+  return JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { nonce: string; staging_path: string };
+}
+
+/** Mirrors lib/offer-pages/upload.ts's finalPathForToken: the final key a token promotes to, named by ITS OWN nonce, never the staging path's mint-time uuid. */
+function expectedFinalPath(stagingPath: string, token: string): string {
+  const nonce = decodeUploadToken(token).nonce;
+  const m = /^(.+\/offer-pages\/)_staging\/([^/]+)\/[0-9a-f-]+(\.[a-z0-9]+)$/.exec(stagingPath);
+  assert.ok(m, `not a staging path: ${stagingPath}`);
+  return `${m![1]}${m![2]}/${nonce}${m![3]}`;
+}
+
 /** Unlike a purely-synchronous presign, confirmOfferUpload's expiry check is reached only after a real DB read awaits, so the override must hold across the whole call, not just its first (synchronous) tick. */
 async function at<T>(ms: number, call: () => Promise<T>): Promise<T> {
   const real = Date.now;
@@ -198,9 +212,42 @@ async function main() {
     fake.opts.forcePreconditionFailed = false;
     assert.equal(r.status, 409, JSON.stringify(r.body));
     assert.equal(r.body.error, "swapped");
-    const finalPath = stagingPath.replace("/offer-pages/_staging/", "/offer-pages/");
+    const finalPath = expectedFinalPath(stagingPath, String(minted.body.upload_token));
     assert.equal(fake.objects.has(finalPath), false, "a swapped source was promoted to the final key anyway");
     assert.equal(fake.objects.has(stagingPath), true, "a refused swap still removed the staging object it did not promote");
+  });
+
+  await step("confirm-replay-overwrite: confirming twice for the SAME token never overwrites the first promotion, even with different, same-size-and-type bytes re-uploaded in between (Codex review of e99e9a90)", async () => {
+    await login(USERS.cc);
+    const minted = await json(await init(FORM, { kind: "video", filename: "replay.mp4", mime_type: "video/mp4", size_bytes: 3_000_000 }));
+    assert.equal(minted.status, 200);
+    const stagingPath = String(minted.body.storage_path);
+    const token = String(minted.body.upload_token);
+    const finalPath = expectedFinalPath(stagingPath, token);
+
+    fake.put(stagingPath, 3_000_000, "video/mp4"); // the editor's real upload
+    const first = await json(await confirm(FORM, { upload_token: token }));
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.path, finalPath);
+    const etagAfterFirst = fake.objects.get(finalPath)?.etag;
+    assert.ok(etagAfterFirst, "the first confirm did not promote anything");
+
+    // The PUT URL is still valid (its own window has not elapsed): the SAME
+    // staging key gets DIFFERENT bytes, same declared size and type, exactly
+    // the review's reproduction - then the SAME token is replayed.
+    fake.put(stagingPath, 3_000_000, "video/mp4");
+    const replay = await json(await confirm(FORM, { upload_token: token }));
+    assert.equal(replay.status, 409, JSON.stringify(replay.body));
+    assert.equal(replay.body.error, "already_confirmed");
+    assert.equal(fake.objects.get(finalPath)?.etag, etagAfterFirst, "the replay changed the already-promoted final object");
+    // The write-once check runs BEFORE any copy is even attempted: the
+    // replay never reaches storage.copyIfMatch at all, so exactly ONE copy
+    // (the first, legitimate confirm) was ever made into this final key.
+    assert.deepEqual(
+      fake.copies.filter((c) => c.dest === finalPath).map((c) => c.source),
+      [stagingPath],
+      "the replay reached copyIfMatch instead of being refused before it",
+    );
   });
 
   await step("another workspace's caller is refused: mint on someone else's form (404), and a token minted for OASIS confirmed under Client A's own form (404)", async () => {

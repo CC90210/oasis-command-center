@@ -110,6 +110,12 @@ export function fakeOfferUploadStorage(opts: { infoThrows?: boolean; copyThrows?
       // HEAD and this call) without needing real concurrency: forced on, as
       // if R2 itself just told us the source no longer matches.
       if (opts.forcePreconditionFailed) return { ok: false as const, error: "precondition_failed" as const };
+      // if-none-match: "*" on the real copy (lib/r2-storage.ts copyIfMatch):
+      // a destination that already exists refuses the write, the same as a
+      // source ETag mismatch - modelled here so the race-window defense is
+      // exercisable even though confirmOfferUpload's own pre-copy HEAD check
+      // is what a test actually drives in practice.
+      if (objects.has(destPath)) return { ok: false as const, error: "precondition_failed" as const };
       const src = objects.get(sourcePath);
       if (!src || src.etag !== etag) return { ok: false as const, error: "precondition_failed" as const };
       objects.set(destPath, { ...src });

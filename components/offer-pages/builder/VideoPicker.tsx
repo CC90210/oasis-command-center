@@ -19,7 +19,7 @@
  * Nothing attaches without the tick "I have the right to show this video
  * publicly"; the server records who ticked it and when.
  */
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Film, Link2, Loader2, Upload, X } from "lucide-react";
 import type { Aspect, UploadKind, UploadVideoRef, VideoRef } from "@/lib/offer-pages/types";
 import { ASPECTS, MAX_UPLOAD_BYTES, UPLOAD_MIME } from "@/lib/offer-pages/types";
@@ -143,6 +143,14 @@ export function VideoPicker({
   libraryAvailable: boolean;
   label?: string;
 }) {
+  // Per-instance ids (Codex review 2026-10-12, P2): two pickers on one page
+  // (e.g. WhatYouGetItems' per-item demos) each render their own upload
+  // inputs; a fixed string id made the SECOND picker's label activate the
+  // FIRST picker's file input instead of its own.
+  const instanceId = useId();
+  const fileInputId = `${instanceId}-video-picker-upload-file`;
+  const posterInputId = `${instanceId}-video-picker-upload-poster`;
+  const captionInputId = `${instanceId}-video-picker-upload-captions`;
   const [mode, setMode] = useState<"idle" | "link" | "library" | "upload">("idle");
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -257,7 +265,7 @@ export function VideoPicker({
 
   if (value) {
     return (
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-bg-border bg-bg-deep/40 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-bg-border bg-bg-deep/40 px-3 py-2" data-picker-instance={instanceId}>
         <Film className="h-4 w-4 text-accent" />
         <span className="text-[13px] text-fg">{describe(value)}</span>
         <select
@@ -285,7 +293,12 @@ export function VideoPicker({
   }
 
   return (
-    <div className="space-y-3 rounded-lg border border-dashed border-bg-border p-3">
+    // data-picker-instance: the SAME useId() value that builds fileInputId /
+    // posterInputId / captionInputId below, present regardless of mode (the
+    // upload inputs only render once mode === "upload") so a test can prove
+    // two sibling pickers get distinct instance ids without needing to drive
+    // a real click. Debugging value only; nothing reads it at runtime.
+    <div className="space-y-3 rounded-lg border border-dashed border-bg-border p-3" data-picker-instance={instanceId}>
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-[13px] font-semibold text-fg">{label}</span>
         <SmallButton tone="primary" onClick={() => setMode("link")}>
@@ -368,11 +381,11 @@ export function VideoPicker({
         <div className="space-y-3">
           {!videoUpload ? (
             <div className="space-y-1">
-              <label className="block text-[12px] text-fg-muted" htmlFor="video-picker-upload-file">
+              <label className="block text-[12px] text-fg-muted" htmlFor={fileInputId}>
                 Video file (MP4, WebM or MOV, up to {Math.round(MAX_UPLOAD_BYTES.video / (1024 * 1024))} MB)
               </label>
               <input
-                id="video-picker-upload-file"
+                id={fileInputId}
                 type="file"
                 accept="video/mp4,video/webm,video/quicktime"
                 disabled={busy}
@@ -398,7 +411,7 @@ export function VideoPicker({
                 <SmallButton onClick={() => setVideoUpload(null)}>Replace</SmallButton>
               </div>
               <div className="space-y-1">
-                <label className="block text-[12px] text-fg-muted" htmlFor="video-picker-upload-poster">
+                <label className="block text-[12px] text-fg-muted" htmlFor={posterInputId}>
                   Poster image, optional (PNG, JPEG or WebP)
                 </label>
                 {posterUpload ? (
@@ -408,7 +421,7 @@ export function VideoPicker({
                   </div>
                 ) : (
                   <input
-                    id="video-picker-upload-poster"
+                    id={posterInputId}
                     type="file"
                     accept="image/png,image/jpeg,image/webp"
                     disabled={busy}
@@ -422,7 +435,7 @@ export function VideoPicker({
                 )}
               </div>
               <div className="space-y-1">
-                <label className="block text-[12px] text-fg-muted" htmlFor="video-picker-upload-captions">
+                <label className="block text-[12px] text-fg-muted" htmlFor={captionInputId}>
                   Captions, optional (WebVTT, .vtt)
                 </label>
                 {captionUpload ? (
@@ -432,7 +445,7 @@ export function VideoPicker({
                   </div>
                 ) : (
                   <input
-                    id="video-picker-upload-captions"
+                    id={captionInputId}
                     type="file"
                     accept="text/vtt,.vtt"
                     disabled={busy}

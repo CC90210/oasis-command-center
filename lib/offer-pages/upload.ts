@@ -78,9 +78,22 @@ function stagingPathFor(tenantId: string, kind: UploadKind, ext: string): string
   return `${tenantId}/offer-pages/${STAGING_SEGMENT}/${uploadSubdirOf(kind)}/${randomUUID()}.${ext}`;
 }
 
-/** The FINAL key a staging key promotes to on confirm: same tenant, kind and name, outside the staging segment. */
-function finalPathFromStaging(stagingPath: string): string {
-  return stagingPath.replace(`/offer-pages/${STAGING_SEGMENT}/`, "/offer-pages/");
+/**
+ * The FINAL key a token promotes to: the staging path's own tenant/kind/
+ * extension, but named by the TOKEN's nonce, not the staging path's own
+ * (mint-time) uuid. This is what makes a replayed token write-once (Codex
+ * security review, confirm-replay-overwrite finding): every confirm call for
+ * the SAME token derives the SAME final path, so confirmOfferUpload's
+ * destination-must-not-exist check below refuses a replay outright - it can
+ * never land on a DIFFERENT final path and never touches the one a first,
+ * legitimate confirm already promoted (which is what let a replay silently
+ * swap already-published media). A fresh mint always gets a fresh nonce, so
+ * a genuinely new upload attempt always gets a fresh final key.
+ */
+function finalPathForToken(stagingPath: string, nonce: string): string {
+  const m = /^(.+\/offer-pages\/)_staging\/([^/]+)\/[0-9a-f-]+(\.[a-z0-9]+)$/.exec(stagingPath);
+  if (!m) throw new Error("not a staging path"); // stagingPath is always ours (stagingPathFor); never attacker input.
+  return `${m[1]}${m[2]}/${nonce}${m[3]}`;
 }
 
 export function offerUploadStorageConfigured(): boolean {
@@ -107,7 +120,7 @@ export function offerUploadStorage(): OfferUploadStorage | null {
     },
     async copyIfMatch(sourcePath, destPath, etag) {
       const r = await bucket.copyIfMatch(sourcePath, destPath, etag);
-      if (r.error) return { ok: false, error: r.error.status === 412 ? "precondition_failed" : "failed" };
+      if (r.error) return { ok: false, error: r.error.status === 412 || r.error.status === 409 ? "precondition_failed" : "failed" };
       return { ok: true };
     },
     async remove(path) {
@@ -244,7 +257,7 @@ export async function mintOfferUpload(input: {
 // re-verify the copy, remove the staging object.
 // ---------------------------------------------------------------------------
 
-export type ConfirmResult = VerifyResult | { ok: false; error: "invalid_token" | "token_expired" | "key_unavailable" };
+export type ConfirmResult = VerifyResult | { ok: false; error: "invalid_token" | "token_expired" | "key_unavailable" | "already_confirmed" };
 
 /**
  * The token-gated confirm step. Trusts nothing about the staging object but
@@ -257,6 +270,18 @@ export type ConfirmResult = VerifyResult | { ok: false; error: "invalid_token" |
  * actually enforced that precondition. The staging object is removed after
  * (best effort); only the FINAL path is ever returned, and it is the only
  * path a page doc may ever carry.
+ *
+ * WRITE-ONCE (Codex security review 2026-10-12, confirm-replay-overwrite):
+ * the final path is derived from the TOKEN's own nonce (finalPathForToken),
+ * so every confirm call for the SAME token lands on the SAME final path -
+ * and `already_confirmed` below refuses outright once that path exists.
+ * Before this, an editor could confirm, then (within the PUT's own 5-minute
+ * window) upload different same-size, same-type bytes to the SAME staging
+ * key and replay the SAME confirm token: the source-only ETag condition does
+ * not protect the destination, so the second confirm silently overwrote
+ * already-published media with no new save, publish or rights confirmation.
+ * A genuinely new upload attempt always mints a fresh token with a fresh
+ * nonce, so it is never blocked by this check.
  */
 export async function confirmOfferUpload(input: {
   tenantId: string;
@@ -276,7 +301,19 @@ export async function confirmOfferUpload(input: {
     return { ok: false, error: "not_found" };
   }
   if (!input.storage) return { ok: false, error: "storage_unavailable" };
-  const { kind, staging_path: stagingPath } = verified.payload;
+  const { kind, staging_path: stagingPath, nonce } = verified.payload;
+  const finalPath = finalPathForToken(stagingPath, nonce);
+
+  // Write-once, checked BEFORE anything is read or written for this attempt:
+  // a token already consumed by an earlier confirm (this one or a concurrent
+  // one that got there first) is refused outright, never re-promoted.
+  let already: { size: number; contentType: string | null } | null;
+  try {
+    already = await input.storage.info(finalPath);
+  } catch {
+    return { ok: false, error: "storage_unavailable" };
+  }
+  if (already) return { ok: false, error: "already_confirmed" };
 
   let head: { size: number; contentType: string | null; etag: string | null } | null;
   try {
@@ -290,7 +327,6 @@ export async function confirmOfferUpload(input: {
   if (mime && mime !== "application/octet-stream" && !(mime in UPLOAD_MIME[kind])) return { ok: false, error: "wrong_type" };
   if (!head.etag) return { ok: false, error: "storage_unavailable" };
 
-  const finalPath = finalPathFromStaging(stagingPath);
   const copied = await input.storage.copyIfMatch(stagingPath, finalPath, head.etag);
   if (!copied.ok) return { ok: false, error: copied.error === "precondition_failed" ? "swapped" : "storage_unavailable" };
 
