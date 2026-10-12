@@ -49,6 +49,7 @@ import {
 import {
   DELIVERY_TENANT_ID,
   OPEN_TICKET_STATUSES,
+  ACTIVE_PROJECT_STAGES,
   PROJECT_STAGE_LABELS,
   PROJECT_STAGES,
   TICKET_SEVERITIES,
@@ -116,6 +117,8 @@ export type Project = {
   lead_id: string | null;
   /** The client record (customers.id) this project is for. Null before migration bravo__188. */
   customer_id: string | null;
+  /** Canonical customers.display_name, populated on the active-client board. */
+  customer_record_name: string | null;
   stage: ProjectStage;
   priority: ProjectPriority;
   assigned_to: string | null;
@@ -144,6 +147,7 @@ function mapProject(r: Row): Project {
     client_email: s(r.client_email),
     lead_id: s(r.lead_id),
     customer_id: s(r.customer_id),
+    customer_record_name: s(r.customer_record_name),
     stage: (isOneOf(PROJECT_STAGES, r.stage) ? r.stage : "discovery") as ProjectStage,
     priority: (s(r.priority) ?? "medium") as ProjectPriority,
     assigned_to: s(r.assigned_to),
@@ -347,16 +351,18 @@ export type ProjectFilters = {
   includeArchived?: boolean;
   /** A client record's projects (the team only; needs migration bravo__188). */
   customer_id?: string | null;
+  /** Current delivery only: active-stage projects anchored to an active/onboarding customer. */
+  activeClientOnly?: boolean;
 };
 
-function projectSelect(viewer: DeliveryViewer): { sql: string; args: string[] } {
+function projectSelect(viewer: DeliveryViewer, activeClientOnly = false): { sql: string; args: string[] } {
   // A client's open-ticket count only counts THEIR tickets on the project.
   // Same trusted-link rule as ticketRowScope — one list, CLIENT_VISIBLE_MATCHES.
   const clientTickets = viewer.kind === "client"
     ? ` AND s.client_tenant_id = ? AND s.client_match IN (${CLIENT_VISIBLE_MATCHES.map((m) => `'${m}'`).join(", ")})`
     : "";
   return {
-    sql: `SELECT p.*, tn.name AS client_tenant_name,
+    sql: `SELECT p.*, tn.name AS client_tenant_name${activeClientOnly && viewer.kind === "founder" ? ", c.display_name AS customer_record_name" : ""},
       (SELECT COUNT(*) FROM delivery_tasks t
          WHERE t.tenant_id = p.tenant_id AND t.project_id = p.id AND t.status <> 'cancelled') AS task_count,
       (SELECT COUNT(*) FROM delivery_tasks t
@@ -371,7 +377,8 @@ function projectSelect(viewer: DeliveryViewer): { sql: string; args: string[] } 
          WHERE u.tenant_id = p.tenant_id AND u.project_id = p.id AND u.visibility = 'client'
          ORDER BY u.created_at DESC, u.id DESC LIMIT 1) AS last_client_update_body
     FROM delivery_projects p
-    LEFT JOIN tenants tn ON tn.id = p.client_tenant_id`,
+    LEFT JOIN tenants tn ON tn.id = p.client_tenant_id
+    ${activeClientOnly && viewer.kind === "founder" ? "JOIN customers c ON c.tenant_id = p.tenant_id AND c.id = p.customer_id" : ""}`,
     args: viewer.kind === "client" ? [viewer.clientTenantId] : [],
   };
 }
@@ -381,11 +388,18 @@ export async function listProjects(
   viewer: DeliveryViewer,
   filters: ProjectFilters = {},
 ): Promise<Listed<Project>> {
-  const head = projectSelect(viewer);
+  const activeClientOnly = viewer.kind === "founder" && filters.activeClientOnly === true;
+  const head = projectSelect(viewer, activeClientOnly);
   const scope = rowScope(viewer, "p");
   const where = [scope.sql];
   const args: string[] = [...head.args, ...scope.args];
   if (!filters.includeArchived) where.push("p.archived_at IS NULL");
+  if (activeClientOnly) {
+    where.push(`p.stage IN (${ACTIVE_PROJECT_STAGES.map(() => "?").join(", ")})`);
+    args.push(...ACTIVE_PROJECT_STAGES);
+    where.push("c.archived_at IS NULL");
+    where.push("c.lifecycle IN ('onboarding', 'active')");
+  }
   if (filters.stage && isOneOf(PROJECT_STAGES, filters.stage)) {
     where.push("p.stage = ?");
     args.push(filters.stage);
@@ -405,7 +419,9 @@ export async function listProjects(
   if (viewer.kind === "founder" && filters.q && filters.q.trim()) {
     const like = likeArg(filters.q.trim());
     where.push(
-      "(p.title LIKE ? ESCAPE '\\' OR p.client_name LIKE ? ESCAPE '\\' OR p.client_email LIKE ? ESCAPE '\\' OR tn.name LIKE ? ESCAPE '\\')",
+      activeClientOnly
+        ? "(p.title LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\' OR c.primary_email LIKE ? ESCAPE '\\' OR tn.name LIKE ? ESCAPE '\\')"
+        : "(p.title LIKE ? ESCAPE '\\' OR p.client_name LIKE ? ESCAPE '\\' OR p.client_email LIKE ? ESCAPE '\\' OR tn.name LIKE ? ESCAPE '\\')",
     );
     args.push(like, like, like, like);
   }
@@ -675,6 +691,20 @@ export async function deskCustomerExists(db: Client, tenantId: string, customerI
   return rs.rows.length > 0;
 }
 
+/** A project may only start or move under a current delivery client. */
+export async function deskActiveCustomerExists(db: Client, tenantId: string, customerId: string): Promise<boolean> {
+  const rs = await readNotRetired("client_tenant_id", (guard) =>
+    db.execute({
+      sql: `SELECT 1 AS ok FROM customers
+            WHERE tenant_id = ? AND id = ? AND archived_at IS NULL
+              AND lifecycle IN ('onboarding', 'active') AND ${guard.sql}
+            LIMIT 1`,
+      args: [requireTenant(tenantId), customerId, ...guard.args],
+    }),
+  );
+  return rs.rows.length > 0;
+}
+
 /**
  * The client record a project belongs to, or null. A ticket on a project
  * belongs to the same client (Codex, PR #473): tickets inherit it, a different
@@ -731,8 +761,8 @@ export type NewProject = {
   priority: ProjectPriority;
   assigned_to: string | null;
   due_date: string | null;
-  /** Written only when set (migration bravo__188). */
-  customer_id?: string | null;
+  /** The current client record this delivery belongs to (migration bravo__188). */
+  customer_id: string;
 };
 
 const STARTED_STAGES: readonly ProjectStage[] = ["building", "review", "live", "maintenance"];
@@ -766,7 +796,7 @@ export async function createProject(
   const at = now.toISOString();
   const cols = [
     "id", "tenant_id", "title", "description", "client_tenant_id", "client_name", "client_email", "lead_id",
-    "stage", "priority", "assigned_to", "due_date", "started_at", "launched_at", "created_by", "created_at", "updated_at",
+    "customer_id", "stage", "priority", "assigned_to", "due_date", "started_at", "launched_at", "created_by", "created_at", "updated_at",
   ];
   const vals: Array<string | null> = [
     id,
@@ -777,6 +807,7 @@ export async function createProject(
     input.client_name,
     input.client_email,
     input.lead_id,
+    input.customer_id,
     input.stage,
     input.priority,
     input.assigned_to,
@@ -787,10 +818,6 @@ export async function createProject(
     at,
     at,
   ];
-  if (input.customer_id) {
-    cols.push("customer_id");
-    vals.push(input.customer_id);
-  }
   await db.batch(
     [
       {

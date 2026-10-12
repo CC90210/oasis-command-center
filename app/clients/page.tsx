@@ -24,15 +24,8 @@
  * IMPORT STRIPE CUSTOMERS (OASIS, founders who may open Money) turns the
  * Stripe customers in OASIS's books into records, after the privacy question.
  *
- * NOT YET CLIENT RECORDS (OASIS only). Before client records existed, OASIS's
- * clients were assembled from what it already records (components/os/landings/
- * clients-model.ts): deals won in Pipeline, delivery projects and open support
- * tickets. Those are still shown, honestly labelled, until each is converted:
- * a won deal that already has a record links to it; the rest offer "Convert to
- * client" (owners and admins). Nothing here is typed in or sampled. A deal
- * about a retired business is never listed (lib/os/customers/retired.ts), and
- * the section is drawn only when it has something to show, so a blank start
- * is a clean empty state.
+ * A client exists here only when it has a `customers` record. Won deals convert
+ * from Pipeline; projects and tickets never invent a second client identity.
  *
  * GATE, first statement: requireOsRoute("/clients") — the rail's own rule
  * (capabilities.canSeeClientIdentities). Each source then applies its own rule
@@ -44,21 +37,9 @@ import { Card } from "@/components/Card";
 import { PageFrame } from "@/components/os/PageFrame";
 import { KpiTile } from "@/components/os/KpiTile";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
-import {
-  CLIENTS_DELIVERY_LIMIT,
-  CLIENTS_LEAD_LIMIT,
-  loadClientSources,
-  type SourceState,
-} from "@/components/os/landings/clients-data";
-import {
-  buildClientRows,
-  shownCount,
-  type ClientFloors,
-  type ClientRow,
-} from "@/components/os/landings/clients-model";
+import { shownCount } from "@/components/os/landings/clients-model";
 import {
   firstParam,
-  loadConvertedLeads,
   loadCustomerRecords,
   loadWorkspaceDirectory,
   ownerName,
@@ -69,8 +50,6 @@ import {
   ClearClientFilters,
   ClientStatusField,
   ClientsByStatus,
-  ConvertToClientButton,
-  EndDealEngagementButton,
   ImportStripeButton,
   NewClientButton,
 } from "@/components/os/landings/clients-actions";
@@ -87,8 +66,6 @@ export const metadata = { title: "Clients" };
 
 type Param = string | string[];
 type Search = { lifecycle?: Param; q?: Param; owner?: Param; archived?: Param };
-
-const rowsOf = <T,>(s: SourceState<T>): T[] | null => (s.state === "ok" ? s.rows : null);
 
 // Next's generated PageProps check rejects a defaulted (possibly-undefined)
 // first argument, so the prop is required in the type; `props?.` keeps a bare
@@ -109,11 +86,10 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
     owner: sp.owner?.trim() || null,
     includeArchived: sp.archived === "1",
   };
-  const [records, sources, directory] = await Promise.all([
+  const [records, directory] = await Promise.all([
     // A list cut at its page size cannot be filtered from the rows at hand:
     // there the server reads the status in the address bar instead.
     loadCustomerRecords(cv, filters, undefined, { statusWhenCut: status }),
-    loadClientSources(viewer),
     loadWorkspaceDirectory(cv.tenantId),
   ]);
   // And its tabs navigate.
@@ -127,6 +103,11 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
       {canOpen("/tickets") && (
         <Link href="/tickets" prefetch={false} className="btn-secondary">
           Support desk
+        </Link>
+      )}
+      {canOpen("/projects") && (
+        <Link href="/projects" prefetch={false} className="btn-secondary">
+          Active projects
         </Link>
       )}
       {cv.canWrite && cv.tenantId === DELIVERY_TENANT_ID && moneyReadable && <ImportStripeButton />}
@@ -157,60 +138,6 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
     const count = statusFromServer ? undefined : t.key ? byLifecycle(t.key) : allRows.length;
     return { ...t, href: `/clients${params.size ? `?${params.toString()}` : ""}`, ...(count === undefined ? {} : { count }) };
   });
-
-  // ── the pipeline-derived clients (OASIS) ─────────────────────────────────
-  const derivedApplies = sources.wonDeals.state !== "not_applicable";
-  // A list at its read cap makes its counts floors ("500+"), never totals
-  // (lib/os/count.ts; #469).
-  const projectsCapped = sources.projects.state === "ok" && sources.projects.truncated;
-  const ticketsCapped = sources.tickets.state === "ok" && sources.tickets.truncated;
-  const built = derivedApplies && !formFiltered && sources.wonDeals.state !== "not_allowed"
-    ? buildClientRows({
-        leads: rowsOf(sources.wonDeals) ?? [],
-        projects: rowsOf(sources.projects),
-        tickets: rowsOf(sources.tickets),
-        capped: {
-          leads: sources.wonDeals.state === "ok" && sources.wonDeals.truncated,
-          projects: projectsCapped,
-          tickets: ticketsCapped,
-        },
-      })
-    : null;
-  const cappedLists = [projectsCapped ? "projects" : null, ticketsCapped ? "open tickets" : null].filter(Boolean);
-  const leadIdOf = (key: string) => (key.startsWith("lead:") ? key.slice("lead:".length) : null);
-  // A won deal already converted is a record above, archived or not; it is not
-  // listed twice. Asked by lead id, so the list's filters and 500-row page do
-  // not decide it. Null when client records cannot be read.
-  const converted =
-    built && records.state === "ok"
-      ? await loadConvertedLeads(cv, [...built.rows, ...built.past].map((r) => leadIdOf(r.key)).filter((x): x is string => x !== null))
-      : null;
-  const convertedLeads = converted?.state === "ok" ? converted.value : null;
-  const notConverted = (row: { key: string }) => {
-    const leadId = leadIdOf(row.key);
-    return !(leadId && convertedLeads?.has(leadId));
-  };
-  const derivedRows = built ? built.rows.filter(notConverted) : [];
-  // The same for ended deals: one that already has a record is listed there.
-  const pastDerivedRows = built ? built.past.filter(notConverted) : [];
-  const derivedFailed = [
-    sources.wonDeals.state === "error" ? "won deals from Pipeline" : null,
-    sources.projects.state === "error" ? "projects" : null,
-    sources.tickets.state === "error" ? "tickets" : null,
-    converted?.state === "error" ? "which deals are already client records" : null,
-  ].filter(Boolean);
-  const deliveryHidden = sources.projects.state === "not_allowed";
-  // A blank start is a clean empty state: the section is drawn only when it has
-  // something to show (a deal, a past deal, unlinked tickets), a failure to
-  // report, or the reason this role sees none of it.
-  const derivedShown =
-    derivedApplies &&
-    !formFiltered &&
-    (sources.wonDeals.state === "not_allowed" ||
-      derivedFailed.length > 0 ||
-      derivedRows.length > 0 ||
-      pastDerivedRows.length > 0 ||
-      (built?.unlinkedTickets ?? 0) > 0);
 
   return (
     <PageFrame title="Clients" subtitle="The customers your business serves." actions={actions}>
@@ -309,93 +236,10 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
           </>
         )}
 
-        {derivedShown && (
-          <section className="space-y-3">
-            <div>
-              <h2 className="text-sm font-semibold text-fg">Not yet client records</h2>
-              <p className="mt-0.5 max-w-prose text-[13px] leading-5 text-fg-muted">
-                Clients recorded before client records existed: deals won in Pipeline, delivery projects and open tickets.
-                {cv.canWrite
-                  ? " Convert a won deal to give it a record, or mark it ended to file it under Past clients. Nothing here changes until you click."
-                  : ""}
-              </p>
-            </div>
-            {sources.wonDeals.state === "not_allowed" ? (
-              <Card>
-                <div className="py-4">
-                  <p className="text-sm font-medium text-fg">Your role sees clients through your own deals.</p>
-                  <p className="mt-1 text-[13px] text-fg-muted">
-                    The full client list is the whole book, which owners and admins manage.{" "}
-                    {canOpen("/pipeline") && (
-                      <Link href="/pipeline" prefetch={false} className="text-accent hover:underline">
-                        Open your pipeline
-                      </Link>
-                    )}
-                  </p>
-                </div>
-              </Card>
-            ) : (
-              <>
-                {derivedFailed.length > 0 && (
-                  <p role="alert" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
-                    Couldn&rsquo;t load {derivedFailed.join(", ")}. The list below may be incomplete; the error has been logged.
-                  </p>
-                )}
-                {built && derivedRows.length > 0 ? (
-                  <ClientsTable
-                    rows={derivedRows}
-                    deliveryHidden={deliveryHidden}
-                    floors={built.floors}
-                    convertedLeads={convertedLeads ? Object.fromEntries(convertedLeads) : null}
-                    canConvert={cv.canWrite && convertedLeads !== null}
-                  />
-                ) : built && derivedFailed.length === 0 ? (
-                  <Card>
-                    <p className="py-4 text-[13px] text-fg-muted">Nothing left to convert: no won deals, projects or open tickets outside client records.</p>
-                  </Card>
-                ) : null}
-                {built && pastDerivedRows.length > 0 && (
-                  <div className="space-y-2">
-                    <h3 className="text-[13px] font-semibold text-fg">Past clients in Pipeline</h3>
-                    <p className="text-[13px] text-fg-muted">Deals whose engagement ended. They are past clients, not clients to convert.</p>
-                    <ClientsTable
-                      rows={pastDerivedRows}
-                      deliveryHidden={deliveryHidden}
-                      floors={built.floors}
-                      convertedLeads={convertedLeads ? Object.fromEntries(convertedLeads) : null}
-                      canConvert={false}
-                    />
-                  </div>
-                )}
-                {built && built.unlinkedTickets !== null && built.unlinkedTickets > 0 && (
-                  <p className="text-[13px] text-fg-muted">
-                    {shownCount(built.unlinkedTickets, built.floors.unlinkedTickets)} open ticket
-                    {built.unlinkedTickets === 1 && !built.floors.unlinkedTickets ? " is" : "s are"} not linked to a client yet.{" "}
-                    {canOpen("/tickets") && (
-                      <Link href="/tickets" prefetch={false} className="text-accent hover:underline">
-                        Review in Support desk
-                      </Link>
-                    )}
-                  </p>
-                )}
-                {sources.wonDeals.state === "ok" && sources.wonDeals.truncated && (
-                  <p className="text-xs text-fg-dim">Showing the {CLIENTS_LEAD_LIMIT} most recently updated won deals.</p>
-                )}
-                {built && cappedLists.length > 0 && (
-                  <p className="text-xs text-fg-dim">
-                    Only the first {CLIENTS_DELIVERY_LIMIT} {cappedLists.join(" and ")} were read, so counts marked + are
-                    minimums, not totals.
-                  </p>
-                )}
-              </>
-            )}
-          </section>
-        )}
       </div>
     </PageFrame>
   );
 }
-
 function Count({ value, hidden, floor = false }: { value: number | null; hidden: boolean; floor?: boolean }) {
   if (value === null) {
     return (
@@ -492,86 +336,5 @@ function CustomerRow({
         <LastTouch at={r.last_touch} />
       </td>
     </tr>
-  );
-}
-
-/** OASIS's pipeline-derived clients, until each is a record. */
-function ClientsTable({
-  rows,
-  deliveryHidden,
-  floors,
-  convertedLeads,
-  canConvert,
-}: {
-  rows: readonly ClientRow[];
-  deliveryHidden: boolean;
-  floors: ClientFloors;
-  /** lead id → client record id; null when client records could not be read. */
-  convertedLeads: Record<string, string> | null;
-  canConvert: boolean;
-}) {
-  return (
-    <Card noPadding>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-sm">
-          <thead>
-            <tr className="border-b border-hairline">
-              <th className={th}>Name</th>
-              <th className={th}>Status</th>
-              <th className={`${th} text-right`}>Open tickets</th>
-              <th className={`${th} text-right`}>Active projects</th>
-              <th className={`${th} text-right`}>Last touch</th>
-              <th className={th}>Client record</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-hairline">
-            {rows.map((r) => {
-              const leadId = r.key.startsWith("lead:") ? r.key.slice("lead:".length) : null;
-              const recordId = leadId && convertedLeads ? convertedLeads[leadId] ?? null : null;
-              return (
-                <tr key={r.key} className="transition-colors duration-150 hover:bg-active-hover">
-                  <td className={td}>
-                    {r.href ? (
-                      <Link href={r.href} prefetch={false} className="font-medium text-fg hover:underline">
-                        {r.name}
-                      </Link>
-                    ) : (
-                      <span className="font-medium text-fg">{r.name}</span>
-                    )}
-                    {r.contact && <div className="text-xs text-fg-dim">{r.contact}</div>}
-                  </td>
-                  <td className={`${td} text-fg-muted`}>{r.status}</td>
-                  <td className={`${td} text-right tabular-nums`}>
-                    <Count value={r.openTickets} hidden={deliveryHidden} floor={floors.openTickets} />
-                  </td>
-                  <td className={`${td} text-right tabular-nums`}>
-                    <Count value={r.activeProjects} hidden={deliveryHidden} floor={floors.activeProjects} />
-                  </td>
-                  <td className={`${td} whitespace-nowrap text-right tabular-nums text-fg-muted`} title={r.lastTouch ?? undefined}>
-                    {r.lastTouch ? timeAgo(r.lastTouch) : "—"}
-                  </td>
-                  <td className={td}>
-                    {recordId ? (
-                      <Link href={`/clients/${recordId}`} prefetch={false} className="text-[13px] text-accent hover:underline">
-                        Open record
-                      </Link>
-                    ) : leadId && canConvert ? (
-                      // A won deal whose engagement already ended goes to Past
-                      // as a record, instead of sitting among current clients.
-                      <div className="flex flex-col items-start gap-1.5">
-                        <ConvertToClientButton leadId={leadId} />
-                        <EndDealEngagementButton leadId={leadId} />
-                      </div>
-                    ) : (
-                      <span className="text-[13px] text-fg-dim">{convertedLeads === null ? "—" : "Not a record yet"}</span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </Card>
   );
 }

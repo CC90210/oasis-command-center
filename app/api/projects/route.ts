@@ -33,7 +33,7 @@ import {
 import {
   clientTenantExists,
   createProject,
-  deskCustomerExists,
+  deskActiveCustomerExists,
   deskLeadExists,
   getProject,
   listProjects,
@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
     if (input.lead_id && !(await deskLeadExists(db, desk, input.lead_id))) {
       return deliveryError(400, "lead_not_found", undefined, { field: "lead_id" });
     }
-    if (input.customer_id && !(await deskCustomerExists(db, desk, input.customer_id))) {
+    if (!(await deskActiveCustomerExists(db, desk, input.customer_id))) {
       return deliveryError(400, "customer_not_found", undefined, { field: "customer_id" });
     }
 

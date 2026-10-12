@@ -156,7 +156,12 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <Link href="/projects" className="text-xs text-fg-muted hover:text-fg">Back to projects</Link>
+      <Link
+        href={project.customer_id ? `/clients/${project.customer_id}?tab=projects` : "/projects"}
+        className="text-xs text-fg-muted hover:text-fg"
+      >
+        {project.customer_id ? "Back to client projects" : "Back to projects"}
+      </Link>
       <PageHeader
         title={project.title}
         subtitle={
