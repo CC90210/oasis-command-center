@@ -68,17 +68,16 @@ const departmentRow = (d: OsDepartment): OsNavEntry => ({
 /**
  * Every row the OS can draw. Order here is order on screen.
  *
- * Projects has ONE home: Team (design doc §(a), the TEAM table). Clients links
- * a client's projects from the client record once /clients ships, rather than
- * listing the same route twice — two rows for one route both light up as
- * "active", which is the double-highlight longest-prefix exists to prevent.
+ * Projects has ONE home: Clients. The aggregate is current delivery across
+ * client records; each record links its own projects. Listing the route twice
+ * would light up two rows as "active", which is the double-highlight
+ * longest-prefix matching exists to prevent.
  */
 export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
   // ── TEAM ────────────────────────────────────────────────────────────────
   { id: "today", href: "/", label: "Today", icon: "Home", section: "team", audience: "everyone", unprovisioned: true },
   { id: "feed", href: "/feed", label: "Feed", icon: "Rss", section: "team", audience: "everyone", badgeKey: "approvals" },
   { id: "schedule", href: "/schedule", label: "Schedule", icon: "CalendarDays", section: "team", audience: "everyone" },
-  { id: "projects", href: "/projects", label: "Projects", icon: "FolderKanban", section: "team", audience: "delivery" },
   // OASIS-only until playbooks are stored per tenant (W10, `playbook_docs`):
   // /playbook reads OASIS's own SOPs from content/playbooks, and those are not
   // another workspace's to browse.
@@ -111,6 +110,7 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
 
   // ── CLIENTS ─────────────────────────────────────────────────────────────
   { id: "clients", href: "/clients", label: "All clients", icon: "Building2", section: "clients", audience: "client_identities" },
+  { id: "projects", href: "/projects", label: "Active projects", icon: "FolderKanban", section: "clients", audience: "delivery" },
   { id: "support", href: "/tickets", label: "Support desk", icon: "LifeBuoy", section: "clients", audience: "delivery", badgeKey: "sla_breaches" },
 
   // ── MONEY (owners; OASIS until fin_* carries tenant_id) ─────────────────

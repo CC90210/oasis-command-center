@@ -184,6 +184,7 @@ async function main() {
   // ── rules ──────────────────────────────────────────────────────────────
   await check("rules: the lifecycle vocabulary is exactly the design's, labelled once", () => {
     assert.deepEqual([...rules.CUSTOMER_LIFECYCLES], ["prospect", "onboarding", "active", "paused", "churned"]);
+    assert.deepEqual([...rules.CURRENT_CUSTOMER_LIFECYCLES], ["onboarding", "active"]);
     for (const l of rules.CUSTOMER_LIFECYCLES) assert.ok(rules.CUSTOMER_LIFECYCLE_LABELS[l]);
     assert.deepEqual([...rules.CONVERTIBLE_LEAD_STAGES], ["won", "onboarding", "in_build", "client_review", "launched"]);
     assert.equal(rules.lifecycleForLeadStage("won"), "onboarding");
@@ -255,6 +256,7 @@ async function main() {
     const paused = await store.listCustomers(db, CLIENT_A, { lifecycle: "paused" });
     assert.deepEqual(paused.rows.map((c) => c.id), [acme.id]);
     assert.equal(paused.rows[0].open_ticket_count, null, "without withDelivery a count is unknown, not 0");
+    assert.equal((await store.listCustomerOptions(db, CLIENT_A)).some((c) => c.value === acme.id), false, "a paused client is not offered for new delivery work");
   });
   await check("contacts: added and removed on the workspace's own client only", async () => {
     const c = await store.addContact(db, CLIENT_A, acme.id, { name: "Dana", email: "dana@acme.test", phone: null, role: "Office manager" }, T0);
@@ -333,6 +335,7 @@ async function main() {
     assert.equal(r.customer.primary_email, "lee@harbour.test");
     assert.equal(r.customer.primary_phone, "+15145550142");
     assert.equal(r.customer.lifecycle, "onboarding");
+    assert.equal((await store.listCustomerOptions(db, CLIENT_A)).some((c) => c.value === r.customer.id), true, "onboarding is current delivery work");
     assert.equal(r.customer.source_lead_id, "lead-won-1");
     assert.deepEqual((await store.listContacts(db, CLIENT_A, harbourId)).map((c) => c.name), ["Dr. Lee"]);
     const p = (await db.execute({ sql: "SELECT customer_id FROM delivery_projects WHERE id = ?", args: [projectForDeal] })).rows[0];
