@@ -19,6 +19,7 @@ import { PROVIDER_LABEL } from "@/lib/providers";
 import {
   describeLocalModel,
   describeRuntime,
+  connectorRestartCommand,
   engineDevicesForScope,
   inheritWorkspaceEngine,
   pollRuntimeJob,
@@ -85,7 +86,7 @@ function setupForMode(mode: EngineSelection["mode"], state: EngineState, scope: 
 function commandFor(device: EngineDevice, provider: CliEngine): string | null {
   const runtime = device.runtimes[provider];
   if (provider === "gemini") return null;
-  if (!device.online) return "oasis bridge restart";
+  if (!device.online) return connectorRestartCommand(device.os);
   if (!runtime.installed) return INSTALL_COMMAND[provider];
   if (!runtime.signedIn) return LOGIN_COMMAND[provider];
   return null;
@@ -279,7 +280,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     const queued = await queueEngineProbe(draftSelection, scope, undefined, { signal: controller.signal });
     if (!queued.ok) {
       setActivity(null);
-      setNotice({ tone: "error", text: queued.message, repair: repairForCode(queued.code, selectedDevice?.label, selectedCli) });
+      setNotice({ tone: "error", text: queued.message, repair: repairForCode(queued.code, selectedDevice?.label, selectedCli, selectedDevice?.os) });
       return;
     }
     const finished = await pollRuntimeJob(queued.jobId, undefined, {
@@ -288,7 +289,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     });
     setActivity(null);
     if (!finished.ok) {
-      setNotice({ tone: "error", text: finished.message, repair: repairForCode(finished.code, selectedDevice?.label, selectedCli) });
+      setNotice({ tone: "error", text: finished.message, repair: repairForCode(finished.code, selectedDevice?.label, selectedCli, selectedDevice?.os) });
       return;
     }
     setProbeReceipt({ key: draftKey, jobId: queued.jobId });
@@ -316,7 +317,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
       setNotice({
         tone: "error",
         text: result.message,
-        repair: repairForCode(result.code, selectedDevice?.label, selectedCli),
+        repair: repairForCode(result.code, selectedDevice?.label, selectedCli, selectedDevice?.os),
       });
       await load({ keepDraft: true });
       return;
@@ -371,7 +372,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     });
     setActivity(null);
     if (!finished.ok) {
-      setNotice({ tone: "error", text: finished.message, repair: repairForCode(finished.code, selectedDevice.label, provider) });
+      setNotice({ tone: "error", text: finished.message, repair: repairForCode(finished.code, selectedDevice.label, provider, selectedDevice.os) });
       return;
     }
     setNotice({ tone: "info", text: `${CLI_ENGINE_LABEL[provider]} finished sign-in on ${selectedDevice.label}. Verifying a real agent reply now…` });

@@ -192,7 +192,8 @@ async function main() {
       "Unsupported",
       "an installed Gemini CLI without a connector-detected managed account offers Google API instead of a login loop",
     );
-    assert.match(client.repairForCode("runtime_unavailable", "CCPC") ?? "", /oasis bridge restart/);
+    assert.match(client.repairForCode("runtime_unavailable", "CCPC", undefined, "Windows") ?? "", /\.oasis\\bin\\oasis\.cmd.*bridge restart/);
+    assert.match(client.repairForCode("runtime_unavailable", "Mac", undefined, "macOS") ?? "", /\.oasis\/bin\/oasis.*bridge restart/);
     assert.match(client.repairForCode("not_authenticated", "CCPC") ?? "", /Sign in/);
     assert.match(client.repairForCode("engine_not_found", "CCPC") ?? "", /Start Ollama or LM Studio/);
     assert.match(client.repairForCode("not_authenticated", "CCPC", "claude") ?? "", /claude\n\/login/);

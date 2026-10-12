@@ -15,6 +15,7 @@ import {
   type EngineSelection,
 } from "@/lib/ai/agent-engine";
 import { machinesOfBody, unsupportedProviders, type CliMachineSnapshot } from "@/lib/bridge-cli-status";
+import { bridgeHostOSFromPlatform, bridgeRestartCommand } from "@/lib/bridge-install-guidance";
 import type { Provider } from "@/lib/providers";
 
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -541,15 +542,23 @@ const CLI_INSTALL: Record<CliEngine, string> = {
 };
 const CLI_LOGIN: Record<CliEngine, string> = { claude: "claude\n/login", codex: "codex login", gemini: "Use a Google API key" };
 
+/** Copy-safe launcher command for the exact paired computer. The launcher
+ * delegates to that OS's registered supervisor, rather than starting an
+ * unmanaged duplicate bridge process. */
+export function connectorRestartCommand(platform: string | null | undefined): string {
+  const hostOS = bridgeHostOSFromPlatform(platform);
+  return hostOS ? bridgeRestartCommand(hostOS) : "oasis bridge restart";
+}
+
 /** One truthful status sentence. A heartbeat/sign-in alone is deliberately never called ready. */
 export function describeRuntime(
-  target: Pick<EngineDevice, "label" | "approved" | "online" | "busy" | "protocols" | "runtimes">,
+  target: Pick<EngineDevice, "label" | "os" | "approved" | "online" | "busy" | "protocols" | "runtimes">,
   provider: CliEngine,
 ): { label: string; verified: boolean; repair: string | null } {
   const state = target.runtimes[provider];
   const name = CLI_LABEL[provider];
   if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
-  if (!target.online) return { label: "Offline", verified: false, repair: `On ${target.label}, run: oasis bridge restart` };
+  if (!target.online) return { label: "Offline", verified: false, repair: `On ${target.label}, run: ${connectorRestartCommand(target.os)}` };
   if (state.unsupported || (provider === "gemini" && state.installed && !state.signedIn)) {
     return { label: "Unsupported", verified: false, repair: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead." };
   }
@@ -576,7 +585,7 @@ export function describeRuntime(
 
 /** A detected model is usable only after the selected connector has run a real probe. */
 export function describeLocalModel(
-  target: Pick<EngineDevice, "label" | "approved" | "online" | "busy" | "protocols">,
+  target: Pick<EngineDevice, "label" | "os" | "approved" | "online" | "busy" | "protocols">,
   model: EngineDevice["localModels"][number] | undefined,
 ): { label: string; verified: boolean; repair: string | null } {
   if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
@@ -601,7 +610,12 @@ export function selectionKey(selection: EngineSelection, scope: EngineScope): st
   return `${scope}:${JSON.stringify(selection)}`;
 }
 
-export function repairForCode(code: string | undefined, deviceLabel?: string, provider?: CliEngine): string | null {
+export function repairForCode(
+  code: string | undefined,
+  deviceLabel?: string,
+  provider?: CliEngine,
+  deviceOS?: string | null,
+): string | null {
   const where = deviceLabel ? ` on ${deviceLabel}` : " on the selected computer";
   switch (code) {
     case "pairing_required":
@@ -612,7 +626,7 @@ export function repairForCode(code: string | undefined, deviceLabel?: string, pr
     case "connector_offline":
     case "bridge_unavailable":
     case "runtime_unavailable":
-      return `Restart the connector${where} with: oasis bridge restart`;
+      return `Restart the connector${where} with: ${connectorRestartCommand(deviceOS)}`;
     case "cli_not_found":
       return provider
         ? `On ${deviceLabel ?? "the selected computer"}, run: ${CLI_INSTALL[provider]}`
