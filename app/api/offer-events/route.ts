@@ -113,36 +113,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return EMPTY_204();
     }
 
-    // 1. Per-visit, BEFORE any DB read. One visit firing page_view, several
-    // step_viewed/step_submitted and four video_progress checkpoints
-    // comfortably fits in well under a minute; 60/min leaves headroom without
-    // opening a flood vector.
-    const visitLimit = rateLimit({ key: `offer-events:visit:${visitId}`, capacity: 60, refillPerSec: 1 });
-    if (!visitLimit.allowed) return EMPTY_204();
-
-    // 2. Per-sender (IP), BEFORE any DB read (CodeRabbit, PRRT_kwDOSgetsc6rd9DP):
-    // the check above cannot see a flood that mints a fresh visit_id on every
-    // request, since each one gets its own bucket. 300/min is generous
+    // RATE LIMITS. lib/rate-limit.ts keeps one in-memory bucket per key with
+    // no eviction, so every limiter key here must have BOUNDED cardinality:
+    // a key built from a client-chosen value (visit_id, raw slugs) lets one
+    // sender mint unlimited buckets and exhaust the isolate's memory
+    // (independent review, 2026-10-12, HIGH). Hence: no per-visit limiter,
+    // and the per-form limiter keys on the RESOLVED form id, after lookup.
+    //
+    // 1. Per-sender (IP), BEFORE any DB read (CodeRabbit, PRRT_kwDOSgetsc6rd9DP):
+    // bounds a flood that mints a fresh visit_id on every request, and
+    // bounds how many form lookups one sender can cause. 300/min is generous
     // enough for a shared office IP legitimately running several visitors'
-    // sessions, while still bounding a script that would otherwise write
-    // unbounded rows. The IP itself is never stored -- see the file doc
-    // comment.
+    // sessions. The IP itself is never stored -- see the file doc comment.
     const ip = getClientIp(req);
     const ipLimit = rateLimit({ key: `offer-events:ip:${ip}`, capacity: 300, refillPerSec: 5 });
     if (!ipLimit.allowed) return EMPTY_204();
-
-    // 3. Per-form, BEFORE any DB read, keyed on the raw (lowercased, length-
-    // capped) slugs rather than the resolved ids -- the whole point is to
-    // never reach resolvePublicForm for a flood. Bounds a flood targeting one
-    // form's Views count even across many distinct IPs and visit_ids.
-    const normalizedTenant = tenantSlug.trim().toLowerCase().slice(0, 64);
-    const normalizedForm = formSlug.trim().toLowerCase().slice(0, 64);
-    const formLimit = rateLimit({
-      key: `offer-events:form:${normalizedTenant}:${normalizedForm}`,
-      capacity: 600,
-      refillPerSec: 10,
-    });
-    if (!formLimit.allowed) return EMPTY_204();
 
     // Resolve tenant_id/form_id SERVER-SIDE. A body's tenant/form slug can
     // never widen to another tenant's id, and an unknown or disabled form
@@ -151,6 +136,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // tenants or form names either.
     const resolved = await resolvePublicForm(getServiceSupabase(), tenantSlug, formSlug);
     if (!resolved.ok) return EMPTY_204();
+
+    // 2. Per-form, keyed on the resolved form id (one bucket per real form,
+    // never per invented slug). Bounds a flood targeting one form's Views
+    // count even across many distinct IPs and visit_ids.
+    const formLimit = rateLimit({ key: `offer-events:form:${resolved.form.id}`, capacity: 600, refillPerSec: 10 });
+    if (!formLimit.allowed) return EMPTY_204();
 
     const db = offerPagesDb();
     if (!db) return EMPTY_204();

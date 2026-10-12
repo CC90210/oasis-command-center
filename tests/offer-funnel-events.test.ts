@@ -757,6 +757,15 @@ async function main() {
     assert.equal(written, 1, "a different sender must not be rate-limited by another sender's flood");
   });
 
+  await check("every rate-limit key in the ingest route has bounded cardinality (never a client-chosen visit_id or raw slug)", () => {
+    // lib/rate-limit.ts keeps one bucket per key forever; a key built from a
+    // value the client invents lets one sender exhaust the isolate's memory.
+    const src = readFileSync(join(__dirname, "..", "app", "api", "offer-events", "route.ts"), "utf8");
+    const keys = [...src.matchAll(/rateLimit\(\{\s*key:\s*`([^`]*)`/g)].map((m) => m[1]);
+    assert.deepEqual(keys, ["offer-events:ip:${ip}", "offer-events:form:${resolved.form.id}"], `unexpected limiter keys: ${JSON.stringify(keys)}`);
+    assert.ok(src.indexOf("resolvePublicForm(") < src.indexOf("offer-events:form:"), "the per-form limiter must key on the RESOLVED form, after lookup");
+  });
+
   // -- 15. CodeRabbit PRRT_kwDOSgetsc6rd9Dj: lead_id resolves INSIDE the INSERT --
   await check("insertFunnelEvent resolves lead_id inside the INSERT itself (one statement, a correlated subquery) -- never a separate lookup then insert", async () => {
     const { insertFunnelEvent } = await import("../lib/offers/tracking-store");
