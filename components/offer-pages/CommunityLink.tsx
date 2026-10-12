@@ -22,6 +22,7 @@
  * Plain `<a>`: keyboard-operable and screen-reader-visible by default, no
  * custom role or JS handler needed.
  */
+import { useEffect, useState } from "react";
 import { peekVisitId } from "@/lib/offers/tracking-client";
 
 export function CommunityLink({
@@ -36,10 +37,18 @@ export function CommunityLink({
   configured: boolean;
   className?: string;
 }) {
+  // The visit id lives in sessionStorage, which the server cannot see. Read it
+  // AFTER hydration and apply it through state, so the first client render
+  // matches the server's href exactly; reading it during render made the two
+  // differ, and React does not promise to patch a mismatched href (CodeRabbit).
+  const [visitId, setVisitId] = useState<string | null>(null);
+  useEffect(() => {
+    setVisitId(peekVisitId());
+  }, []);
+
   if (!configured || !tenantSlug || !formSlug) return null;
 
   const params = new URLSearchParams({ form: formSlug, t: tenantSlug });
-  const visitId = peekVisitId();
   if (visitId) params.set("v", visitId);
 
   return (

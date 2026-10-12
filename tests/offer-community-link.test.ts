@@ -15,6 +15,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { appendPreservedParams, isSafeInternalPath } from "../lib/offers/preserve-query";
 
 function renderCommunityLink(): Record<string, string> {
@@ -79,6 +80,13 @@ async function main() {
     appendPreservedParams("/f/oasis-ai-cc/protocol#book", { cat: "p1" }),
     "/f/oasis-ai-cc/protocol?cat=p1#book",
   );
+
+  console.log("  CommunityLink reads the visit id after hydration, never during render (no server/client href mismatch)");
+  {
+    const linkSrc = readFileSync("components/offer-pages/CommunityLink.tsx", "utf8");
+    assert.match(linkSrc, /useEffect\(\(\) => \{\s*setVisitId\(peekVisitId\(\)\);\s*\}, \[\]\);/, "the visit id must be read inside a mount effect");
+    assert.equal((linkSrc.match(/peekVisitId\(\)/g) ?? []).length, 1, "peekVisitId must not also be called during render");
+  }
 
   console.log("  isSafeInternalPath rejects every open-redirect shape");
   assert.equal(isSafeInternalPath("/f/oasis-ai-cc/protocol"), true);
