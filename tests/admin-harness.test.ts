@@ -166,7 +166,7 @@ async function main() {
       actor_email TEXT, actor_user_id TEXT, action_type TEXT, target_table TEXT, target_id TEXT, after TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT NOT NULL,
-      user_id TEXT, machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT,
+      user_id TEXT, machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT, scope TEXT,
       claim_enabled_at TEXT, paired_via TEXT, claim_protocols TEXT, claim_runtime_state TEXT,
       claim_state_at TEXT, claim_capacity INTEGER, claim_in_flight INTEGER, claim_blocked_reason TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
@@ -442,7 +442,8 @@ async function main() {
     const widget = readFileSync(join(ROOT, "components", "ChatWidget.tsx"), "utf8");
     assert.match(widget, /const ownsUrl = harnessOwnsUrlParams\(active, pathname\);\s*const urlAgent = ownsUrl \? searchParams\?\.get\("agent"\) : null;\s*const urlPrompt = ownsUrl \? searchParams\?\.get\("prompt"\) : null;/);
     assert.doesNotMatch(widget, /OASIS platform default|via the platform default key/, "no platform-default claim");
-    assert.match(widget, /const cloud = chatReadiness\(\{/);
+    assert.match(widget, /fetch\("\/api\/ai\/engine", \{ cache: "no-store"/);
+    assert.match(widget, /const ready = harnessRoute\?\.mode === "cli"[\s\S]*exactRuntimeReady \|\| explicitWorkspaceFallback[\s\S]*canonicalApiReady/);
     assert.doesNotMatch(widget, /cloudReady \|\| isAdmin/, "the retry offer is readiness too: being the operator is not a key");
   });
   await check("the bridge probe waits longer than the proxy's own bridge budget, so an online bridge never reads offline", async () => {
