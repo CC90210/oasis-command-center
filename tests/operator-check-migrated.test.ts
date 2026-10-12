@@ -219,10 +219,10 @@ const MIGRATED: Array<[string, RegExp]> = [
   // is scoped to their own workspace (tests/os-landings.test.ts pins that), so
   // there is no operator decision left on that page to pin.
   ["app/admin/agents/page.tsx", /\n\s*await requireOperator\(\);/],
-  // A department channel reads "ready" through the same verified platform-key
-  // rule as app/api/agents/chat, never the email alone, and only when a
-  // platform key exists to fall back to.
-  ["components/os/department/channel.ts", /operatorPlatformFallback\(\) !== null && \(await isPlatformOperatorForAuthUser\(authUserId, email\)\)/],
+  // A department channel uses the same canonical resolver as /api/os/runs in
+  // read-only mode. It must never infer readiness from an operator platform key
+  // or mutate a legacy engine binding while rendering the page.
+  ["components/os/department/channel.ts", /resolveRunSession\(\{[\s\S]*inspectOnly: true,[\s\S]*engineUserId: authUserId/],
   ["app/integrations/page.tsx", /const isOperator = await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\);/],
   // Settings was split into sections by the OASIS OS shell: every section reads
   // one cached verified verdict (settings-viewer.ts -> isPlatformOperator()).
