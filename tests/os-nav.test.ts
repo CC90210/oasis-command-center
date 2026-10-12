@@ -99,7 +99,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   // The spec's routes are where the spec put them.
   const at = (href: string) => OS_NAV_CATALOG.find((e) => e.href === href);
   const expectSection: Array<[string, OsSectionKey]> = [
-    ["/", "team"], ["/feed", "team"], ["/schedule", "team"], ["/projects", "team"], ["/playbook", "team"],
+    ["/", "team"], ["/feed", "team"], ["/schedule", "team"], ["/projects", "clients"], ["/playbook", "team"],
     ["/agents", "team"], ["/team/chief-of-staff", "team"], ["/pipeline", "growth"], ["/web-leads", "growth"],
     ["/training", "growth"], ["/commissions", "growth"], ["/forms", "growth"], ["/growth/ads", "growth"],
     ["/founders/marketing", "growth"], ["/seo", "growth"], ["/clients", "clients"], ["/tickets", "clients"], ["/money", "money"],
@@ -114,6 +114,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   for (const [href, section] of expectSection) {
     assert.equal(at(href)?.section, section, `${href} belongs in ${section}`);
   }
+  assert.equal(at("/projects")?.label, "Active projects", "the aggregate names its current-client scope");
 }
 
 // ── 2. Unknown and non-OASIS workspaces never see OASIS's rows ────────────

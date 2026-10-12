@@ -1412,7 +1412,7 @@ async function main() {
       // column no record can name a workspace, and the list still reads.
       assert.ok((await store.listCustomers(db, OASIS, {})).rows.some((r) => r.display_name === "Quiet Co"), "the list reads without bravo__195");
       // So do the pickers, the matchers and the desk's validator, through the same guard.
-      assert.ok((await store.listCustomerOptions(db, OASIS)).some((o) => o.value === Y.id), "the Client picker reads without bravo__195");
+      assert.ok((await store.listCustomerOptions(db, OASIS)).some((o) => o.value === X.id), "the current-client picker reads without bravo__195");
       assert.equal(await store.matchCustomerByEmail(db, OASIS, "y@other.test"), Y.id, "the intake match reads without bravo__195");
       assert.equal(await store.isCustomerEmail(db, OASIS, "y@other.test"), true);
       assert.equal(await deliveryStore.deskCustomerExists(db, OASIS, Y.id), true);

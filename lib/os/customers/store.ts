@@ -32,6 +32,7 @@ import { isUniqueViolationError } from "@/lib/api-helpers";
 import { assertNoPayloadConflicts, emit, emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
 import {
   CUSTOMER_LIFECYCLES,
+  CURRENT_CUSTOMER_LIFECYCLES,
   contactFromLead,
   customerFromLead,
   isConvertibleLeadStage,
@@ -324,8 +325,9 @@ async function getCustomerByEmail(db: Client, tenantId: string, email: string): 
 }
 
 /**
- * Id + name pairs for pickers (ticket and project "Client" selects). Active
- * records only; one linked to a retired business's workspace is never offered
+ * Id + name pairs for pickers (ticket and project "Client" selects). Only
+ * onboarding/active records are current enough for new delivery work; one
+ * linked to a retired business's workspace is never offered
  * (lib/os/customers/retired.ts).
  */
 export async function listCustomerOptions(
@@ -336,9 +338,11 @@ export async function listCustomerOptions(
   const rs = await readNotRetired("client_tenant_id", (guard) =>
     db.execute({
       sql: `SELECT id, display_name, primary_email FROM customers
-            WHERE tenant_id = ? AND archived_at IS NULL AND ${guard.sql}
+            WHERE tenant_id = ? AND archived_at IS NULL
+              AND lifecycle IN (${CURRENT_CUSTOMER_LIFECYCLES.map(() => "?").join(", ")})
+              AND ${guard.sql}
             ORDER BY display_name COLLATE NOCASE, id LIMIT ${CUSTOMER_LIST_LIMIT}`,
-      args: [tenantId, ...guard.args],
+      args: [tenantId, ...CURRENT_CUSTOMER_LIFECYCLES, ...guard.args],
     }),
   );
   return rows(rs).map((r) => ({ value: String(r.id), label: String(r.display_name ?? ""), email: s(r.primary_email) }));
