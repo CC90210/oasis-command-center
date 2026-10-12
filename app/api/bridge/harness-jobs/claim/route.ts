@@ -24,6 +24,13 @@ function json(status: number, body: Record<string, unknown>) {
   return NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
+function claimBody(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["protocol", "claim_id", "capacity", "wait_ms"]);
+  return Object.keys(record).every((key) => allowed.has(key)) ? record : null;
+}
+
 async function advertises(pairingId: string, tenantId: string): Promise<boolean> {
   const result = await getServiceSupabase()
     .from("bridge_pairings")
@@ -60,12 +67,14 @@ export async function POST(req: NextRequest) {
     return json(503, { ok: false, error: "protocol_check_unavailable" });
   }
 
-  let body: Record<string, unknown>;
+  let decoded: unknown;
   try {
-    body = (await req.json()) as Record<string, unknown>;
+    decoded = await req.json();
   } catch {
     return json(400, { ok: false, error: "invalid_json" });
   }
+  const body = claimBody(decoded);
+  if (!body) return json(400, { ok: false, error: "invalid_body" });
   if (body.protocol !== HARNESS_PROTOCOL) return json(400, { ok: false, error: "unsupported_protocol" });
   if (!validClaimId(body.claim_id)) return json(400, { ok: false, error: "claim_id_required" });
   const capacity = Number.isFinite(Number(body.capacity)) ? Math.max(0, Math.min(1, Math.floor(Number(body.capacity)))) : 0;

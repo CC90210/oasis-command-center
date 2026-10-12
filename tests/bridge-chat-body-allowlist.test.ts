@@ -174,6 +174,16 @@ async function main() {
   const post = (body: Record<string, unknown>) =>
     POST(new Request("http://localhost/api/bridge/chat", { method: "POST", body: JSON.stringify({ ...savedBinding, ...body }) }) as never);
 
+  await check("top-level JSON primitives are rejected as invalid_body, never 500", async () => {
+    for (const value of [null, [], "text", 7, true]) {
+      const response = await POST(
+        new Request("http://localhost/api/bridge/chat", { method: "POST", body: JSON.stringify(value) }) as never,
+      );
+      assert.equal(response.status, 400, JSON.stringify(value));
+      assert.equal(((await response.json()) as { error?: string }).error, "invalid_body");
+    }
+  });
+
   const postAndClaim = async (body: Record<string, unknown>) => {
     calls = [];
     const response = await post(body);

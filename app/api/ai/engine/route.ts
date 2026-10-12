@@ -62,6 +62,8 @@ import { decryptField, encryptField } from "@/lib/field-encryption";
 import { defaultModelFor, isRegistryProvider, modelInfo, saveCheck } from "@/lib/ai/model-registry";
 import { probeDepartmentAnswer } from "@/lib/agents/provider-probe";
 import { billingForKey, modelCallMeter } from "@/lib/ai/usage";
+import { clientIpFromHeaders } from "@/lib/api-helpers";
+import { rateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -95,6 +97,31 @@ function object(value: unknown): Record<string, unknown> | null {
     }
   }
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function requestObject(value: unknown, allowedKeys: readonly string[]): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(allowedKeys);
+  return Object.keys(record).every((key) => allowed.has(key)) ? record : null;
+}
+
+function apiSwitchRateLimit(req: NextRequest, tenantId: string, userId: string) {
+  const ip = clientIpFromHeaders(req.headers);
+  const user = rateLimit({
+    key: `ai-engine-provider:user:${tenantId}:${userId}`,
+    capacity: 5,
+    refillPerSec: 5 / 900,
+  });
+  const address = rateLimit({
+    key: `ai-engine-provider:ip:${ip}`,
+    capacity: 10,
+    refillPerSec: 10 / 900,
+  });
+  return {
+    allowed: user.allowed && address.allowed,
+    resetIn: Math.max(user.resetIn, address.resetIn),
+  };
 }
 
 function strings(value: unknown): string[] {
@@ -468,12 +495,14 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const ctx = await getSessionContext();
   if (!ctx?.tenantId) return fail(401, "unauthorized", SIGNED_OUT);
-  let raw: { engine?: unknown; scope?: unknown };
+  let decoded: unknown;
   try {
-    raw = (await req.json()) as typeof raw;
+    decoded = await req.json();
   } catch {
     return fail(400, "invalid_json", "That request could not be read. Try again.");
   }
+  const raw = requestObject(decoded, ["engine", "scope"]);
+  if (!raw) return fail(400, "invalid_body", "That request has fields OASIS does not accept.");
   const scope = scopeOf(raw.scope, "person");
   const parsed = selectionFromRequest(raw.engine);
   if (parsed && !parsed.selection && parsed.needsPairing) {
@@ -523,18 +552,14 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const ctx = await getSessionContext();
   if (!ctx?.tenantId) return fail(401, "unauthorized", SIGNED_OUT);
-  let raw: {
-    engine?: unknown;
-    scope?: unknown;
-    expected_version?: unknown;
-    probe_job_id?: unknown;
-    use_workspace_default?: unknown;
-  };
+  let decoded: unknown;
   try {
-    raw = (await req.json()) as typeof raw;
+    decoded = await req.json();
   } catch {
     return fail(400, "invalid_json", "That request could not be read. Try again.");
   }
+  const raw = requestObject(decoded, ["engine", "scope", "expected_version", "probe_job_id", "use_workspace_default"]);
+  if (!raw) return fail(400, "invalid_body", "That request has fields OASIS does not accept.");
   const scope = scopeOf(raw.scope, "workspace");
   if (!scope) return fail(400, "invalid_scope", "Choose My setup or Workspace default.");
   if (scope === "workspace" && !(ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess))) {
@@ -580,6 +605,18 @@ export async function PUT(req: NextRequest) {
         }
         if (!(ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess))) {
           return fail(403, "admin_required", "Only an owner or admin can switch the workspace API account.");
+        }
+        const limit = apiSwitchRateLimit(req, ctx.tenantId, ctx.authUserId);
+        if (!limit.allowed) {
+          return NextResponse.json(
+            {
+              ok: false,
+              error: "rate_limited",
+              message: "Too many paid provider tests were requested. Wait before trying again.",
+              retry_in_sec: limit.resetIn,
+            },
+            { status: 429 },
+          );
         }
         const [saved, stamp] = await Promise.all([
           readSavedKey(ctx.tenantId, selection.provider),

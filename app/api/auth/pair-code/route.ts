@@ -152,7 +152,14 @@ export async function GET(req: NextRequest) {
     .eq("purpose", "connector")
     .eq("code", code)
     .maybeSingle();
-  if (codeRead.error) return bad(500, `status_failed: ${codeRead.error.message}`);
+  if (codeRead.error) {
+    console.error("[auth.pair-code.status.lookup]", {
+      tenantId: session.tenantId,
+      userId: session.userId,
+      error: codeRead.error.message,
+    });
+    return bad(503, "pair_code_status_unavailable");
+  }
   const row = codeRead.data as {
     expires_at?: string | null;
     consumed_at?: string | null;
@@ -172,7 +179,15 @@ export async function GET(req: NextRequest) {
     .eq("id", row.consumed_by_pairing_id)
     .is("revoked_at", null)
     .maybeSingle();
-  if (pairingRead.error) return bad(500, `pairing_status_failed: ${pairingRead.error.message}`);
+  if (pairingRead.error) {
+    console.error("[auth.pair-code.status.pairing]", {
+      tenantId: session.tenantId,
+      userId: session.userId,
+      pairingId: row.consumed_by_pairing_id,
+      error: pairingRead.error.message,
+    });
+    return bad(503, "paired_computer_status_unavailable");
+  }
   if (!pairingRead.data) return bad(409, "paired_computer_unavailable");
   return NextResponse.json({ ok: true, status: "connected", pairing: pairingRead.data });
 }

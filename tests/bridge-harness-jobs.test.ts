@@ -121,6 +121,15 @@ async function main() {
   const heartbeatRoute = await import("../app/api/bridge/harness-jobs/[job_id]/heartbeat/route");
   console.log("bridge-harness-jobs:");
 
+  await check("claim rejects top-level primitives and unknown fields before dereferencing", async () => {
+    const computer = await pairing(USER);
+    for (const value of [null, [], "text", 7, true, { protocol: harness.HARNESS_PROTOCOL, claim_id: "shape", capacity: 1, wait_ms: 0, command: "whoami" }]) {
+      const response = await claimRoute.POST(post("/api/bridge/harness-jobs/claim", computer.token, value));
+      assert.equal(response.status, 400, JSON.stringify(value));
+      assert.equal(((await response.json()) as { error?: string }).error, "invalid_body");
+    }
+  });
+
   await check("migration has tenant-leading claim/event indexes", async () => {
     const indexes = (await db.execute("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name LIKE 'bridge_harness%'")).rows;
     assert.ok(indexes.some((row) => String(row.name) === "bridge_harness_jobs_claim_idx"));

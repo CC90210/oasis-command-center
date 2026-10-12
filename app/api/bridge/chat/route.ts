@@ -130,7 +130,11 @@ export async function POST(req: NextRequest) {
     return jsonError(413, "payload_too_large");
   }
   try {
-    clientBody = JSON.parse(rawText) as IncomingBody;
+    const parsed: unknown = JSON.parse(rawText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return jsonError(400, "invalid_body");
+    }
+    clientBody = parsed as IncomingBody;
   } catch {
     return jsonError(400, "invalid_json");
   }

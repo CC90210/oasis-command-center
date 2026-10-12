@@ -92,11 +92,8 @@ function commandFor(device: EngineDevice, provider: CliEngine): string | null {
   return null;
 }
 
-function inventoryRuntimeLabel(runtime: EngineDevice["runtimes"][CliEngine]): "Unsupported" | "Ready for agents" | "Signed in" | "Installed" | "Not installed" {
-  if (runtime.unsupported) return "Unsupported";
-  if (runtime.executionReady) return "Ready for agents";
-  if (runtime.signedIn) return "Signed in";
-  return runtime.installed ? "Installed" : "Not installed";
+function inventoryRuntimeLabel(device: EngineDevice, provider: CliEngine): string {
+  return describeRuntime(device, provider).label;
 }
 
 function jobSentence(job: RuntimeJob): string {
@@ -786,7 +783,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                       <div key={provider} className="rounded-md border border-hairline bg-bg-deep/40 px-2.5 py-2">
                         <div className="text-xs font-semibold text-fg">{CLI_ENGINE_LABEL[provider]}</div>
                         <div className="mt-0.5 text-[11px] text-fg-muted">
-                          {rolloutRestricted ? "Unsupported" : inventoryRuntimeLabel(runtime)}
+                          {rolloutRestricted ? "Unsupported" : inventoryRuntimeLabel(device, provider)}
                         </div>
                         {runtime.version && <div className="mt-0.5 truncate font-mono text-[10px] text-fg-dim">{runtime.version}</div>}
                       </div>
@@ -797,7 +794,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {device.localModels.map((model) => (
                       <span key={model.ref} className="rounded-md border border-hairline px-2 py-1 text-[11px] text-fg-muted">
-                        {model.label} · {model.state === "ready" ? "Ready for agents" : model.state === "probe_required" ? "Installed" : "Offline"}
+                        {model.label} · {describeLocalModel(device, model).label}
                       </span>
                     ))}
                   </div>
