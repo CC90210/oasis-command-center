@@ -89,11 +89,14 @@ export function buildUtmSetExpression(utm: UtmInput, nowIso: string): { sql: str
     const value = normalizeUtmField(field, utm[field]);
     if (value === null) continue;
     const key = UTM_KEYS[field];
-    clauses.push(`'$.${key}', COALESCE(json_extract(data, '$.${key}'), ?)`);
+    // NULLIF(TRIM(...), '') treats a stored blank or whitespace-only value as
+    // unset, the same rule the old read-then-write adoptUtm applied: a blank
+    // must not block the first real value forever (Codex, 2026-10-12).
+    clauses.push(`'$.${key}', COALESCE(NULLIF(TRIM(json_extract(data, '$.${key}')), ''), ?)`);
     args.push(value);
   }
   if (!clauses.length) return null;
-  clauses.push(`'$.${UTM_AT_KEY}', COALESCE(json_extract(data, '$.${UTM_AT_KEY}'), ?)`);
+  clauses.push(`'$.${UTM_AT_KEY}', COALESCE(NULLIF(TRIM(json_extract(data, '$.${UTM_AT_KEY}')), ''), ?)`);
   args.push(nowIso);
   return { sql: `json_set(data, ${clauses.join(", ")})`, args };
 }

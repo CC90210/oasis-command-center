@@ -603,8 +603,37 @@ async function main() {
 
     assert.equal(calls.length, 1, `exactly one statement must be sent for one stampUtmOnLead call -- a read-then-write sends two (SELECT + UPDATE). Saw: ${JSON.stringify(calls)}`);
     assert.match(calls[0].sql, /^UPDATE tenant_records SET data = json_set\(data,/, "must be a single UPDATE whose value is a json_set(...) expression");
-    assert.match(calls[0].sql, /COALESCE\(json_extract\(data, '\$\.utm_source'\), \?\)/, "each stamped key must be guarded by COALESCE(json_extract(...), ?) so the database -- not a prior JS read -- decides first-touch");
+    assert.match(calls[0].sql, /COALESCE\(NULLIF\(TRIM\(json_extract\(data, '\$\.utm_source'\)\), ''\), \?\)/, "each stamped key must be guarded by COALESCE(NULLIF(TRIM(json_extract(...)), ''), ?) so the database -- not a prior JS read -- decides first-touch, and a stored blank counts as unset");
     assert.doesNotMatch(calls[0].sql, /^SELECT/i, "must never be a plain SELECT (that would mean a read-then-write shape)");
+  });
+
+  await check("a stored blank or whitespace-only utm field does not block the first real value", async () => {
+    const { stampUtmOnLead } = await import("../lib/offer-pages/utm");
+    const visitId = randomVisitId();
+    const email = `blank-${visitId}@visitor.test`;
+    await submit({
+      step_index: 0,
+      anonymous_init: { tenant_slug: "client-a", form_slug: "intake" },
+      payload: { name: "Blank Target", email, phone: "+15553330001" },
+      visit_id: visitId,
+    });
+    const leadId = String(
+      (
+        await db.execute({
+          sql: "SELECT id FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' AND data LIKE ?",
+          args: [CLIENT_A, `%${email}%`],
+        })
+      ).rows[0].id,
+    );
+    await db.execute({
+      sql: "UPDATE tenant_records SET data = json_set(data, '$.utm_source', '', '$.utm_medium', '   ') WHERE id = ?",
+      args: [leadId],
+    });
+    const realDb = (await import("../lib/offer-pages/store")).offerPagesDb()!;
+    await stampUtmOnLead(realDb, { tenantId: CLIENT_A, leadId, utm: { utm_source: "google", utm_medium: "cpc" }, now: new Date().toISOString() });
+    const data = JSON.parse(String((await db.execute({ sql: "SELECT data FROM tenant_records WHERE id = ?", args: [leadId] })).rows[0].data)) as Json;
+    assert.equal(data.utm_source, "google", "an empty stored value must accept the first real value");
+    assert.equal(data.utm_medium, "cpc", "a whitespace-only stored value must accept the first real value");
   });
 
   await check("two overlapping stampUtmOnLead calls for the same lead do not corrupt it: the stored value is exactly one of the two", async () => {
