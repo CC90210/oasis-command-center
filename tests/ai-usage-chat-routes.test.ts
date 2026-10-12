@@ -283,6 +283,11 @@ async function main() {
       config("c-operator-local", OASIS, USERS.operator.id, "ollama", "llama3.3", "http://127.0.0.1:11434/v1"),
       config("c-open", OPEN, null, "anthropic", "claude-sonnet-4-6", "sk-ant-open-0001"),
       config("c-oasis", OASIS, null, "anthropic", "claude-sonnet-4-6", "sk-ant-oasis-0001"),
+      // These are cloud accounting checks. Pin the matching canonical API
+      // provider instead of inheriting OASIS's subscription rollout default.
+      { sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES ('e-capped', ?, NULL, '__engine__', 'api', 'anthropic', NULL, 1, ?)", args: [CAPPED, stamp] },
+      { sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES ('e-open', ?, NULL, '__engine__', 'api', 'anthropic', NULL, 1, ?)", args: [OPEN, stamp] },
+      { sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES ('e-oasis', ?, NULL, '__engine__', 'api', 'anthropic', NULL, 1, ?)", args: [OASIS, stamp] },
       // OASIS's paired machine is online, so its chat is offered the bridge tools (send_email among them).
       { sql: "INSERT INTO bridge_pairings (id, tenant_id, last_seen_at) VALUES ('bp-oasis', ?, ?)", args: [OASIS, new Date().toISOString()] },
       {
@@ -351,21 +356,21 @@ async function main() {
     assert.equal(sent.length, 0);
   });
 
-  await check("a client teammate's saved local model is refused before anything is asked (its key is an address the server would call)", async () => {
+  await check("a legacy personal local row cannot override the canonical workspace API engine", async () => {
     await login(USERS.cappedLocal);
     sent = [];
     provider = () => new Response("unexpected", { status: 599 });
     const rowsBefore = (await usageRows(CAPPED)).length;
     const res = await turn("Summarise my notes");
-    assert.equal(res.status, 403);
+    assert.equal(res.status, 402);
     const body = (await res.json()) as { error: string; code: string };
-    assert.equal(body.code, "local_model_not_allowed");
-    assert.equal(body.error, "Local AI models can't be connected here. Connect a cloud AI account instead.");
+    assert.equal(body.code, "ai_budget_exhausted");
+    assert.equal(body.error, SENTENCE);
     assert.equal(sent.length, 0, `the server called ${sent.map((s) => s.url).join(", ")}`);
     assert.equal((await usageRows(CAPPED)).length, rowsBefore, "a refused turn wrote a usage row");
   });
 
-  await check("a local model still runs at the month's cap for the verified operator: it costs nothing per call, so no cap applies", async () => {
+  await check("a verified operator's legacy local row cannot bypass the canonical API engine or its cap", async () => {
     // OASIS at its cap for this check only.
     await db.execute({
       sql: `INSERT INTO tenant_ai_budgets (tenant_id, period_month, cap_micro_usd, reserved_micro_usd, spent_micro_usd, created_at, updated_at)
@@ -375,30 +380,13 @@ async function main() {
     try {
       await login(USERS.operator);
       sent = [];
-      provider = (s) =>
-        s.url.startsWith("http://127.0.0.1:11434")
-          ? sse([
-              [null, { choices: [{ delta: { content: "local reply" } }] }],
-              [null, { choices: [{ delta: {}, finish_reason: "stop" }] }],
-              [null, { choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }],
-              [null, "[DONE]"],
-            ])
-          : new Response("unexpected", { status: 599 });
+      provider = () => new Response("unexpected", { status: 599 });
       const rowsBefore = (await usageRows(OASIS)).length;
       const res = await turn("Summarise my notes");
-      assert.equal(res.status, 200);
-      const events = parseSse(await res.text());
-      assert.ok(events.some((e) => e.event === "delta" && e.data.text === "local reply"), JSON.stringify(events));
-      assert.ok(!events.some((e) => e.event === "error"), JSON.stringify(events));
-      assert.ok(sent.some((s) => s.url.startsWith("http://127.0.0.1:11434")), "the local server was asked");
-      // The route records the call after it closes the stream: wait for the row.
-      const deadline = Date.now() + 5000;
-      let rows = (await usageRows(OASIS)).slice(rowsBefore);
-      while (rows.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-        rows = (await usageRows(OASIS)).slice(rowsBefore);
-      }
-      assert.deepEqual(rows.map((r) => [r.billing_mode, r.outcome, r.cost_micro_usd, r.reserved_micro_usd]), [["local", "ok", null, null]]);
+      assert.equal(res.status, 402);
+      assert.equal(((await res.json()) as { code: string }).code, "ai_budget_exhausted");
+      assert.equal(sent.length, 0, "no hosted or local provider was asked");
+      assert.equal((await usageRows(OASIS)).length, rowsBefore);
     } finally {
       await db.execute({ sql: "DELETE FROM tenant_ai_budgets WHERE tenant_id = ?", args: [OASIS] });
     }
@@ -459,6 +447,30 @@ async function main() {
     assert.equal(String((await session(used)).tenant_id), OPEN);
     // The caller's OWN session id is kept (the previous check's turn used it).
     assert.equal(await count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?", [openSession]), 4);
+  });
+
+  await check("a session owned by this user but a different agent starts a new thread", async () => {
+    const otherAgentSession = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    await db.execute({
+      sql: `INSERT INTO chat_sessions (id, tenant_id, user_id, agent_key, provider, model, title, total_input_tokens, total_output_tokens, estimated_cost_usd, updated_at)
+            VALUES (?, ?, ?, 'maven', 'anthropic', 'claude-sonnet-4-6', 'Maven thread', 7, 3, 0.25, '2026-09-01T00:00:00.000Z')`,
+      args: [otherAgentSession, OPEN, USERS.openOwner.id],
+    });
+    await login(USERS.openOwner);
+    provider = () => anthropicOk("Bravo reply", 10, 2);
+    const { res, events } = await settledTurn("c-open", "Keep agent identities separate", { session_id: otherAgentSession });
+    assert.equal(res.status, 200);
+    const used = String(events.find((event) => event.event === "session")?.data.session_id || "");
+    assert.ok(used && used !== otherAgentSession, "the Bravo turn reused Maven's session");
+    assert.deepEqual(await session(otherAgentSession), {
+      tenant_id: OPEN,
+      user_id: USERS.openOwner.id,
+      total_input_tokens: 7,
+      total_output_tokens: 3,
+      estimated_cost_usd: "0.25",
+      updated_at: "2026-09-01T00:00:00.000Z",
+    });
+    assert.equal(await count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?", [otherAgentSession]), 0);
   });
 
   console.log("/api/chat/resume totals");
@@ -709,27 +721,21 @@ async function main() {
     assertTotals(await totals(oasisSession), before as [number, number, number]);
   });
 
-  await check("a local model's turn records its tokens: a local call's cost is a known $0, not an unknown", async () => {
-    // The verified operator: the only person a saved local model answers for.
+  await check("a legacy personal local row cannot redirect canonical cloud accounting", async () => {
     await login(USERS.operator);
-    provider = (s) =>
-      s.url.startsWith("http://127.0.0.1:11434")
-        ? sse([
-            [null, { choices: [{ delta: { content: "local reply" } }] }],
-            [null, { choices: [{ delta: {}, finish_reason: "stop" }] }],
-            [null, { choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }],
-            [null, "[DONE]"],
-          ])
-        : new Response("unexpected", { status: 599 });
-    const { res, events } = await settledTurn("c-operator-local", "Summarise my notes again");
+    provider = (s) => s.url.includes("api.anthropic.com")
+      ? anthropicOk("workspace reply", 7, 3)
+      : new Response("unexpected", { status: 599 });
+    sent = [];
+    const { res, events } = await settledTurn("c-oasis", "Summarise my notes again");
     assert.equal(res.status, 200);
     const id = String(events.find((e) => e.event === "session")?.data.session_id || "");
     assert.ok(id, JSON.stringify(events));
-    // The ledger still says the cost is unpriced (no price rows for a local model)...
+    assert.ok(sent.some((request) => request.url.includes("api.anthropic.com")));
+    assert.ok(!sent.some((request) => request.url.startsWith("http://127.0.0.1:11434")), "a legacy local URL was called");
     const row = (await db.execute({ sql: "SELECT billing_mode, cost_micro_usd FROM ai_usage_events WHERE session_id = ?", args: [id] })).rows[0];
-    assert.deepEqual([row.billing_mode, row.cost_micro_usd], ["local", null]);
-    // ...but the session records the turn's tokens at $0.
-    assertTotals(await totals(id), [7, 3, 0]);
+    assert.deepEqual([row.billing_mode, Number(row.cost_micro_usd)], ["byo_key", 66]);
+    assertTotals(await totals(id), [7, 3, 0.000066]);
   });
 
   console.log("a call with no usage report leaves the turn's tokens unknown");

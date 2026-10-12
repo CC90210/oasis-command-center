@@ -550,6 +550,9 @@ async function main() {
       // The OASIS business book's daily upkeep (2026-09-29): rates, Stripe, Wise.
       // Tenant-free: the Finances book carries no tenant key, and SunBiz has none.
       "finance-books",
+      // Device-bound AI runs may opt into a workspace API fallback. The
+      // dispatcher is tenant-scoped at claim time and never targets SunBiz.
+      "dispatch-engine-fallbacks",
     ].map((r) => `/api/cron/${r}`);
     assert.deepEqual([...new Set(CRON_TABLE.map((c) => base(c.path)))].sort(), [...KEPT].sort());
   });

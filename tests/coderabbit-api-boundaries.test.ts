@@ -9,6 +9,16 @@ assert.match(
   /\.from\("bridge_pair_codes"\)[\s\S]*?\.delete\(\)[\s\S]*?\.eq\("tenant_id", session\.tenantId\)[\s\S]*?\.eq\("auth_user_id", session\.userId\)/,
   "pair-code revocation must be scoped to both the active tenant and signed-in user",
 );
+assert.match(pairCode, /pair-code-mint:user:/, "pair-code minting must be rate-limited by signed-in user");
+assert.match(pairCode, /pair-code-mint:ip:/, "pair-code minting must also be rate-limited by source IP");
+assert.match(pairCode, /pair_code_mint_unavailable/, "pair-code database failures must use a stable public error");
+assert.doesNotMatch(pairCode, /return bad\([^\n]*\.error\.message/, "pair-code responses must not expose raw database errors");
+
+const devices = read("app/api/devices/route.ts");
+for (const stableError of ["devices_unavailable", "device_lookup_unavailable", "device_disconnect_unavailable"]) {
+  assert.ok(devices.includes(stableError), `devices route is missing stable error ${stableError}`);
+}
+assert.doesNotMatch(devices, /return bad\([^\n]*\.error\.message/, "device responses must not expose raw database errors");
 
 const threads = read("app/api/conversations/threads/[key]/route.ts");
 assert.match(

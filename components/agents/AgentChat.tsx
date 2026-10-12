@@ -20,6 +20,7 @@ import {
 } from "./chat-shared";
 import { ChannelHeader } from "./ChannelHeader";
 import { DepartmentChat } from "./DepartmentChat";
+import { normalizeAgentChatFrame, readSse } from "./sse-client";
 
 // These lived here before the department channel moved to DepartmentChat; the
 // tests and any other import keep resolving them from this file.
@@ -96,6 +97,10 @@ function DirectAgentChat({
   const [toolsNote, setToolsNote] = useState<string | null>(null);
   const [lookups, setLookups] = useState<string[]>([]);
   const [modelLabel, setModelLabel] = useState<string | null>(null);
+  // Device-backed department calls use the durable run protocol. Keep its
+  // server-issued conversation id so every later turn targets the same
+  // transcript and exact snapshotted runtime.
+  const [conversationId, setConversationId] = useState<string | null>(null);
   // Plan vs Build — OpenCode-style state machine. /plan filters write
   // intent out of the agent's system prompt (server-side, see
   // app/api/agents/chat/route.ts); /build restores full behavior.
@@ -105,6 +110,10 @@ function DirectAgentChat({
   const [planMode, setPlanMode] = usePlanMode(PLAN_MODE_STORAGE_KEY);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setConversationId(null);
+  }, [tenantSlug, agentSlug, department]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -133,6 +142,7 @@ function DirectAgentChat({
         switch (parsed.name) {
           case "clear":
             setTurns([]);
+            setConversationId(null);
             setInput("");
             return;
           case "help":
@@ -229,6 +239,7 @@ function DirectAgentChat({
             ...(tenantSlug ? { tenant_slug: tenantSlug } : {}),
             agent_slug: agentSlug,
             ...(department ? { department } : {}),
+            ...(department && conversationId ? { conversation_id: conversationId } : {}),
             // Filter out system pills — those are client-only chrome
             // (slash-command echoes, error banners) and would confuse
             // the model if sent as conversation history.
@@ -252,82 +263,58 @@ function DirectAgentChat({
           return;
         }
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
         let assistantText = "";
         let streamFailure: string | null = null;
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          // SSE frames are separated by blank lines.
-          const frames = buffer.split("\n\n");
-          buffer = frames.pop() ?? "";
-
-          for (const frame of frames) {
-            if (!frame.trim()) continue;
-            const lines = frame.split("\n");
-            let eventName = "message";
-            let dataStr = "";
-            for (const line of lines) {
-              if (line.startsWith("event:")) eventName = line.slice(6).trim();
-              else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+        for await (const frame of readSse(res.body)) {
+          const event = normalizeAgentChatFrame(frame);
+          if (!event) continue;
+          if (event.conversationId) setConversationId(event.conversationId);
+          if (event.agent) {
+            setToolsNote(deskToolsNote(event.agent.tools));
+            const model = typeof event.agent.model === "string" ? event.agent.model : null;
+            setModelLabel(model);
+            // Stamp the assistant placeholder with what ran it (and whose
+            // credits it spent) so the line renders under the message once
+            // streaming completes. Both stream protocols emit agent before
+            // reply text, so the placeholder is already on screen.
+            const via = viaLine(event.agent);
+            if (via) {
+              setTurns((prev) => {
+                const next = [...prev];
+                const last = next[next.length - 1];
+                if (last && last.role === "assistant") {
+                  next[next.length - 1] = { ...last, runtime: via };
+                }
+                return next;
+              });
             }
-            if (!dataStr) continue;
-            let payload: unknown;
-            try {
-              payload = JSON.parse(dataStr);
-            } catch {
-              continue;
-            }
-            if (eventName === "agent" && payload && typeof payload === "object") {
-              setToolsNote(deskToolsNote((payload as { tools?: unknown }).tools));
-              const model = (payload as { model?: string }).model || null;
-              setModelLabel(model);
-              // Stamp the assistant placeholder with what ran it (and whose
-              // credits it spent) so the line renders under the message once
-              // streaming completes. The server emits this `agent` event
-              // BEFORE any delta, so the placeholder is already on screen.
-              const via = viaLine(payload);
-              if (via) {
-                setTurns((prev) => {
-                  const next = [...prev];
-                  const last = next[next.length - 1];
-                  if (last && last.role === "assistant") {
-                    next[next.length - 1] = { ...last, runtime: via };
-                  }
-                  return next;
-                });
-              }
-            } else if (eventName === "delta" && payload && typeof payload === "object") {
-              const text = (payload as { text?: string }).text || "";
-              if (text) {
-                assistantText += text;
-                setTurns((prev) => {
-                  const next = [...prev];
-                  const last = next[next.length - 1];
-                  // Preserve the runtime stamp from the prior `agent`
-                  // event when patching content during streaming.
-                  next[next.length - 1] = {
-                    role: "assistant",
-                    content: assistantText,
-                    runtime: last?.runtime,
-                  };
-                  return next;
-                });
-              }
-            } else if (eventName === "error" && payload && typeof payload === "object") {
-              streamFailure = (payload as { code?: string }).code || "provider_error";
-              setFailureModel(asFailureModel((payload as { model?: unknown }).model));
-              setFailure(streamFailure);
-            } else if (eventName === "tool" && payload && typeof payload === "object") {
-              const label = (payload as { label?: unknown; phase?: unknown }).label;
-              if ((payload as { phase?: unknown }).phase === "start" && typeof label === "string" && label) {
-                setLookups((prev) => (prev.includes(label) ? prev : [...prev, label]));
-              }
+          }
+          const replyText = event.finalText ?? (event.delta ? assistantText + event.delta : null);
+          if (replyText !== null && replyText !== assistantText) {
+            // `end.final_text` is authoritative and replaces streamed chunks;
+            // it is never appended, so a durable reply cannot render twice.
+            assistantText = replyText;
+            setTurns((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              next[next.length - 1] = {
+                role: "assistant",
+                content: assistantText,
+                runtime: last?.runtime,
+              };
+              return next;
+            });
+          }
+          if (event.error) {
+            streamFailure = event.error.code;
+            setFailureModel(asFailureModel(event.error.model));
+            setFailure(streamFailure);
+          }
+          if (event.tool) {
+            const label = event.tool.label;
+            if (event.tool.phase === "start" && typeof label === "string" && label) {
+              setLookups((prev) => (prev.includes(label) ? prev : [...prev, label]));
             }
           }
         }
@@ -357,7 +344,7 @@ function DirectAgentChat({
     // callback. Both belong in the dep array per
     // react-hooks/exhaustive-deps. setPlanMode is stable (returned
     // from usePlanMode) so adding it is free.
-    [tenantSlug, agentSlug, department, streaming, turns, planMode, setPlanMode]
+    [tenantSlug, agentSlug, department, conversationId, streaming, turns, planMode, setPlanMode]
   );
 
   const handleSubmit = (e: React.FormEvent) => {

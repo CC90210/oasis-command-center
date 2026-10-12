@@ -32,12 +32,21 @@ for (const path of [
   "app/api/integrations/keys/route.ts",
   "app/api/integrations/keys/test/route.ts",
   "app/api/integrations/constant-contact/status/route.ts",
-  "app/api/devices/route.ts",
   "app/api/auth/pair-code/route.ts",
   "app/api/agent-config/test-connection/route.ts",
 ]) {
   includesAll(path, ["canAccessSharedTenantResource"]);
 }
+
+// Devices is deliberately a personal surface now: every member may pair and
+// manage their own computer. Keep the stronger boundary pinned here instead
+// of restoring the old owner-only shared-resource gate.
+includesAll("app/api/devices/route.ts", [
+  "resolveSessionContext",
+  '.eq("tenant_id", tenantId)',
+  "session.isAdmin ? rows : rows.filter((r) => r.user_id === session.userId)",
+  'if (!session.isAdmin) return bad(403, "not_your_computer")',
+]);
 
 // Resolving an alert card is narrower than a shared resource: the workspace's
 // owners and admins only, the audience Needs you shows a card to (2026-10-08;

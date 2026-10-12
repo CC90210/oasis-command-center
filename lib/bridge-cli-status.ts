@@ -78,23 +78,15 @@ export function cliStatusState(info: Pick<CliStatusInfo, "installed" | "authenti
   return info.checked ? "needs_sign_in" : "unknown";
 }
 
-/**
- * Each app's REAL sign-in, checked against the installed apps on CC's PC on
- * 2026-10-09 (`claude auth --help`, `codex login --help`, `gemini --help`):
- *   - Claude Code 2.1.270 has `claude auth login` (it opens Anthropic's
- *     sign-in page; `claude auth status` checks it);
- *   - Codex 0.146.0 has `codex login` (`codex login status` checks it); it has
- *     no `auth` subcommand, so `codex auth login` would start a chat;
- *   - Gemini CLI 0.63.0 has no sign-in subcommand: run `gemini` and choose
- *     "Sign in with Google" (or type /auth).
- * Shown on every card that is not ready, and sent with every Connect answer
- * (app/api/bridge/cli-auth), so a sign-in the bridge cannot start is one
- * command away.
- */
-export const CLI_SIGN_IN: Record<CliProvider, { label: string; command: string }> = {
-  claude: { label: "Claude Code", command: "claude auth login" },
-  codex: { label: "Codex", command: "codex login" },
-  gemini: { label: "Gemini CLI", command: 'gemini   (then choose "Sign in with Google", or type /auth)' },
+/** Vendor-auth flows executed by the paired connector, never browser input. */
+export const CLI_SIGN_IN: Record<CliProvider, { label: string; command: string | null; instructions: string }> = {
+  claude: { label: "Claude Code", command: "claude", instructions: "Launch `claude`, then enter `/login`." },
+  codex: { label: "Codex", command: "codex login", instructions: "Run `codex login`." },
+  gemini: {
+    label: "Gemini CLI",
+    command: null,
+    instructions: "Personal Gemini CLI sign-in is unsupported. Use a Google Gemini API key instead.",
+  },
 };
 
 export function isSignInProvider(v: unknown): v is CliProvider {
@@ -119,26 +111,14 @@ export function cliUnsupportedDetail(provider: CliProvider): string {
     : "The app's maker does not allow this sign-in on this computer. Pick another app, or use an AI account.";
 }
 
-/**
- * ONE LINE per app, for the DEPARTMENT inventory (O3b, Settings > Computers'
- * "Your computers" card) -- distinct from CLI_STATE_LABEL above, which still
- * drives the OLD coding-harness picker (an owner or admin's own console,
- * where Codex and Gemini ARE usable). Codex and Gemini can never answer a
- * department turn (lib/bridge-cli-policy.ts, departments are Claude-only,
- * O3b), so their line says that plainly instead of "Ready" / "Needs
- * sign-in" -- wording that would read as "connect it and it will work",
- * which is false for a department chat.
- *
- * Inventory wording is EXACT (O3b truthfulness rule): a Gemini check that
- * did not finish reads "installed, did not answer the check", never "Needs
- * sign-in" (it may already be signed in; the check just did not finish).
- */
+/** Inventory is deliberately weaker than readiness. It may say Installed or
+ * Signed in; only the exact-device inference probe may say Ready for agents. */
 export function departmentInventoryLine(provider: CliProvider, info: Pick<CliStatusInfo, "installed" | "authenticated" | "checked">): string {
   const label = CLI_SIGN_IN[provider].label;
   if (!info.installed) return `${label}: not detected`;
-  if (provider === "claude") return info.authenticated ? `${label}: signed in` : `${label}: installed, not signed in`;
+  if (info.authenticated) return `${label}: signed in`;
   if (!info.checked) return `${label}: installed, did not answer the check`;
-  return `${label}: installed, not used for department work`;
+  return `${label}: installed, not signed in`;
 }
 
 export type CliStatusSnapshot = Record<CliProvider, CliStatusInfo>;

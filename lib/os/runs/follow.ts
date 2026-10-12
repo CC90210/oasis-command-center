@@ -28,8 +28,19 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { conversationActivity, failQueuedComputerRun, markFirstInLine, nextActiveRun, pollRun, reapStale, type Run, type RunScope } from "./store";
-import { COMPUTER_BUSY_TIMEOUT_MS, COMPUTER_MAX_QUEUED_MS, COMPUTER_NOT_ANSWERING_MS, isTerminalStatus, type RunEvent, type RunExecutor, type RunSource, type RunStatus } from "./types";
+import { conversationActivity, failQueuedComputerRun, fallbackQueuedComputerRun, markFirstInLine, nextActiveRun, pollRun, reapStale, type Run, type RunScope } from "./store";
+import {
+  COMPUTER_BUSY_TIMEOUT_MS,
+  COMPUTER_MAX_QUEUED_MS,
+  COMPUTER_NOT_ANSWERING_MS,
+  isTerminalStatus,
+  isWorkspaceApiFallbackReason,
+  type RunEvent,
+  type RunExecutor,
+  type RunSource,
+  type RunStatus,
+  type WorkspaceApiFallbackReason,
+} from "./types";
 import { blockedReasonCode } from "@/lib/os/channel/outcome";
 import type { ComputerAnswerState } from "@/lib/devices/presence";
 
@@ -90,17 +101,35 @@ export type FollowOptions = {
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   /** A queued run has no live driver: start one. */
-  needDriver?: () => Promise<void>;
+  needDriver?: (run: Run, fallbackReason?: WorkspaceApiFallbackReason | null) => Promise<void>;
   /** Wait between polls, by how long this follow has run. */
   pollMs?: (elapsedMs: number) => number;
   /**
-   * O4: this person's best-ranked paired computer, read fresh on every poll
-   * of a QUEUED computer-executor run only (lib/devices/presence.ts
-   * computerAnswerState). Absent for every other follow (the chat route
-   * that never dispatches to a computer need not know about this at all).
+   * The run's snapshotted target pairing, read fresh on every poll of a
+   * QUEUED computer-executor run. The Run argument is essential: a workspace
+   * default may target the agents owner's computer, not the requester's best
+   * own computer, and a queue may contain different targets.
    */
-  computerState?: () => Promise<ComputerAnswerState>;
+  computerState?: (run: Run) => Promise<ComputerAnswerState>;
 };
+
+/**
+ * The fallback policy is opt-in, but the failure also has to be operational.
+ * Unknown/absent state and approval/security blocks fail closed. In
+ * particular, an unknown connector block may map to `computer_offline` for
+ * copy, but it does not gain permission to spend API credits.
+ */
+export function queuedWorkspaceApiFallbackReason(
+  code: string,
+  state: ComputerAnswerState | null,
+): WorkspaceApiFallbackReason | null {
+  if (!isWorkspaceApiFallbackReason(code) || state === null || state === "not_approved") return null;
+  if (state.startsWith("blocked:")) {
+    const raw = state.slice("blocked:".length);
+    return isWorkspaceApiFallbackReason(raw) && raw === code ? raw : null;
+  }
+  return code;
+}
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const defaultPoll = (elapsed: number) => (elapsed < 20_000 ? 500 : 1_000);
@@ -155,6 +184,10 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
         sawDone = false;
         terminalSince = null;
         quiet = 0;
+        // A maxRuns:1 fallback driver belonged only to the row that just
+        // ended. The next row must be allowed to request its own freshly
+        // rebuilt/validated driver session.
+        askedDriver = false;
         continue;
       }
     } else if (run.status === "queued" && run.executor === "computer") {
@@ -179,7 +212,7 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
         const markedAt = await markFirstInLine(o.db, o.scope, run, now());
         const firstInLineSinceMs = markedAt ? Date.parse(markedAt) : t;
         const waitedMs = t - (Number.isFinite(firstInLineSinceMs) ? firstInLineSinceMs : t);
-        const cs = o.computerState ? await o.computerState() : null;
+        const cs = o.computerState ? await o.computerState(run) : null;
         if (!failedCode) {
           if (cs?.startsWith("blocked:")) {
             // A blocked computer is not "busy": it fails at once.
@@ -194,9 +227,24 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
             // computer is answering fine, just hasn't claimed this ONE run
             // yet). Only the 10-minute absolute cap (`failedCode` set above,
             // from createdAt) still applies while it stays can_answer.
+          } else if (cs === "not_approved") {
+            // Approval/revocation is an authorization boundary. Fail now and
+            // never wait until it resembles an availability timeout.
+            failedCode = "computer_not_approved";
           } else {
-            // 'offline', 'not_approved', or unknown (no computerState hook at all): no live claimer.
+            // 'offline' or unknown (no computerState hook at all): no live claimer.
             if (waitedMs >= COMPUTER_NOT_ANSWERING_MS) failedCode = "computer_not_answering";
+          }
+        }
+        if (failedCode) {
+          const fallbackReason = queuedWorkspaceApiFallbackReason(failedCode, cs);
+          if (run.runtimeFallbackPolicy === "workspace_api" && fallbackReason) {
+            const promoted = await fallbackQueuedComputerRun(o.db, o.scope, run.id, fallbackReason);
+            if (promoted && o.needDriver) {
+              askedDriver = true;
+              await o.needDriver(run, fallbackReason);
+            }
+            failedCode = null;
           }
         }
       }
@@ -206,7 +254,7 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
       quiet = activity.live ? 0 : quiet + 1;
       if (quiet >= QUIET_POLLS_BEFORE_DRIVER && !askedDriver && o.needDriver) {
         askedDriver = true;
-        await o.needDriver();
+        await o.needDriver(run, run.runtimeFallbackReason && isWorkspaceApiFallbackReason(run.runtimeFallbackReason) ? run.runtimeFallbackReason : null);
       }
     } else if (t - lastReap >= REAP_EVERY_MS) {
       // Running: a writer that went silent past its limit is dead; closing the run lets the queue behind it go.
@@ -216,7 +264,7 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
         const activity = await conversationActivity(o.db, o.scope, run.conversationId, now());
         if (activity.queued > 0 && !askedDriver) {
           askedDriver = true;
-          await o.needDriver();
+          await o.needDriver(run);
         }
       }
     }

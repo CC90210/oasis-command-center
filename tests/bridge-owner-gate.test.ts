@@ -4,15 +4,19 @@
  *
  * WHY. Before this, authorizeBridgeRequest (lib/bridge-proxy.ts) admitted ANY
  * verified platform operator into an OASIS-surface workspace's bridge. Since
- * PR #576 made Adon a verified operator too (platform_operators), his
- * department chats, the coding harness and fleet control all ran on CC's PC
- * under CC's own Claude sign-in. database/turso/bravo__210_workspace_agents_owner.sql
- * + lib/agents-owner.ts name the one auth user (CC) whose computer this is;
- * everyone else is refused, truthfully, not routed around.
+ * PR #576 made Adon a verified operator too (platform_operators), legacy
+ * control routes could run on CC's PC under CC's own sign-in.
+ * database/turso/bravo__210_workspace_agents_owner.sql + lib/agents-owner.ts
+ * name the one auth user (CC) whose computer this is; those legacy controls
+ * refuse everyone else. Exact-pairing pull chat is intentionally different:
+ * a live member may request the workspace default while the selected pairing
+ * remains bound to the agents owner and preserves the requester's permissions.
  *
- * WHAT IS PINNED, against the shared gate directly and against every route
- * under app/api/bridge, app/api/automations/background-workers/control and
- * app/api/leads/[id]/clair-report that calls it:
+ * WHAT IS PINNED, against the shared gate directly and against every legacy
+ * shared-bridge route under app/api/bridge, background-worker control and
+ * clair-report that calls it. Exact-device runtime routes (for example chat
+ * and cli-auth) use their own pairing/seat authorization and are covered by
+ * their pairing-isolation suites:
  *   - Adon (verified operator, NOT the owner) gets 403 not_your_computer on
  *     every one;
  *   - CC (the owner) is never refused BY THE OWNER GATE (whatever else a
@@ -141,6 +145,10 @@ async function main() {
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT NOT NULL,
       last_seen_at TEXT, revoked_at TEXT);
+    CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
+      provider TEXT, model TEXT, computer_pairing_id TEXT, fallback_policy TEXT, updated_at TEXT,
+      runtime_probe_job_id TEXT, runtime_probe_pairing_id TEXT, runtime_probe_engine_kind TEXT,
+      runtime_probe_engine_name TEXT, runtime_probe_engine_version TEXT, runtime_probe_verified_at TEXT);
     CREATE TABLE clair_reports (id TEXT PRIMARY KEY, tenant_id TEXT, lead_id TEXT, status TEXT,
       error_message TEXT, result_count INTEGER, people TEXT, phones TEXT, query_name TEXT,
       query_address TEXT, query_city TEXT, query_state TEXT, query_zip TEXT, query_dob TEXT,
@@ -286,7 +294,6 @@ async function main() {
     warmStatus: await import("../app/api/bridge/warm-status/route"),
     prewarm: await import("../app/api/bridge/prewarm/route"),
     actions: await import("../app/api/bridge/actions/route"),
-    cliAuth: await import("../app/api/bridge/cli-auth/route"),
     chatReset: await import("../app/api/bridge/chat-reset/route"),
     health: await import("../app/api/bridge/health/route"),
     control: await import("../app/api/automations/background-workers/control/route"),
@@ -295,11 +302,9 @@ async function main() {
   const post = (url: string, body: unknown) => new Request(`http://localhost${url}`, { method: "POST", body: JSON.stringify(body) });
 
   const asAdon = [
-    ["chat", () => routes.chat.POST(post("/api/bridge/chat", { agent: "bravo", messages: [{ role: "user", content: "hi" }] }) as never)],
     ["exec-tool", () => routes.execTool.POST(post("/api/bridge/exec-tool", { tool_name: "bash", input: { command: "ls" } }) as never)],
     ["prewarm", () => routes.prewarm.POST(post("/api/bridge/prewarm", { agent: "bravo", tab_id: "t1" }) as never)],
     ["actions", () => routes.actions.POST(post("/api/bridge/actions", { type: "write_file" }) as never)],
-    ["cli-auth", () => routes.cliAuth.POST(post("/api/bridge/cli-auth", { provider: "claude" }) as never)],
     ["chat-reset", () => routes.chatReset.POST(post("/api/bridge/chat-reset", { agent: "bravo", tab_id: "t1" }) as never)],
     ["fleet control", () => routes.control.POST(post("/api/automations/background-workers/control", { service: "pm2.bravo-ig-dm", action: "restart" }) as never)],
     ["clair-report GET", () => routes.clairReport.GET(new Request("http://localhost/api/leads/x/clair-report") as never, { params: Promise.resolve({ id: "lead-1" }) })],
@@ -322,6 +327,17 @@ async function main() {
     assert.equal(body.ok, false);
     assert.equal(body.reason, "not_your_computer");
     assert.equal(calls.length, 0, "no call to the computer was made");
+  });
+
+  await check("pull chat: a live member reaches canonical engine selection instead of the legacy agents-owner control gate", async () => {
+    await login(ADON);
+    calls.length = 0;
+    const { status, body } = await jsonOf(
+      await routes.chat.POST(post("/api/bridge/chat", { agent: "bravo", messages: [{ role: "user", content: "hi" }] }) as never),
+    );
+    assert.equal(status, 409, JSON.stringify(body));
+    assert.equal(body.error, "engine_pairing_required", JSON.stringify(body));
+    assert.equal(calls.length, 0, "an unbound selection made no call to the retired bridge URL");
   });
 
   for (const [label, call] of asAdon) {

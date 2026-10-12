@@ -95,7 +95,7 @@ console.error = () => undefined;
 
 async function main() {
   const store = await import("../components/agents/run-store");
-  const { readSse } = await import("../components/agents/sse-client");
+  const { normalizeAgentChatFrame, readSse } = await import("../components/agents/sse-client");
   const identity = await import("../lib/os/channel/identity");
 
   console.log("Reading the wire");
@@ -112,6 +112,27 @@ async function main() {
     pipe.close();
     await reading;
     assert.deepEqual(got, [["run", { id: "r1" }], ["ev", { seq: 2 }], ["end", { id: "r1" }]]);
+  });
+
+  await check("the legacy agent client normalizes durable device frames without duplicating final text", () => {
+    assert.deepEqual(normalizeAgentChatFrame({ event: "conversation", data: { id: "c1" } }), { conversationId: "c1" });
+    assert.deepEqual(
+      normalizeAgentChatFrame({ event: "ev", data: { kind: "agent", data: { runs_on: "Codex", spend: "subscription" } } }),
+      { agent: { runs_on: "Codex", spend: "subscription" } },
+    );
+    assert.deepEqual(
+      normalizeAgentChatFrame({ event: "ev", data: { kind: "delta", data: { text: "Device reply" } } }),
+      { delta: "Device reply" },
+    );
+    assert.deepEqual(
+      normalizeAgentChatFrame({ event: "end", data: { conversation_id: "c1", final_text: "Device reply", error_code: null } }),
+      { conversationId: "c1", finalText: "Device reply", done: true },
+    );
+    assert.deepEqual(
+      normalizeAgentChatFrame({ event: "delta", data: { text: "API reply" } }),
+      { delta: "API reply" },
+      "the original wire contract remains readable",
+    );
   });
 
   console.log("The store keeps the run when the page is gone");

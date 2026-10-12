@@ -10,8 +10,8 @@
  * turn.ts) for the DEPARTMENT STATE block and the palette -- the SAME two
  * calls every other channel makes, so a department speaks as the SAME
  * department whichever engine answers it. Nothing here streams a model:
- * the computer runs Claude Code itself; this module only builds what it is
- * handed.
+ * the computer runs the snapshotted CLI or local model itself; this module
+ * only builds what it is handed. Unbound v1 rows remain Claude-only.
  *
  * CALLER'S RESPONSIBILITY (not re-checked here): liveSeat and
  * departmentGate on `viewer` must already have passed for this run's
@@ -34,6 +34,8 @@ import type { OsDepartment } from "@/lib/os/departments";
 import type { ChatMessage, StreamEvent } from "@/lib/providers";
 import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/secret-redaction";
+import { isCliEngine, parseEngineSelection } from "@/lib/ai/agent-engine";
+import type { BridgeEngine } from "@/lib/ai/bridge-turn";
 
 /** The run token outlives the 20-minute claim deadline a little, so a last event posted right at the edge still verifies. */
 export const RUN_TOKEN_TTL_SEC = 1500;
@@ -48,12 +50,10 @@ export const COMPUTER_MAX_TURNS = 24;
 const MCP_URL = "https://oasisai.work/api/mcp";
 const EVENTS_URL_BASE = "https://oasisai.work/api/os/runs";
 
-export type ClaimRunBody = {
+type ClaimRunBodyBase = {
   id: string;
-  protocol: "department_task_v1";
   origin: Run["origin"];
   claim_id: string;
-  cli: "claude";
   system: string;
   prompt: string;
   max_turns: number;
@@ -71,6 +71,21 @@ export type ClaimRunBody = {
     name: string;
   };
 };
+
+/** Frozen legacy contract: old connectors only ever run Claude. */
+export type ClaimRunBodyV1 = ClaimRunBodyBase & {
+  protocol: "department_task_v1";
+  cli: "claude";
+};
+
+/** Exact-device contract: the queued row carries the tested engine snapshot. */
+export type ClaimRunBodyV2 = ClaimRunBodyBase & {
+  protocol: "department_task_v2";
+  engine: { kind: "cli" | "local"; name: string };
+  sandbox: { mode: "read_only"; repo_writes: false };
+};
+
+export type ClaimRunBody = ClaimRunBodyV1 | ClaimRunBodyV2;
 
 export type ComputerTurnResult = { ok: true; body: ClaimRunBody } | { ok: false; status: number; error: string };
 
@@ -92,6 +107,31 @@ export type BuildComputerTurnInput = {
   sessionVersion: number;
 };
 
+type ComputerRuntime =
+  | { protocol: "department_task_v1"; engine: Extract<BridgeEngine, { kind: "cli" }> }
+  | { protocol: "department_task_v2"; engine: BridgeEngine };
+
+/**
+ * One frozen execution identity for both turn metadata and the connector
+ * payload. Any partial/corrupt v2 snapshot fails closed instead of becoming
+ * a legacy Claude job.
+ */
+function computerRuntime(run: Run, pairingId: string): ComputerRuntime | null {
+  const target = run.targetPairingId?.trim() || null;
+  const kind = run.runtimeEngineKind;
+  const name = run.runtimeEngineName?.trim() || null;
+  const hasSnapshot = target !== null || kind !== null || name !== null;
+  if (!hasSnapshot) return { protocol: "department_task_v1", engine: { kind: "cli", cli: "claude" } };
+  if (!target || target !== pairingId || !kind || !name) return null;
+  if (kind === "cli") {
+    return isCliEngine(name) ? { protocol: "department_task_v2", engine: { kind: "cli", cli: name } } : null;
+  }
+  const parsed = parseEngineSelection({ mode: "local", pairingId: target, modelRef: name, fallback: "none" });
+  return parsed?.mode === "local"
+    ? { protocol: "department_task_v2", engine: { kind: "local", model: parsed.modelRef } }
+    : null;
+}
+
 /** groundDepartmentTurn's plainStream is never invoked for a computer turn (its own 'isComputerEngine' branch returns before touching it); this stub exists only to satisfy the parameter and fails loud if that ever changes. */
 async function* refusePlainStream(): AsyncGenerator<StreamEvent> {
   throw new Error("computer-turn: groundDepartmentTurn's plainStream must never be called for a computer-dispatched turn");
@@ -99,6 +139,8 @@ async function* refusePlainStream(): AsyncGenerator<StreamEvent> {
 
 export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<ComputerTurnResult> {
   const { db, run, viewer, tenantSlug, dept, operatorName, email, label, pairingId, sessionVersion } = input;
+  const runtime = computerRuntime(run, pairingId);
+  if (!runtime) return { ok: false, status: 409, error: "runtime_snapshot_invalid" };
 
   const prepared = await prepareAgentTurn({
     tenantId: run.tenantId,
@@ -110,7 +152,7 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
     revealModel: false,
     userId: run.userId,
     chatMode: run.chatMode,
-    engineInput: { kind: "computer", label },
+    engineInput: { kind: "computer", label, engine: runtime.engine },
   });
   if (!prepared.ok) return { ok: false, status: prepared.status, error: prepared.error };
   const t = prepared.turn;
@@ -205,12 +247,10 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
     : RUN_TOKEN_TTL_SEC;
   const runToken = await mintRunCredential(signingKey, { runId: run.id, tenantId: run.tenantId, ttlSec: runTtlSec });
 
-  const body: ClaimRunBody = {
+  const common: ClaimRunBodyBase = {
     id: run.id,
-    protocol: "department_task_v1",
     origin: run.origin,
     claim_id: run.leaseId ?? "",
-    cli: "claude",
     system,
     prompt,
     max_turns: COMPUTER_MAX_TURNS,
@@ -228,5 +268,17 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
       name: dept.key,
     },
   };
+  const body: ClaimRunBody =
+    runtime.protocol === "department_task_v2"
+      ? {
+          ...common,
+          protocol: "department_task_v2",
+          engine:
+            runtime.engine.kind === "cli"
+              ? { kind: "cli", name: runtime.engine.cli }
+              : { kind: "local", name: runtime.engine.model },
+          sandbox: { mode: "read_only", repo_writes: false },
+        }
+      : { ...common, protocol: "department_task_v1", cli: "claude" };
   return { ok: true, body };
 }

@@ -98,7 +98,7 @@ async function main() {
       last_used_at TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-      user_id TEXT, display_name_override TEXT);
+      user_id TEXT, display_name_override TEXT, computer_pairing_id TEXT, fallback_policy TEXT);
     CREATE UNIQUE INDEX idx_agent_model_config_default_per_agent ON agent_model_config (tenant_id, agent_key) WHERE (user_id IS NULL);
     CREATE UNIQUE INDEX idx_agent_model_config_override_per_user ON agent_model_config (tenant_id, user_id, agent_key) WHERE (user_id IS NOT NULL);
   `);
@@ -217,12 +217,247 @@ async function main() {
     assert.equal(prepared.turn.engine.spend, "cli_subscription");
   });
 
+  await check("a computer-dispatched Codex turn keeps its snapshotted runtime in public and audit metadata", async () => {
+    const prepared = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: CC.email },
+      platformFallback: null,
+      revealModel: true,
+      userId: CC.id,
+      engineInput: { kind: "computer", label: "CCPC (Windows)", engine: { kind: "cli", cli: "codex" } },
+    });
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    if (!prepared.ok) return;
+    assert.deepEqual(
+      {
+        kind: prepared.turn.engine.kind,
+        runsOn: prepared.turn.engine.runsOn,
+        spend: prepared.turn.engine.spend,
+        provider: prepared.turn.provider,
+        model: prepared.turn.model,
+        authKind: prepared.turn.meter.context.authKind,
+        billingMode: prepared.turn.meter.context.billingMode,
+      },
+      {
+        kind: "computer",
+        runsOn: "CCPC (Windows) \u00b7 Codex",
+        spend: "cli_subscription",
+        provider: "openai",
+        model: "codex",
+        authKind: "subscription",
+        billingMode: "subscription",
+      },
+    );
+  });
+
+  await check("a computer-dispatched pure-local turn never inherits Claude subscription metadata", async () => {
+    const prepared = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: CC.email },
+      platformFallback: null,
+      revealModel: true,
+      userId: CC.id,
+      engineInput: { kind: "computer", label: "Mac", engine: { kind: "local", model: "ollama/llama3.3" } },
+    });
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    if (!prepared.ok) return;
+    assert.deepEqual(
+      {
+        kind: prepared.turn.engine.kind,
+        runsOn: prepared.turn.engine.runsOn,
+        spend: prepared.turn.engine.spend,
+        provider: prepared.turn.provider,
+        model: prepared.turn.model,
+        localModelAllowed: prepared.turn.localModelAllowed,
+        authKind: prepared.turn.meter.context.authKind,
+        billingMode: prepared.turn.meter.context.billingMode,
+      },
+      {
+        kind: "computer",
+        runsOn: "Mac \u00b7 ollama/llama3.3 (local model)",
+        spend: "local_model",
+        provider: "ollama",
+        model: "ollama/llama3.3",
+        localModelAllowed: true,
+        authKind: "local",
+        billingMode: "local",
+      },
+    );
+  });
+
+  await check("a legacy computer-dispatched turn with no engine snapshot remains Claude v1", async () => {
+    const prepared = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: CC.email },
+      platformFallback: null,
+      revealModel: true,
+      userId: CC.id,
+      engineInput: { kind: "computer", label: "Legacy PC" },
+    });
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    if (!prepared.ok) return;
+    assert.equal(prepared.turn.engine.runsOn, "Legacy PC \u00b7 Claude Code");
+    assert.equal(prepared.turn.engine.spend, "cli_subscription");
+    assert.equal(prepared.turn.provider, "anthropic");
+    assert.equal(prepared.turn.model, "claude");
+  });
+
+  await check("a direct personal API choice overrides a CLI workspace choice without asking the bridge", async () => {
+    let bridgeAsked = 0;
+    const prepared = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: CC.email },
+      platformFallback: unmistakableFallback,
+      revealModel: true,
+      userId: CC.id,
+      bridge: async () => {
+        bridgeAsked += 1;
+        return ccCaller;
+      },
+      engineChoice: { kind: "api", provider: "anthropic" },
+    });
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    if (!prepared.ok) return;
+    assert.equal(bridgeAsked, 0, "the workspace's CLI row cannot override the person's direct API selection");
+    assert.equal(prepared.turn.engine.kind, "api");
+    assert.equal(prepared.turn.engine.fellBackFrom, null, "a direct API choice is not a fallback");
+    assert.equal(prepared.turn.keySource, "tenant", "the workspace account, not the platform key, answers");
+  });
+
+  await check("a canonical API choice refuses a different workspace provider instead of spending another key", async () => {
+    const refused = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: CC.email },
+      platformFallback: unmistakableFallback,
+      revealModel: true,
+      userId: CC.id,
+      engineChoice: { kind: "api", provider: "openai" },
+    });
+    assert.ok(!refused.ok && refused.error === "engine_snapshot_unavailable", JSON.stringify(refused));
+  });
+
+  await check("a canonical API choice with no workspace account never borrows the operator platform key", async () => {
+    await db.execute("UPDATE agent_model_config SET enabled = 0 WHERE tenant_id = ? AND agent_key = 'bravo'", [OASIS]);
+    try {
+      const refused = await prepareAgentTurn({
+        tenantId: OASIS,
+        tenantSlug: "oasis-ai-cc",
+        agentSlug: "sdr",
+        department: sales,
+        operator: { name: "CC", email: CC.email },
+        platformFallback: unmistakableFallback,
+        revealModel: true,
+        userId: CC.id,
+        engineChoice: { kind: "api", provider: "anthropic" },
+      });
+      assert.ok(!refused.ok && refused.error === "agent_not_configured", JSON.stringify(refused));
+    } finally {
+      await db.execute("UPDATE agent_model_config SET enabled = 1 WHERE tenant_id = ? AND agent_key = 'bravo'", [OASIS]);
+    }
+  });
+
+  await check("a queued API A snapshot fails closed after the workspace switches to API B", async () => {
+    await db.execute({
+      sql: "UPDATE agent_model_config SET provider = 'openai', model = 'gpt-5.2' WHERE tenant_id = ? AND agent_key = 'bravo'",
+      args: [OASIS],
+    });
+    try {
+      const refused = await prepareAgentTurn({
+        tenantId: OASIS,
+        tenantSlug: "oasis-ai-cc",
+        agentSlug: "sdr",
+        department: sales,
+        operator: { name: "CC", email: CC.email },
+        platformFallback: unmistakableFallback,
+        revealModel: true,
+        userId: CC.id,
+        engineChoice: { kind: "api", provider: "anthropic" },
+        apiAccountSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+      });
+      assert.ok(!refused.ok && refused.error === "engine_snapshot_unavailable", JSON.stringify(refused));
+    } finally {
+      await db.execute({
+        sql: "UPDATE agent_model_config SET provider = 'anthropic', model = 'claude-sonnet-4-6' WHERE tenant_id = ? AND agent_key = 'bravo'",
+        args: [OASIS],
+      });
+    }
+  });
+
+  await check("an explicit exact-device fallback uses only the workspace API and records the selected Codex engine", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const selected = { kind: "cli" as const, cli: "codex" as const, pairingId: "pair-ccpc", fallback: "workspace_api" as const };
+    const prepared = await prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug: "sdr",
+      department: sales,
+      operator: { name: "CC", email: CC.email },
+      platformFallback: unmistakableFallback,
+      revealModel: true,
+      userId: CC.id,
+      bridge: null,
+      engineChoice: { kind: "api", provider: "anthropic" },
+      fallbackFrom: selected,
+    });
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    if (!prepared.ok) return;
+    assert.equal(prepared.turn.keySource, "tenant", "the fallback spends only the workspace API account");
+    assert.equal(prepared.turn.engine.kind, "api");
+    assert.equal(prepared.turn.engine.fellBackFrom, "Codex on your paired computer");
+    const call = await prepared.turn.meter.begin({ provider: prepared.turn.provider, model: prepared.turn.model, maxOutputTokens: 8, promptBytes: 12 });
+    await call.finish({
+      outcome: "ok",
+      usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: null, cacheWriteTokens: null },
+    });
+    const rows = await usageRows();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].fallback_reason, "engine_unreachable:codex");
+  });
+
+  await check("an explicit device fallback never borrows the platform key when the workspace account is unavailable", async () => {
+    await db.execute("UPDATE agent_model_config SET enabled = 0 WHERE tenant_id = ? AND agent_key = 'bravo'", [OASIS]);
+    try {
+      const refused = await prepareAgentTurn({
+        tenantId: OASIS,
+        tenantSlug: "oasis-ai-cc",
+        agentSlug: "sdr",
+        department: sales,
+        operator: { name: "CC", email: CC.email },
+        platformFallback: unmistakableFallback,
+        revealModel: true,
+        userId: CC.id,
+        bridge: null,
+        engineChoice: { kind: "api", provider: "anthropic" },
+        fallbackFrom: { kind: "cli", cli: "codex", pairingId: "pair-ccpc", fallback: "workspace_api" },
+      });
+      assert.ok(!refused.ok && refused.error === "agent_not_configured", JSON.stringify(refused));
+    } finally {
+      await db.execute("UPDATE agent_model_config SET enabled = 1 WHERE tenant_id = ? AND agent_key = 'bravo'", [OASIS]);
+    }
+  });
+
   await check("source: lib/os/runs/session.ts intercepts a BridgeRefused BEFORE returning ok:true (so sendMessage, which saves/queues the run, is never reached)", () => {
     const src = readFileSync(join(ROOT, "lib/os/runs/session.ts"), "utf8");
-    const refusedAt = src.indexOf('"refused" in bridge');
-    const okTrueAt = src.indexOf("ok: true,");
+    const resolveAt = src.indexOf("export async function resolveRunSession");
+    const refusedAt = src.indexOf('"refused" in bridge', resolveAt);
+    const okTrueAt = src.indexOf("session: {", refusedAt);
     assert.ok(refusedAt > 0, "resolveRunSession must check the bridge resolution for a BridgeRefused");
-    assert.ok(okTrueAt > 0 && refusedAt < okTrueAt, "the refused check must come before the ok:true session is returned");
+    assert.ok(okTrueAt > 0 && refusedAt < okTrueAt, "the refused check must come before the successful session is returned");
     assert.match(src, /status: 409, error: BRIDGE_REFUSAL_ERROR\[bridge\.refused\]/);
     // The fleet-control override keys on the owner, never on "is an operator"
     // (CodeRabbit, PR #583: Adon is an operator since #576).
@@ -234,6 +469,17 @@ async function main() {
       route.indexOf("resolveRunSession(") < route.indexOf("sendMessage("),
       "the route must resolve the session (and so this refusal) BEFORE sendMessage can save/queue a run",
     );
+    const starter = readFileSync(join(ROOT, "lib/os/runs/turn-starter.ts"), "utf8");
+    assert.match(
+      starter,
+      /!turn\.revealModel && !canManageAi && !turn\.engine\.fellBackFrom/,
+      "a fallback must remain visible in response metadata even when normal engine detail is hidden",
+    );
+    const personOwnershipAt = src.indexOf('effective.source === "person" && computer.userId !== user.id');
+    const workspaceOwnershipAt = src.indexOf('effective.source === "workspace"');
+    const fallbackDecisionAt = src.indexOf("runtimeFallbackDecision(selectedEngine, readiness)");
+    assert.ok(personOwnershipAt > 0 && personOwnershipAt < fallbackDecisionAt, "a personal pairing mismatch must fail before fallback is considered");
+    assert.ok(workspaceOwnershipAt > 0 && workspaceOwnershipAt < fallbackDecisionAt, "a workspace owner mismatch must fail before fallback is considered");
   });
 
   if (failures > 0) {

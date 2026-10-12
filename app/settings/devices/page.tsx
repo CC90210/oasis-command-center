@@ -1,13 +1,12 @@
 /**
  * /settings/devices — Settings › Devices: machines paired to run the local
- * bridge. Operators only.
+ * bridge. Every member manages their own pairings; team-wide/advanced device
+ * inventory remains capability-gated inside SettingsContent.
  *
  * The bridge gives an agent a shell, files and every MCP on the paired machine,
- * so this follows the VERIFIED operator check (resolvePlatformOperator), never
- * workspace admin: requireSettingsSection 404s everyone else before any read,
- * and SettingsContent's Devices card carries the same gate of its own.
- * `/settings#devices` (the install wizard's back link) is forwarded here by
- * /settings for operators only.
+ * The page guard follows the shared Settings registry. APIs scope ordinary
+ * members to their own computers; only verified operators receive the raw
+ * advanced bridge controls.
  */
 
 import { SettingsContent } from "@/components/settings/SettingsContent";

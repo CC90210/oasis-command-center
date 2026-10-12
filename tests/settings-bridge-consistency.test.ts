@@ -44,13 +44,23 @@ const localCliCard = readFileSync(
   join(ROOT, "components", "settings", "LocalCliProvidersCard.tsx"),
   "utf8",
 );
-assert.ok(localCliCard.includes('fetch("/api/bridge/cli-status"'));
-assert.ok(localCliCard.includes('bridgeClientUrl("exec-tool")'));
-assert.ok(localCliCard.includes("serverBridgeOnline"));
-assert.ok(localCliCard.includes("Bridge online · CLI inventory syncing"));
 assert.ok(
-  !localCliCard.includes("Local bridge offline"),
-  "Settings must not contradict a fresh sidebar heartbeat",
+  /export function LocalCliProvidersCard[\s\S]*return null;/.test(localCliCard),
+  "the retired duplicate CLI card must stay inert",
+);
+
+const enginePanel = readFileSync(
+  join(ROOT, "components", "settings", "AgentEnginePanel.tsx"),
+  "utf8",
+);
+const engineRoute = readFileSync(join(ROOT, "app", "api", "ai", "engine", "route.ts"), "utf8");
+assert.ok(enginePanel.includes("describeRuntime(selectedDevice, provider)"));
+assert.ok(enginePanel.includes("startCliSignIn(provider, selectedDevice.pairingId)"));
+assert.ok(engineRoute.includes("CLI_INVENTORY_SERVICE"));
+assert.ok(engineRoute.includes("claim_runtime_state"));
+assert.ok(
+  !enginePanel.includes('bridgeClientUrl("exec-tool")'),
+  "the unified panel must use pairing-authenticated server state, never browser-to-bridge commands",
 );
 
 const settings = readFileSync(
@@ -58,10 +68,8 @@ const settings = readFileSync(
   "utf8",
 );
 assert.ok(
-  // O1: the card also takes isAgentsOwner (lib/agents-owner.ts) — the
-  // heartbeat prop itself is unchanged, which is what this pins.
-  settings.includes("<LocalCliProvidersCard serverBridgeOnline={bridgeOnline} isAgentsOwner={agentsOwner} />"),
-  "Settings must pass the same tenant-scoped heartbeat used by its other bridge indicators",
+  settings.includes("<AgentEnginePanel>"),
+  "Settings must render the single canonical engine configurator",
 );
 
 const chatWidget = readFileSync(join(ROOT, "components", "ChatWidget.tsx"), "utf8");

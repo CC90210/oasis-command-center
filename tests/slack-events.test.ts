@@ -188,6 +188,25 @@ async function main() {
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, updated_at TEXT, deactivated_at TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
+    CREATE TABLE agent_model_config (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      tenant_id TEXT NOT NULL,
+      user_id TEXT,
+      agent_key TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      encrypted_api_key TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT,
+      computer_pairing_id TEXT,
+      fallback_policy TEXT,
+      runtime_probe_job_id TEXT,
+      runtime_probe_pairing_id TEXT,
+      runtime_probe_engine_kind TEXT,
+      runtime_probe_engine_name TEXT,
+      runtime_probe_engine_version TEXT,
+      runtime_probe_verified_at TEXT
+    );
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
     CREATE TABLE "tenant_integration_credentials" (
@@ -273,6 +292,7 @@ async function main() {
   const verify = await import("../lib/slack/verify");
   const events = await import("../lib/slack/events");
   const jobs = await import("../lib/slack/jobs");
+  const departments = await import("../lib/os/departments");
   const routing = await import("../lib/slack/routing");
   const send = await import("../lib/slack/send");
   const interactivity = await import("../lib/slack/interactivity");
@@ -514,10 +534,14 @@ async function main() {
 
   // ── 3. @mention -> exactly one approval -> Approve posts once ─────────────
 
+  let lastSlackPrepare: Record<string, unknown> | null = null;
   const turnDeps = (draft: string) => ({
     db,
     now,
-    prepare: (async () => ({ ok: true, turn: { tenantId: ALPHA } })) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+    prepare: (async (input: Record<string, unknown>) => {
+      lastSlackPrepare = input;
+      return { ok: true, turn: { tenantId: ALPHA } };
+    }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
     runText: (async () => ({ ok: true, text: draft })) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["runText"]>,
   });
   let approvalId = "";
@@ -539,6 +563,7 @@ async function main() {
     const ephemeralsBefore = ephemerals.length;
     const out = await jobs.runSlackMentionJob(job, turnDeps("Hi Acme, the invoice went out today. Client Success"));
     assert.equal(out.outcome, "approval_created", JSON.stringify(out));
+    assert.equal(lastSlackPrepare?.failClosedWithoutComputerDispatch, true, "Slack must not silently bypass the saved computer engine");
     // The queue retrying the same job never drafts a second approval.
     const again = await jobs.runSlackMentionJob(job, turnDeps("a different draft"));
     assert.equal(again.outcome, "duplicate");
@@ -572,6 +597,82 @@ async function main() {
     for (const name of ["bravo", "maven", "atlas", "customer-support", "Conaugh"]) {
       assert.doesNotMatch(noticeAll.toLowerCase(), new RegExp(name.toLowerCase()), `the notice names "${name}"`);
     }
+  });
+
+  await check("an explicitly opted-in Slack API fallback is labeled in the saved draft", async () => {
+    let prepareInput: Record<string, unknown> | null = null;
+    const job = { ...dispatched[0], eventId: "EvMENTIONFB01" };
+    const out = await jobs.runSlackMentionJob(job, {
+      db,
+      now,
+      prepare: (async (input: Record<string, unknown>) => {
+        prepareInput = input;
+        return {
+          ok: true,
+          turn: {
+            tenantId: ALPHA,
+            engine: { kind: "api", fellBackFrom: "Codex on your paired computer" },
+          },
+        };
+      }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+      runText: (async () => ({ ok: true, text: "The invoice went out today." })) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["runText"]>,
+    });
+    assert.equal(out.outcome, "approval_created", JSON.stringify(out));
+    assert.equal(prepareInput?.failClosedWithoutComputerDispatch, true);
+    const approval = await approvalsStore.getApprovalInTenant(db, ALPHA, (out as { approvalId: string }).approvalId);
+    const payload = approval ? approvalsStore.parsePayload(approval) : {};
+    assert.match(String(payload.text ?? ""), /^Workspace API fallback - Codex on your paired computer could not answer\./);
+    assert.match(String(payload.text ?? ""), /This reply uses workspace API credits/);
+  });
+
+  await check("a saved device engine uses the exact-pairing Slack lane and never prepares an API turn", async () => {
+    const job = { ...dispatched[0], eventId: "EvMENTIONDEVICE1" };
+    const expectedEngine = { kind: "cli", pairingId: "pair-exact-1", cli: "codex", fallback: "none" } as const;
+    let prepared = 0;
+    let seenEngine: unknown = null;
+    const out = await jobs.runSlackMentionJob(job, {
+      db,
+      now,
+      readEngine: (async () => ({ engine: expectedEngine })) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["readEngine"]>,
+      runDevice: (async (input: Parameters<typeof jobs.runSlackDeviceTurn>[0]) => {
+        seenEngine = input.expectedEngine;
+        return { ok: true, text: "Drafted on the exact Codex pairing.", fellBackFrom: null };
+      }) as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["runDevice"]>,
+      prepare: (async () => {
+        prepared += 1;
+        throw new Error("API preparation must not run for a device engine");
+      }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+    });
+    assert.equal(out.outcome, "approval_created", JSON.stringify(out));
+    assert.deepEqual(seenEngine, expectedEngine);
+    assert.equal(prepared, 0);
+    const approval = await approvalsStore.getApprovalInTenant(db, ALPHA, (out as { approvalId: string }).approvalId);
+    assert.equal(approvalsStore.parsePayload(approval!).text, "Drafted on the exact Codex pairing.");
+  });
+
+  await check("an unlinked Slack identity cannot borrow the agents owner's computer", async () => {
+    const dept = departments.OS_DEPARTMENTS.find((item) => item.key === "client_success")!;
+    const out = await jobs.runSlackDeviceTurn({
+      deps: { db, now },
+      job: { ...dispatched[0], eventId: "EvMENTIONUNLINK1", profileId: null },
+      dept,
+      tenantSlug: "alpha-co",
+      agentSlug: "customer-support",
+      prompt: "draft this",
+      expectedEngine: { kind: "cli", pairingId: "pair-exact-1", cli: "codex", fallback: "none" },
+    });
+    assert.deepEqual(out, { ok: false, status: 409, error: "slack_identity_not_linked" });
+  });
+
+  await check("Slack device retries derive one durable conversation and run identity", () => {
+    const first = jobs.slackDeviceRunIdentity(ALPHA, "auth-member-a", "EvMENTIONDEVICE1");
+    const retry = jobs.slackDeviceRunIdentity(ALPHA, "auth-member-a", "EvMENTIONDEVICE1");
+    const other = jobs.slackDeviceRunIdentity(ALPHA, "auth-member-a", "EvMENTIONDEVICE2");
+    assert.deepEqual(retry, first);
+    assert.notEqual(other.conversationId, first.conversationId);
+    assert.notEqual(other.runId, first.runId);
+    assert.match(first.conversationId, /^[0-9a-f-]{36}$/);
+    assert.match(first.runId, /^[0-9a-f-]{36}$/);
   });
 
   await check("an owner who asks gets the draft on a card only they can see; the channel still gets no draft", async () => {
@@ -1432,9 +1533,9 @@ async function main() {
     assert.doesNotMatch(component, /fetch\(/, "the component makes no raw request that could reject unseen");
   });
 
-  await check("the platform key in Slack follows the AUTH user's email, never a profile email set to the operator alias", async () => {
-    // OASIS's Slack, routed to OASIS; CC (the operator) and another OASIS owner
-    // whose PROFILE email was changed to CC's alias. The auth records say who is who.
+  await check("canonical Slack API mode never supplies the platform key, even for the verified operator", async () => {
+    // OASIS's Slack, routed to OASIS; CC is the verified platform operator.
+    // Canonical API mode still means the selected workspace provider account.
     await connect(OASIS, "T0OASIS", "conn-slack-oasis", TOKEN_A, BOT_A);
     await db.batch(
       [
@@ -1454,31 +1555,31 @@ async function main() {
       ],
       "write",
     );
-    const savedKey = process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY;
-    process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY = "slack-events-test-not-a-platform-key";
     const realError = console.error;
     console.error = () => undefined;
     try {
-      const fallbackFor = async (profileId: string, eventId: string) => {
-        let seen: unknown = "not called";
+      const preparedFor = async (profileId: string, eventId: string) => {
+        let seen: Record<string, unknown> | null = null;
         const job = { ...dispatched[0], tenantId: OASIS, teamId: "T0OASIS", channelId: "C0OASIS1", channelName: null, eventId, profileId, text: `<@${BOT_A}> Client Success hi`, channelDepartment: null, customerId: null };
         await jobs.runSlackMentionJob(job, {
           db,
           now,
-          prepare: (async (req: { platformFallback: unknown }) => {
-            seen = req.platformFallback;
+          readEngine: (async () => ({ engine: { kind: "api", provider: "openrouter" } })) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["readEngine"]>,
+          prepare: (async (req: Record<string, unknown>) => {
+            seen = req;
             return { ok: false, status: 412, error: "agent_not_configured" };
           }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
         });
         return seen;
       };
-      const cc = await fallbackFor("p-cc", "EvOPERCC001");
-      assert.ok(cc && typeof cc === "object", "CC, the verified operator, gets the platform key");
-      assert.equal(await fallbackFor("p-squat", "EvOPERSQ001"), null, "a profile email set to the alias is not the operator");
+      const cc = await preparedFor("p-cc", "EvOPERCC001");
+      assert.ok(cc, "the verified operator reaches canonical API preparation");
+      assert.equal(cc.platformFallback, null, "Slack never supplies the OASIS platform key");
+      assert.deepEqual(cc.engineChoice, { kind: "api", provider: "openrouter" });
+      const otherOwner = await preparedFor("p-squat", "EvOPERSQ001");
+      assert.equal(otherOwner?.platformFallback, null);
     } finally {
       console.error = realError;
-      if (savedKey === undefined) delete process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY;
-      else process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY = savedKey;
     }
   });
 

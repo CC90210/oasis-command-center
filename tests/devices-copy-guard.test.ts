@@ -29,12 +29,10 @@
  *     in the operator's install modal and install wizard only. The full install
  *     clones a private repository, so OASIS's own computers need the GitHub
  *     CLI signed in; that paragraph stays there, closed by default.
- *   - In LocalCliProvidersCard's CARDS catalogue, the Claude Code entry's own
- *     label, install command and docs link: the card lists the command-line
- *     tools a computer can run (Claude Code, Codex CLI, Gemini CLI) by their
- *     real names and packages. That is the "whatever model" choice, not the
- *     bridge's name. Only those three fields of the `key: "claude"` entry are
- *     allowed, and the test pins exactly what they say.
+ *   - The scanner itself still supports a narrowly scoped CLI-catalogue
+ *     allowance. Settings no longer uses it: runtime selection and repair live
+ *     in AgentEnginePanel, while LocalCliProvidersCard is only a compatibility
+ *     helper during rollout.
  *
  * Run: node --conditions=react-server --import tsx tests/devices-copy-guard.test.ts
  */
@@ -482,13 +480,8 @@ check("no other guarded file has an operator block (a client screen gets no exem
     assert.deepEqual(s.operatorBlocks, [], rel);
   }
 });
-check("the CLI catalogue allowance lets through exactly the Claude Code entry's name, install command and docs link", () => {
-  assert.deepEqual(scan(CATALOGUE_FILE).catalogueAllowed.map((h) => h.text), [
-    "Claude Code",
-    "https://docs.anthropic.com/en/docs/claude-code/quickstart",
-    "npm install -g @anthropic-ai/claude-code",
-  ]);
-  for (const rel of FILES.filter((f) => f !== CATALOGUE_FILE)) assert.deepEqual(scan(rel).catalogueAllowed, [], rel);
+check("the retired CLI compatibility card no longer owns a visible product catalogue", () => {
+  for (const rel of FILES) assert.deepEqual(scan(rel).catalogueAllowed, [], rel);
 });
 
 // The new names, so a revert to other wording fails too.
@@ -559,9 +552,12 @@ check("the install page: its header names OASIS AI Command Center, and the two c
 check("the client's pair-only card names the OASIS bridge", () => {
   assert.ok(shows("app/settings/devices/install/PairBridgeOnly.tsx", "Pair a computer that already has the OASIS bridge"));
 });
-check("the CLI card says it couldn't reach the computer's bridge, not 'bridge returned <n>'", () => {
-  assert.ok(shows(CATALOGUE_FILE, "Couldn't reach this computer's bridge (status"));
-  assert.ok(!scan(CATALOGUE_FILE).visible.some((h) => /bridge returned/i.test(h.text)));
+check("the unified engine panel offers a connector repair without exposing a raw bridge response", () => {
+  const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
+  const client = readFileSync(join(ROOT, "components/settings/agent-engine-client.ts"), "utf8");
+  assert.match(panel, /connectorRestartCommand\(device\.os\)/);
+  assert.match(client, /"oasis bridge restart"/);
+  assert.doesNotMatch(panel, /bridge returned/i);
 });
 check("the Whispr card describes where the clean-up goes for every route, not a sign-in", () => {
   // Whispr's README: the speech model is local unless the Groq backend is chosen;

@@ -203,7 +203,63 @@ export type BridgeAuthResult =
       tenantSlug?: string;
     };
 
-export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
+export type BridgeActorResult =
+  | (Omit<Extract<BridgeAuthResult, { ok: true }>, "target"> & { target: BridgeTarget | null })
+  | Exclude<BridgeAuthResult, { ok: true }>;
+
+/** Identity-only gate for outbound pull protocols. Unlike the legacy bridge
+ * proxy gate, this deliberately does not require platform-operator status,
+ * workspace agents-owner status, or a static bridge URL. The calling route
+ * authorizes the resolved personal/workspace pairing after it knows which
+ * engine row supplied the choice. */
+export async function authorizeBridgePullActor(): Promise<BridgeActorResult> {
+  const { getServiceSupabase, getSessionUser } = await import("@/lib/supabase-server");
+  const { resolveActiveProfileForUser } = await import("@/lib/active-profile-resolver");
+  const { isPlatformOperatorForAuthUser } = await import("@/lib/platform-operator");
+  const { liveSeat } = await import("@/lib/os/seat");
+  const user = await getSessionUser();
+  if (!user) return { ok: false, status: 401, error: "unauthenticated" };
+
+  const svc = getServiceSupabase();
+  try {
+    // Use the same deterministic active-profile resolution as Settings and
+    // getSessionContext. Legacy duplicate rows must not make a harness POST
+    // fail, and a stale privileged duplicate must not elevate the live row.
+    const resolved = await resolveActiveProfileForUser(user);
+    if (resolved.error) throw new Error(resolved.error);
+    const profile = resolved.profile;
+    if (!profile) return { ok: false, status: 403, error: "no_profile" };
+    const tenantId = String(profile.tenant_id || "");
+    if (!tenantId) return { ok: false, status: 403, error: "no_tenant" };
+    if (!(await liveSeat(tenantId, user.id)).live) {
+      return { ok: false, status: 403, error: "seat_inactive" };
+    }
+    let teamRole = (profile.team_role || "read_only").trim().toLowerCase();
+    if (dbBool(profile.is_owner) && teamRole !== "owner" && teamRole !== "admin") teamRole = "owner";
+    if (dbBool(profile.admin_access) && teamRole !== "owner" && teamRole !== "admin") teamRole = "admin";
+
+    const tenantResult = await svc.from("tenants").select("slug").eq("id", tenantId).maybeSingle();
+    if (tenantResult.error) throw new Error(tenantResult.error.message);
+    const tenantSlug = String((tenantResult.data as { slug?: string | null } | null)?.slug || "").toLowerCase();
+    if (!tenantSlug) return { ok: false, status: 403, error: "tenant_lookup_failed" };
+    return {
+      ok: true,
+      target: null,
+      tenantId,
+      tenantSlug,
+      userId: user.id,
+      teamRole,
+      isOperator: await isPlatformOperatorForAuthUser(user.id, user.email),
+    };
+  } catch {
+    return { ok: false, status: 403, error: "profile_lookup_failed" };
+  }
+}
+
+/** Authenticate the person/tenant/agents-owner boundary without requiring an
+ * inbound bridge URL. Pull protocols need this identity gate but deliberately
+ * have no computer URL: the selected pairing calls out to claim its work. */
+export async function authorizeBridgeActor(): Promise<BridgeActorResult> {
   // Imported lazily to keep this module's import graph small for the /chat
   // route, which does not call this function.
   const { getServiceSupabase, getSessionUser } = await import("@/lib/supabase-server");
@@ -310,7 +366,6 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   }
 
   const target = resolveBridgeTarget(tenantRow);
-  if (!target) return { ok: false, status: 503, error: "bridge_not_configured", isOperator, tenantSlug: tenantRow.slug };
   return {
     ok: true,
     target,
@@ -320,4 +375,20 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
     teamRole,
     isOperator,
   };
+}
+
+/** Legacy push routes still require a concrete bridge URL and bearer. */
+export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
+  const actor = await authorizeBridgeActor();
+  if (!actor.ok) return actor;
+  if (!actor.target) {
+    return {
+      ok: false,
+      status: 503,
+      error: "bridge_not_configured",
+      isOperator: actor.isOperator,
+      tenantSlug: actor.tenantSlug,
+    };
+  }
+  return { ...actor, target: actor.target };
 }

@@ -2888,11 +2888,28 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
   // scope) copies through as NULL, which every reader treats as legacy
   // 'daemon' (lib/bridge/pairing-auth.ts).
   const PAIRED_VIA = 'pair_code';
+  // D0: a connector code is a short-lived bearer capability minted by one
+  // authenticated person. The physical redeemer need not have a dashboard
+  // session, but the resulting pairing is always owned by bpc.auth_user_id
+  // (the minter), so the
+  // /api/devices/[id]/approve refusal rules that matter for a second,
+  // separate approval click never apply here: not_your_computer cannot fire
+  // (owner === the minter, always), signup_secret cannot fire (paired_via is
+  // always 'pair_code' on this path), and the daemon/agents-owner rule is
+  // scoped out below by checking scope = 'connector' specifically. Only the
+  // claude_account_hash "shared with someone else's approved pairing" rule
+  // is skipped — the hash does not exist yet at redeem time, so there is
+  // nothing to check; it is still enforced later, same as today, the first
+  // time a hash is actually recorded. Daemon-scope and legacy (NULL-scope)
+  // pairings are untouched: claim_enabled_at/by stay NULL, same as before,
+  // and keep the explicit Approve click.
   const pairStmt = p_fingerprint
     ? {
         sql:
-          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at, scope, paired_via) ' +
-          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, ?, ?, bpc.scope, ? ' +
+          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at, scope, paired_via, claim_enabled_at, claim_enabled_by) ' +
+          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, ?, ?, bpc.scope, ?, ' +
+          "CASE WHEN bpc.scope = 'connector' THEN ? ELSE NULL END, " +
+          "CASE WHEN bpc.scope = 'connector' THEN bpc.auth_user_id ELSE NULL END " +
           'FROM bridge_pair_codes bpc WHERE bpc.code = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ? ' +
           // The target's WHERE must match production's partial index
           // (idx_bridge_pairings_unique_live_machine) exactly, BOTH terms: with
@@ -2901,23 +2918,28 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
           'ON CONFLICT (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL AND machine_fingerprint IS NOT NULL DO UPDATE SET ' +
           'bridge_token_hash = excluded.bridge_token_hash, label = excluded.label, last_seen_at = excluded.last_seen_at, ' +
           'scope = excluded.scope, paired_via = excluded.paired_via, ' +
-          // A re-pair starts a fresh token history and a fresh approval (Codex,
-          // O3a P1): an in-grace previous token must never answer with the new
-          // scope, nor revoke the new pairing later, and a connector's approval
-          // never carries over to a daemon re-pair.
+          // A re-pair starts a fresh token history (Codex, O3a P1): an
+          // in-grace previous token must never answer with the new scope,
+          // nor revoke the new pairing later. Approval resets to NULL on
+          // every re-pair EXCEPT a connector-scope one, where excluded.*
+          // carries the SAME auto-approve this insert just computed above —
+          // re-pairing your own connected computer must not silently demand
+          // a second manual approval it never needed the first time.
           'previous_token_hash = NULL, token_rotated_at = NULL, ' +
-          'claim_enabled_at = NULL, claim_enabled_by = NULL, claude_account_hash = NULL ' +
+          'claim_enabled_at = excluded.claim_enabled_at, claim_enabled_by = excluded.claim_enabled_by, claude_account_hash = NULL ' +
           'WHERE bridge_pairings.user_id = excluded.user_id',
-        args: [freshPairingId, label, p_token_hash, p_fingerprint, nowIso, PAIRED_VIA, p_code, nowIso],
+        args: [freshPairingId, label, p_token_hash, p_fingerprint, nowIso, PAIRED_VIA, nowIso, p_code, nowIso],
       }
     : {
         // No fingerprint, no uniqueness concept (NULL never collides in the
         // partial index) — a plain insert, same as before this fix.
         sql:
-          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at, scope, paired_via) ' +
-          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, NULL, ?, bpc.scope, ? ' +
+          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at, scope, paired_via, claim_enabled_at, claim_enabled_by) ' +
+          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, NULL, ?, bpc.scope, ?, ' +
+          "CASE WHEN bpc.scope = 'connector' THEN ? ELSE NULL END, " +
+          "CASE WHEN bpc.scope = 'connector' THEN bpc.auth_user_id ELSE NULL END " +
           'FROM bridge_pair_codes bpc WHERE bpc.code = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ?',
-        args: [freshPairingId, label, p_token_hash, nowIso, PAIRED_VIA, p_code, nowIso],
+        args: [freshPairingId, label, p_token_hash, nowIso, PAIRED_VIA, nowIso, p_code, nowIso],
       };
 
   const consumeStmt = p_fingerprint

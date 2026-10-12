@@ -132,11 +132,21 @@ export function personComputerRefusal(computers: ReadonlyArray<ComputerClaimFact
   return "computer_dispatch_not_ready";
 }
 
-/** Plain words for one state, used by every screen that renders it. */
-export function computerAnswerSentence(state: ComputerAnswerState, label: string): string {
+/**
+ * Plain words for one state, used by every screen that renders it. Pass
+ * `ownerName` when `label` is NOT the viewer's own computer (a teammate's
+ * row): the sentence then names that person instead of saying "your" to
+ * someone it is not true for. Omit it for the viewer's own computer, where
+ * "your approval" is correct.
+ */
+export function computerAnswerSentence(state: ComputerAnswerState, label: string, ownerName?: string | null): string {
   if (state === "can_answer") return `${label} is ready for department work.`;
   if (state === "busy") return `${label} is finishing another reply. Yours is next.`;
-  if (state === "not_approved") return `${label} connected. Waiting for your approval.`;
+  if (state === "not_approved") {
+    return ownerName
+      ? `${label} connected. Not yet approved by ${ownerName} for department work.`
+      : `${label} connected. Waiting for your approval.`;
+  }
   if (state === "offline") return `${label} is offline.`;
   return `${label} connected, can't answer: ${state.slice("blocked:".length)}.`;
 }

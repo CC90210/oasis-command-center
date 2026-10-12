@@ -11,24 +11,22 @@
  * radio, the app picker and the model box were `disabled` while it waited.
  *
  * PINNED HERE
- *   1. The browser call ends for every outcome (200, 422 with JSON, 500, a
+ *   1. The browser call ends for every outcome (202, 422 with JSON, 500, a
  *      non-JSON 502/504, a dropped connection, a connection that never
  *      answers, a body that never arrives, Cancel) with a plain sentence.
- *   2. The panel, drawn by real hooks (tests/ai-engine-never-hangs.render.ts),
- *      ends its busy state, shows the sentence, offers Cancel and an elapsed
- *      counter while it waits, and disables ONLY the Test and Save buttons.
+ *   2. A probe is queued on one exact pairing, polling follows only that job,
+ *      terminal failures stay terminal, and Stop waiting aborts the poll.
  *   3. The server's probe for one short answer waits 75 s, not 150 s, and the
  *      browser waits a little longer than that.
  *   4. The bridge's failure codes each have their own plain sentence.
- *   5. An app the vendor refuses ("unsupported") is its own finished state and
- *      is not offered a Test or Save.
+ *   5. The consolidated panel invalidates a receipt when the device/runtime
+ *      changes and only unlocks Save for the matching selection and scope.
  *   6. The "AI setup" section is gone; its key management lives in the engine
  *      panel, and #providers still resolves.
  *
  * Run: node --conditions=react-server --import tsx tests/ai-engine-never-hangs.test.ts
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,7 +53,8 @@ async function check(name: string, fn: () => Promise<void> | void) {
 }
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
-const GEMINI = { kind: "cli", cli: "gemini" } as const;
+const GEMINI = { mode: "subscription", provider: "gemini", pairingId: "pair-ccpc", fallback: "none" } as const;
+const BRIDGE_GEMINI = { kind: "cli", cli: "gemini" } as const;
 
 async function main() {
   // A promise that never settles must not let node exit 0 mid-suite (it would read as a pass).
@@ -70,7 +69,7 @@ async function main() {
     const sentence = "It did not pass the test, so nothing was changed. Google no longer lets Gemini CLI run on a personal Google sign-in.";
     const fetch422 = async () => json(422, { ok: false, error: "engine_test_failed", message: sentence });
     assert.deepEqual(await client.saveEngine(GEMINI, null, fetch422), { ok: false, message: sentence });
-    assert.deepEqual(await client.testEngine(GEMINI, fetch422), { ok: false, message: sentence });
+    assert.deepEqual(await client.queueEngineProbe(GEMINI, "person", fetch422), { ok: false, message: sentence });
   });
   await check("a 500, a non-JSON 502 and a 504 each end in a plain sentence, never a status code or HTML", async () => {
     for (const [status, raw] of [
@@ -80,7 +79,7 @@ async function main() {
       [524, "error code: 524"],
     ] as const) {
       const f = async () => new Response(raw, { status });
-      for (const r of [await client.saveEngine(GEMINI, null, f), await client.testEngine(GEMINI, f)]) {
+      for (const r of [await client.saveEngine(GEMINI, null, f), await client.queueEngineProbe(GEMINI, "person", f)]) {
         assert.equal(r.ok, false);
         const message = (r as { message: string }).message;
         assert.match(message, /^[A-Z][^<>]*[.]$/, `${status}: ${message}`);
@@ -99,7 +98,7 @@ async function main() {
   await check("a connection that never answers ends at the deadline, even when fetch ignores its signal", async () => {
     const never = () => new Promise<Response>(() => undefined);
     const started = Date.now();
-    const r = await client.testEngine(GEMINI, never, { deadlineMs: 40 });
+    const r = await client.queueEngineProbe(GEMINI, "person", never, { deadlineMs: 40 });
     assert.ok(Date.now() - started < 1000, "the call must end at its own deadline");
     assert.equal(r.ok, false);
     assert.match((r as { message: string }).message, /didn't answer in time\. Try again, or pick another app\./);
@@ -109,7 +108,7 @@ async function main() {
   });
   await check("a body that never arrives also ends at the deadline", async () => {
     const stuck = async () => ({ ok: true, status: 200, json: () => new Promise(() => undefined) }) as unknown as Response;
-    const r = await client.testEngine(GEMINI, stuck, { deadlineMs: 40 });
+    const r = await client.queueEngineProbe(GEMINI, "person", stuck, { deadlineMs: 40 });
     assert.equal(r.ok, false);
     assert.match((r as { message: string }).message, /didn't answer in time/);
   });
@@ -121,14 +120,14 @@ async function main() {
         init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
       });
     const ctl = new AbortController();
-    const pending = client.testEngine(GEMINI, waits, { signal: ctl.signal });
+    const pending = client.queueEngineProbe(GEMINI, "person", waits, { signal: ctl.signal });
     ctl.abort();
     const r = await pending;
     assert.equal(seen?.aborted, true, "the request itself was aborted");
     assert.deepEqual(r, { ok: false, message: "Stopped waiting for the test. Nothing was changed." });
     const already = new AbortController();
     already.abort();
-    assert.equal((await client.testEngine(GEMINI, waits, { signal: already.signal })).ok, false, "an already-cancelled call ends at once");
+    assert.equal((await client.queueEngineProbe(GEMINI, "person", waits, { signal: already.signal })).ok, false, "an already-cancelled call ends at once");
   });
   await check("a stopped call says the right thing for what it was doing (save, provider switch, key removal, test)", async () => {
     const never = () => new Promise<Response>(() => undefined);
@@ -148,7 +147,11 @@ async function main() {
       sendsVersion.push(String(init.body));
       return json(200, { ok: true });
     });
-    assert.deepEqual(JSON.parse(sendsVersion[0]), { engine: GEMINI, expected_version: "v-7" }, "a save hands back the version the page read");
+    assert.deepEqual(
+      JSON.parse(sendsVersion[0]),
+      { engine: GEMINI, scope: "person", expected_version: "v-7" },
+      "a save hands back the exact selection, scope and version the page read",
+    );
   });
   await check("the browser waits a little longer than the server's one-short-answer probe, which is 75 s", () => {
     assert.equal(bridge.BRIDGE_TEST_TIMEOUT_MS, 75_000);
@@ -179,7 +182,7 @@ async function main() {
       }
       const r = await bridge.testBridgeEngine({
         caller: { target: { baseUrl: "http://bridge.invalid", bearerToken: "t" }, tenantId: "t", userId: "u", teamRole: "owner" } as never,
-        engine: GEMINI,
+        engine: BRIDGE_GEMINI,
         tenantSlug: "oasis",
         system: "s",
         ask: "a",
@@ -202,7 +205,7 @@ async function main() {
     assert.equal(cliStatus.CLI_UNSUPPORTED_DETAIL, c.sentence, "the card and the run error say the same words");
     const r = await bridge.testBridgeEngine({
       caller: { target: { baseUrl: "http://bridge.invalid", bearerToken: "t" }, tenantId: "t", userId: "u", teamRole: "owner" } as never,
-      engine: GEMINI,
+      engine: BRIDGE_GEMINI,
       tenantSlug: "oasis",
       system: "s",
       ask: "a",
@@ -266,115 +269,110 @@ async function main() {
     assert.deepEqual(cliStatus.unsupportedProviders([]), []);
   });
 
-  console.log("5. the panel, drawn by real hooks");
-  type Scenario = {
-    before: { buttons: string[]; unsupportedNote: boolean };
-    started: boolean;
-    mid?: { disabled: string[]; locks: number; cancel: boolean; elapsed: string; accountCardPresent: boolean; accountButtonDisabled: boolean };
-    ended?: boolean;
-    stillBusy?: boolean;
-    note?: string | null;
-    noteRole?: string | null;
-    stillDisabled?: string[];
-    signalAborted?: boolean | null;
-  };
-  // The render needs whole React: drop the suite's react-server condition (CI sets it in NODE_OPTIONS, which children inherit).
-  const nodeOptions = (process.env.NODE_OPTIONS || "")
-    .split(/\s+/)
-    .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
-    .join(" ");
-  const childEnv: NodeJS.ProcessEnv = Object.assign({}, process.env, { NODE_OPTIONS: nodeOptions });
-  if (!nodeOptions) delete childEnv.NODE_OPTIONS;
-  const run = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-engine-never-hangs.render.ts"], { cwd: ROOT, encoding: "utf8", env: childEnv, timeout: 120_000 });
-  let sc: Record<string, Scenario> = {};
-  try {
-    sc = JSON.parse(run.stdout.trim().split("\n").pop() ?? "{}") as Record<string, Scenario>;
-  } catch {
-    sc = {};
-  }
-  await check("the render driver ran", () => {
-    assert.equal(run.status, 0, `${run.stderr}\n${run.stdout}`.slice(0, 1500));
-    assert.ok(Object.keys(sc).length >= 12, "the scenarios did not all print");
+  console.log("5. queued jobs, polling, cancellation and the consolidated panel");
+  await check("a probe is queued once, then polling follows its exact job to a successful receipt", async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const statuses = ["queued", "running", "completed"] as const;
+    let read = 0;
+    const fetcher = async (url: string, init: RequestInit) => {
+      calls.push({ url, method: String(init.method), body: init.body ? JSON.parse(String(init.body)) : null });
+      if (url === "/api/ai/engine") return json(202, { ok: true, job_id: "probe-pair-ccpc" });
+      const status = statuses[Math.min(read++, statuses.length - 1)];
+      return json(200, {
+        ok: true,
+        job: {
+          id: "probe-pair-ccpc",
+          status,
+          action: "probe",
+          engine: { kind: "cli", name: "gemini" },
+          result: status === "completed" ? { reply: "Hello", latency_ms: 4200 } : null,
+        },
+      });
+    };
+    const queued = await client.queueEngineProbe(GEMINI, "person", fetcher);
+    assert.deepEqual(queued, { ok: true, jobId: "probe-pair-ccpc" });
+    const updates: string[] = [];
+    const done = await client.pollRuntimeJob("probe-pair-ccpc", fetcher, { intervalMs: 0, onUpdate: (job) => updates.push(job.status) });
+    assert.equal(done.ok && done.job.status, "done");
+    if (done.ok) {
+      assert.equal(done.job.engine?.name, "gemini");
+      assert.deepEqual(done.job.result, { reply: "Hello", latencyMs: 4200 });
+    }
+    assert.deepEqual(updates, ["queued", "running", "done"]);
+    assert.deepEqual(calls[0], {
+      url: "/api/ai/engine",
+      method: "POST",
+      body: { engine: GEMINI, scope: "person" },
+    });
+    assert.ok(calls.slice(1).every((call) => call.url === "/api/bridge/runtime-jobs/probe-pair-ccpc" && call.method === "GET"));
   });
 
-  const ENDS: Array<[string, RegExp]> = [
-    ["422 json", /Google no longer lets Gemini CLI run on a personal Google sign-in/],
-    ["test 422 json", /didn't answer in time\. Try again, or pick another app\./],
-    ["500 plain text", /OASIS had a problem answering just now\. Nothing was changed\./],
-    ["502 html", /OASIS had a problem answering just now/],
-    ["504", /OASIS took too long to answer/],
-    ["network drop", /We couldn't reach OASIS just now/],
-    ["client timeout", /didn't answer in time\. Try again, or pick another app\./],
-    ["client timeout on test", /didn't answer in time\. Try again, or pick another app\./],
-    ["cancel", /Stopped waiting for the test\. Nothing was changed\./],
-  ];
-  for (const [name, expected] of ENDS) {
-    await check(`'${name}': the busy state ends, one plain sentence shows, nothing stays disabled`, () => {
-      const s = sc[name];
-      assert.ok(s?.started, `${name} did not start`);
-      assert.equal(s.ended, true, "the Cancel button and busy state were still there");
-      assert.equal(s.stillBusy, false);
-      assert.match(s.note ?? "", expected);
-      assert.equal(s.noteRole, "alert");
-      assert.doesNotMatch(s.note ?? "", /<|SyntaxError|\b50\d\b/);
-      assert.deepEqual(s.stillDisabled, [], "a control stayed disabled after the request ended");
+  await check("a failed runtime job is terminal and returns its contextual repair code", async () => {
+    const result = await client.pollRuntimeJob(
+      "probe-failed",
+      async () =>
+        json(200, {
+          ok: true,
+          job: {
+            id: "probe-failed",
+            status: "failed",
+            action: "probe",
+            engine: { kind: "cli", name: "gemini" },
+            error_code: "unsupported_personal_sign_in",
+            message: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.",
+          },
+        }),
+      { intervalMs: 0 },
+    );
+    assert.deepEqual(result, {
+      ok: false,
+      message: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.",
+      code: "unsupported_personal_sign_in",
     });
-  }
-  await check("a connection that never answers is aborted at the browser deadline (the request is stopped, not abandoned)", () => {
-    assert.equal(sc["client timeout"].signalAborted, true);
-    assert.equal(sc["client timeout on test"].signalAborted, true);
-    assert.equal(sc["cancel"].signalAborted, true, "Cancel aborts the request");
+    assert.match(client.repairForCode("unsupported_personal_sign_in") ?? "", /Google API key/);
   });
-  await check("while it waits: Cancel and a seconds counter show, and ONLY the Test and Save buttons are disabled", () => {
-    for (const name of ["client timeout", "client timeout on test", "cancel", "elapsed counter"]) {
-      const m = sc[name].mid;
-      assert.ok(m, name);
-      assert.equal(m.cancel, true, `${name}: no Cancel button while waiting`);
-      assert.match(m.elapsed, /^Testing\.\.\. \d+ s\. An app's first answer can take up to a minute\.$/, name);
-      assert.equal(m.locks, 0, `${name}: something blocks the page (inert / aria-busy / pointer-events-none)`);
-      // Disabled: the Test button and the Use-this button, nothing else (not a radio, not the app picker, not the AI account card).
-      for (const d of m.disabled) assert.match(d, /^button:(Test|Testing\.\.\.|Use this for my agents|Testing a short answer\.\.\.)$/, `${name}: ${d} is disabled while waiting`);
-      assert.ok(m.disabled.length >= 1 && m.disabled.length <= 2, `${name}: ${m.disabled.join(" | ")}`);
-      assert.equal(m.accountCardPresent, true);
-      assert.equal(m.accountButtonDisabled, false, `${name}: the AI account card was locked`);
-    }
-    assert.match(sc["elapsed counter"].mid?.elapsed ?? "", /^Testing\.\.\. [1-9]\d* s\./, "the counter counts seconds");
-    assert.equal(sc["elapsed counter"].note, 'Gemini CLI answered in 2.2 s: "Hi"');
+
+  await check("polling a connection that never answers aborts at its browser deadline", async () => {
+    let signal: AbortSignal | null = null;
+    const never = (_url: string, init: RequestInit) => {
+      signal = init.signal;
+      return new Promise<Response>(() => undefined);
+    };
+    const started = Date.now();
+    const result = await client.pollRuntimeJob("probe-hung", never, { deadlineMs: 40, intervalMs: 0 });
+    assert.ok(Date.now() - started < 1000);
+    assert.equal(result.ok, false);
+    assert.match((result as { message: string }).message, /didn't answer in time/);
+    assert.equal(signal?.aborted, true, "the in-flight status request is aborted, not abandoned");
   });
-  await check("cancel a save and the page reads the truth at once and again after the server's window: 'In use' is never wrong", () => {
-    const s = sc["cancel save: truth is re-read twice"];
-    assert.ok(s?.started);
-    assert.equal(s.puts?.length, 1);
-    assert.deepEqual(s.puts?.[0], { engine: { kind: "cli", cli: "gemini" }, expected_version: "v-1" }, "the save carried the version the page had read");
-    assert.equal(s.gets, 3, "the first read, one at once after the stop, one after the server window");
-    assert.deepEqual(s.inUse?.length, 1);
-    assert.match(s.inUse?.[0] ?? "", /^An app on your paired computer/, "the late commit shows as in use");
-    assert.match(s.note ?? "", /^Stopped waiting\. "In use" above shows what your agents really run on\.$/);
+
+  await check("Stop waiting cancels queued-job polling during the interval", async () => {
+    const ctl = new AbortController();
+    let reads = 0;
+    const pending = client.pollRuntimeJob(
+      "probe-cancelled",
+      async () => {
+        reads += 1;
+        return json(200, { ok: true, job: { id: "probe-cancelled", status: "queued", action: "probe", engine: { kind: "cli", name: "codex" } } });
+      },
+      {
+        signal: ctl.signal,
+        intervalMs: 60_000,
+        onUpdate: () => ctl.abort(),
+      },
+    );
+    const result = await pending;
+    assert.equal(reads, 1);
+    assert.deepEqual(result, { ok: false, message: "Stopped waiting for the test. Nothing was changed." });
   });
-  await check("success names the app that answered, and ends the busy state", () => {
-    assert.equal(sc["ok"].note, 'Gemini CLI answered in 4.2 s: "Hello"');
-    assert.equal(sc["ok"].noteRole, "status");
-    assert.equal(sc["ok"].stillBusy, false);
-  });
-  await check("an app the vendor refuses shows its reason inline and is not offered a Test or Save", () => {
-    for (const name of ["unsupported gemini", "unsupported gemini save"]) {
-      const s = sc[name];
-      assert.equal(s.started, false, `${name}: Test/Save was offered for Gemini CLI`);
-      assert.equal(s.before.unsupportedNote, true);
-      assert.ok(s.before.buttons.includes("Gemini CLI Not supported"), s.before.buttons.join(" | "));
-      assert.ok(!s.before.buttons.some((b) => b === "Test" || b === "Use this for my agents"));
-    }
-    // Picking a working app brings Test and Save back.
-    assert.equal(sc["claude with gemini unsupported"].started, true);
-    assert.equal(sc["claude with gemini unsupported"].before.unsupportedNote, false);
-    assert.match(sc["claude with gemini unsupported"].note ?? "", /^Claude Code answered/);
-  });
-  await check("the radios, the app picker and the model box are never disabled by a pending request (source)", () => {
+
+  await check("the panel keeps the page open, invalidates stale probe receipts and exposes Stop waiting", () => {
     const src = read("components/settings/AgentEnginePanel.tsx");
-    assert.doesNotMatch(src, /busy !== null/, "the old page-wide busy lock is back");
-    assert.doesNotMatch(src, /pointer-events-none|\binert\b/);
-    const radio = /type="radio"[\s\S]*?disabled=\{([^}]*)\}/.exec(src)?.[1] ?? "";
-    assert.equal(radio.trim(), "!canManage", "the engine radios must only be gated by who may manage");
+    assert.doesNotMatch(src, /pointer-events-none|\binert\b/, "a runtime job must not install a page-wide interaction lock");
+    assert.match(src, /function setDraft\([^)]*\)[\s\S]*?setProbeReceipt\(null\)/, "changing computer/runtime invalidates the prior test receipt");
+    assert.match(src, /probeReceipt\?\.key === draftKey/, "Save is unlocked only by a receipt matching the exact current selection and scope");
+    assert.match(src, /data-testid="engine-cancel"[\s\S]*?stop\.current\?\.abort\(\)/, "the active poll can be stopped without leaving Settings");
+    assert.match(src, /pollRuntimeJob\(queued\.jobId[\s\S]*?onUpdate: setJob/, "the dashboard polls the selected job in place");
   });
 
   console.log("5b. a link to #providers opens and scrolls to the card even when it draws late");

@@ -93,6 +93,13 @@ async function main() {
   // would throw "no such table: bridge_pairings".
   await db.execute(`CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT,
     revoked_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT, paired_via TEXT)`);
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_policy TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_reason TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_provider TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_model TEXT");
 
   const store = await import("../lib/os/runs/store");
   const types = await import("../lib/os/runs/types");
@@ -199,6 +206,44 @@ async function main() {
     const winners = [a, b].filter(Boolean);
     assert.equal(winners.length, 1, "exactly one claim won");
     assert.equal(winners[0]?.id, q.ok ? q.run.id : undefined);
+  });
+  await check("an exact-device run can be claimed only by its snapshotted pairing, even when another computer belongs to the same person", async () => {
+    const owner = await person();
+    const otherPairingId = uid();
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, claim_enabled_at, claim_enabled_by, paired_via) VALUES (?, ?, ?, ?, ?, 'test', 'pair_code')`,
+      args: [otherPairingId, owner.scope.tenantId, owner.scope.userId, "other approved computer", new Date().toISOString()],
+    });
+    const c = await conv(owner.scope);
+    const queued = await store.enqueueRun(db, owner.scope, {
+      conversationId: c.id,
+      text: "run this on the selected Codex machine",
+      chatMode: "build",
+      showThinking: false,
+      now: now(),
+      executor: "computer",
+      targetPairingId: owner.pairing.pairingId,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+    });
+    assert.ok(queued.ok);
+    if (!queued.ok) return;
+    assert.equal(queued.run.targetPairingId, owner.pairing.pairingId);
+    assert.equal(queued.run.runtimeEngineKind, "cli");
+    assert.equal(queued.run.runtimeEngineName, "codex");
+    assert.equal(
+      await store.claimComputerRun(
+        db,
+        { ...owner.pairing, pairingId: otherPairingId },
+        "wrong-computer",
+        now(),
+        "department_task_v2",
+      ),
+      null,
+    );
+    const claimed = await store.claimComputerRun(db, owner.pairing, "right-computer", now(), "department_task_v2");
+    assert.equal(claimed?.id, queued.run.id);
+    assert.equal(claimed?.claimedPairingId, owner.pairing.pairingId);
   });
   await check("[P2] claim-id dedup is atomic with claiming: two overlapping requests for the SAME claim_id, with TWO different runs available, never claim two different runs under it", async () => {
     // The scenario the previous check cannot reach: with only ONE queued
@@ -434,6 +479,88 @@ async function main() {
     const { reaped } = await store.claimCleanup(db, owner.scope, now());
     assert.deepEqual(reaped, q.ok ? [q.run.id] : []);
     assert.equal((await store.getRun(db, other.scope, othersRun.ok ? othersRun.run.id : ""))?.status, "running", "another person's still-fresh producer run was not touched by this person's cleanup");
+  });
+
+  await check("v2 pairing cleanup reaches workspace-default runs requested by members, without touching another pairing", async () => {
+    const tenant = uid();
+    const owner = await person(tenant);
+    const member = await person(tenant);
+    const otherOwner = await person(tenant);
+
+    const staleConv = await conv(member.scope);
+    const stale = await store.enqueueRun(db, member.scope, {
+      conversationId: staleConv.id,
+      text: "member request on the workspace owner's Mac",
+      chatMode: "build",
+      showThinking: false,
+      now: now(),
+      executor: "computer",
+      targetPairingId: owner.pairing.pairingId,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "none",
+    });
+    assert.ok(stale.ok);
+    const claimed = await store.claimComputerRun(db, owner.pairing, "workspace-owner-stale", now(), "department_task_v2");
+    assert.equal(claimed?.id, stale.ok ? stale.run.id : "");
+
+    const untouchedConv = await conv(member.scope);
+    const untouched = await store.enqueueRun(db, member.scope, {
+      conversationId: untouchedConv.id,
+      text: "another selected pairing",
+      chatMode: "build",
+      showThinking: false,
+      now: now(),
+      executor: "computer",
+      targetPairingId: otherOwner.pairing.pairingId,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "none",
+    });
+    assert.ok(untouched.ok);
+
+    advance(types.RUN_STALE_PRODUCER_MS + 1_000);
+    const cleaned = await store.claimCleanupForPairing(
+      db,
+      { tenantId: tenant, pairingId: owner.pairing.pairingId },
+      now(),
+    );
+    assert.deepEqual(cleaned.reaped, stale.ok ? [stale.run.id] : []);
+    assert.equal((await store.getRun(db, member.scope, stale.ok ? stale.run.id : ""))?.status, "interrupted");
+    assert.equal((await store.getRun(db, member.scope, untouched.ok ? untouched.run.id : ""))?.status, "queued");
+  });
+
+  await check("v2 pairing cleanup preserves queue-time API fallback consent at the absolute timeout", async () => {
+    const tenant = uid();
+    const owner = await person(tenant);
+    const member = await person(tenant);
+    const c = await conv(member.scope);
+    const queued = await store.enqueueRun(db, member.scope, {
+      conversationId: c.id,
+      text: "fall back after the owner computer never claims",
+      chatMode: "build",
+      showThinking: false,
+      now: now(),
+      executor: "computer",
+      targetPairingId: owner.pairing.pairingId,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "workspace_api",
+      runtimeApiSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+    });
+    assert.ok(queued.ok);
+    advance(types.COMPUTER_MAX_QUEUED_MS + 1_000);
+    const cleaned = await store.claimCleanupForPairing(
+      db,
+      { tenantId: tenant, pairingId: owner.pairing.pairingId },
+      now(),
+    );
+    const row = await store.getRun(db, member.scope, queued.ok ? queued.run.id : "");
+    assert.deepEqual(cleaned.fellBack, queued.ok ? [queued.run.id] : [], `cleanup=${JSON.stringify(cleaned)} row=${JSON.stringify(row)}`);
+    assert.deepEqual(cleaned.timedOut, []);
+    assert.equal(row?.status, "queued");
+    assert.equal(row?.executor, "worker");
+    assert.equal(row?.runtimeFallbackReason, "computer_not_answering");
   });
 
   console.log("finishProducerRun writes a usage-ledger row (O4 truthfulness rule 8)");

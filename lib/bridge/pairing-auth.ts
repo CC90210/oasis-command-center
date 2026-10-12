@@ -173,7 +173,12 @@ export async function resolvePairingFromBearer(
   if (withinGrace) return { ok: true, pairing: toResolved(priorRow, tokenHash) };
 
   const nowIso = new Date().toISOString();
-  const revoke = await db.from("bridge_pairings").update({ revoked_at: nowIso }).eq("id", priorRow.id).is("revoked_at", null);
+  const revoke = await db
+    .from("bridge_pairings")
+    .update({ revoked_at: nowIso })
+    .eq("tenant_id", priorRow.tenant_id)
+    .eq("id", priorRow.id)
+    .is("revoked_at", null);
   if (revoke.error) console.error("[bridge.pairing-auth] revoke-on-reuse failed", revoke.error.message);
   await raiseReusedTokenAttention(db, priorRow);
   return { ok: false, status: 403, error: "token_reused_after_rotation" };
@@ -205,18 +210,23 @@ export function pairingCanClaim(pairing: Pick<ResolvedPairing, "claimEnabledAt" 
  * through claimComputerRun's own atomic pairing-liveness subquery at all.
  * Fails CLOSED: no row, or a read that could not finish, is never "still live".
  */
-export async function pairingLiveForClaim(pairingId: string): Promise<boolean> {
-  if (!pairingId) return false;
+export async function pairingLiveForClaim(pairingId: string, tenantId: string): Promise<boolean> {
+  if (!pairingId || !tenantId) return false;
   try {
     const db = getServiceSupabase();
-    const { data, error } = await db.from("bridge_pairings").select("revoked_at, claim_enabled_at, paired_via").eq("id", pairingId).maybeSingle();
+    const { data, error } = await db
+      .from("bridge_pairings")
+      .select("revoked_at, claim_enabled_at, paired_via")
+      .eq("tenant_id", tenantId)
+      .eq("id", pairingId)
+      .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return false;
     const row = data as { revoked_at: string | null; claim_enabled_at: string | null; paired_via: string | null };
     if (row.revoked_at) return false;
     return pairingCanClaim({ claimEnabledAt: row.claim_enabled_at, pairedVia: normalizePairedVia(row.paired_via) });
   } catch (err) {
-    console.error("[bridge.pairing-auth.liveForClaim]", { pairingId, error: err instanceof Error ? err.message : String(err) });
+    console.error("[bridge.pairing-auth.liveForClaim]", { tenantId, pairingId, error: err instanceof Error ? err.message : String(err) });
     return false;
   }
 }

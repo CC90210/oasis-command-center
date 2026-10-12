@@ -2432,6 +2432,17 @@ export type ResumeState = {
    *  under a session id from the request body (which the browser can send
    *  stale). */
   sessionId?: string;
+  /** Canonical engine authorization frozen by /api/chat when it signs the
+   * paused turn. A resume may continue only while this exact API choice (or
+   * exact opted-in computer fallback) is still canonical. */
+  engineDispatch?:
+    | { mode: "api"; provider: string | null }
+    | {
+        mode: "workspace_api";
+        pairingId: string;
+        engineKind: "subscription" | "local";
+        engineName: string;
+      };
 };
 
 export type ToolLoopRequest = {

@@ -356,19 +356,26 @@ async function main() {
     assert.match(agent, /provider = cfg\.provider;\s*model = cfg\.model;/);
     assert.doesNotMatch(agent, /binding\?\.model_override \|\|/, "a manifest model_override chooses a department model again");
     const channel = readFileSync(join(ROOT, "components/os/department/channel.ts"), "utf8");
-    // fix/ai-brain-engine: the header names what powers the channel (the
-    // account, or an app on the paired computer: lib/ai/agent-engine.ts),
-    // still from the account's brain when the account is what answers.
-    assert.match(channel, /brain = departmentBrain\(account\);/);
-    assert.match(channel, /if \(reachable \|\| brain\) return \{ readiness: "ready", brain, accountChangedAt: changedAt, engine, engineRead \};/);
+    // Readiness runs the same canonical resolver as execution without mutating
+    // a legacy row, and cannot reintroduce the generic bridge/platform fallbacks.
+    assert.match(channel, /import \{ resolveRunSession \} from "@\/lib\/os\/runs\/session";/);
+    assert.match(channel, /resolveRunSession\(\{[\s\S]*?inspectOnly: true,/);
+    assert.match(channel, /if \(session\.computerDispatch\)/);
+    assert.match(channel, /session\.fallbackReason !== null && session\.fallbackFrom !== null/);
+    assert.match(channel, /session\.apiAccountSnapshot \? departmentBrain\(session\.apiAccountSnapshot\) : null/);
+    assert.doesNotMatch(channel, /bridgeCallerForSession|operatorPlatformFallback|readAgentEngine/);
     assert.match(channel, /brain: owner \? brain : null,/);
+    const roster = readFileSync(join(ROOT, "components/os/aiteam/roster.ts"), "utf8");
+    assert.match(roster, /readiness\.directAgentProvider === "ready"/);
+    assert.match(roster, /webOn\(directAgentWeb, \[agentChannelKey\(c\.slug\)\]\)/);
     const deptChannel = readFileSync(join(ROOT, "components/os/department/DepartmentChannel.tsx"), "utf8");
     assert.match(deptChannel, /state\.engine \?\? \(state\.brain \? \{ line: brainLine\(state\.brain\), spend: "api_credits", note: null \} : null\)/);
     const settings = readFileSync(join(ROOT, "components/settings/SettingsContent.tsx"), "utf8");
     assert.match(settings, /readWorkspaceAiAccount\(profile\.tenant_id\)\.then\(\(a\) => \(hasUsableKey\(a\) \? departmentBrain\(a\) : null\)\)/);
     assert.match(settings, /brain=\{aiBrain\}/);
     const card = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
-    assert.match(card, /Your departments use <span className="font-bold">\{brainLine\(brain\)\}<\/span>\./);
+    assert.match(card, /The workspace default API account is <span className="font-bold">\{brainLine\(brain\)\}<\/span>/);
+    assert.match(card, /A member&apos;s My[\s\S]*setup can still override it/);
     // A change from anywhere restarts the picker on the model really saved.
     assert.match(card, /key=\{`\$\{brain\.provider\}:\$\{brain\.savedModel \?\? brain\.model\}`\}/);
     // The local CLI choice is not read by anything that powers a department.
@@ -528,24 +535,28 @@ async function main() {
     assert.match(auth, /apiKey = decryptField\(account\.encryptedApiKey\);/);
   });
 
-  // -- 5. The local CLI card says exactly what it powers ------------------------
-  console.log("5. local CLIs");
-  await check("the paired-computer card chooses nothing: it reports the apps and points at the one engine setting", async () => {
-    // 2026-10-09 (PR fix/ai-brain-engine, CC: "they should be on the same
-    // functionality"): what powers the agents AND the coding harness is ONE
-    // setting (What powers your agents). The card is the computer's report,
-    // with Connect, and has no picker of its own.
-    const cli = await import("../components/settings/local-cli-scope");
-    assert.match(cli.LOCAL_CLI_SCOPE, /Which app your agents and the coding harness use is the one setting above, in What powers your agents\./);
-    // The bridge may run on another computer than this browser (hosted mode): "the paired computer".
-    assert.doesNotMatch(cli.LOCAL_CLI_SCOPE, /this computer/);
-    const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
-    assert.doesNotMatch(src, /Active CLI|title="Local AI CLIs"/, "the card's old wording, which read as choosing the department brain");
-    assert.doesNotMatch(src, /role="radiogroup"|writeCliRuntime|chooseCli/, "a second picker that can disagree with the setting");
-    assert.match(src, /subtitle=\{LOCAL_CLI_SCOPE\}/);
-    // What the choice really drives: only the operator's Coding harness (ChatWidget) sends it.
+  // -- 5. One device-bound engine control powers agents and coding work -------
+  console.log("5. exact-computer engine");
+  await check("one panel selects, tests and saves the exact computer; old CLI controls are inert", () => {
+    const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
+    for (const label of ["Subscription app", "Pure local", "API key"]) assert.match(panel, new RegExp(label));
+    assert.match(panel, /Use stays locked until this exact setup passes Test\./);
+    assert.match(panel, /Installed apps and local models/);
+
+    const oldCliCard = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
+    assert.doesNotMatch(oldCliCard, /Active CLI|title="Local AI CLIs"|role="radiogroup"|writeCliRuntime|chooseCli/);
+    assert.match(oldCliCard, /export function LocalCliProvidersCard[\s\S]*return null;/);
+
+    // The coding harness carries the same immutable engine snapshot. The
+    // server then queues only to the saved pairing rather than trusting a
+    // browser-supplied machine identity or route.
     const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
-    assert.match(widget, /cli_provider: cliRuntime/);
+    assert.match(widget, /target_pairing_id:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.pairingId : undefined/);
+    assert.match(widget, /runtime_engine_kind:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.engineKind : undefined/);
+    assert.match(widget, /runtime_engine_name:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.engineName : undefined/);
+    const route = readFileSync(join(ROOT, "app/api/bridge/chat/route.ts"), "utf8");
+    assert.match(route, /enqueueHarnessJob\(/);
+    assert.match(route, /pairingId:\s*savedRoute\.pairingId/);
   });
 
   console.log(`\n${passed} passed, ${failures} failed`);

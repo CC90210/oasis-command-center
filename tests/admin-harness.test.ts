@@ -166,9 +166,21 @@ async function main() {
       actor_email TEXT, actor_user_id TEXT, action_type TEXT, target_table TEXT, target_id TEXT, after TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT NOT NULL,
-      last_seen_at TEXT, revoked_at TEXT);
+      user_id TEXT, machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT, scope TEXT,
+      claim_enabled_at TEXT, paired_via TEXT, claim_protocols TEXT, claim_runtime_state TEXT,
+      claim_state_at TEXT, claim_capacity INTEGER, claim_in_flight INTEGER, claim_blocked_reason TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
-      provider TEXT, model TEXT, encrypted_api_key TEXT, system_prompt_override TEXT, enabled INTEGER, last_used_at TEXT);
+      provider TEXT, model TEXT, encrypted_api_key TEXT, system_prompt_override TEXT, enabled INTEGER,
+      last_used_at TEXT, computer_pairing_id TEXT, fallback_policy TEXT, updated_at TEXT,
+      runtime_probe_job_id TEXT, runtime_probe_pairing_id TEXT, runtime_probe_engine_kind TEXT,
+      runtime_probe_engine_name TEXT, runtime_probe_engine_version TEXT, runtime_probe_verified_at TEXT);
+    CREATE TABLE bridge_runtime_jobs (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+      pairing_id TEXT NOT NULL, action TEXT NOT NULL, engine_kind TEXT NOT NULL, engine_name TEXT NOT NULL,
+      prompt TEXT, status TEXT NOT NULL, idempotency_key TEXT NOT NULL, claim_id TEXT, lease_id TEXT,
+      claimed_at TEXT, heartbeat_at TEXT, deadline_at TEXT, progress_code TEXT, result_code TEXT,
+      result_json TEXT, error_code TEXT, error_retryable INTEGER, created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL, finished_at TEXT);
+    CREATE TABLE dept_chat_runs (tenant_id TEXT, status TEXT, claimed_pairing_id TEXT, target_pairing_id TEXT);
     CREATE TABLE agent_events (id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY, event_type TEXT NOT NULL,
       publisher_agent TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'info', payload TEXT NOT NULL DEFAULT '{}',
       correlation_id TEXT, published_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
@@ -178,6 +190,7 @@ async function main() {
   // operator reaches the bridge" check below would fail on the NEW gate
   // instead of proving what this file exists to prove.
   await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__210_workspace_agents_owner.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__216_bridge_harness_pull.sql"), "utf8"));
   const profile = (user: { id: string; email: string }, tenant: string, role: string, owner = 0) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, agents_enabled, primary_agent, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, '["bravo","atlas","maven","aura"]', 'aura', ?)`,
@@ -194,7 +207,22 @@ async function main() {
       profile(CLIENT_OWNER, CLIENT, "owner", 1),
       profile(CLOSER, OASIS, "closer"),
       profile(SUNBIZ_REP, SUNBIZ, "owner", 1),
-      { sql: "INSERT INTO bridge_pairings (id, tenant_id, label, last_seen_at) VALUES ('bp-1', ?, 'CCPC (Windows)', ?)", args: [OASIS, new Date(Date.now() - 30_000).toISOString()] },
+      {
+        sql: "INSERT INTO bridge_pairings (id, tenant_id, user_id, label, machine_fingerprint, last_seen_at, claim_enabled_at, paired_via, claim_protocols, claim_runtime_state, claim_state_at, claim_capacity, claim_in_flight) VALUES ('bp-1', ?, ?, 'CCPC (Windows)', 'fp-ccpc', ?, ?, 'pair_code', ?, ?, ?, 1, 0)",
+        args: [
+          OASIS,
+          CC.id,
+          new Date(Date.now() - 30_000).toISOString(),
+          stamp,
+          JSON.stringify(["coding_harness_task_v1"]),
+          JSON.stringify({ claude: { installed: true, authenticated: true, state: "ready" } }),
+          new Date().toISOString(),
+        ],
+      },
+      {
+        sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, computer_pairing_id, fallback_policy, updated_at, runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at) VALUES ('engine-workspace', ?, NULL, '__engine__', 'cli', 'claude', 'bp-1', 'none', ?, 'probe-admin-harness', 'bp-1', 'cli', 'claude', ?, ?)",
+        args: [OASIS, stamp, stamp, stamp],
+      },
     ],
     "write",
   );
@@ -414,7 +442,8 @@ async function main() {
     const widget = readFileSync(join(ROOT, "components", "ChatWidget.tsx"), "utf8");
     assert.match(widget, /const ownsUrl = harnessOwnsUrlParams\(active, pathname\);\s*const urlAgent = ownsUrl \? searchParams\?\.get\("agent"\) : null;\s*const urlPrompt = ownsUrl \? searchParams\?\.get\("prompt"\) : null;/);
     assert.doesNotMatch(widget, /OASIS platform default|via the platform default key/, "no platform-default claim");
-    assert.match(widget, /const cloud = chatReadiness\(\{/);
+    assert.match(widget, /fetch\("\/api\/ai\/engine", \{ cache: "no-store"/);
+    assert.match(widget, /const ready = harnessRoute\?\.mode === "cli"[\s\S]*exactRuntimeReady \|\| explicitWorkspaceFallback[\s\S]*canonicalApiReady/);
     assert.doesNotMatch(widget, /cloudReady \|\| isAdmin/, "the retry offer is readiness too: being the operator is not a key");
   });
   await check("the bridge probe waits longer than the proxy's own bridge budget, so an online bridge never reads offline", async () => {
@@ -704,12 +733,45 @@ async function main() {
       const res = await bridgeChat.POST(
         new Req("http://localhost/api/bridge/chat", {
           method: "POST",
-          body: JSON.stringify({ agent: "bravo", messages: [{ role: "user", content: "set my display name" }], tab_id: "11111111-1111-4111-8111-111111111111", tenant_id: CLIENT }),
+          body: JSON.stringify({
+            agent: "bravo",
+            messages: [{ role: "user", content: "set my display name" }],
+            tab_id: "11111111-1111-4111-8111-111111111111",
+            tenant_id: CLIENT,
+            cli_provider: "claude",
+            target_pairing_id: "bp-1",
+            runtime_engine_kind: "subscription",
+            runtime_engine_name: "claude",
+            fallback_policy: "none",
+          }),
         }),
       );
       assert.equal(res.status, 200);
+      const harness = await import("../lib/bridge/harness-jobs");
+      const claimed = await harness.claimHarnessJob(
+        { tenantId: OASIS, pairingId: "bp-1", claimId: "admin-harness-actions" },
+        db,
+      );
+      assert.ok(claimed, "the exact selected pairing did not receive the harness turn");
+      assert.deepEqual(claimed.engine, { kind: "cli", name: "claude" });
+      const appended = await harness.appendHarnessEvents(
+        {
+          tenantId: OASIS,
+          jobId: claimed.id,
+          events: [
+            {
+              seq: 1,
+              type: "delta",
+              data: { text: 'Saving. <dashboard-action type="update_profile">{"display_name":"CC-FROM-HARNESS"}</dashboard-action>' },
+            },
+            { seq: 2, type: "done", data: {} },
+          ],
+        },
+        db,
+      );
+      assert.deepEqual(appended, { ok: true, terminal: true });
       const text = await res.text();
-      assert.equal(calls[0]?.url, "https://bridge.test/chat");
+      assert.equal(calls.length, 0, "the pull architecture must not call the retired opaque bridge URL");
       const profileName = async () =>
         (await db.execute({ sql: "SELECT display_name FROM user_profiles WHERE auth_user_id = ?", args: [CC.id] })).rows[0]?.display_name ?? null;
       const loggedRows = async () =>

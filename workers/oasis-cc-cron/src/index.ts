@@ -29,6 +29,7 @@ import { cronMatches } from "./cron-match";
 // exchange rates, the Stripe reconcile (payouts included), Wise invoice
 // matches, then the Wise bank feed, in that order, once a day each.
 export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
+  { path: "/api/cron/dispatch-engine-fallbacks", schedule: "* * * * *" },
   { path: "/api/cron/materialize-plans", schedule: "0 3 * * *" },
   { path: "/api/cron/collect-cc-metrics?write=1", schedule: "15 * * * *" },
   { path: "/api/cron/dispatch-scheduled-sends", schedule: "*/5 * * * *" },
@@ -83,6 +84,10 @@ interface ForwardResult {
 
 async function callOnce(env: Env, origin: string, path: string): Promise<{ status: number | string; ok: boolean; retryable: boolean }> {
   try {
+    // This route owns a streamed model turn and advertises maxDuration=800.
+    // The scheduler must outlive that contract; the old blanket 120-second
+    // abort killed a healthy fallback driver and stranded its running lease.
+    const timeoutMs = path === "/api/cron/dispatch-engine-fallbacks" ? 840_000 : 120_000;
     const res = await fetch(origin + path, {
       method: "GET",
       headers: {
@@ -90,7 +95,7 @@ async function callOnce(env: Env, origin: string, path: string): Promise<{ statu
         "x-oasis-cron-attest": env.CRON_ATTEST_SECRET ?? "",
         "user-agent": "oasis-cc-cron/1.0",
       },
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     // Cloudflare counts unread response bodies as live subrequests. A busy
     // minute can fan out more routes than the connection limit; cancel every

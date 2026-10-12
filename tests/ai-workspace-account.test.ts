@@ -703,7 +703,7 @@ async function main() {
     const viewer = await viewerFor(USERS.solo);
     const state = await resolveChannelState(dept("sales"), viewer);
     assert.equal(state.kind, "not_connected", JSON.stringify(state));
-    if (state.kind === "not_connected") assert.match(state.reason, /No AI account is connected for this workspace yet/);
+    if (state.kind === "not_connected") assert.match(state.reason, /selected workspace API account is not connected or does not match/i);
     // The turn itself (web and Slack).
     const turn = await slackTurn(SOLO, "solo-co", "sales", "sdr");
     assert.equal(turn.ok ? "ok" : turn.status, 412);
@@ -778,7 +778,7 @@ async function main() {
     assert.match(personal, /Cloud: no provider connected/);
     assert.equal(count(personal, /Not connected/g), 3, "the other three providers");
     const both = plain(html.connectedAndPersonal);
-    assert.match(both, /Every department chat and Slack mention uses this key\./);
+    assert.match(both, /This workspace API account is selected as the workspace default\./);
     assert.doesNotMatch(both, /Your personal key/, "the workspace account is Connected, not the owner's own");
     assert.match(both, /Cloud: 1 provider connected/);
     for (const key of ["afterPersonalConnect", "afterPersonalConnectRefresh"]) {
@@ -791,7 +791,7 @@ async function main() {
     // It says what the account does instead.
     for (const key of ["clientEmpty", "clientAnthropic"]) {
       const page = plain(html[key]);
-      assert.match(page, /Paste a key once\. Your teammates answer every department chat and Slack mention with the team-wide account\./, key);
+      assert.match(page, /Paste a key once\. It is available when API key is selected, or when an explicit Workspace API fallback runs\./, key);
       assert.doesNotMatch(page, /Claude[- ]?Code/i, `${key}: a vendor tool name on a client's card`);
       assert.doesNotMatch(page, /tool_use|Claude-Code-class|http_get|record reads/i, `${key}: a tool promise on a client's card`);
     }
@@ -916,8 +916,8 @@ async function main() {
     }
   });
 
-  // -- 3. OASIS keeps answering on its legacy row; the account row wins once saved
-  await check("the legacy bravo workspace row still answers for OASIS, exactly as before", async () => {
+  // -- 3. Legacy API rows remain readable but never bypass the canonical engine
+  await check("the legacy bravo row can answer Slack but cannot silently replace OASIS's unbound subscription engine", async () => {
     const acct = await account.readWorkspaceAiAccount(OASIS);
     assert.equal(acct?.source, "legacy");
     assert.deepEqual([...(await q.aiServicesWithKey(OASIS))], ["anthropic"]);
@@ -925,7 +925,9 @@ async function main() {
     assert.ok(turn.ok, JSON.stringify(turn));
     if (turn.ok) assert.equal(turn.turn.apiKey, KEY_OASIS);
     const viewer = await viewerFor(USERS.partner);
-    assert.equal((await resolveChannelState(dept("chief-of-staff"), viewer)).kind, "ready");
+    const state = await resolveChannelState(dept("chief-of-staff"), viewer);
+    assert.equal(state.kind, "not_connected");
+    if (state.kind === "not_connected") assert.match(state.reason, /selected computer runtime is not ready/i);
     // No account row was written for OASIS by anything above.
     assert.ok(!(await rows(OASIS)).some((r) => r.agent_key === account.WORKSPACE_AI_AGENT_KEY));
   });
@@ -1362,7 +1364,7 @@ async function main() {
     }
     assert.ok(sent.some((s) => s.url.startsWith("http://127.0.0.1:11434")), "the operator's local model was not called");
   });
-  await check("the verified operator's verdict still lets a local model answer", async () => {
+  await check("canonical API mode refuses a legacy local account even for the verified operator", async () => {
     const turn = await prepareAgentTurn({
       tenantId: LOCALCO,
       tenantSlug: "local-co",
@@ -1374,12 +1376,10 @@ async function main() {
       userId: USERS.cc.id,
       localModelAllowed: true,
     });
-    assert.ok(turn.ok, JSON.stringify(turn));
-    if (turn.ok) {
-      assert.equal(turn.turn.provider, "ollama");
-      assert.equal(turn.turn.localModelAllowed, true);
-    }
-    // The chat resolver: the operator's own local model row answers for him.
+    assert.ok(!turn.ok && turn.error === "agent_not_configured", JSON.stringify(turn));
+    // The lower-level legacy resolver still applies its verified-operator
+    // guard. Canonical chat routes additionally use workspace_only and the
+    // engine gate, so this row cannot bypass exact-pairing Pure local mode.
     await db.execute({
       sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES ('cc-local', ?, ?, 'bravo', 'ollama', 'llama3.3', ?, 1, ?)",
       args: [OASIS, USERS.cc.id, encryptField("http://127.0.0.1:11434/v1"), stamp],

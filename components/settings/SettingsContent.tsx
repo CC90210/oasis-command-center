@@ -56,10 +56,8 @@ import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { HARNESS_REPO } from "@/lib/install-scripts";
 import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
-import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
 import { AgentEnginePanel } from "@/components/settings/AgentEnginePanel";
 import { ConnectYourComputerCard, YourComputersCard } from "@/components/settings/YourComputersCard";
-import { PersonEngineCard } from "@/components/settings/PersonEngineCard";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
 import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
@@ -213,11 +211,11 @@ export async function SettingsContent({
   const rosterAgentKeys = manifestAgentKeys.filter(onRoster);
 
   // Every authenticated persona owns their profile, password and personal
-  // connections. Non-admins stop here: no credential vault, AI/provider
-  // configuration, device inventory, team mutation, agent roster, cron or
-  // automation data is queried or rendered. Managers receive one additional
-  // read-only, query-scoped OASIS sales scorecard below.
-  if (profile && !canManageTenant) {
+  // connections. AI brain and Devices are also personal surfaces now: their
+  // APIs return only the viewer's setup/computers unless the viewer can
+  // manage the workspace. Other non-admin sections keep the narrow personal
+  // view and never read workspace credentials or team controls.
+  if (profile && !canManageTenant && section !== "ai" && section !== "devices") {
     return (
       <PersonalSettingsView
         profile={profile}
@@ -504,36 +502,6 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
-          {/* "How your departments think" (O3b): YOUR OWN engine choice --
-              your own paired computer, or the workspace API key -- separate
-              from the workspace default this section's "What powers your
-              agents" picks above. Every workspace member who reaches Settings
-              > AI (owners and admins; AI brain is not operator-only) sees
-              and sets their own. */}
-          {show("ai") && (
-            <SettingsSection
-              id="person-engine"
-              defaultOpen
-              title="How your departments think"
-              subtitle="Your own choice: Claude Code on your own computer, or the workspace API key."
-            >
-              <SafeBoundary label="How your departments think">
-                <PersonEngineCard />
-              </SafeBoundary>
-            </SettingsSection>
-          )}
-
-          {/* The paired computer's AI command-line tools. They answer only the
-              operator's own Coding chat (/agent, components/ChatWidget.tsx) when
-              it runs on that computer; no department ever uses them, so the card
-              says so and never reads as a second place choosing the department
-              brain (CC, 2026-10-09). */}
-          {show("ai") && isOperator && (
-            <SafeBoundary label="Local CLI providers">
-              <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} isAgentsOwner={agentsOwner} />
-            </SafeBoundary>
-          )}
-
           {/* "Override an agent's provider" removed 2026-10-09 (CC: "redundant
               and not needed"). It was a second place choosing an AI provider
               and key per teammate, while every department chat answers on the
@@ -619,13 +587,30 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
-          {/* "Your computers" (O3b): each person's OWN computers and their
-              plain-words status, with an Approve button -- separate from the
-              raw pair/revoke list in "Devices (advanced)" below. OASIS only,
-              until J2 packages the connector for clients (ui_changes rule),
-              which this section already follows: it is inside the same
-              VERIFIED-operator gate as Devices. */}
-          {show("devices") && isOperator && (
+          {/* "Add a device" (D0): the Devices section had no way to add a
+              computer at all -- ConnectYourComputerCard existed only on
+              Profile, so reaching it meant leaving Devices. Same card
+              (never a fork), at the TOP of the section. Deliberately NOT
+              gated on isOperator. Adding a device and managing your own
+              computers are personal actions; only the raw team-wide advanced
+              inventory below remains verified-operator-only. */}
+          {section === "devices" && (
+            <SettingsSection
+              id="add-a-device"
+              defaultOpen
+              title="Add a device"
+              subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app."
+            >
+              <SafeBoundary label="Add a device">
+                <ConnectYourComputerCard />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
+
+          {/* Every member sees only their own computers here. The API adds
+              team rows only for workspace managers; the raw advanced bridge
+              inventory remains verified-operator-only below. */}
+          {show("devices") && (
             <SettingsSection id="your-computers" defaultOpen title="Your computers" subtitle="Each of your own computers, and whether it can take department work right now.">
               <SafeBoundary label="Your computers">
                 <YourComputersCard />
@@ -758,6 +743,18 @@ async function PersonalSettingsView({
       {show("profile") && (
         <SettingsSection id="connect-your-computer" defaultOpen title="Connect your computer" subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app.">
           <SafeBoundary label="Connect your computer">
+            <ConnectYourComputerCard />
+          </SafeBoundary>
+        </SettingsSection>
+      )}
+
+      {/* Keep this second placement exclusive to the focused Devices page.
+          The full Settings page already mounts Connect your computer in the
+          Profile section; mounting both would mint two mutually-invalidating
+          one-time codes. */}
+      {section === "devices" && (
+        <SettingsSection id="add-a-device" defaultOpen title="Add a device" subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app.">
+          <SafeBoundary label="Add a device">
             <ConnectYourComputerCard />
           </SafeBoundary>
         </SettingsSection>

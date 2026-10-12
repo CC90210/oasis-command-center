@@ -25,6 +25,7 @@
 
 import { NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import {
   streamChat,
   type ChatMessage,
@@ -86,6 +87,16 @@ import {
 } from "@/lib/ai/usage";
 import { sseErrorFrame } from "@/lib/ai/usage-codes";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
+import { meterWithFallbackReason } from "@/lib/ai/model-registry";
+import {
+  canonicalCloudDispatchError,
+  ENGINE_FALLBACK_SIGNATURE_HEADER,
+  ENGINE_FALLBACK_STATE_HEADER,
+  engineFallbackAuditReason,
+  engineFallbackReplyLabel,
+  verifyEngineFallbackDispatch,
+} from "@/lib/ai/engine-fallback-dispatch";
+import { readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -157,6 +168,53 @@ export async function POST(req: NextRequest) {
   if (!agentKey) {
     return jsonError(400, "missing_agent_key");
   }
+  const fallbackStateHeader = req.headers.get(ENGINE_FALLBACK_STATE_HEADER);
+  const fallbackSignature = req.headers.get(ENGINE_FALLBACK_SIGNATURE_HEADER);
+  const hasFallbackHeaders = fallbackStateHeader !== null || fallbackSignature !== null;
+  const fallbackDispatch = hasFallbackHeaders
+    ? verifyEngineFallbackDispatch({
+        stateHeader: fallbackStateHeader,
+        signature: fallbackSignature,
+        userId: user.id,
+        agentKey,
+      })
+    : null;
+  if (hasFallbackHeaders && !fallbackDispatch) {
+    return jsonError(403, "invalid_engine_fallback");
+  }
+
+  // `/api/chat` is the cloud executor. Resolve the canonical engine before
+  // resolving or decrypting an API key so a direct browser request can never
+  // bypass a saved subscription/local choice. Device engines reach cloud only
+  // through the server-signed, explicitly opted-in fallback minted by the
+  // exact-pairing `/api/bridge/chat` path.
+  const service = getServiceSupabase();
+  const activeProfile = await resolveActiveProfileForUser(user);
+  if (activeProfile.error) {
+    console.error("[chat.engine-profile]", activeProfile.error);
+    return jsonError(503, "engine_config_unavailable", "engine_config_unavailable");
+  }
+  const engineTenantId = activeProfile.profile?.tenant_id ?? null;
+  if (!engineTenantId) return jsonError(403, "no_tenant", "no_tenant");
+  if (fallbackDispatch && fallbackDispatch.tenant_id !== engineTenantId) {
+    return jsonError(403, "engine_fallback_tenant_mismatch", "engine_fallback_tenant_mismatch");
+  }
+  let effectiveEngine: Awaited<ReturnType<typeof readEffectiveAgentEngine>>;
+  try {
+    effectiveEngine = await readEffectiveAgentEngine(engineTenantId, user.id);
+  } catch (error) {
+    console.error("[chat.canonical-engine]", error instanceof Error ? error.message : String(error));
+    return jsonError(503, "engine_config_unavailable", "engine_config_unavailable");
+  }
+  const dispatchError = canonicalCloudDispatchError(effectiveEngine.engine, fallbackDispatch);
+  if (dispatchError) {
+    const message = dispatchError === "engine_requires_device_route"
+      ? "This chat is set to use the selected computer. Send it through that computer, or choose API key in Settings > AI brain. No API credits were used."
+      : dispatchError === "workspace_api_fallback_not_enabled"
+        ? "Workspace API fallback is not enabled for this computer engine. No API credits were used."
+        : "The saved computer engine changed before fallback started. Retry from the current chat setup. No API credits were used.";
+    return jsonError(409, message, dispatchError);
+  }
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
   if (!lastUserMsg) return jsonError(400, "no_user_message");
@@ -164,13 +222,34 @@ export async function POST(req: NextRequest) {
   // Resolve tenant + per-agent provider/model/key. Single helper handles
   // user_profiles lookup, agent_model_config decrypt, and the operator
   // platform-key fallback — shared with /api/chat/resume. See lib/chat-auth.ts.
-  const ctxResult = await resolveChatContext({ id: user.id, email: user.email }, agentKey);
+  const ctxResult = await resolveChatContext(
+    { id: user.id, email: user.email },
+    agentKey,
+    {
+      // `agent_model_config.__engine__` is the routing authority. Once it
+      // selects API mode, the workspace account is the only account that may
+      // answer; a hidden per-person/per-agent key must not silently replace
+      // that canonical choice. Signed computer fallback has the same rule.
+      accountPolicy: "workspace_only",
+      trustedTenantId: engineTenantId,
+    },
+  );
   if (!ctxResult.ok) {
     // Pass both the human-readable detail AND the stable code so the client
     // can pick a friendly recovery UI (e.g. "Replace key" for key_decrypt_failed).
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
   const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope, keySource } = ctxResult;
+  if (tenantId !== engineTenantId) {
+    return jsonError(403, "chat_tenant_mismatch", "chat_tenant_mismatch");
+  }
+  if (!fallbackDispatch && effectiveEngine.engine.kind === "api" && effectiveEngine.engine.provider && effectiveEngine.engine.provider !== provider) {
+    return jsonError(
+      409,
+      "The saved API provider no longer matches the connected AI account. Refresh Settings > AI brain and reconnect it before retrying. No API credits were used.",
+      "engine_api_provider_mismatch",
+    );
+  }
 
   // Manifest-aware agent validation. A tenant's manifest can declare custom
   // agent slugs (e.g. "renewal_specialist") that are not in the empire-wide
@@ -180,7 +259,6 @@ export async function POST(req: NextRequest) {
   if (!(await isTenantChatAgent(tenantId, agentKey))) {
     return jsonError(400, `invalid_agent:${agentKey}`);
   }
-  const service = getServiceSupabase();
   const attachmentIds = Array.isArray(payload.attachments)
     ? payload.attachments
         .map((a) => (a && typeof a.id === "string" ? a.id : ""))
@@ -201,26 +279,28 @@ export async function POST(req: NextRequest) {
   // (= 4/min steady state). Protects the platform key on operator-fallback;
   // client tenants paying their own provider hit this too but the cap is
   // generous — a real human can't sustain 4 messages/min anyway.
-  const limit = rateLimit({
-    key: `chat:${tenantId}`,
-    capacity: 30,
-    refillPerSec: 1 / 15,
-  });
-  if (!limit.allowed) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: "rate_limited",
-        retry_in_sec: limit.resetIn,
-      }),
-      {
-        status: 429,
-        headers: {
-          "content-type": "application/json",
-          "retry-after": String(limit.resetIn),
-        },
-      }
-    );
+  if (!fallbackDispatch?.rate_limit_applied) {
+    const limit = rateLimit({
+      key: `chat:${tenantId}`,
+      capacity: 30,
+      refillPerSec: 1 / 15,
+    });
+    if (!limit.allowed) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "rate_limited",
+          retry_in_sec: limit.resetIn,
+        }),
+        {
+          status: 429,
+          headers: {
+            "content-type": "application/json",
+            "retry-after": String(limit.resetIn),
+          },
+        }
+      );
+    }
   }
 
   // ---- The month's AI budget (lib/ai/usage.ts) ----------------------------
@@ -245,11 +325,13 @@ export async function POST(req: NextRequest) {
   // A body-supplied session id is kept only when it is this person's session
   // in this workspace; the turn's messages, totals and AI usage rows are filed
   // under it.
-  let sessionId = await ownedChatSessionId(payload.session_id, tenantId, user.id);
+  const requestedSessionId = fallbackDispatch?.conversation_id ?? payload.session_id;
+  let sessionId = await ownedChatSessionId(requestedSessionId, tenantId, user.id, agentKey);
   if (!sessionId) {
     const { data: created, error: createErr } = await service
       .from("chat_sessions")
       .insert({
+        ...(fallbackDispatch ? { id: fallbackDispatch.conversation_id } : {}),
         tenant_id: tenantId,
         user_id: user.id,
         agent_key: agentKey,
@@ -320,7 +402,7 @@ export async function POST(req: NextRequest) {
   // pinned cloud_only, the persona is told the bridge is "off" for THIS
   // conversation even if the daemon is paired and the heartbeat is fresh.
   const toolRouting: "bridge_proxy" | "cloud_only" =
-    payload.tool_routing === "cloud_only" ? "cloud_only" : "bridge_proxy";
+    fallbackDispatch || payload.tool_routing === "cloud_only" ? "cloud_only" : "bridge_proxy";
   const supportsNativeTools =
     provider === "anthropic" || provider === "openai" || provider === "openrouter";
   const supportsDeferredBridgeTools = provider === "anthropic";
@@ -602,7 +684,7 @@ export async function POST(req: NextRequest) {
   // One meter for the turn: every model call it makes (each tool-loop
   // iteration, or the one plain stream) records its own ai_usage_events row
   // for the SESSION's tenant, and the turn's cost is their sum.
-  const meter = modelCallMeter({
+  const rawMeter = modelCallMeter({
     tenantId,
     surface: cloudToolsMode === "tools" && supportsNativeTools ? "chat.tools" : "chat.stream",
     ...billing,
@@ -611,9 +693,14 @@ export async function POST(req: NextRequest) {
     teammateId: agentKey,
     userId: user.id,
   });
+  const meter = meterWithFallbackReason(
+    rawMeter,
+    fallbackDispatch ? engineFallbackAuditReason(fallbackDispatch) : null,
+  );
 
   // ---- Stream response back as SSE ----------------------------------------
-  let assistantText = "";
+  const fallbackReplyLabel = fallbackDispatch ? engineFallbackReplyLabel(fallbackDispatch) : "";
+  let assistantText = fallbackReplyLabel;
   // The chat_messages row's tokens; null when the turn's tokens are unknown.
   let usageIn: number | null = 0;
   let usageOut: number | null = 0;
@@ -643,7 +730,11 @@ export async function POST(req: NextRequest) {
       // /api/chat/resume use this factory so the routing semantics
       // can never desync between them.
       const { send } = createRedactingSseSend(controller, vaultSecretsForRedaction);
-      send("session", { session_id: sessionId });
+      // The device path keeps a CLI-specific resume id. A cloud fallback uses
+      // tab_id for shared dashboard history but must not overwrite that CLI id
+      // in the browser with a cloud chat UUID.
+      if (!fallbackDispatch) send("session", { session_id: sessionId });
+      if (fallbackReplyLabel) send("delta", { text: fallbackReplyLabel });
 
       try {
         if (cloudToolsMode === "tools" && supportsNativeTools) {
@@ -740,7 +831,21 @@ export async function POST(req: NextRequest) {
               turnTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
               // The state names this turn's session, signed with the rest:
               // /api/chat/resume files the resumed half under it.
-              const issued: ResumeState = { ...ev.resume_state, sessionId: turnSessionId };
+              const issued: ResumeState = {
+                ...ev.resume_state,
+                sessionId: turnSessionId,
+                engineDispatch: fallbackDispatch
+                  ? {
+                      mode: "workspace_api",
+                      pairingId: fallbackDispatch.pairing_id,
+                      engineKind: fallbackDispatch.engine_kind,
+                      engineName: fallbackDispatch.engine_name,
+                    }
+                  : {
+                      mode: "api",
+                      provider: effectiveEngine.engine.kind === "api" ? effectiveEngine.engine.provider ?? null : null,
+                    },
+              };
               const sig = signResumeState(issued, {
                 tenant_id: tenantId,
                 user_id: user.id,

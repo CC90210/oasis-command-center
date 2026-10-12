@@ -89,11 +89,11 @@ export type CustomTeammate = {
   /** Its chat (/agents/<slug>, an OS page), when the workspace has a chat slug. */
   webHref: string | null;
   /**
-   * Whether that chat can answer, by the leads' own rule: a chat slug and an
-   * AI provider, and then its last turn (recorded under agentChannelKey). A
-   * refusal of the workspace key anywhere, or of this chat's own turn, is
-   * `not_working`; a read that failed is `unknown`. Never a green check over a
-   * key the provider is refusing.
+   * Whether that direct chat can answer: a chat slug plus a primary API engine,
+   * and then its last turn (recorded under agentChannelKey). Device engines are
+   * intentionally not ready here until /agents/<slug> supports exact-computer
+   * dispatch. A refused API account or failed direct turn is `not_working`; a
+   * read that failed is `unknown`.
    */
   web: Exclude<WebState, "not_set_up" | "off">;
   /** Why it is `not_working`, in the department header's own short words; null otherwise. */
@@ -250,7 +250,7 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
   // only case a row names channels); the Telegram card always (a row names
   // Telegram only when it is set up).
   const [readiness, agents, custom, turns, slackPresence, slackCardRead, telegramCard] = await Promise.all([
-    workspaceChatReadiness(viewer),
+    workspaceChatReadiness(viewer, open[0]?.key ?? "chief_of_staff"),
     Promise.all(shown.map((l) => getAgentBySlug(l.teammate.slug, tenantId))),
     loadCustomTeammates(tenantId, teammates),
     readWorkspaceTurns(tenantId),
@@ -259,13 +259,21 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
     loadWorkspaceConnectorStatus(tenantId, "telegram"),
   ]);
   const slackCard = slackPresence.kind === "connected" ? slackCardRead : null;
-  // Key readiness, the same answer the channel gets: no slug or no key is Not
-  // connected; an AI settings read that failed is unknown, not "not connected".
-  const web: "ready" | "not_connected" | "unknown" = !readiness.slug
+  // Department and direct custom chats do not share an execution surface:
+  // departments can target an exact v2 computer, while /agents/<slug> still
+  // accepts only a primary API engine. Keep their status chips separate.
+  const departmentWeb: "ready" | "not_connected" | "unknown" = !readiness.slug
     ? "not_connected"
     : readiness.provider === "ready"
       ? "ready"
       : readiness.provider === "unknown"
+        ? "unknown"
+        : "not_connected";
+  const directAgentWeb: "ready" | "not_connected" | "unknown" = !readiness.slug
+    ? "not_connected"
+    : readiness.directAgentProvider === "ready"
+      ? "ready"
+      : readiness.directAgentProvider === "unknown"
         ? "unknown"
         : "not_connected";
   // A ready teammate is only as good as its channels' last turns (the
@@ -276,8 +284,8 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
   // short words the header uses (StatusPill withLastTurn), so "not working"
   // is never read as a missing web capability (S4-01).
   type WebOn = { web: Exclude<WebState, "not_set_up" | "off">; webReason: string | null };
-  const webOn = (channelKeys: readonly string[]): WebOn => {
-    if (web !== "ready") return { web, webReason: null };
+  const webOn = (base: "ready" | "not_connected" | "unknown", channelKeys: readonly string[]): WebOn => {
+    if (base !== "ready") return { web: base, webReason: null };
     const last = channelKeys.map((k) => lastTurnOn(turns, k, readiness.accountChangedAt));
     const failed = last.find((t): t is Extract<typeof t, { kind: "failed" }> => t.kind === "failed");
     if (failed) return { web: "not_working", webReason: failureCopy(failed.code, { canManageAi: false }).short };
@@ -307,7 +315,7 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
       ...(!teammate.enabled
         ? { web: "off" as const, webReason: null }
         : agent
-          ? webOn(depts.map((d) => departmentChannelKey(d.key)))
+          ? webOn(departmentWeb, depts.map((d) => departmentChannelKey(d.key)))
           : { web: "not_connected" as const, webReason: null }),
       ...(teammate.enabled ? { slack: slackHomeFor(slackPresence, depts.map((d) => d.key)) } : {}),
       toggle: switchFor(teammate),
@@ -343,7 +351,7 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
             // URL. They were /t/<slug>/agent/<agent> and
             // /t/<slug>/marketplace/new, under the legacy manifest sidebar.
             webHref: readiness.slug ? `/agents/${encodeURIComponent(c.slug)}` : null,
-            ...webOn([agentChannelKey(c.slug)]),
+            ...webOn(directAgentWeb, [agentChannelKey(c.slug)]),
             toggle: switchFor(c),
           })),
         }

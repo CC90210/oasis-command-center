@@ -247,7 +247,13 @@ async function main() {
     const page = textOf(tree).join("\n");
     assert.match(page, /Connecting your own computer/);
     assert.match(page, /OASIS connector/);
-    assert.match(page, /nothing to\s*\n?\s*install today/);
+    // D0, 2026-10-12: "there is nothing to install today" was itself false
+    // — the connector already runs on OASIS's own team computers. This now
+    // pins the honest replacement copy instead of the line it used to prove
+    // existed.
+    assert.match(page, /runs today on OASIS's own team computers/);
+    assert.match(page, /one-click installer/i);
+    assert.doesNotMatch(page, /nothing to\s*\n?\s*install today/);
     assert.match(page, /pause/i);
     for (const leak of HARNESS_LEAKS) assert.ok(!page.includes(leak), `"${leak}" shown to a non-owner operator`);
   });

@@ -68,6 +68,29 @@ export const COMPUTER_BUSY_TIMEOUT_MS = 5 * 60_000;
 export const COMPUTER_MAX_QUEUED_MS = 10 * 60_000;
 
 /**
+ * Availability failures an explicitly opted-in computer run may answer through
+ * the workspace API instead. This is deliberately an allowlist: approval,
+ * ownership, seat and locked-profile failures are authorization/security
+ * boundaries and must never be converted into API spend.
+ */
+export const WORKSPACE_API_FALLBACK_REASONS = [
+  "computer_offline",
+  "computer_not_answering",
+  "computer_busy_timeout",
+  "subscription_auth_failure",
+  "subscription_limit",
+  "cli_account_unsupported",
+  "cli_not_found",
+  "cli_outdated",
+] as const;
+
+export type WorkspaceApiFallbackReason = (typeof WORKSPACE_API_FALLBACK_REASONS)[number];
+
+export function isWorkspaceApiFallbackReason(value: unknown): value is WorkspaceApiFallbackReason {
+  return typeof value === "string" && (WORKSPACE_API_FALLBACK_REASONS as readonly string[]).includes(value);
+}
+
+/**
  * Who drives a run and writes its events:
  *   worker      the department chat's driver in the Worker (the default);
  *   producer    a paired computer's bridge, posting events with a run token --
@@ -93,8 +116,8 @@ export type RunSource = "worker" | "producer" | "automation";
  *             (claimComputerRun), for a person whose effective engine is
  *             their own paired computer. claimNextRun explicitly excludes
  *             executor='computer', so a chat Worker driver can never run one
- *             on the workspace's API account -- the one fallback O4 must
- *             never have (Adon, 2026-10-11: NO KEY FALLBACK, ever).
+ *             on the workspace's API account. Explicit workspace_api consent
+ *             changes the queued row to worker before any hosted claim.
  */
 export const RUN_EXECUTORS = ["worker", "computer"] as const;
 export type RunExecutor = (typeof RUN_EXECUTORS)[number];

@@ -70,6 +70,8 @@ import {
 } from "@/lib/ai/usage";
 import { sseErrorFrame } from "@/lib/ai/usage-codes";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
+import { readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -128,13 +130,53 @@ export async function POST(req: NextRequest) {
     is_error: Boolean(toolResult.is_error),
   };
 
-  // Resolve tenant + per-agent provider/key first so the HMAC binding
-  // check below can compare against the caller's actual identity.
-  const ctxResult = await resolveChatContext({ id: user.id, email: user.email }, agentKey);
+  // Resolve the active tenant and canonical engine before decrypting any key.
+  // A paused cloud loop must not become a hidden escape hatch after the user
+  // switches to a computer engine (or disables that engine's API fallback).
+  const activeProfile = await resolveActiveProfileForUser(user);
+  if (activeProfile.error) return jsonError(503, "engine_config_unavailable", "engine_config_unavailable");
+  const engineTenantId = activeProfile.profile?.tenant_id ?? null;
+  if (!engineTenantId) return jsonError(403, "no_tenant", "no_tenant");
+  let effectiveEngine: Awaited<ReturnType<typeof readEffectiveAgentEngine>>;
+  try {
+    effectiveEngine = await readEffectiveAgentEngine(engineTenantId, user.id);
+  } catch (error) {
+    console.error("[chat/resume.canonical-engine]", error instanceof Error ? error.message : String(error));
+    return jsonError(503, "engine_config_unavailable", "engine_config_unavailable");
+  }
+  const frozenDispatch = resumeState.engineDispatch;
+  const canonical = effectiveEngine.engine;
+  const resumeAllowed = frozenDispatch?.mode === "workspace_api"
+    ? canonical.kind !== "api" &&
+      canonical.fallback === "workspace_api" &&
+      canonical.pairingId === frozenDispatch.pairingId &&
+      (canonical.kind === "cli" ? "subscription" : "local") === frozenDispatch.engineKind &&
+      (canonical.kind === "cli" ? canonical.cli : canonical.model) === frozenDispatch.engineName
+    : canonical.kind === "api" &&
+      (!frozenDispatch || frozenDispatch.mode !== "api" || !frozenDispatch.provider || canonical.provider === frozenDispatch.provider);
+  if (!resumeAllowed) {
+    return jsonError(
+      409,
+      "The saved AI engine changed after this step paused. The agent did not continue and no additional API credits were used.",
+      "engine_selection_changed",
+    );
+  }
+
+  // Canonical API and explicit workspace fallback always use the one
+  // workspace account; hidden person/per-agent keys never answer a resume.
+  const ctxResult = await resolveChatContext(
+    { id: user.id, email: user.email },
+    agentKey,
+    { accountPolicy: "workspace_only", trustedTenantId: engineTenantId },
+  );
   if (!ctxResult.ok) {
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
   const { tenantId, provider, apiKey, keySource } = ctxResult;
+  if (tenantId !== engineTenantId) return jsonError(403, "chat_tenant_mismatch", "chat_tenant_mismatch");
+  if (canonical.kind === "api" && canonical.provider && canonical.provider !== provider) {
+    return jsonError(409, "engine_api_provider_mismatch", "engine_api_provider_mismatch");
+  }
 
   // Manifest-aware agent validation — see /api/chat for full context.
   // Custom tenant slugs are accepted here too, otherwise a multi-turn
@@ -205,7 +247,7 @@ export async function POST(req: NextRequest) {
   // must still be this person's session in this workspace before any model is
   // asked. Without that there is nowhere to record the answer, its messages or
   // its cost against, so the resume is refused rather than run unrecorded.
-  const owner = await chatSessionOwner(signedSessionId, tenantId, user.id);
+  const owner = await chatSessionOwner(signedSessionId, tenantId, user.id, agentKey);
   if (owner.state === "unavailable") {
     console.error("[chat/resume.session] could not check the paused turn's chat session; the resume was refused", {
       tenantId,
@@ -328,7 +370,15 @@ export async function POST(req: NextRequest) {
             // /api/chat/resume verification passes (Codex finding #3).
             resumeTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
             // Still the same turn: the new state names the same session.
-            const issued: ResumeState = { ...ev.resume_state, sessionId: signedSessionId };
+            // `resumeAnthropicTurn` rebuilds its pause payload from the tool
+            // loop fields. Re-attach the original signed engine grant so a
+            // second deferred tool cannot lose (or widen) the exact API /
+            // workspace-fallback authorization frozen at the first pause.
+            const issued: ResumeState = {
+              ...ev.resume_state,
+              sessionId: signedSessionId,
+              engineDispatch: resumeState.engineDispatch,
+            };
             const sig = signResumeState(issued, {
               tenant_id: tenantId,
               user_id: user.id,

@@ -7,10 +7,9 @@
  *   1. "Connect your computer" (components/settings/YourComputersCard.tsx
  *      ConnectYourComputerCard) is wired into BOTH of SettingsContent.tsx's
  *      render paths -- the manager branch and PersonalSettingsView, the
- *      non-manager branch -- under the "profile" section, which every
- *      signed-in person with a Settings tab reaches (unlike "devices", whose
- *      own page 404s before SettingsContent ever renders for anyone but a
- *      verified operator). Mutation-checked: the SAME guard-matcher this
+ *      non-manager branch -- under the "profile" section. The dedicated
+ *      Devices page is now also member-visible and scopes each person to
+ *      their own computers. Mutation-checked: the SAME guard-matcher this
  *      test trusts is first proven against a synthetic gated snippet (fails)
  *      and a synthetic ungated one (passes), the way
  *      tests/devices-copy-guard.test.ts proves its own scanner before
@@ -23,7 +22,10 @@
  *   3. DV0's two "on its way" notices (DevicesEditor.tsx OwnerOnlyConnectNotice,
  *      app/settings/devices/install/page.tsx OwnerOnlyInstallNotice) now tell
  *      the truth: the connector app, not a nonexistent installer, and no new
- *      harness leak.
+ *      harness leak. Updated D0 (2026-10-12): "there is nothing to install
+ *      today" was itself false (the connector already runs on OASIS's own
+ *      team computers) — this now pins the HONEST replacement copy instead
+ *      of the line it was previously proving existed.
  *   4. The deferred O4 status line (components/agents/chat-shared.ts
  *      computerStatusLine): queued/busy/running copy, null for every run not
  *      dispatched to a person's own computer, and never a house-agent name
@@ -57,10 +59,10 @@ async function check(name: string, fn: () => Promise<void> | void) {
 
 // ── Mutation-checked matcher #1: is this ConnectYourComputerCard mount ungated? ──
 
-/** The nearest enclosing `{show(...)` line above `fromIdx`, or null. */
+/** The nearest enclosing section guard line above `fromIdx`, or null. */
 function nearestGuard(lines: string[], fromIdx: number): string | null {
   for (let i = fromIdx; i >= 0; i--) {
-    if (/\{show\(/.test(lines[i])) return lines[i];
+    if (/\{(?:show\(|section === "devices")/.test(lines[i])) return lines[i];
   }
   return null;
 }
@@ -99,6 +101,27 @@ const SYNTHETIC_GATED = [
   ")}",
 ].join("\n");
 
+/**
+ * D0: the Devices section's own TOP-of-page "Add a device" mount is gated
+ * on the focused `section === "devices"`, deliberately WITHOUT isOperator -- unlike
+ * "Your computers" and "Devices (advanced)" beside it, which show OTHER
+ * people's bridge pairings and stay operator-only. True only for a guard
+ * that is exactly the focused Devices section with no `isOperator` joined to it.
+ */
+function mountIsDevicesUngated(src: string): boolean[] {
+  const lines = src.split("\n");
+  const results: boolean[] = [];
+  lines.forEach((line, i) => {
+    if (!/<ConnectYourComputerCard\s*\/>/.test(line)) return;
+    const guard = nearestGuard(lines, i);
+    results.push(Boolean(guard && /section === "devices"/.test(guard) && !/isOperator/.test(guard)));
+  });
+  return results;
+}
+
+const SYNTHETIC_DEVICES_UNGATED = ['{section === "devices" && (', "  <ConnectYourComputerCard />", ")}"].join("\n");
+const SYNTHETIC_DEVICES_GATED = ['{section === "devices" && isOperator && (', "  <ConnectYourComputerCard />", ")}"].join("\n");
+
 // ── Mutation-checked matcher #2: does this text leak the old harness path? ──
 
 // Repo names, the private-repo API call, the clone/download commands -- never
@@ -120,6 +143,10 @@ async function main() {
     assert.deepEqual(mountIsUngated(SYNTHETIC_UNGATED), [true]);
     assert.deepEqual(mountIsUngated(SYNTHETIC_GATED), [false]);
   });
+  await check("mountIsDevicesUngated: a focused Devices mount passes and an operator-gated one fails", () => {
+    assert.deepEqual(mountIsDevicesUngated(SYNTHETIC_DEVICES_UNGATED), [true]);
+    assert.deepEqual(mountIsDevicesUngated(SYNTHETIC_DEVICES_GATED), [false]);
+  });
   await check("containsHarnessLeak: a synthetic leaking string is caught, a clean one is not", () => {
     assert.equal(containsHarnessLeak("run `gh api repos/CC90210/CEO-Agent/contents/install.ps1`"), true);
     assert.equal(containsHarnessLeak("Connecting a computer runs through the OASIS connector app."), false);
@@ -128,17 +155,38 @@ async function main() {
   // -- 1: "Connect your computer" reaches every signed-in person ------------
   console.log("1. Connect your computer, every signed-in person");
   const settingsContentSrc = read("components/settings/SettingsContent.tsx");
-  await check("ConnectYourComputerCard is mounted exactly twice (the manager branch and PersonalSettingsView), both ungated", () => {
-    const results = mountIsUngated(settingsContentSrc);
-    assert.equal(results.length, 2, "expected exactly two <ConnectYourComputerCard /> mounts");
-    assert.deepEqual(results, [true, true], "every mount must be show(\"profile\") only, never gated on isOperator");
+  await check(
+    "ConnectYourComputerCard is mounted exactly four times: two Profile mounts (manager branch, PersonalSettingsView) and two TOP-of-Devices mounts (D0, same two branches) — all four ungated on isOperator",
+    () => {
+      const profileResults = mountIsUngated(settingsContentSrc);
+      const devicesResults = mountIsDevicesUngated(settingsContentSrc);
+      assert.equal(profileResults.length, 4, "expected exactly four <ConnectYourComputerCard /> mounts");
+      assert.equal(devicesResults.length, 4);
+      assert.equal(profileResults.filter(Boolean).length, 2, "two mounts are ungated show(\"profile\") only");
+      assert.equal(devicesResults.filter(Boolean).length, 2, "two mounts are ungated focused Devices mounts (Add a device)");
+      assert.deepEqual(
+        profileResults.map((p, i) => p || devicesResults[i]),
+        [true, true, true, true],
+        "every mount must be ungated by isOperator one way or the other",
+      );
+    },
+  );
+  await check("the full Settings page never mounts a second pair-code card", () => {
+    assert.equal((settingsContentSrc.match(/\{section === "devices" && \(/g) || []).length, 2);
+    assert.doesNotMatch(settingsContentSrc, /\{show\("devices"\) && \(\s*<SettingsSection[^>]*id="add-a-device"/);
   });
-  await check("neither mount is reachable only through /settings/devices (which 404s a non-operator before this component renders)", () => {
-    // The two mounts are both inside `show("profile")` (proven above); the
-    // devices page only ever calls SettingsContent with section="devices",
-    // so a show("profile") block can never be the one it renders.
+  await check("the Devices page uses the shared member-visible section gate", () => {
+    // The two Profile mounts are both inside `show("profile")` (proven
+    // above); the devices page only ever calls SettingsContent with
+    // section="devices", so a show("profile") block can never be the one
+    // it renders. The THIRD mount (Add a device, D0) is deliberately the
+    // opposite: it IS inside the devices section, and the devices page's
+    // own operator-only 404 is still the real-traffic gate for who ever
+    // reaches it — unchanged by this test, asserted below.
     const devicesPage = read("app/settings/devices/page.tsx");
-    assert.match(devicesPage, /requireSettingsSection\("devices"\)/, "the devices page still gates on the operator-only section key");
+    const sections = read("components/settings/settings-sections.ts");
+    assert.match(devicesPage, /requireSettingsSection\("devices"\)/);
+    assert.match(sections, /key: "devices"[^\n]+audience: "everyone"/);
     assert.match(devicesPage, /section="devices"/);
   });
 
@@ -159,10 +207,12 @@ async function main() {
     ["DevicesEditor's OwnerOnlyConnectNotice", "components/settings/DevicesEditor.tsx"],
     ["the install page's OwnerOnlyInstallNotice", "app/settings/devices/install/page.tsx"],
   ] as const) {
-    await check(`${label}: names the connector app, says nothing to install today, pauses chats, no harness leak, drops the old "on its way" line`, () => {
+    await check(`${label}: names the connector app, says it runs today on OASIS's own team computers (never "nothing to install today"), names the one-click installer as coming, pauses chats, no harness leak`, () => {
       const src = read(rel);
       assert.match(src, /OASIS connector app/);
-      assert.match(src, /nothing to\s*\n?\s*install today/);
+      assert.match(src, /runs today on OASIS(&apos;|')s own team computers/);
+      assert.match(src, /one-click installer/i);
+      assert.doesNotMatch(src, /nothing to\s*\n?\s*install today/, "must not still say there is nothing to install today — the connector already runs on OASIS's own team computers");
       assert.match(src, /pause/i);
       assert.doesNotMatch(src, /on its way and is not ready yet/);
       assert.equal(containsHarnessLeak(src), false, `${rel} leaks the harness path`);
@@ -257,17 +307,19 @@ async function main() {
   await check("a 403 sets a forbidden state with its own sentence and no retry button", () => {
     const card = read("components/settings/YourComputersCard.tsx");
     assert.match(card, /if \(r\.status === 403\) \{\s*setState\(\{ phase: "forbidden" \}\);/);
-    assert.match(card, /Only an owner or admin can connect a computer in this workspace\./);
+    assert.match(card, /This account cannot connect a computer in this workspace\./);
     assert.match(card, /\(state\.phase === "idle" \|\| state\.phase === "minting" \|\| state\.phase === "error"\) && \(/, "the retry button never renders for forbidden");
   });
 
   // -- 7: the new-pairing check compares server time with server time ------
-  console.log("7. pairing detection never compares a server timestamp with the browser clock");
-  await check("a new pairing is detected against the server's mint time (expiry minus life), not Date.now()", () => {
+  console.log("7. pairing detection follows the code's authoritative redemption");
+  await check("new and re-paired computers are detected by consumed_by_pairing_id, never created_at", () => {
     const card = read("components/settings/YourComputersCard.tsx");
-    assert.match(card, /const serverMintedAtMs = new Date\(j\.expires_at\)\.getTime\(\) - ttl \* 60_000;/);
-    assert.match(card, /new Date\(d\.created_at\)\.getTime\(\) > serverMintedAtMs/);
-    assert.doesNotMatch(card, /new Date\(d\.created_at\)\.getTime\(\) > mintedAtMs/);
+    const route = read("app/api/auth/pair-code/route.ts");
+    assert.match(card, /fetch\(`\/api\/auth\/pair-code\?code=\$\{encodeURIComponent\(code\)\}`\)/);
+    assert.ok(!card.includes("new Date(d.created_at)"));
+    assert.match(route, /consumed_by_pairing_id/);
+    assert.match(route, /status: "connected"/);
   });
 
   console.log(`\n${passed} passed, ${failures} failed`);

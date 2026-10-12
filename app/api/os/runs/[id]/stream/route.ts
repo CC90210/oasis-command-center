@@ -67,14 +67,32 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       // no hook at all and treat it as "no live claimer" after 20 s even
       // when the computer is perfectly reachable.
       computerState: computerStateFor(scoped.scope),
-      needDriver: async () => {
+      needDriver: async (activeRun, fallbackReason) => {
         // An automation's run is never driven from a follower (see above).
-        if (run.source === "automation") return;
+        if (activeRun.source === "automation") return;
         // The full session is needed only to START a turn; resolved here, in the request.
-        const resolved = await resolveRunSession({ department: run.department });
+        const resolved = await resolveRunSession({
+          department: activeRun.department,
+          ...(fallbackReason || activeRun.runtimeFallbackReason
+            ? {
+                queuedFallback: {
+                  targetPairingId: activeRun.targetPairingId,
+                  runtimeEngineKind: activeRun.runtimeEngineKind,
+                  runtimeEngineName: activeRun.runtimeEngineName,
+                  runtimeFallbackPolicy: activeRun.runtimeFallbackPolicy,
+                  runtimeFallbackReason: fallbackReason ?? activeRun.runtimeFallbackReason,
+                  runtimeApiProvider: activeRun.runtimeApiProvider,
+                  runtimeApiModel: activeRun.runtimeApiModel,
+                },
+              }
+            : {}),
+        });
         if (!resolved.ok) return;
         driving = true;
-        await keepAlive(driveConversation(executorDepsFor(resolved.session, db), run.conversationId), `drive:${run.conversationId}`);
+        await keepAlive(
+          driveConversation(executorDepsFor(resolved.session, db), activeRun.conversationId, { maxRuns: 1 }),
+          `drive:${activeRun.conversationId}`,
+        );
       },
     });
     return sseResponse(frames, { onGone: () => (gone = true) });

@@ -19,7 +19,6 @@ import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +26,6 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const session = await resolveSessionContext();
   if (!session.ok) return bad(401, "unauthorized");
-  if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
   const tenantId = session.tenantId;
   const db = getServiceSupabase();
   const { data, error } = await db
@@ -37,20 +35,64 @@ export async function GET() {
     )
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
-  if (error) return bad(500, error.message);
+  if (error) {
+    console.error("[devices.GET.list]", { tenantId, userId: session.userId, error: error.message });
+    return bad(503, "devices_unavailable");
+  }
   const rows = (data || []) as Array<{ user_id: string | null } & Record<string, unknown>>;
   // Everyone sees their own; an owner or admin also sees the team's.
   const devices = session.isAdmin ? rows : rows.filter((r) => r.user_id === session.userId);
+
+  // Owner display names, for "Team computers" rows only (never for the
+  // viewer's own, which already say "your"). Read only the distinct owners
+  // actually present on someone else's row, so a non-admin (who only ever
+  // sees their own rows) never pays this read.
+  const otherOwnerIds = Array.from(
+    new Set(
+      devices
+        .filter((r) => r.user_id !== session.userId)
+        .map((r) => r.user_id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+  const ownerNameById = new Map<string, string>();
+  if (otherOwnerIds.length > 0) {
+    const owners = await db
+      .from("user_profiles")
+      .select("auth_user_id, display_name, full_name, email")
+      .eq("tenant_id", tenantId)
+      .is("deactivated_at", null)
+      .in("auth_user_id", otherOwnerIds);
+    if (owners.error) {
+      console.error("[devices.GET.owner_names]", owners.error.message);
+    } else {
+      for (const row of (owners.data || []) as Array<{
+        auth_user_id: string | null;
+        display_name: string | null;
+        full_name: string | null;
+        email: string | null;
+      }>) {
+        if (row.auth_user_id) {
+          const name = row.display_name || row.full_name || row.email;
+          if (name) ownerNameById.set(row.auth_user_id, name);
+        }
+      }
+    }
+  }
+
   return NextResponse.json({
     ok: true,
-    devices: devices.map((r) => ({ ...r, mine: r.user_id === session.userId })),
+    devices: devices.map((r) => ({
+      ...r,
+      mine: r.user_id === session.userId,
+      owner_name: r.user_id && r.user_id !== session.userId ? ownerNameById.get(r.user_id) || null : null,
+    })),
   });
 }
 
 export async function DELETE(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok) return bad(401, "unauthorized");
-  if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
   const tenantId = session.tenantId;
   const url = new URL(req.url);
   const id = url.searchParams.get("id");
@@ -63,7 +105,10 @@ export async function DELETE(req: NextRequest) {
     .eq("id", id)
     .eq("tenant_id", tenantId)
     .maybeSingle();
-  if (row.error) return bad(500, row.error.message);
+  if (row.error) {
+    console.error("[devices.DELETE.lookup]", { tenantId, userId: session.userId, pairingId: id, error: row.error.message });
+    return bad(503, "device_lookup_unavailable");
+  }
   if (!row.data) return bad(404, "pairing_not_found");
   const pairing = row.data as { id: string; user_id: string | null; label: string | null; revoked_at: string | null };
 
@@ -89,7 +134,10 @@ export async function DELETE(req: NextRequest) {
     .update({ revoked_at: new Date().toISOString() })
     .eq("id", id)
     .eq("tenant_id", tenantId);
-  if (error) return bad(500, error.message);
+  if (error) {
+    console.error("[devices.DELETE.revoke]", { tenantId, userId: session.userId, pairingId: id, error: error.message });
+    return bad(503, "device_disconnect_unavailable");
+  }
 
   if (!isMine) {
     const audit = await db.rpc("log_tenant_event", {

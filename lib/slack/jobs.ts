@@ -23,9 +23,8 @@
  *   3. Exactly once per Slack event: an approval with this event's key already
  *      existing means a retry, and nothing runs again (no second model call).
  *   4. The turn (lib/os/department-agent.ts, metered, budget-checked, the same
- *      rules as the web channel). The workspace's own AI account pays; the
- *      platform key only when the person who @mentioned is the verified
- *      platform operator, the web channel's rule.
+ *      rules as the web channel). The matching workspace AI account pays;
+ *      Slack never substitutes the OASIS platform key.
  *   5. The draft becomes a send_slack_message approval (Feed shows it). Under
  *      the mention goes a line with NO draft text ("drafted a reply for review
  *      in OASIS"); the draft and its Approve button go ephemerally to the
@@ -34,23 +33,24 @@
  *      is readable by the channel until someone approves it and it is posted.
  */
 import "server-only";
+import { createHash } from "node:crypto";
 import type { Client } from "@libsql/client";
 import { resolveWebhookRoute } from "@/lib/connections/store";
 import { appOrigin } from "@/lib/connections/popup";
 import { getTenant } from "@/lib/queries";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
-import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
-import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { getWorkspaceManifest } from "@/lib/manifest/loader";
-import { OS_DEPARTMENTS } from "@/lib/os/departments";
+import { OS_DEPARTMENTS, type OsDepartment } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
 import { departmentChannelFor } from "@/components/os/department/config";
-import { failureCopy, type TurnFailureCode } from "@/lib/os/channel/outcome";
+import { failureCopy, isTurnFailureCode, type TurnFailureCode } from "@/lib/os/channel/outcome";
 import { recordTurnOutcome } from "@/lib/os/channel/turns";
 import { prepareAgentTurn, runAgentTurnToText } from "@/lib/os/department-agent";
+import { workspaceApiFallbackReplyLabel, type AgentEngineChoice } from "@/lib/ai/agent-engine";
+import { readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
 import { createApproval, parsePayload } from "@/lib/os/approvals/store";
 import type { SlackFetch } from "@/lib/slack/client";
 import {
@@ -64,6 +64,8 @@ import {
 } from "@/lib/slack/routing";
 import { slackApproverProfile } from "@/lib/slack/identity";
 import { postApprovalRequest, postNotice } from "@/lib/slack/send";
+import { liveSeat } from "@/lib/os/seat";
+import { RunsUnavailableError } from "@/lib/os/runs/store";
 
 /** A reply short enough to be a Slack message, and a turn short enough for waitUntil. */
 export const SLACK_REPLY_MAX_TOKENS = 1024;
@@ -121,6 +123,8 @@ export type SlackJobDeps = {
   /** Test seams; production uses the real turn. */
   prepare?: typeof prepareAgentTurn;
   runText?: typeof runAgentTurnToText;
+  readEngine?: typeof readEffectiveAgentEngine;
+  runDevice?: typeof runSlackDeviceTurn;
 };
 
 export function approvalKeyForEvent(eventId: string): string {
@@ -173,39 +177,228 @@ export function mentionPrompt(job: SlackMentionJob, question: string): string {
   ].join("\n");
 }
 
-/**
- * Is this workspace teammate the verified platform operator (lib/platform-operator.ts)?
- * Asked with the AUTH user's own email, never user_profiles.email: that is a
- * column, and a profile email set to an operator alias is exactly the squat the
- * platform check exists to refuse. An auth record that cannot be read is "not
- * the operator" (the platform key bills OASIS; it fails closed).
- */
-async function isOperatorTeammate(db: Client, tenantId: string, profileId: string | null): Promise<boolean> {
-  if (!profileId) return false;
+type LinkedSlackActor = { userId: string; email: string | null };
+
+async function linkedSlackActor(db: Client, tenantId: string, profileId: string | null): Promise<LinkedSlackActor | null> {
+  if (!profileId) return null;
   const rs = await db.execute({
     sql: "SELECT auth_user_id FROM user_profiles WHERE id = ? AND tenant_id = ? AND deactivated_at IS NULL LIMIT 1",
     args: [profileId, tenantId],
   });
   const r = rs.rows[0] as unknown as { auth_user_id: string | null } | undefined;
-  if (!r?.auth_user_id) return false;
-  let authEmail: string | null;
+  if (!r?.auth_user_id) return null;
   try {
     const auth = await adminGetUser(getServiceSupabase(), String(r.auth_user_id));
     if (!auth.ok) {
-      console.error("[slack.jobs] the teammate's auth record could not be read; not the operator", { tenantId, error: auth.error });
-      return false;
+      console.error("[slack.jobs] the teammate's auth record could not be read", { tenantId, error: auth.error });
+      return null;
     }
-    authEmail = auth.value.email;
+    return { userId: String(r.auth_user_id), email: auth.value.email };
   } catch (err) {
-    // An auth store this deployment cannot read is not a reason to drop the
-    // mention: the turn runs on the workspace's own key, and the log says why.
-    console.error("[slack.jobs] the teammate's auth record could not be read; not the operator", {
+    console.error("[slack.jobs] the teammate's auth record could not be read", {
       tenantId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return false;
+    return null;
   }
-  return isPlatformOperatorForAuthUser(String(r.auth_user_id), authEmail);
+}
+
+export type SlackDeviceTurnResult =
+  | { ok: true; text: string; fellBackFrom: string | null }
+  | { ok: false; status: number; error: string };
+
+function stableUuid(namespace: string, tenantId: string, userId: string, eventId: string): string {
+  const hex = createHash("sha256")
+    .update(`oasis:slack:${namespace}:${tenantId}:${userId}:${eventId}`, "utf8")
+    .digest("hex")
+    .slice(0, 32)
+    .split("");
+  // UUID v5-shaped IDs keep the run-store's trusted-id contract while the
+  // SHA-256 input (not browser input) provides the durable retry identity.
+  hex[12] = "5";
+  hex[16] = "8";
+  const value = hex.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+export function slackDeviceRunIdentity(tenantId: string, userId: string, eventId: string): {
+  conversationId: string;
+  runId: string;
+} {
+  return {
+    conversationId: stableUuid("conversation", tenantId, userId, eventId),
+    runId: stableUuid("run", tenantId, userId, eventId),
+  };
+}
+
+function sseFrames(text: string): Array<{ event: string; data: Record<string, unknown> }> {
+  return text.split(/\r?\n\r?\n/).flatMap((frame) => {
+    let event = "message";
+    let data = "";
+    for (const line of frame.split(/\r?\n/)) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    }
+    if (!data) return [];
+    try {
+      const parsed = JSON.parse(data) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? [{ event, data: parsed as Record<string, unknown> }]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** Run one Slack draft through the exact-pairing department_task_v2 lane and
+ * wait for its durable run result. The requester is the linked workspace seat;
+ * an unlinked Slack identity cannot borrow the agents owner's permissions. */
+export async function runSlackDeviceTurn(input: {
+  deps: SlackJobDeps;
+  job: SlackMentionJob;
+  dept: OsDepartment;
+  tenantSlug: string;
+  agentSlug: string;
+  prompt: string;
+  expectedEngine: Exclude<AgentEngineChoice, { kind: "api" }>;
+}): Promise<SlackDeviceTurnResult> {
+  const { deps, job, dept, agentSlug, prompt, expectedEngine } = input;
+  const actor = await linkedSlackActor(deps.db, job.tenantId, job.profileId);
+  if (!actor) return { ok: false, status: 409, error: "slack_identity_not_linked" };
+  // Keep the heavy department-run/viewer stack off ordinary API-mode Slack
+  // jobs (and their Worker cold start). It is needed only for a saved device
+  // engine, after the canonical route decision and linked-identity check above.
+  const [viewerModule, sessionModule, starterModule, sendModule] = await Promise.all([
+    import("@/components/os/department/viewer"),
+    import("@/lib/os/runs/session"),
+    import("@/lib/os/runs/turn-starter"),
+    import("@/lib/os/runs/send"),
+  ]);
+  const { resolveOsViewerFor } = viewerModule;
+  const { resolveRunSession, sessionForQueuedFallback } = sessionModule;
+  const { executorDepsFor } = starterModule;
+  const { sendMessage } = sendModule;
+  const seat = await liveSeat(job.tenantId, actor.userId);
+  if (!seat.live) {
+    return {
+      ok: false,
+      status: seat.reason === "unavailable" ? 503 : 403,
+      error: seat.reason === "unavailable" ? "profile_unavailable" : "seat_inactive",
+    };
+  }
+  const viewer = await resolveOsViewerFor(job.tenantId, actor.userId);
+  if (!viewer.ok) {
+    return { ok: false, status: viewer.reason === "degraded" ? 503 : 403, error: viewer.reason === "degraded" ? "profile_unavailable" : "seat_inactive" };
+  }
+  const resolved = await resolveRunSession({
+    department: dept.key,
+    actor: {
+      tenantId: job.tenantId,
+      user: { id: actor.userId, email: actor.email },
+      profile: {
+        team_role: seat.profile.teamRole,
+        is_owner: seat.profile.isOwner,
+        admin_access: seat.profile.adminAccess,
+        display_name: job.authorName,
+        full_name: job.authorName,
+      },
+      viewer,
+      // Slack mentions are workspace-channel work. They use the workspace
+      // default and therefore the approved agents-owner computer, not a
+      // personal override from whichever member happened to mention it.
+      engineUserId: null,
+      operatorName: job.authorName ?? undefined,
+    },
+  });
+  if (!resolved.ok) return resolved;
+
+  try {
+    const session = resolved.session;
+    const dispatch = session.computerDispatch;
+    const expectedKind = expectedEngine.kind === "cli" ? "cli" : "local";
+    const expectedName = expectedEngine.kind === "cli" ? expectedEngine.cli : expectedEngine.model;
+    const fallbackFrom = session.fallbackFrom;
+    const immediateFallbackMatches =
+      !dispatch &&
+      session.fallbackReason !== null &&
+      fallbackFrom !== null &&
+      fallbackFrom.pairingId === expectedEngine.pairingId &&
+      fallbackFrom.kind === expectedEngine.kind &&
+      (fallbackFrom.kind === "cli" ? fallbackFrom.cli : fallbackFrom.model) === expectedName &&
+      expectedEngine.fallback === "workspace_api";
+    const dispatchMatches =
+      !!dispatch &&
+      dispatch.pairingId === expectedEngine.pairingId &&
+      dispatch.engineKind === expectedKind &&
+      dispatch.engineName === expectedName &&
+      dispatch.fallback === (expectedEngine.fallback ?? "none");
+    if (!dispatchMatches && !immediateFallbackMatches) {
+      return { ok: false, status: 409, error: "engine_dispatch_unavailable" };
+    }
+    const idempotency = slackDeviceRunIdentity(job.tenantId, actor.userId, job.eventId);
+    const response = await sendMessage({
+      db: deps.db,
+      deps: executorDepsFor(session, deps.db),
+      showThinking: false,
+      input: {
+        department: dept.key,
+        agentSlug,
+        text: prompt,
+        conversationId: "",
+        chatMode: "build",
+      },
+      computerDispatch: session.computerDispatch,
+      apiAccountSnapshot: session.apiAccountSnapshot,
+      fallbackFrom: session.fallbackFrom,
+      fallbackReason: session.fallbackReason,
+      computerFallbackDeps: (reason) => {
+        const fallbackSession = sessionForQueuedFallback(session, reason);
+        return fallbackSession ? executorDepsFor(fallbackSession, deps.db) : null;
+      },
+      // A queue retry after the webhook's request window follows this exact
+      // persisted run. It can never enqueue a second inference for one Slack
+      // event, even while the selected computer is still working.
+      idempotency,
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      try {
+        const body = JSON.parse(raw) as { error?: unknown };
+        return { ok: false, status: response.status, error: typeof body.error === "string" ? body.error : `http_${response.status}` };
+      } catch {
+        return { ok: false, status: response.status, error: `http_${response.status}` };
+      }
+    }
+    let finalText = "";
+    let errorCode: string | null = null;
+    let fellBackFrom: string | null = null;
+    for (const frame of sseFrames(raw)) {
+      if (frame.event === "ev") {
+        const kind = typeof frame.data.kind === "string" ? frame.data.kind : "";
+        const data = frame.data.data && typeof frame.data.data === "object" && !Array.isArray(frame.data.data)
+          ? frame.data.data as Record<string, unknown>
+          : {};
+        if (kind === "agent" && typeof data.fell_back_from === "string") fellBackFrom = data.fell_back_from;
+        if (kind === "delta" && typeof data.text === "string") finalText += data.text;
+        if (kind === "error" && typeof data.code === "string") errorCode = data.code;
+      } else if (frame.event === "end") {
+        if (typeof frame.data.final_text === "string" && frame.data.final_text.trim()) finalText = frame.data.final_text;
+        if (typeof frame.data.error_code === "string" && frame.data.error_code) errorCode = frame.data.error_code;
+      }
+    }
+    if (errorCode) return { ok: false, status: 409, error: errorCode };
+    if (!finalText.trim()) return { ok: false, status: 502, error: "reply_empty" };
+    return { ok: true, text: finalText.trim(), fellBackFrom };
+  } catch (err) {
+    if (err instanceof RunsUnavailableError) return { ok: false, status: 503, error: "chat_history_unavailable" };
+    console.error("[slack.jobs.device-run]", {
+      tenantId: job.tenantId,
+      department: dept.key,
+      error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+    });
+    return { ok: false, status: 500, error: "send_failed" };
+  }
 }
 
 export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDeps): Promise<JobOutcome> {
@@ -244,39 +437,92 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
     return notice(deps, job, "department_not_set_up", `${label} is not set up in this workspace yet, so it cannot draft a reply.`);
   }
 
-  // The platform key bills OASIS: only when the person who @mentioned is the
-  // verified platform operator (their Slack email linked to that teammate).
-  const operator = await isOperatorTeammate(db, job.tenantId, job.profileId);
-  const prepare = deps.prepare ?? prepareAgentTurn;
-  const prepared = await prepare({
-    tenantId: job.tenantId,
-    tenantSlug,
-    agentSlug: binding.agentSlug,
-    department: dept,
-    operator: { name: job.authorName ?? "your team", email: "" },
-    platformFallback: operator ? operatorPlatformFallback() : null,
-    revealModel: false,
-    userId: null,
-    jobId: key,
-  });
-  if (!prepared.ok) {
-    if (prepared.recordAs) await recordTurn(deps, job.tenantId, dept.key, binding.agentSlug, prepared.recordAs);
-    const sentence =
-      prepared.error === "agent_not_configured"
-        ? "this workspace has no AI account connected (Settings > AI brain)."
-        : failureCopy(prepared.error, { canManageAi: false }).sentence;
-    console.error("[slack.jobs] turn refused", { tenantId: job.tenantId, department: dept.key, code: prepared.error });
-    return notice(deps, job, prepared.error, `${label} could not draft a reply: ${sentence}`);
+  const prompt = mentionPrompt(job, picked.question);
+  let draftedText: string;
+  let fallbackLabel = "";
+  let canonical: Awaited<ReturnType<typeof readEffectiveAgentEngine>>;
+  try {
+    canonical = await (deps.readEngine ?? readEffectiveAgentEngine)(job.tenantId, null);
+  } catch (err) {
+    console.error("[slack.jobs] engine could not be read", {
+      tenantId: job.tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
   }
 
-  const runText = deps.runText ?? runAgentTurnToText;
-  const drafted = await runText(prepared.turn, [{ role: "user", content: mentionPrompt(job, picked.question) }], SLACK_REPLY_MAX_TOKENS);
-  if (!drafted.ok) {
-    await recordTurn(deps, job.tenantId, dept.key, binding.agentSlug, drafted.code);
-    console.error("[slack.jobs] turn failed", { tenantId: job.tenantId, department: dept.key, code: drafted.code });
-    return notice(deps, job, drafted.code, `${label} could not draft a reply: ${failureCopy(drafted.code, { canManageAi: false }).sentence}`);
+  if (canonical.engine.kind !== "api") {
+    // Subscription/local work enters the same exact-pairing durable queue as
+    // the department UI. Only that queue may promote the frozen run to the
+    // workspace API account, and only when fallback_policy says so.
+    const device = await (deps.runDevice ?? runSlackDeviceTurn)({
+      deps,
+      job,
+      dept,
+      tenantSlug,
+      agentSlug: binding.agentSlug,
+      prompt,
+      expectedEngine: canonical.engine,
+    });
+    if (!device.ok) {
+      if (isTurnFailureCode(device.error)) await recordTurn(deps, job.tenantId, dept.key, binding.agentSlug, device.error);
+      const sentence = device.error === "slack_identity_not_linked"
+        ? "link this Slack account to an active workspace member before using the selected computer. No API credits were used."
+        : failureCopy(device.error, { canManageAi: false }).sentence;
+      console.error("[slack.jobs] device turn refused", { tenantId: job.tenantId, department: dept.key, code: device.error });
+      return notice(deps, job, device.error, `${label} could not draft a reply: ${sentence}`);
+    }
+    draftedText = device.text;
+    fallbackLabel = device.fellBackFrom && !device.text.startsWith("Workspace API fallback")
+      ? workspaceApiFallbackReplyLabel(device.fellBackFrom)
+      : "";
+    await recordTurn(deps, job.tenantId, dept.key, binding.agentSlug, null);
+  } else {
+    const prepare = deps.prepare ?? prepareAgentTurn;
+    const prepared = await prepare({
+      tenantId: job.tenantId,
+      tenantSlug,
+      agentSlug: binding.agentSlug,
+      department: dept,
+      operator: { name: job.authorName ?? "your team", email: "" },
+      // Canonical API mode is exactly the saved workspace provider account.
+      // A missing account fails closed; Slack never spends platform credits.
+      platformFallback: null,
+      revealModel: false,
+      userId: null,
+      jobId: key,
+      engineChoice: canonical.engine,
+      // The canonical read above chose the API branch. If settings change to
+      // a device before preparation re-reads them, fail closed instead of
+      // turning that race into unapproved workspace API spend.
+      failClosedWithoutComputerDispatch: true,
+    });
+    if (!prepared.ok) {
+      if (prepared.recordAs) await recordTurn(deps, job.tenantId, dept.key, binding.agentSlug, prepared.recordAs);
+      const sentence =
+        typeof prepared.extra?.hint === "string"
+          ? prepared.extra.hint
+          : prepared.error === "agent_not_configured"
+            ? "this workspace has no AI account connected (Settings > AI brain)."
+            : failureCopy(prepared.error, { canManageAi: false }).sentence;
+      console.error("[slack.jobs] turn refused", { tenantId: job.tenantId, department: dept.key, code: prepared.error });
+      return notice(deps, job, prepared.error, `${label} could not draft a reply: ${sentence}`);
+    }
+
+    const runText = deps.runText ?? runAgentTurnToText;
+    const drafted = await runText(prepared.turn, [{ role: "user", content: prompt }], SLACK_REPLY_MAX_TOKENS);
+    if (!drafted.ok) {
+      await recordTurn(deps, job.tenantId, dept.key, binding.agentSlug, drafted.code);
+      console.error("[slack.jobs] turn failed", { tenantId: job.tenantId, department: dept.key, code: drafted.code });
+      return notice(deps, job, drafted.code, `${label} could not draft a reply: ${failureCopy(drafted.code, { canManageAi: false }).sentence}`);
+    }
+    draftedText = drafted.text;
+    fallbackLabel =
+      prepared.turn.engine?.kind === "api" && prepared.turn.engine.fellBackFrom
+        ? workspaceApiFallbackReplyLabel(prepared.turn.engine.fellBackFrom)
+        : "";
+    await recordTurn(deps, job.tenantId, dept.key, binding.agentSlug, null);
   }
-  await recordTurn(deps, job.tenantId, dept.key, binding.agentSlug, null);
 
   const created = await createApproval(
     db,
@@ -291,7 +537,7 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
         team_id: job.teamId,
         channel_id: job.channelId,
         thread_ts: job.threadTs,
-        text: drafted.text.slice(0, 4000),
+        text: `${fallbackLabel}${draftedText}`.slice(0, 4000),
         ...(job.channelName ? { channel_name: job.channelName } : {}),
         department: dept.key,
       },

@@ -28,20 +28,11 @@
  *
  * A failed read THROWS: "couldn't check" is never "not saved".
  *
- * PER-PERSON ENGINE (O3b, "your engine and your computer's status are
- * yours"). The workspace row above answers for everyone who has not chosen
- * for themselves. A person may save their OWN row instead -- agent_model_config,
- * the SAME agent_key ("__engine__"), but user_id = their own auth user id
- * (the partial unique index idx_agent_model_config_engine_per_user,
- * bravo__212, is one row per tenant+user+agent_key). Its vocabulary is
- * smaller than the workspace row's: 'computer' (Claude Code on MY OWN paired
- * computer, O3a's bridge_pairings -- never the workspace's shared tunnel) or
- * 'api' (the workspace API key). EFFECTIVE ENGINE precedence: the person's
- * own row, else the workspace row (readAgentEngine, unchanged, O1's pause
- * included), else the OASIS default inside it. NO KEY FALLBACK (Adon,
- * 2026-10-11): an explicit 'computer' choice is never silently answered on an
- * API key when the computer cannot be reached -- it is refused, with the
- * reason (lib/os/runs/session.ts).
+ * PER-PERSON ENGINE. Workspace and personal rows use the same subscription,
+ * local, and API vocabulary. A personal row has user_id = the auth user id;
+ * deleting it means inherit the workspace row. Device-backed rows bind one
+ * computer_pairing_id. Fallback defaults to none and can use the workspace API
+ * only when fallback_policy explicitly says workspace_api.
  */
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -67,6 +58,135 @@ function writeClient() {
   return getTursoClient();
 }
 
+type CanonicalEngineRow = {
+  provider?: unknown;
+  model?: unknown;
+  computer_pairing_id?: unknown;
+  fallback_policy?: unknown;
+  updated_at?: unknown;
+  runtime_probe_job_id?: unknown;
+  runtime_probe_pairing_id?: unknown;
+  runtime_probe_engine_kind?: unknown;
+  runtime_probe_engine_name?: unknown;
+  runtime_probe_engine_version?: unknown;
+  runtime_probe_verified_at?: unknown;
+};
+
+export type SavedRuntimeProbeProof = {
+  jobId: string;
+  pairingId: string;
+  engine: { kind: "cli" | "local"; name: string };
+  engineVersion: string;
+  verifiedAt: string;
+};
+
+export type SavedRuntimeProbeProofInput = Omit<SavedRuntimeProbeProof, "engineVersion">;
+
+function missingEngineBindingColumns(message: string): boolean {
+  return /(?:no such column|schema cache).*(?:computer_pairing_id|fallback_policy)|(?:computer_pairing_id|fallback_policy).*(?:does not exist|not found)/i.test(
+    message,
+  );
+}
+
+function missingEngineProofColumns(message: string): boolean {
+  return /(?:no such column|schema cache).*(?:runtime_probe_)|(?:runtime_probe_).*(?:does not exist|not found)/i.test(message);
+}
+
+async function readEngineRow(
+  tenantId: string,
+  userId: string | null,
+): Promise<{ data: CanonicalEngineRow | null; error: { message: string } | null }> {
+  const query = (columns: string) => {
+    let q = getServiceSupabase().from("agent_model_config").select(columns).eq("tenant_id", tenantId);
+    q = userId === null ? q.is("user_id", null) : q.eq("user_id", userId);
+    return q.eq("agent_key", ENGINE_AGENT_KEY).maybeSingle();
+  };
+
+  const current = await query(
+    "provider, model, computer_pairing_id, fallback_policy, updated_at, runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at",
+  );
+  if (!current.error || (!missingEngineProofColumns(current.error.message) && !missingEngineBindingColumns(current.error.message))) {
+    return current as { data: CanonicalEngineRow | null; error: { message: string } | null };
+  }
+
+  // Proof columns are additive. Old workers can still read the canonical
+  // binding during schema rollout, but cannot invent a durable proof.
+  const binding = await query("provider, model, computer_pairing_id, fallback_policy, updated_at");
+  if (!binding.error || !missingEngineBindingColumns(binding.error.message)) {
+    return binding as { data: CanonicalEngineRow | null; error: { message: string } | null };
+  }
+
+  // Old workers remain readable during the additive migration rollout. The
+  // result stays deliberately unbound, so no device can be picked implicitly.
+  const legacy = await query("provider, model, updated_at");
+  return legacy as { data: CanonicalEngineRow | null; error: { message: string } | null };
+}
+
+function engineFromCanonicalRow(row: CanonicalEngineRow, personal: boolean): AgentEngineChoice {
+  if (personal && row.provider === "computer") return { kind: "cli", cli: "claude" };
+  return engineFromRow(row);
+}
+
+function savedProbeProofFromRow(
+  row: CanonicalEngineRow | null,
+  engine: AgentEngineChoice,
+): SavedRuntimeProbeProof | null {
+  if (!row || engine.kind === "api" || !engine.pairingId) return null;
+  const version = typeof row.updated_at === "string" ? row.updated_at : "";
+  const jobId = typeof row.runtime_probe_job_id === "string" ? row.runtime_probe_job_id : "";
+  const pairingId = typeof row.runtime_probe_pairing_id === "string" ? row.runtime_probe_pairing_id : "";
+  const kind = row.runtime_probe_engine_kind;
+  const name = typeof row.runtime_probe_engine_name === "string" ? row.runtime_probe_engine_name : "";
+  const proofVersion = typeof row.runtime_probe_engine_version === "string" ? row.runtime_probe_engine_version : "";
+  const verifiedAt = typeof row.runtime_probe_verified_at === "string" ? row.runtime_probe_verified_at : "";
+  const expectedKind = engine.kind === "cli" ? "cli" : "local";
+  const expectedName = engine.kind === "cli" ? engine.cli : engine.model;
+  if (
+    !version || !jobId || !pairingId || !name || !proofVersion ||
+    (kind !== "cli" && kind !== "local") ||
+    version !== proofVersion || pairingId !== engine.pairingId ||
+    kind !== expectedKind || name !== expectedName || !Number.isFinite(Date.parse(verifiedAt))
+  ) {
+    return null;
+  }
+  return { jobId, pairingId, engine: { kind, name }, engineVersion: version, verifiedAt };
+}
+
+function assertProbeMatchesChoice(choice: AgentEngineChoice, proof: SavedRuntimeProbeProofInput): void {
+  if (choice.kind === "api" || !choice.pairingId) throw new Error("agent engine: probe proof requires a bound device engine");
+  const kind = choice.kind === "cli" ? "cli" : "local";
+  const name = choice.kind === "cli" ? choice.cli : choice.model;
+  if (
+    proof.pairingId !== choice.pairingId || proof.engine.kind !== kind || proof.engine.name !== name ||
+    !proof.jobId || !Number.isFinite(Date.parse(proof.verifiedAt))
+  ) {
+    throw new Error("agent engine: probe proof does not match the saved pairing/runtime");
+  }
+}
+
+/** A later failed exact-runtime probe revokes the saved proof. Its age does
+ * not: freshness is a Save precondition, while live heartbeat/runtime health
+ * remains the execution-time gate. */
+export function savedRuntimeProbeProofReady(
+  proof: SavedRuntimeProbeProof | null | undefined,
+  pairingId: string,
+  engine: { kind: "cli" | "local"; name: string },
+  latestReceipt?: { jobId?: string; ready: boolean; finishedAt: string } | null,
+): boolean {
+  if (!proof || proof.pairingId !== pairingId || proof.engine.kind !== engine.kind || proof.engine.name !== engine.name) return false;
+  if (latestReceipt) {
+    const latestAt = Date.parse(latestReceipt.finishedAt);
+    const verifiedAt = Date.parse(proof.verifiedAt);
+    const isLater =
+      Number.isFinite(latestAt) &&
+      Number.isFinite(verifiedAt) &&
+      (latestAt > verifiedAt ||
+        (latestAt === verifiedAt && Boolean(latestReceipt.jobId) && latestReceipt.jobId !== proof.jobId));
+    if (isLater && !latestReceipt.ready) return false;
+  }
+  return true;
+}
+
 /**
  * The workspace's engine choice. No row: OASIS's own workspace runs on the CLI
  * bridge (CC, 2026-10-09: "for my workspace they don't use API keys ... you
@@ -75,18 +195,14 @@ function writeClient() {
  */
 export async function readAgentEngine(tenantId: string): Promise<AgentEngineChoice> {
   const [{ data, error }, oasis] = await Promise.all([
-    getServiceSupabase()
-      .from("agent_model_config")
-      .select("provider, model")
-      .eq("tenant_id", tenantId)
-      .is("user_id", null)
-      .eq("agent_key", ENGINE_AGENT_KEY)
-      .maybeSingle(),
+    readEngineRow(tenantId, null),
     isOasisWorkspace(tenantId),
   ]);
   if (error) throw new Error(`agent engine: agent_model_config read failed: ${error.message}`);
   if (!data) return oasis ? OASIS_DEFAULT_ENGINE : { kind: "api" };
-  return engineFromRow(data as { provider?: unknown; model?: unknown } | null);
+  return engineFromRow(
+    data as { provider?: unknown; model?: unknown; computer_pairing_id?: unknown; fallback_policy?: unknown } | null,
+  );
 }
 
 /** OASIS's own workspace, when no choice is saved: its agents' harnesses on CC's computer, through the bridge. */
@@ -124,23 +240,57 @@ export async function readAgentEngineVersion(tenantId: string): Promise<string |
  * saved meanwhile makes this one a no-op: returns false and nothing changes.
  * Throws when the write fails.
  */
-export async function saveAgentEngineIfCurrent(tenantId: string, choice: AgentEngineChoice, expectedVersion: string | null): Promise<boolean> {
+export async function saveAgentEngineIfCurrent(
+  tenantId: string,
+  choice: AgentEngineChoice,
+  expectedVersion: string | null,
+  probeProof: SavedRuntimeProbeProofInput | null = null,
+): Promise<boolean> {
   const row = engineRow(choice);
   const now = new Date().toISOString();
+  if (probeProof) assertProbeMatchesChoice(choice, probeProof);
+  if (probeProof) {
+    const proofArgs = [
+      probeProof.jobId,
+      probeProof.pairingId,
+      probeProof.engine.kind,
+      probeProof.engine.name,
+      now,
+      probeProof.verifiedAt,
+    ];
+    const res =
+      expectedVersion === null
+        ? await writeClient().execute({
+            sql:
+              "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at," +
+              " runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at)" +
+              " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)" +
+              " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING",
+            args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now, ...proofArgs],
+          })
+        : await writeClient().execute({
+            sql:
+              "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1, computer_pairing_id = ?, fallback_policy = ?, updated_at = ?," +
+              " runtime_probe_job_id = ?, runtime_probe_pairing_id = ?, runtime_probe_engine_kind = ?, runtime_probe_engine_name = ?, runtime_probe_engine_version = ?, runtime_probe_verified_at = ?" +
+              " WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND updated_at = ?",
+            args: [row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now, ...proofArgs, tenantId, ENGINE_AGENT_KEY, expectedVersion],
+          });
+    return res.rowsAffected === 1;
+  }
   const res =
     expectedVersion === null
       ? await writeClient().execute({
           sql:
-            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
-            " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?)" +
+            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+            " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?)" +
             " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING",
-          args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, now],
+          args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now],
         })
       : await writeClient().execute({
           sql:
-            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1, updated_at = ?" +
+            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1, computer_pairing_id = ?, fallback_policy = ?, updated_at = ?" +
             " WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND updated_at = ?",
-          args: [row.provider, row.model, now, tenantId, ENGINE_AGENT_KEY, expectedVersion],
+          args: [row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now, tenantId, ENGINE_AGENT_KEY, expectedVersion],
         });
   return res.rowsAffected === 1;
 }
@@ -150,12 +300,288 @@ export async function saveAgentEngine(tenantId: string, choice: AgentEngineChoic
   const row = engineRow(choice);
   await writeClient().execute({
     sql:
-      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
-      " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?)" +
+      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+      " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?)" +
       " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL" +
-      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = NULL, updated_at = excluded.updated_at",
-    args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, new Date().toISOString()],
+      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = NULL," +
+      " computer_pairing_id = excluded.computer_pairing_id, fallback_policy = excluded.fallback_policy, updated_at = excluded.updated_at",
+    args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, new Date().toISOString()],
   });
+}
+
+/** The personal override row's version; null means this person inherits. */
+export async function readPersonAgentEngineVersion(tenantId: string, userId: string): Promise<string | null> {
+  const { data, error } = await getServiceSupabase()
+    .from("agent_model_config")
+    .select("updated_at")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .eq("agent_key", ENGINE_AGENT_KEY)
+    .maybeSingle();
+  if (error) throw new Error(`person engine: version read failed: ${error.message}`);
+  const at = (data as { updated_at?: unknown } | null)?.updated_at;
+  return typeof at === "string" && at ? at : null;
+}
+
+/** A person's engine using the same vocabulary and columns as the workspace row. */
+export async function readPersonAgentEngine(tenantId: string, userId: string): Promise<AgentEngineChoice | null> {
+  const { data, error } = await readEngineRow(tenantId, userId);
+  if (error) throw new Error(`person engine: agent_model_config read failed: ${error.message}`);
+  if (!data) return null;
+  const row = data as CanonicalEngineRow;
+  // Rollout compatibility for O3b's old personal vocabulary. It stays
+  // deliberately unbound; callers surface "Choose a computer" rather than
+  // silently selecting whichever machine happens to answer first.
+  if (row.provider === "computer") return { kind: "cli", cli: "claude" };
+  return engineFromRow(row);
+}
+
+/** Persist a person's canonical selection; inheritance is clearPersonEngine. */
+export async function savePersonAgentEngine(tenantId: string, userId: string, choice: AgentEngineChoice): Promise<void> {
+  const row = engineRow(choice);
+  await writeClient().execute({
+    sql:
+      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+      " VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?)" +
+      " ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL AND agent_key = '__engine__'" +
+      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = NULL," +
+      " computer_pairing_id = excluded.computer_pairing_id, fallback_policy = excluded.fallback_policy, updated_at = excluded.updated_at",
+    args: [tenantId, userId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, new Date().toISOString()],
+  });
+}
+
+/**
+ * Upgrade one still-unbound legacy device engine to an exact pairing without
+ * overwriting a choice saved concurrently. A personal upgrade is update-only
+ * (deleting the personal row means inherit, so it must never be recreated).
+ * The only row this may insert is OASIS's implicit workspace Claude default.
+ */
+export async function bindLegacyEngineIfUnchanged(input: {
+  tenantId: string;
+  userId: string | null;
+  engine: Exclude<AgentEngineChoice, { kind: "api" }>;
+  pairingId: string;
+  probeProof?: SavedRuntimeProbeProofInput | null;
+}): Promise<boolean> {
+  if (input.engine.pairingId) return false;
+  const boundChoice: Exclude<AgentEngineChoice, { kind: "api" }> =
+    input.engine.kind === "cli"
+      ? {
+          kind: "cli",
+          cli: input.engine.cli,
+          pairingId: input.pairingId,
+          fallback: input.engine.fallback ?? "none",
+        }
+      : {
+          kind: "local",
+          model: input.engine.model,
+          pairingId: input.pairingId,
+          fallback: input.engine.fallback ?? "none",
+        };
+  const row = engineRow(boundChoice);
+  const now = new Date().toISOString();
+  if (input.probeProof) assertProbeMatchesChoice(boundChoice, input.probeProof);
+  const legacyPersonalClaude = input.userId !== null && input.engine.kind === "cli" && input.engine.cli === "claude";
+  const legacyProviderClause = legacyPersonalClaude ? " OR provider = 'computer'" : "";
+  const userClause = input.userId === null ? "user_id IS NULL" : "user_id = ?";
+  const proofSet = input.probeProof
+    ? ", runtime_probe_job_id = ?, runtime_probe_pairing_id = ?, runtime_probe_engine_kind = ?, runtime_probe_engine_name = ?, runtime_probe_engine_version = ?, runtime_probe_verified_at = ?"
+    : "";
+  const proofArgs = input.probeProof
+    ? [input.probeProof.jobId, input.probeProof.pairingId, input.probeProof.engine.kind, input.probeProof.engine.name, now, input.probeProof.verifiedAt]
+    : [];
+  const result = await writeClient().execute({
+    sql:
+      "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1," +
+      ` computer_pairing_id = ?, fallback_policy = ?, updated_at = ?${proofSet}` +
+      ` WHERE tenant_id = ? AND ${userClause} AND agent_key = ?` +
+      " AND (computer_pairing_id IS NULL OR computer_pairing_id = '')" +
+      ` AND ((provider = ? AND model = ?)${legacyProviderClause})`,
+    args: [
+      row.provider,
+      row.model,
+      row.computerPairingId,
+      row.fallbackPolicy,
+      now,
+      ...proofArgs,
+      input.tenantId,
+      ...(input.userId === null ? [] : [input.userId]),
+      ENGINE_AGENT_KEY,
+      row.provider,
+      row.model,
+    ],
+  });
+  if (result.rowsAffected === 1) return true;
+
+  // A missing personal row means the person chose inheritance while this
+  // upgrade was running. Never undo that choice. For workspaces, only the
+  // implicit OASIS Claude default has no row and is eligible for insertion.
+  if (
+    input.userId !== null ||
+    input.engine.kind !== "cli" ||
+    input.engine.cli !== "claude" ||
+    !(await isOasisWorkspace(input.tenantId))
+  ) {
+    return false;
+  }
+  const insertProofColumns = input.probeProof
+    ? ", runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at"
+    : "";
+  const insertProofValues = input.probeProof ? ", ?, ?, ?, ?, ?, ?" : "";
+  const inserted = await writeClient().execute({
+    sql:
+      `INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at${insertProofColumns})` +
+      ` VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?${insertProofValues})` +
+      " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING",
+    args: [
+      input.tenantId,
+      ENGINE_AGENT_KEY,
+      row.provider,
+      row.model,
+      row.computerPairingId,
+      row.fallbackPolicy,
+      now,
+      ...proofArgs,
+    ],
+  });
+  return inserted.rowsAffected === 1;
+}
+
+/** CAS save for the personal row. A null version means "still inheriting". */
+export async function savePersonAgentEngineIfCurrent(
+  tenantId: string,
+  userId: string,
+  choice: AgentEngineChoice,
+  expectedVersion: string | null,
+  probeProof: SavedRuntimeProbeProofInput | null = null,
+): Promise<boolean> {
+  const row = engineRow(choice);
+  const now = new Date().toISOString();
+  if (probeProof) assertProbeMatchesChoice(choice, probeProof);
+  if (probeProof) {
+    const proofArgs = [
+      probeProof.jobId,
+      probeProof.pairingId,
+      probeProof.engine.kind,
+      probeProof.engine.name,
+      now,
+      probeProof.verifiedAt,
+    ];
+    const result =
+      expectedVersion === null
+        ? await writeClient().execute({
+            sql:
+              "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at," +
+              " runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at)" +
+              " VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)" +
+              " ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL AND agent_key = '__engine__' DO NOTHING",
+            args: [tenantId, userId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now, ...proofArgs],
+          })
+        : await writeClient().execute({
+            sql:
+              "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1," +
+              " computer_pairing_id = ?, fallback_policy = ?, updated_at = ?, runtime_probe_job_id = ?, runtime_probe_pairing_id = ?," +
+              " runtime_probe_engine_kind = ?, runtime_probe_engine_name = ?, runtime_probe_engine_version = ?, runtime_probe_verified_at = ?" +
+              " WHERE tenant_id = ? AND user_id = ? AND agent_key = ? AND updated_at = ?",
+            args: [
+              row.provider,
+              row.model,
+              row.computerPairingId,
+              row.fallbackPolicy,
+              now,
+              ...proofArgs,
+              tenantId,
+              userId,
+              ENGINE_AGENT_KEY,
+              expectedVersion,
+            ],
+          });
+    return result.rowsAffected === 1;
+  }
+  const result =
+    expectedVersion === null
+      ? await writeClient().execute({
+          sql:
+            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+            " VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?)" +
+            " ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL AND agent_key = '__engine__' DO NOTHING",
+          args: [tenantId, userId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now],
+        })
+      : await writeClient().execute({
+          sql:
+            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1," +
+            " computer_pairing_id = ?, fallback_policy = ?, updated_at = ?" +
+            " WHERE tenant_id = ? AND user_id = ? AND agent_key = ? AND updated_at = ?",
+          args: [
+            row.provider,
+            row.model,
+            row.computerPairingId,
+            row.fallbackPolicy,
+            now,
+            tenantId,
+            userId,
+            ENGINE_AGENT_KEY,
+            expectedVersion,
+          ],
+        });
+  return result.rowsAffected === 1;
+}
+
+/** CAS clear: inheritance is deletion, and cannot erase a newer selection. */
+export async function clearPersonEngineIfCurrent(tenantId: string, userId: string, expectedVersion: string | null): Promise<boolean> {
+  if (expectedVersion === null) return (await readPersonAgentEngineVersion(tenantId, userId)) === null;
+  const result = await writeClient().execute({
+    sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND user_id = ? AND agent_key = ? AND updated_at = ?",
+    args: [tenantId, userId, ENGINE_AGENT_KEY, expectedVersion],
+  });
+  return result.rowsAffected === 1;
+}
+
+export type EffectiveAgentEngine = { source: "person" | "workspace"; engine: AgentEngineChoice; legacyUnbound: boolean };
+export type EffectiveAgentEngineWithProof = EffectiveAgentEngine & {
+  version: string | null;
+  probeProof: SavedRuntimeProbeProof | null;
+};
+
+/** Canonical effective engine for dispatch and the consolidated AI Brain. */
+export async function readEffectiveAgentEngine(tenantId: string, userId: string | null | undefined): Promise<EffectiveAgentEngine> {
+  const { source, engine, legacyUnbound } = await readEffectiveAgentEngineWithProof(tenantId, userId);
+  return { source, engine, legacyUnbound };
+}
+
+/** The same canonical selection plus the successful probe bound to this exact
+ * row version. This richer shape is used only at execution/readiness gates;
+ * the long-standing public reader above intentionally keeps its old shape. */
+export async function readEffectiveAgentEngineWithProof(
+  tenantId: string,
+  userId: string | null | undefined,
+): Promise<EffectiveAgentEngineWithProof> {
+  const [personResult, workspaceResult, oasis] = await Promise.all([
+    userId ? readEngineRow(tenantId, userId) : Promise.resolve({ data: null, error: null }),
+    readEngineRow(tenantId, null),
+    isOasisWorkspace(tenantId),
+  ]);
+  if (personResult.error) throw new Error(`person engine: agent_model_config read failed: ${personResult.error.message}`);
+  if (workspaceResult.error) throw new Error(`agent engine: agent_model_config read failed: ${workspaceResult.error.message}`);
+  const personRow = personResult.data;
+  const workspaceRow = workspaceResult.data;
+  const source = personRow ? "person" : "workspace";
+  const selectedRow = personRow ?? workspaceRow;
+  const engine = personRow
+    ? engineFromCanonicalRow(personRow, true)
+    : workspaceRow
+      ? engineFromCanonicalRow(workspaceRow, false)
+      : oasis
+        ? OASIS_DEFAULT_ENGINE
+        : { kind: "api" as const };
+  const version = typeof selectedRow?.updated_at === "string" && selectedRow.updated_at ? selectedRow.updated_at : null;
+  return {
+    source,
+    engine,
+    legacyUnbound: engine.kind !== "api" && !engine.pairingId,
+    version,
+    probeProof: savedProbeProofFromRow(selectedRow, engine),
+  };
 }
 
 /** A person's own engine choice (O3b): their own paired computer, or the workspace API key. */

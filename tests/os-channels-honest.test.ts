@@ -219,7 +219,17 @@ async function main() {
       base_prompt TEXT, required_tools TEXT, suggested_model TEXT, pricing TEXT, is_public INTEGER,
       is_oasis_managed INTEGER, created_by TEXT, tenant_id TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
-      provider TEXT, model TEXT, encrypted_api_key TEXT, enabled INTEGER, updated_at TEXT);
+      provider TEXT, model TEXT, encrypted_api_key TEXT, enabled INTEGER, computer_pairing_id TEXT,
+      fallback_policy TEXT, updated_at TEXT, runtime_probe_job_id TEXT, runtime_probe_pairing_id TEXT,
+      runtime_probe_engine_kind TEXT, runtime_probe_engine_name TEXT, runtime_probe_engine_version TEXT,
+      runtime_probe_verified_at TEXT);
+    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT,
+      last_seen_at TEXT, revoked_at TEXT, scope TEXT, paired_via TEXT, claim_protocols TEXT,
+      claim_enabled_at TEXT, claim_state_at TEXT, claim_blocked_reason TEXT, claim_capacity INTEGER,
+      claim_runtime_state TEXT, created_at TEXT);
+    CREATE TABLE bridge_runtime_jobs (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+      pairing_id TEXT NOT NULL, action TEXT NOT NULL, engine_kind TEXT NOT NULL, engine_name TEXT NOT NULL,
+      status TEXT NOT NULL, result_code TEXT, finished_at TEXT, updated_at TEXT NOT NULL);
   `);
   // Every channel turn and every "Test" is a metered model call (lib/ai/usage.ts),
   // so the AI usage tables are applied as written (bravo__192, what the lead runs),
@@ -253,6 +263,14 @@ async function main() {
       profile("p-multi-oasis", USERS.multi, OASIS, "opener", 0, "2026-08-01T00:00:00Z"),
       profile("p-multi-client", USERS.multi, CLIENT, "owner", 1, "2026-09-20T00:00:00Z"),
       profile("p-rep", USERS.rep, CLIENT, "closer", 0, stamp),
+      // This suite exercises hosted-account channel behavior. OASIS otherwise
+      // defaults to its subscription app, so pin the canonical engine to the
+      // same Anthropic workspace account the legacy cases intentionally test.
+      {
+        sql: `INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, fallback_policy, updated_at)
+              VALUES ('engine-oasis', ?, NULL, '__engine__', 'api', 'anthropic', NULL, 1, 'none', ?)`,
+        args: [OASIS, stamp],
+      },
       // OASIS: the workspace key, and a teammate's PERSONAL key for the same agent.
       {
         sql: `INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)
@@ -298,7 +316,7 @@ async function main() {
   const testConnection = await import("../app/api/agent-config/test-connection/route");
   const { NextRequest } = await import("next/server");
   const { resolveOsViewer } = await import("../components/os/department/viewer");
-  const { resolveChannelState } = await import("../components/os/department/channel");
+  const { resolveChannelState, workspaceChatReadiness } = await import("../components/os/department/channel");
   const { headerStatus, statusFor, withLastTurn } = await import("../components/os/department/StatusPill");
   const { loadAiTeam } = await import("../components/os/aiteam/roster");
   const { Homes } = await import("../components/os/aiteam/TeammateRow");
@@ -505,8 +523,8 @@ async function main() {
       const body = (await res.json()) as { error: string };
       // Not 400 department_agent_mismatch ("this channel is out of date").
       assert.equal(res.status, 503, JSON.stringify(body));
-      assert.equal(body.error, "workspace_unavailable");
-      assert.equal(failureLogs().at(-1)?.code, "workspace_unavailable");
+      assert.equal(body.error, "config_unavailable");
+      assert.equal(failureLogs().at(-1)?.code, "config_unavailable");
       assert.equal(sent.length, 0);
       assert.match(outcome.failureCopy(body.error, { canManageAi: true }).sentence, /Try again/);
     } finally {
@@ -697,13 +715,13 @@ async function main() {
     assert.deepEqual(headerStatus(statusFor(true, 0), state), { kind: "working" });
     renderScenarios.push({ id: "key_saved_after_412", deptSlug: "sales", status: statusFor(true, 0), channel: state });
   });
-  await check("the operator is ready only when a platform key exists to fall back to", async () => {
+  await check("a platform key never bypasses the canonical workspace API account", async () => {
     await db.execute({ sql: "UPDATE agent_model_config SET enabled = 0 WHERE id = 'c-oasis'", args: [] });
     try {
       const cc = await viewerFor(USERS.cc);
       assert.equal((await resolveChannelState(dept("sales"), cc)).kind, "not_connected", "operator, no platform key");
       process.env.PLATFORM_DEFAULT_ANTHROPIC_API_KEY = "sk-ant-platform-0003";
-      assert.equal((await resolveChannelState(dept("sales"), cc)).kind, "ready", "operator with a platform key");
+      assert.equal((await resolveChannelState(dept("sales"), cc)).kind, "not_connected", "operator cannot borrow the platform key");
       const partner = await viewerFor(USERS.partner);
       assert.equal((await resolveChannelState(dept("sales"), partner)).kind, "not_connected", "a non-operator never gets the platform key");
     } finally {
@@ -1151,7 +1169,7 @@ async function main() {
     const src = readFileSync(join(process.cwd(), "components/agents/AgentChat.tsx"), "utf8");
     // With the model a "not found" was about, when the route named it (lib/ai/model-registry.ts).
     assert.match(src, /failureCopy\(failure, \{ canManageAi, model: failureModel \}\)/, "errors go through the plain-sentence table");
-    assert.match(src, /setFailureModel\(asFailureModel\(\(payload as \{ model\?: unknown \}\)\.model\)\)/, "the route's named model is not read");
+    assert.match(src, /setFailureModel\(asFailureModel\(event\.error\.model\)\)/, "the normalized route model is not read");
     assert.doesNotMatch(src, /setError\(detail\)|\(payload as \{ message\?: string \}\)\.message/, "raw error text reaches the screen");
     assert.match(src, /if \(!assistantText\) \{\s*dropEmptyPlaceholder\(\);/, "an empty reply bubble stays on screen");
     assert.match(src, /e\.key === "Enter" && !e\.shiftKey && !e\.nativeEvent\.isComposing/, "Enter sends, Shift+Enter is a newline");
@@ -1242,6 +1260,149 @@ async function main() {
     assert.equal(res.status, 200);
     assert.equal(parseSse(await res.text()).at(-1)?.event, "done");
     assert.ok((await outcomes(OASIS)).includes("dept:chief_of_staff=ok"));
+  });
+
+  await check("canonical readiness keeps one exact engine and computer from settings through the roster", async () => {
+    const pairingId = "pair-channel-codex";
+    const probeJobId = "probe-channel-codex";
+    const probeAt = new Date(Date.now() - 1_000).toISOString();
+    const readyAt = new Date().toISOString();
+    const offlineAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const engineVersion = () => new Date().toISOString();
+    const setWorkspaceEngine = async (input: {
+      provider: "api" | "cli";
+      model: "anthropic" | "openai" | "codex";
+      pairingId?: string | null;
+      fallback?: "none" | "workspace_api";
+      proof?: boolean;
+    }) => {
+      const version = engineVersion();
+      await db.execute({
+        sql: `UPDATE agent_model_config
+                 SET provider = ?, model = ?, computer_pairing_id = ?, fallback_policy = ?, updated_at = ?,
+                     runtime_probe_job_id = ?, runtime_probe_pairing_id = ?, runtime_probe_engine_kind = ?,
+                     runtime_probe_engine_name = ?, runtime_probe_engine_version = ?, runtime_probe_verified_at = ?
+               WHERE id = 'engine-oasis'`,
+        args: [
+          input.provider,
+          input.model,
+          input.pairingId ?? null,
+          input.fallback ?? "none",
+          version,
+          input.proof ? probeJobId : null,
+          input.proof ? pairingId : null,
+          input.proof ? "cli" : null,
+          input.proof ? "codex" : null,
+          input.proof ? version : null,
+          input.proof ? probeAt : null,
+        ],
+      });
+      return version;
+    };
+
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings
+              (id, tenant_id, user_id, label, last_seen_at, scope, paired_via, claim_protocols,
+               claim_enabled_at, claim_state_at, claim_capacity, claim_runtime_state, created_at)
+            VALUES (?, ?, ?, 'CCPC exact', ?, 'connector', 'pair_code', ?, ?, ?, 1, ?, ?)`,
+      args: [
+        pairingId,
+        OASIS,
+        USERS.cc.id,
+        readyAt,
+        JSON.stringify(["runtime_action_v1", "department_task_v2"]),
+        readyAt,
+        offlineAt,
+        JSON.stringify({ codex: { installed: true, authenticated: true, state: "ready" } }),
+        readyAt,
+      ],
+    });
+    await db.execute({
+      sql: `INSERT INTO bridge_runtime_jobs
+              (id, tenant_id, user_id, pairing_id, action, engine_kind, engine_name, status, result_code, finished_at, updated_at)
+            VALUES (?, ?, ?, ?, 'probe', 'cli', 'codex', 'completed', 'probe_ok', ?, ?)`,
+      args: [probeJobId, OASIS, USERS.cc.id, pairingId, probeAt, probeAt],
+    });
+
+    try {
+      const viewer = await viewerFor(USERS.partner);
+
+      // A heartbeat and auth metadata are not execution readiness: no fresh
+      // claim means no device run, and fallback=none cannot spend the account.
+      await setWorkspaceEngine({ provider: "cli", model: "codex", pairingId, fallback: "none", proof: true });
+      let readiness = await workspaceChatReadiness(viewer, "chief_of_staff");
+      assert.equal(readiness.provider, "none", "heartbeat-only device reported Ready");
+      assert.equal(readiness.directAgentProvider, "none");
+
+      // The same offline runtime may use the account only after the saved
+      // selection explicitly opts into it, and the UI labels that fallback.
+      await setWorkspaceEngine({ provider: "cli", model: "codex", pairingId, fallback: "workspace_api", proof: true });
+      readiness = await workspaceChatReadiness(viewer, "chief_of_staff");
+      assert.equal(readiness.provider, "ready");
+      assert.equal(readiness.directAgentProvider, "none", "an active device fallback made direct custom chat look runnable");
+      assert.equal(readiness.engine?.spend, "api_credits");
+      assert.match(readiness.engine?.note ?? "", /explicitly enabled workspace API fallback/);
+
+      // API mode is exact: a selected provider cannot borrow a different
+      // provider's connected key.
+      await setWorkspaceEngine({ provider: "api", model: "openai" });
+      readiness = await workspaceChatReadiness(viewer, "chief_of_staff");
+      assert.equal(readiness.provider, "none", "OpenAI selection borrowed the Anthropic account");
+      assert.equal(readiness.directAgentProvider, "none");
+
+      // A fresh v2 claim plus the matching saved probe makes only this exact
+      // pairing ready. Busy still accepts queued work; removing v2 refuses it.
+      await db.execute({ sql: "UPDATE bridge_pairings SET claim_state_at = ?, claim_capacity = 1 WHERE id = ?", args: [readyAt, pairingId] });
+      const switchedAt = await setWorkspaceEngine({ provider: "cli", model: "codex", pairingId, fallback: "none", proof: true });
+      await db.execute({
+        sql: `INSERT INTO agent_turn_outcomes (tenant_id, channel_key, agent_slug, outcome, code, at)
+              VALUES (?, 'dept:marketing', 'maven', 'failed', 'provider_400_credit', ?)
+              ON CONFLICT (tenant_id, channel_key) DO UPDATE SET outcome = 'failed', code = 'provider_400_credit', at = excluded.at`,
+        args: [OASIS, new Date(Date.parse(switchedAt) - 1_000).toISOString()],
+      });
+      readiness = await workspaceChatReadiness(viewer, "chief_of_staff");
+      assert.equal(readiness.provider, "ready");
+      assert.equal(readiness.engineRead?.chosen.kind, "cli");
+      assert.equal(readiness.engineRead?.reachable, true);
+      assert.match(readiness.engine?.line ?? "", /Codex.*paired computer/);
+      assert.equal(readiness.directAgentProvider, "none");
+      const marketing = await resolveChannelState(dept("marketing"), viewer);
+      assert.ok(marketing.kind === "ready", marketing.kind);
+      if (marketing.kind === "ready") assert.deepEqual(marketing.lastTurn, { kind: "ok" }, "an old API failure survived an engine switch");
+
+      await db.execute({ sql: "UPDATE bridge_pairings SET claim_capacity = 0 WHERE id = ?", args: [pairingId] });
+      assert.equal((await workspaceChatReadiness(viewer, "chief_of_staff")).provider, "ready", "a busy pairing cannot accept queued work");
+      await db.execute({ sql: "UPDATE bridge_pairings SET claim_capacity = 1, claim_protocols = '[\"runtime_action_v1\"]' WHERE id = ?", args: [pairingId] });
+      assert.equal((await workspaceChatReadiness(viewer, "chief_of_staff")).provider, "none", "a v1-only connector reported v2 readiness");
+      await db.execute({ sql: "UPDATE bridge_pairings SET claim_protocols = '[\"runtime_action_v1\",\"department_task_v2\"]' WHERE id = ?", args: [pairingId] });
+
+      const teamOnDevice = await loadAiTeam(viewer);
+      assert.ok(teamOnDevice.leads.some((lead) => lead.web === "ready"), "the exact device did not ready a department lead");
+      const customOnDevice = teamOnDevice.custom.ok
+        ? teamOnDevice.custom.value.find((row) => row.slug === CUSTOM_SLUG)
+        : null;
+      assert.equal(customOnDevice?.web, "not_connected", "device-backed department readiness leaked into a direct custom chat");
+
+      // A personal row overrides the workspace row; deleting it restores
+      // inheritance rather than creating a fourth engine mode.
+      await setWorkspaceEngine({ provider: "api", model: "anthropic" });
+      await db.execute({
+        sql: `INSERT INTO agent_model_config
+                (id, tenant_id, user_id, agent_key, provider, model, enabled, fallback_policy, updated_at)
+              VALUES ('engine-partner', ?, ?, '__engine__', 'api', 'openai', 1, 'none', ?)`,
+        args: [OASIS, USERS.partner.id, engineVersion()],
+      });
+      assert.equal((await workspaceChatReadiness(viewer, "chief_of_staff")).provider, "none", "personal OpenAI selection ignored");
+      await db.execute({ sql: "DELETE FROM agent_model_config WHERE id = 'engine-partner'", args: [] });
+      const inherited = await workspaceChatReadiness(viewer, "chief_of_staff");
+      assert.equal(inherited.provider, "ready");
+      assert.equal(inherited.directAgentProvider, "ready");
+    } finally {
+      await db.execute({ sql: "DELETE FROM agent_model_config WHERE id = 'engine-partner'", args: [] });
+      await db.execute({ sql: "DELETE FROM bridge_runtime_jobs WHERE id = ?", args: [probeJobId] });
+      await db.execute({ sql: "DELETE FROM bridge_pairings WHERE id = ?", args: [pairingId] });
+      await setWorkspaceEngine({ provider: "api", model: "anthropic" });
+    }
   });
 
   console.log(`os-channels-honest: ${failures === 0 ? "OK" : `${failures} FAILED`}`);

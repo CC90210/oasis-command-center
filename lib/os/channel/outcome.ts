@@ -229,6 +229,9 @@ const ROUTE_ERRORS = {
   workspace_unavailable: "We could not confirm your workspace just now. Try again in a moment.",
   config_unavailable: "We could not read this workspace's AI settings just now. Try again in a moment.",
   ai_usage_unavailable: "We could not check this workspace's AI budget just now. Try again in a moment.",
+  computer_choice_needs_pairing: "Choose and test a computer in Settings > AI brain before trying again. Nothing was sent and no API credits were used.",
+  direct_agent_device_unsupported: "This custom teammate cannot run through a paired computer yet. Use it from a department channel, or select API key in Settings > AI brain. Nothing was sent and no API credits were used.",
+  engine_dispatch_unavailable: "This chat cannot send work to the exact selected computer. Use the department channel, choose API key, or explicitly enable Workspace API fallback in Settings > AI brain. Nothing was sent and no API credits were used.",
   // O1 (department-agent.ts prepareAgentTurn, 409): this person is not the
   // workspace's agents owner, so department chats run on each person's own
   // computer and theirs is not connected yet. PAUSE, NOT FALLBACK: never a
@@ -238,6 +241,7 @@ const ROUTE_ERRORS = {
   computer_not_yours: "Department chats in this workspace run on each person's own computer, and yours isn't connected yet. Nothing was sent.",
   computer_owner_not_set: "No one has been set as this workspace's computer owner yet, so department chats are paused. Nothing was sent.",
   computer_owner_unavailable: "Could not confirm this workspace's computer owner just now. Nothing was sent. Try again in a moment.",
+  agents_owner_only: "This legacy full-access computer can run agents only for the workspace's computer owner. Re-pair it as a Connector or choose that owner's computer. Nothing was sent.",
   // POST /api/os/runs into a conversation that holds an automation's runs
   // (lib/os/runs/send.ts): that conversation is the automation's record.
   automation_conversation: "This conversation is an automation's record, so it can't take new messages. Start a new chat to ask a question.",

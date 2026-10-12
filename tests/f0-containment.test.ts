@@ -692,7 +692,7 @@ async function main() {
       await db.execute({ sql: "UPDATE user_profiles SET onboarding_completed_at = ? WHERE auth_user_id = ?", args: [stamp, USERS.cc.id] });
     }
   });
-  await check("Settings › AI: the no-provider notice and an agent's offline strip offer the bridge to the operator only", () => {
+  await check("Settings › AI: install links remain operator-only while the unified engine panel is member-visible", () => {
     const clientNotice = NoProviderNotice({ canInstallBridge: false });
     assert.ok(!hasInstallLink(clientNotice) && textOf(clientNotice).join(" ").includes("connect a cloud provider above"));
     assert.ok(!/local bridge/i.test(textOf(clientNotice).join(" ")), "a client is not told to install the bridge");
@@ -702,12 +702,15 @@ async function main() {
     assert.ok(!hasInstallLink(clientStrip) && !/Install\s+the\s+bridge/i.test(clientStripText) && clientStripText.includes("cloud mode"));
     assert.ok(hasInstallLink(BridgeToolAccess({ bridgeOnline: false, canInstallBridge: true })));
     assert.ok(!hasInstallLink(BridgeToolAccess({ bridgeOnline: true, canInstallBridge: true })), "no install link once the bridge is online");
-    // The card gets the verdict from SettingsContent's verified operator check
-    // (AgentConfigEditor's per-agent override section was removed 2026-10-09).
+    // Provider install links still get the verified-operator verdict. Runtime
+    // selection itself moved into one member-visible exact-device panel; the
+    // old CLI inventory and personal picker must never be mounted beside it.
     const settings = readFileSync(join(ROOT, "components", "settings", "SettingsContent.tsx"), "utf8");
     assert.equal(settings.match(/canInstallBridge=\{isOperator\}/g)?.length, 1, "ProviderAccountsCard gets isOperator");
     assert.doesNotMatch(settings, /<AgentConfigEditor\b/, "the removed per-agent override editor is mounted again");
-    assert.match(settings, /show\("ai"\) && isOperator && \(\s*<SafeBoundary label="Local CLI providers">\s*<LocalCliProvidersCard/, "the CLI card (which links the install) stays operator-only");
+    assert.match(settings, /<AgentEnginePanel>/, "the unified engine panel is mounted");
+    assert.doesNotMatch(settings, /<LocalCliProvidersCard\b/, "the old CLI inventory is mounted beside the unified panel");
+    assert.doesNotMatch(settings, /<PersonEngineCard\b/, "the old personal picker is mounted beside the unified panel");
   });
   await check("/sequences: the offline banner offers Install bridge to the operator only", () => {
     const props = {
@@ -735,7 +738,7 @@ async function main() {
       ["components/settings/BridgeInstallLink.tsx", "the gate itself"],
       ["lib/setup-links.ts", "the setup-link registry: the one place the href is written, under the operator audience, so setupLink() never hands it to anyone else"],
       ["components/settings/SettingsContent.tsx", "inside the Settings › Devices section, which is show(\"devices\") && isOperator (os-connectors test)"],
-      ["components/settings/LocalCliProvidersCard.tsx", "mounted only under show(\"ai\") && isOperator (asserted above)"],
+      ["components/settings/LocalCliProvidersCard.tsx", "retained as an inert compatibility shim and never mounted (asserted above)"],
       ["lib/setup-readiness.ts", "readiness data with no caller in app/ or components/"],
       // A client founder reaches /automations (requireSystemSurface admits any
       // founder). tests/client-surface-isolation.test.ts keeps viewer checks out

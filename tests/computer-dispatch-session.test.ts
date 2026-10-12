@@ -80,7 +80,23 @@ function computer(label: string, over: Partial<OwnComputer> = {}): OwnComputer {
 }
 
 async function main() {
-  const { bestOwnComputer, computerDispatchDecision } = await import("../lib/os/runs/session");
+  const {
+    bestOwnComputer,
+    computerDispatchDecision,
+    runtimeDispatchDecision,
+    runtimeExecutionState,
+    runtimeFallbackDecision,
+    selectLegacyBindingCandidate,
+  } = await import("../lib/os/runs/session");
+  const { runtimeProbeReceiptKey, RUNTIME_PROBE_FRESH_MS } = await import("../lib/bridge/runtime-jobs");
+  const receipt = (pairingId: string, kind: "cli" | "local", name: string, msAgo = 1_000) => ({
+    pairingId,
+    engine: { kind, name },
+    ready: true,
+    finishedAt: new Date(NOW - msAgo).toISOString(),
+  });
+  const receiptMap = (items: Array<ReturnType<typeof receipt>>) =>
+    new Map(items.map((item) => [runtimeProbeReceiptKey(item.pairingId, item.engine), item]));
 
   console.log("bestOwnComputer + computerDispatchDecision:");
 
@@ -138,6 +154,245 @@ async function main() {
       if (d.ok) assert.ok(typeof d.label === "string" && d.label.length > 0);
       else assert.ok(typeof d.error === "string" && d.error.length > 0);
     }
+  });
+  await check("a canonical Codex selection is ready only from a fresh exact probe receipt, never heartbeat state alone", () => {
+    const c = computer("CCPC");
+    assert.deepEqual(
+      runtimeDispatchDecision(c, { kind: "cli", name: "codex" }, { codex: { installed: true, authenticated: true, state: "probe_required" } }, NOW),
+      { ok: false, error: "department_profile_unsupported" },
+    );
+    assert.deepEqual(
+      runtimeDispatchDecision(c, { kind: "cli", name: "codex" }, { codex: { installed: true, authenticated: true, state: "ready" } }, NOW),
+      { ok: false, error: "department_profile_unsupported" },
+      "heartbeat-only ready must fail closed",
+    );
+    assert.deepEqual(
+      runtimeDispatchDecision(
+        c,
+        { kind: "cli", name: "codex" },
+        { codex: { installed: true, authenticated: true, state: "probe_required" } },
+        NOW,
+        receipt(c.id, "cli", "codex"),
+      ),
+      { ok: true, label: "CCPC" },
+      "the server receipt closes the immediate post-probe heartbeat race",
+    );
+    assert.deepEqual(
+      runtimeDispatchDecision(
+        c,
+        { kind: "cli", name: "codex" },
+        { codex: { installed: true, authenticated: true, state: "ready" } },
+        NOW,
+        receipt(c.id, "cli", "codex", RUNTIME_PROBE_FRESH_MS + 1),
+      ),
+      { ok: false, error: "department_profile_unsupported" },
+      "a probe older than the save window must be retested",
+    );
+    assert.deepEqual(
+      runtimeDispatchDecision(
+        c,
+        { kind: "cli", name: "codex" },
+        { codex: { installed: true, authenticated: true, state: "probe_failed" } },
+        NOW,
+        receipt(c.id, "cli", "codex"),
+      ),
+      { ok: false, error: "department_profile_unsupported" },
+      "an explicit execution failure must override an older successful receipt",
+    );
+    assert.deepEqual(
+      runtimeDispatchDecision(
+        c,
+        { kind: "cli", name: "codex" },
+        { codex: { installed: true, authenticated: true, state: "future_failure" } },
+        NOW,
+        receipt(c.id, "cli", "codex"),
+      ),
+      { ok: false, error: "department_profile_unsupported" },
+      "an unknown future heartbeat state must fail closed",
+    );
+  });
+  await check("a saved version-bound probe remains valid after ten minutes, but a changed/unproved row or newer failed probe does not", () => {
+    const c = computer("CCPC");
+    const oldSuccess = receipt(c.id, "cli", "codex", RUNTIME_PROBE_FRESH_MS + 60_000);
+    const proof = {
+      jobId: "probe-saved-codex",
+      pairingId: c.id,
+      engine: { kind: "cli" as const, name: "codex" },
+      engineVersion: "engine-v8",
+      verifiedAt: oldSuccess.finishedAt,
+    };
+    const live = { codex: { installed: true, authenticated: true, state: "ready" } };
+    assert.deepEqual(
+      runtimeDispatchDecision(c, proof.engine, live, NOW, oldSuccess, proof, true),
+      { ok: true, label: "CCPC" },
+      "normal department work must not require a new test every ten minutes",
+    );
+    assert.deepEqual(
+      runtimeDispatchDecision(c, proof.engine, live, NOW, receipt(c.id, "cli", "codex"), null, true),
+      { ok: false, error: "department_profile_unsupported" },
+      "a fresh heartbeat/probe cannot establish readiness for a changed row that has no saved proof",
+    );
+    assert.deepEqual(
+      runtimeDispatchDecision(
+        c,
+        proof.engine,
+        live,
+        NOW,
+        { ...receipt(c.id, "cli", "codex"), ready: false },
+        proof,
+        true,
+      ),
+      { ok: false, error: "department_profile_unsupported" },
+      "a newer failed exact-runtime probe revokes the older saved success",
+    );
+  });
+  await check("runtime failures stay distinct so Settings can offer the right repair", () => {
+    const c = computer("Mac");
+    assert.deepEqual(runtimeDispatchDecision(c, { kind: "cli", name: "gemini" }, { gemini: { state: "unsupported" } }, NOW), {
+      ok: false,
+      error: "cli_account_unsupported",
+    });
+    assert.deepEqual(runtimeDispatchDecision(c, { kind: "cli", name: "claude" }, { claude: { state: "needs_sign_in" } }, NOW), {
+      ok: false,
+      error: "subscription_auth_failure",
+    });
+    assert.deepEqual(runtimeDispatchDecision(c, { kind: "cli", name: "codex" }, { codex: { state: "not_installed" } }, NOW), {
+      ok: false,
+      error: "cli_not_found",
+    });
+  });
+  await check("a signup-secret pairing can never execute an exact canonical engine, even if an approval timestamp was populated", () => {
+    const c = computer("unsafe bootstrap", { pairedVia: "signup_secret", claimEnabledAt: fresh(60_000) });
+    assert.deepEqual(runtimeDispatchDecision(c, { kind: "cli", name: "codex" }, { codex: { state: "ready" } }, NOW), {
+      ok: false,
+      error: "computer_not_approved",
+    });
+  });
+  await check("runtime state accepts the heartbeat's persisted { runtime_state: ... } envelope", () => {
+    assert.equal(
+      runtimeExecutionState({ runtime_state: { codex: { state: "ready" } } }, { kind: "cli", name: "codex" }),
+      "ready",
+      "the bridge ping persists claim_runtime_state with this envelope",
+    );
+    assert.equal(
+      runtimeExecutionState(
+        JSON.stringify({ runtime_state: { local_models: [{ ref: "ollama/llama3.3", state: "ready" }] } }),
+        { kind: "local", name: "ollama/llama3.3" },
+      ),
+      "ready",
+    );
+  });
+  await check("device failure refuses by default and only an explicit workspace_api policy permits API fallback", () => {
+    const failed = { ok: false as const, error: "computer_offline" };
+    const exact = { kind: "cli" as const, cli: "codex" as const, pairingId: "pair-ccpc", fallback: "workspace_api" as const };
+    assert.deepEqual(runtimeFallbackDecision({ ...exact, fallback: "none" }, failed), failed, "fallback none keeps the refusal");
+    assert.deepEqual(runtimeFallbackDecision({ kind: "cli", cli: "codex", pairingId: "pair-ccpc" }, failed), failed, "legacy missing policy never opts in");
+    assert.deepEqual(
+      runtimeFallbackDecision(exact, { ok: false, error: "computer_not_approved" }),
+      { ok: false, error: "computer_not_approved" },
+      "approval is an authorization boundary, never an availability fallback",
+    );
+    assert.deepEqual(
+      runtimeFallbackDecision(exact, { ok: false, error: "department_profile_unsafe" }),
+      { ok: false, error: "department_profile_unsafe" },
+      "a locked-profile failure is a security boundary, never an availability fallback",
+    );
+    assert.deepEqual(
+      runtimeFallbackDecision(exact, { ok: false, error: "claude_account_changed" }),
+      { ok: false, error: "claude_account_changed" },
+      "an account-identity mismatch must not be hidden by API fallback",
+    );
+    assert.deepEqual(runtimeFallbackDecision(exact, failed), {
+      ok: true,
+      mode: "workspace_api",
+      fallbackFrom: exact,
+      reason: "computer_offline",
+    });
+    assert.deepEqual(runtimeFallbackDecision(exact, { ok: true, label: "CCPC" }), { ok: true, mode: "computer", label: "CCPC" });
+  });
+  await check("legacy subscription binding chooses the sole approved v2 pairing whose exact runtime really executed", () => {
+    const ready = {
+      ...computer("CCPC"),
+      claimProtocols: ["department_task_v1", "department_task_v2"],
+      claimRuntimeState: { runtime_state: { codex: { installed: true, authenticated: true, state: "ready" } } },
+    };
+    const v1Only = {
+      ...computer("Old Mac"),
+      claimProtocols: ["department_task_v1"],
+      claimRuntimeState: { runtime_state: { codex: { state: "ready" } } },
+    };
+    const untested = {
+      ...computer("New Mac"),
+      claimProtocols: ["department_task_v2"],
+      claimRuntimeState: { runtime_state: { codex: { installed: true, authenticated: true, state: "probe_required" } } },
+    };
+    const receipts = receiptMap([receipt(ready.id, "cli", "codex")]);
+    assert.equal(selectLegacyBindingCandidate([v1Only, untested, ready], { kind: "cli", name: "codex" }, NOW, receipts)?.id, ready.id);
+  });
+  await check("legacy binding requires exactly one ready compatible pairing; zero or multiple force an explicit choice", () => {
+    const ready = (label: string) => ({
+      ...computer(label),
+      claimProtocols: ["department_task_v2"],
+      claimRuntimeState: { runtime_state: { claude: { state: "ready" } } },
+    });
+    assert.equal(selectLegacyBindingCandidate([], { kind: "cli", name: "claude" }, NOW, new Map()), null);
+    const notApproved = ready("not-approved");
+    assert.equal(
+      selectLegacyBindingCandidate(
+        [{ ...notApproved, claimEnabledAt: null }],
+        { kind: "cli", name: "claude" },
+        NOW,
+        receiptMap([receipt(notApproved.id, "cli", "claude")]),
+      ),
+      null,
+      "an execution probe cannot bypass pairing approval",
+    );
+    const signupSecret = ready("signup-secret");
+    assert.equal(
+      selectLegacyBindingCandidate(
+        [{ ...signupSecret, pairedVia: "signup_secret", claimEnabledAt: fresh(60_000) }],
+        { kind: "cli", name: "claude" },
+        NOW,
+        receiptMap([receipt(signupSecret.id, "cli", "claude")]),
+      ),
+      null,
+      "a populated timestamp cannot make a signup-secret pairing claim-capable",
+    );
+    const one = ready("one");
+    const two = ready("two");
+    assert.equal(
+      selectLegacyBindingCandidate(
+        [one, two],
+        { kind: "cli", name: "claude" },
+        NOW,
+        receiptMap([receipt(one.id, "cli", "claude"), receipt(two.id, "cli", "claude")]),
+      ),
+      null,
+    );
+  });
+  await check("legacy pure-local binding matches the selected namespaced model, not any other ready local model", () => {
+    const selected = {
+      ...computer("Local workstation"),
+      claimProtocols: ["department_task_v2"],
+      claimRuntimeState: {
+        runtime_state: {
+          local_models: [
+            { ref: "ollama/qwen3", state: "ready" },
+            { ref: "ollama/llama3.3", state: "probe_required" },
+          ],
+        },
+      },
+    };
+    assert.equal(selectLegacyBindingCandidate([selected], { kind: "local", name: "ollama/llama3.3" }, NOW, new Map()), null);
+    assert.equal(
+      selectLegacyBindingCandidate(
+        [selected],
+        { kind: "local", name: "ollama/qwen3" },
+        NOW,
+        receiptMap([receipt(selected.id, "local", "ollama/qwen3")]),
+      )?.id,
+      selected.id,
+    );
   });
 
   console.log(`\n${passed} passed, ${failures} failed`);

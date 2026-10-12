@@ -64,6 +64,7 @@ const db: Client = createClient({ url: `file:${dbFile}` });
 // route's per-tenant executor gate never interferes with this file's checks.
 const TENANT = "c1c1c1c1-0000-4000-8000-0000000000c1";
 const OWNER_ID = "auth-owner-0001";
+const REPAIR_OWNER_ID = "auth-owner-repair-0001";
 const MEMBER_ID = "auth-member-0001"; // read_only
 const stamp = "2026-10-11T00:00:00.000Z";
 
@@ -83,7 +84,8 @@ async function createSchema() {
       tool_capabilities TEXT NOT NULL DEFAULT '[]',
       scope TEXT, paired_via TEXT, claim_protocols TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
       claude_account_hash TEXT, previous_token_hash TEXT, token_rotated_at TEXT,
-      last_poll_ok_at TEXT);
+      last_poll_ok_at TEXT, claim_state_at TEXT, claim_capacity INTEGER,
+      claim_in_flight INTEGER, claim_blocked_reason TEXT, claim_runtime_state TEXT);
     CREATE UNIQUE INDEX idx_bridge_pairings_unique_live_machine
       ON bridge_pairings (tenant_id, machine_fingerprint) WHERE ((revoked_at IS NULL) AND (machine_fingerprint IS NOT NULL));
     CREATE TABLE bridge_pair_codes (
@@ -119,7 +121,13 @@ async function seed() {
     [
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-x', 'Client X Plumbing')", args: [TENANT] },
       { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [OWNER_ID, "owner@client-x.test"] },
+      { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [REPAIR_OWNER_ID, "repair-owner@client-x.test"] },
       { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [MEMBER_ID, "member@client-x.test"] },
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, full_name, onboarding_completed_at, updated_at)
+              VALUES ('p-repair-owner', ?, 'repair-owner@client-x.test', ?, 'owner', 1, 'Repair Owner', ?, ?)`,
+        args: [REPAIR_OWNER_ID, TENANT, stamp, stamp],
+      },
       {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, full_name, onboarding_completed_at, updated_at)
               VALUES ('p-owner', ?, 'owner@client-x.test', ?, 'owner', 1, 'Owner', ?, ?)`,
@@ -317,6 +325,53 @@ async function main() {
     assert.deepEqual(JSON.parse(String(row.rows[0].claim_protocols)), ["department_task_v1"]);
   });
 
+  await check("ping persists the connector's truthful busy and idle execution state", async () => {
+    await pairingRow({ id: "bp-ping-load", userId: OWNER_ID, label: "Busy connector", token: "ping-load-token", scope: "connector", fingerprint: "ping-load-fp" });
+    const busy = await pingRoute.POST(pingReq("ping-load-token", {
+      services: {},
+      capacity: 0,
+      in_flight: 1,
+      blocked_reason: null,
+    }));
+    assert.equal(busy.status, 200, JSON.stringify(await busy.clone().json()));
+    let row = (await db.execute({
+      sql: "SELECT claim_state_at, claim_capacity, claim_in_flight, claim_blocked_reason FROM bridge_pairings WHERE id = 'bp-ping-load'",
+    })).rows[0];
+    assert.ok(row.claim_state_at);
+    assert.equal(row.claim_capacity, 0);
+    assert.equal(row.claim_in_flight, 1);
+    assert.equal(row.claim_blocked_reason, null);
+
+    const idle = await pingRoute.POST(pingReq("ping-load-token", {
+      services: {},
+      capacity: 1,
+      in_flight: 0,
+      blocked_reason: null,
+    }));
+    assert.equal(idle.status, 200, JSON.stringify(await idle.clone().json()));
+    row = (await db.execute({
+      sql: "SELECT claim_capacity, claim_in_flight FROM bridge_pairings WHERE id = 'bp-ping-load'",
+    })).rows[0];
+    assert.equal(row.claim_capacity, 1);
+    assert.equal(row.claim_in_flight, 0);
+  });
+
+  await check("ping rejects partial or malformed execution state without changing the pairing", async () => {
+    await pairingRow({ id: "bp-ping-invalid-load", userId: OWNER_ID, label: "Connector", token: "ping-invalid-load-token", scope: "connector", fingerprint: "ping-invalid-load-fp" });
+    const partial = await pingRoute.POST(pingReq("ping-invalid-load-token", { capacity: 0, in_flight: 1 }));
+    assert.equal(partial.status, 400);
+    const malformed = await pingRoute.POST(pingReq("ping-invalid-load-token", {
+      capacity: 1,
+      in_flight: 0,
+      blocked_reason: "../../bad",
+    }));
+    assert.equal(malformed.status, 400);
+    const row = (await db.execute({
+      sql: "SELECT claim_state_at, claim_capacity, claim_in_flight FROM bridge_pairings WHERE id = 'bp-ping-invalid-load'",
+    })).rows[0];
+    assert.deepEqual([row.claim_state_at, row.claim_capacity, row.claim_in_flight], [null, null, null]);
+  });
+
   await check("a connector ping that sends tool_capabilities does not change the operator chat's bridge tool list", async () => {
     await pairingRow({ id: "bp-ping-connector", userId: OWNER_ID, label: "Connector box", token: "ping-connector-token", scope: "connector", fingerprint: "ping-connector-fp" });
     const before = await db.execute({ sql: "SELECT tool_capabilities FROM bridge_pairings WHERE id = 'bp-ping-connector'" });
@@ -348,7 +403,7 @@ async function main() {
   await check("re-pairing a computer clears the previous token and the approval: the old in-grace token answers nothing", async () => {
     const { sha256 } = await import("../lib/api-helpers");
     const fp = "repair-fp";
-    await login(OWNER_ID, "owner@client-x.test");
+    await login(REPAIR_OWNER_ID, "repair-owner@client-x.test");
     const first = (await jsonOf(await mintRoute.POST(mintReq({ purpose: "connector" })))).body as { code: string };
     logout();
     const r1 = await jsonOf(await redeemRoute.POST(redeemReq(first.code, fp)));
@@ -357,9 +412,9 @@ async function main() {
     const nowIso = new Date().toISOString();
     await db.execute({
       sql: "UPDATE bridge_pairings SET previous_token_hash = ?, token_rotated_at = ?, claim_enabled_at = ?, claim_enabled_by = ? WHERE id = ?",
-      args: [sha256("old-connector-token"), nowIso, nowIso, OWNER_ID, pairingId],
+      args: [sha256("old-connector-token"), nowIso, nowIso, REPAIR_OWNER_ID, pairingId],
     });
-    await login(OWNER_ID, "owner@client-x.test");
+    await login(REPAIR_OWNER_ID, "repair-owner@client-x.test");
     const second = (await jsonOf(await mintRoute.POST(mintReq()))).body as { code: string };
     logout();
     const r2 = await jsonOf(await redeemRoute.POST(redeemReq(second.code, fp)));

@@ -24,10 +24,40 @@
 import { NextRequest } from "next/server";
 import { rateLimit } from "@/lib/rate-limit";
 import { bridgeCliPolicy, type BridgeCliProvider } from "@/lib/bridge-cli-policy";
-import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
+import { authorizeBridgePullActor } from "@/lib/bridge-proxy";
 import { validateBridgeAgent } from "@/lib/agent-roots";
 import { teeBridgeChatPersistence } from "@/lib/bridge-chat-persistence";
 import { teeBridgeDashboardActions } from "@/lib/admin/bridge-dashboard-actions";
+import {
+  isOasisWorkspace,
+  readEffectiveAgentEngineWithProof,
+  savedRuntimeProbeProofReady,
+  type SavedRuntimeProbeProof,
+} from "@/lib/ai/agent-engine-store";
+import { harnessRouteFor, type HarnessRoute } from "@/lib/ai/agent-engine";
+import { subscriptionRolloutError } from "@/lib/ai/engine-rollout";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { pairingCanClaim, type PairedVia } from "@/lib/bridge/pairing-auth";
+import { isOnline } from "@/lib/devices/presence";
+import { readAgentsOwner } from "@/lib/agents-owner";
+import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
+import {
+  cancelHarnessJob,
+  enqueueHarnessJob,
+  HARNESS_PROTOCOL,
+  harnessJobStream,
+  harnessJobStreamWithUnclaimedFallback,
+  parseHarnessChatMode,
+} from "@/lib/bridge/harness-jobs";
+import { readLatestRuntimeProbeReceipts, runtimeProbeReceiptKey } from "@/lib/bridge/runtime-jobs";
+import { liveSeat } from "@/lib/os/seat";
+import { isWorkspaceApiFallbackReason, type WorkspaceApiFallbackReason } from "@/lib/os/runs/types";
+import {
+  ENGINE_FALLBACK_SIGNATURE_HEADER,
+  ENGINE_FALLBACK_STATE_HEADER,
+  mintEngineFallbackDispatch,
+} from "@/lib/ai/engine-fallback-dispatch";
+import { POST as cloudChatPost } from "@/app/api/chat/route";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -56,6 +86,10 @@ type IncomingBody = {
   session_id?: string | null;
   tab_id?: string;
   cli_provider?: string;
+  target_pairing_id?: string;
+  runtime_engine_kind?: string;
+  runtime_engine_name?: string;
+  fallback_policy?: string;
   chat_mode?: string;
   attachments?: Array<{
     id?: string;
@@ -96,7 +130,11 @@ export async function POST(req: NextRequest) {
     return jsonError(413, "payload_too_large");
   }
   try {
-    clientBody = JSON.parse(rawText) as IncomingBody;
+    const parsed: unknown = JSON.parse(rawText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return jsonError(400, "invalid_body");
+    }
+    clientBody = parsed as IncomingBody;
   } catch {
     return jsonError(400, "invalid_json");
   }
@@ -123,8 +161,8 @@ export async function POST(req: NextRequest) {
   }
 
   // cli_provider gate — same allowlist /api/chat (and the bridge) enforce.
-  const cliProvider = String(clientBody.cli_provider || "claude").toLowerCase();
-  if (!["claude", "codex", "gemini"].includes(cliProvider)) {
+  const requestedCliProvider = typeof clientBody.cli_provider === "string" ? clientBody.cli_provider.toLowerCase() : null;
+  if (requestedCliProvider !== null && !["claude", "codex", "gemini"].includes(requestedCliProvider)) {
     return jsonError(400, "invalid_cli_provider");
   }
 
@@ -135,7 +173,7 @@ export async function POST(req: NextRequest) {
   // costs nothing measurable and keeps the security check centralized.
   const agent = String(clientBody.agent || "").trim().toLowerCase();
 
-  // ---- HOPs 1-3: auth + tenant gate + bridge target (shared helper) --------
+  // ---- Auth + tenant gate (shared helper) ----------------------------------
   // Consolidated 2026-06-10 — used to inline ~60 lines duplicating
   // authorizeBridgeRequest. Same gate logic, single source of truth. Any
   // change to the security boundary (slug==='submissions' OR isOperator,
@@ -143,13 +181,98 @@ export async function POST(req: NextRequest) {
   // lib/bridge-proxy.ts — instead of two. The /chat-reset + /prewarm
   // routes already use this helper; bringing /chat into line eliminates
   // the privilege-escalation-via-drift bug class.
-  const auth = await authorizeBridgeRequest();
+  const auth = await authorizeBridgePullActor();
   if (!auth.ok) return jsonError(auth.status, auth.error);
 
   // ---- Agent allowlist (both gates: known-universe + tenant-specific) ------
   const agentCheck = validateBridgeAgent(agent, auth.tenantSlug);
   if (!agentCheck.ok) return jsonError(agentCheck.status, agentCheck.error);
 
+  // Resolve the effective choice again on the server. A stale tab, forged
+  // browser body, or remembered CLI cannot change the saved computer/runtime.
+  let savedRoute: HarnessRoute;
+  let engineSource: "person" | "workspace";
+  let savedProbeProof: SavedRuntimeProbeProof | null;
+  try {
+    const effective = await readEffectiveAgentEngineWithProof(auth.tenantId, auth.userId);
+    savedRoute = harnessRouteFor(effective.engine);
+    engineSource = effective.source;
+    savedProbeProof = effective.probeProof;
+  } catch (error) {
+    console.error("[bridge.chat.engine]", error);
+    return jsonError(503, "engine_config_unavailable");
+  }
+  if (savedRoute.mode === "cloud_only") return jsonError(409, "engine_requires_cloud_route");
+  if (savedRoute.mode === "unavailable") return jsonError(409, "engine_pairing_required");
+
+  // Test and Save apply this same rollout gate. Re-check it at execution time
+  // so a legacy/pre-existing row cannot run Codex outside an eligible OASIS
+  // workspace merely because it predates the canonical engine API.
+  if (savedRoute.engineKind === "subscription") {
+    try {
+      if (subscriptionRolloutError(savedRoute.runtime!, await isOasisWorkspace(auth.tenantId))) {
+        return jsonError(409, "codex_oasis_rollout_only");
+      }
+    } catch (error) {
+      console.error("[bridge.chat.rollout]", error instanceof Error ? error.message : String(error));
+      return jsonError(503, "engine_rollout_check_unavailable");
+    }
+  }
+
+  const bindingMatches =
+    clientBody.target_pairing_id === savedRoute.pairingId &&
+    clientBody.runtime_engine_kind === savedRoute.engineKind &&
+    clientBody.runtime_engine_name === savedRoute.engineName &&
+    clientBody.fallback_policy === savedRoute.fallback &&
+    (savedRoute.engineKind === "subscription"
+      ? requestedCliProvider === savedRoute.engineName
+      : requestedCliProvider === null);
+  if (!bindingMatches) return jsonError(409, "engine_selection_stale");
+
+  // Re-check the selected pairing at handoff time. A heartbeat or credential
+  // file is not readiness: the exact runtime must have passed its probe.
+  const { data: pairingData, error: pairingError } = await getServiceSupabase()
+    .from("bridge_pairings")
+    .select("id, user_id, last_seen_at, claim_enabled_at, paired_via, scope, claim_protocols, claim_runtime_state")
+    .eq("tenant_id", auth.tenantId)
+    .eq("id", savedRoute.pairingId)
+    .is("revoked_at", null)
+    .maybeSingle();
+  if (pairingError) {
+    console.error("[bridge.chat.pairing]", pairingError.message);
+    return jsonError(503, "pairing_check_unavailable");
+  }
+  const pairing = pairingData as {
+    id?: string;
+    user_id?: string | null;
+    last_seen_at?: string | null;
+    claim_enabled_at?: string | null;
+    paired_via?: string | null;
+    scope?: string | null;
+    claim_protocols?: unknown;
+    claim_runtime_state?: unknown;
+  } | null;
+  const pairedVia: PairedVia =
+    pairing?.paired_via === "pair_code" || pairing?.paired_via === "hmac" || pairing?.paired_via === "signup_secret"
+      ? pairing.paired_via
+      : null;
+  if (!pairing || !pairingCanClaim({ claimEnabledAt: pairing.claim_enabled_at ?? null, pairedVia })) {
+    return jsonError(409, "pairing_not_approved");
+  }
+  if (!stringList(pairing.claim_protocols).includes(HARNESS_PROTOCOL)) return jsonError(409, "connector_update_required");
+  const pairingScope = pairing.scope === "connector" ? "connector" : "daemon";
+  let workspaceOwnerId: string | null = null;
+  if (engineSource === "workspace" || pairingScope === "daemon") {
+    const owner = await readAgentsOwner(auth.tenantId);
+    if (owner.state === "unavailable") return jsonError(503, "workspace_agents_owner_unavailable");
+    if (engineSource === "workspace" && owner.state !== "set") return jsonError(409, "workspace_agents_owner_unavailable");
+    workspaceOwnerId = owner.state === "set" ? owner.authUserId : null;
+  }
+  if (pairingScope === "daemon" && (!workspaceOwnerId || pairing.user_id !== workspaceOwnerId)) {
+    return jsonError(409, "agents_owner_only");
+  }
+  const pairingOwnerId = engineSource === "workspace" ? workspaceOwnerId! : auth.userId;
+  if (pairing.user_id !== pairingOwnerId) return jsonError(403, "engine_pairing_owner_mismatch");
   // ---- Per-tenant rate limit (same shape as /api/chat) ---------------------
   const limit = rateLimit({ key: `bridge-chat:${auth.tenantId}`, capacity: 30, refillPerSec: 1 / 15 });
   if (!limit.allowed) {
@@ -165,62 +288,181 @@ export async function POST(req: NextRequest) {
   // owner/admin keep their choice and every tool. One rule shared with the
   // department turns on a CLI engine (lib/bridge-cli-policy.ts). The server
   // value wins in the forward body.
-  const { cliProvider: effectiveCliProvider, disallowedTools } = bridgeCliPolicy(
-    auth.teamRole,
-    cliProvider as BridgeCliProvider,
-  );
-
-  // ---- HOP 3: forward to the VPS bridge ------------------------------------
-  // ALLOW-LISTED, never a spread of clientBody (O1, security_rules #14: the
-  // bridge decodes a `department` block the proxy never verifies). Every key
-  // below is one this route already validated or derives itself; an unknown
-  // client-supplied key (a `department` block, or anything else) is dropped
-  // here, not forwarded to a trust boundary that does not check it. Server
-  // fields (agent, cli_provider, tenant_id, user_id, team_role,
-  // disallowed_tools) are this route's own values, never the client's.
-  const forwardBody = {
-    agent, // pinned
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
-    session_id: clientBody.session_id,
-    tab_id: clientBody.tab_id,
-    cli_provider: effectiveCliProvider, // forced to claude for non-owner/admin
-    chat_mode: clientBody.chat_mode,
-    // The six fields ChatWidget sends (components/ChatWidget.tsx attachmentPayload),
-    // each kept only when it has its expected type. Before O1 the whole client
-    // object was spread through, so the bridge has always received these; an
-    // id-only projection silently dropped the file's name and text excerpt.
-    attachments: attachments.map((a) => ({
-      id: a.id,
-      filename: typeof a.filename === "string" ? a.filename : undefined,
-      mime_type: typeof a.mime_type === "string" ? a.mime_type : undefined,
-      size_bytes: typeof a.size_bytes === "number" ? a.size_bytes : undefined,
-      parser: typeof a.parser === "string" ? a.parser : undefined,
-      text_excerpt: typeof a.text_excerpt === "string" ? a.text_excerpt : null,
-    })),
-    tenant_id: auth.tenantId,
-    user_id: auth.userId,
-    team_role: auth.teamRole,
-    disallowed_tools: disallowedTools,
-  };
-
-  // Tie the upstream fetch to the client connection so a browser disconnect
-  // aborts the VPS spawn (the bridge's emit() then hits a broken pipe and
-  // stops). req.signal fires on client abort.
-  let upstream: Response;
-  try {
-    upstream = await fetch(`${auth.target.baseUrl}/chat`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${auth.target.bearerToken}`,
-      },
-      body: JSON.stringify(forwardBody),
-      signal: req.signal,
-    });
-  } catch {
-    return jsonError(502, "bridge_unreachable");
+  const disallowedTools = bridgeDisallowedToolsForRole(auth.teamRole);
+  let effectiveCliProvider: BridgeCliProvider | null = null;
+  if (savedRoute.engineKind === "subscription") {
+    const policy = bridgeCliPolicy(auth.teamRole, savedRoute.engineName as BridgeCliProvider);
+    if (policy.cliProvider !== savedRoute.engineName) return jsonError(403, "engine_not_allowed_for_role");
+    effectiveCliProvider = policy.cliProvider;
+  } else if (disallowedTools.length > 0) {
+    // Local servers have no equivalent of Claude's --disallowed-tools wall.
+    // Refuse the turn rather than quietly substituting Claude.
+    return jsonError(403, "engine_not_allowed_for_role");
   }
 
+  // Every device-backed runtime uses the exact-pairing pull lane. The selected
+  // laptop calls OUT to claim the structured task, then posts a signed SSE
+  // event stream back. This is the missing routing primitive for a Mac/PC
+  // that has no inbound URL at all. No dashboard-controlled shell command or
+  // path crosses this boundary: the connector resolves the allow-listed agent
+  // key to its own local repo root.
+  const parsedChatMode = parseHarnessChatMode(clientBody.chat_mode);
+  if (!parsedChatMode.ok) return jsonError(400, parsedChatMode.code);
+  const chatMode = parsedChatMode.value;
+  if (chatMode === "build" && !(savedRoute.engineKind === "subscription" && savedRoute.engineName === "codex")) {
+    return jsonError(409, "repo_write_sandbox_unavailable_use_codex_or_api");
+  }
+  const repoWrites = savedRoute.engineKind === "subscription" && savedRoute.engineName === "codex" && chatMode === "build" && disallowedTools.length === 0;
+  const normalizedAttachments = attachments.map((attachment) => ({
+    id: String(attachment.id),
+    filename: typeof attachment.filename === "string" ? attachment.filename : undefined,
+    mime_type: typeof attachment.mime_type === "string" ? attachment.mime_type : undefined,
+    size_bytes: typeof attachment.size_bytes === "number" ? attachment.size_bytes : undefined,
+    parser: typeof attachment.parser === "string" ? attachment.parser : undefined,
+    text_excerpt: typeof attachment.text_excerpt === "string" ? attachment.text_excerpt : null,
+  }));
+
+  /** Activate only this saved selection's explicit fallback. The signed
+   * instruction never reaches the browser; /api/chat independently resolves
+   * the authenticated workspace and permits only its current workspace key. */
+  const workspaceFallbackResponse = async (reason: WorkspaceApiFallbackReason): Promise<Response> => {
+    if (savedRoute.fallback !== "workspace_api" || !isWorkspaceApiFallbackReason(reason)) {
+      return jsonError(409, "workspace_api_fallback_not_enabled");
+    }
+    // Approval, ownership and both seat revocations remain hard boundaries
+    // even after a 30-second no-claim wait. They must never turn into API spend.
+    const requesterSeat = await liveSeat(auth.tenantId, auth.userId);
+    if (!requesterSeat.live) {
+      return jsonError(requesterSeat.reason === "unavailable" ? 503 : 403, requesterSeat.reason === "unavailable" ? "requester_check_unavailable" : "requester_inactive");
+    }
+    const ownerSeat = pairingOwnerId === auth.userId ? requesterSeat : await liveSeat(auth.tenantId, pairingOwnerId);
+    if (!ownerSeat.live) {
+      return jsonError(ownerSeat.reason === "unavailable" ? 503 : 403, ownerSeat.reason === "unavailable" ? "pairing_owner_check_unavailable" : "pairing_owner_inactive");
+    }
+    const { data: livePairing, error: livePairingError } = await getServiceSupabase()
+      .from("bridge_pairings")
+      .select("id, user_id, claim_enabled_at, paired_via, scope")
+      .eq("tenant_id", auth.tenantId)
+      .eq("id", savedRoute.pairingId)
+      .is("revoked_at", null)
+      .maybeSingle();
+    if (livePairingError) {
+      console.error("[bridge.chat.fallback-pairing]", livePairingError.message);
+      return jsonError(503, "pairing_check_unavailable");
+    }
+    const live = livePairing as {
+      user_id?: string | null;
+      claim_enabled_at?: string | null;
+      paired_via?: string | null;
+      scope?: string | null;
+    } | null;
+    const livePairedVia: PairedVia =
+      live?.paired_via === "pair_code" || live?.paired_via === "hmac" || live?.paired_via === "signup_secret"
+        ? live.paired_via
+        : null;
+    if (!live || live.user_id !== pairingOwnerId || !pairingCanClaim({ claimEnabledAt: live.claim_enabled_at ?? null, pairedVia: livePairedVia })) {
+      return jsonError(409, "pairing_no_longer_approved");
+    }
+    if (live.scope !== "connector") {
+      const currentOwner = await readAgentsOwner(auth.tenantId);
+      if (currentOwner.state === "unavailable") return jsonError(503, "workspace_agents_owner_unavailable");
+      if (currentOwner.state !== "set" || currentOwner.authUserId !== live.user_id) {
+        return jsonError(409, "agents_owner_only");
+      }
+    }
+    const conversationId = typeof clientBody.tab_id === "string" ? clientBody.tab_id : "";
+    const dispatch = mintEngineFallbackDispatch({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      agentKey: agent,
+      pairingId: savedRoute.pairingId,
+      engineKind: savedRoute.engineKind,
+      engineName: savedRoute.engineName,
+      reason,
+      conversationId,
+    });
+    if (!dispatch) return jsonError(409, "workspace_api_fallback_session_invalid");
+    const headers = new Headers(req.headers);
+    headers.delete("content-length");
+    headers.set("content-type", "application/json");
+    headers.set(ENGINE_FALLBACK_STATE_HEADER, dispatch.stateHeader);
+    headers.set(ENGINE_FALLBACK_SIGNATURE_HEADER, dispatch.signature);
+    const cloudRequest = new NextRequest(new URL("/api/chat", req.url), {
+      method: "POST",
+      headers,
+      signal: req.signal,
+      body: JSON.stringify({
+        agent_key: agent,
+        messages: messages.map((message) => ({ role: message.role, content: message.content })),
+        attachments: normalizedAttachments.map((attachment) => ({ id: attachment.id })),
+        cloud_tools: "tools",
+        tool_routing: "cloud_only",
+        chat_mode: chatMode,
+      }),
+    });
+    return cloudChatPost(cloudRequest);
+  };
+
+  if (!isOnline(pairing.last_seen_at, Date.now())) {
+    return savedRoute.fallback === "workspace_api"
+      ? workspaceFallbackResponse("computer_offline")
+      : jsonError(409, "pairing_offline");
+  }
+  const runtimeCheck = runtimeAvailability(pairing.claim_runtime_state, savedRoute);
+  if (!runtimeCheck.ok) {
+    return savedRoute.fallback === "workspace_api" && runtimeCheck.fallbackReason
+      ? workspaceFallbackResponse(runtimeCheck.fallbackReason)
+      : jsonError(409, runtimeCheck.error);
+  }
+  try {
+    const receipts = await readLatestRuntimeProbeReceipts(auth.tenantId, [savedRoute.pairingId]);
+    const runtimeEngine = savedRoute.engineKind === "subscription"
+      ? { kind: "cli" as const, name: savedRoute.engineName }
+      : { kind: "local" as const, name: savedRoute.engineName };
+    const receipt = receipts.get(runtimeProbeReceiptKey(savedRoute.pairingId, runtimeEngine));
+    if (!savedRuntimeProbeProofReady(savedProbeProof, savedRoute.pairingId, runtimeEngine, receipt)) {
+      return jsonError(409, "engine_needs_test");
+    }
+  } catch (error) {
+    console.error("[bridge.chat.probe-receipt]", error instanceof Error ? error.message : String(error));
+    return jsonError(503, "engine_probe_check_unavailable");
+  }
+
+  const queued = await enqueueHarnessJob({
+    tenantId: auth.tenantId,
+    userId: auth.userId,
+    pairingOwnerId,
+    pairingId: savedRoute.pairingId,
+    agentKey: agent,
+    engine: savedRoute.engineKind === "subscription"
+      ? { kind: "cli", name: savedRoute.engineName }
+      : { kind: "local", name: savedRoute.engineName },
+    chatMode,
+    repoWrites,
+    request: {
+      messages: messages.map((message) => ({
+        role: message.role === "assistant" ? "assistant" : "user",
+        content: String(message.content),
+      })),
+      attachments: normalizedAttachments,
+      session_id: typeof clientBody.session_id === "string" ? clientBody.session_id.slice(0, 200) : null,
+      tab_id: typeof clientBody.tab_id === "string" ? clientBody.tab_id.slice(0, 200) : null,
+      disallowed_tools: disallowedTools,
+      fallback_policy: savedRoute.fallback,
+    },
+  });
+  if (!queued.ok) {
+    return queued.code === "computer_not_answering" && savedRoute.fallback === "workspace_api"
+      ? workspaceFallbackResponse("computer_not_answering")
+      : jsonError(409, queued.code);
+  }
+  const cancelForDisconnect = () => {
+    void cancelHarnessJob({ tenantId: auth.tenantId, userId: auth.userId, jobId: queued.job.id }).catch((error) => {
+      console.error("[bridge.chat.disconnect-cancel]", error instanceof Error ? error.message : String(error));
+    });
+  };
+  if (req.signal.aborted) cancelForDisconnect();
+  else req.signal.addEventListener("abort", cancelForDisconnect, { once: true });
   // ---- SSE relay (+ history persistence tee) -------------------------------
   // The bytes still pass through byte-identical to the widget. On the happy
   // path we additionally TEE the stream (lib/bridge-chat-persistence) to write
@@ -235,34 +477,100 @@ export async function POST(req: NextRequest) {
     connection: "keep-alive",
     "x-accel-buffering": "no",
   };
-  if (!upstream.ok || !upstream.body) {
-    // Error responses (non-2xx) or empty bodies pass straight through — nothing
-    // worth persisting, and we don't want to attach a tee to an error stream.
-    return new Response(upstream.body, { status: upstream.status, headers: sseHeaders });
+  const deviceStream = () => {
+    // Only the device branch owns bridge persistence. If a never-claimed job
+    // falls back, /api/chat persists the turn and its usage exactly once.
+    const persistedBody = teeBridgeChatPersistence(harnessJobStream(queued.job), {
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      agent,
+      cliProvider: effectiveCliProvider ?? `local:${savedRoute.engineName}`,
+      // Stable per-conversation key = the client's tab_id (NOT Claude's per-turn
+      // session id, which forks every --resume turn and would shatter history).
+      conversationId: String(clientBody.tab_id || ""),
+      userMessage: String(lastUserMsg.content || ""),
+      startedAt,
+    });
+    // <dashboard-action> markers in the reply become signed proposals here
+    // (2026-09-30), never writes: markers inside code are ignored, and each
+    // other one is written only when the operator clicks Apply, then Confirm
+    // (POST /api/bridge/actions, which logs it for /runs). Tenant, user and role
+    // are this route's own authorization, never the body.
+    return teeBridgeDashboardActions(persistedBody, {
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      agent,
+      teamRole: auth.teamRole,
+    });
+  };
+  const body = savedRoute.fallback === "workspace_api"
+    ? harnessJobStreamWithUnclaimedFallback(queued.job, {
+        deviceStream,
+        fallbackResponse: () => workspaceFallbackResponse("computer_not_answering"),
+      })
+    : deviceStream();
+  return new Response(body, { status: 200, headers: sseHeaders });
+}
+
+function runtimeRoot(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== "string" || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
   }
-  const persistedBody = teeBridgeChatPersistence(upstream.body, {
-    tenantId: auth.tenantId,
-    userId: auth.userId,
-    agent,
-    cliProvider: effectiveCliProvider,
-    // Stable per-conversation key = the client's tab_id (NOT Claude's per-turn
-    // session id, which forks every --resume turn and would shatter history).
-    conversationId: String(clientBody.tab_id || ""),
-    userMessage: String(lastUserMsg.content || ""),
-    startedAt,
+}
+
+function stringList(raw: unknown): string[] {
+  try {
+    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+type RuntimeAvailability =
+  | { ok: true }
+  | { ok: false; error: string; fallbackReason?: WorkspaceApiFallbackReason };
+
+function runtimeAvailability(raw: unknown, route: Extract<HarnessRoute, { mode: "cli" }>): RuntimeAvailability {
+  const root = runtimeRoot(raw);
+  if (route.engineKind === "subscription") {
+    const runtimeState = root[route.engineName];
+    if (runtimeState === undefined) return { ok: true };
+    if (!runtimeState || typeof runtimeState !== "object" || Array.isArray(runtimeState)) return { ok: false, error: "engine_needs_test" };
+    const state = String((runtimeState as Record<string, unknown>).state || "");
+    if (["ready", "probe_required"].includes(state)) return { ok: true };
+    if (state === "unsupported" || state === "account_unsupported") {
+      return { ok: false, error: "cli_account_unsupported", fallbackReason: "cli_account_unsupported" };
+    }
+    if (["needs_sign_in", "auth_required", "authentication_failed"].includes(state)) {
+      return { ok: false, error: "subscription_auth_failure", fallbackReason: "subscription_auth_failure" };
+    }
+    if (state === "not_installed") return { ok: false, error: "cli_not_found", fallbackReason: "cli_not_found" };
+    if (["outdated", "update_required"].includes(state)) return { ok: false, error: "cli_outdated", fallbackReason: "cli_outdated" };
+    if (["subscription_limit", "limit_reached"].includes(state)) {
+      return { ok: false, error: "subscription_limit", fallbackReason: "subscription_limit" };
+    }
+    return { ok: false, error: "engine_needs_test" };
+  }
+  if (root.local_models === undefined) return { ok: true };
+  if (!Array.isArray(root.local_models)) return { ok: false, error: "engine_needs_test" };
+  const selected = root.local_models.find((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const model = entry as Record<string, unknown>;
+    return model.ref === route.engineName;
   });
-  // <dashboard-action> markers in the reply become signed proposals here
-  // (2026-09-30), never writes: markers inside code are ignored, and each
-  // other one is written only when the operator clicks Apply, then Confirm
-  // (POST /api/bridge/actions, which logs it for /runs). Tenant, user and role
-  // are this route's own authorization, never the body.
-  const withActions = teeBridgeDashboardActions(persistedBody, {
-    tenantId: auth.tenantId,
-    userId: auth.userId,
-    agent,
-    teamRole: auth.teamRole,
-  });
-  return new Response(withActions, { status: upstream.status, headers: sseHeaders });
+  // An omitted inventory is a rolling-upgrade legacy case. Once a connector
+  // advertises an explicit inventory, absence of the selected ref is evidence
+  // that this exact computer cannot run it and must fail closed.
+  if (!selected || typeof selected !== "object" || Array.isArray(selected)) return { ok: false, error: "model_not_found" };
+  return ["ready", "probe_required"].includes(String((selected as Record<string, unknown>).state || ""))
+    ? { ok: true }
+    : { ok: false, error: "engine_needs_test" };
 }
 
 function jsonError(status: number, message: string) {
