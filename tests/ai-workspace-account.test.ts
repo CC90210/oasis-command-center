@@ -770,6 +770,10 @@ async function main() {
     html = renderHelper() as Record<string, string>;
   });
   await check("the card draws a personal key as the owner's own, never Connected", () => {
+    assert.deepEqual(JSON.parse(html.openRequests), {
+      person: { provider: "openai", scope: "user", lockScope: true },
+      workspace: { provider: "google", scope: "tenant", stageOnly: true, lockScope: true },
+    });
     const personal = plain(html.personalOnly);
     assert.match(personal, /Your personal key/);
     assert.match(personal, /This key is saved for you only\. Department chats and Slack mentions don't use it: connect it for the whole team so they can\./);
@@ -781,6 +785,21 @@ async function main() {
     assert.match(both, /This workspace API account is selected as the workspace default\./);
     assert.doesNotMatch(both, /Your personal key/, "the workspace account is Connected, not the owner's own");
     assert.match(both, /Cloud: 1 provider connected/);
+    const personBoth = plain(html.personConnectedAndPersonal);
+    assert.match(personBoth, /Your personal key/);
+    assert.match(personBoth, /Replace my key/);
+    assert.match(personBoth, /Remove my key/);
+    assert.match(personBoth, /Cloud: 1 personal key saved/);
+    assert.doesNotMatch(personBoth, /This workspace API account is/);
+    assert.doesNotMatch(personBoth, /\bTest\b/, "My setup offered the workspace-account test for a personal key");
+    const personWorkspaceOnly = plain(html.personWorkspaceOnly);
+    assert.match(personWorkspaceOnly, /Set my key/);
+    assert.match(personWorkspaceOnly, /Cloud: no personal key saved/);
+    assert.doesNotMatch(personWorkspaceOnly, /Replace key|Replace my key|Remove my key/);
+    const workspaceBoth = plain(html.workspaceConnectedAndPersonal);
+    assert.match(workspaceBoth, /\bConnected\b/);
+    assert.match(workspaceBoth, /Replace key/);
+    assert.doesNotMatch(workspaceBoth, /Replace my key|Remove my key|Your personal key/);
     for (const key of ["afterPersonalConnect", "afterPersonalConnectRefresh"]) {
       const after = plain(html[key]);
       assert.equal(count(after, /Your personal key/g), 1, `${key}: Google is the owner's own key`);
@@ -1047,7 +1066,9 @@ async function main() {
       },
       viaRoutes,
     );
-    assert.deepEqual(result, { kind: "saved", staged: true });
+    assert.equal(result.kind, "saved");
+    assert.equal(result.kind === "saved" && result.staged, true);
+    assert.equal(typeof (result.kind === "saved" ? result.stagedKeyReceipt : undefined), "string");
     assert.deepEqual(callsTo, ["/api/agent-config/test-connection", "/api/agent-config/bulk-provider"]);
     const active = await account.readWorkspaceAiAccount(FRESH);
     assert.ok(account.hasUsableKey(active) && decryptField(active.encryptedApiKey) === KEY_FRESH, "staging replaced the active workspace key");
@@ -1534,7 +1555,9 @@ async function main() {
   const retireWrite = (tenant: string) => (sql: string, args: unknown[]) => has(args, tenant) && sql.startsWith("UPDATE agent_model_config SET enabled = 0");
   /** The read of the account a connect or disconnect is guarded on. */
   const stampRead = (tenant: string) => (sql: string, args: unknown[]) =>
-    has(args, tenant) && sql.startsWith("SELECT provider, model, encrypted_api_key, enabled FROM agent_model_config");
+    has(args, tenant) &&
+    (sql.startsWith("SELECT provider, model, encrypted_api_key, enabled FROM agent_model_config") ||
+      sql.startsWith("SELECT agent_key, provider, model, encrypted_api_key, enabled FROM agent_model_config"));
   /** A person's own save ("Just me"), one step. */
   const personalStep = (tenant: string, userId: string) => (sql: string, args: unknown[]) =>
     has(args, tenant, userId) && sql.includes("ON CONFLICT (tenant_id, user_id, agent_key)");

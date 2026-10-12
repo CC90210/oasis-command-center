@@ -75,6 +75,7 @@ const USERS = {
   cc: u(1, "conaugh@oasisai.work"), // the verified platform operator, OASIS owner
   alpha: u(3, "owner@alpha.test"),
   alphaRep: u(4, "rep@alpha.test"),
+  alphaRace: u(5, "race-owner@alpha.test"),
 } as const;
 const KEY_ANTH = "sk-ant-alpha-anthropic-key-0001";
 const KEY_OR = "sk-or-v1-alpha-openrouter-key-0002";
@@ -196,6 +197,8 @@ async function main() {
       runtime_probe_engine_name TEXT, runtime_probe_engine_version TEXT, runtime_probe_verified_at TEXT);
     CREATE UNIQUE INDEX idx_agent_model_config_default_per_agent ON agent_model_config (tenant_id, agent_key) WHERE (user_id IS NULL);
     CREATE UNIQUE INDEX idx_agent_model_config_override_per_user ON agent_model_config (tenant_id, user_id, agent_key) WHERE (user_id IS NOT NULL);
+    CREATE UNIQUE INDEX idx_agent_model_config_engine_per_user ON agent_model_config (tenant_id, user_id, agent_key)
+      WHERE user_id IS NOT NULL AND agent_key = '__engine__';
     CREATE TABLE bridge_pairings (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT, bridge_token_hash TEXT,
       machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT, created_at TEXT,
@@ -254,6 +257,7 @@ async function main() {
       { sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, 'test', ?)", args: [OASIS, USERS.cc.id, stamp] },
       profile("p-alpha", USERS.alpha, ALPHA, "owner", 1),
       profile("p-alpha-rep", USERS.alphaRep, ALPHA, "closer", 0),
+      profile("p-alpha-race", USERS.alphaRace, ALPHA, "owner", 1),
       // Alpha's AI account (Anthropic), the teammate row a connect stamped with
       // the same key, and an OpenRouter key an older team connect left on another row.
       { sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, '__workspace__', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)", args: [ALPHA, anthCipher, stamp] },
@@ -284,6 +288,29 @@ async function main() {
   const req = (url: string, method: string, body?: unknown) =>
     new NextRequest(`http://localhost${url}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const jsonOf = async (res: Response) => ({ status: res.status, body: (await res.json()) as Record<string, unknown> });
+  // Fixture repair between concurrency cases. Production activation is tested
+  // through the staged receipt + engine CAS above; using that paid-probe route
+  // for test cleanup would intentionally exhaust its five-attempt safety cap.
+  const resetWorkspaceFixture = async (provider: "anthropic" | "openai" | "google" | "openrouter", apiKey: string, model: string) => {
+    const now = Date.now();
+    const encrypted = encryptField(apiKey);
+    const reset = await db.batch(
+      [
+        {
+          sql: "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = ?, enabled = 1, updated_at = ? WHERE tenant_id = ? AND user_id IS NULL AND agent_key IN ('__workspace__', 'sdr')",
+          args: [provider, model, encrypted, new Date(now - 1).toISOString(), ALPHA],
+        },
+        {
+          sql: "UPDATE agent_model_config SET updated_at = ? WHERE tenant_id = ? AND user_id IS NULL AND agent_key = ?",
+          args: [new Date(now - 2).toISOString(), ALPHA, store.savedKeyAgentKey(provider)],
+        },
+      ],
+      "write",
+    );
+    assert.ok(reset[0].rowsAffected >= 1, "fixture workspace account was missing");
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
+    return { status: 200, body: { ok: true } };
+  };
   const sales = departmentBySlug("sales")!;
   const rowsOf = async (tenant: string) =>
     (await db.execute({ sql: "SELECT agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL ORDER BY agent_key", args: [tenant] })).rows.map((r) => ({
@@ -322,39 +349,166 @@ async function main() {
     assert.deepEqual(engineLib.engineFromRow({ provider: "cli", model: "nope" }), { kind: "api" });
   });
 
-  await check("the provider switch moves the AI account to a SAVED key (tested first), keeps the old key, and switches back without a paste", async () => {
+  await check("a canonical engine created during a legacy provider probe wins atomically", async () => {
+    await login(USERS.alpha);
+    await db.execute({
+      sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL AND agent_key = '__engine__'",
+      args: [ALPHA],
+    });
+    const beforeAccount = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(beforeAccount) && beforeAccount.provider === "anthropic");
+    let enteredResolve!: () => void;
+    let releaseResolve!: () => void;
+    const entered = new Promise<void>((resolve) => (enteredResolve = resolve));
+    const release = new Promise<void>((resolve) => (releaseResolve = resolve));
+    answer = async (sentRequest) => {
+      if (sentRequest.url.includes("openrouter.ai")) {
+        enteredResolve();
+        await release;
+        return openrouterOk("The legacy key works.");
+      }
+      return anthropicOk("The canonical key works.");
+    };
+    sent = [];
+    const staleConnect = bulk.POST(
+      req("/api/agent-config/bulk-provider", "POST", {
+        provider: "openrouter",
+        api_key: KEY_OR,
+        model: "anthropic/claude-sonnet-4.6",
+        scope: "tenant",
+      }),
+    );
+    await entered;
+    await store.saveAgentEngine(ALPHA, { kind: "api", provider: "anthropic" });
+    releaseResolve();
+    const blocked = await jsonOf(await staleConnect);
+    assert.equal(blocked.status, 409, JSON.stringify(blocked.body));
+    assert.equal(blocked.body.error, "engine_upgrade_required");
+    assert.equal(sent.length, 1, "the deliberately blocked provider probe did not run exactly once");
+    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "api", provider: "anthropic" });
+    const afterAccount = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(
+      account.hasUsableKey(afterAccount) &&
+        afterAccount.provider === "anthropic" &&
+        decryptField(afterAccount.encryptedApiKey) === decryptField(beforeAccount.encryptedApiKey),
+      "the losing legacy request changed the workspace account",
+    );
+  });
+
+  await check("a legacy provider activation that wins first makes the canonical API save lose atomically", async () => {
+    await db.execute({
+      sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL AND agent_key = '__engine__'",
+      args: [ALPHA],
+    });
+    const staleSnapshot = await account.readWorkspaceAccountSnapshot(ALPHA);
+    assert.ok(account.hasUsableKey(staleSnapshot.account) && staleSnapshot.account.provider === "anthropic");
+    const legacyStamp = await account.readAccountStamp(ALPHA);
+    const legacy = await account.connectWorkspaceAccountInOneStep({
+      tenantId: ALPHA,
+      stamp: legacyStamp,
+      provider: "openrouter",
+      model: "anthropic/claude-sonnet-4.6",
+      encryptedApiKey: encryptField(KEY_OR),
+      agentKeys: [],
+      requireEngineAbsent: true,
+    });
+    assert.equal(legacy.committed, true, "the legacy writer did not win the arranged interleaving");
+    const canonical = await account.saveApiEngineIfAccountAndEngineCurrent({
+      tenantId: ALPHA,
+      stamp: staleSnapshot.stamp,
+      engine: { userId: null, expectedVersion: null, choice: { kind: "api", provider: "anthropic" } },
+    });
+    assert.equal(canonical, false, "a canonical engine was saved against a changed account snapshot");
+    assert.equal(await store.readAgentEngineVersion(ALPHA), null, "the losing canonical request left an engine row");
+    const afterLegacy = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(afterLegacy) && afterLegacy.provider === "openrouter" && decryptField(afterLegacy.encryptedApiKey) === KEY_OR);
+    await resetWorkspaceFixture("anthropic", KEY_ANTH, "claude-sonnet-4-6");
+    await store.saveAgentEngine(ALPHA, { kind: "api", provider: "anthropic" });
+  });
+
+  await check("the pre-engine provider-switch endpoint fails closed without changing keys", async () => {
     await login(USERS.alpha);
     answer = (s) => (s.url.includes("openrouter.ai") ? openrouterOk("Here is a short answer.") : anthropicOk("Here is a short answer."));
     sent = [];
+    const before = JSON.stringify(await rowsOf(ALPHA));
     const first = await jsonOf(await providerRoute.POST(req("/api/agent-config/workspace-provider", "POST", { provider: "openrouter" })));
-    assert.equal(first.status, 200, JSON.stringify(first.body));
-    assert.equal(sent.length, 1, "exactly one test answer before the switch");
-    assert.equal(keyOf(sent[0]), KEY_OR, "the test ran on the saved OpenRouter key");
+    assert.equal(first.status, 409, JSON.stringify(first.body));
+    assert.equal(first.body.error, "engine_upgrade_required");
+    assert.match(String(first.body.message), /Refresh Settings > AI brain/);
+    assert.equal(sent.length, 0, "the retired endpoint spent API credits");
+    assert.equal(JSON.stringify(await rowsOf(ALPHA)), before, "the retired endpoint changed provider state");
     const acct = await account.readWorkspaceAiAccount(ALPHA);
-    assert.ok(account.hasUsableKey(acct) && acct.provider === "openrouter");
-    assert.equal(decryptField(acct.encryptedApiKey), KEY_OR);
-    const rows = await rowsOf(ALPHA);
-    const keptAnth = rows.find((r) => r.agent_key === store.savedKeyAgentKey("anthropic"));
-    assert.ok(keptAnth && keptAnth.key === KEY_ANTH, "the outgoing Anthropic key is kept on its own row");
-    assert.equal(rows.find((r) => r.agent_key === "sdr")?.provider, "openrouter", "the teammate that held the old key moved with the team");
-    // Back to Anthropic: no paste, the kept key answers.
-    sent = [];
-    const back = await jsonOf(await providerRoute.POST(req("/api/agent-config/workspace-provider", "POST", { provider: "anthropic" })));
-    assert.equal(back.status, 200, JSON.stringify(back.body));
-    assert.equal(keyOf(sent[0]), KEY_ANTH);
-    const again = await account.readWorkspaceAiAccount(ALPHA);
-    assert.ok(account.hasUsableKey(again) && again.provider === "anthropic" && decryptField(again.encryptedApiKey) === KEY_ANTH);
+    assert.ok(account.hasUsableKey(acct) && acct.provider === "anthropic" && decryptField(acct.encryptedApiKey) === KEY_ANTH);
   });
 
-  await check("a provider with no saved key, a member, and a failed test change nothing, each in a plain sentence", async () => {
+  await check("a stale direct workspace-key connect cannot split the active account from the canonical engine", async () => {
+    await login(USERS.alpha);
+    answer = (s) => (s.url.includes("openrouter.ai") ? openrouterOk("This must not run.") : anthropicOk("This must not run."));
+    sent = [];
     const before = JSON.stringify(await rowsOf(ALPHA));
-    const none = await jsonOf(await providerRoute.POST(req("/api/agent-config/workspace-provider", "POST", { provider: "openai" })));
-    assert.equal(none.status, 409);
-    assert.match(String(none.body.message), /No OpenAI Direct key is saved for this workspace yet\. Connect it on the OpenAI Direct card below\./);
-    answer = () => new Response(JSON.stringify({ error: { message: "credit balance is too low" } }), { status: 400 });
-    const refused = await jsonOf(await providerRoute.POST(req("/api/agent-config/workspace-provider", "POST", { provider: "openrouter" })));
-    assert.equal(refused.status, 422);
-    assert.match(String(refused.body.message), /did not pass the test, so nothing was changed/);
+    const attempted = await jsonOf(
+      await bulk.POST(
+        req("/api/agent-config/bulk-provider", "POST", {
+          provider: "openrouter",
+          api_key: KEY_OR,
+          model: "anthropic/claude-sonnet-4.6",
+          scope: "tenant",
+        }),
+      ),
+    );
+    assert.equal(attempted.status, 409, JSON.stringify(attempted.body));
+    assert.equal(attempted.body.error, "engine_upgrade_required");
+    assert.equal(sent.length, 0, "the stale connect spent API credits before it was rejected");
+    assert.equal(JSON.stringify(await rowsOf(ALPHA)), before, "the stale connect changed provider state");
+    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "api", provider: "anthropic" });
+  });
+
+  await check("a personal canonical engine also blocks the retired workspace-key activation path", async () => {
+    await db.execute({
+      sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL AND agent_key = '__engine__'",
+      args: [ALPHA],
+    });
+    const personalSaved = await store.savePersonAgentEngineIfCurrent(
+      ALPHA,
+      USERS.alpha.id,
+      { kind: "api", provider: "anthropic" },
+      null,
+    );
+    assert.equal(personalSaved, true);
+    answer = () => openrouterOk("This must not run.");
+    sent = [];
+    const before = await account.readWorkspaceAiAccount(ALPHA);
+    const attempted = await jsonOf(
+      await bulk.POST(
+        req("/api/agent-config/bulk-provider", "POST", {
+          provider: "openrouter",
+          api_key: KEY_OR,
+          model: "anthropic/claude-sonnet-4.6",
+          scope: "tenant",
+        }),
+      ),
+    );
+    assert.equal(attempted.status, 409, JSON.stringify(attempted.body));
+    assert.equal(attempted.body.error, "engine_upgrade_required");
+    assert.equal(sent.length, 0, "the retired connect spent API credits despite a personal canonical engine");
+    const after = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(
+      account.hasUsableKey(before) &&
+        account.hasUsableKey(after) &&
+        after.provider === before.provider &&
+        decryptField(after.encryptedApiKey) === decryptField(before.encryptedApiKey),
+      "the retired connect changed the shared account behind a personal engine",
+    );
+    const personalVersion = await store.readPersonAgentEngineVersion(ALPHA, USERS.alpha.id);
+    assert.ok(personalVersion);
+    assert.equal(await store.clearPersonEngineIfCurrent(ALPHA, USERS.alpha.id, personalVersion), true);
+    await store.saveAgentEngine(ALPHA, { kind: "api", provider: "anthropic" });
+  });
+
+  await check("the retired provider route still validates input and permissions without changing anything", async () => {
+    const before = JSON.stringify(await rowsOf(ALPHA));
+    const invalid = await jsonOf(await providerRoute.POST(req("/api/agent-config/workspace-provider", "POST", { provider: "not-a-provider" })));
+    assert.equal(invalid.status, 400);
     await login(USERS.alphaRep);
     const member = await jsonOf(await providerRoute.POST(req("/api/agent-config/workspace-provider", "POST", { provider: "openrouter" })));
     assert.equal(member.status, 403);
@@ -395,6 +549,7 @@ async function main() {
     );
     assert.equal(staged.status, 200, JSON.stringify(staged.body));
     assert.equal(staged.body.staged, true);
+    assert.equal(typeof staged.body.staged_key_receipt, "string", "staging did not return an immutable key receipt");
     assert.equal(staged.body.workspace_account, false, "staging silently activated the workspace account");
     assert.deepEqual(staged.body.applied_to, [], "staging rewrote teammate rows before Use");
     const beforeUse = await account.readWorkspaceAiAccount(ALPHA);
@@ -411,6 +566,7 @@ async function main() {
         req("/api/ai/engine", "PUT", {
           scope: "workspace",
           expected_version: version,
+          expected_saved_key_receipt: staged.body.staged_key_receipt,
           engine: { mode: "api", provider: "openrouter" },
         }),
       ),
@@ -425,11 +581,14 @@ async function main() {
     assert.ok(teammate?.provider === "openrouter" && teammate.key === KEY_OR, "the workspace switch left a teammate on the old provider");
 
     // Restore the fixture through the same atomic account + engine switch.
+    const savedAnth = await store.readSavedKey(ALPHA, "anthropic");
+    assert.ok(savedAnth, "the outgoing Anthropic key was not cached for a switch back");
     const restored = await jsonOf(
       await engineRoute.PUT(
         req("/api/ai/engine", "PUT", {
           scope: "workspace",
           expected_version: await store.readAgentEngineVersion(ALPHA),
+          expected_saved_key_receipt: savedAnth.receipt,
           engine: { mode: "api", provider: "anthropic" },
         }),
       ),
@@ -451,12 +610,14 @@ async function main() {
       ),
     );
     assert.equal(stagedReplacement.status, 200, JSON.stringify(stagedReplacement.body));
+    assert.equal(typeof stagedReplacement.body.staged_key_receipt, "string");
     const replaceVersion = await store.readAgentEngineVersion(ALPHA);
     const replaced = await jsonOf(
       await engineRoute.PUT(
         req("/api/ai/engine", "PUT", {
           scope: "workspace",
           expected_version: replaceVersion,
+          expected_saved_key_receipt: stagedReplacement.body.staged_key_receipt,
           engine: { mode: "api", provider: "anthropic" },
         }),
       ),
@@ -464,16 +625,7 @@ async function main() {
     assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
     const replacedAccount = await account.readWorkspaceAiAccount(ALPHA);
     assert.ok(account.hasUsableKey(replacedAccount) && decryptField(replacedAccount.encryptedApiKey) === replacement);
-    const reset = await jsonOf(
-      await bulk.POST(
-        req("/api/agent-config/bulk-provider", "POST", {
-          provider: "anthropic",
-          api_key: KEY_ANTH,
-          model: "claude-sonnet-4-6",
-          scope: "tenant",
-        }),
-      ),
-    );
+    const reset = await resetWorkspaceFixture("anthropic", KEY_ANTH, "claude-sonnet-4-6");
     assert.equal(reset.status, 200, JSON.stringify(reset.body));
     const noRevert = await jsonOf(
       await engineRoute.PUT(
@@ -487,6 +639,180 @@ async function main() {
     assert.equal(noRevert.status, 200, JSON.stringify(noRevert.body));
     const stillReset = await account.readWorkspaceAiAccount(ALPHA);
     assert.ok(account.hasUsableKey(stillReset) && decryptField(stillReset.encryptedApiKey) === KEY_ANTH, "an older cached key replaced the newer active key");
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
+  });
+
+  await check("a slower same-provider Use cannot replace a newer staged key", async () => {
+    await login(USERS.alphaRace);
+    const engineRoute = await import("../app/api/ai/engine/route");
+    const firstKey = "sk-ant-race-first-key-0005";
+    const newerKey = "sk-ant-race-newer-key-0006";
+    answer = () => anthropicOk("The current key works.");
+    const reset = await resetWorkspaceFixture("anthropic", KEY_ANTH, "claude-sonnet-4-6");
+    assert.equal(reset.status, 200, JSON.stringify(reset.body));
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
+    await db.execute({
+      sql: "UPDATE agent_model_config SET updated_at = '2000-01-01T00:00:00.000Z' WHERE tenant_id = ? AND user_id IS NULL AND agent_key = '__workspace__'",
+      args: [ALPHA],
+    });
+    await store.keepSavedKey({ tenantId: ALPHA, provider: "anthropic", model: "claude-sonnet-4-6", encryptedApiKey: encryptField(firstKey) });
+    const first = await store.readSavedKey(ALPHA, "anthropic");
+    assert.ok(first?.source === "kept" && decryptField(first.encryptedApiKey) === firstKey);
+    const versionBefore = await store.readAgentEngineVersion(ALPHA);
+
+    let enteredResolve!: () => void;
+    let releaseResolve!: () => void;
+    const entered = new Promise<void>((resolve) => (enteredResolve = resolve));
+    const release = new Promise<void>((resolve) => (releaseResolve = resolve));
+    answer = async (sentRequest) => {
+      if (keyOf(sentRequest) === firstKey) {
+        enteredResolve();
+        await release;
+      }
+      return anthropicOk("The staged key works.");
+    };
+    const pending = engineRoute.PUT(
+      req("/api/ai/engine", "PUT", {
+        scope: "workspace",
+        expected_version: versionBefore,
+        expected_saved_key_receipt: first.receipt,
+        engine: { mode: "api", provider: "anthropic" },
+      }),
+    );
+    await entered;
+    await store.keepSavedKey({ tenantId: ALPHA, provider: "anthropic", model: "claude-sonnet-4-6", encryptedApiKey: encryptField(newerKey) });
+    const newerBeforeResume = await store.readSavedKeySlot(ALPHA, "anthropic");
+    const newer = await store.readSavedKey(ALPHA, "anthropic");
+    assert.ok(newer?.source === "kept" && decryptField(newer.encryptedApiKey) === newerKey);
+    releaseResolve();
+    const stale = await jsonOf(await pending);
+    assert.equal(stale.status, 409, JSON.stringify(stale.body));
+    assert.equal(stale.body.error, "stale_provider_key");
+    assert.equal(await store.readAgentEngineVersion(ALPHA), versionBefore, "the losing request changed the engine row");
+    assert.deepEqual(await store.readSavedKeySlot(ALPHA, "anthropic"), newerBeforeResume, "the losing request rewrote the newer staged key");
+    const unchanged = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(unchanged) && decryptField(unchanged.encryptedApiKey) === KEY_ANTH, "the losing request changed the active account");
+
+    answer = () => anthropicOk("The newer key works.");
+    const activated = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "workspace",
+          expected_version: versionBefore,
+          expected_saved_key_receipt: newer.receipt,
+          engine: { mode: "api", provider: "anthropic" },
+        }),
+      ),
+    );
+    assert.equal(activated.status, 200, JSON.stringify(activated.body));
+    const activeNewer = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(activeNewer) && decryptField(activeNewer.encryptedApiKey) === newerKey);
+  });
+
+  await check("a losing engine CAS has zero cache effects, while a winning switch preserves a newer outgoing stage", async () => {
+    await login(USERS.alphaRace);
+    const engineRoute = await import("../app/api/ai/engine/route");
+    const outgoingOne = "sk-ant-outgoing-stage-0007";
+    const outgoingTwo = "sk-ant-outgoing-newer-0008";
+    answer = (sentRequest) => (sentRequest.url.includes("openrouter.ai") ? openrouterOk("OpenRouter works.") : anthropicOk("Anthropic works."));
+    const reset = await resetWorkspaceFixture("anthropic", KEY_ANTH, "claude-sonnet-4-6");
+    assert.equal(reset.status, 200, JSON.stringify(reset.body));
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
+    await store.keepSavedKey({ tenantId: ALPHA, provider: "openrouter", model: "anthropic/claude-sonnet-4.6", encryptedApiKey: encryptField(KEY_OR) });
+    const openrouter = await store.readSavedKey(ALPHA, "openrouter");
+    assert.ok(openrouter?.source === "kept");
+
+    let enteredResolve!: () => void;
+    let releaseResolve!: () => void;
+    const entered = new Promise<void>((resolve) => (enteredResolve = resolve));
+    const release = new Promise<void>((resolve) => (releaseResolve = resolve));
+    answer = async (sentRequest) => {
+      if (keyOf(sentRequest) === KEY_OR) {
+        enteredResolve();
+        await release;
+        return openrouterOk("OpenRouter works.");
+      }
+      return anthropicOk("Anthropic works.");
+    };
+    const staleVersion = await store.readAgentEngineVersion(ALPHA);
+    const losing = engineRoute.PUT(
+      req("/api/ai/engine", "PUT", {
+        scope: "workspace",
+        expected_version: staleVersion,
+        expected_saved_key_receipt: openrouter.receipt,
+        engine: { mode: "api", provider: "openrouter" },
+      }),
+    );
+    await entered;
+    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "codex", pairingId: "pair-race", fallback: "none" });
+    await store.keepSavedKey({ tenantId: ALPHA, provider: "anthropic", model: "claude-sonnet-4-6", encryptedApiKey: encryptField(outgoingOne) });
+    const outgoingAfterConcurrentSave = await store.readSavedKeySlot(ALPHA, "anthropic");
+    releaseResolve();
+    const lost = await jsonOf(await losing);
+    assert.equal(lost.status, 409, JSON.stringify(lost.body));
+    assert.equal(lost.body.error, "stale_choice");
+    assert.deepEqual(await store.readSavedKeySlot(ALPHA, "anthropic"), outgoingAfterConcurrentSave, "a losing engine CAS changed the outgoing cache");
+    const accountAfterLoss = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(accountAfterLoss) && decryptField(accountAfterLoss.encryptedApiKey) === KEY_ANTH);
+    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "cli", cli: "codex", pairingId: "pair-race", fallback: "none" });
+
+    answer = (sentRequest) => (sentRequest.url.includes("openrouter.ai") ? openrouterOk("OpenRouter works.") : anthropicOk("Anthropic works."));
+    const accountRefresh = await resetWorkspaceFixture("anthropic", KEY_ANTH, "claude-sonnet-4-6");
+    assert.equal(accountRefresh.status, 200, JSON.stringify(accountRefresh.body));
+    await db.execute({
+      sql: "UPDATE agent_model_config SET updated_at = '2099-01-01T00:00:00.000Z' WHERE tenant_id = ? AND user_id IS NULL AND agent_key = '__workspace__'",
+      args: [ALPHA],
+    });
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
+
+    let winningEnteredResolve!: () => void;
+    let winningReleaseResolve!: () => void;
+    const winningEntered = new Promise<void>((resolve) => (winningEnteredResolve = resolve));
+    const winningRelease = new Promise<void>((resolve) => (winningReleaseResolve = resolve));
+    answer = async (sentRequest) => {
+      if (keyOf(sentRequest) === KEY_OR) {
+        winningEnteredResolve();
+        await winningRelease;
+        return openrouterOk("OpenRouter works.");
+      }
+      return anthropicOk("Anthropic works.");
+    };
+    const winning = engineRoute.PUT(
+      req("/api/ai/engine", "PUT", {
+        scope: "workspace",
+        expected_version: await store.readAgentEngineVersion(ALPHA),
+        expected_saved_key_receipt: openrouter.receipt,
+        engine: { mode: "api", provider: "openrouter" },
+      }),
+    );
+    await winningEntered;
+    await store.keepSavedKey({ tenantId: ALPHA, provider: "anthropic", model: "claude-sonnet-4-6", encryptedApiKey: encryptField(outgoingTwo) });
+    const newestOutgoing = await store.readSavedKey(ALPHA, "anthropic");
+    const newestOutgoingSlot = await store.readSavedKeySlot(ALPHA, "anthropic");
+    assert.ok(newestOutgoing?.source === "kept" && decryptField(newestOutgoing.encryptedApiKey) === outgoingTwo);
+    winningReleaseResolve();
+    const won = await jsonOf(await winning);
+    assert.equal(won.status, 200, JSON.stringify(won.body));
+    assert.deepEqual(await store.readSavedKeySlot(ALPHA, "anthropic"), newestOutgoingSlot, "the winning switch overwrote a newer outgoing stage");
+
+    answer = () => anthropicOk("The newest outgoing key works.");
+    const switchedBack = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "workspace",
+          expected_version: await store.readAgentEngineVersion(ALPHA),
+          expected_saved_key_receipt: newestOutgoing.receipt,
+          engine: { mode: "api", provider: "anthropic" },
+        }),
+      ),
+    );
+    assert.equal(switchedBack.status, 200, JSON.stringify(switchedBack.body));
+    const finalAccount = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(finalAccount) && decryptField(finalAccount.encryptedApiKey) === outgoingTwo);
+
+    answer = () => anthropicOk("The fixture key works.");
+    const finalReset = await resetWorkspaceFixture("anthropic", KEY_ANTH, "claude-sonnet-4-6");
+    assert.equal(finalReset.status, 200, JSON.stringify(finalReset.body));
     await store.saveAgentEngine(ALPHA, { kind: "api" });
   });
 

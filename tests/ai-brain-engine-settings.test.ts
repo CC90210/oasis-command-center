@@ -48,6 +48,12 @@ async function main() {
     assert.match(panel, /Replace \$\{PROVIDER_LABEL\[draft\.provider\]\} key/, "the active provider key can be replaced without leaving the engine picker");
     const accounts = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
     assert.match(accounts, /addEventListener\(OPEN_AI_PROVIDER_ACCOUNT_EVENT/, "the provider account card receives the engine panel's requested provider");
+    assert.match(accounts, /engineScope === "person"\) return \{ provider, scope: "user", lockScope: true \}/, "My setup generic key actions are locked to the viewer");
+    assert.match(accounts, /engineScope === "workspace"[\s\S]*scope: "tenant", stageOnly: true, lockScope: true/, "Workspace default generic key actions only stage a tenant key");
+    assert.match(accounts, /canManageTeam=\{canManageTeam && engineScope !== "person"\}/, "My setup cannot switch the workspace API model");
+    assert.match(accounts, /const canManageWorkspaceAccount = canManageTeam && engineScope !== "person"/, "My setup cannot disconnect a workspace provider");
+    assert.match(accounts, /\{canManageWorkspaceAccount && \(/, "workspace disconnects use the scope-safe permission");
+    assert.match(panel, /AgentEngineScopeProvider key=\{scope\}/, "provider dialogs are remounted when the visible scope changes");
     assert.doesNotMatch(panel, /await switchProvider\(/, "the browser must not switch the API account before the engine CAS");
     const route = readFileSync(join(ROOT, "app/api/ai/engine/route.ts"), "utf8");
     assert.match(route, /connectWorkspaceAccountAndEngineInOneStep/, "provider activation and the engine CAS use one server transaction");
@@ -158,6 +164,7 @@ async function main() {
           workspace: "oasis",
           account: null,
           savedProviders: [],
+          savedKeyReceipts: { openrouter: "receipt-or-1" },
         }),
         { status: 200 },
       ),
@@ -170,6 +177,7 @@ async function main() {
       assert.equal(next.state.devices[0].workspaceEligible, true);
       assert.equal(next.state.devices[0].runtimes.claude.executionReady, false, "signed in is not execution verified");
       assert.equal(next.state.devices[0].runtimes.codex.executionReady, true);
+      assert.equal(next.state.savedKeyReceipts.openrouter, "receipt-or-1");
     }
 
     const legacy = await client.readEngine(async () =>
@@ -424,13 +432,16 @@ async function main() {
     }
   });
 
-  await check("switching a saved API provider changes the workspace account before engine save", async () => {
+  await check("the legacy provider switch tells old tabs to use the atomic AI Brain flow", async () => {
     const calls: string[] = [];
     const switched = await client.switchProvider("google", async (url, init) => {
       calls.push(`${init.method} ${url} ${String(init.body)}`);
-      return new Response(JSON.stringify({ ok: true, label: "Google Gemini" }), { status: 200 });
+      return new Response(
+        JSON.stringify({ ok: false, error: "engine_upgrade_required", message: "Refresh Settings > AI brain, then Test and Use it. Nothing was changed." }),
+        { status: 409 },
+      );
     });
-    assert.deepEqual(switched, { ok: true, label: "Google Gemini" });
+    assert.deepEqual(switched, { ok: false, message: "Refresh Settings > AI brain, then Test and Use it. Nothing was changed." });
     assert.deepEqual(calls, ['POST /api/agent-config/workspace-provider {"provider":"google"}']);
   });
 
@@ -444,7 +455,7 @@ async function main() {
     assert.deepEqual(calls, ['PUT /api/ai/engine {"scope":"person","use_workspace_default":true,"expected_version":"v2"}']);
   });
 
-  await check("API key mode saves without a computer probe job", async () => {
+  await check("API key mode saves with the exact staged-key receipt and no computer probe job", async () => {
     const calls: string[] = [];
     const result = await client.saveEngine(
       { mode: "api", provider: "google" },
@@ -453,10 +464,10 @@ async function main() {
         calls.push(`${init.method} ${url} ${String(init.body)}`);
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       },
-      { scope: "workspace" },
+      { scope: "workspace", savedKeyReceipt: "receipt-google-5" },
     );
     assert.equal(result.ok, true);
-    assert.deepEqual(calls, ['PUT /api/ai/engine {"engine":{"mode":"api","provider":"google"},"scope":"workspace","expected_version":"workspace-v5"}']);
+    assert.deepEqual(calls, ['PUT /api/ai/engine {"engine":{"mode":"api","provider":"google"},"scope":"workspace","expected_version":"workspace-v5","expected_saved_key_receipt":"receipt-google-5"}']);
   });
 
   if (failures) {

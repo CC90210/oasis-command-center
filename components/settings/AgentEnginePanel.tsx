@@ -37,9 +37,12 @@ import {
 import { startCliSignIn } from "@/components/settings/LocalCliProvidersCard";
 import {
   OPEN_AI_PROVIDER_ACCOUNT_EVENT,
+  OASIS_PROVIDER_KEY_STAGED_EVENT,
   type ProviderAccountOpenRequest,
+  type ProviderKeyStagedDetail,
 } from "@/components/settings/ProviderAccountsCard";
 import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
+import { AgentEngineScopeProvider } from "@/components/settings/agent-engine-scope-context";
 
 const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "gemini"];
 const API_PROVIDERS: ApiEngineProvider[] = ["anthropic", "openai", "google", "openrouter"];
@@ -144,6 +147,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const [job, setJob] = useState<RuntimeJob | null>(null);
   const [probeReceipt, setProbeReceipt] = useState<{ key: string; jobId: string } | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const [stagedKeyReceipts, setStagedKeyReceipts] = useState<Partial<Record<ApiEngineProvider, string>>>({});
   const stop = useRef<AbortController | null>(null);
   const noticeRef = useRef<HTMLDivElement | null>(null);
   const scopeRef = useRef<EngineScope>("person");
@@ -159,6 +163,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     }
     setReadError(null);
     setState(result.state);
+    setStagedKeyReceipts(result.state.savedKeyReceipts);
     if (!options.keepDraft || !draftRef.current) {
       const nextScope: EngineScope = scopeRef.current === "workspace" && result.state.canManage ? "workspace" : "person";
       const next =
@@ -178,9 +183,16 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   useEffect(() => {
     void load();
     const refreshAccount = () => void load({ keepDraft: true });
+    const rememberStagedKey = (event: Event) => {
+      const detail = (event as CustomEvent<ProviderKeyStagedDetail>).detail;
+      if (!detail || !API_PROVIDERS.includes(detail.provider as ApiEngineProvider) || !detail.receipt) return;
+      setStagedKeyReceipts((current) => ({ ...current, [detail.provider]: detail.receipt }));
+    };
     window.addEventListener("oasis:agent-configs-changed", refreshAccount);
+    window.addEventListener(OASIS_PROVIDER_KEY_STAGED_EVENT, rememberStagedKey);
     return () => {
       window.removeEventListener("oasis:agent-configs-changed", refreshAccount);
+      window.removeEventListener(OASIS_PROVIDER_KEY_STAGED_EVENT, rememberStagedKey);
       stop.current?.abort();
     };
     // The initial server truth is intentionally read once; refresh actions call load explicitly.
@@ -199,7 +211,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
             Retry
           </button>
         </div>
-        <AccountSection>{children}</AccountSection>
+        <AgentEngineScopeProvider scope={scope}>
+          <AccountSection>{children}</AccountSection>
+        </AgentEngineScopeProvider>
       </div>
     );
   }
@@ -324,6 +338,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     setNotice(null);
     const result = await saveEngine(draftSelection, versionForScope(loadedState, scope), undefined, {
       scope,
+      ...(draftSelection.mode === "api" && scope === "workspace" && stagedKeyReceipts[draftSelection.provider]
+        ? { savedKeyReceipt: stagedKeyReceipts[draftSelection.provider] }
+        : {}),
       ...(probeReceipt?.key === draftKey ? { probeJobId: probeReceipt.jobId } : {}),
       signal: controller.signal,
     });
@@ -865,7 +882,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
         )}
       </section>
 
-      <AccountSection>{children}</AccountSection>
+      <AgentEngineScopeProvider key={scope} scope={scope}>
+        <AccountSection>{children}</AccountSection>
+      </AgentEngineScopeProvider>
     </div>
   );
 }

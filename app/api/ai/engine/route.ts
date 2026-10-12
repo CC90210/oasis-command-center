@@ -10,11 +10,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
+  accountMatchesStamp,
   connectWorkspaceAccountAndEngineInOneStep,
   hasUsableKey,
-  readAccountStamp,
-  readWorkspaceAccountChangedAt,
+  readWorkspaceAccountSnapshot,
   readWorkspaceAiAccount,
+  saveApiEngineIfAccountAndEngineCurrent,
 } from "@/lib/ai/workspace-account";
 import { departmentBrain } from "@/lib/ai/department-brain";
 import {
@@ -27,9 +28,11 @@ import {
   readPersonAgentEngineVersion,
   readSavedProviders,
   readSavedKey,
-  keepSavedKey,
+  readSavedKeyReceipts,
+  readSavedKeySlot,
   saveAgentEngineIfCurrent,
   savePersonAgentEngineIfCurrent,
+  savedKeyAgentKey,
   savedRuntimeProbeProofReady,
   type SavedRuntimeProbeProof,
   type SavedRuntimeProbeProofInput,
@@ -442,13 +445,14 @@ export async function GET() {
   const tenantId = ctx.tenantId;
   const canManage = ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess);
   try {
-    const [workspaceEngine, workspaceVersion, personEngine, personVersion, account, savedProviders, pairings, oasis, agentsOwner, effectiveEngine] = await Promise.all([
+    const [workspaceEngine, workspaceVersion, personEngine, personVersion, account, savedProviders, savedKeyReceipts, pairings, oasis, agentsOwner, effectiveEngine] = await Promise.all([
       readAgentEngine(tenantId),
       readAgentEngineVersion(tenantId),
       readPersonAgentEngine(tenantId, ctx.authUserId),
       readPersonAgentEngineVersion(tenantId, ctx.authUserId),
       readWorkspaceAiAccount(tenantId),
       readSavedProviders(tenantId),
+      readSavedKeyReceipts(tenantId),
       readPairings(tenantId),
       isOasisWorkspace(tenantId),
       readAgentsOwner(tenantId),
@@ -531,6 +535,7 @@ export async function GET() {
           ? { provider: brain.provider, providerLabel: brain.providerLabel, model: brain.savedModel ?? brain.model, modelLabel: brain.modelLabel }
           : null,
         savedProviders,
+        savedKeyReceipts,
         effectiveRuntime: effectiveRuntimeSummary(
           effectiveChoice,
           pairings,
@@ -618,7 +623,7 @@ export async function PUT(req: NextRequest) {
   } catch {
     return fail(400, "invalid_json", "That request could not be read. Try again.");
   }
-  const raw = requestObject(decoded, ["engine", "scope", "expected_version", "probe_job_id", "use_workspace_default"]);
+  const raw = requestObject(decoded, ["engine", "scope", "expected_version", "expected_saved_key_receipt", "probe_job_id", "use_workspace_default"]);
   if (!raw) return fail(400, "invalid_body", "That request has fields OASIS does not accept.");
   const scope = scopeOf(raw.scope, "workspace");
   if (!scope) return fail(400, "invalid_scope", "Choose My setup or Workspace default.");
@@ -635,7 +640,8 @@ export async function PUT(req: NextRequest) {
       if (!cleared) return fail(409, "stale_choice", "A newer choice was saved. Refresh AI Brain before changing it.");
       return NextResponse.json({ ok: true, inherited: true });
     }
-    const account = await readWorkspaceAiAccount(ctx.tenantId);
+    const accountSnapshot = await readWorkspaceAccountSnapshot(ctx.tenantId);
+    const account = accountSnapshot.account;
     const activeApiProvider = isApiEngineProvider(account?.provider) ? account.provider : undefined;
     const parsed = selectionFromRequest(raw.engine, activeApiProvider);
     if (parsed && !parsed.selection && parsed.needsPairing) {
@@ -652,11 +658,10 @@ export async function PUT(req: NextRequest) {
     let probeProof: SavedRuntimeProbeProofInput | null = null;
     if (selection.mode === "api") {
       let stagedReplacement: Awaited<ReturnType<typeof readSavedKey>> = null;
+      let accountChangedAt: string | null = null;
       if (scope === "workspace" && hasUsableKey(account) && account.provider === selection.provider) {
-        const [candidate, accountChangedAt] = await Promise.all([
-          readSavedKey(ctx.tenantId, selection.provider),
-          readWorkspaceAccountChangedAt(ctx.tenantId),
-        ]);
+        const candidate = await readSavedKey(ctx.tenantId, selection.provider);
+        accountChangedAt = accountSnapshot.changedAt;
         const stagedAfterAccount =
           candidate?.source === "kept" &&
           typeof candidate.updatedAt === "string" &&
@@ -688,6 +693,25 @@ export async function PUT(req: NextRequest) {
         if (!(ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess))) {
           return fail(403, "admin_required", "Only an owner or admin can switch the workspace API account.");
         }
+        const outgoingProvider = hasUsableKey(account) && isApiEngineProvider(account.provider) && account.provider !== selection.provider
+          ? account.provider
+          : null;
+        const [saved, outgoingSlot] = await Promise.all([
+          stagedReplacement ?? readSavedKey(ctx.tenantId, selection.provider),
+          outgoingProvider ? readSavedKeySlot(ctx.tenantId, outgoingProvider) : Promise.resolve(null),
+        ]);
+        const stamp = accountSnapshot.stamp;
+        const changedAt = accountChangedAt ?? accountSnapshot.changedAt;
+        if (!accountMatchesStamp(account, stamp)) {
+          return fail(409, "stale_choice", "The AI account changed in another window. Refresh AI Brain before trying again.");
+        }
+        if (!saved) {
+          return fail(409, "api_provider_not_connected", "Connect that provider key below before putting it in use.");
+        }
+        const expectedSavedKeyReceipt = typeof raw.expected_saved_key_receipt === "string" ? raw.expected_saved_key_receipt : null;
+        if (!expectedSavedKeyReceipt || expectedSavedKeyReceipt !== saved.receipt) {
+          return fail(409, "stale_provider_key", "That provider key changed in another window. Refresh AI Brain, test the key shown there, then press Use again.");
+        }
         const limit = apiSwitchRateLimit(req, ctx.tenantId, ctx.authUserId);
         if (!limit.allowed) {
           return NextResponse.json(
@@ -699,13 +723,6 @@ export async function PUT(req: NextRequest) {
             },
             { status: 429 },
           );
-        }
-        const [saved, stamp] = await Promise.all([
-          stagedReplacement ?? readSavedKey(ctx.tenantId, selection.provider),
-          readAccountStamp(ctx.tenantId),
-        ]);
-        if (!saved) {
-          return fail(409, "api_provider_not_connected", "Connect that provider key below before putting it in use.");
         }
         const model = apiSwitchModel(selection.provider, saved.model);
         const check = saveCheck(selection.provider, model);
@@ -729,24 +746,40 @@ export async function PUT(req: NextRequest) {
           return fail(422, "provider_test_failed", `${modelInfo(selection.provider, model)?.label ?? model} did not pass the test. Nothing was changed. ${tested.message}`);
         }
         if (req.signal.aborted) return fail(409, "cancelled", "Stopped before the change finished. Nothing was changed.");
-        // Saving key-cache rows is harmless preparation: neither row can
-        // answer. Provider activation and the engine CAS happen together
-        // below, so a stale tab cannot leave the account and engine split.
-        if (hasUsableKey(account) && isApiEngineProvider(account.provider)) {
-          await keepSavedKey({
-            tenantId: ctx.tenantId,
-            provider: account.provider,
-            model: account.model,
-            encryptedApiKey: account.encryptedApiKey,
-          });
-        }
-        if (saved.source !== "kept") {
-          await keepSavedKey({
-            tenantId: ctx.tenantId,
-            provider: selection.provider,
-            model,
-            encryptedApiKey: saved.encryptedApiKey,
-          });
+        let outgoingCache = null;
+        if (outgoingProvider && outgoingSlot && hasUsableKey(account)) {
+          let slotHasActiveKey = false;
+          if (outgoingSlot.present && outgoingSlot.encryptedApiKey) {
+            try {
+              slotHasActiveKey =
+                outgoingSlot.provider === account.provider &&
+                outgoingSlot.model === account.model &&
+                decryptField(outgoingSlot.encryptedApiKey) === decryptField(account.encryptedApiKey);
+            } catch {
+              return fail(500, "key_unreadable", "That saved provider key could not be read. Connect it again below.");
+            }
+          }
+          const slotMs = outgoingSlot.present && outgoingSlot.updatedAt ? Date.parse(outgoingSlot.updatedAt) : NaN;
+          const accountMs = changedAt ? Date.parse(changedAt) : NaN;
+          const slotIsStrictlyOlder = Number.isFinite(slotMs) && Number.isFinite(accountMs) && slotMs < accountMs;
+          if (!slotHasActiveKey && (!outgoingSlot.present || slotIsStrictlyOlder)) {
+            outgoingCache = {
+              agentKey: savedKeyAgentKey(outgoingProvider),
+              provider: outgoingProvider,
+              model: account.model,
+              encryptedApiKey: account.encryptedApiKey,
+              slot: outgoingSlot.present
+                ? {
+                    present: true as const,
+                    provider: outgoingSlot.provider,
+                    model: outgoingSlot.model,
+                    encryptedApiKey: outgoingSlot.encryptedApiKey,
+                    enabled: outgoingSlot.enabled,
+                    updatedAt: outgoingSlot.updatedAt,
+                  }
+                : { present: false as const },
+            };
+          }
         }
         const choice = choiceFromSelection(selection);
         const switched = await connectWorkspaceAccountAndEngineInOneStep({
@@ -756,6 +789,17 @@ export async function PUT(req: NextRequest) {
           model,
           encryptedApiKey: encryptField(key),
           agentKeys: [],
+          candidate: {
+            source: saved.source,
+            agentKey: saved.agentKey,
+            keptAgentKey: savedKeyAgentKey(selection.provider),
+            provider: saved.provider,
+            model: saved.model,
+            encryptedApiKey: saved.encryptedApiKey,
+            enabled: saved.enabled,
+            updatedAt: saved.updatedAt,
+          },
+          outgoingCache,
           engine: {
             userId: scope === "workspace" ? null : ctx.authUserId,
             expectedVersion: expected,
@@ -763,6 +807,10 @@ export async function PUT(req: NextRequest) {
           },
         });
         if (!switched.committed) {
+          const current = await readSavedKey(ctx.tenantId, selection.provider);
+          if (!current || current.receipt !== saved.receipt) {
+            return fail(409, "stale_provider_key", "That provider key changed while OASIS was testing it. Nothing was changed. Refresh AI Brain, then press Use on the newer key.");
+          }
           return fail(409, "stale_choice", "The AI account or engine changed in another window. Refresh AI Brain before trying again.");
         }
         return NextResponse.json({ ok: true, engine: selection });
@@ -802,9 +850,19 @@ export async function PUT(req: NextRequest) {
     }
     const choice = choiceFromSelection(selection);
     const committed =
-      scope === "workspace"
-        ? await saveAgentEngineIfCurrent(ctx.tenantId, choice, expected, probeProof)
-        : await savePersonAgentEngineIfCurrent(ctx.tenantId, ctx.authUserId, choice, expected, probeProof);
+      selection.mode === "api"
+        ? await saveApiEngineIfAccountAndEngineCurrent({
+            tenantId: ctx.tenantId,
+            stamp: accountSnapshot.stamp,
+            engine: {
+              userId: scope === "workspace" ? null : ctx.authUserId,
+              expectedVersion: expected,
+              choice,
+            },
+          })
+        : scope === "workspace"
+          ? await saveAgentEngineIfCurrent(ctx.tenantId, choice, expected, probeProof)
+          : await savePersonAgentEngineIfCurrent(ctx.tenantId, ctx.authUserId, choice, expected, probeProof);
     if (!committed) return fail(409, "stale_choice", "A newer choice was saved. Refresh AI Brain before changing it.");
     return NextResponse.json({ ok: true, engine: selection });
   } catch (error) {

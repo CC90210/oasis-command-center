@@ -485,17 +485,17 @@ export async function SettingsContent({
                     id="providers"
                     className="scroll-mt-24"
                   >
-                  <SafeBoundary label="AI provider accounts">
-                    <ProviderAccountsCard
-                      connectedServices={connectedAiSet}
-                      personalServices={personalAiSet}
-                      bridgeOnline={bridgeOnline}
-                      canManageTeam={canManageTenant}
-                      canInstallBridge={isOperator}
-                      brain={aiBrain}
-                      accountIsTheEngine={agentEngine === null || agentEngine.kind === "api"}
-                    />
-                  </SafeBoundary>
+                    <SafeBoundary label="AI provider accounts">
+                      <ProviderAccountsCard
+                        connectedServices={connectedAiSet}
+                        personalServices={personalAiSet}
+                        bridgeOnline={bridgeOnline}
+                        canManageTeam={canManageTenant}
+                        canInstallBridge={isOperator}
+                        brain={aiBrain}
+                        accountIsTheEngine={agentEngine === null || agentEngine.kind === "api"}
+                      />
+                    </SafeBoundary>
                   </div>
                 </AgentEnginePanel>
               </SafeBoundary>

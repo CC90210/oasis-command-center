@@ -66,6 +66,7 @@ export type EngineState = {
   devices: EngineDevice[];
   account: { provider: ApiEngineProvider; providerLabel: string; model: string; modelLabel: string } | null;
   savedProviders: ApiEngineProvider[];
+  savedKeyReceipts: Partial<Record<ApiEngineProvider, string>>;
   bridgeReachable: boolean;
   canManage: boolean;
   oasis: boolean;
@@ -127,6 +128,7 @@ export type EngineCallOptions = {
 export type SaveEngineOptions = EngineCallOptions & {
   scope?: EngineScope;
   probeJobId?: string;
+  savedKeyReceipt?: string;
 };
 
 type CallResult = { ok: boolean; status: number; body: Record<string, unknown> };
@@ -296,6 +298,15 @@ export async function readEngine(
       ? (result.body.engineVersions as Record<string, unknown>)
       : null;
     const legacyVersion = nonEmpty(result.body.engineVersion);
+    const rawReceipts = result.body.savedKeyReceipts && typeof result.body.savedKeyReceipts === "object"
+      ? (result.body.savedKeyReceipts as Record<string, unknown>)
+      : {};
+    const savedKeyReceipts = Object.fromEntries(
+      Object.entries(rawReceipts).filter(
+        (entry): entry is [ApiEngineProvider, string] =>
+          isProvider(entry[0]) && typeof entry[1] === "string" && entry[1].length > 0,
+      ),
+    );
     return {
       ok: true,
       state: {
@@ -304,6 +315,7 @@ export async function readEngine(
         devices: Array.isArray(result.body.devices) ? result.body.devices.flatMap((item) => device(item) ?? []) : [],
         account,
         savedProviders: Array.isArray(result.body.savedProviders) ? result.body.savedProviders.filter(isProvider) : [],
+        savedKeyReceipts,
         bridgeReachable: bridge?.reachable === true || (Array.isArray(result.body.devices) && result.body.devices.some((item) => device(item)?.online)),
         canManage: result.body.canManage === true,
         oasis: result.body.workspace === "oasis",
@@ -457,6 +469,7 @@ export async function saveEngine(
           engine,
           scope: opts.scope ?? "person",
           expected_version: expectedVersion,
+          ...(opts.savedKeyReceipt ? { expected_saved_key_receipt: opts.savedKeyReceipt } : {}),
           ...(opts.probeJobId ? { probe_job_id: opts.probeJobId } : {}),
         }
       : { engine, expected_version: expectedVersion };
