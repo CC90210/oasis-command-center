@@ -411,7 +411,6 @@ export function FormPublicClient({
   useEffect(() => {
     if (!tenantSlug || !formSlug) return;
     trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_viewed", stepIndex: currentStep });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on step change only, not on every render
   }, [tenantSlug, formSlug, currentStep]);
 
   // UTM/kw/cat read once from the page's own URL (never re-read mid-funnel —
