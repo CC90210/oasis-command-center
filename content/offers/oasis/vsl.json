@@ -1,0 +1,185 @@
+{
+  "slug": "vsl",
+  "pillar": "ROUTER",
+  "community_link": {
+    "label": "Not ready? Join the free community",
+    "href": "/go/community?form=vsl&t=oasis-ai-cc"
+  },
+  "routing_rules": {
+    "status": "First cut from HANDOVER section 4 (the funnel doc's triage: self-selection + revenue + intent). Data, not code: slice V2/V5 stores these per workspace so CC and Adon can tune them. Nothing reads this yet.",
+    "precedence": "First match wins, top to bottom, in the HANDOVER table's order. The table overlaps (for example a COMMAND pick with no budget also matches the COMMUNITY row); CC and Adon confirm the order before V2 ships.",
+    "fields": {
+      "path": ["protocol", "command", "community", "fleet"],
+      "monthly_revenue": ["pre_revenue", "under_10k", "10k_50k", "50k_250k", "250k_plus"],
+      "budget": ["none_yet", "under_2k", "2k_5k", "5k_15k", "15k_plus"]
+    },
+    "rules": [
+      {
+        "go": "protocol",
+        "community_link_first": true,
+        "when_any": [
+          { "path": ["protocol"] },
+          { "monthly_revenue": ["pre_revenue", "under_10k"], "budget": ["none_yet"] }
+        ]
+      },
+      {
+        "go": "command",
+        "when_any": [
+          { "path": ["command"], "monthly_revenue": ["10k_50k", "50k_250k", "250k_plus"] },
+          { "budget": ["2k_5k", "5k_15k", "15k_plus"] }
+        ]
+      },
+      {
+        "go": "community",
+        "when_any": [
+          { "path": ["community"] },
+          { "budget": ["none_yet"] }
+        ]
+      },
+      {
+        "go": "fleet",
+        "when_any": [
+          { "path": ["fleet"] },
+          { "monthly_revenue": ["250k_plus"] }
+        ],
+        "not_asked_here": "The HANDOVER table also routes team size 21+ to FLEET. The router does not ask team size; FLEET's own form does."
+      },
+      {
+        "go": "community_link",
+        "when": "the visitor closes the router, or answers not now",
+        "note": "Tracked through /go/community (slice V5)."
+      }
+    ]
+  },
+  "form": {
+    "name": "Start here: the OASIS router",
+    "slug": "vsl",
+    "description": "OASIS router page draft (/vsl, start here). One click to pick a path, then monthly revenue and budget (the /ai-audit option values). No contact details are asked here; each path's own page asks.",
+    "branding": {
+      "primary_color": "#e8c547",
+      "accent_color": "#faf9f5",
+      "headline": "Which is you?",
+      "subheadline": "One click, then two quick questions.",
+      "thanks_message": "Thanks. Open the page for the path you picked to take the next step. Not ready for any of them? Join the free community: https://oasisai.work/go/community?form=vsl&t=oasis-ai-cc"
+    },
+    "on_complete_stage": null,
+    "step_outcomes": {},
+    "steps": [
+      {
+        "key": "path",
+        "title": "Which is you?",
+        "description": "Pick the one that sounds most like you. You can change your mind on any page.",
+        "cta_label": "Next",
+        "fields": [
+          {
+            "name": "path",
+            "label": "Your path",
+            "type": "select",
+            "required": true,
+            "options": [
+              { "value": "protocol", "label": "PROTOCOL: I want to set it up myself" },
+              { "value": "command", "label": "COMMAND: I run a service business and leads slip through" },
+              { "value": "community", "label": "COMMUNITY: I am early and want to build alongside others" },
+              { "value": "fleet", "label": "FLEET: we are a larger or multi-location operation" }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "fit",
+        "title": "Two quick questions",
+        "description": "Rough is fine. It decides which page fits you best.",
+        "cta_label": "Show me my page",
+        "fields": [
+          {
+            "name": "monthly_revenue",
+            "label": "Monthly revenue",
+            "type": "select",
+            "options": [
+              { "value": "pre_revenue", "label": "Pre-revenue / just starting" },
+              { "value": "under_10k", "label": "Under $10K/mo" },
+              { "value": "10k_50k", "label": "$10K to $50K/mo" },
+              { "value": "50k_250k", "label": "$50K to $250K/mo" },
+              { "value": "250k_plus", "label": "$250K+/mo" }
+            ]
+          },
+          {
+            "name": "budget",
+            "label": "Budget set aside for this?",
+            "type": "select",
+            "options": [
+              { "value": "none_yet", "label": "Nothing yet, exploring what it costs" },
+              { "value": "under_2k", "label": "Under $2K/mo" },
+              { "value": "2k_5k", "label": "$2K to $5K/mo" },
+              { "value": "5k_15k", "label": "$5K to $15K/mo" },
+              { "value": "15k_plus", "label": "$15K+/mo" }
+            ],
+            "help": "Optional. Skipping it does not rule you out."
+          }
+        ]
+      }
+    ]
+  },
+  "offer_page": {
+    "v": 1,
+    "template": "book_call",
+    "theme": { "canvas": "dark", "logo": "workspace" },
+    "nav": { "pinned": ["what_you_get", "faq"], "cta_label": "Pick your path" },
+    "hero": {
+      "eyebrow": "Start here",
+      "headline": "Find the OASIS path that fits where your business is today",
+      "subheadline": "Watch how OASIS went from doing everything by hand to running on its own operating system. Then pick the one that sounds like you, and we will point you to the right page.",
+      "cta_label": "Pick your path",
+      "video": null,
+      "show_transcript": false,
+      "vsl_script": {
+        "source": "cc",
+        "text": "ROUTER VSL (/vsl, start here). Target length about 12 minutes, an epiphany bridge: the founders' own story from doing everything by hand to an autonomous operating system, then pick the one that's you. Adon and CC on camera, landscape, eye level, quiet room. Oasis Studio adds captions, b-roll, the screen recordings named below and the OASIS end card.\nRule for the whole video: the story is yours, told in your own words with real details only. This script gives the structure and the factual lines (what OASIS is, the four paths, the prices). Lines in square brackets are prompts for you, not words to read. Say no number, result or client story that is not on a page.\n\n[BEAT 1. HOOK, 0:00 to 0:30]\n[CC or Adon: open on one real moment from before OASIS ran itself, when you were doing everything by hand. Where were you, what time was it, what slipped through. One moment, told plainly.]\n\n[BEAT 2. WHO THIS IS FOR, AND WHO IT IS NOT FOR, 0:30 to 1:30]\nOn camera: If you run a business and you are the one holding every follow-up, booking and handoff in your head, this is for you. Whether you are just starting, running a service business, building for clients, or running a larger operation, there is a path for you at the end of this video.\nIt is not for you if you are looking for a shortcut that needs no work from you. And if you are not ready for any of it, the free community is linked below the video.\n\n[BEAT 3. THE STORY, 1:30 to 5:00]\n[Adon and CC: tell the true story from that first moment to where OASIS is now. What you tried that did not work. The point where you stopped adding tools and started building one operating system. Keep it specific and true. No numbers unless you can show where they came from.]\n\n[BEAT 4. WHY IT KEEPS HAPPENING, 5:00 to 6:30]\nOn camera: [Confirm this is true for you, or replace it.] The cause was never a missing app. It was that every follow-up, booking and handoff depended on one of us remembering it. Another tool did not change that. A system that does the remembering did.\n\n[BEAT 5. WHAT WE BUILT, SHOWN IN THE COMMAND CENTER, 6:30 to 8:30]\nScreen recording, synthetic data only: a test lead arrives, gets an answer, and a call lands in Schedule. Then a short tour of the back office screens.\nVoice over: This is the OASIS Command Center, the system OASIS runs on.\n\n[BEAT 6. THE FOUR PATHS, PRICES SAID OUT LOUD, 8:30 to 11:00]\nOn camera, matching each page word for word:\nPROTOCOL is for solo operators and DIY builders: the SOPs, prompts and blueprints we run on, from $17 for a quick-win pack to $297 for the full suite, and up to $395 for the advanced vault.\nCOMMAND is for service businesses doing roughly $10K to $75K a month: the Command Center, from $497 a month on OS DIY, or set up for you on Turnkey at $2,500 plus $997 a month.\nCOMMUNITY is for early builders and agencies: free on Telegram, with a weekly build room at $47 to $97 a month and founder mentorship at $2,500 to $5,000 a month when you want them.\nFLEET is for mid-market and multi-location teams: it starts with an enterprise AI and security audit, $2,500 to $7,500, credited in full to the build.\nEvery monthly plan: cancel any time from your account, no cancellation fee.\nNote for the recording: once Adon picks one number for each range, say that number, and update this script and the pages together.\n\n[BEAT 7. PROOF, 11:00 to 11:30]\nNo permissioned examples are confirmed yet. Let the beat 5 recording be the proof: the product working.\n\n[BEAT 8. CALL TO ACTION, 11:30 to 12:00]\nOn camera: Pick the one that's you below. One click, two quick questions, and we point you to the right page. Not ready for any of them? The free community is linked right below this video."
+      }
+    },
+    "sections": [
+      {
+        "key": "what_you_get",
+        "eyebrow": "Pick your path",
+        "title": "Pick the one that sounds like you",
+        "items": [
+          { "title": "PROTOCOL: set it up yourself", "body": "For solo operators and DIY builders. The SOPs, prompts and blueprints OASIS runs on, from $17 for a quick-win pack to $297 for the full suite." },
+          { "title": "COMMAND: the Command Center for your service business", "body": "For service businesses doing roughly $10K to $75K a month. Follow-up, booking and back office running without you, from $497 a month." },
+          { "title": "COMMUNITY: build alongside us, free", "body": "For early builders and agencies. Free on Telegram, with a paid weekly build room and founder mentorship when you want them." },
+          { "title": "FLEET: AI fleets for larger operations", "body": "For mid-market and multi-location teams. It starts with an enterprise AI and security audit, from $2,500, credited in full to the build." }
+        ]
+      },
+      {
+        "key": "faq",
+        "title": "Questions",
+        "items": [
+          { "q": "Which path is right for me?", "a": "Pick the one that sounds most like you. We also ask about revenue and budget so we can point you to the page that fits, and you can change your mind on any page." },
+          { "q": "Do I have to talk to anyone?", "a": "No. PROTOCOL and COMMUNITY need no call. COMMAND and FLEET start with a conversation, because they are built around your business." },
+          { "q": "Why do you ask about revenue and budget?", "a": "So we do not send a solo builder to an enterprise audit, or a growing service business to a starter pack. Skipping the budget question does not rule you out." },
+          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside us, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=vsl&t=oasis-ai-cc" }
+        ]
+      }
+    ],
+    "book": {
+      "eyebrow": "Start here",
+      "title": "Which is you?",
+      "lede": "One click, then a couple of quick questions.",
+      "mode": "form",
+      "qualify": "before"
+    },
+    "seo": {
+      "title": "Start here: OASIS",
+      "description": "Find the OASIS path that fits your business: PROTOCOL, COMMAND, COMMUNITY or FLEET.",
+      "indexable": false
+    },
+    "brief": {
+      "audience": "Everyone arriving from social, ads or a ManyChat deep link (/vsl?cat=p1..p4&kw=...).",
+      "promise": "Founder story, from doing everything by hand to an autonomous operating system. Then pick the one that's you (HANDOVER section 7 angle).",
+      "included": "The four pillars, each with its own page. ?cat=p1..p4 preselects a card and kw= is recorded once slice V2/V5 ship; until then the path question is answered by hand.",
+      "proof_available": "None confirmed. The founder story must be the founders' own true account.",
+      "price": "Starting prices only, each taken from the funnel doc: PROTOCOL from $17 (to $297, vault to $395), COMMAND from $497/mo (Turnkey $2,500 + $997/mo), COMMUNITY free (VIP $47-97/mo, mentorship $2,500-5,000/mo), FLEET audit $2,500-7,500 credited to the build. Currency unconfirmed.",
+      "bonuses": "None.",
+      "guarantee": "None confirmed. Section omitted."
+    }
+  }
+}

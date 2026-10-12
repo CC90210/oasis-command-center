@@ -1,0 +1,211 @@
+{
+  "slug": "command",
+  "pillar": "COMMAND",
+  "community_link": {
+    "label": "Not ready? Join the free community",
+    "href": "/go/community?form=command&t=oasis-ai-cc"
+  },
+  "work_steps": [
+    { "title": "Book the call and show us where work leaks", "body": "You talk first: how leads come in, where they stall, what a good week looks like." },
+    { "title": "We set it up around your business, or you do", "body": "Turnkey and the managed partner are set up by us. OS DIY is yours to configure." },
+    { "title": "The follow-up keeps going without you", "body": "New leads get an answer, calls land on your calendar, and the back office keeps moving." }
+  ],
+  "form": {
+    "name": "COMMAND: the OASIS Command Center",
+    "slug": "command",
+    "description": "OASIS offer page draft (COMMAND, cat=p2). Qualifies a service business, then offers a time for the 45-minute discovery call.",
+    "branding": {
+      "primary_color": "#e8c547",
+      "accent_color": "#faf9f5",
+      "headline": "Book your discovery call",
+      "subheadline": "A few questions about your business, then pick a time.",
+      "thanks_message": "Thanks, we have your answers. We will confirm your discovery call by email. Not ready yet? Join the free community: https://oasisai.work/go/community?form=command&t=oasis-ai-cc"
+    },
+    "on_complete_stage": "researched",
+    "step_outcomes": {},
+    "steps": [
+      {
+        "key": "contact",
+        "title": "First, who are we talking to?",
+        "description": "Takes about twenty seconds.",
+        "cta_label": "Next",
+        "fields": [
+          { "name": "name", "label": "Your name", "type": "text", "required": true, "placeholder": "First and last" },
+          { "name": "email", "label": "Work email", "type": "email", "required": true, "placeholder": "you@company.com" },
+          { "name": "phone", "label": "Mobile number", "type": "phone", "required": true, "help": "So we can confirm the call with you." },
+          { "name": "company", "label": "Company name", "type": "text", "required": true },
+          { "name": "website", "label": "Website or social handle", "type": "text", "help": "Optional, but it lets us look at your setup before the call." },
+          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "command" }
+        ]
+      },
+      {
+        "key": "business",
+        "title": "Tell us about the business",
+        "description": "Rough is fine.",
+        "cta_label": "Next",
+        "fields": [
+          {
+            "name": "monthly_revenue",
+            "label": "Monthly revenue",
+            "type": "select",
+            "options": [
+              { "value": "pre_revenue", "label": "Pre-revenue / just starting" },
+              { "value": "under_10k", "label": "Under $10K/mo" },
+              { "value": "10k_50k", "label": "$10K to $50K/mo" },
+              { "value": "50k_250k", "label": "$50K to $250K/mo" },
+              { "value": "250k_plus", "label": "$250K+/mo" }
+            ]
+          },
+          {
+            "name": "team_size",
+            "label": "Team size",
+            "type": "select",
+            "options": [
+              { "value": "solo", "label": "Just me" },
+              { "value": "2_5", "label": "2 to 5" },
+              { "value": "6_20", "label": "6 to 20" },
+              { "value": "21_100", "label": "21 to 100" },
+              { "value": "100_plus", "label": "100+" }
+            ]
+          },
+          {
+            "name": "leak",
+            "label": "Where does work slip most?",
+            "type": "select",
+            "required": true,
+            "options": [
+              { "value": "lead_followup", "label": "New leads waiting for a reply" },
+              { "value": "booking", "label": "Getting people booked" },
+              { "value": "back_office", "label": "Admin and the back office" },
+              { "value": "all", "label": "All of it" }
+            ]
+          },
+          {
+            "name": "leak_detail",
+            "label": "What does that look like on a bad week?",
+            "type": "textarea",
+            "maxLength": 1000,
+            "placeholder": "e.g. quotes sit for days because nobody owns the follow-up"
+          }
+        ]
+      },
+      {
+        "key": "setup",
+        "title": "How would you like it set up?",
+        "description": "No wrong answer. We will recommend one on the call.",
+        "cta_label": "Pick a time",
+        "fields": [
+          {
+            "name": "setup_preference",
+            "label": "Setup",
+            "type": "select",
+            "options": [
+              { "value": "diy", "label": "I will configure it myself (OS DIY)" },
+              { "value": "turnkey", "label": "Set it up for me (Turnkey)" },
+              { "value": "managed", "label": "Run it with me every week (managed partner)" },
+              { "value": "not_sure", "label": "Not sure yet" }
+            ]
+          },
+          {
+            "name": "budget",
+            "label": "Budget set aside for this?",
+            "type": "select",
+            "options": [
+              { "value": "none_yet", "label": "Nothing yet, exploring what it costs" },
+              { "value": "under_2k", "label": "Under $2K/mo" },
+              { "value": "2k_5k", "label": "$2K to $5K/mo" },
+              { "value": "5k_15k", "label": "$5K to $15K/mo" },
+              { "value": "15k_plus", "label": "$15K+/mo" }
+            ],
+            "help": "Optional. Skipping it does not rule you out."
+          }
+        ]
+      }
+    ]
+  },
+  "offer_page": {
+    "v": 1,
+    "template": "book_call",
+    "theme": { "canvas": "dark", "logo": "workspace" },
+    "nav": { "pinned": ["obstacles", "what_you_get", "faq"], "cta_label": "Book the call" },
+    "hero": {
+      "eyebrow": "COMMAND, for service businesses",
+      "headline": "Your follow-up, booking and back office, running without you",
+      "subheadline": "The OASIS Command Center answers new leads, books the call and keeps the back office moving while you do the work you are paid for. We set it up for you, or you set it up yourself.",
+      "cta_label": "Book your discovery call",
+      "video": null,
+      "show_transcript": false,
+      "vsl_script": {
+        "source": "cc",
+        "text": "COMMAND VSL. Target length 3 to 6 minutes. Adon or CC on camera, landscape, eye level, quiet room. Oasis Studio adds captions, b-roll, the screen recordings named below and the OASIS end card.\nRule for the whole video: say no number, result or client story that is not on the page. Prices are said exactly as the page shows them. Every screen recording uses a synthetic test lead, never a real customer's details.\n\n[BEAT 1. HOOK, 0:00 to 0:20]\nOn camera: You are on a job. Your phone buzzes with a new enquiry. By the time you call back that evening, they have hired whoever answered first. Leads go cold while you work.\n\n[BEAT 2. WHO THIS IS FOR, AND WHO IT IS NOT FOR]\nOn camera: This is for service businesses doing roughly $10K to $75K a month, where the owner is still the one chasing every lead.\nIt is not for you if you are just starting out or want to build it all yourself. PROTOCOL is a better start. And if you are not ready for any of it, the free community is linked below this video.\n\n[BEAT 3. WHY IT KEEPS HAPPENING]\nOn camera: It keeps happening because follow-up has no owner. It lives in your inbox, your texts and your head, and nothing chases it unless you do. Another app does not fix that. A system that does the chasing does.\n\n[BEAT 4. WHAT WE DO ABOUT IT, SHOWN IN THE COMMAND CENTER]\nScreen recording: a test lead fills in a form.\nVoice over: Here is your follow-up and booking running without you. Watch a lead arrive.\nScreen recording: the automatic reply going out.\nVoice over: It gets an answer.\nScreen recording: the call appearing in Schedule.\nVoice over: And the call lands on the calendar. Three steps: book the call and show us where work slips. We set it up around your business, or you set it up yourself. Then the follow-up keeps going without you.\n\n[BEAT 5. WHAT YOU GET, PRICES SAID OUT LOUD]\nOn camera, matching the page word for word:\nOS DIY, $497 a month, no setup fee. You configure it yourself.\nOS Turnkey, done for you, $2,500 setup plus $997 a month, or the setup in two payments of $1,400. The 7-day setup clock starts when your onboarding vault is 100% submitted.\nManaged operating partner, $5,000 setup plus $2,500 to $3,500 a month.\nEvery monthly plan: cancel any time from your account, no cancellation fee.\nNote for the recording: once Adon picks one number for each range, say that number, and update this script and the page together.\n\n[BEAT 6. PROOF]\nNo permissioned examples are confirmed yet, so the proof is the product working: the beat 4 recording, start to finish, no cuts in the middle.\n\n[BEAT 7. CALL TO ACTION]\nOn camera: Book your discovery call below. It is 45 minutes. You talk first, then we show you the Command Center set up around what you told us. Not ready? The free community is linked right below this video."
+      }
+    },
+    "sections": [
+      {
+        "key": "obstacles",
+        "eyebrow": "Sound familiar?",
+        "title": "The work is good. The follow-up is where it leaks.",
+        "items": [
+          { "title": "Leads go cold while you are on the job", "body": "A new enquiry comes in while you are with a customer. By the time you call back, they have hired someone who answered first." },
+          { "title": "Follow-up lives in your head", "body": "Quotes, callbacks and reminders sit in your inbox, your texts and a notebook. Nothing chases them unless you do." },
+          { "title": "Booking takes a string of messages", "body": "Back and forth about times before anyone is on the calendar, and some people give up halfway." },
+          { "title": "You bought tools nobody uses", "body": "Another app with another login. It was supposed to save time and became one more thing to manage." },
+          { "title": "The back office eats your evenings", "body": "Admin happens after hours, because the day belongs to the customers." }
+        ]
+      },
+      {
+        "key": "what_you_get",
+        "eyebrow": "The plans",
+        "title": "Set up for you, or by you",
+        "lede": "Every plan runs on the OASIS Command Center. The difference is who sets it up and who runs it with you.",
+        "items": [
+          { "title": "OS DIY: $497 a month, no setup fee", "body": "The OASIS Command Center platform, provisioned for your business, and you configure it yourself. For owners comfortable with software. Cancel any time from your account; no cancellation fee." },
+          { "title": "OS Turnkey, done for you: $2,500 setup + $997 a month", "body": "We configure the Command Center around how your business already runs. You fill in the onboarding vault (your logins, documents and channels), and the 7-day setup clock starts when it is 100% submitted. Prefer to split the setup? Two payments of $1,400. Cancel the monthly plan any time from your account; no cancellation fee." },
+          { "title": "Managed operating partner: $5,000 setup + $2,500 to $3,500 a month", "body": "For established businesses that want a dedicated team running the system with them, with a weekly audit. Cancel any time from your account; no cancellation fee." }
+        ]
+      },
+      {
+        "key": "bonuses",
+        "eyebrow": "On the call",
+        "title": "A bonus for starting on the call",
+        "items": [
+          { "title": "Expedited VIP vault bonus", "body": "Offered to owners who decide to start at the end of the discovery call. We walk you through what it includes on the call.", "value": null }
+        ]
+      },
+      {
+        "key": "faq",
+        "title": "Questions",
+        "items": [
+          { "q": "What happens on the discovery call?", "a": "It is a 45-minute video call. For the first part you talk and we listen: how leads come in, where they stall, and what a good week looks like for you. Then we share a screen and walk through the Command Center set up around what you told us. If it is a fit, you can start on the call. If it is not, we will tell you." },
+          { "q": "How does it work?", "a": "First, book the call and show us where work slips. Then we set up the Command Center around your business, or you set it up yourself on OS DIY. After that, new leads get an answer, calls land on your calendar and the follow-up keeps going without you chasing it." },
+          { "q": "Which plan is right for me?", "a": "If you are comfortable configuring software, OS DIY. If you would rather hand it over, Turnkey. If you want a team running it alongside you every week, the managed partner. We will recommend one on the call." },
+          { "q": "What do you need from me to get started?", "a": "For Turnkey, your onboarding vault: you add the logins, sign the documents and choose your channels in one place. Setup starts when it is complete." },
+          { "q": "What if the setup fee is too much right now?", "a": "Turnkey's setup can be split into two payments of $1,400. You can also start on OS DIY at $497 a month with no setup fee, or join the VIP mastermind at $97 a month and build alongside us first." },
+          { "q": "How do I cancel?", "a": "Cancel any time from your account. There is no cancellation fee." },
+          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside us, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=command&t=oasis-ai-cc" }
+        ]
+      }
+    ],
+    "book": {
+      "eyebrow": "Next step",
+      "title": "Book your discovery call",
+      "lede": "Answer a few questions about your business, then pick a time.",
+      "mode": "form_then_link",
+      "qualify": "after"
+    },
+    "seo": {
+      "title": "COMMAND: the OASIS Command Center for service businesses",
+      "description": "Follow-up, booking and back office running without you. Set up by OASIS or by you. Book a discovery call.",
+      "indexable": false
+    },
+    "brief": {
+      "audience": "Service businesses doing about $10K-75K a month (funnel doc COMMAND, cat=p2). 2A targets tech-fluent SMBs ($10K-30K/mo), 2B service SMBs ($20K-75K/mo), 2C established businesses.",
+      "promise": "The OASIS Command Center runs your follow-up, booking and back office, set up for you or by you (HANDOVER section 4).",
+      "included": "2A OS DIY core platform (Cloudflare Worker + Turso provisioning). 2B OS Turnkey (OCC onboarding vault, then agent configuration; 7-day SLA starts only when the vault is 100% submitted). 2C Managed operating partner (dedicated fleet ops + weekly audit).",
+      "proof_available": "None confirmed. The VSL shows the product working on a synthetic lead instead.",
+      "price": "As the funnel doc states: 2A $497/mo, no setup. 2B $2,500 setup + $997/mo, or 2-pay $1,400 x 2. 2C $5,000 setup + $2,500-3,500/mo. Downsell ladder: 2-pay, then DIY $497/mo, then VIP $97/mo, then the free community. Currency unconfirmed.",
+      "bonuses": "Expedited VIP vault bonus, offered at the close of the discovery call. The funnel doc gives a $500 value; not shown until Adon or CC confirm it.",
+      "guarantee": "None confirmed. Section omitted."
+    }
+  }
+}
