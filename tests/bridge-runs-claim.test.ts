@@ -344,6 +344,72 @@ async function main() {
     assert.equal(row.rows[0].claim_blocked_reason, "claude_account_changed");
   });
 
+  // ── First-seen Claude account binding (Codex review, P1, 2026-10-12) ──
+  //
+  // WHY. D0's connector auto-approve (lib/turso-rpc-shim.ts redeem_pair_code)
+  // stamps claim_enabled_at itself, so a connector pairing never passes
+  // through POST /api/devices/[id]/approve -- the route that used to be the
+  // ONLY place a claude_account_hash was ever recorded or checked against
+  // another person's approved pairing. Without this, a connector pairing
+  // could claim work under a shared Claude sign-in forever, nothing ever
+  // checking it. This call site is the one every connector pairing actually
+  // passes through.
+  async function rowOf(id: string): Promise<{ claude_account_hash: unknown; claim_blocked_reason: unknown }> {
+    const r = await db.execute({ sql: `SELECT claude_account_hash, claim_blocked_reason FROM bridge_pairings WHERE id = ?`, args: [id] });
+    return r.rows[0] as unknown as { claude_account_hash: unknown; claim_blocked_reason: unknown };
+  }
+  /** True only when `row` carries EXACTLY `expected` as its bound hash -- never true for null, never true for a different string. */
+  function hashIsBoundTo(row: { claude_account_hash: unknown }, expected: string): boolean {
+    return row.claude_account_hash === expected;
+  }
+  await check(
+    "mutation check: hashIsBoundTo distinguishes a bound hash from an unbound/different one, before trusting it against the real collision check below",
+    () => {
+      assert.equal(hashIsBoundTo({ claude_account_hash: "hash-a" }, "hash-a"), true, "a matching hash must read as bound");
+      assert.equal(hashIsBoundTo({ claude_account_hash: null }, "hash-a"), false, "a NULL hash must never read as bound");
+      assert.equal(hashIsBoundTo({ claude_account_hash: "hash-b" }, "hash-a"), false, "a different hash must never read as bound");
+    },
+  );
+  await check("a pairing approved with NO recorded hash binds the FIRST claude_account_hash a claim reports (the only enforcement point a connector pairing ever passes through)", async () => {
+    const member = await freshMember();
+    const { id, token } = await makePairing({ userId: member, scope: "connector", claudeAccountHash: null });
+    assert.equal((await rowOf(id)).claude_account_hash, null, "fixture sanity: no hash recorded yet");
+    const r = await claim(token, body(randomUUID(), { claude_account_hash: "first-seen-hash-001" }));
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, true);
+    const row = await rowOf(id);
+    assert.equal(hashIsBoundTo(row, "first-seen-hash-001"), true, "the first hash this pairing ever reported must be recorded");
+    assert.equal(row.claim_blocked_reason, null, "binding a FRESH hash (no collision) must never block the claim itself");
+  });
+  await check("a SECOND person's computer reporting the SAME hash as someone else's already-approved pairing is refused claude_account_shared, and the hash is never recorded on it", async () => {
+    const owner1 = await freshMember();
+    const owner2 = await freshMember();
+    await makePairing({ userId: owner1, scope: "connector", claudeAccountHash: "shared-hash-collision-1" });
+    const { id: pairing2Id, token: pairing2Token } = await makePairing({ userId: owner2, scope: "connector", claudeAccountHash: null });
+    const r = await claim(pairing2Token, body(randomUUID(), { claude_account_hash: "shared-hash-collision-1" }));
+    assert.equal(r.status, 200, "the claim call itself still answers normally, just with no work");
+    assert.deepEqual(r.json, { ok: true, run: null });
+    const row = await rowOf(pairing2Id);
+    assert.equal(row.claim_blocked_reason, "claude_account_shared");
+    assert.equal(hashIsBoundTo(row, "shared-hash-collision-1"), false, "a colliding hash must NEVER be recorded on the second pairing");
+    assert.equal(row.claude_account_hash, null, "refused, not silently bound under someone else's account");
+  });
+  await check("a pairing already live-approved with a NULL hash before this fix shipped (the Adon/938fbd09 shape) still binds correctly on its first claim", async () => {
+    // Same fixture shape as a pairing approved by the OLD POST /approve path
+    // with no claude_account_hash ever sent in the approve body: claim_enabled_at
+    // set, claude_account_hash NULL. Not scope-specific -- the review named
+    // this gap for ANY scope, daemon included. A daemon-scope pairing must
+    // belong to the workspace's actual agents owner (OWNER_ID) or the claim
+    // route refuses it 403 agents_owner_only before ever reaching the hash
+    // logic this check is about.
+    const { id, token } = await makePairing({ userId: OWNER_ID, scope: "daemon", claudeAccountHash: null });
+    const r = await claim(token, body(randomUUID(), { claude_account_hash: "legacy-pairing-first-hash" }));
+    assert.equal(r.status, 200);
+    const row = await rowOf(id);
+    assert.equal(hashIsBoundTo(row, "legacy-pairing-first-hash"), true);
+    assert.equal(row.claim_blocked_reason, null);
+  });
+
   console.log("Claiming a real run: the CAS, the turn it builds, idempotency, claim_already_started");
   await check("Ann's computer can never claim Ben's run, and the reverse", async () => {
     const annId = await freshMember();

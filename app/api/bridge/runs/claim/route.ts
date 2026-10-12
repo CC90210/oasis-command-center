@@ -26,8 +26,16 @@
  * claim_state_at being unset or at least 1s old (the per-computer limiter;
  * replaces the per-isolate in-memory one, lib/rate-limit.ts, which keeps a
  * separate count in every Worker isolate). A claude_account_hash that
- * differs from the one recorded at approval overrides blocked_reason to
- * 'claude_account_changed', whatever the body itself said.
+ * differs from the one already recorded on this pairing overrides
+ * blocked_reason to 'claude_account_changed', whatever the body itself
+ * said. A pairing with NO recorded hash yet binds the FIRST one a claim
+ * reports here (bindFirstClaudeAccountHash, Codex review P1, 2026-10-12) --
+ * this is the only enforcement point for a connector pairing, which is
+ * auto-approved on redeem and never passes through POST
+ * /api/devices/[id]/approve, the route this used to depend on entirely.
+ * Refused ('claude_account_shared') if another approved, non-revoked
+ * pairing in the same tenant already carries that hash under a different
+ * person.
  *
  * Before claiming: claimCleanup (store.ts) reaps this person's own silent
  * producers and times out any chat run that has sat queued too long, so the
@@ -142,6 +150,78 @@ async function approvedClaudeAccountHash(pairingId: string): Promise<string | nu
   } catch {
     return null;
   }
+}
+
+/**
+ * First-seen Claude account binding (Codex review, P1, 2026-10-12).
+ *
+ * POST /api/devices/[id]/approve used to be the ONLY place a
+ * claude_account_hash was ever recorded or checked against another
+ * person's approved pairing (security rule: two people sharing one Claude
+ * sign-in is not "their own subscription"). D0's connector auto-approve
+ * (lib/turso-rpc-shim.ts redeem_pair_code) skips that route entirely, so a
+ * connector pairing could claim work under a shared Claude account forever
+ * with nothing ever checking it -- this call site, not the approve route,
+ * is the one every connector pairing actually passes through.
+ *
+ * Runs ONLY when the pairing has NO recorded hash yet (the caller checks
+ * `!approvedHash` first) -- a pairing that already has one takes the
+ * existing claude_account_changed path below instead, unchanged.
+ *   1. Check FIRST: another ACTIVE (approved, non-revoked) pairing in the
+ *      SAME tenant, owned by a DIFFERENT person, already carrying this
+ *      exact hash -> refuse, never record.
+ *   2. Record SECOND, compare-and-set `WHERE claude_account_hash IS NULL`:
+ *      a concurrent first claim for the SAME pairing can only ever write
+ *      once; the loser's write affects zero rows and is harmless (the next
+ *      claim call re-reads whatever won and falls on the normal
+ *      claude_account_changed path if the two calls disagreed).
+ *
+ * This also covers the re-pair case the review flagged: lib/turso-rpc-
+ * shim.ts clears claude_account_hash to NULL on every rotate (including a
+ * connector-scope one, which keeps approval across the rotate) -- a cleared
+ * hash is NOT a cleared BINDING, it is "unbound again," and the very next
+ * claim call re-runs this exact check before anything can claim work.
+ *
+ * And the pre-existing gap the review also named: a pairing approved
+ * before this feature existed (NULL hash, daemon scope included) records
+ * its hash the same way, on its very first claim call after this ships.
+ */
+async function bindFirstClaudeAccountHash(
+  pairing: Pick<ResolvedPairing, "pairingId" | "tenantId" | "userId">,
+  hash: string,
+): Promise<{ ok: true } | { ok: false; blockedReason: "claude_account_shared" | "claude_account_changed" }> {
+  const db = getServiceSupabase();
+  const sameHash = await db
+    .from("bridge_pairings")
+    .select("id, user_id, claim_enabled_at")
+    .eq("tenant_id", pairing.tenantId)
+    .eq("claude_account_hash", hash)
+    .is("revoked_at", null);
+  if (sameHash.error) {
+    console.error("[bridge.runs.claim] claude-account collision check failed", sameHash.error.message);
+    // Fail CLOSED on a read error this call could not actually verify is
+    // unshared -- never record. "claude_account_changed" (not "_shared",
+    // which would name a collision this call never confirmed) is the
+    // closest existing honest code: "we can't currently vouch for this
+    // binding, approve it again."
+    return { ok: false, blockedReason: "claude_account_changed" };
+  }
+  const sharedWithSomeoneElse = (
+    (sameHash.data || []) as Array<{ id: string; user_id: string | null; claim_enabled_at: string | null }>
+  ).some((r) => r.id !== pairing.pairingId && r.user_id && r.user_id !== pairing.userId && r.claim_enabled_at);
+  if (sharedWithSomeoneElse) return { ok: false, blockedReason: "claude_account_shared" };
+
+  const write = await db
+    .from("bridge_pairings")
+    .update({ claude_account_hash: hash })
+    .eq("id", pairing.pairingId)
+    .is("claude_account_hash", null)
+    .is("revoked_at", null);
+  if (write.error) {
+    console.error("[bridge.runs.claim] claude-account bind write failed", write.error.message);
+    return { ok: false, blockedReason: "claude_account_changed" };
+  }
+  return { ok: true };
 }
 
 type ClaimState = { capacity: number; inFlight: number; blockedReason: string | null };
@@ -261,8 +341,19 @@ export async function POST(req: NextRequest) {
   const waitMs = clampInt(body.wait_ms, 0, MAX_WAIT_MS, 0);
 
   const approvedHash = await approvedClaudeAccountHash(pairing.pairingId);
-  const accountChanged = Boolean(approvedHash && claudeAccountHash && approvedHash !== claudeAccountHash);
-  const blockedReason = accountChanged ? "claude_account_changed" : bodyBlockedReason;
+  let blockedReason = bodyBlockedReason;
+  if (approvedHash && claudeAccountHash && approvedHash !== claudeAccountHash) {
+    blockedReason = "claude_account_changed";
+  } else if (!approvedHash && claudeAccountHash) {
+    // First time THIS pairing has ever reported a hash (or it was cleared
+    // by a re-pair, D0) -- bind it now, under the same collision rule the
+    // approve route always enforced (Codex review, P1).
+    const bind = await bindFirstClaudeAccountHash(
+      { pairingId: pairing.pairingId, tenantId: pairing.tenantId, userId: pairing.userId },
+      claudeAccountHash,
+    );
+    if (!bind.ok) blockedReason = bind.blockedReason;
+  }
 
   const now = new Date();
   const stamped = await stampClaimState(pairing, { capacity, inFlight, blockedReason }, getClientIp(req), now.toISOString());

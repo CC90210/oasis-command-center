@@ -35,6 +35,9 @@ async function main() {
   // relative to whenever this test actually runs.
   const NOW = Date.now();
   const RECENT = new Date(NOW - 10_000).toISOString(); // 10s ago: online
+  // lib/devices/presence.ts: ONLINE_MS = 150_000, IDLE_MS = 600_000. 5
+  // minutes ago is inside that band -- idle, never offline, never "online".
+  const IDLE_AGO = new Date(NOW - 5 * 60_000).toISOString();
   const OLD = new Date(NOW - 20 * 60_000).toISOString(); // 20min ago: offline
 
   console.log("devices-team-row-copy:");
@@ -45,6 +48,12 @@ async function main() {
     assert.doesNotMatch(line, /\byou\b|\byour\b/i, `team row addresses the viewer directly: ${line}`);
     assert.match(line, /\bCC\b/, `team row does not name the owner: ${line}`);
     assert.equal(line, "CC's computer · Online · not yet approved by CC for department work");
+  });
+
+  check("a not-approved team row for an IDLE teammate's computer (150-600s heartbeat) says 'Idle', never 'Online' (Codex review, P2)", () => {
+    const line = teamRowLine("CC's computer", "CC", "not_approved", null, IDLE_AGO, NOW);
+    assert.equal(line, "CC's computer · Idle · not yet approved by CC for department work");
+    assert.doesNotMatch(line, /\bOnline\b/, `an idle heartbeat read as Online: ${line}`);
   });
 
   check("a not-approved team row for an offline teammate's computer still never says 'your approval'", () => {

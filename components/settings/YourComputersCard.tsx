@@ -58,6 +58,7 @@ const BLOCKED_REASON_WORDS: Record<string, string> = {
   department_profile_unsafe: "its department profile failed a safety check",
   cli_not_found: "Claude Code isn't installed there anymore",
   claude_account_changed: "it signed in to a different Claude account; approve it again",
+  claude_account_shared: "its Claude account is already bound to another person's computer",
 };
 
 function blockedWords(reason: string): string {
@@ -86,10 +87,16 @@ function rowLine(label: string, state: ComputerAnswerState, claimStateAt: string
  * The Team computers row line (fixes: these rows were reusing rowLine's
  * "Waiting for your approval", which told CC's Mac and CCPC that THEY were
  * waiting on Adon's own approval -- never true for a computer that is not
- * his). Names the owner, never says "your" or "you". The online/offline word
+ * his). Names the owner, never says "your" or "you". The presence word
  * comes from the plain heartbeat (lib/devices/presence.ts machineState), not
  * computerAnswerState's claim-freshness rule -- a teammate's machine can be
  * genuinely online and simply not yet approved, and that is worth showing.
+ *
+ * machineState has THREE states, not two (Codex review, P2, 2026-10-12): a
+ * heartbeat 150-600s old is 'idle', not 'offline' -- a sleeping laptop, a
+ * dropped network, a restart in progress. Collapsing 'idle' into "Online"
+ * read as a live, working computer when it was anything but; it now gets
+ * its own word, matching lib/devices/presence.ts's own rule exactly.
  */
 function teamRowLine(
   label: string,
@@ -102,7 +109,8 @@ function teamRowLine(
   if (state === "can_answer") return `${label} · Ready for department work, checked ${timeAgo(claimStateAt)}`;
   if (state === "busy") return `${label} · Finishing a reply`;
   if (state === "not_approved") {
-    const presence = machineState(lastSeenAt, nowMs) === "offline" ? `Offline since ${timeAgo(lastSeenAt)}` : "Online";
+    const heartbeat = machineState(lastSeenAt, nowMs);
+    const presence = heartbeat === "offline" ? `Offline since ${timeAgo(lastSeenAt)}` : heartbeat === "idle" ? "Idle" : "Online";
     return `${label} · ${presence} · not yet approved by ${ownerName} for department work`;
   }
   if (state === "offline") return `${label} · Offline since ${timeAgo(lastSeenAt)}`;
