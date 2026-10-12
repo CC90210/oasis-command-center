@@ -20,6 +20,8 @@ import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
 import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
+import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
+import { SUPPORT_FORM_SLUG } from "@/lib/delivery/support-form";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -307,6 +309,13 @@ export default async function PublicFormPage({
       // a Bluerise merchant's consent under SunBiz's site key and disclosure —
       // an evidence record stating they were shown wording they never saw.
       brand={consentBrandForTenant(result.tenant_slug, result.form.slug)}
+      consentIdentity={
+        resolveConsentIdentity({ tenantId: result.form.tenant_id, tenantSlug: result.tenant_slug }).identity
+      }
+      // One rule on both pages: a form named "support" draws no consent boxes.
+      // (A token-bearing body does reach the ledger even for that slug, so
+      // this is consistency, not a gap: it can only ever refuse a send.)
+      consentLedgerEnabled={result.form.slug.trim().toLowerCase() !== SUPPORT_FORM_SLUG}
     />
   );
 }

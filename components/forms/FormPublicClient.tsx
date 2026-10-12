@@ -18,7 +18,7 @@
  * bank-statement step gets first-class treatment.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { FormRenderer } from "./FormRenderer";
 import type { FormStep, FormBranding } from "@/lib/forms/types";
@@ -26,6 +26,12 @@ import { isFieldVisible } from "@/lib/forms/visibility";
 import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 import { captureConsent, disclosureFor, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
+import {
+  consentDisclosureText,
+  renderedChannelsForStep,
+  type ConsentChannel,
+  type ConsentIdentity,
+} from "@/lib/consent/ledger-disclosure";
 import { SafeLogo } from "@/components/brand/SafeLogo";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
@@ -38,6 +44,25 @@ type Props = {
   /** Sending brand this form belongs to, resolved server-side. Drives which
    *  capture site and disclosure the consent evidence is sealed under. */
   brand?: string | null;
+  /**
+   * The business name/address the CONSENT LEDGER's checkboxes name — resolved
+   * server-side (lib/consent/ledger-identity.ts resolveConsentIdentity) from
+   * the SAME tenant the submit route will resolve it from. REQUIRED, not
+   * optional with a client-side default: a default computed here could never
+   * be guaranteed to match what the server hashes, and a mismatch between
+   * what a visitor was shown and what the ledger asserts they were shown is
+   * the exact failure this whole feature exists to prevent. Separate from
+   * `brand` above, which only ever covers SunBiz/Bluerise.
+   */
+  consentIdentity: ConsentIdentity;
+  /**
+   * Whether this form's submissions reach the consent ledger at all. False on
+   * a support form: the submit route hands those to the ticket desk before the
+   * ledger runs (a ticket is not a lead, and the ledger records against a
+   * lead), so a box drawn there would be a choice nobody records. Required so
+   * a new mount point has to decide.
+   */
+  consentLedgerEnabled: boolean;
   formId: string;
   formName: string;
   branding: FormBranding;
@@ -191,6 +216,8 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
 
   // Nothing the merchant did. Say so, and do not make them re-type anything.
   server_error: "Something went wrong on our end. Please try submitting again.",
+  consent_record_unavailable:
+    "We couldn't save your contact preferences just now. Please try submitting again.",
   form_corrupt: "This form is temporarily unavailable. We have been notified, please try again shortly.",
   form_definition_corrupt:
     "This form is temporarily unavailable. We have been notified, please try again shortly.",
@@ -230,6 +257,8 @@ export function FormPublicClient({
   submissionPath,
   prefill,
   brand,
+  consentIdentity,
+  consentLedgerEnabled,
   chrome = "page",
   onStepSubmitted,
 }: Props) {
@@ -370,6 +399,34 @@ export function FormPublicClient({
     [stepValues],
   );
 
+  // CONSENT LEDGER. Which box(es) the CURRENT step renders — derived from its
+  // own fields via renderedChannelsForStep (lib/consent/ledger-disclosure.ts),
+  // the SAME function the submit route calls, so the two can never disagree
+  // about which boxes exist — and whether each is ticked right now.
+  // Per-step, not per-form: a form whose email and phone fields sit on
+  // different steps renders each box on the step that actually asks for
+  // that channel. Unticked by default on every render, including a step
+  // revisited via Back — a consent box must never arrive pre-checked.
+  const ledgerChannels = useMemo(
+    () => (consentLedgerEnabled ? renderedChannelsForStep(step, mergedValues) : []),
+    [consentLedgerEnabled, step, mergedValues],
+  );
+  const [ledgerTicked, setLedgerTicked] = useState<Record<ConsentChannel, boolean>>({
+    email: false,
+    sms: false,
+  });
+  // Every step change, forward or Back, presents the disclosure afresh, so
+  // the boxes go back to unticked: a tick carried over from an earlier view
+  // would record a "yes" the visitor never gave on this one. Reset during
+  // render (React's pattern for resetting state when an input changes), not
+  // in an effect, so the stale tick is never painted even for one frame.
+  const [ledgerStep, setLedgerStep] = useState(currentStep);
+  if (ledgerStep !== currentStep) {
+    setLedgerStep(currentStep);
+    setLedgerTicked({ email: false, sms: false });
+  }
+  const ledgerIdBase = useId();
+
   const setFieldValue = useCallback(
     (name: string, value: unknown) => {
       setStepValues((prev) => ({
@@ -467,6 +524,14 @@ export function FormPublicClient({
   validateRef.current = validate;
   const buildSubmitPayloadRef = useRef<typeof buildSubmitPayload>(buildSubmitPayload);
   buildSubmitPayloadRef.current = buildSubmitPayload;
+  // The consent boxes, for the same reason: they stay clickable during the
+  // address wait, so a visitor can untick one after pressing Continue. Read
+  // in the old closure, the tick they just took back would be sent as a "yes".
+  // `step` says which step these boxes belong to: a Back click during a wait
+  // re-points the ref at the PREVIOUS step's boxes, which must never be sent
+  // as the answer to the step being submitted.
+  const ledgerRef = useRef({ step: currentStep, channels: ledgerChannels, ticked: ledgerTicked });
+  ledgerRef.current = { step: currentStep, channels: ledgerChannels, ticked: ledgerTicked };
   /** Claimed before the first await in `submit()` so a second click cannot
    *  start a second submission while the first is waiting. */
   const submitGuard = useRef(false);
@@ -735,6 +800,25 @@ export function FormPublicClient({
       } else if (anonymousInit) {
         submitBody.anonymous_init = anonymousInit;
       }
+
+      // CONSENT LEDGER. Only which box(es) THIS step rendered, and whether
+      // each was ticked right now — nothing else is sent, because nothing
+      // else is trusted: the server independently derives which channels
+      // step `stepAtStart` actually declares and ignores anything here that
+      // disagrees (app/api/forms/submit/route.ts). Read through ledgerRef,
+      // never the closure, and HERE, immediately before the request: both the
+      // address wait and the vault capture above can take seconds while the
+      // boxes stay clickable, and the visitor's last answer is the one sent.
+      // If they navigated to another step during a wait, the boxes they can
+      // see are not this step's: nothing is sent, so nothing is recorded,
+      // which can only ever refuse a send.
+      const ledgerNow = ledgerRef.current;
+      if (ledgerNow.step === stepAtStart && ledgerNow.channels.length > 0) {
+        submitBody.consent_ledger = {
+          email: ledgerNow.channels.includes("email") ? ledgerNow.ticked.email : undefined,
+          sms: ledgerNow.channels.includes("sms") ? ledgerNow.ticked.sms : undefined,
+        };
+      }
       const res = await fetch("/api/forms/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -993,6 +1077,42 @@ export function FormPublicClient({
                 uploadToken={token}
                 ensureUploadToken={ensureUploadToken}
                 onAddressResolvingChange={setAddressResolving}
+                belowFields={
+                  ledgerChannels.length > 0 ? (
+                    // THE CONSENT LEDGER'S OWN BOXES. Separate, unticked, one per
+                    // channel this step actually collects — never pre-checked,
+                    // never combined into one "I agree to everything" box (CASL
+                    // requires express consent PER channel). Each is a real
+                    // <label>/<input> pair, not a styled div: a screen reader
+                    // announces it as a checkbox with this exact text, and Tab
+                    // + Space operate it with no mouse. Recorded whether ticked
+                    // or not — see lib/consent/ledger.ts.
+                    <div className="space-y-3 rounded-lg border border-bg-border bg-bg-elev/30 p-3">
+                      {ledgerChannels.map((channel) => {
+                        const inputId = `${ledgerIdBase}-consent-${channel}`;
+                        return (
+                          <div key={channel} className="flex items-start gap-3 py-1">
+                            <input
+                              id={inputId}
+                              type="checkbox"
+                              checked={ledgerTicked[channel]}
+                              onChange={(e) =>
+                                setLedgerTicked((prev) => ({ ...prev, [channel]: e.target.checked }))
+                              }
+                              className="mt-0.5 h-4 w-4 shrink-0 rounded border-bg-border"
+                            />
+                            <label
+                              htmlFor={inputId}
+                              className="text-[12px] leading-relaxed text-fg-muted"
+                            >
+                              {consentDisclosureText(channel, consentIdentity)}
+                            </label>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null
+                }
               />
               {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
                   Rendered on the final step, immediately by the submit control,
