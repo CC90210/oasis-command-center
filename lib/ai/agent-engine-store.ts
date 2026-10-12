@@ -675,12 +675,19 @@ export async function workspaceAllowsPersonApiChoice(tenantId: string): Promise<
   return (await readAgentEngine(tenantId)).kind === "api";
 }
 
-type KeyRow = { agent_key: string; provider: string; model: string; encrypted_api_key: string | null; enabled: unknown };
+type KeyRow = {
+  agent_key: string;
+  provider: string;
+  model: string;
+  encrypted_api_key: string | null;
+  enabled: unknown;
+  updated_at?: unknown;
+};
 
 async function teamKeyRows(tenantId: string): Promise<KeyRow[]> {
   const { data, error } = await getServiceSupabase()
     .from("agent_model_config")
-    .select("agent_key, provider, model, encrypted_api_key, enabled")
+    .select("agent_key, provider, model, encrypted_api_key, enabled, updated_at")
     .eq("tenant_id", tenantId)
     .is("user_id", null);
   if (error) throw new Error(`saved AI keys: agent_model_config read failed: ${error.message}`);
@@ -699,14 +706,35 @@ const on = (v: unknown) => v === true || Number(v) === 1;
 export async function readSavedKey(
   tenantId: string,
   provider: Provider,
-): Promise<{ encryptedApiKey: string; model: string; source: "kept" | "account" | "team" } | null> {
+): Promise<{ encryptedApiKey: string; model: string; source: "kept" | "account" | "team"; updatedAt: string | null } | null> {
   const rows = (await teamKeyRows(tenantId)).filter((r) => r.provider === provider);
   const kept = rows.find((r) => r.agent_key === savedKeyAgentKey(provider));
-  if (kept?.encrypted_api_key) return { encryptedApiKey: kept.encrypted_api_key, model: kept.model, source: "kept" };
+  if (kept?.encrypted_api_key) {
+    return {
+      encryptedApiKey: kept.encrypted_api_key,
+      model: kept.model,
+      source: "kept",
+      updatedAt: typeof kept.updated_at === "string" ? kept.updated_at : null,
+    };
+  }
   const account = rows.find((r) => r.agent_key === WORKSPACE_AI_AGENT_KEY && on(r.enabled));
-  if (account?.encrypted_api_key) return { encryptedApiKey: account.encrypted_api_key, model: account.model, source: "account" };
+  if (account?.encrypted_api_key) {
+    return {
+      encryptedApiKey: account.encrypted_api_key,
+      model: account.model,
+      source: "account",
+      updatedAt: typeof account.updated_at === "string" ? account.updated_at : null,
+    };
+  }
   const team = rows.find((r) => !r.agent_key.startsWith("__") && on(r.enabled));
-  if (team?.encrypted_api_key) return { encryptedApiKey: team.encrypted_api_key, model: team.model, source: "team" };
+  if (team?.encrypted_api_key) {
+    return {
+      encryptedApiKey: team.encrypted_api_key,
+      model: team.model,
+      source: "team",
+      updatedAt: typeof team.updated_at === "string" ? team.updated_at : null,
+    };
+  }
   return null;
 }
 

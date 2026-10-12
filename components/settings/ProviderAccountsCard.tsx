@@ -84,6 +84,15 @@ type Props = {
 // the bridge + AgentConfigEditor and shouldn't pretend it's an account.
 const CARD_PROVIDERS: Provider[] = ["anthropic", "openrouter", "openai", "google"];
 export const OPEN_AI_PROVIDER_ACCOUNT_EVENT = "oasis:open-ai-provider-account";
+export type ProviderAccountOpenRequest = {
+  provider: Provider;
+  scope?: "tenant" | "user";
+  /** Save the tested workspace key without activating it. AI Brain activates
+   * it atomically with the workspace engine only after the user presses Use. */
+  stageOnly?: boolean;
+  /** The canonical engine configurator owns scope; its dialog must not drift. */
+  lockScope?: boolean;
+};
 
 /** This page's own connects and removals, and the server answer they were made on. */
 type Overlay = { on: Set<string> | null | undefined; changes: ReadonlyMap<string, boolean> };
@@ -132,7 +141,7 @@ export function ProviderAccountsCard({
   const [changedHere, setChangedHere] = useState<Overlay>(() => ({ on: initialServices, changes: NO_CHANGES }));
   const latestServices = useRef(initialServices);
   const services = laidOver(initialServices, changedHere);
-  const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
+  const [activeProvider, setActiveProvider] = useState<ProviderAccountOpenRequest | null>(null);
   // The viewer's own keys (department chats never use them), with this page's
   // own personal connects and removals laid over the server's answer, until
   // the next one.
@@ -150,9 +159,16 @@ export function ProviderAccountsCard({
   useLayoutEffect(() => {
     if (typeof window === "undefined") return;
     const openProvider = (event: Event) => {
-      const provider = (event as CustomEvent<{ provider?: unknown }>).detail?.provider;
+      const detail = (event as CustomEvent<Partial<ProviderAccountOpenRequest>>).detail;
+      const provider = detail?.provider;
       if (typeof provider === "string" && CARD_PROVIDERS.includes(provider as Provider)) {
-        setActiveProvider(provider as Provider);
+        const scope = detail?.scope === "tenant" || detail?.scope === "user" ? detail.scope : undefined;
+        setActiveProvider({
+          provider: provider as Provider,
+          ...(scope ? { scope } : {}),
+          stageOnly: detail?.stageOnly === true,
+          lockScope: detail?.lockScope === true,
+        });
       }
     };
     window.addEventListener(OPEN_AI_PROVIDER_ACCOUNT_EVENT, openProvider);
@@ -170,11 +186,12 @@ export function ProviderAccountsCard({
     else setChangedHere(apply);
   };
 
-  function markConnected(p: Provider, scope: "tenant" | "user" = "tenant") {
+  function markConnected(p: Provider, scope: "tenant" | "user" = "tenant", staged = false) {
     const svc = PROVIDER_TO_SERVICE[p];
     if (!svc) return;
-    // A key saved "Just me" is the viewer's own: it never reads Connected.
-    change(scope, svc, true);
+    // A staged workspace key is deliberately not the connected account yet.
+    // It becomes active only with the engine compare-and-swap after Use.
+    if (!staged) change(scope, svc, true);
     // Cross-component refresh: AgentConfigEditor on this same page caches
     // its config list in client state from a fetch() on mount. Without a
     // poke, the per-agent rows below would still show "no key on file"
@@ -345,7 +362,7 @@ export function ProviderAccountsCard({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setActiveProvider(p)}
+                  onClick={() => setActiveProvider({ provider: p })}
                   className={`text-[11px] font-bold inline-flex items-center gap-1 ${
                     connected
                       ? "text-fg-muted hover:text-fg"
@@ -418,16 +435,19 @@ export function ProviderAccountsCard({
 
       {activeProvider && (
         <ConnectProviderDialog
-          provider={activeProvider}
+          provider={activeProvider.provider}
           canManageTeam={canManageTeam}
+          initialScope={activeProvider.scope}
+          lockScope={activeProvider.lockScope}
+          stageOnly={activeProvider.stageOnly}
           onClose={() => {
             setActiveProvider(null);
             // A save whose answer never came may have landed after all: the
             // cards are drawn again from the server once the dialog closes.
             router.refresh();
           }}
-          onConnected={(p, scope) => {
-            markConnected(p, scope);
+          onConnected={(p, scope, staged) => {
+            markConnected(p, scope, staged);
             setActiveProvider(null);
           }}
         />
@@ -442,7 +462,7 @@ export function ProviderAccountsCard({
 
 /** How a connect attempt ended. Every message is one plain sentence. */
 export type ConnectResult =
-  | { kind: "saved" }
+  | { kind: "saved"; staged: boolean }
   /**
    * The test refused the key (nothing was saved). `proof` is the test's
    * signed verdict when the provider was down or slow: "Save anyway" sends it
@@ -508,6 +528,8 @@ export async function connectProviderKey(
     apiKey: string;
     model: string;
     scope: "tenant" | "user";
+    /** Store a tested tenant key as inactive preparation for an atomic engine switch. */
+    stageOnly?: boolean;
     skipTest?: boolean;
     /** With skipTest: the proof the timed-out test returned. */
     proof?: string | null;
@@ -568,6 +590,7 @@ export async function connectProviderKey(
     api_key: input.apiKey,
     model: input.model,
     scope: input.scope,
+    ...(input.stageOnly ? { stage_only: true } : {}),
     ...(proof ? { tested: proof } : {}),
     ...(input.skipTest ? { save_anyway: true } : {}),
   };
@@ -581,7 +604,9 @@ export async function connectProviderKey(
     } catch {
       return { kind: "failed", message: COULD_NOT_TELL };
     }
-    if (check.body.ok === true && check.body.saved === true) return { kind: "saved" };
+    if (check.body.ok === true && check.body.saved === true) {
+      return { kind: "saved", staged: check.body.staged === true };
+    }
     // Not saved YET: the abandoned save may still be running on the server
     // and land a moment later, so this is never told as a failure.
     if (check.body.ok === true && check.body.saved === false) return { kind: "failed", message: NOT_SAVED_WHEN_CHECKED };
@@ -609,7 +634,7 @@ export async function connectProviderKey(
   if (Array.isArray(saved.failed) && saved.failed.length > 0) {
     console.warn("[bulk-provider] some teammate rows were not updated", saved.failed);
   }
-  return { kind: "saved" };
+  return { kind: "saved", staged: saved.staged === true };
 }
 
 // ============================================================================
@@ -629,13 +654,19 @@ function sameKey(a: TestedKey | null, b: TestedKey): boolean {
 export function ConnectProviderDialog({
   provider,
   canManageTeam,
+  initialScope,
+  lockScope = false,
+  stageOnly = false,
   onClose,
   onConnected,
 }: {
   provider: Provider;
   canManageTeam: boolean;
+  initialScope?: "tenant" | "user";
+  lockScope?: boolean;
+  stageOnly?: boolean;
   onClose: () => void;
-  onConnected: (p: Provider, scope: "tenant" | "user") => void;
+  onConnected: (p: Provider, scope: "tenant" | "user", staged: boolean) => void;
 }) {
   const reg = PROVIDER_REGISTRY.find((r) => r.value === provider);
   const [apiKey, setApiKey] = useState("");
@@ -647,7 +678,9 @@ export function ConnectProviderDialog({
   // tested is never saved untested (Codex review, PR #535).
   const [untested, setUntested] = useState<TestedKey | null>(null);
   const [model, setModel] = useState(reg?.models[0]?.id || "");
-  const [scope, setScope] = useState<"tenant" | "user">(canManageTeam ? "tenant" : "user");
+  const [scope, setScope] = useState<"tenant" | "user">(
+    initialScope === "tenant" && canManageTeam ? "tenant" : initialScope === "user" ? "user" : canManageTeam ? "tenant" : "user",
+  );
   // An answer that lands late must not speak for a form that moved on: it
   // brought "Save anyway" back for a key no longer on screen (Codex review,
   // PR #535). So every run (a test, or Save anyway) takes the next number,
@@ -682,6 +715,7 @@ export function ConnectProviderDialog({
     setUntested(null);
     const result = await connectProviderKey({
       ...target,
+      stageOnly,
       skipTest,
       stillWanted: () => mounted.current && isNewest() && formUnchanged(),
     });
@@ -691,7 +725,7 @@ export function ConnectProviderDialog({
     setSaving(false);
     if (result.kind === "dropped" || !formUnchanged()) return;
     if (result.kind === "saved") {
-      onConnected(target.provider, target.scope);
+      onConnected(target.provider, target.scope, result.staged);
       return;
     }
     setError(result.message);
@@ -832,7 +866,7 @@ export function ConnectProviderDialog({
             <label className="text-xs font-bold uppercase tracking-wider text-fg-muted block mb-1.5">
               Save scope
             </label>
-            {canManageTeam ? (
+            {canManageTeam && !lockScope ? (
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -867,7 +901,11 @@ export function ConnectProviderDialog({
               </div>
             ) : (
               <div className="rounded-md border border-bg-border bg-bg-deep/40 px-3 py-2 text-xs text-fg-muted">
-                Saves just for you. Team defaults are managed by an owner or admin.
+                {scope === "tenant"
+                  ? stageOnly
+                    ? "Saves this tested key without changing the team. It becomes active only when you press Use under Workspace default."
+                    : "Saves for the whole team."
+                  : "Saves just for you. Team defaults are managed by an owner or admin."}
               </div>
             )}
           </div>

@@ -1031,6 +1031,34 @@ async function main() {
     const turn = await slackTurn(FRESH, "fresh-co", "sales", "sdr");
     assert.ok(turn.ok && turn.turn.apiKey === KEY_FRESH && turn.turn.model === "claude-haiku-4-5", JSON.stringify(turn));
   });
+  await check("AI Brain stages a tested workspace key without activating it until the engine switch", async () => {
+    await login(USERS.fresh);
+    callsTo.length = 0;
+    sent = [];
+    provider = answering("ok");
+    const stagedKey = "sk-ant-fresh-staged-key-0002";
+    const result = await connectProviderKey(
+      {
+        provider: "anthropic",
+        apiKey: stagedKey,
+        model: "claude-sonnet-4-6",
+        scope: "tenant",
+        stageOnly: true,
+      },
+      viaRoutes,
+    );
+    assert.deepEqual(result, { kind: "saved", staged: true });
+    assert.deepEqual(callsTo, ["/api/agent-config/test-connection", "/api/agent-config/bulk-provider"]);
+    const active = await account.readWorkspaceAiAccount(FRESH);
+    assert.ok(account.hasUsableKey(active) && decryptField(active.encryptedApiKey) === KEY_FRESH, "staging replaced the active workspace key");
+    const engineStore = await import("../lib/ai/agent-engine-store");
+    const kept = await engineStore.readSavedKey(FRESH, "anthropic");
+    assert.ok(kept?.source === "kept" && decryptField(kept.encryptedApiKey) === stagedKey, "the inactive tested key was not cached");
+    await db.execute({
+      sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL AND agent_key = ?",
+      args: [FRESH, engineStore.savedKeyAgentKey("anthropic")],
+    });
+  });
   await check("a save that does not go through is one sentence, never a teammate name or an error code", async () => {
     await login(USERS.alphaRep); // a closer: may test, may not connect for the team
     provider = answering("ok");
@@ -1738,7 +1766,7 @@ async function main() {
       "the connect after a lost answer",
       connectProviderKey({ provider: "anthropic", apiKey: KEY_LOOK[0], model: "claude-sonnet-4-6", scope: "tenant", timeoutMs: 1500 }, answerLost),
     );
-    assert.deepEqual(landed, { kind: "saved" }, "a save that landed was reported as failed");
+    assert.deepEqual(landed, { kind: "saved", staged: false }, "a save that landed was reported as failed");
     assert.deepEqual(await spending(LOOKCO, "look-co", USERS.look), answersWith(KEY_LOOK[0]));
     // This time the save never reaches the server at all.
     const neverArrived = async (url: string, init: RequestInit) => {
@@ -2337,7 +2365,7 @@ async function main() {
     };
     // The Worker stopped after the commit: the platform answered with an HTML page.
     const html502 = await run(() => new Response("<html>502 Bad Gateway</html>", { status: 502 }), { ok: true, saved: true });
-    assert.deepEqual([html502.result, html502.verified], [{ kind: "saved" }, 1]);
+    assert.deepEqual([html502.result, html502.verified], [{ kind: "saved", staged: false }, 1]);
     // The route's own 500 after it read back "not saved".
     const json500 = await run(() => new Response(JSON.stringify({ ok: false, message: "The key couldn't be saved just now. Nothing was changed. Try again in a moment." }), { status: 500 }), { ok: true, saved: false });
     assert.deepEqual([json500.result, json500.verified], [{ kind: "failed", message: "The key wasn't saved when we checked. Close this, look at the card in a moment, and connect again if it doesn't show it." }, 1]);

@@ -35,7 +35,10 @@ import {
   type RuntimeJob,
 } from "@/components/settings/agent-engine-client";
 import { startCliSignIn } from "@/components/settings/LocalCliProvidersCard";
-import { OPEN_AI_PROVIDER_ACCOUNT_EVENT } from "@/components/settings/ProviderAccountsCard";
+import {
+  OPEN_AI_PROVIDER_ACCOUNT_EVENT,
+  type ProviderAccountOpenRequest,
+} from "@/components/settings/ProviderAccountsCard";
 import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
 
 const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "gemini"];
@@ -226,8 +229,11 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     draft.mode === "local" ? selectedDevice?.localModels.find((model) => model.ref === draft.modelRef) : undefined;
   const draftKey = selectionKey(draft, scope);
   const apiConnected =
-    draft.mode === "api" && (state.savedProviders.includes(draft.provider) || state.account?.provider === draft.provider);
-  const apiProviderOptions = state.canManage
+    draft.mode === "api" &&
+    (scope === "workspace"
+      ? state.savedProviders.includes(draft.provider) || state.account?.provider === draft.provider
+      : state.account?.provider === draft.provider);
+  const apiProviderOptions = scope === "workspace" && state.canManage
     ? API_PROVIDERS
     : state.account
       ? [state.account.provider]
@@ -246,7 +252,14 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   }
 
   function openProviderAccount(provider: ApiEngineProvider) {
-    window.dispatchEvent(new CustomEvent(OPEN_AI_PROVIDER_ACCOUNT_EVENT, { detail: { provider } }));
+    if (scope !== "workspace" || !loadedState.canManage) return;
+    const detail: ProviderAccountOpenRequest = {
+      provider,
+      scope: "tenant",
+      stageOnly: true,
+      lockScope: true,
+    };
+    window.dispatchEvent(new CustomEvent(OPEN_AI_PROVIDER_ACCOUNT_EVENT, { detail }));
   }
 
   function changeScope(next: EngineScope) {
@@ -665,7 +678,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
               </option>
             ))}
           </select>
-          {state.canManage ? (
+          {scope === "workspace" && state.canManage ? (
             <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
               <span>
                 {apiConnected
@@ -680,6 +693,17 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                 className="font-semibold text-accent underline underline-offset-2 hover:text-accent-bright focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               >
                 {apiConnected ? `Replace ${PROVIDER_LABEL[draft.provider]} key` : `Connect ${PROVIDER_LABEL[draft.provider]} key`}
+              </button>
+            </div>
+          ) : state.canManage ? (
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
+              <span>My setup uses the workspace API account; changing its provider affects the whole workspace.</span>
+              <button
+                type="button"
+                onClick={() => changeScope("workspace")}
+                className="font-semibold text-accent underline underline-offset-2 hover:text-accent-bright focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                Manage under Workspace default
               </button>
             </div>
           ) : (

@@ -101,6 +101,18 @@ async function main() {
     assert.match(route, /if \(scope !== "workspace"\)[\s\S]*api_provider_workspace_scope_required/, "a personal choice must never activate a workspace-wide API provider");
   });
 
+  await check("provider connection keeps the selected AI Brain scope and stages workspace keys until Use", () => {
+    const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
+    const accounts = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
+    const bulk = readFileSync(join(ROOT, "app/api/agent-config/bulk-provider/route.ts"), "utf8");
+    assert.match(panel, /scope === "workspace" && state\.canManage[\s\S]*\? API_PROVIDERS/, "My setup still offers a workspace-wide provider switch");
+    assert.match(panel, /scope: "tenant",[\s\S]*stageOnly: true,[\s\S]*lockScope: true/, "the workspace provider dialog lost its fixed staged scope");
+    assert.match(panel, /Manage under Workspace default/, "My setup has no safe path to workspace provider management");
+    assert.match(accounts, /stage_only: true/, "the staged choice is not sent to the save route");
+    assert.match(bulk, /else if \(stageOnly\)[\s\S]*keepSavedKey/, "the save route activates a staged key instead of caching it inactive");
+    assert.match(bulk, /workspace_account: scope === "tenant" && !stageOnly/, "a staged key is still reported as the active workspace account");
+  });
+
   await check("the old separately-mounted cards render nothing", () => {
     const person = readFileSync(join(ROOT, "components/settings/PersonEngineCard.tsx"), "utf8");
     const local = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");

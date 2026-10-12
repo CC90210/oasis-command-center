@@ -870,6 +870,69 @@ async function main() {
       ["queued", "worker", null, "subscription_auth_failure"],
     );
   });
+  await check("v2 subscription limits stay signed in and activate only the explicitly opted-in workspace API fallback", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector" });
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+      args: [JSON.stringify(["department_task_v2"]), pairing.id],
+    });
+    const store = await import("../lib/os/runs/store");
+    const scope = { tenantId: TENANT, userId: member };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const queued = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "use my explicit fallback while the subscription resets",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+      executor: "computer",
+      targetPairingId: pairing.id,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "workspace_api",
+      runtimeApiSnapshot: { provider: "google", model: "gemini-3.8-flash" },
+    });
+    assert.ok(queued.ok);
+    const runtimeState = readyRuntimeState();
+    runtimeState.codex = { installed: true, authenticated: true, state: "rate_limited" };
+    const response = await claim(
+      pairing.token,
+      body(randomUUID(), { protocol: "department_task_v2", runtime_state: runtimeState }),
+    );
+    assert.deepEqual(response.json, { ok: true, run: null });
+    const pairingRow = await db.execute({
+      sql: "SELECT claim_blocked_reason, claim_runtime_state FROM bridge_pairings WHERE id = ?",
+      args: [pairing.id],
+    });
+    assert.equal(pairingRow.rows[0].claim_blocked_reason, "subscription_limit");
+    const persisted = JSON.parse(String(pairingRow.rows[0].claim_runtime_state)) as Record<string, Record<string, unknown>>;
+    assert.equal(persisted.codex.authenticated, true, "a quota reset was relabeled as sign-out");
+    assert.equal(persisted.codex.state, "rate_limited");
+
+    const { computerStateForTarget } = await import("../lib/os/runs/send");
+    const { fallbackQueueDecision } = await import("../lib/os/runs/fallback-dispatcher");
+    const computerState = await computerStateForTarget(scope)(queued.ok ? queued.run : { targetPairingId: pairing.id });
+    assert.equal(computerState, "blocked:subscription_limit");
+    assert.deepEqual(
+      fallbackQueueDecision({
+        run: queued.ok ? queued.run : { createdAt: new Date().toISOString() },
+        firstInLineAt: new Date().toISOString(),
+        state: computerState,
+        nowMs: Date.now(),
+      }),
+      { action: "fallback", reason: "subscription_limit" },
+    );
+    assert.equal(await store.fallbackQueuedComputerRun(db, scope, queued.ok ? queued.run.id : "", "subscription_limit"), true);
+    const row = await db.execute({
+      sql: "SELECT status, executor, claimed_pairing_id, runtime_fallback_reason FROM dept_chat_runs WHERE id = ?",
+      args: [queued.ok ? queued.run.id : ""],
+    });
+    assert.deepEqual(
+      [row.rows[0].status, row.rows[0].executor, row.rows[0].claimed_pairing_id, row.rows[0].runtime_fallback_reason],
+      ["queued", "worker", null, "subscription_limit"],
+    );
+  });
   await check("Claude-account mismatch or collision never blocks Codex or pure-local department_task_v2 work", async () => {
     const cases: Array<{
       kind: "cli" | "local";

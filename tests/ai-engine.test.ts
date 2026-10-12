@@ -376,8 +376,152 @@ async function main() {
     const acct = await account.readWorkspaceAiAccount(ALPHA);
     assert.ok(account.hasUsableKey(acct) && acct.provider === "anthropic", "the account in use is untouched");
     assert.deepEqual(await store.readSavedProviders(ALPHA), ["anthropic"]);
-    // Put the OpenRouter key back for the checks below (a kept key, as a switch leaves it).
-    await store.keepSavedKey({ tenantId: ALPHA, provider: "openrouter", model: "anthropic/claude-sonnet-4.6", encryptedApiKey: encryptField(KEY_OR) });
+  });
+
+  await check("a first-time workspace key stays inactive until Use atomically switches the account and engine", async () => {
+    await login(USERS.alpha);
+    answer = (s) => (s.url.includes("openrouter.ai") ? openrouterOk("The staged key works.") : anthropicOk("The current key works."));
+    sent = [];
+    const staged = await jsonOf(
+      await bulk.POST(
+        req("/api/agent-config/bulk-provider", "POST", {
+          provider: "openrouter",
+          api_key: KEY_OR,
+          model: "anthropic/claude-sonnet-4.6",
+          scope: "tenant",
+          stage_only: true,
+        }),
+      ),
+    );
+    assert.equal(staged.status, 200, JSON.stringify(staged.body));
+    assert.equal(staged.body.staged, true);
+    assert.equal(staged.body.workspace_account, false, "staging silently activated the workspace account");
+    assert.deepEqual(staged.body.applied_to, [], "staging rewrote teammate rows before Use");
+    const beforeUse = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(beforeUse) && beforeUse.provider === "anthropic", "the workspace account changed before Use");
+    assert.equal((await rowsOf(ALPHA)).find((r) => r.agent_key === "sdr")?.provider, "anthropic");
+    const cached = await store.readSavedKey(ALPHA, "openrouter");
+    assert.ok(cached?.source === "kept" && decryptField(cached.encryptedApiKey) === KEY_OR, "the tested key was not staged inactive");
+
+    const engineRoute = await import("../app/api/ai/engine/route");
+    const version = await store.readAgentEngineVersion(ALPHA);
+    sent = [];
+    const used = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "workspace",
+          expected_version: version,
+          engine: { mode: "api", provider: "openrouter" },
+        }),
+      ),
+    );
+    assert.equal(used.status, 200, JSON.stringify(used.body));
+    assert.equal(sent.length, 1, "Use did not verify the exact staged key once");
+    assert.equal(keyOf(sent[0]), KEY_OR);
+    const afterUse = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(afterUse) && afterUse.provider === "openrouter" && decryptField(afterUse.encryptedApiKey) === KEY_OR);
+    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "api", provider: "openrouter" });
+    const teammate = (await rowsOf(ALPHA)).find((r) => r.agent_key === "sdr");
+    assert.ok(teammate?.provider === "openrouter" && teammate.key === KEY_OR, "the workspace switch left a teammate on the old provider");
+
+    // Restore the fixture through the same atomic account + engine switch.
+    const restored = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "workspace",
+          expected_version: await store.readAgentEngineVersion(ALPHA),
+          engine: { mode: "api", provider: "anthropic" },
+        }),
+      ),
+    );
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+
+    // Replacing the key for the provider already selected follows the same
+    // staged transaction; it must not be mistaken for "already in use".
+    const replacement = "sk-ant-alpha-replacement-key-0004";
+    const stagedReplacement = await jsonOf(
+      await bulk.POST(
+        req("/api/agent-config/bulk-provider", "POST", {
+          provider: "anthropic",
+          api_key: replacement,
+          model: "claude-sonnet-4-6",
+          scope: "tenant",
+          stage_only: true,
+        }),
+      ),
+    );
+    assert.equal(stagedReplacement.status, 200, JSON.stringify(stagedReplacement.body));
+    const replaceVersion = await store.readAgentEngineVersion(ALPHA);
+    const replaced = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "workspace",
+          expected_version: replaceVersion,
+          engine: { mode: "api", provider: "anthropic" },
+        }),
+      ),
+    );
+    assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
+    const replacedAccount = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(replacedAccount) && decryptField(replacedAccount.encryptedApiKey) === replacement);
+    const reset = await jsonOf(
+      await bulk.POST(
+        req("/api/agent-config/bulk-provider", "POST", {
+          provider: "anthropic",
+          api_key: KEY_ANTH,
+          model: "claude-sonnet-4-6",
+          scope: "tenant",
+        }),
+      ),
+    );
+    assert.equal(reset.status, 200, JSON.stringify(reset.body));
+    const noRevert = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "workspace",
+          expected_version: await store.readAgentEngineVersion(ALPHA),
+          engine: { mode: "api", provider: "anthropic" },
+        }),
+      ),
+    );
+    assert.equal(noRevert.status, 200, JSON.stringify(noRevert.body));
+    const stillReset = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(stillReset) && decryptField(stillReset.encryptedApiKey) === KEY_ANTH, "an older cached key replaced the newer active key");
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
+  });
+
+  await check("My setup cannot stage or activate a different workspace API provider", async () => {
+    await login(USERS.alpha);
+    const before = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(before) && before.provider === "anthropic");
+    const invalidStage = await jsonOf(
+      await bulk.POST(
+        req("/api/agent-config/bulk-provider", "POST", {
+          provider: "openrouter",
+          api_key: KEY_OR,
+          model: "anthropic/claude-sonnet-4.6",
+          scope: "user",
+          stage_only: true,
+        }),
+      ),
+    );
+    assert.equal(invalidStage.status, 400);
+    assert.equal(invalidStage.body.error, "stage_requires_tenant_scope");
+    const engineRoute = await import("../app/api/ai/engine/route");
+    const personal = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "person",
+          expected_version: await store.readPersonAgentEngineVersion(ALPHA, USERS.alpha.id),
+          engine: { mode: "api", provider: "openrouter" },
+        }),
+      ),
+    );
+    assert.equal(personal.status, 409);
+    assert.equal(personal.body.error, "api_provider_workspace_scope_required");
+    const after = await account.readWorkspaceAiAccount(ALPHA);
+    assert.ok(account.hasUsableKey(after) && after.provider === "anthropic" && decryptField(after.encryptedApiKey) === KEY_ANTH);
+    assert.equal(await store.readPersonAgentEngine(ALPHA, USERS.alpha.id), null, "a rejected personal switch left an engine override");
   });
 
   await check("a subscription selection is invalid until it names one exact paired computer", async () => {

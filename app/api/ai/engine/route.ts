@@ -13,6 +13,7 @@ import {
   connectWorkspaceAccountAndEngineInOneStep,
   hasUsableKey,
   readAccountStamp,
+  readWorkspaceAccountChangedAt,
   readWorkspaceAiAccount,
 } from "@/lib/ai/workspace-account";
 import { departmentBrain } from "@/lib/ai/department-brain";
@@ -650,7 +651,29 @@ export async function PUT(req: NextRequest) {
     }
     let probeProof: SavedRuntimeProbeProofInput | null = null;
     if (selection.mode === "api") {
-      if (!hasUsableKey(account) || account.provider !== selection.provider) {
+      let stagedReplacement: Awaited<ReturnType<typeof readSavedKey>> = null;
+      if (scope === "workspace" && hasUsableKey(account) && account.provider === selection.provider) {
+        const [candidate, accountChangedAt] = await Promise.all([
+          readSavedKey(ctx.tenantId, selection.provider),
+          readWorkspaceAccountChangedAt(ctx.tenantId),
+        ]);
+        const stagedAfterAccount =
+          candidate?.source === "kept" &&
+          typeof candidate.updatedAt === "string" &&
+          typeof accountChangedAt === "string" &&
+          Date.parse(candidate.updatedAt) > Date.parse(accountChangedAt);
+        if (candidate?.source === "kept" && stagedAfterAccount) {
+          try {
+            const stagedModel = apiSwitchModel(selection.provider, candidate.model);
+            if (decryptField(candidate.encryptedApiKey) !== decryptField(account.encryptedApiKey) || stagedModel !== account.model) {
+              stagedReplacement = candidate;
+            }
+          } catch {
+            return fail(500, "key_unreadable", "That saved provider key could not be read. Connect it again below.");
+          }
+        }
+      }
+      if (!hasUsableKey(account) || account.provider !== selection.provider || stagedReplacement) {
         // The API account is workspace-wide. A personal engine row may opt
         // into the provider the workspace already uses, but it must never
         // activate a different provider (and therefore change everyone
@@ -678,7 +701,7 @@ export async function PUT(req: NextRequest) {
           );
         }
         const [saved, stamp] = await Promise.all([
-          readSavedKey(ctx.tenantId, selection.provider),
+          stagedReplacement ?? readSavedKey(ctx.tenantId, selection.provider),
           readAccountStamp(ctx.tenantId),
         ]);
         if (!saved) {

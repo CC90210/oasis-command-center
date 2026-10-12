@@ -388,6 +388,7 @@ function runtimeBlockReason(run: Pick<Run, "runtimeEngineKind" | "runtimeEngineN
     if (runtime.state === "unsupported") return "cli_account_unsupported";
     if (!runtime.installed || runtime.state === "not_installed") return "cli_not_found";
     if (!runtime.authenticated || runtime.state === "needs_sign_in") return "subscription_auth_failure";
+    if (runtime.state === "rate_limited") return "subscription_limit";
     return runtime.state === "ready" ? null : "department_profile_unsupported";
   }
   if (run.runtimeEngineKind === "local" && name) {

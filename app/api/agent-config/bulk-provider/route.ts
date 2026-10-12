@@ -60,7 +60,8 @@
  *     scope?: "tenant" | "user",          // default tenant
  *     tested?: string,                    // test-connection's proof of its test
  *     save_anyway?: boolean,              // save a key the provider could not test
- *     verify?: boolean                    // read-only check, see above
+ *     verify?: boolean,                   // read-only check, see above
+ *     stage_only?: boolean                // tenant only: cache without activation
  *   }
  *
  * Returns: { ok, scope, workspace_account, applied_to: [agent_key,...], failed: [], count }
@@ -77,7 +78,8 @@ import { defaultModelFor, isRegistryProvider, saveCheck } from "@/lib/ai/model-r
 import { probeProvider } from "@/lib/agents/provider-probe";
 import { billingForKey, modelCallMeter } from "@/lib/ai/usage";
 import { readConnectTest, signConnectTest, type ConnectTestSubject } from "@/lib/ai/connect-test-proof";
-import { encryptField } from "@/lib/field-encryption";
+import { decryptField, encryptField } from "@/lib/field-encryption";
+import { keepSavedKey, readSavedKey } from "@/lib/ai/agent-engine-store";
 import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
@@ -151,6 +153,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: `invalid_provider:${provider}` }, { status: 400 });
   }
   const scope = body?.scope === "user" ? "user" : "tenant";
+  const stageOnly = body?.stage_only === true;
+  if (stageOnly && scope !== "tenant") {
+    return NextResponse.json({ ok: false, error: "stage_requires_tenant_scope" }, { status: 400 });
+  }
   if (scope === "tenant" && !canManageTenant) {
     return NextResponse.json({ ok: false, error: "admin_required" }, { status: 403 });
   }
@@ -206,10 +212,16 @@ export async function POST(req: NextRequest) {
   // Read-only: is exactly this key saved now? The card asks this when a
   // connect's answer never came back (it timed out in the browser): the save
   // may have landed, so it says what is saved instead of guessing.
+  const stagedKeyIsSaved = async (): Promise<boolean> => {
+    const saved = await readSavedKey(tenantId, provider as Provider);
+    return !!saved && saved.source === "kept" && saved.model === model && decryptField(saved.encryptedApiKey) === apiKeyPlain;
+  };
   if (body?.verify === true) {
     try {
-      const saved = await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain });
-      return NextResponse.json({ ok: true, saved });
+      const saved = stageOnly
+        ? await stagedKeyIsSaved()
+        : await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain });
+      return NextResponse.json({ ok: true, saved, staged: stageOnly && saved });
     } catch (err) {
       console.error("[bulk-provider.verify]", { tenantId, provider, error: errText(err) });
       return NextResponse.json({ ok: false, error: "verify_failed", message: COULD_NOT_TELL }, { status: 503 });
@@ -294,7 +306,10 @@ export async function POST(req: NextRequest) {
   const readBack = async (err: unknown, where: string): Promise<NextResponse | null> => {
     console.error(`[bulk-provider.${where}]`, { tenantId, provider, error: errText(err) });
     try {
-      if (await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain })) return null;
+      const saved = stageOnly
+        ? await stagedKeyIsSaved()
+        : await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain });
+      if (saved) return null;
     } catch (readErr) {
       console.error("[bulk-provider.read_back]", { tenantId, provider, error: errText(readErr) });
       return NextResponse.json({ ok: false, error: "save_unknown", message: COULD_NOT_TELL }, { status: 503 });
@@ -306,6 +321,14 @@ export async function POST(req: NextRequest) {
       await savePersonalKeyInOneStep({ tenantId, userId: userId!, provider, model, encryptedApiKey: encryptedKey, agentKeys: targetAgents });
     } catch (err) {
       const answer = await readBack(err, "personal_save");
+      if (answer) return answer;
+    }
+  } else if (stageOnly) {
+    try {
+      await keepSavedKey({ tenantId, provider: provider as Provider, model, encryptedApiKey: encryptedKey });
+      applied = [];
+    } catch (err) {
+      const answer = await readBack(err, "stage");
       if (answer) return answer;
     }
   } else {
@@ -343,14 +366,15 @@ export async function POST(req: NextRequest) {
     const authed = await getAuthedSupabase();
     await authed.rpc("log_tenant_event", {
       p_tenant_id: tenantId,
-      p_action_type: scope === "user" ? "agent_config.user_update" : "agent_config.tenant_update",
+      p_action_type: scope === "user" ? "agent_config.user_update" : stageOnly ? "agent_config.tenant_key_staged" : "agent_config.tenant_update",
       p_target_table: "agent_model_config",
       p_target_id: `${tenantId}:${effectiveUserId || "tenant"}:${provider}:bulk`,
       p_after: {
         provider,
         model,
         scope,
-        workspace_account: scope === "tenant",
+        workspace_account: scope === "tenant" && !stageOnly,
+        staged: stageOnly,
         applied_to: applied,
         has_key: true,
       },
@@ -362,7 +386,8 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     ok: true,
     scope,
-    workspace_account: scope === "tenant",
+    workspace_account: scope === "tenant" && !stageOnly,
+    staged: stageOnly,
     applied_to: applied,
     failed: [],
     count: applied.length,

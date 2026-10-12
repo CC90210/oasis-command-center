@@ -902,6 +902,7 @@ export function runtimeDispatchDecision(
   if (state === "unsupported") return { ok: false, error: "cli_account_unsupported" };
   if (state === "needs_sign_in") return { ok: false, error: "subscription_auth_failure" };
   if (state === "not_installed") return { ok: false, error: "cli_not_found" };
+  if (state === "rate_limited") return { ok: false, error: "subscription_limit" };
   if (state === "probe_failed" || state === "unavailable") return { ok: false, error: "department_profile_unsupported" };
   if (state !== null && state !== "ready" && state !== "probe_required") {
     return { ok: false, error: "department_profile_unsupported" };
