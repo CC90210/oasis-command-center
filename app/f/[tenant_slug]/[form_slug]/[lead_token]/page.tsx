@@ -21,6 +21,7 @@ import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-ident
 import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
+import { SUPPORT_FORM_SLUG } from "@/lib/delivery/support-form";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -311,10 +312,10 @@ export default async function PublicFormPage({
       consentIdentity={
         resolveConsentIdentity({ tenantId: result.form.tenant_id, tenantSlug: result.tenant_slug }).identity
       }
-      // A signed link is bound to a lead, and the submit route never sends a
-      // token-bearing body to the support desk, so every box drawn here is
-      // recorded.
-      consentLedgerEnabled
+      // One rule on both pages: a form named "support" draws no consent boxes.
+      // (A token-bearing body does reach the ledger even for that slug, so
+      // this is consistency, not a gap: it can only ever refuse a send.)
+      consentLedgerEnabled={result.form.slug.trim().toLowerCase() !== SUPPORT_FORM_SLUG}
     />
   );
 }

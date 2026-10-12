@@ -625,6 +625,11 @@ async function main() {
     assert.ok(/const consentLedgerEnabled = result\.form\.slug\.trim\(\)\.toLowerCase\(\) !== SUPPORT_FORM_SLUG;/.test(page));
     assert.ok(/consentLedgerEnabled=\{consentLedgerEnabled\}/.test(page), "the plain form must receive it");
     assert.ok(/^\s+consentLedgerEnabled,$/m.test(page), "the offer page's embedded form must receive it");
+    const tokenPage = readFileSync(join(ROOT, "app", "f", "[tenant_slug]", "[form_slug]", "[lead_token]", "page.tsx"), "utf8");
+    assert.ok(
+      /consentLedgerEnabled=\{result\.form\.slug\.trim\(\)\.toLowerCase\(\) !== SUPPORT_FORM_SLUG\}/.test(tokenPage),
+      "the signed-link page applies the same rule",
+    );
     const support = readFileSync(join(ROOT, "lib", "delivery", "support-form.ts"), "utf8");
     assert.ok(/export const SUPPORT_FORM_SLUG = "support";/.test(support), "the slug the route routes on");
   });
