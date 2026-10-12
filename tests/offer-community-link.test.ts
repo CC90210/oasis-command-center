@@ -75,6 +75,15 @@ async function main() {
     "/f/oasis-ai-cc/protocol?utm_source=google",
   );
 
+  console.log("  keeps the whole existing query when a value itself contains '?'");
+  {
+    const out = appendPreservedParams("/go/community?next=a?b=1&t=x", { v: "visit123" });
+    const qs = new URLSearchParams(out.slice(out.indexOf("?") + 1));
+    assert.equal(qs.get("next"), "a?b=1", "a '?' inside a value must survive");
+    assert.equal(qs.get("t"), "x");
+    assert.equal(qs.get("v"), "visit123");
+  }
+
   console.log("  preserves a hash fragment");
   assert.equal(
     appendPreservedParams("/f/oasis-ai-cc/protocol#book", { cat: "p1" }),

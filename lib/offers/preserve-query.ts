@@ -56,7 +56,11 @@ export function appendPreservedParams(
   const hashIndex = path.indexOf("#");
   const hash = hashIndex === -1 ? "" : path.slice(hashIndex);
   const withoutHash = hashIndex === -1 ? path : path.slice(0, hashIndex);
-  const [base, existingQuery = ""] = withoutHash.split("?", 2);
+  // Split at the FIRST "?" only: split("?", 2) would drop everything after a
+  // second "?" inside a query value (CodeRabbit).
+  const qIndex = withoutHash.indexOf("?");
+  const base = qIndex === -1 ? withoutHash : withoutHash.slice(0, qIndex);
+  const existingQuery = qIndex === -1 ? "" : withoutHash.slice(qIndex + 1);
   const sp = new URLSearchParams(existingQuery);
   for (const [key, value] of Object.entries(params)) {
     if (typeof value === "string" && value.trim()) sp.set(key, value);
