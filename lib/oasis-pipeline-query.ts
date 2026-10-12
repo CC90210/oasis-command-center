@@ -8,6 +8,7 @@ import {
 } from "@/lib/manifest/data";
 import { isReleasedOasisPipelineRow } from "@/lib/oasis-sales-pipeline-policy";
 import { isInPipelineCycle, type PipelineCycleBoundary } from "@/lib/pipeline-cycle";
+import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
 
 export const OASIS_PIPELINE_OVERVIEW_LIMIT = 40;
 export const OASIS_PIPELINE_STAGE_PAGE_SIZE = 100;
@@ -249,6 +250,12 @@ export async function listOasisPipelineWindow(
     assignedTo?: string | null;
     /** Assigned sales-rep union for a manager's read-only team view. */
     assignedToAny?: readonly string[];
+    /**
+     * Include the unassigned triage pool alongside the normal admin/team
+     * scope. This is accepted only for the warm-inbound motion; cold prospect
+     * rows remain behind their existing assignment boundary.
+     */
+    includeUnassigned?: boolean;
     /** Self-scoped rep read: assigned rows OR collaborator rows. */
     viewerUserId?: string | null;
     /** Builder delivery allocation stored outside assigned_to. */
@@ -270,7 +277,15 @@ export async function listOasisPipelineWindow(
   const hasConflictingAssigneeScopes =
     teamAssignees !== null && input.assignedTo !== undefined;
   const hasEmptyTeamScope = teamAssignees !== null && teamAssignees.length === 0;
-  const stageKeys = hasConflictingAssigneeScopes || hasEmptyTeamScope
+  const invalidUnassignedScope = Boolean(
+    input.includeUnassigned &&
+      (
+        input.salesMotion !== OASIS_INBOUND_WARM_MOTION ||
+        input.assignedTo !== undefined ||
+        teamAssignees !== null
+      ),
+  );
+  const stageKeys = hasConflictingAssigneeScopes || hasEmptyTeamScope || invalidUnassignedScope
     ? []
     : [...new Set(input.stageKeys.filter(Boolean))];
   const activeStage = resolveOasisPipelineActiveStage(input.requestedStage, stageKeys);
@@ -398,7 +413,9 @@ export async function listOasisPipelineWindow(
       ...(input.assignedTo === null
         ? { whereEmpty: ["assigned_to"] }
         : input.assignedTo === undefined
-          ? { whereNotEmpty: ["assigned_to"] }
+          ? input.includeUnassigned
+            ? {}
+            : { whereNotEmpty: ["assigned_to"] }
           : {}),
       ...(Object.keys(where).length ? { where } : {}),
       ...(search ? { search } : {}),

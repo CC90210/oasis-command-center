@@ -105,7 +105,7 @@ export function MarketingNav() {
           aria-expanded={open}
           aria-controls="m-nav-sheet"
           aria-label={open ? "Close menu" : "Open menu"}
-          className="-mr-2 p-2 text-fg-muted transition-colors hover:text-fg md:hidden"
+          className="-mr-2 flex h-11 w-11 items-center justify-center text-fg-muted transition-colors hover:text-fg md:hidden"
         >
           {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>

@@ -9,6 +9,8 @@ import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
 import { AuditForm } from "@/components/marketing/AuditForm";
 import { CLIENT_BUILDS, DIFFERENTIATORS, ECONOMICS } from "@/lib/marketing/fleet";
+import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
+import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
 
 /**
  * The marketing home page.
@@ -62,6 +64,8 @@ const STEPS = [
 ];
 
 export default function MarketingHome() {
+  const consentIdentity = resolveConsentIdentity({ tenantSlug: AUDIT_FUNNEL.tenantSlug }).identity;
+
   return (
     <>
       {/* ── Hero ─────────────────────────────────────────────────────── */}
@@ -336,7 +340,7 @@ export default function MarketingHome() {
 
           <Reveal delay={120}>
             <div className="border border-ops-edge bg-ops-panel/80 p-6 backdrop-blur-sm sm:p-8">
-              <AuditForm />
+              <AuditForm consentIdentity={consentIdentity} />
             </div>
           </Reveal>
         </div>

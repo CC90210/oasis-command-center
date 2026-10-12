@@ -131,6 +131,22 @@ export function stagesForOasisRole(role: string, isOwner = false, adminAccess = 
     : OASIS_LEAD_STAGES.filter((stage) => stageSetForOasisRole(role).has(stage.key));
 }
 
+/**
+ * Warm inbound starts unassigned in `researched`, so a sales manager's triage
+ * board needs that one extra stage. This does not widen the cold prospecting
+ * board, and individual reps retain their own-book stage set.
+ */
+export function stagesForOasisWarmInboundRole(
+  role: string,
+  isOwner = false,
+  adminAccess = false,
+): StageMeta[] {
+  const base = stagesForOasisRole(role, isOwner, adminAccess);
+  if (base.length === 0 || base.some((stage) => stage.key === "researched")) return base;
+  const researched = OASIS_LEAD_STAGES.find((stage) => stage.key === "researched");
+  return researched ? [researched, ...base] : base;
+}
+
 type PipelineRow = { id: string; data: Record<string, unknown> };
 
 /**

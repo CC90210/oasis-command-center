@@ -40,8 +40,8 @@ assert.equal(normalizeOasisPipelinePage("not-a-page"), 1);
 
 assert.match(
   pipelinePageSource,
-  /cycle:\s*CURRENT_OASIS_PIPELINE_CYCLE/,
-  "the live Pipeline board must activate the non-destructive current-cycle boundary",
+  /cycle:\s*warmInbound\s*\?\s*undefined\s*:\s*CURRENT_OASIS_PIPELINE_CYCLE/,
+  "the cold Pipeline board keeps the cycle boundary while warm form leads remain visible",
 );
 
 assert.deepEqual(
