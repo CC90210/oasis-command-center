@@ -691,18 +691,41 @@ export async function deskCustomerExists(db: Client, tenantId: string, customerI
   return rs.rows.length > 0;
 }
 
-/** A project may only start or move under a current delivery client. */
-export async function deskActiveCustomerExists(db: Client, tenantId: string, customerId: string): Promise<boolean> {
-  const rs = await readNotRetired("client_tenant_id", (guard) =>
-    db.execute({
-      sql: `SELECT 1 AS ok FROM customers
-            WHERE tenant_id = ? AND id = ? AND archived_at IS NULL
-              AND lifecycle IN ('onboarding', 'active') AND ${guard.sql}
-            LIMIT 1`,
-      args: [requireTenant(tenantId), customerId, ...guard.args],
-    }),
-  );
-  return rs.rows.length > 0;
+export type ResolvedProjectCustomer = {
+  id: string;
+  client_tenant_id: string | null;
+  active: boolean;
+};
+
+/**
+ * Resolve a project customer inside this desk and return its authoritative
+ * client-workspace link. `active` is the stricter create/move eligibility;
+ * existing inactive clients still resolve so an unchanged project can be
+ * edited without inventing a second workspace link.
+ */
+export async function resolveProjectCustomer(
+  db: Client,
+  tenantId: string,
+  customerId: string,
+): Promise<ResolvedProjectCustomer | null> {
+  // SELECT * preserves pre-bravo__195 compatibility: on that schema there is
+  // no linked workspace, so the missing property maps to null. Retired links
+  // still resolve for unchanged historical edits, but never count as active.
+  const rs = await db.execute({
+    sql: "SELECT * FROM customers WHERE tenant_id = ? AND id = ? LIMIT 1",
+    args: [requireTenant(tenantId), customerId],
+  });
+  const row = rows(rs)[0];
+  if (!row) return null;
+  const clientTenantId = s(row.client_tenant_id);
+  return {
+    id: String(row.id),
+    client_tenant_id: clientTenantId,
+    active:
+      s(row.archived_at) === null &&
+      (row.lifecycle === "onboarding" || row.lifecycle === "active") &&
+      !isRetiredClientRef({ client_tenant_id: clientTenantId }),
+  };
 }
 
 /**
@@ -792,6 +815,11 @@ export async function createProject(
   now: Date,
 ): Promise<string> {
   requireTenant(tenantId);
+  const customer = await resolveProjectCustomer(db, tenantId, input.customer_id);
+  if (!customer?.active) throw new Error("delivery.store: project customer is not active in this desk");
+  if (input.client_tenant_id !== customer.client_tenant_id) {
+    throw new Error("delivery.store: project customer/client workspace mismatch");
+  }
   const id = randomUUID();
   const at = now.toISOString();
   const cols = [
@@ -872,39 +900,61 @@ export async function updateProject(
   requireTenant(tenantId);
   const cur = rows(
     await db.execute({
-      sql: "SELECT stage, started_at, launched_at, archived_at FROM delivery_projects WHERE tenant_id = ? AND id = ?",
+      sql: `SELECT stage, started_at, launched_at, archived_at, customer_id, client_tenant_id
+            FROM delivery_projects WHERE tenant_id = ? AND id = ?`,
       args: [tenantId, id],
     }),
   )[0];
   if (!cur) return false;
+  const normalizedChanges: ProjectChanges = { ...changes };
+  const customerChanged = "customer_id" in normalizedChanges;
+  const workspaceChanged = "client_tenant_id" in normalizedChanges;
+  if (customerChanged || workspaceChanged) {
+    const customerId = customerChanged ? normalizedChanges.customer_id : s(cur.customer_id);
+    if (!customerId) {
+      if (customerChanged) throw new Error("delivery.store: a project customer is required");
+      // Historical projects created before customer records keep their old
+      // standalone workspace-link behavior; the route validates any new link.
+    } else {
+      const customer = await resolveProjectCustomer(db, tenantId, customerId);
+      if (!customer || (customerChanged && !customer.active)) {
+        throw new Error("delivery.store: project customer is not active in this desk");
+      }
+      if (workspaceChanged && normalizedChanges.client_tenant_id !== customer.client_tenant_id) {
+        throw new Error("delivery.store: project customer/client workspace mismatch");
+      }
+      // A customer-only move always carries its linked workspace with it.
+      normalizedChanges.client_tenant_id = customer.client_tenant_id;
+    }
+  }
   const at = now.toISOString();
   const sets: string[] = [];
   const args: Array<string | null> = [];
   for (const col of PROJECT_COLUMNS) {
-    if (!(col in changes)) continue;
+    if (!(col in normalizedChanges)) continue;
     sets.push(`${col} = ?`);
-    args.push((changes as Record<string, string | null>)[col] ?? null);
+    args.push((normalizedChanges as Record<string, string | null>)[col] ?? null);
   }
   const timeline: InStatement[] = [];
   const fromStage = String(cur.stage) as ProjectStage;
-  if (changes.stage && changes.stage !== fromStage) {
-    if (!cur.started_at && STARTED_STAGES.includes(changes.stage)) {
+  if (normalizedChanges.stage && normalizedChanges.stage !== fromStage) {
+    if (!cur.started_at && STARTED_STAGES.includes(normalizedChanges.stage)) {
       sets.push("started_at = ?");
       args.push(at);
     }
-    if (!cur.launched_at && LAUNCHED_STAGES.includes(changes.stage)) {
+    if (!cur.launched_at && LAUNCHED_STAGES.includes(normalizedChanges.stage)) {
       sets.push("launched_at = ?");
       args.push(at);
     }
     const fromLabel = isOneOf(PROJECT_STAGES, fromStage) ? PROJECT_STAGE_LABELS[fromStage] : fromStage;
     timeline.push(
-      updateStatement(tenantId, id, author, `Stage moved from ${fromLabel} to ${PROJECT_STAGE_LABELS[changes.stage]}.`, "internal", at),
+      updateStatement(tenantId, id, author, `Stage moved from ${fromLabel} to ${PROJECT_STAGE_LABELS[normalizedChanges.stage]}.`, "internal", at),
     );
   }
-  if (changes.archived !== undefined && changes.archived !== Boolean(cur.archived_at)) {
+  if (normalizedChanges.archived !== undefined && normalizedChanges.archived !== Boolean(cur.archived_at)) {
     sets.push("archived_at = ?");
-    args.push(changes.archived ? at : null);
-    timeline.push(updateStatement(tenantId, id, author, changes.archived ? "Project archived." : "Project restored from the archive.", "internal", at));
+    args.push(normalizedChanges.archived ? at : null);
+    timeline.push(updateStatement(tenantId, id, author, normalizedChanges.archived ? "Project archived." : "Project restored from the archive.", "internal", at));
   }
   if (sets.length === 0) return true;
   sets.push("updated_at = ?");
@@ -912,15 +962,24 @@ export async function updateProject(
   // A project's tickets belong to its client: re-pointing the project moves
   // them in the same batch, so the client record and the project never
   // disagree about who a ticket is for.
-  const ticketsFollow: InStatement[] =
-    "customer_id" in changes
-      ? [
-          {
-            sql: "UPDATE support_tickets SET customer_id = ?, updated_at = ? WHERE tenant_id = ? AND project_id = ?",
-            args: [changes.customer_id ?? null, at, tenantId, id],
-          },
-        ]
-      : [];
+  const ticketSets: string[] = [];
+  const ticketArgs: Array<string | null> = [];
+  if ("customer_id" in normalizedChanges) {
+    ticketSets.push("customer_id = ?");
+    ticketArgs.push(normalizedChanges.customer_id ?? null);
+  }
+  if ("client_tenant_id" in normalizedChanges) {
+    ticketSets.push("client_tenant_id = ?", "client_match = ?");
+    ticketArgs.push(normalizedChanges.client_tenant_id ?? null, normalizedChanges.client_tenant_id ? "manual" : "none");
+  }
+  const ticketsFollow: InStatement[] = ticketSets.length
+    ? [
+        {
+          sql: `UPDATE support_tickets SET ${ticketSets.join(", ")}, updated_at = ? WHERE tenant_id = ? AND project_id = ?`,
+          args: [...ticketArgs, at, tenantId, id],
+        },
+      ]
+    : [];
   await db.batch(
     [
       {

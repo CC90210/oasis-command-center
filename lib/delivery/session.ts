@@ -172,6 +172,7 @@ const MESSAGES: Record<string, string> = {
   client_tenant_not_found: "That client workspace does not exist.",
   client_workspace_links_are_oasis_only: "Linking to a client workspace is only for OASIS's own desk. Link a client record instead.",
   customer_not_found: "That client record does not exist in this workspace.",
+  customer_workspace_mismatch: "That client record is linked to a different client workspace.",
   project_belongs_to_another_customer:
     "This ticket's project belongs to a different client. Move the ticket to another project first, or change the project's client.",
   lead_not_found: "That lead does not exist in this workspace's pipeline.",
