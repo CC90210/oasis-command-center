@@ -33,11 +33,11 @@ import {
 import {
   clientTenantExists,
   createProject,
-  deskActiveCustomerExists,
   deskLeadExists,
   getProject,
   listProjects,
   profileContact,
+  resolveProjectCustomer,
 } from "@/lib/delivery/store";
 
 export const runtime = "nodejs";
@@ -84,21 +84,36 @@ export async function POST(req: NextRequest) {
 
     const assignee = validateAssignee(input.assigned_to, await loadAssignmentRoster(desk));
     if (!assignee.ok) return deliveryError(400, assignee.error, undefined, { field: "assigned_to" });
-    if (input.client_tenant_id) {
-      if (!isOasisDesk(viewer)) return deliveryError(400, "client_workspace_links_are_oasis_only", undefined, { field: "client_tenant_id" });
-      if (!(await clientTenantExists(db, input.client_tenant_id))) {
-        return deliveryError(400, "client_tenant_not_found", undefined, { field: "client_tenant_id" });
-      }
+    if (input.client_tenant_id && !isOasisDesk(viewer)) {
+      return deliveryError(400, "client_workspace_links_are_oasis_only", undefined, { field: "client_tenant_id" });
     }
     if (input.lead_id && !(await deskLeadExists(db, desk, input.lead_id))) {
       return deliveryError(400, "lead_not_found", undefined, { field: "lead_id" });
     }
-    if (!(await deskActiveCustomerExists(db, desk, input.customer_id))) {
+    const customer = await resolveProjectCustomer(db, desk, input.customer_id);
+    if (!customer?.active) {
       return deliveryError(400, "customer_not_found", undefined, { field: "customer_id" });
+    }
+    if (input.client_tenant_id && input.client_tenant_id !== customer.client_tenant_id) {
+      return deliveryError(409, "customer_workspace_mismatch", undefined, { field: "client_tenant_id" });
+    }
+    if (customer.client_tenant_id) {
+      if (!isOasisDesk(viewer)) {
+        return deliveryError(400, "client_workspace_links_are_oasis_only", undefined, { field: "client_tenant_id" });
+      }
+      if (!(await clientTenantExists(db, customer.client_tenant_id))) {
+        return deliveryError(400, "client_tenant_not_found", undefined, { field: "client_tenant_id" });
+      }
     }
 
     const author = { userId: viewer.userId, name: (await profileContact(db, viewer.userId, desk)).name };
-    const id = await createProject(db, desk, { ...input, assigned_to: assignee.value }, author, new Date());
+    const id = await createProject(
+      db,
+      desk,
+      { ...input, client_tenant_id: customer.client_tenant_id, assigned_to: assignee.value },
+      author,
+      new Date(),
+    );
     const project = await getProject(db, viewer, id);
     return NextResponse.json({ ok: true, id, project }, { status: 201 });
   } catch (err) {
