@@ -83,7 +83,8 @@ async function createSchema() {
       tool_capabilities TEXT NOT NULL DEFAULT '[]',
       scope TEXT, paired_via TEXT, claim_protocols TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
       claude_account_hash TEXT, previous_token_hash TEXT, token_rotated_at TEXT,
-      last_poll_ok_at TEXT);
+      last_poll_ok_at TEXT, claim_state_at TEXT, claim_capacity INTEGER,
+      claim_in_flight INTEGER, claim_blocked_reason TEXT, claim_runtime_state TEXT);
     CREATE UNIQUE INDEX idx_bridge_pairings_unique_live_machine
       ON bridge_pairings (tenant_id, machine_fingerprint) WHERE ((revoked_at IS NULL) AND (machine_fingerprint IS NOT NULL));
     CREATE TABLE bridge_pair_codes (
@@ -315,6 +316,53 @@ async function main() {
     assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
     const row = await db.execute({ sql: "SELECT claim_protocols, tool_capabilities FROM bridge_pairings WHERE id = 'bp-ping-daemon'" });
     assert.deepEqual(JSON.parse(String(row.rows[0].claim_protocols)), ["department_task_v1"]);
+  });
+
+  await check("ping persists the connector's truthful busy and idle execution state", async () => {
+    await pairingRow({ id: "bp-ping-load", userId: OWNER_ID, label: "Busy connector", token: "ping-load-token", scope: "connector", fingerprint: "ping-load-fp" });
+    const busy = await pingRoute.POST(pingReq("ping-load-token", {
+      services: {},
+      capacity: 0,
+      in_flight: 1,
+      blocked_reason: null,
+    }));
+    assert.equal(busy.status, 200, JSON.stringify(await busy.clone().json()));
+    let row = (await db.execute({
+      sql: "SELECT claim_state_at, claim_capacity, claim_in_flight, claim_blocked_reason FROM bridge_pairings WHERE id = 'bp-ping-load'",
+    })).rows[0];
+    assert.ok(row.claim_state_at);
+    assert.equal(row.claim_capacity, 0);
+    assert.equal(row.claim_in_flight, 1);
+    assert.equal(row.claim_blocked_reason, null);
+
+    const idle = await pingRoute.POST(pingReq("ping-load-token", {
+      services: {},
+      capacity: 1,
+      in_flight: 0,
+      blocked_reason: null,
+    }));
+    assert.equal(idle.status, 200, JSON.stringify(await idle.clone().json()));
+    row = (await db.execute({
+      sql: "SELECT claim_capacity, claim_in_flight FROM bridge_pairings WHERE id = 'bp-ping-load'",
+    })).rows[0];
+    assert.equal(row.claim_capacity, 1);
+    assert.equal(row.claim_in_flight, 0);
+  });
+
+  await check("ping rejects partial or malformed execution state without changing the pairing", async () => {
+    await pairingRow({ id: "bp-ping-invalid-load", userId: OWNER_ID, label: "Connector", token: "ping-invalid-load-token", scope: "connector", fingerprint: "ping-invalid-load-fp" });
+    const partial = await pingRoute.POST(pingReq("ping-invalid-load-token", { capacity: 0, in_flight: 1 }));
+    assert.equal(partial.status, 400);
+    const malformed = await pingRoute.POST(pingReq("ping-invalid-load-token", {
+      capacity: 1,
+      in_flight: 0,
+      blocked_reason: "../../bad",
+    }));
+    assert.equal(malformed.status, 400);
+    const row = (await db.execute({
+      sql: "SELECT claim_state_at, claim_capacity, claim_in_flight FROM bridge_pairings WHERE id = 'bp-ping-invalid-load'",
+    })).rows[0];
+    assert.deepEqual([row.claim_state_at, row.claim_capacity, row.claim_in_flight], [null, null, null]);
   });
 
   await check("a connector ping that sends tool_capabilities does not change the operator chat's bridge tool list", async () => {

@@ -133,6 +133,9 @@ export async function POST(req: NextRequest) {
     tool_capabilities?: string[];
     claim_protocols?: string[];
     runtime_state?: unknown;
+    capacity?: unknown;
+    in_flight?: unknown;
+    blocked_reason?: unknown;
   };
   try {
     body = await req.json();
@@ -171,6 +174,29 @@ export async function POST(req: NextRequest) {
   const runtimeState = parseRuntimeClaimState(body.runtime_state);
   if (!runtimeState.ok) return bad(400, runtimeState.code);
   if (runtimeState.state) pairingUpdate.claim_runtime_state = JSON.stringify(runtimeState.state);
+  const claimKeys = ["capacity", "in_flight", "blocked_reason"] as const;
+  const hasClaimState = claimKeys.some((key) => Object.prototype.hasOwnProperty.call(body, key));
+  if (hasClaimState) {
+    if (!claimKeys.every((key) => Object.prototype.hasOwnProperty.call(body, key))) {
+      return bad(400, "invalid_claim_state");
+    }
+    if (!Number.isInteger(body.capacity) || Number(body.capacity) < 0 || Number(body.capacity) > 2) {
+      return bad(400, "invalid_claim_state");
+    }
+    if (!Number.isInteger(body.in_flight) || Number(body.in_flight) < 0 || Number(body.in_flight) > 2) {
+      return bad(400, "invalid_claim_state");
+    }
+    if (
+      body.blocked_reason !== null &&
+      (typeof body.blocked_reason !== "string" || !/^[a-z][a-z0-9_]{0,79}$/.test(body.blocked_reason))
+    ) {
+      return bad(400, "invalid_claim_state");
+    }
+    pairingUpdate.claim_state_at = new Date().toISOString();
+    pairingUpdate.claim_capacity = Number(body.capacity);
+    pairingUpdate.claim_in_flight = Number(body.in_flight);
+    pairingUpdate.claim_blocked_reason = body.blocked_reason;
+  }
   const pairingWrite = await db
     .from("bridge_pairings")
     .update(pairingUpdate)
@@ -261,6 +287,7 @@ export async function POST(req: NextRequest) {
     real_results_kept: realResultsKept,
     tool_capabilities_recorded: toolCapsRecorded,
     runtime_state_recorded: runtimeState.state !== null,
+    claim_state_recorded: hasClaimState,
   });
 }
 
