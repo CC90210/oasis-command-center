@@ -6,12 +6,18 @@
  * Server component above passes initialRows; this client component
  * handles the create flows and per-row toggle/delete.
  *
- *   Offers        forms with an offer page (form_offer_pages): the page's
- *                 status (Live, version N / Live + unpublished changes /
- *                 Draft page), new leads in the last 7 days, responses, the
- *                 link with a Share menu, Edit.
- *   Intake forms  forms without a page, exactly as before (the Client Support
- *                 Ticket is one, and stays one).
+ *   Offers        forms with an offer page (form_offer_pages), as CARDS (R1,
+ *                 2026-10-12, HANDOVER section 3: "they literally look the
+ *                 exact same" as the table below). Each card: the one-line
+ *                 promise from the page's own hero, the page's status (Live,
+ *                 version N / Live + unpublished changes / Draft page), its
+ *                 VSL status, new leads in the last 7 days, responses, the
+ *                 link with a Share menu, Edit. The form at slug "vsl" (if any)
+ *                 is pinned above the grid as the "Start here" router card;
+ *                 with none, a quiet empty-state card offers Create.
+ *   Intake forms  forms without a page, exactly as before, in a plain table
+ *                 visibly secondary to Offers (the Client Support Ticket is
+ *                 one, and stays one).
  *
  * New offer (primary) opens the template picker: a template (structure only),
  * the offer's name (internal) and its link name (the slug, fixed once made).
@@ -36,6 +42,8 @@ import { Plus, Edit3, ToggleLeft, ToggleRight, Trash2, ExternalLink, Loader2, Co
 import { starterFormForTenant } from "@/lib/forms/tenant-form-config";
 import { OFFER_TEMPLATES, starterStepsForTemplate } from "@/lib/offer-pages/templates";
 import type { TemplateKey } from "@/lib/offer-pages/types";
+import { OffersCardsGrid, type OfferCardEntry } from "./OffersCardsClient";
+import type { OfferCardViewModel } from "./OfferCard";
 
 type FormRow = {
   id: string;
@@ -47,7 +55,14 @@ type FormRow = {
   updated_at: string;
 };
 
-export type OfferColumn = { status: "live" | "live_with_changes" | "draft"; publishedVersion: number };
+export type OfferColumn = {
+  status: "live" | "live_with_changes" | "draft";
+  publishedVersion: number;
+  /** The hero headline/subheadline/video of the copy a card shows. Optional: a caller built before R1 (tests included) may omit them, and the card falls back to an honest placeholder - never a 0 or an invented promise. */
+  headline?: string | null;
+  subheadline?: string | null;
+  hasVideo?: boolean;
+};
 
 /** Today's date in YYYY-MM-DD for default form names. */
 function todayStamp(): string {
@@ -74,12 +89,6 @@ const SHARE_PRESETS: Array<{ label: string; params: string }> = [
   { label: "Email", params: "utm_source=email&utm_medium=email" },
   { label: "SMS", params: "utm_source=sms&utm_medium=sms" },
 ];
-
-function pageLabel(o: OfferColumn): string {
-  if (o.status === "live") return o.publishedVersion > 0 ? `Live, version ${o.publishedVersion}` : "Live";
-  if (o.status === "live_with_changes") return "Live + unpublished changes";
-  return "Draft page (not live)";
-}
 
 export function FormsListClient({
   initialRows,
@@ -288,6 +297,24 @@ export function FormsListClient({
     </button>
   );
 
+  /** An offer card's Preview: the public path with ?offer_preview=1, open to the workspace's own owner only (the route itself gates it). */
+  const previewLink = (r: FormRow) => {
+    const path = publicFormPath(r.slug);
+    if (!path) return null;
+    return (
+      <a
+        href={`${path}?offer_preview=1`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 text-fg-muted hover:text-fg text-xs"
+        title="See the page as it is right now, draft changes included. Only you can open this."
+      >
+        <ExternalLink className="w-3 h-3" />
+        Preview
+      </a>
+    );
+  };
+
   const actions = (r: FormRow, offer: boolean) => (
     <div className="inline-flex items-center gap-3">
       {canEdit && (
@@ -299,6 +326,7 @@ export function FormsListClient({
           Edit
         </Link>
       )}
+      {offer ? previewLink(r) : null}
       {copyButton(r)}
       {offer && tenantSlug && r.enabled ? (
         <ShareMenu
@@ -308,6 +336,7 @@ export function FormsListClient({
           formId={r.id}
         />
       ) : null}
+      {offer ? responsesLink(r) : null}
       {canEdit && (
         <button
           type="button"
@@ -320,6 +349,24 @@ export function FormsListClient({
       )}
     </div>
   );
+
+  // Every offer row as a card view model + its pre-built toggle/actions nodes
+  // (OffersCardsClient lays these out; it owns no click handler of its own).
+  const offerCards: OfferCardEntry[] = offerRows.map((r) => {
+    const o = offers![r.id];
+    const view: OfferCardViewModel = {
+      id: r.id,
+      name: r.name,
+      slug: r.slug,
+      headline: o.headline ?? null,
+      subheadline: o.subheadline ?? null,
+      hasVideo: o.hasVideo ?? false,
+      status: o.status,
+      publishedVersion: o.publishedVersion,
+      leads: typeof recentLeads[r.id] === "number" ? recentLeads[r.id] : null,
+    };
+    return { view, toggle: onOff(r, ["On", "Off"]), actions: actions(r, true) };
+  });
 
   return (
     <div className="space-y-8">
@@ -370,65 +417,20 @@ export function FormsListClient({
         </div>
       )}
 
-      {/* -- Offers ----------------------------------------------------------- */}
+      {/* -- Offers, as cards (R1) ---------------------------------------------- */}
       <section className="space-y-3">
-        <h2 className="text-sm font-bold text-fg">Offers</h2>
-        {offerRows.length === 0 ? (
-          <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-6 text-sm text-fg-muted">
-            {offers === null
-              ? "Offers aren't switched on in this workspace yet. Your forms keep working as they are."
-              : canEdit
-                ? "No offers yet. New offer builds a full page around a form: a video, what people get, your proof, and the form to book."
-                : "No offers yet."}
-          </div>
-        ) : (
-          <div className="overflow-x-auto rounded-xl border border-bg-border">
-            <table className="w-full text-sm">
-              <thead className="bg-bg-elev/50">
-                <tr className="text-left text-[10px] uppercase tracking-wider text-fg-dim">
-                  <th className="px-4 py-2 font-bold">Offer</th>
-                  <th className="px-4 py-2 font-bold">Page</th>
-                  <th className="px-4 py-2 font-bold">Leads (7 days)</th>
-                  <th className="px-4 py-2 font-bold">Responses</th>
-                  <th className="px-4 py-2 font-bold">Form</th>
-                  <th className="px-4 py-2 font-bold text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-bg-border">
-                {offerRows.map((r) => {
-                  const o = offers![r.id];
-                  const leads = recentLeads[r.id];
-                  return (
-                    <tr key={r.id} className="hover:bg-bg-elev/30">
-                      <td className="px-4 py-3">
-                        <div className="font-bold text-fg">{r.name}</div>
-                        <div className="font-mono text-[11px] text-fg-dim">/{r.slug}</div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`text-xs ${
-                            o.status === "live" ? "text-status-engaged" : o.status === "live_with_changes" ? "text-status-warm" : "text-fg-muted"
-                          }`}
-                        >
-                          {pageLabel(o)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-fg">{typeof leads === "number" ? leads : "-"}</td>
-                      <td className="px-4 py-3">{responsesLink(r)}</td>
-                      <td className="px-4 py-3">{onOff(r, ["On", "Off"])}</td>
-                      <td className="px-4 py-3 text-right">{actions(r, true)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <h2 className="text-base font-bold text-fg">Offers</h2>
+        <OffersCardsGrid
+          cards={offerCards}
+          canEdit={canEdit}
+          offersEnabled={offers !== null}
+          onCreateRouter={() => setPicker(true)}
+        />
       </section>
 
-      {/* -- Intake forms ----------------------------------------------------- */}
-      <section className="space-y-3">
-        <h2 className="text-sm font-bold text-fg">Intake forms</h2>
+      {/* -- Intake forms: plain table, visibly secondary to Offers above ------- */}
+      <section className="space-y-3 pt-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">Intake forms</h2>
         {intakeRows.length === 0 ? (
           <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-6 text-center text-fg-muted">
             <div className="text-sm">No intake forms.</div>

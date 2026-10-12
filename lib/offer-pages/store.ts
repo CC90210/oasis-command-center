@@ -255,6 +255,73 @@ export async function listOfferStatuses(
   }
 }
 
+/** What an Offer card (R1) needs beyond the status: its one-line promise and whether a video is attached. */
+export type OfferSummary = {
+  status: OfferPageStatus;
+  publishedVersion: number;
+  /** The hero headline of the copy actually shown (published while live, the draft otherwise). null when unwritten. */
+  headline: string | null;
+  /** The hero subheadline of that same copy. null when unwritten. */
+  subheadline: string | null;
+  /** Whether that copy's hero carries a video, library or linked. */
+  hasVideo: boolean;
+};
+
+/**
+ * Each form's offer-page summary for the Offers cards; null when the table is
+ * missing (bravo__203 not applied), exactly like listOfferStatuses. Reads the
+ * same rows listOfferStatuses does - no second query - so this replaces that
+ * call in app/forms/page.tsx rather than running beside it.
+ */
+export async function listOfferSummaries(db: Client, tenantId: string): Promise<Map<string, OfferSummary> | null> {
+  try {
+    const rs = await db.execute({
+      sql: "SELECT form_id, draft, published, live, draft_version, published_version FROM form_offer_pages WHERE tenant_id = ?",
+      args: [tenantId],
+    });
+    const out = new Map<string, OfferSummary>();
+    for (const r of rowsOf(rs)) {
+      let draft: OfferPageDoc | null = null;
+      let published: OfferPageDoc | null = null;
+      try {
+        draft = parseOfferPageDoc(String(r.draft ?? "{}"));
+      } catch {
+        draft = null;
+      }
+      try {
+        published = r.published == null ? null : parseOfferPageDoc(String(r.published));
+      } catch {
+        published = null;
+      }
+      const row = {
+        live: Number(r.live) === 1,
+        published,
+        draft,
+        draftVersion: Number(r.draft_version ?? 0),
+        publishedVersion: Number(r.published_version ?? 0),
+      };
+      const status = statusOf(row);
+      // The copy actually on the public page while live; the draft while there
+      // is nothing live yet. A card never shows words nobody can see.
+      const shown = row.live ? row.published : row.draft;
+      out.set(String(r.form_id), {
+        status,
+        publishedVersion: row.publishedVersion,
+        headline: shown?.hero.headline ?? null,
+        subheadline: shown?.hero.subheadline ?? null,
+        hasVideo: Boolean(shown?.hero.video),
+      });
+    }
+    return out;
+  } catch (err) {
+    if (isMissingOfferTable(err)) {
+      noteOfferTableMissing("summaries");
+      return null;
+    }
+    throw err;
+  }
+}
+
 export type WriteResult<T> =
   | ({ ok: true } & T)
   | { ok: false; error: "unavailable" | "not_found" | "conflict"; currentVersion?: number };
