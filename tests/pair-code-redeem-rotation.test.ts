@@ -104,7 +104,7 @@ async function createSchema() {
       claude_account_hash TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX idx_bridge_pairings_unique_live_machine
-      ON bridge_pairings (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL;
+      ON bridge_pairings (tenant_id, machine_fingerprint) WHERE ((revoked_at IS NULL) AND (machine_fingerprint IS NOT NULL));
     CREATE TABLE bridge_pair_codes (
       id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY,
       code TEXT NOT NULL, tenant_id TEXT NOT NULL, auth_user_id TEXT NOT NULL,
