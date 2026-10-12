@@ -455,3 +455,58 @@ Design direction:
 **Order with the funnel:** D0 first (small, Adon is blocked by it), then funnel slices 1-3, then D1-D5 interleaved
 with funnel 5-7. Write the D1-D5 design as a spec and get Adon's and CC's yes before building D1 (it changes what
 O4's claim route trusts).
+
+---
+
+## 12. AI brain: redesign it per person (Adon, 2026-10-12, with screenshots)
+
+Adon's words: AI brain, Devices, Connections and Chat apps "work interconnectingly". AI brain must be HIS instance,
+never CC's info. Connecting cloud models, API keys, subscription accounts and your own local LLM must be easy, in
+**three clearly separated categories**. Remove the redundant and useless parts; keep the valuable ones.
+
+**What is wrong today** (Settings > AI brain, signed in as adon@, after his PC was paired):
+
+| Seen | Problem |
+|---|---|
+| Header: "run on Claude Code on your paired computer", then the warning "can't be reached from this account" | The workspace engine (CC's machine) is shown as if it were Adon's. |
+| "AI apps on your paired computer: This runs on another team member's computer" | The card reads the workspace's bridge, not the viewer's own devices. |
+| "Your AI account is Google Gemini" while the header says Claude Code | The fallback key reads like the primary. One sentence must say primary and fallback together. |
+| "What powers your agents", "How your departments think", and the Claude Code / Codex / Gemini CLI tabs | Three controls for one decision. |
+| Workspace agents list and the Jev (TypeSafe) panel | They belong on AI Team and Connections, not AI brain. |
+| Adon's pairing `938fbd09` has `claude_account_hash` NULL and no CLI inventory | The connector pings, but what it detects (CLIs, sign-in, local models) is not reaching the server, so there is nothing per-device to show. Check `probeCliInventory` / `buildPingBody` in JARVIS `services/oasis-connector/index.mjs` against what `/api/bridge/ping` stores. |
+
+**Target layout.** One page, per signed-in person. Workspace-wide settings sit in a collapsed "Workspace defaults"
+that only owners and admins see.
+
+1. **One sentence at the top, with one Change button:**
+   "Your departments answer with **Claude Code on UPPAECHELON**. If it is offline: **Gemini 3.8 Flash (workspace
+   key)**."
+   - It is live: device online or offline, last answer time.
+   - It is built only from the viewer's own devices and keys, plus the workspace fallback, labelled as such.
+2. **Three categories, as tabs or three cards, same layout each:**
+
+   | Category | What it shows | Connect action |
+   |---|---|---|
+   | **On my devices** (apps) | Per paired device: detected Claude Code / Codex / Gemini CLI, each with signed in / not signed in, and "Use for my departments". Codex and Gemini keep their "not for departments" reason. | Empty state: "Connect a device", which opens the Devices "Add a device" flow (section 11, D0). |
+   | **Local models** | Per device: Ollama / LM Studio detected, the model list, a "Test" that runs one short prompt locally, and "Use for my departments". | Short how-to: install Ollama, `ollama pull <model>`, then it appears here on the next ping. |
+   | **API keys** (cloud) | Provider cards: Anthropic, OpenAI, Google Gemini, OpenRouter. Each shows Connected / Not connected, whose key (mine or workspace), model picker, Test, Replace, Disconnect. | Paste a key once; Test before save. Keys are encrypted and never sent to any computer. |
+
+3. **Interlinks:**
+   - a device on Devices links to its AI brain card and back;
+   - Connections lists AI keys only as a link to AI brain, never a second editor;
+   - Chat apps (Slack mention) says which brain answers there: always the API key, per the existing rule.
+4. **Remove from AI brain:**
+   - the duplicated explanations;
+   - "How your departments think" (merged into item 1);
+   - the Workspace agents list (it lives on AI Team);
+   - the Jev panel (move it to Connections under "Specialist models").
+5. **States to design** (hallmark 8): no device, device offline, app not signed in, key failing, no fallback,
+   loading, read error, and a member (not admin) view.
+
+**Rules that stay** (O1-O4):
+- a person's departments run only on their own approved device, else their fallback;
+- never on another person's device;
+- Codex and Gemini CLI are not offered for department work.
+
+**Slice:** AI1, after D0 and D1 (D1 delivers the per-device capability list this page reads). About 14 h. Write the
+mockup first and get Adon's yes before building. Use the oasis-ui-library doctrine and run the UI gate.
