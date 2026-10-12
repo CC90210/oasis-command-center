@@ -22,7 +22,7 @@
  * Plain `<a>`: keyboard-operable and screen-reader-visible by default, no
  * custom role or JS handler needed.
  */
-import type { MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
 export function CommunityLink({
@@ -37,26 +37,37 @@ export function CommunityLink({
   configured: boolean;
   className?: string;
 }) {
+  // Three constraints, all from review:
+  //  1. The first client render must match the server's href (CodeRabbit:
+  //     React does not promise to patch a mismatched href), so it renders
+  //     without `v`.
+  //  2. After hydration the href must carry `v`, so a middle-click or "open
+  //     in new tab" (which bypass onClick) is still attributed (Codex).
+  //  3. Reading the id on mount must not race the tracking effect that
+  //     creates it on a fresh tab (Codex): getOrCreateVisitId creates it if
+  //     absent, and the page's own events reuse that same sessionStorage id.
+  // The click handler refreshes it once more for the ordinary-click case.
+  const [visitId, setVisitId] = useState<string | null>(null);
+  useEffect(() => {
+    setVisitId(getOrCreateVisitId());
+  }, []);
+
   if (!configured || !tenantSlug || !formSlug) return null;
 
-  // The rendered href never carries the visit id, so server and client render
-  // the same markup (CodeRabbit: React does not promise to patch a mismatched
-  // href). The id is attached at CLICK time instead: reading it on mount raced
-  // the tracking effect that creates it on a fresh tab, leaving the link
-  // without `v` for the whole visit (Codex). getOrCreateVisitId is the same
-  // sessionStorage id the page's own events use, so the click joins the visit.
   const base = new URLSearchParams({ form: formSlug, t: tenantSlug });
+  const hrefFor = (id: string | null) => {
+    const params = new URLSearchParams(base);
+    if (id) params.set("v", id);
+    return `/go/community?${params.toString()}`;
+  };
   const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
-    const visitId = getOrCreateVisitId();
-    if (!visitId) return;
-    const withVisit = new URLSearchParams(base);
-    withVisit.set("v", visitId);
-    e.currentTarget.href = `/go/community?${withVisit.toString()}`;
+    const id = getOrCreateVisitId();
+    if (id) e.currentTarget.href = hrefFor(id);
   };
 
   return (
     <a
-      href={`/go/community?${base.toString()}`}
+      href={hrefFor(visitId)}
       onClick={onClick}
       className={`text-[14px] text-fg-dim underline underline-offset-4 transition-colors hover:text-fg ${className}`}
     >

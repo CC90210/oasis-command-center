@@ -81,13 +81,14 @@ async function main() {
     "/f/oasis-ai-cc/protocol?cat=p1#book",
   );
 
-  console.log("  CommunityLink attaches the visit id at CLICK time: same server/client href, and never a stale empty id on a fresh tab");
+  console.log("  CommunityLink: server-matching first render, visit id in the real href after hydration (new-tab opens), refreshed on click");
   {
     const linkSrc = readFileSync("components/offer-pages/CommunityLink.tsx", "utf8");
-    assert.match(linkSrc, /href=\{`\/go\/community\?\$\{base\.toString\(\)\}`\}/, "the rendered href must carry no visit id (server and client identical)");
-    assert.match(linkSrc, /onClick=\{onClick\}/, "the link must attach the id on click");
-    assert.match(linkSrc, /const visitId = getOrCreateVisitId\(\);[\s\S]*e\.currentTarget\.href = /, "the click handler must read or create the id at click time and set the href");
-    assert.doesNotMatch(linkSrc, /useEffect|peekVisitId/, "no mount-time read: it raced the tracking effect that creates the id");
+    assert.match(linkSrc, /const \[visitId, setVisitId\] = useState<string \| null>\(null\);/, "first render must start without a visit id (matches the server)");
+    assert.match(linkSrc, /useEffect\(\(\) => \{\s*setVisitId\(getOrCreateVisitId\(\)\);\s*\}, \[\]\);/, "after hydration the id must be created-or-read (never a peek that races the tracking effect)");
+    assert.match(linkSrc, /href=\{hrefFor\(visitId\)\}/, "the real href must carry the id so middle-click and open-in-new-tab are attributed");
+    assert.match(linkSrc, /onClick=\{onClick\}/, "ordinary clicks refresh the id once more");
+    assert.doesNotMatch(linkSrc, /peekVisitId/, "peekVisitId raced the effect that creates the id on a fresh tab");
   }
 
   console.log("  isSafeInternalPath rejects every open-redirect shape");
