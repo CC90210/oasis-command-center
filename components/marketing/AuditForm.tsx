@@ -1,10 +1,22 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { AUDIT_FUNNEL, CONTACT_EMAIL } from "@/lib/marketing/routes";
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
-import { auditFormBody, auditFormProblem } from "@/components/marketing/audit-form-body";
+import {
+  AUDIT_CONSENT_FIELDS,
+  auditAttributionFromSearch,
+  auditFormBody,
+  auditFormContinuationPath,
+  auditFormProblem,
+} from "@/components/marketing/audit-form-body";
+import {
+  consentDisclosureText,
+  type ConsentChannel,
+  type ConsentIdentity,
+} from "@/lib/consent/ledger-disclosure";
+import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
 /**
  * The site's one conversion point.
@@ -31,9 +43,21 @@ import { auditFormBody, auditFormProblem } from "@/components/marketing/audit-fo
 
 type Status = "idle" | "sending" | "error";
 
-export function AuditForm({ compact = false }: { compact?: boolean }) {
+export function AuditForm({
+  compact = false,
+  consentIdentity,
+}: {
+  compact?: boolean;
+  /** Resolved server-side for the same OASIS tenant the submit route resolves. */
+  consentIdentity: ConsentIdentity;
+}) {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [consentTicked, setConsentTicked] = useState<Record<ConsentChannel, boolean>>({
+    email: false,
+    sms: false,
+  });
+  const consentIdBase = useId();
   // The in-flight guard has to be a ref, not `status`. React state updates
   // are asynchronous: two submit events dispatched before the next render
   // (double-click, Enter-then-click) would both read "idle" and both POST,
@@ -48,7 +72,12 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
     if (inFlight.current) return;
     inFlight.current = true;
 
-    const body = auditFormBody(new FormData(e.currentTarget));
+    const context = {
+      submissionPath: window.location.pathname,
+      visitId: getOrCreateVisitId(),
+      attribution: auditAttributionFromSearch(window.location.search),
+    };
+    const body = auditFormBody(new FormData(e.currentTarget), context);
     const problem = auditFormProblem(body.payload);
     if (problem) {
       setError(problem);
@@ -92,9 +121,10 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
       // inFlight is deliberately NOT released here. The navigation is
       // already committed, and clearing it would reopen the double-submit
       // window for however long the browser takes to leave the page.
-      window.location.href = data.minted_token
+      const nextPath = data.minted_token
         ? `${AUDIT_FUNNEL.path}/${encodeURIComponent(data.minted_token)}`
         : AUDIT_FUNNEL.path;
+      window.location.href = auditFormContinuationPath(nextPath, context);
     } catch {
       setError("Couldn't reach the server. Check your connection and try again.");
       setStatus("error");
@@ -105,7 +135,13 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
   const sending = status === "sending";
 
   return (
-    <form onSubmit={onSubmit} className="w-full" noValidate={false}>
+    <form
+      onSubmit={onSubmit}
+      action="/api/forms/submit"
+      method="post"
+      className="w-full"
+      noValidate={false}
+    >
       <div className={`grid gap-4 ${compact ? "" : "sm:grid-cols-2"}`}>
         <Field name="name" label="Your name" autoComplete="name" required />
         <Field
@@ -143,6 +179,41 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
           hint="Optional"
         />
       </div>
+
+      <div className="mt-5 space-y-3 rounded-md border border-ops-line bg-ops-void/35 p-3.5">
+        {(["email", "sms"] as const).map((channel) => {
+          const inputId = `${consentIdBase}-consent-${channel}`;
+          return (
+            <label key={channel} htmlFor={inputId} className="flex cursor-pointer items-start gap-3 py-1">
+              <input
+                id={inputId}
+                name={AUDIT_CONSENT_FIELDS[channel]}
+                value="true"
+                type="checkbox"
+                autoComplete="off"
+                checked={consentTicked[channel]}
+                onChange={(event) =>
+                  setConsentTicked((current) => ({ ...current, [channel]: event.target.checked }))
+                }
+                className="mt-0.5 h-4 w-4 shrink-0 rounded border-ops-edge"
+              />
+              <span className="text-[12px] leading-relaxed text-fg-muted">
+                {consentDisclosureText(channel, consentIdentity)}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+
+      <noscript>
+        <p className="mt-4 text-[13px] leading-5 text-status-hot">
+          JavaScript is required to submit this secure form. You can also email{" "}
+          <a href={`mailto:${CONTACT_EMAIL}`} className="underline underline-offset-2">
+            {CONTACT_EMAIL}
+          </a>
+          .
+        </p>
+      </noscript>
 
       <button
         type="submit"
@@ -211,7 +282,7 @@ function Field({
           required={required}
           autoComplete={autoComplete}
           aria-describedby={helpId}
-          className="mt-2 w-full rounded-md border border-ops-edge bg-ops-void/60 px-3.5 py-2.5 text-[15px] text-fg outline-none transition-colors placeholder:text-fg-faint hover:border-fg-faint focus:border-signal"
+          className="mt-2 w-full rounded-md border border-ops-edge bg-ops-void/60 px-3.5 py-2.5 text-[16px] text-fg outline-none transition-colors placeholder:text-fg-faint hover:border-fg-faint focus:border-signal sm:text-[15px]"
         />
       </label>
       {help ? (

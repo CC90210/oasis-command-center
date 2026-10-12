@@ -1,5 +1,6 @@
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
 import { normalizePhoneE164 } from "@/lib/conversation-threading";
+import { appendPreservedParams, isSafeInternalPath } from "@/lib/offers/preserve-query";
 
 /**
  * What the homepage audit form sends: step 0 of the live `ai-audit` funnel
@@ -13,8 +14,29 @@ import { normalizePhoneE164 } from "@/lib/conversation-threading";
  */
 export const AUDIT_FORM_FIELDS = ["name", "email", "phone", "company", "website"] as const;
 export const AUDIT_FORM_REQUIRED = ["name", "email", "phone", "company"] as const;
+export const AUDIT_CONSENT_FIELDS = {
+  email: "consent_email",
+  sms: "consent_sms",
+} as const;
+export const AUDIT_ATTRIBUTION_FIELDS = [
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "kw",
+  "cat",
+] as const;
 
 export type AuditFormField = (typeof AUDIT_FORM_FIELDS)[number];
+export type AuditAttributionField = (typeof AUDIT_ATTRIBUTION_FIELDS)[number];
+export type AuditAttribution = Partial<Record<AuditAttributionField, string>>;
+
+export type AuditFormContext = {
+  /** The public page that held the inline form, never a signed lead URL. */
+  submissionPath: string;
+  /** Per-tab, browser-generated funnel visit id. Null means tracking is unavailable. */
+  visitId: string | null;
+  attribution: AuditAttribution;
+};
 
 const MISSING_LABEL: Record<(typeof AUDIT_FORM_REQUIRED)[number], string> = {
   name: "your name",
@@ -23,10 +45,23 @@ const MISSING_LABEL: Record<(typeof AUDIT_FORM_REQUIRED)[number], string> = {
   company: "your company",
 };
 
-export function auditFormBody(form: FormData) {
+export function auditAttributionFromSearch(search: string): AuditAttribution {
+  const params = new URLSearchParams(search);
+  const attribution: AuditAttribution = {};
+  for (const key of AUDIT_ATTRIBUTION_FIELDS) {
+    const value = params.get(key)?.trim();
+    if (value) attribution[key] = value;
+  }
+  return attribution;
+}
+
+export function auditFormBody(form: FormData, context: AuditFormContext) {
   const payload = Object.fromEntries(
     AUDIT_FORM_FIELDS.map((key) => [key, String(form.get(key) ?? "").trim()]),
   ) as Record<AuditFormField, string>;
+  const submissionPath = isSafeInternalPath(context.submissionPath)
+    ? context.submissionPath
+    : AUDIT_FUNNEL.path;
   return {
     step_index: 0,
     anonymous_init: {
@@ -34,7 +69,28 @@ export function auditFormBody(form: FormData) {
       form_slug: AUDIT_FUNNEL.formSlug,
     },
     payload,
+    consent_ledger: {
+      email: form.get(AUDIT_CONSENT_FIELDS.email) === "true",
+      sms: form.get(AUDIT_CONSENT_FIELDS.sms) === "true",
+    },
+    submission_path: submissionPath,
+    ...(context.visitId ? { visit_id: context.visitId } : {}),
+    ...context.attribution,
   };
+}
+
+/**
+ * Carry first-touch attribution into the canonical funnel after step 0.
+ * `v` is the established URL alias for the per-tab visit id used by
+ * FormPublicClient's cross-form navigation. The id also remains in
+ * sessionStorage; the query copy keeps links produced by that page joined to
+ * the same visit without exposing any contact field.
+ */
+export function auditFormContinuationPath(path: string, context: AuditFormContext): string {
+  return appendPreservedParams(path, {
+    ...context.attribution,
+    v: context.visitId ?? undefined,
+  });
 }
 
 /**
