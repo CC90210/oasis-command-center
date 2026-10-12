@@ -45,6 +45,7 @@ import type { TemplateKey } from "@/lib/offer-pages/types";
 import { OffersCardsGrid, type OfferCardEntry } from "./OffersCardsClient";
 import type { OfferCardViewModel } from "./OfferCard";
 import { offerCreateSlug, slugTakenMessage, ROUTER_SLUG } from "@/lib/offers/router-create";
+import type { FunnelCounts } from "@/lib/offers/tracking-store";
 
 type FormRow = {
   id: string;
@@ -102,6 +103,7 @@ export function FormsListClient({
   responseCounts,
   offers = null,
   recentLeads = {},
+  recentFunnel = {},
 }: {
   initialRows: FormRow[];
   tenantLogoUrl: string | null;
@@ -120,6 +122,10 @@ export function FormsListClient({
   offers?: Record<string, OfferColumn> | null;
   /** New leads in the last 7 days per offer form; null where it could not be read. */
   recentLeads?: Record<string, number | null>;
+  /** Views/video plays/community-click counts per offer form over the same
+   *  7-day window (V5a, offer_funnel_events). Missing = untracked (table not
+   *  applied here yet); each metric's own null = a failed read. */
+  recentFunnel?: Record<string, FunnelCounts>;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -376,6 +382,9 @@ export function FormsListClient({
       status: o.status,
       publishedVersion: o.publishedVersion,
       leads: typeof recentLeads[r.id] === "number" ? recentLeads[r.id] : null,
+      views: typeof recentFunnel[r.id]?.views === "number" ? recentFunnel[r.id].views : null,
+      videoPlays: typeof recentFunnel[r.id]?.video_plays === "number" ? recentFunnel[r.id].video_plays : null,
+      community: typeof recentFunnel[r.id]?.community === "number" ? recentFunnel[r.id].community : null,
     };
     return { view, toggle: onOff(r, ["On", "Off"]), actions: actions(r, true) };
   });

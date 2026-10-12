@@ -159,6 +159,18 @@ for (const notPublic of ["/api/perf", "/api/perf/anything-else", "/api/perf/vita
   );
 }
 
+// V5a funnel tracking (HANDOVER section 5): the public ingest beacon and the
+// save-basin redirect both run with no session — a visitor on a public offer
+// page, or one who never gave any details. Each self-authenticates inside its
+// own route (resolvePublicForm); gated here, every event 401s before the
+// route can even answer its own 204/404.
+for (const open of ["/api/offer-events", "/go/community"]) {
+  assert.equal(isPublic(open), true, `${open} is self-gated inside its route and MUST bypass session middleware`);
+}
+for (const notPublic of ["/api/offer-eventsx", "/api/offer-event", "/go/communityx", "/go/community-admin", "/go"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated — only the exact paths above are public`);
+}
+
 // The Business Ledger ingest authenticates each producer by HMAC inside its
 // route (lib/ledger/ingest.ts); the harnesses hold no session. Only that exact
 // path is public: the rest of /api/ledger stays behind the session.
