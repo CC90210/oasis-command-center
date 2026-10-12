@@ -74,7 +74,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         });
         const leadId = await findLeadForVisit(db, resolved.tenant_id, visitId);
         if (leadId) {
-          await recordSaveBasinEnrolled(getServiceSupabase(), {
+          // The raw Turso client, not getServiceSupabase() -- the dedupe is a
+          // single conditional INSERT (see save-basin.ts), which the
+          // Supabase-shim query builder cannot express.
+          await recordSaveBasinEnrolled(db, {
             tenantId: resolved.tenant_id,
             leadId,
             formId: resolved.form.id,

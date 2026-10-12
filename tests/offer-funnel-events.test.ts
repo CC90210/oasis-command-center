@@ -70,6 +70,7 @@ const FORM_B = "f2000000-0000-4000-8000-00000000000b"; // CLIENT_B / "intake" (s
 const FORM_DISABLED = "f3000000-0000-4000-8000-00000000000c"; // CLIENT_A / "off"
 const FORM_OASIS = "f4000000-0000-4000-8000-00000000000d"; // OASIS / "lounge"
 const FORM_TWO_STEP = "f5000000-0000-4000-8000-00000000000e"; // CLIENT_A / "two-step"
+const FORM_FLOOD = "f6000000-0000-4000-8000-00000000000f"; // CLIENT_A / "flood-target" -- isolated for the IP-flood test, never touched by any other check
 
 const STEPS = [
   {
@@ -131,6 +132,7 @@ async function main() {
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'off', 'Off', ?, 0)`, args: [FORM_DISABLED, CLIENT_A, JSON.stringify(STEPS)] },
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'lounge', 'Lounge', ?, 1)`, args: [FORM_OASIS, OASIS_TENANT, JSON.stringify(STEPS)] },
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'two-step', 'Two Step', ?, 1)`, args: [FORM_TWO_STEP, CLIENT_A, JSON.stringify(STEPS_TWO)] },
+      { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'flood-target', 'Flood Target', ?, 1)`, args: [FORM_FLOOD, CLIENT_A, JSON.stringify(STEPS)] },
     ],
     "write",
   );
@@ -703,6 +705,117 @@ async function main() {
     assert.equal(accepted.status, 200, accepted.text.slice(0, 300));
     const afterAccept = await lead(leadId);
     assert.equal(afterAccept?.utm_source, "correct-source", "the later VALID submission must still be able to supply the correct attribution");
+  });
+
+  // -- 14. CodeRabbit PRRT_kwDOSgetsc6rd9DP: a flood from one sender is capped,
+  //        even though it rotates a fresh visit_id on every request ---------
+  await check("a flood from one sender (one IP, a fresh visit_id every request) is capped by the per-IP limit", async () => {
+    const before = (await eventsFor(CLIENT_A, FORM_FLOOD)).length;
+    const floodIp = "203.0.113.250";
+    const totalRequests = 310; // exceeds the 300/min per-IP cap
+    // FIRED CONCURRENTLY, not awaited one at a time. A real flood is
+    // rapid-fire; a sequential `for` loop that awaits each full DB round
+    // trip lets the token bucket (which refills continuously against real
+    // elapsed time, 5/sec) regenerate between requests once the per-request
+    // latency climbs under load -- turning this from "a flood" into "a slow
+    // trickle the limiter was never meant to catch", and flaking the test on
+    // a busy machine. Promise.all keeps the whole batch's wall-clock window
+    // tiny regardless of individual request latency, which is what a flood
+    // actually looks like.
+    await Promise.all(
+      Array.from({ length: totalRequests }, () =>
+        eventsRoute.POST(
+          new NextRequest("http://localhost/api/offer-events", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-forwarded-for": floodIp },
+            body: JSON.stringify({ tenant: "client-a", form: "flood-target", visit_id: randomVisitId(), event: "page_view" }),
+          }),
+        ),
+      ),
+    );
+    const written = (await eventsFor(CLIENT_A, FORM_FLOOD)).length - before;
+    // The cap is 300; allow a little slack for legitimate refill, but
+    // nothing close to "every request got through unbounded".
+    assert.ok(
+      written < totalRequests - 5,
+      `the per-IP limit must cap a flood from one sender well under ${totalRequests} distinct visit_ids -- a per-visit limit alone cannot, since each rotated id gets its own fresh bucket. Wrote ${written} rows.`,
+    );
+    assert.ok(written >= 1, "at least the allowed burst must still write through");
+  });
+
+  await check("a SECOND sender (a different IP) hitting the same form is unaffected by the first sender's flood", async () => {
+    const before = (await eventsFor(CLIENT_A, FORM_FLOOD)).length;
+    const res = await eventsRoute.POST(
+      new NextRequest("http://localhost/api/offer-events", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": "198.51.100.200" },
+        body: JSON.stringify({ tenant: "client-a", form: "flood-target", visit_id: randomVisitId(), event: "page_view" }),
+      }),
+    );
+    assert.equal(res.status, 204);
+    const written = (await eventsFor(CLIENT_A, FORM_FLOOD)).length - before;
+    assert.equal(written, 1, "a different sender must not be rate-limited by another sender's flood");
+  });
+
+  // -- 15. CodeRabbit PRRT_kwDOSgetsc6rd9Dj: lead_id resolves INSIDE the INSERT --
+  await check("insertFunnelEvent resolves lead_id inside the INSERT itself (one statement, a correlated subquery) -- never a separate lookup then insert", async () => {
+    const { insertFunnelEvent } = await import("../lib/offers/tracking-store");
+    const realDb = (await import("../lib/offer-pages/store")).offerPagesDb()!;
+    const visitId = randomVisitId();
+
+    const calls: Array<{ sql: string }> = [];
+    const realExecute = realDb.execute.bind(realDb);
+    const spiedDb = Object.create(realDb) as typeof realDb;
+    spiedDb.execute = ((stmt: unknown) => {
+      const sql = typeof stmt === "string" ? stmt : (stmt as { sql: string }).sql;
+      calls.push({ sql });
+      return realExecute(stmt as never);
+    }) as typeof realDb.execute;
+
+    await insertFunnelEvent(spiedDb, { tenantId: CLIENT_A, formId: FORM_A, visitId, event: "page_view" });
+
+    assert.equal(
+      calls.length,
+      1,
+      `exactly one statement must be sent for one insertFunnelEvent call -- a separate lookup-then-insert sends two (a SELECT then an INSERT), which reopens the exact race window the fix closes. Saw: ${JSON.stringify(calls)}`,
+    );
+    assert.match(calls[0].sql, /^INSERT INTO offer_funnel_events/, "must be a single INSERT");
+    assert.match(
+      calls[0].sql,
+      /SELECT lead_id FROM offer_funnel_visit_leads\s+WHERE tenant_id = \? AND visit_id = \? LIMIT 1/,
+      "lead_id must be resolved via a correlated subquery against the persistent mapping, inside the INSERT itself -- not a prior round trip",
+    );
+  });
+
+  // -- 16. CodeRabbit PRRT_kwDOSgetsc6rd9Dc: save_basin.enrolled is deduped --
+  await check("repeated /go/community clicks for the same lead add exactly ONE save_basin.enrolled row, never more", async () => {
+    const visitId = randomVisitId();
+    const email = `savebasin-repeat-${visitId}@visitor.test`;
+    await postEvent({ tenant: "oasis-ai-cc", form: "lounge", visit_id: visitId, event: "page_view" });
+    await submit({
+      step_index: 0,
+      anonymous_init: { tenant_slug: "oasis-ai-cc", form_slug: "lounge" },
+      payload: { name: "Repeat Basin", email, phone: "+15559990000" },
+      visit_id: visitId,
+    });
+    const leadRow = (
+      await db.execute({
+        sql: "SELECT id FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' AND data LIKE ?",
+        args: [OASIS_TENANT, `%${email}%`],
+      })
+    ).rows[0];
+    assert.ok(leadRow, "precondition: the lead exists");
+    const leadId = String(leadRow.id);
+
+    for (let i = 0; i < 5; i++) {
+      const res = await getCommunity(`?form=lounge&t=oasis-ai-cc&v=${visitId}`);
+      assert.equal(res.status, 302, "every repeated click must still redirect");
+    }
+
+    const rows = (
+      await db.execute({ sql: "SELECT id FROM lead_interactions WHERE lead_id = ? AND type = 'save_basin.enrolled'", args: [leadId] })
+    ).rows;
+    assert.equal(rows.length, 1, `exactly one save_basin.enrolled row must exist after 5 repeated clicks, got ${rows.length}`);
   });
 
   finish("offer-funnel-events");

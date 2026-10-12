@@ -128,11 +128,14 @@ async function lookupVisitLead(db: Client, tenantId: string, visitId: string): P
 /**
  * Record one event. lead_id is NEVER accepted from the caller -- it is
  * always resolved here, server-side, from the persistent visit->lead
- * mapping (lookupVisitLead), so a client can never claim an event belongs
- * to a lead it does not. Never throws on a missing table or a DB error -- a
- * tracking failure must never surface to the visitor or the caller that
- * fired it (the ingest route always answers 204 regardless). Returns
- * whether a row was actually written, for the caller's own logging.
+ * mapping, via a correlated subquery INSIDE the INSERT itself (not a
+ * separate lookup call -- see the statement below and its own comment), so
+ * a client can never claim an event belongs to a lead it does not, and
+ * there is no gap between reading the mapping and writing the row. Never
+ * throws on a missing table or a DB error -- a tracking failure must never
+ * surface to the visitor or the caller that fired it (the ingest route
+ * always answers 204 regardless). Returns whether a row was actually
+ * written, for the caller's own logging.
  */
 export async function insertFunnelEvent(
   db: Client,
@@ -147,10 +150,20 @@ export async function insertFunnelEvent(
   },
 ): Promise<boolean> {
   try {
-    const leadId = await lookupVisitLead(db, input.tenantId, input.visitId);
+    // lead_id is resolved IN THE SAME STATEMENT, via a correlated subquery
+    // against the persistent mapping -- not read-then-insert (CodeRabbit,
+    // PRRT_kwDOSgetsc6rd9Dj, 2026-10-12). A separate `SELECT` before this
+    // `INSERT` left a real gap: if linkVisitToLead's own insert-and-backfill
+    // landed in between the two statements, this row would still persist
+    // lead_id = NULL, permanently excluded from attribution unless some
+    // LATER submission happened to trigger another backfill. The subquery
+    // reads the mapping at the instant THIS statement executes, so there is
+    // no window for a commit to land in between.
     await db.execute({
       sql: `INSERT INTO offer_funnel_events (id, tenant_id, form_id, visit_id, event, step_index, detail, lead_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            VALUES (?, ?, ?, ?, ?, ?, ?,
+              (SELECT lead_id FROM offer_funnel_visit_leads WHERE tenant_id = ? AND visit_id = ? LIMIT 1),
+              ?)`,
       args: [
         randomUUID(),
         input.tenantId,
@@ -159,7 +172,8 @@ export async function insertFunnelEvent(
         input.event,
         input.stepIndex ?? null,
         input.detail ?? null,
-        leadId,
+        input.tenantId,
+        input.visitId,
         input.now ?? new Date().toISOString(),
       ],
     });
