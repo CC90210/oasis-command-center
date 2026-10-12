@@ -380,3 +380,78 @@ the licence of every asset).
 | **Adon / CC** | Record the five VSLs (section 7). Answer the publish checklist (section 6). Create the Stripe Payment Links. Confirm the currency. |
 | **Adon** | Pair his PC. Create the Slack app. |
 | **Bravo** | Slices 1-7 in order, merge gate per section 8. Report each merge with its plain-language description first and the SHA second. |
+
+---
+
+## 11. Devices (Adon, 2026-10-12: "a big part", top priority with the funnel)
+
+**What Adon saw on Settings > Devices, signed in as adon@ (verified against `origin/main`):**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| "Team computers (2): 192.168.11.27 (Mac) · Waiting for your approval / CCPC (Windows) · Waiting for your approval" | `components/settings/YourComputersCard.tsx:76`: the team list reuses the viewer's own label function, so CC's machines say "your approval" to Adon. They wait on CC. | Team rows say the owner: "CC's computer · online · not yet approved by CC for department work". Only the owner sees an Approve button. |
+| No way to pair from Devices | `ConnectYourComputerCard` is mounted only in Settings > Profile (`SettingsContent.tsx:373, :761`). Devices only has a sentence pointing at it, and that sentence says "there is nothing to install today". | Put the connect flow at the TOP of Devices as one button, "Add a device". Keep the Profile mount too. |
+| "Waiting for your approval" on your own newly paired computer | O3a requires the owner to approve claiming after pairing. When the person minted the code themselves, the code already proves it is them. | A connector code minted and redeemed by the same signed-in person is approved on redeem. Keep the explicit approval only for legacy or team-paired machines. |
+| Nothing to install | The J1 connector exists only inside JARVIS (Adon's machine: `node scripts/oasis_pair.mjs`). J2, the installer for everyone else, is not built. | Until J2 ships, the card shows the exact command for OASIS team machines and says plainly that the client installer is coming. Never show a button that cannot work (the Devices full-install button failed live once; it is now owner-only). |
+
+**D0 = the four fixes above. Ship them first, about 6 h, one PR.** Tests:
+- a team row never says "your approval";
+- an own code is approved on redeem;
+- someone else's code is not;
+- the card renders on Devices for a non-admin member.
+
+**What Adon wants Devices to become.** Every device a person owns connects here, and everything that person sets up then runs on their own device:
+- AI connections: local models, cloud models, subscription accounts, API keys;
+- automations;
+- tracked tasks.
+
+It also has to hold future device types: computers, iPhones, whatever comes next.
+
+Design direction:
+
+- **A device is anything a person owns that can do work or take decisions.** It advertises CAPABILITIES; jobs route
+  by the capabilities they need plus the person they run as (`run_as`), never by device type. Capability vocabulary,
+  versioned:
+  - `cli_agent:claude_code` / `cli_agent:codex`;
+  - `local_llm` (with its model list);
+  - `files`, `shell`, `browser`, `schedule`;
+  - `notify`, `approve`, `capture:camera` / `capture:voice`.
+
+  New hardware adds capabilities, not code paths.
+- **Computers (Windows, macOS, Linux)** run the connector and advertise what they actually detect:
+  - installed CLIs and whether each is signed in;
+  - local model servers (Ollama / LM Studio: models listed, never their prompts);
+  - free capacity.
+
+  The page shows the detected list live.
+- **Phones (iPhone, Android): the decide-and-capture device, not the runner.**
+  - v1 is the OCC web app installed to the home screen (PWA), paired by scanning a QR code on Devices, with web push.
+  - It carries approvals (approve or decline approval cards), alerts, voice notes into a department chat, and
+    photos/docs into the Library.
+  - Native apps are later. A phone never holds keys or runs agents.
+- **AI connections bind to a person, and optionally to a device:**
+  - cloud API keys stay server-side, per person, encrypted;
+  - subscription CLIs and local models belong to the device that has them;
+  - AI brain shows "where this runs" for each.
+- **Automations and tasks get a "Run on" picker** listing the person's devices with the capability the job needs and
+  their live status. If the chosen device is offline, the run says so and follows the missed-run rule already decided
+  (catch up once within 12 h, else "Missed"). It never falls back to someone else's device.
+- **Security, unchanged from O1-O4:**
+  - a device answers only its owner's work;
+  - revoked = refused everywhere;
+  - pairing codes are short-lived and single-use;
+  - every capability report is data, validated server-side, never trusted to widen access.
+
+**Slices after D0:**
+
+| Slice | Ships | Est. |
+|---|---|---|
+| D1 | Capability registry: device capabilities table plus a versioned vocabulary; the connector reports them; Devices shows them | 16 h |
+| D2 | J2 installers for Windows and macOS, signed, one-click, code pre-filled from "Add a device" | 24 h+ (signing certificates are a CC/Adon purchase) |
+| D3 | Phone as a device: PWA install, QR pairing, web push, approve from the phone | 20 h |
+| D4 | AI connections bound to devices: detected CLIs and local models shown and selectable in AI brain | 16 h |
+| D5 | "Run on" picker for automations and tasks, with live device status | 10 h |
+
+**Order with the funnel:** D0 first (small, Adon is blocked by it), then funnel slices 1-3, then D1-D5 interleaved
+with funnel 5-7. Write the D1-D5 design as a spec and get Adon's and CC's yes before building D1 (it changes what
+O4's claim route trusts).
