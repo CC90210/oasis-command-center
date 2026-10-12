@@ -92,7 +92,13 @@ async function main() {
   });
 
   check("invalidatePendingUpload() bumps the attempt counter AND aborts the in-flight request", () => {
-    assert.match(src, /function invalidatePendingUpload\(\)\s*\{\s*uploadAttempt\.current \+= 1;\s*uploadAbort\.current\?\.abort\(\);/, "invalidatePendingUpload does not both bump and abort");
+    assert.match(src, /function invalidatePendingUpload\(\)\s*\{\s*uploadAttempt\.current \+= 1;\s*const inFlight = uploadAbort\.current;\s*uploadAbort\.current = null;\s*if \(inFlight\) \{\s*inFlight\.abort\(\);/, "invalidatePendingUpload does not both bump and abort");
+  });
+
+  check("cancelling an in-flight upload clears busy, because the cancelled attempt's own finally is stale and will not", () => {
+    const body = src.slice(src.indexOf("function invalidatePendingUpload()"), src.indexOf("function resetUpload()"));
+    assert.match(body, /if \(inFlight\) \{[\s\S]*setBusy\(false\);[\s\S]*\}/, "a cancelled upload leaves busy stuck true (inputs and the link Check disabled for good)");
+    assert.match(src, /if \(myAttempt === uploadAttempt\.current\) \{\s*setBusy\(false\);\s*uploadAbort\.current = null;/, "a finished current attempt must clear busy and its controller");
   });
 
   check("Cancel (the X), Replace, and the other two source buttons all invalidate a pending upload before switching away", () => {

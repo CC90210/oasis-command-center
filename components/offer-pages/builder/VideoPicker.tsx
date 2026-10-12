@@ -204,8 +204,16 @@ export function VideoPicker({
   /** Supersedes whatever upload/confirm is in flight: the NEXT settle of an older attempt is discarded, and the browser is told to stop trying. Called on Cancel (the X), on Replace, and on leaving upload mode for a different source. */
   function invalidatePendingUpload() {
     uploadAttempt.current += 1;
-    uploadAbort.current?.abort();
+    const inFlight = uploadAbort.current;
     uploadAbort.current = null;
+    if (inFlight) {
+      inFlight.abort();
+      // The cancelled attempt's own finally is now stale and will not clear
+      // busy, so clear it here; otherwise the inputs and the link Check stay
+      // disabled for good (Codex, 2026-10-12). Only when an upload was in
+      // flight, so a running link check keeps its own busy state.
+      setBusy(false);
+    }
   }
 
   function resetUpload() {
@@ -237,7 +245,10 @@ export function VideoPicker({
       if (myAttempt !== uploadAttempt.current) return; // a superseded attempt's own failure (including its abort) is not shown
       setError(err instanceof Error ? err.message : "That upload failed. Try again.");
     } finally {
-      if (myAttempt === uploadAttempt.current) setBusy(false);
+      if (myAttempt === uploadAttempt.current) {
+        setBusy(false);
+        uploadAbort.current = null;
+      }
     }
   }
 
