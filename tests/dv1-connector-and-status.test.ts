@@ -59,10 +59,10 @@ async function check(name: string, fn: () => Promise<void> | void) {
 
 // ── Mutation-checked matcher #1: is this ConnectYourComputerCard mount ungated? ──
 
-/** The nearest enclosing `{show(...)` line above `fromIdx`, or null. */
+/** The nearest enclosing section guard line above `fromIdx`, or null. */
 function nearestGuard(lines: string[], fromIdx: number): string | null {
   for (let i = fromIdx; i >= 0; i--) {
-    if (/\{show\(/.test(lines[i])) return lines[i];
+    if (/\{(?:show\(|section === "devices")/.test(lines[i])) return lines[i];
   }
   return null;
 }
@@ -103,10 +103,10 @@ const SYNTHETIC_GATED = [
 
 /**
  * D0: the Devices section's own TOP-of-page "Add a device" mount is gated
- * on `show("devices")` alone, deliberately WITHOUT isOperator -- unlike
+ * on the focused `section === "devices"`, deliberately WITHOUT isOperator -- unlike
  * "Your computers" and "Devices (advanced)" beside it, which show OTHER
  * people's bridge pairings and stay operator-only. True only for a guard
- * that is exactly `show("devices")` with no `isOperator` joined to it.
+ * that is exactly the focused Devices section with no `isOperator` joined to it.
  */
 function mountIsDevicesUngated(src: string): boolean[] {
   const lines = src.split("\n");
@@ -114,13 +114,13 @@ function mountIsDevicesUngated(src: string): boolean[] {
   lines.forEach((line, i) => {
     if (!/<ConnectYourComputerCard\s*\/>/.test(line)) return;
     const guard = nearestGuard(lines, i);
-    results.push(Boolean(guard && /show\("devices"\)/.test(guard) && !/isOperator/.test(guard)));
+    results.push(Boolean(guard && /section === "devices"/.test(guard) && !/isOperator/.test(guard)));
   });
   return results;
 }
 
-const SYNTHETIC_DEVICES_UNGATED = ['{show("devices") && (', "  <ConnectYourComputerCard />", ")}"].join("\n");
-const SYNTHETIC_DEVICES_GATED = ['{show("devices") && isOperator && (', "  <ConnectYourComputerCard />", ")}"].join("\n");
+const SYNTHETIC_DEVICES_UNGATED = ['{section === "devices" && (', "  <ConnectYourComputerCard />", ")}"].join("\n");
+const SYNTHETIC_DEVICES_GATED = ['{section === "devices" && isOperator && (', "  <ConnectYourComputerCard />", ")}"].join("\n");
 
 // ── Mutation-checked matcher #2: does this text leak the old harness path? ──
 
@@ -143,7 +143,7 @@ async function main() {
     assert.deepEqual(mountIsUngated(SYNTHETIC_UNGATED), [true]);
     assert.deepEqual(mountIsUngated(SYNTHETIC_GATED), [false]);
   });
-  await check("mountIsDevicesUngated: a synthetic show(devices)-only mount passes, a show(devices)+isOperator mount fails", () => {
+  await check("mountIsDevicesUngated: a focused Devices mount passes and an operator-gated one fails", () => {
     assert.deepEqual(mountIsDevicesUngated(SYNTHETIC_DEVICES_UNGATED), [true]);
     assert.deepEqual(mountIsDevicesUngated(SYNTHETIC_DEVICES_GATED), [false]);
   });
@@ -163,7 +163,7 @@ async function main() {
       assert.equal(profileResults.length, 4, "expected exactly four <ConnectYourComputerCard /> mounts");
       assert.equal(devicesResults.length, 4);
       assert.equal(profileResults.filter(Boolean).length, 2, "two mounts are ungated show(\"profile\") only");
-      assert.equal(devicesResults.filter(Boolean).length, 2, "two mounts are ungated show(\"devices\") only (Add a device)");
+      assert.equal(devicesResults.filter(Boolean).length, 2, "two mounts are ungated focused Devices mounts (Add a device)");
       assert.deepEqual(
         profileResults.map((p, i) => p || devicesResults[i]),
         [true, true, true, true],
@@ -171,6 +171,10 @@ async function main() {
       );
     },
   );
+  await check("the full Settings page never mounts a second pair-code card", () => {
+    assert.equal((settingsContentSrc.match(/\{section === "devices" && \(/g) || []).length, 2);
+    assert.doesNotMatch(settingsContentSrc, /\{show\("devices"\) && \(\s*<SettingsSection[^>]*id="add-a-device"/);
+  });
   await check("the Devices page uses the shared member-visible section gate", () => {
     // The two Profile mounts are both inside `show("profile")` (proven
     // above); the devices page only ever calls SettingsContent with

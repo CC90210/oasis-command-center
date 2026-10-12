@@ -38,6 +38,20 @@ export function harnessJobStream(job: HarnessJob): ReadableStream<Uint8Array> {
               return;
             }
             if (["completed", "failed", "cancelled"].includes(current.status)) {
+              // Event rows are committed before the terminal status update.
+              // A connector can finish between this loop's event read and
+              // status read, and one read is capped at 100 rows. Drain every
+              // remaining committed frame before deciding whether a
+              // synthetic terminal frame is needed.
+              for (;;) {
+                const remaining = await readHarnessEvents({ tenantId: job.tenantId, jobId: job.id, after });
+                if (remaining.length === 0) break;
+                for (const event of remaining) {
+                  after = Math.max(after, event.seq);
+                  if (event.type === "done") terminalFrameSeen = true;
+                  controller.enqueue(frame(event.type, event.data));
+                }
+              }
               if (!terminalFrameSeen) {
                 if (current.status !== "completed") {
                   controller.enqueue(frame("error", {

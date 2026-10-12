@@ -565,6 +565,32 @@ async function main() {
     assert.match(deviceText, /device authoritative/);
   });
 
+  await check("a terminal harness stream drains every committed event beyond the 100-row page before closing", async () => {
+    const target = await pairing(USER);
+    const queued = await harness.enqueueHarnessJob({
+      tenantId: TENANT, userId: USER, pairingOwnerId: USER, pairingId: target.id, agentKey: "bravo",
+      engine: { kind: "cli", name: "codex" }, chatMode: "plan", repoWrites: false,
+      request: { messages: [{ role: "user", content: "Stream every frame." }], attachments: [], session_id: null, tab_id: null, disallowed_tools: [], fallback_policy: "none" },
+    });
+    assert.ok(queued.ok);
+    const rows = Array.from({ length: 101 }, (_, index) => ({
+      sql: "INSERT INTO bridge_harness_job_events (tenant_id, job_id, seq, event_type, data_json, created_at) VALUES (?, ?, ?, 'delta', ?, ?)",
+      args: [TENANT, queued.job.id, index + 1, JSON.stringify({ text: `chunk-${index + 1}` }), NOW],
+    }));
+    rows.push({
+      sql: "INSERT INTO bridge_harness_job_events (tenant_id, job_id, seq, event_type, data_json, created_at) VALUES (?, ?, 102, 'done', '{}', ?)",
+      args: [TENANT, queued.job.id, NOW],
+    });
+    await db.batch(rows, "write");
+    await db.execute({
+      sql: "UPDATE bridge_harness_jobs SET status = 'completed', finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+      args: [NOW, NOW, TENANT, queued.job.id],
+    });
+    const streamed = await new Response(harness.harnessJobStream(queued.job)).text();
+    assert.match(streamed, /chunk-101/);
+    assert.equal((streamed.match(/event: done/g) || []).length, 1, "the persisted terminal frame is emitted exactly once");
+  });
+
   await check("the public chat route always pulls the exact pairing and rechecks rollout/readiness", () => {
     const source = readFileSync(join(ROOT, "app", "api", "bridge", "chat", "route.ts"), "utf8");
     assert.match(source, /authorizeBridgePullActor\(\)/);
@@ -601,6 +627,8 @@ async function main() {
     const widget = readFileSync(join(ROOT, "components", "ChatWidget.tsx"), "utf8");
     assert.match(widget, /effectiveRuntime\?\.pairingId === harnessRoute\.pairingId/);
     assert.match(widget, /explicitWorkspaceFallback/);
+    assert.match(widget, /const lastEngineKeyRef = useRef<string \| null>\(null\)/);
+    assert.match(widget, /if \(!engineChanged\) return;\s*setSessionId\(null\)/, "a routine readiness refresh must preserve the active session and CLI resume id");
     assert.doesNotMatch(widget, /\/api\/bridge\/(?:prewarm|chat-reset)/);
   });
 

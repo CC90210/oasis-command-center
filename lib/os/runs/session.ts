@@ -489,16 +489,26 @@ export async function resolveRunSession(input: {
     const engineKind = selectedEngine.kind === "cli" ? "cli" : "local";
     const engineName = selectedEngine.kind === "cli" ? selectedEngine.cli : selectedEngine.model;
     if (selectedEngine.pairingId) {
-      const computer = await exactComputer(tenantId, selectedEngine.pairingId);
+      let computer: ExactComputer | null;
+      try {
+        computer = await exactComputer(tenantId, selectedEngine.pairingId);
+      } catch (err) {
+        console.error("[os.runs.session.exact-computer]", {
+          tenantId,
+          pairingId: selectedEngine.pairingId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { ok: false, status: 503, error: "config_unavailable" };
+      }
       if (!computer) return { ok: false, status: 409, error: "computer_not_connected" };
       if (!queuedFallback && effective && effective.source === "person" && computer.userId !== user.id) {
         return { ok: false, status: 403, error: "computer_not_yours" };
       }
       if (!queuedFallback && effective && effective.source === "workspace") {
         const owner = await readAgentsOwner(tenantId);
-        if (owner.state !== "set" || computer.userId !== owner.authUserId) {
-          return { ok: false, status: 409, error: owner.state === "unavailable" ? "computer_owner_unavailable" : "computer_owner_not_set" };
-        }
+        if (owner.state === "unavailable") return { ok: false, status: 503, error: "computer_owner_unavailable" };
+        if (owner.state !== "set") return { ok: false, status: 409, error: "computer_owner_not_set" };
+        if (computer.userId !== owner.authUserId) return { ok: false, status: 409, error: "agents_owner_only" };
       }
       if (computer.scope !== "connector") {
         const owner = await readAgentsOwner(tenantId);
@@ -557,10 +567,20 @@ export async function resolveRunSession(input: {
         }
         candidateUserId = owner.authUserId;
       }
-      const owned = await getOwnComputers(tenantId, candidateUserId);
-      const candidates = (
-        await Promise.all(owned.map((computer) => exactComputer(tenantId, computer.id)))
-      ).filter((computer): computer is ExactComputer => computer !== null && computer.userId === candidateUserId);
+      let candidates: ExactComputer[];
+      try {
+        const owned = await getOwnComputers(tenantId, candidateUserId);
+        candidates = (
+          await Promise.all(owned.map((computer) => exactComputer(tenantId, computer.id)))
+        ).filter((computer): computer is ExactComputer => computer !== null && computer.userId === candidateUserId);
+      } catch (err) {
+        console.error("[os.runs.session.legacy-computers]", {
+          tenantId,
+          userId: candidateUserId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { ok: false, status: 503, error: "config_unavailable" };
+      }
       let probeReceipts: Map<string, RuntimeProbeReceipt>;
       try {
         probeReceipts = await readLatestRuntimeProbeReceipts(tenantId, candidates.map((computer) => computer.id));

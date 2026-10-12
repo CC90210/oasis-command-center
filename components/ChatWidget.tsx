@@ -914,6 +914,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, welcomeMessages, a
   const [engineLoaded, setEngineLoaded] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
   const [engineNote, setEngineNote] = useState<string | null>(null);
+  const lastEngineKeyRef = useRef<string | null>(null);
   const harnessRoute = agentsEngine ? harnessRouteFor(agentsEngine) : null;
   const harnessUnavailableMessage = harnessRoute?.mode === "unavailable" ? harnessRoute.note : null;
   useEffect(() => {
@@ -981,11 +982,19 @@ export default function ChatWidget({ agentKeys, defaultAgent, welcomeMessages, a
             : null,
         );
         const route = harnessRouteFor(engine);
+        const nextEngineKey = JSON.stringify(engine);
+        const engineChanged = lastEngineKeyRef.current !== nextEngineKey;
+        lastEngineKeyRef.current = nextEngineKey;
         setAgentsEngine(engine);
         setEngineAccount(account);
         setEngineLoaded(true);
         setEngineError(null);
         setEngineNote(route.note);
+        // This request repeats every 30 seconds so readiness stays truthful.
+        // Keep the current conversation and CLI resume id when only the
+        // heartbeat/account facts changed; reset them only for a saved-engine
+        // change (the first successful read intentionally counts as one).
+        if (!engineChanged) return;
         setSessionId(null);
         if (route.mode === "unavailable") return;
         setChatModeState(route.mode);

@@ -318,13 +318,22 @@ export async function runSlackDeviceTurn(input: {
     const dispatch = session.computerDispatch;
     const expectedKind = expectedEngine.kind === "cli" ? "cli" : "local";
     const expectedName = expectedEngine.kind === "cli" ? expectedEngine.cli : expectedEngine.model;
-    if (
-      !dispatch ||
-      dispatch.pairingId !== expectedEngine.pairingId ||
-      dispatch.engineKind !== expectedKind ||
-      dispatch.engineName !== expectedName ||
-      dispatch.fallback !== (expectedEngine.fallback ?? "none")
-    ) {
+    const fallbackFrom = session.fallbackFrom;
+    const immediateFallbackMatches =
+      !dispatch &&
+      session.fallbackReason !== null &&
+      fallbackFrom !== null &&
+      fallbackFrom.pairingId === expectedEngine.pairingId &&
+      fallbackFrom.kind === expectedEngine.kind &&
+      (fallbackFrom.kind === "cli" ? fallbackFrom.cli : fallbackFrom.model) === expectedName &&
+      expectedEngine.fallback === "workspace_api";
+    const dispatchMatches =
+      !!dispatch &&
+      dispatch.pairingId === expectedEngine.pairingId &&
+      dispatch.engineKind === expectedKind &&
+      dispatch.engineName === expectedName &&
+      dispatch.fallback === (expectedEngine.fallback ?? "none");
+    if (!dispatchMatches && !immediateFallbackMatches) {
       return { ok: false, status: 409, error: "engine_dispatch_unavailable" };
     }
     const idempotency = slackDeviceRunIdentity(job.tenantId, actor.userId, job.eventId);

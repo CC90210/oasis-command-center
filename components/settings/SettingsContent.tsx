@@ -594,7 +594,7 @@ export async function SettingsContent({
               gated on isOperator. Adding a device and managing your own
               computers are personal actions; only the raw team-wide advanced
               inventory below remains verified-operator-only. */}
-          {show("devices") && (
+          {section === "devices" && (
             <SettingsSection
               id="add-a-device"
               defaultOpen
@@ -748,10 +748,11 @@ async function PersonalSettingsView({
         </SettingsSection>
       )}
 
-      {/* Full-page personal Settings mounts still use this branch with no
-          focused section. Reuse the same card there; the dedicated Devices
-          page is handled by the main, viewer-scoped branch above. */}
-      {show("devices") && (
+      {/* Keep this second placement exclusive to the focused Devices page.
+          The full Settings page already mounts Connect your computer in the
+          Profile section; mounting both would mint two mutually-invalidating
+          one-time codes. */}
+      {section === "devices" && (
         <SettingsSection id="add-a-device" defaultOpen title="Add a device" subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app.">
           <SafeBoundary label="Add a device">
             <ConnectYourComputerCard />

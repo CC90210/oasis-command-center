@@ -158,6 +158,8 @@ async function main() {
     assert.match(auth, /workspaceOnly \|\| !userOverride\.data\?\.encrypted_api_key/);
     assert.match(route, /ownedChatSessionId\(requestedSessionId, tenantId, user\.id, agentKey\)/, "a fallback cannot append under another agent's session");
     assert.match(widget, /setTabId\(mintTabId\(\)\);\s*setMessages\(seedMessagesForAgent\(agent, welcomeMessages\)\)/, "switching agents mints a new bridge conversation id");
+    assert.match(widget, /const engineChanged = lastEngineKeyRef\.current !== nextEngineKey/);
+    assert.match(widget, /if \(!engineChanged\) return;\s*setSessionId\(null\)/, "the 30-second readiness refresh preserves one conversation unless the saved engine changed");
   });
 
   await check("direct custom teammates never turn ordinary chat into a repo-writing coding task", () => {
@@ -171,7 +173,14 @@ async function main() {
     assert.match(route, /engineChoice: effective\.engine/);
     assert.match(slack, /platformFallback: null/);
     assert.match(slack, /engineChoice: canonical\.engine/);
+    assert.match(slack, /const immediateFallbackMatches =/);
+    assert.match(slack, /session\.fallbackReason !== null/);
+    assert.match(slack, /expectedEngine\.fallback === "workspace_api"/);
+    assert.match(slack, /if \(!dispatchMatches && !immediateFallbackMatches\)/, "Slack accepts only the exact explicitly opted-in immediate fallback");
     assert.doesNotMatch(session, /operatorPlatformFallback/);
+    assert.match(session, /\[os\.runs\.session\.exact-computer\]/);
+    assert.match(session, /\[os\.runs\.session\.legacy-computers\]/);
+    assert.match(session, /computer\.userId !== owner\.authUserId\) return \{ ok: false, status: 409, error: "agents_owner_only" \}/);
     assert.match(session, /Canonical runs never borrow the OASIS platform key[\s\S]{0,180}fallback: null/);
     assert.match(copy, /direct_agent_device_unsupported:[\s\S]{0,260}Nothing was sent and no API credits were used/);
   });
