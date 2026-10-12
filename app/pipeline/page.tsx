@@ -33,7 +33,10 @@ import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { getTenant } from "@/lib/queries";
-import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  isOasisPipelineAdmin,
+  stagesForOasisWarmInboundRole,
+} from "@/lib/oasis-sales-pipeline-policy";
 import { buildMemberDirectory, withAssignedName } from "@/lib/assigned-names";
 import { getOasisSalesRepRoster, isActiveMember } from "@/lib/team";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
@@ -50,6 +53,7 @@ import {
   resolveOasisPipelineAssigneeScope,
 } from "@/lib/oasis-pipeline-query";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
+import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
 
 export const dynamic = "force-dynamic";
 
@@ -70,7 +74,7 @@ const OASIS_PIPELINE_SLUGS = new Set(["oasis", "oasis-ai-cc", OASIS_WEBSITE_TENA
 export default async function PipelinePage({
   searchParams,
 }: {
-  searchParams?: Promise<{ stage?: string; q?: string; rep?: string; page?: string }>;
+  searchParams?: Promise<{ stage?: string; q?: string; rep?: string; page?: string; motion?: string }>;
 }) {
   // Tenant-aware redirect. Non-OASIS operators land in their own
   // tenant's leads view rather than seeing CC's OASIS personal stages.
@@ -120,6 +124,7 @@ export default async function PipelinePage({
   // the pool nobody owns yet.
   const repFilter = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : null;
   const requestedPage = typeof sp.page === "string" ? sp.page : null;
+  const warmInbound = sp.motion === "inbound";
 
   if (!tenantId) {
     return (
@@ -149,6 +154,15 @@ export default async function PipelinePage({
   // The predicate lives in lib/oasis-lead-create.ts beside the create stamp,
   // because the stamp must satisfy it or a lead someone adds is invisible here.
   const boardFilter = oasisBoardProgramFilter(tenantSlug);
+  const pipelineAdmin = session.ok
+    ? isOasisPipelineAdmin(session.teamRole, session.isTrueAdmin, session.adminAccess)
+    : false;
+  const managerTeamRead =
+    session.ok &&
+    canReadOasisSalesTeamPipeline({
+      teamRole: session.teamRole,
+      tenantSlug,
+    });
 
   // Optional ?q= filter — match across the operator-relevant fields.
   // Search is applied by the database before the bounded working-set read.
@@ -179,32 +193,29 @@ export default async function PipelinePage({
   // lib/oasis-lead-create.ts so the stages a lead may be CREATED in are carved
   // out of exactly the stages this board draws.
   const stages = session.ok
-    ? oasisBoardStages({
-        teamRole: session.teamRole,
-        isOwner: session.isTrueAdmin,
-        adminAccess: session.adminAccess,
-      })
+    ? warmInbound
+      ? stagesForOasisWarmInboundRole(
+          session.teamRole,
+          session.isTrueAdmin,
+          session.adminAccess,
+        )
+      : oasisBoardStages({
+          teamRole: session.teamRole,
+          isOwner: session.isTrueAdmin,
+          adminAccess: session.adminAccess,
+        })
     : [];
   // The columns this viewer may add a lead to. Each gets a "+" (D9); the create
   // route enforces the same list, so a "+" never opens a form it would refuse.
   // Intersected with the drawn columns, so a "+" can never exist without its
   // column, even if this page ever narrows `stages` further.
   const drawnStageKeys = new Set(stages.map((stage) => stage.key));
-  const creatableStageKeys = session.ok
+  const creatableStageKeys = session.ok && !warmInbound
     ? creatableOasisStages({ isAdmin: session.isAdmin, teamRole: session.teamRole })
         .map((stage) => stage.key)
         .filter((key) => drawnStageKeys.has(key))
     : [];
 
-  const pipelineAdmin = session.ok
-    ? isOasisPipelineAdmin(session.teamRole, session.isTrueAdmin, session.adminAccess)
-    : false;
-  const managerTeamRead =
-    session.ok &&
-    canReadOasisSalesTeamPipeline({
-      teamRole: session.teamRole,
-      tenantSlug,
-    });
   // ═══ START THE INDEPENDENT READ BEFORE AWAITING THE ROSTER ═══════════════
   //
   // The roster read gates the pipeline query (it supplies the assignee
@@ -284,9 +295,11 @@ export default async function PipelinePage({
         requestedStage: stageFilter,
         requestedPage,
         salesProgram: boardFilter.salesProgram,
-        salesMotion: boardFilter.salesMotion,
+        salesMotion: warmInbound ? OASIS_INBOUND_WARM_MOTION : boardFilter.salesMotion,
         assignedTo: assigneeScope.allowed ? directAssignee : undefined,
         assignedToAny: assigneeScope.allowed ? teamAssigneeUnion : undefined,
+        includeUnassigned:
+          warmInbound && !repFilter && pipelineAdmin,
         viewerUserId:
           assigneeScope.allowed && !pipelineAdmin && !managerTeamRead
             ? session.ok
@@ -297,7 +310,10 @@ export default async function PipelinePage({
           session.ok && session.teamRole.trim().toLowerCase() === "builder"
             ? session.userId
             : null,
-        cycle: CURRENT_OASIS_PIPELINE_CYCLE,
+        // Warm form submissions are intentionally unassigned and therefore do
+        // not carry the cold-sales assignment cycle stamp. Filtering them by
+        // that cycle would make the new queue look empty while the rows exist.
+        cycle: warmInbound ? undefined : CURRENT_OASIS_PIPELINE_CYCLE,
         query,
       }),
       memberNameMapPromise,
@@ -386,6 +402,7 @@ export default async function PipelinePage({
     if (nextStage) params.set("stage", nextStage);
     if (query) params.set("q", query);
     if (nextRep) params.set("rep", nextRep);
+    if (warmInbound) params.set("motion", "inbound");
     if (changes.page && changes.page > 1) params.set("page", String(changes.page));
     return `/pipeline${params.toString() ? `?${params.toString()}` : ""}`;
   };
@@ -399,6 +416,7 @@ export default async function PipelinePage({
     if (pipelineWindow.activeStage) params.set("stage", pipelineWindow.activeStage);
     if (query) params.set("q", query);
     if (value) params.set("rep", value);
+    if (warmInbound) params.set("motion", "inbound");
     const href = `/pipeline${params.toString() ? `?${params.toString()}` : ""}`;
     return (
       <Link
@@ -417,6 +435,29 @@ export default async function PipelinePage({
 
   return (
     <div className="animate-fade-in space-y-4">
+      <nav aria-label="Lead queue" className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-[11px] uppercase tracking-wider text-fg-dim">Queue</span>
+        <Link
+          href="/pipeline"
+          className={`rounded-full border px-3 py-2 text-xs transition-colors ${
+            !warmInbound
+              ? "border-accent bg-accent/15 font-semibold text-accent"
+              : "border-bg-border bg-bg-elev/40 text-fg-muted hover:border-fg-dim hover:text-fg"
+          }`}
+        >
+          Cold outbound
+        </Link>
+        <Link
+          href="/pipeline?motion=inbound"
+          className={`rounded-full border px-3 py-2 text-xs transition-colors ${
+            warmInbound
+              ? "border-accent bg-accent/15 font-semibold text-accent"
+              : "border-bg-border bg-bg-elev/40 text-fg-muted hover:border-fg-dim hover:text-fg"
+          }`}
+        >
+          Warm inbound
+        </Link>
+      </nav>
       {/* WHOSE BOARD. Admins and managers get one chip per rep plus the
           unassigned pool, so assigning work is a click rather than a search.
           Reps never see this row: their board is already only theirs, so a

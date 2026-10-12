@@ -12,19 +12,23 @@
  * every branch soft-fails: the prospect's submission is never affected.
  */
 import "server-only";
+import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { sendTelegram } from "@/lib/notify/telegram";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { AI_AUDIT_STEP_COUNT } from "@/lib/forms/oasis-ai-audit-seed";
-import { deliverWelcomeEmail } from "@/lib/forms/oasis-funnel-email";
 import { buildAiAuditAlert, composeAiAuditWelcome } from "@/lib/forms/ai-audit-format";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import { isFirstSubmissionForLead } from "@/lib/forms/first-submission";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
+import {
+  queueAiAuditConfirmation,
+  TRANSACTIONAL_OUTBOX_SOURCE,
+} from "@/lib/forms/transactional-outbox";
 
 /** Distinct source tag → its own idempotency slot, so an ai-audit confirmation
  *  and a personal-funnel welcome never suppress each other for the same lead. */
-export const AI_AUDIT_WELCOME_SOURCE = "ai_audit_welcome";
+export const AI_AUDIT_WELCOME_SOURCE = TRANSACTIONAL_OUTBOX_SOURCE;
 
 /**
  * Source tag for the "alert could not be delivered" marker.
@@ -37,6 +41,66 @@ export const AI_AUDIT_WELCOME_SOURCE = "ai_audit_welcome";
  * able to silence the notification.
  */
 export const AI_AUDIT_ALERT_SOURCE = "ai_audit_alert";
+
+type AiAuditSalesEvent = "started" | "completed";
+
+function deterministicEventId(input: {
+  tenantId: string;
+  formId: string;
+  leadId: string;
+  event: AiAuditSalesEvent;
+}): string {
+  const digest = createHash("sha256")
+    .update(
+      `oasis-ai-audit-sales-event:v1:${input.tenantId}:${input.formId}:${input.leadId}:${input.event}`,
+      "utf8",
+    )
+    .digest("hex");
+  // Valid both for UUID-backed production rows and text-backed Turso mirrors.
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+/** Persist the Sales handoff idempotently and report failures to the caller. */
+export async function ensureAiAuditSalesEvent(input: {
+  db: SupabaseClient;
+  tenantId: string;
+  formId: string;
+  leadId: string;
+  event: AiAuditSalesEvent;
+  submissionId?: string;
+  score?: ScoreBreakdown;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const payload: Record<string, unknown> = {
+      lead_id: input.leadId,
+      form_id: input.formId,
+      lifecycle: "warm_inbound",
+      tenant_id: input.tenantId,
+    };
+    if (input.submissionId) payload.submission_id = input.submissionId;
+    if (input.score) {
+      payload.score = input.score.score;
+      payload.qualification = input.score.status;
+    }
+    const result = await input.db.from("agent_events").upsert(
+      {
+        id: deterministicEventId(input),
+        event_type:
+          input.event === "started" ? "OASIS_AI_AUDIT_STARTED" : "OASIS_AI_AUDIT_COMPLETED",
+        publisher_agent: "dept:sales",
+        target_agent: "dept:sales",
+        severity: input.score?.status === "qualified" ? "warn" : "info",
+        payload,
+        correlation_id: input.tenantId,
+      },
+      { onConflict: "id", ignoreDuplicates: true },
+    );
+    if (result.error) return { ok: false, error: result.error.message };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 /**
  * First-touch alert for the ai-audit funnel.
@@ -85,6 +149,20 @@ export async function notifyAiAuditStarted(input: {
   answers: Record<string, unknown>;
 }): Promise<void> {
   const { db, tenantId, formId, leadId, submissionId, answers } = input;
+
+  // Persist before Telegram dedupe. A repeat step-0 submission can repair a
+  // missing event without producing another operator notification.
+  const salesEvent = await ensureAiAuditSalesEvent({
+    db,
+    tenantId,
+    formId,
+    leadId,
+    event: "started",
+    submissionId,
+  });
+  if (!salesEvent.ok) {
+    console.error("[ai-audit.started] Sales event:", salesEvent.error);
+  }
 
   // The first-submission rule (oldest row wins, fail closed) is shared with the
   // offer-page lead alert, so the two can never disagree about what a new lead
@@ -138,48 +216,69 @@ export async function notifyAiAuditStarted(input: {
 export type AiAuditNotifyInput = {
   db: SupabaseClient;
   tenantId: string;
+  formId: string;
   leadId: string;
   answers: Record<string, unknown>;
   score: ScoreBreakdown;
 };
+
+export async function ensureAiAuditSubmissionDelivery(
+  input: AiAuditNotifyInput,
+): Promise<{ emailNote: string; salesEventOk: boolean }> {
+  const { db, tenantId, formId, leadId, answers, score } = input;
+  const salesEvent = await ensureAiAuditSalesEvent({
+    db,
+    tenantId,
+    formId,
+    leadId,
+    event: "completed",
+    score,
+  });
+  if (!salesEvent.ok) {
+    console.error("[ai-audit.notify] Sales event:", salesEvent.error);
+  }
+
+  const toEmail = String(answers.email ?? "").trim().toLowerCase();
+  const { subject, body } = composeAiAuditWelcome(answers);
+  let emailNote = "";
+  try {
+    const firstName = String(answers.name ?? "there").trim().split(/\s+/)[0] || "there";
+    const queued = await queueAiAuditConfirmation({
+      db,
+      tenantId,
+      formId,
+      leadId,
+      email: toEmail,
+      phone: answers.phone,
+      emailSubject: subject,
+      emailBody: body,
+      smsBody: `${firstName}, thanks for completing your OASIS AI audit. We have your answers and will follow up with the clearest next step. Reply STOP to opt out.`,
+    });
+    if (queued.email.queued) {
+      emailNote = "queued through send_gateway";
+    } else if (queued.email.reason === "already_queued") {
+      emailNote = "already queued earlier";
+    } else if (queued.email.reason === "already_sent") {
+      emailNote = "already sent earlier";
+    } else {
+      emailNote = `NOT queued — ${queued.email.reason ?? "unknown"}`;
+      console.error("[ai-audit.notify] welcome email queue:", queued.email.reason);
+    }
+  } catch (err) {
+    emailNote = "NOT queued — threw";
+    console.error("[ai-audit.notify] confirmation queue threw:", err);
+  }
+  return { emailNote, salesEventOk: salesEvent.ok };
+}
 
 export async function notifyAiAuditSubmission(
   input: AiAuditNotifyInput,
 ): Promise<void> {
   const { db, tenantId, leadId, answers, score } = input;
   const toEmail = String(answers.email ?? "").trim().toLowerCase();
-  const { subject, body } = composeAiAuditWelcome(answers);
-
-  // The email goes FIRST, and its result is carried into the alert.
-  //
-  // These used to run concurrently via allSettled so neither could block the
-  // other. That was defensible, but it meant the Telegram alert could not say
-  // whether the lead had actually been emailed — and CC's ask is one message
-  // that says a form came in AND that we replied to it. Sequencing costs a
-  // few hundred ms inside an `after()` callback the visitor never waits on,
-  // and buys an alert that describes the whole event instead of half of it.
-  // A failing email still cannot stop the alert: deliverWelcomeEmail returns
-  // a result rather than throwing, and the alert reports the failure.
-  let emailNote = "";
-  try {
-    const r = await deliverWelcomeEmail({
-      db, tenantId, leadId, toEmail,
-      source: AI_AUDIT_WELCOME_SOURCE, subject, body,
-    });
-    if (r.sent) {
-      emailNote = "sent";
-    } else if (r.reason === "already_sent") {
-      emailNote = "already sent earlier";
-    } else if (r.reason === "suppressed") {
-      emailNote = "NOT sent — address suppressed";
-    } else {
-      emailNote = `NOT sent — ${r.reason ?? "unknown"}`;
-      console.error("[ai-audit.notify] welcome email:", r.reason);
-    }
-  } catch (err) {
-    emailNote = "NOT sent — threw";
-    console.error("[ai-audit.notify] welcome email threw:", err);
-  }
+  // Both writes use deterministic keys. A repeat submission repairs a missing
+  // event or queue row without duplicating either one.
+  const { emailNote } = await ensureAiAuditSubmissionDelivery(input);
 
   const alert = buildAiAuditAlert(answers, score, {
     emailStatus: emailNote,

@@ -33,7 +33,10 @@ import { canWriteCrm } from "@/lib/role-gates";
 import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
-import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import {
+  OASIS_INBOUND_WARM_MOTION,
+  isWebsiteSalesTenantSlug,
+} from "@/lib/leads/canonical-lead-fields";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
 import { runBlast, resolveLeadsAudience, renderTemplate, getDefaultSender } from "@/lib/integrations/constant-contact/blast";
@@ -267,6 +270,9 @@ export async function POST(req: NextRequest) {
       };
       const currentStage = str(bulkRecord.data.stage).toLowerCase();
       const currentOwner = str(bulkRecord.data.assigned_to).toLowerCase();
+      const isWarmInboundLead =
+        bulkRecord.entity_type === "lead" &&
+        bulkRecord.data.sales_motion === OASIS_INBOUND_WARM_MOTION;
       // Re-checked per row: an owner changed since the scan above must not
       // hand this row to a deactivated teammate.
       if (targetDeactivated && currentOwner !== nextAssignedTo) {
@@ -275,6 +281,7 @@ export async function POST(req: NextRequest) {
       }
       if (
         isOasisBulkWorkspace &&
+        !isWarmInboundLead &&
         (!currentOwner ||
           !currentStage ||
           currentStage === "unassigned" ||
@@ -299,7 +306,8 @@ export async function POST(req: NextRequest) {
         record: bulkRecord,
         assignedTo: nextAssignedTo,
         occurredAt,
-        resetClaimClock: isOasisBulkWorkspace,
+        resetClaimClock: isOasisBulkWorkspace && !isWarmInboundLead,
+        advanceResearchedLeadOnAssign: isWarmInboundLead,
       });
       if (!upd.ok) {
         out.failed += 1;

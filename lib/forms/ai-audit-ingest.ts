@@ -1,8 +1,8 @@
 /**
  * ai-audit-ingest.ts — CRM ingestion for the B2B qualification funnel.
  *
- * WHAT WAS MISSING. app/api/forms/submit/route.ts already upserts the `leads`
- * row, transitions stage and fires notifications — it is a hardened path and
+ * WHAT WAS MISSING. app/api/forms/submit/route.ts already upserts the canonical
+ * `tenant_records` lead, transitions stage and fires notifications — it is a hardened path and
  * this file does not duplicate any of it. Two things it never did:
  *
  *   1. no `lead_interactions` row on submit, so the funnel answers existed only
@@ -10,12 +10,13 @@
  *   2. no score, so every inbound funnel lead sat at whatever default the row
  *      was created with and the pipeline could not rank them.
  *
- * SCHEMA NOTE, verified against the live DB rather than assumed: `leads` has
- * `score` (int) and `status` (text) — there is NO `leads.stage` column. Funnel
- * "stage" language maps onto `status`. `lead_interactions` keys off
- * (lead_id, tenant_id) and carries type/channel/direction/content/metadata.
+ * CANONICAL NOTE. Public intake creates `tenant_records`, not the retired
+ * top-level `leads` row. Qualification is therefore stored in lead.data as
+ * `score` + `ai_audit_qualification`. It must never overwrite `stage` or
+ * `status`: those fields drive the real sales lifecycle.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createHash } from "node:crypto";
 
 export type AiAuditAnswers = Record<string, unknown>;
 
@@ -174,6 +175,28 @@ export type IngestResult = {
   error?: string;
 };
 
+async function persistCanonicalScore(input: {
+  db: SupabaseClient;
+  tenantId: string;
+  leadId: string;
+  score: ScoreBreakdown;
+}): Promise<string | null> {
+  // This RPC is one atomic, tenant-scoped shallow merge in Postgres and an
+  // optimistic compare-and-swap in the Turso compatibility layer. A normal
+  // read/spread/update can erase an assignment or pipeline edit that lands
+  // between the read and write.
+  const updated = await input.db.rpc("patch_tenant_record_data", {
+    p_id: input.leadId,
+    p_tenant_id: input.tenantId,
+    p_patch: {
+      score: input.score.score,
+      ai_audit_qualification: input.score.status,
+      ai_audit_scored_at: new Date().toISOString(),
+    },
+  });
+  return updated.error?.message || null;
+}
+
 /**
  * Score the lead, stamp score+status, and write the timeline interaction.
  *
@@ -187,6 +210,20 @@ export async function ingestAiAuditSubmission(input: IngestInput): Promise<Inges
   try {
     const s = scoreAiAuditLead(answers);
     const summary = summarizeAiAuditLead(answers, s);
+
+    // Persist before the interaction idempotency check. This ordering repairs
+    // leads created while the old implementation was writing scores into the
+    // disconnected legacy `leads` table when they submit again.
+    const scoreWriteError = await persistCanonicalScore({
+      db,
+      tenantId,
+      leadId,
+      score: s,
+    });
+    if (scoreWriteError) {
+      console.error("[ai-audit.ingest] canonical lead update failed:", scoreWriteError);
+      return { ok: false, score: s.score, status: s.status, breakdown: s, error: scoreWriteError };
+    }
 
     // Idempotency — one timeline row per (lead, funnel). The submit route lets
     // a last-step POST repeat (sequential-progress check only requires steps
@@ -203,22 +240,16 @@ export async function ingestAiAuditSubmission(input: IngestInput): Promise<Inges
       return { ok: true, score: s.score, status: s.status, breakdown: s, error: "already_ingested" };
     }
 
-    const upd = await db
-      .from("leads")
-      .update({
-        score: s.score,
-        status: s.status,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", leadId)
-      .eq("tenant_id", tenantId);
-    if (upd.error) {
-      console.error("[ai-audit.ingest] lead update failed:", upd.error.message);
-    }
-
+    // The pre-read above preserves compatibility with timeline rows written
+    // before provider keys existed. The deterministic upsert below is the
+    // actual concurrency guard: two last-step requests can both miss that
+    // read, but only one can win the existing provider/message unique index.
+    const providerMessageId = createHash("sha256")
+      .update(`ai-audit-ingest:v1:${tenantId}:${leadId}`, "utf8")
+      .digest("hex");
     const ins = await db
       .from("lead_interactions")
-      .insert({
+      .upsert({
         lead_id: leadId,
         tenant_id: tenantId,
         type: "form_submission",
@@ -228,17 +259,21 @@ export async function ingestAiAuditSubmission(input: IngestInput): Promise<Inges
         content: summary,
         content_preview: summary.slice(0, 200),
         agent_source: "ai_audit_funnel",
+        provider: "oasis_form_ingest",
+        provider_message_id: providerMessageId,
         metadata: {
           form_slug: "ai-audit",
           score: s.score,
           score_parts: s.parts,
-          status: s.status,
+          qualification: s.status,
           reasons: s.reasons,
           answers,
         },
+      }, {
+        onConflict: "provider,provider_message_id",
+        ignoreDuplicates: true,
       })
-      .select("id")
-      .maybeSingle();
+      .select("id");
     if (ins.error) {
       console.error("[ai-audit.ingest] interaction insert failed:", ins.error.message);
       // Still hand back the breakdown: the timeline write failed but the score
@@ -246,12 +281,17 @@ export async function ingestAiAuditSubmission(input: IngestInput): Promise<Inges
       return { ok: false, score: s.score, status: s.status, breakdown: s, error: ins.error.message };
     }
 
+    const inserted = Array.isArray(ins.data) && ins.data.length > 0;
+    if (!inserted) {
+      return { ok: true, score: s.score, status: s.status, breakdown: s, error: "already_ingested" };
+    }
+
     return {
       ok: true,
       score: s.score,
       status: s.status,
       breakdown: s,
-      interaction_id: (ins.data as { id?: string } | null)?.id,
+      interaction_id: (ins.data?.[0] as { id?: string } | undefined)?.id,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

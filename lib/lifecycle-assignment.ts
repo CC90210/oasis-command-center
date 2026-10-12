@@ -14,6 +14,8 @@ export async function assignLifecycleOwner(input: {
   occurredAt?: string;
   /** Reset the ownership clock without altering lifecycle/source fields. */
   resetClaimClock?: boolean;
+  /** Warm inbound intake becomes actionable when its first owner is assigned. */
+  advanceResearchedLeadOnAssign?: boolean;
 }): Promise<{ ok: true; updatedIds: string[]; previousOwners: Array<string | null> } | { ok: false; error: string }> {
   const db = getServiceSupabase();
   const rows = new Map<string, RecordRow>([[input.record.id, input.record]]);
@@ -70,11 +72,23 @@ export async function assignLifecycleOwner(input: {
             last_call_at: null,
           }
       : { assigned_to: input.assignedTo };
+    const warmStagePatch =
+      input.advanceResearchedLeadOnAssign &&
+      row.entity_type === "lead" &&
+      nextOwner &&
+      String(row.data.stage ?? "").trim().toLowerCase() === "researched"
+        ? {
+            stage: "assigned",
+            assigned_at: ownershipChangedAt,
+            stage_entered_at: ownershipChangedAt,
+          }
+        : {};
     const update = await db.rpc("patch_tenant_record_data", {
       p_id: row.id,
       p_tenant_id: input.tenantId,
       p_patch: {
         ...cycleOwnershipPatch,
+        ...warmStagePatch,
         ...(input.occurredAt ? { last_contacted_at: input.occurredAt } : {}),
       },
     });

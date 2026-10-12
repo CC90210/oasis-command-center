@@ -293,6 +293,13 @@ const nextConfig = {
   async redirects() {
     return [
       {
+        // The short campaign URL is public and permanent. Next preserves the
+        // query string, so UTM/source attribution reaches the canonical form.
+        source: "/ai-audit",
+        destination: "/f/oasis-ai-cc/ai-audit",
+        permanent: true,
+      },
+      {
         // The entry-path page moved off the brand apex when the marketing
         // site took over "/" (2026-07-31). /welcome had been shared
         // directly, so the old URL has to keep resolving. It pointed at

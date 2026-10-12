@@ -63,7 +63,11 @@ import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
-import { notifyAiAuditSubmission, notifyAiAuditStarted } from "@/lib/forms/ai-audit-notify";
+import {
+  ensureAiAuditSubmissionDelivery,
+  notifyAiAuditSubmission,
+  notifyAiAuditStarted,
+} from "@/lib/forms/ai-audit-notify";
 import { hasOwnFunnelAlert, notifyOfferLead } from "@/lib/offer-pages/notify";
 import { offerPagesDb } from "@/lib/offer-pages/store";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
@@ -1791,16 +1795,30 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
           error: r.error,
         });
       }
-      if (r.error === "already_ingested") return;
       // Tell CC, and confirm to the lead. Until 2026-07-30 this block scored
       // the lead and stopped — a funnel that ranks someone 90/100 in silence
       // does the work and lets the lead go cold. Scoring is recomputed here
       // only if ingest could not return it, so the alert always carries the
       // same numbers that were written to the timeline.
       const score = r.breakdown ?? scoreAiAuditLead(answers);
+      if (r.error === "already_ingested") {
+        // The timeline write may have won immediately before an event/outbox
+        // failure. Re-run only the deterministic side effects so a resubmit
+        // repairs that partial success without sending Telegram twice.
+        await ensureAiAuditSubmissionDelivery({
+          db,
+          tenantId: form.tenant_id,
+          formId: form.id,
+          leadId: link.lead_id,
+          answers,
+          score,
+        });
+        return;
+      }
       await notifyAiAuditSubmission({
         db,
         tenantId: form.tenant_id,
+        formId: form.id,
         leadId: link.lead_id,
         answers,
         score,
@@ -2087,7 +2105,15 @@ async function initAnonymousLead(input: {
   // link + re-enters their details must NOT spawn a duplicate lead. Match an
   // existing lead by email/phone and route the new info into that SAME file
   // (uploads attach to lead_id, so they land on the existing file too).
-  const existing = await findExistingLead(form.tenant_id, { email, phone, business });
+  // Public intake may only merge on an address or phone the visitor actually
+  // supplied. A company name is not an identity key: two people at Acme (or
+  // two unrelated companies with the same name) must never be collapsed into
+  // one CRM record and inherit each other's consent, attribution or answers.
+  const existing = await findExistingLead(
+    form.tenant_id,
+    { email, phone, business },
+    { matchOnBusinessName: false },
+  );
 
   let lead: { id: string; data: Record<string, unknown> };
   if (existing) {
@@ -2110,6 +2136,16 @@ async function initAnonymousLead(input: {
     } else if (repAssign) {
       merged.assigned_to = repAssign.auth_user_id;
       merged.assigned_agent_name = repAssign.name;
+      if (
+        !funding &&
+        merged.sales_motion === OASIS_INBOUND_WARM_MOTION &&
+        String(merged.stage ?? "").trim().toLowerCase() === "researched"
+      ) {
+        const assignedAt = new Date().toISOString();
+        merged.stage = "assigned";
+        merged.assigned_at = assignedAt;
+        merged.stage_entered_at = assignedAt;
+      }
     }
     // Origination attribution on a RETURNING merchant. adoptLeadSource is the
     // idempotency boundary: it returns null (no write) when the lead already
@@ -2138,8 +2174,11 @@ async function initAnonymousLead(input: {
       : form.on_complete_stage ||
         (form.step_outcomes as Record<string, string> | null | undefined)?.["0"] ||
         "researched";
+    const repStartsWarmWork =
+      Boolean(repAssign) && !funding && defaultStage.trim().toLowerCase() === "researched";
+    const repAssignedAt = repStartsWarmWork ? new Date().toISOString() : null;
     const leadData: Record<string, unknown> = {
-      stage: defaultStage,
+      stage: repStartsWarmWork ? "assigned" : defaultStage,
       // OASIS lead source enum has no "public_form" — map to "inbound" (a
       // social/funnel lead came to us). SunBiz keeps "public_form".
       source: funding ? "public_form" : "inbound",
@@ -2162,6 +2201,10 @@ async function initAnonymousLead(input: {
     if (repAssign) {
       leadData.assigned_to = repAssign.auth_user_id;
       leadData.assigned_agent_name = repAssign.name;
+      if (repAssignedAt) {
+        leadData.assigned_at = repAssignedAt;
+        leadData.stage_entered_at = repAssignedAt;
+      }
     } else {
       // Unassigned → still give the drip a sane signer so
       // {{lead.assigned_agent_name}} never renders blank.
