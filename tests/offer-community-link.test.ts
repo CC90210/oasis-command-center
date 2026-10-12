@@ -81,11 +81,13 @@ async function main() {
     "/f/oasis-ai-cc/protocol?cat=p1#book",
   );
 
-  console.log("  CommunityLink reads the visit id after hydration, never during render (no server/client href mismatch)");
+  console.log("  CommunityLink attaches the visit id at CLICK time: same server/client href, and never a stale empty id on a fresh tab");
   {
     const linkSrc = readFileSync("components/offer-pages/CommunityLink.tsx", "utf8");
-    assert.match(linkSrc, /useEffect\(\(\) => \{\s*setVisitId\(peekVisitId\(\)\);\s*\}, \[\]\);/, "the visit id must be read inside a mount effect");
-    assert.equal((linkSrc.match(/peekVisitId\(\)/g) ?? []).length, 1, "peekVisitId must not also be called during render");
+    assert.match(linkSrc, /href=\{`\/go\/community\?\$\{base\.toString\(\)\}`\}/, "the rendered href must carry no visit id (server and client identical)");
+    assert.match(linkSrc, /onClick=\{onClick\}/, "the link must attach the id on click");
+    assert.match(linkSrc, /const visitId = getOrCreateVisitId\(\);[\s\S]*e\.currentTarget\.href = /, "the click handler must read or create the id at click time and set the href");
+    assert.doesNotMatch(linkSrc, /useEffect|peekVisitId/, "no mount-time read: it raced the tracking effect that creates the id");
   }
 
   console.log("  isSafeInternalPath rejects every open-redirect shape");
