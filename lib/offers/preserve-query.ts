@@ -20,11 +20,15 @@
  * that a server response is well-formed just because it currently is.
  */
 
-/** `/foo` yes. `//evil.com`, `http://..`, `javascript:..`, `` (empty) no. */
+/** `/foo` yes. `//evil.com`, `/\evil.com`, `http://..`, `javascript:..`, `` (empty) no. */
 export function isSafeInternalPath(path: unknown): path is string {
   if (typeof path !== "string" || path.length === 0) return false;
   if (!path.startsWith("/")) return false;
   if (path.startsWith("//")) return false;
+  // Browsers treat a backslash like a slash in http(s) URLs (WHATWG URL), so
+  // `/\evil.com` navigates to https://evil.com. No internal path needs one:
+  // refuse any backslash or control character anywhere.
+  if (/[\\\u0000-\u001f]/.test(path)) return false;
   // A colon before the first later `/`, `?` or `#` would make the first
   // path SEGMENT look like a scheme to some parsers -- reject it to be safe
   // rather than clever. (path[0] is already known to be "/", so start at 1.)

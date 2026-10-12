@@ -85,6 +85,10 @@ async function main() {
   assert.equal(isSafeInternalPath("//evil.example.com"), false, "protocol-relative must be refused");
   assert.equal(isSafeInternalPath("https://evil.example.com"), false);
   assert.equal(isSafeInternalPath("javascript:alert(1)"), false);
+  assert.equal(isSafeInternalPath("/\\evil.example.com"), false, "a backslash is a slash to browsers: /\\evil.com goes off-site");
+  assert.equal(isSafeInternalPath("/\\/evil.example.com"), false);
+  assert.equal(isSafeInternalPath("/f/a\\b"), false, "no internal path needs a backslash anywhere");
+  assert.equal(isSafeInternalPath("/f/oasis\tai"), false, "control characters are refused");
   assert.equal(isSafeInternalPath(""), false);
   assert.equal(isSafeInternalPath(null), false);
   assert.equal(isSafeInternalPath(undefined), false);
