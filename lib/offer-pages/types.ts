@@ -114,7 +114,82 @@ export type LinkVideoRef = {
   /** Our copy of the provider thumbnail, in the public tenant-assets prefix. */
   thumb_path?: string;
 };
-export type VideoRef = { rights: Confirmation; aspect: Aspect; duration_s?: number } & (LibraryVideoRef | LinkVideoRef);
+
+/**
+ * A video a workspace uploaded itself (slice V3), never OASIS's Library and
+ * never a third-party link. The object lives in the PRIVATE offer-page-uploads
+ * prefix, under this workspace's own tenant id, and is signed on tap by the
+ * same route a Library video uses (lib/offer-pages/video.ts).
+ *
+ * The paths here are the server's own answer from
+ * app/api/forms/[id]/offer/video-upload/confirm (lib/offer-pages/upload.ts),
+ * never typed by a browser: the parser only checks their SHAPE (tenant prefix,
+ * one of the three subfolders, a real extension for that kind) and the size is
+ * a whole number inside that kind's own cap. Which workspace may actually show
+ * them is re-checked, against the real object, every time a NEW one is saved
+ * into a draft (the route) and every time one plays (resolvePublishedVideo).
+ */
+export type UploadVideoRef = {
+  source: "upload";
+  video_path: string;
+  video_bytes: number;
+  video_mime: "video/mp4" | "video/webm" | "video/quicktime";
+  poster_path?: string;
+  caption_path?: string;
+};
+export type VideoRef = { rights: Confirmation; aspect: Aspect; duration_s?: number } & (LibraryVideoRef | LinkVideoRef | UploadVideoRef);
+
+/** The bucket (an R2 key prefix: lib/r2-storage.ts has ONE physical bucket) an uploaded offer-page video, poster or caption lives under. Private: never in PUBLIC_BUCKET_PREFIXES. */
+export const OFFER_UPLOAD_BUCKET = "offer-page-uploads";
+
+export type UploadKind = "video" | "poster" | "caption";
+
+/** Allowed content types per kind, mapped to the extension `uploadPathFor` writes. */
+export const UPLOAD_MIME: Readonly<Record<UploadKind, Readonly<Record<string, string>>>> = {
+  video: { "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov" },
+  poster: { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" },
+  caption: { "text/vtt": "vtt" },
+};
+
+/** The size cap enforced at mint (declared) AND again at confirm (the real object's HEAD size). */
+export const MAX_UPLOAD_BYTES: Readonly<Record<UploadKind, number>> = {
+  video: 500 * 1024 * 1024,
+  poster: 5 * 1024 * 1024,
+  caption: 512 * 1024,
+};
+
+/** The one folder name each kind writes under; "caption" (singular, matching UploadKind) lives in "captions" (plural, matching the existing captions.ts convention). */
+const UPLOAD_SUBDIR: Readonly<Record<UploadKind, string>> = { video: "video", poster: "poster", caption: "captions" };
+const SUBDIR_TO_KIND: Readonly<Record<string, UploadKind>> = { video: "video", poster: "poster", captions: "caption" };
+
+/** `<tenant>/offer-pages/<video|poster|captions>/<uuid>.<ext>` - the only shape an upload path may ever have. */
+const UPLOAD_PATH_RE =
+  /^([A-Za-z0-9-]{1,64})\/offer-pages\/(video|poster|captions)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([a-z0-9]{2,5})$/;
+
+export function uploadSubdirOf(kind: UploadKind): string {
+  return UPLOAD_SUBDIR[kind];
+}
+
+/**
+ * The kind this path's shape and extension say it is, or null when it is not
+ * one of ours at all (wrong shape, wrong folder, or an extension that kind
+ * never writes). Pure syntax: ownership (does this tenant own it) and
+ * existence (is there really an object there) are checked separately, by
+ * `lib/offer-pages/upload.ts` (write side) and `pathBelongsToTenant` (read
+ * side) - this function alone is never enough to trust a path.
+ */
+export function uploadPathKind(path: string): UploadKind | null {
+  const m = UPLOAD_PATH_RE.exec(path);
+  if (!m) return null;
+  const kind = SUBDIR_TO_KIND[m[2]];
+  if (!kind) return null;
+  const ext = m[4].toLowerCase();
+  return Object.values(UPLOAD_MIME[kind]).includes(ext) ? kind : null;
+}
+
+export function isUploadPath(kind: UploadKind, path: unknown): path is string {
+  return typeof path === "string" && uploadPathKind(path) === kind;
+}
 
 /** A Library image (private bucket, signed at render). Uploads arrive in a later version. */
 export type ImageRef = { asset_id: string; media_id: string };
@@ -361,6 +436,38 @@ export function parseVideoRef(v: unknown, path: string): VideoRef {
       ...(o.caption_media_id != null ? { caption_media_id: idOf(o.caption_media_id, `${path}.caption_media_id`) } : {}),
     };
   }
+  if (o.source === "upload") {
+    onlyKeys(o, ["source", "video_path", "video_bytes", "video_mime", "poster_path", "caption_path", "rights", "aspect", "duration_s"], path);
+    if (!isUploadPath("video", o.video_path)) {
+      throw new OfferPageError(`${path}.video_path`, "not an uploaded video this workspace stored");
+    }
+    if (typeof o.video_bytes !== "number" || !Number.isInteger(o.video_bytes) || o.video_bytes <= 0 || o.video_bytes > MAX_UPLOAD_BYTES.video) {
+      throw new OfferPageError(`${path}.video_bytes`, `expected a whole number of bytes up to ${MAX_UPLOAD_BYTES.video}`);
+    }
+    if (typeof o.video_mime !== "string" || !(o.video_mime in UPLOAD_MIME.video)) {
+      throw new OfferPageError(`${path}.video_mime`, "expected video/mp4, video/webm or video/quicktime");
+    }
+    const out: VideoRef = {
+      ...base,
+      source: "upload",
+      video_path: o.video_path,
+      video_bytes: o.video_bytes,
+      video_mime: o.video_mime as UploadVideoRef["video_mime"],
+    };
+    if (o.poster_path !== undefined && o.poster_path !== null) {
+      if (!isUploadPath("poster", o.poster_path)) {
+        throw new OfferPageError(`${path}.poster_path`, "not an uploaded poster this workspace stored");
+      }
+      out.poster_path = o.poster_path;
+    }
+    if (o.caption_path !== undefined && o.caption_path !== null) {
+      if (!isUploadPath("caption", o.caption_path)) {
+        throw new OfferPageError(`${path}.caption_path`, "not uploaded captions this workspace stored");
+      }
+      out.caption_path = o.caption_path;
+    }
+    return out;
+  }
   if (o.source === "youtube" || o.source === "vimeo" || o.source === "loom") {
     const source = o.source;
     onlyKeys(o, ["source", "id", "hash", "title", "thumb_path", "rights", "aspect", "duration_s"], path);
@@ -384,7 +491,7 @@ export function parseVideoRef(v: unknown, path: string): VideoRef {
     }
     return out;
   }
-  throw new OfferPageError(`${path}.source`, "expected library, youtube, vimeo or loom");
+  throw new OfferPageError(`${path}.source`, "expected library, upload, youtube, vimeo or loom");
 }
 
 function parseEvidence(v: unknown, path: string): Evidence {

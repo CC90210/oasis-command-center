@@ -19,14 +19,17 @@ import type { Aspect, OfferPageDoc, TemplateKey } from "./types";
 import { DEFAULT_ACCENT } from "./types";
 import { drawnPage, type DrawnPage, type MediaCheck } from "./visibility";
 import { embedUrl, formatDuration } from "./providers";
-import { imageKey, ownThumbPath, resolveDocLibrary, signPageMedia, type ResolvedLibrary, type Signer } from "./video";
+import { imageKey, ownThumbPath, resolveDocLibrary, signPageMedia, signUploadPosters, type ResolvedLibrary, type Signer } from "./video";
 
 export type FacadeMedia = {
   source:
     | { kind: "link"; embedSrc: string }
     // preview: the owner's signed-in preview of the DRAFT, signed by the
     // builder's own route (it reads the draft); absent on the public page.
-    | { kind: "library"; formId: string; videoRef: string; captions: boolean; preview?: true };
+    // "library" and "upload" are signed and played the same way (the signed
+    // GET and its captions come from the same two routes either way); only
+    // which private bucket is signed differs, and that is decided server-side.
+    | { kind: "library" | "upload"; formId: string; videoRef: string; captions: boolean; preview?: true };
   posterUrl: string | null;
   posterWidth: number | null;
   posterHeight: number | null;
@@ -77,9 +80,15 @@ export async function prepareOfferRender(input: {
     }
   }
   const signed = await signPageMedia(resolved, input.sign);
+  const uploadPosters = await signUploadPosters(doc, input.sign);
 
   const media: MediaCheck = {
-    video: (ref, video) => (video.source === "library" ? resolved.videos.has(ref) : embedUrl(video) !== null),
+    // A Library video is drawn only when it resolves for this workspace; an
+    // upload is drawn by construction (the same posture as a link video: the
+    // object was checked when it was saved, and a since-deleted one simply
+    // fails to play, never a server-render error); a link is drawn when its
+    // id is valid.
+    video: (ref, video) => (video.source === "library" ? resolved.videos.has(ref) : video.source === "upload" ? true : embedUrl(video) !== null),
     image: (image) => signed.images.has(imageKey(image)),
   };
   const page = drawnPage(doc, { fallbackHeadline: input.fallbackHeadline, media });
@@ -107,6 +116,17 @@ export async function prepareOfferRender(input: {
         posterHeight: r.poster?.height ?? null,
         aspect: v.aspect,
         duration: formatDuration(v.duration_s ?? r.asset.duration_s),
+      };
+      return;
+    }
+    if (v.source === "upload") {
+      out[ref] = {
+        source: { kind: "upload", formId, videoRef: ref, captions: !!v.caption_path, ...(input.preview ? { preview: true as const } : {}) },
+        posterUrl: uploadPosters.get(ref) ?? null,
+        posterWidth: null,
+        posterHeight: null,
+        aspect: v.aspect,
+        duration: formatDuration(v.duration_s),
       };
       return;
     }

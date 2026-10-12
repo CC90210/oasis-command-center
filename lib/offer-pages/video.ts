@@ -26,7 +26,8 @@
  */
 import type { Client, ResultSet } from "@libsql/client";
 import { FOUNDERS_OWN_BRAND } from "@/lib/founders-marketing-core";
-import type { ImageRef, LibraryVideoRef, LinkVideoRef, OfferPageDoc, VideoRef } from "./types";
+import { pathBelongsToTenant } from "@/lib/storage-helpers";
+import { OFFER_UPLOAD_BUCKET, type ImageRef, type LibraryVideoRef, type LinkVideoRef, type OfferPageDoc, type UploadVideoRef, type VideoRef } from "./types";
 import { parseOfferPageDoc } from "./types";
 import { canonicalUrl, findVideoRef, videoRefs } from "./providers";
 import { isMissingOfferTable, noteOfferTableMissing } from "./store";
@@ -254,13 +255,17 @@ export async function signPageMedia(
 }
 
 export type PublishedVideo =
-  | { ok: true; tenantId: string; resolved: ResolvedVideo }
+  | { ok: true; tenantId: string; kind: "library"; resolved: ResolvedVideo }
+  | { ok: true; tenantId: string; kind: "upload"; video: UploadVideoRef }
   | { ok: false; reason: "not_found" };
 
 /**
- * The Library video at `ref`, ONLY if it is in the PUBLISHED copy of a LIVE
- * offer page on an ENABLED form, and resolves for that form's own workspace.
- * Everything else, a draft-only ref included, is not_found.
+ * The video at `ref`, ONLY if it is in the PUBLISHED copy of a LIVE offer page
+ * on an ENABLED form, and (a Library ref) resolves for that form's own
+ * workspace, or (an upload ref) its object path belongs to that same tenant.
+ * Everything else, a draft-only ref and a link video included (a link never
+ * needs signing: the facade embeds it straight from its provider id), is
+ * not_found.
  */
 export async function resolvePublishedVideo(db: Client, formId: string, ref: string): Promise<PublishedVideo> {
   let row: Record<string, unknown> | undefined;
@@ -288,11 +293,53 @@ export async function resolvePublishedVideo(db: Client, formId: string, ref: str
     return { ok: false, reason: "not_found" };
   }
   const video = findVideoRef(doc, ref);
-  if (!video || video.source !== "library") return { ok: false, reason: "not_found" };
+  if (!video) return { ok: false, reason: "not_found" };
   const tenantId = String(row.tenant_id);
-  const resolved = await resolveLibrary(db, tenantId, [{ ref, video }]);
-  const hit = resolved.videos.get(ref);
-  return hit ? { ok: true, tenantId, resolved: hit } : { ok: false, reason: "not_found" };
+  if (video.source === "library") {
+    const resolved = await resolveLibrary(db, tenantId, [{ ref, video }]);
+    const hit = resolved.videos.get(ref);
+    return hit ? { ok: true, tenantId, kind: "library", resolved: hit } : { ok: false, reason: "not_found" };
+  }
+  if (video.source === "upload") {
+    if (!pathBelongsToTenant(tenantId, video.video_path)) return { ok: false, reason: "not_found" };
+    return { ok: true, tenantId, kind: "upload", video };
+  }
+  return { ok: false, reason: "not_found" };
+}
+
+/** A synthetic MediaRow for an upload video's captions, so captionsResponse (written for Library media rows) serves them unchanged. null when the ref carries no captions. */
+export function uploadCaptionMediaRow(video: UploadVideoRef): MediaRow | null {
+  if (!video.caption_path) return null;
+  return {
+    id: "upload-caption",
+    asset_id: "upload",
+    kind: "caption",
+    storage_bucket: OFFER_UPLOAD_BUCKET,
+    storage_path: video.caption_path,
+    mime: "text/vtt",
+    bytes: null,
+    width: null,
+    height: null,
+  };
+}
+
+/** Signed poster URLs for every upload-source video in a document, keyed by ref - the upload equivalent of signPageMedia's poster half (no Library DB join: the path lives straight in the doc). */
+export async function signUploadPosters(doc: OfferPageDoc, sign: Signer): Promise<Map<string, string>> {
+  const refs = videoRefs(doc).filter(
+    (v): v is { ref: string; video: VideoRef & UploadVideoRef } => v.video.source === "upload" && !!v.video.poster_path,
+  );
+  const out = new Map<string, string>();
+  if (!refs.length) return out;
+  try {
+    const urls = await sign(refs.map((r) => ({ bucket: OFFER_UPLOAD_BUCKET, path: r.video.poster_path! })), POSTER_TTL_SEC);
+    for (const r of refs) {
+      const u = urls.get(mediaKey(OFFER_UPLOAD_BUCKET, r.video.poster_path!));
+      if (u) out.set(r.ref, u);
+    }
+  } catch (err) {
+    console.error("[offer-pages] upload poster signing failed; posters omitted", err instanceof Error ? err.message : String(err));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

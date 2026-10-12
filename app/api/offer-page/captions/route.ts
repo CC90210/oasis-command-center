@@ -16,7 +16,7 @@
  */
 import { NextResponse } from "next/server";
 import { offerPagesDb } from "@/lib/offer-pages/store";
-import { resolvePublishedVideo } from "@/lib/offer-pages/video";
+import { resolvePublishedVideo, uploadCaptionMediaRow } from "@/lib/offer-pages/video";
 import { NOT_FOUND, limited, validIds } from "@/lib/offer-pages/public-http";
 import { captionsResponse } from "@/lib/offer-pages/captions";
 
@@ -37,8 +37,10 @@ export async function GET(req: Request) {
     console.error("[offer-pages.captions] resolve failed", { form_id: ids.formId, error: err instanceof Error ? err.message : String(err) });
     return NextResponse.json({ ok: false, error: "unavailable" }, { status: 503 });
   }
-  if (!hit.ok || !hit.resolved.caption) return NOT_FOUND();
-  return captionsResponse(hit.resolved.caption, {
+  if (!hit.ok) return NOT_FOUND();
+  const caption = hit.kind === "library" ? hit.resolved.caption : uploadCaptionMediaRow(hit.video);
+  if (!caption) return NOT_FOUND();
+  return captionsResponse(caption, {
     where: "offer-pages.captions",
     formId: ids.formId,
     ref: ids.ref,

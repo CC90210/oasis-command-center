@@ -24,10 +24,10 @@ import { ACCENT_FILL } from "./styles";
 
 export type FacadeSource =
   | { kind: "link"; embedSrc: string }
-  | { kind: "library"; formId: string; videoRef: string; captions: boolean; preview?: true };
+  | { kind: "library" | "upload"; formId: string; videoRef: string; captions: boolean; preview?: true };
 
-/** Where a Library video is signed, and its captions read: the draft for the owner's preview, else the live page. */
-export function libraryEndpoints(s: Extract<FacadeSource, { kind: "library" }>): { sign: string; body: string; captions: string } {
+/** Where a Library OR an uploaded video is signed, and its captions read: the draft for the owner's preview, else the live page. Which private bucket the server actually signs is decided there, by `ref`; the client never needs to know. */
+export function libraryEndpoints(s: Extract<FacadeSource, { kind: "library" | "upload" }>): { sign: string; body: string; captions: string } {
   const ref = encodeURIComponent(s.videoRef);
   if (s.preview) {
     const base = `/api/forms/${encodeURIComponent(s.formId)}/offer/preview-video`;
@@ -93,7 +93,7 @@ export function VideoFacade({
   const [defW, defH] = ASPECT_SIZE[aspect] ?? ASPECT_SIZE["16:9"];
 
   async function signedUrl(): Promise<string | null> {
-    if (source.kind !== "library") return null;
+    if (source.kind === "link") return null;
     const at = libraryEndpoints(source);
     try {
       const res = await fetch(at.sign, {
@@ -127,14 +127,14 @@ export function VideoFacade({
   // The tap was the visitor asking it to play; some browsers still want play()
   // called from script once the element exists.
   useEffect(() => {
-    if (state !== "playing" || source.kind !== "library" || !src) return;
+    if (state !== "playing" || source.kind === "link" || !src) return;
     const el = videoEl.current;
     if (el && typeof el.play === "function") void el.play().catch(() => undefined);
   }, [state, src, source.kind]);
 
   /** A signed URL that expired mid-watch: ask again, then resume where they were. */
   async function onMediaError() {
-    if (source.kind !== "library" || resigns.current >= 3) {
+    if (source.kind === "link" || resigns.current >= 3) {
       setState("failed");
       return;
     }
@@ -169,7 +169,7 @@ export function VideoFacade({
           allowFullScreen
           className="absolute inset-0 h-full w-full border-0"
         />
-      ) : playing && source.kind === "library" && src ? (
+      ) : playing && source.kind !== "link" && src ? (
         <video
           ref={videoEl}
           src={src}

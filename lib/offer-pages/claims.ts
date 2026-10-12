@@ -398,7 +398,7 @@ export function publishGate(
     if (!c.confirmed) blockers.push(`Confirm ${quote(c.sentence)} is true and you can back it.`);
   }
   const hero = doc.hero.video;
-  if (hero && hero.source === "library" && !hero.caption_media_id) {
+  if (hero && ((hero.source === "library" && !hero.caption_media_id) || (hero.source === "upload" && !hero.caption_path))) {
     warnings.push("The top video has no captions. People watching without sound will only have the transcript.");
   }
   return { blockers, warnings, claims };

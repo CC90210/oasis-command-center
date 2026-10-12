@@ -80,6 +80,42 @@ export async function stubSigner(): Promise<void> {
   });
 }
 
+/** An object store that keeps uploaded-video objects in memory: the same shape lib/offer-pages/upload.ts's OfferUploadStorage expects. */
+export function fakeOfferUploadStorage(opts: { infoThrows?: boolean } = {}) {
+  const objects = new Map<string, { size: number; contentType: string | null }>();
+  const signed: string[] = [];
+  const storage = {
+    async createSignedUploadUrl(path: string) {
+      signed.push(path);
+      return { signedUrl: `https://r2.test/offer-page-uploads/${path}?sig=fake` };
+    },
+    async info(path: string) {
+      if (opts.infoThrows) throw new Error("storage unreachable");
+      return objects.get(path) ?? null;
+    },
+  };
+  /** What a browser's PUT would leave behind, for a test to assert against without a real R2. */
+  const put = (path: string, size: number, contentType: string | null) => objects.set(path, { size, contentType });
+  return { storage, objects, signed, put };
+}
+
+/**
+ * Replace lib/offer-pages/upload.ts's `offerUploadStorage` (and its configured
+ * check) with a fixed fake, the same way stubSigner stands in for the R2
+ * signer: every other export (mintOfferUpload, confirmOfferUpload,
+ * verifyUploadObject, uploadPathFor) stays real, so the test exercises the
+ * actual tenant, shape, expiry and HEAD-size logic against an in-memory store.
+ */
+export async function stubOfferUploadStorage(storage: ReturnType<typeof fakeOfferUploadStorage>["storage"] | null): Promise<void> {
+  const p = require.resolve(join(ROOT, "lib", "offer-pages", "upload.ts"));
+  const real = await import("../lib/offer-pages/upload");
+  stubPath(p, {
+    ...real,
+    offerUploadStorage: () => storage,
+    offerUploadStorageConfigured: () => storage !== null,
+  });
+}
+
 export async function applyOfferMigration(db: Client): Promise<void> {
   for (const stmt of splitSql(readFileSync(OFFER_MIGRATION_PATH, "utf8"))) await db.execute(stmt);
 }
