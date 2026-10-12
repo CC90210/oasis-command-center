@@ -32,6 +32,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { ROOT, done, step } from "./_offer-pages-harness";
 import { funnelCell } from "../lib/offers/funnel-strip";
 import { offerCreateSlug, slugTakenMessage, ROUTER_SLUG } from "../lib/offers/router-create";
@@ -84,6 +85,13 @@ async function main() {
       assert.notEqual(cell.text, "0");
       assert.equal(cell.ariaLabel, "not tracked yet");
     }
+  });
+  await step("a failed leads read says 'couldn't load', never 'not tracked yet'", () => {
+    const cell = funnelCell(null, "unavailable");
+    assert.equal(cell.text, "-");
+    assert.equal(cell.ariaLabel, "couldn't load");
+    const src = readFileSync(join(ROOT, "components", "forms", "OfferCard.tsx"), "utf8");
+    assert.ok(/funnelCell\(value, m\.key === "leads" \? "unavailable" : "untracked"\)/.test(src));
   });
   await step("the glyph is a plain hyphen, never an em dash", () => {
     assert.equal(funnelCell(null).text, "-");

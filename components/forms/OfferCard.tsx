@@ -56,7 +56,9 @@ function FunnelStrip({ leads }: { leads: number | null }) {
       <dl className="grid grid-cols-5 gap-1.5 rounded-lg border border-hairline bg-bg-elev/40 p-2">
         {FUNNEL_METRICS.map((m) => {
           const value = m.key === "leads" ? leads : null;
-          const cell = funnelCell(value);
+          // Leads is the one tracked metric: a missing number there is a failed
+          // read, not a metric nobody measures yet.
+          const cell = funnelCell(value, m.key === "leads" ? "unavailable" : "untracked");
           return (
             <div key={m.key} className="flex flex-col items-center gap-0.5 text-center">
               <dt className="text-[9px] leading-tight uppercase tracking-wide text-fg-dim">{m.label}</dt>
