@@ -2,12 +2,25 @@
   "_comment": "OASIS's default /vsl router rules (HANDOVER 2026-10-12 section 4), in the forms.routing shape lib/forms/routing.ts parses (migration bravo__220). NOT applied to any live row by this PR -- APEX applies migrations and seeds data. Kept as its OWN file, deliberately not edited into PR #599's content/offers/oasis/vsl.json (apex/offer-pages-content), so the two branches never collide on the same file. See the PR description for the one-line change PR #599 needs to actually carry this: add a top-level \"routing\" key to vsl.json's \"form\" object with the \"rules\" array below, and have scripts/seed-oasis-offer-pages.ts pass content.form.routing through to the forms insert as the `routing` column (JSON.stringify'd). Field names/option values copied verbatim from vsl.json's own (pre-existing, currently unread) routing_rules block -- this file is the same data, in the schema the code actually evaluates.",
   "form_slug": "vsl",
   "tenant_slug": "oasis-ai-cc",
+  "_order": "First match wins, so EXPLICIT path choices come first and inferences after: otherwise a visitor who picks FLEET, PROTOCOL or COMMUNITY with a budget would hit the budget branch of the command rule and be overridden. The one deliberate exception is rule 1: $250K+ a month goes to FLEET whatever card was picked.",
   "rules": [
+    {
+      "go": "fleet",
+      "when_any": [
+        { "path": ["fleet"] },
+        { "monthly_revenue": ["250k_plus"] }
+      ]
+    },
     {
       "go": "protocol",
       "when_any": [
-        { "path": ["protocol"] },
-        { "monthly_revenue": ["pre_revenue", "under_10k"], "budget": ["none_yet"] }
+        { "path": ["protocol"] }
+      ]
+    },
+    {
+      "go": "community",
+      "when_any": [
+        { "path": ["community"] }
       ]
     },
     {
@@ -18,17 +31,15 @@
       ]
     },
     {
-      "go": "community",
+      "go": "protocol",
       "when_any": [
-        { "path": ["community"] },
-        { "budget": ["none_yet"] }
+        { "monthly_revenue": ["pre_revenue", "under_10k"], "budget": ["none_yet"] }
       ]
     },
     {
-      "go": "fleet",
+      "go": "community",
       "when_any": [
-        { "path": ["fleet"] },
-        { "monthly_revenue": ["250k_plus"] }
+        { "budget": ["none_yet"] }
       ]
     }
   ]

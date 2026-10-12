@@ -91,8 +91,8 @@ async function main() {
   assert.deepEqual(parseFormRouting(undefined), []);
   assert.deepEqual(parseFormRouting([]), []);
 
-  console.log("  OASIS's real default rules parse without throwing, 4 rules");
-  assert.equal(oasisRules.length, 4);
+  console.log("  OASIS's real default rules parse without throwing, 6 rules (explicit choices first)");
+  assert.equal(oasisRules.length, 6);
 
   console.log("  rejects go as an absolute URL (never an open redirect at the DATA layer either)");
   assert.throws(
@@ -138,6 +138,18 @@ async function main() {
 
   console.log("  revenue $250k+ alone (no path, no budget) -> fleet");
   assert.equal(firstMatchingGo(oasisRules, { monthly_revenue: "250k_plus" }), "fleet");
+
+  console.log("  an EXPLICIT choice is never overridden by a budget (rule order regression)");
+  for (const budget of ["2k_5k", "5k_15k", "15k_plus"]) {
+    assert.equal(firstMatchingGo(oasisRules, { path: "fleet", budget }), "fleet", `fleet + ${budget}`);
+    assert.equal(firstMatchingGo(oasisRules, { path: "community", budget }), "community", `community + ${budget}`);
+    assert.equal(firstMatchingGo(oasisRules, { path: "protocol", budget }), "protocol", `protocol + ${budget}`);
+  }
+
+  console.log("  $250K+ a month goes to FLEET whatever card was picked (the one deliberate override)");
+  for (const path of ["protocol", "command", "community", "fleet"]) {
+    assert.equal(firstMatchingGo(oasisRules, { path, monthly_revenue: "250k_plus" }), "fleet", path);
+  }
 
   console.log("  no answers at all -> no rule matches (never guesses)");
   assert.equal(firstMatchingGo(oasisRules, {}), null);
