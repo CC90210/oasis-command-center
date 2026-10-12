@@ -51,7 +51,7 @@ import { SunBizFormsClient } from "@/components/forms/SunBizFormsClient";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { formsEditRefusal } from "@/lib/forms/access";
 import { countResponsesByForm } from "@/lib/forms/responses";
-import { countRecentLeads, listOfferStatuses, offerPagesDb, type OfferPageStatus } from "@/lib/offer-pages/store";
+import { countRecentLeads, listOfferSummaries, offerPagesDb, type OfferSummary } from "@/lib/offer-pages/store";
 import { AlertCircle } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -157,18 +157,19 @@ export default async function FormsPage() {
 }
 
 /**
- * Which forms have an offer page, and each one's new leads over the last 7
- * days. null when offer pages are not available here (no Turso data plane, or
- * bravo__203 not applied): every form is then an intake form, as before.
+ * Which forms have an offer page, each one's card summary (status, promise,
+ * video), and new leads over the last 7 days. null when offer pages are not
+ * available here (no Turso data plane, or bravo__203 not applied): every form
+ * is then an intake form, as before.
  */
 async function loadOfferColumns(
   tenantId: string,
   formIds: string[],
-): Promise<{ statuses: Record<string, { status: OfferPageStatus; publishedVersion: number }>; recentLeads: Record<string, number | null> } | null> {
+): Promise<{ statuses: Record<string, OfferSummary>; recentLeads: Record<string, number | null> } | null> {
   const db = offerPagesDb();
   if (!db) return null;
   try {
-    const map = await listOfferStatuses(db, tenantId);
+    const map = await listOfferSummaries(db, tenantId);
     if (!map) return null;
     const statuses = Object.fromEntries([...map.entries()].filter(([id]) => formIds.includes(id)));
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();

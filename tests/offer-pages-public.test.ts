@@ -480,13 +480,17 @@ async function main() {
     assert.ok(!book.includes("rounded-2xl border border-bg-border bg-bg-elev/40 p-6 shadow-lg"), "the embedded form draws its own card inside the Book card");
   });
 
-  await step("the Offers list renders on the server with an enabled offer row and its links (no window there)", () => {
+  await step("the Offers list renders cards on the server with an enabled offer and its links (no window there)", () => {
     const h = String(html.offersList);
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
-    assert.ok(h.includes("Live, version 2"), "the offer row's page status is missing");
-    assert.ok(h.includes(">3</td>"), "the offer row's new leads are missing");
-    assert.ok(h.includes("Share</button>"), "the enabled offer row has no Share menu");
+    assert.ok(h.includes("Live, version 2"), "the offer card's page status is missing");
+    assert.ok(h.includes(">3</dd>"), "the offer card's new leads are missing");
+    assert.ok(h.includes("Share</button>"), "the enabled offer card has no Share menu");
     assert.ok(h.includes(">Intake<"), "the intake form's row is missing");
+    // FORM_VSL's slug is "vsl": R1 pins it as the "Start here" router card
+    // instead of the regular grid, so the grid below it reads as empty.
+    assert.ok(h.includes("Start here"), "the vsl-slugged offer is not pinned as the router card");
+    assert.ok(h.includes("No offers yet. New offer builds a full page"), "the now-empty offers grid lost its empty state");
   });
 
   done("offer-pages-public");
