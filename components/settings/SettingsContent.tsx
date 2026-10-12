@@ -56,10 +56,8 @@ import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { HARNESS_REPO } from "@/lib/install-scripts";
 import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
-import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
 import { AgentEnginePanel } from "@/components/settings/AgentEnginePanel";
 import { ConnectYourComputerCard, YourComputersCard } from "@/components/settings/YourComputersCard";
-import { PersonEngineCard } from "@/components/settings/PersonEngineCard";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
 import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
@@ -213,11 +211,11 @@ export async function SettingsContent({
   const rosterAgentKeys = manifestAgentKeys.filter(onRoster);
 
   // Every authenticated persona owns their profile, password and personal
-  // connections. Non-admins stop here: no credential vault, AI/provider
-  // configuration, device inventory, team mutation, agent roster, cron or
-  // automation data is queried or rendered. Managers receive one additional
-  // read-only, query-scoped OASIS sales scorecard below.
-  if (profile && !canManageTenant) {
+  // connections. AI brain and Devices are also personal surfaces now: their
+  // APIs return only the viewer's setup/computers unless the viewer can
+  // manage the workspace. Other non-admin sections keep the narrow personal
+  // view and never read workspace credentials or team controls.
+  if (profile && !canManageTenant && section !== "ai" && section !== "devices") {
     return (
       <PersonalSettingsView
         profile={profile}
@@ -504,36 +502,6 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
-          {/* "How your departments think" (O3b): YOUR OWN engine choice --
-              your own paired computer, or the workspace API key -- separate
-              from the workspace default this section's "What powers your
-              agents" picks above. Every workspace member who reaches Settings
-              > AI (owners and admins; AI brain is not operator-only) sees
-              and sets their own. */}
-          {show("ai") && (
-            <SettingsSection
-              id="person-engine"
-              defaultOpen
-              title="How your departments think"
-              subtitle="Your own choice: Claude Code on your own computer, or the workspace API key."
-            >
-              <SafeBoundary label="How your departments think">
-                <PersonEngineCard />
-              </SafeBoundary>
-            </SettingsSection>
-          )}
-
-          {/* The paired computer's AI command-line tools. They answer only the
-              operator's own Coding chat (/agent, components/ChatWidget.tsx) when
-              it runs on that computer; no department ever uses them, so the card
-              says so and never reads as a second place choosing the department
-              brain (CC, 2026-10-09). */}
-          {show("ai") && isOperator && (
-            <SafeBoundary label="Local CLI providers">
-              <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} isAgentsOwner={agentsOwner} />
-            </SafeBoundary>
-          )}
-
           {/* "Override an agent's provider" removed 2026-10-09 (CC: "redundant
               and not needed"). It was a second place choosing an AI provider
               and key per teammate, while every department chat answers on the
@@ -623,16 +591,9 @@ export async function SettingsContent({
               computer at all -- ConnectYourComputerCard existed only on
               Profile, so reaching it meant leaving Devices. Same card
               (never a fork), at the TOP of the section. Deliberately NOT
-              gated on isOperator the way "Your computers" and "Devices
-              (advanced)" below are: those two show OTHER people's bridge
-              pairings and stay operator-only. Adding a device is your own
-              action on your own computer, same as the Profile mount, so it
-              follows show("devices") alone. The real-traffic gate for who
-              ever reaches section="devices" at all is still
-              /settings/devices' own requireSettingsSection (operator-only,
-              O3b's deliberate "bridge is never client-facing" decision) --
-              unchanged here; this just removes the extra hop for whoever
-              is already on this page. */}
+              gated on isOperator. Adding a device and managing your own
+              computers are personal actions; only the raw team-wide advanced
+              inventory below remains verified-operator-only. */}
           {show("devices") && (
             <SettingsSection
               id="add-a-device"
@@ -646,13 +607,10 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
-          {/* "Your computers" (O3b): each person's OWN computers and their
-              plain-words status, with an Approve button -- separate from the
-              raw pair/revoke list in "Devices (advanced)" below. OASIS only,
-              until J2 packages the connector for clients (ui_changes rule),
-              which this section already follows: it is inside the same
-              VERIFIED-operator gate as Devices. */}
-          {show("devices") && isOperator && (
+          {/* Every member sees only their own computers here. The API adds
+              team rows only for workspace managers; the raw advanced bridge
+              inventory remains verified-operator-only below. */}
+          {show("devices") && (
             <SettingsSection id="your-computers" defaultOpen title="Your computers" subtitle="Each of your own computers, and whether it can take department work right now.">
               <SafeBoundary label="Your computers">
                 <YourComputersCard />
@@ -790,15 +748,9 @@ async function PersonalSettingsView({
         </SettingsSection>
       )}
 
-      {/* "Add a device" (D0): the non-manager mirror of the same TOP-of-
-          Devices entry in SettingsContent's own render above. In real
-          traffic this branch is never reached for section="devices" --
-          /settings/devices' own requireSettingsSection stays operator-only,
-          and today's verified operators are always canManageTenant too, so
-          nobody hits this path live. It exists so a non-admin viewer who
-          IS routed here (any future loosening of that route gate, or a
-          direct render) gets the same connector entry as everyone else,
-          same card, never a fork. */}
+      {/* Full-page personal Settings mounts still use this branch with no
+          focused section. Reuse the same card there; the dedicated Devices
+          page is handled by the main, viewer-scoped branch above. */}
       {show("devices") && (
         <SettingsSection id="add-a-device" defaultOpen title="Add a device" subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app.">
           <SafeBoundary label="Add a device">

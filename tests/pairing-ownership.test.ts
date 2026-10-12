@@ -82,6 +82,10 @@ async function createSchema() {
       claude_account_hash TEXT, claim_state_at TEXT, claim_capacity INTEGER, claim_in_flight INTEGER,
       claim_blocked_reason TEXT, last_claim_ip TEXT, previous_token_hash TEXT, token_rotated_at TEXT,
       last_poll_ok_at TEXT);
+    CREATE TABLE bridge_pair_codes (
+      code TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, auth_user_id TEXT NOT NULL, email TEXT,
+      expires_at TEXT NOT NULL, consumed_at TEXT, consumed_by_pairing_id TEXT,
+      purpose TEXT NOT NULL DEFAULT 'desktop', scope TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE agent_events (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
       event_type TEXT, publisher_agent TEXT, severity TEXT, payload TEXT, correlation_id TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
@@ -93,12 +97,12 @@ async function createSchema() {
 }
 
 async function seed() {
-  for (const t of ["tenants", "_supabase_auth_users", "user_profiles", "workspace_agents_owner", "bridge_pairings", "agent_events", "tenant_audit_log"]) {
+  for (const t of ["tenants", "_supabase_auth_users", "user_profiles", "workspace_agents_owner", "bridge_pairings", "bridge_pair_codes", "agent_events", "tenant_audit_log"]) {
     await db.execute(`DELETE FROM ${t}`);
   }
   await db.batch(
     [
-      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-y', 'Client Y Dental')", args: [TENANT] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI Solutions')", args: [TENANT] },
       ...[
         [OWNER_ID, "owner@client-y.test"],
         [MEMBER_ID, "member@client-y.test"],
@@ -168,6 +172,7 @@ async function main() {
   await createSchema();
   const approveRoute = await import("../app/api/devices/[id]/approve/route");
   const devicesRoute = await import("../app/api/devices/route");
+  const pairCodeRoute = await import("../app/api/auth/pair-code/route");
   const rotateRoute = await import("../app/api/bridge/pairing/rotate/route");
   const { resolvePairingFromBearer, pairingCanClaim } = await import("../lib/bridge/pairing-auth");
 
@@ -184,6 +189,48 @@ async function main() {
     new NextRequest("https://oasisai.work/api/bridge/pairing/rotate", { method: "POST", headers: { authorization: `Bearer ${token}` } });
 
   console.log("pairing-ownership:");
+
+  await check("an OASIS member can mint a connector code for their own computer, but not a daemon desktop code", async () => {
+    await login(MEMBER_ID, "member@client-y.test");
+    const connector = await jsonOf(
+      await pairCodeRoute.POST(
+        new NextRequest("https://oasisai.work/api/auth/pair-code", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ purpose: "connector" }),
+        }),
+      ),
+    );
+    assert.equal(connector.status, 200, JSON.stringify(connector.body));
+    assert.equal(connector.body.scope, "connector");
+    const desktop = await jsonOf(
+      await pairCodeRoute.POST(
+        new NextRequest("https://oasisai.work/api/auth/pair-code", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ purpose: "desktop" }),
+        }),
+      ),
+    );
+    assert.equal(desktop.status, 403, JSON.stringify(desktop.body));
+  });
+
+  await check("pair-code status correlates a re-paired computer by consumed_by_pairing_id, never created_at", async () => {
+    await pairing({ id: "bp-member-connector", userId: MEMBER_ID, label: "Member laptop", token: "t-member-connector", scope: "connector", pairedVia: "pair_code" });
+    await db.execute({
+      sql: `INSERT INTO bridge_pair_codes (code, tenant_id, auth_user_id, email, expires_at, consumed_at, consumed_by_pairing_id, purpose, scope)
+            VALUES ('ABC-DEF-GHJ', ?, ?, 'member@client-y.test', '2099-01-01T00:00:00.000Z', ?, 'bp-member-connector', 'connector', 'connector')`,
+      args: [TENANT, MEMBER_ID, stamp],
+    });
+    await login(MEMBER_ID, "member@client-y.test");
+    const mine = await jsonOf(await pairCodeRoute.GET(new NextRequest("https://oasisai.work/api/auth/pair-code?code=ABC-DEF-GHJ")));
+    assert.equal(mine.status, 200, JSON.stringify(mine.body));
+    assert.equal(mine.body.status, "connected");
+    assert.deepEqual(mine.body.pairing, { id: "bp-member-connector", label: "Member laptop", claim_enabled_at: null });
+    await login(OTHER_ID, "other@client-y.test");
+    const other = await jsonOf(await pairCodeRoute.GET(new NextRequest("https://oasisai.work/api/auth/pair-code?code=ABC-DEF-GHJ")));
+    assert.equal(other.status, 404, JSON.stringify(other.body));
+  });
 
   // ── Who can approve what ─────────────────────────────────────────────────
   await check("the pairing's own member approves their own connector computer", async () => {

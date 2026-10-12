@@ -61,6 +61,7 @@ import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { decryptField } from "@/lib/field-encryption";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { PROVIDER_TO_SERVICE, type Provider } from "@/lib/providers";
+import { ENGINE_AGENT_KEY, engineRow, type AgentEngineChoice } from "@/lib/ai/agent-engine";
 
 /** The agent_model_config.agent_key of the workspace's AI account row. */
 export const WORKSPACE_AI_AGENT_KEY = "__workspace__";
@@ -389,6 +390,161 @@ export async function connectWorkspaceAccountInOneStep(input: {
     committed: results[results.length - 1].rowsAffected === 1,
     legacyRowMoved: moveLegacyRow && results[results.length - 2].rowsAffected === 1,
     movedWithTeam: moveTeamIndex < 0 ? [] : results[moveTeamIndex].rows.map((r) => String(r.agent_key)),
+  };
+}
+
+export type AtomicEngineCommit = {
+  userId: string | null;
+  expectedVersion: string | null;
+  choice: AgentEngineChoice;
+};
+
+function engineStillAsRead(tenantId: string, commit: AtomicEngineCommit): { sql: string; args: InValue[] } {
+  const user = commit.userId === null ? "user_id IS NULL" : "user_id = ?";
+  const userArgs: InValue[] = commit.userId === null ? [] : [commit.userId];
+  if (commit.expectedVersion === null) {
+    return {
+      sql: `NOT EXISTS (SELECT 1 FROM agent_model_config e WHERE e.tenant_id = ? AND e.agent_key = ? AND e.${user})`,
+      args: [tenantId, ENGINE_AGENT_KEY, ...userArgs],
+    };
+  }
+  return {
+    sql: `EXISTS (SELECT 1 FROM agent_model_config e WHERE e.tenant_id = ? AND e.agent_key = ? AND e.${user} AND e.updated_at = ?)`,
+    args: [tenantId, ENGINE_AGENT_KEY, ...userArgs, commit.expectedVersion],
+  };
+}
+
+/**
+ * Switch the workspace API account and save the canonical engine row in the
+ * same libSQL transaction. The account mutation is conditional on the engine
+ * compare-and-swap succeeding, so a stale AI Brain tab cannot switch the
+ * workspace provider and then fail to save its engine choice.
+ *
+ * Key-cache rows may be prepared before this call, but only this transaction
+ * activates a provider or changes what agents use.
+ */
+export async function connectWorkspaceAccountAndEngineInOneStep(input: {
+  tenantId: string;
+  stamp: AccountStamp;
+  provider: string;
+  model: string;
+  encryptedApiKey: string;
+  agentKeys: string[];
+  engine: AtomicEngineCommit;
+}): Promise<{ committed: boolean; legacyRowMoved: boolean; movedWithTeam: string[] }> {
+  const { tenantId, stamp, provider, model, encryptedApiKey } = input;
+  const atDate = new Date();
+  if (input.engine.expectedVersion === atDate.toISOString()) atDate.setMilliseconds(atDate.getMilliseconds() + 1);
+  const at = atDate.toISOString();
+  const accountGuard = stillAsRead(tenantId, stamp);
+  const engineGuard = engineStillAsRead(tenantId, input.engine);
+  const before = { sql: `(${accountGuard.sql}) AND (${engineGuard.sql})`, args: [...accountGuard.args, ...engineGuard.args] };
+  const stmts: InStatement[] = input.agentKeys.map((agentKey) => ({
+    sql:
+      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
+      ` SELECT ?, NULL, ?, ?, ?, ?, 1, ? WHERE ${before.sql}` +
+      " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL" +
+      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = excluded.encrypted_api_key, updated_at = excluded.updated_at",
+    args: [tenantId, agentKey, provider, model, encryptedApiKey, at, ...before.args],
+  }));
+  const previousKey: { sql: string; args: InValue[] } | null = stamp.present
+    ? stamp.encryptedApiKey
+      ? { sql: "?", args: [stamp.encryptedApiKey] }
+      : null
+    : {
+        sql: "(SELECT l.encrypted_api_key FROM agent_model_config l WHERE l.tenant_id = ? AND l.agent_key = ? AND l.user_id IS NULL)",
+        args: [tenantId, LEGACY_WORKSPACE_AI_AGENT_KEY],
+      };
+  const moveTeamIndex = previousKey ? stmts.length : -1;
+  if (previousKey) {
+    stmts.push({
+      sql:
+        "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = ?, updated_at = ?" +
+        " WHERE tenant_id = ? AND user_id IS NULL AND agent_key <> ? AND agent_key <> ?" +
+        ` AND encrypted_api_key = ${previousKey.sql} AND ${before.sql} RETURNING agent_key`,
+      args: [provider, model, encryptedApiKey, at, tenantId, WORKSPACE_AI_AGENT_KEY, LEGACY_WORKSPACE_AI_AGENT_KEY, ...previousKey.args, ...before.args],
+    });
+  }
+  const moveLegacyRow = !input.agentKeys.includes(LEGACY_WORKSPACE_AI_AGENT_KEY);
+  const moveLegacyIndex = moveLegacyRow ? stmts.length : -1;
+  if (moveLegacyRow) {
+    stmts.push({
+      sql:
+        "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = ?, updated_at = ?" +
+        ` WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND ${before.sql}`,
+      args: [provider, model, encryptedApiKey, at, tenantId, LEGACY_WORKSPACE_AI_AGENT_KEY, ...before.args],
+    });
+  }
+
+  const row = engineRow(input.engine.choice);
+  const engineIndex = stmts.length;
+  if (input.engine.expectedVersion === null) {
+    const userValues = input.engine.userId === null ? "NULL" : "?";
+    const userArgs: InValue[] = input.engine.userId === null ? [] : [input.engine.userId];
+    const conflict =
+      input.engine.userId === null
+        ? "ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING"
+        : "ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL AND agent_key = '__engine__' DO NOTHING";
+    stmts.push({
+      sql:
+        `INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)` +
+        ` SELECT ?, ${userValues}, ?, ?, ?, NULL, 1, ?, ?, ? WHERE ${accountGuard.sql} AND ${engineGuard.sql} ${conflict}`,
+      args: [tenantId, ...userArgs, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, at, ...accountGuard.args, ...engineGuard.args],
+    });
+  } else {
+    const user = input.engine.userId === null ? "user_id IS NULL" : "user_id = ?";
+    const userArgs: InValue[] = input.engine.userId === null ? [] : [input.engine.userId];
+    stmts.push({
+      sql:
+        "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1," +
+        " computer_pairing_id = ?, fallback_policy = ?, updated_at = ?" +
+        ` WHERE tenant_id = ? AND agent_key = ? AND ${user} AND updated_at = ? AND ${accountGuard.sql}`,
+      args: [
+        row.provider,
+        row.model,
+        row.computerPairingId,
+        row.fallbackPolicy,
+        at,
+        tenantId,
+        ENGINE_AGENT_KEY,
+        ...userArgs,
+        input.engine.expectedVersion,
+        ...accountGuard.args,
+      ],
+    });
+  }
+
+  const afterUser = input.engine.userId === null ? "user_id IS NULL" : "user_id = ?";
+  const afterUserArgs: InValue[] = input.engine.userId === null ? [] : [input.engine.userId];
+  const engineAfter = {
+    sql:
+      `EXISTS (SELECT 1 FROM agent_model_config e WHERE e.tenant_id = ? AND e.agent_key = ? AND e.${afterUser}` +
+      " AND e.provider = ? AND e.model = ? AND e.computer_pairing_id IS ? AND e.fallback_policy = ? AND e.updated_at = ?)",
+    args: [tenantId, ENGINE_AGENT_KEY, ...afterUserArgs, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, at] as InValue[],
+  };
+  const accountAfter = { sql: `(${accountGuard.sql}) AND (${engineAfter.sql})`, args: [...accountGuard.args, ...engineAfter.args] };
+  const accountIndex = stmts.length;
+  stmts.push(
+    stamp.present
+      ? {
+          sql:
+            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = ?, enabled = 1, updated_at = ?" +
+            ` WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND ${accountAfter.sql}`,
+          args: [provider, model, encryptedApiKey, at, tenantId, WORKSPACE_AI_AGENT_KEY, ...accountAfter.args],
+        }
+      : {
+          sql:
+            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
+            ` SELECT ?, NULL, ?, ?, ?, ?, 1, ? WHERE ${accountAfter.sql}`,
+          args: [tenantId, WORKSPACE_AI_AGENT_KEY, provider, model, encryptedApiKey, at, ...accountAfter.args],
+        },
+  );
+  const results = await oneStepClient().batch(stmts, "write");
+  const committed = results[engineIndex].rowsAffected === 1 && results[accountIndex].rowsAffected === 1;
+  return {
+    committed,
+    legacyRowMoved: committed && moveLegacyIndex >= 0 && results[moveLegacyIndex].rowsAffected === 1,
+    movedWithTeam: !committed || moveTeamIndex < 0 ? [] : results[moveTeamIndex].rows.map((r) => String(r.agent_key)),
   };
 }
 

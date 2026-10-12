@@ -26,6 +26,14 @@ async function main() {
   const settings = await import("../components/settings/settings-sections");
   const { startCliSignIn } = await import("../components/settings/LocalCliProvidersCard");
 
+  await check("browser polling outlives the connector's longest restricted probe", () => {
+    assert.equal(client.CONNECTOR_PROBE_MAX_MS, 540_000);
+    assert.ok(
+      client.RUNTIME_JOB_DEADLINE_MS >= client.CONNECTOR_PROBE_MAX_MS + 60_000,
+      "probe polling needs queue/network margin beyond the connector ceiling",
+    );
+  });
+
   await check("the consolidated panel exposes exactly the three runtime choices and the two manager scopes", () => {
     const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
     for (const label of ["Subscription app", "Pure local", "API key", "My setup", "Workspace default"]) {
@@ -34,9 +42,16 @@ async function main() {
     assert.doesNotMatch(panel, />\s*(?:An app on your paired computer|An AI account \(fallback\)|A local model)\s*</);
     assert.match(panel, /fallback/i, "the no-silent-fallback control is visible in the one panel");
     assert.match(panel, /state\.canManage\s*\?\s*API_PROVIDERS\.filter/, "only managers can choose among saved API providers");
-    assert.match(panel, /await switchProvider\(draftSelection\.provider/, "a saved provider becomes the active tested workspace account before engine save");
+    assert.doesNotMatch(panel, /await switchProvider\(/, "the browser must not switch the API account before the engine CAS");
+    const route = readFileSync(join(ROOT, "app/api/ai/engine/route.ts"), "utf8");
+    assert.match(route, /connectWorkspaceAccountAndEngineInOneStep/, "provider activation and the engine CAS use one server transaction");
+    assert.match(route, /readLatestRuntimeProbeReceipts/, "readiness is derived from completed probe receipts");
+    assert.doesNotMatch(route, /lastTestedAt:[^\n]*lastSeenAt/, "a heartbeat timestamp must never be reported as a test timestamp");
+    assert.match(route, /code === null \|\| code === "ready" \|\| code === "probe_required"/, "a fresh receipt cannot override an explicit heartbeat failure");
     assert.match(panel, /addEventListener\("oasis:agent-configs-changed"/, "connecting a key below refreshes the engine panel immediately");
     assert.match(panel, /status\?\.label === "Unsupported"/, "an unsupported Gemini account disables reconnect and offers the API path");
+    assert.match(panel, /provider === "gemini" \?/, "Gemini never renders the unsupported CLI auth action");
+    assert.match(panel, /Managed Gemini CLI account detected/, "a connector-detected managed Gemini account keeps Test without a fake reconnect");
     assert.match(panel, /Choose a computer to finish upgrading this saved setup\./, "legacy unbound rows explain the one required upgrade action");
     const connectFlow = panel.slice(panel.indexOf("async function connect"), panel.indexOf("const modeOption"));
     assert.match(connectFlow, /await pollRuntimeJob\(/, "the dashboard stays open and polls the selected computer's auth job");
@@ -53,6 +68,12 @@ async function main() {
     const route = readFileSync(join(ROOT, "app/api/ai/engine/route.ts"), "utf8");
     assert.match(route, /subscriptionRolloutError\(selection\.provider, oasis\)/, "probe and save use the server-side rollout gate");
     assert.match(route, /pairingForSelection/, "the rollout gate is followed by exact-pairing approval checks");
+    const runSession = readFileSync(join(ROOT, "lib/os/runs/session.ts"), "utf8");
+    assert.match(
+      runSession,
+      /subscriptionRolloutError\(selectedEngine\.cli, oasisWorkspace\)/,
+      "department execution reapplies the rollout gate to legacy and already-saved rows",
+    );
   });
 
   await check("every member can open AI brain and Devices for their own setup, while workspace controls remain manager-only", () => {
@@ -61,13 +82,20 @@ async function main() {
     assert.equal(settings.maySeeSettingsSection(member, "devices"), true);
     assert.equal(settings.maySeeSettingsSection(member, "brand"), false);
     assert.equal(settings.maySeeSettingsSection(member, "billing"), false);
+    const route = readFileSync(join(ROOT, "app/api/ai/engine/route.ts"), "utf8");
+    assert.match(route, /const visiblePairings = canManage \? pairings : pairings\.filter\(\(pairing\) => pairing\.user_id === ctx\.authUserId\)/, "members must never receive teammate device labels, owners, or inventory");
+    assert.match(route, /inventoryByPairing\(tenantId, visiblePairings\)/, "even the inventory lookup is limited to devices visible to the caller");
+    assert.match(route, /if \(scope !== "workspace"\)[\s\S]*api_provider_workspace_scope_required/, "a personal choice must never activate a workspace-wide API provider");
   });
 
   await check("the old separately-mounted cards render nothing", () => {
     const person = readFileSync(join(ROOT, "components/settings/PersonEngineCard.tsx"), "utf8");
     const local = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
+    const content = readFileSync(join(ROOT, "components/settings/SettingsContent.tsx"), "utf8");
     assert.match(person, /export function PersonEngineCard\([^)]*\)\s*\{\s*return null;\s*\}/s);
     assert.match(local, /export function LocalCliProvidersCard\([^)]*\)\s*\{[\s\S]*?return null;\s*\}/);
+    assert.doesNotMatch(content, /<PersonEngineCard\b|<LocalCliProvidersCard\b|title="How your departments think"/);
+    assert.match(content, /section !== "ai" && section !== "devices"/, "members must reach their personal AI and Devices surfaces");
   });
 
   const DEVICE = {
@@ -81,13 +109,13 @@ async function main() {
     approved: true,
     online: true,
     busy: false,
-    protocols: ["department_task_v2", "runtime_action_v1"],
+    protocols: ["department_task_v2", "runtime_action_v1", "coding_harness_task_v1"],
     runtimes: {
       claude: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "2.1.270", lastTestedAt: null, code: null },
       codex: { installed: true, signedIn: true, executionReady: true, unsupported: false, version: "0.146.0", lastTestedAt: "2026-10-12T06:00:00.000Z", code: null },
       gemini: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "0.63.0", lastTestedAt: null, code: "unsupported_personal_sign_in" },
     },
-    localModels: [{ ref: "ollama/llama3.3", label: "Llama 3.3", adapter: "ollama", state: "ready" }],
+    localModels: [{ ref: "ollama/llama3.3", label: "Llama 3.3", adapter: "ollama", state: "ready", lastTestedAt: "2026-10-12T06:00:00.000Z" }],
   } as const;
 
   await check("GET parsing keeps person scope, exact devices and execution verification, while old responses still parse", async () => {
@@ -152,6 +180,18 @@ async function main() {
     assert.equal(gemini.label, "Unsupported");
     assert.equal(gemini.verified, false);
     assert.match(gemini.repair ?? "", /Google API key/);
+    assert.equal(client.describeRuntime({ ...DEVICE, busy: true }, "gemini").label, "Unsupported", "busy never masks an unsupported account");
+    assert.equal(
+      client.describeRuntime({
+        ...DEVICE,
+        runtimes: {
+          ...DEVICE.runtimes,
+          gemini: { ...DEVICE.runtimes.gemini, unsupported: false, installed: true, signedIn: false },
+        },
+      }, "gemini").label,
+      "Unsupported",
+      "an installed Gemini CLI without a connector-detected managed account offers Google API instead of a login loop",
+    );
     assert.match(client.repairForCode("runtime_unavailable", "CCPC") ?? "", /oasis bridge restart/);
     assert.match(client.repairForCode("not_authenticated", "CCPC") ?? "", /Sign in/);
     assert.match(client.repairForCode("engine_not_found", "CCPC") ?? "", /Start Ollama or LM Studio/);
@@ -174,11 +214,33 @@ async function main() {
       ).label,
       "Sign-in needed",
     );
+    const unidentifiedClaude = client.describeRuntime(
+      {
+        ...DEVICE,
+        runtimes: {
+          ...DEVICE.runtimes,
+          claude: {
+            ...DEVICE.runtimes.claude,
+            installed: true,
+            signedIn: true,
+            executionReady: false,
+            code: "account_identity_unavailable",
+          },
+        },
+      },
+      "claude",
+    );
+    assert.equal(unidentifiedClaude.label, "Sign-in needed");
+    assert.match(unidentifiedClaude.repair ?? "", /Open Claude Code once on CCPC \(Windows\)/);
+    assert.match(unidentifiedClaude.repair ?? "", /restart the OASIS connector/);
     assert.equal(client.describeLocalModel(DEVICE, DEVICE.localModels[0]).label, "Ready for agents");
     assert.equal(client.describeLocalModel(DEVICE, { ...DEVICE.localModels[0], state: "probe_required" }).label, "Needs test");
     assert.equal(client.describeLocalModel(DEVICE, { ...DEVICE.localModels[0], state: "unavailable" }).label, "Offline");
     assert.equal(client.describeLocalModel({ ...DEVICE, busy: true }, DEVICE.localModels[0]).label, "Busy");
     assert.equal(client.describeLocalModel(DEVICE, undefined).label, "Not installed");
+    const oldConnector = { ...DEVICE, protocols: ["department_task_v2", "runtime_action_v1"] };
+    assert.equal(client.describeRuntime(oldConnector, "codex").label, "Needs test");
+    assert.equal(client.describeLocalModel(oldConnector, oldConnector.localModels[0]).label, "Needs test");
   });
 
   await check("Test queues and polls the exact pairing; Use includes the successful probe receipt", async () => {

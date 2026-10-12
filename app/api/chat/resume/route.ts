@@ -205,7 +205,7 @@ export async function POST(req: NextRequest) {
   // must still be this person's session in this workspace before any model is
   // asked. Without that there is nowhere to record the answer, its messages or
   // its cost against, so the resume is refused rather than run unrecorded.
-  const owner = await chatSessionOwner(signedSessionId, tenantId, user.id);
+  const owner = await chatSessionOwner(signedSessionId, tenantId, user.id, agentKey);
   if (owner.state === "unavailable") {
     console.error("[chat/resume.session] could not check the paused turn's chat session; the resume was refused", {
       tenantId,

@@ -60,10 +60,106 @@ const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex
 const db: Client = createClient({ url: `file:${dbFile}` });
 
 const TENANT = "f4f4f4f4-0000-4000-8000-0000000000f4";
+const OTHER_TENANT = "f4f4f4f4-0000-4000-8000-0000000000f5";
 const OWNER_ID = "auth-claim-owner-0001"; // the workspace's agents owner
 const MEMBER_ID = "auth-claim-member-0001"; // a plain member with their own connector
 const OTHER_MEMBER_ID = "auth-claim-other-0001";
 const stamp = "2026-10-11T00:00:00.000Z";
+const CLAUDE_HASH_A = "a".repeat(64);
+const CLAUDE_HASH_B = "b".repeat(64);
+const CLAUDE_HASH_FIRST = sha256("claim-first-binding");
+const CLAUDE_HASH_SHARED = sha256("claim-shared-binding");
+const CLAUDE_HASH_READ_FAILURE = sha256("claim-read-failure");
+const CLAUDE_HASH_CAS_REQUEST = sha256("claim-cas-request");
+const CLAUDE_HASH_CAS_WINNER = sha256("claim-cas-winner");
+const CLAUDE_HASH_CONCURRENT = sha256("claim-concurrent-binding");
+const CLAUDE_HASH_LEGACY = sha256("claim-legacy-binding");
+const CLAUDE_HASH_LOCAL_COLLISION = sha256("claim-local-collision");
+
+type ClaudeDbFault = {
+  failApprovedHashRead: boolean;
+};
+
+const claudeDbFault: ClaudeDbFault = {
+  failApprovedHashRead: false,
+};
+
+type QueryMeta = {
+  operation: "select" | "update" | null;
+  columns: string | null;
+  payload: Record<string, unknown> | null;
+  filters: Array<{ method: string; args: unknown[] }>;
+};
+
+/**
+ * Keep the route on its real Turso-backed service client while allowing two
+ * otherwise-unreachable database races to be exercised through POST:
+ * a failed approval-hash read and another writer winning the NULL-hash CAS.
+ */
+function instrumentBridgePairingsQuery(query: unknown, meta: QueryMeta): unknown {
+  return new Proxy(query as object, {
+    get(target, prop, receiver) {
+      if (prop === "then") {
+        return (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) => {
+          const execute = async () => {
+            if (
+              meta.operation === "select" &&
+              meta.columns === "claude_account_hash" &&
+              claudeDbFault.failApprovedHashRead
+            ) {
+              claudeDbFault.failApprovedHashRead = false;
+              return { data: null, error: { message: "injected claude hash read failure" } };
+            }
+            return await (target as PromiseLike<unknown>);
+          };
+          return execute().then(resolve, reject);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        if (prop === "select") {
+          meta.operation = meta.operation ?? "select";
+          meta.columns = typeof args[0] === "string" ? args[0] : "*";
+        } else if (prop === "update") {
+          meta.operation = "update";
+          meta.payload = args[0] && typeof args[0] === "object" ? (args[0] as Record<string, unknown>) : null;
+        } else if (prop === "eq" || prop === "is") {
+          meta.filters.push({ method: String(prop), args });
+        }
+        const next = value.apply(target, args);
+        return instrumentBridgePairingsQuery(next, meta);
+      };
+    },
+  });
+}
+
+{
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const real = require("../lib/supabase-server") as Record<string, unknown>;
+  const realGetServiceSupabase = real.getServiceSupabase as () => object;
+  stub(join(ROOT, "lib", "supabase-server.ts"), {
+    ...real,
+    getServiceSupabase: () => {
+      const service = realGetServiceSupabase();
+      return new Proxy(service, {
+        get(target, prop, receiver) {
+          if (prop !== "from") return Reflect.get(target, prop, receiver);
+          return (table: string) => {
+            const query = (Reflect.get(target, prop, receiver) as (name: string) => unknown)(table);
+            if (table !== "bridge_pairings") return query;
+            return instrumentBridgePairingsQuery(query, {
+              operation: null,
+              columns: null,
+              payload: null,
+              filters: [],
+            });
+          };
+        },
+      });
+    },
+  });
+}
 
 function splitStatements(sql: string): string[] {
   const out: string[] = [];
@@ -100,6 +196,10 @@ async function createSchema() {
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT");
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT");
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_policy TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_reason TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_provider TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_model TEXT");
   await db.executeMultiple(`
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL, custom_fields TEXT NOT NULL DEFAULT '{}');
     CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT NOT NULL,
@@ -118,7 +218,7 @@ async function createSchema() {
       tool_capabilities TEXT NOT NULL DEFAULT '[]',
       scope TEXT, paired_via TEXT, claim_protocols TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
       claude_account_hash TEXT, claim_state_at TEXT, claim_capacity INTEGER, claim_in_flight INTEGER,
-      claim_blocked_reason TEXT, last_claim_ip TEXT, previous_token_hash TEXT, token_rotated_at TEXT,
+      claim_blocked_reason TEXT, claim_runtime_state TEXT, last_claim_ip TEXT, previous_token_hash TEXT, token_rotated_at TEXT,
       last_poll_ok_at TEXT);
     CREATE TABLE agent_events (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
       event_type TEXT, publisher_agent TEXT, severity TEXT, payload TEXT, correlation_id TEXT,
@@ -208,15 +308,39 @@ async function enqueueComputerRun(userId: string, text = "hi from the test") {
   return { conv, run: q.ok ? q.run : null };
 }
 
-function body(claimId: string, over: Partial<{ protocol: string; capacity: number; in_flight: number; blocked_reason: string | null; wait_ms: number; claude_account_hash: string }> = {}) {
+function readyRuntimeState() {
   return {
-    protocol: over.protocol ?? "department_task_v1",
+    claude: { installed: true, authenticated: true, state: "ready" },
+    codex: { installed: true, authenticated: true, state: "ready" },
+    gemini: { installed: true, authenticated: true, state: "ready" },
+    local_models: [{ ref: "ollama/llama3.3", label: "Llama 3.3", adapter: "ollama", state: "ready" }],
+  };
+}
+
+function body(
+  claimId: string,
+  over: Partial<{
+    protocol: string;
+    capacity: number;
+    in_flight: number;
+    blocked_reason: string | null;
+    wait_ms: number;
+    claude_account_hash: string;
+    runtime_state: unknown;
+  }> = {},
+) {
+  const protocol = over.protocol ?? "department_task_v1";
+  return {
+    protocol,
     claim_id: claimId,
     capacity: over.capacity ?? 2,
     in_flight: over.in_flight ?? 0,
     blocked_reason: over.blocked_reason ?? null,
     wait_ms: over.wait_ms ?? 0,
     ...(over.claude_account_hash ? { claude_account_hash: over.claude_account_hash } : {}),
+    ...(protocol === "department_task_v2"
+      ? { runtime_state: Object.prototype.hasOwnProperty.call(over, "runtime_state") ? over.runtime_state : readyRuntimeState() }
+      : {}),
   };
 }
 
@@ -335,13 +459,23 @@ async function main() {
   });
   await check("a claude_account_hash that differs from the one recorded at approval overrides blocked_reason to claude_account_changed, recorded on the pairing row", async () => {
     const member = await freshMember();
-    const { id, token } = await makePairing({ userId: member, scope: "connector", claudeAccountHash: "approved-hash-abc" });
+    const { id, token } = await makePairing({ userId: member, scope: "connector", claudeAccountHash: CLAUDE_HASH_A });
     const { run } = await enqueueComputerRun(member);
     assert.ok(run);
-    const r = await claim(token, body(randomUUID(), { claude_account_hash: "a-different-hash-xyz" }));
+    const r = await claim(token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_B }));
     assert.deepEqual(r.json, { ok: true, run: null }, "the override blocks the claim even though capacity was 2");
     const row = await db.execute({ sql: `SELECT claim_blocked_reason FROM bridge_pairings WHERE id = ?`, args: [id] });
     assert.equal(row.rows[0].claim_blocked_reason, "claude_account_changed");
+  });
+  await check("a present claude_account_hash must be exactly 64 lowercase hexadecimal characters", async () => {
+    for (const invalid of ["", "a".repeat(63), "A".repeat(64), `${"a".repeat(63)}g`]) {
+      const pairing = await makePairing({ userId: await freshMember(), scope: "connector", claudeAccountHash: null });
+      const requestBody = { ...body(randomUUID()), claude_account_hash: invalid };
+      const r = await claim(pairing.token, requestBody);
+      assert.equal(r.status, 400, `expected ${JSON.stringify(invalid)} to be rejected`);
+      assert.equal(r.json.error, "claude_account_hash_invalid");
+      assert.equal((await rowOf(pairing.id)).claude_account_hash, null, "invalid input must never bind");
+    }
   });
 
   // ── First-seen Claude account binding (Codex review, P1, 2026-10-12) ──
@@ -365,34 +499,92 @@ async function main() {
   await check(
     "mutation check: hashIsBoundTo distinguishes a bound hash from an unbound/different one, before trusting it against the real collision check below",
     () => {
-      assert.equal(hashIsBoundTo({ claude_account_hash: "hash-a" }, "hash-a"), true, "a matching hash must read as bound");
-      assert.equal(hashIsBoundTo({ claude_account_hash: null }, "hash-a"), false, "a NULL hash must never read as bound");
-      assert.equal(hashIsBoundTo({ claude_account_hash: "hash-b" }, "hash-a"), false, "a different hash must never read as bound");
+      assert.equal(hashIsBoundTo({ claude_account_hash: CLAUDE_HASH_A }, CLAUDE_HASH_A), true, "a matching hash must read as bound");
+      assert.equal(hashIsBoundTo({ claude_account_hash: null }, CLAUDE_HASH_A), false, "a NULL hash must never read as bound");
+      assert.equal(hashIsBoundTo({ claude_account_hash: CLAUDE_HASH_B }, CLAUDE_HASH_A), false, "a different hash must never read as bound");
     },
   );
   await check("a pairing approved with NO recorded hash binds the FIRST claude_account_hash a claim reports (the only enforcement point a connector pairing ever passes through)", async () => {
     const member = await freshMember();
     const { id, token } = await makePairing({ userId: member, scope: "connector", claudeAccountHash: null });
     assert.equal((await rowOf(id)).claude_account_hash, null, "fixture sanity: no hash recorded yet");
-    const r = await claim(token, body(randomUUID(), { claude_account_hash: "first-seen-hash-001" }));
+    const r = await claim(token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_FIRST }));
     assert.equal(r.status, 200);
     assert.equal(r.json.ok, true);
     const row = await rowOf(id);
-    assert.equal(hashIsBoundTo(row, "first-seen-hash-001"), true, "the first hash this pairing ever reported must be recorded");
+    assert.equal(hashIsBoundTo(row, CLAUDE_HASH_FIRST), true, "the first hash this pairing ever reported must be recorded");
     assert.equal(row.claim_blocked_reason, null, "binding a FRESH hash (no collision) must never block the claim itself");
   });
   await check("a SECOND person's computer reporting the SAME hash as someone else's already-approved pairing is refused claude_account_shared, and the hash is never recorded on it", async () => {
     const owner1 = await freshMember();
     const owner2 = await freshMember();
-    await makePairing({ userId: owner1, scope: "connector", claudeAccountHash: "shared-hash-collision-1" });
+    await makePairing({ userId: owner1, scope: "connector", claudeAccountHash: CLAUDE_HASH_SHARED });
     const { id: pairing2Id, token: pairing2Token } = await makePairing({ userId: owner2, scope: "connector", claudeAccountHash: null });
-    const r = await claim(pairing2Token, body(randomUUID(), { claude_account_hash: "shared-hash-collision-1" }));
+    const r = await claim(pairing2Token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_SHARED }));
     assert.equal(r.status, 200, "the claim call itself still answers normally, just with no work");
     assert.deepEqual(r.json, { ok: true, run: null });
     const row = await rowOf(pairing2Id);
     assert.equal(row.claim_blocked_reason, "claude_account_shared");
-    assert.equal(hashIsBoundTo(row, "shared-hash-collision-1"), false, "a colliding hash must NEVER be recorded on the second pairing");
+    assert.equal(hashIsBoundTo(row, CLAUDE_HASH_SHARED), false, "a colliding hash must NEVER be recorded on the second pairing");
     assert.equal(row.claude_account_hash, null, "refused, not silently bound under someone else's account");
+  });
+  await check("a failed approval-hash read fails closed and never binds or claims Claude work", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector", claudeAccountHash: null });
+    const { run } = await enqueueComputerRun(member, "must stay queued when the binding cannot be read");
+    assert.ok(run);
+    claudeDbFault.failApprovedHashRead = true;
+    const r = await claim(pairing.token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_READ_FAILURE }));
+    assert.deepEqual(r.json, { ok: true, run: null });
+    const pairingRow = await rowOf(pairing.id);
+    assert.equal(pairingRow.claude_account_hash, null);
+    assert.equal(pairingRow.claim_blocked_reason, "claude_account_changed");
+    const runRow = await db.execute({ sql: "SELECT status FROM dept_chat_runs WHERE id = ?", args: [run!.id] });
+    assert.equal(runRow.rows[0].status, "queued");
+  });
+  await check("the first-bind ownership guard is one conditional UPDATE, never a read-then-write race", () => {
+    const source = readFileSync(join(ROOT, "app", "api", "bridge", "runs", "claim", "route.ts"), "utf8");
+    assert.match(source, /UPDATE bridge_pairings[\s\S]*SET claude_account_hash = \?[\s\S]*AND NOT EXISTS \(/);
+    assert.match(source, /other\.tenant_id = \?[\s\S]*other\.claude_account_hash = \?[\s\S]*other\.user_id IS NOT \?/);
+    assert.match(source, /if \(winner\.hash === hash\) return \{ ok: true \}/, "a same-hash retry must accept the concurrent winner");
+    assert.match(source, /winner\.hash === null \? "claude_account_shared" : "claude_account_changed"/);
+  });
+  await check("two concurrent first binds on one pairing cannot overwrite the winning Claude account", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector", claudeAccountHash: null });
+    await Promise.all([
+      claim(pairing.token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_CAS_REQUEST })),
+      claim(pairing.token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_CAS_WINNER })),
+    ]);
+    const pairingRow = await rowOf(pairing.id);
+    assert.ok(
+      pairingRow.claude_account_hash === CLAUDE_HASH_CAS_REQUEST || pairingRow.claude_account_hash === CLAUDE_HASH_CAS_WINNER,
+      "exactly one concurrent account hash must win",
+    );
+    const losingHash = pairingRow.claude_account_hash === CLAUDE_HASH_CAS_REQUEST ? CLAUDE_HASH_CAS_WINNER : CLAUDE_HASH_CAS_REQUEST;
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    const retry = await claim(pairing.token, body(randomUUID(), { claude_account_hash: losingHash }));
+    assert.deepEqual(retry.json, { ok: true, run: null });
+    const afterRetry = await rowOf(pairing.id);
+    assert.equal(afterRetry.claude_account_hash, pairingRow.claude_account_hash, "the losing account must never overwrite the winner");
+    assert.equal(afterRetry.claim_blocked_reason, "claude_account_changed");
+  });
+  await check("two concurrent first binds cannot leave the same Claude hash approved for different people", async () => {
+    const first = await makePairing({ userId: await freshMember(), scope: "connector", claudeAccountHash: null });
+    const second = await makePairing({ userId: await freshMember(), scope: "connector", claudeAccountHash: null });
+    await Promise.all([
+      claim(first.token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_CONCURRENT })),
+      claim(second.token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_CONCURRENT })),
+    ]);
+    const rows = await db.execute({
+      sql: "SELECT id, claude_account_hash FROM bridge_pairings WHERE id IN (?, ?) ORDER BY id",
+      args: [first.id, second.id],
+    });
+    assert.equal(
+      rows.rows.filter((row) => row.claude_account_hash === CLAUDE_HASH_CONCURRENT).length,
+      1,
+      "at most one different person's approved pairing may retain the hash",
+    );
   });
   await check("a pairing already live-approved with a NULL hash before this fix shipped (the Adon/938fbd09 shape) still binds correctly on its first claim", async () => {
     // Same fixture shape as a pairing approved by the OLD POST /approve path
@@ -403,10 +595,10 @@ async function main() {
     // route refuses it 403 agents_owner_only before ever reaching the hash
     // logic this check is about.
     const { id, token } = await makePairing({ userId: OWNER_ID, scope: "daemon", claudeAccountHash: null });
-    const r = await claim(token, body(randomUUID(), { claude_account_hash: "legacy-pairing-first-hash" }));
+    const r = await claim(token, body(randomUUID(), { claude_account_hash: CLAUDE_HASH_LEGACY }));
     assert.equal(r.status, 200);
     const row = await rowOf(id);
-    assert.equal(hashIsBoundTo(row, "legacy-pairing-first-hash"), true);
+    assert.equal(hashIsBoundTo(row, CLAUDE_HASH_LEGACY), true);
     assert.equal(row.claim_blocked_reason, null);
   });
 
@@ -467,6 +659,31 @@ async function main() {
     );
     assert.ok(row.rows[0].deadline_at);
   });
+  await check("department_task_v2 rejects missing or oversized runtime state before stamping the pairing", async () => {
+    const pairing = await makePairing({ userId: await freshMember(), scope: "connector" });
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+      args: [JSON.stringify(["department_task_v2"]), pairing.id],
+    });
+    const missing = body(randomUUID(), { protocol: "department_task_v2", runtime_state: undefined });
+    assert.equal((await claim(pairing.token, missing)).status, 400);
+
+    const oversized = readyRuntimeState();
+    oversized.local_models = Array.from({ length: 201 }, (_, index) => ({
+      ref: `ollama/model-${index}`,
+      label: `Model ${index}`,
+      adapter: "ollama",
+      state: "ready",
+    }));
+    const rejected = await claim(
+      pairing.token,
+      body(randomUUID(), { protocol: "department_task_v2", runtime_state: oversized }),
+    );
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.json.error, "invalid_runtime_state");
+    const row = await db.execute({ sql: "SELECT claim_state_at, claim_runtime_state FROM bridge_pairings WHERE id = ?", args: [pairing.id] });
+    assert.deepEqual([row.rows[0].claim_state_at, row.rows[0].claim_runtime_state], [null, null]);
+  });
   await check("department_task_v2 keeps the exact tested pairing and Codex runtime through claim, with a read-only sandbox", async () => {
     const member = await freshMember();
     const pairing = await makePairing({ userId: member, scope: "connector" });
@@ -502,6 +719,266 @@ async function main() {
       /engineInput:\s*\{\s*kind:\s*"computer",\s*label,\s*engine:\s*runtime\.engine\s*\}/,
       "the same snapshotted runtime used in the claim payload must prepare the turn metadata",
     );
+  });
+  await check("a pairing owner deactivated during a v2 long poll receives no requester prompt or context", async () => {
+    const pairingOwner = await freshMember();
+    const requester = await freshMember();
+    const pairing = await makePairing({ userId: pairingOwner, scope: "connector" });
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+      args: [JSON.stringify(["department_task_v2"]), pairing.id],
+    });
+    const claimPromise = claim(pairing.token, body(randomUUID(), { protocol: "department_task_v2", wait_ms: 3000 }));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await db.execute({
+      sql: "UPDATE user_profiles SET deactivated_at = ? WHERE tenant_id = ? AND auth_user_id = ?",
+      args: [new Date().toISOString(), TENANT, pairingOwner],
+    });
+    try {
+      const store = await import("../lib/os/runs/store");
+      const scope = { tenantId: TENANT, userId: requester };
+      const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+      const queued = await store.enqueueRun(db, scope, {
+        conversationId: conv.id,
+        text: "PAIRING_OWNER_REMOVED_PRIVATE_PROMPT",
+        chatMode: "build",
+        showThinking: false,
+        now: new Date(),
+        executor: "computer",
+        targetPairingId: pairing.id,
+        runtimeEngineKind: "cli",
+        runtimeEngineName: "codex",
+        runtimeFallbackPolicy: "none",
+      });
+      assert.ok(queued.ok);
+      const response = await claimPromise;
+      assert.deepEqual(response.json, { ok: true, run: null });
+      assert.doesNotMatch(JSON.stringify(response.json), /PAIRING_OWNER_REMOVED_PRIVATE_PROMPT/);
+      const row = await db.execute({
+        sql: "SELECT status, error_code FROM dept_chat_runs WHERE id = ?",
+        args: [queued.ok ? queued.run.id : ""],
+      });
+      assert.deepEqual([row.rows[0].status, row.rows[0].error_code], ["failed", "seat_removed"]);
+    } finally {
+      await db.execute({
+        sql: "UPDATE user_profiles SET deactivated_at = NULL WHERE tenant_id = ? AND auth_user_id = ?",
+        args: [TENANT, pairingOwner],
+      });
+    }
+  });
+  await check("v2 Codex sign-out before claim persists truthful state and never claims or discloses the queued prompt", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector" });
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+      args: [JSON.stringify(["department_task_v2"]), pairing.id],
+    });
+    const store = await import("../lib/os/runs/store");
+    const scope = { tenantId: TENANT, userId: member };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const queued = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "SIGNED_OUT_CODEX_PRIVATE_PROMPT",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+      executor: "computer",
+      targetPairingId: pairing.id,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "none",
+    });
+    assert.ok(queued.ok);
+    const runtimeState = readyRuntimeState();
+    runtimeState.codex = { installed: true, authenticated: false, state: "needs_sign_in" };
+    const response = await claim(
+      pairing.token,
+      body(randomUUID(), { protocol: "department_task_v2", runtime_state: runtimeState }),
+    );
+    assert.deepEqual(response.json, { ok: true, run: null });
+    assert.doesNotMatch(JSON.stringify(response.json), /SIGNED_OUT_CODEX_PRIVATE_PROMPT/);
+    const runRow = await db.execute({
+      sql: "SELECT status, claimed_pairing_id, runtime_fallback_policy FROM dept_chat_runs WHERE id = ?",
+      args: [queued.ok ? queued.run.id : ""],
+    });
+    assert.deepEqual(
+      [runRow.rows[0].status, runRow.rows[0].claimed_pairing_id, runRow.rows[0].runtime_fallback_policy],
+      ["queued", null, "none"],
+      "a signed-out runtime with no fallback stays queued and was never leased",
+    );
+    const pairingRow = await db.execute({
+      sql: "SELECT claim_blocked_reason, claim_runtime_state FROM bridge_pairings WHERE id = ?",
+      args: [pairing.id],
+    });
+    assert.equal(pairingRow.rows[0].claim_blocked_reason, "subscription_auth_failure");
+    const persisted = JSON.parse(String(pairingRow.rows[0].claim_runtime_state)) as Record<string, Record<string, unknown>>;
+    assert.equal(persisted.codex.state, "needs_sign_in");
+  });
+  await check("v2 Codex sign-out exposes the immediate availability reason to an explicitly opted-in workspace API fallback", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector" });
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+      args: [JSON.stringify(["department_task_v2"]), pairing.id],
+    });
+    const store = await import("../lib/os/runs/store");
+    const scope = { tenantId: TENANT, userId: member };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const queued = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "use only my explicit fallback if Codex is signed out",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+      executor: "computer",
+      targetPairingId: pairing.id,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "workspace_api",
+      runtimeApiSnapshot: { provider: "google", model: "gemini-3.8-flash" },
+    });
+    assert.ok(queued.ok);
+    const runtimeState = readyRuntimeState();
+    runtimeState.codex = { installed: true, authenticated: false, state: "needs_sign_in" };
+    const response = await claim(
+      pairing.token,
+      body(randomUUID(), { protocol: "department_task_v2", runtime_state: runtimeState }),
+    );
+    assert.deepEqual(response.json, { ok: true, run: null });
+
+    const { computerStateForTarget } = await import("../lib/os/runs/send");
+    const { fallbackQueueDecision } = await import("../lib/os/runs/fallback-dispatcher");
+    const computerState = await computerStateForTarget(scope)(queued.ok ? queued.run : { targetPairingId: pairing.id });
+    assert.equal(computerState, "blocked:subscription_auth_failure");
+    const decision = fallbackQueueDecision({
+      run: queued.ok ? queued.run : { createdAt: new Date().toISOString() },
+      firstInLineAt: new Date().toISOString(),
+      state: computerState,
+      nowMs: Date.now(),
+    });
+    assert.deepEqual(decision, { action: "fallback", reason: "subscription_auth_failure" });
+    assert.equal(
+      await store.fallbackQueuedComputerRun(db, scope, queued.ok ? queued.run.id : "", "subscription_auth_failure"),
+      true,
+    );
+    const row = await db.execute({
+      sql: "SELECT status, executor, claimed_pairing_id, runtime_fallback_reason FROM dept_chat_runs WHERE id = ?",
+      args: [queued.ok ? queued.run.id : ""],
+    });
+    assert.deepEqual(
+      [row.rows[0].status, row.rows[0].executor, row.rows[0].claimed_pairing_id, row.rows[0].runtime_fallback_reason],
+      ["queued", "worker", null, "subscription_auth_failure"],
+    );
+  });
+  await check("Claude-account mismatch or collision never blocks Codex or pure-local department_task_v2 work", async () => {
+    const cases: Array<{
+      kind: "cli" | "local";
+      name: string;
+      reportedHash: string;
+      pairingHash: string | null;
+      seedCollision: boolean;
+    }> = [
+      { kind: "cli", name: "codex", reportedHash: CLAUDE_HASH_B, pairingHash: CLAUDE_HASH_A, seedCollision: false },
+      {
+        kind: "local",
+        name: "ollama/llama3.3",
+        reportedHash: CLAUDE_HASH_LOCAL_COLLISION,
+        pairingHash: null,
+        seedCollision: true,
+      },
+    ];
+    for (const testCase of cases) {
+      const member = await freshMember();
+      if (testCase.seedCollision) {
+        await makePairing({ userId: await freshMember(), scope: "connector", claudeAccountHash: testCase.reportedHash });
+      }
+      const pairing = await makePairing({ userId: member, scope: "connector", claudeAccountHash: testCase.pairingHash });
+      await db.execute({
+        sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+        args: [JSON.stringify(["department_task_v2"]), pairing.id],
+      });
+      const store = await import("../lib/os/runs/store");
+      const scope = { tenantId: TENANT, userId: member };
+      const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+      const queued = await store.enqueueRun(db, scope, {
+        conversationId: conv.id,
+        text: `answer with ${testCase.name}`,
+        chatMode: "build",
+        showThinking: false,
+        now: new Date(),
+        executor: "computer",
+        targetPairingId: pairing.id,
+        runtimeEngineKind: testCase.kind,
+        runtimeEngineName: testCase.name,
+      });
+      assert.ok(queued.ok);
+      const response = await claim(
+        pairing.token,
+        body(randomUUID(), { protocol: "department_task_v2", claude_account_hash: testCase.reportedHash }),
+      );
+      assert.equal(response.status, 200, JSON.stringify(response.json));
+      assert.equal((response.json.run as Record<string, unknown>)?.id, queued.ok ? queued.run.id : null);
+      const pairingRow = await rowOf(pairing.id);
+      assert.equal(pairingRow.claim_blocked_reason, null, `${testCase.name} must not inherit a Claude-only block`);
+    }
+  });
+  await check("a Claude department_task_v2 run requires the connector to prove its Claude account hash", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector", claudeAccountHash: CLAUDE_HASH_A });
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+      args: [JSON.stringify(["department_task_v2"]), pairing.id],
+    });
+    const store = await import("../lib/os/runs/store");
+    const scope = { tenantId: TENANT, userId: member };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const queued = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "do not run Claude without account identity proof",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+      executor: "computer",
+      targetPairingId: pairing.id,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "claude",
+    });
+    assert.ok(queued.ok);
+    const response = await claim(pairing.token, body(randomUUID(), { protocol: "department_task_v2" }));
+    assert.deepEqual(response.json, { ok: true, run: null });
+    const runRow = await db.execute({ sql: "SELECT status, error_code FROM dept_chat_runs WHERE id = ?", args: [queued.ok ? queued.run.id : ""] });
+    assert.deepEqual([runRow.rows[0].status, runRow.rows[0].error_code], ["failed", "department_profile_unsupported"]);
+  });
+  await check("a mismatched Claude account still blocks a Claude department_task_v2 run on the exact target pairing", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector", claudeAccountHash: CLAUDE_HASH_A });
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+      args: [JSON.stringify(["department_task_v2"]), pairing.id],
+    });
+    const store = await import("../lib/os/runs/store");
+    const scope = { tenantId: TENANT, userId: member };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const queued = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "do not execute this under the wrong Claude account",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+      executor: "computer",
+      targetPairingId: pairing.id,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "claude",
+    });
+    assert.ok(queued.ok);
+    const response = await claim(
+      pairing.token,
+      body(randomUUID(), { protocol: "department_task_v2", claude_account_hash: CLAUDE_HASH_B }),
+    );
+    assert.deepEqual(response.json, { ok: true, run: null });
+    const runRow = await db.execute({ sql: "SELECT status, error_code FROM dept_chat_runs WHERE id = ?", args: [queued.ok ? queued.run.id : ""] });
+    assert.deepEqual([runRow.rows[0].status, runRow.rows[0].error_code], ["failed", "claude_account_changed"]);
+    assert.equal((await rowOf(pairing.id)).claim_blocked_reason, null, "v2 stores runtime-specific state without poisoning other engines");
   });
   await check("a pasted credential-shaped string in the message never reaches the claim payload (env-secret redaction, [P1] Codex finding)", async () => {
     const member = await freshMember();
@@ -679,22 +1156,23 @@ async function main() {
     // (pairingLiveForClaim) directly, over every state it must get right.
     const { pairingLiveForClaim } = await import("../lib/bridge/pairing-auth");
     const approved = await makePairing({ userId: await freshMember(), scope: "connector" });
-    assert.equal(await pairingLiveForClaim(approved.id), true);
+    assert.equal(await pairingLiveForClaim(approved.id, TENANT), true);
 
     const revoked = await makePairing({ userId: await freshMember(), scope: "connector" });
     await db.execute({ sql: `UPDATE bridge_pairings SET revoked_at = ? WHERE id = ?`, args: [stamp, revoked.id] });
-    assert.equal(await pairingLiveForClaim(revoked.id), false);
+    assert.equal(await pairingLiveForClaim(revoked.id, TENANT), false);
 
     const deApproved = await makePairing({ userId: await freshMember(), scope: "connector" });
     await db.execute({ sql: `UPDATE bridge_pairings SET claim_enabled_at = NULL, claim_enabled_by = NULL WHERE id = ?`, args: [deApproved.id] });
-    assert.equal(await pairingLiveForClaim(deApproved.id), false);
+    assert.equal(await pairingLiveForClaim(deApproved.id, TENANT), false);
 
     const signup = await makePairing({ userId: await freshMember(), scope: "connector" });
     await db.execute({ sql: `UPDATE bridge_pairings SET paired_via = 'signup_secret' WHERE id = ?`, args: [signup.id] });
-    assert.equal(await pairingLiveForClaim(signup.id), false, "a signup_secret pairing can never be approved for claiming, however claim_enabled_at reads");
+    assert.equal(await pairingLiveForClaim(signup.id, TENANT), false, "a signup_secret pairing can never be approved for claiming, however claim_enabled_at reads");
 
-    assert.equal(await pairingLiveForClaim("no-such-pairing-id"), false);
-    assert.equal(await pairingLiveForClaim(""), false);
+    assert.equal(await pairingLiveForClaim("no-such-pairing-id", TENANT), false);
+    assert.equal(await pairingLiveForClaim("", TENANT), false);
+    assert.equal(await pairingLiveForClaim(approved.id, OTHER_TENANT), false, "a pairing id is never revalidated outside its tenant");
   });
   await check("buildAndRespond still calls the re-check (source pin, since the exact few-millisecond race is not reproducible on demand)", () => {
     const src = readFileSync(join(ROOT, "app/api/bridge/runs/claim/route.ts"), "utf8");

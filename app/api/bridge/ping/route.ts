@@ -164,7 +164,7 @@ export async function POST(req: NextRequest) {
   // tool_capabilities, and recorded for every scope (a connector computer
   // still needs to tell the server which claim protocols it speaks).
   if (Array.isArray(body.claim_protocols)) {
-    const allowedProtocols = new Set(["department_task_v1", "department_task_v2", "runtime_action_v1"]);
+    const allowedProtocols = new Set(["department_task_v1", "department_task_v2", "runtime_action_v1", "coding_harness_task_v1"]);
     const cleanedProtocols = body.claim_protocols.filter((t): t is string => typeof t === "string" && allowedProtocols.has(t));
     pairingUpdate.claim_protocols = JSON.stringify(cleanedProtocols);
   }
@@ -174,7 +174,9 @@ export async function POST(req: NextRequest) {
   const pairingWrite = await db
     .from("bridge_pairings")
     .update(pairingUpdate)
-    .eq("id", pairing.pairingId);
+    .eq("tenant_id", pairing.tenantId)
+    .eq("id", pairing.pairingId)
+    .is("revoked_at", null);
   if (pairingWrite.error) {
     console.error("[bridge.ping.pairing]", pairingWrite.error.message);
     return bad(503, "pairing_heartbeat_persist_failed");

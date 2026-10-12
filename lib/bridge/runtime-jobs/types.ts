@@ -6,6 +6,7 @@ export const RUNTIME_ACTIONS = ["probe", "auth"] as const;
 export const RUNTIME_ENGINE_KINDS = ["cli", "local"] as const;
 export const RUNTIME_PROGRESS_CODES = ["starting", "waiting_for_user", "authenticating", "probing", "retrying"] as const;
 export const RUNTIME_FAILURE_CODES = [
+  "account_identity_unavailable",
   "account_unsupported",
   "auth_process_failed",
   "auth_start_failed",
@@ -29,7 +30,14 @@ export type RuntimeFailureCode = (typeof RUNTIME_FAILURE_CODES)[number];
 export type RuntimeEngine = { kind: RuntimeEngineKind; name: string };
 export type RuntimeCapability = { action: RuntimeAction; engine: RuntimeEngine };
 export type RuntimeJobStatus = "queued" | "running" | "completed" | "failed";
-export type CliRuntimeStateCode = "ready" | "needs_sign_in" | "not_installed" | "unsupported" | "probe_failed" | "probe_required";
+export type CliRuntimeStateCode =
+  | "ready"
+  | "needs_sign_in"
+  | "not_installed"
+  | "unsupported"
+  | "probe_failed"
+  | "probe_required"
+  | "account_identity_unavailable";
 export type RuntimeClaimState = {
   claude: { installed: boolean; authenticated: boolean; state: CliRuntimeStateCode };
   codex: { installed: boolean; authenticated: boolean; state: CliRuntimeStateCode };
@@ -60,7 +68,14 @@ export type RuntimeJobRow = {
   progressCode: RuntimeProgressCode | null;
   resultCode: string | null;
   result: Record<string, unknown> | null;
-  errorCode: RuntimeFailureCode | "lease_expired" | "pairing_approval_lost" | "pairing_revoked" | null;
+  errorCode:
+    | RuntimeFailureCode
+    | "lease_expired"
+    | "queue_expired"
+    | "pairing_approval_lost"
+    | "pairing_revoked"
+    | "requester_seat_inactive"
+    | null;
   errorRetryable: boolean | null;
   createdAt: string;
   updatedAt: string;
@@ -70,7 +85,15 @@ export type RuntimeJobRow = {
 const IDENTIFIER_RE = /^[a-z0-9][a-z0-9._:/-]{0,95}$/;
 const REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/;
 const CLI_NAMES = new Set(["claude", "codex", "gemini"]);
-const CLI_RUNTIME_STATES = new Set(["ready", "needs_sign_in", "not_installed", "unsupported", "probe_failed", "probe_required"]);
+const CLI_RUNTIME_STATES = new Set([
+  "ready",
+  "needs_sign_in",
+  "not_installed",
+  "unsupported",
+  "probe_failed",
+  "probe_required",
+  "account_identity_unavailable",
+]);
 const LOCAL_RUNTIME_STATES = new Set(["ready", "unavailable", "probe_required"]);
 const LOCAL_REF_RE = /^(?:ollama|lmstudio)\/[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
 const SAFE_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9 ._:/()\-]{0,139}$/;
@@ -103,11 +126,12 @@ export function validRequestId(value: unknown): value is string {
 export function parseRuntimeEngine(value: unknown): { ok: true; engine: RuntimeEngine } | { ok: false; code: string } {
   if (!isPlainObject(value) || !hasOnlyKeys(value, ["kind", "name"])) return { ok: false, code: "unexpected_field" };
   if (value.kind !== "cli" && value.kind !== "local") return { ok: false, code: "unsupported_engine" };
-  if (typeof value.name !== "string" || !IDENTIFIER_RE.test(value.name) || redactAll(value.name) !== value.name) {
+  if (typeof value.name !== "string" || redactAll(value.name) !== value.name) {
     return { ok: false, code: "unsupported_engine" };
   }
-  const name = value.name.toLowerCase();
-  if (value.kind === "cli" && !CLI_NAMES.has(name)) return { ok: false, code: "unsupported_engine" };
+  const name = value.kind === "cli" ? value.name.toLowerCase() : value.name;
+  if (value.kind === "cli" && (!IDENTIFIER_RE.test(name) || !CLI_NAMES.has(name))) return { ok: false, code: "unsupported_engine" };
+  if (value.kind === "local" && (name.length > 160 || !LOCAL_REF_RE.test(name))) return { ok: false, code: "unsupported_engine" };
   return { ok: true, engine: { kind: value.kind, name } };
 }
 

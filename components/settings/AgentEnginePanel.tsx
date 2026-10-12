@@ -27,7 +27,6 @@ import {
   repairForCode,
   saveEngine,
   selectionKey,
-  switchProvider,
   type EngineDevice,
   type EngineScope,
   type EngineSelection,
@@ -307,16 +306,6 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     stop.current = controller;
     setActivity("saving");
     setNotice(null);
-    let switchedAccount: string | null = null;
-    if (draftSelection.mode === "api" && loadedState.account?.provider !== draftSelection.provider) {
-      const switched = await switchProvider(draftSelection.provider, undefined, { signal: controller.signal });
-      if (!switched.ok) {
-        setActivity(null);
-        setNotice({ tone: "error", text: switched.message });
-        return;
-      }
-      switchedAccount = PROVIDER_LABEL[draftSelection.provider];
-    }
     const result = await saveEngine(draftSelection, versionForScope(loadedState, scope), undefined, {
       scope,
       ...(probeReceipt?.key === draftKey ? { probeJobId: probeReceipt.jobId } : {}),
@@ -326,9 +315,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     if (!result.ok) {
       setNotice({
         tone: "error",
-        text: switchedAccount
-          ? `${switchedAccount} is now the workspace API account, but this agent setup was not saved. Refresh and press Use again.`
-          : result.message,
+        text: result.message,
         repair: repairForCode(result.code, selectedDevice?.label, selectedCli),
       });
       await load({ keepDraft: true });
@@ -567,7 +554,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                   {(selected || unsupported) && status?.repair && <p className="mt-2 text-[11px] leading-relaxed text-fg-muted">{status.repair}</p>}
                   {selected && selectedDevice && !unsupported && (
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      {selectedDevice.ownedByViewer ? (
+                      {provider === "gemini" ? (
+                        <span className="text-[11px] text-fg-muted">Managed Gemini CLI account detected. Test it here; sign-in is managed on the computer.</span>
+                      ) : selectedDevice.ownedByViewer ? (
                         <button
                           type="button"
                           onClick={() => void connect(provider)}

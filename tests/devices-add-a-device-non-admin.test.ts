@@ -2,35 +2,24 @@
  * devices-add-a-device-non-admin.test.ts - D0: the Devices section had no
  * way to add a computer at all (ConnectYourComputerCard lived only on
  * Profile). Fix: the SAME card, reused not forked, at the TOP of the
- * Devices section, gated on `show("devices")` alone -- never joined with
- * `isOperator` the way "Your computers" and "Devices (advanced)" beside it
- * are (those two list OTHER people's bridge pairings and stay operator-only
- * on purpose).
+ * Devices section, gated on `show("devices")` alone. Every member also sees
+ * their own computers; only the raw team/advanced inventory remains operator-
+ * only.
  *
- * WHY THIS RUNS DIRECTLY AGAINST THE COMPONENT, NOT THE ROUTE. The real
- * /settings/devices page (app/settings/devices/page.tsx) still calls
- * requireSettingsSection("devices"), which 404s anyone who is not a
- * verified platform operator before SettingsContent ever renders -- that
- * route-level gate is unchanged by this fix (see the comment beside the
- * new section in components/settings/SettingsContent.tsx). So the entry
- * point this test exercises -- SettingsContent({ section: "devices", ... })
- * called directly, the same technique tests/client-route-gating.test.ts
- * already uses for Settings > AI brain -- is deliberately the ONE place a
- * non-admin viewer's copy of this section can be proven, now and if a
- * future change ever lets a non-operator reach the real page.
+ * This exercises the real /settings/devices page guard and then renders the
+ * SettingsContent it returns. A component-only test previously passed while
+ * the actual page still 404ed members.
  *
  * Both personas are real rows read through the real Turso adapter and the
- * real session cookie: a client owner (canManageTenant true, routes through
- * SettingsContent's own manager branch) and a plain member (canManageTenant
- * false, routes through PersonalSettingsView). Neither is a verified
- * platform operator (ADMIN_EMAILS is empty, OPERATOR_EMAIL is unset), so
- * "Your computers" and "Devices (advanced)" are absent for both -- proving
- * the new entry does not ride in on the operator gate.
+ * real session cookie: a workspace owner and a plain member. Neither is a
+ * verified platform operator (ADMIN_EMAILS is empty, OPERATOR_EMAIL is
+ * unset), but both can manage their own computers. Only the raw team-wide
+ * "Devices (advanced)" inventory stays operator-only.
  *
  * Run: node --conditions=react-server --import tsx tests/devices-add-a-device-non-admin.test.ts
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
@@ -169,11 +158,13 @@ async function main() {
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
     CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, last_seen_at TEXT,
       tool_capabilities TEXT, revoked_at TEXT);
+    CREATE TABLE workspace_agents_owner (id TEXT PRIMARY KEY, tenant_id TEXT, auth_user_id TEXT,
+      created_at TEXT, revoked_at TEXT);
   `);
 
   const { parseManifest } = await import("../lib/manifest/schema");
   const { finalizeManifestFromWizard } = await import("../lib/manifest/wizard-finalize");
-  const clientManifest = parseManifest(finalizeManifestFromWizard({ template: "custom", slug: "devices-test-client", answers: {} }));
+  const clientManifest = parseManifest(finalizeManifestFromWizard({ template: "custom", slug: "oasis-ai-cc", answers: {} }));
 
   const stamp = "2026-10-12T00:00:00Z";
   const profile = (who: Who, role: string, owner: 0 | 1, name: string) => ({
@@ -185,9 +176,9 @@ async function main() {
   await raw.batch(
     [
       ...Object.values(USERS).map((x) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [x.id, x.email] })),
-      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'devices-test-client', 'Devices Test Client')", args: [CLIENT] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI Solutions')", args: [CLIENT] },
       {
-        sql: "INSERT INTO tenant_manifests VALUES ('m-client', ?, 'devices-test-client', ?, 1, 1, ?, ?)",
+        sql: "INSERT INTO tenant_manifests VALUES ('m-client', ?, 'oasis-ai-cc', ?, 1, 1, ?, ?)",
         args: [CLIENT, JSON.stringify(clientManifest), stamp, stamp],
       },
       profile("client", "owner", 1, "Alex Owner"),
@@ -198,70 +189,54 @@ async function main() {
 
   const { SettingsContent } = await import("../components/settings/SettingsContent");
   const { ConnectYourComputerCard } = await import("../components/settings/YourComputersCard");
-  const settingsProfilePage = (await import("../app/settings/page")).default;
+  const settingsDevicesPage = (await import("../app/settings/devices/page")).default;
 
   /**
-   * The real /settings page resolves a real viewerAccess for whoever is
-   * signed in; pull it out, then call SettingsContent directly for
-   * "devices" -- the one render path the real /settings/devices route's
-   * operator-only 404 would otherwise block a non-operator from ever
-   * reaching.
-   *
-   * For a non-admin member, SettingsContent's own early return is a SINGLE
-   * `<PersonalSettingsView .../>` element (an async Server Component one
-   * level down) -- its own JSX, including the new Add a device section,
-   * only exists once that function is actually called and awaited, not
-   * from merely holding the unresolved element descriptor. Resolved by
-   * calling the CAPTURED type/props straight off that descriptor (no
-   * export needed): safe here because PersonalSettingsView is a plain
-   * server async function, never a "use client" component with hooks.
+   * The page guard resolves a real viewerAccess. We then render its captured
+   * SettingsContent props so this bare-node test can inspect the server tree.
    */
   async function devicesTreeFor(who: Who): Promise<unknown> {
     await login(who);
-    const page = await settingsProfilePage();
+    const page = await settingsDevicesPage();
     const el = walk(page).elements.find((e) => e.type === SettingsContent);
-    assert.ok(el, "/settings mounts SettingsContent");
+    assert.ok(el, "/settings/devices mounts SettingsContent");
     const props = el!.props as Parameters<typeof SettingsContent>[0];
-    let tree: unknown = await SettingsContent({ ...props, section: "devices" });
-    const top = tree as { type?: unknown; props?: unknown };
-    if (typeof top?.type === "function" && (top.type as { name?: string }).name === "PersonalSettingsView") {
-      tree = await (top.type as (p: unknown) => unknown)(top.props);
-    }
-    return tree;
+    return SettingsContent(props);
   }
 
   console.log("devices-add-a-device-non-admin:");
 
-  await check("a plain, non-admin member (canManageTenant false, PersonalSettingsView) sees the Add a device entry on the Devices section", async () => {
+  await check("a plain OASIS member reaches the real Devices page and sees Add a device", async () => {
     const tree = await devicesTreeFor("member");
     const found = walk(tree);
     assert.ok(found.elements.some((e) => e.type === ConnectYourComputerCard), "ConnectYourComputerCard is not in a non-admin member's Devices tree");
     assert.ok(found.strings.includes("Add a device"), 'the "Add a device" title is not in a non-admin member\'s Devices tree');
   });
 
-  await check("that same non-admin member never sees Your computers or Devices (advanced) -- those stay operator-only", async () => {
+  await check("that same non-admin member sees their own computers but never Devices (advanced)", async () => {
     const tree = await devicesTreeFor("member");
     const ids = walk(tree)
       .elements.map((e) => e.props.id)
       .filter((id): id is string => typeof id === "string");
-    assert.ok(!ids.includes("your-computers"), "a non-admin member can see Your computers, which lists other people's bridge pairings");
+    assert.ok(ids.includes("your-computers"), "a non-admin member cannot manage their own computers");
     assert.ok(!ids.includes("devices"), "a non-admin member can see Devices (advanced), the raw pair/revoke list");
     assert.ok(ids.includes("add-a-device"), "the add-a-device section id is missing");
+    const card = readFileSync(join(__dirname, "..", "components/settings/YourComputersCard.tsx"), "utf8");
+    assert.match(card, />\s*Disconnect\s*</);
+    assert.ok(card.includes('fetch(`/api/devices?id=${encodeURIComponent(id)}`, { method: "DELETE" })'));
   });
 
-  await check("a client OWNER (canManageTenant true, the manager branch) also sees Add a device at the top, same card, not forked", async () => {
+  await check("the workspace owner also sees Add a device at the top, using the same card", async () => {
     const tree = await devicesTreeFor("client");
     const found = walk(tree);
     assert.ok(found.elements.some((e) => e.type === ConnectYourComputerCard), "ConnectYourComputerCard is not in the owner's Devices tree");
     assert.ok(found.strings.includes("Add a device"));
-    // Neither the owner nor the member in this fixture is a verified platform
-    // operator (ADMIN_EMAILS is empty) -- Your computers / Devices (advanced)
-    // stay absent for the owner too, proving Add a device does not ride in
-    // on the operator gate for either persona.
+    // Neither viewer is a verified platform operator. Both still manage their
+    // own computers; only the raw advanced surface stays absent.
     const ids = walk(tree)
       .elements.map((e) => e.props.id)
       .filter((id): id is string => typeof id === "string");
-    assert.ok(!ids.includes("your-computers"));
+    assert.ok(ids.includes("your-computers"));
     assert.ok(!ids.includes("devices"));
   });
 

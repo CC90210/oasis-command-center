@@ -26,6 +26,7 @@ function publicMessage(job: RuntimeJobRow, status: PublicStatus): string {
   if (status === "done") return job.action === "auth" ? "Sign-in completed on the selected computer." : "The selected runtime answered successfully.";
   if (status === "failed") {
     const messages: Record<string, string> = {
+      account_identity_unavailable: "Claude is signed in, but OASIS cannot identify that account on the selected computer.",
       account_unsupported: "That account cannot be used by the selected runtime.",
       auth_process_failed: "The selected computer could not complete sign-in.",
       auth_start_failed: "The selected computer could not start sign-in.",
@@ -40,7 +41,9 @@ function publicMessage(job: RuntimeJobRow, status: PublicStatus): string {
       runtime_engine_not_allowed: "That runtime is not allowed for this action.",
       runtime_probe_failed: "The selected runtime did not answer the test.",
       status_check_failed: "The selected computer could not check that runtime.",
+      queue_expired: "The selected computer did not pick up the action in time. Check its connector and runtime, then try again.",
       lease_expired: "The selected computer stopped responding before the action finished.",
+      requester_seat_inactive: "This action stopped because the person who requested it no longer has access to this workspace.",
     };
     return messages[job.errorCode ?? ""] ?? "The runtime action failed.";
   }

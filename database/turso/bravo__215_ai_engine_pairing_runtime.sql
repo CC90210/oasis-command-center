@@ -25,13 +25,15 @@ ALTER TABLE bridge_pairings ADD COLUMN claim_runtime_state TEXT;
 ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT;
 ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT;
 ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT;
+ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_policy TEXT;
+ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_reason TEXT;
 
 CREATE INDEX IF NOT EXISTS dept_chat_runs_target_idx
   ON dept_chat_runs (tenant_id, user_id, target_pairing_id, status, created_at);
 
 -- A connector claims workspace-default work for one exact pairing regardless
 -- of which member requested it, so the hot pull query cannot lead with user_id.
-CREATE INDEX IF NOT EXISTS dept_chat_runs_pairing_claim_idx
+CREATE INDEX IF NOT EXISTS dept_chat_runs_target_claim_idx
   ON dept_chat_runs (tenant_id, target_pairing_id, status, created_at);
 
 CREATE INDEX IF NOT EXISTS dept_chat_runs_runtime_engine_idx

@@ -63,12 +63,33 @@ type CanonicalEngineRow = {
   model?: unknown;
   computer_pairing_id?: unknown;
   fallback_policy?: unknown;
+  updated_at?: unknown;
+  runtime_probe_job_id?: unknown;
+  runtime_probe_pairing_id?: unknown;
+  runtime_probe_engine_kind?: unknown;
+  runtime_probe_engine_name?: unknown;
+  runtime_probe_engine_version?: unknown;
+  runtime_probe_verified_at?: unknown;
 };
+
+export type SavedRuntimeProbeProof = {
+  jobId: string;
+  pairingId: string;
+  engine: { kind: "cli" | "local"; name: string };
+  engineVersion: string;
+  verifiedAt: string;
+};
+
+export type SavedRuntimeProbeProofInput = Omit<SavedRuntimeProbeProof, "engineVersion">;
 
 function missingEngineBindingColumns(message: string): boolean {
   return /(?:no such column|schema cache).*(?:computer_pairing_id|fallback_policy)|(?:computer_pairing_id|fallback_policy).*(?:does not exist|not found)/i.test(
     message,
   );
+}
+
+function missingEngineProofColumns(message: string): boolean {
+  return /(?:no such column|schema cache).*(?:runtime_probe_)|(?:runtime_probe_).*(?:does not exist|not found)/i.test(message);
 }
 
 async function readEngineRow(
@@ -81,15 +102,89 @@ async function readEngineRow(
     return q.eq("agent_key", ENGINE_AGENT_KEY).maybeSingle();
   };
 
-  const current = await query("provider, model, computer_pairing_id, fallback_policy");
-  if (!current.error || !missingEngineBindingColumns(current.error.message)) {
+  const current = await query(
+    "provider, model, computer_pairing_id, fallback_policy, updated_at, runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at",
+  );
+  if (!current.error || (!missingEngineProofColumns(current.error.message) && !missingEngineBindingColumns(current.error.message))) {
     return current as { data: CanonicalEngineRow | null; error: { message: string } | null };
+  }
+
+  // Proof columns are additive. Old workers can still read the canonical
+  // binding during schema rollout, but cannot invent a durable proof.
+  const binding = await query("provider, model, computer_pairing_id, fallback_policy, updated_at");
+  if (!binding.error || !missingEngineBindingColumns(binding.error.message)) {
+    return binding as { data: CanonicalEngineRow | null; error: { message: string } | null };
   }
 
   // Old workers remain readable during the additive migration rollout. The
   // result stays deliberately unbound, so no device can be picked implicitly.
-  const legacy = await query("provider, model");
+  const legacy = await query("provider, model, updated_at");
   return legacy as { data: CanonicalEngineRow | null; error: { message: string } | null };
+}
+
+function engineFromCanonicalRow(row: CanonicalEngineRow, personal: boolean): AgentEngineChoice {
+  if (personal && row.provider === "computer") return { kind: "cli", cli: "claude" };
+  return engineFromRow(row);
+}
+
+function savedProbeProofFromRow(
+  row: CanonicalEngineRow | null,
+  engine: AgentEngineChoice,
+): SavedRuntimeProbeProof | null {
+  if (!row || engine.kind === "api" || !engine.pairingId) return null;
+  const version = typeof row.updated_at === "string" ? row.updated_at : "";
+  const jobId = typeof row.runtime_probe_job_id === "string" ? row.runtime_probe_job_id : "";
+  const pairingId = typeof row.runtime_probe_pairing_id === "string" ? row.runtime_probe_pairing_id : "";
+  const kind = row.runtime_probe_engine_kind;
+  const name = typeof row.runtime_probe_engine_name === "string" ? row.runtime_probe_engine_name : "";
+  const proofVersion = typeof row.runtime_probe_engine_version === "string" ? row.runtime_probe_engine_version : "";
+  const verifiedAt = typeof row.runtime_probe_verified_at === "string" ? row.runtime_probe_verified_at : "";
+  const expectedKind = engine.kind === "cli" ? "cli" : "local";
+  const expectedName = engine.kind === "cli" ? engine.cli : engine.model;
+  if (
+    !version || !jobId || !pairingId || !name || !proofVersion ||
+    (kind !== "cli" && kind !== "local") ||
+    version !== proofVersion || pairingId !== engine.pairingId ||
+    kind !== expectedKind || name !== expectedName || !Number.isFinite(Date.parse(verifiedAt))
+  ) {
+    return null;
+  }
+  return { jobId, pairingId, engine: { kind, name }, engineVersion: version, verifiedAt };
+}
+
+function assertProbeMatchesChoice(choice: AgentEngineChoice, proof: SavedRuntimeProbeProofInput): void {
+  if (choice.kind === "api" || !choice.pairingId) throw new Error("agent engine: probe proof requires a bound device engine");
+  const kind = choice.kind === "cli" ? "cli" : "local";
+  const name = choice.kind === "cli" ? choice.cli : choice.model;
+  if (
+    proof.pairingId !== choice.pairingId || proof.engine.kind !== kind || proof.engine.name !== name ||
+    !proof.jobId || !Number.isFinite(Date.parse(proof.verifiedAt))
+  ) {
+    throw new Error("agent engine: probe proof does not match the saved pairing/runtime");
+  }
+}
+
+/** A later failed exact-runtime probe revokes the saved proof. Its age does
+ * not: freshness is a Save precondition, while live heartbeat/runtime health
+ * remains the execution-time gate. */
+export function savedRuntimeProbeProofReady(
+  proof: SavedRuntimeProbeProof | null | undefined,
+  pairingId: string,
+  engine: { kind: "cli" | "local"; name: string },
+  latestReceipt?: { jobId?: string; ready: boolean; finishedAt: string } | null,
+): boolean {
+  if (!proof || proof.pairingId !== pairingId || proof.engine.kind !== engine.kind || proof.engine.name !== engine.name) return false;
+  if (latestReceipt) {
+    const latestAt = Date.parse(latestReceipt.finishedAt);
+    const verifiedAt = Date.parse(proof.verifiedAt);
+    const isLater =
+      Number.isFinite(latestAt) &&
+      Number.isFinite(verifiedAt) &&
+      (latestAt > verifiedAt ||
+        (latestAt === verifiedAt && Boolean(latestReceipt.jobId) && latestReceipt.jobId !== proof.jobId));
+    if (isLater && !latestReceipt.ready) return false;
+  }
+  return true;
 }
 
 /**
@@ -145,9 +240,43 @@ export async function readAgentEngineVersion(tenantId: string): Promise<string |
  * saved meanwhile makes this one a no-op: returns false and nothing changes.
  * Throws when the write fails.
  */
-export async function saveAgentEngineIfCurrent(tenantId: string, choice: AgentEngineChoice, expectedVersion: string | null): Promise<boolean> {
+export async function saveAgentEngineIfCurrent(
+  tenantId: string,
+  choice: AgentEngineChoice,
+  expectedVersion: string | null,
+  probeProof: SavedRuntimeProbeProofInput | null = null,
+): Promise<boolean> {
   const row = engineRow(choice);
   const now = new Date().toISOString();
+  if (probeProof) assertProbeMatchesChoice(choice, probeProof);
+  if (probeProof) {
+    const proofArgs = [
+      probeProof.jobId,
+      probeProof.pairingId,
+      probeProof.engine.kind,
+      probeProof.engine.name,
+      now,
+      probeProof.verifiedAt,
+    ];
+    const res =
+      expectedVersion === null
+        ? await writeClient().execute({
+            sql:
+              "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at," +
+              " runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at)" +
+              " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)" +
+              " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING",
+            args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now, ...proofArgs],
+          })
+        : await writeClient().execute({
+            sql:
+              "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1, computer_pairing_id = ?, fallback_policy = ?, updated_at = ?," +
+              " runtime_probe_job_id = ?, runtime_probe_pairing_id = ?, runtime_probe_engine_kind = ?, runtime_probe_engine_name = ?, runtime_probe_engine_version = ?, runtime_probe_verified_at = ?" +
+              " WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND updated_at = ?",
+            args: [row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now, ...proofArgs, tenantId, ENGINE_AGENT_KEY, expectedVersion],
+          });
+    return res.rowsAffected === 1;
+  }
   const res =
     expectedVersion === null
       ? await writeClient().execute({
@@ -232,6 +361,7 @@ export async function bindLegacyEngineIfUnchanged(input: {
   userId: string | null;
   engine: Exclude<AgentEngineChoice, { kind: "api" }>;
   pairingId: string;
+  probeProof?: SavedRuntimeProbeProofInput | null;
 }): Promise<boolean> {
   if (input.engine.pairingId) return false;
   const boundChoice: Exclude<AgentEngineChoice, { kind: "api" }> =
@@ -250,13 +380,20 @@ export async function bindLegacyEngineIfUnchanged(input: {
         };
   const row = engineRow(boundChoice);
   const now = new Date().toISOString();
+  if (input.probeProof) assertProbeMatchesChoice(boundChoice, input.probeProof);
   const legacyPersonalClaude = input.userId !== null && input.engine.kind === "cli" && input.engine.cli === "claude";
   const legacyProviderClause = legacyPersonalClaude ? " OR provider = 'computer'" : "";
   const userClause = input.userId === null ? "user_id IS NULL" : "user_id = ?";
+  const proofSet = input.probeProof
+    ? ", runtime_probe_job_id = ?, runtime_probe_pairing_id = ?, runtime_probe_engine_kind = ?, runtime_probe_engine_name = ?, runtime_probe_engine_version = ?, runtime_probe_verified_at = ?"
+    : "";
+  const proofArgs = input.probeProof
+    ? [input.probeProof.jobId, input.probeProof.pairingId, input.probeProof.engine.kind, input.probeProof.engine.name, now, input.probeProof.verifiedAt]
+    : [];
   const result = await writeClient().execute({
     sql:
       "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1," +
-      " computer_pairing_id = ?, fallback_policy = ?, updated_at = ?" +
+      ` computer_pairing_id = ?, fallback_policy = ?, updated_at = ?${proofSet}` +
       ` WHERE tenant_id = ? AND ${userClause} AND agent_key = ?` +
       " AND (computer_pairing_id IS NULL OR computer_pairing_id = '')" +
       ` AND ((provider = ? AND model = ?)${legacyProviderClause})`,
@@ -266,6 +403,7 @@ export async function bindLegacyEngineIfUnchanged(input: {
       row.computerPairingId,
       row.fallbackPolicy,
       now,
+      ...proofArgs,
       input.tenantId,
       ...(input.userId === null ? [] : [input.userId]),
       ENGINE_AGENT_KEY,
@@ -286,12 +424,25 @@ export async function bindLegacyEngineIfUnchanged(input: {
   ) {
     return false;
   }
+  const insertProofColumns = input.probeProof
+    ? ", runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at"
+    : "";
+  const insertProofValues = input.probeProof ? ", ?, ?, ?, ?, ?, ?" : "";
   const inserted = await writeClient().execute({
     sql:
-      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
-      " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?)" +
+      `INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at${insertProofColumns})` +
+      ` VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?${insertProofValues})` +
       " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING",
-    args: [input.tenantId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now],
+    args: [
+      input.tenantId,
+      ENGINE_AGENT_KEY,
+      row.provider,
+      row.model,
+      row.computerPairingId,
+      row.fallbackPolicy,
+      now,
+      ...proofArgs,
+    ],
   });
   return inserted.rowsAffected === 1;
 }
@@ -302,9 +453,51 @@ export async function savePersonAgentEngineIfCurrent(
   userId: string,
   choice: AgentEngineChoice,
   expectedVersion: string | null,
+  probeProof: SavedRuntimeProbeProofInput | null = null,
 ): Promise<boolean> {
   const row = engineRow(choice);
   const now = new Date().toISOString();
+  if (probeProof) assertProbeMatchesChoice(choice, probeProof);
+  if (probeProof) {
+    const proofArgs = [
+      probeProof.jobId,
+      probeProof.pairingId,
+      probeProof.engine.kind,
+      probeProof.engine.name,
+      now,
+      probeProof.verifiedAt,
+    ];
+    const result =
+      expectedVersion === null
+        ? await writeClient().execute({
+            sql:
+              "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at," +
+              " runtime_probe_job_id, runtime_probe_pairing_id, runtime_probe_engine_kind, runtime_probe_engine_name, runtime_probe_engine_version, runtime_probe_verified_at)" +
+              " VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)" +
+              " ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL AND agent_key = '__engine__' DO NOTHING",
+            args: [tenantId, userId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now, ...proofArgs],
+          })
+        : await writeClient().execute({
+            sql:
+              "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1," +
+              " computer_pairing_id = ?, fallback_policy = ?, updated_at = ?, runtime_probe_job_id = ?, runtime_probe_pairing_id = ?," +
+              " runtime_probe_engine_kind = ?, runtime_probe_engine_name = ?, runtime_probe_engine_version = ?, runtime_probe_verified_at = ?" +
+              " WHERE tenant_id = ? AND user_id = ? AND agent_key = ? AND updated_at = ?",
+            args: [
+              row.provider,
+              row.model,
+              row.computerPairingId,
+              row.fallbackPolicy,
+              now,
+              ...proofArgs,
+              tenantId,
+              userId,
+              ENGINE_AGENT_KEY,
+              expectedVersion,
+            ],
+          });
+    return result.rowsAffected === 1;
+  }
   const result =
     expectedVersion === null
       ? await writeClient().execute({
@@ -345,18 +538,49 @@ export async function clearPersonEngineIfCurrent(tenantId: string, userId: strin
 }
 
 export type EffectiveAgentEngine = { source: "person" | "workspace"; engine: AgentEngineChoice; legacyUnbound: boolean };
+export type EffectiveAgentEngineWithProof = EffectiveAgentEngine & {
+  version: string | null;
+  probeProof: SavedRuntimeProbeProof | null;
+};
 
 /** Canonical effective engine for dispatch and the consolidated AI Brain. */
 export async function readEffectiveAgentEngine(tenantId: string, userId: string | null | undefined): Promise<EffectiveAgentEngine> {
-  const [person, workspace] = await Promise.all([
-    userId ? readPersonAgentEngine(tenantId, userId) : Promise.resolve(null),
-    readAgentEngine(tenantId),
+  const { source, engine, legacyUnbound } = await readEffectiveAgentEngineWithProof(tenantId, userId);
+  return { source, engine, legacyUnbound };
+}
+
+/** The same canonical selection plus the successful probe bound to this exact
+ * row version. This richer shape is used only at execution/readiness gates;
+ * the long-standing public reader above intentionally keeps its old shape. */
+export async function readEffectiveAgentEngineWithProof(
+  tenantId: string,
+  userId: string | null | undefined,
+): Promise<EffectiveAgentEngineWithProof> {
+  const [personResult, workspaceResult, oasis] = await Promise.all([
+    userId ? readEngineRow(tenantId, userId) : Promise.resolve({ data: null, error: null }),
+    readEngineRow(tenantId, null),
+    isOasisWorkspace(tenantId),
   ]);
-  const engine = person ?? workspace;
+  if (personResult.error) throw new Error(`person engine: agent_model_config read failed: ${personResult.error.message}`);
+  if (workspaceResult.error) throw new Error(`agent engine: agent_model_config read failed: ${workspaceResult.error.message}`);
+  const personRow = personResult.data;
+  const workspaceRow = workspaceResult.data;
+  const source = personRow ? "person" : "workspace";
+  const selectedRow = personRow ?? workspaceRow;
+  const engine = personRow
+    ? engineFromCanonicalRow(personRow, true)
+    : workspaceRow
+      ? engineFromCanonicalRow(workspaceRow, false)
+      : oasis
+        ? OASIS_DEFAULT_ENGINE
+        : { kind: "api" as const };
+  const version = typeof selectedRow?.updated_at === "string" && selectedRow.updated_at ? selectedRow.updated_at : null;
   return {
-    source: person ? "person" : "workspace",
+    source,
     engine,
     legacyUnbound: engine.kind !== "api" && !engine.pairingId,
+    version,
+    probeProof: savedProbeProofFromRow(selectedRow, engine),
   };
 }
 

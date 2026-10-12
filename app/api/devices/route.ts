@@ -19,7 +19,6 @@ import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +26,6 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const session = await resolveSessionContext();
   if (!session.ok) return bad(401, "unauthorized");
-  if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
   const tenantId = session.tenantId;
   const db = getServiceSupabase();
   const { data, error } = await db
@@ -60,8 +58,11 @@ export async function GET() {
       .from("user_profiles")
       .select("auth_user_id, display_name, full_name, email")
       .eq("tenant_id", tenantId)
+      .is("deactivated_at", null)
       .in("auth_user_id", otherOwnerIds);
-    if (!owners.error) {
+    if (owners.error) {
+      console.error("[devices.GET.owner_names]", owners.error.message);
+    } else {
       for (const row of (owners.data || []) as Array<{
         auth_user_id: string | null;
         display_name: string | null;
@@ -89,7 +90,6 @@ export async function GET() {
 export async function DELETE(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok) return bad(401, "unauthorized");
-  if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
   const tenantId = session.tenantId;
   const url = new URL(req.url);
   const id = url.searchParams.get("id");

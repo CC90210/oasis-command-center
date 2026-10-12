@@ -11,14 +11,27 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { conversationActivity, createConversation, enqueueRun, getConversation, hasAutomationRun, type Conversation, type RunScope } from "./store";
+import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
+import {
+  conversationActivity,
+  createConversation,
+  enqueueRun,
+  getConversation,
+  hasAutomationRun,
+  type Conversation,
+  type Run,
+  type RunApiSnapshot,
+  type RunScope,
+} from "./store";
 import { driveConversation, type ExecutorDeps } from "./executor";
 import { followRun, headOf } from "./follow";
 import { sseResponse } from "./sse";
 import { keepAlive } from "./keepalive";
 import { json } from "./scope";
-import { getOwnComputers } from "@/lib/queries";
+import { getOwnComputers, type OwnComputer } from "@/lib/queries";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { bestComputerAnswerState, computerAnswerState, type ComputerAnswerState } from "@/lib/devices/presence";
+import type { WorkspaceApiFallbackReason } from "./types";
 
 /** The longest one request follows (and so holds a driver's connection). Past it the browser re-attaches. */
 export const MAX_FOLLOW_MS = 14 * 60_000;
@@ -41,7 +54,8 @@ export function followRunResponse(args: {
   now?: () => Date;
   pollMs?: (elapsedMs: number) => number;
   /** O4: read fresh on every poll of a QUEUED computer-executor run (lib/os/runs/follow.ts FollowOptions.computerState). */
-  computerState?: () => Promise<ComputerAnswerState>;
+  computerState?: (run: Run) => Promise<ComputerAnswerState>;
+  needDriver?: (run: Run, fallbackReason?: WorkspaceApiFallbackReason | null) => Promise<void>;
 }): Response {
   let gone = false;
   const frames = followRun({
@@ -55,22 +69,72 @@ export function followRunResponse(args: {
     now: args.now,
     pollMs: args.pollMs,
     computerState: args.computerState,
+    needDriver: args.needDriver,
   });
   return sseResponse(frames, { prelude: args.prelude, onGone: () => (gone = true) });
 }
 
-/** This person's current best-ranked own-computer state (lib/devices/presence.ts), for follow.ts's computer-queue clocks. Read failures answer 'offline': never read as a live claimer on an error. */
-export function computerStateFor(scope: RunScope): () => Promise<ComputerAnswerState> {
-  return async () => {
+type ComputerStateSource = {
+  readTarget: (tenantId: string, pairingId: string) => Promise<OwnComputer | null>;
+  readOwn: (tenantId: string, userId: string) => Promise<OwnComputer[]>;
+  now: () => number;
+};
+
+async function readTargetComputer(tenantId: string, pairingId: string): Promise<OwnComputer | null> {
+  const { data, error } = await getServiceSupabase()
+    .from("bridge_pairings")
+    .select("id, label, last_seen_at, revoked_at, scope, paired_via, claim_enabled_at, claim_state_at, claim_blocked_reason, claim_capacity")
+    .eq("tenant_id", tenantId)
+    .eq("id", pairingId)
+    .maybeSingle();
+  if (error) throw new Error(`computerStateForTarget: bridge_pairings read failed: ${error.message}`);
+  if (!data) return null;
+  const row = data as Record<string, unknown>;
+  return {
+    id: String(row.id),
+    label: typeof row.label === "string" && row.label.trim() ? row.label : "Unnamed computer",
+    lastSeenAt: typeof row.last_seen_at === "string" ? row.last_seen_at : null,
+    revokedAt: typeof row.revoked_at === "string" ? row.revoked_at : null,
+    scope: typeof row.scope === "string" ? row.scope : null,
+    pairedVia: typeof row.paired_via === "string" ? row.paired_via : null,
+    claimEnabledAt: typeof row.claim_enabled_at === "string" ? row.claim_enabled_at : null,
+    claimStateAt: typeof row.claim_state_at === "string" ? row.claim_state_at : null,
+    claimBlockedReason: typeof row.claim_blocked_reason === "string" ? row.claim_blocked_reason : null,
+    claimCapacity: typeof row.claim_capacity === "number" ? row.claim_capacity : row.claim_capacity == null ? null : Number(row.claim_capacity),
+  };
+}
+
+/**
+ * Read the state of the pairing frozen onto each queued run. V2 workspace
+ * defaults commonly target the agents owner's computer, so substituting the
+ * requester's best machine here would watch a different runtime than the one
+ * allowed to claim. Legacy unbound rows retain the old own-computer lookup.
+ */
+export function computerStateForTarget(
+  scope: RunScope,
+  source: ComputerStateSource = { readTarget: readTargetComputer, readOwn: getOwnComputers, now: Date.now },
+): (run: Pick<Run, "targetPairingId">) => Promise<ComputerAnswerState> {
+  return async (run) => {
     try {
-      const computers = await getOwnComputers(scope.tenantId, scope.userId);
-      return bestComputerAnswerState(computers.map((c) => computerAnswerState(c, Date.now())));
+      if (run.targetPairingId) {
+        const computer = await source.readTarget(scope.tenantId, run.targetPairingId);
+        if (!computer || computer.revokedAt) return "not_approved";
+        return computerAnswerState(computer, source.now());
+      }
+      const computers = await source.readOwn(scope.tenantId, scope.userId);
+      return bestComputerAnswerState(computers.map((c) => computerAnswerState(c, source.now())));
     } catch (err) {
       console.error("[os.runs.send.computerState]", { tenantId: scope.tenantId, error: err instanceof Error ? err.message : String(err) });
-      return "offline";
+      // An unreadable authorization row is not proof of availability. Keep
+      // the public copy generic while the raw unknown block makes API
+      // fallback fail closed in follow.ts.
+      return "blocked:pairing_state_unavailable";
     }
   };
 }
+
+/** Backward-compatible name used by the stream route. */
+export const computerStateFor = computerStateForTarget;
 
 export type SendInput = {
   department: string;
@@ -104,13 +168,32 @@ export async function sendMessage(args: {
     label: string;
     engineKind: "cli" | "local";
     engineName: string;
+    fallback: "none" | "workspace_api";
   } | null;
+  /** Exact hosted account identity frozen into this run (and any opted-in fallback). */
+  apiAccountSnapshot?: RunApiSnapshot | null;
+  /** A device selection whose explicit workspace-API fallback was activated
+   * before enqueue because its exact runtime was already unavailable. */
+  fallbackFrom?: Exclude<AgentEngineChoice, { kind: "api" }> | null;
+  fallbackReason?: WorkspaceApiFallbackReason | null;
+  /** Builds the workspace-API driver only after an eligible guarded fallback transition. */
+  computerFallbackDeps?: (reason: WorkspaceApiFallbackReason) => ExecutorDeps | null;
 }): Promise<Response> {
   const { db, deps, input } = args;
   const scope = deps.scope;
   const now = args.now ?? (() => new Date());
   const keep = args.keep ?? keepAlive;
   const computerDispatch = args.computerDispatch ?? null;
+  const apiAccountSnapshot = args.apiAccountSnapshot ?? null;
+  const fallbackFrom = args.fallbackFrom ?? null;
+  const fallbackReason = args.fallbackReason ?? null;
+  const immediateFallback = !computerDispatch && fallbackFrom && fallbackReason
+    ? {
+        pairingId: fallbackFrom.pairingId ?? "",
+        engineKind: fallbackFrom.kind === "cli" ? ("cli" as const) : ("local" as const),
+        engineName: fallbackFrom.kind === "cli" ? fallbackFrom.cli : fallbackFrom.model,
+      }
+    : null;
 
   let conversation: Conversation | null;
   if (input.conversationId) {
@@ -136,8 +219,29 @@ export async function sendMessage(args: {
           targetPairingId: computerDispatch.pairingId,
           runtimeEngineKind: computerDispatch.engineKind,
           runtimeEngineName: computerDispatch.engineName,
+          runtimeFallbackPolicy: computerDispatch.fallback,
+          ...(computerDispatch.fallback === "workspace_api" && apiAccountSnapshot
+            ? { runtimeApiSnapshot: apiAccountSnapshot }
+            : {}),
         }
-      : {}),
+      : immediateFallback && apiAccountSnapshot
+        ? {
+            executor: "worker" as const,
+            origin: "chat" as const,
+            targetPairingId: immediateFallback.pairingId,
+            runtimeEngineKind: immediateFallback.engineKind,
+            runtimeEngineName: immediateFallback.engineName,
+            runtimeFallbackPolicy: "workspace_api" as const,
+            runtimeFallbackReason: fallbackReason!,
+            runtimeApiSnapshot: apiAccountSnapshot,
+          }
+      : apiAccountSnapshot
+        ? {
+            runtimeEngineKind: "api" as const,
+            runtimeEngineName: apiAccountSnapshot.provider,
+            runtimeApiSnapshot: apiAccountSnapshot,
+          }
+        : {}),
   });
   if (!queued.ok) {
     return queued.reason === "queue_full" ? json(429, { ok: false, error: "queue_full" }) : json(404, { ok: false, error: "conversation_not_found" });
@@ -158,10 +262,9 @@ export async function sendMessage(args: {
   })}\n\n`;
 
   if (computerDispatch) {
-    // NO KEY FALLBACK: this request starts no driver and calls no model. The
-    // run waits, queued, for the person's own computer to claim it through
-    // the claim route's compare-and-swap; this response only FOLLOWS it from
-    // the database, exactly as a re-attach does.
+    // The selected computer gets the first and only claim path. This request
+    // starts no model unless the queue-time policy explicitly opted into the
+    // guarded workspace-API fallback and the availability clock fires.
     return followRunResponse({
       db,
       scope,
@@ -171,7 +274,18 @@ export async function sendMessage(args: {
       prelude,
       now,
       pollMs: args.pollMs,
-      computerState: computerStateFor(scope),
+      computerState: computerStateForTarget(scope),
+      needDriver: args.computerFallbackDeps
+        ? async (_activeRun: Run, fallbackReason?: WorkspaceApiFallbackReason | null) => {
+            if (!fallbackReason) return;
+            const fallbackDeps = args.computerFallbackDeps?.(fallbackReason);
+            if (!fallbackDeps) return;
+            // One immutable fallback session may drive only the row that
+            // activated it. The follower asks again for the next queued row,
+            // which rebuilds and validates that row's own API snapshot.
+            await keep(driveConversation(fallbackDeps, conversation.id, { maxRuns: 1 }), `drive:fallback:${conversation.id}`);
+          }
+        : undefined,
     });
   }
 

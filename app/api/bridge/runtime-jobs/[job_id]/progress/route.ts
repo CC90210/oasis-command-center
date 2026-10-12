@@ -31,6 +31,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ job_id: st
     leaseId: body.lease_id,
     code: progressCode,
   });
-  if (!result.ok) return bad(result.code === "pairing_revoked" || result.code === "pairing_not_approved" ? 403 : 409, result.code);
+  if (!result.ok) {
+    return bad(
+      result.code === "pairing_revoked" || result.code === "pairing_not_approved" || result.code === "requester_seat_inactive" ? 403 : 409,
+      result.code,
+    );
+  }
   return NextResponse.json({ ok: true, code: "progress_recorded" });
 }

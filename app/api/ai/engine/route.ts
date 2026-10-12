@@ -9,39 +9,64 @@
 import { NextRequest, NextResponse } from "next/server";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import {
+  connectWorkspaceAccountAndEngineInOneStep,
+  hasUsableKey,
+  readAccountStamp,
+  readWorkspaceAiAccount,
+} from "@/lib/ai/workspace-account";
 import { departmentBrain } from "@/lib/ai/department-brain";
 import {
   clearPersonEngineIfCurrent,
   isOasisWorkspace,
   readAgentEngine,
   readAgentEngineVersion,
+  readEffectiveAgentEngineWithProof,
   readPersonAgentEngine,
   readPersonAgentEngineVersion,
   readSavedProviders,
+  readSavedKey,
+  keepSavedKey,
   saveAgentEngineIfCurrent,
   savePersonAgentEngineIfCurrent,
+  savedRuntimeProbeProofReady,
+  type SavedRuntimeProbeProof,
+  type SavedRuntimeProbeProofInput,
 } from "@/lib/ai/agent-engine-store";
 import {
   choiceFromSelection,
-  parseEngineSelection,
+  isApiEngineProvider,
+  selectionFromRequest,
   selectionFromChoice,
+  type AgentEngineChoice,
   type ApiEngineProvider,
   type EngineSelection,
 } from "@/lib/ai/agent-engine";
-import { enqueueRuntimeJob, readRuntimeJobForOwner, type RuntimeEngine } from "@/lib/bridge/runtime-jobs";
+import {
+  enqueueRuntimeJob,
+  isFreshRuntimeProbeReceipt,
+  readLatestRuntimeProbeReceipts,
+  readRuntimeJobForOwner,
+  runtimeProbeReceiptKey,
+  type RuntimeEngine,
+  type RuntimeProbeReceipt,
+  RUNTIME_PROBE_FRESH_MS,
+} from "@/lib/bridge/runtime-jobs";
 import { readAgentsOwner } from "@/lib/agents-owner";
 import { CLI_INVENTORY_SERVICE, normalizeCliMachines, type CliStatusSnapshot } from "@/lib/bridge-cli-status";
 import { computerAnswerState, isOnline } from "@/lib/devices/presence";
 import { pairingCanClaim, type PairedVia } from "@/lib/bridge/pairing-auth";
 import { DEPARTMENT_TEST_ASK } from "@/lib/os/channel/reply-budget";
 import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
+import { decryptField, encryptField } from "@/lib/field-encryption";
+import { defaultModelFor, isRegistryProvider, modelInfo, saveCheck } from "@/lib/ai/model-registry";
+import { probeDepartmentAnswer } from "@/lib/agents/provider-probe";
+import { billingForKey, modelCallMeter } from "@/lib/ai/usage";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const SIGNED_OUT = "Your session ended. Sign in again, then try again.";
-const PROBE_FRESH_MS = 10 * 60_000;
 const fail = (status: number, error: string, message: string) => NextResponse.json({ ok: false, error, message }, { status });
 const errText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -99,22 +124,44 @@ function publicSelection(choice: Awaited<ReturnType<typeof readAgentEngine>>, ap
   return selectionFromChoice(choice, apiProvider) ?? choice;
 }
 
-function runtimeInfo(root: Record<string, unknown>, provider: "claude" | "codex" | "gemini", inventory?: CliStatusSnapshot) {
+function runtimeInfo(
+  root: Record<string, unknown>,
+  provider: "claude" | "codex" | "gemini",
+  inventory: CliStatusSnapshot | undefined,
+  receipt: RuntimeProbeReceipt | undefined,
+  savedProof?: SavedRuntimeProbeProof | null,
+  requireSavedProof = false,
+) {
   const state = object(root[provider]) ?? {};
   const code = typeof state.state === "string" ? state.state : null;
   const inv = inventory?.[provider];
+  const installed = state.installed === true || inv?.installed === true;
+  const signedIn = state.authenticated === true || inv?.authenticated === true;
+  const unsupported = code === "unsupported";
+  const proven = requireSavedProof
+    ? savedRuntimeProbeProofReady(savedProof, receipt?.pairingId ?? savedProof?.pairingId ?? "", { kind: "cli", name: provider }, receipt)
+    : isFreshRuntimeProbeReceipt(receipt);
+  // A receipt may bridge the short post-probe heartbeat lag, but it must not
+  // override an explicit runtime failure (or an unknown future state).
+  const receiptEligibleState = code === null || code === "ready" || code === "probe_required";
   return {
-    installed: state.installed === true || inv?.installed === true,
-    signedIn: state.authenticated === true || inv?.authenticated === true,
-    executionReady: code === "ready",
-    unsupported: code === "unsupported",
+    installed,
+    signedIn,
+    executionReady: installed && signedIn && !unsupported && receiptEligibleState && proven,
+    unsupported,
     version: inv?.version ?? null,
-    lastTestedAt: null,
+    lastTestedAt: receipt?.ready ? receipt.finishedAt : null,
     code: code === "unsupported" ? "unsupported_personal_sign_in" : code,
   };
 }
 
-function localModels(root: Record<string, unknown>) {
+function localModels(
+  root: Record<string, unknown>,
+  pairingId: string,
+  receipts: ReadonlyMap<string, RuntimeProbeReceipt>,
+  savedProof?: SavedRuntimeProbeProof | null,
+  requireSavedProof = false,
+) {
   const raw = Array.isArray(root.local_models) ? root.local_models : [];
   return raw.flatMap((entry) => {
     const model = object(entry);
@@ -122,8 +169,98 @@ function localModels(root: Record<string, unknown>) {
     const adapter = model.adapter === "ollama" || model.adapter === "lmstudio" ? model.adapter : null;
     const state = model.state === "ready" || model.state === "probe_required" || model.state === "unavailable" ? model.state : null;
     if (!adapter || !state) return [];
-    return [{ ref: model.ref, label: model.label, adapter, state }];
+    const receipt = receipts.get(runtimeProbeReceiptKey(pairingId, { kind: "local", name: model.ref }));
+    const proven = requireSavedProof
+      ? savedRuntimeProbeProofReady(savedProof, pairingId, { kind: "local", name: model.ref }, receipt)
+      : isFreshRuntimeProbeReceipt(receipt);
+    const verifiedState = state === "unavailable" ? "unavailable" : proven ? "ready" : "probe_required";
+    return [{ ref: model.ref, label: model.label, adapter, state: verifiedState, lastTestedAt: receipt?.ready ? receipt.finishedAt : null }];
   });
+}
+
+type EffectiveRuntimeSummary = {
+  pairingId: string | null;
+  codingHarnessReady: boolean;
+  status: string;
+};
+
+/**
+ * A privacy-safe readiness answer for the effective engine. Members who
+ * inherit the workspace default do not receive the agents owner's device
+ * inventory, but the coding composer still needs the truth about that exact
+ * saved pairing. No label, owner or inventory detail leaves this summary.
+ */
+function effectiveRuntimeSummary(
+  choice: AgentEngineChoice,
+  pairings: readonly PairingRow[],
+  inventory: ReadonlyMap<string, CliStatusSnapshot>,
+  receipts: ReadonlyMap<string, RuntimeProbeReceipt>,
+  savedProof: SavedRuntimeProbeProof | null,
+  nowMs: number,
+): EffectiveRuntimeSummary {
+  if (choice.kind === "api") return { pairingId: null, codingHarnessReady: true, status: "ready" };
+  const pairingId = choice.pairingId ?? null;
+  if (!pairingId) return { pairingId: null, codingHarnessReady: false, status: "computer_choice_required" };
+  const pairing = pairings.find((item) => item.id === pairingId);
+  if (!pairing) return { pairingId, codingHarnessReady: false, status: "pairing_not_found" };
+  if (!pairingCanClaim({ claimEnabledAt: pairing.claim_enabled_at, pairedVia: pairing.paired_via })) {
+    return { pairingId, codingHarnessReady: false, status: "approval_needed" };
+  }
+  const answerState = computerAnswerState(
+    {
+      claimEnabledAt: pairing.claim_enabled_at,
+      claimStateAt: pairing.claim_state_at,
+      claimBlockedReason: pairing.claim_blocked_reason,
+      claimCapacity: typeof pairing.claim_capacity === "number" ? pairing.claim_capacity : Number(pairing.claim_capacity),
+    },
+    nowMs,
+  );
+  if (!isOnline(pairing.last_seen_at, nowMs) || answerState === "offline") {
+    return { pairingId, codingHarnessReady: false, status: "offline" };
+  }
+  if (answerState.startsWith("blocked:")) {
+    return { pairingId, codingHarnessReady: false, status: answerState.slice("blocked:".length) || "unavailable" };
+  }
+  const protocols = strings(pairing.claim_protocols);
+  if (!protocols.includes("coding_harness_task_v1")) {
+    return { pairingId, codingHarnessReady: false, status: "connector_update_required" };
+  }
+  const root = runtimeRoot(pairing.claim_runtime_state);
+  if (choice.kind === "cli") {
+    const info = runtimeInfo(
+      root,
+      choice.cli,
+      inventory.get(pairing.id),
+      receipts.get(runtimeProbeReceiptKey(pairing.id, { kind: "cli", name: choice.cli })),
+      savedProof,
+      true,
+    );
+    if (info.unsupported) return { pairingId, codingHarnessReady: false, status: "unsupported" };
+    if (!info.installed) return { pairingId, codingHarnessReady: false, status: "not_installed" };
+    if (!info.signedIn) return { pairingId, codingHarnessReady: false, status: "sign_in_needed" };
+    if (!info.executionReady) return { pairingId, codingHarnessReady: false, status: info.code || "needs_test" };
+  } else {
+    const model = localModels(root, pairing.id, receipts, savedProof, true).find((item) => item.ref === choice.model);
+    if (!model) return { pairingId, codingHarnessReady: false, status: "model_not_found" };
+    if (model.state !== "ready") return { pairingId, codingHarnessReady: false, status: model.state === "unavailable" ? "offline" : "needs_test" };
+  }
+  return { pairingId, codingHarnessReady: true, status: answerState === "busy" ? "busy" : "ready" };
+}
+
+async function probeReceiptsByPairing(tenantId: string, pairings: readonly PairingRow[]) {
+  try {
+    return await readLatestRuntimeProbeReceipts(tenantId, pairings.map((pairing) => pairing.id));
+  } catch (error) {
+    // During the additive rollout, an old database may not have the jobs
+    // table yet. Fail closed to Needs test; a heartbeat is never promoted.
+    console.error("[ai.engine.probe-receipts]", { tenantId, error: errText(error) });
+    return new Map<string, RuntimeProbeReceipt>();
+  }
+}
+
+function apiSwitchModel(provider: ApiEngineProvider, savedModel: string): string {
+  if (savedModel && saveCheck(provider, savedModel).ok && modelInfo(provider, savedModel)) return savedModel;
+  return isRegistryProvider(provider) ? defaultModelFor(provider) : savedModel;
 }
 
 async function readPairings(tenantId: string): Promise<PairingRow[]> {
@@ -207,7 +344,11 @@ async function pairingForSelection(input: {
     return { ok: false, status: 409, error: "pairing_not_approved", message: "Approve that computer in Devices before using it for agents." };
   }
   const protocols = strings(pairing.claim_protocols);
-  if (!protocols.includes("runtime_action_v1") || !protocols.includes("department_task_v2")) {
+  if (
+    !protocols.includes("runtime_action_v1") ||
+    !protocols.includes("department_task_v2") ||
+    !protocols.includes("coding_harness_task_v1")
+  ) {
     return { ok: false, status: 409, error: "connector_update_required", message: "Update and restart the connector on that computer, then try again." };
   }
   return { ok: true, pairing };
@@ -222,8 +363,9 @@ export async function GET() {
   const ctx = await getSessionContext();
   if (!ctx?.tenantId) return fail(401, "unauthorized", SIGNED_OUT);
   const tenantId = ctx.tenantId;
+  const canManage = ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess);
   try {
-    const [workspaceEngine, workspaceVersion, personEngine, personVersion, account, savedProviders, pairings, oasis, agentsOwner] = await Promise.all([
+    const [workspaceEngine, workspaceVersion, personEngine, personVersion, account, savedProviders, pairings, oasis, agentsOwner, effectiveEngine] = await Promise.all([
       readAgentEngine(tenantId),
       readAgentEngineVersion(tenantId),
       readPersonAgentEngine(tenantId, ctx.authUserId),
@@ -233,11 +375,29 @@ export async function GET() {
       readPairings(tenantId),
       isOasisWorkspace(tenantId),
       readAgentsOwner(tenantId),
+      readEffectiveAgentEngineWithProof(tenantId, ctx.authUserId),
     ]);
-    const [inventory, names] = await Promise.all([inventoryByPairing(tenantId, pairings), ownerNames(tenantId)]);
+    // Personal AI Brain is available to every member, but that must not turn
+    // into a tenant-wide device directory. Managers need the full inventory
+    // for Workspace default; everyone else receives only their own machines.
+    const visiblePairings = canManage ? pairings : pairings.filter((pairing) => pairing.user_id === ctx.authUserId);
+    const effectiveChoice = effectiveEngine.engine;
+    const effectivePairingId = effectiveChoice.kind === "api" ? null : effectiveChoice.pairingId ?? null;
+    const hiddenEffectivePairing = effectivePairingId && !visiblePairings.some((pairing) => pairing.id === effectivePairingId)
+      ? pairings.find((pairing) => pairing.id === effectivePairingId) ?? null
+      : null;
+    const [inventory, names, probeReceipts, hiddenInventory, hiddenProbeReceipts] = await Promise.all([
+      inventoryByPairing(tenantId, visiblePairings),
+      ownerNames(tenantId),
+      probeReceiptsByPairing(tenantId, visiblePairings),
+      hiddenEffectivePairing ? inventoryByPairing(tenantId, [hiddenEffectivePairing]) : Promise.resolve(new Map<string, CliStatusSnapshot>()),
+      hiddenEffectivePairing ? probeReceiptsByPairing(tenantId, [hiddenEffectivePairing]) : Promise.resolve(new Map<string, RuntimeProbeReceipt>()),
+    ]);
+    for (const [pairingId, snapshot] of hiddenInventory) inventory.set(pairingId, snapshot);
+    for (const [key, receipt] of hiddenProbeReceipts) probeReceipts.set(key, receipt);
     const brain = hasUsableKey(account) ? departmentBrain(account) : null;
     const apiProvider = brain?.provider as ApiEngineProvider | undefined;
-    const devices = pairings.map((pairing) => {
+    const devices = visiblePairings.map((pairing) => {
       const root = runtimeRoot(pairing.claim_runtime_state);
       const inv = inventory.get(pairing.id);
       const lastSeenAt = pairing.last_seen_at;
@@ -250,6 +410,13 @@ export async function GET() {
         },
         Date.now(),
       );
+      const runtime = (provider: "claude" | "codex" | "gemini") =>
+        runtimeInfo(
+          root,
+          provider,
+          inv,
+          probeReceipts.get(runtimeProbeReceiptKey(pairing.id, { kind: "cli", name: provider })),
+        );
       return {
         pairingId: pairing.id,
         label: pairing.label || "Unnamed computer",
@@ -263,11 +430,11 @@ export async function GET() {
         busy: claimState === "busy",
         protocols: strings(pairing.claim_protocols),
         runtimes: {
-          claude: { ...runtimeInfo(root, "claude", inv), lastTestedAt: runtimeInfo(root, "claude", inv).executionReady ? lastSeenAt : null },
-          codex: { ...runtimeInfo(root, "codex", inv), lastTestedAt: runtimeInfo(root, "codex", inv).executionReady ? lastSeenAt : null },
-          gemini: { ...runtimeInfo(root, "gemini", inv), lastTestedAt: runtimeInfo(root, "gemini", inv).executionReady ? lastSeenAt : null },
+          claude: runtime("claude"),
+          codex: runtime("codex"),
+          gemini: runtime("gemini"),
         },
-        localModels: localModels(root),
+        localModels: localModels(root, pairing.id, probeReceipts),
       };
     });
     return NextResponse.json(
@@ -285,9 +452,10 @@ export async function GET() {
           ? { provider: brain.provider, providerLabel: brain.providerLabel, model: brain.savedModel ?? brain.model, modelLabel: brain.modelLabel }
           : null,
         savedProviders,
+        effectiveRuntime: effectiveRuntimeSummary(effectiveChoice, pairings, inventory, probeReceipts, effectiveEngine.probeProof, Date.now()),
         bridge: { reachable: devices.some((device) => device.online) },
         workspace: oasis ? "oasis" : "client",
-        canManage: ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess),
+        canManage,
       },
       { headers: { "cache-control": "no-store" } },
     );
@@ -307,7 +475,11 @@ export async function POST(req: NextRequest) {
     return fail(400, "invalid_json", "That request could not be read. Try again.");
   }
   const scope = scopeOf(raw.scope, "person");
-  const selection = parseEngineSelection(raw.engine);
+  const parsed = selectionFromRequest(raw.engine);
+  if (parsed && !parsed.selection && parsed.needsPairing) {
+    return fail(409, "computer_choice_needs_pairing", "Choose a computer to finish upgrading this saved setup.");
+  }
+  const selection = parsed?.selection ?? null;
   if (!scope || !selection || selection.mode === "api") {
     return fail(400, "invalid_engine", "Choose a subscription app or local model on one paired computer to test.");
   }
@@ -378,7 +550,13 @@ export async function PUT(req: NextRequest) {
       if (!cleared) return fail(409, "stale_choice", "A newer choice was saved. Refresh AI Brain before changing it.");
       return NextResponse.json({ ok: true, inherited: true });
     }
-    const selection = parseEngineSelection(raw.engine);
+    const account = await readWorkspaceAiAccount(ctx.tenantId);
+    const activeApiProvider = isApiEngineProvider(account?.provider) ? account.provider : undefined;
+    const parsed = selectionFromRequest(raw.engine, activeApiProvider);
+    if (parsed && !parsed.selection && parsed.needsPairing) {
+      return fail(409, "computer_choice_needs_pairing", "Choose a computer to finish upgrading this saved setup.");
+    }
+    const selection = parsed?.selection ?? null;
     if (!selection) return fail(400, "invalid_engine", "Choose Subscription app, Pure local, or API key.");
     if (selection.mode === "subscription") {
       const oasis = await isOasisWorkspace(ctx.tenantId);
@@ -386,10 +564,89 @@ export async function PUT(req: NextRequest) {
         return fail(409, "codex_oasis_rollout_only", CODEX_OASIS_ROLLOUT_MESSAGE);
       }
     }
-    const account = await readWorkspaceAiAccount(ctx.tenantId);
+    let probeProof: SavedRuntimeProbeProofInput | null = null;
     if (selection.mode === "api") {
       if (!hasUsableKey(account) || account.provider !== selection.provider) {
-        return fail(409, "api_provider_not_active", "Connect and test that provider key, then make it the active AI account before using it.");
+        // The API account is workspace-wide. A personal engine row may opt
+        // into the provider the workspace already uses, but it must never
+        // activate a different provider (and therefore change everyone
+        // else's spend) while leaving the workspace engine row untouched.
+        if (scope !== "workspace") {
+          return fail(
+            409,
+            "api_provider_workspace_scope_required",
+            "That API provider is not the workspace account in use. Switch it under Workspace default, or keep My setup on the current workspace provider.",
+          );
+        }
+        if (!(ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess))) {
+          return fail(403, "admin_required", "Only an owner or admin can switch the workspace API account.");
+        }
+        const [saved, stamp] = await Promise.all([
+          readSavedKey(ctx.tenantId, selection.provider),
+          readAccountStamp(ctx.tenantId),
+        ]);
+        if (!saved) {
+          return fail(409, "api_provider_not_connected", "Connect that provider key below before putting it in use.");
+        }
+        const model = apiSwitchModel(selection.provider, saved.model);
+        const check = saveCheck(selection.provider, model);
+        if (!check.ok) return fail(409, "api_model_unavailable", check.message);
+        let key: string;
+        try {
+          key = decryptField(saved.encryptedApiKey);
+        } catch {
+          return fail(500, "key_unreadable", "That saved provider key could not be read. Connect it again below.");
+        }
+        const tested = await probeDepartmentAnswer(selection.provider, key, {
+          model,
+          meter: modelCallMeter({
+            tenantId: ctx.tenantId,
+            surface: "probe",
+            ...billingForKey(selection.provider, "tenant"),
+            userId: ctx.authUserId,
+          }),
+        });
+        if (!tested.ok) {
+          return fail(422, "provider_test_failed", `${modelInfo(selection.provider, model)?.label ?? model} did not pass the test. Nothing was changed. ${tested.message}`);
+        }
+        if (req.signal.aborted) return fail(409, "cancelled", "Stopped before the change finished. Nothing was changed.");
+        // Saving key-cache rows is harmless preparation: neither row can
+        // answer. Provider activation and the engine CAS happen together
+        // below, so a stale tab cannot leave the account and engine split.
+        if (hasUsableKey(account) && isApiEngineProvider(account.provider)) {
+          await keepSavedKey({
+            tenantId: ctx.tenantId,
+            provider: account.provider,
+            model: account.model,
+            encryptedApiKey: account.encryptedApiKey,
+          });
+        }
+        if (saved.source !== "kept") {
+          await keepSavedKey({
+            tenantId: ctx.tenantId,
+            provider: selection.provider,
+            model,
+            encryptedApiKey: saved.encryptedApiKey,
+          });
+        }
+        const choice = choiceFromSelection(selection);
+        const switched = await connectWorkspaceAccountAndEngineInOneStep({
+          tenantId: ctx.tenantId,
+          stamp,
+          provider: selection.provider,
+          model,
+          encryptedApiKey: encryptField(key),
+          agentKeys: [],
+          engine: {
+            userId: scope === "workspace" ? null : ctx.authUserId,
+            expectedVersion: expected,
+            choice,
+          },
+        });
+        if (!switched.committed) {
+          return fail(409, "stale_choice", "The AI account or engine changed in another window. Refresh AI Brain before trying again.");
+        }
+        return NextResponse.json({ ok: true, engine: selection });
       }
     } else {
       const checked = await pairingForSelection({ tenantId: ctx.tenantId, authUserId: ctx.authUserId, scope, selection });
@@ -403,7 +660,8 @@ export async function PUT(req: NextRequest) {
       const job = await readRuntimeJobForOwner(ctx.tenantId, ctx.authUserId, raw.probe_job_id);
       const wanted = engineFor(selection)!;
       const finishedMs = job?.finishedAt ? Date.parse(job.finishedAt) : NaN;
-      const fresh = Number.isFinite(finishedMs) && Date.now() - finishedMs <= PROBE_FRESH_MS;
+      const probeAgeMs = Date.now() - finishedMs;
+      const fresh = Number.isFinite(finishedMs) && probeAgeMs >= 0 && probeAgeMs <= RUNTIME_PROBE_FRESH_MS;
       if (
         !job ||
         job.action !== "probe" ||
@@ -416,12 +674,18 @@ export async function PUT(req: NextRequest) {
       ) {
         return fail(409, "probe_mismatch", "That test is missing, stale, or belongs to another computer or runtime. Test again before saving.");
       }
+      probeProof = {
+        jobId: job.id,
+        pairingId: job.pairingId,
+        engine: job.engine,
+        verifiedAt: job.finishedAt!,
+      };
     }
     const choice = choiceFromSelection(selection);
     const committed =
       scope === "workspace"
-        ? await saveAgentEngineIfCurrent(ctx.tenantId, choice, expected)
-        : await savePersonAgentEngineIfCurrent(ctx.tenantId, ctx.authUserId, choice, expected);
+        ? await saveAgentEngineIfCurrent(ctx.tenantId, choice, expected, probeProof)
+        : await savePersonAgentEngineIfCurrent(ctx.tenantId, ctx.authUserId, choice, expected, probeProof);
     if (!committed) return fail(409, "stale_choice", "A newer choice was saved. Refresh AI Brain before changing it.");
     return NextResponse.json({ ok: true, engine: selection });
   } catch (error) {

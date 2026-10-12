@@ -93,12 +93,97 @@ async function main() {
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT");
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT");
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_policy TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_reason TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_provider TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_model TEXT");
 
   const store = await import("../lib/os/runs/store");
   const follow = await import("../lib/os/runs/follow");
+  const send = await import("../lib/os/runs/send");
   const types = await import("../lib/os/runs/types");
 
   console.log("follow-busy-timeout ([P2] Codex finding):");
+
+  await check("the queued watcher reads the run's exact target pairing, even when another own computer is ready", async () => {
+    const calls: Array<{ tenantId: string; pairingId: string }> = [];
+    const target = {
+      id: "workspace-owner-mac",
+      label: "Workspace owner's Mac",
+      lastSeenAt: new Date().toISOString(),
+      revokedAt: null,
+      scope: "connector",
+      pairedVia: "pair_code",
+      claimEnabledAt: new Date().toISOString(),
+      claimStateAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      claimBlockedReason: null,
+      claimCapacity: 1,
+    };
+    const ownReady = {
+      ...target,
+      id: "requester-ready-pc",
+      label: "Requester's ready PC",
+      claimStateAt: new Date().toISOString(),
+    };
+    const state = send.computerStateForTarget(
+      { tenantId: "tenant-a", userId: "requester" },
+      {
+        readTarget: async (tenantId: string, pairingId: string) => {
+          calls.push({ tenantId, pairingId });
+          return target;
+        },
+        readOwn: async () => [ownReady],
+        now: () => Date.now(),
+      },
+    );
+
+    assert.equal(await state({ targetPairingId: "workspace-owner-mac" }), "offline");
+    assert.deepEqual(calls, [{ tenantId: "tenant-a", pairingId: "workspace-owner-mac" }]);
+  });
+
+  await check("a one-run browser driver may be rebuilt independently for the next queued row", async () => {
+    const scope = { tenantId: uid(), userId: uid() };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const first = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "first",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+    });
+    const second = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "second",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+    });
+    assert.ok(first.ok && second.ok);
+    const calls: string[] = [];
+    let t = Date.now();
+    for await (const _frame of follow.followRun({
+      db,
+      scope,
+      runId: first.run.id,
+      afterSeq: 0,
+      queue: true,
+      now: () => new Date(t),
+      sleep: async (ms: number) => {
+        t += ms;
+      },
+      pollMs: () => 1_000,
+      needDriver: async (run: import("../lib/os/runs/store").Run) => {
+        calls.push(run.id);
+        await db.execute({
+          sql: "UPDATE dept_chat_runs SET status = 'done', final_text = 'ok', finished_at = ? WHERE id = ?",
+          args: [new Date(t).toISOString(), run.id],
+        });
+      },
+    })) {
+      // followRun ends after both queue entries become terminal.
+    }
+    assert.deepEqual(calls, [first.run.id, second.run.id]);
+  });
 
   /**
    * Drive followRun for ONE simulated "stream session" (ends at
@@ -187,6 +272,144 @@ async function main() {
     const row = await store.getRun(db, scope, runId);
     assert.equal(row?.status, "queued", "can_answer must never time out on its own; only computer_not_answering/busy/blocked clocks apply");
   });
+
+  await check("an explicitly opted-in run switches atomically to the workspace API after its exact target goes offline", async () => {
+    const tenantId = uid();
+    const userId = uid();
+    const scope = { tenantId, userId };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const q = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "answer even if the selected Mac disappears",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+      executor: "computer",
+      targetPairingId: "workspace-owner-mac",
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "workspace_api",
+      runtimeApiSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+    });
+    assert.ok(q.ok);
+    const runId = q.ok ? q.run.id : "";
+    const clockRef = { value: Date.now() };
+    let driverCall: { target: string | null; reason: string | null } | null = null;
+    let stop = false;
+    const gen = follow.followRun({
+      db,
+      scope,
+      runId,
+      afterSeq: 0,
+      now: () => new Date(clockRef.value),
+      sleep: async (ms: number) => {
+        clockRef.value += ms;
+      },
+      pollMs: () => 5_000,
+      gone: () => stop,
+      computerState: async () => "offline",
+      needDriver: async (run: import("../lib/os/runs/store").Run, fallbackReason?: string | null) => {
+        driverCall = { target: run.targetPairingId, reason: fallbackReason ?? null };
+        stop = true;
+      },
+    });
+    for await (const _frame of gen) {
+      // The generator exits as soon as the fallback transition asks for a driver.
+    }
+
+    const promoted = await store.getRun(db, scope, runId);
+    assert.equal(promoted?.status, "queued");
+    assert.equal(promoted?.executor, "worker");
+    assert.equal(promoted?.targetPairingId, "workspace-owner-mac", "the audit snapshot keeps the exact computer that failed");
+    assert.equal(promoted?.runtimeFallbackPolicy, "workspace_api");
+    assert.equal(promoted?.runtimeFallbackReason, "computer_not_answering");
+    assert.deepEqual(driverCall, { target: "workspace-owner-mac", reason: "computer_not_answering" });
+
+    const executor = await import("../lib/os/runs/executor");
+    await executor.driveConversation(
+      {
+        db,
+        scope,
+        departmentLabel: "Sales",
+        heartbeatMs: 1,
+        startTurn: async () => ({
+          ok: true as const,
+          agent: {
+            display_name: "Sales",
+            runs_on: "Google Gemini (API)",
+            spend: "api_credits",
+            fell_back_from: "Codex on Workspace owner's Mac",
+            fallback_reason: "computer_not_answering",
+          },
+          channelKey: "sales",
+          agentSlug: "sdr",
+          failureModel: () => null,
+          stream: (async function* () {
+            yield { type: "delta" as const, text: "Workspace API fallback answered." };
+            yield { type: "done" as const, inputTokens: 2, outputTokens: 4 };
+          })(),
+        }),
+        recordOutcome: async () => undefined,
+      },
+      conv.id,
+    );
+    const answered = await store.getRun(db, scope, runId);
+    assert.equal(answered?.status, "done");
+    assert.equal(answered?.finalText, "Workspace API fallback answered.");
+    assert.equal(answered?.agent?.fell_back_from, "Codex on Workspace owner's Mac");
+    assert.equal(answered?.agent?.fallback_reason, "computer_not_answering");
+  });
+
+  for (const state of ["not_approved", "blocked:department_profile_unsafe", "blocked:claude_account_changed"] as const) {
+    await check(`explicit fallback refuses the authorization/security state ${state}`, async () => {
+      const tenantId = uid();
+      const userId = uid();
+      const scope = { tenantId, userId };
+      const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+      const q = await store.enqueueRun(db, scope, {
+        conversationId: conv.id,
+        text: `do not spend for ${state}`,
+        chatMode: "build",
+        showThinking: false,
+        now: new Date(),
+        executor: "computer",
+        targetPairingId: "selected-pairing",
+        runtimeEngineKind: "cli",
+        runtimeEngineName: "codex",
+        runtimeFallbackPolicy: "workspace_api",
+        runtimeApiSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+      });
+      assert.ok(q.ok);
+      const runId = q.ok ? q.run.id : "";
+      const clockRef = { value: Date.now() };
+      let driverCalls = 0;
+      const frames: unknown[] = [];
+      const gen = follow.followRun({
+        db,
+        scope,
+        runId,
+        afterSeq: 0,
+        now: () => new Date(clockRef.value),
+        sleep: async (ms: number) => {
+          clockRef.value += ms;
+        },
+        pollMs: () => 5_000,
+        computerState: async () => state,
+        needDriver: async () => {
+          driverCalls += 1;
+        },
+      });
+      for await (const frame of gen) {
+        frames.push(frame);
+        if ((frame as { type?: string }).type === "end") break;
+      }
+      const refused = await store.getRun(db, scope, runId);
+      assert.equal(refused?.status, "failed");
+      assert.notEqual(refused?.executor, "worker");
+      assert.equal(driverCalls, 0);
+      assert.ok(frames.some((frame) => (frame as { type?: string }).type === "end"));
+    });
+  }
 
   console.log("[P2, round 2] markFirstInLine must not start the clock behind an earlier QUEUED (not yet running) message");
   await check("following the SECOND of two queued computer messages never sets ITS OWN first_in_line_at while the first is still queued; its clock starts at zero only once the first truly leaves the queue", async () => {

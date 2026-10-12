@@ -336,6 +336,33 @@ async function main() {
     assert.equal(prepared.turn.keySource, "tenant", "the workspace account, not the platform key, answers");
   });
 
+  await check("a queued API A snapshot fails closed after the workspace switches to API B", async () => {
+    await db.execute({
+      sql: "UPDATE agent_model_config SET provider = 'openai', model = 'gpt-5.2' WHERE tenant_id = ? AND agent_key = 'bravo'",
+      args: [OASIS],
+    });
+    try {
+      const refused = await prepareAgentTurn({
+        tenantId: OASIS,
+        tenantSlug: "oasis-ai-cc",
+        agentSlug: "sdr",
+        department: sales,
+        operator: { name: "CC", email: CC.email },
+        platformFallback: unmistakableFallback,
+        revealModel: true,
+        userId: CC.id,
+        engineChoice: { kind: "api", provider: "anthropic" },
+        apiAccountSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+      });
+      assert.ok(!refused.ok && refused.error === "engine_snapshot_unavailable", JSON.stringify(refused));
+    } finally {
+      await db.execute({
+        sql: "UPDATE agent_model_config SET provider = 'anthropic', model = 'claude-sonnet-4-6' WHERE tenant_id = ? AND agent_key = 'bravo'",
+        args: [OASIS],
+      });
+    }
+  });
+
   await check("an explicit exact-device fallback uses only the workspace API and records the selected Codex engine", async () => {
     await db.execute("DELETE FROM ai_usage_events");
     const selected = { kind: "cli" as const, cli: "codex" as const, pairingId: "pair-ccpc", fallback: "workspace_api" as const };
@@ -391,10 +418,11 @@ async function main() {
 
   await check("source: lib/os/runs/session.ts intercepts a BridgeRefused BEFORE returning ok:true (so sendMessage, which saves/queues the run, is never reached)", () => {
     const src = readFileSync(join(ROOT, "lib/os/runs/session.ts"), "utf8");
-    const refusedAt = src.indexOf('"refused" in bridge');
-    const okTrueAt = src.indexOf("ok: true,");
+    const resolveAt = src.indexOf("export async function resolveRunSession");
+    const refusedAt = src.indexOf('"refused" in bridge', resolveAt);
+    const okTrueAt = src.indexOf("session: {", refusedAt);
     assert.ok(refusedAt > 0, "resolveRunSession must check the bridge resolution for a BridgeRefused");
-    assert.ok(okTrueAt > 0 && refusedAt < okTrueAt, "the refused check must come before the ok:true session is returned");
+    assert.ok(okTrueAt > 0 && refusedAt < okTrueAt, "the refused check must come before the successful session is returned");
     assert.match(src, /status: 409, error: BRIDGE_REFUSAL_ERROR\[bridge\.refused\]/);
     // The fleet-control override keys on the owner, never on "is an operator"
     // (CodeRabbit, PR #583: Adon is an operator since #576).

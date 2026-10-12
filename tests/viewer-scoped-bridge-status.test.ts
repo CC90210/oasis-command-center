@@ -202,17 +202,17 @@ async function main() {
   });
 
   // ── Inventory wording (truthfulness rule, lib/bridge-cli-status.ts) ─────
-  await check("departmentInventoryLine: Claude signed in, Codex never for departments, Gemini's timeout reads honestly", () => {
+  await check("departmentInventoryLine: inventory says only installed or signed in; readiness belongs to a real probe", () => {
     assert.equal(departmentInventoryLine("claude", { installed: true, authenticated: true, checked: true }), "Claude Code: signed in");
     assert.equal(departmentInventoryLine("claude", { installed: true, authenticated: false, checked: true }), "Claude Code: installed, not signed in");
     assert.equal(departmentInventoryLine("claude", { installed: false, authenticated: false, checked: false }), "Claude Code: not detected");
-    assert.equal(departmentInventoryLine("codex", { installed: true, authenticated: true, checked: true }), "Codex: installed, not used for department work");
+    assert.equal(departmentInventoryLine("codex", { installed: true, authenticated: true, checked: true }), "Codex: signed in");
     assert.equal(
       departmentInventoryLine("gemini", { installed: true, authenticated: false, checked: false }),
       "Gemini CLI: installed, did not answer the check",
       "a timeout never reads as 'needs sign-in' — it may already be signed in",
     );
-    assert.equal(departmentInventoryLine("gemini", { installed: true, authenticated: true, checked: true }), "Gemini CLI: installed, not used for department work");
+    assert.equal(departmentInventoryLine("gemini", { installed: true, authenticated: true, checked: true }), "Gemini CLI: signed in");
   });
 
   if (failures > 0) {

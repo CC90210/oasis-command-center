@@ -43,6 +43,7 @@ export const dynamic = "force-dynamic";
 
 const CODE_TTL_MIN = 15;
 const CONNECTOR_CODE_TTL_MIN = 5;
+const PAIR_CODE_RE = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{3}(?:-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{3}){2}$/;
 
 // Alphabet excludes ambiguous chars (0/O, 1/I/L) so the operator can read
 // it off the screen and type it without errors.
@@ -62,7 +63,6 @@ function mintCode(): string {
 export async function POST(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok || !session.email) return bad(401, "unauthorized");
-  if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
 
   let body: { purpose?: unknown } = {};
   try {
@@ -71,6 +71,13 @@ export async function POST(req: NextRequest) {
     body = {};
   }
   const purpose = body.purpose === "connector" ? "connector" : "desktop";
+  // A connector code can create only a connector-scoped pairing owned by the
+  // signed-in member, so OASIS members may mint one for themselves. Desktop
+  // codes can create a daemon-capable install and retain the stricter shared-
+  // resource gate.
+  if (purpose !== "connector" && !(await canAccessSharedTenantResource(session))) {
+    return bad(403, "forbidden");
+  }
   // Daemon scope is reserved for a desktop code minted by an owner or
   // admin — a connector code is always 'connector', by construction.
   const scope = purpose === "connector" ? "connector" : session.isAdmin ? "daemon" : "connector";
@@ -123,4 +130,49 @@ export async function POST(req: NextRequest) {
     purpose,
     scope,
   });
+}
+
+/**
+ * Browser polling for the exact code it minted. This is the authoritative
+ * completion signal for both a new pairing and a re-pair: re-pairing preserves
+ * bridge_pairings.created_at, so time-based device discovery is not truthful.
+ */
+export async function GET(req: NextRequest) {
+  const session = await resolveSessionContext();
+  if (!session.ok) return bad(401, "unauthorized");
+  const code = new URL(req.url).searchParams.get("code")?.trim().toUpperCase() ?? "";
+  if (!PAIR_CODE_RE.test(code)) return bad(400, "invalid_code");
+
+  const db = getServiceSupabase();
+  const codeRead = await db
+    .from("bridge_pair_codes")
+    .select("expires_at, consumed_at, consumed_by_pairing_id")
+    .eq("tenant_id", session.tenantId)
+    .eq("auth_user_id", session.userId)
+    .eq("purpose", "connector")
+    .eq("code", code)
+    .maybeSingle();
+  if (codeRead.error) return bad(500, `status_failed: ${codeRead.error.message}`);
+  const row = codeRead.data as {
+    expires_at?: string | null;
+    consumed_at?: string | null;
+    consumed_by_pairing_id?: string | null;
+  } | null;
+  if (!row) return bad(404, "code_not_found");
+  if (!row.consumed_at || !row.consumed_by_pairing_id) {
+    const expired = !row.expires_at || new Date(row.expires_at).getTime() < Date.now();
+    return NextResponse.json({ ok: true, status: expired ? "expired" : "pending" });
+  }
+
+  const pairingRead = await db
+    .from("bridge_pairings")
+    .select("id, label, claim_enabled_at")
+    .eq("tenant_id", session.tenantId)
+    .eq("user_id", session.userId)
+    .eq("id", row.consumed_by_pairing_id)
+    .is("revoked_at", null)
+    .maybeSingle();
+  if (pairingRead.error) return bad(500, `pairing_status_failed: ${pairingRead.error.message}`);
+  if (!pairingRead.data) return bad(409, "paired_computer_unavailable");
+  return NextResponse.json({ ok: true, status: "connected", pairing: pairingRead.data });
 }

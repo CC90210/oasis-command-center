@@ -138,7 +138,7 @@ const deviceFromHeartbeat = (executionReady: boolean): EngineDevice => ({
   approved: true,
   online: true,
   busy: false,
-  protocols: ["department_task_v2", "runtime_action_v1"],
+  protocols: ["department_task_v2", "runtime_action_v1", "coding_harness_task_v1"],
   runtimes: {
     claude: { installed: true, signedIn: true, executionReady, unsupported: false, version: "2.1.215", lastTestedAt: null, code: null },
     codex: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "0.146.0", lastTestedAt: null, code: null },

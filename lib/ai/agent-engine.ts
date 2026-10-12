@@ -188,6 +188,28 @@ export function parseEngineChoice(raw: unknown): AgentEngineChoice | null {
   return null;
 }
 
+/** Dual-read rollout adapter for already-open clients using the former
+ * `{kind: ...}` payload. Legacy device choices remain unbound and are never
+ * guessed; callers can return the explicit computer-upgrade repair. */
+export function selectionFromRequest(
+  raw: unknown,
+  activeApiProvider?: ApiEngineProvider,
+):
+  | { selection: EngineSelection; legacy: boolean }
+  | { selection: null; legacy: true; needsPairing: true }
+  | null {
+  const canonical = parseEngineSelection(raw);
+  if (canonical) return { selection: canonical, legacy: false };
+  const legacy = parseEngineChoice(raw);
+  if (!legacy) return null;
+  if (legacy.kind === "api") {
+    const provider = legacy.provider ?? activeApiProvider;
+    return provider ? { selection: { mode: "api", provider }, legacy: true } : null;
+  }
+  const selection = selectionFromChoice(legacy);
+  return selection ? { selection, legacy: true } : { selection: null, legacy: true, needsPairing: true };
+}
+
 /** "Claude Code on your paired computer": the words for a choice that is not the API account. */
 export function bridgeEngineLine(choice: Exclude<AgentEngineChoice, { kind: "api" }>): string {
   return choice.kind === "cli"

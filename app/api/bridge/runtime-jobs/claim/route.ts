@@ -9,6 +9,7 @@ import { pairingCanClaim, resolvePairingFromBearer } from "@/lib/bridge/pairing-
 import {
   RUNTIME_ACTION_PROTOCOL,
   claimRuntimeJob,
+  failClaimedRuntimeJobForInactiveRequester,
   hasOnlyKeys,
   isPlainObject,
   parseCapabilities,
@@ -17,6 +18,7 @@ import {
   runtimePairingApproval,
   validRequestId,
 } from "@/lib/bridge/runtime-jobs";
+import { liveSeat } from "@/lib/os/seat";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +37,7 @@ export async function POST(req: NextRequest) {
   const pairing = resolved.pairing;
   if (!pairing.userId) return bad(409, "pairing_has_no_owner");
   if (!pairingCanClaim(pairing)) return bad(403, "pairing_not_approved");
+  if (!(await liveSeat(pairing.tenantId, pairing.userId)).live) return bad(403, "seat_inactive");
 
   let raw: unknown;
   try {
@@ -62,6 +65,9 @@ export async function POST(req: NextRequest) {
 
   const deadline = Date.now() + Number(waitMs);
   for (;;) {
+    // The bearer may stay cryptographically valid after its owner's seat is
+    // removed. Re-check on every pass so an already-open long poll stops.
+    if (!(await liveSeat(pairing.tenantId, pairing.userId)).live) return bad(403, "seat_inactive");
     const job = await claimRuntimeJob({
       tenantId: pairing.tenantId,
       pairingId: pairing.pairingId,
@@ -70,6 +76,26 @@ export async function POST(req: NextRequest) {
     });
     if (job) {
       if (!job.leaseId || !job.deadlineAt) return bad(500, "invalid_runtime_job_state");
+      const requesterSeat = await liveSeat(job.tenantId, job.userId);
+      if (!requesterSeat.live) {
+        const terminalized = Boolean(job.claimId) && await failClaimedRuntimeJobForInactiveRequester({
+          tenantId: job.tenantId,
+          pairingId: job.pairingId,
+          jobId: job.id,
+          claimId: job.claimId!,
+          leaseId: job.leaseId,
+        });
+        if (!terminalized) {
+          console.error("[bridge.runtime-jobs.claim.requester-seat]", {
+            tenantId: job.tenantId,
+            pairingId: job.pairingId,
+            jobId: job.id,
+            reason: requesterSeat.reason,
+            error: "lease_terminalize_failed",
+          });
+        }
+        return NextResponse.json({ ok: true, job: null });
+      }
       return NextResponse.json({
         ok: true,
         job: {

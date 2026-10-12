@@ -541,14 +541,15 @@ async function main() {
     assert.match(oldCliCard, /export function LocalCliProvidersCard[\s\S]*return null;/);
 
     // The coding harness carries the same immutable engine snapshot. The
-    // server then resolves the machine fingerprint from that pairing rather
-    // than trusting browser-supplied identity.
+    // server then queues only to the saved pairing rather than trusting a
+    // browser-supplied machine identity or route.
     const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
-    assert.match(widget, /target_pairing_id: harnessRoute\.pairingId/);
-    assert.match(widget, /runtime_engine_kind: harnessRoute\.engineKind/);
-    assert.match(widget, /runtime_engine_name: harnessRoute\.engineName/);
+    assert.match(widget, /target_pairing_id:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.pairingId : undefined/);
+    assert.match(widget, /runtime_engine_kind:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.engineKind : undefined/);
+    assert.match(widget, /runtime_engine_name:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.engineName : undefined/);
     const route = readFileSync(join(ROOT, "app/api/bridge/chat/route.ts"), "utf8");
-    assert.match(route, /target_machine_fingerprint: targetMachineFingerprint/);
+    assert.match(route, /enqueueHarnessJob\(/);
+    assert.match(route, /pairingId:\s*savedRoute\.pairingId/);
   });
 
   console.log(`\n${passed} passed, ${failures} failed`);

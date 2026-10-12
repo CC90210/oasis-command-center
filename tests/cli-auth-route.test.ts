@@ -195,7 +195,7 @@ async function main() {
     assert.equal(old.body.error, "connector_update_required");
   });
 
-  await check("queues Codex auth once per stable user/pairing operation and returns codex login", async () => {
+  await check("deduplicates active Codex auth, then lets an explicit reconnect start a fresh login", async () => {
     await addPairing({ id: "pair-codex" });
     const result = await json(await route.POST(request({ provider: "codex", pairing_id: "pair-codex" })));
     assert.equal(result.status, 202, JSON.stringify(result.body));
@@ -235,7 +235,12 @@ async function main() {
       args: [JSON.stringify({ authenticated: true }), new Date().toISOString(), new Date().toISOString(), String(result.body.job_id)],
     });
     const recent = await json(await route.POST(request({ provider: "codex", pairing_id: "pair-codex" })));
-    assert.equal(recent.body.job_id, result.body.job_id, "a recent terminal auth receipt is reused instead of opening another login window");
+    assert.notEqual(recent.body.job_id, result.body.job_id, "a finished sign-in is audit history; a later explicit Reconnect starts fresh work");
+    assert.equal(recent.status, 202);
+    assert.equal(
+      Number((await db.execute({ sql: "SELECT count(*) AS n FROM bridge_runtime_jobs WHERE pairing_id = ? AND action = 'auth' AND engine_name = 'codex'", args: ["pair-codex"] })).rows[0].n),
+      2,
+    );
   });
 
   await check("queues Claude with the real interactive flow instructions", async () => {

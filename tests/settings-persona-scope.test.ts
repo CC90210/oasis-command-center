@@ -17,11 +17,16 @@ assert.ok(
 );
 
 const settings = read("components/settings/SettingsContent.tsx");
-const personalBranch = settings.indexOf("if (profile && !canManageTenant)");
+const personalBranch = settings.indexOf(
+  'if (profile && !canManageTenant && section !== "ai" && section !== "devices")',
+);
 // The system reads that remain (AI keys, bridge heartbeat). The integration
 // heartbeats moved to the operator /health page with the one-card Connections hub.
 const systemReads = ['safe("settings.ai_keys"', 'safe("settings.bridge_online"'].map((m) => settings.indexOf(m));
-assert.ok(personalBranch >= 0, "non-admins need an explicit personal-only Settings branch");
+assert.ok(
+  personalBranch >= 0,
+  "non-admins need an explicit personal-only branch with only AI Brain and Devices excepted",
+);
 assert.ok(
   systemReads.every((at) => at > personalBranch),
   "the personal-only branch must return before system integration/provider/device data is queried",

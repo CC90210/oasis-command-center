@@ -69,6 +69,22 @@ let browserSession: Session = {
 };
 stub("../lib/api-auth", { resolveSessionContext: async () => browserSession });
 
+const inactiveSeats = new Set<string>();
+const seatChecks = new Map<string, number>();
+const seatKey = (tenantId: string, userId: string) => `${tenantId}\u0000${userId}`;
+stub("../lib/os/seat", {
+  liveSeat: async (tenantId: string, userId: string) => {
+    const key = seatKey(tenantId, userId);
+    seatChecks.set(key, (seatChecks.get(key) ?? 0) + 1);
+    return inactiveSeats.has(key)
+      ? { live: false, reason: "deactivated" }
+      : {
+          live: true,
+          profile: { id: `profile-${userId}`, email: null, teamRole: "member", isOwner: false, adminAccess: false },
+        };
+  },
+});
+
 function splitStatements(sql: string): string[] {
   const out: string[] = [];
   let buffer: string[] = [];
@@ -100,8 +116,11 @@ async function createSchema() {
     );
     CREATE TABLE dept_chat_runs (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
-      status TEXT NOT NULL, created_at TEXT NOT NULL
+      status TEXT NOT NULL, created_at TEXT NOT NULL, claimed_pairing_id TEXT,
+      lease_id TEXT
     );
+    CREATE UNIQUE INDEX dept_chat_runs_pairing_claim_idx
+      ON dept_chat_runs (claimed_pairing_id, lease_id);
     CREATE TABLE agent_events (
       id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), event_type TEXT,
       publisher_agent TEXT, severity TEXT, payload TEXT, correlation_id TEXT,
@@ -188,12 +207,34 @@ async function main() {
 
   console.log("bridge-runtime-jobs:");
 
+  await check("local model refs preserve vendor case while CLI provider names normalize", () => {
+    assert.deepEqual(runtime.parseRuntimeEngine({ kind: "local", name: "lmstudio/Qwen3-Coder-GGUF" }), {
+      ok: true,
+      engine: { kind: "local", name: "lmstudio/Qwen3-Coder-GGUF" },
+    });
+    assert.deepEqual(runtime.parseRuntimeEngine({ kind: "cli", name: "CODEX" }), {
+      ok: true,
+      engine: { kind: "cli", name: "codex" },
+    });
+    const identity = { tenantId: TENANT, userId: USER, pairingId: "pair-case", action: "probe" as const };
+    assert.notEqual(
+      runtime.runtimeOperationKey({ ...identity, engine: { kind: "local", name: "lmstudio/Foo" } }),
+      runtime.runtimeOperationKey({ ...identity, engine: { kind: "local", name: "lmstudio/foo" } }),
+      "case-distinct local models must never collide in the queue",
+    );
+    assert.equal(
+      runtime.runtimeOperationKey({ ...identity, engine: { kind: "cli", name: "CODEX" } }),
+      runtime.runtimeOperationKey({ ...identity, engine: { kind: "cli", name: "codex" } }),
+      "CLI provider ids remain case-insensitive",
+    );
+  });
+
   await check("migration adds the engine binding, runtime claim state, targeted-run fields, queue, and tenant-leading indexes", async () => {
     const columns = async (table: string) => (await db.execute(`PRAGMA table_info('${table}')`)).rows.map((row) => String(row.name));
     assert.ok((await columns("agent_model_config")).includes("computer_pairing_id"));
     assert.ok((await columns("agent_model_config")).includes("fallback_policy"));
     assert.ok((await columns("bridge_pairings")).includes("claim_runtime_state"));
-    for (const name of ["target_pairing_id", "runtime_engine_kind", "runtime_engine_name"]) {
+    for (const name of ["target_pairing_id", "runtime_engine_kind", "runtime_engine_name", "runtime_fallback_policy", "runtime_fallback_reason"]) {
       assert.ok((await columns("dept_chat_runs")).includes(name), `${name} missing`);
     }
     const jobColumns = await columns("bridge_runtime_jobs");
@@ -203,13 +244,15 @@ async function main() {
     const indexes = (await db.execute("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('bridge_runtime_jobs','dept_chat_runs')")).rows;
     assert.ok(indexes.some((row) => /bridge_runtime_jobs.*claim/i.test(String(row.name))));
     assert.ok(indexes.some((row) => /dept_chat_runs.*target/i.test(String(row.name))));
+    const exactClaimColumns = (await db.execute("PRAGMA index_info('dept_chat_runs_target_claim_idx')")).rows.map((row) => String(row.name));
+    assert.deepEqual(exactClaimColumns, ["tenant_id", "target_pairing_id", "status", "created_at"], "the v2 target claim index must not collide with migration 213's lease index");
     for (const row of indexes) {
       const sql = String(row.sql || "");
       if (/bridge_runtime_jobs/.test(sql) && /CREATE INDEX/i.test(sql)) assert.match(sql, /\(tenant_id,/i, `${row.name} is not tenant-leading`);
     }
   });
 
-  await check("enqueue derives a stable operation key, reuses active/recent work, and opens a new attempt after the reuse window", async () => {
+  await check("enqueue derives a stable operation key, reuses only active work, and retries immediately after a terminal result", async () => {
     const pairing = await makePairing();
     const at = new Date("2026-10-12T12:00:00.000Z");
     const invalidAction = await runtime.enqueueRuntimeJob({
@@ -254,13 +297,90 @@ async function main() {
       sql: "UPDATE bridge_runtime_jobs SET status = 'completed', result_code = 'probe_ok', result_json = '{}', finished_at = ?, updated_at = ? WHERE id = ?",
       args: [at.toISOString(), at.toISOString(), first.job.id],
     });
-    const recent = await runtime.enqueueRuntimeJob({ ...input, now: new Date(at.getTime() + 1_000) });
-    assert.equal(recent.ok && recent.job.id, first.job.id, "a double click after completion reuses the recent receipt");
-    const later = await runtime.enqueueRuntimeJob({ ...input, now: new Date(at.getTime() + runtime.RUNTIME_JOB_REUSE_MS + 1_000) });
-    assert.equal(later.ok, true);
-    if (later.ok) assert.notEqual(later.job.id, first.job.id, "a deliberate later retest creates a new auditable attempt");
+    const retry = await runtime.enqueueRuntimeJob({ ...input, now: new Date(at.getTime() + 1_000) });
+    assert.equal(retry.ok, true);
+    if (retry.ok) assert.notEqual(retry.job.id, first.job.id, "a completed or failed receipt must never suppress a real retry");
+    const duplicateRetry = await runtime.enqueueRuntimeJob({ ...input, now: new Date(at.getTime() + 1_000) });
+    assert.equal(duplicateRetry.ok && retry.ok && duplicateRetry.job.id, retry.ok ? retry.job.id : null, "concurrent retry clicks still share the one active attempt");
     await db.execute({ sql: "UPDATE bridge_pairings SET revoked_at = ? WHERE id = ?", args: [new Date().toISOString(), pairing.id] });
-    assert.deepEqual(await runtime.enqueueRuntimeJob({ ...input, now: new Date(at.getTime() + runtime.RUNTIME_JOB_REUSE_MS * 2) }), { ok: false, code: "pairing_unavailable" });
+    assert.deepEqual(await runtime.enqueueRuntimeJob({ ...input, now: new Date(at.getTime() + 2_000) }), { ok: false, code: "pairing_unavailable" });
+  });
+
+  await check("an unclaimed job expires instead of being reused forever", async () => {
+    const pairing = await makePairing();
+    const at = new Date("2026-10-12T12:30:00.000Z");
+    const input = {
+      tenantId: TENANT,
+      userId: USER,
+      pairingId: pairing.id,
+      action: "probe" as const,
+      engine: { kind: "cli" as const, name: "codex" },
+      prompt: "Reply with OASIS runtime ready.",
+    };
+    const stale = await runtime.enqueueRuntimeJob({ ...input, now: at });
+    assert.equal(stale.ok, true);
+    if (!stale.ok) return;
+    const afterTtl = new Date(at.getTime() + runtime.RUNTIME_QUEUED_TTL_MS + 1);
+    const expiredClaim = await runtime.claimRuntimeJob({
+      tenantId: TENANT,
+      pairingId: pairing.id,
+      claimId: "stale-queue-claim",
+      capabilities: [{ action: "probe", engine: { kind: "cli", name: "codex" } }],
+      now: afterTtl,
+    });
+    assert.equal(expiredClaim, null, "the claim path handed out an expired queued job");
+    const retry = await runtime.enqueueRuntimeJob({
+      ...input,
+      now: afterTtl,
+    });
+    assert.equal(retry.ok, true);
+    if (!retry.ok) return;
+    assert.notEqual(retry.job.id, stale.job.id, "the expired queued job was incorrectly reused");
+    const old = (await db.execute({
+      sql: "SELECT status, error_code, error_retryable, finished_at FROM bridge_runtime_jobs WHERE id = ?",
+      args: [stale.job.id],
+    })).rows[0];
+    assert.deepEqual(
+      { status: old.status, error: old.error_code, retryable: Number(old.error_retryable), finished: typeof old.finished_at },
+      { status: "failed", error: "queue_expired", retryable: 1, finished: "string" },
+    );
+  });
+
+  await check("expired queued jobs release the per-pairing active cap", async () => {
+    const pairing = await makePairing();
+    const at = new Date("2026-10-12T12:45:00.000Z");
+    for (let i = 0; i < runtime.RUNTIME_JOB_MAX_ACTIVE_PER_USER_PAIRING; i += 1) {
+      const queued = await runtime.enqueueRuntimeJob({
+        tenantId: TENANT,
+        userId: USER,
+        pairingId: pairing.id,
+        action: "probe",
+        engine: { kind: "local", name: `ollama/stale-cap-${i}` },
+        prompt: "Reply with OASIS runtime ready.",
+        now: at,
+      });
+      assert.equal(queued.ok, true);
+    }
+    const recovered = await runtime.enqueueRuntimeJob({
+      tenantId: TENANT,
+      userId: USER,
+      pairingId: pairing.id,
+      action: "auth",
+      engine: { kind: "cli", name: "claude" },
+      now: new Date(at.getTime() + runtime.RUNTIME_QUEUED_TTL_MS + 1),
+    });
+    assert.equal(recovered.ok, true, "stale queued rows still consumed active capacity");
+    const states = await db.execute({
+      sql: "SELECT status, error_code, COUNT(*) AS n FROM bridge_runtime_jobs WHERE tenant_id = ? AND pairing_id = ? GROUP BY status, error_code ORDER BY status",
+      args: [TENANT, pairing.id],
+    });
+    assert.deepEqual(
+      states.rows.map((row) => [row.status, row.error_code, Number(row.n)]),
+      [
+        ["failed", "queue_expired", runtime.RUNTIME_JOB_MAX_ACTIVE_PER_USER_PAIRING],
+        ["queued", null, 1],
+      ],
+    );
   });
 
   await check("dashboard callers cannot restore UUID-per-click idempotency", () => {
@@ -428,7 +548,7 @@ async function main() {
       claim_id: "claim-runtime-auth-1",
       capabilities: [{ action: "auth", engine: { kind: "cli", name: "gemini" } }],
       runtime_state: {
-        claude: { installed: true, authenticated: true, state: "ready" },
+        claude: { installed: true, authenticated: true, state: "account_identity_unavailable" },
         codex: { installed: true, authenticated: true, state: "ready" },
         gemini: { installed: true, authenticated: false, state: "needs_sign_in" },
         local_models: [{ ref: "ollama/llama3.3:70b", label: "Llama 3.3 70B", adapter: "ollama", state: "ready" }],
@@ -449,6 +569,7 @@ async function main() {
     assert.equal(retry.body.job.lease_id, claimed.body.job.lease_id);
     const state = (await db.execute({ sql: "SELECT claim_runtime_state FROM bridge_pairings WHERE id = ?", args: [target.id] })).rows[0].claim_runtime_state;
     const runtimeState = JSON.parse(String(state));
+    assert.equal(runtimeState.claude.state, "account_identity_unavailable");
     assert.equal(runtimeState.gemini.state, "needs_sign_in");
     assert.equal(runtimeState.local_models[0].ref, "ollama/llama3.3:70b");
     assert.doesNotMatch(String(state), /Bearer|oab_runtime/);
@@ -524,6 +645,98 @@ async function main() {
     assert.equal(result.body.error, "pairing_not_approved");
   });
 
+  await check("an inactive pairing owner is refused at claim entry and during an open long poll", async () => {
+    const pairing = await makePairing({ userId: USER });
+    const key = seatKey(TENANT, USER);
+    const body = {
+      protocol: "runtime_action_v1",
+      claim_id: "claim-owner-seat-entry",
+      capabilities: [{ action: "probe", engine: { kind: "cli", name: "codex" } }],
+      wait_ms: 0,
+    };
+    try {
+      inactiveSeats.add(key);
+      const entry = await json(await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", pairing.token, body)));
+      assert.equal(entry.status, 403);
+      assert.equal(entry.body.error, "seat_inactive");
+
+      inactiveSeats.delete(key);
+      const checksBeforePoll = seatChecks.get(key) ?? 0;
+      const pending = claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", pairing.token, {
+        ...body,
+        claim_id: "claim-owner-seat-mid-poll",
+        wait_ms: 1_000,
+      }));
+      for (let attempt = 0; attempt < 100 && (seatChecks.get(key) ?? 0) < checksBeforePoll + 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.ok((seatChecks.get(key) ?? 0) >= checksBeforePoll + 2, "the request never reached its first long-poll pass");
+      inactiveSeats.add(key);
+      const midPoll = await json(await pending);
+      assert.equal(midPoll.status, 403);
+      assert.equal(midPoll.body.error, "seat_inactive");
+    } finally {
+      inactiveSeats.delete(key);
+    }
+  });
+
+  await check("requester seat revocation terminalizes only the exact claimed lease before disclosing an action", async () => {
+    const pairing = await makePairing({ userId: USER });
+    const revoked = await runtime.enqueueRuntimeJob({
+      tenantId: TENANT,
+      userId: OTHER_USER,
+      pairingId: pairing.id,
+      action: "probe",
+      engine: { kind: "cli", name: "codex" },
+      prompt: "Reply with OASIS runtime ready.",
+    });
+    const untouched = await runtime.enqueueRuntimeJob({
+      tenantId: TENANT,
+      userId: USER,
+      pairingId: pairing.id,
+      action: "probe",
+      engine: { kind: "local", name: "ollama/seat-control" },
+      prompt: "Reply with OASIS runtime ready.",
+    });
+    assert.equal(revoked.ok, true);
+    assert.equal(untouched.ok, true);
+    if (!revoked.ok || !untouched.ok) return;
+
+    const key = seatKey(TENANT, OTHER_USER);
+    try {
+      inactiveSeats.add(key);
+      const response = await json(await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", pairing.token, {
+        protocol: "runtime_action_v1",
+        claim_id: "claim-revoked-requester",
+        capabilities: [{ action: "probe", engine: { kind: "cli", name: "codex" } }],
+        wait_ms: 0,
+      })));
+      assert.deepEqual(response, { status: 200, body: { ok: true, job: null } });
+
+      const stopped = (await db.execute({
+        sql: "SELECT status, claim_id, lease_id, error_code, error_retryable, finished_at FROM bridge_runtime_jobs WHERE id = ?",
+        args: [revoked.job.id],
+      })).rows[0];
+      assert.equal(stopped.status, "failed");
+      assert.equal(stopped.claim_id, "claim-revoked-requester");
+      assert.equal(typeof stopped.lease_id, "string");
+      assert.equal(stopped.error_code, "requester_seat_inactive");
+      assert.equal(Number(stopped.error_retryable), 0);
+      assert.equal(typeof stopped.finished_at, "string");
+
+      const control = (await db.execute({
+        sql: "SELECT status, claim_id, lease_id, error_code FROM bridge_runtime_jobs WHERE id = ?",
+        args: [untouched.job.id],
+      })).rows[0];
+      assert.deepEqual(
+        { status: control.status, claim_id: control.claim_id, lease_id: control.lease_id, error_code: control.error_code },
+        { status: "queued", claim_id: null, lease_id: null, error_code: null },
+      );
+    } finally {
+      inactiveSeats.delete(key);
+    }
+  });
+
   await check("heartbeat and progress require the authenticated pairing's live lease and accept codes, never commands", async () => {
     const pairing = await makePairing();
     const other = await makePairing();
@@ -532,14 +745,14 @@ async function main() {
       userId: USER,
       pairingId: pairing.id,
       action: "probe",
-      engine: { kind: "local", name: "llama3.3:70b" },
+      engine: { kind: "local", name: "ollama/llama3.3:70b" },
       prompt: "Reply with OASIS runtime ready.",
     });
     assert.equal(queued.ok, true);
     const claim = await json(await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", pairing.token, {
       protocol: "runtime_action_v1",
       claim_id: "heartbeat-progress-claim",
-      capabilities: [{ action: "probe", engine: { kind: "local", name: "llama3.3:70b" } }],
+      capabilities: [{ action: "probe", engine: { kind: "local", name: "ollama/llama3.3:70b" } }],
       wait_ms: 0,
     })));
     const jobId = claim.body.job.job_id as string;
@@ -632,6 +845,75 @@ async function main() {
     }
   });
 
+  await check("requester deactivation after claim cancels heartbeat, progress, complete and fail for probe and auth jobs", async () => {
+    const cases = [
+      {
+        name: "heartbeat-probe",
+        action: "probe" as const,
+        run: (pairing: { token: string }, jobId: string, leaseId: string, ctx: { params: Promise<{ job_id: string }> }) =>
+          heartbeatRoute.POST(machineRequest(`/api/bridge/runtime-jobs/${jobId}/heartbeat`, pairing.token, { lease_id: leaseId }), ctx),
+      },
+      {
+        name: "progress-auth",
+        action: "auth" as const,
+        run: (pairing: { token: string }, jobId: string, leaseId: string, ctx: { params: Promise<{ job_id: string }> }) =>
+          progressRoute.POST(machineRequest(`/api/bridge/runtime-jobs/${jobId}/progress`, pairing.token, { lease_id: leaseId, progress: { code: "waiting_for_sign_in" } }), ctx),
+      },
+      {
+        name: "complete-probe",
+        action: "probe" as const,
+        run: (pairing: { token: string }, jobId: string, leaseId: string, ctx: { params: Promise<{ job_id: string }> }) =>
+          completeRoute.POST(machineRequest(`/api/bridge/runtime-jobs/${jobId}/complete`, pairing.token, { lease_id: leaseId, result: { code: "probe_ok", answer: "OASIS_RUNTIME_READY" } }), ctx),
+      },
+      {
+        name: "fail-auth",
+        action: "auth" as const,
+        run: (pairing: { token: string }, jobId: string, leaseId: string, ctx: { params: Promise<{ job_id: string }> }) =>
+          failRoute.POST(machineRequest(`/api/bridge/runtime-jobs/${jobId}/fail`, pairing.token, { lease_id: leaseId, error: { code: "auth_process_failed", retryable: true } }), ctx),
+      },
+    ];
+    const requesterKey = seatKey(TENANT, OTHER_USER);
+    for (const scenario of cases) {
+      const pairing = await makePairing({ userId: USER });
+      const queued = await runtime.enqueueRuntimeJob({
+        tenantId: TENANT,
+        userId: OTHER_USER,
+        pairingId: pairing.id,
+        action: scenario.action,
+        engine: { kind: "cli", name: "codex" },
+        ...(scenario.action === "probe" ? { prompt: "Reply with OASIS runtime ready." } : {}),
+      });
+      assert.equal(queued.ok, true, scenario.name);
+      if (!queued.ok) continue;
+      const claimed = await json(await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", pairing.token, {
+        protocol: "runtime_action_v1",
+        claim_id: `requester-revoked-${scenario.name}`,
+        capabilities: [{ action: scenario.action, engine: { kind: "cli", name: "codex" } }],
+        wait_ms: 0,
+      })));
+      assert.equal(claimed.status, 200, scenario.name);
+      const jobId = claimed.body.job.job_id as string;
+      const leaseId = claimed.body.job.lease_id as string;
+      const ctx = { params: Promise.resolve({ job_id: jobId }) };
+      try {
+        inactiveSeats.add(requesterKey);
+        const refused = await json(await scenario.run(pairing, jobId, leaseId, ctx));
+        assert.equal(refused.status, 403, scenario.name);
+        assert.equal(refused.body.error, "requester_seat_inactive", scenario.name);
+        const row = (await db.execute({
+          sql: "SELECT status, error_code, error_retryable, finished_at FROM bridge_runtime_jobs WHERE id = ?",
+          args: [jobId],
+        })).rows[0];
+        assert.equal(row.status, "failed", scenario.name);
+        assert.equal(row.error_code, "requester_seat_inactive", scenario.name);
+        assert.equal(Number(row.error_retryable), 0, scenario.name);
+        assert.equal(typeof row.finished_at, "string", scenario.name);
+      } finally {
+        inactiveSeats.delete(requesterKey);
+      }
+    }
+  });
+
   await check("completion requires the exact inference canary, stores only structured results, and rejects later lease writes", async () => {
     const pairing = await makePairing();
     const queued = await runtime.enqueueRuntimeJob({
@@ -669,10 +951,15 @@ async function main() {
       result: { code: "probe_ok", answer: "OASIS_RUNTIME_READY", model: "claude-sonnet", latency_ms: 321 },
     }), ctx));
     assert.equal(completed.status, 200);
-    const row = (await db.execute({ sql: "SELECT status, result_json FROM bridge_runtime_jobs WHERE id = ?", args: [jobId] })).rows[0];
+    const row = (await db.execute({ sql: "SELECT status, result_json, finished_at FROM bridge_runtime_jobs WHERE id = ?", args: [jobId] })).rows[0];
     assert.equal(row.status, "completed");
     assert.doesNotMatch(String(row.result_json), /sk-runtime-job/);
     assert.match(String(row.result_json), /OASIS_RUNTIME_READY/);
+    const receipts = await runtime.readLatestRuntimeProbeReceipts(TENANT, [pairing.id]);
+    const receipt = receipts.get(runtime.runtimeProbeReceiptKey(pairing.id, { kind: "cli", name: "claude" }));
+    assert.equal(receipt?.ready, true, "the exact completed probe is the readiness receipt");
+    assert.equal(receipt?.finishedAt, row.finished_at, "last tested comes from probe completion, not a heartbeat timestamp");
+    assert.equal(receipts.has(runtime.runtimeProbeReceiptKey(pairing.id, { kind: "cli", name: "codex" })), false);
     const publicDone = await json(await statusRoute.GET(new NextRequest(`https://oasisai.work/api/bridge/runtime-jobs/${jobId}`), ctx));
     assert.equal(publicDone.body.job.status, "done");
     assert.equal(publicDone.body.job.errorCode, null);
@@ -709,16 +996,17 @@ async function main() {
     assert.equal(arbitrary.body.error, "unsupported_failure_code");
     const failed = await json(await failRoute.POST(machineRequest(`/api/bridge/runtime-jobs/${jobId}/fail`, pairing.token, {
       lease_id: leaseId,
-      error: { code: "auth_process_failed", retryable: true },
+      error: { code: "account_identity_unavailable", retryable: true },
     }), ctx));
     assert.equal(failed.status, 200);
     assert.deepEqual(
       (await db.execute({ sql: "SELECT status, error_code, error_retryable FROM bridge_runtime_jobs WHERE id = ?", args: [jobId] })).rows[0],
-      { status: "failed", error_code: "auth_process_failed", error_retryable: 1 },
+      { status: "failed", error_code: "account_identity_unavailable", error_retryable: 1 },
     );
     const publicFailed = await json(await statusRoute.GET(new NextRequest(`https://oasisai.work/api/bridge/runtime-jobs/${jobId}`), ctx));
     assert.equal(publicFailed.body.job.status, "failed");
-    assert.equal(publicFailed.body.job.errorCode, "auth_process_failed");
+    assert.equal(publicFailed.body.job.errorCode, "account_identity_unavailable");
+    assert.match(publicFailed.body.job.message, /cannot identify/i);
 
     const expiring = await runtime.enqueueRuntimeJob({
       tenantId: TENANT,
@@ -777,6 +1065,29 @@ async function main() {
     assert.equal((await json(await statusRoute.GET(request, ctx))).status, 404);
     browserSession = { ok: false, reason: "no_session" };
     assert.equal((await json(await statusRoute.GET(request, ctx))).status, 401);
+  });
+
+  await check("browser polling turns an abandoned queued job into a clear terminal repair", async () => {
+    const pairing = await makePairing();
+    const staleAt = new Date(Date.now() - runtime.RUNTIME_QUEUED_TTL_MS - 5_000);
+    const queued = await runtime.enqueueRuntimeJob({
+      tenantId: TENANT,
+      userId: USER,
+      pairingId: pairing.id,
+      action: "probe",
+      engine: { kind: "cli", name: "codex" },
+      prompt: "Reply with OASIS runtime ready.",
+      now: staleAt,
+    });
+    assert.equal(queued.ok, true);
+    if (!queued.ok) return;
+    browserSession = { ...browserSession, ok: true, userId: USER, tenantId: TENANT } as Session;
+    const ctx = { params: Promise.resolve({ job_id: queued.job.id }) };
+    const status = await json(await statusRoute.GET(new NextRequest(`https://oasisai.work/api/bridge/runtime-jobs/${queued.job.id}`), ctx));
+    assert.equal(status.status, 200);
+    assert.equal(status.body.job.status, "failed");
+    assert.equal(status.body.job.errorCode, "queue_expired");
+    assert.match(String(status.body.job.message), /did not pick up.*connector.*try again/i);
   });
 
   console.log(`\n${passed} passed, ${failures} failed`);

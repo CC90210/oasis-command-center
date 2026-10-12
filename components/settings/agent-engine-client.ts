@@ -47,7 +47,13 @@ export type EngineDevice = {
   busy: boolean;
   protocols: string[];
   runtimes: Record<CliEngine, DeviceRuntime>;
-  localModels: Array<{ ref: string; label: string; adapter: "ollama" | "lmstudio"; state: "ready" | "unavailable" | "probe_required" }>;
+  localModels: Array<{
+    ref: string;
+    label: string;
+    adapter: "ollama" | "lmstudio";
+    state: "ready" | "unavailable" | "probe_required";
+    lastTestedAt: string | null;
+  }>;
 };
 
 export type EngineState = {
@@ -102,7 +108,11 @@ const STOPPED: Record<CallAction, { cancelled: string; deadline: string }> = {
 
 export const ENGINE_CLIENT_DEADLINE_MS = 85_000;
 export const ENGINE_SERVER_WINDOW_MS = 80_000;
-export const RUNTIME_JOB_DEADLINE_MS = 180_000;
+/** Connector probes may legitimately run for 540 s. Keep the browser alive
+ * for that full restricted inference plus one minute of queue/network margin;
+ * its Stop button still cancels immediately. */
+export const CONNECTOR_PROBE_MAX_MS = 540_000;
+export const RUNTIME_JOB_DEADLINE_MS = CONNECTOR_PROBE_MAX_MS + 60_000;
 const QUICK_DEADLINE_MS = 30_000;
 
 export type EngineCallOptions = {
@@ -227,7 +237,13 @@ function device(raw: unknown): EngineDevice | null {
       const adapter = model.adapter === "ollama" || model.adapter === "lmstudio" ? model.adapter : null;
       if (!ref || !adapter) return [];
       const state = model.state === "ready" || model.state === "unavailable" || model.state === "probe_required" ? model.state : "probe_required";
-      return [{ ref, label: nonEmpty(model.label) ?? ref, adapter, state }];
+      return [{
+        ref,
+        label: nonEmpty(model.label) ?? ref,
+        adapter,
+        state,
+        lastTestedAt: nonEmpty(model.lastTestedAt) ?? nonEmpty(model.last_tested_at),
+      }];
     }),
   };
 }
@@ -534,15 +550,26 @@ export function describeRuntime(
   const name = CLI_LABEL[provider];
   if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
   if (!target.online) return { label: "Offline", verified: false, repair: `On ${target.label}, run: oasis bridge restart` };
-  if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
-  if (state.unsupported) {
+  if (state.unsupported || (provider === "gemini" && state.installed && !state.signedIn)) {
     return { label: "Unsupported", verified: false, repair: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead." };
   }
-  if (!target.protocols.includes("runtime_action_v1") || !target.protocols.includes("department_task_v2")) {
+  if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
+  if (
+    !target.protocols.includes("runtime_action_v1") ||
+    !target.protocols.includes("department_task_v2") ||
+    !target.protocols.includes("coding_harness_task_v1")
+  ) {
     return { label: "Needs test", verified: false, repair: `Update and restart the OASIS connector on ${target.label}, then Test again.` };
   }
   if (!state.installed) return { label: "Not installed", verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
   if (!state.signedIn) return { label: "Sign-in needed", verified: false, repair: `On ${target.label}, run: ${CLI_LOGIN[provider]}` };
+  if (state.code === "account_identity_unavailable") {
+    return {
+      label: "Sign-in needed",
+      verified: false,
+      repair: `Open Claude Code once on ${target.label}, sign in so OASIS can identify the account, restart the OASIS connector, then Test again.`,
+    };
+  }
   if (!state.executionReady) return { label: "Needs test", verified: false, repair: `Test ${name} on ${target.label} before using it for agents.` };
   return { label: "Ready for agents", verified: true, repair: null };
 }
@@ -555,7 +582,11 @@ export function describeLocalModel(
   if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
   if (!target.online) return { label: "Offline", verified: false, repair: `Start Ollama or LM Studio and restart the OASIS connector on ${target.label}.` };
   if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
-  if (!target.protocols.includes("runtime_action_v1") || !target.protocols.includes("department_task_v2")) {
+  if (
+    !target.protocols.includes("runtime_action_v1") ||
+    !target.protocols.includes("department_task_v2") ||
+    !target.protocols.includes("coding_harness_task_v1")
+  ) {
     return { label: "Needs test", verified: false, repair: `Update and restart the OASIS connector on ${target.label}, then Test again.` };
   }
   if (!model) return { label: "Not installed", verified: false, repair: `Start Ollama or LM Studio on ${target.label}, install a model, then Refresh.` };
@@ -600,6 +631,7 @@ export function repairForCode(code: string | undefined, deviceLabel?: string, pr
       return "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.";
     case "runtime_job_timeout":
     case "timeout":
+    case "queue_expired":
     case "lease_expired":
       return "The computer did not finish in time. Check that its connector is running, then Test again.";
     default:

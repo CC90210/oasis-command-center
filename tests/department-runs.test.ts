@@ -154,6 +154,10 @@ async function main() {
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT");
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT");
   await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_policy TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_fallback_reason TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_provider TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_api_model TEXT");
   await db.executeMultiple(`
     CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
       service TEXT, field_key TEXT, encrypted_value TEXT, created_at TEXT, updated_at TEXT);
@@ -183,6 +187,7 @@ async function main() {
   const exec = await import("../lib/os/runs/executor");
   const follow = await import("../lib/os/runs/follow");
   const send = await import("../lib/os/runs/send");
+  const starter = await import("../lib/os/runs/turn-starter");
   const reduce = await import("../lib/os/runs/reduce");
   const types = await import("../lib/os/runs/types");
   const activity = await import("../lib/os/runs/activity");
@@ -194,6 +199,7 @@ async function main() {
   type StreamEvent = import("../lib/providers").StreamEvent;
   type ExecutorDeps = import("../lib/os/runs/executor").ExecutorDeps;
   type Run = import("../lib/os/runs/store").Run;
+  type RunSession = import("../lib/os/runs/session").RunSession;
 
   const scopeA = { tenantId: ACME, userId: ANN };
   const scopeB = { tenantId: ACME, userId: BEN };
@@ -398,6 +404,96 @@ async function main() {
   });
 
   console.log("Queue and Stop");
+  await check("a conversation driver opened on API A rebuilds queued API B from B's immutable row", async () => {
+    const conv = await store.createConversation(db, scopeA, { department: "sales", agentSlug: "sdr", now: now() });
+    const a = await store.enqueueRun(db, scopeA, {
+      conversationId: conv.id,
+      text: "run on A",
+      chatMode: "build",
+      showThinking: false,
+      now: now(),
+      runtimeEngineKind: "api",
+      runtimeEngineName: "anthropic",
+      runtimeApiSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+    });
+    const b = await store.enqueueRun(db, scopeA, {
+      conversationId: conv.id,
+      text: "run on B",
+      chatMode: "build",
+      showThinking: false,
+      now: now(),
+      runtimeEngineKind: "api",
+      runtimeEngineName: "openai",
+      runtimeApiSnapshot: { provider: "openai", model: "gpt-5.2" },
+    });
+    assert.ok(a.ok && b.ok);
+    const driverSessionA = {
+      apiEngineChoice: { kind: "api", provider: "anthropic" },
+      apiAccountSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+      fallbackFrom: null,
+      fallbackReason: null,
+    } as unknown as RunSession;
+    const forA = starter.sessionForQueuedRun(driverSessionA, a.run);
+    const forB = starter.sessionForQueuedRun(driverSessionA, b.run);
+    assert.ok(forA.ok && forB.ok);
+    assert.deepEqual(forA.session.apiAccountSnapshot, { provider: "anthropic", model: "claude-sonnet-4-6" });
+    assert.deepEqual(forB.session.apiAccountSnapshot, { provider: "openai", model: "gpt-5.2" });
+    assert.deepEqual(forB.session.apiEngineChoice, { kind: "api", provider: "openai" });
+    assert.notEqual(forB.session.apiAccountSnapshot?.provider, driverSessionA.apiAccountSnapshot?.provider, "queued B inherited API A");
+  });
+  await check("an opted-in Codex sign-in failure known before POST keeps its device origin and fallback label on the first worker run", async () => {
+    await resetLedger();
+    script = [{ type: "delta", text: "Answered by the workspace API." }, { type: "done", inputTokens: 2, outputTokens: 3 }];
+    const selected = { kind: "cli" as const, cli: "codex" as const, pairingId: "pair-ccpc", fallback: "workspace_api" as const };
+    const response = await send.sendMessage({
+      db,
+      deps: depsFor(),
+      showThinking: false,
+      input: { department: "sales", agentSlug: "sdr", text: "Codex is signed out before send", conversationId: "", chatMode: "build" },
+      keep,
+      pollMs: () => 10,
+      computerDispatch: null,
+      apiAccountSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+      fallbackFrom: selected,
+      fallbackReason: "subscription_auth_failure",
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    const row = (await db.execute({
+      sql: "SELECT id FROM dept_chat_runs WHERE tenant_id = ? AND user_id = ? AND user_text = ?",
+      args: [ACME, ANN, "Codex is signed out before send"],
+    })).rows[0];
+    const run = await store.getRun(db, scopeA, String(row.id));
+    assert.ok(run);
+    assert.deepEqual(
+      {
+        executor: run!.executor,
+        pairing: run!.targetPairingId,
+        engine: [run!.runtimeEngineKind, run!.runtimeEngineName],
+        policy: run!.runtimeFallbackPolicy,
+        reason: run!.runtimeFallbackReason,
+        api: [run!.runtimeApiProvider, run!.runtimeApiModel],
+      },
+      {
+        executor: "worker",
+        pairing: "pair-ccpc",
+        engine: ["cli", "codex"],
+        policy: "workspace_api",
+        reason: "subscription_auth_failure",
+        api: ["anthropic", "claude-sonnet-4-6"],
+      },
+      "the immediate fallback was flattened into a generic API run",
+    );
+    const rebuilt = starter.sessionForQueuedRun({
+      apiEngineChoice: { kind: "api", provider: "anthropic" },
+      apiAccountSnapshot: { provider: "anthropic", model: "claude-sonnet-4-6" },
+      fallbackFrom: null,
+      fallbackReason: null,
+    } as unknown as RunSession, run!);
+    assert.ok(rebuilt.ok);
+    assert.deepEqual(rebuilt.session.fallbackFrom, selected);
+    assert.equal(rebuilt.session.fallbackReason, "subscription_auth_failure", "the first reply/audit can label why Codex fell back");
+  });
   await check("messages sent while it works queue, run in order, each with the answers before it, and the sixth waiting is refused", async () => {
     await resetLedger();
     scriptFor = (run) => [{ wait: 60 }, { type: "delta", text: `answer to ${run.userText}` }, { type: "done", inputTokens: 1, outputTokens: 1 }];

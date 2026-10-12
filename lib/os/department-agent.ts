@@ -146,6 +146,13 @@ export type AgentTurnRequest = {
    */
   engineChoice?: Extract<AgentEngineChoice, { kind: "api" }> | null;
   /**
+   * The provider/model frozen on a queued worker run. When present, the live
+   * workspace account (or an explicitly supplied operator fallback on a
+   * direct API run) must still be this exact identity immediately before the
+   * key is decrypted. A later settings change never retargets queued work.
+   */
+  apiAccountSnapshot?: { provider: Provider; model: string } | null;
+  /**
    * The exact device engine whose explicit workspace_api policy was taken.
    * Its identity is carried into reply metadata and the usage ledger.
    */
@@ -461,6 +468,31 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   const fallbackChoice = explicitFallback ?? (unreachable ? bridgeEngine : null);
   const fellBackFrom = fallbackChoice ? bridgeEngineLine(fallbackChoice) : null;
   const notUsedFor = !explicitFallback && bridgeEngine && !viaBridge && !unreachable ? engineLine : null;
+  const expectedApi = req.apiAccountSnapshot ?? null;
+  if (expectedApi && !viaBridge) {
+    const workspaceAccount =
+      hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)
+        ? { provider: cfg.provider, model: cfg.model }
+        : null;
+    // A connected workspace account always wins. Do not silently borrow a
+    // platform key merely because the queued identity no longer matches it.
+    const activeAccount = workspaceAccount ?? (!fallbackChoice && req.platformFallback
+      ? { provider: req.platformFallback.provider, model: req.platformFallback.model }
+      : null);
+    if (
+      !activeAccount ||
+      activeAccount.provider !== expectedApi.provider ||
+      activeAccount.model !== expectedApi.model
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        error: "engine_snapshot_unavailable",
+        agentSlug: agent.slug,
+        channelKey,
+      };
+    }
+  }
   if (viaBridge) {
     // Named for the logs and the operator's model detail; no key is sent.
     provider = hasUsableKey(cfg) ? cfg.provider : "anthropic";

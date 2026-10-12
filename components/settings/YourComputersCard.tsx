@@ -16,9 +16,8 @@
  * ever reports one, so every approved computer here reads 'offline' until
  * then. That is the honest state, not a bug in this card.
  *
- * Disconnecting a computer (any state) stays in DevicesEditor below, which
- * already carries the revoke flow and its own pinned copy; this card never
- * duplicates it.
+ * Every member can approve or disconnect their own row here. Team-wide raw
+ * pairing controls remain in the verified-operator-only DevicesEditor.
  */
 
 import { useEffect, useState } from "react";
@@ -167,6 +166,22 @@ export function YourComputersCard() {
     }
   }
 
+  async function disconnect(id: string, label: string) {
+    if (!window.confirm(`Disconnect ${label}? It will stop taking agent work immediately.`)) return;
+    setBusyId(id);
+    setNotice(null);
+    try {
+      const r = await fetch(`/api/devices?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const j = await r.json();
+      if (!j.ok) setNotice(j.message || j.error || "Could not disconnect this computer. Try again.");
+      else await load();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "disconnect_failed");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   // A first load that failed shows the error and a way to retry, never an
   // endless spinner (Codex review, O3b).
   if (devices === null && error) {
@@ -245,16 +260,26 @@ export function YourComputersCard() {
                     )}
                   </div>
                 </div>
-                {state === "not_approved" && (
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                  {state === "not_approved" && (
+                    <button
+                      onClick={() => approve(d.id)}
+                      disabled={busyId === d.id}
+                      className="btn-primary text-xs inline-flex items-center gap-1 shrink-0"
+                    >
+                      {busyId === d.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                      Use this computer
+                    </button>
+                  )}
                   <button
-                    onClick={() => approve(d.id)}
+                    type="button"
+                    onClick={() => void disconnect(d.id, label)}
                     disabled={busyId === d.id}
-                    className="btn-primary text-xs inline-flex items-center gap-1 shrink-0"
+                    className="text-xs text-fg-dim underline underline-offset-2 hover:text-status-warm disabled:opacity-50"
                   >
-                    {busyId === d.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-                    Use this computer
+                    Disconnect
                   </button>
-                )}
+                </div>
               </li>
             );
           })}
@@ -298,13 +323,10 @@ export { teamRowLine };
 // ConnectYourComputerCard (DV1) — mint a connector code, for every signed-in
 // person in the workspace, not only this workspace's computer owner.
 //
-// WHY A SEPARATE CARD FROM THE LIST ABOVE. YourComputersCard (and "Devices
-// (advanced)" beside it) stay behind SettingsContent's VERIFIED-operator
-// gate: that was a deliberate OASIS-only choice (O3b) pending J2's client
-// installer, and this task is not J2 — it is giving every workspace member a
-// way to use the connector program (J1) that O3a's server side has already
-// supported since the 'connector' purpose/scope landed. So this card asks for
-// nothing the gated list needs: it mints its own code, watches for the
+// WHY A SEPARATE CARD FROM THE LIST ABOVE. YourComputersCard manages existing
+// rows; this card creates one. Both are member-visible and scoped server-side
+// to the signed-in person's computers, while Devices (advanced) stays
+// verified-operator-only. It mints its own code and watches for the
 // pairing the connector creates, and lets the person approve THAT pairing
 // right here — the owner-of-that-computer rule (POST /api/devices/[id]/
 // approve) already allows any person to approve a pairing they themselves
@@ -314,12 +336,9 @@ export { teamRowLine };
 // name: this is the connector app's path, not the harness clone (DV0).
 // ─────────────────────────────────────────────────────────────────────────
 
-type ConnectorDeviceRow = {
+type ConnectorPairing = {
   id: string;
   label: string | null;
-  mine: boolean;
-  revoked_at: string | null;
-  created_at: string;
   claim_enabled_at: string | null;
 };
 
@@ -327,10 +346,10 @@ type ConnectState =
   | { phase: "idle" }
   | { phase: "minting" }
   | { phase: "error"; message: string }
-  /** The workspace does not let this person connect a computer (403): permanent, never "try again". */
+  /** This account cannot connect a computer (403): permanent, never "try again". */
   | { phase: "forbidden" }
-  /** mintedAtMs identifies this code (browser clock); serverMintedAtMs is the server's mint time, the only baseline compared with server timestamps. */
-  | { phase: "code"; code: string; expiresAt: string; mintedAtMs: number; serverMintedAtMs: number }
+  /** mintedAtMs identifies the active countdown instance. */
+  | { phase: "code"; code: string; expiresAt: string; mintedAtMs: number }
   | { phase: "expired" }
   | { phase: "found"; pairingId: string; label: string; approving: boolean; approveError: string | null }
   | { phase: "approved"; label: string };
@@ -361,8 +380,8 @@ export function ConnectYourComputerCard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ purpose: "connector" }),
       });
-      // 403: this workspace only lets owners and admins connect a computer
-      // (independent review, DV1). Say so; a retry can never succeed.
+      // A 403 is permanent for this session; retrying cannot repair the
+      // account/workspace authorization.
       if (r.status === 403) {
         setState({ phase: "forbidden" });
         return;
@@ -373,12 +392,7 @@ export function ConnectYourComputerCard() {
         return;
       }
       const ttl = typeof j.ttl_minutes === "number" ? j.ttl_minutes : 5;
-      // The server's own mint time (its expiry minus the code's life), so a new
-      // pairing's created_at is compared clock-to-clock on the server side: a
-      // browser clock running ahead would otherwise hide a successful pairing
-      // (CodeRabbit, PR #590).
-      const serverMintedAtMs = new Date(j.expires_at).getTime() - ttl * 60_000;
-      setState({ phase: "code", code: j.code, expiresAt: j.expires_at, mintedAtMs: Date.now(), serverMintedAtMs });
+      setState({ phase: "code", code: j.code, expiresAt: j.expires_at, mintedAtMs: Date.now() });
       setAnnouncement(`Connector code ${j.code}. Expires in ${ttl} minute${ttl === 1 ? "" : "s"}.`);
     } catch (e) {
       setState({ phase: "error", message: e instanceof Error ? e.message : "code_failed" });
@@ -404,30 +418,32 @@ export function ConnectYourComputerCard() {
     return () => clearInterval(t);
   }, [state]);
 
-  // Watch for the pairing the connector creates once someone pastes the
-  // code in on the other computer — a new, unrevoked row of this person's
-  // own (GET /api/devices already scopes "mine" to the signed-in user)
-  // created after this code was minted.
+  // Poll the exact server-side redemption record. Re-pairing preserves the
+  // existing pairing's created_at, so a timestamp scan cannot prove which
+  // computer consumed this code.
   useEffect(() => {
     if (state.phase !== "code") return;
-    const { serverMintedAtMs } = state;
+    const { code } = state;
     let cancelled = false;
     const poll = async () => {
       try {
-        const r = await fetch("/api/devices");
+        const r = await fetch(`/api/auth/pair-code?code=${encodeURIComponent(code)}`);
         const j = await r.json();
-        if (cancelled || !j.ok || !Array.isArray(j.devices)) return;
-        const fresh = (j.devices as ConnectorDeviceRow[]).find(
-          (d) => d.mine && !d.revoked_at && new Date(d.created_at).getTime() > serverMintedAtMs,
-        );
-        if (!fresh) return;
-        const label = fresh.label || "Your computer";
-        if (fresh.claim_enabled_at) {
+        if (cancelled || !j.ok) return;
+        if (j.status === "expired") {
+          setAnnouncement("This code expired. Get a new one below.");
+          setState({ phase: "expired" });
+          return;
+        }
+        if (j.status !== "connected" || !j.pairing || typeof j.pairing.id !== "string") return;
+        const pairing = j.pairing as ConnectorPairing;
+        const label = pairing.label || "Your computer";
+        if (pairing.claim_enabled_at) {
           setAnnouncement(`${label} is connected.`);
           setState({ phase: "approved", label });
         } else {
           setAnnouncement(`${label} connected. Approve it to let it take department work.`);
-          setState({ phase: "found", pairingId: fresh.id, label, approving: false, approveError: null });
+          setState({ phase: "found", pairingId: pairing.id, label, approving: false, approveError: null });
         }
       } catch {
         // Transient — keep polling until the code's own countdown ends it.
@@ -491,7 +507,7 @@ export function ConnectYourComputerCard() {
       {state.phase === "forbidden" && (
         <div role="status" className="rounded-md border border-border p-3 text-sm text-fg-muted flex items-center gap-2">
           <AlertCircle className="w-4 h-4" aria-hidden="true" />
-          <span>Only an owner or admin can connect a computer in this workspace. Ask one of them if you need yours connected.</span>
+          <span>This account cannot connect a computer in this workspace. Ask a workspace owner to check your access.</span>
         </div>
       )}
       {(state.phase === "idle" || state.phase === "minting" || state.phase === "error") && (
@@ -529,7 +545,7 @@ export function ConnectYourComputerCard() {
           <ol className="text-xs text-fg-muted leading-relaxed list-decimal list-inside space-y-1">
             <li>On the computer you want to connect, open the OASIS connector and paste this code.</li>
             <li>Confirm the workspace and account it shows.</li>
-            <li>Come back here and click Approve on that computer.</li>
+            <li>Keep this page open. It will confirm the exact computer and finish setup automatically.</li>
           </ol>
           <button type="button" onClick={mint} className="text-[11px] text-fg-dim hover:text-fg-muted underline">
             Get a new code

@@ -95,6 +95,8 @@ export type ChatAuthResult =
   | ({ ok: true } & ChatAuthContext)
   | ({ ok: false } & ChatAuthError);
 
+export type ChatAccountPolicy = "normal" | "workspace_only";
+
 /**
  * Resolve the chat context for (authed user, agent_key). Returns a
  * structured result — callers map ok=false to a JSON error response.
@@ -105,8 +107,10 @@ export type ChatAuthResult =
 export async function resolveChatContext(
   user: { id: string; email: string | null | undefined },
   agentKey: string,
+  options: { accountPolicy?: ChatAccountPolicy } = {},
 ): Promise<ChatAuthResult> {
   const service = getServiceSupabase();
+  const workspaceOnly = options.accountPolicy === "workspace_only";
 
   const { data: profileRow } = await service
     .from("user_profiles")
@@ -132,7 +136,7 @@ export async function resolveChatContext(
     .eq("agent_key", agentKey)
     .maybeSingle();
 
-  const tenantDefault = userOverride.data?.encrypted_api_key
+  const tenantDefault = !workspaceOnly && userOverride.data?.encrypted_api_key
     ? { data: null as null }
     : await service
         .from("agent_model_config")
@@ -162,7 +166,7 @@ export async function resolveChatContext(
   // as every department chat's do. The agent's own row still says whether the
   // agent is switched on and carries its extra instructions; its provider,
   // model and key are kept (nothing is deleted) and no longer route anything.
-  if (!userOverride.data?.encrypted_api_key) {
+  if (workspaceOnly || !userOverride.data?.encrypted_api_key) {
     const agentRow = tenantDefault.data;
     if (agentRow && !agentRow.enabled) {
       return { ok: false, status: 403, code: "agent_disabled" };
@@ -175,7 +179,7 @@ export async function resolveChatContext(
     }
     const cfgOverride = (agentRow?.system_prompt_override as string | null) || null;
     if (hasUsableKey(account)) {
-      if (account.provider === LOCAL_MODEL_PROVIDER && !isOperator) {
+      if (account.provider === LOCAL_MODEL_PROVIDER && (workspaceOnly || !isOperator)) {
         return { ok: false, status: 403, code: "local_model_not_allowed", detail: LOCAL_MODEL_REFUSAL };
       }
       let apiKey: string;
@@ -196,6 +200,12 @@ export async function resolveChatContext(
         cfgScope: "tenant",
         keySource: "tenant",
       };
+    }
+    // An explicit engine fallback means the workspace API account exactly.
+    // It must never spend a personal key or the operator's hidden platform
+    // credential when the paired computer cannot answer.
+    if (workspaceOnly) {
+      return { ok: false, status: 412, code: "agent_not_configured", detail: "workspace_api_not_configured" };
     }
     // No usable workspace account: the verified operator's platform key, or
     // a typed 412 for anyone else (they must never bill the platform owner).
@@ -290,18 +300,19 @@ export async function resolveChatContext(
 /**
  * A chat session id from a request body, kept only when that session is the
  * caller's own: this workspace's (from the session, never the body) and this
- * person's, the same pair /api/chat/sessions lists by. Anything else (another
- * workspace's id, a teammate's, a made-up one, or a failed read) comes back
- * null, so the turn opens a new session instead of writing into someone else's
- * and filing its AI usage under that id.
+ * person's and, when supplied, the same agent identity. Anything else (another
+ * workspace's id, a teammate's, another agent's, a made-up one, or a failed
+ * read) comes back null, so the turn opens a new session instead of mixing
+ * identities or filing its AI usage under the wrong thread.
  */
 export async function ownedChatSessionId(
   sessionId: unknown,
   tenantId: string,
   userId: string,
+  agentKey?: string,
 ): Promise<string | null> {
   if (typeof sessionId !== "string" || !sessionId.trim()) return null;
-  const owner = await chatSessionOwner(sessionId, tenantId, userId);
+  const owner = await chatSessionOwner(sessionId, tenantId, userId, agentKey);
   if (owner.state === "unavailable") {
     console.error("[chat-auth] could not check a chat session's owner; opening a new one", { tenantId, error: owner.error });
     return null;
@@ -325,14 +336,16 @@ export async function chatSessionOwner(
   sessionId: string,
   tenantId: string,
   userId: string,
+  agentKey?: string,
 ): Promise<{ state: "owned" } | { state: "not_owned" } | { state: "unavailable"; error: string }> {
-  const { data, error } = await getServiceSupabase()
+  let query = getServiceSupabase()
     .from("chat_sessions")
     .select("id")
     .eq("id", sessionId)
     .eq("tenant_id", tenantId)
-    .eq("user_id", userId)
-    .maybeSingle();
+    .eq("user_id", userId);
+  if (agentKey) query = query.eq("agent_key", agentKey);
+  const { data, error } = await query.maybeSingle();
   if (error) return { state: "unavailable", error: error.message };
   return data ? { state: "owned" } : { state: "not_owned" };
 }

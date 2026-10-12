@@ -7,10 +7,9 @@
  *   1. "Connect your computer" (components/settings/YourComputersCard.tsx
  *      ConnectYourComputerCard) is wired into BOTH of SettingsContent.tsx's
  *      render paths -- the manager branch and PersonalSettingsView, the
- *      non-manager branch -- under the "profile" section, which every
- *      signed-in person with a Settings tab reaches (unlike "devices", whose
- *      own page 404s before SettingsContent ever renders for anyone but a
- *      verified operator). Mutation-checked: the SAME guard-matcher this
+ *      non-manager branch -- under the "profile" section. The dedicated
+ *      Devices page is now also member-visible and scopes each person to
+ *      their own computers. Mutation-checked: the SAME guard-matcher this
  *      test trusts is first proven against a synthetic gated snippet (fails)
  *      and a synthetic ungated one (passes), the way
  *      tests/devices-copy-guard.test.ts proves its own scanner before
@@ -172,7 +171,7 @@ async function main() {
       );
     },
   );
-  await check("the two Profile mounts are reachable without ever going through /settings/devices' operator gate", () => {
+  await check("the Devices page uses the shared member-visible section gate", () => {
     // The two Profile mounts are both inside `show("profile")` (proven
     // above); the devices page only ever calls SettingsContent with
     // section="devices", so a show("profile") block can never be the one
@@ -181,7 +180,9 @@ async function main() {
     // own operator-only 404 is still the real-traffic gate for who ever
     // reaches it — unchanged by this test, asserted below.
     const devicesPage = read("app/settings/devices/page.tsx");
-    assert.match(devicesPage, /requireSettingsSection\("devices"\)/, "the devices page still gates on the operator-only section key");
+    const sections = read("components/settings/settings-sections.ts");
+    assert.match(devicesPage, /requireSettingsSection\("devices"\)/);
+    assert.match(sections, /key: "devices"[^\n]+audience: "everyone"/);
     assert.match(devicesPage, /section="devices"/);
   });
 
@@ -302,17 +303,19 @@ async function main() {
   await check("a 403 sets a forbidden state with its own sentence and no retry button", () => {
     const card = read("components/settings/YourComputersCard.tsx");
     assert.match(card, /if \(r\.status === 403\) \{\s*setState\(\{ phase: "forbidden" \}\);/);
-    assert.match(card, /Only an owner or admin can connect a computer in this workspace\./);
+    assert.match(card, /This account cannot connect a computer in this workspace\./);
     assert.match(card, /\(state\.phase === "idle" \|\| state\.phase === "minting" \|\| state\.phase === "error"\) && \(/, "the retry button never renders for forbidden");
   });
 
   // -- 7: the new-pairing check compares server time with server time ------
-  console.log("7. pairing detection never compares a server timestamp with the browser clock");
-  await check("a new pairing is detected against the server's mint time (expiry minus life), not Date.now()", () => {
+  console.log("7. pairing detection follows the code's authoritative redemption");
+  await check("new and re-paired computers are detected by consumed_by_pairing_id, never created_at", () => {
     const card = read("components/settings/YourComputersCard.tsx");
-    assert.match(card, /const serverMintedAtMs = new Date\(j\.expires_at\)\.getTime\(\) - ttl \* 60_000;/);
-    assert.match(card, /new Date\(d\.created_at\)\.getTime\(\) > serverMintedAtMs/);
-    assert.doesNotMatch(card, /new Date\(d\.created_at\)\.getTime\(\) > mintedAtMs/);
+    const route = read("app/api/auth/pair-code/route.ts");
+    assert.match(card, /fetch\(`\/api\/auth\/pair-code\?code=\$\{encodeURIComponent\(code\)\}`\)/);
+    assert.ok(!card.includes("new Date(d.created_at)"));
+    assert.match(route, /consumed_by_pairing_id/);
+    assert.match(route, /status: "connected"/);
   });
 
   console.log(`\n${passed} passed, ${failures} failed`);

@@ -461,6 +461,30 @@ async function main() {
     assert.equal(await count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?", [openSession]), 4);
   });
 
+  await check("a session owned by this user but a different agent starts a new thread", async () => {
+    const otherAgentSession = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    await db.execute({
+      sql: `INSERT INTO chat_sessions (id, tenant_id, user_id, agent_key, provider, model, title, total_input_tokens, total_output_tokens, estimated_cost_usd, updated_at)
+            VALUES (?, ?, ?, 'maven', 'anthropic', 'claude-sonnet-4-6', 'Maven thread', 7, 3, 0.25, '2026-09-01T00:00:00.000Z')`,
+      args: [otherAgentSession, OPEN, USERS.openOwner.id],
+    });
+    await login(USERS.openOwner);
+    provider = () => anthropicOk("Bravo reply", 10, 2);
+    const { res, events } = await settledTurn("c-open", "Keep agent identities separate", { session_id: otherAgentSession });
+    assert.equal(res.status, 200);
+    const used = String(events.find((event) => event.event === "session")?.data.session_id || "");
+    assert.ok(used && used !== otherAgentSession, "the Bravo turn reused Maven's session");
+    assert.deepEqual(await session(otherAgentSession), {
+      tenant_id: OPEN,
+      user_id: USERS.openOwner.id,
+      total_input_tokens: 7,
+      total_output_tokens: 3,
+      estimated_cost_usd: "0.25",
+      updated_at: "2026-09-01T00:00:00.000Z",
+    });
+    assert.equal(await count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?", [otherAgentSession]), 0);
+  });
+
   console.log("/api/chat/resume totals");
   /** A signed state naming `sessionId`, as /api/chat issues one (the body's session_id is ignored). */
   const resume = async (sessionId: string, model = "claude-sonnet-4-6") => {

@@ -2888,9 +2888,10 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
   // scope) copies through as NULL, which every reader treats as legacy
   // 'daemon' (lib/bridge/pairing-auth.ts).
   const PAIRED_VIA = 'pair_code';
-  // D0: a 'connector'-scope code is always redeemed by the SAME person who
-  // minted it (the SELECT's user_id is bpc.auth_user_id, the minter — a
-  // connector code never changes hands before redeem), so the
+  // D0: a connector code is a short-lived bearer capability minted by one
+  // authenticated person. The physical redeemer need not have a dashboard
+  // session, but the resulting pairing is always owned by bpc.auth_user_id
+  // (the minter), so the
   // /api/devices/[id]/approve refusal rules that matter for a second,
   // separate approval click never apply here: not_your_computer cannot fire
   // (owner === the minter, always), signup_secret cannot fire (paired_via is

@@ -125,17 +125,23 @@ async function main() {
     "the composer must stay closed while the canonical engine is unknown or unavailable",
   );
   assert.match(widget, /data-testid="coding-harness-engine-unavailable"/, "the repair guidance is visible beside the composer");
-  assert.match(widget, /target_pairing_id:\s*harnessRoute\.pairingId/);
-  assert.match(widget, /runtime_engine_kind:\s*harnessRoute\.engineKind/);
-  assert.match(widget, /runtime_engine_name:\s*harnessRoute\.engineName/);
-  assert.match(widget, /fallback_policy:\s*harnessRoute\.fallback/);
+  assert.match(widget, /target_pairing_id:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.pairingId : undefined/);
+  assert.match(widget, /runtime_engine_kind:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.engineKind : undefined/);
+  assert.match(widget, /runtime_engine_name:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.engineName : undefined/);
+  assert.match(widget, /fallback_policy:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.fallback : undefined/);
   assert.doesNotMatch(widget, /cli_provider:\s*cliRuntime/, "the wire runtime must come from the saved engine, never remembered browser state");
 
   // Old rows and payloads remain readable while the exact-device rollout is in progress.
   assert.deepEqual(engine.parseEngineChoice({ kind: "cli", cli: "claude" }), { kind: "cli", cli: "claude" });
   assert.deepEqual(engine.engineFromRow({ provider: "local", model: "llama3.3" }), { kind: "local", model: "llama3.3" });
+  assert.deepEqual(engine.selectionFromRequest({ kind: "api" }, "google"), { selection: { mode: "api", provider: "google" }, legacy: true });
+  assert.deepEqual(engine.selectionFromRequest({ kind: "cli", cli: "codex", pairingId: "pair-ccpc" }), {
+    selection: { mode: "subscription", provider: "codex", pairingId: "pair-ccpc", fallback: "none" },
+    legacy: true,
+  });
+  assert.deepEqual(engine.selectionFromRequest({ kind: "cli", cli: "codex" }), { selection: null, legacy: true, needsPairing: true });
 
-  console.log("agent-engine-selection: 25 assertions passed");
+  console.log("agent-engine-selection: 28 assertions passed");
 }
 
 main().catch((error) => {

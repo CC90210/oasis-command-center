@@ -2,6 +2,7 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { getTursoClient } from "@/lib/turso";
+import { liveSeat } from "@/lib/os/seat";
 import {
   hasOnlyKeys,
   isFailureCode,
@@ -20,10 +21,11 @@ import {
 } from "./types";
 
 export const RUNTIME_LEASE_MS = 45_000;
-export const RUNTIME_JOB_REUSE_MS = 60_000;
 export const RUNTIME_JOB_RATE_WINDOW_MS = 60_000;
 export const RUNTIME_JOB_MAX_ACTIVE_PER_USER_PAIRING = 4;
 export const RUNTIME_JOB_MAX_NEW_PER_WINDOW = 8;
+export const RUNTIME_PROBE_FRESH_MS = 10 * 60_000;
+export const RUNTIME_QUEUED_TTL_MS = 90_000;
 
 type DbRow = Record<string, unknown>;
 
@@ -64,6 +66,67 @@ function rowOf(row: DbRow): RuntimeJobRow {
   };
 }
 
+export type RuntimeProbeReceipt = {
+  /** The terminal probe job that produced this receipt. Older test fixtures
+   * may omit it; durable engine saves always read receipts/jobs from storage. */
+  jobId?: string;
+  pairingId: string;
+  engine: RuntimeEngine;
+  ready: boolean;
+  finishedAt: string;
+};
+
+export function runtimeProbeReceiptKey(pairingId: string, engine: RuntimeEngine): string {
+  return `${pairingId}\u0000${engine.kind}\u0000${engine.name}`;
+}
+
+export function isFreshRuntimeProbeReceipt(receipt: RuntimeProbeReceipt | null | undefined, nowMs = Date.now()): boolean {
+  if (!receipt?.ready) return false;
+  const finishedMs = Date.parse(receipt.finishedAt);
+  return Number.isFinite(finishedMs) && nowMs >= finishedMs && nowMs - finishedMs <= RUNTIME_PROBE_FRESH_MS;
+}
+
+/**
+ * The newest terminal probe is the readiness receipt for an exact
+ * pairing/runtime. Connector heartbeats may report installation and sign-in,
+ * but only a server-recorded probe completion can make the UI say the runtime
+ * is ready for agents. A newer failed probe revokes an older success.
+ */
+export async function readLatestRuntimeProbeReceipts(
+  tenantId: string,
+  pairingIds: readonly string[],
+  db: Client = getTursoClient(),
+): Promise<Map<string, RuntimeProbeReceipt>> {
+  const out = new Map<string, RuntimeProbeReceipt>();
+  if (!pairingIds.length) return out;
+  const placeholders = pairingIds.map(() => "?").join(",");
+  const result = await db.execute({
+    sql: `SELECT id, pairing_id, engine_kind, engine_name, status, result_code, finished_at
+            FROM bridge_runtime_jobs
+           WHERE tenant_id = ? AND pairing_id IN (${placeholders}) AND action = 'probe'
+             AND status IN ('completed', 'failed') AND finished_at IS NOT NULL
+           ORDER BY finished_at DESC, updated_at DESC, id DESC`,
+    args: [tenantId, ...pairingIds],
+  });
+  for (const raw of result.rows as unknown as DbRow[]) {
+    const parsed = parseRuntimeEngine({ kind: raw.engine_kind, name: raw.engine_name });
+    if (!parsed.ok) continue;
+    const pairingId = String(raw.pairing_id ?? "");
+    const finishedAt = String(raw.finished_at ?? "");
+    if (!pairingId || !finishedAt) continue;
+    const key = runtimeProbeReceiptKey(pairingId, parsed.engine);
+    if (out.has(key)) continue;
+    out.set(key, {
+      jobId: String(raw.id),
+      pairingId,
+      engine: parsed.engine,
+      ready: raw.status === "completed" && raw.result_code === "probe_ok",
+      finishedAt,
+    });
+  }
+  return out;
+}
+
 async function one(db: Client, statement: InStatement): Promise<RuntimeJobRow | null> {
   const result = await db.execute(statement);
   return result.rows[0] ? rowOf(result.rows[0] as DbRow) : null;
@@ -89,8 +152,12 @@ type RuntimeOperationIdentity = Pick<EnqueueRuntimeJobInput, "tenantId" | "userI
  * allowlisted action on one engine. Callers cannot defeat deduplication with
  * a new UUID; the store owns both this key and its short attempt window. */
 export function runtimeOperationKey(input: RuntimeOperationIdentity): string {
+  // CLI provider ids are case-insensitive; local model ids are not. Folding
+  // an LM Studio/Ollama ref here made distinct models share one unique key
+  // even though every lookup below correctly preserves their case.
+  const engineName = input.engine.kind === "cli" ? input.engine.name.toLowerCase() : input.engine.name;
   const digest = createHash("sha256")
-    .update(JSON.stringify([input.tenantId, input.userId, input.pairingId, input.action, input.engine.kind, input.engine.name.toLowerCase()]))
+    .update(JSON.stringify([input.tenantId, input.userId, input.pairingId, input.action, input.engine.kind, engineName]))
     .digest("hex")
     .slice(0, 48);
   return `runtime:${digest}`;
@@ -98,6 +165,42 @@ export function runtimeOperationKey(input: RuntimeOperationIdentity): string {
 
 function pairingApproved(row: Record<string, unknown> | undefined): boolean {
   return Boolean(row && !row.revoked_at && row.claim_enabled_at && row.paired_via !== "signup_secret");
+}
+
+async function expireQueuedRuntimeJobsForPairing(
+  db: Client,
+  tenantId: string,
+  pairingId: string,
+  now: Date,
+): Promise<number> {
+  const nowIso = now.toISOString();
+  const cutoff = new Date(now.getTime() - RUNTIME_QUEUED_TTL_MS).toISOString();
+  const result = await db.execute({
+    sql: `UPDATE bridge_runtime_jobs
+             SET status = 'failed', error_code = 'queue_expired', error_retryable = 1,
+                 finished_at = ?, updated_at = ?
+           WHERE tenant_id = ? AND pairing_id = ? AND status = 'queued' AND created_at <= ?`,
+    args: [nowIso, nowIso, tenantId, pairingId, cutoff],
+  });
+  return result.rowsAffected;
+}
+
+async function expireQueuedRuntimeJobForOwner(
+  db: Client,
+  tenantId: string,
+  userId: string,
+  jobId: string,
+  now: Date,
+): Promise<void> {
+  const nowIso = now.toISOString();
+  const cutoff = new Date(now.getTime() - RUNTIME_QUEUED_TTL_MS).toISOString();
+  await db.execute({
+    sql: `UPDATE bridge_runtime_jobs
+             SET status = 'failed', error_code = 'queue_expired', error_retryable = 1,
+                 finished_at = ?, updated_at = ?
+           WHERE tenant_id = ? AND user_id = ? AND id = ? AND status = 'queued' AND created_at <= ?`,
+    args: [nowIso, nowIso, tenantId, userId, jobId, cutoff],
+  });
 }
 
 async function runtimeJobCounts(
@@ -133,24 +236,26 @@ export async function enqueueRuntimeJob(input: EnqueueRuntimeJobInput, db: Clien
 
   const nowDate = input.now ?? new Date();
   const now = nowDate.toISOString();
+  // A connector that is offline or lacks this runtime's capability must not
+  // leave an unclaimed job reusable forever or permanently consume capacity.
+  await expireQueuedRuntimeJobsForPairing(db, input.tenantId, input.pairingId, nowDate);
   const pairing = await db.execute({
     sql: "SELECT revoked_at, claim_enabled_at, paired_via FROM bridge_pairings WHERE id = ? AND tenant_id = ? LIMIT 1",
     args: [input.pairingId, input.tenantId],
   });
   if (!pairingApproved(pairing.rows[0] as Record<string, unknown> | undefined)) return { ok: false, code: "pairing_unavailable" };
 
-  const reuseCutoff = new Date(nowDate.getTime() - RUNTIME_JOB_REUSE_MS).toISOString();
   const reusable = await one(db, {
     sql: `SELECT j.* FROM bridge_runtime_jobs j
             JOIN bridge_pairings p ON p.id = j.pairing_id AND p.tenant_id = j.tenant_id
            WHERE j.tenant_id = ? AND j.user_id = ? AND j.pairing_id = ?
              AND j.action = ? AND j.engine_kind = ? AND j.engine_name = ?
-             AND (j.status IN ('queued', 'running') OR (j.status IN ('completed', 'failed') AND j.finished_at >= ?))
+             AND j.status IN ('queued', 'running')
              AND p.revoked_at IS NULL AND p.claim_enabled_at IS NOT NULL
              AND (p.paired_via IS NULL OR p.paired_via <> 'signup_secret')
-           ORDER BY CASE WHEN j.status IN ('queued', 'running') THEN 0 ELSE 1 END, j.updated_at DESC, j.id DESC
+           ORDER BY j.updated_at DESC, j.id DESC
            LIMIT 1`,
-    args: [input.tenantId, input.userId, input.pairingId, input.action, engine.engine.kind, engine.engine.name, reuseCutoff],
+    args: [input.tenantId, input.userId, input.pairingId, input.action, engine.engine.kind, engine.engine.name],
   });
   if (reusable) {
     if (reusable.prompt !== prompt.prompt) return { ok: false, code: "idempotency_conflict" };
@@ -163,7 +268,21 @@ export async function enqueueRuntimeJob(input: EnqueueRuntimeJobInput, db: Clien
   if (counts.recent >= RUNTIME_JOB_MAX_NEW_PER_WINDOW) return { ok: false, code: "rate_limited" };
 
   const operationKey = runtimeOperationKey({ ...input, engine: engine.engine });
-  const idempotencyKey = `${operationKey}:${Math.floor(nowDate.getTime() / RUNTIME_JOB_REUSE_MS)}`;
+  // A terminal receipt is audit history, not an active request. Anchor the
+  // next attempt to the most recent terminal job so retries are immediate,
+  // while concurrent clicks after that same receipt still converge on one
+  // unique insert. This avoids both stale Test/Auth results and duplicate
+  // work without trusting a dashboard-supplied idempotency token.
+  const terminalAnchor = await one(db, {
+    sql: `SELECT j.* FROM bridge_runtime_jobs j
+           WHERE j.tenant_id = ? AND j.user_id = ? AND j.pairing_id = ?
+             AND j.action = ? AND j.engine_kind = ? AND j.engine_name = ?
+             AND j.status IN ('completed', 'failed')
+           ORDER BY j.finished_at DESC, j.updated_at DESC, j.id DESC
+           LIMIT 1`,
+    args: [input.tenantId, input.userId, input.pairingId, input.action, engine.engine.kind, engine.engine.name],
+  });
+  const idempotencyKey = `${operationKey}:${terminalAnchor?.id ?? "initial"}`;
   const id = randomUUID();
   let inserted = 0;
   try {
@@ -233,6 +352,13 @@ export async function enqueueRuntimeJob(input: EnqueueRuntimeJobInput, db: Clien
     if (after.active >= RUNTIME_JOB_MAX_ACTIVE_PER_USER_PAIRING) return { ok: false, code: "queue_full" };
     if (after.recent >= RUNTIME_JOB_MAX_NEW_PER_WINDOW) return { ok: false, code: "rate_limited" };
     return { ok: false, code: "pairing_unavailable" };
+  }
+  if (inserted === 0 && (job.status === "completed" || job.status === "failed")) {
+    // The active request we raced completed between the first lookup and the
+    // conflict read. Re-anchor once to that now-terminal receipt so this
+    // caller still performs the requested retry instead of returning stale
+    // output. The next call observes the newly queued row as reusable.
+    return enqueueRuntimeJob(input, db);
   }
   if (job.userId !== input.userId || job.action !== input.action || job.engine.kind !== engine.engine.kind || job.engine.name !== engine.engine.name || job.prompt !== prompt.prompt) {
     return { ok: false, code: "idempotency_conflict" };
@@ -316,6 +442,7 @@ export async function claimRuntimeJob(
 ): Promise<RuntimeJobRow | null> {
   const now = input.now ?? new Date();
   const nowIso = now.toISOString();
+  await expireQueuedRuntimeJobsForPairing(db, input.tenantId, input.pairingId, now);
   const approval = await db.execute({
     sql: "SELECT revoked_at, claim_enabled_at, paired_via FROM bridge_pairings WHERE id = ? AND tenant_id = ? LIMIT 1",
     args: [input.pairingId, input.tenantId],
@@ -400,9 +527,93 @@ export async function claimRuntimeJob(
   }
 }
 
-type LeaseRefusal = { ok: false; code: "pairing_revoked" | "pairing_not_approved" | "lease_lost" };
+/**
+ * Fail closed after a connector acquired a runtime-action lease but before
+ * the action is disclosed. Matching the exact job, claim, and lease keeps a
+ * stale or concurrent claimant from terminalizing a different execution.
+ */
+export async function failClaimedRuntimeJobForInactiveRequester(input: {
+  tenantId: string;
+  pairingId: string;
+  jobId: string;
+  claimId: string;
+  leaseId: string;
+  now?: Date;
+}, db: Client = getTursoClient()): Promise<boolean> {
+  const nowIso = (input.now ?? new Date()).toISOString();
+  const result = await db.execute({
+    sql: `UPDATE bridge_runtime_jobs
+             SET status = 'failed', error_code = 'requester_seat_inactive',
+                 error_retryable = 0, finished_at = ?, updated_at = ?
+           WHERE tenant_id = ? AND pairing_id = ? AND id = ?
+             AND claim_id = ? AND lease_id = ? AND status = 'running'`,
+    args: [
+      nowIso,
+      nowIso,
+      input.tenantId,
+      input.pairingId,
+      input.jobId,
+      input.claimId,
+      input.leaseId,
+    ],
+  });
+  return result.rowsAffected === 1;
+}
+
+type LeaseRefusal = {
+  ok: false;
+  code: "pairing_revoked" | "pairing_not_approved" | "requester_seat_inactive" | "lease_lost";
+};
 type LeaseOutcome = { ok: true } | LeaseRefusal;
 type HeartbeatOutcome = { ok: true; deadlineAt: string } | LeaseRefusal;
+
+type RuntimeLeaseInput = { tenantId: string; pairingId: string; jobId: string; leaseId: string };
+
+/**
+ * Re-check the original requester's workspace seat for every live-lease
+ * mutation. The connector bearer proves which computer is speaking; it does
+ * not keep the person who requested the action authorized after that person
+ * is removed from the workspace. An inactive or unreadable seat terminalizes
+ * only this exact lease before heartbeat/progress/result data can be accepted.
+ */
+async function liveRequesterForLease(
+  db: Client,
+  input: RuntimeLeaseInput,
+  nowIso: string,
+): Promise<{ ok: true; job: RuntimeJobRow } | LeaseRefusal> {
+  const job = await one(db, {
+    sql: `SELECT j.* FROM bridge_runtime_jobs j
+            JOIN bridge_pairings p ON p.id = j.pairing_id AND p.tenant_id = j.tenant_id
+           WHERE j.id = ? AND j.tenant_id = ? AND j.pairing_id = ? AND j.lease_id = ?
+             AND j.status = 'running' AND j.deadline_at > ?
+             AND p.revoked_at IS NULL AND p.claim_enabled_at IS NOT NULL
+             AND (p.paired_via IS NULL OR p.paired_via <> 'signup_secret')`,
+    args: [input.jobId, input.tenantId, input.pairingId, input.leaseId, nowIso],
+  });
+  if (!job) return leaseFailure(db, input, nowIso);
+
+  let requesterLive = false;
+  try {
+    requesterLive = (await liveSeat(job.tenantId, job.userId)).live;
+  } catch (error) {
+    console.error("[bridge.runtime-jobs.requester-seat]", {
+      tenantId: job.tenantId,
+      jobId: job.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  if (requesterLive) return { ok: true, job };
+
+  await db.execute({
+    sql: `UPDATE bridge_runtime_jobs
+             SET status = 'failed', error_code = 'requester_seat_inactive',
+                 error_retryable = 0, finished_at = ?, updated_at = ?
+           WHERE id = ? AND tenant_id = ? AND pairing_id = ? AND lease_id = ?
+             AND status = 'running'`,
+    args: [nowIso, nowIso, input.jobId, input.tenantId, input.pairingId, input.leaseId],
+  });
+  return { ok: false, code: "requester_seat_inactive" };
+}
 
 async function leaseFailure(
   db: Client,
@@ -433,6 +644,8 @@ export async function heartbeatRuntimeJob(
 ): Promise<HeartbeatOutcome> {
   const now = input.now ?? new Date();
   const nowIso = now.toISOString();
+  const requester = await liveRequesterForLease(db, input, nowIso);
+  if (!requester.ok) return requester;
   const deadline = new Date(now.getTime() + RUNTIME_LEASE_MS).toISOString();
   const result = await db.execute({
     sql: `UPDATE bridge_runtime_jobs
@@ -456,6 +669,8 @@ export async function progressRuntimeJob(
 ): Promise<LeaseOutcome> {
   if (!isProgressCode(input.code)) return { ok: false, code: "lease_lost" };
   const nowIso = (input.now ?? new Date()).toISOString();
+  const requester = await liveRequesterForLease(db, input, nowIso);
+  if (!requester.ok) return requester;
   const result = await db.execute({
     sql: `UPDATE bridge_runtime_jobs
              SET progress_code = ?, updated_at = ?
@@ -507,17 +722,9 @@ function completionFor(job: RuntimeJobRow, code: unknown, value: unknown): Compl
 
 export async function completeRuntimeJob(input: CompleteInput, db: Client = getTursoClient()): Promise<CompleteOutcome> {
   const nowIso = (input.now ?? new Date()).toISOString();
-  const job = await one(db, {
-    sql: `SELECT j.* FROM bridge_runtime_jobs j
-            JOIN bridge_pairings p ON p.id = j.pairing_id AND p.tenant_id = j.tenant_id
-           WHERE j.id = ? AND j.tenant_id = ? AND j.pairing_id = ? AND j.lease_id = ?
-             AND j.status = 'running' AND j.deadline_at > ?
-             AND p.revoked_at IS NULL AND p.claim_enabled_at IS NOT NULL
-             AND (p.paired_via IS NULL OR p.paired_via <> 'signup_secret')`,
-    args: [input.jobId, input.tenantId, input.pairingId, input.leaseId, nowIso],
-  });
-  if (!job) return leaseFailure(db, input, nowIso);
-  const parsed = completionFor(job, input.code, input.result);
+  const requester = await liveRequesterForLease(db, input, nowIso);
+  if (!requester.ok) return requester;
+  const parsed = completionFor(requester.job, input.code, input.result);
   if (!parsed.ok) return parsed;
   const result = await db.execute({
     sql: `UPDATE bridge_runtime_jobs
@@ -541,6 +748,8 @@ export async function failRuntimeJob(
 ): Promise<LeaseOutcome | { ok: false; code: "unsupported_failure_code" }> {
   if (!isFailureCode(input.code)) return { ok: false, code: "unsupported_failure_code" };
   const nowIso = (input.now ?? new Date()).toISOString();
+  const requester = await liveRequesterForLease(db, input, nowIso);
+  if (!requester.ok) return requester;
   const result = await db.execute({
     sql: `UPDATE bridge_runtime_jobs
              SET status = 'failed', error_code = ?, error_retryable = ?, finished_at = ?, updated_at = ?
@@ -562,7 +771,12 @@ export async function readRuntimeJobForOwner(
   userId: string,
   jobId: string,
   db: Client = getTursoClient(),
+  now: Date = new Date(),
 ): Promise<RuntimeJobRow | null> {
+  // Browser polling is itself a lifecycle driver. If no connector ever
+  // claims the job, the dashboard receives a terminal repair instead of
+  // spinning until only its local timeout fires.
+  await expireQueuedRuntimeJobForOwner(db, tenantId, userId, jobId, now);
   return one(db, {
     sql: `SELECT * FROM bridge_runtime_jobs WHERE tenant_id = ? AND user_id = ? AND id = ?`,
     args: [tenantId, userId, jobId],

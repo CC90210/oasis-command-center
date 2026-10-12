@@ -67,11 +67,10 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    # 25, not 10: curl below waits up to 330s per route (matching the slowest
-    # route's maxDuration=300 + margin), and the busiest tick drives 4 routes
-    # sequentially — 4 x 330s = 22 min worst case. A job timeout below that
-    # would kill a still-succeeding tick and report it as a driver failure.
-    timeout-minutes: 25
+    # Manual rollback includes one 840s engine-fallback call plus six ordinary
+    # 330s routes (47 minutes worst case), with runner/network margin. A lower
+    # job timeout would kill a still-succeeding route and report false failure.
+    timeout-minutes: 55
     steps:
       - name: Drive the due cron routes
         env:
@@ -114,6 +113,8 @@ jobs:
           # rollback cannot restart writes for a tenant whose data is being
           # exported and deleted. See workers/oasis-cc-cron/src/index.ts.
           case "${SCHEDULE}" in
+            "* * * * *")
+              ROUTES="/api/cron/dispatch-engine-fallbacks" ;;
             "*/5 * * * *")
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
@@ -145,7 +146,8 @@ jobs:
               # the watchdog. Deliberately not everything — a hand-run should
               # not fire daily sweeps out of band.
               echo "manual run: driving the fast paths + health-check"
-              ROUTES="/api/cron/dispatch-drips
+              ROUTES="/api/cron/dispatch-engine-fallbacks
+                      /api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders
                       /api/cron/sms-reply-agent
@@ -169,9 +171,8 @@ jobs:
           # exports GET. (Codex review, 2026-08-11.)
           FAILED=0
           for path in ${ROUTES}; do
-            # -m 330 covers the slowest route's maxDuration (reconcile-sms,
-            # 300s) plus network margin. At the old -m 120 a route Vercel was
-            # still legally running would be reported dead by the driver.
+            # 330s covers ordinary maxDuration=300 routes plus network margin.
+            # The engine-fallback dispatcher gets 840s for maxDuration=800.
             #
             # Truncate FIRST: on a curl failure (code 000) out.json still holds
             # the PREVIOUS route's response, and the log line then attributes
@@ -180,7 +181,11 @@ jobs:
             # sent diagnosis the wrong way. A failed call must show an EMPTY
             # body, because that is the truth.
             : > /tmp/out.json
-            code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m 330 \
+            timeout_s=330
+            if [ "${path}" = "/api/cron/dispatch-engine-fallbacks" ]; then
+              timeout_s=840
+            fi
+            code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m "${timeout_s}" \
                      "${BASE}${path}" \
                      -H "Authorization: Bearer ${SECRET}" \
                      -H "x-oasis-cron-attest: ${ATTEST}") || code="000"

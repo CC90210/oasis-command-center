@@ -191,9 +191,26 @@ async function main() {
       last_used_at TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-      user_id TEXT, display_name_override TEXT, computer_pairing_id TEXT, fallback_policy TEXT);
+      user_id TEXT, display_name_override TEXT, computer_pairing_id TEXT, fallback_policy TEXT,
+      runtime_probe_job_id TEXT, runtime_probe_pairing_id TEXT, runtime_probe_engine_kind TEXT,
+      runtime_probe_engine_name TEXT, runtime_probe_engine_version TEXT, runtime_probe_verified_at TEXT);
     CREATE UNIQUE INDEX idx_agent_model_config_default_per_agent ON agent_model_config (tenant_id, agent_key) WHERE (user_id IS NULL);
     CREATE UNIQUE INDEX idx_agent_model_config_override_per_user ON agent_model_config (tenant_id, user_id, agent_key) WHERE (user_id IS NOT NULL);
+    CREATE TABLE bridge_pairings (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT, bridge_token_hash TEXT,
+      machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT, created_at TEXT,
+      scope TEXT, paired_via TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
+      claim_state_at TEXT, claim_capacity INTEGER, claim_blocked_reason TEXT,
+      claim_protocols TEXT, claim_runtime_state TEXT
+    );
+    CREATE TABLE bridge_runtime_jobs (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, pairing_id TEXT NOT NULL,
+      action TEXT NOT NULL, engine_kind TEXT NOT NULL, engine_name TEXT NOT NULL, prompt TEXT,
+      status TEXT NOT NULL, idempotency_key TEXT NOT NULL, claim_id TEXT, lease_id TEXT,
+      claimed_at TEXT, heartbeat_at TEXT, deadline_at TEXT, progress_code TEXT, result_code TEXT,
+      result_json TEXT, error_code TEXT, error_retryable INTEGER, created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL, finished_at TEXT
+    );
   `);
   await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__192_ai_usage.sql"), "utf8"));
   await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__191_agent_turn_outcomes.sql"), "utf8"));
@@ -473,6 +490,74 @@ async function main() {
       probe_job_id: "probe-8",
     });
     assert.deepEqual(await store.readAgentEngine(OASIS), claude, "the cancelled browser call did not mutate the row");
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+  });
+
+  await check("Save rejects a successful probe that is older than the ten-minute pre-save window", async () => {
+    await login(USERS.cc);
+    await store.saveAgentEngine(OASIS, { kind: "api" });
+    const version = await store.readAgentEngineVersion(OASIS);
+    const pairingId = "pair-stale-probe";
+    const jobId = "probe-stale-codex";
+    const staleAt = new Date(Date.now() - 10 * 60_000 - 1_000).toISOString();
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings
+        (id, tenant_id, user_id, label, bridge_token_hash, last_seen_at, created_at, scope, paired_via,
+         claim_enabled_at, claim_enabled_by, claim_state_at, claim_capacity, claim_protocols, claim_runtime_state)
+        VALUES (?, ?, ?, 'CCPC', 'hash', ?, ?, 'connector', 'pair_code', ?, ?, ?, 1, ?, ?)`,
+      args: [
+        pairingId,
+        OASIS,
+        USERS.cc.id,
+        new Date().toISOString(),
+        stamp,
+        stamp,
+        USERS.cc.id,
+        new Date().toISOString(),
+        JSON.stringify(["runtime_action_v1", "department_task_v2", "coding_harness_task_v1"]),
+        JSON.stringify({ codex: { installed: true, authenticated: true, state: "ready" } }),
+      ],
+    });
+    await db.execute({
+      sql: `INSERT INTO bridge_runtime_jobs
+        (id, tenant_id, user_id, pairing_id, action, engine_kind, engine_name, prompt, status, idempotency_key,
+         result_code, result_json, created_at, updated_at, finished_at)
+        VALUES (?, ?, ?, ?, 'probe', 'cli', 'codex', 'test', 'completed', ?, 'probe_ok', ?, ?, ?, ?)`,
+      args: [jobId, OASIS, USERS.cc.id, pairingId, `idem-${jobId}`, JSON.stringify({ answer: "OASIS_RUNTIME_READY" }), staleAt, staleAt, staleAt],
+    });
+    const engineRoute = await import("../app/api/ai/engine/route");
+    const response = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "workspace",
+          expected_version: version,
+          probe_job_id: jobId,
+          engine: { mode: "subscription", provider: "codex", pairingId, fallback: "none" },
+        }),
+      ),
+    );
+    assert.equal(response.status, 409, JSON.stringify(response.body));
+    assert.equal(response.body.error, "probe_mismatch");
+    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "api" }, "a stale test changed the engine row");
+    const freshAt = new Date().toISOString();
+    await db.execute({
+      sql: "UPDATE bridge_runtime_jobs SET created_at = ?, updated_at = ?, finished_at = ? WHERE id = ?",
+      args: [freshAt, freshAt, freshAt, jobId],
+    });
+    const saved = await jsonOf(
+      await engineRoute.PUT(
+        req("/api/ai/engine", "PUT", {
+          scope: "workspace",
+          expected_version: version,
+          probe_job_id: jobId,
+          engine: { mode: "subscription", provider: "codex", pairingId, fallback: "none" },
+        }),
+      ),
+    );
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    const proved = await store.readEffectiveAgentEngineWithProof(OASIS, USERS.cc.id);
+    assert.equal(proved.probeProof?.jobId, jobId, "the successful Save did not persist its exact probe proof");
+    assert.equal(proved.probeProof?.engineVersion, proved.version, "the saved proof was not bound to the new engine version");
     await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
   });
 
@@ -1114,7 +1199,7 @@ async function main() {
       approved: true,
       online: true,
       busy: false,
-      protocols: ["department_task_v2", "runtime_action_v1"],
+      protocols: ["department_task_v2", "runtime_action_v1", "coding_harness_task_v1"],
       runtimes: {
         claude: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "2.1.270", lastTestedAt: null, code: null },
         codex: { installed: true, signedIn: true, executionReady: true, unsupported: false, version: "0.146", lastTestedAt: stamp, code: null },

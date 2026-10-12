@@ -25,11 +25,12 @@
  * State stamp + rate limit, ONE statement on bridge_pairings, CAS'd on
  * claim_state_at being unset or at least 1s old (the per-computer limiter;
  * replaces the per-isolate in-memory one, lib/rate-limit.ts, which keeps a
- * separate count in every Worker isolate). A claude_account_hash that
- * differs from the one already recorded on this pairing overrides
- * blocked_reason to 'claude_account_changed', whatever the body itself
- * said. A pairing with NO recorded hash yet binds the FIRST one a claim
- * reports here (bindFirstClaudeAccountHash, Codex review P1, 2026-10-12) --
+ * separate count in every Worker isolate). For Claude work only, a
+ * claude_account_hash that differs from the pairing's recorded value blocks
+ * execution as 'claude_account_changed'. Codex and local v2 work ignore that
+ * Claude-only block. A pairing with NO recorded hash yet binds the FIRST one
+ * a Claude claim reports here (bindFirstClaudeAccountHash, Codex review P1,
+ * 2026-10-12) --
  * this is the only enforcement point for a connector pairing, which is
  * auto-approved on redeem and never passes through POST
  * /api/devices/[id]/approve, the route this used to depend on entirely.
@@ -62,15 +63,18 @@ import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import {
   claimCleanup,
+  claimCleanupForPairing,
   claimComputerRun,
   findClaimedComputerRun,
   finishProducerRun,
+  peekComputerRun,
   producerEventsExist,
   type ClaimPairing,
   type Run,
 } from "@/lib/os/runs/store";
 import { failureCopy } from "@/lib/os/channel/outcome";
 import { buildComputerTurn } from "@/lib/os/runs/computer-turn";
+import { parseRuntimeClaimState, type RuntimeClaimState } from "@/lib/bridge/runtime-jobs/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -79,6 +83,7 @@ const MAX_WAIT_MS = 20_000;
 const POLL_EVERY_MS = 2_000;
 const CLAIM_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 const BLOCKED_REASON_RE = /^[a-z0-9_]{1,80}$/;
+const CLAUDE_ACCOUNT_HASH_RE = /^[a-f0-9]{64}$/;
 
 type ClaimBody = {
   protocol?: unknown;
@@ -87,16 +92,22 @@ type ClaimBody = {
   in_flight?: unknown;
   blocked_reason?: unknown;
   claude_account_hash?: unknown;
+  runtime_state?: unknown;
   wait_ms?: unknown;
 };
 
 type DepartmentTaskProtocol = "department_task_v1" | "department_task_v2";
+type ClaudeAccountBlockReason = "claude_account_shared" | "claude_account_changed";
 
-async function pairingAdvertisesProtocol(pairingId: string, protocol: DepartmentTaskProtocol): Promise<boolean> {
+async function pairingAdvertisesProtocol(
+  pairing: Pick<ResolvedPairing, "pairingId" | "tenantId">,
+  protocol: DepartmentTaskProtocol,
+): Promise<boolean> {
   const { data, error } = await getServiceSupabase()
     .from("bridge_pairings")
     .select("claim_protocols")
-    .eq("id", pairingId)
+    .eq("tenant_id", pairing.tenantId)
+    .eq("id", pairing.pairingId)
     .maybeSingle();
   if (error) throw new Error(`bridge claim protocol read failed: ${error.message}`);
   const raw = (data as { claim_protocols?: unknown } | null)?.claim_protocols;
@@ -141,15 +152,129 @@ async function operatorIdentityFor(tenantId: string, userId: string): Promise<{ 
   }
 }
 
-/** The claude_account_hash recorded at this pairing's approval, for the claude_account_changed override. */
-async function approvedClaudeAccountHash(pairingId: string): Promise<string | null> {
+/** The claude_account_hash recorded at this pairing's approval. A failed read is never equivalent to NULL. */
+async function approvedClaudeAccountHash(
+  pairing: Pick<ResolvedPairing, "pairingId" | "tenantId">,
+): Promise<{ ok: true; hash: string | null } | { ok: false }> {
   try {
-    const { data } = await getServiceSupabase().from("bridge_pairings").select("claude_account_hash").eq("id", pairingId).maybeSingle();
+    const { data, error } = await getServiceSupabase()
+      .from("bridge_pairings")
+      .select("claude_account_hash")
+      .eq("tenant_id", pairing.tenantId)
+      .eq("id", pairing.pairingId)
+      .maybeSingle();
+    if (error) {
+      console.error("[bridge.runs.claim] claude-account binding read failed", error.message);
+      return { ok: false };
+    }
+    if (!data) return { ok: false };
     const v = (data as { claude_account_hash?: unknown } | null)?.claude_account_hash;
-    return typeof v === "string" && v ? v : null;
-  } catch {
-    return null;
+    if (v == null || v === "") return { ok: true, hash: null };
+    if (typeof v !== "string" || !CLAUDE_ACCOUNT_HASH_RE.test(v)) {
+      console.error("[bridge.runs.claim] stored claude-account hash is invalid", pairing.pairingId);
+      return { ok: false };
+    }
+    return { ok: true, hash: v };
+  } catch (error) {
+    console.error("[bridge.runs.claim] claude-account binding read threw", error instanceof Error ? error.message : String(error));
+    return { ok: false };
   }
+}
+
+type ClaudeHashRow = {
+  id: string;
+  user_id: string | null;
+  claim_enabled_at: string | null;
+  created_at: string | null;
+};
+
+async function activeClaudeHashRows(
+  pairing: Pick<ResolvedPairing, "tenantId">,
+  hash: string,
+): Promise<{ ok: true; rows: ClaudeHashRow[] } | { ok: false }> {
+  try {
+    const result = await getServiceSupabase()
+      .from("bridge_pairings")
+      .select("id, user_id, claim_enabled_at, created_at")
+      .eq("tenant_id", pairing.tenantId)
+      .eq("claude_account_hash", hash)
+      .is("revoked_at", null);
+    if (result.error) {
+      console.error("[bridge.runs.claim] claude-account collision read failed", result.error.message);
+      return { ok: false };
+    }
+    return {
+      ok: true,
+      rows: ((result.data || []) as ClaudeHashRow[]).filter((row) => Boolean(row.user_id && row.claim_enabled_at)),
+    };
+  } catch (error) {
+    console.error("[bridge.runs.claim] claude-account collision read threw", error instanceof Error ? error.message : String(error));
+    return { ok: false };
+  }
+}
+
+/** Clear only the binding this reconciliation observed; a newer value always wins. */
+async function clearClaudeHashIfStill(
+  pairing: Pick<ResolvedPairing, "pairingId" | "tenantId">,
+  hash: string,
+): Promise<boolean> {
+  try {
+    const result = await getServiceSupabase()
+      .from("bridge_pairings")
+      .update({ claude_account_hash: null })
+      .eq("tenant_id", pairing.tenantId)
+      .eq("id", pairing.pairingId)
+      .eq("claude_account_hash", hash)
+      .is("revoked_at", null)
+      .select("id, claude_account_hash");
+    if (result.error) {
+      console.error("[bridge.runs.claim] claude-account collision cleanup failed", result.error.message);
+      return false;
+    }
+    if ((result.data?.length ?? 0) > 0) return true;
+    const reread = await approvedClaudeAccountHash(pairing);
+    return reread.ok && reread.hash !== hash;
+  } catch (error) {
+    console.error("[bridge.runs.claim] claude-account collision cleanup threw", error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
+/**
+ * Reconcile the only cross-row race a per-pairing CAS cannot prevent. SQLite
+ * serializes the writes, then this deterministic pass retains the oldest
+ * approved owner's binding and CAS-clears every different owner's loser.
+ */
+async function reconcileClaudeHashOwners(
+  pairing: Pick<ResolvedPairing, "pairingId" | "tenantId" | "userId">,
+  hash: string,
+): Promise<{ ok: true } | { ok: false; blockedReason: ClaudeAccountBlockReason }> {
+  const bindings = await activeClaudeHashRows(pairing, hash);
+  if (!bindings.ok) return { ok: false, blockedReason: "claude_account_changed" };
+  if (!bindings.rows.some((row) => row.id === pairing.pairingId)) {
+    // This pairing was cleared/de-approved between its CAS/read and this
+    // reconciliation. Another pairing carrying the hash is not proof that
+    // THIS caller is bound to it.
+    return { ok: false, blockedReason: "claude_account_changed" };
+  }
+  const owners = new Set(bindings.rows.map((row) => row.user_id).filter((userId): userId is string => Boolean(userId)));
+  if (owners.size <= 1) return { ok: true };
+
+  const ordered = [...bindings.rows].sort((a, b) => {
+    const byCreated = String(a.created_at || "").localeCompare(String(b.created_at || ""));
+    return byCreated || a.id.localeCompare(b.id);
+  });
+  const winningUserId = ordered[0]?.user_id ?? null;
+  if (!winningUserId) return { ok: false, blockedReason: "claude_account_changed" };
+
+  const losers = bindings.rows.filter((row) => row.user_id !== winningUserId);
+  const cleared = await Promise.all(
+    losers.map((row) => clearClaudeHashIfStill({ pairingId: row.id, tenantId: pairing.tenantId }, hash)),
+  );
+  if (cleared.some((ok) => !ok)) return { ok: false, blockedReason: "claude_account_shared" };
+  return pairing.userId === winningUserId
+    ? { ok: true }
+    : { ok: false, blockedReason: "claude_account_shared" };
 }
 
 /**
@@ -167,14 +292,12 @@ async function approvedClaudeAccountHash(pairingId: string): Promise<string | nu
  * Runs ONLY when the pairing has NO recorded hash yet (the caller checks
  * `!approvedHash` first) -- a pairing that already has one takes the
  * existing claude_account_changed path below instead, unchanged.
- *   1. Check FIRST: another ACTIVE (approved, non-revoked) pairing in the
- *      SAME tenant, owned by a DIFFERENT person, already carrying this
- *      exact hash -> refuse, never record.
- *   2. Record SECOND, compare-and-set `WHERE claude_account_hash IS NULL`:
- *      a concurrent first claim for the SAME pairing can only ever write
- *      once; the loser's write affects zero rows and is harmless (the next
- *      claim call re-reads whatever won and falls on the normal
- *      claude_account_changed path if the two calls disagreed).
+ *
+ * The ownership check and bind are deliberately ONE SQLite statement. A
+ * prior read-then-CAS implementation still let two different people's first
+ * claims both write during the gap between those statements. SQLite
+ * serializes these conditional UPDATEs, so the second writer observes the
+ * first binding in NOT EXISTS and affects zero rows.
  *
  * This also covers the re-pair case the review flagged: lib/turso-rpc-
  * shim.ts clears claude_account_hash to NULL on every rotate (including a
@@ -189,56 +312,114 @@ async function approvedClaudeAccountHash(pairingId: string): Promise<string | nu
 async function bindFirstClaudeAccountHash(
   pairing: Pick<ResolvedPairing, "pairingId" | "tenantId" | "userId">,
   hash: string,
-): Promise<{ ok: true } | { ok: false; blockedReason: "claude_account_shared" | "claude_account_changed" }> {
-  const db = getServiceSupabase();
-  const sameHash = await db
-    .from("bridge_pairings")
-    .select("id, user_id, claim_enabled_at")
-    .eq("tenant_id", pairing.tenantId)
-    .eq("claude_account_hash", hash)
-    .is("revoked_at", null);
-  if (sameHash.error) {
-    console.error("[bridge.runs.claim] claude-account collision check failed", sameHash.error.message);
-    // Fail CLOSED on a read error this call could not actually verify is
-    // unshared -- never record. "claude_account_changed" (not "_shared",
-    // which would name a collision this call never confirmed) is the
-    // closest existing honest code: "we can't currently vouch for this
-    // binding, approve it again."
+): Promise<{ ok: true } | { ok: false; blockedReason: ClaudeAccountBlockReason }> {
+  try {
+    const write = await getTursoClient().execute({
+      sql: `UPDATE bridge_pairings
+               SET claude_account_hash = ?
+             WHERE id = ? AND tenant_id = ?
+               AND claude_account_hash IS NULL
+               AND revoked_at IS NULL
+               AND claim_enabled_at IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1
+                   FROM bridge_pairings other
+                  WHERE other.tenant_id = ?
+                    AND other.claude_account_hash = ?
+                    AND other.user_id IS NOT ?
+                    AND other.revoked_at IS NULL
+                    AND other.claim_enabled_at IS NOT NULL
+               )`,
+      args: [hash, pairing.pairingId, pairing.tenantId, pairing.tenantId, hash, pairing.userId],
+    });
+    if (write.rowsAffected === 1) return { ok: true };
+  } catch (error) {
+    console.error("[bridge.runs.claim] claude-account bind write threw", error instanceof Error ? error.message : String(error));
     return { ok: false, blockedReason: "claude_account_changed" };
   }
-  const sharedWithSomeoneElse = (
-    (sameHash.data || []) as Array<{ id: string; user_id: string | null; claim_enabled_at: string | null }>
-  ).some((r) => r.id !== pairing.pairingId && r.user_id && r.user_id !== pairing.userId && r.claim_enabled_at);
-  if (sharedWithSomeoneElse) return { ok: false, blockedReason: "claude_account_shared" };
 
-  const write = await db
-    .from("bridge_pairings")
-    .update({ claude_account_hash: hash })
-    .eq("id", pairing.pairingId)
-    .is("claude_account_hash", null)
-    .is("revoked_at", null);
-  if (write.error) {
-    console.error("[bridge.runs.claim] claude-account bind write failed", write.error.message);
-    return { ok: false, blockedReason: "claude_account_changed" };
-  }
-  return { ok: true };
+  // Zero rows has exactly three safe interpretations. A concurrent request
+  // may have bound this same pairing to the same hash; a different hash means
+  // the account changed; a still-NULL row means NOT EXISTS found another
+  // person's active binding and this account is shared.
+  const winner = await approvedClaudeAccountHash(pairing);
+  if (!winner.ok) return { ok: false, blockedReason: "claude_account_changed" };
+  if (winner.hash === hash) return { ok: true };
+  return {
+    ok: false,
+    blockedReason: winner.hash === null ? "claude_account_shared" : "claude_account_changed",
+  };
 }
 
-type ClaimState = { capacity: number; inFlight: number; blockedReason: string | null };
+async function claudeAccountBlockReason(
+  pairing: Pick<ResolvedPairing, "pairingId" | "tenantId" | "userId">,
+  hash: string | null,
+): Promise<ClaudeAccountBlockReason | null> {
+  if (!hash) return null;
+  const approved = await approvedClaudeAccountHash(pairing);
+  if (!approved.ok) return "claude_account_changed";
+  if (approved.hash && approved.hash !== hash) return "claude_account_changed";
+  if (!approved.hash) {
+    const bound = await bindFirstClaudeAccountHash(pairing, hash);
+    return bound.ok ? null : bound.blockedReason;
+  }
+  const reconciled = await reconcileClaudeHashOwners(pairing, hash);
+  return reconciled.ok ? null : reconciled.blockedReason;
+}
+
+function isClaudeAccountBlockReason(reason: string | null): reason is ClaudeAccountBlockReason {
+  return reason === "claude_account_changed" || reason === "claude_account_shared";
+}
+
+function runUsesClaude(run: Run, protocol: DepartmentTaskProtocol): boolean {
+  return protocol === "department_task_v1" || (run.runtimeEngineKind === "cli" && run.runtimeEngineName === "claude");
+}
+
+/**
+ * Turn the connector's bounded, fresh runtime snapshot into the same
+ * availability reason the queue follower understands. A v2 task is ready
+ * only when the exact snapshotted CLI/model says it can execute now;
+ * installation or an auth artifact alone is deliberately insufficient.
+ */
+function runtimeBlockReason(run: Pick<Run, "runtimeEngineKind" | "runtimeEngineName">, state: RuntimeClaimState): string | null {
+  const name = run.runtimeEngineName;
+  if (run.runtimeEngineKind === "cli" && (name === "claude" || name === "codex" || name === "gemini")) {
+    const runtime = state[name];
+    if (runtime.state === "unsupported") return "cli_account_unsupported";
+    if (!runtime.installed || runtime.state === "not_installed") return "cli_not_found";
+    if (!runtime.authenticated || runtime.state === "needs_sign_in") return "subscription_auth_failure";
+    return runtime.state === "ready" ? null : "department_profile_unsupported";
+  }
+  if (run.runtimeEngineKind === "local" && name) {
+    const model = state.local_models?.find((candidate) => candidate.ref === name);
+    return model?.state === "ready" ? null : "department_profile_unsupported";
+  }
+  return "department_profile_unsupported";
+}
+
+type ClaimState = {
+  capacity: number;
+  inFlight: number;
+  blockedReason: string | null;
+  runtimeState: RuntimeClaimState | null;
+};
 
 /** The state stamp + rate limit, in ONE UPDATE. null = the rate limit held (too fast), or the row was revoked between auth and here. */
 async function stampClaimState(pairing: ResolvedPairing, state: ClaimState, ip: string, nowIso: string): Promise<boolean> {
   const db = getServiceSupabase();
   const cutoff = new Date(Date.parse(nowIso) - 1000).toISOString();
+  const update: Record<string, unknown> = {
+    claim_state_at: nowIso,
+    claim_capacity: state.capacity,
+    claim_in_flight: state.inFlight,
+    claim_blocked_reason: state.blockedReason,
+    last_claim_ip: ip,
+  };
+  if (state.runtimeState) update.claim_runtime_state = JSON.stringify(state.runtimeState);
   const upd = await db
     .from("bridge_pairings")
-    .update({
-      claim_state_at: nowIso,
-      claim_capacity: state.capacity,
-      claim_in_flight: state.inFlight,
-      claim_blocked_reason: state.blockedReason,
-      last_claim_ip: ip,
-    })
+    .update(update)
+    .eq("tenant_id", pairing.tenantId)
     .eq("id", pairing.pairingId)
     .is("revoked_at", null)
     .or(`claim_state_at.is.null,claim_state_at.lte.${cutoff}`)
@@ -250,40 +431,76 @@ async function stampClaimState(pairing: ResolvedPairing, state: ClaimState, ip: 
   return (upd.data?.length ?? 0) > 0;
 }
 
+/**
+ * Record why the exact runtime for the next v2 run cannot answer. The
+ * claim_state_at equality is a stale-writer guard: an older long poll must
+ * never overwrite a newer claim call that already repaired the runtime.
+ */
+async function recordRuntimeBlock(
+  pairing: ResolvedPairing,
+  runtimeState: RuntimeClaimState,
+  blockedReason: string,
+  claimStateAt: string,
+): Promise<boolean> {
+  const upd = await getServiceSupabase()
+    .from("bridge_pairings")
+    .update({
+      claim_runtime_state: JSON.stringify(runtimeState),
+      claim_blocked_reason: blockedReason,
+    })
+    .eq("tenant_id", pairing.tenantId)
+    .eq("id", pairing.pairingId)
+    .eq("claim_state_at", claimStateAt)
+    .is("revoked_at", null)
+    .select("id");
+  if (upd.error) {
+    console.error("[bridge.runs.claim] runtime block stamp failed", upd.error.message);
+    return false;
+  }
+  return (upd.data?.length ?? 0) > 0;
+}
+
+async function failClaimedRun(run: Run, code: string): Promise<NextResponse> {
+  const copyCode = code === "claude_account_shared" ? "claude_account_changed" : code;
+  await finishProducerRun(getTursoClient(), run, {
+    status: "failed",
+    errorCode: copyCode,
+    message: failureCopy(copyCode, { canManageAi: false }).sentence,
+    inputTokens: null,
+    outputTokens: null,
+    now: new Date(),
+  });
+  return NextResponse.json({ ok: true, run: null });
+}
+
 async function buildAndRespond(run: Run, pairing: ResolvedPairing): Promise<NextResponse> {
   const dept = OS_DEPARTMENTS.find((d) => d.key === run.department);
-  const fail = async (code: string) => {
-    await finishProducerRun(getTursoClient(), run, {
-      status: "failed",
-      errorCode: code,
-      message: failureCopy(code, { canManageAi: false }).sentence,
-      inputTokens: null,
-      outputTokens: null,
-      now: new Date(),
-    });
-    return NextResponse.json({ ok: true, run: null });
-  };
-  // Re-check the PAIRING right before building the response, not only at
-  // claim time: this covers the idempotent-retry path (which bypasses the
-  // CAS entirely) and the few milliseconds between a fresh claim and this
-  // function returning. A disconnected computer must never receive the
-  // run's conversation history or department context just because it was
-  // still approved when the request started.
-  if (!(await pairingLiveForClaim(run.claimedPairingId ?? pairing.pairingId))) return fail("computer_offline");
-  if (!dept) return fail("department_profile_unsafe");
+  if (!dept) return failClaimedRun(run, "department_profile_unsafe");
 
   // Re-check the seat AFTER claiming (O4 security rule): a removal between
   // send and claim, or between claim calls, must never hand a removed
   // person's run to any computer.
   const viewer = await resolveOsViewerFor(run.tenantId, run.userId);
-  if (!viewer.ok || departmentGate(dept.slug, viewer.navInput) === null) return fail("seat_removed");
+  if (!viewer.ok || departmentGate(dept.slug, viewer.navInput) === null) return failClaimedRun(run, "seat_removed");
 
   const [tenantSlug, operator, sessionVersion] = await Promise.all([
     resolveOwnedSlug(run.tenantId),
     operatorIdentityFor(run.tenantId, run.userId),
     currentSessionVersion(run.userId),
   ]);
-  if (!tenantSlug) return fail("department_profile_unsafe");
+  if (!tenantSlug) return failClaimedRun(run, "department_profile_unsafe");
+
+  // Final disclosure gate. The request may have spent 20 seconds in its
+  // long poll, and workspace-default work may belong to someone other than
+  // this computer's owner. Re-check BOTH the pairing and that owner's seat
+  // after all setup reads and immediately before buildComputerTurn creates
+  // the prompt, history and MCP credentials returned to the connector.
+  const [pairingLive, pairingOwnerSeat] = await Promise.all([
+    pairingLiveForClaim(run.claimedPairingId ?? pairing.pairingId, pairing.tenantId),
+    pairing.userId ? liveSeat(pairing.tenantId, pairing.userId) : Promise.resolve({ live: false as const }),
+  ]);
+  if (!pairingLive) return failClaimedRun(run, "computer_offline");
+  if (!pairingOwnerSeat.live) return failClaimedRun(run, "seat_removed");
 
   const result = await buildComputerTurn({
     db: getTursoClient(),
@@ -297,7 +514,7 @@ async function buildAndRespond(run: Run, pairing: ResolvedPairing): Promise<Next
     pairingId: pairing.pairingId,
     sessionVersion: sessionVersion ?? 0,
   });
-  if (!result.ok) return fail(result.error);
+  if (!result.ok) return failClaimedRun(run, result.error);
   return NextResponse.json({ ok: true, run: result.body });
 }
 
@@ -326,37 +543,54 @@ export async function POST(req: NextRequest) {
   if (body.protocol !== "department_task_v1" && body.protocol !== "department_task_v2") return bad(400, "unsupported_protocol");
   const protocol = body.protocol as DepartmentTaskProtocol;
   try {
-    if (!(await pairingAdvertisesProtocol(pairing.pairingId, protocol))) return bad(400, "unsupported_protocol");
+    if (!(await pairingAdvertisesProtocol(pairing, protocol))) return bad(400, "unsupported_protocol");
   } catch (error) {
     console.error("[bridge.runs.claim.protocol]", error instanceof Error ? error.message : String(error));
     return bad(503, "protocol_check_unavailable");
   }
   const claimId = typeof body.claim_id === "string" && CLAIM_ID_RE.test(body.claim_id) ? body.claim_id : null;
   if (!claimId) return bad(400, "claim_id_required");
+  const parsedRuntimeState = protocol === "department_task_v2" ? parseRuntimeClaimState(body.runtime_state) : null;
+  if (parsedRuntimeState && !parsedRuntimeState.ok) return bad(400, parsedRuntimeState.code);
+  if (protocol === "department_task_v2" && !parsedRuntimeState?.state) return bad(400, "runtime_state_required");
+  const runtimeState = parsedRuntimeState?.state ?? null;
   const capacity = clampInt(body.capacity, 0, 2, 0);
   const inFlight = clampInt(body.in_flight, 0, 2, 0);
   const bodyBlockedReason =
     typeof body.blocked_reason === "string" && BLOCKED_REASON_RE.test(body.blocked_reason) ? body.blocked_reason : null;
-  const claudeAccountHash = typeof body.claude_account_hash === "string" && body.claude_account_hash ? body.claude_account_hash : null;
+  const hasClaudeAccountHash = Object.prototype.hasOwnProperty.call(body, "claude_account_hash");
+  if (
+    hasClaudeAccountHash &&
+    (typeof body.claude_account_hash !== "string" || !CLAUDE_ACCOUNT_HASH_RE.test(body.claude_account_hash))
+  ) {
+    return bad(400, "claude_account_hash_invalid");
+  }
+  const claudeAccountHash = hasClaudeAccountHash ? (body.claude_account_hash as string) : null;
   const waitMs = clampInt(body.wait_ms, 0, MAX_WAIT_MS, 0);
 
-  const approvedHash = await approvedClaudeAccountHash(pairing.pairingId);
-  let blockedReason = bodyBlockedReason;
-  if (approvedHash && claudeAccountHash && approvedHash !== claudeAccountHash) {
-    blockedReason = "claude_account_changed";
-  } else if (!approvedHash && claudeAccountHash) {
-    // First time THIS pairing has ever reported a hash (or it was cleared
-    // by a re-pair, D0) -- bind it now, under the same collision rule the
-    // approve route always enforced (Codex review, P1).
-    const bind = await bindFirstClaudeAccountHash(
+  // V2 derives availability from the exact queued run's engine below. A
+  // pairing-wide free-form block could otherwise let one signed-out CLI
+  // poison a different ready CLI or local model on the same computer.
+  let blockedReason = protocol === "department_task_v2" ? null : bodyBlockedReason;
+  if (protocol === "department_task_v1") {
+    // V1 is Claude-only, so its account identity remains a pairing-wide
+    // claim block. V2 defers this until it knows the claimed run's engine;
+    // otherwise a Claude mismatch would incorrectly stop Codex/local work.
+    const accountBlock = await claudeAccountBlockReason(
       { pairingId: pairing.pairingId, tenantId: pairing.tenantId, userId: pairing.userId },
       claudeAccountHash,
     );
-    if (!bind.ok) blockedReason = bind.blockedReason;
+    if (accountBlock) blockedReason = accountBlock;
   }
 
   const now = new Date();
-  const stamped = await stampClaimState(pairing, { capacity, inFlight, blockedReason }, getClientIp(req), now.toISOString());
+  const claimStateAt = now.toISOString();
+  const stamped = await stampClaimState(
+    pairing,
+    { capacity, inFlight, blockedReason, runtimeState },
+    getClientIp(req),
+    claimStateAt,
+  );
   if (!stamped) {
     const current = await resolvePairingFromBearer(req);
     if (!current.ok) return bad(current.status, current.error);
@@ -367,7 +601,38 @@ export async function POST(req: NextRequest) {
   const db = getTursoClient();
   const scope = { tenantId: pairing.tenantId, userId: pairing.userId };
 
-  await claimCleanup(db, scope, now);
+  if (protocol === "department_task_v2") {
+    await claimCleanupForPairing(db, { tenantId: pairing.tenantId, pairingId: pairing.pairingId }, now);
+  } else {
+    await claimCleanup(db, scope, now);
+  }
+
+  const respondToClaimedRun = async (run: Run): Promise<NextResponse> => {
+    if (protocol === "department_task_v2") {
+      const runtimeReason = runtimeBlockReason(run, runtimeState!);
+      if (runtimeReason) {
+        await recordRuntimeBlock(pairing, runtimeState!, runtimeReason, claimStateAt);
+        // This branch is reachable for an idempotent retry whose runtime
+        // changed after its original lease. It is already claimed, so close
+        // it without ever rebuilding/disclosing the prompt.
+        return failClaimedRun(run, runtimeReason);
+      }
+    }
+    if (protocol === "department_task_v2" && runUsesClaude(run, protocol)) {
+      // V2 advertises per-run engines, so a connector may legitimately omit
+      // Claude identity while claiming Codex/local work. Once the exact run
+      // is known to be Claude, however, the account proof is mandatory. A
+      // heartbeat/auth-file check is not sufficient to execute tenant work.
+      if (!claudeAccountHash) return failClaimedRun(run, "department_profile_unsupported");
+      const accountBlock = await claudeAccountBlockReason(
+        { pairingId: pairing.pairingId, tenantId: pairing.tenantId, userId: pairing.userId },
+        claudeAccountHash,
+      );
+      const claudeOnlyBlock = accountBlock ?? (isClaudeAccountBlockReason(bodyBlockedReason) ? bodyBlockedReason : null);
+      if (claudeOnlyBlock) return failClaimedRun(run, claudeOnlyBlock);
+    }
+    return buildAndRespond(run, pairing);
+  };
 
   // The idempotent-retry lookup runs REGARDLESS of capacity/blocked_reason:
   // it answers "did I already claim something under this claim_id", which
@@ -383,7 +648,7 @@ export async function POST(req: NextRequest) {
     }
     // No events posted yet under this claim_id: a safe, idempotent retry
     // (a lost answer). Fresh tokens, same run.
-    return buildAndRespond(existing, pairing);
+    return respondToClaimedRun(existing);
   };
   const retried = await idempotentLookup();
   if (retried) return retried;
@@ -395,15 +660,31 @@ export async function POST(req: NextRequest) {
   if (capacity <= 0 || blockedReason) return NextResponse.json({ ok: true, run: null });
 
   const tryClaim = async (): Promise<NextResponse | null> => {
-    const claimed = await claimComputerRun(db, claimPairing, claimId, new Date(), protocol);
-    if (claimed) return buildAndRespond(claimed, pairing);
+    // V2 peeks the exact row selected by the queue ordering, validates that
+    // row's immutable engine snapshot against THIS claim's fresh bounded
+    // runtime state, then pins the row id into the claim CAS. If queue order
+    // changes in between, the CAS refuses rather than disclose a different
+    // engine that was never checked.
+    const candidate = protocol === "department_task_v2"
+      ? await peekComputerRun(db, claimPairing, protocol)
+      : null;
+    if (protocol === "department_task_v2" && !candidate) return null;
+    if (candidate) {
+      const runtimeReason = runtimeBlockReason(candidate, runtimeState!);
+      if (runtimeReason) {
+        await recordRuntimeBlock(pairing, runtimeState!, runtimeReason, claimStateAt);
+        return NextResponse.json({ ok: true, run: null });
+      }
+    }
+    const claimed = await claimComputerRun(db, claimPairing, claimId, new Date(), protocol, candidate?.id ?? null);
+    if (claimed) return respondToClaimedRun(claimed);
     // claimComputerRun returning null is ambiguous on its own: either there
     // was nothing left to claim, OR a concurrent request for this EXACT
     // (pairing, claim_id) just won the unique-index race for a DIFFERENT
     // run (Codex review, [P2]). The loser must return the WINNER's
     // assignment, never silently re-poll as if nothing happened yet.
     const wonByOther = await findClaimedComputerRun(db, claimPairing, claimId, protocol);
-    return wonByOther ? buildAndRespond(wonByOther, pairing) : null;
+    return wonByOther ? respondToClaimedRun(wonByOther) : null;
   };
   const first = await tryClaim();
   if (first) return first;

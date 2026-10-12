@@ -32,7 +32,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ job_id: st
     retryable: body.error.retryable,
   });
   if (!result.ok) {
-    if (result.code === "pairing_revoked" || result.code === "pairing_not_approved") return bad(403, result.code);
+    if (result.code === "pairing_revoked" || result.code === "pairing_not_approved" || result.code === "requester_seat_inactive") {
+      return bad(403, result.code);
+    }
     if (result.code === "lease_lost") return bad(409, result.code);
     return bad(400, result.code);
   }

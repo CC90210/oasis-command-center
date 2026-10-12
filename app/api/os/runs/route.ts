@@ -28,7 +28,7 @@
 import { type NextRequest } from "next/server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { RunsUnavailableError } from "@/lib/os/runs/store";
-import { resolveRunSession, mayWatchThinking } from "@/lib/os/runs/session";
+import { resolveRunSession, mayWatchThinking, sessionForQueuedFallback } from "@/lib/os/runs/session";
 import { executorDepsFor } from "@/lib/os/runs/turn-starter";
 import { sendMessage } from "@/lib/os/runs/send";
 import { json } from "@/lib/os/runs/scope";
@@ -80,6 +80,13 @@ export async function POST(req: NextRequest) {
         chatMode: body.chat_mode === "plan" ? "plan" : "build",
       },
       computerDispatch: session.computerDispatch,
+      apiAccountSnapshot: session.apiAccountSnapshot,
+      fallbackFrom: session.fallbackFrom,
+      fallbackReason: session.fallbackReason,
+      computerFallbackDeps: (reason) => {
+        const fallbackSession = sessionForQueuedFallback(session, reason);
+        return fallbackSession ? executorDepsFor(fallbackSession, db) : null;
+      },
     });
   } catch (err) {
     if (err instanceof RunsUnavailableError) return json(503, { ok: false, error: "chat_history_unavailable" });
