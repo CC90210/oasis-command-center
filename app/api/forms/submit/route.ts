@@ -99,6 +99,8 @@ import {
   type ConsentDecision,
 } from "@/lib/consent/ledger";
 import { consentDecisionsForStep } from "@/lib/consent/ledger-disclosure";
+import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
+import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -173,6 +175,24 @@ type SubmitBody = {
    * when step 0 itself is a direct-to-storage upload and therefore needs the
    * token before the file can be selected. */
   initialize_only?: boolean;
+  // -- V5a funnel tracking (HANDOVER section 5.3/5.4) --------------------
+  /** The browser's per-tab visit id (lib/offers/tracking-client.ts,
+   *  sessionStorage, never a cookie). Present on every step once the client
+   *  has one; used ONLY to link that visit's offer_funnel_events rows to the
+   *  lead this submission resolves to (lib/offers/tracking-store.ts
+   *  linkVisitToLead) -- never trusted for anything else, and never itself
+   *  written onto the lead. */
+  visit_id?: string;
+  /** Campaign attribution read from the offer page's query string
+   *  (lib/offer-pages/utm.ts), first-touch like lead_source but on its own
+   *  namespace -- never written if the lead already carries a real value. */
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  /** The keyword/search term that brought this visitor in. */
+  kw?: string;
+  /** The funnel pillar the offer page preselected (p1-p4). */
+  cat?: string;
 };
 
 // The public client embeds files as `inline_base64` inside payload[field].
@@ -612,6 +632,32 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   const tenantRow = Array.isArray(form.tenant) ? form.tenant[0] : form.tenant;
   if (!tenantRow || tenantRow.slug !== link.tenant) {
     return NextResponse.json({ ok: false, error: "tenant_mismatch" }, { status: 400 });
+  }
+
+  // -------------------------------------------------------------------
+  // V5a FUNNEL TRACKING: visit->lead link + first-touch UTM stamp.
+  //
+  // Both are best-effort and run on every step (not just step 0): the link
+  // is idempotent (linkVisitToLead only fills rows still carrying lead_id
+  // IS NULL) and the UTM stamp is first-touch-wins, so repeating either on a
+  // later step changes nothing once the first one lands. Neither can fail
+  // the submission -- both helpers swallow their own errors, and this block
+  // never throws out of handleSubmit.
+  if (typeof body.visit_id === "string" && isValidVisitId(body.visit_id)) {
+    const tdb = offerPagesDb();
+    if (tdb) await linkVisitToLead(tdb, { tenantId: form.tenant_id, visitId: body.visit_id, leadId: link.lead_id });
+  }
+  {
+    const utmInput: UtmInput = {
+      utm_source: body.utm_source,
+      utm_medium: body.utm_medium,
+      utm_campaign: body.utm_campaign,
+      kw: body.kw,
+      cat: body.cat,
+    };
+    if (Object.values(utmInput).some((v) => typeof v === "string" && v.trim())) {
+      await stampUtmOnLead(db, { tenantId: form.tenant_id, leadId: link.lead_id, utm: utmInput, now: new Date().toISOString() });
+    }
   }
 
   // Parse the steps to validate step_index range. parseFormSteps throws

@@ -29,6 +29,7 @@ import { OfferNav } from "./OfferNav";
 import { OfferSection, OfferHead, OfferFacade } from "./sections";
 import { OfferBook, type EmbeddedFormProps } from "./OfferBook";
 import { StickyBookBar } from "./StickyBookBar";
+import type { VideoTracking } from "./VideoFacade";
 
 /** Same switch as app/(marketing)/layout.tsx: reveals animate only once JS can undo them. */
 const JS_FLAG = `document.documentElement.classList.add('js')`;
@@ -45,6 +46,8 @@ export function OfferPage({
   bookingUrl,
   contactEmail = null,
   preview,
+  tenantSlug = null,
+  formSlug = null,
 }: {
   prepared: PreparedOffer;
   workspaceName: string;
@@ -58,8 +61,17 @@ export function OfferPage({
   contactEmail?: string | null;
   /** Set for the owner's signed-in preview: a banner, and step titles instead of the form. */
   preview?: { steps: string[] } | null;
+  /**
+   * V5a funnel tracking (HANDOVER section 5): the public slugs every hero
+   * and body VideoFacade needs to fire video_play/video_progress. null in
+   * the owner's preview (same rule `form` already follows) -- a draft view
+   * must never count as a visitor's video_play.
+   */
+  tenantSlug?: string | null;
+  formSlug?: string | null;
 }) {
   const { page, ctaLabel } = prepared;
+  const tracking: VideoTracking = tenantSlug && formSlug ? { tenant: tenantSlug, form: formSlug } : null;
   const hero = page.hero;
   const heroMedia = hero.video ? prepared.media[hero.video.ref] : undefined;
   const bookTitle = page.book.title || ctaLabel;
@@ -119,7 +131,7 @@ export function OfferPage({
                 </div>
                 {heroMedia ? (
                   <div>
-                    <OfferFacade media={heroMedia} label={hero.headline} priority />
+                    <OfferFacade media={heroMedia} label={hero.headline} priority tracking={tracking} />
                     {hero.transcript ? (
                       <details className="mt-4">
                         <summary className={`${CTA_INLINE} cursor-pointer list-none [&::-webkit-details-marker]:hidden`}>
@@ -139,7 +151,13 @@ export function OfferPage({
           </section>
 
           {page.sections.map((s) => (
-            <OfferSection key={s.key} s={s} prepared={prepared} cta={ASK_AGAIN_AFTER.has(s.key) ? ctaLabel : null} />
+            <OfferSection
+              key={s.key}
+              s={s}
+              prepared={prepared}
+              cta={ASK_AGAIN_AFTER.has(s.key) ? ctaLabel : null}
+              tracking={tracking}
+            />
           ))}
 
           {/* -- Book: always last ---------------------------------------- */}

@@ -296,6 +296,10 @@ export default async function AnonymousFormPage({
         bookingUrl={oasis ? resolveBookingUrl() || null : null}
         contactEmail={oasis ? CONTACT_EMAIL : null}
         preview={offer.preview ? { steps: result.form.steps.map((s) => s.title) } : null}
+        // V5a funnel tracking (HANDOVER section 5): null in the owner's
+        // preview, same rule `form` below already follows.
+        tenantSlug={offer.preview ? null : result.tenant_slug}
+        formSlug={offer.preview ? null : result.form.slug}
         form={
           offer.preview
             ? null
@@ -315,6 +319,11 @@ export default async function AnonymousFormPage({
                 consentLedgerEnabled,
                 submissionSource: source,
                 submissionPath: `/f/${result.tenant_slug}/${result.form.slug}`,
+                // V5a funnel tracking (HANDOVER section 5): the public slugs
+                // /api/offer-events resolves server-side, never the internal
+                // tenant_id/form_id.
+                tenantSlug: result.tenant_slug,
+                formSlug: result.form.slug,
                 anonymousInit: {
                   tenant_slug: result.tenant_slug,
                   form_slug: result.form.slug,
@@ -358,6 +367,9 @@ export default async function AnonymousFormPage({
       // it feeds a DIFFERENT thing — lead_source origination at lead creation.
       submissionSource={source}
       submissionPath={`/f/${result.tenant_slug}/${result.form.slug}`}
+      // V5a funnel tracking (HANDOVER section 5).
+      tenantSlug={result.tenant_slug}
+      formSlug={result.form.slug}
       anonymousInit={{
         tenant_slug: result.tenant_slug,
         form_slug: result.form.slug,

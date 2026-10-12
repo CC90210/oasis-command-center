@@ -33,6 +33,7 @@ import {
   type ConsentIdentity,
 } from "@/lib/consent/ledger-disclosure";
 import { SafeLogo } from "@/components/brand/SafeLogo";
+import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -105,6 +106,17 @@ type Props = {
   chrome?: "page" | "embedded";
   /** Told after each step the server accepted; `finished` on the last one. */
   onStepSubmitted?: (stepIndex: number, finished: boolean) => void;
+  /**
+   * V5a funnel tracking (HANDOVER section 5). The public tenant/form slug —
+   * NOT the internal tenant_id/form_id — exactly as /api/offer-events
+   * resolves them server-side. Optional so every existing caller/test that
+   * does not pass them keeps working unchanged: without both, every
+   * trackEvent call below is a deliberate no-op (lib/offers/tracking-client.ts
+   * already no-ops with no visit id; the same fail-quiet rule applies here to
+   * a missing tenant/form slug).
+   */
+  tenantSlug?: string;
+  formSlug?: string;
 };
 
 type SubmitResponse = {
@@ -261,6 +273,8 @@ export function FormPublicClient({
   consentLedgerEnabled,
   chrome = "page",
   onStepSubmitted,
+  tenantSlug,
+  formSlug,
 }: Props) {
   const consentIdemKey = useConsentIdempotencyKey();
   const consentDone = useRef(false);
@@ -379,6 +393,44 @@ export function FormPublicClient({
       // Best-effort — view tracking failure shouldn't disrupt the form UX.
     });
   }, [token]);
+
+  // -- V5a funnel tracking (HANDOVER section 5) --------------------------
+  // page_view fires exactly once per mount, independent of the view-ping
+  // above (which only fires once a token exists). step_viewed fires once per
+  // step INCLUDING step 0 on mount, and again every time currentStep changes
+  // — a visitor going back and forward re-views a step, which is real signal,
+  // not a bug to dedupe away. Both no-op silently when tenantSlug/formSlug
+  // were not supplied (see the Props doc comment) or sessionStorage is
+  // unavailable (lib/offers/tracking-client.ts).
+  const pageViewFired = useRef(false);
+  useEffect(() => {
+    if (pageViewFired.current || !tenantSlug || !formSlug) return;
+    pageViewFired.current = true;
+    trackEvent({ tenant: tenantSlug, form: formSlug, event: "page_view" });
+  }, [tenantSlug, formSlug]);
+  useEffect(() => {
+    if (!tenantSlug || !formSlug) return;
+    trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_viewed", stepIndex: currentStep });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on step change only, not on every render
+  }, [tenantSlug, formSlug, currentStep]);
+
+  // UTM/kw/cat read once from the page's own URL (never re-read mid-funnel —
+  // the visitor is still on the same page). Forwarded on every step's submit
+  // (lib/offer-pages/utm.ts stamps first-touch only, so repeating this is
+  // harmless) so attribution survives even if the visitor only completes a
+  // later step. No prop threading needed: this is the one place a public
+  // form page is rendered, and the URL is already in the browser.
+  const utmFromUrlRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    const out: Record<string, string> = {};
+    for (const key of ["utm_source", "utm_medium", "utm_campaign", "kw", "cat"]) {
+      const v = sp.get(key);
+      if (v && v.trim()) out[key] = v.trim();
+    }
+    utmFromUrlRef.current = out;
+  }, []);
 
   const step = steps[currentStep];
 
@@ -714,6 +766,17 @@ export function FormPublicClient({
       if (submissionSource) submitBody.submission_source = submissionSource;
       if (submissionPath) submitBody.submission_path = submissionPath;
 
+      // V5a funnel tracking (HANDOVER section 5.3/5.4): the visit id links
+      // this visit's offer_funnel_events rows to the lead this submission
+      // resolves to (lib/offers/tracking-store.ts linkVisitToLead), and the
+      // UTM fields are stamped first-touch-only onto that same lead
+      // (lib/offer-pages/utm.ts). Both are best-effort on the server; sending
+      // them on every step is harmless (idempotent) and means attribution
+      // survives even if the visitor only completes a later step.
+      const visitId = getOrCreateVisitId();
+      if (visitId) submitBody.visit_id = visitId;
+      Object.assign(submitBody, utmFromUrlRef.current);
+
       // CONSENT EVIDENCE. Sealed from the BROWSER, because the evidence is only
       // worth having if it records the merchant's own IP — a call from our API
       // would record our Vercel IP, which the vault correctly refuses to treat
@@ -873,6 +936,9 @@ export function FormPublicClient({
       if (!token && data.minted_token) {
         tokenRef.current = data.minted_token;
         setToken(data.minted_token);
+      }
+      if (tenantSlug && formSlug) {
+        trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
       }
       onStepSubmitted?.(currentStep, data.next_step === null || data.next_step === undefined);
 
