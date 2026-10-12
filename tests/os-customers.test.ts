@@ -766,7 +766,8 @@ async function main() {
     const patchTicket = (body: Json) => call(ticket.PATCH(req("PATCH", "/api/tickets/t-sb-linked", body), params({ id: "t-sb-linked" })));
     try {
       await login(USERS.cc);
-      // Exactly what the project editor sends on Save (components/delivery/ProjectForms.tsx): every field, the stored link included.
+      // Legacy callers may still re-save the stored link while editing other
+      // fields; the project UI no longer offers or submits this field.
       const renamed = await patchProject({ title: "SunBiz site (old)", description: null, client_tenant_id: SUNBIZ, client_name: "Ezra", client_email: "ezra@sunbiz.test", lead_id: null });
       assert.equal(renamed.status, 200, `a rename re-sending the stored link was refused: ${JSON.stringify(renamed.body)}`);
       assert.equal(await linkOf("delivery_projects", "p-sb-linked"), SUNBIZ, "the save changed the link");
@@ -794,7 +795,7 @@ async function main() {
       await db.execute({ sql: "DELETE FROM tenants WHERE id = ?", args: [SUNBIZ] });
     }
   });
-  await check("the client-workspace select on a ticket and a project shows a link the list no longer offers, as a choice that cannot be made, so None clears it", async () => {
+  await check("the ticket workspace select preserves a retired current link, while projects derive workspace from the client record", async () => {
     const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
     const { ClientWorkspaceOptions } = await import("../components/delivery/client-workspace-options");
     type El = { type?: unknown; props?: { value?: string; disabled?: boolean; children?: unknown } };
@@ -817,10 +818,11 @@ async function main() {
     ];
     assert.deepEqual(shown(CLIENT_A), plain, "a listed link gets no extra option");
     assert.deepEqual(shown(null), plain, "no link, no extra option");
-    // Both editors draw their workspace select from it, with the row's STORED link.
+    // Tickets can still be linked manually. Projects cannot: their customer
+    // record is now the single authoritative workspace link.
     const src = (f: string) => readFileSync(join(__dirname, "..", "components", "delivery", f), "utf8");
     assert.match(src("TicketForms.tsx"), /<ClientWorkspaceOptions current=\{ticket\.client_tenant_id\} options=\{clientTenants\} noneLabel="None" \/>/);
-    assert.match(src("ProjectForms.tsx"), /<ClientWorkspaceOptions current=\{project\.client_tenant_id\} options=\{clientTenants\} noneLabel="No portal \(email only\)" \/>/);
+    assert.doesNotMatch(src("ProjectForms.tsx"), /ClientWorkspaceOptions|Client portal workspace|client_tenant_id|clientTenantId/);
   });
   await check("SLA cron: a workspace desk's breach is flagged (its Breaching view) but alerted through no lane; OASIS's alerts", async () => {
     const sent: string[] = [];

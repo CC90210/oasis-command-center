@@ -220,6 +220,7 @@ async function main() {
   const tickets = await import("../app/api/tickets/route");
   const comments = await import("../app/api/tickets/[id]/comments/route");
   const ticketRoute = await import("../app/api/tickets/[id]/route");
+  const projectRoute = await import("../app/api/projects/[id]/route");
   const customerRoute = await import("../app/api/customers/[id]/route");
 
   const req = (method: string, url: string, body?: unknown) =>
@@ -999,35 +1000,83 @@ async function main() {
   });
 
   // ── The client's own workspace ─────────────────────────────────────────────
+  const linkWorkspace = (id: string, body: unknown) =>
+    call(linkRoute.POST(req("POST", `/api/clients/${id}/link-workspace`, body), params({ id })));
   await check("Link workspace: operator only, OASIS only, one record per workspace", async () => {
-    const link = (id: string, body: unknown) => call(linkRoute.POST(req("POST", `/api/clients/${id}/link-workspace`, body), params({ id })));
     await login(USERS.adon);
-    const notOperator = await link(X.id, { client_tenant_id: CLIENT_A, confirmed: true });
+    const notOperator = await linkWorkspace(X.id, { client_tenant_id: CLIENT_A, confirmed: true });
     assert.equal(notOperator.status, 403);
     assert.equal(notOperator.body.error, "operator_only");
     await login(USERS.clientA);
-    const notOasis = await link(A.id, { client_tenant_id: CLIENT_B, confirmed: true });
+    const notOasis = await linkWorkspace(A.id, { client_tenant_id: CLIENT_B, confirmed: true });
     assert.equal(notOasis.status, 403);
     await login(USERS.cc);
-    const unconfirmed = await link(X.id, { client_tenant_id: CLIENT_A });
+    const unconfirmed = await linkWorkspace(X.id, { client_tenant_id: CLIENT_A });
     assert.equal(unconfirmed.status, 400, "a cross-workspace read grant is confirmed first");
     assert.equal(unconfirmed.body.error, "link_confirmation_required");
     assert.equal((await store.getCustomer(db, OASIS, X.id))!.client_tenant_id, null, "nothing changed");
-    const ok = await link(X.id, { client_tenant_id: CLIENT_A, confirmed: true });
+    const ok = await linkWorkspace(X.id, { client_tenant_id: CLIENT_A, confirmed: true });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal((await store.getCustomer(db, OASIS, X.id))!.client_tenant_id, CLIENT_A);
-    const unlinkUnconfirmed = await link(X.id, { client_tenant_id: null });
+    const unlinkUnconfirmed = await linkWorkspace(X.id, { client_tenant_id: null });
     assert.equal(unlinkUnconfirmed.body.error, "link_confirmation_required");
     assert.equal((await store.getCustomer(db, OASIS, X.id))!.client_tenant_id, CLIENT_A, "unlinking is confirmed too");
-    const taken = await link(Y.id, { client_tenant_id: CLIENT_A, confirmed: true });
+    const taken = await linkWorkspace(Y.id, { client_tenant_id: CLIENT_A, confirmed: true });
     assert.equal(taken.status, 409);
     assert.equal(taken.body.error, "client_tenant_taken");
-    const self = await link(Y.id, { client_tenant_id: OASIS, confirmed: true });
+    const self = await linkWorkspace(Y.id, { client_tenant_id: OASIS, confirmed: true });
     assert.equal(self.body.error, "client_tenant_is_this_workspace");
-    const unknown = await link(Y.id, { client_tenant_id: "0e000000-0000-4000-8000-00000000dead", confirmed: true });
+    const unknown = await linkWorkspace(Y.id, { client_tenant_id: "0e000000-0000-4000-8000-00000000dead", confirmed: true });
     assert.equal(unknown.status, 409, JSON.stringify(unknown.body));
     assert.equal(unknown.body.error, "client_tenant_not_found");
     assert.equal((await store.getCustomer(db, OASIS, Y.id))!.client_tenant_id, null, "nothing is linked to a workspace that does not exist");
+  });
+  const linkedProjectId = await deliveryStore.createProject(db, OASIS, {
+    title: "Workspace cascade project", description: null, client_tenant_id: CLIENT_A, client_name: X.display_name, client_email: X.primary_email,
+    lead_id: X.source_lead_id, customer_id: X.id, stage: "building", priority: "medium", assigned_to: null, due_date: null,
+  }, { userId: USERS.cc.id, name: "CC" }, T0);
+  const linkedTicket = (await deliveryStore.createTicket(db, OASIS, {
+    title: "Workspace cascade ticket", description: null, category: "bug", severity: "low", source: "internal",
+    project_id: linkedProjectId, client_tenant_id: CLIENT_A, client_name: X.display_name, client_email: X.primary_email,
+    client_company: null, client_match: "manual", project_hint: null, reporter_user_id: USERS.cc.id, assigned_to: null,
+    customer_id: X.id,
+  }, T0)).ticket;
+  const getLinkedProject = () => call(projectRoute.GET(req("GET", `/api/projects/${linkedProjectId}`), params({ id: linkedProjectId })));
+  const getLinkedTicket = () => call(ticketRoute.GET(req("GET", `/api/tickets/${linkedTicket.id}`), params({ id: linkedTicket.id })));
+  await check("Link workspace: unlink revokes project/ticket access and relink moves it to the new workspace", async () => {
+    try {
+      await login(USERS.clientA);
+      assert.equal((await getLinkedProject()).status, 200, "the linked client initially sees its project");
+      assert.equal((await getLinkedTicket()).status, 200, "the linked client initially sees its ticket");
+
+      await login(USERS.cc);
+      const unlinked = await linkWorkspace(X.id, { client_tenant_id: null, confirmed: true });
+      assert.equal(unlinked.status, 200, JSON.stringify(unlinked.body));
+      const unlinkedProject = (await db.execute({ sql: "SELECT client_tenant_id FROM delivery_projects WHERE tenant_id = ? AND id = ?", args: [OASIS, linkedProjectId] })).rows[0];
+      const unlinkedTicket = (await db.execute({ sql: "SELECT client_tenant_id, client_match FROM support_tickets WHERE tenant_id = ? AND id = ?", args: [OASIS, linkedTicket.id] })).rows[0];
+      assert.equal(unlinkedProject.client_tenant_id, null, "the project link is revoked in the same operation");
+      assert.deepEqual([unlinkedTicket.client_tenant_id, unlinkedTicket.client_match], [null, "none"], "the ticket link is revoked and no longer trusted");
+      await login(USERS.clientA);
+      assert.equal((await getLinkedProject()).status, 404, "the old workspace loses project access");
+      assert.equal((await getLinkedTicket()).status, 404, "the old workspace loses ticket access");
+
+      await login(USERS.cc);
+      const relinked = await linkWorkspace(X.id, { client_tenant_id: CLIENT_B, confirmed: true });
+      assert.equal(relinked.status, 200, JSON.stringify(relinked.body));
+      const movedProject = (await db.execute({ sql: "SELECT client_tenant_id FROM delivery_projects WHERE tenant_id = ? AND id = ?", args: [OASIS, linkedProjectId] })).rows[0];
+      const movedTicket = (await db.execute({ sql: "SELECT client_tenant_id, client_match FROM support_tickets WHERE tenant_id = ? AND id = ?", args: [OASIS, linkedTicket.id] })).rows[0];
+      assert.equal(movedProject.client_tenant_id, CLIENT_B, "the project follows the authoritative workspace");
+      assert.deepEqual([movedTicket.client_tenant_id, movedTicket.client_match], [CLIENT_B, "manual"], "the ticket follows as an operator-confirmed link");
+      await login(USERS.clientA);
+      assert.equal((await getLinkedProject()).status, 404, "the previous workspace stays revoked after a move");
+      assert.equal((await getLinkedTicket()).status, 404, "the previous workspace stays revoked on the ticket too");
+      await login(USERS.clientB);
+      assert.equal((await getLinkedProject()).status, 200, "the new workspace receives project access");
+      assert.equal((await getLinkedTicket()).status, 200, "the new workspace receives ticket access");
+    } finally {
+      await login(USERS.cc);
+      await linkWorkspace(X.id, { client_tenant_id: CLIENT_A, confirmed: true });
+    }
   });
   await check("Usage reads the linked workspace only: its snapshots, agent channels, approvals and desk over 30 days", async () => {
     await db.batch(

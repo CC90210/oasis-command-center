@@ -18,7 +18,6 @@ import {
   type TaskStatus,
 } from "@/lib/delivery/rules";
 import { useDeliveryAction, type Option } from "@/components/delivery/useDeliveryAction";
-import { ClientWorkspaceOptions } from "@/components/delivery/client-workspace-options";
 
 function ErrorLine({ error }: { error: string | null }) {
   return error ? <p className="text-sm text-status-hot" role="alert">{error}</p> : null;
@@ -57,7 +56,6 @@ export type ProjectCreateCustomer = {
   value: string;
   label: string;
   email: string | null;
-  clientTenantId: string | null;
   leadId: string | null;
 };
 
@@ -89,7 +87,6 @@ export function ProjectCreateForm({ roster, customer }: { roster: Option[]; cust
     const data = await run("/api/projects?scope=desk", "POST", {
       ...f,
       customer_id: customer.value,
-      client_tenant_id: customer.clientTenantId,
       client_name: customer.label,
       client_email: customer.email,
       lead_id: customer.leadId,
@@ -171,7 +168,6 @@ export type EditableProject = {
   priority: string;
   assigned_to: string | null;
   due_date: string | null;
-  client_tenant_id: string | null;
   client_name: string | null;
   client_email: string | null;
   lead_id: string | null;
@@ -183,13 +179,10 @@ export type EditableProject = {
 export function ProjectControls({
   project,
   roster,
-  clientTenants,
   customers = null,
 }: {
   project: EditableProject;
   roster: Option[];
-  /** Client portal workspaces — OASIS's desk only. Empty hides the field. */
-  clientTenants: Option[];
   /** The desk's client records; null hides the field. */
   customers?: Option[] | null;
 }) {
@@ -198,7 +191,6 @@ export function ProjectControls({
   const [d, setD] = useState({
     title: project.title,
     description: project.description ?? "",
-    client_tenant_id: project.client_tenant_id ?? "",
     client_name: project.client_name ?? "",
     client_email: project.client_email ?? "",
     lead_id: project.lead_id ?? "",
@@ -252,6 +244,7 @@ export function ProjectControls({
                 <option key={c.value} value={c.value}>{c.label}</option>
               ))}
             </select>
+            <span className="mt-1 block text-xs text-fg-dim">Portal access follows the workspace linked on the client record.</span>
           </label>
         )}
       </div>
@@ -264,8 +257,6 @@ export function ProjectControls({
             const ok = await patch({
               title: d.title,
               description: d.description || null,
-              // Only OASIS's desk has client workspaces; any other desk's API refuses the field.
-              ...(clientTenants.length > 0 ? { client_tenant_id: d.client_tenant_id || null } : {}),
               client_name: d.client_name || null,
               client_email: d.client_email || null,
               lead_id: d.lead_id.trim() || null,
@@ -278,14 +269,6 @@ export function ProjectControls({
               <span className="label">Title</span>
               <input className="input" required maxLength={200} value={d.title} onChange={(e) => setD({ ...d, title: e.target.value })} />
             </label>
-            {clientTenants.length > 0 && (
-              <label>
-                <span className="label">Client portal workspace</span>
-                <select className="select" value={d.client_tenant_id} onChange={(e) => setD({ ...d, client_tenant_id: e.target.value })}>
-                  <ClientWorkspaceOptions current={project.client_tenant_id} options={clientTenants} noneLabel="No portal (email only)" />
-                </select>
-              </label>
-            )}
             <label>
               <span className="label">Client email</span>
               <input className="input" type="email" value={d.client_email} onChange={(e) => setD({ ...d, client_email: e.target.value })} />

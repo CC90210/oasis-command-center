@@ -136,7 +136,6 @@ export default async function ClientRecordLayout({ params, children }: { params:
                 value: c.id,
                 label: c.display_name,
                 email: c.primary_email,
-                clientTenantId: cv.oasis ? c.client_tenant_id : null,
                 leadId: c.source_lead_id,
               }}
             />

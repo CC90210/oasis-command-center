@@ -223,6 +223,7 @@ async function main() {
     const boardSrc = readFileSync(join(__dirname, "..", "app/projects/page.tsx"), "utf8");
     const clientSrc = readFileSync(join(__dirname, "..", "app/clients/[id]/layout.tsx"), "utf8");
     assert.match(formSrc, /customer_id: customer\.value/);
+    assert.doesNotMatch(formSrc, /Client portal workspace|ClientWorkspaceOptions|clientTenantId|client_tenant_id/, "project forms choose a client record only; its workspace is derived server-side");
     assert.doesNotMatch(boardSrc, /<ProjectCreateForm/);
     assert.match(clientSrc, /<ProjectCreateForm/);
   });
