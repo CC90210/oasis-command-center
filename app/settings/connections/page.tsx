@@ -25,6 +25,11 @@ import { ConnectionsHub } from "@/components/os/connections/ConnectionsHub";
 import { loadConnectorStatuses } from "@/components/os/connections/connector-facts";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
+import { JevCard, type JevCardFacts } from "@/components/settings/JevCard";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { findActiveConnection, toPublicConnection } from "@/lib/connections/store";
+import { JEV_TEXT_PROCESSING_APPROVED, jevStats, readJevMode } from "@/lib/jev/mode";
+import { isSlackSchemaMissing } from "@/lib/slack/routing";
 
 export const dynamic = "force-dynamic";
 
@@ -34,13 +39,56 @@ function one(v: string | string[] | undefined): string | null {
   return typeof v === "string" && v ? v : null;
 }
 
+/**
+ * "Specialist models" (AI1 round 2, moved here from Settings > AI brain):
+ * Jev, TypeSafe's System One classifier, as this workspace has it. Every
+ * line is the workspace's real state or a sourced fact; one failed read
+ * never blanks the others.
+ */
+async function loadJevFacts(tenantId: string, userId: string, nowMs: number): Promise<JevCardFacts> {
+  // The same loader as the onboarding connections step and AI brain used to:
+  // the card's drawer (ConnectorDrawerButton) is the Connections drawer itself.
+  const jevStatuses = await loadConnectorStatuses({ tenantId, userId, nowMs });
+  const facts: JevCardFacts = {
+    status: jevStatuses.jev ?? { kind: "unknown", label: "Status unavailable" },
+    connection: null,
+    mode: null,
+    stats: null,
+    statsNote: null,
+  };
+  if (!tursoConfigured()) return { ...facts, statsNote: "The database is not configured on this deployment." };
+  const db = getTursoClient();
+  const [conn, mode, stats] = await Promise.allSettled([
+    findActiveConnection(db, tenantId, "jev"),
+    readJevMode(db, tenantId),
+    jevStats(db, tenantId, new Date(nowMs)),
+  ]);
+  if (conn.status === "fulfilled") facts.connection = conn.value ? toPublicConnection(conn.value, nowMs) : null;
+  else console.error("[settings.connections.jev.connection]", { tenantId, error: String(conn.reason) });
+  if (mode.status === "fulfilled") facts.mode = mode.value;
+  else console.error("[settings.connections.jev.mode]", { tenantId, error: String(mode.reason) });
+  if (stats.status === "fulfilled") facts.stats = stats.value;
+  else if (isSlackSchemaMissing(stats.reason)) facts.statsNote = "Jev's numbers are not recorded on this deployment yet (its table is not installed).";
+  else console.error("[settings.connections.jev.stats]", { tenantId, error: String(stats.reason) });
+  return facts;
+}
+
 export default async function SettingsConnectionsPage({ searchParams }: { searchParams: SearchParams }) {
   const viewer = await requireSettingsSection("connections");
+  const nowMs = Date.now();
+  const jev = await loadJevFacts(viewer.tenantId, viewer.userId, nowMs);
+  const specialistModels = (
+    <div className="mt-6 space-y-2">
+      <h2 className="text-sm font-semibold text-fg">Specialist models</h2>
+      <JevCard facts={jev} nowMs={nowMs} canManage={viewer.access.canManage} oasis={viewer.access.oasisWorkspace} textApproved={JEV_TEXT_PROCESSING_APPROVED} />
+    </div>
+  );
 
   if (!viewer.access.canManage) {
     return (
       <PageFrame title="Connections" subtitle="The accounts OASIS uses on your behalf. Workspace apps are connected by an owner or admin.">
         <SettingsContent section="connections" viewerAccess={viewer.viewerAccess} />
+        {specialistModels}
       </PageFrame>
     );
   }
@@ -71,6 +119,7 @@ export default async function SettingsConnectionsPage({ searchParams }: { search
         initialReason={initialReason}
         personalGoogle={!isSharedInboxTenant(viewer.tenantSlug)}
       />
+      {specialistModels}
     </PageFrame>
   );
 }

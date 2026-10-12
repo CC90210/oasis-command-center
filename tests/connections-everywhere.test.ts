@@ -9,9 +9,10 @@
  *     request the OASIS team sees (a real ticket on OASIS's desk through the
  *     real POST /api/tickets), never a dead chip or a release date. Settings >
  *     Chat apps offers the same request for its not-built apps.
- *   - One drawer, three entry points: Settings > Connections, the workspace
- *     setup's connections step and Settings > AI brain render the same
- *     ConnectorDrawer, with statuses from one loader. An owner still in the
+ *   - One drawer, three entry points: Settings > Connections (including
+ *     "Specialist models", where Jev moved from Settings > AI brain, AI1
+ *     round 2, 2026-10-12) and the workspace setup's connections step render
+ *     the same ConnectorDrawer, with statuses from one loader. An owner still in the
  *     setup saves and tests Twilio through the drawer's own API, and the setup
  *     and Settings then read the same verified state.
  *   - Slack, per CC: a client workspace connects its own Slack app; OASIS's own
@@ -422,18 +423,29 @@ async function main() {
     assert.match(step, /<ConnectionsHub[\s\S]*statuses=\{connections\.statuses\}[\s\S]*embedded/);
   });
 
-  await check("AI brain opens the same drawer in place, with the status from the same loader", () => {
+  // AI1 round 2 (Adon 2026-10-12): Jev moved from Settings > AI brain to
+  // Settings > Connections, under "Specialist models" -- it is a connection
+  // (a vendor OASIS talks to), not an engine choice. Same guarantee, new
+  // home: its drawer still opens in place, from the SAME loader Connections'
+  // own hub uses.
+  await check("Connections (Specialist models) opens the Jev drawer in place, with the status from the same loader", () => {
     const jev = read("components/settings/JevCard.tsx");
     assert.match(jev, /<ConnectorDrawerButton\s+slug="jev"/);
     assert.doesNotMatch(jev, /settings\/connections\?app=jev/, "no more sending the owner to another page");
     const button = read("components/os/connections/ConnectorDrawerButton.tsx");
     assert.match(button, /<ConnectorDrawer\s/);
     assert.match(button, /const close = useCallback\(\(\) => setOpen\(false\), \[\]\);/, "a stable close keeps the sheet's focus handling from re-running");
-    assert.match(read("app/settings/ai/page.tsx"), /await loadConnectorStatuses\(\{ tenantId, userId, nowMs \}\)/);
+    assert.doesNotMatch(read("app/settings/ai/page.tsx"), /JevCard|loadJevFacts/, "Jev must no longer be mounted on AI brain");
+    const connectionsPage = read("app/settings/connections/page.tsx");
+    // Jev's own facts loader (ported verbatim), AND the hub's own loader for
+    // everyone else's cards: two calls, same function, same shape of input.
+    assert.match(connectionsPage, /await loadConnectorStatuses\(\{ tenantId, userId, nowMs \}\)/, "Jev's own facts loader must still exist, now on the Connections page");
     assert.match(
-      read("app/settings/connections/page.tsx"),
+      connectionsPage,
       /await loadConnectorStatuses\(\{ tenantId: viewer\.tenantId, userId: viewer\.userId, viewerIsOperator: viewer\.access\.isOperator \}\)/,
     );
+    assert.match(connectionsPage, /<JevCard\b/, "the Jev card must be mounted on the Connections page");
+    assert.match(connectionsPage, /Specialist models/, "the Jev card must sit under a 'Specialist models' heading");
   });
 
   await check("an OAuth card already connected, configured or needing attention opens its details drawer on click instead of starting sign-in again; its drawer's own Reconnect still starts the popup (CodeRabbit PR #574)", () => {

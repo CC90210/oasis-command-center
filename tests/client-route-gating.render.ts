@@ -3,7 +3,7 @@
  *
  * WHY A SEPARATE PROCESS. The suite runs with `--conditions=react-server`,
  * under which `react-dom/server` does not resolve and `react` exports no
- * hooks. The cards this checks (Settings > AI brain's workspace agents and
+ * hooks. The cards this checks (Settings > AI brain's profile editor and
  * provider overrides, the two error boundaries on operator and prospect-facing
  * paths, the /unsubscribe form) are client components, so the
  * only way to see what they draw is to render them where React is whole. The
@@ -19,7 +19,6 @@
 export {};
 
 type Input = {
-  marketplace: Record<string, unknown> | null;
   agentConfig: Record<string, unknown> | null;
   profileEditor: Record<string, unknown> | null;
 };
@@ -63,7 +62,6 @@ async function main() {
   const React = await import("react");
   (globalThis as unknown as { React: typeof React }).React = React;
   const { renderToStaticMarkup } = await import("react-dom/server");
-  const { AgentMarketplaceCard } = await import("../components/settings/AgentMarketplaceCard");
   const { AgentConfigEditor } = await import("../components/settings/AgentConfigEditor");
   const { ProfileEditor } = await import("../components/settings/ProfileEditor");
   const ErrorBoundary = (await import("../app/error")).default;
@@ -77,9 +75,6 @@ async function main() {
     out[id] = renderToStaticMarkup(el as Parameters<typeof renderToStaticMarkup>[0]);
   };
 
-  if (input.marketplace) {
-    render("marketplace", React.createElement(AgentMarketplaceCard, input.marketplace as never));
-  }
   if (input.agentConfig) {
     render("agentConfig", React.createElement(AgentConfigEditor, input.agentConfig as never));
   }

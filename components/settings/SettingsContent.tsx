@@ -51,7 +51,6 @@ import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
 import { TelegramConnectCard } from "@/components/settings/TelegramConnectCard";
 import { SafeBoundary } from "@/components/SafeBoundary";
-import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { HARNESS_REPO } from "@/lib/install-scripts";
 import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
@@ -70,15 +69,17 @@ import { isUnprovisionedManifest } from "@/lib/manifest/seeds";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 import { resolveAgentKey } from "@/lib/agents";
-import { teammateNamesFor, workspaceAgentsSubtitle } from "@/lib/os/teammate-names";
-import { departmentLabelsFor, teammateFor } from "@/lib/os/teammates";
-import { loadWorkspaceRoster } from "@/components/os/aiteam/roster";
+import { teammateNamesFor } from "@/lib/os/teammate-names";
+import { teammateFor } from "@/lib/os/teammates";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
 import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
 import { isVerifiedOperator } from "@/components/settings/settings-viewer";
 import { isAgentsOwner } from "@/lib/agents-owner";
 import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
+import { AiBrainSummaryBar } from "@/components/settings/AiBrainSummaryBar";
+import { LocalModelsCard } from "@/components/settings/LocalModelsCard";
+import { loadAiBrainSummary, type AiBrainSummary } from "@/lib/ai/ai-brain-summary";
 
 type ViewerSettingsAccess = {
   persona: Persona;
@@ -212,10 +213,11 @@ export async function SettingsContent({
   const onRoster = (slug: string) => teammateFor(slug, teammateScope) !== null;
   const rosterAgentKeys = manifestAgentKeys.filter(onRoster);
 
-  // Every authenticated persona owns their profile, password and personal
-  // connections. Non-admins stop here: no credential vault, AI/provider
-  // configuration, device inventory, team mutation, agent roster, cron or
-  // automation data is queried or rendered. Managers receive one additional
+  // Every authenticated persona owns their profile, password, personal
+  // connections, and (AI1) their own AI brain summary and engine choice: no
+  // credential vault, workspace-wide provider configuration, device
+  // inventory, team mutation, agent roster, cron or automation data is
+  // queried or rendered for a non-admin. Managers receive one additional
   // read-only, query-scoped OASIS sales scorecard below.
   if (profile && !canManageTenant) {
     return (
@@ -241,16 +243,13 @@ export async function SettingsContent({
   // never "Not connected" / "offline" for a key or a machine that may be fine.
   const needsAiKeys = show("ai");
   const needsBridge = show("ai");
-  // Workspace agents read the AI Team's own roster (components/os/aiteam/
-  // roster.ts loadWorkspaceRoster), so the two pages list the same teammates.
-  const needsRoster = show("ai") && !!manifest && !!profile?.tenant_id;
   // connectedAiSet: the workspace's AI account, the key every department chat
   // uses. personalAiSet: keys the viewer saved for their own chats only, shown
   // apart because department chats don't use them (lib/ai/workspace-account.ts).
   // aiBrain: what powers the departments (lib/ai/department-brain.ts), the
   // provider and model AI brain shows and switches and every department header
   // names. undefined when the read failed: nothing is claimed.
-  const [connectedAiSet, personalAiSet, bridgeOnline, roster, aiBrain, agentEngine] = await Promise.all([
+  const [connectedAiSet, personalAiSet, bridgeOnline, aiBrain, agentEngine, aiBrainSummary] = await Promise.all([
     needsAiKeys
       ? safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), null)
       : Promise.resolve(new Set<string>()),
@@ -260,9 +259,6 @@ export async function SettingsContent({
     needsBridge
       ? safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), null)
       : Promise.resolve(false),
-    needsRoster && profile?.tenant_id
-      ? safe("settings.roster", loadWorkspaceRoster({ tenantId: profile.tenant_id, scope: teammateScope }), null)
-      : Promise.resolve(null),
     needsAiKeys && profile?.tenant_id
       ? safe<DepartmentBrain | null | undefined>(
           "settings.ai_brain",
@@ -275,11 +271,12 @@ export async function SettingsContent({
     needsAiKeys && profile?.tenant_id
       ? safe<AgentEngineChoice | null>("settings.agent_engine", readAgentEngine(profile.tenant_id), null)
       : Promise.resolve<AgentEngineChoice | null>(null),
+    // AI1: the one-sentence header (AiBrainSummaryBar), built ONLY from this
+    // viewer's own effective engine/device plus the workspace fallback.
+    needsAiKeys && profile?.tenant_id && profile?.auth_user_id
+      ? safe<AiBrainSummary>("settings.ai_brain_summary", loadAiBrainSummary(profile.tenant_id, profile.auth_user_id), { ok: false })
+      : Promise.resolve<AiBrainSummary>({ ok: false }),
   ]);
-  // The Workspace agents card cannot state the roster when the workspace's
-  // manifest read failed (the in-code seed answered in its place, which for a
-  // client is the empty unprovisioned one) or the roster load threw.
-  const rosterUnread = manifestRead?.storedReadFailed === true || (needsRoster && roster === null);
   // The AI Team page, for a viewer its rail row opens for (owners and admins,
   // lib/os/nav.ts "ai-team") in a workspace OASIS has set up.
   const aiTeamHref =
@@ -462,76 +459,101 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
-          {/* ── AI brain ────────────────────────────────────────────── */}
-          {/* id="engine": what powers your agents, ONE choice for every
-              department, Slack mention and the coding harness (lib/ai/
-              agent-engine.ts). Every "what powers this" label in a chat links
-              here (lib/ai/agent-engine.ts ENGINE_SETTINGS_HREF), and
-              OpenSectionOnHash opens it. */}
+          {/* ── AI brain (AI1, Adon 2026-10-12) ─────────────────────────
+              One sentence first: what answers THIS viewer's departments
+              right now, built only from their own device/choice plus the
+              workspace fallback (lib/ai/ai-brain-summary.ts) -- never a
+              teammate's row. Then three plainly separated categories: On my
+              devices, Local models, API keys (cloud: inside Workspace
+              defaults below, where the account is actually switched). */}
           {show("ai") && (
-            <SettingsSection
-              id="engine"
-              defaultOpen
-              title="What powers your agents"
-              subtitle="One choice for every department, Slack mention and the coding harness: an AI account (API key), an app on your paired computer (Claude Code, Codex, Gemini CLI), or a local model there."
-            >
-              <SafeBoundary label="What powers your agents">
-                {/* The AI account (connect / replace / remove a key, the model,
-                    Test) lives INSIDE this panel, where its choice is made: the
-                    separate "AI setup" section that repeated the engine choice
-                    was removed 2026-10-10 (CC). The panel anchors it as
-                    id="providers", so every "Connect an AI account" link
-                    (lib/setup-links.ts ai_account) still lands on it. */}
-                <AgentEnginePanel>
-                  <div
-                    id="providers"
-                    className="scroll-mt-24"
-                  >
-                  <SafeBoundary label="AI provider accounts">
-                    <ProviderAccountsCard
-                      connectedServices={connectedAiSet}
-                      personalServices={personalAiSet}
-                      bridgeOnline={bridgeOnline}
-                      canManageTeam={canManageTenant}
-                      canInstallBridge={isOperator}
-                      brain={aiBrain}
-                      accountIsTheEngine={agentEngine === null || agentEngine.kind === "api"}
-                    />
-                  </SafeBoundary>
-                  </div>
-                </AgentEnginePanel>
-              </SafeBoundary>
-            </SettingsSection>
+            <SafeBoundary label="AI brain summary">
+              <AiBrainSummaryBar summary={aiBrainSummary} changeHref="#my-devices" />
+            </SafeBoundary>
           )}
 
-          {/* "How your departments think" (O3b): YOUR OWN engine choice --
-              your own paired computer, or the workspace API key -- separate
-              from the workspace default this section's "What powers your
-              agents" picks above. Every workspace member who reaches Settings
-              > AI (owners and admins; AI brain is not operator-only) sees
-              and sets their own. */}
+          {/* "On my devices": your own choice (your paired computer, or the
+              workspace API key -- O3b PersonEngineCard, self-only, every
+              workspace member who reaches Settings > AI, not just owners),
+              plus the paired computer's own AI-app report. The report below
+              is always THIS VIEWER's own devices (app/api/bridge/cli-status
+              is scoped by the viewer's own profile_id); only the workspace's
+              shared Install/Connect actions stay isAgentsOwner-gated inside
+              the card itself (AI1 fix: it used to hide the whole card and
+              call it "another team member's computer"). */}
           {show("ai") && (
-            <SettingsSection
-              id="person-engine"
-              defaultOpen
-              title="How your departments think"
-              subtitle="Your own choice: Claude Code on your own computer, or the workspace API key."
-            >
+            <SettingsSection id="my-devices" defaultOpen title="On my devices" subtitle="Your own paired computers, and whether they answer your departments.">
               <SafeBoundary label="How your departments think">
                 <PersonEngineCard />
               </SafeBoundary>
+              {show("ai") && isOperator && (
+              <SafeBoundary label="Local CLI providers">
+                <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} isAgentsOwner={agentsOwner} />
+              </SafeBoundary>
+              )}
             </SettingsSection>
           )}
 
-          {/* The paired computer's AI command-line tools. They answer only the
-              operator's own Coding chat (/agent, components/ChatWidget.tsx) when
-              it runs on that computer; no department ever uses them, so the card
-              says so and never reads as a second place choosing the department
-              brain (CC, 2026-10-09). */}
-          {show("ai") && isOperator && (
-            <SafeBoundary label="Local CLI providers">
-              <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} isAgentsOwner={agentsOwner} />
-            </SafeBoundary>
+          {/* "Local models": honest by design -- no bridge build yet reports
+              an Ollama / LM Studio model list, so this says so plainly
+              instead of a picker that would do nothing (LocalModelsCard). */}
+          {show("ai") && (
+            <SettingsSection id="local-models" defaultOpen title="Local models" subtitle="A model served on one of your paired computers.">
+              <SafeBoundary label="Local models">
+                <LocalModelsCard />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
+
+          {/* "API keys (cloud)" (AI1 round 2, Adon 2026-10-12: its own
+              always-visible third category, same as On my devices and Local
+              models -- decoupled from AgentEnginePanel, which used to be the
+              only way to reach it, so a member could never see it even
+              though ProviderAccountsCard already supports a personal-only
+              key for a non-manager. id="providers" moves WITH the card: every
+              "Connect an AI account" link in the product (lib/setup-links.ts
+              ai_account) still lands here, just at this new, always-visible
+              location instead of inside the owner-only engine section. */}
+          {show("ai") && (
+            <SettingsSection
+              id="providers"
+              defaultOpen
+              title="API keys (cloud)"
+              subtitle="Anthropic, OpenAI, Google Gemini or OpenRouter: connect, replace or remove a key, pick its model, and test it."
+            >
+              <div className="scroll-mt-24">
+              <SafeBoundary label="AI provider accounts">
+                <ProviderAccountsCard
+                  connectedServices={connectedAiSet}
+                  personalServices={personalAiSet}
+                  bridgeOnline={bridgeOnline}
+                  canManageTeam={canManageTenant}
+                  canInstallBridge={isOperator}
+                  brain={aiBrain}
+                  accountIsTheEngine={agentEngine === null || agentEngine.kind === "api"}
+                />
+              </SafeBoundary>
+              </div>
+            </SettingsSection>
+          )}
+
+          {/* "Workspace defaults" (owners and admins only, collapsed): ONLY
+              the workspace-wide engine CHOICE (API key vs. an app on a paired
+              computer vs. a local model). The AI account itself lives in API
+              keys (cloud) above now -- AgentEnginePanel is mounted with no
+              children, so its own "Your AI account" sub-panel renders
+              nothing (AccountSection: `if (!children) return null`). */}
+          {show("ai") && canManageTenant && (
+            <SettingsSection
+              id="engine"
+              defaultOpen={false}
+              title="Workspace defaults"
+              subtitle="Owners and admins only. Which engine the workspace uses by default: an API key, an app on a paired computer, or a local model."
+            >
+              <SafeBoundary label="What powers your agents">
+                <AgentEnginePanel />
+              </SafeBoundary>
+            </SettingsSection>
           )}
 
           {/* "Override an agent's provider" removed 2026-10-09 (CC: "redundant
@@ -544,61 +566,19 @@ export async function SettingsContent({
               (lib/chat-auth.ts). "Just-for-me overrides" went the same way on
               2026-08-17. */}
 
-          {/* Workspace agents: the AI Team's own roster (one list, W4a), with
-              owner toggles and a link to the AI Team page. Every teammate is
-              named by its manifest binding, never by persona. No add-ons:
-              OASIS's house agents live in Admin > Fleet. When the workspace's
-              manifest or the roster could not be read, the card says so
-              instead of vanishing or listing the seed's guess (W4a review R3). */}
-          {show("ai") && !previewMode && manifest?.agents && needsRoster && (
-            <Card
-              title="Workspace agents"
-              subtitle={rosterUnread ? "The AI teammates this workspace runs." : workspaceAgentsSubtitle(teammateScope)}
-              action={
-                aiTeamHref ? (
-                  <Link
-                    href={aiTeamHref}
-                    prefetch={false}
-                    className="shrink-0 text-xs text-accent hover:text-accent/80 underline underline-offset-2"
-                  >
-                    Open AI Team →
-                  </Link>
-                ) : undefined
-              }
-            >
-              {rosterUnread || !roster ? (
-                <EmptyState message="Couldn't check this workspace's AI teammates just now. Refresh to try again; nothing was changed." />
-              ) : (
-                <SafeBoundary label="Workspace agents">
-                  <AgentMarketplaceCard
-                    leads={roster.leads.map((l) => ({
-                      slug: l.slug,
-                      name: l.name,
-                      summary: l.summary,
-                      departments: departmentLabelsFor(l.departments),
-                      enabled: l.enabled,
-                      core: l.core,
-                      bound: l.bound,
-                    }))}
-                    custom={
-                      roster.custom.ok
-                        ? roster.custom.value.map((c) => ({
-                            slug: c.slug,
-                            name: c.name,
-                            summary: c.summary,
-                            departments: [],
-                            enabled: c.enabled,
-                            core: c.core,
-                            bound: c.bound,
-                          }))
-                        : null
-                    }
-                    isOwner={canManageTenant}
-                    aiTeamHref={aiTeamHref}
-                  />
-                </SafeBoundary>
-              )}
-            </Card>
+          {/* Workspace agents (AI1 round 2, Adon 2026-10-12): the full list
+              moved to the AI Team page (app/agents/page.tsx loadAiTeam,
+              components/os/aiteam/TeammateRow), which already renders the
+              SAME manifest-scoped roster (workspaceTeammates) with no
+              duplicate UI here. AI brain keeps a one-line link, shown only
+              where the viewer may actually open AI Team (aiTeamHref, the
+              same gate the old card's "Open AI Team" action used). */}
+          {show("ai") && !previewMode && aiTeamHref && (
+            <p className="text-xs text-fg-muted">
+              <Link href={aiTeamHref} prefetch={false} className="text-accent hover:text-accent-bright underline underline-offset-2">
+                Manage your agents on AI Team →
+              </Link>
+            </p>
           )}
 
           {/* Weekday/Weekend template editors removed 2026-08-17 alongside the
@@ -692,6 +672,39 @@ async function PersonalSettingsView({
   section?: SettingsContentSection;
 }) {
   const show = (s: SettingsContentSection) => !section || section === s;
+  // AI1: a member's own AI brain summary, read ONLY when this section shows
+  // and only their own data (never another member's row). "API keys (cloud)"
+  // is always-visible (round 2, Adon 2026-10-12): ProviderAccountsCard
+  // already supports a PERSONAL-only key for a non-manager (canManageTeam
+  // false), so a member connecting their own key for their own chats is not
+  // "workspace-wide provider configuration" -- that stays admin-only
+  // (Workspace defaults, the engine CHOICE, never reached from this branch).
+  const authUserId = (profile as { auth_user_id?: string | null }).auth_user_id;
+  const needsAi = show("ai") && !!tenantId;
+  const [aiBrainSummary, connectedAiSet, personalAiSet, bridgeOnline, aiBrain, agentEngine] = await Promise.all([
+    needsAi && authUserId
+      ? safe<AiBrainSummary>("settings.personal.ai_brain_summary", loadAiBrainSummary(tenantId, authUserId), { ok: false })
+      : Promise.resolve<AiBrainSummary>({ ok: false }),
+    needsAi
+      ? safe("settings.personal.ai_keys", aiServicesWithKey(tenantId), null)
+      : Promise.resolve(new Set<string>()),
+    needsAi
+      ? safe("settings.personal.personal_ai_keys", personalAiServicesWithKey(tenantId), null)
+      : Promise.resolve(new Set<string>()),
+    needsAi
+      ? safe("settings.personal.bridge_online", getBridgeOnline(tenantId), null)
+      : Promise.resolve(false),
+    needsAi
+      ? safe<DepartmentBrain | null | undefined>(
+          "settings.personal.ai_brain",
+          readWorkspaceAiAccount(tenantId!).then((a) => (hasUsableKey(a) ? departmentBrain(a) : null)),
+          undefined,
+        )
+      : Promise.resolve<DepartmentBrain | null | undefined>(null),
+    needsAi
+      ? safe<AgentEngineChoice | null>("settings.personal.agent_engine", readAgentEngine(tenantId!), null)
+      : Promise.resolve<AgentEngineChoice | null>(null),
+  ]);
   return (
     <div className="space-y-6 animate-fade-in">
       {!hideHeader && !section && (
@@ -760,6 +773,59 @@ async function PersonalSettingsView({
           <SafeBoundary label="Connect your computer">
             <ConnectYourComputerCard />
           </SafeBoundary>
+        </SettingsSection>
+      )}
+
+      {/* ── AI brain, member view (AI1, Adon 2026-10-12) ────────────
+          PersonEngineCard is self-only by its own route (GET/PUT
+          /api/agent-config/person-engine) and its doc says plainly "every
+          workspace member who reaches Settings > AI, not just owners" --
+          but the early return above used to send every non-admin here
+          with NOTHING for AI brain at all. Same summary + "on my devices" +
+          "local models" as the admin view; no workspace-wide provider
+          configuration (that stays admin-only, in Workspace defaults). */}
+      {show("ai") && (
+        <SafeBoundary label="AI brain summary">
+          <AiBrainSummaryBar summary={aiBrainSummary} changeHref="#my-devices" />
+        </SafeBoundary>
+      )}
+      {show("ai") && (
+        <SettingsSection id="my-devices" defaultOpen title="On my devices" subtitle="Your own paired computers, and whether they answer your departments.">
+          <SafeBoundary label="How your departments think">
+            <PersonEngineCard />
+          </SafeBoundary>
+          <p className="mt-2 text-[11px] text-fg-dim">
+            No computer connected yet? <Link href="/settings/devices" className="text-accent hover:text-accent-bright underline underline-offset-2">Connect a device</Link>.
+          </p>
+        </SettingsSection>
+      )}
+      {show("ai") && (
+        <SettingsSection id="local-models" defaultOpen title="Local models" subtitle="A model served on one of your paired computers.">
+          <SafeBoundary label="Local models">
+            <LocalModelsCard />
+          </SafeBoundary>
+        </SettingsSection>
+      )}
+      {show("ai") && (
+        <SettingsSection
+          id="providers"
+          defaultOpen
+          title="API keys (cloud)"
+          subtitle="Connect your own key for your own chats. Department chats use the workspace's key, set by an owner or admin."
+        >
+          <div className="scroll-mt-24">
+          <SafeBoundary label="AI provider accounts">
+            <ProviderAccountsCard
+              connectedServices={connectedAiSet}
+              personalServices={personalAiSet}
+              bridgeOnline={bridgeOnline}
+              canManageTeam={false}
+              canInstallBridge={false}
+              brain={aiBrain}
+              accountIsTheEngine={agentEngine === null || agentEngine.kind === "api"}
+            />
+          </SafeBoundary>
+          </div>
         </SettingsSection>
       )}
 

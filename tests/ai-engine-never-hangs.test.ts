@@ -22,8 +22,10 @@
  *   4. The bridge's failure codes each have their own plain sentence.
  *   5. An app the vendor refuses ("unsupported") is its own finished state and
  *      is not offered a Test or Save.
- *   6. The "AI setup" section is gone; its key management lives in the engine
- *      panel, and #providers still resolves.
+ *   6. The "AI setup" section is gone; its key management lives in its own
+ *      always-visible "API keys (cloud)" category (AI1 round 2, Adon
+ *      2026-10-12, moved OUT of the owner-only engine/"Workspace defaults"
+ *      section so a member can reach it too), and #providers still resolves.
  *
  * Run: node --conditions=react-server --import tsx tests/ai-engine-never-hangs.test.ts
  */
@@ -437,20 +439,45 @@ async function main() {
   });
 
   console.log("6. the 'AI setup' section is gone and nothing it did is lost");
-  await check("no separate AI setup section; the AI account sits inside 'What powers your agents' and #providers resolves", () => {
+  await check("no separate AI setup section; the AI account is its own always-visible 'API keys (cloud)' category, decoupled from the owner-only engine section, and #providers resolves there", () => {
     const content = read("components/settings/SettingsContent.tsx");
     assert.doesNotMatch(content, /title="AI setup"/, "the duplicate section is back");
-    const providers = content.search(/^\s+id="providers"\s*$/m);
-    const engine = content.search(/^\s+id="engine"\s*$/m);
-    const next = content.indexOf("<SettingsSection", engine + 10);
-    assert.ok(engine !== -1 && providers > engine && providers < next, "#providers must sit inside the engine section");
+    // AI1 round 2 (Adon 2026-10-12): the account card moved OUT of the
+    // owner-only "Workspace defaults" (id="engine") section into its own
+    // always-visible one, so a member can reach it too (ProviderAccountsCard
+    // already supports a personal-only key for a non-manager). Pinned: the
+    // id="providers" section is a SIBLING of id="engine", never nested in it.
+    const providersSection = content.search(/^\s+id="providers"\s*$/m);
+    const engineSection = content.search(/^\s+id="engine"\s*$/m);
+    assert.ok(providersSection !== -1, "an id=\"providers\" SettingsSection must exist");
+    assert.ok(engineSection !== -1, "the id=\"engine\" (Workspace defaults) section must still exist");
+    assert.ok(providersSection < engineSection, "API keys (cloud) must come before Workspace defaults, decoupled from it");
     const idx = content.indexOf("<ProviderAccountsCard");
-    assert.ok(idx > engine && idx < next, "the AI account card (connect / replace / remove a key, the model, Test) must be mounted in the engine section");
-    assert.match(content, /<AgentEnginePanel>\s*<div\s+id="providers"[^>]*>\s*<SafeBoundary label="AI provider accounts">/);
+    const nextSectionAfterProviders = content.indexOf("<SettingsSection", providersSection + 10);
+    assert.ok(idx > providersSection && idx < nextSectionAfterProviders, "the AI account card (connect / replace / remove a key, the model, Test) must be mounted inside its own API keys section");
+    // Decoupled: AgentEnginePanel no longer wraps the account card as
+    // children (it is mounted bare in Workspace defaults now).
+    assert.doesNotMatch(content, /<AgentEnginePanel>\s*<div\s+id="providers"/, "the account card must not still be nested inside AgentEnginePanel");
+    assert.match(content, /<AgentEnginePanel \/>/, "AgentEnginePanel is mounted with no children once the account card moved out");
     const card = read("components/settings/ProviderAccountsCard.tsx");
     for (const kept of ["Replace key", "Connect", "DisconnectButton", "TestConnectionButton", "DepartmentBrainPanel"]) assert.ok(card.includes(kept), `${kept} was lost`);
-    // The panel still shows the account when its own read failed.
-    assert.match(read("components/settings/AgentEnginePanel.tsx"), /if \(readError\) \{[\s\S]*?<AccountSection/);
+    // The resilience property this used to prove via AgentEnginePanel's own
+    // readError branch ("the account is never lost to an engine-panel read
+    // failure") now holds structurally instead: the account card lives in
+    // its OWN SettingsSection, with its own SafeBoundary, entirely outside
+    // AgentEnginePanel -- a failed engine-panel read cannot touch it at all.
+    assert.match(content, /^\s+id="providers"\s*$[\s\S]*?<SafeBoundary label="AI provider accounts">[\s\S]*?<\/SettingsSection>/m);
+  });
+  await check("API keys (cloud) is always visible: a member (non-manager) reaches it too, same as the owner branch", () => {
+    const content = read("components/settings/SettingsContent.tsx");
+    // Two id="providers" mounts: the manager branch and PersonalSettingsView
+    // (the non-manager branch) -- neither gated on canManageTenant.
+    const mounts = [...content.matchAll(/^\s+id="providers"\s*$/gm)];
+    assert.equal(mounts.length, 2, "API keys (cloud) must be mounted in both the manager branch and PersonalSettingsView");
+    for (const m of mounts) {
+      const before = content.slice(Math.max(0, m.index! - 200), m.index!);
+      assert.doesNotMatch(before, /canManageTenant &&\s*\(?\s*$/, "API keys (cloud) must never be gated on canManageTenant");
+    }
   });
   await check("the nav word 'AI setup' no longer points anywhere", () => {
     for (const f of ["components/ChatWidget.tsx", "components/settings/SettingsContent.tsx"]) {

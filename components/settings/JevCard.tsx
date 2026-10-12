@@ -1,6 +1,8 @@
 /**
- * JevCard - Settings > AI brain: Jev (TypeSafe's System One), the specialist
- * classifier, as this workspace has it.
+ * JevCard - Settings > Connections, under "Specialist models" (AI1 round 2,
+ * moved here from Settings > AI brain 2026-10-12: Jev is a connection, not an
+ * engine choice): Jev (TypeSafe's System One), the specialist classifier, as
+ * this workspace has it.
  *
  * Every line is the workspace's real state or a sourced fact:
  *   status     the Jev connection, through the Connections hub's own resolver
@@ -87,7 +89,7 @@ export function JevCard({
             status={facts.status}
             label={connected ? "Manage key" : "Connect a key"}
             className={connected ? "btn-secondary" : "btn-primary"}
-            requestFrom="Settings > AI brain"
+            requestFrom="Settings > Connections"
           />
         )}
       </header>

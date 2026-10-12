@@ -128,14 +128,24 @@ assert.ok(
   readFileSync(join(ROOT, "lib", "shell-status.ts"), "utf8").includes("resolveEnabledAgentSlugs"),
   "lib/shell-status.ts must resolve the same manifest-first roster",
 );
-// The AI Team page and Settings > AI brain list ONE roster (W4a): both load it
-// through components/os/aiteam/roster.ts, built on lib/os/teammates.ts, whose
-// "on" is agent-roster.ts's own rule (isBindingOn, which resolveEnabledAgentSlugs uses).
+// ONE roster, ONE place it is listed (W4a; AI1 round 2, Adon 2026-10-12: the
+// Workspace agents list moved off Settings > AI brain to the AI Team page,
+// which is its sole remaining consumer, so a roster read and a toggle can no
+// longer disagree between two surfaces). "on" is agent-roster.ts's own rule
+// (isBindingOn, which resolveEnabledAgentSlugs uses).
 assert.ok(
   readFileSync(join(ROOT, "app", "agents", "page.tsx"), "utf8").includes("loadAiTeam(viewer)"),
   "app/agents/page.tsx must load the workspace roster",
 );
-assert.ok(settings.includes("loadWorkspaceRoster("), "Settings > AI brain must load the same roster as the AI Team");
+assert.ok(
+  !settings.includes("loadWorkspaceRoster("),
+  "Settings > AI brain must not load its own roster any more now that the list lives only on AI Team",
+);
+assert.match(
+  settings,
+  /Manage your agents on AI Team/,
+  "Settings > AI brain must still link to the AI Team page where the roster lives",
+);
 assert.ok(
   readFileSync(join(ROOT, "components", "os", "department", "config.ts"), "utf8").includes("isBindingOn"),
   "the department channels must use the roster's own on/off rule",
