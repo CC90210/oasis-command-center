@@ -198,12 +198,13 @@ const MIGRATED: Array<[string, RegExp]> = [
   // narrower than "a verified platform operator" — PR #576 made Adon one too.
   // Pinned instead by tests/automation-inventory-contract.test.ts and
   // tests/automations-owner-scope.test.ts.
-  // Read once: the same verdict gates the platform key and the model id in the
-  // stream (clients never see which model answered).
-  ["app/api/agents/chat/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);[\s\S]*const fallback = isOperator \? operatorPlatformFallback\(\) : null;/],
-  // A Slack mention gets the platform key only when the person who wrote it is
-  // the verified operator (their Slack email linked to that teammate).
-  ["lib/slack/jobs.ts", /return isPlatformOperatorForAuthUser\(String\(r\.auth_user_id\), [\s\S]*platformFallback: operator \? operatorPlatformFallback\(\) : null,/],
+  // Read once: the verified verdict controls model disclosure and local-model
+  // eligibility. Department turns use only the canonical saved engine, so an
+  // operator identity must never re-introduce the hidden platform key.
+  ["app/api/agents/chat/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);[\s\S]*platformFallback: null,[\s\S]*revealModel: isOperator,/],
+  // Slack follows the same canonical engine. A missing workspace account fails
+  // closed instead of silently spending OASIS platform credits.
+  ["lib/slack/jobs.ts", /platformFallback: null,[\s\S]*engineChoice: canonical\.engine,/],
   ["app/api/agents/generate/route.ts", /\(await isPlatformOperatorForAuthUser\(user\.id, user\.email\)\) \? operatorPlatformFallback\(\)/],
   ["app/api/manifest/chat/route.ts", /\(await isPlatformOperatorForAuthUser\(user\.id, user\.email\)\) \? operatorPlatformFallback\(\)/],
   ["app/api/gmail-templates/[id]/solara/route.ts", /\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\) \? operatorPlatformFallback\(\)/],
