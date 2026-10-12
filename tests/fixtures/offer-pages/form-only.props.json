@@ -267,6 +267,8 @@
   },
   "consentLedgerEnabled": true,
   "submissionPath": "/f/oasis-ai-cc/ai-audit",
+  "tenantSlug": "oasis-ai-cc",
+  "formSlug": "ai-audit",
   "anonymousInit": {
     "tenant_slug": "oasis-ai-cc",
     "form_slug": "ai-audit"

@@ -99,6 +99,8 @@ import {
   type ConsentDecision,
 } from "@/lib/consent/ledger";
 import { consentDecisionsForStep } from "@/lib/consent/ledger-disclosure";
+import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
+import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -173,6 +175,24 @@ type SubmitBody = {
    * when step 0 itself is a direct-to-storage upload and therefore needs the
    * token before the file can be selected. */
   initialize_only?: boolean;
+  // -- V5a funnel tracking (HANDOVER section 5.3/5.4) --------------------
+  /** The browser's per-tab visit id (lib/offers/tracking-client.ts,
+   *  sessionStorage, never a cookie). Present on every step once the client
+   *  has one; used ONLY to link that visit's offer_funnel_events rows to the
+   *  lead this submission resolves to (lib/offers/tracking-store.ts
+   *  linkVisitToLead) -- never trusted for anything else, and never itself
+   *  written onto the lead. */
+  visit_id?: string;
+  /** Campaign attribution read from the offer page's query string
+   *  (lib/offer-pages/utm.ts), first-touch like lead_source but on its own
+   *  namespace -- never written if the lead already carries a real value. */
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  /** The keyword/search term that brought this visitor in. */
+  kw?: string;
+  /** The funnel pillar the offer page preselected (p1-p4). */
+  cat?: string;
 };
 
 // The public client embeds files as `inline_base64` inside payload[field].
@@ -1047,6 +1067,41 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
   const submissionId = (insertRes.data as { id: string }).id;
+
+  // -------------------------------------------------------------------
+  // V5a FUNNEL TRACKING: visit->lead link + first-touch UTM stamp.
+  //
+  // DELIBERATELY HERE, AFTER the form_submissions insert succeeded -- never
+  // earlier (Codex review, PR #598, 2026-10-12 [P2]: this used to run before
+  // step-range, sequential-progress and required-field validation, so a
+  // REJECTED submission could still permanently stamp first-touch campaign
+  // values on an existing lead, locking out the correct attribution a later,
+  // valid submission would have supplied). By this point the step has been
+  // accepted; every 4xx above returns before reaching here.
+  //
+  // Both are best-effort and run on every step (not just step 0): the link
+  // is idempotent (linkVisitToLead only fills rows still carrying lead_id
+  // IS NULL, and upserts the persistent visit->lead mapping ON CONFLICT DO
+  // NOTHING) and the UTM stamp is a single atomic first-touch UPDATE
+  // (lib/offer-pages/utm.ts), so repeating either on a later step changes
+  // nothing once the first one lands. Neither can fail the submission --
+  // both helpers swallow their own errors, and this block never throws out
+  // of handleSubmit.
+  if (typeof body.visit_id === "string" && isValidVisitId(body.visit_id)) {
+    const tdb = offerPagesDb();
+    if (tdb) await linkVisitToLead(tdb, { tenantId: form.tenant_id, visitId: body.visit_id, leadId: link.lead_id });
+  }
+  {
+    const utmInput: UtmInput = {
+      utm_source: body.utm_source,
+      utm_medium: body.utm_medium,
+      utm_campaign: body.utm_campaign,
+      kw: body.kw,
+      cat: body.cat,
+    };
+    const tdb = offerPagesDb();
+    if (tdb) await stampUtmOnLead(tdb, { tenantId: form.tenant_id, leadId: link.lead_id, utm: utmInput, now: new Date().toISOString() });
+  }
 
   // ---------------------------------------------------------------------
   // Channel of THIS submission (Adon 2026-08-24: "so we could easily see if

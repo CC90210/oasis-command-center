@@ -14,7 +14,7 @@
 import type { ReactNode } from "react";
 import { Plus } from "lucide-react";
 import { Tag } from "@/components/Card";
-import { FUNNEL_METRICS, funnelCell } from "@/lib/offers/funnel-strip";
+import { FUNNEL_METRICS, funnelCell, type FunnelMetricKey } from "@/lib/offers/funnel-strip";
 
 export type OfferPageStatus = "live" | "live_with_changes" | "draft";
 
@@ -29,6 +29,12 @@ export type OfferCardViewModel = {
   publishedVersion: number;
   /** New leads in the last 7 days. null = could not be read (shown "-", never 0). */
   leads: number | null;
+  /** Distinct visits over the last 7 days (V5a, offer_funnel_events). null = could not be read. */
+  views: number | null;
+  /** Distinct visits that played the hero video over the last 7 days. null = could not be read. */
+  videoPlays: number | null;
+  /** Distinct visits sent to the free community over the last 7 days. null = could not be read. */
+  community: number | null;
 };
 
 /** "Live, version N" / "Live + unpublished changes" / "Draft page (not live)". */
@@ -49,16 +55,38 @@ function promiseOf(offer: Pick<OfferCardViewModel, "headline" | "subheadline">):
   return offer.headline || offer.subheadline || "No headline written yet.";
 }
 
-function FunnelStrip({ leads }: { leads: number | null }) {
+/**
+ * views, video plays, leads and community are all tracked (V5a): a missing
+ * number is a FAILED READ (reason "unavailable"), never "nobody measures
+ * this" — same contract `leads` always had. Only `booked` has genuinely no
+ * tracking yet (V4, HANDOVER section 6 build order), so it alone keeps
+ * reason "untracked" and a hardcoded null regardless of anything this card
+ * was handed.
+ */
+function FunnelStrip({
+  views,
+  videoPlays,
+  leads,
+  community,
+}: {
+  views: number | null;
+  videoPlays: number | null;
+  leads: number | null;
+  community: number | null;
+}) {
+  const VALUES: Record<FunnelMetricKey, number | null> = {
+    views,
+    video_plays: videoPlays,
+    leads,
+    booked: null,
+    community,
+  };
   return (
     <div>
       <div className="mb-1.5 text-[9.5px] font-semibold uppercase tracking-wider text-fg-dim">Last 7 days</div>
       <dl className="grid grid-cols-5 gap-1.5 rounded-lg border border-hairline bg-bg-elev/40 p-2">
         {FUNNEL_METRICS.map((m) => {
-          const value = m.key === "leads" ? leads : null;
-          // Leads is the one tracked metric: a missing number there is a failed
-          // read, not a metric nobody measures yet.
-          const cell = funnelCell(value, m.key === "leads" ? "unavailable" : "untracked");
+          const cell = funnelCell(VALUES[m.key], m.key === "booked" ? "untracked" : "unavailable");
           return (
             <div key={m.key} className="flex flex-col items-center gap-0.5 text-center">
               <dt className="text-[9px] leading-tight uppercase tracking-wide text-fg-dim">{m.label}</dt>
@@ -111,7 +139,7 @@ export function OfferCard({
         <Tag tone={statusTone(offer.status)}>{offerPageLabel(offer.status, offer.publishedVersion)}</Tag>
         <Tag tone={offer.hasVideo ? "accent" : "neutral"}>{offer.hasVideo ? "Video attached" : "No video attached"}</Tag>
       </div>
-      <FunnelStrip leads={offer.leads} />
+      <FunnelStrip views={offer.views} videoPlays={offer.videoPlays} leads={offer.leads} community={offer.community} />
       <div className="flex flex-wrap items-center gap-3 border-t border-hairline pt-3 text-xs">{actions}</div>
     </article>
   );

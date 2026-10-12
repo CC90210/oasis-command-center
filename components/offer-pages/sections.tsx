@@ -17,7 +17,7 @@ import { formatMoney } from "@/lib/offer-pages/visibility";
 import { BODY_ANCHORS } from "@/lib/offer-pages/types";
 import type { FacadeMedia, PreparedOffer } from "@/lib/offer-pages/render";
 import { imageKey } from "@/lib/offer-pages/video";
-import { VideoFacade } from "./VideoFacade";
+import { VideoFacade, type VideoTracking } from "./VideoFacade";
 import { ResultsViewer, type ResultCard } from "./ResultsViewer";
 import { ACCENT_BORDER, ACCENT_RULE, ACCENT_TEXT, ACCENT_WASH, DATA_LABEL, H2, LEDE } from "./styles";
 
@@ -38,7 +38,17 @@ export function OfferHead({ head, fallbackTitle }: { head: { eyebrow?: string; t
   );
 }
 
-function Facade({ media, label, priority = false }: { media: FacadeMedia | undefined; label: string; priority?: boolean }) {
+function Facade({
+  media,
+  label,
+  priority = false,
+  tracking = null,
+}: {
+  media: FacadeMedia | undefined;
+  label: string;
+  priority?: boolean;
+  tracking?: VideoTracking;
+}) {
   if (!media) return null;
   return (
     <VideoFacade
@@ -50,11 +60,20 @@ function Facade({ media, label, priority = false }: { media: FacadeMedia | undef
       label={label}
       duration={media.duration}
       priority={priority}
+      tracking={tracking}
     />
   );
 }
 
-function WhatYouGet({ s, media }: { s: Extract<DrawnSection, { key: "what_you_get" }>; media: PreparedOffer["media"] }) {
+function WhatYouGet({
+  s,
+  media,
+  tracking,
+}: {
+  s: Extract<DrawnSection, { key: "what_you_get" }>;
+  media: PreparedOffer["media"];
+  tracking: VideoTracking;
+}) {
   return (
     <>
       <OfferHead head={s.head} />
@@ -67,7 +86,7 @@ function WhatYouGet({ s, media }: { s: Extract<DrawnSection, { key: "what_you_ge
               {it.body ? <p className="text-[15px] leading-relaxed text-fg-muted">{it.body}</p> : null}
               {it.video ? (
                 <div className="mt-2">
-                  <Facade media={media[it.video.ref]} label={it.title} />
+                  <Facade media={media[it.video.ref]} label={it.title} tracking={tracking} />
                 </div>
               ) : null}
             </article>
@@ -99,7 +118,15 @@ function Obstacles({ s }: { s: Extract<DrawnSection, { key: "obstacles" }> }) {
   );
 }
 
-function Work({ s, media }: { s: Extract<DrawnSection, { key: "work" }>; media: PreparedOffer["media"] }) {
+function Work({
+  s,
+  media,
+  tracking,
+}: {
+  s: Extract<DrawnSection, { key: "work" }>;
+  media: PreparedOffer["media"];
+  tracking: VideoTracking;
+}) {
   return (
     <>
       <OfferHead head={s.head} />
@@ -107,7 +134,7 @@ function Work({ s, media }: { s: Extract<DrawnSection, { key: "work" }>; media: 
         {s.items.map((it, i) => (
           <Reveal key={it.index} delay={(i % 2) * 80}>
             <figure className="space-y-4">
-              <Facade media={media[it.video.ref]} label={it.title || "Our work"} />
+              <Facade media={media[it.video.ref]} label={it.title || "Our work"} tracking={tracking} />
               {it.title || it.body ? (
                 <figcaption>
                   {it.title ? <p className="font-display text-lg font-bold tracking-tight text-fg">{it.title}</p> : null}
@@ -225,18 +252,30 @@ function Faq({ s }: { s: Extract<DrawnSection, { key: "faq" }> }) {
  * with the booking button, so a long page asks again after its proof, its
  * value and its guarantee instead of only in the header.
  */
-export function OfferSection({ s, prepared, cta = null }: { s: DrawnSection; prepared: PreparedOffer; cta?: string | null }): ReactNode {
+export function OfferSection({
+  s,
+  prepared,
+  cta = null,
+  tracking = null,
+}: {
+  s: DrawnSection;
+  prepared: PreparedOffer;
+  cta?: string | null;
+  /** V5a funnel tracking (HANDOVER section 5): threaded to every video this
+   *  section draws. null in the owner's preview. */
+  tracking?: VideoTracking;
+}): ReactNode {
   const id = BODY_ANCHORS[s.key];
   let inner: ReactNode;
   switch (s.key) {
     case "what_you_get":
-      inner = <WhatYouGet s={s} media={prepared.media} />;
+      inner = <WhatYouGet s={s} media={prepared.media} tracking={tracking} />;
       break;
     case "obstacles":
       inner = <Obstacles s={s} />;
       break;
     case "work":
-      inner = <Work s={s} media={prepared.media} />;
+      inner = <Work s={s} media={prepared.media} tracking={tracking} />;
       break;
     case "results":
       inner = <Results s={s} prepared={prepared} />;

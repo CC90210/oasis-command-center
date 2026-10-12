@@ -52,6 +52,7 @@ import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { formsEditRefusal } from "@/lib/forms/access";
 import { countResponsesByForm } from "@/lib/forms/responses";
 import { countRecentLeads, listOfferSummaries, offerPagesDb, type OfferSummary } from "@/lib/offer-pages/store";
+import { countFunnelEventMetrics, type FunnelCounts } from "@/lib/offers/tracking-store";
 import { AlertCircle } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -150,6 +151,7 @@ export default async function FormsPage() {
           responseCounts={responseCounts}
           offers={offers?.statuses ?? null}
           recentLeads={offers?.recentLeads ?? {}}
+          recentFunnel={offers?.funnel ?? {}}
         />
       ) : null}
     </div>
@@ -165,7 +167,11 @@ export default async function FormsPage() {
 async function loadOfferColumns(
   tenantId: string,
   formIds: string[],
-): Promise<{ statuses: Record<string, OfferSummary>; recentLeads: Record<string, number | null> } | null> {
+): Promise<{
+  statuses: Record<string, OfferSummary>;
+  recentLeads: Record<string, number | null>;
+  funnel: Record<string, FunnelCounts>;
+} | null> {
   const db = offerPagesDb();
   if (!db) return null;
   try {
@@ -173,8 +179,15 @@ async function loadOfferColumns(
     if (!map) return null;
     const statuses = Object.fromEntries([...map.entries()].filter(([id]) => formIds.includes(id)));
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const recentLeads = await countRecentLeads(db, tenantId, Object.keys(statuses), since);
-    return { statuses, recentLeads };
+    const ids = Object.keys(statuses);
+    // Two independent reads (leads from form_submissions, views/video_plays/
+    // community from offer_funnel_events) -- a failure in one must never cost
+    // the other (V5a, HANDOVER section 5.5: "Keep the strip honest").
+    const [recentLeads, funnel] = await Promise.all([
+      countRecentLeads(db, tenantId, ids, since),
+      countFunnelEventMetrics(db, tenantId, ids, since),
+    ]);
+    return { statuses, recentLeads, funnel };
   } catch (err) {
     console.error("[forms.offers] offer pages unreadable", { tenantId }, err);
     return null;

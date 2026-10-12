@@ -90,8 +90,11 @@ async function main() {
     const cell = funnelCell(null, "unavailable");
     assert.equal(cell.text, "-");
     assert.equal(cell.ariaLabel, "couldn't load");
+    // V5a: views/video_plays/leads/community are all tracked now (offer_funnel_events)
+    // -- a missing number in any of them is a failed read, same as leads always was.
+    // Only booked has no tracking yet, so it alone keeps "untracked".
     const src = readFileSync(join(ROOT, "components", "forms", "OfferCard.tsx"), "utf8");
-    assert.ok(/funnelCell\(value, m\.key === "leads" \? "unavailable" : "untracked"\)/.test(src));
+    assert.ok(/funnelCell\(VALUES\[m\.key\], m\.key === "booked" \? "untracked" : "unavailable"\)/.test(src));
   });
   await step("the glyph is a plain hyphen, never an em dash", () => {
     assert.equal(funnelCell(null).text, "-");
@@ -119,6 +122,7 @@ async function main() {
           },
         },
         recentLeads: { "offer-1": 5 },
+        recentFunnel: { "offer-1": { views: 12, video_plays: 4, community: 1 } },
       },
     },
     // -- 3. router card: present only with a "vsl"-slugged form ------------
@@ -206,14 +210,30 @@ async function main() {
     assert.ok(h.includes(">Support Ticket<"), "the intake form's row is missing");
   });
 
-  await step("the tracked leads metric shows its real number; every untracked metric shows a hyphen with its label, never 0", () => {
+  await step("every tracked metric (views, video plays, leads, community) shows its real number; booked alone stays untracked", () => {
     const h = html.cardsAndTable;
     assert.ok(h.includes(">5</dd>"), "the real 7-day leads count is missing");
-    for (const label of ["Views", "Video plays", "Booked", "Sent to community"]) {
-      assert.ok(h.includes(`aria-label="${label}: not tracked yet"`), `${label} is missing its accessible label`);
+    assert.ok(h.includes(">12</dd>"), "the real 7-day views count is missing");
+    assert.ok(h.includes(">4</dd>"), "the real 7-day video-plays count is missing");
+    assert.ok(h.includes(">1</dd>"), "the real 7-day community count is missing");
+    assert.ok(h.includes('aria-label="Booked: not tracked yet"'), "Booked is missing its 'not tracked yet' label");
+    assert.ok(!h.includes('aria-label="Views: not tracked yet"'), "Views is tracked now and must not say 'not tracked yet'");
+    assert.ok(!h.includes('aria-label="Video plays: not tracked yet"'), "Video plays is tracked now and must not say 'not tracked yet'");
+    assert.ok(!h.includes('aria-label="Sent to community: not tracked yet"'), "Sent to community is tracked now and must not say 'not tracked yet'");
+    assert.equal((h.match(/>-<\/dd>/g) || []).length, 1, "expected exactly 1 untracked metric (Booked) showing a hyphen");
+  });
+
+  await step("a tracked metric with no data for this form reads as a failed read ('couldn't load'), never a false 0", () => {
+    // routerPresent supplies no recentFunnel at all for its form -- every
+    // tracked metric (views/video_plays/leads/community) must say "couldn't
+    // load", not silently render 0 or "not tracked yet".
+    const h = html.routerPresent;
+    for (const label of ["Views", "Video plays", "Sent to community"]) {
+      // React escapes the apostrophe in an attribute as &#x27; — matching the
+      // literal rendered markup, not the un-escaped string.
+      assert.ok(h.includes(`aria-label="${label}: couldn&#x27;t load"`), `${label} should read as a failed read with no funnel data`);
     }
-    assert.equal((h.match(/>-<\/dd>/g) || []).length, 4, "expected exactly 4 untracked metrics showing a hyphen");
-    assert.ok(!/>0<\/dd>/.test(h), "an untracked metric rendered as 0");
+    assert.ok(h.includes('aria-label="Booked: not tracked yet"'), "Booked stays 'not tracked yet' even here");
   });
 
   await step("a form at slug 'vsl' is pinned as the Start here router card, by name, with no empty-state text", () => {

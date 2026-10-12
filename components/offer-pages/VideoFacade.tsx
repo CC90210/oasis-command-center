@@ -21,6 +21,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { Aspect } from "@/lib/offer-pages/types";
 import { ACCENT_FILL } from "./styles";
+import { trackEvent } from "@/lib/offers/tracking-client";
+
+/** Which (tenant slug, form slug) a tap-to-play / progress event belongs to.
+ *  null (the owner's draft preview) means: track nothing. */
+export type VideoTracking = { tenant: string; form: string } | null;
+
+const PROGRESS_CHECKPOINTS = [25, 50, 75, 100] as const;
 
 export type FacadeSource =
   | { kind: "link"; embedSrc: string }
@@ -72,6 +79,7 @@ export function VideoFacade({
   label,
   duration,
   priority = false,
+  tracking = null,
 }: {
   source: FacadeSource;
   posterUrl: string | null;
@@ -84,6 +92,13 @@ export function VideoFacade({
   duration?: string;
   /** The hero's poster: fetched first, never lazy. */
   priority?: boolean;
+  /** V5a funnel tracking (HANDOVER section 5): video_play on first tap,
+   *  video_progress at 25/50/75/100% for a Library OR an uploaded video's
+   *  native player (both render through the same non-"link" branch below,
+   *  so neither needs its own tracking path -- PR #597 merge, 2026-10-12).
+   *  null in the owner's preview — a draft view must never count as a
+   *  visitor's video_play. */
+  tracking?: VideoTracking;
 }) {
   const [state, setState] = useState<"idle" | "loading" | "playing" | "failed">("idle");
   const [src, setSrc] = useState<string | null>(null);
@@ -91,6 +106,32 @@ export function VideoFacade({
   const resumeAt = useRef(0);
   const resigns = useRef(0);
   const [defW, defH] = ASPECT_SIZE[aspect] ?? ASPECT_SIZE["16:9"];
+  const playFired = useRef(false);
+  const progressFired = useRef<Set<number>>(new Set());
+
+  function fireVideoPlay() {
+    if (playFired.current || !tracking) return;
+    playFired.current = true;
+    trackEvent({ tenant: tracking.tenant, form: tracking.form, event: "video_play" });
+  }
+
+  /** A Library OR an uploaded video's native <video> element reports real
+   *  watch progress -- both are same-origin signed URLs served the same way.
+   *  A provider iframe (YouTube/Vimeo/Loom, kind "link") is cross-origin —
+   *  this build has no postMessage listener for it, so progress tracking is
+   *  limited to the two first-party sources. */
+  function onVideoTimeUpdate() {
+    if (!tracking) return;
+    const el = videoEl.current;
+    if (!el || !Number.isFinite(el.duration) || el.duration <= 0) return;
+    const percent = (el.currentTime / el.duration) * 100;
+    for (const checkpoint of PROGRESS_CHECKPOINTS) {
+      if (percent >= checkpoint && !progressFired.current.has(checkpoint)) {
+        progressFired.current.add(checkpoint);
+        trackEvent({ tenant: tracking.tenant, form: tracking.form, event: "video_progress", detail: { percent: checkpoint } });
+      }
+    }
+  }
 
   async function signedUrl(): Promise<string | null> {
     if (source.kind === "link") return null;
@@ -112,6 +153,7 @@ export function VideoFacade({
     if (state === "loading" || state === "playing") return;
     if (source.kind === "link") {
       setState("playing");
+      fireVideoPlay();
       return;
     }
     setState("loading");
@@ -122,6 +164,7 @@ export function VideoFacade({
     }
     setSrc(url);
     setState("playing");
+    fireVideoPlay();
   }
 
   // The tap was the visitor asking it to play; some browsers still want play()
@@ -179,6 +222,7 @@ export function VideoFacade({
           preload="auto"
           onError={onMediaError}
           onLoadedMetadata={onLoaded}
+          onTimeUpdate={onVideoTimeUpdate}
           className="absolute inset-0 h-full w-full bg-black object-contain"
         >
           {source.captions ? (

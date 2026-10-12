@@ -305,6 +305,12 @@ export default async function PublicFormPage({
       // ever reaches an email (lib/forms/lead-source.ts describeSubmissionLink).
       submissionSource={source}
       submissionPath={`/f/${resolved.tenant_slug}/${resolved.form_slug}/${resolved.lead_token}`}
+      // V5a funnel tracking (HANDOVER section 5): the same public slugs
+      // /api/offer-events resolves server-side, so a merchant following an
+      // emailed personalized link is tracked exactly like an anonymous
+      // visitor.
+      tenantSlug={result.tenant_slug}
+      formSlug={result.form.slug}
       // Same brand resolution as the anonymous page. Omitting it here would seal
       // a Bluerise merchant's consent under SunBiz's site key and disclosure —
       // an evidence record stating they were shown wording they never saw.
