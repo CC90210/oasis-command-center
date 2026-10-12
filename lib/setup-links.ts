@@ -79,9 +79,9 @@ const TARGETS: Record<Exclude<SetupNeed, `connector:${string}`>, SetupTarget> = 
   // Settings > AI brain > "What powers your agents" (id="engine").
   ai_engine: {
     href: ENGINE_SETTINGS_HREF,
-    audience: "manage",
+    audience: "everyone",
     label: "Choose what powers your agents",
-    ask: "Ask your workspace owner to choose what powers your agents.",
+    ask: "Open AI brain to choose what powers your agents.",
     anchorIn: SETTINGS_CONTENT,
   },
   // Settings > AI brain > "What powers your agents" > "Your AI account" (id="providers"): where a key is saved.
@@ -101,13 +101,13 @@ const TARGETS: Record<Exclude<SetupNeed, `connector:${string}`>, SetupTarget> = 
     label: "Pair a computer",
     ask: "Ask OASIS to pair a computer for you.",
   },
-  // Settings > Devices (id="devices"): the machines already paired. Operators only.
+  // Settings > Devices > Your computers: every member manages their own
+  // pairings; the advanced all-workspace inventory remains operator-gated.
   bridge_devices: {
-    href: "/settings/devices#devices",
-    audience: "operator",
+    href: "/settings/devices",
+    audience: "everyone",
     label: "Open Devices",
-    ask: "Ask OASIS to pair a computer for you.",
-    anchorIn: SETTINGS_CONTENT,
+    ask: "Open Devices to manage your computers.",
   },
   // Name, contact details, password: the Profile section.
   business_profile: {

@@ -99,7 +99,12 @@ export async function sendMessage(args: {
    * reaches the browser in the SSE prelude, for "Waiting for {label} to pick
    * this up".
    */
-  computerDispatch?: { label: string } | null;
+  computerDispatch?: {
+    pairingId: string;
+    label: string;
+    engineKind: "cli" | "local";
+    engineName: string;
+  } | null;
 }): Promise<Response> {
   const { db, deps, input } = args;
   const scope = deps.scope;
@@ -124,7 +129,15 @@ export async function sendMessage(args: {
     chatMode: input.chatMode,
     showThinking: args.showThinking,
     now: now(),
-    ...(computerDispatch ? { executor: "computer" as const, origin: "chat" as const } : {}),
+    ...(computerDispatch
+      ? {
+          executor: "computer" as const,
+          origin: "chat" as const,
+          targetPairingId: computerDispatch.pairingId,
+          runtimeEngineKind: computerDispatch.engineKind,
+          runtimeEngineName: computerDispatch.engineName,
+        }
+      : {}),
   });
   if (!queued.ok) {
     return queued.reason === "queue_full" ? json(429, { ok: false, error: "queue_full" }) : json(404, { ok: false, error: "conversation_not_found" });

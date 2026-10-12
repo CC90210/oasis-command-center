@@ -64,6 +64,7 @@ import {
   PRESENCE_ONLY_VIA,
   isPresenceOnlyHeartbeat,
 } from "@/lib/integrations/presence-heartbeat";
+import { parseRuntimeClaimState } from "@/lib/bridge/runtime-jobs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -131,6 +132,7 @@ export async function POST(req: NextRequest) {
     services?: Record<string, ServiceReport>;
     tool_capabilities?: string[];
     claim_protocols?: string[];
+    runtime_state?: unknown;
   };
   try {
     body = await req.json();
@@ -162,15 +164,21 @@ export async function POST(req: NextRequest) {
   // tool_capabilities, and recorded for every scope (a connector computer
   // still needs to tell the server which claim protocols it speaks).
   if (Array.isArray(body.claim_protocols)) {
-    const cleanedProtocols = body.claim_protocols.filter(
-      (t): t is string => typeof t === "string" && t.length > 0,
-    );
+    const allowedProtocols = new Set(["department_task_v1", "department_task_v2", "runtime_action_v1"]);
+    const cleanedProtocols = body.claim_protocols.filter((t): t is string => typeof t === "string" && allowedProtocols.has(t));
     pairingUpdate.claim_protocols = JSON.stringify(cleanedProtocols);
   }
-  await db
+  const runtimeState = parseRuntimeClaimState(body.runtime_state);
+  if (!runtimeState.ok) return bad(400, runtimeState.code);
+  if (runtimeState.state) pairingUpdate.claim_runtime_state = JSON.stringify(runtimeState.state);
+  const pairingWrite = await db
     .from("bridge_pairings")
     .update(pairingUpdate)
     .eq("id", pairing.pairingId);
+  if (pairingWrite.error) {
+    console.error("[bridge.ping.pairing]", pairingWrite.error.message);
+    return bad(503, "pairing_heartbeat_persist_failed");
+  }
 
   // Upsert per-service health rows, tenant-scoped
   const tenantId = pairing.tenantId;
@@ -250,6 +258,7 @@ export async function POST(req: NextRequest) {
     services_recorded: recorded,
     real_results_kept: realResultsKept,
     tool_capabilities_recorded: toolCapsRecorded,
+    runtime_state_recorded: runtimeState.state !== null,
   });
 }
 

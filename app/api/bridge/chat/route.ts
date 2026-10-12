@@ -28,6 +28,12 @@ import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
 import { validateBridgeAgent } from "@/lib/agent-roots";
 import { teeBridgeChatPersistence } from "@/lib/bridge-chat-persistence";
 import { teeBridgeDashboardActions } from "@/lib/admin/bridge-dashboard-actions";
+import { readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
+import { harnessRouteFor, type HarnessRoute } from "@/lib/ai/agent-engine";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { pairingCanClaim, type PairedVia } from "@/lib/bridge/pairing-auth";
+import { isOnline } from "@/lib/devices/presence";
+import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -56,6 +62,10 @@ type IncomingBody = {
   session_id?: string | null;
   tab_id?: string;
   cli_provider?: string;
+  target_pairing_id?: string;
+  runtime_engine_kind?: string;
+  runtime_engine_name?: string;
+  fallback_policy?: string;
   chat_mode?: string;
   attachments?: Array<{
     id?: string;
@@ -123,8 +133,8 @@ export async function POST(req: NextRequest) {
   }
 
   // cli_provider gate — same allowlist /api/chat (and the bridge) enforce.
-  const cliProvider = String(clientBody.cli_provider || "claude").toLowerCase();
-  if (!["claude", "codex", "gemini"].includes(cliProvider)) {
+  const requestedCliProvider = typeof clientBody.cli_provider === "string" ? clientBody.cli_provider.toLowerCase() : null;
+  if (requestedCliProvider !== null && !["claude", "codex", "gemini"].includes(requestedCliProvider)) {
     return jsonError(400, "invalid_cli_provider");
   }
 
@@ -150,6 +160,61 @@ export async function POST(req: NextRequest) {
   const agentCheck = validateBridgeAgent(agent, auth.tenantSlug);
   if (!agentCheck.ok) return jsonError(agentCheck.status, agentCheck.error);
 
+  // Resolve the effective choice again on the server. A stale tab, forged
+  // browser body, or remembered CLI cannot change the saved computer/runtime.
+  let savedRoute: HarnessRoute;
+  try {
+    savedRoute = harnessRouteFor((await readEffectiveAgentEngine(auth.tenantId, auth.userId)).engine);
+  } catch (error) {
+    console.error("[bridge.chat.engine]", error);
+    return jsonError(503, "engine_config_unavailable");
+  }
+  if (savedRoute.mode === "cloud_only") return jsonError(409, "engine_requires_cloud_route");
+  if (savedRoute.mode === "unavailable") return jsonError(409, "engine_pairing_required");
+
+  const bindingMatches =
+    clientBody.target_pairing_id === savedRoute.pairingId &&
+    clientBody.runtime_engine_kind === savedRoute.engineKind &&
+    clientBody.runtime_engine_name === savedRoute.engineName &&
+    clientBody.fallback_policy === savedRoute.fallback &&
+    (savedRoute.engineKind === "subscription"
+      ? requestedCliProvider === savedRoute.engineName
+      : requestedCliProvider === null);
+  if (!bindingMatches) return jsonError(409, "engine_selection_stale");
+
+  // Re-check the selected pairing at handoff time. A heartbeat or credential
+  // file is not readiness: the exact runtime must have passed its probe.
+  const { data: pairingData, error: pairingError } = await getServiceSupabase()
+    .from("bridge_pairings")
+    .select("id, machine_fingerprint, last_seen_at, claim_enabled_at, paired_via, claim_runtime_state")
+    .eq("tenant_id", auth.tenantId)
+    .eq("id", savedRoute.pairingId)
+    .is("revoked_at", null)
+    .maybeSingle();
+  if (pairingError) {
+    console.error("[bridge.chat.pairing]", pairingError.message);
+    return jsonError(503, "pairing_check_unavailable");
+  }
+  const pairing = pairingData as {
+    id?: string;
+    machine_fingerprint?: string | null;
+    last_seen_at?: string | null;
+    claim_enabled_at?: string | null;
+    paired_via?: string | null;
+    claim_runtime_state?: unknown;
+  } | null;
+  const pairedVia: PairedVia =
+    pairing?.paired_via === "pair_code" || pairing?.paired_via === "hmac" || pairing?.paired_via === "signup_secret"
+      ? pairing.paired_via
+      : null;
+  if (!pairing || !pairingCanClaim({ claimEnabledAt: pairing.claim_enabled_at ?? null, pairedVia })) {
+    return jsonError(409, "pairing_not_approved");
+  }
+  if (!isOnline(pairing.last_seen_at, Date.now())) return jsonError(409, "pairing_offline");
+  if (!runtimeReady(pairing.claim_runtime_state, savedRoute)) return jsonError(409, "engine_needs_test");
+  const targetMachineFingerprint = pairing.machine_fingerprint?.trim();
+  if (!targetMachineFingerprint) return jsonError(409, "pairing_identity_unavailable");
+
   // ---- Per-tenant rate limit (same shape as /api/chat) ---------------------
   const limit = rateLimit({ key: `bridge-chat:${auth.tenantId}`, capacity: 30, refillPerSec: 1 / 15 });
   if (!limit.allowed) {
@@ -165,10 +230,17 @@ export async function POST(req: NextRequest) {
   // owner/admin keep their choice and every tool. One rule shared with the
   // department turns on a CLI engine (lib/bridge-cli-policy.ts). The server
   // value wins in the forward body.
-  const { cliProvider: effectiveCliProvider, disallowedTools } = bridgeCliPolicy(
-    auth.teamRole,
-    cliProvider as BridgeCliProvider,
-  );
+  const disallowedTools = bridgeDisallowedToolsForRole(auth.teamRole);
+  let effectiveCliProvider: BridgeCliProvider | null = null;
+  if (savedRoute.engineKind === "subscription") {
+    const policy = bridgeCliPolicy(auth.teamRole, savedRoute.engineName as BridgeCliProvider);
+    if (policy.cliProvider !== savedRoute.engineName) return jsonError(403, "engine_not_allowed_for_role");
+    effectiveCliProvider = policy.cliProvider;
+  } else if (disallowedTools.length > 0) {
+    // Local servers have no equivalent of Claude's --disallowed-tools wall.
+    // Refuse the turn rather than quietly substituting Claude.
+    return jsonError(403, "engine_not_allowed_for_role");
+  }
 
   // ---- HOP 3: forward to the VPS bridge ------------------------------------
   // ALLOW-LISTED, never a spread of clientBody (O1, security_rules #14: the
@@ -183,7 +255,12 @@ export async function POST(req: NextRequest) {
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
     session_id: clientBody.session_id,
     tab_id: clientBody.tab_id,
-    cli_provider: effectiveCliProvider, // forced to claude for non-owner/admin
+    ...(effectiveCliProvider ? { cli_provider: effectiveCliProvider } : { model: localModelName(savedRoute.engineName) }),
+    target_pairing_id: savedRoute.pairingId,
+    target_machine_fingerprint: targetMachineFingerprint,
+    runtime_engine_kind: savedRoute.engineKind,
+    runtime_engine_name: savedRoute.engineName,
+    fallback_policy: savedRoute.fallback,
     chat_mode: clientBody.chat_mode,
     // The six fields ChatWidget sends (components/ChatWidget.tsx attachmentPayload),
     // each kept only when it has its expected type. Before O1 the whole client
@@ -208,7 +285,8 @@ export async function POST(req: NextRequest) {
   // stops). req.signal fires on client abort.
   let upstream: Response;
   try {
-    upstream = await fetch(`${auth.target.baseUrl}/chat`, {
+    const upstreamPath = savedRoute.engineKind === "local" ? "/local-chat" : "/chat";
+    upstream = await fetch(`${auth.target.baseUrl}${upstreamPath}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -244,7 +322,7 @@ export async function POST(req: NextRequest) {
     tenantId: auth.tenantId,
     userId: auth.userId,
     agent,
-    cliProvider: effectiveCliProvider,
+    cliProvider: effectiveCliProvider ?? `local:${savedRoute.engineName}`,
     // Stable per-conversation key = the client's tab_id (NOT Claude's per-turn
     // session id, which forks every --resume turn and would shatter history).
     conversationId: String(clientBody.tab_id || ""),
@@ -263,6 +341,41 @@ export async function POST(req: NextRequest) {
     teamRole: auth.teamRole,
   });
   return new Response(withActions, { status: upstream.status, headers: sseHeaders });
+}
+
+function runtimeRoot(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== "string" || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function runtimeReady(raw: unknown, route: Extract<HarnessRoute, { mode: "cli" }>): boolean {
+  const root = runtimeRoot(raw);
+  if (route.engineKind === "subscription") {
+    const runtimeState = root[route.engineName];
+    return Boolean(
+      runtimeState &&
+        typeof runtimeState === "object" &&
+        !Array.isArray(runtimeState) &&
+        (runtimeState as Record<string, unknown>).state === "ready",
+    );
+  }
+  const models = Array.isArray(root.local_models) ? root.local_models : [];
+  return models.some((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const model = entry as Record<string, unknown>;
+    return model.ref === route.engineName && model.state === "ready";
+  });
+}
+
+function localModelName(modelRef: string): string {
+  const slash = modelRef.indexOf("/");
+  return slash >= 0 ? modelRef.slice(slash + 1) : modelRef;
 }
 
 function jsonError(status: number, message: string) {

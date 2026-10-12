@@ -66,6 +66,7 @@ import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
 import {
   bridgeEngineLine,
+  CLI_ENGINE_LABEL,
   engineFallbackReason,
   harnessEngineLine,
   spendFor,
@@ -138,7 +139,17 @@ export type AgentTurnRequest = {
    * monthly budget check entirely -- a computer turn spends no API credits
    * and calls no hosted model from the Worker, so none of that applies.
    */
-  engineInput?: { kind: "computer"; label: string } | null;
+  engineInput?: { kind: "computer"; label: string; engine?: BridgeEngine } | null;
+  /**
+   * A session-scoped canonical API choice. This bypasses the workspace engine
+   * row while still using only the workspace's configured API account.
+   */
+  engineChoice?: Extract<AgentEngineChoice, { kind: "api" }> | null;
+  /**
+   * The exact device engine whose explicit workspace_api policy was taken.
+   * Its identity is carried into reply metadata and the usage ledger.
+   */
+  fallbackFrom?: Exclude<AgentEngineChoice, { kind: "api" }> | null;
 };
 
 /**
@@ -246,6 +257,18 @@ export function interpolate(template: string, vars: Record<string, string>): str
   });
 }
 
+/** Provider-family metadata for a computer runtime. No hosted call is made. */
+function computerRuntimeProvider(engine: BridgeEngine): Provider {
+  if (engine.kind === "local") return LOCAL_MODEL_PROVIDER;
+  if (engine.cli === "codex") return "openai";
+  if (engine.cli === "gemini") return "google";
+  return "anthropic";
+}
+
+function computerRuntimeLabel(engine: BridgeEngine): string {
+  return engine.kind === "cli" ? CLI_ENGINE_LABEL[engine.cli] : `${engine.model} (local model)`;
+}
+
 /**
  * Resolve everything a turn needs, or say why it cannot run. No model is
  * called here; the budget is only checked.
@@ -318,7 +341,10 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
     const { composeSystemPrompt, normalizeMode } = await import("@/lib/chat-modes/plan-mode");
     const system = composeSystemPrompt(baseSystem, normalizeMode(req.chatMode));
     const label = req.engineInput.label;
-    const billing = billingForBridge({ kind: "cli" });
+    // No engine means a frozen department_task_v1 row, whose contract is
+    // Claude. V2 callers pass the exact engine snapshotted at queue time.
+    const computerEngine: BridgeEngine = req.engineInput.engine ?? { kind: "cli", cli: "claude" };
+    const billing = billingForBridge(computerEngine);
     const meter = modelCallMeter({
       tenantId,
       surface: req.surface ?? "agents.chat",
@@ -328,7 +354,14 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       userId: req.userId,
       jobId: req.jobId ?? null,
     });
-    const engine: TurnEngine = { kind: "computer", runsOn: `${label} · Claude Code`, spend: spendFor({ kind: "cli", cli: "claude" }), fellBackFrom: null, notUsedFor: null, label };
+    const engine: TurnEngine = {
+      kind: "computer",
+      runsOn: `${label} · ${computerRuntimeLabel(computerEngine)}`,
+      spend: spendFor(computerEngine),
+      fellBackFrom: null,
+      notUsedFor: null,
+      label,
+    };
     return {
       ok: true,
       turn: {
@@ -337,20 +370,18 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
         channelKey,
         department: dept,
         displayName,
-        provider: "anthropic",
-        // Nominal only: this turn sends no hosted model call, so nothing here
-        // is ever matched against lib/ai/model-registry.ts. "claude" (not
-        // "claude-code") on purpose -- the model-literal scan
-        // (tests/model-registry.checks.ts) matches `claude-<word>` shapes as
-        // a real provider model id and would otherwise flag this as unknown.
-        model: "claude",
+        // Nominal only: this turn sends no hosted model call. These fields
+        // still feed audit/public metadata, so they must name the runtime that
+        // the selected computer is actually about to run.
+        provider: computerRuntimeProvider(computerEngine),
+        model: bridgeLedgerModel(computerEngine),
         swap: null,
         apiKey: "",
         keySource: "tenant",
         system,
         meter,
         revealModel: req.revealModel,
-        localModelAllowed: false,
+        localModelAllowed: computerEngine.kind === "local",
         engine,
       },
     };
@@ -362,7 +393,10 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   let cfg: WorkspaceAiAccount | null;
   let chosen: AgentEngineChoice;
   try {
-    [cfg, chosen] = await Promise.all([readWorkspaceAiAccount(tenantId), readAgentEngine(tenantId)]);
+    [cfg, chosen] = await Promise.all([
+      readWorkspaceAiAccount(tenantId),
+      req.engineChoice ? Promise.resolve(req.engineChoice) : readAgentEngine(tenantId),
+    ]);
   } catch (err) {
     // A failed read is not "no key": answering 412 would send the owner to
     // connect an account that is already connected.
@@ -421,10 +455,12 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // WHY the chosen engine is not answering decides what is said and recorded.
   // Only a person the gate admits, for whom the computer cannot be used, is a
   // FALLBACK (a fault). Everyone else is answered by the API account by design.
+  const explicitFallback = req.fallbackFrom ?? null;
   const engineLine = bridgeEngine ? bridgeEngineLine(bridgeEngine) : null;
   const unreachable = Boolean(bridgeEngine && !viaBridge && resolved && "unavailable" in resolved);
-  const fellBackFrom = unreachable ? engineLine : null;
-  const notUsedFor = bridgeEngine && !viaBridge && !unreachable ? engineLine : null;
+  const fallbackChoice = explicitFallback ?? (unreachable ? bridgeEngine : null);
+  const fellBackFrom = fallbackChoice ? bridgeEngineLine(fallbackChoice) : null;
+  const notUsedFor = !explicitFallback && bridgeEngine && !viaBridge && !unreachable ? engineLine : null;
   if (viaBridge) {
     // Named for the logs and the operator's model detail; no key is sent.
     provider = hasUsableKey(cfg) ? cfg.provider : "anthropic";
@@ -444,18 +480,26 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       return { ok: false, status: 500, error: "key_unreadable", recordAs: "key_unreadable", agentSlug: agent.slug, channelKey };
     }
   } else {
-    const fallback = req.platformFallback;
+    // An opted-in device fallback may spend only the workspace's own account.
+    // Even a verified operator's platform key is deliberately unavailable on
+    // this path, so a missing workspace key fails instead of hiding spend.
+    const fallback = fallbackChoice ? null : req.platformFallback;
     if (!fallback) {
       // Not recorded as the channel's last turn: no key was tried, so this says
       // nothing about the key. It IS a department turn that got no answer, so
       // the ledger gets its row: with an app chosen, its computer down and no
       // account behind it, this refusal is the whole outage.
+      const unavailableEngine = fallbackChoice ?? bridgeEngine;
       await recordRefusedTurn(
         req,
         startedAt,
         "agent_not_configured",
-        bridgeEngine
-          ? { provider: "bridge", model: bridgeLedgerModel(bridgeEngine), ...billingForBridge(bridgeEngine) }
+        unavailableEngine
+          ? {
+              provider: "bridge",
+              model: bridgeLedgerModel(unavailableEngine),
+              ...billingForBridge(unavailableEngine),
+            }
           : { provider: "none", model: "none", ...billingForKey("none", "tenant") },
       );
       return {
@@ -534,7 +578,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // fallback: an API turn that is the rule (Slack, a teammate the gate does not
   // admit, a chat with no harness) records none, or the health check would page
   // on turns that are working as designed.
-  const apiMeter = bridgeEngine && fellBackFrom ? meterWithFallbackReason(meter, engineFallbackReason(bridgeEngine)) : meter;
+  const apiMeter = fallbackChoice ? meterWithFallbackReason(meter, engineFallbackReason(fallbackChoice)) : meter;
   const picked = viaBridge ? { model, swap: null, meter } : resolveCall(provider, model, apiMeter);
   const brain = keySource === "tenant" && hasUsableKey(cfg) ? departmentBrain({ provider, model: picked.model }) : null;
   const engine: TurnEngine = viaBridge
@@ -709,10 +753,10 @@ export function streamAgentTurn(
 ): AsyncGenerator<StreamEvent> {
   // O4: a turn pull-dispatched to the person's OWN paired computer never
   // streams through the Worker at all (lib/os/runs/computer-turn.ts builds
-  // its system prompt and MCP/run tokens, and the computer runs Claude Code
-  // itself). Calling this with one is a caller bug, not a thing to paper
-  // over as a local-model stream -- fail loud, never silently mis-route to
-  // 'local' (turn.engine has no `model` field to read there, which is
+  // its system prompt and MCP/run tokens, and the computer runs the queued
+  // CLI/local snapshot itself). Calling this with one is a caller bug, not a
+  // thing to paper over as a local-model stream -- fail loud, never silently
+  // mis-route to 'local' (turn.engine has no `model` field to read there, which is
   // exactly the shape-mismatch this guard exists to catch before it happens).
   if (turn.engine.kind === "computer") {
     throw new Error("streamAgentTurn: a computer-dispatched turn must never stream through the Worker's model-call path");

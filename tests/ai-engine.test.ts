@@ -191,7 +191,7 @@ async function main() {
       last_used_at TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-      user_id TEXT, display_name_override TEXT);
+      user_id TEXT, display_name_override TEXT, computer_pairing_id TEXT, fallback_policy TEXT);
     CREATE UNIQUE INDEX idx_agent_model_config_default_per_agent ON agent_model_config (tenant_id, agent_key) WHERE (user_id IS NULL);
     CREATE UNIQUE INDEX idx_agent_model_config_override_per_user ON agent_model_config (tenant_id, user_id, agent_key) WHERE (user_id IS NOT NULL);
   `);
@@ -249,12 +249,9 @@ async function main() {
   const outcome = await import("../lib/os/channel/outcome");
   const providerRoute = await import("../app/api/agent-config/workspace-provider/route");
   const bulk = await import("../app/api/agent-config/bulk-provider/route");
-  const cliAuth = await import("../app/api/bridge/cli-auth/route");
   const harness = await import("../lib/admin/harness-targets");
-  const engineRoute = await import("../app/api/ai/engine/route");
   const chat = await import("../app/api/agents/chat/route");
   const cliStatus = await import("../lib/bridge-cli-status");
-  const cliRuntime = await import("../lib/cli-runtime");
   const layout = await import("../components/agents/chat-layout");
   const { channelEngine } = await import("../components/os/department/channel");
   const { NextRequest } = await import("next/server");
@@ -263,13 +260,15 @@ async function main() {
   const jsonOf = async (res: Response) => ({ status: res.status, body: (await res.json()) as Record<string, unknown> });
   const sales = departmentBySlug("sales")!;
   const rowsOf = async (tenant: string) =>
-    (await db.execute({ sql: "SELECT agent_key, provider, model, encrypted_api_key, enabled FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL ORDER BY agent_key", args: [tenant] })).rows.map((r) => ({
+    (await db.execute({ sql: "SELECT agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL ORDER BY agent_key", args: [tenant] })).rows.map((r) => ({
       agent_key: String(r.agent_key),
       provider: String(r.provider),
       model: String(r.model),
       key: r.encrypted_api_key === null ? null : decryptField(String(r.encrypted_api_key)),
       cipher: r.encrypted_api_key === null ? null : String(r.encrypted_api_key),
       enabled: Number(r.enabled),
+      pairingId: r.computer_pairing_id === null ? null : String(r.computer_pairing_id),
+      fallback: r.fallback_policy === null ? null : String(r.fallback_policy),
     }));
 
   console.log("ai-engine:");
@@ -277,12 +276,19 @@ async function main() {
   console.log("1. what powers your agents");
   await check("no engine row is the AI account; a choice is stored on its own keyless row and read back", async () => {
     assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "api" });
-    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "codex" });
-    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "cli", cli: "codex" });
-    await store.saveAgentEngine(ALPHA, { kind: "local", model: "llama3.3" });
-    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "local", model: "llama3.3" });
+    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "codex", pairingId: "pair-alpha", fallback: "none" });
+    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "cli", cli: "codex", pairingId: "pair-alpha", fallback: "none" });
+    await store.saveAgentEngine(ALPHA, { kind: "local", model: "ollama/llama3.3", pairingId: "pair-alpha", fallback: "workspace_api" });
+    assert.deepEqual(await store.readAgentEngine(ALPHA), {
+      kind: "local",
+      model: "ollama/llama3.3",
+      pairingId: "pair-alpha",
+      fallback: "workspace_api",
+    });
     const row = (await rowsOf(ALPHA)).find((r) => r.agent_key === engineLib.ENGINE_AGENT_KEY);
     assert.ok(row && row.cipher === null, "the engine row holds no key");
+    assert.equal(row.pairingId, "pair-alpha", "the exact computer is stored on the canonical engine row");
+    assert.equal(row.fallback, "workspace_api", "fallback is explicit, never inferred");
     await store.saveAgentEngine(ALPHA, { kind: "api" });
     assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "api" });
     assert.equal(engineLib.parseEngineChoice({ kind: "cli", cli: "bash" }), null);
@@ -348,116 +354,125 @@ async function main() {
     await store.keepSavedKey({ tenantId: ALPHA, provider: "openrouter", model: "anthropic/claude-sonnet-4.6", encryptedApiKey: encryptField(KEY_OR) });
   });
 
-  await check("the engine route: a client workspace can't reach CC's computer, so an app engine is refused before anything is saved", async () => {
-    await login(USERS.alpha);
-    sent = [];
-    const r = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "claude" }, expected_version: null })));
-    assert.equal(r.status, 409);
-    assert.equal(r.body.error, "bridge_unavailable");
-    assert.equal(sent.length, 0, "no request left the server");
-    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "api" });
-    const got = await jsonOf(await engineRoute.GET());
-    assert.equal(got.status, 200);
-    assert.deepEqual(got.body.engine, { kind: "api" });
-    assert.deepEqual(got.body.bridge, { reachable: false });
-    assert.ok((got.body.savedProviders as string[]).includes("openrouter"), "the kept OpenRouter key is switchable");
+  await check("a subscription selection is invalid until it names one exact paired computer", async () => {
+    const client = await import("../components/settings/agent-engine-client");
+    assert.equal(
+      engineLib.parseEngineSelection({ mode: "subscription", provider: "claude", fallback: "none" }),
+      null,
+      "the canonical server payload cannot be unbound",
+    );
+    const selection = { mode: "subscription", provider: "claude", pairingId: "pair-alpha", fallback: "none" } as const;
+    assert.deepEqual(engineLib.parseEngineSelection(selection), selection);
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const queued = await client.queueEngineProbe(selection, "person", async (url, init) => {
+      calls.push({ url, body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ ok: true, job_id: "probe-alpha" }), { status: 202 });
+    });
+    assert.deepEqual(queued, { ok: true, jobId: "probe-alpha" });
+    assert.deepEqual(calls, [{ url: "/api/ai/engine", body: { engine: selection, scope: "person" } }]);
+    assert.deepEqual(await store.readAgentEngine(ALPHA), { kind: "api" }, "queueing a test does not save the candidate");
   });
 
-  await check("the engine route: OASIS's owner picks Codex; it answers one test reply through the bridge FIRST, then it is saved", async () => {
-    await login(USERS.cc);
-    sent = [];
-    answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Ready when you are.") : new Response("unexpected", { status: 599 }));
-    // OASIS with nothing saved runs on the CLI bridge (CC: "for my workspace they don't use API keys").
-    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "claude" });
-    const shown = await jsonOf(await engineRoute.GET());
-    assert.equal(shown.body.workspace, "oasis");
-    assert.deepEqual(shown.body.bridge, { reachable: true });
-    const r = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "codex" }, expected_version: null })));
-    assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].url, `${BRIDGE}/chat`);
-    assert.equal(sent[0].headers.authorization, "Bearer bearer-oasis-test", "the server-only bearer, as the coding harness's proxy sends it");
-    assert.equal(sent[0].body?.cli_provider, "codex", "an owner keeps the app they chose");
-    assert.equal(sent[0].body?.chat_mode, "plan");
-    assert.equal(sent[0].body?.agent, "bravo", "the test answers in the Chief of Staff's harness");
-    assert.match(String((sent[0].body?.messages as Array<{ content: string }>)[0].content), /^This message comes from the Chief of Staff channel of the OASIS Command Center\./);
-    assert.equal(sent[0].body?.tenant_id, OASIS);
-    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
-    // A test that fails changes nothing.
-    answer = () => sse([["error", { code: "cli_not_authenticated", message: "codex: not signed in" }], ["done", {}]]);
-    const bad = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "gemini" }, expected_version: null })));
-    assert.equal(bad.status, 422);
-    assert.match(String(bad.body.message), /nothing was changed\. The AI app on your paired computer could not answer\./);
-    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
-  });
-
-  await check("ONLY THE LATEST CHOICE WINS: a stale save is refused (409), a cancelled one commits nothing, a late one cannot overwrite a newer one", async () => {
-    await login(USERS.cc);
-    answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Ready when you are.") : new Response("unexpected", { status: 599 }));
-    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
-    const version = async () => (await jsonOf(await engineRoute.GET())).body.engineVersion as string | null;
-    const v0 = await version();
-    assert.equal(typeof v0, "string", "GET hands the page the choice's version");
-    const put = (engine: unknown, expected: unknown, signal?: AbortSignal) =>
-      engineRoute.PUT(
-        new NextRequest("http://localhost/api/ai/engine", {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ engine, expected_version: expected }),
-          signal,
-        }),
-      );
-    // No version at all is refused (the page always sends one).
-    assert.equal((await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "claude" } })))).body.error, "invalid_version");
-    // A version that is not current: refused, nothing changes.
-    const stale = await jsonOf(await put({ kind: "cli", cli: "claude" }, "2000-01-01T00:00:00.000Z"));
-    assert.equal(stale.status, 409);
-    assert.equal(stale.body.error, "stale_choice");
-    assert.match(String(stale.body.message), /A newer choice was saved/);
-    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
-    // A request cancelled while its test runs commits nothing, even though the test passed.
-    const ctl = new AbortController();
-    answer = () => {
-      ctl.abort();
-      return bridgeOk("Ready when you are.");
-    };
-    const cancelled = await jsonOf(await put({ kind: "cli", cli: "claude" }, v0, ctl.signal));
-    assert.equal(cancelled.status, 409);
-    assert.equal(cancelled.body.error, "cancelled");
-    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
-    assert.equal(await version(), v0, "the cancelled save left the row alone");
-    // Cancel Gemini at 10 s, pick Claude, save: Claude commits, then the OLD Gemini test finishes and must NOT overwrite it.
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((r) => (release = r));
-    let first = true;
-    answer = async () => {
-      if (first) {
-        first = false;
-        await gate; // the slow Gemini probe
+  await check("Test, poll and Save keep the same pairing, runtime, probe receipt and engine version end to end", async () => {
+    const client = await import("../components/settings/agent-engine-client");
+    const selection = { mode: "subscription", provider: "codex", pairingId: "pair-ccpc", fallback: "none" } as const;
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    let reads = 0;
+    const fetcher = async (url: string, init: RequestInit) => {
+      calls.push({ url, method: String(init.method), body: init.body ? JSON.parse(String(init.body)) : null });
+      if (url === "/api/ai/engine" && init.method === "POST") {
+        return new Response(JSON.stringify({ ok: true, job_id: "probe-ccpc-codex" }), { status: 202 });
       }
-      return bridgeOk("Ready when you are.");
+      if (url === "/api/bridge/runtime-jobs/probe-ccpc-codex") {
+        reads += 1;
+        const status = reads === 1 ? "queued" : "completed";
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            job: {
+              id: "probe-ccpc-codex",
+              status,
+              action: "probe",
+              engine: { kind: "cli", name: "codex" },
+              result: status === "completed" ? { reply: "Ready when you are.", latency_ms: 420 } : null,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, engine: selection }), { status: 200 });
     };
-    const slow = put({ kind: "cli", cli: "gemini" }, v0);
-    await new Promise((r) => setTimeout(r, 20));
-    const claude = await jsonOf(await put({ kind: "cli", cli: "claude" }, v0));
-    assert.equal(claude.status, 200, JSON.stringify(claude.body));
-    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "claude" });
-    release();
-    const late = await jsonOf(await slow);
-    assert.equal(late.status, 409, "the late Gemini save is refused");
-    assert.equal(late.body.error, "stale_choice");
-    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "claude" }, "Claude stays the choice");
-    // The page that re-reads gets the new version and its save goes through.
-    const v1 = await version();
-    assert.notEqual(v1, v0);
-    answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Ready when you are.") : new Response("unexpected", { status: 599 }));
-    assert.equal((await jsonOf(await put({ kind: "cli", cli: "codex" }, v1))).status, 200);
-    // First-ever save (no row) goes in only while there is still no row.
-    await db.execute({ sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND agent_key = '__engine__' AND user_id IS NULL", args: [OASIS] });
-    assert.equal(await version(), null);
-    assert.equal((await jsonOf(await put({ kind: "cli", cli: "claude" }, null))).status, 200);
-    assert.equal((await jsonOf(await put({ kind: "cli", cli: "codex" }, null))).body.error, "stale_choice", "a second first-save finds the row there");
-    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "claude" });
+    const queued = await client.queueEngineProbe(selection, "workspace", fetcher);
+    assert.equal(queued.ok, true);
+    if (!queued.ok) return;
+    const finished = await client.pollRuntimeJob(queued.jobId, fetcher, { intervalMs: 0 });
+    assert.equal(finished.ok && finished.job.status, "done");
+    const saved = await client.saveEngine(selection, "workspace-v7", fetcher, {
+      scope: "workspace",
+      probeJobId: queued.jobId,
+    });
+    assert.equal(saved.ok, true);
+    assert.deepEqual(calls[0], {
+      url: "/api/ai/engine",
+      method: "POST",
+      body: { engine: selection, scope: "workspace" },
+    });
+    assert.deepEqual(calls.at(-1), {
+      url: "/api/ai/engine",
+      method: "PUT",
+      body: { engine: selection, scope: "workspace", expected_version: "workspace-v7", probe_job_id: "probe-ccpc-codex" },
+    });
+    assert.ok(
+      calls.filter((call) => call.url === "/api/bridge/runtime-jobs/probe-ccpc-codex").every((call) => call.method === "GET"),
+      "polling reads only the receipt for the queued exact-pairing probe",
+    );
+  });
+
+  await check("ONLY THE LATEST CHOICE WINS: CAS rejects a stale exact-device row and a cancelled browser save commits nothing", async () => {
+    const client = await import("../components/settings/agent-engine-client");
+    const codex = { kind: "cli", cli: "codex", pairingId: "pair-ccpc", fallback: "none" } as const;
+    const claude = { kind: "cli", cli: "claude", pairingId: "pair-mac", fallback: "none" } as const;
+    await store.saveAgentEngine(OASIS, codex);
+    const versionRow = await db.execute({
+      sql: "SELECT updated_at FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL AND agent_key = '__engine__'",
+      args: [OASIS],
+    });
+    const staleVersion = String(versionRow.rows[0].updated_at);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await store.saveAgentEngine(OASIS, claude);
+    assert.equal(
+      await store.saveAgentEngineIfCurrent(OASIS, { ...codex, pairingId: "pair-late" }, staleVersion),
+      false,
+      "a late save cannot overwrite the newer exact pairing",
+    );
+    assert.deepEqual(await store.readAgentEngine(OASIS), claude);
+
+    let seenSignal: AbortSignal | null = null;
+    let sentBody: Record<string, unknown> | null = null;
+    const waits = (_url: string, init: RequestInit) => {
+      seenSignal = init.signal;
+      sentBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return new Promise<Response>(() => undefined);
+    };
+    const ctl = new AbortController();
+    const pending = client.saveEngine(
+      { mode: "subscription", provider: "codex", pairingId: "pair-ccpc", fallback: "none" },
+      "workspace-v8",
+      waits,
+      { scope: "workspace", probeJobId: "probe-8", signal: ctl.signal },
+    );
+    ctl.abort();
+    const cancelled = await pending;
+    assert.equal(cancelled.ok, false);
+    assert.equal((cancelled as { stopped?: boolean }).stopped, true);
+    assert.equal(seenSignal?.aborted, true, "Cancel aborts the in-flight save request");
+    assert.deepEqual(sentBody, {
+      engine: { mode: "subscription", provider: "codex", pairingId: "pair-ccpc", fallback: "none" },
+      scope: "workspace",
+      expected_version: "workspace-v8",
+      probe_job_id: "probe-8",
+    });
+    assert.deepEqual(await store.readAgentEngine(OASIS), claude, "the cancelled browser call did not mutate the row");
     await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
   });
 
@@ -937,7 +952,7 @@ async function main() {
     assert.equal(r.outcome, "cancelled");
   });
 
-  await check("one rule for who runs which app: a member is pinned to Claude Code with its tools switched off; the proxy route uses the same rule", () => {
+  await check("one rule identifies an unsafe app for a restricted role; the coding proxy refuses it instead of substituting Claude", () => {
     const member = policy.bridgeCliPolicy("closer", "codex");
     assert.equal(member.cliProvider, "claude");
     assert.ok(member.disallowedTools.length > 0);
@@ -956,6 +971,7 @@ async function main() {
     assert.ok((turnReq.body.disallowed_tools as string[]).length > 0);
     const proxy = readFileSync(join(ROOT, "app/api/bridge/chat/route.ts"), "utf8");
     assert.match(proxy, /bridgeCliPolicy\(\s*auth\.teamRole,/);
+    assert.match(proxy, /policy\.cliProvider !== savedRoute\.engineName\) return jsonError\(403, "engine_not_allowed_for_role"\)/);
   });
 
   await check("the bridge gate: CC (operator, OASIS) reaches OASIS's computer; a client owner reaches nothing", async () => {
@@ -983,13 +999,39 @@ async function main() {
   });
 
   await check("ONE setting: the coding harness's route comes from what powers your agents, and there is no second picker", () => {
-    assert.deepEqual(engineLib.harnessRouteFor({ kind: "cli", cli: "codex" }), { mode: "cli", runtime: "codex", note: null });
-    assert.deepEqual(engineLib.harnessRouteFor({ kind: "api" }), { mode: "cloud_only", runtime: "claude", note: null });
-    assert.equal(engineLib.harnessRouteFor({ kind: "local", model: "llama3.3" }).runtime, "claude");
+    assert.deepEqual(engineLib.harnessRouteFor({ kind: "cli", cli: "codex", pairingId: "pair-ccpc", fallback: "none" }), {
+      mode: "cli",
+      runtime: "codex",
+      pairingId: "pair-ccpc",
+      engineKind: "subscription",
+      engineName: "codex",
+      fallback: "none",
+      note: null,
+    });
+    assert.equal(engineLib.harnessRouteFor({ kind: "cli", cli: "codex" }).mode, "unavailable");
+    assert.deepEqual(engineLib.harnessRouteFor({ kind: "api" }), {
+      mode: "cloud_only",
+      runtime: null,
+      pairingId: null,
+      engineKind: "api",
+      engineName: null,
+      fallback: "none",
+      note: null,
+    });
+    assert.deepEqual(engineLib.harnessRouteFor({ kind: "local", model: "ollama/llama3.3", pairingId: "pair-ccpc", fallback: "none" }), {
+      mode: "cli",
+      runtime: null,
+      pairingId: "pair-ccpc",
+      engineKind: "local",
+      engineName: "ollama/llama3.3",
+      fallback: "none",
+      note: null,
+    });
     const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
     assert.doesNotMatch(widget, /aria-label="Chat route"|renderCliOption|writeHarnessOverride/, "the harness's own route picker is gone");
     assert.match(widget, /const route = harnessRouteFor\(engine\);/);
-    assert.match(widget, /setChatModeState\(route\.mode\);\s*setCliRuntimeState\(route\.runtime\);/);
+    assert.match(widget, /setChatModeState\(route\.mode\);\s*if \(route\.runtime\) \{\s*setCliRuntimeState\(route\.runtime\);/);
+    assert.match(widget, /target_pairing_id:\s*harnessRoute\?\.mode === "cli" \? harnessRoute\.pairingId/);
     const card = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
     assert.doesNotMatch(card, /role="radiogroup"|chooseCli|writeCliRuntime/, "the paired-computer card has no picker");
     // Nothing that powers a department reads the browser-local route.
@@ -998,48 +1040,28 @@ async function main() {
     }
   });
 
-  await check("Connect / Reconnect: the bridge starts the app's own sign-in on the paired computer, with the app's real command", async () => {
-    // The real commands (checked against the installed apps on CC's PC, 2026-10-09).
-    assert.equal(cliStatus.CLI_SIGN_IN.claude.command, "claude auth login");
+  await check("Connect / Reconnect: auth is queued on one exact pairing with the vendor's real command", async () => {
+    assert.equal(cliStatus.CLI_SIGN_IN.claude.command, "claude");
+    assert.match(cliStatus.CLI_SIGN_IN.claude.instructions, /then enter `\/login`/);
     assert.equal(cliStatus.CLI_SIGN_IN.codex.command, "codex login");
-    assert.match(cliStatus.CLI_SIGN_IN.gemini.command, /^gemini\s+\(then choose "Sign in with Google", or type \/auth\)$/);
-    await login(USERS.cc);
-    sent = [];
-    answer = (s) =>
-      s.url === `${BRIDGE}/exec-tool`
-        ? new Response(JSON.stringify({ ok: true, output: "codex sign-in started. https://auth.openai.com/...", is_error: false }), { status: 200 })
-        : new Response("x", { status: 599 });
-    const r = await jsonOf(await cliAuth.POST(new Request("http://localhost/api/bridge/cli-auth", { method: "POST", body: JSON.stringify({ provider: "codex" }) })));
-    assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].headers.authorization, "Bearer bearer-oasis-test");
-    assert.deepEqual(sent[0].body, { tool_name: "cli_auth_start", input: { provider: "codex" } });
-    assert.equal(r.body.command, "codex login");
-    assert.match(String(r.body.output), /https:\/\/auth\.openai\.com/);
-    // A bridge that does not answer is said plainly, with the command to run there.
-    answer = () => {
-      throw new TypeError("fetch failed");
-    };
-    const down = await jsonOf(await cliAuth.POST(new Request("http://localhost/api/bridge/cli-auth", { method: "POST", body: JSON.stringify({ provider: "claude" }) })));
-    assert.equal(down.status, 502);
-    assert.match(String(down.body.message), /On that computer, run: claude auth login$/);
-    // A client owner reaches no bridge: refused before anything is sent.
-    await login(USERS.alpha);
-    sent = [];
-    const client = await jsonOf(await cliAuth.POST(new Request("http://localhost/api/bridge/cli-auth", { method: "POST", body: JSON.stringify({ provider: "gemini" }) })));
-    assert.equal(client.status, 403);
-    assert.equal(sent.length, 0);
-    // The card's button calls exactly this route.
+    assert.equal(cliStatus.CLI_SIGN_IN.gemini.command, null);
+    assert.match(cliStatus.CLI_SIGN_IN.gemini.instructions, /unsupported.*Google Gemini API key/i);
     const calls: string[] = [];
     const { startCliSignIn } = await import("../components/settings/LocalCliProvidersCard");
-    const res = await startCliSignIn("codex", async (url, init) => {
+    const res = await startCliSignIn("codex", "pair-ccpc", async (url, init) => {
       calls.push(`${init.method} ${url} ${String(init.body)}`);
-      return new Response(JSON.stringify({ ok: true, message: "Started.", output: "" }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true, job_id: "auth-codex-1", command: "codex login", message: "Started on CCPC." }), { status: 202 });
     });
-    assert.deepEqual(res, { ok: true, text: "Started." });
-    assert.deepEqual(calls, ['POST /api/bridge/cli-auth {"provider":"codex"}']);
-    const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
-    assert.match(src, /\{cs !== "ready" && cs !== "unsupported" && \(/, "every card that is not ready offers Connect, except one the vendor refuses (signing in again cannot help)");
+    assert.deepEqual(res, { ok: true, text: "Started on CCPC.", jobId: "auth-codex-1", command: "codex login" });
+    assert.deepEqual(calls, ['POST /api/bridge/cli-auth {"provider":"codex","pairing_id":"pair-ccpc"}']);
+    let geminiCalled = false;
+    const unsupported = await startCliSignIn("gemini", "pair-ccpc", async () => {
+      geminiCalled = true;
+      return new Response(null, { status: 204 });
+    });
+    assert.equal(unsupported.ok, false);
+    assert.equal(geminiCalled, false, "Gemini personal sign-in never starts a reconnect loop");
+    assert.match(unsupported.text, /Google API key/);
   });
 
   await check("the coding harness never spins forever: each read has a time limit and says why it failed", async () => {
@@ -1085,13 +1107,26 @@ async function main() {
     assert.ok(timedOut.ok && cliStatus.cliStatusState(timedOut.data.gemini) === "unknown");
   });
 
-  await check("the paired-computer card never locks an app out, and never says 'Needs auth' or 'Not installed'", () => {
-    const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
-    assert.doesNotMatch(src, /"Needs auth"|"Not installed"/);
-    assert.doesNotMatch(src, /disabled=\{!ready\}/, "an app the report got wrong could not be chosen");
-    assert.match(src, /cliStatusState\(/);
-    const panel = readFileSync(join(ROOT, "components/BridgeCliPanel.tsx"), "utf8");
-    assert.match(panel, /CLI_STATE_LABEL\[cli\]/);
+  await check("the consolidated panel distinguishes installed/sign-in evidence from a real agent-ready probe", async () => {
+    const client = await import("../components/settings/agent-engine-client");
+    const device = {
+      label: "CCPC (Windows)",
+      approved: true,
+      online: true,
+      busy: false,
+      protocols: ["department_task_v2", "runtime_action_v1"],
+      runtimes: {
+        claude: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "2.1.270", lastTestedAt: null, code: null },
+        codex: { installed: true, signedIn: true, executionReady: true, unsupported: false, version: "0.146", lastTestedAt: stamp, code: null },
+        gemini: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "0.63", lastTestedAt: null, code: "unsupported_personal_sign_in" },
+      },
+    };
+    assert.equal(client.describeRuntime(device, "claude").label, "Needs test", "signed in is inventory evidence, not execution proof");
+    assert.equal(client.describeRuntime(device, "codex").label, "Ready for agents");
+    assert.equal(client.describeRuntime(device, "gemini").label, "Unsupported");
+    const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
+    assert.match(panel, /describeRuntime\(selectedDevice, provider\)/, "the unified picker uses the truthful per-device state");
+    assert.doesNotMatch(readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8"), /fetch\("\/api\/bridge\/cli-status"/, "the retired separate card cannot publish a competing status");
   });
 
   // -- 4 + 5. The label opens AI brain at the engine; the chat has room ---------

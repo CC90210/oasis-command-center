@@ -17,7 +17,7 @@
  * computer, where it closes the request the app is answering.
  */
 import "server-only";
-import { prepareAgentTurn, streamAgentTurn } from "@/lib/os/department-agent";
+import { prepareAgentTurn, streamAgentTurn, type PreparedTurn } from "@/lib/os/department-agent";
 import { groundDepartmentTurn } from "@/lib/os/desk/turn";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 import { modelFactsForCopy } from "@/lib/ai/model-registry";
@@ -50,6 +50,21 @@ export function executorDepsFor(session: RunSession, db: Client): ExecutorDeps {
   };
 }
 
+/** Engine fields for the run's public agent event. Fallback spend is always disclosed. */
+export function engineMetadataForTurn(
+  turn: Pick<PreparedTurn, "revealModel" | "model" | "engine">,
+  canManageAi: boolean,
+): Record<string, unknown> {
+  if (!turn.revealModel && !canManageAi && !turn.engine.fellBackFrom) return {};
+  return {
+    ...(turn.revealModel ? { model: turn.model } : {}),
+    runs_on: turn.engine.runsOn,
+    spend: turn.engine.spend,
+    ...(turn.engine.fellBackFrom ? { fell_back_from: turn.engine.fellBackFrom } : {}),
+    ...(turn.engine.notUsedFor ? { engine_not_used: turn.engine.notUsedFor } : {}),
+  };
+}
+
 export function turnStarterFor(session: RunSession) {
   return async (input: { run: Run; messages: ChatMessage[]; signal: AbortSignal }): Promise<TurnStart> => {
     const { run, messages, signal } = input;
@@ -59,13 +74,17 @@ export function turnStarterFor(session: RunSession) {
       agentSlug: run.agentSlug,
       department: session.dept,
       operator: { name: session.operatorName, email: session.email },
-      platformFallback: session.fallback,
+      // An opted-in device fallback may spend only this workspace's account;
+      // never borrow the operator platform key when that account is absent.
+      platformFallback: session.fallbackFrom ? null : session.fallback,
       revealModel: session.isOperator,
       // A local model account answers for the verified operator only.
       localModelAllowed: session.isOperator,
       userId: session.scope.userId,
       chatMode: run.chatMode,
       bridge: async () => session.bridge,
+      engineChoice: session.apiEngineChoice,
+      fallbackFrom: session.fallbackFrom,
     });
     if (!prepared.ok) {
       return {
@@ -93,18 +112,10 @@ export function turnStarterFor(session: RunSession) {
       agent: {
         display_name: t.displayName,
         ...(t.department ? { department: t.department.key } : { agent_slug: t.agentSlug }),
-        ...(t.revealModel ? { model: t.model } : {}),
         ...(desk ? { tools: desk.tools } : {}),
         // What answered and whose credits it used, for the people who choose
         // it in Settings > AI brain (lib/ai/agent-engine.ts).
-        ...(t.revealModel || session.canManageAi
-          ? {
-              runs_on: t.engine.runsOn,
-              spend: t.engine.spend,
-              ...(t.engine.fellBackFrom ? { fell_back_from: t.engine.fellBackFrom } : {}),
-              ...(t.engine.notUsedFor ? { engine_not_used: t.engine.notUsedFor } : {}),
-            }
-          : {}),
+        ...engineMetadataForTurn(t, session.canManageAi),
       },
       channelKey: t.channelKey,
       agentSlug: t.agentSlug,

@@ -93,6 +93,9 @@ async function main() {
   // would throw "no such table: bridge_pairings".
   await db.execute(`CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT,
     revoked_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT, paired_via TEXT)`);
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT");
 
   const store = await import("../lib/os/runs/store");
   const types = await import("../lib/os/runs/types");
@@ -199,6 +202,44 @@ async function main() {
     const winners = [a, b].filter(Boolean);
     assert.equal(winners.length, 1, "exactly one claim won");
     assert.equal(winners[0]?.id, q.ok ? q.run.id : undefined);
+  });
+  await check("an exact-device run can be claimed only by its snapshotted pairing, even when another computer belongs to the same person", async () => {
+    const owner = await person();
+    const otherPairingId = uid();
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, claim_enabled_at, claim_enabled_by, paired_via) VALUES (?, ?, ?, ?, ?, 'test', 'pair_code')`,
+      args: [otherPairingId, owner.scope.tenantId, owner.scope.userId, "other approved computer", new Date().toISOString()],
+    });
+    const c = await conv(owner.scope);
+    const queued = await store.enqueueRun(db, owner.scope, {
+      conversationId: c.id,
+      text: "run this on the selected Codex machine",
+      chatMode: "build",
+      showThinking: false,
+      now: now(),
+      executor: "computer",
+      targetPairingId: owner.pairing.pairingId,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+    });
+    assert.ok(queued.ok);
+    if (!queued.ok) return;
+    assert.equal(queued.run.targetPairingId, owner.pairing.pairingId);
+    assert.equal(queued.run.runtimeEngineKind, "cli");
+    assert.equal(queued.run.runtimeEngineName, "codex");
+    assert.equal(
+      await store.claimComputerRun(
+        db,
+        { ...owner.pairing, pairingId: otherPairingId },
+        "wrong-computer",
+        now(),
+        "department_task_v2",
+      ),
+      null,
+    );
+    const claimed = await store.claimComputerRun(db, owner.pairing, "right-computer", now(), "department_task_v2");
+    assert.equal(claimed?.id, queued.run.id);
+    assert.equal(claimed?.claimedPairingId, owner.pairing.pairingId);
   });
   await check("[P2] claim-id dedup is atomic with claiming: two overlapping requests for the SAME claim_id, with TWO different runs available, never claim two different runs under it", async () => {
     // The scenario the previous check cannot reach: with only ONE queued

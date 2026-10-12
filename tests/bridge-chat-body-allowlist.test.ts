@@ -109,6 +109,10 @@ async function main() {
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
       onboarding_completed_at TEXT, updated_at TEXT, deactivated_at TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT, lifecycle TEXT);
+    CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
+      provider TEXT, model TEXT, computer_pairing_id TEXT, fallback_policy TEXT, updated_at TEXT);
+    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT, machine_fingerprint TEXT,
+      last_seen_at TEXT, revoked_at TEXT, claim_enabled_at TEXT, paired_via TEXT, claim_runtime_state TEXT);
   `);
   for (const file of ["database/turso/bravo__208_platform_operators.sql", "database/turso/bravo__210_workspace_agents_owner.sql"]) {
     await db.executeMultiple(readFileSync(join(ROOT, file), "utf8"));
@@ -123,6 +127,14 @@ async function main() {
         args: [CC.id, CC.email, OASIS, stamp, stamp],
       },
       { sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, 'test', ?)", args: [OASIS, CC.id, stamp] },
+      {
+        sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, computer_pairing_id, fallback_policy, updated_at) VALUES ('engine-workspace', ?, NULL, '__engine__', 'cli', 'codex', 'pair-ccpc', 'workspace_api', ?)",
+        args: [OASIS, stamp],
+      },
+      {
+        sql: "INSERT INTO bridge_pairings (id, tenant_id, user_id, label, machine_fingerprint, last_seen_at, claim_enabled_at, paired_via, claim_runtime_state) VALUES ('pair-ccpc', ?, ?, 'CCPC', 'fp-ccpc', ?, ?, 'pair_code', ?)",
+        args: [OASIS, CC.id, new Date().toISOString(), stamp, JSON.stringify({ codex: { state: "ready" }, local_models: [{ ref: "ollama/llama3.3", state: "ready" }] })],
+      },
     ],
     "write",
   );
@@ -131,8 +143,15 @@ async function main() {
   const { POST } = await import("../app/api/bridge/chat/route");
   await login(CC);
 
+  const savedBinding = {
+    cli_provider: "codex",
+    target_pairing_id: "pair-ccpc",
+    runtime_engine_kind: "subscription",
+    runtime_engine_name: "codex",
+    fallback_policy: "workspace_api",
+  };
   const post = (body: Record<string, unknown>) =>
-    POST(new Request("http://localhost/api/bridge/chat", { method: "POST", body: JSON.stringify(body) }) as never);
+    POST(new Request("http://localhost/api/bridge/chat", { method: "POST", body: JSON.stringify({ ...savedBinding, ...body }) }) as never);
 
   await check("a client-supplied `department` block is dropped, never forwarded", async () => {
     calls = [];
@@ -162,7 +181,7 @@ async function main() {
     const keys = Object.keys(calls[0].body).sort();
     assert.deepEqual(
       keys,
-      ["agent", "attachments", "chat_mode", "cli_provider", "disallowed_tools", "messages", "session_id", "tab_id", "team_role", "tenant_id", "user_id"],
+      ["agent", "attachments", "chat_mode", "cli_provider", "disallowed_tools", "fallback_policy", "messages", "runtime_engine_kind", "runtime_engine_name", "session_id", "tab_id", "target_machine_fingerprint", "target_pairing_id", "team_role", "tenant_id", "user_id"],
       `forwarded body must be exactly the allow-list, got: ${keys.join(", ")}`,
     );
     assert.ok(!("not_a_real_field" in calls[0].body));
@@ -244,6 +263,7 @@ async function main() {
       user_id: "forged-user",
       team_role: "owner",
       disallowed_tools: [],
+      target_machine_fingerprint: "forged-machine",
     });
     assert.equal(calls[0].body.tenant_id, OASIS);
     assert.equal(calls[0].body.user_id, CC.id);
@@ -252,6 +272,87 @@ async function main() {
     // not get: team_role is recomputed server-side from the session, never
     // read off the body (bridgeCliPolicy(auth.teamRole, ...), not body.team_role).
     assert.equal(calls[0].body.team_role, "owner");
+    assert.equal(calls[0].body.target_machine_fingerprint, "fp-ccpc", "the machine identity is resolved server-side");
+  });
+
+  await check("the saved subscription binding reaches the bridge byte-for-byte and stale browser choices fail closed", async () => {
+    calls = [];
+    const ok = await post({ agent: "bravo", messages: [{ role: "user", content: "hi" }] });
+    assert.equal(ok.status, 200, await ok.text());
+    assert.equal(calls[0].body.target_pairing_id, "pair-ccpc");
+    assert.equal(calls[0].body.target_machine_fingerprint, "fp-ccpc");
+    assert.equal(calls[0].body.runtime_engine_kind, "subscription");
+    assert.equal(calls[0].body.runtime_engine_name, "codex");
+    assert.equal(calls[0].body.fallback_policy, "workspace_api");
+    assert.equal(calls[0].body.cli_provider, "codex");
+
+    for (const forged of [
+      { target_pairing_id: "pair-other" },
+      { runtime_engine_kind: "local" },
+      { runtime_engine_name: "claude" },
+      { fallback_policy: "none" },
+      { cli_provider: "claude" },
+    ]) {
+      calls = [];
+      const stale = await post({ agent: "bravo", messages: [{ role: "user", content: "hi" }], ...forged });
+      assert.equal(stale.status, 409, JSON.stringify(forged));
+      assert.equal(((await stale.json()) as { error?: string }).error, "engine_selection_stale");
+      assert.equal(calls.length, 0, "a mismatched binding must never reach any bridge");
+    }
+  });
+
+  await check("a saved local binding uses local-chat on the same pairing and never inherits the remembered CLI", async () => {
+    await db.execute({
+      sql: "UPDATE agent_model_config SET provider = 'local', model = 'ollama/llama3.3', fallback_policy = 'none' WHERE id = 'engine-workspace'",
+    });
+    calls = [];
+    const res = await post({
+      agent: "bravo",
+      messages: [{ role: "user", content: "hi" }],
+      cli_provider: undefined,
+      runtime_engine_kind: "local",
+      runtime_engine_name: "ollama/llama3.3",
+      fallback_policy: "none",
+    });
+    assert.equal(res.status, 200, await res.text());
+    assert.equal(calls[0].url, "https://bridge.test/local-chat");
+    assert.equal(calls[0].body.model, "llama3.3");
+    assert.equal(calls[0].body.target_pairing_id, "pair-ccpc");
+    assert.equal(calls[0].body.runtime_engine_kind, "local");
+    assert.equal(calls[0].body.runtime_engine_name, "ollama/llama3.3");
+    assert.equal(calls[0].body.fallback_policy, "none");
+    assert.ok(!("cli_provider" in calls[0].body), "local must not silently become Claude");
+  });
+
+  await check("heartbeat-only, untested, unidentified, and revoked pairings cannot execute coding work", async () => {
+    await db.execute("UPDATE agent_model_config SET provider = 'cli', model = 'codex', fallback_policy = 'workspace_api' WHERE id = 'engine-workspace'");
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_runtime_state = ? WHERE id = 'pair-ccpc'",
+      args: [JSON.stringify({ codex: { state: "signed_in" } })],
+    });
+    calls = [];
+    const untested = await post({ agent: "bravo", messages: [{ role: "user", content: "hi" }] });
+    assert.equal(untested.status, 409);
+    assert.equal(((await untested.json()) as { error?: string }).error, "engine_needs_test");
+    assert.equal(calls.length, 0);
+
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_runtime_state = ?, machine_fingerprint = NULL WHERE id = 'pair-ccpc'",
+      args: [JSON.stringify({ codex: { state: "ready" } })],
+    });
+    const unidentified = await post({ agent: "bravo", messages: [{ role: "user", content: "hi" }] });
+    assert.equal(unidentified.status, 409);
+    assert.equal(((await unidentified.json()) as { error?: string }).error, "pairing_identity_unavailable");
+    assert.equal(calls.length, 0);
+
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET machine_fingerprint = 'fp-ccpc', revoked_at = ? WHERE id = 'pair-ccpc'",
+      args: [new Date().toISOString()],
+    });
+    const revoked = await post({ agent: "bravo", messages: [{ role: "user", content: "hi" }] });
+    assert.equal(revoked.status, 409);
+    assert.equal(((await revoked.json()) as { error?: string }).error, "pairing_not_approved");
+    assert.equal(calls.length, 0);
   });
 
   // ── Source-level backstop: no index signature, no spread ─────────────────

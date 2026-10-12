@@ -97,6 +97,9 @@ async function createSchema() {
   for (const file of ["bravo__192_ai_usage.sql", "bravo__207_department_chat_runs.sql", "bravo__213_dept_runs_computer.sql"]) {
     for (const stmt of splitStatements(readFileSync(join(ROOT, "database", "turso", file), "utf8"))) await db.execute(stmt);
   }
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT");
   await db.executeMultiple(`
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL, custom_fields TEXT NOT NULL DEFAULT '{}');
     CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT NOT NULL,
@@ -397,6 +400,42 @@ async function main() {
       ["running", "producer", "computer", pairing.id],
     );
     assert.ok(row.rows[0].deadline_at);
+  });
+  await check("department_task_v2 keeps the exact tested pairing and Codex runtime through claim, with a read-only sandbox", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector" });
+    await db.execute({
+      sql: "UPDATE bridge_pairings SET claim_protocols = ? WHERE id = ?",
+      args: [JSON.stringify(["department_task_v1", "department_task_v2"]), pairing.id],
+    });
+    const store = await import("../lib/os/runs/store");
+    const scope = { tenantId: TENANT, userId: member };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const queued = await store.enqueueRun(db, scope, {
+      conversationId: conv.id,
+      text: "answer with Codex on this computer",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+      executor: "computer",
+      targetPairingId: pairing.id,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+    });
+    assert.ok(queued.ok);
+    const response = await claim(pairing.token, body(randomUUID(), { protocol: "department_task_v2" }));
+    assert.equal(response.status, 200, JSON.stringify(response.json));
+    const run = response.json.run as Record<string, unknown>;
+    assert.equal(run.protocol, "department_task_v2");
+    assert.deepEqual(run.engine, { kind: "cli", name: "codex" });
+    assert.deepEqual(run.sandbox, { mode: "read_only", repo_writes: false });
+    assert.equal(run.cli, undefined, "v2 never falls back to v1's hard-coded Claude field");
+    const builder = readFileSync(join(ROOT, "lib/os/runs/computer-turn.ts"), "utf8");
+    assert.match(
+      builder,
+      /engineInput:\s*\{\s*kind:\s*"computer",\s*label,\s*engine:\s*runtime\.engine\s*\}/,
+      "the same snapshotted runtime used in the claim payload must prepare the turn metadata",
+    );
   });
   await check("a pasted credential-shaped string in the message never reaches the claim payload (env-secret redaction, [P1] Codex finding)", async () => {
     const member = await freshMember();

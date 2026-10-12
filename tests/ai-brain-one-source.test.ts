@@ -528,24 +528,27 @@ async function main() {
     assert.match(auth, /apiKey = decryptField\(account\.encryptedApiKey\);/);
   });
 
-  // -- 5. The local CLI card says exactly what it powers ------------------------
-  console.log("5. local CLIs");
-  await check("the paired-computer card chooses nothing: it reports the apps and points at the one engine setting", async () => {
-    // 2026-10-09 (PR fix/ai-brain-engine, CC: "they should be on the same
-    // functionality"): what powers the agents AND the coding harness is ONE
-    // setting (What powers your agents). The card is the computer's report,
-    // with Connect, and has no picker of its own.
-    const cli = await import("../components/settings/local-cli-scope");
-    assert.match(cli.LOCAL_CLI_SCOPE, /Which app your agents and the coding harness use is the one setting above, in What powers your agents\./);
-    // The bridge may run on another computer than this browser (hosted mode): "the paired computer".
-    assert.doesNotMatch(cli.LOCAL_CLI_SCOPE, /this computer/);
-    const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
-    assert.doesNotMatch(src, /Active CLI|title="Local AI CLIs"/, "the card's old wording, which read as choosing the department brain");
-    assert.doesNotMatch(src, /role="radiogroup"|writeCliRuntime|chooseCli/, "a second picker that can disagree with the setting");
-    assert.match(src, /subtitle=\{LOCAL_CLI_SCOPE\}/);
-    // What the choice really drives: only the operator's Coding harness (ChatWidget) sends it.
+  // -- 5. One device-bound engine control powers agents and coding work -------
+  console.log("5. exact-computer engine");
+  await check("one panel selects, tests and saves the exact computer; old CLI controls are inert", () => {
+    const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
+    for (const label of ["Subscription app", "Pure local", "API key"]) assert.match(panel, new RegExp(label));
+    assert.match(panel, /Use stays locked until this exact setup passes Test\./);
+    assert.match(panel, /Installed apps and local models/);
+
+    const oldCliCard = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
+    assert.doesNotMatch(oldCliCard, /Active CLI|title="Local AI CLIs"|role="radiogroup"|writeCliRuntime|chooseCli/);
+    assert.match(oldCliCard, /export function LocalCliProvidersCard[\s\S]*return null;/);
+
+    // The coding harness carries the same immutable engine snapshot. The
+    // server then resolves the machine fingerprint from that pairing rather
+    // than trusting browser-supplied identity.
     const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
-    assert.match(widget, /cli_provider: cliRuntime/);
+    assert.match(widget, /target_pairing_id: harnessRoute\.pairingId/);
+    assert.match(widget, /runtime_engine_kind: harnessRoute\.engineKind/);
+    assert.match(widget, /runtime_engine_name: harnessRoute\.engineName/);
+    const route = readFileSync(join(ROOT, "app/api/bridge/chat/route.ts"), "utf8");
+    assert.match(route, /target_machine_fingerprint: targetMachineFingerprint/);
   });
 
   console.log(`\n${passed} passed, ${failures} failed`);

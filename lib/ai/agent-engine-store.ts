@@ -28,20 +28,11 @@
  *
  * A failed read THROWS: "couldn't check" is never "not saved".
  *
- * PER-PERSON ENGINE (O3b, "your engine and your computer's status are
- * yours"). The workspace row above answers for everyone who has not chosen
- * for themselves. A person may save their OWN row instead -- agent_model_config,
- * the SAME agent_key ("__engine__"), but user_id = their own auth user id
- * (the partial unique index idx_agent_model_config_engine_per_user,
- * bravo__212, is one row per tenant+user+agent_key). Its vocabulary is
- * smaller than the workspace row's: 'computer' (Claude Code on MY OWN paired
- * computer, O3a's bridge_pairings -- never the workspace's shared tunnel) or
- * 'api' (the workspace API key). EFFECTIVE ENGINE precedence: the person's
- * own row, else the workspace row (readAgentEngine, unchanged, O1's pause
- * included), else the OASIS default inside it. NO KEY FALLBACK (Adon,
- * 2026-10-11): an explicit 'computer' choice is never silently answered on an
- * API key when the computer cannot be reached -- it is refused, with the
- * reason (lib/os/runs/session.ts).
+ * PER-PERSON ENGINE. Workspace and personal rows use the same subscription,
+ * local, and API vocabulary. A personal row has user_id = the auth user id;
+ * deleting it means inherit the workspace row. Device-backed rows bind one
+ * computer_pairing_id. Fallback defaults to none and can use the workspace API
+ * only when fallback_policy explicitly says workspace_api.
  */
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -67,6 +58,40 @@ function writeClient() {
   return getTursoClient();
 }
 
+type CanonicalEngineRow = {
+  provider?: unknown;
+  model?: unknown;
+  computer_pairing_id?: unknown;
+  fallback_policy?: unknown;
+};
+
+function missingEngineBindingColumns(message: string): boolean {
+  return /(?:no such column|schema cache).*(?:computer_pairing_id|fallback_policy)|(?:computer_pairing_id|fallback_policy).*(?:does not exist|not found)/i.test(
+    message,
+  );
+}
+
+async function readEngineRow(
+  tenantId: string,
+  userId: string | null,
+): Promise<{ data: CanonicalEngineRow | null; error: { message: string } | null }> {
+  const query = (columns: string) => {
+    let q = getServiceSupabase().from("agent_model_config").select(columns).eq("tenant_id", tenantId);
+    q = userId === null ? q.is("user_id", null) : q.eq("user_id", userId);
+    return q.eq("agent_key", ENGINE_AGENT_KEY).maybeSingle();
+  };
+
+  const current = await query("provider, model, computer_pairing_id, fallback_policy");
+  if (!current.error || !missingEngineBindingColumns(current.error.message)) {
+    return current as { data: CanonicalEngineRow | null; error: { message: string } | null };
+  }
+
+  // Old workers remain readable during the additive migration rollout. The
+  // result stays deliberately unbound, so no device can be picked implicitly.
+  const legacy = await query("provider, model");
+  return legacy as { data: CanonicalEngineRow | null; error: { message: string } | null };
+}
+
 /**
  * The workspace's engine choice. No row: OASIS's own workspace runs on the CLI
  * bridge (CC, 2026-10-09: "for my workspace they don't use API keys ... you
@@ -75,18 +100,14 @@ function writeClient() {
  */
 export async function readAgentEngine(tenantId: string): Promise<AgentEngineChoice> {
   const [{ data, error }, oasis] = await Promise.all([
-    getServiceSupabase()
-      .from("agent_model_config")
-      .select("provider, model")
-      .eq("tenant_id", tenantId)
-      .is("user_id", null)
-      .eq("agent_key", ENGINE_AGENT_KEY)
-      .maybeSingle(),
+    readEngineRow(tenantId, null),
     isOasisWorkspace(tenantId),
   ]);
   if (error) throw new Error(`agent engine: agent_model_config read failed: ${error.message}`);
   if (!data) return oasis ? OASIS_DEFAULT_ENGINE : { kind: "api" };
-  return engineFromRow(data as { provider?: unknown; model?: unknown } | null);
+  return engineFromRow(
+    data as { provider?: unknown; model?: unknown; computer_pairing_id?: unknown; fallback_policy?: unknown } | null,
+  );
 }
 
 /** OASIS's own workspace, when no choice is saved: its agents' harnesses on CC's computer, through the bridge. */
@@ -131,16 +152,16 @@ export async function saveAgentEngineIfCurrent(tenantId: string, choice: AgentEn
     expectedVersion === null
       ? await writeClient().execute({
           sql:
-            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
-            " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?)" +
+            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+            " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?)" +
             " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING",
-          args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, now],
+          args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now],
         })
       : await writeClient().execute({
           sql:
-            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1, updated_at = ?" +
+            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1, computer_pairing_id = ?, fallback_policy = ?, updated_at = ?" +
             " WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND updated_at = ?",
-          args: [row.provider, row.model, now, tenantId, ENGINE_AGENT_KEY, expectedVersion],
+          args: [row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now, tenantId, ENGINE_AGENT_KEY, expectedVersion],
         });
   return res.rowsAffected === 1;
 }
@@ -150,12 +171,193 @@ export async function saveAgentEngine(tenantId: string, choice: AgentEngineChoic
   const row = engineRow(choice);
   await writeClient().execute({
     sql:
-      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
-      " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?)" +
+      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+      " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?)" +
       " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL" +
-      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = NULL, updated_at = excluded.updated_at",
-    args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, new Date().toISOString()],
+      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = NULL," +
+      " computer_pairing_id = excluded.computer_pairing_id, fallback_policy = excluded.fallback_policy, updated_at = excluded.updated_at",
+    args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, new Date().toISOString()],
   });
+}
+
+/** The personal override row's version; null means this person inherits. */
+export async function readPersonAgentEngineVersion(tenantId: string, userId: string): Promise<string | null> {
+  const { data, error } = await getServiceSupabase()
+    .from("agent_model_config")
+    .select("updated_at")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .eq("agent_key", ENGINE_AGENT_KEY)
+    .maybeSingle();
+  if (error) throw new Error(`person engine: version read failed: ${error.message}`);
+  const at = (data as { updated_at?: unknown } | null)?.updated_at;
+  return typeof at === "string" && at ? at : null;
+}
+
+/** A person's engine using the same vocabulary and columns as the workspace row. */
+export async function readPersonAgentEngine(tenantId: string, userId: string): Promise<AgentEngineChoice | null> {
+  const { data, error } = await readEngineRow(tenantId, userId);
+  if (error) throw new Error(`person engine: agent_model_config read failed: ${error.message}`);
+  if (!data) return null;
+  const row = data as CanonicalEngineRow;
+  // Rollout compatibility for O3b's old personal vocabulary. It stays
+  // deliberately unbound; callers surface "Choose a computer" rather than
+  // silently selecting whichever machine happens to answer first.
+  if (row.provider === "computer") return { kind: "cli", cli: "claude" };
+  return engineFromRow(row);
+}
+
+/** Persist a person's canonical selection; inheritance is clearPersonEngine. */
+export async function savePersonAgentEngine(tenantId: string, userId: string, choice: AgentEngineChoice): Promise<void> {
+  const row = engineRow(choice);
+  await writeClient().execute({
+    sql:
+      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+      " VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?)" +
+      " ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL AND agent_key = '__engine__'" +
+      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = NULL," +
+      " computer_pairing_id = excluded.computer_pairing_id, fallback_policy = excluded.fallback_policy, updated_at = excluded.updated_at",
+    args: [tenantId, userId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, new Date().toISOString()],
+  });
+}
+
+/**
+ * Upgrade one still-unbound legacy device engine to an exact pairing without
+ * overwriting a choice saved concurrently. A personal upgrade is update-only
+ * (deleting the personal row means inherit, so it must never be recreated).
+ * The only row this may insert is OASIS's implicit workspace Claude default.
+ */
+export async function bindLegacyEngineIfUnchanged(input: {
+  tenantId: string;
+  userId: string | null;
+  engine: Exclude<AgentEngineChoice, { kind: "api" }>;
+  pairingId: string;
+}): Promise<boolean> {
+  if (input.engine.pairingId) return false;
+  const boundChoice: Exclude<AgentEngineChoice, { kind: "api" }> =
+    input.engine.kind === "cli"
+      ? {
+          kind: "cli",
+          cli: input.engine.cli,
+          pairingId: input.pairingId,
+          fallback: input.engine.fallback ?? "none",
+        }
+      : {
+          kind: "local",
+          model: input.engine.model,
+          pairingId: input.pairingId,
+          fallback: input.engine.fallback ?? "none",
+        };
+  const row = engineRow(boundChoice);
+  const now = new Date().toISOString();
+  const legacyPersonalClaude = input.userId !== null && input.engine.kind === "cli" && input.engine.cli === "claude";
+  const legacyProviderClause = legacyPersonalClaude ? " OR provider = 'computer'" : "";
+  const userClause = input.userId === null ? "user_id IS NULL" : "user_id = ?";
+  const result = await writeClient().execute({
+    sql:
+      "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1," +
+      " computer_pairing_id = ?, fallback_policy = ?, updated_at = ?" +
+      ` WHERE tenant_id = ? AND ${userClause} AND agent_key = ?` +
+      " AND (computer_pairing_id IS NULL OR computer_pairing_id = '')" +
+      ` AND ((provider = ? AND model = ?)${legacyProviderClause})`,
+    args: [
+      row.provider,
+      row.model,
+      row.computerPairingId,
+      row.fallbackPolicy,
+      now,
+      input.tenantId,
+      ...(input.userId === null ? [] : [input.userId]),
+      ENGINE_AGENT_KEY,
+      row.provider,
+      row.model,
+    ],
+  });
+  if (result.rowsAffected === 1) return true;
+
+  // A missing personal row means the person chose inheritance while this
+  // upgrade was running. Never undo that choice. For workspaces, only the
+  // implicit OASIS Claude default has no row and is eligible for insertion.
+  if (
+    input.userId !== null ||
+    input.engine.kind !== "cli" ||
+    input.engine.cli !== "claude" ||
+    !(await isOasisWorkspace(input.tenantId))
+  ) {
+    return false;
+  }
+  const inserted = await writeClient().execute({
+    sql:
+      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+      " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?, ?, ?)" +
+      " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING",
+    args: [input.tenantId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now],
+  });
+  return inserted.rowsAffected === 1;
+}
+
+/** CAS save for the personal row. A null version means "still inheriting". */
+export async function savePersonAgentEngineIfCurrent(
+  tenantId: string,
+  userId: string,
+  choice: AgentEngineChoice,
+  expectedVersion: string | null,
+): Promise<boolean> {
+  const row = engineRow(choice);
+  const now = new Date().toISOString();
+  const result =
+    expectedVersion === null
+      ? await writeClient().execute({
+          sql:
+            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at)" +
+            " VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?)" +
+            " ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL AND agent_key = '__engine__' DO NOTHING",
+          args: [tenantId, userId, ENGINE_AGENT_KEY, row.provider, row.model, row.computerPairingId, row.fallbackPolicy, now],
+        })
+      : await writeClient().execute({
+          sql:
+            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1," +
+            " computer_pairing_id = ?, fallback_policy = ?, updated_at = ?" +
+            " WHERE tenant_id = ? AND user_id = ? AND agent_key = ? AND updated_at = ?",
+          args: [
+            row.provider,
+            row.model,
+            row.computerPairingId,
+            row.fallbackPolicy,
+            now,
+            tenantId,
+            userId,
+            ENGINE_AGENT_KEY,
+            expectedVersion,
+          ],
+        });
+  return result.rowsAffected === 1;
+}
+
+/** CAS clear: inheritance is deletion, and cannot erase a newer selection. */
+export async function clearPersonEngineIfCurrent(tenantId: string, userId: string, expectedVersion: string | null): Promise<boolean> {
+  if (expectedVersion === null) return (await readPersonAgentEngineVersion(tenantId, userId)) === null;
+  const result = await writeClient().execute({
+    sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND user_id = ? AND agent_key = ? AND updated_at = ?",
+    args: [tenantId, userId, ENGINE_AGENT_KEY, expectedVersion],
+  });
+  return result.rowsAffected === 1;
+}
+
+export type EffectiveAgentEngine = { source: "person" | "workspace"; engine: AgentEngineChoice; legacyUnbound: boolean };
+
+/** Canonical effective engine for dispatch and the consolidated AI Brain. */
+export async function readEffectiveAgentEngine(tenantId: string, userId: string | null | undefined): Promise<EffectiveAgentEngine> {
+  const [person, workspace] = await Promise.all([
+    userId ? readPersonAgentEngine(tenantId, userId) : Promise.resolve(null),
+    readAgentEngine(tenantId),
+  ]);
+  const engine = person ?? workspace;
+  return {
+    source: person ? "person" : "workspace",
+    engine,
+    legacyUnbound: engine.kind !== "api" && !engine.pairingId,
+  };
 }
 
 /** A person's own engine choice (O3b): their own paired computer, or the workspace API key. */

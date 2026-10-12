@@ -82,6 +82,31 @@ type ClaimBody = {
   wait_ms?: unknown;
 };
 
+type DepartmentTaskProtocol = "department_task_v1" | "department_task_v2";
+
+async function pairingAdvertisesProtocol(pairingId: string, protocol: DepartmentTaskProtocol): Promise<boolean> {
+  const { data, error } = await getServiceSupabase()
+    .from("bridge_pairings")
+    .select("claim_protocols")
+    .eq("id", pairingId)
+    .maybeSingle();
+  if (error) throw new Error(`bridge claim protocol read failed: ${error.message}`);
+  const raw = (data as { claim_protocols?: unknown } | null)?.claim_protocols;
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = [];
+    }
+  }
+  // A missing field is the frozen v1 connector deployed before capability
+  // advertisement existed. New work never targets it because canonical
+  // selections require v2.
+  if (protocol === "department_task_v1" && (raw == null || raw === "")) return true;
+  return Array.isArray(parsed) && parsed.includes(protocol);
+}
+
 function clampInt(v: unknown, min: number, max: number, fallback: number): number {
   const n = typeof v === "number" && Number.isFinite(v) ? Math.floor(v) : fallback;
   return Math.max(min, Math.min(max, n));
@@ -218,7 +243,14 @@ export async function POST(req: NextRequest) {
   } catch {
     return bad(400, "invalid_json");
   }
-  if (body.protocol !== "department_task_v1") return bad(400, "unsupported_protocol");
+  if (body.protocol !== "department_task_v1" && body.protocol !== "department_task_v2") return bad(400, "unsupported_protocol");
+  const protocol = body.protocol as DepartmentTaskProtocol;
+  try {
+    if (!(await pairingAdvertisesProtocol(pairing.pairingId, protocol))) return bad(400, "unsupported_protocol");
+  } catch (error) {
+    console.error("[bridge.runs.claim.protocol]", error instanceof Error ? error.message : String(error));
+    return bad(503, "protocol_check_unavailable");
+  }
   const claimId = typeof body.claim_id === "string" && CLAIM_ID_RE.test(body.claim_id) ? body.claim_id : null;
   if (!claimId) return bad(400, "claim_id_required");
   const capacity = clampInt(body.capacity, 0, 2, 0);
@@ -253,7 +285,7 @@ export async function POST(req: NextRequest) {
   // capacity (or a blocked reason) right after a real claim still gets its
   // answer back rather than losing it.
   const idempotentLookup = async (): Promise<NextResponse | null> => {
-    const existing = await findClaimedComputerRun(db, claimPairing, claimId);
+    const existing = await findClaimedComputerRun(db, claimPairing, claimId, protocol);
     if (!existing) return null;
     if (await producerEventsExist(db, existing)) {
       return NextResponse.json({ ok: false, error: "claim_already_started" }, { status: 409 });
@@ -272,14 +304,14 @@ export async function POST(req: NextRequest) {
   if (capacity <= 0 || blockedReason) return NextResponse.json({ ok: true, run: null });
 
   const tryClaim = async (): Promise<NextResponse | null> => {
-    const claimed = await claimComputerRun(db, claimPairing, claimId, new Date());
+    const claimed = await claimComputerRun(db, claimPairing, claimId, new Date(), protocol);
     if (claimed) return buildAndRespond(claimed, pairing);
     // claimComputerRun returning null is ambiguous on its own: either there
     // was nothing left to claim, OR a concurrent request for this EXACT
     // (pairing, claim_id) just won the unique-index race for a DIFFERENT
     // run (Codex review, [P2]). The loser must return the WINNER's
     // assignment, never silently re-poll as if nothing happened yet.
-    const wonByOther = await findClaimedComputerRun(db, claimPairing, claimId);
+    const wonByOther = await findClaimedComputerRun(db, claimPairing, claimId, protocol);
     return wonByOther ? buildAndRespond(wonByOther, pairing) : null;
   };
   const first = await tryClaim();

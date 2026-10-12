@@ -258,6 +258,11 @@ export type Run = {
   origin: RunOrigin;
   /** O4: claim time + 20 minutes -- the longest an MCP or run token may outlive. null until claimed. */
   deadlineAt: string | null;
+  /** V2: the one bridge_pairings row allowed to claim this run. null is a legacy unbound row. */
+  targetPairingId: string | null;
+  /** V2's snapshotted engine. These two fields are either both set or both null. */
+  runtimeEngineKind: "cli" | "local" | null;
+  runtimeEngineName: string | null;
 };
 
 function parseObject(raw: unknown): Record<string, unknown> | null {
@@ -276,6 +281,7 @@ function sourceOf(raw: unknown): RunSource {
 
 const executorOf = (v: unknown): RunExecutor => (isRunExecutor(v) ? v : "worker");
 const originOf = (v: unknown): RunOrigin => (isRunOrigin(v) ? v : "chat");
+const runtimeEngineKindOf = (v: unknown): "cli" | "local" | null => (v === "cli" || v === "local" ? v : null);
 
 function runOf(r: Record<string, unknown>): Run {
   return {
@@ -306,6 +312,9 @@ function runOf(r: Record<string, unknown>): Run {
     claimedPairingId: sOrNull(r.claimed_pairing_id),
     origin: originOf(r.origin),
     deadlineAt: sOrNull(r.deadline_at),
+    targetPairingId: sOrNull(r.target_pairing_id),
+    runtimeEngineKind: runtimeEngineKindOf(r.runtime_engine_kind),
+    runtimeEngineName: sOrNull(r.runtime_engine_name),
   };
 }
 
@@ -377,12 +386,29 @@ export async function enqueueRun(
     source?: "automation";
     executor?: RunExecutor;
     origin?: RunOrigin;
+    targetPairingId?: string;
+    runtimeEngineKind?: "cli" | "local";
+    runtimeEngineName?: string;
   },
 ): Promise<EnqueueResult> {
   if (input.id !== undefined && !RUN_ID_RE.test(input.id)) throw new Error("os.runs.enqueue: the run id is not a lowercase UUID");
   if (input.source !== undefined && input.source !== "automation") throw new Error("os.runs.enqueue: unknown run source");
   if (input.executor !== undefined && !isRunExecutor(input.executor)) throw new Error("os.runs.enqueue: unknown executor");
   if (input.origin !== undefined && !isRunOrigin(input.origin)) throw new Error("os.runs.enqueue: unknown origin");
+  const hasRuntimeSnapshot =
+    input.targetPairingId !== undefined || input.runtimeEngineKind !== undefined || input.runtimeEngineName !== undefined;
+  if (hasRuntimeSnapshot) {
+    if (input.executor !== "computer") throw new Error("os.runs.enqueue: a runtime snapshot requires the computer executor");
+    if (!input.targetPairingId?.trim() || !input.runtimeEngineKind || !input.runtimeEngineName?.trim()) {
+      throw new Error("os.runs.enqueue: target pairing and engine snapshot must be complete");
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.targetPairingId)) {
+      throw new Error("os.runs.enqueue: invalid target pairing");
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(input.runtimeEngineName)) {
+      throw new Error("os.runs.enqueue: invalid runtime engine name");
+    }
+  }
   const id = input.id ?? newId();
   const source: RunSource = input.source ?? "worker";
   const executor: RunExecutor = input.executor ?? "worker";
@@ -392,10 +418,10 @@ export async function enqueueRun(
     let affected = 0;
     try {
       const rs = await db.execute({
-        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, chat_mode, source, show_thinking, executor, origin, created_at)
+        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, chat_mode, source, show_thinking, executor, origin, target_pairing_id, runtime_engine_kind, runtime_engine_name, created_at)
               SELECT ?, c.tenant_id, c.user_id, c.id, c.department_key, c.agent_slug,
                      COALESCE((SELECT MAX(r.seq) FROM dept_chat_runs r WHERE r.conversation_id = c.id), 0) + 1,
-                     'queued', ?, ?, ?, ?, ?, ?, ?
+                     'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
               FROM dept_chat_conversations c
               WHERE c.id = ? AND c.tenant_id = ? AND c.user_id = ?
                 AND (SELECT COUNT(*) FROM dept_chat_runs q WHERE q.conversation_id = c.id AND q.status = 'queued') < ?`,
@@ -407,6 +433,9 @@ export async function enqueueRun(
           input.showThinking ? 1 : 0,
           executor,
           origin,
+          input.targetPairingId ?? null,
+          input.runtimeEngineKind ?? null,
+          input.runtimeEngineName ?? null,
           at,
           input.conversationId,
           scope.tenantId,
@@ -575,7 +604,13 @@ export type ClaimPairing = { tenantId: string; userId: string; pairingId: string
  * worker-dispatched message never gets skipped the way claimNextRun's old
  * bug skipped an earlier computer-dispatched one.
  */
-export async function claimComputerRun(db: Client, pairing: ClaimPairing, claimId: string, now: Date): Promise<Run | null> {
+export async function claimComputerRun(
+  db: Client,
+  pairing: ClaimPairing,
+  claimId: string,
+  now: Date,
+  protocol: "department_task_v1" | "department_task_v2" = "department_task_v1",
+): Promise<Run | null> {
   const at = iso(now);
   const deadline = iso(new Date(now.getTime() + COMPUTER_CLAIM_DEADLINE_MS));
   let rs: ResultSet;
@@ -583,14 +618,16 @@ export async function claimComputerRun(db: Client, pairing: ClaimPairing, claimI
     rs = await exec(db, {
       sql: `UPDATE dept_chat_runs
             SET status = 'running', source = 'producer', lease_id = ?, claimed_pairing_id = ?, started_at = ?, heartbeat_at = ?, deadline_at = ?
-            WHERE status = 'queued' AND executor = 'computer' AND tenant_id = ? AND user_id = ?
+            WHERE status = 'queued' AND executor = 'computer' AND tenant_id = ?
+              AND ((? = 'department_task_v2' AND target_pairing_id = ?) OR (target_pairing_id IS NULL AND user_id = ?))
               AND EXISTS (
                 SELECT 1 FROM bridge_pairings bp
                 WHERE bp.id = ? AND bp.tenant_id = ? AND bp.user_id = ? AND bp.revoked_at IS NULL AND bp.claim_enabled_at IS NOT NULL
               )
               AND id = (
                 SELECT q.id FROM dept_chat_runs q
-                WHERE q.tenant_id = ? AND q.user_id = ? AND q.executor = 'computer' AND q.status = 'queued'
+                WHERE q.tenant_id = ? AND q.executor = 'computer' AND q.status = 'queued'
+                  AND ((? = 'department_task_v2' AND q.target_pairing_id = ?) OR (q.target_pairing_id IS NULL AND q.user_id = ?))
                   AND q.seq = (SELECT MIN(f.seq) FROM dept_chat_runs f WHERE f.conversation_id = q.conversation_id AND f.status = 'queued')
                   AND NOT EXISTS (SELECT 1 FROM dept_chat_runs x WHERE x.conversation_id = q.conversation_id AND x.status = 'running')
                 ORDER BY CASE q.origin WHEN 'chat' THEN 0 WHEN 'test' THEN 1 ELSE 2 END, q.created_at
@@ -604,11 +641,15 @@ export async function claimComputerRun(db: Client, pairing: ClaimPairing, claimI
         at,
         deadline,
         pairing.tenantId,
+        protocol,
+        pairing.pairingId,
         pairing.userId,
         pairing.pairingId,
         pairing.tenantId,
         pairing.userId,
         pairing.tenantId,
+        protocol,
+        pairing.pairingId,
         pairing.userId,
       ],
     });
@@ -681,11 +722,17 @@ export async function markFirstInLine(db: Client, scope: RunScope, run: Pick<Run
  * none) -- the claim route then checks producerEventsExist to tell a safe
  * retry (mint fresh tokens again) from claim_already_started (409).
  */
-export async function findClaimedComputerRun(db: Client, pairing: ClaimPairing, claimId: string): Promise<Run | null> {
+export async function findClaimedComputerRun(
+  db: Client,
+  pairing: ClaimPairing,
+  claimId: string,
+  protocol: "department_task_v1" | "department_task_v2" = "department_task_v1",
+): Promise<Run | null> {
   const rs = await exec(db, {
     sql: `SELECT * FROM dept_chat_runs
-          WHERE lease_id = ? AND claimed_pairing_id = ? AND tenant_id = ? AND user_id = ? AND executor = 'computer' AND status = 'running'`,
-    args: [claimId, pairing.pairingId, pairing.tenantId, pairing.userId],
+          WHERE lease_id = ? AND claimed_pairing_id = ? AND tenant_id = ? AND executor = 'computer' AND status = 'running'
+            AND (? = 'department_task_v2' OR target_pairing_id IS NULL)`,
+    args: [claimId, pairing.pairingId, pairing.tenantId, protocol],
   });
   const r = rows(rs)[0];
   return r ? runOf(r) : null;
@@ -959,9 +1006,9 @@ export async function finishProducerRun(
 /**
  * The usage-ledger row every producer run leaves, whatever its end -- the
  * same shape meteredBridgeTurn writes (lib/os/department-agent.ts) for a
- * department turn on the paired computer: provider 'bridge', model 'claude'
- * (bridgeCliPolicy forces Claude Code for every department run, push or
- * pull), subscription billing, a known cost of 0, real token counts. Before
+ * department turn on the paired computer: provider 'bridge', the snapshotted
+ * v2 runtime name (or legacy 'claude'), subscription/local billing, a known
+ * cost of 0, real token counts. Before
  * this, finishProducerRun wrote NO row at all, so a department's 600-run
  * monthly cap never counted a computer-dispatched reply, and its usage
  * dashboard undercounted every workspace that answers on a paired computer.
@@ -974,7 +1021,7 @@ async function recordProducerLedgerRow(
   run: Run,
   f: { status: "done" | "failed" | "cancelled"; errorCode: string | null; inputTokens: number | null; outputTokens: number | null; now: Date },
 ): Promise<void> {
-  const billing = billingForBridge({ kind: "cli" });
+  const billing = billingForBridge({ kind: run.runtimeEngineKind ?? "cli" });
   const outcome = f.status === "done" ? "ok" : f.status === "cancelled" ? "cancelled" : "error";
   const usage: ModelUsage | null =
     f.inputTokens !== null || f.outputTokens !== null
@@ -991,7 +1038,7 @@ async function recordProducerLedgerRow(
       userId: run.userId,
       occurredAt: f.now,
       provider: "bridge",
-      model: "claude",
+      model: run.runtimeEngineName ?? "claude",
       usage,
       costMicroUsd: 0,
       costSource: "none",

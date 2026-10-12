@@ -1,27 +1,76 @@
 /**
- * What powers your agents, as the browser calls it (components/settings/
- * AgentEnginePanel.tsx): read the choice, switch the AI account's provider to
- * a saved key, test or save an app / local model on the paired computer. Each
- * route tests before it changes anything, and its plain sentence comes back on
- * any failure. No React, so a test drives it without a browser.
+ * Browser contract for Settings > AI brain.
+ *
+ * New writes use one explicit EngineSelection. During rollout, GET and the
+ * legacy test helpers still accept the old {kind:"cli"|"local"|"api"}
+ * choice so an older server cannot strand Settings.
  */
-import { parseEngineChoice, type AgentEngineChoice, type CliEngine } from "@/lib/ai/agent-engine";
+import {
+  isApiEngineProvider,
+  parseEngineChoice,
+  parseEngineSelection as parseCanonicalEngineSelection,
+  type AgentEngineChoice,
+  type ApiEngineProvider,
+  type CliEngine,
+  type EngineSelection,
+} from "@/lib/ai/agent-engine";
 import { machinesOfBody, unsupportedProviders, type CliMachineSnapshot } from "@/lib/bridge-cli-status";
 import type { Provider } from "@/lib/providers";
 
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 const defaultFetch: FetchLike = (url, init) => fetch(url, init);
 
+export type EngineScope = "person" | "workspace";
+export type { EngineFallback, EngineSelection } from "@/lib/ai/agent-engine";
+
+export type DeviceRuntime = {
+  installed: boolean;
+  signedIn: boolean;
+  executionReady: boolean;
+  unsupported: boolean;
+  version: string | null;
+  lastTestedAt: string | null;
+  code: string | null;
+};
+
+export type EngineDevice = {
+  pairingId: string;
+  label: string;
+  ownerName: string | null;
+  ownedByViewer: boolean;
+  /** True only when this pairing belongs to the workspace's configured agents owner. */
+  workspaceEligible: boolean;
+  os: string | null;
+  lastSeenAt: string | null;
+  approved: boolean;
+  online: boolean;
+  busy: boolean;
+  protocols: string[];
+  runtimes: Record<CliEngine, DeviceRuntime>;
+  localModels: Array<{ ref: string; label: string; adapter: "ollama" | "lmstudio"; state: "ready" | "unavailable" | "probe_required" }>;
+};
+
 export type EngineState = {
-  engine: AgentEngineChoice;
-  account: { provider: Provider; providerLabel: string; model: string; modelLabel: string } | null;
-  savedProviders: Provider[];
+  engine: EngineSelection;
+  personEngine: { source: "workspace" | "person"; selection: EngineSelection | null };
+  devices: EngineDevice[];
+  account: { provider: ApiEngineProvider; providerLabel: string; model: string; modelLabel: string } | null;
+  savedProviders: ApiEngineProvider[];
   bridgeReachable: boolean;
   canManage: boolean;
-  /** OASIS's own workspace: its agents run in their harnesses through the bridge; API keys are the fallback. */
   oasis: boolean;
-  /** The saved choice's version (null = none saved); handed back on a save so only the latest choice wins. */
   engineVersion: string | null;
+  engineVersions: { person: string | null; workspace: string | null };
+};
+
+export type RuntimeJob = {
+  id: string;
+  status: "queued" | "claimed" | "running" | "waiting_user" | "done" | "failed";
+  action: string;
+  engine: { kind: string; name: string } | null;
+  errorCode: string | null;
+  message: string | null;
+  result: { reply?: string; latencyMs?: number; instructions?: string; authUrl?: string } | null;
 };
 
 const READ_FAILED = "We could not read what powers your agents just now. Refresh to try again.";
@@ -30,7 +79,8 @@ const TEST_FAILED = "The test couldn't run just now. Try again in a moment.";
 const NO_CONNECTION = "We couldn't reach OASIS just now. Check your connection, then try again. Nothing was changed.";
 const SERVER_PROBLEM = "OASIS had a problem answering just now. Nothing was changed. Try again in a moment.";
 const TOO_SLOW = "OASIS took too long to answer. Try again, or pick another app. Nothing was changed.";
-/** What a stopped call says, by what it was doing. Every one points at the page, which is re-read, as the truth. */
+
+type CallAction = "test" | "save" | "switch" | "remove";
 const STOPPED: Record<CallAction, { cancelled: string; deadline: string }> = {
   test: {
     cancelled: "Stopped waiting for the test. Nothing was changed.",
@@ -50,57 +100,30 @@ const STOPPED: Record<CallAction, { cancelled: string; deadline: string }> = {
   },
 };
 
-/**
- * How long the browser waits for the app test (Test or Use this): a little
- * ABOVE the server's own deadline for one short answer
- * (lib/ai/bridge-turn.ts BRIDGE_TEST_TIMEOUT_MS, 75 s), so the server's plain
- * sentence normally arrives first, and a dropped or stalled connection still
- * ends here instead of spinning for good (CC, 2026-10-10: the button sat on
- * "Testing a short answer..." after the server had already answered 422).
- */
 export const ENGINE_CLIENT_DEADLINE_MS = 85_000;
-/**
- * After a save the browser stopped waiting for (Cancel or the deadline), the
- * server may still be finishing its own test (up to 75 s). The panel reads what
- * is in use once at once and once more after this, so "In use" is never stale.
- */
 export const ENGINE_SERVER_WINDOW_MS = 80_000;
-/** Reads and quick changes (switch provider, remove a key): nothing on them is slow. */
+export const RUNTIME_JOB_DEADLINE_MS = 180_000;
 const QUICK_DEADLINE_MS = 30_000;
 
 export type EngineCallOptions = {
-  /** Abort to stop waiting (the panel's Cancel button). */
   signal?: AbortSignal;
-  /** Overrides the default deadline; for the app test, ENGINE_CLIENT_DEADLINE_MS. */
   deadlineMs?: number;
 };
 
-/** What a call is for, so a stopped one says the right thing. */
-type CallAction = "test" | "save" | "switch" | "remove";
+export type SaveEngineOptions = EngineCallOptions & {
+  scope?: EngineScope;
+  probeJobId?: string;
+};
 
 type CallResult = { ok: boolean; status: number; body: Record<string, unknown> };
 
-/** Why a call ended without an answer. */
 class CallStopped extends Error {
   constructor(readonly why: "deadline" | "cancelled") {
     super(why);
   }
 }
 
-/**
- * One JSON call that ALWAYS ends: with the server's answer, or by throwing
- * CallStopped (the deadline passed, or the caller cancelled), or by the
- * network error. The deadline and Cancel cover the body read too, and a fetch
- * that ignores its signal (a stalled connection, a test double) is raced
- * against the same abort, so nothing here can wait forever.
- */
-async function call(
-  fetchImpl: FetchLike,
-  url: string,
-  method: string,
-  body: unknown,
-  opts: EngineCallOptions = {},
-): Promise<CallResult> {
+async function call(fetchImpl: FetchLike, url: string, method: string, body: unknown, opts: EngineCallOptions = {}): Promise<CallResult> {
   const ctl = new AbortController();
   let why: "deadline" | "cancelled" = "cancelled";
   const stop = (reason: "deadline" | "cancelled") => {
@@ -113,7 +136,6 @@ async function call(
   if (opts.signal?.aborted) onCancel();
   else opts.signal?.addEventListener("abort", onCancel, { once: true });
   const stopped = new Promise<never>((_, reject) => {
-    // Already stopped (a Cancel pressed before the call began): the abort event has fired and will not fire again.
     if (ctl.signal.aborted) reject(new CallStopped(why));
     else ctl.signal.addEventListener("abort", () => reject(new CallStopped(why)), { once: true });
   });
@@ -138,19 +160,97 @@ async function call(
   }
 }
 
-/** The server's own plain sentence, else one that says what kind of failure it was (never a status code or raw text). */
-function failureSentence(r: CallResult, fallback: string): string {
-  if (typeof r.body.message === "string" && r.body.message.trim()) return r.body.message;
-  if (r.status === 408 || r.status === 504 || r.status === 524) return TOO_SLOW;
-  if (r.status >= 500) return SERVER_PROBLEM;
+function nonEmpty(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isProvider(value: unknown): value is ApiEngineProvider {
+  return isApiEngineProvider(value);
+}
+
+export function parseEngineSelection(raw: unknown, fallbackProvider: ApiEngineProvider = "anthropic"): EngineSelection | null {
+  if (!raw || typeof raw !== "object") return null;
+  const canonical = parseCanonicalEngineSelection(raw);
+  if (canonical) return canonical;
+  const value = raw as Record<string, unknown>;
+  // Rollout compatibility with the old workspace-wide choice.
+  const legacy = parseEngineChoice(raw);
+  if (legacy?.kind === "api") return { mode: "api", provider: legacy.provider ?? fallbackProvider };
+  if (legacy?.kind === "cli") {
+    const pairingId = legacy.pairingId ?? nonEmpty(value.pairing_id) ?? "";
+    return { mode: "subscription", pairingId, provider: legacy.cli, fallback: legacy.fallback ?? "none" };
+  }
+  if (legacy?.kind === "local") {
+    const pairingId = legacy.pairingId ?? nonEmpty(value.pairing_id) ?? "";
+    return { mode: "local", pairingId, modelRef: legacy.model, fallback: legacy.fallback ?? "none" };
+  }
+  return null;
+}
+
+function runtime(raw: unknown): DeviceRuntime {
+  const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return {
+    installed: value.installed === true,
+    signedIn: value.signedIn === true || value.signed_in === true || value.authenticated === true,
+    executionReady: value.executionReady === true || value.execution_ready === true,
+    unsupported: value.unsupported === true || value.code === "unsupported_personal_sign_in",
+    version: nonEmpty(value.version),
+    lastTestedAt: nonEmpty(value.lastTestedAt) ?? nonEmpty(value.last_tested_at),
+    code: nonEmpty(value.code),
+  };
+}
+
+function device(raw: unknown): EngineDevice | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const pairingId = nonEmpty(value.pairingId) ?? nonEmpty(value.pairing_id) ?? nonEmpty(value.id);
+  if (!pairingId) return null;
+  const runtimes = value.runtimes && typeof value.runtimes === "object" ? (value.runtimes as Record<string, unknown>) : {};
+  const models = Array.isArray(value.localModels) ? value.localModels : Array.isArray(value.local_models) ? value.local_models : [];
+  return {
+    pairingId,
+    label: nonEmpty(value.label) ?? "Paired computer",
+    ownerName: nonEmpty(value.ownerName) ?? nonEmpty(value.owner_name),
+    ownedByViewer: value.ownedByViewer === true || value.owned_by_viewer === true,
+    workspaceEligible: value.workspaceEligible === true || value.workspace_eligible === true,
+    os: nonEmpty(value.os),
+    lastSeenAt: nonEmpty(value.lastSeenAt) ?? nonEmpty(value.last_seen_at),
+    approved: value.approved === true,
+    online: value.online === true,
+    busy: value.busy === true,
+    protocols: Array.isArray(value.protocols) ? value.protocols.filter((item): item is string => typeof item === "string") : [],
+    runtimes: { claude: runtime(runtimes.claude), codex: runtime(runtimes.codex), gemini: runtime(runtimes.gemini) },
+    localModels: models.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const model = item as Record<string, unknown>;
+      const ref = nonEmpty(model.ref);
+      const adapter = model.adapter === "ollama" || model.adapter === "lmstudio" ? model.adapter : null;
+      if (!ref || !adapter) return [];
+      const state = model.state === "ready" || model.state === "unavailable" || model.state === "probe_required" ? model.state : "probe_required";
+      return [{ ref, label: nonEmpty(model.label) ?? ref, adapter, state }];
+    }),
+  };
+}
+
+/** The scope picker never offers a teammate's computer for a personal row or a non-owner computer for the workspace row. */
+export function engineDevicesForScope(devices: EngineDevice[], scope: EngineScope): EngineDevice[] {
+  return devices.filter((item) => (scope === "person" ? item.ownedByViewer : item.workspaceEligible));
+}
+
+function failureSentence(result: CallResult, fallback: string): string {
+  if (typeof result.body.message === "string" && result.body.message.trim()) return result.body.message;
+  if (result.status === 408 || result.status === 504 || result.status === 524) return TOO_SLOW;
+  if (result.status >= 500) return SERVER_PROBLEM;
   return fallback;
 }
 
-/** What a call that threw means, in one plain sentence. */
-function stoppedSentence(err: unknown, fallback: string, action: CallAction): string {
-  if (err instanceof CallStopped) return err.why === "cancelled" ? STOPPED[action].cancelled : STOPPED[action].deadline;
-  // fetch itself rejected (offline, dropped connection, blocked): not a server answer.
-  return err instanceof TypeError ? NO_CONNECTION : fallback;
+function failureCode(result: CallResult): string | undefined {
+  return nonEmpty(result.body.errorCode) ?? nonEmpty(result.body.error_code) ?? nonEmpty(result.body.code) ?? undefined;
+}
+
+function stoppedSentence(error: unknown, fallback: string, action: CallAction): string {
+  if (error instanceof CallStopped) return error.why === "cancelled" ? STOPPED[action].cancelled : STOPPED[action].deadline;
+  return error instanceof TypeError ? NO_CONNECTION : fallback;
 }
 
 export async function readEngine(
@@ -158,20 +258,35 @@ export async function readEngine(
   opts: EngineCallOptions = {},
 ): Promise<{ ok: true; state: EngineState } | { ok: false; message: string }> {
   try {
-    const r = await call(fetchImpl, "/api/ai/engine", "GET", undefined, opts);
-    const engine = parseEngineChoice(r.body.engine);
-    if (!r.ok || !engine) return { ok: false, message: failureSentence(r, READ_FAILED) };
-    const bridge = r.body.bridge as { reachable?: unknown } | undefined;
+    const result = await call(fetchImpl, "/api/ai/engine", "GET", undefined, opts);
+    const account = (result.body.account as EngineState["account"]) ?? null;
+    const defaultProvider: ApiEngineProvider = account && isProvider(account.provider) ? account.provider : "anthropic";
+    const selection = parseEngineSelection(result.body.engine, defaultProvider);
+    if (!result.ok || !selection) return { ok: false, message: failureSentence(result, READ_FAILED) };
+    const rawPerson = result.body.personEngine && typeof result.body.personEngine === "object" ? (result.body.personEngine as Record<string, unknown>) : null;
+    const source = rawPerson?.source === "person" ? "person" : "workspace";
+    const personSelection = rawPerson ? parseEngineSelection(rawPerson.selection, defaultProvider) : null;
+    const bridge = result.body.bridge as { reachable?: unknown } | undefined;
+    const versions = result.body.engineVersions && typeof result.body.engineVersions === "object"
+      ? (result.body.engineVersions as Record<string, unknown>)
+      : null;
+    const legacyVersion = nonEmpty(result.body.engineVersion);
     return {
       ok: true,
       state: {
-        engine,
-        account: (r.body.account as EngineState["account"]) ?? null,
-        savedProviders: Array.isArray(r.body.savedProviders) ? (r.body.savedProviders as Provider[]) : [],
-        bridgeReachable: bridge?.reachable === true,
-        canManage: r.body.canManage === true,
-        oasis: r.body.workspace === "oasis",
-        engineVersion: typeof r.body.engineVersion === "string" ? r.body.engineVersion : null,
+        engine: selection,
+        personEngine: { source, selection: personSelection },
+        devices: Array.isArray(result.body.devices) ? result.body.devices.flatMap((item) => device(item) ?? []) : [],
+        account,
+        savedProviders: Array.isArray(result.body.savedProviders) ? result.body.savedProviders.filter(isProvider) : [],
+        bridgeReachable: bridge?.reachable === true || (Array.isArray(result.body.devices) && result.body.devices.some((item) => device(item)?.online)),
+        canManage: result.body.canManage === true,
+        oasis: result.body.workspace === "oasis",
+        engineVersion: legacyVersion,
+        engineVersions: {
+          person: versions && Object.prototype.hasOwnProperty.call(versions, "person") ? nonEmpty(versions.person) : legacyVersion,
+          workspace: versions && Object.prototype.hasOwnProperty.call(versions, "workspace") ? nonEmpty(versions.workspace) : legacyVersion,
+        },
       },
     };
   } catch {
@@ -179,83 +294,315 @@ export async function readEngine(
   }
 }
 
-/**
- * The apps the paired computer reports the vendor refuses (probe "unsupported",
- * lib/bridge-cli-status.ts unsupportedProviders). A hint for the app picker:
- * when the report cannot be read, nothing is claimed (an empty list).
- */
+/** Rollout helper retained for callers that still read the old CLI inventory route. */
 export async function readUnsupportedApps(fetchImpl: FetchLike = defaultFetch, opts: EngineCallOptions = {}): Promise<CliEngine[]> {
   try {
-    const r = await call(fetchImpl, "/api/bridge/cli-status", "GET", undefined, opts);
-    if (r.body.ok !== true) return [];
-    const machines = machinesOfBody(r.body as { machines?: CliMachineSnapshot[]; data?: unknown });
+    const result = await call(fetchImpl, "/api/bridge/cli-status", "GET", undefined, opts);
+    if (result.body.ok !== true) return [];
+    const machines = machinesOfBody(result.body as { machines?: CliMachineSnapshot[]; data?: unknown });
     return unsupportedProviders(machines);
   } catch {
     return [];
   }
 }
 
-/** Save the choice. An app or local model is tested by the route first. */
-export async function saveEngine(
-  engine: AgentEngineChoice,
-  expectedVersion: string | null,
+function isSelection(value: EngineSelection | AgentEngineChoice): value is EngineSelection {
+  return "mode" in value;
+}
+
+export async function queueEngineProbe(
+  engine: EngineSelection,
+  scope: EngineScope,
   fetchImpl: FetchLike = defaultFetch,
   opts: EngineCallOptions = {},
-): Promise<{ ok: true; latencyMs: number | null } | { ok: false; message: string; stopped?: boolean }> {
+): Promise<{ ok: true; jobId: string } | { ok: false; message: string; code?: string }> {
   try {
-    const r = await call(fetchImpl, "/api/ai/engine", "PUT", { engine, expected_version: expectedVersion }, { deadlineMs: ENGINE_CLIENT_DEADLINE_MS, ...opts });
-    if (!r.ok) return { ok: false, message: failureSentence(r, CHANGE_FAILED) };
-    const test = r.body.test as { latency_ms?: unknown } | undefined;
-    return { ok: true, latencyMs: typeof test?.latency_ms === "number" ? test.latency_ms : null };
-  } catch (err) {
-    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, "save"), ...(err instanceof CallStopped ? { stopped: true } : {}) };
+    const result = await call(fetchImpl, "/api/ai/engine", "POST", { engine, scope }, { deadlineMs: ENGINE_CLIENT_DEADLINE_MS, ...opts });
+    const jobId = nonEmpty(result.body.job_id) ?? nonEmpty(result.body.jobId);
+    if (!(result.ok || (result.status === 202 && jobId)) || !jobId) {
+      const code = failureCode(result);
+      return { ok: false, message: failureSentence(result, TEST_FAILED), ...(code ? { code } : {}) };
+    }
+    return { ok: true, jobId };
+  } catch (error) {
+    return { ok: false, message: stoppedSentence(error, TEST_FAILED, "test") };
   }
 }
 
-/** Test an app or local model on the paired computer without saving it. */
+function parseRuntimeJob(raw: unknown): RuntimeJob | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const id = nonEmpty(value.id) ?? nonEmpty(value.job_id);
+  const statuses = ["queued", "claimed", "running", "waiting_user", "done", "failed"];
+  const progress = value.progress && typeof value.progress === "object" ? (value.progress as Record<string, unknown>) : null;
+  const rawStatus = value.status === "completed" ? "done" : progress?.code === "waiting_for_user" ? "waiting_user" : value.status;
+  const status = typeof rawStatus === "string" && statuses.includes(rawStatus) ? (rawStatus as RuntimeJob["status"]) : null;
+  if (!id || !status) return null;
+  const rawEngine = value.engine && typeof value.engine === "object" ? (value.engine as Record<string, unknown>) : null;
+  const rawResult = value.result && typeof value.result === "object" ? (value.result as Record<string, unknown>) : null;
+  const rawError = value.error && typeof value.error === "object" ? (value.error as Record<string, unknown>) : null;
+  return {
+    id,
+    status,
+    action: nonEmpty(value.action) ?? "runtime",
+    engine: rawEngine ? { kind: nonEmpty(rawEngine.kind) ?? "runtime", name: nonEmpty(rawEngine.name) ?? "runtime" } : null,
+    errorCode: nonEmpty(value.errorCode) ?? nonEmpty(value.error_code) ?? nonEmpty(rawError?.code),
+    message: nonEmpty(value.message),
+    result: rawResult
+      ? {
+          ...(nonEmpty(rawResult.reply) || nonEmpty(rawResult.answer) ? { reply: nonEmpty(rawResult.reply) ?? nonEmpty(rawResult.answer)! } : {}),
+          ...(typeof rawResult.latency_ms === "number" ? { latencyMs: rawResult.latency_ms } : {}),
+          ...(nonEmpty(rawResult.instructions) ? { instructions: nonEmpty(rawResult.instructions)! } : {}),
+          ...(nonEmpty(rawResult.auth_url) || nonEmpty(rawResult.authUrl) ? { authUrl: nonEmpty(rawResult.auth_url) ?? nonEmpty(rawResult.authUrl)! } : {}),
+        }
+      : null,
+  };
+}
+
+export async function readRuntimeJob(
+  jobId: string,
+  fetchImpl: FetchLike = defaultFetch,
+  opts: EngineCallOptions = {},
+): Promise<{ ok: true; job: RuntimeJob } | { ok: false; message: string; code?: string }> {
+  try {
+    const result = await call(fetchImpl, `/api/bridge/runtime-jobs/${encodeURIComponent(jobId)}`, "GET", undefined, opts);
+    const job = parseRuntimeJob(result.body.job);
+    if (!result.ok || !job) {
+      const code = failureCode(result);
+      return { ok: false, message: failureSentence(result, TEST_FAILED), ...(code ? { code } : {}) };
+    }
+    return { ok: true, job };
+  } catch (error) {
+    return { ok: false, message: stoppedSentence(error, TEST_FAILED, "test") };
+  }
+}
+
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new CallStopped("cancelled"));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new CallStopped("cancelled"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function pollRuntimeJob(
+  jobId: string,
+  fetchImpl: FetchLike = defaultFetch,
+  opts: EngineCallOptions & { intervalMs?: number; onUpdate?: (job: RuntimeJob) => void } = {},
+): Promise<{ ok: true; job: RuntimeJob } | { ok: false; message: string; code?: string }> {
+  const started = Date.now();
+  const deadline = opts.deadlineMs ?? RUNTIME_JOB_DEADLINE_MS;
+  while (Date.now() - started < deadline) {
+    const current = await readRuntimeJob(jobId, fetchImpl, opts);
+    if (!current.ok) return current;
+    opts.onUpdate?.(current.job);
+    if (current.job.status === "done") return current;
+    if (current.job.status === "failed") {
+      return {
+        ok: false,
+        message: current.job.message ?? "The computer could not finish that action.",
+        ...(current.job.errorCode ? { code: current.job.errorCode } : {}),
+      };
+    }
+    try {
+      await wait(opts.intervalMs ?? 1_500, opts.signal);
+    } catch (error) {
+      return { ok: false, message: stoppedSentence(error, TEST_FAILED, "test") };
+    }
+  }
+  return { ok: false, message: TOO_SLOW, code: "runtime_job_timeout" };
+}
+
+export async function saveEngine(
+  engine: EngineSelection | AgentEngineChoice,
+  expectedVersion: string | null,
+  fetchImpl: FetchLike = defaultFetch,
+  opts: SaveEngineOptions = {},
+): Promise<{ ok: true; latencyMs: number | null } | { ok: false; message: string; code?: string; stopped?: boolean }> {
+  try {
+    const body = isSelection(engine)
+      ? {
+          engine,
+          scope: opts.scope ?? "person",
+          expected_version: expectedVersion,
+          ...(opts.probeJobId ? { probe_job_id: opts.probeJobId } : {}),
+        }
+      : { engine, expected_version: expectedVersion };
+    const result = await call(fetchImpl, "/api/ai/engine", "PUT", body, { deadlineMs: ENGINE_CLIENT_DEADLINE_MS, ...opts });
+    if (!result.ok) {
+      const code = failureCode(result);
+      return { ok: false, message: failureSentence(result, CHANGE_FAILED), ...(code ? { code } : {}) };
+    }
+    const test = result.body.test as { latency_ms?: unknown } | undefined;
+    return { ok: true, latencyMs: typeof test?.latency_ms === "number" ? test.latency_ms : null };
+  } catch (error) {
+    return {
+      ok: false,
+      message: stoppedSentence(error, CHANGE_FAILED, "save"),
+      ...(error instanceof CallStopped ? { stopped: true } : {}),
+    };
+  }
+}
+
+export async function inheritWorkspaceEngine(
+  expectedVersion: string | null,
+  fetchImpl: FetchLike = defaultFetch,
+  opts: EngineCallOptions = {},
+): Promise<{ ok: true } | { ok: false; message: string; code?: string }> {
+  try {
+    const result = await call(
+      fetchImpl,
+      "/api/ai/engine",
+      "PUT",
+      { scope: "person", use_workspace_default: true, expected_version: expectedVersion },
+      opts,
+    );
+    if (result.ok) return { ok: true };
+    const code = failureCode(result);
+    return { ok: false, message: failureSentence(result, CHANGE_FAILED), ...(code ? { code } : {}) };
+  } catch (error) {
+    return { ok: false, message: stoppedSentence(error, CHANGE_FAILED, "save") };
+  }
+}
+
+/** Legacy synchronous helper retained until every caller moves to queued jobs. */
 export async function testEngine(
   engine: AgentEngineChoice,
   fetchImpl: FetchLike = defaultFetch,
   opts: EngineCallOptions = {},
-): Promise<{ ok: true; latencyMs: number; reply: string } | { ok: false; message: string }> {
+): Promise<{ ok: true; latencyMs: number; reply: string } | { ok: false; message: string; code?: string }> {
   try {
-    const r = await call(fetchImpl, "/api/ai/engine", "POST", { engine }, { deadlineMs: ENGINE_CLIENT_DEADLINE_MS, ...opts });
-    if (!r.ok || typeof r.body.latency_ms !== "number") return { ok: false, message: failureSentence(r, TEST_FAILED) };
-    return { ok: true, latencyMs: r.body.latency_ms, reply: typeof r.body.reply === "string" ? r.body.reply : "" };
-  } catch (err) {
-    return { ok: false, message: stoppedSentence(err, TEST_FAILED, "test") };
+    const result = await call(fetchImpl, "/api/ai/engine", "POST", { engine }, { deadlineMs: ENGINE_CLIENT_DEADLINE_MS, ...opts });
+    if (!result.ok || typeof result.body.latency_ms !== "number") {
+      const code = failureCode(result);
+      return { ok: false, message: failureSentence(result, TEST_FAILED), ...(code ? { code } : {}) };
+    }
+    return { ok: true, latencyMs: result.body.latency_ms, reply: typeof result.body.reply === "string" ? result.body.reply : "" };
+  } catch (error) {
+    return { ok: false, message: stoppedSentence(error, TEST_FAILED, "test") };
   }
 }
 
-/**
- * Remove a saved key that is not in use (the team-wide disconnect of that
- * provider: every workspace row on it goes; the account is not on it, so it is
- * untouched). A kept key is never left with no way to remove it.
- */
 export async function removeSavedKey(
   provider: Provider,
   fetchImpl: FetchLike = defaultFetch,
   opts: EngineCallOptions = {},
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
-    const r = await call(fetchImpl, `/api/agent-config/bulk-provider?provider=${encodeURIComponent(provider)}`, "DELETE", undefined, opts);
-    return r.ok ? { ok: true } : { ok: false, message: failureSentence(r, CHANGE_FAILED) };
-  } catch (err) {
-    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, "remove") };
+    const result = await call(fetchImpl, `/api/agent-config/bulk-provider?provider=${encodeURIComponent(provider)}`, "DELETE", undefined, opts);
+    return result.ok ? { ok: true } : { ok: false, message: failureSentence(result, CHANGE_FAILED) };
+  } catch (error) {
+    return { ok: false, message: stoppedSentence(error, CHANGE_FAILED, "remove") };
   }
 }
 
-/** Move the AI account to another provider whose key is saved (tested first by the route). */
 export async function switchProvider(
   provider: Provider,
   fetchImpl: FetchLike = defaultFetch,
   opts: EngineCallOptions = {},
 ): Promise<{ ok: true; label: string } | { ok: false; message: string }> {
   try {
-    const r = await call(fetchImpl, "/api/agent-config/workspace-provider", "POST", { provider }, { deadlineMs: 60_000, ...opts });
-    if (!r.ok) return { ok: false, message: failureSentence(r, CHANGE_FAILED) };
-    return { ok: true, label: typeof r.body.label === "string" ? r.body.label : provider };
-  } catch (err) {
-    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, "switch") };
+    const result = await call(fetchImpl, "/api/agent-config/workspace-provider", "POST", { provider }, { deadlineMs: 60_000, ...opts });
+    if (!result.ok) return { ok: false, message: failureSentence(result, CHANGE_FAILED) };
+    return { ok: true, label: typeof result.body.label === "string" ? result.body.label : provider };
+  } catch (error) {
+    return { ok: false, message: stoppedSentence(error, CHANGE_FAILED, "switch") };
+  }
+}
+
+const CLI_LABEL: Record<CliEngine, string> = { claude: "Claude Code", codex: "Codex", gemini: "Gemini CLI" };
+const CLI_INSTALL: Record<CliEngine, string> = {
+  claude: "npm install -g @anthropic-ai/claude-code",
+  codex: "npm install -g @openai/codex",
+  gemini: "npm install -g @google/gemini-cli",
+};
+const CLI_LOGIN: Record<CliEngine, string> = { claude: "claude\n/login", codex: "codex login", gemini: "Use a Google API key" };
+
+/** One truthful status sentence. A heartbeat/sign-in alone is deliberately never called ready. */
+export function describeRuntime(
+  target: Pick<EngineDevice, "label" | "approved" | "online" | "busy" | "protocols" | "runtimes">,
+  provider: CliEngine,
+): { label: string; verified: boolean; repair: string | null } {
+  const state = target.runtimes[provider];
+  const name = CLI_LABEL[provider];
+  if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
+  if (!target.online) return { label: "Offline", verified: false, repair: `On ${target.label}, run: oasis bridge restart` };
+  if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
+  if (state.unsupported) {
+    return { label: "Unsupported", verified: false, repair: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead." };
+  }
+  if (!target.protocols.includes("runtime_action_v1") || !target.protocols.includes("department_task_v2")) {
+    return { label: "Needs test", verified: false, repair: `Update and restart the OASIS connector on ${target.label}, then Test again.` };
+  }
+  if (!state.installed) return { label: "Not installed", verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
+  if (!state.signedIn) return { label: "Sign-in needed", verified: false, repair: `On ${target.label}, run: ${CLI_LOGIN[provider]}` };
+  if (!state.executionReady) return { label: "Needs test", verified: false, repair: `Test ${name} on ${target.label} before using it for agents.` };
+  return { label: "Ready for agents", verified: true, repair: null };
+}
+
+/** A detected model is usable only after the selected connector has run a real probe. */
+export function describeLocalModel(
+  target: Pick<EngineDevice, "label" | "approved" | "online" | "busy" | "protocols">,
+  model: EngineDevice["localModels"][number] | undefined,
+): { label: string; verified: boolean; repair: string | null } {
+  if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
+  if (!target.online) return { label: "Offline", verified: false, repair: `Start Ollama or LM Studio and restart the OASIS connector on ${target.label}.` };
+  if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
+  if (!target.protocols.includes("runtime_action_v1") || !target.protocols.includes("department_task_v2")) {
+    return { label: "Needs test", verified: false, repair: `Update and restart the OASIS connector on ${target.label}, then Test again.` };
+  }
+  if (!model) return { label: "Not installed", verified: false, repair: `Start Ollama or LM Studio on ${target.label}, install a model, then Refresh.` };
+  if (model.state === "unavailable") {
+    return { label: "Offline", verified: false, repair: `Start ${model.adapter === "ollama" ? "Ollama" : "LM Studio"} on ${target.label}, then Test again.` };
+  }
+  if (model.state !== "ready") return { label: "Needs test", verified: false, repair: `Test ${model.label} on ${target.label} before using it for agents.` };
+  return { label: "Ready for agents", verified: true, repair: null };
+}
+
+export function selectionKey(selection: EngineSelection, scope: EngineScope): string {
+  return `${scope}:${JSON.stringify(selection)}`;
+}
+
+export function repairForCode(code: string | undefined, deviceLabel?: string, provider?: CliEngine): string | null {
+  const where = deviceLabel ? ` on ${deviceLabel}` : " on the selected computer";
+  switch (code) {
+    case "pairing_required":
+    case "pairing_not_found":
+      return "Pair this computer in Settings > Devices, then return here and Test again.";
+    case "pairing_not_approved":
+      return "Approve this computer in Settings > Devices, then Test again.";
+    case "connector_offline":
+    case "bridge_unavailable":
+    case "runtime_unavailable":
+      return `Restart the connector${where} with: oasis bridge restart`;
+    case "cli_not_found":
+      return provider
+        ? `On ${deviceLabel ?? "the selected computer"}, run: ${CLI_INSTALL[provider]}`
+        : `Install the selected app${where}, then Test again.`;
+    case "engine_not_found":
+      return "Start Ollama or LM Studio on the selected computer, then Refresh and Test again.";
+    case "cli_not_authenticated":
+    case "not_authenticated":
+    case "auth_failed":
+    case "auth_cancelled":
+      if (provider === "gemini") return "Gemini CLI personal sign-in is not supported. Choose a Google API key instead.";
+      return provider
+        ? `On ${deviceLabel ?? "the selected computer"}, run: ${CLI_LOGIN[provider]}`
+        : `Sign in to the selected app${where}, then Test again.`;
+    case "unsupported_personal_sign_in":
+      return "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.";
+    case "runtime_job_timeout":
+    case "timeout":
+    case "lease_expired":
+      return "The computer did not finish in time. Check that its connector is running, then Test again.";
+    default:
+      return null;
   }
 }

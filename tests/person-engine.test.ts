@@ -40,7 +40,8 @@ async function createSchema() {
       id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY,
       tenant_id TEXT NOT NULL, user_id TEXT, agent_key TEXT NOT NULL,
       provider TEXT NOT NULL, model TEXT NOT NULL, encrypted_api_key TEXT,
-      enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
+      enabled INTEGER NOT NULL DEFAULT 1, computer_pairing_id TEXT, fallback_policy TEXT,
+      updated_at TEXT NOT NULL);
     CREATE UNIQUE INDEX idx_agent_model_config_default_per_agent
       ON agent_model_config (tenant_id, agent_key) WHERE user_id IS NULL;
     CREATE UNIQUE INDEX idx_agent_model_config_engine_per_user

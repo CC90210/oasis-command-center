@@ -49,13 +49,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionDef[] = [
   { key: "team", href: "/settings/team", label: "Team", audience: "team" },
   { key: "connections", href: "/settings/connections", label: "Connections", audience: "everyone" },
   { key: "chat-apps", href: "/settings/chat-apps", label: "Chat apps", audience: "everyone" },
-  { key: "ai", href: "/settings/ai", label: "AI brain", audience: "manage" },
+  { key: "ai", href: "/settings/ai", label: "AI brain", audience: "everyone" },
   { key: "brand", href: "/settings/brand", label: "Brand & domain", audience: "manage" },
   { key: "billing", href: "/settings/billing", label: "Billing & add-ons", audience: "manage" },
   { key: "notifications", href: "/settings/notifications", label: "Notifications", audience: "everyone" },
   { key: "privacy", href: "/settings/privacy", label: "Data & privacy", audience: "everyone" },
   { key: "audit-log", href: "/settings/audit-log", label: "Activity log", audience: "team_performance" },
-  { key: "devices", href: "/settings/devices", label: "Devices", audience: "operator" },
+  { key: "devices", href: "/settings/devices", label: "Devices", audience: "everyone" },
 ];
 
 /** What the section gates need to know about the viewer. */

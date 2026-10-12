@@ -200,7 +200,7 @@ test("a viewer who cannot open the target is told who can, never linked to a ref
   const operator = { canManage: true, isOperator: true };
 
   // Owner-only settings.
-  for (const need of ["ai_account", "ai_engine", "revenue_goal", "brand", "team", "connections", "connector:stripe", "connector:slack"] as SetupNeed[]) {
+  for (const need of ["ai_account", "revenue_goal", "brand", "team", "connections", "connector:stripe", "connector:slack"] as SetupNeed[]) {
     assert.equal(setupAudience(need), "manage", `${need} is an owner's setting`);
     const asked = setupLink(need, member);
     assert.equal(asked.kind, "ask", `${need}: a member must not be linked to a page that refuses them`);
@@ -214,11 +214,12 @@ test("a viewer who cannot open the target is told who can, never linked to a ref
   assert.equal(setupAudience("connector:google-workspace"), "everyone");
   assert.equal(setupLink("connector:google-workspace", member).kind, "link");
 
-  // Devices are the verified operator's, not a workspace admin's.
-  assert.equal(setupAudience("bridge_devices"), "operator");
-  assert.equal(viewerMaySetUp("bridge_devices", owner), false);
-  assert.equal(viewerMaySetUp("bridge_devices", operator), true);
-  assert.equal(setupLink("bridge_devices", owner).kind, "ask");
+  // Every member manages their personal engine and their own paired computers.
+  assert.equal(setupAudience("ai_engine"), "everyone");
+  assert.equal(setupLink("ai_engine", member).kind, "link");
+  assert.equal(setupAudience("bridge_devices"), "everyone");
+  assert.equal(viewerMaySetUp("bridge_devices", member), true);
+  assert.equal(setupLink("bridge_devices", member).kind, "link");
 
   // Installing the bridge is the verified operator's alone (F0 containment).
   assert.equal(setupAudience("bridge_install"), "operator");

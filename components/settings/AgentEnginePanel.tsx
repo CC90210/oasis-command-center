@@ -1,65 +1,132 @@
 "use client";
 
-/**
- * AgentEnginePanel - "What powers your agents": ONE choice for every
- * department, Slack mention and the coding harness (lib/ai/agent-engine.ts).
- *
- *   An AI account   a cloud provider's key (Anthropic, OpenAI, Google,
- *                   OpenRouter). Switch between providers whose key is saved
- *                   without pasting again; pick the model and Test below.
- *                   Spends API credits.
- *   An app on your paired computer   Claude Code, Codex or Gemini CLI, on its
- *                   own sign-in there, through the OASIS bridge. No API credits.
- *   A local model on your paired computer   Ollama or LM Studio, through the
- *                   same bridge. No API credits.
- *
- * Every change is tested with one short department answer before it is saved,
- * and nothing changes when the test fails (the routes do it, not this panel).
- * The status of each app comes from the paired computer's own report (the card
- * below); it is a hint, never a lock: any app can be chosen, and its Test says
- * plainly whether it answers.
- */
-
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Cloud, Cpu, HardDrive, Loader2 } from "lucide-react";
-import { CLI_STATE_LABEL, cliUnsupportedDetail } from "@/lib/bridge-cli-status";
-import { PROVIDER_LABEL, type Provider } from "@/lib/providers";
+import Link from "next/link";
 import {
-  CLI_ENGINES,
-  CLI_ENGINE_LABEL,
-  agentsEngineLine,
-  isLocalModelName,
-  spendFor,
-  spendSentence,
-  type AgentEngineChoice,
-  type CliEngine,
-} from "@/lib/ai/agent-engine";
-import { ENGINE_SERVER_WINDOW_MS, readEngine, readUnsupportedApps, removeSavedKey, saveEngine, switchProvider, testEngine, type EngineState } from "@/components/settings/agent-engine-client";
+  CheckCircle2,
+  CircleAlert,
+  Cloud,
+  Copy,
+  Cpu,
+  HardDrive,
+  KeyRound,
+  Loader2,
+  RefreshCw,
+} from "lucide-react";
+import { CLI_ENGINE_LABEL, type ApiEngineProvider, type CliEngine } from "@/lib/ai/agent-engine";
+import { PROVIDER_LABEL } from "@/lib/providers";
+import {
+  describeLocalModel,
+  describeRuntime,
+  engineDevicesForScope,
+  inheritWorkspaceEngine,
+  pollRuntimeJob,
+  queueEngineProbe,
+  readEngine,
+  repairForCode,
+  saveEngine,
+  selectionKey,
+  switchProvider,
+  type EngineDevice,
+  type EngineScope,
+  type EngineSelection,
+  type EngineState,
+  type RuntimeJob,
+} from "@/components/settings/agent-engine-client";
+import { startCliSignIn } from "@/components/settings/LocalCliProvidersCard";
+import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
 
-const PROVIDERS: Provider[] = ["anthropic", "openai", "google", "openrouter"];
+const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "gemini"];
+const API_PROVIDERS: ApiEngineProvider[] = ["anthropic", "openai", "google", "openrouter"];
+const INSTALL_COMMAND: Record<CliEngine, string> = {
+  claude: "npm install -g @anthropic-ai/claude-code",
+  codex: "npm install -g @openai/codex",
+  gemini: "npm install -g @google/gemini-cli",
+};
+const LOGIN_COMMAND: Record<CliEngine, string> = {
+  claude: "claude\n/login",
+  codex: "codex login",
+  gemini: "Use a Google API key",
+};
 
-type Kind = AgentEngineChoice["kind"];
+type Notice = { tone: "ok" | "error" | "info"; text: string; repair?: string | null } | null;
+type Activity = "reading" | "testing" | "saving" | "connecting" | "inheriting" | null;
 
-function engineName(c: AgentEngineChoice): string {
-  return c.kind === "cli" ? CLI_ENGINE_LABEL[c.cli] : c.kind === "local" ? c.model : "Your AI account";
+function engineTitle(selection: EngineSelection, devices: EngineDevice[] = []): string {
+  const computer = selection.mode === "api" ? null : devices.find((device) => device.pairingId === selection.pairingId)?.label;
+  if (selection.mode === "subscription") return `${CLI_ENGINE_LABEL[selection.provider]} on ${computer ?? "a paired computer"}`;
+  if (selection.mode === "local") return `${selection.modelRef} on ${computer ?? "a paired computer"}`;
+  return `${PROVIDER_LABEL[selection.provider]} API key`;
 }
-type Note = { ok: boolean; text: string } | null;
 
-/**
- * The AI account (connect, replace or remove a key, the model, Test), inside the
- * panel where the engine is chosen. The card it wraps carries id="providers"
- * (SettingsContent), the anchor every "Connect an AI account" link lands on
- * (lib/setup-links.ts ai_account).
- */
-function AccountSection({ heading, blurb, children }: { heading: string; blurb?: string; children?: React.ReactNode }) {
+function selectedPairing(selection: EngineSelection): string | null {
+  return selection.mode === "api" ? null : selection.pairingId;
+}
+
+function deviceFor(devices: EngineDevice[], selection: EngineSelection): EngineDevice | null {
+  const pairingId = selectedPairing(selection);
+  return pairingId ? devices.find((device) => device.pairingId === pairingId) ?? null : null;
+}
+
+function versionForScope(state: EngineState, scope: EngineScope): string | null {
+  return state.engineVersions[scope];
+}
+
+function setupForMode(mode: EngineSelection["mode"], state: EngineState, scope: EngineScope): EngineSelection {
+  const available = engineDevicesForScope(state.devices, scope);
+  const target = available[0] ?? state.devices[0];
+  if (mode === "subscription") return { mode, pairingId: target?.pairingId ?? "", provider: "claude", fallback: "none" };
+  if (mode === "local") {
+    return { mode, pairingId: target?.pairingId ?? "", modelRef: target?.localModels[0]?.ref ?? "", fallback: "none" };
+  }
+  return { mode, provider: state.account?.provider ?? state.savedProviders[0] ?? "anthropic" };
+}
+
+function commandFor(device: EngineDevice, provider: CliEngine): string | null {
+  const runtime = device.runtimes[provider];
+  if (provider === "gemini") return null;
+  if (!device.online) return "oasis bridge restart";
+  if (!runtime.installed) return INSTALL_COMMAND[provider];
+  if (!runtime.signedIn) return LOGIN_COMMAND[provider];
+  return null;
+}
+
+function inventoryRuntimeLabel(runtime: EngineDevice["runtimes"][CliEngine]): "Unsupported" | "Ready for agents" | "Signed in" | "Installed" | "Not installed" {
+  if (runtime.unsupported) return "Unsupported";
+  if (runtime.executionReady) return "Ready for agents";
+  if (runtime.signedIn) return "Signed in";
+  return runtime.installed ? "Installed" : "Not installed";
+}
+
+function jobSentence(job: RuntimeJob): string {
+  if (job.status === "queued") return "Queued on the selected computer.";
+  if (job.status === "claimed") return "The selected computer claimed the job.";
+  if (job.status === "running") return "The selected computer is running the check.";
+  if (job.status === "waiting_user") return job.result?.instructions ?? job.message ?? "Finish the sign-in on the selected computer.";
+  if (job.status === "done") return "The selected computer finished successfully.";
+  return job.message ?? "The selected computer could not finish the job.";
+}
+
+function safeHttpUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function AccountSection({ children }: { children?: React.ReactNode }) {
   if (!children) return null;
   return (
-    <div className="space-y-2 border-t border-hairline pt-3" data-testid="engine-ai-account">
-      <div className="text-sm font-semibold text-fg">{heading}</div>
-      <p className="text-[11px] leading-relaxed text-fg-dim">
-        Connect, replace or remove the API key, pick its model and test it here. {blurb}
-      </p>
+    <div className="space-y-2 border-t border-hairline pt-4" data-testid="engine-ai-account">
+      <div className="flex items-center gap-2 text-sm font-semibold text-fg">
+        <KeyRound className="h-4 w-4" aria-hidden="true" />
+        API provider accounts
+      </div>
+      <p className="text-xs leading-relaxed text-fg-muted">Connect, replace, test or remove provider keys here.</p>
       {children}
     </div>
   );
@@ -68,454 +135,694 @@ function AccountSection({ heading, blurb, children }: { heading: string; blurb?:
 export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const router = useRouter();
   const [state, setState] = useState<EngineState | null>(null);
+  const [draft, setDraftState] = useState<EngineSelection | null>(null);
+  const [scope, setScopeState] = useState<EngineScope>("person");
   const [readError, setReadError] = useState<string | null>(null);
-  const [kind, setKind] = useState<Kind>("api");
-  const [cli, setCli] = useState<CliEngine>("claude");
-  const [localModel, setLocalModel] = useState("");
-  const [provider, setProvider] = useState<Provider | "">("");
-  // Two independent busy states, and neither locks the page. A Test or Save
-  // check only disables the Test and Save buttons; switching a provider or
-  // removing a key only disables the provider controls. Radios, the app
-  // picker, the model box and everything else outside this panel stay live
-  // (CC, 2026-10-10: "I couldn't click anything else on the page").
-  const [check, setCheck] = useState<null | "save" | "test">(null);
-  const [providerBusy, setProviderBusy] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const [note, setNote] = useState<Note>(null);
-  const [unsupported, setUnsupported] = useState<CliEngine[]>([]);
-  const stopCheck = useRef<AbortController | null>(null);
-  const lateRead = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [activity, setActivity] = useState<Activity>("reading");
+  const [notice, setNotice] = useState<Notice>(null);
+  const [job, setJob] = useState<RuntimeJob | null>(null);
+  const [probeReceipt, setProbeReceipt] = useState<{ key: string; jobId: string } | null>(null);
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const stop = useRef<AbortController | null>(null);
+  const noticeRef = useRef<HTMLDivElement | null>(null);
+  const scopeRef = useRef<EngineScope>("person");
+  const draftRef = useRef<EngineSelection | null>(null);
 
-  async function load(opts: { keepDraft?: boolean; syncProvider?: boolean } = {}) {
-    const [r, refused] = await Promise.all([readEngine(), readUnsupportedApps()]);
-    setUnsupported(refused);
-    if (!r.ok) {
-      // A failed refresh after a failed save keeps what is on screen.
-      if (!opts.keepDraft) setReadError(r.message);
+  async function load(options: { keepDraft?: boolean } = {}) {
+    if (!options.keepDraft) setActivity("reading");
+    const result = await readEngine();
+    if (!result.ok) {
+      setReadError(result.message);
+      setActivity(null);
       return;
     }
     setReadError(null);
-    setState(r.state);
-    if (opts.syncProvider) setProvider(r.state.account?.provider ?? "");
-    if (opts.keepDraft) return;
-    setKind(r.state.engine.kind);
-    if (r.state.engine.kind === "cli") setCli(r.state.engine.cli);
-    if (r.state.engine.kind === "local") setLocalModel(r.state.engine.model);
-    setProvider(r.state.account?.provider ?? "");
+    setState(result.state);
+    if (!options.keepDraft || !draftRef.current) {
+      const nextScope: EngineScope = scopeRef.current === "workspace" && result.state.canManage ? "workspace" : "person";
+      const next =
+        nextScope === "workspace"
+          ? result.state.engine
+          : result.state.personEngine.source === "person" && result.state.personEngine.selection
+            ? result.state.personEngine.selection
+            : result.state.engine;
+      scopeRef.current = nextScope;
+      draftRef.current = next;
+      setScopeState(nextScope);
+      setDraftState(next);
+    }
+    setActivity(null);
   }
 
   useEffect(() => {
     void load();
-    // Leaving the page stops a check that is still waiting.
+    const refreshAccount = () => void load({ keepDraft: true });
+    window.addEventListener("oasis:agent-configs-changed", refreshAccount);
     return () => {
-      stopCheck.current?.abort();
-      if (lateRead.current) clearTimeout(lateRead.current);
+      window.removeEventListener("oasis:agent-configs-changed", refreshAccount);
+      stop.current?.abort();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The initial server truth is intentionally read once; refresh actions call load explicitly.
   }, []);
 
-  // The seconds a check has been waiting, so a slow app never looks frozen.
   useEffect(() => {
-    if (check === null) {
-      setElapsed(0);
-      return;
-    }
-    const started = Date.now();
-    const id = setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 1000);
-    return () => clearInterval(id);
-  }, [check]);
+    if (notice) noticeRef.current?.focus();
+  }, [notice]);
 
-  // The AI account stays reachable when the engine choice could not be read:
-  // a key is never locked away behind a failed read.
   if (readError) {
     return (
-      <div className="space-y-3" data-testid="agent-engine">
-        <p className="text-sm text-fg-muted">{readError}</p>
-        <AccountSection heading="Your AI account">{children}</AccountSection>
+      <div className="space-y-4" data-testid="agent-engine">
+        <div role="alert" className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-fg">
+          {readError}
+          <button type="button" onClick={() => void load()} className="ml-2 font-semibold text-accent underline underline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2">
+            Retry
+          </button>
+        </div>
+        <AccountSection>{children}</AccountSection>
       </div>
     );
   }
-  if (!state) {
+
+  if (!state || !draft) {
     return (
-      <div className="flex items-center gap-2 text-sm text-fg-muted">
-        <Loader2 className="h-4 w-4 animate-spin" /> Reading what powers your agents...
+      <div className="flex items-center gap-2 text-sm text-fg-muted" role="status">
+        <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Reading your AI setup…
       </div>
     );
   }
 
-  const draft: AgentEngineChoice | null =
-    kind === "api" ? { kind: "api" } : kind === "cli" ? { kind: "cli", cli } : isLocalModelName(localModel.trim()) ? { kind: "local", model: localModel.trim() } : null;
-  const current = state.engine;
-  const unchanged = draft !== null && JSON.stringify(draft) === JSON.stringify(current);
-  const canManage = state.canManage;
-  // An app the vendor refuses on this sign-in: selectable only to show why, never offered a Test or Save.
-  const refused = kind === "cli" && unsupported.includes(cli);
+  // Stable non-null snapshots for async callbacks created by this render.
+  const loadedState = state;
+  const draftSelection = draft;
+  const eligibleDevices = engineDevicesForScope(state.devices, scope);
+  const current =
+    scope === "workspace"
+      ? state.engine
+      : state.personEngine.source === "person" && state.personEngine.selection
+        ? state.personEngine.selection
+        : state.engine;
+  const legacyNeedsComputer = current.mode !== "api" && !current.pairingId;
+  const selectedDevice = deviceFor(state.devices, draft);
+  const selectedCli = draft.mode === "subscription" ? draft.provider : undefined;
+  const selectedLocalModel =
+    draft.mode === "local" ? selectedDevice?.localModels.find((model) => model.ref === draft.modelRef) : undefined;
+  const draftKey = selectionKey(draft, scope);
+  const apiConnected =
+    draft.mode === "api" && (state.savedProviders.includes(draft.provider) || state.account?.provider === draft.provider);
+  const apiProviderOptions = state.canManage
+    ? API_PROVIDERS.filter((provider) => state.account?.provider === provider || state.savedProviders.includes(provider))
+    : state.account
+      ? [state.account.provider]
+      : [];
+  const tested = draft.mode === "api" ? apiConnected : probeReceipt?.key === draftKey;
+  const rolloutBlocked = draft.mode === "subscription" && subscriptionRolloutError(draft.provider, state.oasis) !== null;
+  const canEdit = scope === "person" || state.canManage;
+  const jobAuthUrl = safeHttpUrl(job?.result?.authUrl);
 
-  /** Runs one Test or Save to an end: the result, or a plain sentence. The busy state always clears. */
-  async function runCheck(which: "save" | "test", work: (signal: AbortSignal) => Promise<void>) {
-    const ctl = new AbortController();
-    stopCheck.current = ctl;
-    setCheck(which);
-    setNote(null);
+  function setDraft(next: EngineSelection) {
+    draftRef.current = next;
+    setDraftState(next);
+    setProbeReceipt(null);
+    setJob(null);
+    setNotice(null);
+  }
+
+  function changeScope(next: EngineScope) {
+    if (next === "workspace" && !loadedState.canManage) return;
+    scopeRef.current = next;
+    setScopeState(next);
+    setDraft(
+      next === "workspace"
+        ? loadedState.engine
+        : loadedState.personEngine.source === "person" && loadedState.personEngine.selection
+          ? loadedState.personEngine.selection
+          : loadedState.engine,
+    );
+  }
+
+  async function copyCommand(command: string) {
     try {
-      await work(ctl.signal);
+      await navigator.clipboard.writeText(command);
+      setCopyFeedback(`Copied: ${command}`);
     } catch {
-      setNote({ ok: false, text: "That couldn't be finished just now. Nothing was changed. Try again in a moment." });
-    } finally {
-      if (stopCheck.current === ctl) stopCheck.current = null;
-      setCheck(null);
+      setCopyFeedback(`Copy failed. Select and copy: ${command}`);
     }
   }
 
-  async function save() {
-    if (!draft) return;
-    const chosen = draft;
-    await runCheck("save", async (signal) => {
-      const r = await saveEngine(chosen, state?.engineVersion ?? null, undefined, { signal });
-      if (!r.ok) {
-        setNote({ ok: false, text: r.message });
-        // A save whose answer never came may have landed: read what is in use, keeping the pick on screen.
-        await load({ keepDraft: true });
-        // The server may still be finishing its own test: read once more after its window.
-        if (r.stopped) {
-          if (lateRead.current) clearTimeout(lateRead.current);
-          lateRead.current = setTimeout(() => void load({ keepDraft: true }), ENGINE_SERVER_WINDOW_MS);
-        }
+  async function testSelection() {
+    if (draftSelection.mode === "api") return;
+    const controller = new AbortController();
+    stop.current = controller;
+    setActivity("testing");
+    setNotice(null);
+    setJob(null);
+    setProbeReceipt(null);
+    const queued = await queueEngineProbe(draftSelection, scope, undefined, { signal: controller.signal });
+    if (!queued.ok) {
+      setActivity(null);
+      setNotice({ tone: "error", text: queued.message, repair: repairForCode(queued.code, selectedDevice?.label, selectedCli) });
+      return;
+    }
+    const finished = await pollRuntimeJob(queued.jobId, undefined, {
+      signal: controller.signal,
+      onUpdate: setJob,
+    });
+    setActivity(null);
+    if (!finished.ok) {
+      setNotice({ tone: "error", text: finished.message, repair: repairForCode(finished.code, selectedDevice?.label, selectedCli) });
+      return;
+    }
+    setProbeReceipt({ key: draftKey, jobId: queued.jobId });
+    const latency = finished.job.result?.latencyMs;
+    const reply = finished.job.result?.reply;
+    setNotice({
+      tone: "ok",
+      text: `${engineTitle(draftSelection, loadedState.devices)} passed${typeof latency === "number" ? ` in ${(latency / 1000).toFixed(1)} s` : ""}.${reply ? ` “${reply.slice(0, 140)}”` : ""}`,
+    });
+  }
+
+  async function saveSelection() {
+    if (draftSelection.mode !== "api" && (!probeReceipt || probeReceipt.key !== draftKey)) return;
+    const controller = new AbortController();
+    stop.current = controller;
+    setActivity("saving");
+    setNotice(null);
+    let switchedAccount: string | null = null;
+    if (draftSelection.mode === "api" && loadedState.account?.provider !== draftSelection.provider) {
+      const switched = await switchProvider(draftSelection.provider, undefined, { signal: controller.signal });
+      if (!switched.ok) {
+        setActivity(null);
+        setNotice({ tone: "error", text: switched.message });
         return;
       }
-      // The coding harness reads this same setting (lib/ai/agent-engine.ts harnessRouteFor).
-      setNote({
-        ok: true,
-        text: `Your agents now use ${agentsEngineLine(chosen)}.${r.latencyMs !== null ? ` A test answer came back in ${(r.latencyMs / 1000).toFixed(1)} s.` : ""}`,
+      switchedAccount = PROVIDER_LABEL[draftSelection.provider];
+    }
+    const result = await saveEngine(draftSelection, versionForScope(loadedState, scope), undefined, {
+      scope,
+      ...(probeReceipt?.key === draftKey ? { probeJobId: probeReceipt.jobId } : {}),
+      signal: controller.signal,
+    });
+    setActivity(null);
+    if (!result.ok) {
+      setNotice({
+        tone: "error",
+        text: switchedAccount
+          ? `${switchedAccount} is now the workspace API account, but this agent setup was not saved. Refresh and press Use again.`
+          : result.message,
+        repair: repairForCode(result.code, selectedDevice?.label, selectedCli),
       });
-      await load();
-      router.refresh();
-    });
-  }
-
-  async function test() {
-    if (!draft || draft.kind === "api") return;
-    const chosen = draft;
-    await runCheck("test", async (signal) => {
-      const r = await testEngine(chosen, undefined, { signal });
-      // Named, because the pick can change while the test waits.
-      const name = engineName(chosen);
-      setNote(
-        r.ok
-          ? { ok: true, text: `${name} answered in ${(r.latencyMs / 1000).toFixed(1)} s: "${r.reply.slice(0, 160)}"` }
-          : { ok: false, text: `${name}: ${r.message}` },
-      );
-    });
-  }
-
-  function cancelCheck() {
-    stopCheck.current?.abort();
-  }
-
-  async function moveProvider(next: Provider) {
-    setProviderBusy(true);
-    setNote(null);
-    try {
-      const r = await switchProvider(next);
-      if (!r.ok) {
-        setNote({ ok: false, text: r.message });
-        setProvider(state?.account?.provider ?? "");
-        await load({ keepDraft: true, syncProvider: true });
-        return;
-      }
-      setNote({ ok: true, text: `Your AI account is now ${PROVIDER_LABEL[next]}, ${r.label}.` });
-      await load();
-      router.refresh();
-    } finally {
-      setProviderBusy(false);
+      await load({ keepDraft: true });
+      return;
     }
+    setNotice({ tone: "ok", text: `${engineTitle(draftSelection, loadedState.devices)} is now in use for ${scope === "workspace" ? "the workspace default" : "your setup"}.` });
+    await load();
+    router.refresh();
   }
 
-  async function forget(p: Provider) {
-    if (typeof window !== "undefined" && !window.confirm(`Remove the saved ${PROVIDER_LABEL[p]} key from this workspace?`)) return;
-    setProviderBusy(true);
-    setNote(null);
-    try {
-      const r = await removeSavedKey(p);
-      setNote(r.ok ? { ok: true, text: `The saved ${PROVIDER_LABEL[p]} key was removed.` } : { ok: false, text: r.message });
-      await load(r.ok ? {} : { keepDraft: true, syncProvider: true });
-      router.refresh();
-    } finally {
-      setProviderBusy(false);
+  async function applyWorkspaceDefault() {
+    setActivity("inheriting");
+    setNotice(null);
+    const result = await inheritWorkspaceEngine(versionForScope(loadedState, "person"));
+    setActivity(null);
+    if (!result.ok) {
+      setNotice({ tone: "error", text: result.message, repair: repairForCode(result.code) });
+      return;
     }
+    setNotice({ tone: "ok", text: "Your agents now inherit the workspace default." });
+    setProbeReceipt(null);
+    await load();
+    router.refresh();
   }
 
-  const option = (value: Kind, icon: React.ReactNode, title: string, sub: string) => (
+  async function connect(provider: CliEngine) {
+    if (!selectedDevice || !selectedDevice.ownedByViewer) return;
+    const controller = new AbortController();
+    stop.current = controller;
+    setActivity("connecting");
+    setNotice(null);
+    setCopyFeedback(null);
+    const started = await startCliSignIn(provider, selectedDevice.pairingId);
+    if (!started.ok) {
+      setActivity(null);
+      setNotice({ tone: "error", text: started.text, repair: started.command ? `Run on ${selectedDevice.label}: ${started.command}` : null });
+      return;
+    }
+    if (!started.jobId) {
+      setActivity(null);
+      setNotice({ tone: "info", text: started.text });
+      await load({ keepDraft: true });
+      return;
+    }
+    setNotice({
+      tone: "info",
+      text: started.text,
+      repair: started.command ? `On ${selectedDevice.label}, run: ${started.command}` : null,
+    });
+    const finished = await pollRuntimeJob(started.jobId, undefined, {
+      signal: controller.signal,
+      onUpdate: setJob,
+    });
+    setActivity(null);
+    if (!finished.ok) {
+      setNotice({ tone: "error", text: finished.message, repair: repairForCode(finished.code, selectedDevice.label, provider) });
+      return;
+    }
+    setNotice({ tone: "info", text: `${CLI_ENGINE_LABEL[provider]} finished sign-in on ${selectedDevice.label}. Verifying a real agent reply now…` });
+    await load({ keepDraft: true });
+    await testSelection();
+  }
+
+  const modeOption = (mode: EngineSelection["mode"], icon: React.ReactNode, title: string, description: string) => (
     <label
-      className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-        kind === value ? "border-accent/60 bg-accent-soft" : "border-hairline bg-bg-panel hover:border-bg-border-strong"
-      } ${!canManage ? "cursor-default" : ""}`}
+      className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-accent ${
+        draft.mode === mode ? "border-accent/60 bg-accent-soft" : "border-hairline bg-bg-panel hover:border-bg-border-strong"
+      } ${!canEdit ? "cursor-default opacity-70" : ""}`}
     >
       <input
         type="radio"
         name="agent-engine"
-        value={value}
-        checked={kind === value}
-        disabled={!canManage}
-        onChange={() => {
-          setKind(value);
-          setNote(null);
-        }}
+        value={mode === "subscription" ? "cli" : mode === "local" ? "local" : "api"}
+        checked={draft.mode === mode}
+        disabled={!canEdit}
+        onChange={() => setDraft(setupForMode(mode, state, scope))}
         className="mt-1"
       />
       <span className="min-w-0">
         <span className="flex items-center gap-1.5 text-sm font-semibold text-fg">
           {icon}
           {title}
-          {current.kind === value && <span className="ml-1 text-[10px] font-bold uppercase tracking-wider text-status-engaged">In use</span>}
         </span>
-        <span className="mt-0.5 block text-xs leading-relaxed text-fg-muted">{sub}</span>
+        <span className="mt-1 block text-xs leading-relaxed text-fg-muted">{description}</span>
       </span>
     </label>
   );
 
-  const apiOption = option(
-    "api",
-    <Cloud className="h-3.5 w-3.5" />,
-    state.oasis ? "An AI account (fallback)" : "An AI account",
-    "An API key from Anthropic, OpenAI, Google or OpenRouter. Each reply spends API credits.",
-  );
-  const cliOption = option(
-    "cli",
-    <Cpu className="h-3.5 w-3.5" />,
-    "An app on your paired computer",
-    state.oasis
-      ? "Claude Code, Codex or Gemini CLI, running each department's own harness through the bridge. No API credits."
-      : "Claude Code, Codex or Gemini CLI, on its own sign-in there. No API credits.",
-  );
-  const localOption = option("local", <HardDrive className="h-3.5 w-3.5" />, "A local model", "Ollama or LM Studio on your paired computer. No API credits.");
-
-  return (
-    <div className="space-y-3" data-testid="agent-engine">
-      <p className="text-sm text-fg">
-        Your agents and the coding harness run on <span className="font-bold">{agentsEngineLine(current)}</span>
-        {current.kind === "api" && state.account ? (
-          <>
-            : <span className="font-bold">{state.account.providerLabel}, {state.account.modelLabel}</span>
-          </>
-        ) : null}
-        {current.kind === "cli" ? ", through the bridge" : ""}. <span className="text-fg-muted">{spendSentence(spendFor(current))}</span>
-      </p>
-      {state.oasis && (
-        <p className="text-xs leading-relaxed text-fg-muted">
-          This workspace runs each department in its own agent harness on your paired computer: Chief of Staff, Sales, Client
-          Success and Operations in the Chief of Staff&apos;s, Marketing and Finance in their own. Each harness&apos;s own
-          instructions and skills route the work. An AI account below is only the fallback when the computer can&apos;t be reached.
-        </p>
-      )}
-      {current.kind !== "api" && !state.bridgeReachable && (
-        <p className="text-xs leading-relaxed text-status-warm">
-          Your paired computer can&apos;t be reached from this account right now, so{" "}
-          {state.account ? "your AI account answers in its place until it is back." : "your agents can't answer until it is back, or until an AI account is connected below."}
-        </p>
-      )}
-
-      {/* OASIS's own workflow first (CC, 2026-10-09: "for mine you should know
-          our workflow and show it that way"); a client sees its API key first. */}
-      <div className="grid gap-2 md:grid-cols-3" role="radiogroup" aria-label="What powers your agents">
-        {state.oasis ? (
-          <>
-            {cliOption}
-            {apiOption}
-            {localOption}
-          </>
-        ) : (
-          <>
-            {apiOption}
-            {cliOption}
-            {localOption}
-          </>
-        )}
-      </div>
-
-      {kind === "api" && (
-        <div className="space-y-2 rounded-lg border border-hairline bg-bg-panel p-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <label htmlFor="engine-provider" className="text-xs text-fg-muted">
-              Provider
-            </label>
-            <select
-              id="engine-provider"
-              value={provider}
-              disabled={!canManage || providerBusy}
-              onChange={(e) => {
-                const next = e.target.value as Provider;
-                setProvider(next);
-                if (next && next !== state.account?.provider) void moveProvider(next);
-              }}
-              className="select !py-1 !text-xs"
-            >
-              {!state.account && <option value="">None connected</option>}
-              {PROVIDERS.map((p) => {
-                const saved = state.savedProviders.includes(p) || state.account?.provider === p;
-                return (
-                  <option key={p} value={p} disabled={!saved}>
-                    {PROVIDER_LABEL[p]}
-                    {saved ? "" : " (connect its key below)"}
-                  </option>
-                );
-              })}
-            </select>
-            {providerBusy && (
-              <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
-                <Loader2 className="h-3 w-3 animate-spin" /> Switching...
-              </span>
-            )}
-          </div>
-          <p className="text-[11px] leading-relaxed text-fg-dim">
-            A provider whose key is saved switches at once, after one short test answer, and the key you switch away from stays
-            saved so you can switch back. To add a provider, connect its key on its card below. Pick the model and Test it just below.
-          </p>
-          {canManage &&
-            state.savedProviders
-              .filter((p) => p !== state.account?.provider)
-              .map((p) => (
-                <div key={p} className="flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
-                  <span>{PROVIDER_LABEL[p]}: key saved, not in use.</span>
-                  <button
-                    type="button"
-                    disabled={providerBusy}
-                    onClick={() => void forget(p)}
-                    className="text-fg-dim underline underline-offset-2 hover:text-status-warm disabled:opacity-50"
-                  >
-                    Remove saved key
-                  </button>
-                </div>
-              ))}
+  const devicePicker = draft.mode !== "api" && (
+    <div className="space-y-1.5">
+      <label htmlFor="engine-device" className="text-xs font-semibold text-fg">
+        Computer
+      </label>
+      {eligibleDevices.length ? (
+        <select
+          id="engine-device"
+          aria-label="Computer for this AI setup"
+          value={draft.pairingId}
+          disabled={!canEdit}
+          onChange={(event) => {
+            const pairingId = event.target.value;
+            if (draft.mode === "subscription") setDraft({ ...draft, pairingId });
+            else {
+              const target = state.devices.find((item) => item.pairingId === pairingId);
+              setDraft({ ...draft, pairingId, modelRef: target?.localModels[0]?.ref ?? "" });
+            }
+          }}
+          className="select w-full !py-2 !text-sm"
+        >
+          {!eligibleDevices.some((device) => device.pairingId === draft.pairingId) && <option value="">Choose a computer</option>}
+          {eligibleDevices.map((device) => (
+            <option key={device.pairingId} value={device.pairingId}>
+              {device.label}{device.ownerName ? ` · ${device.ownerName}` : ""}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-xs text-fg-muted">
+          No approved computer is available for this setup. <Link href="/settings/devices" className="font-semibold text-accent underline underline-offset-2">Pair or approve a computer</Link>.
         </div>
       )}
+    </div>
+  );
 
-      {kind === "cli" && (
-        <div className="space-y-2 rounded-lg border border-hairline bg-bg-panel p-3">
-          <div role="radiogroup" aria-label="App on your paired computer" className="flex flex-wrap gap-1.5">
-            {CLI_ENGINES.map((c) => (
+  return (
+    <div className="space-y-4" data-testid="agent-engine">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm text-fg">
+            In use for {scope === "workspace" ? "the workspace default" : "you"}: <span className="font-semibold">{engineTitle(current, state.devices)}</span>
+          </p>
+          <p className="mt-1 text-xs text-fg-muted">Choose where the model runs, verify that exact connection, then put it in use.</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void load({ keepDraft: true })}
+          disabled={activity !== null}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-fg-muted hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${activity === "reading" ? "animate-spin" : ""}`} aria-hidden="true" />
+          Refresh
+        </button>
+      </div>
+
+      {state.canManage ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <div role="tablist" aria-label="AI setup scope" className="inline-flex rounded-lg border border-hairline bg-bg-deep/50 p-1">
+            {(["person", "workspace"] as const).map((item) => (
               <button
-                key={c}
+                key={item}
                 type="button"
-                role="radio"
-                aria-checked={cli === c}
-                disabled={!canManage}
-                onClick={() => {
-                  setCli(c);
-                  setNote(null);
-                }}
-                className={`rounded-md border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
-                  cli === c ? "border-accent bg-accent/15 text-accent" : "border-bg-border bg-bg-deep/60 text-fg-muted hover:text-fg"
-                }`}
+                role="tab"
+                aria-selected={scope === item}
+                onClick={() => changeScope(item)}
+                disabled={activity !== null}
+                className={`rounded-md px-3 py-1.5 text-xs font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                  scope === item ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"
+                } disabled:opacity-50`}
               >
-                {CLI_ENGINE_LABEL[c]}{" "}
-                {unsupported.includes(c) && <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wider text-status-warm">Not supported</span>}
+                {item === "person" ? "My setup" : "Workspace default"}
               </button>
             ))}
           </div>
-          {refused && (
-            <p role="status" className="text-xs leading-relaxed text-status-warm" data-testid="engine-cli-unsupported">
-              <span className="font-semibold">{CLI_STATE_LABEL.unsupported}.</span> {cliUnsupportedDetail(cli)}
-            </p>
-          )}
-          <p className="text-[11px] leading-relaxed text-fg-dim">
-            Your agents answer through the app&apos;s own sign-in on your paired computer, reached by the OASIS bridge. It answers in
-            plan mode: it reads and replies, and is told not to change files for a department reply. When the computer can&apos;t be
-            reached, your AI account answers instead, and the reply says so.
-          </p>
-        </div>
-      )}
-
-      {kind === "local" && (
-        <div className="space-y-2 rounded-lg border border-hairline bg-bg-panel p-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <label htmlFor="engine-local-model" className="text-xs text-fg-muted">
-              Model name
-            </label>
-            <input
-              id="engine-local-model"
-              value={localModel}
-              onChange={(e) => {
-                setLocalModel(e.target.value);
-                setNote(null);
-              }}
-              disabled={!canManage}
-              placeholder="llama3.3"
-              className="input !py-1 !text-xs w-48"
-            />
-          </div>
-          <p className="text-[11px] leading-relaxed text-fg-dim">
-            The name Ollama or LM Studio uses for the model on your paired computer. The bridge there calls it; OASIS never does.
-          </p>
-        </div>
-      )}
-
-      {canManage ? (
-        <div className="flex flex-wrap items-center gap-2" data-testid="engine-actions">
-          {!refused && kind !== "api" && (
+          {scope === "person" && state.personEngine.source === "person" && (
             <button
               type="button"
-              onClick={() => void test()}
-              disabled={!draft || check !== null}
-              className="btn-secondary inline-flex items-center gap-1.5 !py-1.5 !text-xs disabled:opacity-50"
+              onClick={() => void applyWorkspaceDefault()}
+              disabled={activity !== null}
+              className="text-xs font-semibold text-fg-muted underline underline-offset-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
             >
-              {check === "test" && <Loader2 className="h-3 w-3 animate-spin" />}
-              {check === "test" ? "Testing..." : "Test"}
+              Use workspace default
             </button>
           )}
-          {!refused && (
-            <button
-              type="button"
-              onClick={() => void save()}
-              disabled={!draft || unchanged || check !== null || providerBusy}
-              className="btn-primary inline-flex items-center gap-1.5 !py-1.5 !text-xs disabled:opacity-50"
-            >
-              {check === "save" && <Loader2 className="h-3 w-3 animate-spin" />}
-              {check === "save" ? "Testing a short answer..." : unchanged ? "In use" : "Use this for my agents"}
-            </button>
-          )}
-          {check !== null && (
-            <>
-              <span role="status" className="text-[11px] text-fg-muted" data-testid="engine-elapsed">
-                Testing... {elapsed} s. An app&apos;s first answer can take up to a minute.
-              </span>
-              <button
-                type="button"
-                onClick={cancelCheck}
-                className="btn-secondary !py-1.5 !text-xs"
-                data-testid="engine-cancel"
-              >
-                Cancel
-              </button>
-            </>
-          )}
-          {check === null && !refused && kind !== "api" && <span className="text-[11px] text-fg-dim">An app&apos;s first answer can take up to a minute.</span>}
         </div>
       ) : (
-        <p className="text-[11px] text-fg-dim">An owner or admin changes what powers your agents.</p>
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-hairline bg-bg-panel p-3">
+          <div>
+            <div className="text-sm font-semibold text-fg">My setup</div>
+            <div className="text-xs text-fg-muted">
+              {state.personEngine.source === "workspace" ? "You currently inherit the workspace default." : "Your personal setup overrides the workspace default."}
+            </div>
+          </div>
+          {state.personEngine.source === "person" && (
+            <button
+              type="button"
+              onClick={() => void applyWorkspaceDefault()}
+              disabled={activity !== null}
+              className="rounded-md border border-hairline px-3 py-1.5 text-xs font-semibold text-fg hover:border-bg-border-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
+            >
+              Use workspace default
+            </button>
+          )}
+        </div>
       )}
 
-      {note && (
-        <p role={note.ok ? "status" : "alert"} className={`text-xs leading-relaxed ${note.ok ? "text-status-engaged" : "text-status-warm"}`}>
-          {note.text}
-        </p>
+      {legacyNeedsComputer && (
+        <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-xs leading-relaxed text-fg" role="status">
+          Choose a computer to finish upgrading this saved setup. Nothing will run or spend API credits until that exact computer passes Test.
+        </div>
       )}
 
-      <AccountSection
-        heading={kind === "api" ? "Your AI account" : "Your AI account (the fallback)"}
-        blurb={
-          current.kind === "api"
-            ? "Your agents answer with it."
-            : "Your agents answer with it only when the paired computer can't be reached, and Slack mentions always do."
-        }
-      >
-        {children}
-      </AccountSection>
+      <div className="grid gap-2 md:grid-cols-3" role="radiogroup" aria-label="AI runtime type">
+        {modeOption("subscription", <Cpu className="h-4 w-4" aria-hidden="true" />, "Subscription app", "Use an AI app signed in on a paired computer. No API credits.")}
+        {modeOption("local", <HardDrive className="h-4 w-4" aria-hidden="true" />, "Pure local", "Use an Ollama or LM Studio model detected on a paired computer.")}
+        {modeOption("api", <Cloud className="h-4 w-4" aria-hidden="true" />, "API key", "Use Anthropic, OpenAI, Google or OpenRouter with usage-based billing.")}
+      </div>
 
-      <p className="text-[11px] leading-relaxed text-fg-dim">
-        The coding harness uses this same setting: there is no second picker. On an app, it runs that app on your paired
-        computer; on an AI account, it uses that account; with a local model, it runs on Claude Code (it edits files).
-      </p>
+      {draft.mode === "subscription" && (
+        <div className="space-y-3 rounded-lg border border-hairline bg-bg-panel p-3">
+          {devicePicker}
+          <div className="grid gap-2 md:grid-cols-3" role="radiogroup" aria-label="Subscription app">
+            {CLI_PROVIDERS.map((provider) => {
+              const runtime = selectedDevice?.runtimes[provider];
+              const rolloutRestricted = subscriptionRolloutError(provider, state.oasis) !== null;
+              const status = rolloutRestricted
+                ? { label: "Unsupported", verified: false, repair: CODEX_OASIS_ROLLOUT_MESSAGE }
+                : selectedDevice
+                  ? describeRuntime(selectedDevice, provider)
+                  : null;
+              const unsupported = status?.label === "Unsupported";
+              const selected = draft.provider === provider;
+              return (
+                <div key={provider} className={`rounded-lg border p-3 ${selected ? "border-accent/60 bg-accent-soft" : "border-hairline bg-bg-deep/40"}`}>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={!canEdit || !selectedDevice || unsupported}
+                    onClick={() => setDraft({ ...draft, provider })}
+                    className="w-full text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <span className="block text-sm font-semibold text-fg">{CLI_ENGINE_LABEL[provider]}</span>
+                    <span className="mt-1 block text-[11px] text-fg-muted">{status?.label ?? "Choose a computer"}</span>
+                    {runtime?.version && <span className="mt-1 block truncate font-mono text-[10px] text-fg-dim">{runtime.version}</span>}
+                  </button>
+                  {(selected || unsupported) && status?.repair && <p className="mt-2 text-[11px] leading-relaxed text-fg-muted">{status.repair}</p>}
+                  {selected && selectedDevice && !unsupported && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {selectedDevice.ownedByViewer ? (
+                        <button
+                          type="button"
+                          onClick={() => void connect(provider)}
+                          disabled={!canEdit || activity !== null || rolloutRestricted}
+                          className="rounded-md border border-hairline px-2.5 py-1.5 text-[11px] font-semibold text-fg hover:border-bg-border-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
+                        >
+                          {runtime?.signedIn ? "Reconnect" : "Connect"}
+                        </button>
+                      ) : (
+                        <span className="text-[11px] text-fg-muted">
+                          {selectedDevice.ownerName ?? "The computer owner"} must connect this app on that computer.
+                        </span>
+                      )}
+                      {commandFor(selectedDevice, provider) && (
+                        <button
+                          type="button"
+                          aria-label={`Copy repair command for ${CLI_ENGINE_LABEL[provider]}`}
+                          onClick={() => void copyCommand(commandFor(selectedDevice, provider)!)}
+                          className="inline-flex items-center gap-1 text-[11px] text-fg-muted underline underline-offset-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        >
+                          <Copy className="h-3 w-3" aria-hidden="true" /> Copy command
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {unsupported && (
+                    <button
+                      type="button"
+                      onClick={() => setDraft({ mode: "api", provider: "google" })}
+                      className="mt-2 text-[11px] font-semibold text-accent underline underline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      Use Google API key
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {draft.mode === "local" && (
+        <div className="space-y-3 rounded-lg border border-hairline bg-bg-panel p-3">
+          {devicePicker}
+          {selectedDevice?.localModels.length ? (
+            <div className="space-y-1.5">
+              <label htmlFor="engine-local-model" className="text-xs font-semibold text-fg">Detected model</label>
+              <select
+                id="engine-local-model"
+                value={draft.modelRef}
+                disabled={!canEdit}
+                onChange={(event) => setDraft({ ...draft, modelRef: event.target.value })}
+                className="select w-full !py-2 !text-sm"
+              >
+                {selectedDevice.localModels.map((model) => (
+                  <option key={model.ref} value={model.ref}>{model.label} · {model.adapter === "ollama" ? "Ollama" : "LM Studio"}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-fg-muted">Detected on {selectedDevice.label}. Test verifies that the model can complete an agent reply.</p>
+              {selectedLocalModel && (() => {
+                const status = describeLocalModel(selectedDevice, selectedLocalModel);
+                return (
+                  <div className="text-[11px] leading-relaxed text-fg-muted" role="status">
+                    <span className="font-semibold text-fg">{status.label}.</span>{status.repair ? ` ${status.repair}` : ""}
+                  </div>
+                );
+              })()}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-xs text-fg-muted">
+              No local model was reported on this computer. Start Ollama or LM Studio there, then Refresh.
+            </div>
+          )}
+        </div>
+      )}
+
+      {draft.mode === "api" && (
+        <div className="space-y-3 rounded-lg border border-hairline bg-bg-panel p-3">
+          <label htmlFor="engine-api-provider" className="text-xs font-semibold text-fg">Provider</label>
+          <select
+            id="engine-api-provider"
+            value={apiProviderOptions.includes(draft.provider) ? draft.provider : ""}
+            disabled={!canEdit}
+            onChange={(event) => setDraft({ mode: "api", provider: event.target.value as ApiEngineProvider })}
+            className="select w-full !py-2 !text-sm"
+          >
+            {!apiProviderOptions.includes(draft.provider) && (
+              <option value="" disabled>
+                {apiProviderOptions.length ? "Choose the active account" : "Connect an API provider below"}
+              </option>
+            )}
+            {apiProviderOptions.map((provider) => (
+              <option key={provider} value={provider}>{PROVIDER_LABEL[provider]}{state.account?.provider === provider ? " · active" : " · saved"}</option>
+            ))}
+          </select>
+          <p className="text-[11px] text-fg-muted">
+            {state.canManage
+              ? "Connect and test provider accounts below. Choosing a saved key makes it the workspace account when you press Use."
+              : "The workspace owner manages this API account. You can use the active provider or choose a computer-backed setup."}
+          </p>
+        </div>
+      )}
+
+      {draft.mode !== "api" && (
+        <label className="flex items-start gap-2 rounded-lg border border-hairline bg-bg-panel p-3">
+          <input
+            type="checkbox"
+            checked={draft.fallback === "workspace_api"}
+            disabled={!canEdit || !state.account}
+            onChange={(event) => setDraft({ ...draft, fallback: event.target.checked ? "workspace_api" : "none" })}
+            className="mt-0.5"
+          />
+          <span>
+            <span className="block text-sm font-semibold text-fg">API fallback is {draft.fallback === "workspace_api" ? "on" : "off"}</span>
+            <span className="mt-0.5 block text-xs leading-relaxed text-fg-muted">
+              Off by default. When enabled, the workspace API key may answer only if this exact computer cannot.
+              {!state.account ? " Connect an API key below before enabling it." : ""}
+            </span>
+          </span>
+        </label>
+      )}
+
+      {job && activity !== null && (
+        <div className="rounded-lg border border-hairline bg-bg-panel p-3" role="status" aria-live="polite">
+          <div className="flex items-center gap-2 text-sm font-semibold text-fg">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> {jobSentence(job)}
+          </div>
+          {jobAuthUrl && (
+            <a href={jobAuthUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex text-xs font-semibold text-accent underline underline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+              Open sign-in
+            </a>
+          )}
+          <div className="mt-1 font-mono text-[10px] text-fg-dim">Job {job.id} · {job.status}</div>
+        </div>
+      )}
+
+      {notice && (
+        <div
+          ref={noticeRef}
+          tabIndex={-1}
+          role={notice.tone === "error" ? "alert" : "status"}
+          aria-live={notice.tone === "error" ? "assertive" : "polite"}
+          className={`rounded-lg border p-3 text-sm focus:outline-none ${
+            notice.tone === "ok"
+              ? "border-status-engaged/40 bg-status-engaged/10 text-fg"
+              : notice.tone === "error"
+                ? "border-status-warm/40 bg-status-warm/10 text-fg"
+                : "border-hairline bg-bg-panel text-fg"
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            {notice.tone === "ok" ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-status-engaged" aria-hidden="true" /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-status-warm" aria-hidden="true" />}
+            <div>
+              <div>{notice.text}</div>
+              {notice.repair && <div className="mt-1 text-xs text-fg-muted">{notice.repair}</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {draft.mode !== "api" && (
+          <button
+            type="button"
+            onClick={() => void testSelection()}
+            disabled={!canEdit || activity !== null || !selectedDevice || rolloutBlocked || (draft.mode === "local" && !draft.modelRef)}
+            className="rounded-md border border-hairline px-3 py-2 text-xs font-semibold text-fg hover:border-bg-border-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {activity === "testing" ? "Testing…" : "Test"}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => void saveSelection()}
+          disabled={!canEdit || activity !== null || !tested || rolloutBlocked}
+          className="rounded-md bg-accent px-3 py-2 text-xs font-semibold text-bg-deep hover:bg-accent-bright focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {activity === "saving" ? "Saving…" : "Use this for my agents"}
+        </button>
+        {activity && activity !== "reading" && (
+          <button
+            type="button"
+            data-testid="engine-cancel"
+            onClick={() => stop.current?.abort()}
+            className="px-2 py-2 text-xs font-semibold text-fg-muted underline underline-offset-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            Stop waiting
+          </button>
+        )}
+        {!tested && (
+          <span className="text-[11px] text-fg-dim">
+            {draft.mode === "api" ? "Connect and test this provider in its account card below before Use is enabled." : "Use stays locked until this exact setup passes Test."}
+          </span>
+        )}
+      </div>
+
+      {copyFeedback && (
+        <div role="status" aria-live="polite" className="rounded-md border border-hairline bg-bg-panel px-3 py-2 font-mono text-[11px] text-fg-muted">
+          {copyFeedback}
+        </div>
+      )}
+
+      <section className="space-y-3 border-t border-hairline pt-4" aria-labelledby="engine-inventory-title">
+        <div>
+          <h3 id="engine-inventory-title" className="text-sm font-semibold text-fg">Installed apps and local models</h3>
+          <p className="mt-1 text-xs text-fg-muted">What each paired computer last reported. Installed or signed in is not agent-ready until a real Test passes.</p>
+        </div>
+        {(state.canManage ? state.devices : state.devices.filter((device) => device.ownedByViewer)).length ? (
+          <div className="grid gap-3 lg:grid-cols-2">
+            {(state.canManage ? state.devices : state.devices.filter((device) => device.ownedByViewer)).map((device) => (
+              <div key={device.pairingId} className="rounded-lg border border-hairline bg-bg-panel p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-fg" title={device.label}>{device.label}</div>
+                    {device.ownerName && <div className="text-[11px] text-fg-dim">{device.ownerName}</div>}
+                  </div>
+                  <span className={`text-[11px] font-semibold ${device.online ? "text-status-engaged" : "text-status-warm"}`}>
+                    {device.online ? "Online" : "Offline"}
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  {CLI_PROVIDERS.map((provider) => {
+                    const runtime = device.runtimes[provider];
+                    const rolloutRestricted = subscriptionRolloutError(provider, state.oasis) !== null;
+                    return (
+                      <div key={provider} className="rounded-md border border-hairline bg-bg-deep/40 px-2.5 py-2">
+                        <div className="text-xs font-semibold text-fg">{CLI_ENGINE_LABEL[provider]}</div>
+                        <div className="mt-0.5 text-[11px] text-fg-muted">
+                          {rolloutRestricted ? "Unsupported" : inventoryRuntimeLabel(runtime)}
+                        </div>
+                        {runtime.version && <div className="mt-0.5 truncate font-mono text-[10px] text-fg-dim">{runtime.version}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+                {device.localModels.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {device.localModels.map((model) => (
+                      <span key={model.ref} className="rounded-md border border-hairline px-2 py-1 text-[11px] text-fg-muted">
+                        {model.label} · {model.state === "ready" ? "Ready for agents" : model.state === "probe_required" ? "Installed" : "Offline"}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-hairline bg-bg-panel p-3 text-xs text-fg-muted">
+            No paired computer has reported its installed runtimes yet. <Link href="/settings/devices" className="font-semibold text-accent underline underline-offset-2">Add a computer</Link>.
+          </div>
+        )}
+      </section>
+
+      <AccountSection>{children}</AccountSection>
     </div>
   );
 }

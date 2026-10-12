@@ -16,18 +16,15 @@
  *   local  a model served on the paired computer (Ollama or LM Studio),
  *          reached through the same bridge. No credits, no subscription.
  *
- * FALLBACK. A cli or local choice answers only when the paired computer can be
- * reached for the person asking (lib/ai/bridge-turn.ts). When it cannot, a
- * usable API account answers instead, and the reply says so ("via ... API"),
- * so a closed laptop never leaves the departments silent (the approved rule:
- * OASIS's own workspace runs on CC's CLI with an API key as fallback).
+ * FALLBACK. A subscription or local choice defaults to no fallback. The user
+ * can explicitly opt in to workspace_api; only then may an unreachable target
+ * use the workspace API account, and both the reply and audit trail say so.
  *
- * THE ROW. agent_model_config, agent_key ENGINE_AGENT_KEY ("__engine__"),
- * user_id IS NULL: provider holds the kind ("cli" or "local"), model holds the
- * CLI or the local model's name. No row, or any other provider, is "api". It
- * holds no key (encrypted_api_key stays NULL), so no key-matching statement in
- * workspace-account.ts ever touches it, and the agent-config routes hide every
- * "__" row from the teammate list.
+ * THE ROW. agent_model_config, agent_key ENGINE_AGENT_KEY ("__engine__"). A
+ * NULL user_id is the workspace default; a user id is that person's override.
+ * Subscription/local rows also bind computer_pairing_id and fallback_policy.
+ * Deleting the personal row means "use workspace default"; inheritance is not
+ * a fourth engine. Engine rows hold no key (encrypted_api_key stays NULL).
  *
  * PURE: no I/O, safe for client components.
  */
@@ -37,10 +34,24 @@ export const ENGINE_AGENT_KEY = "__engine__";
 export const CLI_ENGINES = ["claude", "codex", "gemini"] as const;
 export type CliEngine = (typeof CLI_ENGINES)[number];
 
+export const API_ENGINE_PROVIDERS = ["anthropic", "openai", "google", "openrouter"] as const;
+export type ApiEngineProvider = (typeof API_ENGINE_PROVIDERS)[number];
+export const ENGINE_FALLBACKS = ["none", "workspace_api"] as const;
+export type EngineFallback = (typeof ENGINE_FALLBACKS)[number];
+
+/**
+ * The browser/API contract. Device-backed choices always name the exact
+ * pairing that Test, Connect, Save and real work must use.
+ */
+export type EngineSelection =
+  | { mode: "subscription"; pairingId: string; provider: CliEngine; fallback: EngineFallback }
+  | { mode: "local"; pairingId: string; modelRef: string; fallback: EngineFallback }
+  | { mode: "api"; provider: ApiEngineProvider };
+
 export type AgentEngineChoice =
-  | { kind: "api" }
-  | { kind: "cli"; cli: CliEngine }
-  | { kind: "local"; model: string };
+  | { kind: "api"; provider?: ApiEngineProvider }
+  | { kind: "cli"; cli: CliEngine; pairingId?: string; fallback?: EngineFallback }
+  | { kind: "local"; model: string; pairingId?: string; fallback?: EngineFallback };
 
 export const CLI_ENGINE_LABEL: Record<CliEngine, string> = {
   claude: "Claude Code",
@@ -53,9 +64,23 @@ export type EngineSpend = "api_credits" | "cli_subscription" | "local_model" | "
 
 /** A local model name: what Ollama or LM Studio call it. Short, no spaces at the ends, no control characters. */
 const LOCAL_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,119}$/;
+const LOCAL_MODEL_REF_RE = /^(?:ollama|lmstudio)\/[A-Za-z0-9][A-Za-z0-9._:\/-]{0,111}$/;
+const PAIRING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export function isCliEngine(v: unknown): v is CliEngine {
   return typeof v === "string" && (CLI_ENGINES as readonly string[]).includes(v);
+}
+
+export function isApiEngineProvider(v: unknown): v is ApiEngineProvider {
+  return typeof v === "string" && (API_ENGINE_PROVIDERS as readonly string[]).includes(v);
+}
+
+export function isEngineFallback(v: unknown): v is EngineFallback {
+  return typeof v === "string" && (ENGINE_FALLBACKS as readonly string[]).includes(v);
+}
+
+export function isPairingId(v: unknown): v is string {
+  return typeof v === "string" && PAIRING_ID_RE.test(v);
 }
 
 export function isLocalModelName(v: unknown): v is string {
@@ -63,28 +88,102 @@ export function isLocalModelName(v: unknown): v is string {
 }
 
 /** The choice a stored row holds. Anything unreadable is the default, the API account. */
-export function engineFromRow(row: { provider?: unknown; model?: unknown } | null | undefined): AgentEngineChoice {
+export function engineFromRow(
+  row:
+    | { provider?: unknown; model?: unknown; computer_pairing_id?: unknown; fallback_policy?: unknown }
+    | null
+    | undefined,
+): AgentEngineChoice {
   if (!row) return { kind: "api" };
-  if (row.provider === "cli" && isCliEngine(row.model)) return { kind: "cli", cli: row.model };
-  if (row.provider === "local" && isLocalModelName(row.model)) return { kind: "local", model: row.model };
+  const pairingId = isPairingId(row.computer_pairing_id) ? row.computer_pairing_id : undefined;
+  const fallback = isEngineFallback(row.fallback_policy) ? row.fallback_policy : undefined;
+  if (row.provider === "cli" && isCliEngine(row.model)) {
+    return { kind: "cli", cli: row.model, ...(pairingId ? { pairingId } : {}), ...(fallback ? { fallback } : {}) };
+  }
+  if (row.provider === "local" && isLocalModelName(row.model)) {
+    return { kind: "local", model: row.model, ...(pairingId ? { pairingId } : {}), ...(fallback ? { fallback } : {}) };
+  }
+  if (row.provider === "api") {
+    return { kind: "api", ...(isApiEngineProvider(row.model) ? { provider: row.model } : {}) };
+  }
   return { kind: "api" };
 }
 
 /** The row a choice is stored as (provider and model are NOT NULL columns). */
-export function engineRow(choice: AgentEngineChoice): { provider: string; model: string } {
-  if (choice.kind === "cli") return { provider: "cli", model: choice.cli };
-  if (choice.kind === "local") return { provider: "local", model: choice.model };
-  return { provider: "api", model: "-" };
+export function engineRow(choice: AgentEngineChoice): {
+  provider: string;
+  model: string;
+  computerPairingId: string | null;
+  fallbackPolicy: EngineFallback;
+} {
+  if (choice.kind === "cli") {
+    return { provider: "cli", model: choice.cli, computerPairingId: choice.pairingId ?? null, fallbackPolicy: choice.fallback ?? "none" };
+  }
+  if (choice.kind === "local") {
+    return { provider: "local", model: choice.model, computerPairingId: choice.pairingId ?? null, fallbackPolicy: choice.fallback ?? "none" };
+  }
+  return { provider: "api", model: choice.provider ?? "-", computerPairingId: null, fallbackPolicy: "none" };
+}
+
+/** Strict new browser/API shape. Legacy shapes are accepted only by parseEngineChoice. */
+export function parseEngineSelection(raw: unknown): EngineSelection | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (r.mode === "subscription" && isPairingId(r.pairingId) && isCliEngine(r.provider) && isEngineFallback(r.fallback)) {
+    return { mode: "subscription", pairingId: r.pairingId, provider: r.provider, fallback: r.fallback };
+  }
+  if (
+    r.mode === "local" &&
+    isPairingId(r.pairingId) &&
+    typeof r.modelRef === "string" &&
+    LOCAL_MODEL_REF_RE.test(r.modelRef) &&
+    isEngineFallback(r.fallback)
+  ) {
+    return { mode: "local", pairingId: r.pairingId, modelRef: r.modelRef, fallback: r.fallback };
+  }
+  if (r.mode === "api" && isApiEngineProvider(r.provider)) return { mode: "api", provider: r.provider };
+  return null;
+}
+
+export function choiceFromSelection(selection: EngineSelection): AgentEngineChoice {
+  if (selection.mode === "subscription") {
+    return { kind: "cli", cli: selection.provider, pairingId: selection.pairingId, fallback: selection.fallback };
+  }
+  if (selection.mode === "local") {
+    return { kind: "local", model: selection.modelRef, pairingId: selection.pairingId, fallback: selection.fallback };
+  }
+  return { kind: "api", provider: selection.provider };
+}
+
+export function selectionFromChoice(choice: AgentEngineChoice, apiProvider?: ApiEngineProvider): EngineSelection | null {
+  if (choice.kind === "api") {
+    const provider = choice.provider ?? apiProvider;
+    return provider ? { mode: "api", provider } : null;
+  }
+  if (!choice.pairingId) return null;
+  if (choice.kind === "cli") {
+    return { mode: "subscription", pairingId: choice.pairingId, provider: choice.cli, fallback: choice.fallback ?? "none" };
+  }
+  if (!LOCAL_MODEL_REF_RE.test(choice.model)) return null;
+  return { mode: "local", pairingId: choice.pairingId, modelRef: choice.model, fallback: choice.fallback ?? "none" };
 }
 
 /** A request body's choice, or null when it is not one. */
 export function parseEngineChoice(raw: unknown): AgentEngineChoice | null {
+  const selection = parseEngineSelection(raw);
+  if (selection) return choiceFromSelection(selection);
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  if (r.kind === "api") return { kind: "api" };
-  if (r.kind === "cli" && isCliEngine(r.cli)) return { kind: "cli", cli: r.cli };
+  if (r.kind === "api") return { kind: "api", ...(isApiEngineProvider(r.provider) ? { provider: r.provider } : {}) };
+  if (r.kind === "cli" && isCliEngine(r.cli)) {
+    const pairingId = isPairingId(r.pairingId) ? r.pairingId : undefined;
+    const fallback = isEngineFallback(r.fallback) ? r.fallback : undefined;
+    return { kind: "cli", cli: r.cli, ...(pairingId ? { pairingId } : {}), ...(fallback ? { fallback } : {}) };
+  }
   if (r.kind === "local" && typeof r.model === "string" && isLocalModelName(r.model.trim())) {
-    return { kind: "local", model: r.model.trim() };
+    const pairingId = isPairingId(r.pairingId) ? r.pairingId : undefined;
+    const fallback = isEngineFallback(r.fallback) ? r.fallback : undefined;
+    return { kind: "local", model: r.model.trim(), ...(pairingId ? { pairingId } : {}), ...(fallback ? { fallback } : {}) };
   }
   return null;
 }
@@ -109,16 +208,83 @@ export function harnessEngineLine(choice: Exclude<AgentEngineChoice, { kind: "ap
  * The coding harness's route, read from the SAME choice (CC, 2026-10-09: "the
  * coding harness and the department agents should share the same connection
  * ... on the same functionality"). There is no second picker: an app on the
- * paired computer runs the harness on that app; an AI account runs it on the
- * cloud API. A local model cannot edit files, so the harness then runs on
- * Claude Code on the same computer, and says so.
+ * paired computer runs the harness on that app; a local selection runs the
+ * selected local model on that same pairing; an AI account runs on the cloud
+ * API. Device routes carry the complete immutable binding so browser state
+ * cannot quietly swap the computer, runtime, or fallback policy.
  */
-export function harnessRouteFor(choice: AgentEngineChoice): { mode: "cli" | "cloud_only"; runtime: CliEngine; note: string | null } {
-  if (choice.kind === "cli") return { mode: "cli", runtime: choice.cli, note: null };
-  if (choice.kind === "local") {
-    return { mode: "cli", runtime: "claude", note: "Your agents use a local model; the coding harness edits files, so it runs on Claude Code on the same computer." };
+export type HarnessRoute =
+  | {
+      mode: "cli";
+      runtime: CliEngine | null;
+      pairingId: string;
+      engineKind: "subscription" | "local";
+      engineName: string;
+      fallback: EngineFallback;
+      note: null;
+    }
+  | {
+      mode: "cloud_only";
+      runtime: null;
+      pairingId: null;
+      engineKind: "api";
+      engineName: ApiEngineProvider | null;
+      fallback: "none";
+      note: null;
+    }
+  | {
+      mode: "unavailable";
+      runtime: null;
+      pairingId: null;
+      engineKind: null;
+      engineName: null;
+      fallback: null;
+      note: string;
+    };
+
+export function harnessRouteFor(choice: AgentEngineChoice): HarnessRoute {
+  if (choice.kind !== "api" && !choice.pairingId) {
+    return {
+      mode: "unavailable",
+      runtime: null,
+      pairingId: null,
+      engineKind: null,
+      engineName: null,
+      fallback: null,
+      note: "Choose a computer in Settings > AI brain, test it, and save before starting coding work. Nothing was routed to another engine.",
+    };
   }
-  return { mode: "cloud_only", runtime: "claude", note: null };
+  if (choice.kind === "cli") {
+    return {
+      mode: "cli",
+      runtime: choice.cli,
+      pairingId: choice.pairingId!,
+      engineKind: "subscription",
+      engineName: choice.cli,
+      fallback: choice.fallback ?? "none",
+      note: null,
+    };
+  }
+  if (choice.kind === "local") {
+    return {
+      mode: "cli",
+      runtime: null,
+      pairingId: choice.pairingId!,
+      engineKind: "local",
+      engineName: choice.model,
+      fallback: choice.fallback ?? "none",
+      note: null,
+    };
+  }
+  return {
+    mode: "cloud_only",
+    runtime: null,
+    pairingId: null,
+    engineKind: "api",
+    engineName: choice.provider ?? null,
+    fallback: "none",
+    note: null,
+  };
 }
 
 /**

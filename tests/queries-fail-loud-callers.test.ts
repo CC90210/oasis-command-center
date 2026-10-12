@@ -17,7 +17,7 @@
  *
  * Client components cannot run under react-server; the walker records the
  * props a page hands them instead (IntegrationDot, ProviderAccountsCard,
- * AgentConfigEditor, LocalCliProvidersCard), and tests/queries-fail-loud.render.ts
+ * AgentConfigEditor, AgentEnginePanel), and tests/queries-fail-loud.render.ts
  * draws those components with that null in a separate, full-React process.
  *
  * next/headers, next/navigation and next/link are the only stand-ins (the same
@@ -331,7 +331,7 @@ async function main() {
   });
   // Two callers the walker cannot reach: the chat route only GATES tools on the
   // heartbeat (offline is the safe gate, but the failure must be logged), and
-  // the CLI card only reaches its bridge branches after a browser probe.
+  // the unified engine panel reads its exact-device state in the browser.
   await check("/api/chat: a failed pairings read is logged, then gated as offline", () => {
     const src = readFileSync(join(ROOT, "app", "api", "chat", "route.ts"), "utf8");
     const at = src.indexOf("getBridgeToolCapabilities(tenantId).catch(");
@@ -340,13 +340,12 @@ async function main() {
     assert.match(handler, /console\.error\(/, "the catch swallows the read failure silently");
     assert.match(handler, /online: false/, "the tool gate must still fail closed");
   });
-  await check("LocalCliProvidersCard: an unread heartbeat is never 'Bridge offline'", () => {
-    const src = readFileSync(join(ROOT, "components", "settings", "LocalCliProvidersCard.tsx"), "utf8");
-    assert.match(src, /serverBridgeOnline: boolean \| null;/);
-    assert.match(src, /state\.kind === "bridge_unreachable" && serverBridgeOnline === null && \(/);
-    assert.match(src, /Couldn&apos;t check the bridge/);
-    const offline = src.slice(src.indexOf('<div className="font-bold">Bridge offline</div>') - 700, src.indexOf('<div className="font-bold">Bridge offline</div>'));
-    assert.match(offline, /serverBridgeOnline !== null && deriveDropdownState\(false, serverBridgeOnline\) === "offline"/);
+  await check("AgentEnginePanel: an unread setup is an explicit read error, never 'Offline'", () => {
+    const src = readFileSync(join(ROOT, "components", "settings", "AgentEnginePanel.tsx"), "utf8");
+    assert.match(src, /if \(readError\)/);
+    assert.match(src, /role="alert"/);
+    assert.match(src, /\{readError\}/);
+    assert.doesNotMatch(src.slice(src.indexOf("if (readError)"), src.indexOf("if (!state || !draft)")), />Offline</);
   });
   await check("Sidebar keeps the rail's null: no `?? false` fallback, every parse tri-state", () => {
     const src = readFileSync(join(ROOT, "components", "Sidebar.tsx"), "utf8");
@@ -373,7 +372,7 @@ async function main() {
     assert.equal(accounts.bridgeOnline, null);
     // What powers the departments could not be read either: nothing is claimed.
     assert.equal(accounts.brain, undefined);
-    assert.equal(one(client, "LocalCliProvidersCard").serverBridgeOnline, null);
+    assert.ok(client.some((component) => component.name === "AgentEnginePanel"));
     // The per-agent override section (and its "Tool access" tag) was removed 2026-10-09.
     assert.doesNotMatch(text, /Tool access:|Override an agent/);
   });
@@ -459,9 +458,7 @@ async function main() {
     const settings = await render(await SettingsContent({ section: "ai" }));
     assert.equal(one(settings.client, "ProviderAccountsCard").bridgeOnline, false);
     assert.ok(one(settings.client, "ProviderAccountsCard").connectedServices instanceof Set);
-    // The "Tool access" tag left with the per-agent override section (2026-10-09);
-    // the offline bridge is the local CLI card's own reading.
-    assert.equal(one(settings.client, "LocalCliProvidersCard").serverBridgeOnline, false);
+    assert.ok(settings.client.some((component) => component.name === "AgentEnginePanel"));
     assert.equal((await (await shellStatus.GET()).json()).bridgeOnline, false);
   });
 

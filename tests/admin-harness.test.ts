@@ -166,9 +166,11 @@ async function main() {
       actor_email TEXT, actor_user_id TEXT, action_type TEXT, target_table TEXT, target_id TEXT, after TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT NOT NULL,
-      last_seen_at TEXT, revoked_at TEXT);
+      user_id TEXT, machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT,
+      claim_enabled_at TEXT, paired_via TEXT, claim_runtime_state TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
-      provider TEXT, model TEXT, encrypted_api_key TEXT, system_prompt_override TEXT, enabled INTEGER, last_used_at TEXT);
+      provider TEXT, model TEXT, encrypted_api_key TEXT, system_prompt_override TEXT, enabled INTEGER,
+      last_used_at TEXT, computer_pairing_id TEXT, fallback_policy TEXT, updated_at TEXT);
     CREATE TABLE agent_events (id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY, event_type TEXT NOT NULL,
       publisher_agent TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'info', payload TEXT NOT NULL DEFAULT '{}',
       correlation_id TEXT, published_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
@@ -194,7 +196,14 @@ async function main() {
       profile(CLIENT_OWNER, CLIENT, "owner", 1),
       profile(CLOSER, OASIS, "closer"),
       profile(SUNBIZ_REP, SUNBIZ, "owner", 1),
-      { sql: "INSERT INTO bridge_pairings (id, tenant_id, label, last_seen_at) VALUES ('bp-1', ?, 'CCPC (Windows)', ?)", args: [OASIS, new Date(Date.now() - 30_000).toISOString()] },
+      {
+        sql: "INSERT INTO bridge_pairings (id, tenant_id, user_id, label, machine_fingerprint, last_seen_at, claim_enabled_at, paired_via, claim_runtime_state) VALUES ('bp-1', ?, ?, 'CCPC (Windows)', 'fp-ccpc', ?, ?, 'pair_code', ?)",
+        args: [OASIS, CC.id, new Date(Date.now() - 30_000).toISOString(), stamp, JSON.stringify({ claude: { state: "ready" } })],
+      },
+      {
+        sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, computer_pairing_id, fallback_policy, updated_at) VALUES ('engine-workspace', ?, NULL, '__engine__', 'cli', 'claude', 'bp-1', 'none', ?)",
+        args: [OASIS, stamp],
+      },
     ],
     "write",
   );
@@ -704,7 +713,17 @@ async function main() {
       const res = await bridgeChat.POST(
         new Req("http://localhost/api/bridge/chat", {
           method: "POST",
-          body: JSON.stringify({ agent: "bravo", messages: [{ role: "user", content: "set my display name" }], tab_id: "11111111-1111-4111-8111-111111111111", tenant_id: CLIENT }),
+          body: JSON.stringify({
+            agent: "bravo",
+            messages: [{ role: "user", content: "set my display name" }],
+            tab_id: "11111111-1111-4111-8111-111111111111",
+            tenant_id: CLIENT,
+            cli_provider: "claude",
+            target_pairing_id: "bp-1",
+            runtime_engine_kind: "subscription",
+            runtime_engine_name: "claude",
+            fallback_policy: "none",
+          }),
         }),
       );
       assert.equal(res.status, 200);

@@ -151,6 +151,9 @@ async function main() {
   for (const file of ["bravo__192_ai_usage.sql", "bravo__207_department_chat_runs.sql", "bravo__213_dept_runs_computer.sql"]) {
     for (const stmt of splitStatements(readFileSync(join(ROOT, "database", "turso", file), "utf8"))) await db.execute(stmt);
   }
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN target_pairing_id TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_kind TEXT");
+  await db.execute("ALTER TABLE dept_chat_runs ADD COLUMN runtime_engine_name TEXT");
   await db.executeMultiple(`
     CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
       service TEXT, field_key TEXT, encrypted_value TEXT, created_at TEXT, updated_at TEXT);

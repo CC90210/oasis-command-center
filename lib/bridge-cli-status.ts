@@ -78,23 +78,15 @@ export function cliStatusState(info: Pick<CliStatusInfo, "installed" | "authenti
   return info.checked ? "needs_sign_in" : "unknown";
 }
 
-/**
- * Each app's REAL sign-in, checked against the installed apps on CC's PC on
- * 2026-10-09 (`claude auth --help`, `codex login --help`, `gemini --help`):
- *   - Claude Code 2.1.270 has `claude auth login` (it opens Anthropic's
- *     sign-in page; `claude auth status` checks it);
- *   - Codex 0.146.0 has `codex login` (`codex login status` checks it); it has
- *     no `auth` subcommand, so `codex auth login` would start a chat;
- *   - Gemini CLI 0.63.0 has no sign-in subcommand: run `gemini` and choose
- *     "Sign in with Google" (or type /auth).
- * Shown on every card that is not ready, and sent with every Connect answer
- * (app/api/bridge/cli-auth), so a sign-in the bridge cannot start is one
- * command away.
- */
-export const CLI_SIGN_IN: Record<CliProvider, { label: string; command: string }> = {
-  claude: { label: "Claude Code", command: "claude auth login" },
-  codex: { label: "Codex", command: "codex login" },
-  gemini: { label: "Gemini CLI", command: 'gemini   (then choose "Sign in with Google", or type /auth)' },
+/** Vendor-auth flows executed by the paired connector, never browser input. */
+export const CLI_SIGN_IN: Record<CliProvider, { label: string; command: string | null; instructions: string }> = {
+  claude: { label: "Claude Code", command: "claude", instructions: "Launch `claude`, then enter `/login`." },
+  codex: { label: "Codex", command: "codex login", instructions: "Run `codex login`." },
+  gemini: {
+    label: "Gemini CLI",
+    command: null,
+    instructions: "Personal Gemini CLI sign-in is unsupported. Use a Google Gemini API key instead.",
+  },
 };
 
 export function isSignInProvider(v: unknown): v is CliProvider {

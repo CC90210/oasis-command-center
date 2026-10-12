@@ -59,7 +59,6 @@ import { setupHref } from "@/lib/setup-links";
 import { ENGINE_SETTINGS_HREF, agentsEngineLine, harnessRouteFor, parseEngineChoice, type AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { isProxyModeRuntime } from "@/lib/bridge-client-routing";
-import { bridgeHostOSFromPlatform, bridgeRecoveryGuidance } from "@/lib/bridge-install-guidance";
 import { computeEffectiveBridgeOnline } from "@/lib/bridge-effective-online";
 import type { BridgeHealthResponse } from "@/lib/bridge-health-types";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
@@ -161,13 +160,12 @@ const isChatMode = (s: unknown): s is ChatMode =>
  */
 function computeExpectedRuntime(args: {
   chatMode: ChatMode;
-  modeOverride?: ChatMode;
   bridgeOnline: boolean | null;
   cliRuntime: CliRuntime;
   cfgProvider?: string;
   cfgModel?: string;
 }): { label: string; detail?: string } {
-  const mode = args.modeOverride ?? args.chatMode;
+  const mode = args.chatMode;
   const usingBridge = mode === "cli" || (mode === "auto" && args.bridgeOnline === true);
   if (usingBridge) {
     return {
@@ -523,7 +521,7 @@ function mintTabId(): string {
     : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner, serverBridgeOnline, variant = "card", active = true, targetLabels }: Props) {
+export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, serverBridgeOnline, variant = "card", active = true, targetLabels }: Props) {
   const isFullscreenVariant = variant === "fullscreen";
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -732,8 +730,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // Surfaced in the dropdown tooltip so the operator can see WHY the bridge
   // is degraded ("bridge_not_configured", "vps_unauthorized", etc.) instead
   // of just "(bridge offline)". null when probe succeeded or inflight.
-  const [bridgeProbeReason, setBridgeProbeReason] = useState<string | null>(null);
-  const [bridgeProbeDetail, setBridgeProbeDetail] = useState<string | null>(null);
+  const [_bridgeProbeReason, setBridgeProbeReason] = useState<string | null>(null);
+  const [_bridgeProbeDetail, setBridgeProbeDetail] = useState<string | null>(null);
   // Chat-mode picker — see the type docs at the top of this file. SSR-safe
   // initializer (always returns the same value on the server, then
   // localStorage hydration runs in the mount effect below).
@@ -758,24 +756,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // duplicating the code. Per-surface storage key keeps the two
   // surfaces' plan-mode state isolated.
   const [planMode, setPlanMode] = usePlanMode(PLAN_MODE_STORAGE_KEY);
-  // Tracks which routing mode the most recent FAILED message used. Powers
-  // the "Retry on the other mode" affordance on the error banner. Null
-  // while everything is healthy or after a successful turn.
-  // Tracks which transport bucket failed on the previous turn so the
-  // Retry button can pick the most-likely-working alternate. Collapsed
-  // to two buckets — cli-vs-cloud — because the API surface for the
-  // retry is the same regardless of which cloud variant failed.
-  const [lastFailedMode, setLastFailedMode] = useState<"cli" | "cloud" | null>(null);
-  function setChatMode(next: ChatMode) {
-    setChatModeState(next);
-    if (typeof window !== "undefined") {
-      try {
-        window.localStorage.setItem(CHAT_MODE_STORAGE_KEY, next);
-      } catch {
-        // localStorage quota / privacy mode — fine, mode is in-memory.
-      }
-    }
-  }
   const [usage, setUsage] = useState<{ usage: number; limit: number | null } | null>(null);
   // Cloud-tool results — only fire on the cloud /api/chat path. Each
   // entry is one execution of a <cloud-tool> marker the agent emitted
@@ -1086,11 +1066,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // ONE ENGINE (CC, 2026-10-09: the coding harness and the departments "should
   // share the same connection ... on the same functionality"). The harness
   // runs on what powers your agents (lib/ai/agent-engine.ts harnessRouteFor):
-  // there is no second picker that can disagree with Settings > AI brain. Until
-  // the setting is read, the last route this browser used stands; a read that
-  // fails says so in the header instead of guessing.
+  // there is no second picker that can disagree with Settings > AI brain. The
+  // composer stays blocked until this read succeeds; otherwise its remembered
+  // CLI could answer before a pure-local selection is known.
   const [agentsEngine, setAgentsEngine] = useState<AgentEngineChoice | null>(null);
   const [engineNote, setEngineNote] = useState<string | null>(null);
+  const harnessRoute = agentsEngine ? harnessRouteFor(agentsEngine) : null;
+  const harnessUnavailableMessage = harnessRoute?.mode === "unavailable" ? harnessRoute.note : null;
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -1102,9 +1084,17 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     let alive = true;
     void fetch("/api/ai/engine", { cache: "no-store", signal: AbortSignal.timeout(15_000) })
       .then(async (r) => {
-        const body = (await r.json().catch(() => null)) as { ok?: boolean; engine?: unknown; message?: string } | null;
+        const body = (await r.json().catch(() => null)) as {
+          ok?: boolean;
+          engine?: unknown;
+          message?: string;
+          personEngine?: { source?: unknown; selection?: unknown };
+        } | null;
         if (!alive) return;
-        const engine = r.ok && body?.ok ? parseEngineChoice(body.engine) : null;
+        const selectedEngine = body?.personEngine?.source === "person"
+          ? body.personEngine.selection
+          : body?.engine;
+        const engine = r.ok && body?.ok ? parseEngineChoice(selectedEngine) : null;
         if (!engine) {
           setEngineNote(body?.message || "Couldn't read what powers your agents, so the coding harness kept its last route.");
           return;
@@ -1112,14 +1102,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         const route = harnessRouteFor(engine);
         setAgentsEngine(engine);
         setEngineNote(route.note);
-        setChatModeState(route.mode);
-        setCliRuntimeState(route.runtime);
         setSessionId(null);
-        // Remembered only so the next load starts on the same route before the setting is read.
-        try {
-          window.localStorage.setItem(CLI_RUNTIME_STORAGE_KEY, route.runtime);
-        } catch {
-          // localStorage quota / privacy mode: the setting is read again next load.
+        if (route.mode === "unavailable") return;
+        setChatModeState(route.mode);
+        if (route.runtime) {
+          setCliRuntimeState(route.runtime);
+          // Remembered only for old display/prewarm state. Dispatch below uses
+          // the saved engine binding, never this browser cache.
+          try {
+            window.localStorage.setItem(CLI_RUNTIME_STORAGE_KEY, route.runtime);
+          } catch {
+            // localStorage quota / privacy mode: the setting is read again next load.
+          }
         }
       })
       .catch((err) => {
@@ -1211,7 +1205,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     if (!active) return;
     // Prewarm fires when bridge is effectively reachable (local OR proxy).
     if (!computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline)) return;
-    if (cliRuntime !== "claude") return;
+    if (agentsEngine?.kind !== "cli" || agentsEngine.cli !== "claude" || !agentsEngine.pairingId) return;
     // Proxy mode routes through the same-origin proxy so the prewarm POST
     // isn't a cross-origin (CORS-blocked, bearer-less) hit on the VPS.
     void fetch(isProxyModeRuntime() ? "/api/bridge/prewarm" : `${BRIDGE_CHAT_BASE}/prewarm`, {
@@ -1222,7 +1216,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // serverBridgeOnline included so the prewarm fires when only the
     // server-side signal transitions to true (degraded-proxy case where
     // bridgeOnline=false but daemon IS heartbeating per DB).
-  }, [bridgeOnline, serverBridgeOnline, agent, tabId, prewarmEpoch, cliRuntime, active]);
+  }, [bridgeOnline, serverBridgeOnline, agent, tabId, prewarmEpoch, agentsEngine, active]);
 
   useEffect(() => {
     if (awayFromBottom) return;
@@ -1271,7 +1265,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // previous agent. The button hides anyway when error=null, but
     // leaving the state populated is a foot-gun for any future code
     // path that surfaces the value.
-    setLastFailedMode(null);
   }, [agent, activeWelcomeMessage, welcomeMessages]);
 
   const handleScroll = useCallback(() => {
@@ -1306,28 +1299,19 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // shared helper so the proxy-mode handling stays in lockstep with
   // the dropdown + send gates.
   const bridgeReady = computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline);
-  const effectiveMode: "cli" | "cloud_only" | "cloud_bridge_tools" =
-    chatMode === "cli"
-      ? "cli"
-      : chatMode === "cloud_only"
-        ? "cloud_only"
-        : chatMode === "cloud_bridge_tools"
-          ? "cloud_bridge_tools"
-          : bridgeReady
-            ? "cli"
-            : "cloud_bridge_tools";
+  const effectiveMode: "cli" | "cloud_only" = harnessRoute?.mode === "cloud_only" ? "cloud_only" : "cli";
   // Routing self-selects now: desktop bridge when paired + online, else the
   // per-agent API key. The Auto/Cloud/Desktop picker is gone — see the
   // header render block + commit 150a124.
   const desktopBridgeActive = effectiveMode === "cli" && bridgeReady;
-  const ready = bridgeReady || cloudReady;
+  const ready = harnessRoute?.mode === "cli" ? bridgeReady : harnessRoute?.mode === "cloud_only" ? cloudReady : false;
   const readyViaPlatformKey = !bridgeReady && cloud.viaPlatformKey;
   const providerStatus = (() => {
-    if (desktopBridgeActive && cfg?.provider === "ollama" && cliRuntime === "claude") {
-      return `Provider: ${cfg.provider} · ${cfg.model} · local desktop`;
+    if (desktopBridgeActive && agentsEngine?.kind === "local") {
+      return `Provider: ${agentsEngine.model} · local model`;
     }
-    if (desktopBridgeActive) {
-      return `Provider: ${CLI_RUNTIME_LABELS[cliRuntime]} subscription (desktop bridge)`;
+    if (desktopBridgeActive && agentsEngine?.kind === "cli") {
+      return `Provider: ${CLI_RUNTIME_LABELS[agentsEngine.cli]} subscription (selected computer)`;
     }
     if (cfg?.provider === "ollama") return "Provider: local model (Desktop required)";
     if (cfg && hasOwnKey) return `Provider: ${cfg.provider} · ${cfg.model} · saved key`;
@@ -1342,24 +1326,20 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // execution from a path that doesn't have them. Codex Finding #1.B.
   const accessStatus =
     effectiveMode === "cli"
-      ? `On this computer · ${CLI_RUNTIME_LABELS[cliRuntime]}`
-      : effectiveMode === "cloud_only"
-        ? "Cloud · chat only (no files)"
-        : bridgeReady
-          ? "Cloud + my files (bridge runs tools)"
-          : "Cloud · bridge offline";
+      ? agentsEngine?.kind === "local"
+        ? `On selected computer · ${agentsEngine.model}`
+        : agentsEngine?.kind === "cli"
+          ? `On selected computer · ${CLI_RUNTIME_LABELS[agentsEngine.cli]}`
+          : "Checking selected computer"
+      : "Cloud · chat only (no files)";
   const accessTitle =
-    chatMode === "auto"
-      ? "Best path: use your computer's CLI when the bridge is running, otherwise fall back to your saved API key. Install the bridge to unlock file edits + shell access."
-      : chatMode === "cli"
-        ? `On my computer: pinned to the ${CLI_RUNTIME_LABELS[cliRuntime]} CLI running on this machine. Uses your subscription, full file/script access. Errors loud if the bridge isn't running.`
-        : chatMode === "cloud_only"
-          ? "Cloud — chat only: uses your saved API key. Agent can chat, look up records, hit the dashboard, and check integrations — but CANNOT touch files on your machine, run scripts, or shell out. Pick this when you don't want the agent on your computer."
-          : "Cloud + my files: your API key drives the LLM, but the agent still has access to files + scripts on your machine through the bridge. Read, write, bash, send email/SMS all work. Best of both worlds — your paid LLM, your free local tools.";
+    effectiveMode === "cli"
+      ? "Runs only on the computer and runtime saved in Settings > AI brain. It fails closed if that exact binding cannot answer."
+      : "Cloud — chat only: uses the API account saved in Settings > AI brain.";
   const activeStatus = `${providerStatus} · ${accessStatus}`;
   const composerPlaceholder = !ready
-    ? cfg?.provider === "ollama"
-      ? "Install the desktop bridge to use local Ollama models"
+    ? harnessRoute?.mode === "cli"
+      ? "Repair or test the selected computer in Settings → AI brain"
       : "Connect an AI account in Settings → AI brain"
     : `Message ${targetLabels?.[agent] ?? agentDisplayName(agent).toUpperCase()}…  (Shift+Enter for newline)`;
 
@@ -1382,7 +1362,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // the reaper is the safety net.
     // Chat-reset POST goes through /api/bridge/chat-reset in proxy mode,
     // so reuse the shared effective-online check.
-    if (computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline)) {
+    if (
+      computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline) &&
+      harnessRoute?.mode === "cli" &&
+      harnessRoute.engineKind === "subscription"
+    ) {
       // Proxy mode routes through the same-origin proxy so reset (which kills
       // the warm VPS process) isn't a cross-origin (CORS-blocked) hit.
       void fetch(isProxyModeRuntime() ? "/api/bridge/chat-reset" : `${BRIDGE_CHAT_BASE}/chat-reset`, {
@@ -1390,7 +1374,16 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         headers: { "content-type": "application/json" },
         // tab_id is the canonical pool key; session_id sent for legacy
         // fallback path on older bridge builds.
-        body: JSON.stringify({ agent, tab_id: tabId, session_id: sessionId, cli_provider: cliRuntime }),
+        body: JSON.stringify({
+          agent,
+          tab_id: tabId,
+          session_id: sessionId,
+          cli_provider: harnessRoute.engineName,
+          target_pairing_id: harnessRoute.pairingId,
+          runtime_engine_kind: harnessRoute.engineKind,
+          runtime_engine_name: harnessRoute.engineName,
+          fallback_policy: harnessRoute.fallback,
+        }),
       }).catch(() => null);
       // Bump the prewarm epoch so the prewarm effect re-fires and
       // spawns a fresh warm process for the next chat. Without this,
@@ -1423,7 +1416,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     // previous agent. The button hides anyway when error=null, but
     // leaving the state populated is a foot-gun for any future code
     // path that surfaces the value.
-    setLastFailedMode(null);
   }
 
   /**
@@ -1457,7 +1449,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     }
     setError(null);
     setErrorCode(null);
-    setLastFailedMode(null);
     setActions([]);
     setPendingActions([]);
     setCloudResults([]);
@@ -1639,10 +1630,21 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }
     }
 
+    if (!agentsEngine) {
+      setError(engineNote || "Checking what powers your agents before coding work starts.");
+      setErrorCode("coding_harness_engine_unresolved");
+      return;
+    }
+    if (harnessUnavailableMessage) {
+      setError(harnessUnavailableMessage);
+      setErrorCode("coding_harness_engine_unavailable");
+      return;
+    }
+
     setInput("");
     setPendingAttachments([]);
     setAttachmentError(null);
-    return submitText(text, undefined, attachmentsForTurn);
+    return submitText(text, attachmentsForTurn);
   }
 
   /**
@@ -1844,19 +1846,22 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     }
   }
 
-  /**
-   * Internal: send a user message with full routing logic. send() is the
-   * thin entry point from the composer; submitText also powers the
-   * "Retry on the other mode" button below the error banner — that retry
-   * passes a modeOverride so we route to the alternate path WITHOUT
-   * having to wait for setChatMode to flush before reading state.
-   */
+  /** Internal: send a user message through the saved engine selection. */
   async function submitText(
     text: string,
-    modeOverride?: ChatMode,
     attachmentsForTurn: ChatAttachmentSummary[] = [],
   ) {
     if (!text || streaming) return;
+    if (!agentsEngine) {
+      setError(engineNote || "Checking what powers your agents before coding work starts.");
+      setErrorCode("coding_harness_engine_unresolved");
+      return;
+    }
+    if (harnessUnavailableMessage) {
+      setError(harnessUnavailableMessage);
+      setErrorCode("coding_harness_engine_unavailable");
+      return;
+    }
     setError(null);
     setErrorCode(null);
     const now = Date.now();
@@ -1879,20 +1884,20 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       text_excerpt: att.text_excerpt || null,
     }));
     setMessages(newMessages);
-    // Stamp the assistant placeholder with the runtime we expect to
-    // service this turn, derived from the same picker state the routing
-    // logic below uses. This lets the operator verify (a) "yes, Gemini
-    // really did run" or (b) "no, it fell back to cloud because the
-    // bridge dropped." Updated downstream if the bridge sends back an
-    // `info` event with the actual runtime it dispatched to.
-    const expectedRuntime = computeExpectedRuntime({
-      chatMode,
-      modeOverride,
-      bridgeOnline,
-      cliRuntime,
-      cfgProvider: cfg?.provider,
-      cfgModel: cfg?.model,
-    });
+    // Stamp the assistant placeholder with the exact runtime selected for
+    // this turn. The connector's `info` event can confirm the actual runtime.
+    const expectedRuntime =
+      agentsEngine.kind === "local"
+        ? { label: agentsEngine.model, detail: "local model · selected computer" }
+        : agentsEngine.kind === "cli"
+          ? { label: agentsEngine.cli, detail: "subscription · selected computer" }
+          : computeExpectedRuntime({
+              chatMode: "cloud_only",
+              bridgeOnline,
+              cliRuntime,
+              cfgProvider: cfg?.provider,
+              cfgModel: cfg?.model,
+            });
     setMessages((m) => [
       ...m,
       { role: "assistant", content: "", at: Date.now(), runtime: expectedRuntime },
@@ -1900,61 +1905,21 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setStreaming(true);
     setThinking(true);
     setStreamStartedAt(Date.now());
-    // Resolve routing intent — honors the chat-mode picker, with an explicit
-    // modeOverride taking precedence (used by the "Retry on the other mode"
-    // button below the error banner so the retry routes to the OTHER path
-    // without waiting for a setChatMode flush to land in React state).
-    const activeMode: ChatMode = modeOverride ?? chatMode;
+    // The canonical engine selection owns the route for this turn.
+    const activeMode: ChatMode = harnessRoute?.mode === "cli" ? "cli" : "cloud_only";
     // Phase 3 routing — the 4-mode union collapses into "bridge-pinned" vs
     // "cloud path." Both cloud_only and cloud_bridge_tools go through
     // /api/chat; they differ only in whether bridge tools join the palette
     // (resolved server-side via tool_routing below).
-    const wantsBridge =
-      activeMode === "cli" ||
-      (activeMode === "auto" && bridgeOnline === true);
+    const wantsBridge = harnessRoute?.mode === "cli";
     // The send-side gate respects the same effective-online rule as the
     // dropdown gate — so picking a CLI option from the picker actually
     // results in a working send via /api/bridge/chat when proxy mode is on.
     if (activeMode === "cli" && !computeEffectiveBridgeOnline(bridgeOnline, serverBridgeOnline)) {
-      // Pinned to bridge but neither the local probe NOR the proxy path
-      // can reach the bridge. Two very different situations to surface
-      // differently (ADR-0006):
-      //
-      //   A. The tenant has a bridge online elsewhere (typical multi-
-      //      employee model: admin's always-on machine). Tell the
-      //      employee whose machine owns the bridge so they understand
-      //      the model + suggest switching to API-key mode for this
-      //      session.
-      //
-      //   B. No bridge anywhere in the tenant. Tell them to start one
-      //      on their own machine or switch modes.
-      const tenantHasRemoteBridge =
-        tenantBridgeOwner?.online === true &&
-        (tenantBridgeOwner.machine_label || tenantBridgeOwner.owner_display_name);
-      if (tenantHasRemoteBridge) {
-        const owner = tenantBridgeOwner!.owner_display_name;
-        const machine = tenantBridgeOwner!.machine_label;
-        const where = owner && machine
-          ? `${owner}'s machine (${machine})`
-          : owner
-            ? `${owner}'s machine`
-            : machine
-              ? machine
-              : "another teammate's machine";
-        setError(
-          `Bridge runs on ${where} and isn't reachable from this browser. ` +
-          "Switch the chat mode to API key for this session, or open the dashboard on the machine that owns the bridge."
-        );
-      } else {
-        const recovery = bridgeRecoveryGuidance(
-          bridgeHostOSFromPlatform(typeof navigator === "undefined" ? null : navigator.platform),
-        );
-        setError(
-          "Pinned to CLI (local bridge), but no bridge is online. " +
-          `${recovery}, ` +
-          "or switch the mode to API key."
-        );
-      }
+      setError(
+        "The exact computer selected in Settings > AI brain is not reachable. " +
+          "Open AI brain to restart, sign in, test, or choose a different computer. Nothing was routed elsewhere.",
+      );
       setStreaming(false);
       setMessages((m) => m.slice(0, -1));
       return;
@@ -1963,53 +1928,26 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setStatusDetail("");
 
     try {
-      // Routing now respects the chat-mode picker (chatMode):
-      //   - "cli" or ("auto" + bridgeOnline)
-      //         → bridge endpoints (Claude Code subprocess or local Ollama)
-      //   - "cloud_only" / "cloud_bridge_tools" / ("auto" + bridge offline)
-      //         → /api/chat (cloud relay with operator's API key + native
-      //           tool_use loop on Anthropic provider). The cloud_only vs
-      //           cloud_bridge_tools split is conveyed via the tool_routing
-      //           body field below — the URL is the same.
-      const isOllama = cfg?.provider === "ollama";
+      // Subscription and local engines use the authenticated bridge proxy;
+      // API engines use the cloud route. The server re-resolves the saved
+      // selection and rejects stale or mismatched device bindings.
       const useBridge = wantsBridge;
-      // Ollama local-chat is a localhost-operator feature only — its URL is the
-      // direct bridge (browser->127.0.0.1). In proxy mode that bridge is the
-      // private VPS (unreachable from the browser, no bearer), so disable the
-      // direct local-chat path and fall through to the same-origin proxy
-      // (/api/bridge/chat). Employees use the subscription CLIs, not Ollama.
-      const proxyMode = isProxyModeRuntime();
-      const useLocalChat = useBridge && isOllama && cliRuntime === "claude" && !proxyMode;
-      // Proxy mode: bridge chat goes through the same-origin proxy
-      // (/api/bridge/chat), which authenticates via the Supabase cookie and
-      // attaches the VPS bearer server-side. The request body shape is
-      // unchanged — the proxy forwards it through and overrides identity
-      // fields server-side. Operator localhost keeps the direct path.
-      const url = useLocalChat
-        ? `${BRIDGE_CHAT_BASE}/local-chat`
-        : useBridge && proxyMode
-          ? "/api/bridge/chat"
-          : useBridge
-            ? `${BRIDGE_CHAT_BASE}/chat`
-            : "/api/chat";
-      const body = useLocalChat
-        ? {
-            // Bridge `/local-chat` payload: model + messages. The bridge
-            // resolves base_url from its own .env.agents (OLLAMA_BASE_URL
-            // / LM_STUDIO_BASE_URL) since the operator's saved URL is
-            // encrypted in Supabase and the dashboard never has it
-            // unencrypted on the client side. System prompt is built
-            // by the bridge from agent_roots like the Claude Code path.
-            model: cfg?.model || "llama3.3",
-            messages: outboundMessages,
-            attachments: attachmentPayload,
-          }
-        : useBridge
+      // Every device-bound turn stays same-origin so the browser never chooses
+      // a bridge identity or bypasses exact-pairing verification.
+      const url = useBridge ? "/api/bridge/chat" : "/api/chat";
+      const body = useBridge
           ? {
               agent,
               messages: outboundMessages,
               session_id: sessionId,
-              cli_provider: cliRuntime,
+              cli_provider:
+                harnessRoute?.mode === "cli" && harnessRoute.engineKind === "subscription"
+                  ? harnessRoute.engineName
+                  : undefined,
+              target_pairing_id: harnessRoute?.mode === "cli" ? harnessRoute.pairingId : undefined,
+              runtime_engine_kind: harnessRoute?.mode === "cli" ? harnessRoute.engineKind : undefined,
+              runtime_engine_name: harnessRoute?.mode === "cli" ? harnessRoute.engineName : undefined,
+              fallback_policy: harnessRoute?.mode === "cli" ? harnessRoute.fallback : undefined,
               attachments: attachmentPayload,
               tab_id: tabId,  // warm pool key — stable across the widget's lifetime
               // Plan vs Build — bridge_chat_server honors this since 2026-05-22.
@@ -2060,7 +1998,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         const errBody = asRecord(await safeReadJson(res));
         setError(getString(errBody?.error) || `http_${res.status}`);
         setErrorCode(getString(errBody?.code));
-        setLastFailedMode(useBridge ? "cli" : "cloud");
+        // The saved engine owns this turn. Do not offer an untracked switch to
+        // another runtime; explicit fallback must be handled and audited by
+        // the server/connector named in the immutable binding above.
         setStreaming(false);
         setMessages((m) => m.slice(0, -1));
         return;
@@ -2073,7 +2013,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       // stream "empty content" check can decide whether to overwrite
       // with the generic banner or trust the specific bridge error.
       // Alpha.6 — bridge emits {code, message} so we can drive specific
-      // UX (install CLI, sign in to provider, switch to API-key mode).
+      // UX (install CLI, sign in to provider, or repair the selected runtime).
       let streamErrorCode = "";
       let streamErrorMessage = "";
       // Populated when the cloud tool_use loop pauses on a deferred tool
@@ -2584,13 +2524,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           setError(
             "The agent returned no response. The bridge closed the stream without sending any text or error. " +
               (useBridge
-                ? "Open Operations → Local Bridge for CLI status, or use the Retry button below to try API-key mode."
+                ? "Open Settings > AI brain to repair or test the exact computer selected for this engine."
                 : "Often a provider quota or network blip — try again, or check Settings → AI provider accounts.")
           );
         }
         // Stash which route just failed so the error banner can offer a
         // one-click retry on the OTHER route (CLI bridge ↔ cloud API key).
-        setLastFailedMode(useBridge ? "cli" : "cloud");
+        // A failed saved route stays failed closed. Switching engines here
+        // would bypass the saved pairing and its explicit fallback policy.
         // Stale session_id can keep tripping the same failure if the
         // server-side process crashed — clear it for a clean retry.
         setSessionId(null);
@@ -2605,7 +2546,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       } else {
         // Successful turn — clear any stale "last failed mode" tracking so
         // the retry button doesn't linger past the next happy message.
-        setLastFailedMode(null);
         // Tick the history sidebar so the freshly-saved session lands
         // in the operator's "previous chats" list without a page reload.
         setHistoryRefresh((n) => n + 1);
@@ -3249,7 +3189,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   <div className="font-bold">The local CLI for this agent isn&apos;t installed.</div>
                   <div className="text-xs text-fg-muted font-sans whitespace-pre-wrap">{error}</div>
                   <div className="text-xs text-fg-muted font-sans">
-                    Either install it (the message above tells you how) or use the Retry button below to switch to API-key mode.
+                    Install it on the selected computer, then test that exact runtime again in Settings &gt; AI brain.
                   </div>
                 </>
               ) : errorCode === "cli_auth_required" ? (
@@ -3270,14 +3210,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   <div className="font-bold">The CLI ran but returned nothing.</div>
                   <div className="text-xs text-fg-muted font-sans whitespace-pre-wrap">{error}</div>
                   <div className="text-xs text-fg-muted font-sans">
-                    Usually a quota or auth issue. Try Retry on API-key mode below, or check the CLI in Terminal.
+                    Usually a quota or sign-in issue. Repair and re-test this runtime in Settings &gt; AI brain.
                   </div>
                 </>
               ) : errorCode === "cli_timeout" ? (
                 <>
                   <div className="font-bold">The CLI timed out.</div>
                   <div className="text-xs text-fg-muted font-sans">
-                    The bridge gave up waiting (6h ceiling). Check the bridge logs for a stuck subprocess, or retry on API-key mode which streams.
+                    The bridge gave up waiting (6h ceiling). Check the selected computer&apos;s bridge logs, then re-test it in AI brain.
                   </div>
                 </>
               ) : errorCode === "cli_nonzero_exit" ? (
@@ -3348,72 +3288,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   Too many messages too fast. Wait ~15 seconds and try again.
                 </div>
               )}
-              {/* One-click recovery: if a route failed (CLI or cloud), offer
-                  to re-send the same message on the OTHER route. The retry
-                  pops the trailing user message from history before calling
-                  submitText so the chat doesn't double-print "yo wsp" once
-                  the assistant replies.
-
-                  Phase 3 — the picker now has 4 modes (auto / cli /
-                  cloud_only / cloud_bridge_tools). The retry button picks
-                  the most-likely-working alternate within the OTHER bucket:
-                    - cli failed   → cloud_bridge_tools (if bridge online),
-                                      else cloud_only
-                    - cloud failed → cli (if bridge ready) */}
-              {(() => {
-                if (!lastFailedMode || streaming) return null;
-                // Map the collapsed bucket to a concrete ChatMode the
-                // retry will route through. cloud_bridge_tools is the
-                // preferred "other cloud" because it has the broadest
-                // tool surface; fall back to cloud_only when the bridge
-                // isn't reachable.
-                const otherMode: ChatMode =
-                  lastFailedMode === "cli"
-                    ? (bridgeOnline === true ? "cloud_bridge_tools" : "cloud_only")
-                    : "cli";
-                const otherReady =
-                  otherMode === "cli"
-                    ? bridgeReady
-                    : cloudReady;
-                if (!otherReady) return null;
-                // Last user message — what we'll re-send. If history has no
-                // user message somehow, the button shouldn't appear.
-                const lastUser = [...messages].reverse().find((m) => m.role === "user");
-                if (!lastUser) return null;
-                const otherLabel =
-                  otherMode === "cli"
-                    ? "CLI (local bridge)"
-                    : otherMode === "cloud_only"
-                      ? "API key · cloud tools only"
-                      : "API key + local tools";
-                return (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const text = lastUser.content;
-                      setLastFailedMode(null);
-                      setError(null);
-    setErrorCode(null);
-                      // Pop the trailing user message so submitText doesn't
-                      // print it twice when it re-pushes its own copy.
-                      setMessages((m) => {
-                        const last = m[m.length - 1];
-                        if (last && last.role === "user" && last.content === text) {
-                          return m.slice(0, -1);
-                        }
-                        return m;
-                      });
-                      // Update the persisted picker too so subsequent turns
-                      // default to the working path.
-                      setChatMode(otherMode);
-                      void submitText(text, otherMode, lastUser.attachments || []);
-                    }}
-                    className="mt-2 inline-flex items-center gap-1 px-3 py-1.5 rounded-md border border-accent/40 bg-accent/10 hover:bg-accent/20 text-accent text-xs font-bold transition-colors"
-                  >
-                    Retry on {otherLabel} →
-                  </button>
-                );
-              })()}
             </div>
           </div>
         )}
@@ -3472,6 +3346,19 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             )}
           </div>
         )}
+        {harnessUnavailableMessage && (
+          <div
+            id="coding-harness-engine-unavailable"
+            role="alert"
+            data-testid="coding-harness-engine-unavailable"
+            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-status-warm/30 bg-status-warm/5 px-3 py-2 text-xs text-status-warm"
+          >
+            <span>{harnessUnavailableMessage}</span>
+            <Link href={ENGINE_SETTINGS_HREF} prefetch={false} className="font-bold underline underline-offset-2">
+              Choose engine
+            </Link>
+          </div>
+        )}
         <div className="flex gap-2 relative">
           {/* Slash-command autocomplete — anchored above the textarea
               via the parent's relative positioning. Renders only when
@@ -3511,7 +3398,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           />
           <button
             type="button"
-            disabled={!ready || streaming || uploadingAttachments}
+            disabled={!ready || streaming || uploadingAttachments || !agentsEngine || Boolean(harnessUnavailableMessage)}
             onClick={() => fileInputRef.current?.click()}
             className="h-11 w-11 inline-flex items-center justify-center rounded-lg border border-bg-border bg-bg-elev hover:border-accent/50 hover:text-accent disabled:opacity-50 transition-colors"
             title="Attach files"
@@ -3584,8 +3471,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={composerPlaceholder}
-            disabled={!ready || streaming}
+            placeholder={!agentsEngine ? "Checking what powers your agents..." : harnessUnavailableMessage ? "Choose Subscription app or API key in AI brain to use coding work." : composerPlaceholder}
+            disabled={!ready || streaming || !agentsEngine || Boolean(harnessUnavailableMessage)}
+            aria-describedby={harnessUnavailableMessage ? "coding-harness-engine-unavailable" : undefined}
             rows={1}
             /* text-base on mobile prevents iOS Safari's auto-zoom on
                focus (it zooms whenever an input's font-size is <16px).
@@ -3612,7 +3500,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           ) : (
             <button
               type="submit"
-              disabled={!ready || uploadingAttachments || (!input.trim() && pendingAttachments.length === 0)}
+              disabled={!ready || uploadingAttachments || !agentsEngine || Boolean(harnessUnavailableMessage) || (!input.trim() && pendingAttachments.length === 0)}
               className="btn-send"
             >
               <Send className="w-4 h-4" />

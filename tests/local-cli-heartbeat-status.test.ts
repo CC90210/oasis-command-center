@@ -8,6 +8,7 @@ import {
   normalizeCliSnapshot,
   type CliInventoryMetadata,
 } from "../lib/bridge-cli-status";
+import { describeRuntime, type EngineDevice } from "../components/settings/agent-engine-client";
 
 const ROOT = process.cwd();
 const NOW = Date.parse("2026-08-25T16:30:00.000Z");
@@ -51,33 +52,15 @@ assert.deepEqual(
   "missing provider records must fail closed",
 );
 
-const localCliCard = readFileSync(
-  join(ROOT, "components", "settings", "LocalCliProvidersCard.tsx"),
-  "utf8",
-);
-assert.ok(
-  localCliCard.includes('fetch("/api/bridge/cli-status"'),
-  "Settings must read the pairing-authenticated outbound CLI snapshot",
-);
-assert.ok(
-  !localCliCard.includes('localMachineBridgeUrl("health")'),
-  "hosted Settings must not depend on browser permission to reach loopback",
-);
-assert.ok(
-  !localCliCard.includes('bridgeClientUrl("exec-tool")') ||
-    localCliCard.match(/bridgeClientUrl\("exec-tool"\)/g)?.length === 1,
-  "only explicit install/auth actions may use the inbound bridge proxy; status must not",
-);
-const localActionGuard = localCliCard.indexOf("if (!localActionsAvailable)");
-const execToolFetch = localCliCard.indexOf('fetch(bridgeClientUrl("exec-tool")');
-assert.ok(
-  localActionGuard >= 0 && execToolFetch > localActionGuard,
-  "hosted Settings must fail closed before any install/auth request can target an unrelated tenant daemon",
-);
-assert.ok(
-  localCliCard.includes("setLocalActionsAvailable(!isProxyModeRuntime())"),
-  "interactive CLI mutations must only be enabled on the loopback dashboard",
-);
+const enginePanel = readFileSync(join(ROOT, "components", "settings", "AgentEnginePanel.tsx"), "utf8");
+const engineRoute = readFileSync(join(ROOT, "app", "api", "ai", "engine", "route.ts"), "utf8");
+const localCliCard = readFileSync(join(ROOT, "components", "settings", "LocalCliProvidersCard.tsx"), "utf8");
+assert.ok(engineRoute.includes("CLI_INVENTORY_SERVICE") && engineRoute.includes("normalizeCliMachines"), "AI Brain must read the connector's outbound CLI inventory");
+assert.ok(engineRoute.includes("claim_runtime_state"), "AI Brain must combine inventory with per-runtime execution state from the selected pairing");
+assert.ok(enginePanel.includes("describeRuntime(selectedDevice, provider)"), "the unified panel must label each runtime from one exact device snapshot");
+assert.ok(enginePanel.includes("startCliSignIn(provider, selectedDevice.pairingId)"), "Connect must stay bound to the computer whose status is shown");
+assert.ok(!enginePanel.includes('localMachineBridgeUrl("health")') && !enginePanel.includes('bridgeClientUrl("exec-tool")'), "hosted Settings must never reach a browser-local daemon");
+assert.match(localCliCard, /export function LocalCliProvidersCard\([^)]*\)\s*\{\s*return null;/s, "the old inventory card must not publish a second source of truth");
 assert.deepEqual(
   normalizeCliSnapshot(metadata, "2026-08-25T16:31:00.000Z", NOW),
   { ok: false, reason: "stale" },
@@ -144,10 +127,38 @@ const unversioned = normalizeCliSnapshot(
   NOW,
 );
 assert.equal(unversioned.ok && cliStatusState(unversioned.data.gemini), "unknown");
-assert.ok(localCliCard.includes('cs === "unsupported"'), "the paired-computer card shows the refused state with its reason");
-assert.ok(
-  localCliCard.includes('cs !== "ready" && cs !== "unsupported"'),
-  "a refused app is not offered Connect (signing in again cannot help)",
-);
+
+const deviceFromHeartbeat = (executionReady: boolean): EngineDevice => ({
+  pairingId: "pair-ccpc",
+  label: "CCPC (Windows)",
+  ownerName: "CC",
+  ownedByViewer: true,
+  os: "windows",
+  lastSeenAt: "2026-08-25T16:29:00.000Z",
+  approved: true,
+  online: true,
+  busy: false,
+  protocols: ["department_task_v2", "runtime_action_v1"],
+  runtimes: {
+    claude: { installed: true, signedIn: true, executionReady, unsupported: false, version: "2.1.215", lastTestedAt: null, code: null },
+    codex: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "0.146.0", lastTestedAt: null, code: null },
+    gemini: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "0.42.0", lastTestedAt: null, code: "unsupported_personal_sign_in" },
+  },
+  localModels: [],
+});
+
+assert.deepEqual(describeRuntime(deviceFromHeartbeat(false), "claude"), {
+  label: "Needs test",
+  verified: false,
+  repair: "Test Claude Code on CCPC (Windows) before using it for agents.",
+}, "installed and signed in from a heartbeat is not agent-ready without a real probe");
+assert.deepEqual(describeRuntime(deviceFromHeartbeat(true), "claude"), {
+  label: "Ready for agents",
+  verified: true,
+  repair: null,
+}, "the same pairing becomes ready only after execution evidence says so");
+assert.equal(describeRuntime(deviceFromHeartbeat(false), "gemini").label, "Unsupported");
+assert.match(describeRuntime(deviceFromHeartbeat(false), "gemini").repair ?? "", /Google API key/);
+assert.equal(describeRuntime({ ...deviceFromHeartbeat(true), online: false }, "claude").label, "Offline", "a stale/offline pairing overrides an old successful probe");
 
 console.log("local-cli-heartbeat-status.test.ts: OK");

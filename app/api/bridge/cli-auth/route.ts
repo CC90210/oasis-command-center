@@ -1,94 +1,127 @@
 /**
- * POST /api/bridge/cli-auth  { provider: "claude" | "codex" | "gemini" }
+ * Queue one allowlisted vendor sign-in on one exact paired computer.
  *
- * The Connect / Reconnect button on each app card in Settings > AI brain (CC,
- * 2026-10-09: "if it says not connected, clicking it takes you to the page
- * that authorizes it"). It asks the PAIRED COMPUTER's bridge to start that
- * app's own sign-in there (the bridge's cli_auth_start tool), which opens the
- * vendor's sign-in page in that computer's browser. Nothing signs in inside
- * OASIS, and no credential passes through it: the app keeps its own sign-in on
- * that computer.
- *
- *   - The coding harness's own gate (lib/bridge-proxy.ts
- *     authorizeBridgeRequest): this workspace's bridge, with its server-only
- *     bearer. Then owners and admins only (403): starting a sign-in on the
- *     operator's computer is theirs to do.
- *   - Every answer carries `command`: the app's real sign-in command
- *     (lib/bridge-cli-status.ts CLI_SIGN_IN), to run in a terminal on that
- *     computer when the bridge cannot start it.
- *   - The bridge's own words come back as `output` (its URL, or what it did),
- *     cut short; a bridge that does not answer is said plainly (502).
- *
- * Install stays where it was (the card, on the computer itself): an npm
- * install is not something to start from a hosted page.
+ * This route deliberately accepts no command or free-form input. The selected
+ * connector pulls the structured `auth` job and maps its provider to a
+ * hard-coded login flow locally.
  */
 import { NextResponse } from "next/server";
-import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
-import { isPrivilegedBridgeRole } from "@/lib/bridge-cli-policy";
 import { CLI_SIGN_IN, isSignInProvider } from "@/lib/bridge-cli-status";
+import { enqueueRuntimeJob, hasOnlyKeys, isPlainObject, validRequestId } from "@/lib/bridge/runtime-jobs";
+import { pairingCanClaim, type PairedVia } from "@/lib/bridge/pairing-auth";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { getSessionContext } from "@/lib/team";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const SIGN_IN_TIMEOUT_MS = 20_000;
+const SIGNED_OUT = "Your session ended. Sign in again, then try again.";
+
+type PairingRow = {
+  id: string;
+  label: string | null;
+  claim_enabled_at: string | null;
+  paired_via: PairedVia;
+  claim_protocols: unknown;
+};
+
+const fail = (status: number, error: string, message: string, extra: Record<string, unknown> = {}) =>
+  NextResponse.json({ ok: false, error, message, ...extra }, { status });
+
+function stringList(value: unknown): string[] {
+  if (typeof value === "string") {
+    try {
+      return stringList(JSON.parse(value));
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
 
 export async function POST(req: Request) {
-  let raw: { provider?: unknown };
+  const session = await getSessionContext();
+  if (!session?.tenantId) return fail(401, "unauthorized", SIGNED_OUT);
+
+  let raw: unknown;
   try {
-    raw = (await req.json()) as { provider?: unknown };
+    raw = await req.json();
   } catch {
-    return NextResponse.json({ ok: false, error: "invalid_json", message: "That request could not be read. Try again." }, { status: 400 });
+    return fail(400, "invalid_json", "That request could not be read. Try again.");
   }
-  const provider = raw.provider;
-  if (!isSignInProvider(provider)) {
-    return NextResponse.json({ ok: false, error: "invalid_provider", message: "Pick Claude Code, Codex or Gemini CLI." }, { status: 400 });
+  if (!isPlainObject(raw)) return fail(400, "invalid_request", "Choose an AI app and computer.");
+  if (!hasOnlyKeys(raw, ["provider", "pairing_id"])) {
+    return fail(400, "unexpected_field", "Only an AI app and paired computer can be sent here.");
   }
-  const sign = CLI_SIGN_IN[provider];
-  const auth = await authorizeBridgeRequest();
-  if (!auth.ok) {
-    const message =
-      auth.status === 401
-        ? "Your session ended. Sign in again, then try again."
-        : auth.error === "bridge_not_configured"
-          ? `No paired computer is set up for this workspace. On that computer, run: ${sign.command}`
-          : `This account can't reach the paired computer. On that computer, run: ${sign.command}`;
-    return NextResponse.json({ ok: false, error: auth.error, message, command: sign.command }, { status: auth.status });
+  if (!isSignInProvider(raw.provider)) {
+    return fail(400, "invalid_provider", "Pick Claude Code, Codex, or the supported Google API alternative.");
   }
-  if (!isPrivilegedBridgeRole(auth.teamRole)) {
-    return NextResponse.json(
-      { ok: false, error: "admin_required", message: "Only an owner or admin can start a sign-in on the paired computer.", command: sign.command },
-      { status: 403 },
-    );
+  if (!validRequestId(raw.pairing_id)) {
+    return fail(400, "invalid_pairing_id", "Choose the computer where this AI app should sign in.");
   }
-  const r = await callBridgeExecTool(auth.target, { tool_name: "cli_auth_start", input: { provider } }, { timeoutMs: SIGN_IN_TIMEOUT_MS });
-  const output = r.output.trim().slice(0, 2000);
-  if (r.httpStatus === 0) {
+
+  try {
+    const { data, error } = await getServiceSupabase()
+      .from("bridge_pairings")
+      .select("id, label, claim_enabled_at, paired_via, claim_protocols")
+      .eq("tenant_id", session.tenantId)
+      .eq("user_id", session.authUserId)
+      .eq("id", raw.pairing_id)
+      .is("revoked_at", null)
+      .maybeSingle();
+    if (error) throw new Error(`cli auth pairing read failed: ${error.message}`);
+    const pairing = data as PairingRow | null;
+    if (!pairing) {
+      return fail(404, "pairing_not_found", "That computer is not paired to your account. Choose one of your computers.");
+    }
+    if (!pairingCanClaim({ claimEnabledAt: pairing.claim_enabled_at, pairedVia: pairing.paired_via })) {
+      return fail(409, "pairing_not_approved", "Approve that computer in Devices before starting sign-in.");
+    }
+    if (!stringList(pairing.claim_protocols).includes("runtime_action_v1")) {
+      return fail(409, "connector_update_required", "Update and restart the connector on that computer, then try again.");
+    }
+
+    if (raw.provider === "gemini") {
+      return fail(
+        409,
+        "unsupported_personal_sign_in",
+        "Gemini CLI personal sign-in is unsupported. Connect a Google Gemini API key instead.",
+        { alternative: { mode: "api", provider: "google" } },
+      );
+    }
+
+    const signIn = CLI_SIGN_IN[raw.provider];
+    const queued = await enqueueRuntimeJob({
+      tenantId: session.tenantId,
+      userId: session.authUserId,
+      pairingId: pairing.id,
+      action: "auth",
+      engine: { kind: "cli", name: raw.provider },
+    });
+    if (!queued.ok) {
+      if (queued.code === "pairing_unavailable") {
+        return fail(409, "pairing_unavailable", "That computer was disconnected or revoked. Choose another computer.");
+      }
+      if (queued.code === "queue_full" || queued.code === "rate_limited") {
+        return fail(429, queued.code, "That computer already has several setup actions waiting. Let one finish, then try again.");
+      }
+      console.error("[bridge.cli-auth] runtime auth enqueue refused", queued.code);
+      return fail(500, "auth_job_not_queued", "The sign-in could not be queued. Try again.");
+    }
+
+    const label = pairing.label?.trim() || "the selected computer";
     return NextResponse.json(
       {
-        ok: false,
-        error: "bridge_unreachable",
-        message: `The paired computer didn't answer. On that computer, run: ${sign.command}`,
-        command: sign.command,
+        ok: true,
+        job_id: queued.job.id,
+        command: signIn.command,
+        instructions: `${signIn.instructions} Complete it on the selected computer (${label}); this page will update automatically.`,
+        message: `Sign-in was queued for ${label}.`,
       },
-      { status: 502 },
+      { status: 202 },
     );
+  } catch (error) {
+    console.error("[bridge.cli-auth] failed", error);
+    return fail(500, "cli_auth_unavailable", "The selected computer could not be checked. Try again.");
   }
-  if (!r.ok) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "sign_in_not_started",
-        message: `The paired computer couldn't start the sign-in. On that computer, run: ${sign.command}`,
-        output,
-        command: sign.command,
-      },
-      { status: 502 },
-    );
-  }
-  return NextResponse.json({
-    ok: true,
-    message: `Started the ${sign.label} sign-in on your paired computer. Finish it in the browser window that opened there; this card updates within a minute or two.`,
-    output,
-    command: sign.command,
-  });
 }

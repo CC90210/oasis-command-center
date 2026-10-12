@@ -703,25 +703,23 @@ const access = (over: Partial<SettingsAccess> = {}): SettingsAccess => ({
 });
 const keys = (a: SettingsAccess) => visibleSettingsSections(a).map((s) => s.key);
 
-// A rep on a client workspace: only their own sections.
-assert.deepEqual(keys(access()), ["profile", "connections", "chat-apps", "notifications", "privacy"]);
-// An owner with every flag but operator: everything except Devices.
+// A rep can manage their own AI setup and computers.
+assert.deepEqual(keys(access()), ["profile", "connections", "chat-apps", "ai", "notifications", "privacy", "devices"]);
+// An owner with every flag can also manage workspace-only sections.
 const owner = access({ canManage: true, canSeeTeamPerformance: true, oasisWorkspace: true });
-assert.ok(!keys(owner).includes("devices"), "Devices is operator-only, not owner/admin");
-assert.ok(keys(owner).includes("billing") && keys(owner).includes("audit-log"));
-// The operator gets Devices.
+assert.ok(keys(owner).includes("devices") && keys(owner).includes("billing") && keys(owner).includes("audit-log"));
+// Operator status is no longer needed for personal AI or computer management.
 assert.ok(keys({ ...owner, isOperator: true }).includes("devices"));
-// Operator status alone does not grant workspace management.
-assert.ok(!keys(access({ isOperator: true })).includes("ai"), "operator without a manage seat must not see AI brain");
+assert.ok(keys(access({ isOperator: true })).includes("ai"), "every member can see AI brain");
 // A sales manager on a CLIENT workspace has no Team section (their scorecard is OASIS-only).
 assert.ok(!keys(access({ canSeeTeamPerformance: true })).includes("team"));
 assert.ok(keys(access({ canSeeTeamPerformance: true, oasisWorkspace: true })).includes("team"));
 // An unknown key is refused, not waved through.
 assert.equal(maySeeSettingsSection(owner, "no-such-section" as SettingsSectionKey), false);
 // Old anchors never forward anyone to a section they cannot open.
-assert.ok(!("devices" in legacyAnchorTargets(owner)));
+assert.equal(legacyAnchorTargets(owner).devices, "/settings/devices");
 assert.equal(legacyAnchorTargets({ ...owner, isOperator: true }).devices, "/settings/devices");
-assert.deepEqual(Object.keys(legacyAnchorTargets(access())), ["integrations"]);
+assert.deepEqual(Object.keys(legacyAnchorTargets(access())), ["providers", "agents", "integrations", "devices"]);
 
 // Every section link lands on a page, and every page gates on its own key, so
 // a link can never sit over a 404 and a hidden section can never be reached.
@@ -739,10 +737,12 @@ for (const s of SETTINGS_SECTIONS) {
 }
 assert.match(read("app/settings/layout.tsx"), /visibleSettingsSections\(viewer\.access\)/);
 
-// The cards themselves keep their operator gates, from the VERIFIED check.
+// Personal cards are visible to members; the advanced all-workspace device
+// inventory remains behind the verified operator gate.
 const content = read("components/settings/SettingsContent.tsx");
-assert.match(content, /show\("devices"\) && isOperator &&/, "the Devices card must stay operator-only");
-assert.match(content, /show\("ai"\) && isOperator &&[\s\S]{0,80}LocalCliProvidersCard/, "local CLI must stay operator-only");
+assert.match(content, /show\("devices"\) && \([\s\S]{0,180}id="your-computers"/, "members must see their own computers");
+assert.match(content, /show\("devices"\) && isOperator &&[\s\S]{0,180}id="devices"/, "advanced team devices stay operator-only");
+assert.doesNotMatch(content, /show\("ai"\) && isOperator &&[\s\S]{0,80}LocalCliProvidersCard/, "AI brain must not hide a member's setup behind operator access");
 assert.match(content, /isVerifiedOperator\(\)/);
 assert.doesNotMatch(content, /isOperatorEmail\(/, "operator status must not come from the session email alone");
 // The workspace-level hub is owners/admins only; everyone else sees their own Google.
