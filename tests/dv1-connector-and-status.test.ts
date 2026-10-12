@@ -23,7 +23,10 @@
  *   3. DV0's two "on its way" notices (DevicesEditor.tsx OwnerOnlyConnectNotice,
  *      app/settings/devices/install/page.tsx OwnerOnlyInstallNotice) now tell
  *      the truth: the connector app, not a nonexistent installer, and no new
- *      harness leak.
+ *      harness leak. Updated D0 (2026-10-12): "there is nothing to install
+ *      today" was itself false (the connector already runs on OASIS's own
+ *      team computers) — this now pins the HONEST replacement copy instead
+ *      of the line it was previously proving existed.
  *   4. The deferred O4 status line (components/agents/chat-shared.ts
  *      computerStatusLine): queued/busy/running copy, null for every run not
  *      dispatched to a person's own computer, and never a house-agent name
@@ -99,6 +102,27 @@ const SYNTHETIC_GATED = [
   ")}",
 ].join("\n");
 
+/**
+ * D0: the Devices section's own TOP-of-page "Add a device" mount is gated
+ * on `show("devices")` alone, deliberately WITHOUT isOperator -- unlike
+ * "Your computers" and "Devices (advanced)" beside it, which show OTHER
+ * people's bridge pairings and stay operator-only. True only for a guard
+ * that is exactly `show("devices")` with no `isOperator` joined to it.
+ */
+function mountIsDevicesUngated(src: string): boolean[] {
+  const lines = src.split("\n");
+  const results: boolean[] = [];
+  lines.forEach((line, i) => {
+    if (!/<ConnectYourComputerCard\s*\/>/.test(line)) return;
+    const guard = nearestGuard(lines, i);
+    results.push(Boolean(guard && /show\("devices"\)/.test(guard) && !/isOperator/.test(guard)));
+  });
+  return results;
+}
+
+const SYNTHETIC_DEVICES_UNGATED = ['{show("devices") && (', "  <ConnectYourComputerCard />", ")}"].join("\n");
+const SYNTHETIC_DEVICES_GATED = ['{show("devices") && isOperator && (', "  <ConnectYourComputerCard />", ")}"].join("\n");
+
 // ── Mutation-checked matcher #2: does this text leak the old harness path? ──
 
 // Repo names, the private-repo API call, the clone/download commands -- never
@@ -120,6 +144,10 @@ async function main() {
     assert.deepEqual(mountIsUngated(SYNTHETIC_UNGATED), [true]);
     assert.deepEqual(mountIsUngated(SYNTHETIC_GATED), [false]);
   });
+  await check("mountIsDevicesUngated: a synthetic show(devices)-only mount passes, a show(devices)+isOperator mount fails", () => {
+    assert.deepEqual(mountIsDevicesUngated(SYNTHETIC_DEVICES_UNGATED), [true]);
+    assert.deepEqual(mountIsDevicesUngated(SYNTHETIC_DEVICES_GATED), [false]);
+  });
   await check("containsHarnessLeak: a synthetic leaking string is caught, a clean one is not", () => {
     assert.equal(containsHarnessLeak("run `gh api repos/CC90210/CEO-Agent/contents/install.ps1`"), true);
     assert.equal(containsHarnessLeak("Connecting a computer runs through the OASIS connector app."), false);
@@ -128,15 +156,30 @@ async function main() {
   // -- 1: "Connect your computer" reaches every signed-in person ------------
   console.log("1. Connect your computer, every signed-in person");
   const settingsContentSrc = read("components/settings/SettingsContent.tsx");
-  await check("ConnectYourComputerCard is mounted exactly twice (the manager branch and PersonalSettingsView), both ungated", () => {
-    const results = mountIsUngated(settingsContentSrc);
-    assert.equal(results.length, 2, "expected exactly two <ConnectYourComputerCard /> mounts");
-    assert.deepEqual(results, [true, true], "every mount must be show(\"profile\") only, never gated on isOperator");
-  });
-  await check("neither mount is reachable only through /settings/devices (which 404s a non-operator before this component renders)", () => {
-    // The two mounts are both inside `show("profile")` (proven above); the
-    // devices page only ever calls SettingsContent with section="devices",
-    // so a show("profile") block can never be the one it renders.
+  await check(
+    "ConnectYourComputerCard is mounted exactly four times: two Profile mounts (manager branch, PersonalSettingsView) and two TOP-of-Devices mounts (D0, same two branches) — all four ungated on isOperator",
+    () => {
+      const profileResults = mountIsUngated(settingsContentSrc);
+      const devicesResults = mountIsDevicesUngated(settingsContentSrc);
+      assert.equal(profileResults.length, 4, "expected exactly four <ConnectYourComputerCard /> mounts");
+      assert.equal(devicesResults.length, 4);
+      assert.equal(profileResults.filter(Boolean).length, 2, "two mounts are ungated show(\"profile\") only");
+      assert.equal(devicesResults.filter(Boolean).length, 2, "two mounts are ungated show(\"devices\") only (Add a device)");
+      assert.deepEqual(
+        profileResults.map((p, i) => p || devicesResults[i]),
+        [true, true, true, true],
+        "every mount must be ungated by isOperator one way or the other",
+      );
+    },
+  );
+  await check("the two Profile mounts are reachable without ever going through /settings/devices' operator gate", () => {
+    // The two Profile mounts are both inside `show("profile")` (proven
+    // above); the devices page only ever calls SettingsContent with
+    // section="devices", so a show("profile") block can never be the one
+    // it renders. The THIRD mount (Add a device, D0) is deliberately the
+    // opposite: it IS inside the devices section, and the devices page's
+    // own operator-only 404 is still the real-traffic gate for who ever
+    // reaches it — unchanged by this test, asserted below.
     const devicesPage = read("app/settings/devices/page.tsx");
     assert.match(devicesPage, /requireSettingsSection\("devices"\)/, "the devices page still gates on the operator-only section key");
     assert.match(devicesPage, /section="devices"/);
@@ -159,10 +202,12 @@ async function main() {
     ["DevicesEditor's OwnerOnlyConnectNotice", "components/settings/DevicesEditor.tsx"],
     ["the install page's OwnerOnlyInstallNotice", "app/settings/devices/install/page.tsx"],
   ] as const) {
-    await check(`${label}: names the connector app, says nothing to install today, pauses chats, no harness leak, drops the old "on its way" line`, () => {
+    await check(`${label}: names the connector app, says it runs today on OASIS's own team computers (never "nothing to install today"), names the one-click installer as coming, pauses chats, no harness leak`, () => {
       const src = read(rel);
       assert.match(src, /OASIS connector app/);
-      assert.match(src, /nothing to\s*\n?\s*install today/);
+      assert.match(src, /runs today on OASIS(&apos;|')s own team computers/);
+      assert.match(src, /one-click installer/i);
+      assert.doesNotMatch(src, /nothing to\s*\n?\s*install today/, "must not still say there is nothing to install today — the connector already runs on OASIS's own team computers");
       assert.match(src, /pause/i);
       assert.doesNotMatch(src, /on its way and is not ready yet/);
       assert.equal(containsHarnessLeak(src), false, `${rel} leaks the harness path`);

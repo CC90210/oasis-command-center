@@ -619,6 +619,33 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
+          {/* "Add a device" (D0): the Devices section had no way to add a
+              computer at all -- ConnectYourComputerCard existed only on
+              Profile, so reaching it meant leaving Devices. Same card
+              (never a fork), at the TOP of the section. Deliberately NOT
+              gated on isOperator the way "Your computers" and "Devices
+              (advanced)" below are: those two show OTHER people's bridge
+              pairings and stay operator-only. Adding a device is your own
+              action on your own computer, same as the Profile mount, so it
+              follows show("devices") alone. The real-traffic gate for who
+              ever reaches section="devices" at all is still
+              /settings/devices' own requireSettingsSection (operator-only,
+              O3b's deliberate "bridge is never client-facing" decision) --
+              unchanged here; this just removes the extra hop for whoever
+              is already on this page. */}
+          {show("devices") && (
+            <SettingsSection
+              id="add-a-device"
+              defaultOpen
+              title="Add a device"
+              subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app."
+            >
+              <SafeBoundary label="Add a device">
+                <ConnectYourComputerCard />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
+
           {/* "Your computers" (O3b): each person's OWN computers and their
               plain-words status, with an Approve button -- separate from the
               raw pair/revoke list in "Devices (advanced)" below. OASIS only,
@@ -758,6 +785,23 @@ async function PersonalSettingsView({
       {show("profile") && (
         <SettingsSection id="connect-your-computer" defaultOpen title="Connect your computer" subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app.">
           <SafeBoundary label="Connect your computer">
+            <ConnectYourComputerCard />
+          </SafeBoundary>
+        </SettingsSection>
+      )}
+
+      {/* "Add a device" (D0): the non-manager mirror of the same TOP-of-
+          Devices entry in SettingsContent's own render above. In real
+          traffic this branch is never reached for section="devices" --
+          /settings/devices' own requireSettingsSection stays operator-only,
+          and today's verified operators are always canManageTenant too, so
+          nobody hits this path live. It exists so a non-admin viewer who
+          IS routed here (any future loosening of that route gate, or a
+          direct render) gets the same connector entry as everyone else,
+          same card, never a fork. */}
+      {show("devices") && (
+        <SettingsSection id="add-a-device" defaultOpen title="Add a device" subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app.">
+          <SafeBoundary label="Add a device">
             <ConnectYourComputerCard />
           </SafeBoundary>
         </SettingsSection>
