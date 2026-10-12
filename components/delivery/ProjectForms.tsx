@@ -53,20 +53,24 @@ function AssigneeSelect({
 // Create
 // ---------------------------------------------------------------------------
 
-export function ProjectCreateForm({ roster, clientTenants }: { roster: Option[]; clientTenants: Option[] }) {
+export type ProjectCreateCustomer = {
+  value: string;
+  label: string;
+  email: string | null;
+  clientTenantId: string | null;
+  leadId: string | null;
+};
+
+export function ProjectCreateForm({ roster, customer }: { roster: Option[]; customer: ProjectCreateCustomer }) {
   const router = useRouter();
   const { run, busy, error } = useDeliveryAction();
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({
     title: "",
-    client_tenant_id: "",
-    client_name: "",
-    client_email: "",
     stage: "discovery",
     priority: "medium",
     assigned_to: "",
     due_date: "",
-    lead_id: "",
     description: "",
   });
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
@@ -84,10 +88,13 @@ export function ProjectCreateForm({ roster, clientTenants }: { roster: Option[];
     // same desk /projects lists — never OASIS's board as a vendor.
     const data = await run("/api/projects?scope=desk", "POST", {
       ...f,
-      client_tenant_id: f.client_tenant_id || null,
+      customer_id: customer.value,
+      client_tenant_id: customer.clientTenantId,
+      client_name: customer.label,
+      client_email: customer.email,
+      lead_id: customer.leadId,
       assigned_to: f.assigned_to || null,
       due_date: f.due_date || null,
-      lead_id: f.lead_id.trim() || null,
     });
     if (data?.id) router.push(`/projects/${String(data.id)}`);
   }
@@ -106,29 +113,13 @@ export function ProjectCreateForm({ roster, clientTenants }: { roster: Option[];
         </button>
       </div>
       <div className="grid gap-4 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <span className="label">Client</span>
+          <p className="rounded-lg border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg">{customer.label}</p>
+        </div>
         <label className="sm:col-span-2">
           <span className="label">Title</span>
           <input className="input" required maxLength={200} value={f.title} onChange={set("title")} placeholder="Acme Plumbing website" />
-        </label>
-        {/* Only OASIS's desk links a project to a client workspace. */}
-        {clientTenants.length > 0 && (
-          <label>
-            <span className="label">Client portal workspace</span>
-            <select className="select" value={f.client_tenant_id} onChange={set("client_tenant_id")}>
-              <option value="">No portal (email only)</option>
-              {clientTenants.map((t) => (
-                <option key={t.value} value={t.value}>{t.label}</option>
-              ))}
-            </select>
-          </label>
-        )}
-        <label>
-          <span className="label">Client email</span>
-          <input className="input" type="email" value={f.client_email} onChange={set("client_email")} placeholder="owner@client.com" />
-        </label>
-        <label>
-          <span className="label">Client name</span>
-          <input className="input" maxLength={160} value={f.client_name} onChange={set("client_name")} />
         </label>
         <label>
           <span className="label">Assignee</span>
@@ -153,10 +144,6 @@ export function ProjectCreateForm({ roster, clientTenants }: { roster: Option[];
         <label>
           <span className="label">Due date</span>
           <input className="input" type="date" value={f.due_date} onChange={set("due_date")} />
-        </label>
-        <label>
-          <span className="label">Pipeline lead id (optional)</span>
-          <input className="input font-mono text-xs" value={f.lead_id} onChange={set("lead_id")} placeholder="links the deal this came from" />
         </label>
         <label className="sm:col-span-2">
           <span className="label">Description</span>
@@ -256,10 +243,10 @@ export function ProjectControls({
         {customers && (
           <label>
             <span className="label">Client</span>
-            <select className="select" value={project.customer_id ?? ""} disabled={busy} onChange={(e) => patch({ customer_id: e.target.value || null })}>
-              <option value="">Not linked</option>
+            <select className="select" value={project.customer_id ?? ""} required disabled={busy} onChange={(e) => e.target.value && patch({ customer_id: e.target.value })}>
+              {!project.customer_id && <option value="" disabled>Select an active client</option>}
               {project.customer_id && !customers.some((c) => c.value === project.customer_id) && (
-                <option value={project.customer_id}>Archived client</option>
+                <option value={project.customer_id}>Current client (not active)</option>
               )}
               {customers.map((c) => (
                 <option key={c.value} value={c.value}>{c.label}</option>

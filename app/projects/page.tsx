@@ -1,14 +1,13 @@
 /**
- * /projects — delivery projects: the viewer's OWN workspace's board first.
+ * /projects — active client delivery across the viewer's own workspace.
  *
  * Every workspace runs its own desk (lib/delivery/access.ts, relation "desk"),
  * and this page resolves it first, exactly as /tickets does (Codex, PR #473:
  * a client workspace's owner used to land on OASIS's vendor view here and
- * could neither list nor create their own projects).
- *   - Owners/admins: their workspace's board, one column per stage, with
- *     filters (stage, assignee, client/title search, archived) and a create
- *     form that writes to the same desk (?scope=desk). OASIS's board is the
- *     same page it always was.
+ * could neither list their own projects).
+ *   - Owners/admins: active-stage projects anchored to an active/onboarding
+ *     client record. New projects start from that client's record, never from
+ *     this aggregate board.
  *   - Anyone in another workspace ALSO sees "Projects OASIS runs for you":
  *     OASIS's projects about their workspace (relation "vendor"), with the
  *     last update shared with them — the only view for members below
@@ -21,27 +20,24 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Card, EmptyState, PageHeader, Stat } from "@/components/Card";
 import { LoadError, PriorityTag, StageTag } from "@/components/delivery/badges";
-import { ProjectCreateForm } from "@/components/delivery/ProjectForms";
 import { timeAgo } from "@/lib/fmt";
 import {
   ACTIVE_PROJECT_STAGES,
-  DELIVERY_TENANT_ID,
-  PROJECT_STAGES,
   PROJECT_STAGE_LABELS,
   memberDisplayName,
   type ProjectStage,
 } from "@/lib/delivery/rules";
 import { getDeliveryAccessChain, getDeliveryDb, loadAssignmentRoster, loadMemberDirectory } from "@/lib/delivery/session";
-import { listClientTenants, listProjects, type Project } from "@/lib/delivery/store";
+import { listProjects, type Project } from "@/lib/delivery/store";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 
 export const dynamic = "force-dynamic";
 
-type Search = { stage?: string; assignee?: string; q?: string; archived?: string };
+type Search = { stage?: string; assignee?: string; q?: string };
 
 function ProjectCard({ p, assignee }: { p: Project; assignee: string | null }) {
   const progress = p.task_count > 0 ? Math.round((p.tasks_done / p.task_count) * 100) : null;
-  const client = p.client_tenant_name || p.client_name || p.client_email;
+  const client = p.customer_record_name;
   return (
     <Link
       href={`/projects/${p.id}`}
@@ -51,7 +47,7 @@ function ProjectCard({ p, assignee }: { p: Project; assignee: string | null }) {
         <h3 className="text-sm font-semibold leading-snug text-fg">{p.title}</h3>
         <PriorityTag priority={p.priority} />
       </div>
-      <div className="mt-1 truncate text-xs text-fg-muted">{client || "No client set"}</div>
+      <div className="mt-1 truncate text-xs text-fg-muted">{client}</div>
       {progress !== null && (
         <div className="mt-3">
           <div className="mb-1 flex justify-between text-[10px] text-fg-dim">
@@ -147,37 +143,34 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
 
   // ── the viewer's own workspace's board ──────────────────────────────────
   const viewer = desk.viewer;
-  // Linking a project to a client WORKSPACE exists only on OASIS's desk; any
-  // other desk links to its own client records (lib/os/customers).
-  const oasisDesk = viewer.tenantId === DELIVERY_TENANT_ID;
-  const stageFilter = PROJECT_STAGES.includes(sp.stage as ProjectStage) ? (sp.stage as ProjectStage) : null;
+  const stageFilter = (ACTIVE_PROJECT_STAGES as readonly ProjectStage[]).includes(sp.stage as ProjectStage)
+    ? (sp.stage as ProjectStage)
+    : null;
   let result: Awaited<ReturnType<typeof listProjects>> | null = null;
   let failure: string | null = null;
   let roster: Awaited<ReturnType<typeof loadAssignmentRoster>> = [];
   let directory: Awaited<ReturnType<typeof loadMemberDirectory>> = [];
-  let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
   // The assignee menu's roster fails on its own (OASIS's needs both founders
   // active: lib/team.ts getOasisPipelineAssignmentRoster throws otherwise).
   // The board still renders; only the menu degrades, with a notice.
   let rosterNotice: string | null = null;
   try {
-    [result, roster, directory, tenants] = await Promise.all([
+    [result, roster, directory] = await Promise.all([
       listProjects(db, viewer, {
+        activeClientOnly: true,
         stage: stageFilter,
         assignee: sp.assignee || null,
         q: sp.q || null,
-        includeArchived: sp.archived === "1",
       }),
       loadAssignmentRoster(viewer.tenantId).catch((err: unknown) => {
         console.error("[projects.page.roster]", err);
         const msg = err instanceof Error ? err.message : String(err);
         rosterNotice = msg.includes("oasis_pipeline_assignment_roster_incomplete")
-          ? "Projects can't be assigned from here right now: the assignment roster needs both founders as active members of this workspace, and one is missing. Everything else on the board works."
-          : "The assignee list couldn't be loaded, so projects can't be assigned from here right now. The error has been logged; everything else on the board works.";
+          ? "The assignee filter needs both founders as active members of this workspace, and one is missing. Everything else on the board works."
+          : "The assignee filter couldn't be loaded. The error has been logged; everything else on the board works.";
         return [] as Awaited<ReturnType<typeof loadAssignmentRoster>>;
       }),
       loadMemberDirectory(viewer.tenantId),
-      oasisDesk ? listClientTenants(db) : Promise.resolve([]),
     ]);
   } catch (err) {
     console.error("[projects.page]", err);
@@ -188,22 +181,22 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
     .map((m) => ({ value: String(m.auth_user_id).toLowerCase(), label: m.display_name || m.full_name }));
   const projects = result?.rows ?? [];
   const nameOf = (id: string | null) => memberDisplayName(id, directory);
-  const columns = (stageFilter ? [stageFilter] : PROJECT_STAGES).map((stage) => ({
+  const columns = (stageFilter ? [stageFilter] : ACTIVE_PROJECT_STAGES).map((stage) => ({
     stage,
     items: projects.filter((p) => p.stage === stage),
   }));
-  const active = projects.filter((p) => ACTIVE_PROJECT_STAGES.includes(p.stage)).length;
+  const active = projects.length;
   const openTickets = projects.reduce((n, p) => n + p.open_ticket_count, 0);
-  const filtered = Boolean(stageFilter || sp.assignee || sp.q || sp.archived === "1");
+  const filtered = Boolean(stageFilter || sp.assignee || sp.q);
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
-        title="Projects"
+        title="Active projects"
         subtitle={
-          failure ? "Delivery projects." : `${active} active project${active === 1 ? "" : "s"}${filtered ? " in this view" : ""}.`
+          failure ? "Current client delivery." : `${active} active client project${active === 1 ? "" : "s"}${filtered ? " in this view" : ""}.`
         }
-        action={<ProjectCreateForm roster={rosterOptions} clientTenants={tenants.map((t) => ({ value: t.id, label: t.name }))} />}
+        action={<Link href="/clients" className="btn-secondary">Choose a client</Link>}
       />
 
       {failure ? (
@@ -218,7 +211,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
           <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Stat label="Active" value={active} accent />
             <Stat label="In client review" value={projects.filter((p) => p.stage === "review").length} />
-            <Stat label="Live + maintenance" value={projects.filter((p) => p.stage === "live" || p.stage === "maintenance").length} />
+            <Stat label="Building" value={projects.filter((p) => p.stage === "building").length} />
             <Stat label="Open tickets" value={openTickets} hint={openTickets ? "across these projects" : undefined} />
           </section>
 
@@ -227,7 +220,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
               <span className="label">Stage</span>
               <select name="stage" className="select" defaultValue={stageFilter ?? ""}>
                 <option value="">All stages</option>
-                {PROJECT_STAGES.map((s) => (
+                {ACTIVE_PROJECT_STAGES.map((s) => (
                   <option key={s} value={s}>{PROJECT_STAGE_LABELS[s]}</option>
                 ))}
               </select>
@@ -246,10 +239,6 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
               <span className="label">Search</span>
               <input name="q" className="input" defaultValue={sp.q ?? ""} placeholder="Title, client or email" />
             </label>
-            <label className="flex items-center gap-2 pb-2 text-sm text-fg-muted">
-              <input type="checkbox" name="archived" value="1" defaultChecked={sp.archived === "1"} />
-              Include archived
-            </label>
             <button type="submit" className="btn-secondary">Apply</button>
             {filtered && <Link href="/projects" className="pb-2 text-sm text-fg-muted hover:text-fg">Clear</Link>}
           </form>
@@ -260,7 +249,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
 
           {projects.length === 0 ? (
             <Card>
-              <EmptyState message={filtered ? "No projects match these filters." : "No projects yet. Create the first one above."} />
+              <EmptyState message={filtered ? "No active client projects match these filters." : "No active client projects. Start one from a client record."} />
             </Card>
           ) : (
             <div className="-mx-4 overflow-x-auto px-4 pb-2 md:mx-0 md:px-0">

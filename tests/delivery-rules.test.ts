@@ -147,7 +147,7 @@ check("someone not on the roster, or a non-string, is refused", () => {
 // ── validation ─────────────────────────────────────────────────────────────
 check("project create: title required, defaults, bad stage/date/email refused", () => {
   assert.equal(validateProjectCreate({}).ok, false);
-  const ok = validateProjectCreate({ title: "  Site build ", client_email: "A@B.CO" });
+  const ok = validateProjectCreate({ title: "  Site build ", customer_id: "customer-a", client_email: "A@B.CO" });
   assert.ok(ok.ok);
   if (ok.ok) {
     assert.equal(ok.value.title, "Site build");
@@ -155,13 +155,15 @@ check("project create: title required, defaults, bad stage/date/email refused", 
     assert.equal(ok.value.priority, "medium");
     assert.equal(ok.value.client_email, "a@b.co", "emails are stored lowercased");
   }
-  assert.deepEqual(validateProjectCreate({ title: "x", stage: "qa" }), { ok: false, error: "stage_invalid", field: "stage" });
-  assert.deepEqual(validateProjectCreate({ title: "x", due_date: "2026-02-30" }), { ok: false, error: "due_date_invalid", field: "due_date" });
-  assert.deepEqual(validateProjectCreate({ title: "x", client_email: "nope" }), { ok: false, error: "client_email_invalid", field: "client_email" });
+  assert.deepEqual(validateProjectCreate({ title: "x" }), { ok: false, error: "customer_id_required", field: "customer_id" });
+  assert.deepEqual(validateProjectCreate({ title: "x", customer_id: "customer-a", stage: "qa" }), { ok: false, error: "stage_invalid", field: "stage" });
+  assert.deepEqual(validateProjectCreate({ title: "x", customer_id: "customer-a", due_date: "2026-02-30" }), { ok: false, error: "due_date_invalid", field: "due_date" });
+  assert.deepEqual(validateProjectCreate({ title: "x", customer_id: "customer-a", client_email: "nope" }), { ok: false, error: "client_email_invalid", field: "client_email" });
 });
 check("patches take only known keys and refuse an empty change", () => {
   assert.deepEqual(validateProjectPatch({ bogus: 1 }), { ok: false, error: "no_changes" });
   assert.deepEqual(validateProjectPatch({ stage: null }), { ok: false, error: "stage_invalid", field: "stage" });
+  assert.deepEqual(validateProjectPatch({ customer_id: null }), { ok: false, error: "customer_id_required", field: "customer_id" });
   assert.deepEqual(validateProjectPatch({ archived: true }), { ok: true, value: { archived: true } });
   assert.deepEqual(validateTicketPatch({ status: "done" }), { ok: false, error: "status_invalid", field: "status" });
 });

@@ -87,6 +87,10 @@ require.cache[navigationPath] = {
 export const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 export const CLIENT_A = "aaaaaaaa-0000-4000-8000-00000000000a";
 export const CLIENT_B = "bbbbbbbb-0000-4000-8000-00000000000b";
+export const OASIS_CUSTOMER_A = "customer-oasis-client-a";
+export const OASIS_CUSTOMER_B = "customer-oasis-client-b";
+export const CLIENT_A_CUSTOMER = "customer-client-a-own";
+export const CLIENT_B_CUSTOMER = "customer-client-b-own";
 
 export const USERS = {
   cc: { id: "0d000000-0000-4000-8000-000000000001", email: "conaugh@oasisai.work" },
@@ -116,6 +120,8 @@ export function splitSql(sql: string): string[] {
 
 export const MIGRATION_PATH = join(__dirname, "..", "database", "turso", "183_delivery_and_support.turso.sql");
 export const LEDGER_MIGRATION_PATH = join(__dirname, "..", "database", "turso", "bravo__190_ledger_core.sql");
+export const CUSTOMERS_MIGRATION_PATH = join(__dirname, "..", "database", "turso", "bravo__188_os_customers.sql");
+export const CUSTOMER_LINKS_MIGRATION_PATH = join(__dirname, "..", "database", "turso", "bravo__195_customers_links.sql");
 
 const NOW_SQL = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
 const UUID_SQL =
@@ -190,6 +196,27 @@ export async function setupDatabase(): Promise<Client> {
     "write",
   );
   return db;
+}
+
+export async function setupProjectCustomers(db: Client): Promise<void> {
+  for (const stmt of splitSql(readFileSync(CUSTOMERS_MIGRATION_PATH, "utf8"))) await db.execute(stmt);
+  for (const stmt of splitSql(readFileSync(CUSTOMER_LINKS_MIGRATION_PATH, "utf8"))) await db.execute(stmt);
+
+  const customer = (id: string, tenantId: string, name: string, email: string, clientTenantId: string | null) => ({
+    sql: `INSERT INTO customers
+          (id, tenant_id, display_name, primary_email, lifecycle, tags, custom_fields, client_tenant_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'active', '[]', '{}', ?, '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')`,
+    args: [id, tenantId, name, email, clientTenantId],
+  });
+  await db.batch(
+    [
+      customer(OASIS_CUSTOMER_A, OASIS, "Client A Plumbing", USERS.clientA.email, CLIENT_A),
+      customer(OASIS_CUSTOMER_B, OASIS, "Client B Dental", USERS.clientB.email, CLIENT_B),
+      customer(CLIENT_A_CUSTOMER, CLIENT_A, "A's Customer", "customer@client-a.test", null),
+      customer(CLIENT_B_CUSTOMER, CLIENT_B, "B's Customer", "customer@client-b.test", null),
+    ],
+    "write",
+  );
 }
 
 export async function login(user: { id: string; email: string } | null): Promise<void> {

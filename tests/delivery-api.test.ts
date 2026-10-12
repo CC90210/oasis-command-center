@@ -17,12 +17,25 @@
  */
 import "./_delivery-harness";
 import assert from "node:assert/strict";
-import { CLIENT_A, CLIENT_B, USERS, check, finish, login, setupDatabase } from "./_delivery-harness";
+import {
+  CLIENT_A,
+  CLIENT_A_CUSTOMER,
+  CLIENT_B,
+  OASIS_CUSTOMER_A,
+  OASIS_CUSTOMER_B,
+  USERS,
+  check,
+  finish,
+  login,
+  setupDatabase,
+  setupProjectCustomers,
+} from "./_delivery-harness";
 
 type Json = Record<string, unknown>;
 
 async function main() {
   const db = await setupDatabase();
+  await setupProjectCustomers(db);
   const { NextRequest } = await import("next/server");
   const projects = await import("../app/api/projects/route");
   const project = await import("../app/api/projects/[id]/route");
@@ -51,10 +64,10 @@ async function main() {
   await login(USERS.cc);
   const pa = await call(projects.POST(req("POST", "/api/projects", {
     title: "Client A website", client_tenant_id: CLIENT_A, client_name: "Alice", client_email: "OWNER@client-a.test",
-    stage: "building", assigned_to: USERS.adon.id,
+    customer_id: OASIS_CUSTOMER_A, stage: "building", assigned_to: USERS.adon.id,
   })));
   const pb = await call(projects.POST(req("POST", "/api/projects", {
-    title: "Client B automation", client_tenant_id: CLIENT_B, stage: "discovery",
+    title: "Client B automation", client_tenant_id: CLIENT_B, customer_id: OASIS_CUSTOMER_B, stage: "discovery",
   })));
   const projectA = String(pa.body.id);
   const projectB = String(pb.body.id);
@@ -66,6 +79,25 @@ async function main() {
     assert.equal(p.assigned_to, USERS.adon.id);
     assert.equal(p.client_email, "owner@client-a.test");
     assert.ok(p.started_at, "a project created in Building has started");
+  });
+  await check("projects require a current client record and cannot be unlinked", async () => {
+    const missing = await call(projects.POST(req("POST", "/api/projects", { title: "Orphan" })));
+    assert.equal(missing.status, 400, JSON.stringify(missing.body));
+    assert.equal(missing.body.error, "customer_id_required");
+
+    const foreign = await call(projects.POST(req("POST", "/api/projects", { title: "Foreign", customer_id: CLIENT_A_CUSTOMER })));
+    assert.equal(foreign.status, 400, JSON.stringify(foreign.body));
+    assert.equal(foreign.body.error, "customer_not_found");
+
+    await db.execute({ sql: "UPDATE customers SET lifecycle = 'paused' WHERE id = ?", args: [OASIS_CUSTOMER_B] });
+    const paused = await call(projects.POST(req("POST", "/api/projects", { title: "Paused", customer_id: OASIS_CUSTOMER_B })));
+    assert.equal(paused.status, 400, JSON.stringify(paused.body));
+    assert.equal(paused.body.error, "customer_not_found");
+    await db.execute({ sql: "UPDATE customers SET lifecycle = 'active' WHERE id = ?", args: [OASIS_CUSTOMER_B] });
+
+    const unlink = await call(project.PATCH(req("PATCH", `/api/projects/${projectA}`, { customer_id: null }), params({ id: projectA })));
+    assert.equal(unlink.status, 400, JSON.stringify(unlink.body));
+    assert.equal(unlink.body.error, "customer_id_required");
   });
 
   const ta = await call(tickets.POST(req("POST", "/api/tickets", {

@@ -306,10 +306,15 @@ async function main() {
   await lead("lead-merge", CLIENT_A, { stage: "launched", name: "Solo Sam", email: "ops@acme.test" });
   await lead("lead-b", CLIENT_B, { stage: "won", company: "B's deal", email: "deal@b.test" });
   // Work that already exists for the deal, before it is a client.
-  const projectForDeal = await delivery.createProject(db, CLIENT_A, {
-    title: "Harbour site", description: null, client_tenant_id: null, client_name: "Harbour Dental", client_email: "lee@harbour.test",
-    lead_id: "lead-won-1", stage: "building", priority: "medium", assigned_to: null, due_date: null,
-  }, { userId: USERS.clientA.id, name: "Alice" }, T0);
+  // A real legacy orphan from before customer records existed. New project
+  // writes require a customer; conversion still repairs historical rows.
+  const projectForDeal = "legacy-harbour-project";
+  await db.execute({
+    sql: `INSERT INTO delivery_projects
+          (id, tenant_id, title, client_name, client_email, lead_id, stage, priority, created_at, updated_at)
+          VALUES (?, ?, 'Harbour site', 'Harbour Dental', 'lee@harbour.test', 'lead-won-1', 'building', 'medium', ?, ?)`,
+    args: [projectForDeal, CLIENT_A, T0.toISOString(), T0.toISOString()],
+  });
   const ticketBase = {
     description: null, category: "bug" as const, severity: "medium" as const, source: "internal" as const,
     client_tenant_id: null, client_name: null, client_company: null, client_match: "none", project_hint: null,
@@ -1003,13 +1008,18 @@ async function main() {
   });
   // The editor saves one field at a time (TicketForms patch), so moving a
   // ticket arrives as { project_id } alone (CodeRabbit, #473).
-  const projectFor = (title: string, customerId: string | null, clientEmail: string | null = null) =>
+  const projectFor = (title: string, customerId: string, clientEmail: string | null = null) =>
     delivery.createProject(db, CLIENT_A, {
       title, description: null, client_tenant_id: null, client_name: null, client_email: clientEmail,
       lead_id: null, stage: "building", priority: "medium", assigned_to: null, due_date: null, customer_id: customerId,
     }, author, T0);
   const pX2 = await projectFor("Link project X2", X);
-  const pNone = await projectFor("Link project, no client", null);
+  const pNone = "legacy-project-no-client";
+  await db.execute({
+    sql: `INSERT INTO delivery_projects (id, tenant_id, title, stage, priority, created_at, updated_at)
+          VALUES (?, ?, 'Link project, no client', 'building', 'medium', ?, ?)`,
+    args: [pNone, CLIENT_A, T0.toISOString(), T0.toISOString()],
+  });
   await check("links: moving a ticket to another client's project takes that project's client", async () => {
     const r = await delivery.updateTicket(db, CLIENT_A, loose.id, { project_id: pX2 }, author, T0, { customer: () => "Link X" });
     assert.ok(r.ok, JSON.stringify(r));

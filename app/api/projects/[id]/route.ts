@@ -25,7 +25,7 @@ import {
 } from "@/lib/delivery/session";
 import {
   clientTenantChangeAllowed,
-  deskCustomerExists,
+  deskActiveCustomerExists,
   deskLeadExists,
   getProject,
   listProjectTasks,
@@ -99,7 +99,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     if (changes.lead_id && !(await deskLeadExists(db, desk, changes.lead_id))) {
       return deliveryError(400, "lead_not_found", undefined, { field: "lead_id" });
     }
-    if (changes.customer_id && !(await deskCustomerExists(db, desk, changes.customer_id))) {
+    if (changes.customer_id && !(await deskActiveCustomerExists(db, desk, changes.customer_id))) {
       return deliveryError(400, "customer_not_found", undefined, { field: "customer_id" });
     }
 

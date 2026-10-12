@@ -1330,7 +1330,7 @@ async function main() {
   const TicketsPage = (await import("../app/tickets/page")).default;
   const ProjectsPage = (await import("../app/projects/page")).default;
   const Portal = (await import("../app/client-portal/page")).default;
-  await check("/tickets and /projects render with an incomplete sales roster, and say why the assignee menu is empty", async () => {
+  await check("/tickets and /projects render with an incomplete sales roster, and say why assignment controls are empty", async () => {
     await db.execute({ sql: "UPDATE user_profiles SET deactivated_at = ? WHERE auth_user_id = ?", args: [ago(1), USERS.adon.id] });
     try {
       await login(USERS.cc);
@@ -1340,7 +1340,7 @@ async function main() {
       assert.match(desk, /can't be assigned from here right now: the assignment roster needs both founders/);
       const board = await page(ProjectsPage({ searchParams: Promise.resolve({}) }));
       assert.doesNotMatch(board, /Could not load/);
-      assert.match(board, /Projects can't be assigned from here right now/);
+      assert.match(board, /The assignee filter needs both founders as active members/);
     } finally {
       await db.execute({ sql: "UPDATE user_profiles SET deactivated_at = NULL WHERE auth_user_id = ?", args: [USERS.adon.id] });
     }

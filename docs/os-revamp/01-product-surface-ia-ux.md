@@ -82,6 +82,7 @@ Each department row shows a trailing red pill (needs-you count) or a grey last-a
 | Row | Route | Gate |
 |---|---|---|
 | All clients | `/clients` | |
+| Active projects | `/projects` | active delivery anchored to an active/onboarding client record |
 | Support desk | `/clients/support` | badge = SLA breaches |
 | Agreements | `/clients/agreements` | e-sign |
 | Meetings | `/clients/meetings` | module `meetings` (Phase 3) |
@@ -120,7 +121,7 @@ Verdicts: KEEP · RENAME · MERGE · MOVE (new path; old path redirects) · SETT
 | `/automations` | SPLIT | Clients see Routines (department panels + Team › Operations); cron, the Python drafter and workers go to Admin › Automations | `AutomationsContent.tsx` stays admin-only. |
 | `/health` | MERGE | Admin › Health; client-safe checks go to Operations › Connections health; the stale-lead alert becomes a Sales routine | Drop the "Quiet shop-outs" card (`health/page.tsx:414-416`) at retirement. |
 | `/analytics` | MERGE + CUT | Money › Overview (money); Sales and Marketing department Numbers (funnel, sources) | Delete the fake-MRR path at `lib/queries.ts:1010-1025`. |
-| `/projects` (+`[id]`) | KEEP, re-scope | Team › Projects + the client record's Projects tab | Generalize `DELIVERY_TENANT_ID` (`lib/delivery/rules.ts:18`) to the session tenant and add `customer_id`. |
+| `/projects` (+`[id]`) | KEEP, re-scope | Clients › Active projects + the client record's Projects tab | The aggregate lists only active-stage work anchored by `customer_id` to an active/onboarding client. Projects start from a client record; the customer-facing portal projection remains separate. |
 | `/tickets` (+`[id]`) | REBUILD | Clients › Support desk `/clients/support` | Same store, SLA and comments. `tenant_id` = the business; the requester is its customer. |
 | `/settings` | SPLIT | Settings rail (see (a)) | `SettingsContent.tsx` is broken into per-section pages. |
 | `/settings/audit-log` | KEEP | Settings › Audit log | Absorbs `/runs`. |

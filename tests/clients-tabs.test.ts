@@ -128,11 +128,12 @@ type Tab = { key: string; label: string; href: string; count?: number };
 
 /**
  * The "use client" modules the Clients pages' server files import or re-export
- * directly (read 2026-10-08; all three were boundaries on main before the tabs
- * work). Each is listed in every route's manifest of the Worker; a new one
- * fails the check that computes this set.
+ * directly. ProjectForms joins the existing boundaries because project
+ * creation now starts from a client record. Each is listed in every route's
+ * manifest of the Worker; a new one fails the check that computes this set.
  */
 const CLIENTS_BOUNDARIES: string[] = [
+  "components/delivery/ProjectForms.tsx",
   "components/delivery/TicketForms.tsx",
   "components/os/landings/client-conversations.tsx",
   "components/os/landings/clients-actions.tsx",
@@ -283,7 +284,7 @@ async function main() {
   const alma = await make(OASIS, "Alma Active", "active", USERS.cc.id);
   await make(OASIS, "Abe Active", "active", USERS.cc.id);
   await make(OASIS, "Pete Past", "churned", USERS.cc.id);
-  // A won deal not yet converted, so "Not yet client records" has a row.
+  // A won deal without a customer record stays in Pipeline, not Clients.
   await db.execute({
     sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES ('lead-won-tabs', ?, 'lead', ?)",
     args: [OASIS, JSON.stringify({ stage: "won", company: "Wendy Won Deal Co", name: "Wendy" })],
@@ -317,10 +318,10 @@ async function main() {
     const read = byStatus(props.lifecycles);
     for (const k of Object.keys(EXPECTED)) assert.equal(read[k] ?? 0, EXPECTED[k], `rows with status '${k || "all"}'`);
     assert.equal(props.rows.length, props.lifecycles.length, "one rendered row per record");
-    // The KPI row and the deals not yet records stay on the page under a status.
+    // The KPI row stays on the page under a status; Pipeline rows do not become clients.
     const active = findAll(tree, KpiTile).find((k) => k.props.label === "Active");
     assert.equal(active?.props.value, 2, "the Active tile is drawn under the Active tab, with every record counted");
-    assert.match(textOf(tree).join("\n"), /Not yet client records[\s\S]*Wendy Won Deal Co/);
+    assert.doesNotMatch(textOf(tree).join("\n"), /Not yet client records|Wendy Won Deal Co/);
   });
   await check("/clients: each tab's link is its status plus the form's filters, so the address bar, Back and a shared link agree", async () => {
     const { props } = await listView({ lifecycle: "paused", q: "Active" });

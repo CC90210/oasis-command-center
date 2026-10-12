@@ -228,6 +228,8 @@ async function main() {
   );
   assert.equal(deliveryTables?.length, 5, "the five delivery tables are in migration 183");
   await raw.executeMultiple(deliveryTables!.join("\n"));
+  await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__188_os_customers.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__195_customers_links.sql"), "utf8"));
   // The Feed's Needs-you tab reads approvals (migration bravo__186); an empty
   // table is the real "nothing waiting", not a failed read.
   await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__186_os_approvals.sql"), "utf8"));
@@ -288,13 +290,19 @@ async function main() {
       lead("lead-won", { stage: "in_build", company: "Harbour Dental", name: "Dr. Lee", email: "lee@harbour.test", last_contacted_at: iso(3 * 24 * 60 * MINUTE) }),
       lead("lead-lost", { stage: "lost", company: "Gone Co", email: "x@gone.test" }),
       {
-        sql: `INSERT INTO delivery_projects (id, tenant_id, title, client_name, client_email, lead_id, stage)
-              VALUES ('proj-1', ?, 'Harbour site', 'Harbour Dental', 'lee@harbour.test', 'lead-won', 'building')`,
+        sql: `INSERT INTO customers
+              (id, tenant_id, display_name, primary_email, lifecycle, source_lead_id, tags, custom_fields, created_at, updated_at)
+              VALUES ('customer-harbour', ?, 'Harbour Dental', 'lee@harbour.test', 'active', 'lead-won', '[]', '{}', ?, ?)`,
+        args: [OASIS, stamp, stamp],
+      },
+      {
+        sql: `INSERT INTO delivery_projects (id, tenant_id, title, client_name, client_email, lead_id, customer_id, stage)
+              VALUES ('proj-1', ?, 'Harbour site', 'Harbour Dental', 'lee@harbour.test', 'lead-won', 'customer-harbour', 'building')`,
         args: [OASIS],
       },
       {
-        sql: `INSERT INTO support_tickets (id, tenant_id, ticket_seq, ticket_number, title, status, project_id, sla_target, client_match)
-              VALUES ('t-1', ?, 1, 'T-0001', 'Form broken', 'open', 'proj-1', ?, 'manual')`,
+        sql: `INSERT INTO support_tickets (id, tenant_id, ticket_seq, ticket_number, title, status, project_id, customer_id, sla_target, client_match)
+              VALUES ('t-1', ?, 1, 'T-0001', 'Form broken', 'open', 'proj-1', 'customer-harbour', ?, 'manual')`,
         args: [OASIS, iso(-60 * MINUTE)],
       },
       {
@@ -647,21 +655,15 @@ async function main() {
   });
 
   // ── /clients ───────────────────────────────────────────────────────────
-  await check("/clients: CC sees the paid deal with its project and ticket; the lost deal is not a client", async () => {
+  await check("/clients: CC sees only the canonical client record with its project and ticket", async () => {
     await login("cc");
     const tree = await ClientsPage();
-    const rows = walk(tree).elements.find((e) => e.props && "rows" in e.props && "deliveryHidden" in e.props)?.props.rows as
-      | Array<{ name: string; status: string; openTickets: number | null; activeProjects: number | null }>
-      | undefined;
-    assert.ok(rows, "the client table rendered");
-    assert.deepEqual(
-      rows.map((r) => [r.name, r.status, r.openTickets, r.activeProjects]),
-      [["Harbour Dental", "In build", 1, 1]],
-    );
-    assert.ok(
-      walk(tree).strings.join("").includes("1 open ticket is not linked to a client yet"),
-      "the stranger's ticket is reported, not invented into a client",
-    );
+    const client = walk(tree).elements.map((e) => e.props.r as Record<string, unknown> | undefined).find((r) => r?.display_name === "Harbour Dental");
+    assert.ok(client, "the canonical customer record rendered");
+    assert.equal(client.open_ticket_count, 1);
+    assert.equal(client.active_project_count, 1);
+    const all = walk(tree).strings.join("");
+    assert.ok(!all.includes("Gone Co") && !all.includes("stranger@nowhere.test") && !all.includes("Not yet client records"));
   });
   for (const who of ["rep", "manager"] as const) {
     await check(`/clients: a ${who} (not on their rail) gets a 404 before any read`, async () => {
@@ -675,10 +677,8 @@ async function main() {
     await login("worker");
     const run = await recording(() => ClientsPage());
     assert.ok(!(run.result instanceof Error), String(run.result));
-    const rows = walk(run.result).elements.find((e) => e.props && "rows" in e.props && "deliveryHidden" in e.props)?.props.rows as
-      | Array<{ name: string; openTickets: number | null; activeProjects: number | null }>
-      | undefined;
-    assert.deepEqual(rows?.map((r) => [r.name, r.openTickets, r.activeProjects]), [["Harbour Dental", null, null]]);
+    const client = walk(run.result).elements.map((e) => e.props.r as Record<string, unknown> | undefined).find((r) => r?.display_name === "Harbour Dental");
+    assert.deepEqual([client?.open_ticket_count, client?.active_project_count], [null, null]);
     assert.deepEqual(run.sql.filter((s) => /delivery_projects|support_tickets/i.test(s)), [], "delivery is founder-only inside OASIS");
   });
   await check("/clients: a client workspace never sees OASIS's delivery rows as its customers", async () => {
@@ -699,14 +699,12 @@ async function main() {
     }
     assert.equal(run.sql.some((s) => /\btenant_records\b/i.test(s)), false, "no pipeline-derived clients outside OASIS");
   });
-  await check("/clients: a ticket list past its read cap shows floors (N+), never a total", async () => {
-    const { CLIENTS_DELIVERY_LIMIT } = await import("../components/os/landings/clients-data");
-    // One more open ticket than the read returns, all on Harbour's project and
-    // newer than the fixture's two, so the capped read is exactly these.
+  await check("/clients: canonical delivery counts come from customer_id, not a capped inferred-client read", async () => {
+    const many = 501;
     await raw.batch(
-      Array.from({ length: CLIENTS_DELIVERY_LIMIT + 1 }, (_, i) => ({
-        sql: `INSERT INTO support_tickets (id, tenant_id, ticket_seq, ticket_number, title, status, project_id, sla_target)
-              VALUES (?, ?, ?, ?, 'Capped', 'open', 'proj-1', ?)`,
+      Array.from({ length: many }, (_, i) => ({
+        sql: `INSERT INTO support_tickets (id, tenant_id, ticket_seq, ticket_number, title, status, project_id, customer_id, sla_target)
+              VALUES (?, ?, ?, ?, 'Canonical', 'open', 'proj-1', 'customer-harbour', ?)`,
         args: [`cap-${i}`, OASIS, 1000 + i, `T-C${i}`, iso(-60 * MINUTE)],
       })),
       "write",
@@ -714,60 +712,25 @@ async function main() {
     try {
       await login("cc");
       const tree = await ClientsPage();
-      const els = walk(tree).elements;
-      const table = els.find((e) => e.props && "rows" in e.props && "deliveryHidden" in e.props)?.props as
-        | { rows: Array<{ name: string; openTickets: number | null }>; floors: Record<string, boolean> }
-        | undefined;
-      assert.deepEqual(table?.rows.map((r) => [r.name, r.openTickets]), [["Harbour Dental", CLIENTS_DELIVERY_LIMIT]]);
-      assert.equal(table?.floors.openTickets, true, "the per-client ticket count is marked as a floor");
-      assert.equal(table?.floors.activeProjects, false, "the project list was not capped");
-      // Client records lead the page now (migration bravo__188), so the
-      // subtitle carries no counts: it cannot print an unfloored total. The
-      // derived list's floors are asserted on the table and the words below.
-      const subtitle = els.find((e) => e.props && e.props.title === "Clients" && "subtitle" in e.props)?.props.subtitle;
-      assert.equal(subtitle, "The customers your business serves.");
-      const all = walk(tree).strings.join("");
-      assert.ok(all.includes(`Only the first ${CLIENTS_DELIVERY_LIMIT} open tickets were read`), "the cap is said in words");
-      // walk() records elements without rendering function components, so the
-      // cell has to be rendered here: ClientsTable, then each Count in it.
-      // (Before client records, this check passed on the SUBTITLE's "500+",
-      // never on a cell.)
-      const tableEl = els.find((e) => e.props && "rows" in e.props && "deliveryHidden" in e.props)!;
-      const tableTree = (tableEl.type as (p: unknown) => unknown)(tableEl.props);
-      const cells = walk(tableTree)
-        .elements.filter((e) => e.props && "value" in e.props && "hidden" in e.props)
-        .map((e) => String(((e.type as (p: unknown) => { props: { children: unknown } })(e.props)).props.children));
-      assert.ok(cells.includes(`${CLIENTS_DELIVERY_LIMIT}+`), `the table cell prints the floor: ${JSON.stringify(cells)}`);
+      const client = walk(tree).elements.map((e) => e.props.r as Record<string, unknown> | undefined).find((r) => r?.display_name === "Harbour Dental");
+      assert.equal(client?.open_ticket_count, many + 1, "all current tickets plus the original are counted exactly");
+      assert.equal(client?.active_project_count, 1);
     } finally {
       await raw.execute("DELETE FROM support_tickets WHERE id LIKE 'cap-%'");
     }
   });
-  await check("/clients: a blank start draws no 'Not yet client records' section at all, not an empty card (CC, 2026-10-02)", async () => {
+  await check("/clients: pipeline, project and ticket rows never invent a client without a customer record", async () => {
     await login("cc");
     const before = text(await ClientsPage());
-    assert.ok(before.includes("Not yet client records"), "control: the paid deal is listed under its heading");
-    // Nothing left in OASIS's book: the deal lost, its project archived, both tickets resolved.
-    await raw.batch(
-      [
-        "UPDATE tenant_records SET data = json_set(data, '$.stage', 'lost') WHERE id = 'lead-won'",
-        "UPDATE delivery_projects SET archived_at = '2026-10-02T00:00:00.000Z' WHERE id = 'proj-1'",
-        "UPDATE support_tickets SET status = 'resolved' WHERE id IN ('t-1', 't-2')",
-      ],
-      "write",
-    );
+    assert.ok(before.includes("Harbour Dental") && !before.includes("Not yet client records"));
+    await raw.execute("UPDATE customers SET archived_at = '2026-10-02T00:00:00.000Z' WHERE id = 'customer-harbour'");
     try {
       const blank = text(await ClientsPage());
-      assert.ok(!blank.includes("Not yet client records"), "a blank start still draws the section");
-      assert.ok(!blank.includes("Nothing left to convert"), "nor the old empty card");
+      assert.ok(!blank.includes("Harbour Dental"), "the remaining deal, project and tickets do not synthesize a client");
+      assert.ok(blank.includes("No client records yet."));
+      assert.ok(!blank.includes("Not yet client records") && !blank.includes("Nothing left to convert"));
     } finally {
-      await raw.batch(
-        [
-          "UPDATE tenant_records SET data = json_set(data, '$.stage', 'in_build') WHERE id = 'lead-won'",
-          "UPDATE delivery_projects SET archived_at = NULL WHERE id = 'proj-1'",
-          "UPDATE support_tickets SET status = 'open' WHERE id IN ('t-1', 't-2')",
-        ],
-        "write",
-      );
+      await raw.execute("UPDATE customers SET archived_at = NULL WHERE id = 'customer-harbour'");
     }
   });
 

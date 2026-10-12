@@ -525,6 +525,12 @@ function id(body: Record<string, unknown>, key: string): Validation<string | nul
   return { ok: true, value: v.trim() };
 }
 
+function requiredId(body: Record<string, unknown>, key: string): Validation<string> {
+  const r = id(body, key);
+  if (!r.ok) return r;
+  return r.value ? { ok: true, value: r.value } : invalid(`${key}_required`, key);
+}
+
 function enumOf<T extends string>(
   body: Record<string, unknown>,
   key: string,
@@ -557,7 +563,7 @@ export type ProjectCreateInput = {
   client_name: string | null;
   client_email: string | null;
   lead_id: string | null;
-  customer_id: string | null;
+  customer_id: string;
   stage: ProjectStage;
   priority: ProjectPriority;
   assigned_to: unknown;
@@ -574,7 +580,7 @@ export function validateProjectCreate(raw: unknown): Validation<ProjectCreateInp
     ["client_name", text(b, "client_name", LIMITS.clientName, false)],
     ["client_email", email(b, "client_email", false)],
     ["lead_id", id(b, "lead_id")],
-    ["customer_id", id(b, "customer_id")],
+    ["customer_id", requiredId(b, "customer_id")],
     ["stage", enumOf(b, "stage", PROJECT_STAGES, "discovery")],
     ["priority", enumOf(b, "priority", PROJECT_PRIORITIES, "medium")],
     ["due_date", date(b, "due_date")],
@@ -612,7 +618,7 @@ export function validateProjectPatch(raw: unknown): Validation<ProjectPatch> {
     ["client_name", () => text(b, "client_name", LIMITS.clientName, false)],
     ["client_email", () => email(b, "client_email", false)],
     ["lead_id", () => id(b, "lead_id")],
-    ["customer_id", () => id(b, "customer_id")],
+    ["customer_id", () => requiredId(b, "customer_id")],
     ["stage", () => (b.stage === null || b.stage === "" ? invalid("stage_invalid", "stage") : enumOf(b, "stage", PROJECT_STAGES, null))],
     ["priority", () => (b.priority === null || b.priority === "" ? invalid("priority_invalid", "priority") : enumOf(b, "priority", PROJECT_PRIORITIES, null))],
     ["due_date", () => date(b, "due_date")],
