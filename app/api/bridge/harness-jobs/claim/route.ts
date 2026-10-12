@@ -13,6 +13,8 @@ import {
 import { liveHarnessPairingOwner } from "@/lib/bridge/harness-jobs/producer-auth";
 import { liveSeat } from "@/lib/os/seat";
 import { mintRunCredential, runSigningKey } from "@/lib/os/runs/producer-auth";
+import { clientIpFromHeaders } from "@/lib/api-helpers";
+import { rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,6 +82,24 @@ export async function POST(req: NextRequest) {
   const capacity = Number.isFinite(Number(body.capacity)) ? Math.max(0, Math.min(1, Math.floor(Number(body.capacity)))) : 0;
   const waitMs = Number.isFinite(Number(body.wait_ms)) ? Math.max(0, Math.min(MAX_WAIT_MS, Math.floor(Number(body.wait_ms)))) : 0;
   if (capacity === 0) return json(200, { ok: true, job: null });
+
+  const pairingLimit = rateLimit({
+    key: `harness-job-claim:${pairing.tenantId}:${pairing.pairingId}`,
+    capacity: 3,
+    refillPerSec: 1,
+  });
+  const ipLimit = rateLimit({
+    key: `harness-job-claim:ip:${clientIpFromHeaders(req.headers)}`,
+    capacity: 30,
+    refillPerSec: 5,
+  });
+  if (!pairingLimit.allowed || !ipLimit.allowed) {
+    return json(429, {
+      ok: false,
+      error: "claim_too_fast",
+      retry_in_sec: Math.max(pairingLimit.resetIn, ipLimit.resetIn),
+    });
+  }
 
   const db = getTursoClient();
   const tryClaim = () => claimHarnessJob({

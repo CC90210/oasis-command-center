@@ -4,7 +4,7 @@
  * the body. A repeated claim_id returns the same live lease.
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { bad } from "@/lib/api-helpers";
+import { bad, clientIpFromHeaders } from "@/lib/api-helpers";
 import { pairingCanClaim, resolvePairingFromBearer } from "@/lib/bridge/pairing-auth";
 import {
   RUNTIME_ACTION_PROTOCOL,
@@ -19,6 +19,7 @@ import {
   validRequestId,
 } from "@/lib/bridge/runtime-jobs";
 import { liveSeat } from "@/lib/os/seat";
+import { rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,6 +57,27 @@ export async function POST(req: NextRequest) {
   if (!runtimeState.ok) return bad(400, runtimeState.code);
   const waitMs = raw.wait_ms === undefined ? 0 : raw.wait_ms;
   if (!Number.isInteger(waitMs) || Number(waitMs) < 0 || Number(waitMs) > MAX_WAIT_MS) return bad(400, "invalid_wait_ms");
+
+  const pairingLimit = rateLimit({
+    key: `runtime-job-claim:${pairing.tenantId}:${pairing.pairingId}`,
+    capacity: 3,
+    refillPerSec: 1,
+  });
+  const ipLimit = rateLimit({
+    key: `runtime-job-claim:ip:${clientIpFromHeaders(req.headers)}`,
+    capacity: 30,
+    refillPerSec: 5,
+  });
+  if (!pairingLimit.allowed || !ipLimit.allowed) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "claim_too_fast",
+        retry_in_sec: Math.max(pairingLimit.resetIn, ipLimit.resetIn),
+      },
+      { status: 429 },
+    );
+  }
 
   const stateRecorded = await recordRuntimeClaimState(pairing.tenantId, pairing.pairingId, runtimeState.state);
   if (!stateRecorded) {

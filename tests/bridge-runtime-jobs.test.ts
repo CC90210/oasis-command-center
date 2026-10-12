@@ -207,6 +207,22 @@ async function main() {
 
   console.log("bridge-runtime-jobs:");
 
+  await check("runtime claim long-polls are throttled per pairing and protocol", async () => {
+    const computer = await makePairing();
+    const statuses: number[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const response = await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", computer.token, {
+        protocol: "runtime_action_v1",
+        claim_id: `rate-runtime-${index}`,
+        capabilities: [],
+        wait_ms: 0,
+      }));
+      statuses.push(response.status);
+      if (index === 3) assert.equal(((await response.json()) as { error?: string }).error, "claim_too_fast");
+    }
+    assert.deepEqual(statuses, [200, 200, 200, 429]);
+  });
+
   await check("local model refs preserve vendor case while CLI provider names normalize", () => {
     assert.deepEqual(runtime.parseRuntimeEngine({ kind: "local", name: "lmstudio/Qwen3-Coder-GGUF" }), {
       ok: true,

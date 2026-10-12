@@ -130,6 +130,22 @@ async function main() {
     }
   });
 
+  await check("harness claim long-polls are throttled independently per pairing and protocol", async () => {
+    const computer = await pairing(USER);
+    const statuses: number[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const response = await claimRoute.POST(post("/api/bridge/harness-jobs/claim", computer.token, {
+        protocol: harness.HARNESS_PROTOCOL,
+        claim_id: `rate-harness-${index}`,
+        capacity: 1,
+        wait_ms: 0,
+      }));
+      statuses.push(response.status);
+      if (index === 3) assert.equal(((await response.json()) as { error?: string }).error, "claim_too_fast");
+    }
+    assert.deepEqual(statuses, [200, 200, 200, 429]);
+  });
+
   await check("migration has tenant-leading claim/event indexes", async () => {
     const indexes = (await db.execute("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name LIKE 'bridge_harness%'")).rows;
     assert.ok(indexes.some((row) => String(row.name) === "bridge_harness_jobs_claim_idx"));
