@@ -1,0 +1,183 @@
+{
+  "slug": "community",
+  "pillar": "COMMUNITY",
+  "community_link": {
+    "label": "Not ready? Join the free community",
+    "href": "/go/community?form=community&t=oasis-ai-cc"
+  },
+  "work_steps": [
+    { "title": "Answer two quick questions", "body": "So we only show you what fits." },
+    { "title": "Get your free link", "body": "Leave your details and the free community link is on the next screen." },
+    { "title": "Upgrade only when you want the room", "body": "The weekly build room and founder mentorship are there when you want them, never before." }
+  ],
+  "form": {
+    "name": "COMMUNITY: build alongside OASIS",
+    "slug": "community",
+    "description": "OASIS offer page draft (COMMUNITY, cat=p3). The innocence questions, contact details, then the free link; a stated budget also shows the VIP room, mentorship and COMMAND.",
+    "branding": {
+      "primary_color": "#e8c547",
+      "accent_color": "#faf9f5",
+      "headline": "Join the OASIS community",
+      "subheadline": "Two quick questions, then your free link.",
+      "thanks_message": "You are in. Your free community link: https://oasisai.work/go/community?form=community&t=oasis-ai-cc. If you asked about the VIP room or mentorship, we will email you the next step."
+    },
+    "on_complete_stage": "researched",
+    "step_outcomes": {},
+    "steps": [
+      {
+        "key": "gate",
+        "title": "Two quick questions",
+        "description": "So we only show you what fits.",
+        "cta_label": "Next",
+        "fields": [
+          {
+            "name": "free_self_serve",
+            "label": "Are you sure you want free self-serve?",
+            "type": "select",
+            "required": true,
+            "options": [
+              { "value": "yes", "label": "Yes, free and self-serve is what I want" },
+              { "value": "no", "label": "No, I would like more help than that" }
+            ]
+          },
+          {
+            "name": "has_budget",
+            "label": "Do you have a budget?",
+            "type": "select",
+            "required": true,
+            "options": [
+              { "value": "yes", "label": "Yes, I have a budget" },
+              { "value": "no", "label": "Not right now" }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "contact",
+        "title": "Where should we send your link?",
+        "cta_label": "Get my link",
+        "fields": [
+          { "name": "name", "label": "Your name", "type": "text", "required": true, "placeholder": "First and last" },
+          { "name": "email", "label": "Email", "type": "email", "required": true, "placeholder": "you@company.com" },
+          { "name": "phone", "label": "Mobile number", "type": "phone", "help": "Optional." },
+          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "community" }
+        ]
+      },
+      {
+        "key": "upgrade",
+        "title": "You have a budget, so here are your options",
+        "description": "Pick one, or stay with the free community. Either is fine.",
+        "cta_label": "Finish",
+        "show_if": { "field": "has_budget", "equals": "yes" },
+        "fields": [
+          {
+            "name": "upgrade_choice",
+            "label": "What would you like?",
+            "type": "select",
+            "required": true,
+            "options": [
+              { "value": "vip", "label": "The VIP mastermind, a weekly build room ($47 to $97 a month)" },
+              { "value": "mentorship", "label": "Apply for one-on-one founder mentorship ($2,500 to $5,000 a month)" },
+              { "value": "command", "label": "Show me COMMAND for my business" },
+              { "value": "free_only", "label": "Just the free community for now" }
+            ]
+          },
+          {
+            "name": "building",
+            "label": "What are you building, and where is it now?",
+            "type": "textarea",
+            "maxLength": 1500,
+            "required": true,
+            "show_if": { "field": "upgrade_choice", "equals": "mentorship" }
+          },
+          {
+            "name": "monthly_revenue",
+            "label": "Monthly revenue",
+            "type": "select",
+            "options": [
+              { "value": "pre_revenue", "label": "Pre-revenue / just starting" },
+              { "value": "under_10k", "label": "Under $10K/mo" },
+              { "value": "10k_50k", "label": "$10K to $50K/mo" },
+              { "value": "50k_250k", "label": "$50K to $250K/mo" },
+              { "value": "250k_plus", "label": "$250K+/mo" }
+            ],
+            "show_if": { "field": "upgrade_choice", "in": ["mentorship", "command"] }
+          }
+        ]
+      }
+    ]
+  },
+  "offer_page": {
+    "v": 1,
+    "template": "book_call",
+    "theme": { "canvas": "dark", "logo": "workspace" },
+    "nav": { "pinned": ["obstacles", "what_you_get", "faq"], "cta_label": "Join free" },
+    "hero": {
+      "eyebrow": "COMMUNITY, for early builders and agencies",
+      "headline": "Build alongside us for free. Upgrade only when you want the room.",
+      "subheadline": "Join the free OASIS community on Telegram and build in the open with people who are shipping. When you want a weekly build room or one-on-one time with a founder, the paid options are here.",
+      "cta_label": "Join free",
+      "video": null,
+      "show_transcript": false,
+      "vsl_script": {
+        "source": "cc",
+        "text": "COMMUNITY VSL. Target length 3 to 6 minutes. Adon or CC on camera, landscape, eye level, quiet room. Oasis Studio adds captions, b-roll, the screen recordings named below and the OASIS end card.\nRule for the whole video: say no number, result or member story that is not on the page. Prices are said exactly as the page shows them. Any footage of the Telegram group blurs every member's name and face unless that member agreed in writing.\n\n[BEAT 1. HOOK, 0:00 to 0:20]\nOn camera: You are building something with AI, mostly alone, and every time you get stuck there is nobody to ask who has actually done it.\n\n[BEAT 2. WHO THIS IS FOR, AND WHO IT IS NOT FOR]\nOn camera: This is for early builders and agencies who learn by building. It is not for you if you want it done for you. If that is you, look at COMMAND or FLEET.\n\n[BEAT 3. WHY IT KEEPS HAPPENING]\nOn camera: Building alone is slow because nobody near you has shipped the thing you are stuck on. And most AI groups are people selling courses to each other, not people building.\n\n[BEAT 4. WHAT WE DO ABOUT IT]\nVoice over, with the join flow on screen: Three steps. Answer two quick questions. Leave your details and get the free link. Then build alongside us, and upgrade only when you want the room.\n\n[BEAT 5. WHAT YOU GET, PRICES SAID OUT LOUD]\nOn camera, matching the page word for word:\nThe Telegram lounge is free.\nThe VIP mastermind, a weekly build room, is $47 to $97 a month.\nOne-on-one founder mentorship is $2,500 to $5,000 a month, by application.\nEvery paid plan: cancel any time from your account, no cancellation fee.\nNote for the recording: once Adon picks one number for each range, say that number, and update this script and the page together.\n\n[BEAT 6. PROOF]\nNo permissioned examples are confirmed yet. Show one real weekly build clip instead, with the permission of everyone visible in it.\n\n[BEAT 7. CALL TO ACTION]\nOn camera: Join free below. Build alongside us for free, and upgrade only when you want the room."
+      }
+    },
+    "sections": [
+      {
+        "key": "obstacles",
+        "eyebrow": "Sound familiar?",
+        "title": "Building alone is the slow way",
+        "items": [
+          { "title": "Nobody to ask", "body": "You get stuck on a step, nobody around you has done it, and a fix that should take an hour takes a week." },
+          { "title": "Too much noise, not enough builders", "body": "Most AI groups are people selling courses to each other. You want to be around people actually shipping." },
+          { "title": "Not ready to buy software", "body": "And you should not have to be, just to learn how it is built." }
+        ]
+      },
+      {
+        "key": "what_you_get",
+        "eyebrow": "The rooms",
+        "title": "Start free. Upgrade when you want the room.",
+        "items": [
+          { "title": "Free Telegram lounge: $0", "body": "The OASIS community on Telegram, with weekly build clips. Stay as long as you like." },
+          { "title": "VIP mastermind: $47 to $97 a month", "body": "A weekly build room for builders with a budget. Cancel any time from your account; no cancellation fee." },
+          { "title": "One-on-one founder mentorship: $2,500 to $5,000 a month", "body": "For high-growth founders: a private Telegram chat with an OASIS founder. By application only. Cancel any time from your account; no cancellation fee." }
+        ]
+      },
+      {
+        "key": "faq",
+        "title": "Questions",
+        "items": [
+          { "q": "Is the free community really free?", "a": "Yes. It costs nothing and there is no card to enter." },
+          { "q": "Why do you ask whether I have a budget?", "a": "So we only show you what fits. Without a budget you get the free link and nothing else. With one, we also show you the VIP room, mentorship and the COMMAND page." },
+          { "q": "How does it work?", "a": "First, answer a couple of quick questions. Then leave your details and your free link is on the next screen. If you have a budget, you can also pick the VIP room or apply for mentorship." },
+          { "q": "Who is the mentorship for?", "a": "High-growth founders who want direct time with an OASIS founder. It is by application, through the form below." },
+          { "q": "How do I cancel a paid plan?", "a": "Cancel any time from your account. There is no cancellation fee." },
+          { "q": "What if I'm not ready?", "a": "Then the free community is exactly where to start. It costs nothing, and you can stay as long as you like. Join here: https://oasisai.work/go/community?form=community&t=oasis-ai-cc" }
+        ]
+      }
+    ],
+    "book": {
+      "eyebrow": "Join",
+      "title": "Join the community",
+      "lede": "A couple of quick questions, then your link.",
+      "mode": "form",
+      "qualify": "before"
+    },
+    "seo": {
+      "title": "COMMUNITY: build alongside OASIS for free",
+      "description": "The free OASIS community on Telegram for early builders and agencies, plus a paid weekly build room and founder mentorship when you want them.",
+      "indexable": false
+    },
+    "brief": {
+      "audience": "Early builders and agencies (funnel doc COMMUNITY, cat=p3). Also the save basin for anyone who stalls on any page.",
+      "promise": "Build alongside us for free. Upgrade only when you want the room (HANDOVER section 7 angle).",
+      "included": "3A Free Telegram lounge (invite link + welcome drip; the drip is not mentioned on the page because any nurture send must pass marketingSendAllowed first). 3B Paid VIP mastermind, weekly build room. 3C 1-on-1 founder mentorship, private Telegram with CC, application only.",
+      "proof_available": "None confirmed.",
+      "price": "As the funnel doc states: 3A $0. 3B $47-97/mo. 3C $2,500-5,000/mo. Currency unconfirmed. Ranges need one number each before publish.",
+      "bonuses": "None named for COMMUNITY.",
+      "guarantee": "None confirmed. Section omitted."
+    }
+  }
+}
