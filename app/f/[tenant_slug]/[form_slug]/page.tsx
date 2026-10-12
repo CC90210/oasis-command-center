@@ -55,6 +55,7 @@ import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import { offerPagesDb, readOfferRow, readPublicOfferState, type PublicOfferState } from "@/lib/offer-pages/store";
 import { fallbackHeadline } from "@/lib/offer-pages/operator";
 import { prepareOfferRender, type PreparedOffer } from "@/lib/offer-pages/render";
+import { offerUploadStorage } from "@/lib/offer-pages/upload";
 import type { OfferPageDoc } from "@/lib/offer-pages/types";
 import { signMediaUrls } from "@/lib/founders/marketing-queries";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
@@ -449,6 +450,7 @@ async function loadOfferView(
       preview,
       // Read lazily: without an object store a link video simply has no poster.
       publicUrl: (path) => getServiceSupabase().storage.from("tenant-assets").getPublicUrl(path).data.publicUrl || null,
+      uploadStorage: offerUploadStorage(),
     });
     return { doc, prepared, workspaceName, preview };
   } catch (err) {

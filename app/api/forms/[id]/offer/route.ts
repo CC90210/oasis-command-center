@@ -30,10 +30,12 @@ import {
   parseOfferPageDoc,
   type LibraryVideoRef,
   type TemplateKey,
+  type UploadVideoRef,
   type VideoRef,
 } from "@/lib/offer-pages/types";
 import { videoRefs } from "@/lib/offer-pages/providers";
-import { imageKey, imageRefs, resolveLibrary } from "@/lib/offer-pages/video";
+import { imageKey, imageRefs, resolveLibrary, verifyUploadObject } from "@/lib/offer-pages/video";
+import { offerUploadStorage } from "@/lib/offer-pages/upload";
 import { emptyDocForTemplate } from "@/lib/offer-pages/templates";
 import { applyClaimTicks, lintDoc, stampConfirmations } from "@/lib/offer-pages/claims";
 import { createOfferRow, isSupportDeskForm, offerPagesDb, readOfferRow, saveDraft } from "@/lib/offer-pages/store";
@@ -189,6 +191,35 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
         { ok: false, error: "invalid_page", path: bad.path, reason: "not a Library image this workspace may show" },
         { status: 400 },
       );
+    }
+  }
+  // The same for an UPLOADED video, poster or caption NEWLY in the page: the
+  // confirm step (video-upload/confirm) already checked this once; this
+  // re-asserts it so a tampered PUT can never attach an object outside this
+  // tenant or one that never actually landed. A path already on record (draft
+  // or published) is not re-checked: a deleted object simply stops playing.
+  const knownUploadPaths = new Set(
+    [row.draft, row.published]
+      .flatMap((d) => (d ? videoRefs(d) : []))
+      .flatMap(({ video }) => (video.source === "upload" ? [video.video_path, video.poster_path, video.caption_path] : []))
+      .filter((p): p is string => typeof p === "string" && p.length > 0),
+  );
+  const freshUpload = videoRefs(parsed).filter(
+    (v): v is { ref: string; video: VideoRef & UploadVideoRef } =>
+      v.video.source === "upload" &&
+      [v.video.video_path, v.video.poster_path, v.video.caption_path].some((p) => typeof p === "string" && p.length > 0 && !knownUploadPaths.has(p)),
+  );
+  if (freshUpload.length) {
+    const storage = offerUploadStorage();
+    for (const { ref, video } of freshUpload) {
+      const paths = [video.video_path, video.poster_path, video.caption_path].filter((p): p is string => typeof p === "string" && p.length > 0);
+      for (const p of paths) {
+        if (knownUploadPaths.has(p)) continue;
+        const verified = await verifyUploadObject({ tenantId, path: p, storage });
+        if (!verified.ok) {
+          return NextResponse.json({ ok: false, error: "invalid_page", path: ref, reason: "not an uploaded file this workspace may show" }, { status: 400 });
+        }
+      }
     }
   }
   const draft = stampConfirmations(parsed, [row.draft, row.published], actor, now);

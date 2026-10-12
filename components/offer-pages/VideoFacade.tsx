@@ -31,10 +31,10 @@ const PROGRESS_CHECKPOINTS = [25, 50, 75, 100] as const;
 
 export type FacadeSource =
   | { kind: "link"; embedSrc: string }
-  | { kind: "library"; formId: string; videoRef: string; captions: boolean; preview?: true };
+  | { kind: "library" | "upload"; formId: string; videoRef: string; captions: boolean; preview?: true };
 
-/** Where a Library video is signed, and its captions read: the draft for the owner's preview, else the live page. */
-export function libraryEndpoints(s: Extract<FacadeSource, { kind: "library" }>): { sign: string; body: string; captions: string } {
+/** Where a Library OR an uploaded video is signed, and its captions read: the draft for the owner's preview, else the live page. Which private bucket the server actually signs is decided there, by `ref`; the client never needs to know. */
+export function libraryEndpoints(s: Extract<FacadeSource, { kind: "library" | "upload" }>): { sign: string; body: string; captions: string } {
   const ref = encodeURIComponent(s.videoRef);
   if (s.preview) {
     const base = `/api/forms/${encodeURIComponent(s.formId)}/offer/preview-video`;
@@ -93,7 +93,9 @@ export function VideoFacade({
   /** The hero's poster: fetched first, never lazy. */
   priority?: boolean;
   /** V5a funnel tracking (HANDOVER section 5): video_play on first tap,
-   *  video_progress at 25/50/75/100% for a Library video's native player.
+   *  video_progress at 25/50/75/100% for a Library OR an uploaded video's
+   *  native player (both render through the same non-"link" branch below,
+   *  so neither needs its own tracking path -- PR #597 merge, 2026-10-12).
    *  null in the owner's preview — a draft view must never count as a
    *  visitor's video_play. */
   tracking?: VideoTracking;
@@ -113,9 +115,11 @@ export function VideoFacade({
     trackEvent({ tenant: tracking.tenant, form: tracking.form, event: "video_play" });
   }
 
-  /** Library video's native <video> element reports real watch progress. A
-   *  provider iframe (YouTube/Vimeo/Loom) is cross-origin — this build has no
-   *  postMessage listener for it, so progress tracking is Library-only. */
+  /** A Library OR an uploaded video's native <video> element reports real
+   *  watch progress -- both are same-origin signed URLs served the same way.
+   *  A provider iframe (YouTube/Vimeo/Loom, kind "link") is cross-origin —
+   *  this build has no postMessage listener for it, so progress tracking is
+   *  limited to the two first-party sources. */
   function onVideoTimeUpdate() {
     if (!tracking) return;
     const el = videoEl.current;
@@ -130,7 +134,7 @@ export function VideoFacade({
   }
 
   async function signedUrl(): Promise<string | null> {
-    if (source.kind !== "library") return null;
+    if (source.kind === "link") return null;
     const at = libraryEndpoints(source);
     try {
       const res = await fetch(at.sign, {
@@ -166,14 +170,14 @@ export function VideoFacade({
   // The tap was the visitor asking it to play; some browsers still want play()
   // called from script once the element exists.
   useEffect(() => {
-    if (state !== "playing" || source.kind !== "library" || !src) return;
+    if (state !== "playing" || source.kind === "link" || !src) return;
     const el = videoEl.current;
     if (el && typeof el.play === "function") void el.play().catch(() => undefined);
   }, [state, src, source.kind]);
 
   /** A signed URL that expired mid-watch: ask again, then resume where they were. */
   async function onMediaError() {
-    if (source.kind !== "library" || resigns.current >= 3) {
+    if (source.kind === "link" || resigns.current >= 3) {
       setState("failed");
       return;
     }
@@ -208,7 +212,7 @@ export function VideoFacade({
           allowFullScreen
           className="absolute inset-0 h-full w-full border-0"
         />
-      ) : playing && source.kind === "library" && src ? (
+      ) : playing && source.kind !== "link" && src ? (
         <video
           ref={videoEl}
           src={src}

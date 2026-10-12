@@ -19,6 +19,8 @@
 import { NextResponse } from "next/server";
 import { offerPagesDb } from "@/lib/offer-pages/store";
 import { PLAY_TTL_SEC, mediaKey, resolvePublishedVideo } from "@/lib/offer-pages/video";
+import { OFFER_UPLOAD_BUCKET } from "@/lib/offer-pages/types";
+import { offerUploadStorage } from "@/lib/offer-pages/upload";
 import { NOT_FOUND, limited, readCappedJson, sameOrigin, validIds } from "@/lib/offer-pages/public-http";
 import { signMediaUrls } from "@/lib/founders/marketing-queries";
 
@@ -39,14 +41,17 @@ export async function POST(req: Request) {
   if (!db) return NOT_FOUND();
   let hit;
   try {
-    hit = await resolvePublishedVideo(db, ids.formId, ids.ref);
+    hit = await resolvePublishedVideo(db, ids.formId, ids.ref, offerUploadStorage());
   } catch (err) {
     console.error("[offer-pages.video] resolve failed", { form_id: ids.formId, error: err instanceof Error ? err.message : String(err) });
     return NextResponse.json({ ok: false, error: "unavailable" }, { status: 503 });
   }
   if (!hit.ok) return NOT_FOUND();
 
-  const { storage_bucket: bucket, storage_path: path } = hit.resolved.video;
+  const { bucket, path } =
+    hit.kind === "library"
+      ? { bucket: hit.resolved.video.storage_bucket, path: hit.resolved.video.storage_path }
+      : { bucket: OFFER_UPLOAD_BUCKET, path: hit.video.video_path };
   const urls = await signMediaUrls([{ bucket, path }], PLAY_TTL_SEC);
   const url = urls.get(mediaKey(bucket, path));
   if (!url) {

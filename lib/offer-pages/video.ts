@@ -26,7 +26,20 @@
  */
 import type { Client, ResultSet } from "@libsql/client";
 import { FOUNDERS_OWN_BRAND } from "@/lib/founders-marketing-core";
-import type { ImageRef, LibraryVideoRef, LinkVideoRef, OfferPageDoc, VideoRef } from "./types";
+import { pathBelongsToTenant } from "@/lib/storage-helpers";
+import {
+  MAX_UPLOAD_BYTES,
+  OFFER_UPLOAD_BUCKET,
+  isAllowedUploadMime,
+  uploadPathKind,
+  type ImageRef,
+  type LibraryVideoRef,
+  type LinkVideoRef,
+  type OfferPageDoc,
+  type UploadKind,
+  type UploadVideoRef,
+  type VideoRef,
+} from "./types";
 import { parseOfferPageDoc } from "./types";
 import { canonicalUrl, findVideoRef, videoRefs } from "./providers";
 import { isMissingOfferTable, noteOfferTableMissing } from "./store";
@@ -253,16 +266,82 @@ export async function signPageMedia(
   return { posters, images };
 }
 
+// ---------------------------------------------------------------------------
+// The upload storage contract and its read-only verify check. Lives HERE,
+// not in lib/offer-pages/upload.ts (the write side, with real R2 side
+// effects and HMAC signing), because THIS module deliberately carries no
+// "server-only": lib/offer-pages/render.ts's render path runs in a child
+// process that strips the react-server condition so react-dom/server can
+// load (tests/offer-pages-public.test.ts), and "server-only" throws there on
+// sight. upload.ts imports this type and function from here, never the
+// other way - the dependency runs resolve -> write, not write -> resolve.
+// ---------------------------------------------------------------------------
+
+export type OfferUploadStorage = {
+  createSignedUploadUrl(path: string, opts: { contentLength: number; contentType: string; ttlSec: number }): Promise<{ signedUrl: string }>;
+  /** null: no such object. Throws when the store could not be asked. */
+  info(path: string): Promise<{ size: number; contentType: string | null; etag: string | null } | null>;
+  /** Conditional server-side copy; see lib/offer-pages/upload.ts's header. Never throws on a precondition failure - that is a normal, expected outcome. */
+  copyIfMatch(sourcePath: string, destPath: string, etag: string): Promise<{ ok: true } | { ok: false; error: "precondition_failed" | "failed" }>;
+  /** Best-effort; a failure here is logged by the caller, never surfaced as a confirm failure. */
+  remove(path: string): Promise<void>;
+};
+
+export type ConfirmedUpload = { kind: UploadKind; path: string; bytes: number; mime: string | null };
+export type VerifyResult =
+  | { ok: true; upload: ConfirmedUpload }
+  | { ok: false; error: "invalid_path" | "not_found" | "too_large" | "wrong_type" | "swapped" | "storage_unavailable" };
+
+export const normalizedMime = (contentType: string | null): string => (contentType || "").split(";")[0].trim().toLowerCase();
+
+/**
+ * The read-only check for an UNTRUSTED FINAL path - a NEW ref straight from a
+ * request body (the offer PUT route), or a path about to be served (resolve/
+ * play time): its shape and kind, that it belongs to this tenant, and its
+ * REAL size and type against the kind's cap, read fresh every time
+ * (resource-cap-bypass finding: "not only confirm"). Never involves staging
+ * or a copy: a final key is written to exactly once, by the conditional copy
+ * in lib/offer-pages/upload.ts, and this never trusts anything about it but
+ * what it reads back right now.
+ */
+export async function verifyUploadObject(input: { tenantId: string; path: unknown; kind?: UploadKind; storage: OfferUploadStorage | null }): Promise<VerifyResult> {
+  if (typeof input.path !== "string" || !input.path) return { ok: false, error: "invalid_path" };
+  const kind = uploadPathKind(input.path);
+  if (!kind || (input.kind && kind !== input.kind)) return { ok: false, error: "invalid_path" };
+  if (!pathBelongsToTenant(input.tenantId, input.path)) return { ok: false, error: "not_found" };
+  if (!input.storage) return { ok: false, error: "storage_unavailable" };
+  let head: { size: number; contentType: string | null } | null;
+  try {
+    head = await input.storage.info(input.path);
+  } catch {
+    return { ok: false, error: "storage_unavailable" };
+  }
+  if (!head) return { ok: false, error: "not_found" };
+  if (!Number.isFinite(head.size) || head.size <= 0 || head.size > MAX_UPLOAD_BYTES[kind]) return { ok: false, error: "too_large" };
+  const mime = normalizedMime(head.contentType);
+  if (mime && mime !== "application/octet-stream" && !isAllowedUploadMime(kind, mime)) return { ok: false, error: "wrong_type" };
+  return { ok: true, upload: { kind, path: input.path, bytes: head.size, mime: mime || null } };
+}
+
 export type PublishedVideo =
-  | { ok: true; tenantId: string; resolved: ResolvedVideo }
+  | { ok: true; tenantId: string; kind: "library"; resolved: ResolvedVideo }
+  | { ok: true; tenantId: string; kind: "upload"; video: UploadVideoRef }
   | { ok: false; reason: "not_found" };
 
 /**
- * The Library video at `ref`, ONLY if it is in the PUBLISHED copy of a LIVE
- * offer page on an ENABLED form, and resolves for that form's own workspace.
- * Everything else, a draft-only ref included, is not_found.
+ * The video at `ref`, ONLY if it is in the PUBLISHED copy of a LIVE offer page
+ * on an ENABLED form, and (a Library ref) resolves for that form's own
+ * workspace, or (an upload ref) its object belongs to that same tenant AND
+ * its REAL size and type are still within its kind's cap right now - a
+ * re-check at every play, not only at the confirm step that first attached
+ * it (Codex security review 2026-10-12, resource-cap-bypass): a HEAD on the
+ * FINAL (immutable, post-copy) object is cheap, and nothing here trusts what
+ * confirm found once. `uploadStorage` null (R2 not configured) fails CLOSED
+ * for an upload ref the same as a missing object. Everything else, a
+ * draft-only ref and a link video included (a link never needs signing: the
+ * facade embeds it straight from its provider id), is not_found.
  */
-export async function resolvePublishedVideo(db: Client, formId: string, ref: string): Promise<PublishedVideo> {
+export async function resolvePublishedVideo(db: Client, formId: string, ref: string, uploadStorage: OfferUploadStorage | null): Promise<PublishedVideo> {
   let row: Record<string, unknown> | undefined;
   try {
     row = rowsOf(
@@ -288,11 +367,66 @@ export async function resolvePublishedVideo(db: Client, formId: string, ref: str
     return { ok: false, reason: "not_found" };
   }
   const video = findVideoRef(doc, ref);
-  if (!video || video.source !== "library") return { ok: false, reason: "not_found" };
+  if (!video) return { ok: false, reason: "not_found" };
   const tenantId = String(row.tenant_id);
-  const resolved = await resolveLibrary(db, tenantId, [{ ref, video }]);
-  const hit = resolved.videos.get(ref);
-  return hit ? { ok: true, tenantId, resolved: hit } : { ok: false, reason: "not_found" };
+  if (video.source === "library") {
+    const resolved = await resolveLibrary(db, tenantId, [{ ref, video }]);
+    const hit = resolved.videos.get(ref);
+    return hit ? { ok: true, tenantId, kind: "library", resolved: hit } : { ok: false, reason: "not_found" };
+  }
+  if (video.source === "upload") {
+    const verified = await verifyUploadObject({ tenantId, path: video.video_path, kind: "video", storage: uploadStorage });
+    return verified.ok ? { ok: true, tenantId, kind: "upload", video } : { ok: false, reason: "not_found" };
+  }
+  return { ok: false, reason: "not_found" };
+}
+
+/** A synthetic MediaRow for an upload video's captions, so captionsResponse (written for Library media rows) serves them unchanged. null when the ref carries no captions. */
+export function uploadCaptionMediaRow(video: UploadVideoRef): MediaRow | null {
+  if (!video.caption_path) return null;
+  return {
+    id: "upload-caption",
+    asset_id: "upload",
+    kind: "caption",
+    storage_bucket: OFFER_UPLOAD_BUCKET,
+    storage_path: video.caption_path,
+    mime: "text/vtt",
+    bytes: null,
+    width: null,
+    height: null,
+  };
+}
+
+/**
+ * Signed poster URLs for every upload-source video in a document, keyed by
+ * ref - the upload equivalent of signPageMedia's poster half (no Library DB
+ * join: the path lives straight in the doc). Each poster's real size and type
+ * are re-checked against its cap right here, the same re-check the video
+ * itself gets at play: a poster is drawn in the page's initial HTML, with no
+ * later gate at all, so this IS its only serve-time check.
+ */
+export async function signUploadPosters(doc: OfferPageDoc, tenantId: string, sign: Signer, uploadStorage: OfferUploadStorage | null): Promise<Map<string, string>> {
+  const refs = videoRefs(doc).filter(
+    (v): v is { ref: string; video: VideoRef & UploadVideoRef } => v.video.source === "upload" && !!v.video.poster_path,
+  );
+  const out = new Map<string, string>();
+  if (!refs.length) return out;
+  const verifiedRefs: typeof refs = [];
+  for (const r of refs) {
+    const verified = await verifyUploadObject({ tenantId, path: r.video.poster_path, kind: "poster", storage: uploadStorage });
+    if (verified.ok) verifiedRefs.push(r);
+  }
+  if (!verifiedRefs.length) return out;
+  try {
+    const urls = await sign(verifiedRefs.map((r) => ({ bucket: OFFER_UPLOAD_BUCKET, path: r.video.poster_path! })), POSTER_TTL_SEC);
+    for (const r of verifiedRefs) {
+      const u = urls.get(mediaKey(OFFER_UPLOAD_BUCKET, r.video.poster_path!));
+      if (u) out.set(r.ref, u);
+    }
+  } catch (err) {
+    console.error("[offer-pages] upload poster signing failed; posters omitted", err instanceof Error ? err.message : String(err));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

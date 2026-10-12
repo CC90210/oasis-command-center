@@ -9,16 +9,134 @@
  *   Choose from Library  OASIS's own workspace only (MKT-12): approved or
  *                      published videos of OASIS's own brand, with poster,
  *                      length and a captions badge.
+ *   Upload a video     every workspace's own (slice V3): a presigned PUT to
+ *                      our private storage, confirmed, with an optional
+ *                      poster image and WebVTT captions, by the same two-step
+ *                      flow (app/api/forms/[id]/offer/video-upload[/confirm]).
+ *                      A failed upload leaves an empty slot, never a broken
+ *                      player.
  *
  * Nothing attaches without the tick "I have the right to show this video
  * publicly"; the server records who ticked it and when.
  */
-import { useState } from "react";
-import { Film, Link2, Loader2, X } from "lucide-react";
-import type { Aspect, VideoRef } from "@/lib/offer-pages/types";
-import { ASPECTS } from "@/lib/offer-pages/types";
+import { useId, useRef, useState } from "react";
+import { Film, Link2, Loader2, Upload, X } from "lucide-react";
+import type { Aspect, UploadKind, UploadVideoRef, VideoRef } from "@/lib/offer-pages/types";
+import { ASPECTS, MAX_UPLOAD_BYTES, isAllowedUploadMime } from "@/lib/offer-pages/types";
 import { formatDuration } from "@/lib/offer-pages/providers";
 import { SmallButton, Tick, pendingConfirmation } from "./fields";
+
+type UploadedObject = { path: string; bytes: number; mime: string | null };
+
+/** "12.4 MB" - MAX_UPLOAD_BYTES.video is large enough that bytes or KB would be unreadable. The ONE place any size is turned into words, so a size-limit message can never disagree with the real cap (CodeRabbit, PR #597: a separate ad hoc `Math.round(...) || 1` rounded a sub-1-MB cap up to a lying "1 MB"). */
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+/** The browser's own file.type, or (for a .vtt a browser leaves blank) the one type that extension can mean. */
+function resolvedMime(kind: UploadKind, file: File): string {
+  // Normalized the same way the server normalizes the declared type before
+  // signing it into the PUT: this exact string becomes the Content-Type
+  // header the signature requires, so client and server must agree on it
+  // byte for byte, not just "the same type".
+  if (file.type) return file.type.trim().toLowerCase();
+  if (kind === "caption" && file.name.toLowerCase().endsWith(".vtt")) return "text/vtt";
+  return "";
+}
+
+/**
+ * The plain-language reason a file is refused before any request is made, or
+ * null when it is fine to upload. isAllowedUploadMime (not a bare `mime in
+ * UPLOAD_MIME[kind]`) is an Object.hasOwn check: a plain `in` lookup also
+ * walks the prototype chain, so a crafted file.type like "constructor" would
+ * otherwise read as allowed (CodeRabbit, PR #597).
+ */
+export function clientUploadError(kind: UploadKind, file: File): string | null {
+  const mime = resolvedMime(kind, file);
+  if (!mime || !isAllowedUploadMime(kind, mime)) {
+    const names = kind === "video" ? "MP4, WebM or MOV" : kind === "poster" ? "PNG, JPEG or WebP" : "a WebVTT (.vtt) file";
+    return `Only ${names}.`;
+  }
+  const cap = MAX_UPLOAD_BYTES[kind];
+  if (file.size > cap) return `That file is larger than ${formatBytes(cap)}.`;
+  if (file.size <= 0) return "That file is empty.";
+  return null;
+}
+
+/**
+ * PUT with upload progress - fetch() cannot report it, so this is the one
+ * place XHR is still the right tool.
+ *
+ * The PUT's Content-Type MUST be exactly the value the server signed
+ * (lib/r2-storage.ts createSignedUploadUrlConstrained): R2 answers
+ * SignatureDoesNotMatch otherwise, so this is set explicitly rather than
+ * left to the browser's own guess from the file (empty for a .vtt in some
+ * browsers). Content-Length is never set here - it is a forbidden header for
+ * XHR, and the browser always sends the body's real byte count, which is
+ * exactly what makes the signed cap hold against a client that lies about it.
+ */
+/** Thrown when `signal` is already aborted, or becomes aborted mid-request; pickUpload treats this as silent (never shown as an error - the attempt was deliberately superseded, not a failure). */
+export class UploadAbortedError extends Error {}
+
+function putWithProgress(url: string, file: File, contentType: string, onProgress: (pct: number) => void, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new UploadAbortedError("upload superseded"));
+      return;
+    }
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("content-type", contentType);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error("That upload failed. Try again.")));
+    xhr.onerror = () => reject(new Error("That upload failed. Try again."));
+    const onAbort = () => {
+      xhr.abort();
+      reject(new UploadAbortedError("upload superseded"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    xhr.onloadend = () => signal.removeEventListener("abort", onAbort);
+    xhr.send(file);
+  });
+}
+
+/**
+ * Mint a presigned PUT, upload the file, then confirm it landed. Throws a
+ * plain-language message on any failure, or UploadAbortedError when `signal`
+ * fires mid-flight (Cancel, or picking a different file - pickUpload's own
+ * per-attempt token is still the authority on whether a RESOLVED result gets
+ * applied; aborting here mainly stops the browser doing pointless network
+ * work for an attempt nothing will use).
+ */
+async function uploadOne(formId: string, kind: UploadKind, file: File, onProgress: (pct: number) => void, signal: AbortSignal): Promise<UploadedObject> {
+  const mimeType = resolvedMime(kind, file);
+  const initRes = await fetch(`/api/forms/${formId}/offer/video-upload`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ kind, filename: file.name, mime_type: mimeType, size_bytes: file.size }),
+    signal,
+  });
+  const init = (await initRes.json().catch(() => ({}))) as { ok?: boolean; message?: string; signed_url?: string; upload_token?: string };
+  if (!initRes.ok || !init.ok || !init.signed_url || !init.upload_token) {
+    throw new Error(init.message || "That upload couldn't start. Try again.");
+  }
+  await putWithProgress(init.signed_url, file, mimeType, onProgress, signal);
+  const confirmRes = await fetch(`/api/forms/${formId}/offer/video-upload/confirm`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ upload_token: init.upload_token }),
+    signal,
+  });
+  const confirmed = (await confirmRes.json().catch(() => ({}))) as { ok?: boolean; path?: string; bytes?: number; mime?: string | null };
+  if (!confirmRes.ok || !confirmed.ok || !confirmed.path || typeof confirmed.bytes !== "number") {
+    throw new Error("That upload finished, but couldn't be confirmed. Try again.");
+  }
+  return { path: confirmed.path, bytes: confirmed.bytes, mime: confirmed.mime ?? null };
+}
 
 type LibraryVideo = {
   asset_id: string;
@@ -35,6 +153,7 @@ type Candidate = { ref: Omit<VideoRef, "rights">; label: string; thumb: string |
 
 function describe(v: VideoRef): string {
   if (v.source === "library") return "Library video";
+  if (v.source === "upload") return "Uploaded video";
   const name = v.source === "youtube" ? "YouTube" : v.source === "vimeo" ? "Vimeo" : "Loom";
   return v.title ? `${name}: ${v.title}` : `${name} video ${v.id}`;
 }
@@ -52,13 +171,86 @@ export function VideoPicker({
   libraryAvailable: boolean;
   label?: string;
 }) {
-  const [mode, setMode] = useState<"idle" | "link" | "library">("idle");
+  // Per-instance ids (Codex review 2026-10-12, P2): two pickers on one page
+  // (e.g. WhatYouGetItems' per-item demos) each render their own upload
+  // inputs; a fixed string id made the SECOND picker's label activate the
+  // FIRST picker's file input instead of its own.
+  const instanceId = useId();
+  const fileInputId = `${instanceId}-video-picker-upload-file`;
+  const posterInputId = `${instanceId}-video-picker-upload-poster`;
+  const captionInputId = `${instanceId}-video-picker-upload-captions`;
+  const [mode, setMode] = useState<"idle" | "link" | "library" | "upload">("idle");
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<Candidate | null>(null);
   const [rights, setRights] = useState(false);
   const [library, setLibrary] = useState<LibraryVideo[] | null>(null);
+  const [uploadPct, setUploadPct] = useState(0);
+  const [videoUpload, setVideoUpload] = useState<UploadedObject | null>(null);
+  const [posterUpload, setPosterUpload] = useState<UploadedObject | null>(null);
+  const [captionUpload, setCaptionUpload] = useState<UploadedObject | null>(null);
+
+  // A stale in-flight upload/confirm must never land after Cancel or after
+  // choosing a different video (CodeRabbit, PR #597): pickUpload's own
+  // request is wrapped in an AbortController AND stamped with a per-attempt
+  // number, checked again once the request settles. Either guard alone would
+  // do (the token check catches a result that resolves anyway; the abort
+  // stops pointless network work) - both together, because aborting a
+  // request already in flight is never instant or guaranteed.
+  const uploadAttempt = useRef(0);
+  const uploadAbort = useRef<AbortController | null>(null);
+
+  /** Supersedes whatever upload/confirm is in flight: the NEXT settle of an older attempt is discarded, and the browser is told to stop trying. Called on Cancel (the X), on Replace, and on leaving upload mode for a different source. */
+  function invalidatePendingUpload() {
+    uploadAttempt.current += 1;
+    const inFlight = uploadAbort.current;
+    uploadAbort.current = null;
+    if (inFlight) {
+      inFlight.abort();
+      // The cancelled attempt's own finally is now stale and will not clear
+      // busy, so clear it here; otherwise the inputs and the link Check stay
+      // disabled for good (Codex, 2026-10-12). Only when an upload was in
+      // flight, so a running link check keeps its own busy state.
+      setBusy(false);
+    }
+  }
+
+  function resetUpload() {
+    invalidatePendingUpload();
+    setUploadPct(0);
+    setVideoUpload(null);
+    setPosterUpload(null);
+    setCaptionUpload(null);
+  }
+
+  async function pickUpload(kind: UploadKind, file: File, onDone: (u: UploadedObject) => void) {
+    const clientErr = clientUploadError(kind, file);
+    if (clientErr) {
+      setError(clientErr);
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    if (kind === "video") setUploadPct(0);
+    uploadAttempt.current += 1;
+    const myAttempt = uploadAttempt.current;
+    const controller = new AbortController();
+    uploadAbort.current = controller;
+    try {
+      const up = await uploadOne(formId, kind, file, kind === "video" ? setUploadPct : () => undefined, controller.signal);
+      if (myAttempt !== uploadAttempt.current) return; // superseded while this was in flight: discard, never apply
+      onDone(up);
+    } catch (err) {
+      if (myAttempt !== uploadAttempt.current) return; // a superseded attempt's own failure (including its abort) is not shown
+      setError(err instanceof Error ? err.message : "That upload failed. Try again.");
+    } finally {
+      if (myAttempt === uploadAttempt.current) {
+        setBusy(false);
+        uploadAbort.current = null;
+      }
+    }
+  }
 
   async function checkLink() {
     setBusy(true);
@@ -131,11 +323,12 @@ export function VideoPicker({
     setRights(false);
     setMode("idle");
     setUrl("");
+    resetUpload();
   }
 
   if (value) {
     return (
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-bg-border bg-bg-deep/40 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-bg-border bg-bg-deep/40 px-3 py-2" data-picker-instance={instanceId}>
         <Film className="h-4 w-4 text-accent" />
         <span className="text-[13px] text-fg">{describe(value)}</span>
         <select
@@ -152,6 +345,7 @@ export function VideoPicker({
         </select>
         {value.duration_s ? <span className="font-mono text-[11px] text-fg-dim">{formatDuration(value.duration_s)}</span> : null}
         {value.source === "library" && !value.caption_media_id ? <span className="text-[11px] text-status-warm">No captions</span> : null}
+        {value.source === "upload" && !value.caption_path ? <span className="text-[11px] text-status-warm">No captions</span> : null}
         <span className="ml-auto">
           <SmallButton tone="danger" onClick={() => onChange(null)}>
             Remove
@@ -162,26 +356,37 @@ export function VideoPicker({
   }
 
   return (
-    <div className="space-y-3 rounded-lg border border-dashed border-bg-border p-3">
+    // data-picker-instance: the SAME useId() value that builds fileInputId /
+    // posterInputId / captionInputId below, present regardless of mode (the
+    // upload inputs only render once mode === "upload") so a test can prove
+    // two sibling pickers get distinct instance ids without needing to drive
+    // a real click. Debugging value only; nothing reads it at runtime.
+    <div className="space-y-3 rounded-lg border border-dashed border-bg-border p-3" data-picker-instance={instanceId}>
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-[13px] font-semibold text-fg">{label}</span>
-        <SmallButton tone="primary" onClick={() => setMode("link")}>
+        <SmallButton tone="primary" onClick={() => { invalidatePendingUpload(); setMode("link"); }}>
           <span className="inline-flex items-center gap-1">
             <Link2 className="h-3 w-3" />
             Paste a link
           </span>
         </SmallButton>
         {libraryAvailable ? (
-          <SmallButton tone="primary" onClick={openLibrary}>
+          <SmallButton tone="primary" onClick={() => { invalidatePendingUpload(); void openLibrary(); }}>
             <span className="inline-flex items-center gap-1">
               <Film className="h-3 w-3" />
               Choose from Library
             </span>
           </SmallButton>
         ) : null}
+        <SmallButton tone="primary" onClick={() => setMode("upload")}>
+          <span className="inline-flex items-center gap-1">
+            <Upload className="h-3 w-3" />
+            Upload a video
+          </span>
+        </SmallButton>
         {mode !== "idle" ? (
           <span className="ml-auto">
-            <SmallButton onClick={() => { setMode("idle"); setCandidate(null); setError(null); }}>
+            <SmallButton onClick={() => { setMode("idle"); setCandidate(null); setError(null); resetUpload(); }}>
               <X className="h-3 w-3" />
             </SmallButton>
           </span>
@@ -233,6 +438,114 @@ export function VideoPicker({
             ))}
           </div>
         )
+      ) : null}
+
+      {mode === "upload" && !candidate ? (
+        <div className="space-y-3">
+          {!videoUpload ? (
+            <div className="space-y-1">
+              <label className="block text-[12px] text-fg-muted" htmlFor={fileInputId}>
+                Video file (MP4, WebM or MOV, up to {formatBytes(MAX_UPLOAD_BYTES.video)})
+              </label>
+              <input
+                id={fileInputId}
+                type="file"
+                accept="video/mp4,video/webm,video/quicktime"
+                disabled={busy}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) void pickUpload("video", file, setVideoUpload);
+                }}
+                className="block w-full text-xs text-fg-muted"
+              />
+              {busy ? (
+                <div className="flex items-center gap-2 text-xs text-fg-muted" role="status">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  <span>Uploading... {uploadPct}%</span>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-[13px] text-fg">
+                <Upload className="h-4 w-4 text-accent" aria-hidden="true" />
+                <span>Video uploaded ({formatBytes(videoUpload.bytes)}).</span>
+                <SmallButton onClick={() => { invalidatePendingUpload(); setVideoUpload(null); }}>Replace</SmallButton>
+              </div>
+              <div className="space-y-1">
+                <label className="block text-[12px] text-fg-muted" htmlFor={posterInputId}>
+                  Poster image, optional (PNG, JPEG or WebP)
+                </label>
+                {posterUpload ? (
+                  <div className="flex items-center gap-2 text-[12px] text-fg">
+                    <span>Poster uploaded ({formatBytes(posterUpload.bytes)}).</span>
+                    <SmallButton onClick={() => setPosterUpload(null)}>Remove</SmallButton>
+                  </div>
+                ) : (
+                  <input
+                    id={posterInputId}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    disabled={busy}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (file) void pickUpload("poster", file, setPosterUpload);
+                    }}
+                    className="block w-full text-xs text-fg-muted"
+                  />
+                )}
+              </div>
+              <div className="space-y-1">
+                <label className="block text-[12px] text-fg-muted" htmlFor={captionInputId}>
+                  Captions, optional (WebVTT, .vtt)
+                </label>
+                {captionUpload ? (
+                  <div className="flex items-center gap-2 text-[12px] text-fg">
+                    <span>Captions uploaded ({formatBytes(captionUpload.bytes)}).</span>
+                    <SmallButton onClick={() => setCaptionUpload(null)}>Remove</SmallButton>
+                  </div>
+                ) : (
+                  <input
+                    id={captionInputId}
+                    type="file"
+                    accept="text/vtt,.vtt"
+                    disabled={busy}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (file) void pickUpload("caption", file, setCaptionUpload);
+                    }}
+                    className="block w-full text-xs text-fg-muted"
+                  />
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn-primary !px-3 !py-1.5 text-xs"
+                disabled={busy}
+                onClick={() =>
+                  setCandidate({
+                    ref: {
+                      source: "upload",
+                      video_path: videoUpload.path,
+                      video_bytes: videoUpload.bytes,
+                      video_mime: (videoUpload.mime ?? "video/mp4") as UploadVideoRef["video_mime"],
+                      ...(posterUpload ? { poster_path: posterUpload.path } : {}),
+                      ...(captionUpload ? { caption_path: captionUpload.path } : {}),
+                      aspect: "16:9",
+                    } as Omit<VideoRef, "rights">,
+                    label: "Uploaded video",
+                    thumb: null,
+                  })
+                }
+              >
+                Continue
+              </button>
+            </div>
+          )}
+        </div>
       ) : null}
 
       {candidate ? (
