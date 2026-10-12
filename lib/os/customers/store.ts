@@ -32,6 +32,7 @@ import { isUniqueViolationError } from "@/lib/api-helpers";
 import { assertNoPayloadConflicts, emit, emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
 import {
   CUSTOMER_LIFECYCLES,
+  CURRENT_CUSTOMER_LIFECYCLES,
   contactFromLead,
   customerFromLead,
   isConvertibleLeadStage,
@@ -324,8 +325,9 @@ async function getCustomerByEmail(db: Client, tenantId: string, email: string): 
 }
 
 /**
- * Id + name pairs for pickers (ticket and project "Client" selects). Active
- * records only; one linked to a retired business's workspace is never offered
+ * Id + name pairs for pickers (ticket and project "Client" selects). Only
+ * onboarding/active records are current enough for new delivery work; one
+ * linked to a retired business's workspace is never offered
  * (lib/os/customers/retired.ts).
  */
 export async function listCustomerOptions(
@@ -336,9 +338,11 @@ export async function listCustomerOptions(
   const rs = await readNotRetired("client_tenant_id", (guard) =>
     db.execute({
       sql: `SELECT id, display_name, primary_email FROM customers
-            WHERE tenant_id = ? AND archived_at IS NULL AND ${guard.sql}
+            WHERE tenant_id = ? AND archived_at IS NULL
+              AND lifecycle IN (${CURRENT_CUSTOMER_LIFECYCLES.map(() => "?").join(", ")})
+              AND ${guard.sql}
             ORDER BY display_name COLLATE NOCASE, id LIMIT ${CUSTOMER_LIST_LIMIT}`,
-      args: [tenantId, ...guard.args],
+      args: [tenantId, ...CURRENT_CUSTOMER_LIFECYCLES, ...guard.args],
     }),
   );
   return rows(rs).map((r) => ({ value: String(r.id), label: String(r.display_name ?? ""), email: s(r.primary_email) }));
@@ -1014,11 +1018,54 @@ export async function setClientWorkspace(
     if (t.rows.length === 0) return { ok: false, error: "client_tenant_not_found" };
   }
   if ((cur.client_tenant_id ?? null) === clientTenantId) return { ok: true, customer: cur, changed: false };
-  try {
-    await db.execute({
+  const at = now.toISOString();
+  // Client records can exist in installations where the delivery tables are
+  // still their pre-183 bare shapes. Build the cascade from the live schema;
+  // every available dependent write still joins the customer update in one
+  // transaction, while absent legacy columns are not treated as migration 195
+  // being missing from customers itself.
+  const [projectInfo, ticketInfo] = await Promise.all([
+    db.execute("PRAGMA table_info(delivery_projects)"),
+    db.execute("PRAGMA table_info(support_tickets)"),
+  ]);
+  const projectColumns = new Set(rows(projectInfo).map((r) => String(r.name)));
+  const ticketColumns = new Set(rows(ticketInfo).map((r) => String(r.name)));
+  const statements: InStatement[] = [
+    {
       sql: "UPDATE customers SET client_tenant_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
-      args: [clientTenantId, now.toISOString(), tenantId, id],
+      args: [clientTenantId, at, tenantId, id],
+    },
+  ];
+  const projectsCanFollow = ["client_tenant_id", "customer_id", "updated_at"].every((column) => projectColumns.has(column));
+  if (projectsCanFollow) {
+    statements.push({
+      sql: "UPDATE delivery_projects SET client_tenant_id = ?, updated_at = ? WHERE tenant_id = ? AND customer_id = ?",
+      args: [clientTenantId, at, tenantId, id],
     });
+  }
+  const ticketLinks: string[] = [];
+  const ticketLinkArgs: string[] = [];
+  if (ticketColumns.has("customer_id")) {
+    ticketLinks.push("customer_id = ?");
+    ticketLinkArgs.push(id);
+  }
+  if (projectsCanFollow && ticketColumns.has("project_id")) {
+    ticketLinks.push("project_id IN (SELECT id FROM delivery_projects WHERE tenant_id = ? AND customer_id = ?)");
+    ticketLinkArgs.push(tenantId, id);
+  }
+  if (["client_tenant_id", "client_match", "updated_at"].every((column) => ticketColumns.has(column)) && ticketLinks.length > 0) {
+    statements.push({
+      // Tickets linked directly to the customer or through one of its
+      // projects carry the same access grant. An operator-confirmed link is
+      // trusted as manual; unlinking removes both the tenant and trust.
+      sql: `UPDATE support_tickets
+            SET client_tenant_id = ?, client_match = ?, updated_at = ?
+            WHERE tenant_id = ? AND (${ticketLinks.join(" OR ")})`,
+      args: [clientTenantId, clientTenantId ? "manual" : "none", at, tenantId, ...ticketLinkArgs],
+    });
+  }
+  try {
+    await db.batch(statements, "write");
   } catch (err) {
     if (!isUniqueViolationError(err as { message?: string; code?: string })) throw err;
     const holder = await db.execute({

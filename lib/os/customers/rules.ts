@@ -23,6 +23,8 @@ import { normalizePhoneE164 } from "@/lib/conversation-threading";
 /** Where a client stands with the business (design doc §3.5). */
 export const CUSTOMER_LIFECYCLES = ["prospect", "onboarding", "active", "paused", "churned"] as const;
 export type CustomerLifecycle = (typeof CUSTOMER_LIFECYCLES)[number];
+/** Client records that may receive new delivery work. */
+export const CURRENT_CUSTOMER_LIFECYCLES = ["onboarding", "active"] as const satisfies readonly CustomerLifecycle[];
 export const CUSTOMER_LIFECYCLE_LABELS: Record<CustomerLifecycle, string> = {
   prospect: "Prospect",
   onboarding: "Onboarding",

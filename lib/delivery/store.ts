@@ -49,6 +49,7 @@ import {
 import {
   DELIVERY_TENANT_ID,
   OPEN_TICKET_STATUSES,
+  ACTIVE_PROJECT_STAGES,
   PROJECT_STAGE_LABELS,
   PROJECT_STAGES,
   TICKET_SEVERITIES,
@@ -116,6 +117,8 @@ export type Project = {
   lead_id: string | null;
   /** The client record (customers.id) this project is for. Null before migration bravo__188. */
   customer_id: string | null;
+  /** Canonical customers.display_name, populated on the active-client board. */
+  customer_record_name: string | null;
   stage: ProjectStage;
   priority: ProjectPriority;
   assigned_to: string | null;
@@ -144,6 +147,7 @@ function mapProject(r: Row): Project {
     client_email: s(r.client_email),
     lead_id: s(r.lead_id),
     customer_id: s(r.customer_id),
+    customer_record_name: s(r.customer_record_name),
     stage: (isOneOf(PROJECT_STAGES, r.stage) ? r.stage : "discovery") as ProjectStage,
     priority: (s(r.priority) ?? "medium") as ProjectPriority,
     assigned_to: s(r.assigned_to),
@@ -347,16 +351,18 @@ export type ProjectFilters = {
   includeArchived?: boolean;
   /** A client record's projects (the team only; needs migration bravo__188). */
   customer_id?: string | null;
+  /** Current delivery only: active-stage projects anchored to an active/onboarding customer. */
+  activeClientOnly?: boolean;
 };
 
-function projectSelect(viewer: DeliveryViewer): { sql: string; args: string[] } {
+function projectSelect(viewer: DeliveryViewer, activeClientOnly = false): { sql: string; args: string[] } {
   // A client's open-ticket count only counts THEIR tickets on the project.
   // Same trusted-link rule as ticketRowScope — one list, CLIENT_VISIBLE_MATCHES.
   const clientTickets = viewer.kind === "client"
     ? ` AND s.client_tenant_id = ? AND s.client_match IN (${CLIENT_VISIBLE_MATCHES.map((m) => `'${m}'`).join(", ")})`
     : "";
   return {
-    sql: `SELECT p.*, tn.name AS client_tenant_name,
+    sql: `SELECT p.*, tn.name AS client_tenant_name${activeClientOnly && viewer.kind === "founder" ? ", c.display_name AS customer_record_name" : ""},
       (SELECT COUNT(*) FROM delivery_tasks t
          WHERE t.tenant_id = p.tenant_id AND t.project_id = p.id AND t.status <> 'cancelled') AS task_count,
       (SELECT COUNT(*) FROM delivery_tasks t
@@ -371,7 +377,8 @@ function projectSelect(viewer: DeliveryViewer): { sql: string; args: string[] } 
          WHERE u.tenant_id = p.tenant_id AND u.project_id = p.id AND u.visibility = 'client'
          ORDER BY u.created_at DESC, u.id DESC LIMIT 1) AS last_client_update_body
     FROM delivery_projects p
-    LEFT JOIN tenants tn ON tn.id = p.client_tenant_id`,
+    LEFT JOIN tenants tn ON tn.id = p.client_tenant_id
+    ${activeClientOnly && viewer.kind === "founder" ? "JOIN customers c ON c.tenant_id = p.tenant_id AND c.id = p.customer_id" : ""}`,
     args: viewer.kind === "client" ? [viewer.clientTenantId] : [],
   };
 }
@@ -381,11 +388,18 @@ export async function listProjects(
   viewer: DeliveryViewer,
   filters: ProjectFilters = {},
 ): Promise<Listed<Project>> {
-  const head = projectSelect(viewer);
+  const activeClientOnly = viewer.kind === "founder" && filters.activeClientOnly === true;
+  const head = projectSelect(viewer, activeClientOnly);
   const scope = rowScope(viewer, "p");
   const where = [scope.sql];
   const args: string[] = [...head.args, ...scope.args];
   if (!filters.includeArchived) where.push("p.archived_at IS NULL");
+  if (activeClientOnly) {
+    where.push(`p.stage IN (${ACTIVE_PROJECT_STAGES.map(() => "?").join(", ")})`);
+    args.push(...ACTIVE_PROJECT_STAGES);
+    where.push("c.archived_at IS NULL");
+    where.push("c.lifecycle IN ('onboarding', 'active')");
+  }
   if (filters.stage && isOneOf(PROJECT_STAGES, filters.stage)) {
     where.push("p.stage = ?");
     args.push(filters.stage);
@@ -405,7 +419,9 @@ export async function listProjects(
   if (viewer.kind === "founder" && filters.q && filters.q.trim()) {
     const like = likeArg(filters.q.trim());
     where.push(
-      "(p.title LIKE ? ESCAPE '\\' OR p.client_name LIKE ? ESCAPE '\\' OR p.client_email LIKE ? ESCAPE '\\' OR tn.name LIKE ? ESCAPE '\\')",
+      activeClientOnly
+        ? "(p.title LIKE ? ESCAPE '\\' OR c.display_name LIKE ? ESCAPE '\\' OR c.primary_email LIKE ? ESCAPE '\\' OR tn.name LIKE ? ESCAPE '\\')"
+        : "(p.title LIKE ? ESCAPE '\\' OR p.client_name LIKE ? ESCAPE '\\' OR p.client_email LIKE ? ESCAPE '\\' OR tn.name LIKE ? ESCAPE '\\')",
     );
     args.push(like, like, like, like);
   }
@@ -675,6 +691,43 @@ export async function deskCustomerExists(db: Client, tenantId: string, customerI
   return rs.rows.length > 0;
 }
 
+export type ResolvedProjectCustomer = {
+  id: string;
+  client_tenant_id: string | null;
+  active: boolean;
+};
+
+/**
+ * Resolve a project customer inside this desk and return its authoritative
+ * client-workspace link. `active` is the stricter create/move eligibility;
+ * existing inactive clients still resolve so an unchanged project can be
+ * edited without inventing a second workspace link.
+ */
+export async function resolveProjectCustomer(
+  db: Client,
+  tenantId: string,
+  customerId: string,
+): Promise<ResolvedProjectCustomer | null> {
+  // SELECT * preserves pre-bravo__195 compatibility: on that schema there is
+  // no linked workspace, so the missing property maps to null. Retired links
+  // still resolve for unchanged historical edits, but never count as active.
+  const rs = await db.execute({
+    sql: "SELECT * FROM customers WHERE tenant_id = ? AND id = ? LIMIT 1",
+    args: [requireTenant(tenantId), customerId],
+  });
+  const row = rows(rs)[0];
+  if (!row) return null;
+  const clientTenantId = s(row.client_tenant_id);
+  return {
+    id: String(row.id),
+    client_tenant_id: clientTenantId,
+    active:
+      s(row.archived_at) === null &&
+      (row.lifecycle === "onboarding" || row.lifecycle === "active") &&
+      !isRetiredClientRef({ client_tenant_id: clientTenantId }),
+  };
+}
+
 /**
  * The client record a project belongs to, or null. A ticket on a project
  * belongs to the same client (Codex, PR #473): tickets inherit it, a different
@@ -731,8 +784,8 @@ export type NewProject = {
   priority: ProjectPriority;
   assigned_to: string | null;
   due_date: string | null;
-  /** Written only when set (migration bravo__188). */
-  customer_id?: string | null;
+  /** The current client record this delivery belongs to (migration bravo__188). */
+  customer_id: string;
 };
 
 const STARTED_STAGES: readonly ProjectStage[] = ["building", "review", "live", "maintenance"];
@@ -762,11 +815,16 @@ export async function createProject(
   now: Date,
 ): Promise<string> {
   requireTenant(tenantId);
+  const customer = await resolveProjectCustomer(db, tenantId, input.customer_id);
+  if (!customer?.active) throw new Error("delivery.store: project customer is not active in this desk");
+  if (input.client_tenant_id !== customer.client_tenant_id) {
+    throw new Error("delivery.store: project customer/client workspace mismatch");
+  }
   const id = randomUUID();
   const at = now.toISOString();
   const cols = [
     "id", "tenant_id", "title", "description", "client_tenant_id", "client_name", "client_email", "lead_id",
-    "stage", "priority", "assigned_to", "due_date", "started_at", "launched_at", "created_by", "created_at", "updated_at",
+    "customer_id", "stage", "priority", "assigned_to", "due_date", "started_at", "launched_at", "created_by", "created_at", "updated_at",
   ];
   const vals: Array<string | null> = [
     id,
@@ -777,6 +835,7 @@ export async function createProject(
     input.client_name,
     input.client_email,
     input.lead_id,
+    input.customer_id,
     input.stage,
     input.priority,
     input.assigned_to,
@@ -787,10 +846,6 @@ export async function createProject(
     at,
     at,
   ];
-  if (input.customer_id) {
-    cols.push("customer_id");
-    vals.push(input.customer_id);
-  }
   await db.batch(
     [
       {
@@ -845,39 +900,61 @@ export async function updateProject(
   requireTenant(tenantId);
   const cur = rows(
     await db.execute({
-      sql: "SELECT stage, started_at, launched_at, archived_at FROM delivery_projects WHERE tenant_id = ? AND id = ?",
+      sql: `SELECT stage, started_at, launched_at, archived_at, customer_id, client_tenant_id
+            FROM delivery_projects WHERE tenant_id = ? AND id = ?`,
       args: [tenantId, id],
     }),
   )[0];
   if (!cur) return false;
+  const normalizedChanges: ProjectChanges = { ...changes };
+  const customerChanged = "customer_id" in normalizedChanges;
+  const workspaceChanged = "client_tenant_id" in normalizedChanges;
+  if (customerChanged || workspaceChanged) {
+    const customerId = customerChanged ? normalizedChanges.customer_id : s(cur.customer_id);
+    if (!customerId) {
+      if (customerChanged) throw new Error("delivery.store: a project customer is required");
+      // Historical projects created before customer records keep their old
+      // standalone workspace-link behavior; the route validates any new link.
+    } else {
+      const customer = await resolveProjectCustomer(db, tenantId, customerId);
+      if (!customer || (customerChanged && !customer.active)) {
+        throw new Error("delivery.store: project customer is not active in this desk");
+      }
+      if (workspaceChanged && normalizedChanges.client_tenant_id !== customer.client_tenant_id) {
+        throw new Error("delivery.store: project customer/client workspace mismatch");
+      }
+      // A customer-only move always carries its linked workspace with it.
+      normalizedChanges.client_tenant_id = customer.client_tenant_id;
+    }
+  }
   const at = now.toISOString();
   const sets: string[] = [];
   const args: Array<string | null> = [];
   for (const col of PROJECT_COLUMNS) {
-    if (!(col in changes)) continue;
+    if (!(col in normalizedChanges)) continue;
     sets.push(`${col} = ?`);
-    args.push((changes as Record<string, string | null>)[col] ?? null);
+    args.push((normalizedChanges as Record<string, string | null>)[col] ?? null);
   }
   const timeline: InStatement[] = [];
   const fromStage = String(cur.stage) as ProjectStage;
-  if (changes.stage && changes.stage !== fromStage) {
-    if (!cur.started_at && STARTED_STAGES.includes(changes.stage)) {
+  if (normalizedChanges.stage && normalizedChanges.stage !== fromStage) {
+    if (!cur.started_at && STARTED_STAGES.includes(normalizedChanges.stage)) {
       sets.push("started_at = ?");
       args.push(at);
     }
-    if (!cur.launched_at && LAUNCHED_STAGES.includes(changes.stage)) {
+    if (!cur.launched_at && LAUNCHED_STAGES.includes(normalizedChanges.stage)) {
       sets.push("launched_at = ?");
       args.push(at);
     }
     const fromLabel = isOneOf(PROJECT_STAGES, fromStage) ? PROJECT_STAGE_LABELS[fromStage] : fromStage;
     timeline.push(
-      updateStatement(tenantId, id, author, `Stage moved from ${fromLabel} to ${PROJECT_STAGE_LABELS[changes.stage]}.`, "internal", at),
+      updateStatement(tenantId, id, author, `Stage moved from ${fromLabel} to ${PROJECT_STAGE_LABELS[normalizedChanges.stage]}.`, "internal", at),
     );
   }
-  if (changes.archived !== undefined && changes.archived !== Boolean(cur.archived_at)) {
+  if (normalizedChanges.archived !== undefined && normalizedChanges.archived !== Boolean(cur.archived_at)) {
     sets.push("archived_at = ?");
-    args.push(changes.archived ? at : null);
-    timeline.push(updateStatement(tenantId, id, author, changes.archived ? "Project archived." : "Project restored from the archive.", "internal", at));
+    args.push(normalizedChanges.archived ? at : null);
+    timeline.push(updateStatement(tenantId, id, author, normalizedChanges.archived ? "Project archived." : "Project restored from the archive.", "internal", at));
   }
   if (sets.length === 0) return true;
   sets.push("updated_at = ?");
@@ -885,15 +962,24 @@ export async function updateProject(
   // A project's tickets belong to its client: re-pointing the project moves
   // them in the same batch, so the client record and the project never
   // disagree about who a ticket is for.
-  const ticketsFollow: InStatement[] =
-    "customer_id" in changes
-      ? [
-          {
-            sql: "UPDATE support_tickets SET customer_id = ?, updated_at = ? WHERE tenant_id = ? AND project_id = ?",
-            args: [changes.customer_id ?? null, at, tenantId, id],
-          },
-        ]
-      : [];
+  const ticketSets: string[] = [];
+  const ticketArgs: Array<string | null> = [];
+  if ("customer_id" in normalizedChanges) {
+    ticketSets.push("customer_id = ?");
+    ticketArgs.push(normalizedChanges.customer_id ?? null);
+  }
+  if ("client_tenant_id" in normalizedChanges) {
+    ticketSets.push("client_tenant_id = ?", "client_match = ?");
+    ticketArgs.push(normalizedChanges.client_tenant_id ?? null, normalizedChanges.client_tenant_id ? "manual" : "none");
+  }
+  const ticketsFollow: InStatement[] = ticketSets.length
+    ? [
+        {
+          sql: `UPDATE support_tickets SET ${ticketSets.join(", ")}, updated_at = ? WHERE tenant_id = ? AND project_id = ?`,
+          args: [...ticketArgs, at, tenantId, id],
+        },
+      ]
+    : [];
   await db.batch(
     [
       {

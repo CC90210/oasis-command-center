@@ -25,13 +25,13 @@ import {
 } from "@/lib/delivery/session";
 import {
   clientTenantChangeAllowed,
-  deskCustomerExists,
   deskLeadExists,
   getProject,
   listProjectTasks,
   listProjectUpdates,
   listTickets,
   profileContact,
+  resolveProjectCustomer,
   updateProject,
   type ProjectChanges,
 } from "@/lib/delivery/store";
@@ -90,19 +90,40 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       if (!a.ok) return deliveryError(400, a.error, undefined, { field: "assigned_to" });
       changes.assigned_to = a.value;
     }
-    if ("client_tenant_id" in changes && !isOasisDesk(viewer)) {
+    const customerChanged = "customer_id" in changes;
+    const workspaceChanged = "client_tenant_id" in changes;
+    if (workspaceChanged && !isOasisDesk(viewer)) {
       return deliveryError(400, "client_workspace_links_are_oasis_only", undefined, { field: "client_tenant_id" });
     }
-    if (!(await clientTenantChangeAllowed(db, changes.client_tenant_id, access.project.client_tenant_id))) {
-      return deliveryError(400, "client_tenant_not_found", undefined, { field: "client_tenant_id" });
+    if (customerChanged || workspaceChanged) {
+      const targetCustomerId = customerChanged ? changes.customer_id : access.project.customer_id;
+      if (!targetCustomerId) {
+        // Historical projects may predate customer records. Preserve their
+        // standalone workspace link, including re-saving or clearing a retired
+        // link; every project with a customer uses the stricter branch below.
+        if (!(await clientTenantChangeAllowed(db, changes.client_tenant_id, access.project.client_tenant_id))) {
+          return deliveryError(400, "client_tenant_not_found", undefined, { field: "client_tenant_id" });
+        }
+      } else {
+        const customer = await resolveProjectCustomer(db, desk, targetCustomerId);
+        if (!customer || (customerChanged && !customer.active)) {
+          return deliveryError(400, "customer_not_found", undefined, { field: "customer_id" });
+        }
+        if (workspaceChanged && changes.client_tenant_id !== customer.client_tenant_id) {
+          return deliveryError(409, "customer_workspace_mismatch", undefined, { field: "client_tenant_id" });
+        }
+        if (customer.client_tenant_id && !isOasisDesk(viewer)) {
+          return deliveryError(400, "client_workspace_links_are_oasis_only", undefined, { field: "client_tenant_id" });
+        }
+        if (!(await clientTenantChangeAllowed(db, customer.client_tenant_id, access.project.client_tenant_id))) {
+          return deliveryError(400, "client_tenant_not_found", undefined, { field: "client_tenant_id" });
+        }
+        changes.client_tenant_id = customer.client_tenant_id;
+      }
     }
     if (changes.lead_id && !(await deskLeadExists(db, desk, changes.lead_id))) {
       return deliveryError(400, "lead_not_found", undefined, { field: "lead_id" });
     }
-    if (changes.customer_id && !(await deskCustomerExists(db, desk, changes.customer_id))) {
-      return deliveryError(400, "customer_not_found", undefined, { field: "customer_id" });
-    }
-
     const author = { userId: viewer.userId, name: (await profileContact(db, viewer.userId, desk)).name };
     const found = await updateProject(db, desk, id, changes, author, new Date());
     if (!found) return deliveryError(404, "not_found");

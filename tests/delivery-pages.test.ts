@@ -15,7 +15,20 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
 import { createElement, isValidElement, type ReactNode } from "react";
-import { CLIENT_A, CLIENT_B, OASIS, USERS, check, finish, login, setupDatabase } from "./_delivery-harness";
+import {
+  CLIENT_A,
+  CLIENT_A_CUSTOMER,
+  CLIENT_B,
+  OASIS,
+  OASIS_CUSTOMER_A,
+  OASIS_CUSTOMER_B,
+  USERS,
+  check,
+  finish,
+  login,
+  setupDatabase,
+  setupProjectCustomers,
+} from "./_delivery-harness";
 
 // tsconfig.json sets jsx:"preserve" for Next, so tsx compiles the pages' JSX
 // with the classic runtime, which expects a global `React` (see
@@ -80,6 +93,7 @@ function textOf(node: unknown, out: string[] = [], depth = 0): string[] {
 
 async function main() {
   const db = await setupDatabase();
+  await setupProjectCustomers(db);
   const store = await import("../lib/delivery/store");
   const now = new Date();
   const founder = { userId: USERS.cc.id, name: "CC" };
@@ -89,13 +103,39 @@ async function main() {
     reporter_user_id: null, assigned_to: null,
   };
   const pA = await store.createProject(db, OASIS, {
-    title: "ALPHA-PROJECT", description: null, client_tenant_id: CLIENT_A, client_name: null, client_email: null,
-    lead_id: null, stage: "building", priority: "high", assigned_to: null, due_date: null,
+    title: "ALPHA-PROJECT", description: null, client_tenant_id: CLIENT_A, client_name: "STALE-ALPHA-NAME", client_email: null,
+    lead_id: null, customer_id: OASIS_CUSTOMER_A, stage: "building", priority: "high", assigned_to: null, due_date: null,
   }, founder, now);
   const pB = await store.createProject(db, OASIS, {
     title: "BRAVO-PROJECT", description: null, client_tenant_id: CLIENT_B, client_name: null, client_email: null,
-    lead_id: null, stage: "review", priority: "low", assigned_to: null, due_date: null,
+    lead_id: null, customer_id: OASIS_CUSTOMER_B, stage: "review", priority: "low", assigned_to: null, due_date: null,
   }, founder, now);
+  await db.batch(
+    [
+      {
+        sql: `INSERT INTO customers
+              (id, tenant_id, display_name, lifecycle, tags, custom_fields, created_at, updated_at)
+              VALUES ('customer-paused', ?, 'Paused Client', 'paused', '[]', '{}', ?, ?)`,
+        args: [OASIS, now.toISOString(), now.toISOString()],
+      },
+      {
+        sql: `INSERT INTO delivery_projects (id, tenant_id, title, customer_id, stage, priority)
+              VALUES ('PAUSED-PROJECT-ID', ?, 'PAUSED-CLIENT-PROJECT', 'customer-paused', 'building', 'medium')`,
+        args: [OASIS],
+      },
+      {
+        sql: `INSERT INTO delivery_projects (id, tenant_id, title, stage, priority)
+              VALUES ('ORPHAN-PROJECT-ID', ?, 'ORPHAN-PROJECT', 'building', 'medium')`,
+        args: [OASIS],
+      },
+      {
+        sql: `INSERT INTO delivery_projects (id, tenant_id, title, customer_id, stage, priority)
+              VALUES ('HISTORY-PROJECT-ID', ?, 'HISTORY-PROJECT', ?, 'live', 'medium')`,
+        args: [OASIS, OASIS_CUSTOMER_A],
+      },
+    ],
+    "write",
+  );
   await store.addProjectUpdate(db, OASIS, pA, { body: "ALPHA-SHARED-UPDATE", visibility: "client" }, founder, now);
   await store.addProjectUpdate(db, OASIS, pA, { body: "ALPHA-INTERNAL-UPDATE", visibility: "internal" }, founder, now);
   const tA = (await store.createTicket(db, OASIS, { ...base, title: "ALPHA-TICKET", project_id: pA, client_tenant_id: CLIENT_A }, now)).ticket;
@@ -122,10 +162,13 @@ async function main() {
   console.log("delivery-pages:");
 
   await login(USERS.cc);
-  await check("founder: the board carries every client's projects and the queue every ticket", async () => {
+  await check("founder: Active projects carries current client delivery and canonical client names", async () => {
     const board = await text(projects({ searchParams: sp }));
     assert.match(board, /ALPHA-PROJECT/);
     assert.match(board, /BRAVO-PROJECT/);
+    assert.match(board, /Client A Plumbing/);
+    assert.doesNotMatch(board, /STALE-ALPHA-NAME|No client set/);
+    assert.doesNotMatch(board, /ORPHAN-PROJECT|PAUSED-CLIENT-PROJECT|HISTORY-PROJECT/);
     const queue = await text(tickets({ searchParams: Promise.resolve({ status: "all" }) }));
     assert.match(queue, /ALPHA-TICKET/);
     assert.match(queue, /BRAVO-TICKET/);
@@ -168,7 +211,7 @@ async function main() {
   // resolves the viewer's own desk first, like /tickets.
   const ownA = await store.createProject(db, CLIENT_A, {
     title: "CLIENT-A-OWN-PROJECT", description: null, client_tenant_id: null, client_name: "A's customer", client_email: null,
-    lead_id: null, stage: "building", priority: "medium", assigned_to: null, due_date: null,
+    lead_id: null, customer_id: CLIENT_A_CUSTOMER, stage: "building", priority: "medium", assigned_to: null, due_date: null,
   }, { userId: USERS.clientA.id, name: "Alice Client" }, now);
   await check("client A's owner: their OWN board on /projects, and OASIS's projects for them in their own section", async () => {
     const board = await text(projects({ searchParams: sp }));
@@ -176,8 +219,13 @@ async function main() {
     assert.match(board, /Projects OASIS runs for you/);
     assert.match(board, /ALPHA-PROJECT/, "OASIS's project about A, as vendor");
     assert.doesNotMatch(board, /BRAVO-PROJECT/);
-    const src = readFileSync(join(__dirname, "..", "components/delivery/ProjectForms.tsx"), "utf8");
-    assert.match(src, /run\("\/api\/projects\?scope=desk", "POST"/, "New project writes to the viewer's own desk");
+    const formSrc = readFileSync(join(__dirname, "..", "components/delivery/ProjectForms.tsx"), "utf8");
+    const boardSrc = readFileSync(join(__dirname, "..", "app/projects/page.tsx"), "utf8");
+    const clientSrc = readFileSync(join(__dirname, "..", "app/clients/[id]/layout.tsx"), "utf8");
+    assert.match(formSrc, /customer_id: customer\.value/);
+    assert.doesNotMatch(formSrc, /Client portal workspace|ClientWorkspaceOptions|clientTenantId|client_tenant_id/, "project forms choose a client record only; its workspace is derived server-side");
+    assert.doesNotMatch(boardSrc, /<ProjectCreateForm/);
+    assert.match(clientSrc, /<ProjectCreateForm/);
   });
   await login(USERS.clientB);
   await check("client B never sees client A's own project", async () => {

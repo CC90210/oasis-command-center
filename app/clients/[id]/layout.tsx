@@ -27,6 +27,7 @@ import { Tag } from "@/components/Card";
 import { PageFrame } from "@/components/os/PageFrame";
 import { LoadError } from "@/components/delivery/badges";
 import { TicketCreateForm } from "@/components/delivery/TicketForms";
+import { ProjectCreateForm } from "@/components/delivery/ProjectForms";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { clientTabsFor, loadClientHeader, loadWorkspaceDirectory, ownerName } from "@/components/os/landings/clients-records-data";
 import { ClientRecordTabs, EndEngagementButton } from "@/components/os/landings/clients-actions";
@@ -55,8 +56,8 @@ async function deskRoster(viewer: ClientsViewer): Promise<{ rows: MemberRow[]; n
     return {
       rows: [],
       notice: msg.includes("oasis_pipeline_assignment_roster_incomplete")
-        ? "New tickets can't be assigned from here right now: the assignment roster needs both founders as active members."
-        : "The assignee list couldn't be loaded, so new tickets start unassigned. The error has been logged.",
+        ? "New projects and tickets can't be assigned from here right now: the assignment roster needs both founders as active members."
+        : "The assignee list couldn't be loaded, so new projects and tickets start unassigned. The error has been logged.",
     };
   }
 }
@@ -98,6 +99,13 @@ export default async function ClientRecordLayout({ params, children }: { params:
   // A deal in OASIS's pipeline opens at /pipeline/<id>; another workspace's
   // lead page lives in its own manifest, so the deal is named, not linked.
   const dealHref = c.source_lead_id && cv.oasis ? `/pipeline/${c.source_lead_id}` : null;
+  const rosterOptions = (roster?.rows ?? [])
+    .filter((m) => m.auth_user_id)
+    .map((m) => ({ value: String(m.auth_user_id).toLowerCase(), label: m.display_name || m.full_name }));
+  const canCreateProject =
+    cv.desk?.canAct === true &&
+    !c.archived_at &&
+    (c.lifecycle === "onboarding" || c.lifecycle === "active");
 
   return (
     <PageFrame
@@ -121,11 +129,20 @@ export default async function ClientRecordLayout({ params, children }: { params:
           )}
           {cv.desk && <WriteToClientLink customerId={c.id} />}
           {cv.canWrite && c.lifecycle !== "churned" && <EndEngagementButton customerId={c.id} clientName={c.display_name} />}
+          {canCreateProject && (
+            <ProjectCreateForm
+              roster={rosterOptions}
+              customer={{
+                value: c.id,
+                label: c.display_name,
+                email: c.primary_email,
+                leadId: c.source_lead_id,
+              }}
+            />
+          )}
           {cv.desk && cv.desk.canAct && roster && (
             <TicketCreateForm
-              roster={roster.rows
-                .filter((m) => m.auth_user_id)
-                .map((m) => ({ value: String(m.auth_user_id).toLowerCase(), label: m.display_name || m.full_name }))}
+              roster={rosterOptions}
               projects={projects.state === "ok" ? projects.value.rows.map((p) => ({ value: p.id, label: p.title, clientTenantId: p.client_tenant_id })) : []}
               clientTenants={[]}
               customers={[{ value: c.id, label: c.display_name }]}

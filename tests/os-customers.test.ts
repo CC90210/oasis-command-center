@@ -184,6 +184,7 @@ async function main() {
   // ── rules ──────────────────────────────────────────────────────────────
   await check("rules: the lifecycle vocabulary is exactly the design's, labelled once", () => {
     assert.deepEqual([...rules.CUSTOMER_LIFECYCLES], ["prospect", "onboarding", "active", "paused", "churned"]);
+    assert.deepEqual([...rules.CURRENT_CUSTOMER_LIFECYCLES], ["onboarding", "active"]);
     for (const l of rules.CUSTOMER_LIFECYCLES) assert.ok(rules.CUSTOMER_LIFECYCLE_LABELS[l]);
     assert.deepEqual([...rules.CONVERTIBLE_LEAD_STAGES], ["won", "onboarding", "in_build", "client_review", "launched"]);
     assert.equal(rules.lifecycleForLeadStage("won"), "onboarding");
@@ -255,6 +256,7 @@ async function main() {
     const paused = await store.listCustomers(db, CLIENT_A, { lifecycle: "paused" });
     assert.deepEqual(paused.rows.map((c) => c.id), [acme.id]);
     assert.equal(paused.rows[0].open_ticket_count, null, "without withDelivery a count is unknown, not 0");
+    assert.equal((await store.listCustomerOptions(db, CLIENT_A)).some((c) => c.value === acme.id), false, "a paused client is not offered for new delivery work");
   });
   await check("contacts: added and removed on the workspace's own client only", async () => {
     const c = await store.addContact(db, CLIENT_A, acme.id, { name: "Dana", email: "dana@acme.test", phone: null, role: "Office manager" }, T0);
@@ -306,10 +308,15 @@ async function main() {
   await lead("lead-merge", CLIENT_A, { stage: "launched", name: "Solo Sam", email: "ops@acme.test" });
   await lead("lead-b", CLIENT_B, { stage: "won", company: "B's deal", email: "deal@b.test" });
   // Work that already exists for the deal, before it is a client.
-  const projectForDeal = await delivery.createProject(db, CLIENT_A, {
-    title: "Harbour site", description: null, client_tenant_id: null, client_name: "Harbour Dental", client_email: "lee@harbour.test",
-    lead_id: "lead-won-1", stage: "building", priority: "medium", assigned_to: null, due_date: null,
-  }, { userId: USERS.clientA.id, name: "Alice" }, T0);
+  // A real legacy orphan from before customer records existed. New project
+  // writes require a customer; conversion still repairs historical rows.
+  const projectForDeal = "legacy-harbour-project";
+  await db.execute({
+    sql: `INSERT INTO delivery_projects
+          (id, tenant_id, title, client_name, client_email, lead_id, stage, priority, created_at, updated_at)
+          VALUES (?, ?, 'Harbour site', 'Harbour Dental', 'lee@harbour.test', 'lead-won-1', 'building', 'medium', ?, ?)`,
+    args: [projectForDeal, CLIENT_A, T0.toISOString(), T0.toISOString()],
+  });
   const ticketBase = {
     description: null, category: "bug" as const, severity: "medium" as const, source: "internal" as const,
     client_tenant_id: null, client_name: null, client_company: null, client_match: "none", project_hint: null,
@@ -328,6 +335,7 @@ async function main() {
     assert.equal(r.customer.primary_email, "lee@harbour.test");
     assert.equal(r.customer.primary_phone, "+15145550142");
     assert.equal(r.customer.lifecycle, "onboarding");
+    assert.equal((await store.listCustomerOptions(db, CLIENT_A)).some((c) => c.value === r.customer.id), true, "onboarding is current delivery work");
     assert.equal(r.customer.source_lead_id, "lead-won-1");
     assert.deepEqual((await store.listContacts(db, CLIENT_A, harbourId)).map((c) => c.name), ["Dr. Lee"]);
     const p = (await db.execute({ sql: "SELECT customer_id FROM delivery_projects WHERE id = ?", args: [projectForDeal] })).rows[0];
@@ -758,7 +766,8 @@ async function main() {
     const patchTicket = (body: Json) => call(ticket.PATCH(req("PATCH", "/api/tickets/t-sb-linked", body), params({ id: "t-sb-linked" })));
     try {
       await login(USERS.cc);
-      // Exactly what the project editor sends on Save (components/delivery/ProjectForms.tsx): every field, the stored link included.
+      // Legacy callers may still re-save the stored link while editing other
+      // fields; the project UI no longer offers or submits this field.
       const renamed = await patchProject({ title: "SunBiz site (old)", description: null, client_tenant_id: SUNBIZ, client_name: "Ezra", client_email: "ezra@sunbiz.test", lead_id: null });
       assert.equal(renamed.status, 200, `a rename re-sending the stored link was refused: ${JSON.stringify(renamed.body)}`);
       assert.equal(await linkOf("delivery_projects", "p-sb-linked"), SUNBIZ, "the save changed the link");
@@ -786,7 +795,7 @@ async function main() {
       await db.execute({ sql: "DELETE FROM tenants WHERE id = ?", args: [SUNBIZ] });
     }
   });
-  await check("the client-workspace select on a ticket and a project shows a link the list no longer offers, as a choice that cannot be made, so None clears it", async () => {
+  await check("the ticket workspace select preserves a retired current link, while projects derive workspace from the client record", async () => {
     const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
     const { ClientWorkspaceOptions } = await import("../components/delivery/client-workspace-options");
     type El = { type?: unknown; props?: { value?: string; disabled?: boolean; children?: unknown } };
@@ -809,10 +818,11 @@ async function main() {
     ];
     assert.deepEqual(shown(CLIENT_A), plain, "a listed link gets no extra option");
     assert.deepEqual(shown(null), plain, "no link, no extra option");
-    // Both editors draw their workspace select from it, with the row's STORED link.
+    // Tickets can still be linked manually. Projects cannot: their customer
+    // record is now the single authoritative workspace link.
     const src = (f: string) => readFileSync(join(__dirname, "..", "components", "delivery", f), "utf8");
     assert.match(src("TicketForms.tsx"), /<ClientWorkspaceOptions current=\{ticket\.client_tenant_id\} options=\{clientTenants\} noneLabel="None" \/>/);
-    assert.match(src("ProjectForms.tsx"), /<ClientWorkspaceOptions current=\{project\.client_tenant_id\} options=\{clientTenants\} noneLabel="No portal \(email only\)" \/>/);
+    assert.doesNotMatch(src("ProjectForms.tsx"), /ClientWorkspaceOptions|Client portal workspace|client_tenant_id|clientTenantId/);
   });
   await check("SLA cron: a workspace desk's breach is flagged (its Breaching view) but alerted through no lane; OASIS's alerts", async () => {
     const sent: string[] = [];
@@ -1003,13 +1013,18 @@ async function main() {
   });
   // The editor saves one field at a time (TicketForms patch), so moving a
   // ticket arrives as { project_id } alone (CodeRabbit, #473).
-  const projectFor = (title: string, customerId: string | null, clientEmail: string | null = null) =>
+  const projectFor = (title: string, customerId: string, clientEmail: string | null = null) =>
     delivery.createProject(db, CLIENT_A, {
       title, description: null, client_tenant_id: null, client_name: null, client_email: clientEmail,
       lead_id: null, stage: "building", priority: "medium", assigned_to: null, due_date: null, customer_id: customerId,
     }, author, T0);
   const pX2 = await projectFor("Link project X2", X);
-  const pNone = await projectFor("Link project, no client", null);
+  const pNone = "legacy-project-no-client";
+  await db.execute({
+    sql: `INSERT INTO delivery_projects (id, tenant_id, title, stage, priority, created_at, updated_at)
+          VALUES (?, ?, 'Link project, no client', 'building', 'medium', ?, ?)`,
+    args: [pNone, CLIENT_A, T0.toISOString(), T0.toISOString()],
+  });
   await check("links: moving a ticket to another client's project takes that project's client", async () => {
     const r = await delivery.updateTicket(db, CLIENT_A, loose.id, { project_id: pX2 }, author, T0, { customer: () => "Link X" });
     assert.ok(r.ok, JSON.stringify(r));
