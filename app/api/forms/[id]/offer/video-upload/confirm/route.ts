@@ -59,7 +59,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!(await editableForm(db, tenantId, id))) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
   const storage = offerUploadStorage();
-  const result = await confirmOfferUpload({ tenantId, formId: id, uploadToken: body.upload_token, storage });
+  const result = await confirmOfferUpload({ db, tenantId, formId: id, uploadToken: body.upload_token, storage });
   if (!result.ok) {
     if (result.error === "key_unavailable") console.error("[offer-pages.video-upload.confirm] signing key unavailable");
     return NextResponse.json(errorBody(result.error), { status: STATUS[result.error] ?? 400, headers: { "cache-control": "no-store" } });

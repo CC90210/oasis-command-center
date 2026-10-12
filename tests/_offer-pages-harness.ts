@@ -183,6 +183,13 @@ export async function applyOfferMigration(db: Client): Promise<void> {
   for (const stmt of splitSql(readFileSync(OFFER_MIGRATION_PATH, "utf8"))) await db.execute(stmt);
 }
 
+/** database/turso/bravo__219_offer_upload_confirms.sql - the single-use claim table confirmOfferUpload's atomic INSERT ... ON CONFLICT DO NOTHING targets. NOT applied to bravo-empire by this PR (dry-run only, via scripts/turso_sql.mjs's own splitSqlStatements, reported separately); applied HERE only to this throwaway test file. */
+export const OFFER_UPLOAD_CONFIRMS_MIGRATION_PATH = join(ROOT, "database", "turso", "bravo__219_offer_upload_confirms.sql");
+
+export async function applyOfferUploadConfirmsMigration(db: Client): Promise<void> {
+  for (const stmt of splitSql(readFileSync(OFFER_UPLOAD_CONFIRMS_MIGRATION_PATH, "utf8"))) await db.execute(stmt);
+}
+
 export async function createLibraryTables(db: Client): Promise<void> {
   await db.executeMultiple(`
     CREATE TABLE marketing_asset (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, brand_slug TEXT NOT NULL DEFAULT 'oasis-ai',
@@ -198,6 +205,7 @@ export async function createLibraryTables(db: Client): Promise<void> {
 export async function setupOfferDatabase(opts: { migrate?: boolean; library?: boolean } = {}): Promise<Client> {
   const db = await setupDatabase();
   if (opts.migrate !== false) await applyOfferMigration(db);
+  if (opts.migrate !== false) await applyOfferUploadConfirmsMigration(db);
   if (opts.library !== false) await createLibraryTables(db);
   // Connections > Telegram's saved fields (lib/tenant-integration-store.ts),
   // empty: no workspace has saved a bot unless a test writes one. The live

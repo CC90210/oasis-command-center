@@ -221,7 +221,7 @@ async function main() {
     assert.equal(fake.objects.has(stagingPath), true, "a refused swap still removed the staging object it did not promote");
   });
 
-  await step("confirm-replay-overwrite, closed by construction: a sequential replay with different, same-size-and-type bytes re-uploaded in between never touches the first promotion (Codex review of e99e9a90)", async () => {
+  await step("sequential replay of ONE token is idempotent: the SAME final path, no new copy, even with different same-size-and-type bytes re-uploaded in between (Codex resource-exhaustion finding - single-use is now an atomic Turso claim, not a fresh key every time)", async () => {
     await login(USERS.cc);
     const minted = await json(await init(FORM, { kind: "video", filename: "replay.mp4", mime_type: "video/mp4", size_bytes: 3_000_000 }));
     assert.equal(minted.status, 200);
@@ -234,53 +234,93 @@ async function main() {
     const firstFinalPath = String(first.body.path);
     const etagAfterFirst = fake.objects.get(firstFinalPath)?.etag;
     assert.ok(etagAfterFirst, "the first confirm did not promote anything");
+    const copiesAfterFirst = fake.copies.length;
 
     // The PUT URL is still valid (its own window has not elapsed): the SAME
     // staging key gets DIFFERENT bytes, same declared size and type, exactly
-    // the review's reproduction - then the SAME token is replayed.
+    // the overwrite review's reproduction - then the SAME token is replayed.
     fake.put(stagingPath, 3_000_000, "video/mp4");
     const replay = await json(await confirm(FORM, { upload_token: token }));
-    assert.equal(replay.status, 200, JSON.stringify(replay.body)); // a replay is not an error any more - it just promotes to its OWN fresh key
-    assert.notEqual(replay.body.path, firstFinalPath, "the replay landed on the first confirm's own final key");
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.equal(replay.body.path, firstFinalPath, "the replay minted a DIFFERENT final path instead of returning the claimed one");
     assert.equal(fake.objects.get(firstFinalPath)?.etag, etagAfterFirst, "the replay changed the already-promoted final object");
+    assert.equal(fake.copies.length, copiesAfterFirst, "the replay made a new copy instead of reading the existing claim");
   });
 
-  await step("two concurrent confirms of ONE token yield two distinct final keys; the race is removed by construction, not by checking for it (Codex follow-up TOCTOU finding on e99e9a90's own fix)", async () => {
+  await step("two concurrent confirms of ONE token make EXACTLY ONE copy and agree on one final path (Codex follow-up: the atomic Turso claim removes the race the per-call-random-key version still had)", async () => {
     await login(USERS.cc);
     const minted = await json(await init(FORM, { kind: "video", filename: "concurrent.mp4", mime_type: "video/mp4", size_bytes: 4_000_000 }));
     assert.equal(minted.status, 200);
     const stagingPath = String(minted.body.storage_path);
     const token = String(minted.body.upload_token);
     fake.put(stagingPath, 4_000_000, "video/mp4");
+    const copiesBefore = fake.copies.length;
 
-    // Both confirms are started together, with no await in between, so
-    // neither one's HEAD/copy sequence waits on the other's result before
-    // deciding what to do - the exact shape of the race a "does the final
-    // key already exist" check could lose (two HEADs both seeing "no" before
-    // either copy lands).
+    // Both confirms are started together, with no await in between: neither
+    // one's INSERT ... ON CONFLICT DO NOTHING waits on the other's result
+    // before deciding whether it won the claim - this is Turso's own atomic
+    // decision, not a read-then-write gap in application code.
     const responses = await Promise.all([confirm(FORM, { upload_token: token }), confirm(FORM, { upload_token: token })]);
     const [a, b] = await Promise.all(responses.map(json));
 
     assert.equal(a.status, 200, JSON.stringify(a.body));
     assert.equal(b.status, 200, JSON.stringify(b.body));
     assert.match(String(a.body.path), finalVideoPathRe(OASIS, FORM));
-    assert.match(String(b.body.path), finalVideoPathRe(OASIS, FORM));
-    assert.notEqual(a.body.path, b.body.path, "two concurrent confirms of one token landed on the SAME final key");
+    assert.equal(a.body.path, b.body.path, "two concurrent confirms of one token agreed on different final paths");
+    assert.equal(fake.copies.length, copiesBefore + 1, "more than one copy was made for one token's claim");
 
-    const etagA = fake.objects.get(String(a.body.path))?.etag;
-    const etagB = fake.objects.get(String(b.body.path))?.etag;
-    assert.ok(etagA, "the first concurrent confirm's final object does not exist");
-    assert.ok(etagB, "the second concurrent confirm's final object does not exist");
-
-    // A third, later confirm of the SAME (still-valid) token still succeeds
-    // with yet another fresh key, and touches neither earlier one.
-    fake.put(stagingPath, 4_000_000, "video/mp4");
+    // A third, later confirm of the SAME (still-valid, still-claimed) token
+    // is the same idempotent replay: same path, no new copy.
     const third = await json(await confirm(FORM, { upload_token: token }));
     assert.equal(third.status, 200, JSON.stringify(third.body));
-    assert.notEqual(third.body.path, a.body.path);
-    assert.notEqual(third.body.path, b.body.path);
-    assert.equal(fake.objects.get(String(a.body.path))?.etag, etagA, "a later confirm of the same token changed an earlier promotion");
-    assert.equal(fake.objects.get(String(b.body.path))?.etag, etagB, "a later confirm of the same token changed an earlier promotion");
+    assert.equal(third.body.path, a.body.path);
+    assert.equal(fake.copies.length, copiesBefore + 1, "a third confirm of an already-claimed token made another copy");
+  });
+
+  await step("a copy failure after a successful claim frees it: a retry with the SAME token succeeds instead of being stuck", async () => {
+    await login(USERS.cc);
+    const minted = await json(await init(FORM, { kind: "video", filename: "claim-then-fail.mp4", mime_type: "video/mp4", size_bytes: 1_500_000 }));
+    assert.equal(minted.status, 200);
+    const stagingPath = String(minted.body.storage_path);
+    const token = String(minted.body.upload_token);
+    fake.put(stagingPath, 1_500_000, "video/mp4");
+
+    // The claim lands (INSERT succeeds), but the copy itself fails (a
+    // transient storage error, modelled the same way the TOCTOU-swap test
+    // models R2 reporting a precondition failure).
+    fake.opts.forcePreconditionFailed = true;
+    const failed = await json(await confirm(FORM, { upload_token: token }));
+    fake.opts.forcePreconditionFailed = false;
+    assert.equal(failed.status, 409, JSON.stringify(failed.body));
+    assert.equal(failed.body.error, "swapped");
+
+    const [body] = token.split(".");
+    const nonce = (JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { nonce: string }).nonce;
+    const claims = await db.execute({ sql: "SELECT token_nonce FROM offer_upload_confirms WHERE token_nonce = ?", args: [nonce] });
+    assert.equal(claims.rows.length, 0, "a failed copy left its claim row behind, blocking every retry");
+
+    // The staging object is untouched (never removed on a failure) and the
+    // SAME token is still valid: a retry must be able to claim again.
+    const retry = await json(await confirm(FORM, { upload_token: token }));
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    assert.ok(fake.objects.has(String(retry.body.path)), "the retry's final object does not exist");
+  });
+
+  await step("another tenant cannot read a claim, even knowing its token_nonce", async () => {
+    await login(USERS.cc);
+    const minted = await json(await init(FORM, { kind: "video", filename: "isolation.mp4", mime_type: "video/mp4", size_bytes: 1_200_000 }));
+    assert.equal(minted.status, 200);
+    fake.put(String(minted.body.storage_path), 1_200_000, "video/mp4");
+    const confirmed = await json(await confirm(FORM, { upload_token: minted.body.upload_token }));
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+
+    const [body] = String(minted.body.upload_token).split(".");
+    const nonce = (JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { nonce: string }).nonce;
+    const crossTenantRead = await db.execute({
+      sql: "SELECT final_path FROM offer_upload_confirms WHERE token_nonce = ? AND tenant_id = ?",
+      args: [nonce, CLIENT_A],
+    });
+    assert.equal(crossTenantRead.rows.length, 0, "a claim written for OASIS was readable by filtering on Client A's tenant_id");
   });
 
   await step("another workspace's caller is refused: mint on someone else's form (404), and a token minted for OASIS confirmed under Client A's own form (404)", async () => {

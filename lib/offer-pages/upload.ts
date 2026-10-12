@@ -76,6 +76,7 @@
  */
 import "server-only";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import type { Client } from "@libsql/client";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { DERIVED_KEY_LABELS, deriveKey } from "@/lib/crypto/derived-keys";
 import { MAX_UPLOAD_BYTES, OFFER_UPLOAD_BUCKET, UPLOAD_MIME, uploadSubdirOf, type UploadKind } from "./types";
@@ -85,7 +86,7 @@ import { MAX_UPLOAD_BYTES, OFFER_UPLOAD_BUCKET, UPLOAD_MIME, uploadSubdirOf, typ
 // react-dom/server, and "server-only" throws there on sight). This module
 // stays the one with real side effects (R2 writes, HMAC signing); the
 // read-only verify check belongs with the rest of the resolve/serve logic.
-import { normalizedMime, type OfferUploadStorage, type VerifyResult } from "./video";
+import { normalizedMime, verifyUploadObject, type OfferUploadStorage, type VerifyResult } from "./video";
 
 export { OFFER_UPLOAD_BUCKET };
 
@@ -130,6 +131,20 @@ function finalPathFor(stagingPath: string, formId: string): string {
 
 export function offerUploadStorageConfigured(): boolean {
   return r2Configured();
+}
+
+/** "offer_upload_confirms does not exist yet" (database/turso/bravo__219_offer_upload_confirms.sql has not been applied) - mirrors lib/offer-pages/store.ts isMissingOfferTable. Treated as storage_unavailable, fail CLOSED: the whole point of this table is the single-use guarantee, so a missing table is never silently bypassed. */
+function isMissingConfirmsTable(err: unknown): boolean {
+  return /no such table:\s*"?offer_upload_confirms\b/i.test(err instanceof Error ? err.message : String(err));
+}
+
+/** Best-effort: a failure to delete a freed claim is logged, never surfaced - the row would otherwise just sit there pointing at an object that failed to promote; a later retry with a FRESH token is unaffected either way. */
+async function deleteClaim(db: Client, nonce: string): Promise<void> {
+  try {
+    await db.execute({ sql: "DELETE FROM offer_upload_confirms WHERE token_nonce = ?", args: [nonce] });
+  } catch (err) {
+    console.error("[offer-pages.upload] freeing a failed claim failed (non-fatal)", { nonce, error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 /** The real adapter: null when R2 is not configured (every caller treats that as "unavailable", never a silent pass). */
@@ -292,28 +307,46 @@ export async function mintOfferUpload(input: {
 export type ConfirmResult = VerifyResult | { ok: false; error: "invalid_token" | "token_expired" | "key_unavailable" };
 
 /**
- * The token-gated confirm step. Trusts nothing about the staging object but
- * its real HEAD; closes the TOCTOU window (confirm checks the object, but the
- * presigned PUT stays valid until it expires, so the object could otherwise
- * be replaced after confirm) by copying it to a FRESH, call-specific FINAL
- * key (finalPathFor) conditional on the ETag just verified - a swap between
- * the HEAD and the copy fails the copy's own precondition instead of
- * promoting different bytes - and then re-checking the FINAL object's own
- * size and type regardless of whether R2 actually enforced that precondition.
- * The staging object is removed after (best effort); only the FINAL path is
- * ever returned, and it is the only path a page doc may ever carry.
+ * The token-gated confirm step, made SINGLE-USE atomically in Turso (Codex
+ * security review 2026-10-12, resource-exhaustion finding on the
+ * per-confirm-random-key fix: with no claim record, one token replayed
+ * indefinitely - the PUT URL stays valid for minutes - minted an unbounded
+ * number of 500 MB final copies).
  *
- * NO SHARED DESTINATION, SO NO RACE (Codex security review 2026-10-12,
- * confirm-replay-overwrite then its own TOCTOU follow-up): a sequential
- * replay and two truly concurrent confirms of the SAME token each mint
- * their OWN final key here, so none of them can ever land on the SAME
- * object another one (or an earlier, legitimate confirm) already wrote -
- * there is no "does it already exist" question left to race on. A replay or
- * a race can at most leave an extra, never-referenced object behind; the one
- * a draft save or a published page already points at can never change
- * without a new save and publish (its own rights-tick gate).
+ * The claim is ONE INSERT ... ON CONFLICT(token_nonce) DO NOTHING
+ * (database/turso/bravo__219_offer_upload_confirms.sql): Turso itself
+ * decides which of any number of concurrent confirms for the SAME token
+ * affects a row, so there is no read-then-write gap in application code to
+ * race on, unlike a HEAD "does it already exist" check (which two
+ * concurrent HEADs can both pass before either writes).
+ *
+ *   - This call's INSERT affects 1 row: it owns the promotion. It HEADs the
+ *     staging object, re-checks its REAL size and type against the kind's
+ *     cap (never the declared ones), then COPIES it to the final path THIS
+ *     claim recorded, conditional on the ETag just read
+ *     (x-amz-copy-source-if-match) - a swap between the HEAD and the copy
+ *     fails the copy's own precondition instead of promoting different
+ *     bytes - and re-checks the FINAL object's own size/type straight after,
+ *     independent of whether R2 actually enforced that precondition (belt
+ *     and suspenders). A failure at ANY point after the claim lands DELETES
+ *     this claim row (deleteClaim) so a genuine retry - a fresh confirm call
+ *     with the SAME still-valid token - is not permanently locked out by a
+ *     transient storage failure.
+ *   - This call's INSERT affects 0 rows: some other confirm (this token
+ *     replayed, sequentially or concurrently) already claimed it. Reads the
+ *     stored row back, SCOPED TO THIS CALLER'S OWN TENANT (so a claim
+ *     cannot be read across a tenant boundary even if a token_nonce were
+ *     somehow known there), and returns its already-promoted object -
+ *     re-verified for real (verifyUploadObject), never a blind trust of the
+ *     stored path - with NO new copy. An idempotent replay, by design.
+ *
+ * Every check fails CLOSED: a storage error, a malformed or expired token, a
+ * cross-tenant/cross-form token, a missing signing key, a missing claims
+ * table (the migration not yet applied), or an object outside its kind's
+ * cap or type is the same refusal as "not found" or 503.
  */
 export async function confirmOfferUpload(input: {
+  db: Client;
   tenantId: string;
   formId: string;
   uploadToken: unknown;
@@ -331,45 +364,105 @@ export async function confirmOfferUpload(input: {
     return { ok: false, error: "not_found" };
   }
   if (!input.storage) return { ok: false, error: "storage_unavailable" };
-  const { kind, staging_path: stagingPath } = verified.payload;
-  const finalPath = finalPathFor(stagingPath, input.formId);
+  const { kind, nonce, staging_path: stagingPath } = verified.payload;
+  const candidateFinalPath = finalPathFor(stagingPath, input.formId);
 
+  let claimedByUs: boolean;
+  try {
+    const claim = await input.db.execute({
+      sql: "INSERT INTO offer_upload_confirms (token_nonce, tenant_id, form_id, final_path, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(token_nonce) DO NOTHING",
+      args: [nonce, input.tenantId, input.formId, candidateFinalPath, new Date().toISOString()],
+    });
+    claimedByUs = Number(claim.rowsAffected) === 1;
+  } catch (err) {
+    if (isMissingConfirmsTable(err)) {
+      console.error("[offer-pages.upload] offer_upload_confirms is missing (migration bravo__219 not applied)");
+    }
+    return { ok: false, error: "storage_unavailable" };
+  }
+
+  if (!claimedByUs) {
+    // Someone else's INSERT won the claim for this token: read it back,
+    // scoped to our own tenant, and return the SAME final object - no copy.
+    let row: Record<string, unknown> | undefined;
+    try {
+      const read = await input.db.execute({
+        sql: "SELECT final_path FROM offer_upload_confirms WHERE token_nonce = ? AND tenant_id = ? AND form_id = ?",
+        args: [nonce, input.tenantId, input.formId],
+      });
+      row = read.rows[0] as unknown as Record<string, unknown> | undefined;
+    } catch {
+      return { ok: false, error: "storage_unavailable" };
+    }
+    // Lost the insert race but the winner's row is not there yet (still mid-
+    // promotion) or already freed (its own promotion failed): the caller may
+    // retry with the SAME token - a fresh claim attempt is still possible
+    // once the row is gone.
+    if (!row?.final_path) return { ok: false, error: "not_found" };
+    const existing = await verifyUploadObject({ tenantId: input.tenantId, path: String(row.final_path), kind, storage: input.storage });
+    return existing;
+  }
+
+  // We own the claim: do the actual promotion. Any failure from here frees
+  // it (deleteClaim) so a retry with the same token is not stuck forever.
   let head: { size: number; contentType: string | null; etag: string | null } | null;
   try {
     head = await input.storage.info(stagingPath);
   } catch {
+    await deleteClaim(input.db, nonce);
     return { ok: false, error: "storage_unavailable" };
   }
-  if (!head) return { ok: false, error: "not_found" };
-  if (!Number.isFinite(head.size) || head.size <= 0 || head.size > MAX_UPLOAD_BYTES[kind]) return { ok: false, error: "too_large" };
+  if (!head) {
+    await deleteClaim(input.db, nonce);
+    return { ok: false, error: "not_found" };
+  }
+  if (!Number.isFinite(head.size) || head.size <= 0 || head.size > MAX_UPLOAD_BYTES[kind]) {
+    await deleteClaim(input.db, nonce);
+    return { ok: false, error: "too_large" };
+  }
   const mime = normalizedMime(head.contentType);
-  if (mime && mime !== "application/octet-stream" && !(mime in UPLOAD_MIME[kind])) return { ok: false, error: "wrong_type" };
-  if (!head.etag) return { ok: false, error: "storage_unavailable" };
+  if (mime && mime !== "application/octet-stream" && !(mime in UPLOAD_MIME[kind])) {
+    await deleteClaim(input.db, nonce);
+    return { ok: false, error: "wrong_type" };
+  }
+  if (!head.etag) {
+    await deleteClaim(input.db, nonce);
+    return { ok: false, error: "storage_unavailable" };
+  }
 
-  const copied = await input.storage.copyIfMatch(stagingPath, finalPath, head.etag);
-  if (!copied.ok) return { ok: false, error: copied.error === "precondition_failed" ? "swapped" : "storage_unavailable" };
+  const copied = await input.storage.copyIfMatch(stagingPath, candidateFinalPath, head.etag);
+  if (!copied.ok) {
+    await deleteClaim(input.db, nonce);
+    return { ok: false, error: copied.error === "precondition_failed" ? "swapped" : "storage_unavailable" };
+  }
 
   // Belt and suspenders: re-check the FINAL object's own properties, whether
   // or not R2 actually enforced the copy's precondition.
   let finalHead: { size: number; contentType: string | null; etag: string | null } | null;
   try {
-    finalHead = await input.storage.info(finalPath);
+    finalHead = await input.storage.info(candidateFinalPath);
   } catch {
+    await deleteClaim(input.db, nonce);
     return { ok: false, error: "storage_unavailable" };
   }
-  if (!finalHead || finalHead.size !== head.size) return { ok: false, error: "swapped" };
+  if (!finalHead || finalHead.size !== head.size) {
+    await deleteClaim(input.db, nonce);
+    return { ok: false, error: "swapped" };
+  }
   const finalMime = normalizedMime(finalHead.contentType);
-  if (finalMime && finalMime !== "application/octet-stream" && !(finalMime in UPLOAD_MIME[kind])) return { ok: false, error: "wrong_type" };
+  if (finalMime && finalMime !== "application/octet-stream" && !(finalMime in UPLOAD_MIME[kind])) {
+    await deleteClaim(input.db, nonce);
+    return { ok: false, error: "wrong_type" };
+  }
 
-  // The staging object is deliberately NOT deleted here. Each confirm now
-  // promotes to its OWN fresh final key (finalPathFor), so a second
-  // confirm of the same token - sequential or truly concurrent - reads the
-  // SAME still-present staging object and independently succeeds with its
-  // own copy, rather than racing to delete a source the other one still
-  // needs. Staging objects are ephemeral by construction (their presign and
-  // this feature's own token both expire in minutes) and belong under an R2
+  // The staging object is deliberately NOT deleted here. A LOST race (the
+  // 0-rows branch above) still reads the SAME still-present staging object
+  // indirectly, through the claim row this call wrote; deleting it would
+  // serve no purpose now that promotion is claim-gated, not source-gated.
+  // Staging objects are ephemeral by construction (their presign and this
+  // feature's own token both expire in minutes) and belong under an R2
   // lifecycle rule that expires the `_staging/` prefix after a short TTL -
   // NOT configured here; this sandbox has no live R2 to apply it against,
   // and it is called out as a NOT VERIFIED follow-up in the PR.
-  return { ok: true, upload: { kind, path: finalPath, bytes: finalHead.size, mime: finalMime || null } };
+  return { ok: true, upload: { kind, path: candidateFinalPath, bytes: finalHead.size, mime: finalMime || null } };
 }
