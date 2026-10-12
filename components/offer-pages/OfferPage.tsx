@@ -29,6 +29,7 @@ import { OfferNav } from "./OfferNav";
 import { OfferSection, OfferHead, OfferFacade } from "./sections";
 import { OfferBook, type EmbeddedFormProps } from "./OfferBook";
 import { StickyBookBar } from "./StickyBookBar";
+import { CommunityLink } from "./CommunityLink";
 import type { VideoTracking } from "./VideoFacade";
 
 /** Same switch as app/(marketing)/layout.tsx: reveals animate only once JS can undo them. */
@@ -48,6 +49,7 @@ export function OfferPage({
   preview,
   tenantSlug = null,
   formSlug = null,
+  communityConfigured = false,
 }: {
   prepared: PreparedOffer;
   workspaceName: string;
@@ -69,9 +71,20 @@ export function OfferPage({
    */
   tenantSlug?: string | null;
   formSlug?: string | null;
+  /**
+   * Server-resolved: this tenant has a community URL configured (lib/offers/
+   * community-link.ts). Gates the persistent "Not ready? Join the free
+   * community" link the same way `tenantSlug`/`formSlug` gate tracking —
+   * null in preview means no link there either, since the link's own href
+   * needs those same two slugs.
+   */
+  communityConfigured?: boolean;
 }) {
   const { page, ctaLabel } = prepared;
   const tracking: VideoTracking = tenantSlug && formSlug ? { tenant: tenantSlug, form: formSlug } : null;
+  const communityLink = (
+    <CommunityLink tenantSlug={tenantSlug} formSlug={formSlug} configured={communityConfigured} />
+  );
   const hero = page.hero;
   const heroMedia = hero.video ? prepared.media[hero.video.ref] : undefined;
   const bookTitle = page.book.title || ctaLabel;
@@ -127,7 +140,10 @@ export function OfferPage({
                     <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-fg-muted sm:text-[18px]">{hero.subheadline}</p>
                   ) : null}
                   {/* Desktop: the button under the words. Phones draw it after the video. */}
-                  <div className={`mt-9 ${heroMedia ? "hidden lg:flex" : "flex"}`}>{heroCta}</div>
+                  <div className={`mt-9 flex flex-col gap-3 ${heroMedia ? "hidden lg:flex" : ""}`}>
+                    {heroCta}
+                    {communityLink}
+                  </div>
                 </div>
                 {heroMedia ? (
                   <div>
@@ -142,7 +158,10 @@ export function OfferPage({
                         </div>
                       </details>
                     ) : null}
-                    <div className="mt-8 flex lg:hidden">{heroCta}</div>
+                    <div className="mt-8 flex flex-col gap-3 lg:hidden">
+                      {heroCta}
+                      {communityLink}
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -166,14 +185,17 @@ export function OfferPage({
               <div>
                 <OfferHead head={{ eyebrow: page.book.eyebrow, title: page.book.title, lede: page.book.lede }} fallbackTitle={bookTitle} />
               </div>
-              <div className="rounded-2xl border border-ops-line bg-ops-panel/70 p-5 shadow-raised sm:p-8">
-                <OfferBook
-                  form={form}
-                  mode={page.book.mode}
-                  bookingUrl={bookingUrl}
-                  contactEmail={contactEmail}
-                  previewSteps={preview?.steps}
-                />
+              <div>
+                <div className="mb-3 flex justify-end">{communityLink}</div>
+                <div className="rounded-2xl border border-ops-line bg-ops-panel/70 p-5 shadow-raised sm:p-8">
+                  <OfferBook
+                    form={form}
+                    mode={page.book.mode}
+                    bookingUrl={bookingUrl}
+                    contactEmail={contactEmail}
+                    previewSteps={preview?.steps}
+                  />
+                </div>
               </div>
             </div>
           </Section>

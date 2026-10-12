@@ -34,6 +34,7 @@ import {
 } from "@/lib/consent/ledger-disclosure";
 import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
+import { appendPreservedParams } from "@/lib/offers/preserve-query";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -125,6 +126,11 @@ type SubmitResponse = {
   next_step?: number | null;
   lead_stage?: string | null;
   redirect_url?: string | null;
+  /** V2 router routing: a relative path only, present on the router form's
+   *  final step with a resolved destination. Preferred over redirect_url —
+   *  see the navigation branch below for why it gets kw/cat/utm/visit params
+   *  appended and redirect_url does not. */
+  route_to?: string | null;
   error?: string;
   /** Human sentence the route already wrote for this rejection. Preferred over
    *  any copy on the client, because it can name the specific problem. */
@@ -948,7 +954,18 @@ export function FormPublicClient({
         // Final step done. Capture any continue-now links the server returned
         // (interest form only) so the thank-you screen can offer them.
         setNextForms(data.next_forms ?? []);
-        const target = data.redirect_url || redirectUrl;
+        // V2 router routing: route_to is ANOTHER of this workspace's own pages
+        // (or the community route), not a generic redirect — carry forward the
+        // kw/cat/utm this visitor arrived with (read once on mount,
+        // utmFromUrlRef) and the visit id (sessionStorage also survives this
+        // same-tab navigation on its own, but the destination page's own
+        // /go/community link needs it in the URL, so it travels explicitly
+        // too) so attribution and the funnel stay continuous across the hop.
+        const routeTo = data.route_to;
+        const target =
+          typeof routeTo === "string" && routeTo
+            ? appendPreservedParams(routeTo, { ...utmFromUrlRef.current, v: getOrCreateVisitId() ?? undefined })
+            : data.redirect_url || redirectUrl;
         if (target) {
           window.location.href = target;
         } else {

@@ -64,6 +64,8 @@ import { CONTACT_EMAIL } from "@/lib/marketing/routes";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolvePersona } from "@/lib/role-surfaces";
 import { formsEditRefusal } from "@/lib/forms/access";
+import { communityUrlForTenant } from "@/lib/offers/community-link";
+import { routerPrefillForCat } from "@/lib/forms/router-cat-preselect";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -252,7 +254,11 @@ export default async function AnonymousFormPage({
   // agent blasts texts AND dials, so both params travel together on a link.
   // Passed through raw; lib/forms/lead-source.ts normalizes it server-side on
   // submit, where a bad value becomes "unknown" instead of rejecting the lead.
-  searchParams?: Promise<{ rep?: string; source?: string; offer_preview?: string }>;
+  //
+  // ?cat=p1..p4 — V2 router routing (HANDOVER section 4): preselects a router
+  // form's own "path" field, when it has one with a matching option
+  // (lib/forms/router-cat-preselect.ts). An unknown cat is ignored.
+  searchParams?: Promise<{ rep?: string; source?: string; offer_preview?: string; cat?: string }>;
 }) {
   const resolved = await params;
   const sp = (await searchParams) || {};
@@ -281,11 +287,19 @@ export default async function AnonymousFormPage({
   // form named "support" counts: the rare ordinary form with that name simply
   // collects no marketing consent, which can only ever refuse a send.
   const consentLedgerEnabled = result.form.slug.trim().toLowerCase() !== SUPPORT_FORM_SLUG;
+  // V2 router routing (HANDOVER section 4): null when there is no ?cat, the
+  // value is unrecognized, or this form has no "path" field offering it.
+  const catPrefill = routerPrefillForCat(result.form.steps, sp.cat);
 
   const offer = await loadOfferView(result, sp.offer_preview === "1");
   if (offer) {
     const tenantId = result.form.tenant_id;
     const oasis = isOasisInternalTenant(tenantId);
+    // The "Not ready? Join the free community" link (HANDOVER sections 1.3
+    // and 4): shown only when this tenant actually has one configured —
+    // lib/offers/community-link.ts fails closed to null for every workspace
+    // but OASIS today.
+    const communityConfigured = Boolean(communityUrlForTenant(tenantId));
     return (
       <OfferPage
         prepared={offer.prepared}
@@ -301,6 +315,7 @@ export default async function AnonymousFormPage({
         // preview, same rule `form` below already follows.
         tenantSlug={offer.preview ? null : result.tenant_slug}
         formSlug={offer.preview ? null : result.form.slug}
+        communityConfigured={offer.preview ? false : communityConfigured}
         form={
           offer.preview
             ? null
@@ -325,6 +340,12 @@ export default async function AnonymousFormPage({
                 // tenant_id/form_id.
                 tenantSlug: result.tenant_slug,
                 formSlug: result.form.slug,
+                // Omitted entirely (not even `null`) when there is nothing to
+                // prefill, so an ordinary offer form's props are unchanged —
+                // tests/offer-pages-public.test.ts pins this object byte for
+                // byte, and only a form with a matching "path" field and a
+                // recognized ?cat ever gets this key at all.
+                ...(catPrefill ? { prefill: catPrefill } : {}),
                 anonymousInit: {
                   tenant_slug: result.tenant_slug,
                   form_slug: result.form.slug,
@@ -345,6 +366,10 @@ export default async function AnonymousFormPage({
       steps={result.form.steps}
       redirectUrl={result.form.redirect_url}
       token={null}
+      // Omitted entirely when there is nothing to prefill (see the matching
+      // comment on the offer-page branch above) — tests/offer-pages-public.test.ts
+      // pins this element's props byte for byte.
+      {...(catPrefill ? { prefill: catPrefill } : {})}
       // Sealed consent must name the brand whose disclosure the visitor was
       // actually shown. No Bluerise-hosted form exists yet, so this resolves to
       // SunBiz today; the slug check means standing one up needs no code change.
