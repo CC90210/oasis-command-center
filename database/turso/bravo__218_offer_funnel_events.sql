@@ -25,6 +25,17 @@
 -- given their own details -- never before. A visit that never submits stays
 -- anonymous forever.
 --
+-- offer_funnel_visit_leads (Codex review, PR #598, 2026-10-12 [P2]) is the
+-- PERSISTENT record of that same fact, written once at submit. Without it,
+-- only the rows that existed AT THE MOMENT of submit ever got lead_id filled
+-- in (linkVisitToLead's UPDATE ... WHERE lead_id IS NULL) -- every event
+-- arriving AFTER submit (the submission's own step_submitted beacon, a later
+-- video_play, a delayed page_view beacon that lands after the response) was
+-- permanently anonymous even though the visit plainly has a lead. Every
+-- insert now looks this table up SERVER-SIDE (lib/offers/tracking-store.ts
+-- insertFunnelEvent) and stamps lead_id from it directly -- never from
+-- anything the client sends.
+--
 -- RETENTION: 13 months. lib/offers/tracking-store.ts:purgeFunnelEventsOlderThan
 -- is the purge helper (tests/offer-funnel-events.test.ts proves it deletes
 -- exactly the rows past the cutoff and nothing else). No cron wiring yet --
@@ -84,3 +95,18 @@ CREATE INDEX IF NOT EXISTS ix_offer_funnel_events_visit
 -- cross-tenant table scan, matching the house rule above).
 CREATE INDEX IF NOT EXISTS ix_offer_funnel_events_purge
   ON offer_funnel_events (tenant_id, created_at);
+
+-- The persistent visit->lead mapping (see the note above). ONE row per
+-- (tenant_id, visit_id): the FIRST lead a visit ever resolves to is final --
+-- written once at submit (lib/offers/tracking-store.ts:linkVisitToLead,
+-- `INSERT ... ON CONFLICT (tenant_id, visit_id) DO NOTHING`), read by every
+-- later insertFunnelEvent call for that same visit. Never written from
+-- anything the client supplies; lead_id always comes from the server's own
+-- just-created-or-matched lead record.
+CREATE TABLE IF NOT EXISTS offer_funnel_visit_leads (
+  tenant_id  TEXT NOT NULL,
+  visit_id   TEXT NOT NULL,
+  lead_id    TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, visit_id)
+);

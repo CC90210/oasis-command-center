@@ -26,7 +26,11 @@
  * fallback where sendBeacon is unavailable (old Safari, non-browser test
  * environments).
  */
-import { FUNNEL_EVENT_NAMES, type FunnelEventName } from "./tracking-store";
+// BROWSER-SAFE IMPORT ONLY. tracking-events.ts has zero dependencies; never
+// import lib/offers/tracking-store.ts from this file (it pulls node:crypto
+// and the Turso client into the browser bundle -- Codex P1, PR #598).
+// tests/tracking-client-browser-safe.test.ts pins this.
+import { FUNNEL_EVENT_NAMES, type FunnelEventName } from "./tracking-events";
 
 const VISIT_ID_KEY = "oasis_visit_id";
 const ENDPOINT = "/api/offer-events";

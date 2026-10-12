@@ -23,6 +23,14 @@
  *      resolved to a lead, the save_basin.enrolled interaction.
  *   7. Funnel counts (views/video_plays/community) are tenant-isolated: two
  *      tenants sharing a form slug never see each other's numbers.
+ *   8. (Codex review, PR #598, 2026-10-12 [P2]) An event inserted WELL AFTER
+ *      submit -- not one of the rows present at submit time -- still gets
+ *      lead_id stamped immediately, via the persistent
+ *      offer_funnel_visit_leads mapping, never a client-supplied value.
+ *   9. (Codex review, PR #598 [P2]) stampUtmOnLead's atomic UPDATE never
+ *      discards an unrelated field on the lead, and two overlapping calls
+ *      for the same lead do not corrupt it -- the stored value is exactly
+ *      one of the two, never a mixed/partial write.
  *
  * Run: node --conditions=react-server --import tsx tests/offer-funnel-events.test.ts
  */
@@ -61,6 +69,7 @@ const FORM_A = "f1000000-0000-4000-8000-00000000000a"; // CLIENT_A / "intake"
 const FORM_B = "f2000000-0000-4000-8000-00000000000b"; // CLIENT_B / "intake" (same slug, different tenant)
 const FORM_DISABLED = "f3000000-0000-4000-8000-00000000000c"; // CLIENT_A / "off"
 const FORM_OASIS = "f4000000-0000-4000-8000-00000000000d"; // OASIS / "lounge"
+const FORM_TWO_STEP = "f5000000-0000-4000-8000-00000000000e"; // CLIENT_A / "two-step"
 
 const STEPS = [
   {
@@ -71,6 +80,18 @@ const STEPS = [
       { name: "email", label: "Email", type: "email", required: true },
       { name: "phone", label: "Phone", type: "phone", required: true },
     ],
+  },
+];
+
+/** Two steps, so a TOKEN-authenticated step 1 can be rejected without ever
+ *  touching step 0's lead-creation path -- the ordering test (Codex P2) needs
+ *  exactly this shape. */
+const STEPS_TWO = [
+  STEPS[0],
+  {
+    key: "more",
+    title: "One more thing",
+    fields: [{ name: "company", label: "Company", type: "text", required: true }],
   },
 ];
 
@@ -109,6 +130,7 @@ async function main() {
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'intake', 'Intake', ?, 1)`, args: [FORM_B, CLIENT_B, JSON.stringify(STEPS)] },
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'off', 'Off', ?, 0)`, args: [FORM_DISABLED, CLIENT_A, JSON.stringify(STEPS)] },
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'lounge', 'Lounge', ?, 1)`, args: [FORM_OASIS, OASIS_TENANT, JSON.stringify(STEPS)] },
+      { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'two-step', 'Two Step', ?, 1)`, args: [FORM_TWO_STEP, CLIENT_A, JSON.stringify(STEPS_TWO)] },
     ],
     "write",
   );
@@ -446,6 +468,212 @@ async function main() {
     assert.equal(remainingOld, 0, "the row older than 13 months must be gone");
     const remainingFresh = (await db.execute({ sql: "SELECT 1 FROM offer_funnel_events WHERE visit_id = ?", args: [freshVisit] })).rows.length;
     assert.equal(remainingFresh, 1, "a fresh row must survive the purge");
+  });
+
+  // -- 11. an event long after submit still links, via the persistent mapping --
+  await check("an event inserted well after submit (not present at submit time) still gets lead_id stamped, via the persistent mapping", async () => {
+    const { insertFunnelEvent } = await import("../lib/offers/tracking-store");
+    const dbClient = (await import("../lib/offer-pages/store")).offerPagesDb()!;
+    const visitId = randomVisitId();
+    const email = `late-event-${visitId}@visitor.test`;
+    // No postEvent before submit this time -- the visit has NO row at all
+    // when submit runs, so linkVisitToLead's backfill UPDATE has nothing to
+    // touch. Only the persistent mapping it also writes can save this.
+    const res = await submit({
+      step_index: 0,
+      anonymous_init: { tenant_slug: "client-a", form_slug: "intake" },
+      payload: { name: "Late Event", email, phone: "+15550008888" },
+      visit_id: visitId,
+    });
+    assert.equal(res.status, 200, res.text.slice(0, 300));
+    const leadRow = (
+      await db.execute({
+        sql: "SELECT id FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' AND data LIKE ?",
+        args: [CLIENT_A, `%${email}%`],
+      })
+    ).rows[0];
+    assert.ok(leadRow, "precondition: the lead exists");
+    const leadId = String(leadRow.id);
+
+    // A step_submitted beacon (or any later event) arriving well after the
+    // response -- inserted directly, exactly as the ingest route would.
+    const wrote = await insertFunnelEvent(dbClient, {
+      tenantId: CLIENT_A,
+      formId: FORM_A,
+      visitId,
+      event: "step_submitted",
+      stepIndex: 0,
+    });
+    assert.equal(wrote, true);
+    const lateRow = (await eventsFor(CLIENT_A, FORM_A)).find((r) => r.visit_id === visitId && r.event === "step_submitted")!;
+    assert.ok(lateRow, "the late event must be recorded");
+    assert.equal(lateRow.lead_id, leadId, "a late event must be linked immediately from the persistent mapping, never anonymous");
+  });
+
+  await check("the ingest route itself (not just insertFunnelEvent directly) stamps lead_id on a late event through the persistent mapping", async () => {
+    const visitId = randomVisitId();
+    const email = `late-ingest-${visitId}@visitor.test`;
+    await submit({
+      step_index: 0,
+      anonymous_init: { tenant_slug: "client-a", form_slug: "intake" },
+      payload: { name: "Late Ingest", email, phone: "+15550009999" },
+      visit_id: visitId,
+    });
+    const leadRow = (
+      await db.execute({
+        sql: "SELECT id FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' AND data LIKE ?",
+        args: [CLIENT_A, `%${email}%`],
+      })
+    ).rows[0];
+    const leadId = String(leadRow.id);
+
+    await postEvent({ tenant: "client-a", form: "intake", visit_id: visitId, event: "video_play" });
+    const row = (await eventsFor(CLIENT_A, FORM_A)).find((r) => r.visit_id === visitId && r.event === "video_play")!;
+    assert.equal(row.lead_id, leadId, "the public ingest route must stamp lead_id on a late event too, via the same persistent mapping");
+  });
+
+  // -- 12. stampUtmOnLead's atomic update: no corruption, no discarded fields --
+  await check("stampUtmOnLead's atomic update never discards an unrelated field already on the lead", async () => {
+    const { stampUtmOnLead } = await import("../lib/offer-pages/utm");
+    const dbClient = (await import("../lib/offer-pages/store")).offerPagesDb()!;
+    const visitId = randomVisitId();
+    const email = `unrelated-${visitId}@visitor.test`;
+    await submit({
+      step_index: 0,
+      anonymous_init: { tenant_slug: "client-a", form_slug: "intake" },
+      payload: { name: "Unrelated Field", email, phone: "+15551110000" },
+      visit_id: visitId,
+    });
+    const leadRow = (
+      await db.execute({
+        sql: "SELECT id, data FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' AND data LIKE ?",
+        args: [CLIENT_A, `%${email}%`],
+      })
+    ).rows[0];
+    const leadId = String(leadRow.id);
+    // A field this helper has nothing to do with, committed by some OTHER
+    // write between a hypothetical read and write -- the old read-modify-
+    // write implementation would have clobbered this; the atomic UPDATE
+    // (json_set on named paths only) must leave it exactly alone.
+    await db.execute({
+      sql: "UPDATE tenant_records SET data = json_set(data, '$.custom_note', 'keep me') WHERE id = ?",
+      args: [leadId],
+    });
+    await stampUtmOnLead(dbClient, { tenantId: CLIENT_A, leadId, utm: { utm_source: "google" }, now: new Date().toISOString() });
+    const after = (await db.execute({ sql: "SELECT data FROM tenant_records WHERE id = ?", args: [leadId] })).rows[0];
+    const data = JSON.parse(String(after.data)) as Json;
+    assert.equal(data.custom_note, "keep me", "an unrelated field committed between read and write must survive the atomic stamp");
+    assert.equal(data.utm_source, "google");
+  });
+
+  await check("stampUtmOnLead sends exactly ONE statement (an UPDATE with a json_set/COALESCE expression), never a SELECT-then-write pair", async () => {
+    const { stampUtmOnLead } = await import("../lib/offer-pages/utm");
+    const realDb = (await import("../lib/offer-pages/store")).offerPagesDb()!;
+    const visitId = randomVisitId();
+    const email = `spy-${visitId}@visitor.test`;
+    await submit({
+      step_index: 0,
+      anonymous_init: { tenant_slug: "client-a", form_slug: "intake" },
+      payload: { name: "Spy Target", email, phone: "+15553330000" },
+      visit_id: visitId,
+    });
+    const leadRow = (
+      await db.execute({
+        sql: "SELECT id FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' AND data LIKE ?",
+        args: [CLIENT_A, `%${email}%`],
+      })
+    ).rows[0];
+    const leadId = String(leadRow.id);
+
+    // A thin spy over the real client's .execute -- counts calls and
+    // captures the SQL text, without faking the database itself. A read-
+    // then-write implementation sends a SELECT and then a separate UPDATE
+    // (2 calls); the atomic version sends exactly one UPDATE whose SET
+    // expression is json_set(...) guarded by COALESCE(json_extract(...)).
+    const calls: Array<{ sql: string }> = [];
+    const realExecute = realDb.execute.bind(realDb);
+    const spiedDb = Object.create(realDb) as typeof realDb;
+    spiedDb.execute = ((stmt: unknown) => {
+      const sql = typeof stmt === "string" ? stmt : (stmt as { sql: string }).sql;
+      calls.push({ sql });
+      return realExecute(stmt as never);
+    }) as typeof realDb.execute;
+
+    await stampUtmOnLead(spiedDb, { tenantId: CLIENT_A, leadId, utm: { utm_source: "spy-source" }, now: new Date().toISOString() });
+
+    assert.equal(calls.length, 1, `exactly one statement must be sent for one stampUtmOnLead call -- a read-then-write sends two (SELECT + UPDATE). Saw: ${JSON.stringify(calls)}`);
+    assert.match(calls[0].sql, /^UPDATE tenant_records SET data = json_set\(data,/, "must be a single UPDATE whose value is a json_set(...) expression");
+    assert.match(calls[0].sql, /COALESCE\(json_extract\(data, '\$\.utm_source'\), \?\)/, "each stamped key must be guarded by COALESCE(json_extract(...), ?) so the database -- not a prior JS read -- decides first-touch");
+    assert.doesNotMatch(calls[0].sql, /^SELECT/i, "must never be a plain SELECT (that would mean a read-then-write shape)");
+  });
+
+  await check("two overlapping stampUtmOnLead calls for the same lead do not corrupt it: the stored value is exactly one of the two", async () => {
+    const { stampUtmOnLead } = await import("../lib/offer-pages/utm");
+    const dbClient = (await import("../lib/offer-pages/store")).offerPagesDb()!;
+    const visitId = randomVisitId();
+    const email = `concurrent-utm-${visitId}@visitor.test`;
+    await submit({
+      step_index: 0,
+      anonymous_init: { tenant_slug: "client-a", form_slug: "intake" },
+      payload: { name: "Concurrent UTM", email, phone: "+15552220000" },
+      visit_id: visitId,
+    });
+    const leadRow = (
+      await db.execute({
+        sql: "SELECT id FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' AND data LIKE ?",
+        args: [CLIENT_A, `%${email}%`],
+      })
+    ).rows[0];
+    const leadId = String(leadRow.id);
+
+    await Promise.all([
+      stampUtmOnLead(dbClient, { tenantId: CLIENT_A, leadId, utm: { utm_source: "race-a" }, now: new Date().toISOString() }),
+      stampUtmOnLead(dbClient, { tenantId: CLIENT_A, leadId, utm: { utm_source: "race-b" }, now: new Date().toISOString() }),
+    ]);
+    const after = (await db.execute({ sql: "SELECT data FROM tenant_records WHERE id = ?", args: [leadId] })).rows[0];
+    const data = JSON.parse(String(after.data)) as Json;
+    assert.ok(["race-a", "race-b"].includes(String(data.utm_source)), `utm_source must be exactly one clean value, got ${JSON.stringify(data.utm_source)}`);
+  });
+
+  // -- 13. attribution stamps only AFTER validation passes (Codex P2) --------
+  await check("a rejected TOKEN-authenticated step never stamps UTM attribution; a later valid one still can", async () => {
+    const visitId = randomVisitId();
+    const email = `order-${visitId}@visitor.test`;
+    const step0 = await submit({
+      step_index: 0,
+      anonymous_init: { tenant_slug: "client-a", form_slug: "two-step" },
+      payload: { name: "Order Test", email, phone: "+15554440000" },
+      visit_id: visitId,
+    });
+    assert.equal(step0.status, 200, step0.text.slice(0, 300));
+    const token = step0.body.minted_token as string | undefined;
+    assert.ok(token, "step 0 must mint a token for step 1 to use");
+
+    const leadRow = (
+      await db.execute({
+        sql: "SELECT id FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' AND data LIKE ?",
+        args: [CLIENT_A, `%${email}%`],
+      })
+    ).rows[0];
+    const leadId = String(leadRow.id);
+
+    // Step 1, TOKEN-authenticated (not anonymous_init -- this is the exact
+    // path Codex's note names), missing its required field. Must be
+    // rejected, and must NOT stamp utm_source even though the body carries
+    // one.
+    const rejected = await submit({ token, step_index: 1, payload: {}, utm_source: "should-never-land" });
+    assert.equal(rejected.status, 400, rejected.text.slice(0, 300));
+    const afterReject = await lead(leadId);
+    assert.equal(afterReject?.utm_source, undefined, "a rejected submission must never stamp attribution, even when the body carries one");
+
+    // The same step, completed VALIDLY, with the CORRECT attribution this
+    // time -- proving the bug's actual harm (a permanently wrong first-touch
+    // value locking out the correct one) cannot happen: nothing was stamped
+    // by the rejection, so this is still a true first touch.
+    const accepted = await submit({ token, step_index: 1, payload: { company: "Order Co" }, utm_source: "correct-source" });
+    assert.equal(accepted.status, 200, accepted.text.slice(0, 300));
+    const afterAccept = await lead(leadId);
+    assert.equal(afterAccept?.utm_source, "correct-source", "the later VALID submission must still be able to supply the correct attribution");
   });
 
   finish("offer-funnel-events");

@@ -634,32 +634,6 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     return NextResponse.json({ ok: false, error: "tenant_mismatch" }, { status: 400 });
   }
 
-  // -------------------------------------------------------------------
-  // V5a FUNNEL TRACKING: visit->lead link + first-touch UTM stamp.
-  //
-  // Both are best-effort and run on every step (not just step 0): the link
-  // is idempotent (linkVisitToLead only fills rows still carrying lead_id
-  // IS NULL) and the UTM stamp is first-touch-wins, so repeating either on a
-  // later step changes nothing once the first one lands. Neither can fail
-  // the submission -- both helpers swallow their own errors, and this block
-  // never throws out of handleSubmit.
-  if (typeof body.visit_id === "string" && isValidVisitId(body.visit_id)) {
-    const tdb = offerPagesDb();
-    if (tdb) await linkVisitToLead(tdb, { tenantId: form.tenant_id, visitId: body.visit_id, leadId: link.lead_id });
-  }
-  {
-    const utmInput: UtmInput = {
-      utm_source: body.utm_source,
-      utm_medium: body.utm_medium,
-      utm_campaign: body.utm_campaign,
-      kw: body.kw,
-      cat: body.cat,
-    };
-    if (Object.values(utmInput).some((v) => typeof v === "string" && v.trim())) {
-      await stampUtmOnLead(db, { tenantId: form.tenant_id, leadId: link.lead_id, utm: utmInput, now: new Date().toISOString() });
-    }
-  }
-
   // Parse the steps to validate step_index range. parseFormSteps throws
   // on malformed data — if a DB row is somehow corrupt we 500 cleanly.
   let steps: FormStep[];
@@ -1093,6 +1067,41 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
   const submissionId = (insertRes.data as { id: string }).id;
+
+  // -------------------------------------------------------------------
+  // V5a FUNNEL TRACKING: visit->lead link + first-touch UTM stamp.
+  //
+  // DELIBERATELY HERE, AFTER the form_submissions insert succeeded -- never
+  // earlier (Codex review, PR #598, 2026-10-12 [P2]: this used to run before
+  // step-range, sequential-progress and required-field validation, so a
+  // REJECTED submission could still permanently stamp first-touch campaign
+  // values on an existing lead, locking out the correct attribution a later,
+  // valid submission would have supplied). By this point the step has been
+  // accepted; every 4xx above returns before reaching here.
+  //
+  // Both are best-effort and run on every step (not just step 0): the link
+  // is idempotent (linkVisitToLead only fills rows still carrying lead_id
+  // IS NULL, and upserts the persistent visit->lead mapping ON CONFLICT DO
+  // NOTHING) and the UTM stamp is a single atomic first-touch UPDATE
+  // (lib/offer-pages/utm.ts), so repeating either on a later step changes
+  // nothing once the first one lands. Neither can fail the submission --
+  // both helpers swallow their own errors, and this block never throws out
+  // of handleSubmit.
+  if (typeof body.visit_id === "string" && isValidVisitId(body.visit_id)) {
+    const tdb = offerPagesDb();
+    if (tdb) await linkVisitToLead(tdb, { tenantId: form.tenant_id, visitId: body.visit_id, leadId: link.lead_id });
+  }
+  {
+    const utmInput: UtmInput = {
+      utm_source: body.utm_source,
+      utm_medium: body.utm_medium,
+      utm_campaign: body.utm_campaign,
+      kw: body.kw,
+      cat: body.cat,
+    };
+    const tdb = offerPagesDb();
+    if (tdb) await stampUtmOnLead(tdb, { tenantId: form.tenant_id, leadId: link.lead_id, utm: utmInput, now: new Date().toISOString() });
+  }
 
   // ---------------------------------------------------------------------
   // Channel of THIS submission (Adon 2026-08-24: "so we could easily see if

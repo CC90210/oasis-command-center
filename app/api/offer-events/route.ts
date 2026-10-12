@@ -24,6 +24,12 @@
  *     (lib/offers/tracking-store.ts:isValidFunnelEvent).
  *   - detail is re-built from an explicit per-event whitelist
  *     (sanitizeFunnelDetail), never stored verbatim.
+ *   - lead_id is NEVER read from the body (there is no such field in `Body`
+ *     at all). insertFunnelEvent resolves it itself from the persistent
+ *     offer_funnel_visit_leads mapping (Codex review, PR #598, 2026-10-12
+ *     [P2]), so an event arriving long after submit -- this route's own
+ *     normal case, since every event lands here, not just the first one --
+ *     still lands linked, without ever trusting a client-supplied id.
  *
  * NO PII, EVER: no IP, no User-Agent, no cookie is read or stored here. The
  * only identifier is the client-generated visit_id (opaque, no server

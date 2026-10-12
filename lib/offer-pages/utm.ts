@@ -15,8 +15,22 @@
  * returning through a different campaign link can never overwrite it. A key
  * that has never been set CAN be filled in later — an upgrade from "never
  * attributed", not a reassignment.
+ *
+ * ATOMIC WRITE (Codex review, PR #598, 2026-10-12 [P2]). stampUtmOnLead used
+ * to read the lead's `data`, compute the patch in JS, and write the WHOLE
+ * object back. Two submissions for the same lead overlapping could both read
+ * the same unset field and race to write it (the later write wins, not the
+ * first, which is backwards for "first touch"), and the full-object rewrite
+ * could discard an unrelated field some OTHER write committed in between the
+ * read and this write. The fix is ONE UPDATE statement per call, built from
+ * `json_set` + `COALESCE(json_extract(...), ?)` per key — SQLite (and so
+ * libSQL) evaluates the whole SET expression against the CURRENT row inside
+ * the single statement, so "keep the existing value if there is one, else
+ * use the new one" is enforced by the database itself, not by a read this
+ * code did a moment ago. Every OTHER key in `data` this statement does not
+ * name is untouched, unlike a full-object write.
  */
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Client } from "@libsql/client";
 
 export const UTM_FIELDS =["utm_source", "utm_medium", "utm_campaign", "kw", "cat"] as const;
 export type UtmField = (typeof UTM_FIELDS)[number];
@@ -58,62 +72,50 @@ export function normalizeUtmField(field: UtmField, raw: unknown): string | null 
 }
 
 /**
- * The patch to merge into a lead's `data`, or null when there is nothing new
- * to write. Each of the five fields is independent: a lead may already carry
- * `cat` from an earlier visit while `kw` is still unset, and this fills in
- * only `kw` without touching `cat`. Mirrors adoptLeadSource's "first touch
- * wins, never a blind overwrite" contract field-by-field.
+ * Builds the `json_set(data, ...)` expression (and its bound parameters)
+ * that stamps exactly the fields this call has a valid value for, each
+ * guarded by `COALESCE(json_extract(data, '<path>'), ?)` so the database
+ * itself keeps an existing value over the new one. Pure and testable: null
+ * when there is nothing valid to stamp at all, so the caller can skip the
+ * UPDATE entirely. The JSON path literals are built from the fixed
+ * UTM_KEYS/UTM_AT_KEY constants, never from caller input, so there is no
+ * injection surface in interpolating them directly into the SQL text --
+ * only the VALUES are placeholders.
  */
-export function adoptUtm(
-  existing: Record<string, unknown> | null | undefined,
-  incoming: UtmInput,
-  nowIso: string,
-): Record<string, string> | null {
-  const patch: Record<string, string> = {};
-  let changed = false;
+export function buildUtmSetExpression(utm: UtmInput, nowIso: string): { sql: string; args: string[] } | null {
+  const clauses: string[] = [];
+  const args: string[] = [];
   for (const field of UTM_FIELDS) {
-    const key = UTM_KEYS[field];
-    const already = existing?.[key];
-    if (typeof already === "string" && already.trim()) continue; // first touch wins
-    const value = normalizeUtmField(field, incoming[field]);
+    const value = normalizeUtmField(field, utm[field]);
     if (value === null) continue;
-    patch[key] = value;
-    changed = true;
+    const key = UTM_KEYS[field];
+    clauses.push(`'$.${key}', COALESCE(json_extract(data, '$.${key}'), ?)`);
+    args.push(value);
   }
-  if (!changed) return null;
-  patch[UTM_AT_KEY] = nowIso;
-  return patch;
+  if (!clauses.length) return null;
+  clauses.push(`'$.${UTM_AT_KEY}', COALESCE(json_extract(data, '$.${UTM_AT_KEY}'), ?)`);
+  args.push(nowIso);
+  return { sql: `json_set(data, ${clauses.join(", ")})`, args };
 }
 
 /**
- * Read-modify-write wrapper for the submit route: reads the lead's current
- * `data`, computes the first-touch patch, and writes it back only when there
- * is something new. A no-op (not found, nothing new, or a DB error) is
- * silent and never throws — this is best-effort attribution, not a gate on
- * the submission it rides alongside. A rare race against another write to
- * the same lead can at worst repeat an already-first-touch value (adoptUtm
- * is idempotent per field), never corrupt it.
+ * Stamp first-touch UTM attribution on a lead in ONE atomic UPDATE -- see
+ * the module doc comment for why this replaced a read-then-write. A no-op
+ * (nothing valid to stamp, or a DB error) is silent and never throws --
+ * this is best-effort attribution, not a gate on the submission it rides
+ * alongside.
  */
 export async function stampUtmOnLead(
-  db: SupabaseClient,
+  db: Client,
   input: { tenantId: string; leadId: string; utm: UtmInput; now: string },
 ): Promise<void> {
+  const built = buildUtmSetExpression(input.utm, input.now);
+  if (!built) return;
   try {
-    const cur = await db
-      .from("tenant_records")
-      .select("data")
-      .eq("id", input.leadId)
-      .eq("tenant_id", input.tenantId)
-      .maybeSingle();
-    if (cur.error || !cur.data) return;
-    const curData = (cur.data as { data?: Record<string, unknown> }).data || {};
-    const patch = adoptUtm(curData, input.utm, input.now);
-    if (!patch) return;
-    await db
-      .from("tenant_records")
-      .update({ data: { ...curData, ...patch } })
-      .eq("id", input.leadId)
-      .eq("tenant_id", input.tenantId);
+    await db.execute({
+      sql: `UPDATE tenant_records SET data = ${built.sql} WHERE id = ? AND tenant_id = ? AND entity_type = 'lead'`,
+      args: [...built.args, input.leadId, input.tenantId],
+    });
   } catch (err) {
     console.error("[offer-pages.utm] stamp failed", {
       leadId: input.leadId,

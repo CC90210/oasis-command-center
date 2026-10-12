@@ -16,27 +16,18 @@
 import type { Client } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { offerPagesDb, isMissingOfferTable } from "@/lib/offer-pages/store";
+import { FUNNEL_EVENT_NAMES, isValidFunnelEvent, type FunnelEventName } from "./tracking-events";
 
 export { offerPagesDb };
 
-/** The whitelisted event vocabulary (HANDOVER section 5 + the build spec). */
-export const FUNNEL_EVENT_NAMES = [
-  "page_view",
-  "video_play",
-  "video_progress",
-  "path_selected",
-  "step_viewed",
-  "step_submitted",
-  "community_click",
-  "checkout_click",
-  "booking_made",
-] as const;
-
-export type FunnelEventName = (typeof FUNNEL_EVENT_NAMES)[number];
-
-export function isValidFunnelEvent(value: unknown): value is FunnelEventName {
-  return typeof value === "string" && (FUNNEL_EVENT_NAMES as readonly string[]).includes(value);
-}
+/**
+ * The whitelisted event vocabulary (HANDOVER section 5 + the build spec).
+ * Re-exported from lib/offers/tracking-events.ts, which is the browser-safe
+ * module -- see its own doc comment and the Codex P1 note there. Every
+ * SERVER-side import of these three names keeps working unchanged; only the
+ * browser side (lib/offers/tracking-client.ts) was moved off this file.
+ */
+export { FUNNEL_EVENT_NAMES, isValidFunnelEvent, type FunnelEventName };
 
 /** video_progress's only valid checkpoints. Anything else is dropped (not rejected). */
 const VIDEO_PROGRESS_CHECKPOINTS = new Set([25, 50, 75, 100]);
@@ -95,9 +86,9 @@ function rowsOf<T extends Record<string, unknown>>(rs: { rows: unknown[]; column
   });
 }
 
-/** "offer_funnel_events does not exist yet": bravo__218 has not been applied here. */
+/** "offer_funnel_events or offer_funnel_visit_leads does not exist yet": bravo__218 has not been applied here. */
 export function isMissingFunnelTable(err: unknown): boolean {
-  return /no such table:\s*"?offer_funnel_events\b/i.test(err instanceof Error ? err.message : String(err));
+  return /no such table:\s*"?offer_funnel_(events|visit_leads)\b/i.test(err instanceof Error ? err.message : String(err));
 }
 
 let missingLogged = false;
@@ -108,10 +99,40 @@ function noteMissing(where: string): void {
 }
 
 /**
- * Record one event. Never throws on a missing table or a DB error -- a
- * tracking failure must never surface to the visitor or the caller that fired
- * it (the ingest route always answers 204 regardless). Returns whether a row
- * was actually written, for the caller's own logging.
+ * The PERSISTENT visit->lead mapping (offer_funnel_visit_leads, Codex
+ * review PR #598 [P2]). The single source of truth for "does this visit
+ * have a lead", read by every insert (so an event arriving minutes after
+ * submit still lands linked) and by /go/community (to decide whether to
+ * write save_basin.enrolled). null on a missing table, a failed read, or a
+ * visit that genuinely has no lead yet -- all three mean "insert with no
+ * lead_id", never a thrown error.
+ */
+async function lookupVisitLead(db: Client, tenantId: string, visitId: string): Promise<string | null> {
+  try {
+    const rs = await db.execute({
+      sql: `SELECT lead_id FROM offer_funnel_visit_leads WHERE tenant_id = ? AND visit_id = ? LIMIT 1`,
+      args: [tenantId, visitId],
+    });
+    const r = rowsOf<{ lead_id: string }>(rs)[0];
+    return r ? String(r.lead_id) : null;
+  } catch (err) {
+    if (isMissingFunnelTable(err) || isMissingOfferTable(err)) {
+      noteMissing("lookup-visit-lead");
+      return null;
+    }
+    console.error("[offer-funnel] visit-lead lookup failed", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+}
+
+/**
+ * Record one event. lead_id is NEVER accepted from the caller -- it is
+ * always resolved here, server-side, from the persistent visit->lead
+ * mapping (lookupVisitLead), so a client can never claim an event belongs
+ * to a lead it does not. Never throws on a missing table or a DB error -- a
+ * tracking failure must never surface to the visitor or the caller that
+ * fired it (the ingest route always answers 204 regardless). Returns
+ * whether a row was actually written, for the caller's own logging.
  */
 export async function insertFunnelEvent(
   db: Client,
@@ -122,11 +143,11 @@ export async function insertFunnelEvent(
     event: FunnelEventName;
     stepIndex?: number | null;
     detail?: string | null;
-    leadId?: string | null;
     now?: string;
   },
 ): Promise<boolean> {
   try {
+    const leadId = await lookupVisitLead(db, input.tenantId, input.visitId);
     await db.execute({
       sql: `INSERT INTO offer_funnel_events (id, tenant_id, form_id, visit_id, event, step_index, detail, lead_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -138,7 +159,7 @@ export async function insertFunnelEvent(
         input.event,
         input.stepIndex ?? null,
         input.detail ?? null,
-        input.leadId ?? null,
+        leadId,
         input.now ?? new Date().toISOString(),
       ],
     });
@@ -154,10 +175,17 @@ export async function insertFunnelEvent(
 }
 
 /**
- * Link a visit to the lead it just became, at submit -- and ONLY then. Every
- * row this visit wrote BEFORE the visitor gave their details gets lead_id
- * filled in once; a row already linked (a second step's submit re-running
- * this) is left alone, so the FIRST lead a visit resolves to is final.
+ * Link a visit to the lead it just became, at submit -- and ONLY then.
+ * Does TWO things, both idempotent:
+ *   1. Writes the PERSISTENT mapping (offer_funnel_visit_leads), ON CONFLICT
+ *      DO NOTHING -- the first lead a visit resolves to is final, and every
+ *      event inserted from this point on (insertFunnelEvent) reads it
+ *      straight back, including ones that arrive long after this call
+ *      returns (Codex review, PR #598 [P2]: before this table existed, only
+ *      rows already present at this exact moment ever got linked).
+ *   2. Backfills every row THIS VISIT WROTE BEFORE the mapping existed
+ *      (lead_id IS NULL) -- the historical page_view/step_viewed events from
+ *      before the visitor gave their details.
  * Never throws: a failed link must not fail the submission it rides on.
  */
 export async function linkVisitToLead(
@@ -165,6 +193,12 @@ export async function linkVisitToLead(
   input: { tenantId: string; visitId: string; leadId: string },
 ): Promise<void> {
   try {
+    await db.execute({
+      sql: `INSERT INTO offer_funnel_visit_leads (tenant_id, visit_id, lead_id, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (tenant_id, visit_id) DO NOTHING`,
+      args: [input.tenantId, input.visitId, input.leadId, new Date().toISOString()],
+    });
     await db.execute({
       sql: `UPDATE offer_funnel_events SET lead_id = ?
             WHERE tenant_id = ? AND visit_id = ? AND lead_id IS NULL`,
@@ -182,27 +216,13 @@ export async function linkVisitToLead(
 /**
  * Does this visit already carry a lead (from an earlier submit in the same
  * session)? Used by /go/community to decide whether to also write the
- * save_basin.enrolled lead interaction. null on any failure or missing table
- * -- the redirect still happens either way; this is best-effort enrichment.
+ * save_basin.enrolled lead interaction. Reads the same persistent mapping
+ * insertFunnelEvent does. null on any failure, missing table, or a visit
+ * that genuinely has no lead yet -- the redirect still happens either way;
+ * this is best-effort enrichment.
  */
 export async function findLeadForVisit(db: Client, tenantId: string, visitId: string): Promise<string | null> {
-  try {
-    const rs = await db.execute({
-      sql: `SELECT lead_id FROM offer_funnel_events
-            WHERE tenant_id = ? AND visit_id = ? AND lead_id IS NOT NULL
-            ORDER BY created_at DESC LIMIT 1`,
-      args: [tenantId, visitId],
-    });
-    const r = rowsOf<{ lead_id: string }>(rs)[0];
-    return r ? String(r.lead_id) : null;
-  } catch (err) {
-    if (isMissingFunnelTable(err) || isMissingOfferTable(err)) {
-      noteMissing("find-lead");
-      return null;
-    }
-    console.error("[offer-funnel] find-lead-for-visit failed", { tenantId, error: err instanceof Error ? err.message : String(err) });
-    return null;
-  }
+  return lookupVisitLead(db, tenantId, visitId);
 }
 
 export type FunnelCounts = { views: number | null; video_plays: number | null; community: number | null };
@@ -258,17 +278,22 @@ export async function countFunnelEventMetrics(
 }
 
 /**
- * The 13-month retention purge (migration comment). Deletes every event
- * created before `cutoffIso` and returns the row count removed. No cron
- * wiring yet -- this is the helper a later scheduled job calls.
+ * The 13-month retention purge (migration comment). Deletes every event AND
+ * every persistent visit->lead mapping row created before `cutoffIso`,
+ * returning the combined row count removed. No cron wiring yet -- this is
+ * the helper a later scheduled job calls.
  */
 export async function purgeFunnelEventsOlderThan(db: Client, cutoffIso: string): Promise<number> {
   try {
-    const rs = await db.execute({
+    const events = await db.execute({
       sql: `DELETE FROM offer_funnel_events WHERE created_at < ?`,
       args: [cutoffIso],
     });
-    return rs.rowsAffected;
+    const mappings = await db.execute({
+      sql: `DELETE FROM offer_funnel_visit_leads WHERE created_at < ?`,
+      args: [cutoffIso],
+    });
+    return events.rowsAffected + mappings.rowsAffected;
   } catch (err) {
     if (isMissingFunnelTable(err) || isMissingOfferTable(err)) {
       noteMissing("purge");
