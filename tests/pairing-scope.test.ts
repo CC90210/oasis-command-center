@@ -64,6 +64,7 @@ const db: Client = createClient({ url: `file:${dbFile}` });
 // route's per-tenant executor gate never interferes with this file's checks.
 const TENANT = "c1c1c1c1-0000-4000-8000-0000000000c1";
 const OWNER_ID = "auth-owner-0001";
+const REPAIR_OWNER_ID = "auth-owner-repair-0001";
 const MEMBER_ID = "auth-member-0001"; // read_only
 const stamp = "2026-10-11T00:00:00.000Z";
 
@@ -120,7 +121,13 @@ async function seed() {
     [
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-x', 'Client X Plumbing')", args: [TENANT] },
       { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [OWNER_ID, "owner@client-x.test"] },
+      { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [REPAIR_OWNER_ID, "repair-owner@client-x.test"] },
       { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [MEMBER_ID, "member@client-x.test"] },
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, full_name, onboarding_completed_at, updated_at)
+              VALUES ('p-repair-owner', ?, 'repair-owner@client-x.test', ?, 'owner', 1, 'Repair Owner', ?, ?)`,
+        args: [REPAIR_OWNER_ID, TENANT, stamp, stamp],
+      },
       {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, full_name, onboarding_completed_at, updated_at)
               VALUES ('p-owner', ?, 'owner@client-x.test', ?, 'owner', 1, 'Owner', ?, ?)`,
@@ -396,7 +403,7 @@ async function main() {
   await check("re-pairing a computer clears the previous token and the approval: the old in-grace token answers nothing", async () => {
     const { sha256 } = await import("../lib/api-helpers");
     const fp = "repair-fp";
-    await login(OWNER_ID, "owner@client-x.test");
+    await login(REPAIR_OWNER_ID, "repair-owner@client-x.test");
     const first = (await jsonOf(await mintRoute.POST(mintReq({ purpose: "connector" })))).body as { code: string };
     logout();
     const r1 = await jsonOf(await redeemRoute.POST(redeemReq(first.code, fp)));
@@ -405,9 +412,9 @@ async function main() {
     const nowIso = new Date().toISOString();
     await db.execute({
       sql: "UPDATE bridge_pairings SET previous_token_hash = ?, token_rotated_at = ?, claim_enabled_at = ?, claim_enabled_by = ? WHERE id = ?",
-      args: [sha256("old-connector-token"), nowIso, nowIso, OWNER_ID, pairingId],
+      args: [sha256("old-connector-token"), nowIso, nowIso, REPAIR_OWNER_ID, pairingId],
     });
-    await login(OWNER_ID, "owner@client-x.test");
+    await login(REPAIR_OWNER_ID, "repair-owner@client-x.test");
     const second = (await jsonOf(await mintRoute.POST(mintReq()))).body as { code: string };
     logout();
     const r2 = await jsonOf(await redeemRoute.POST(redeemReq(second.code, fp)));
