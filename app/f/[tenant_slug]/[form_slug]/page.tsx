@@ -42,6 +42,7 @@ import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { OfferPage } from "@/components/offer-pages/OfferPage";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
+import { SUPPORT_FORM_SLUG } from "@/lib/delivery/support-form";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -274,6 +275,11 @@ export default async function AnonymousFormPage({
     tenantId: result.form.tenant_id,
     tenantSlug: result.tenant_slug,
   }).identity;
+  // A support form files a ticket, and the submit route hands it to the ticket
+  // desk before the consent ledger runs, so it draws no consent boxes. Any
+  // form named "support" counts: the rare ordinary form with that name simply
+  // collects no marketing consent, which can only ever refuse a send.
+  const consentLedgerEnabled = result.form.slug.trim().toLowerCase() !== SUPPORT_FORM_SLUG;
 
   const offer = await loadOfferView(result, sp.offer_preview === "1");
   if (offer) {
@@ -306,6 +312,7 @@ export default async function AnonymousFormPage({
                 token: null,
                 brand: consentBrandForTenant(result.tenant_slug, result.form.slug),
                 consentIdentity,
+                consentLedgerEnabled,
                 submissionSource: source,
                 submissionPath: `/f/${result.tenant_slug}/${result.form.slug}`,
                 anonymousInit: {
@@ -333,6 +340,7 @@ export default async function AnonymousFormPage({
       // SunBiz today; the slug check means standing one up needs no code change.
       brand={consentBrandForTenant(result.tenant_slug, result.form.slug)}
       consentIdentity={consentIdentity}
+      consentLedgerEnabled={consentLedgerEnabled}
       // Channel on EVERY submit, not only inside anonymous_init.
       //
       // Codex review 2026-08-24 (P2, confirmed): a form whose step 0 is a

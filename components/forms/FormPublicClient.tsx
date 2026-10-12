@@ -55,6 +55,14 @@ type Props = {
    * `brand` above, which only ever covers SunBiz/Bluerise.
    */
   consentIdentity: ConsentIdentity;
+  /**
+   * Whether this form's submissions reach the consent ledger at all. False on
+   * a support form: the submit route hands those to the ticket desk before the
+   * ledger runs (a ticket is not a lead, and the ledger records against a
+   * lead), so a box drawn there would be a choice nobody records. Required so
+   * a new mount point has to decide.
+   */
+  consentLedgerEnabled: boolean;
   formId: string;
   formName: string;
   branding: FormBranding;
@@ -250,6 +258,7 @@ export function FormPublicClient({
   prefill,
   brand,
   consentIdentity,
+  consentLedgerEnabled,
   chrome = "page",
   onStepSubmitted,
 }: Props) {
@@ -398,7 +407,10 @@ export function FormPublicClient({
   // different steps renders each box on the step that actually asks for
   // that channel. Unticked by default on every render, including a step
   // revisited via Back — a consent box must never arrive pre-checked.
-  const ledgerChannels = useMemo(() => renderedChannelsForStep(step, mergedValues), [step, mergedValues]);
+  const ledgerChannels = useMemo(
+    () => (consentLedgerEnabled ? renderedChannelsForStep(step, mergedValues) : []),
+    [consentLedgerEnabled, step, mergedValues],
+  );
   const [ledgerTicked, setLedgerTicked] = useState<Record<ConsentChannel, boolean>>({
     email: false,
     sms: false,
@@ -699,21 +711,6 @@ export function FormPublicClient({
       if (submissionSource) submitBody.submission_source = submissionSource;
       if (submissionPath) submitBody.submission_path = submissionPath;
 
-      // CONSENT LEDGER. Only which box(es) THIS step rendered, and whether
-      // each was ticked right now — nothing else is sent, because nothing
-      // else is trusted: the server independently derives which channels
-      // step `stepAtStart` actually declares and ignores anything here that
-      // disagrees (app/api/forms/submit/route.ts). Read through ledgerRef,
-      // never the closure: this line runs after the address wait, and the
-      // visitor's last answer is what the current render holds.
-      const ledgerNow = ledgerRef.current;
-      if (ledgerNow.channels.length > 0) {
-        submitBody.consent_ledger = {
-          email: ledgerNow.channels.includes("email") ? ledgerNow.ticked.email : undefined,
-          sms: ledgerNow.channels.includes("sms") ? ledgerNow.ticked.sms : undefined,
-        };
-      }
-
       // CONSENT EVIDENCE. Sealed from the BROWSER, because the evidence is only
       // worth having if it records the merchant's own IP — a call from our API
       // would record our Vercel IP, which the vault correctly refuses to treat
@@ -799,6 +796,22 @@ export function FormPublicClient({
         submitBody.token = token;
       } else if (anonymousInit) {
         submitBody.anonymous_init = anonymousInit;
+      }
+
+      // CONSENT LEDGER. Only which box(es) THIS step rendered, and whether
+      // each was ticked right now — nothing else is sent, because nothing
+      // else is trusted: the server independently derives which channels
+      // step `stepAtStart` actually declares and ignores anything here that
+      // disagrees (app/api/forms/submit/route.ts). Read through ledgerRef,
+      // never the closure, and HERE, immediately before the request: both the
+      // address wait and the vault capture above can take seconds while the
+      // boxes stay clickable, and the visitor's last answer is the one sent.
+      const ledgerNow = ledgerRef.current;
+      if (ledgerNow.channels.length > 0) {
+        submitBody.consent_ledger = {
+          email: ledgerNow.channels.includes("email") ? ledgerNow.ticked.email : undefined,
+          sms: ledgerNow.channels.includes("sms") ? ledgerNow.ticked.sms : undefined,
+        };
       }
       const res = await fetch("/api/forms/submit", {
         method: "POST",

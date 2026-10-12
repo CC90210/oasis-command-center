@@ -603,6 +603,26 @@ async function main() {
     const block = src.slice(Math.max(0, at - 400), at + 300);
     assert.ok(/const ledgerNow = ledgerRef\.current;/.test(block), "submit must read the boxes through the ref");
     assert.ok(!/ledgerTicked\.(email|sms)/.test(block), "submit must not read the closure's tick state");
+    // Read AFTER every wait: the vault capture can take seconds with the boxes
+    // still clickable, so the answer is taken immediately before the request.
+    const vaultAt = src.indexOf("await captureConsent(");
+    const fetchAt = src.indexOf('await fetch("/api/forms/submit", {', at);
+    assert.ok(vaultAt > 0 && at > vaultAt, "the consent answer must be read after the vault capture");
+    assert.ok(fetchAt > at && fetchAt - at < 400, "the consent answer must be read immediately before the submit request");
+  });
+
+  await check("support forms draw no consent boxes (their submissions go to the ticket desk, which never records them)", () => {
+    const client = readFileSync(join(ROOT, "components", "forms", "FormPublicClient.tsx"), "utf8");
+    assert.ok(
+      /consentLedgerEnabled \? renderedChannelsForStep\(step, mergedValues\) : \[\]/.test(client),
+      "a disabled ledger must draw no boxes",
+    );
+    const page = readFileSync(join(ROOT, "app", "f", "[tenant_slug]", "[form_slug]", "page.tsx"), "utf8");
+    assert.ok(/const consentLedgerEnabled = result\.form\.slug\.trim\(\)\.toLowerCase\(\) !== SUPPORT_FORM_SLUG;/.test(page));
+    assert.ok(/consentLedgerEnabled=\{consentLedgerEnabled\}/.test(page), "the plain form must receive it");
+    assert.ok(/^\s+consentLedgerEnabled,$/m.test(page), "the offer page's embedded form must receive it");
+    const support = readFileSync(join(ROOT, "lib", "delivery", "support-form.ts"), "utf8");
+    assert.ok(/export const SUPPORT_FORM_SLUG = "support";/.test(support), "the slug the route routes on");
   });
 
   finish("consent-ledger");

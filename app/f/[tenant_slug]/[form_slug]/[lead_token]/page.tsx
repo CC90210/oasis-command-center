@@ -311,6 +311,10 @@ export default async function PublicFormPage({
       consentIdentity={
         resolveConsentIdentity({ tenantId: result.form.tenant_id, tenantSlug: result.tenant_slug }).identity
       }
+      // A signed link is bound to a lead, and the submit route never sends a
+      // token-bearing body to the support desk, so every box drawn here is
+      // recorded.
+      consentLedgerEnabled
     />
   );
 }

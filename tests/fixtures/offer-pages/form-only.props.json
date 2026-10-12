@@ -265,6 +265,7 @@
     "address": "6993 Decarie Blvd, Montreal, QC H3W 0B5",
     "privacyUrl": "https://oasisai.work/privacy"
   },
+  "consentLedgerEnabled": true,
   "submissionPath": "/f/oasis-ai-cc/ai-audit",
   "anonymousInit": {
     "tenant_slug": "oasis-ai-cc",
