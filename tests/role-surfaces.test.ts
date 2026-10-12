@@ -698,12 +698,13 @@ assert.ok(
  * tests/oasis-create-stage-contract.test.ts. */
 const boardStagesCode = stripComments(read("lib/oasis-lead-create.ts"));
 assert.ok(
-  /const stages = session\.ok\s*\?\s*oasisBoardStages\(/.test(pipelineCode) &&
+  /const stages = session\.ok\s*\?\s*warmInbound/.test(pipelineCode) &&
+    /\?\s*stagesForOasisWarmInboundRole\(/.test(pipelineCode) &&
+    /:\s*oasisBoardStages\(/.test(pipelineCode) &&
     /export const OASIS_POOL_STAGE = OASIS_INTAKE_STAGE;/.test(boardStagesCode) &&
     /\.filter\(\(stage\) => stage\.key !== OASIS_POOL_STAGE\)/.test(boardStagesCode) &&
     /stageKeys: assigneeScope\.allowed \? stages\.map/.test(pipelineCode),
-  "the pipeline must exclude the researched stage — those are un-worked directory rows, " +
-    "not deals, and /web-leads reads the very same rows so they must be HIDDEN, never deleted",
+  "the cold pipeline must exclude researched directory rows while the explicit warm-inbound queue may show researched form intake",
 );
 
 /* ───── the FOUNDERS GATE must follow the capability, not a persona name ─────

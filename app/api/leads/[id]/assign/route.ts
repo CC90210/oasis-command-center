@@ -37,6 +37,7 @@ import { nudgeBoards } from "@/lib/realtime/board-nudge";
 import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import {
+  OASIS_INBOUND_WARM_MOTION,
   OASIS_WEBSITE_SALES_PROGRAM,
   isWebsiteSalesTenantSlug,
 } from "@/lib/leads/canonical-lead-fields";
@@ -217,6 +218,8 @@ export async function POST(
     typeof record.data.assigned_to === "string"
       ? record.data.assigned_to.trim().toLowerCase()
       : "";
+  const isWarmInboundLead =
+    isOasisSalesLead && record.data.sales_motion === OASIS_INBOUND_WARM_MOTION;
   // A deactivated teammate keeps the deals they already hold, so re-saving the
   // same owner is allowed; handing them this deal is not.
   if (targetDeactivated && nextAssignedTo !== currentOwner) {
@@ -227,6 +230,7 @@ export async function POST(
   }
   if (
     isOasisSalesLead &&
+    !isWarmInboundLead &&
     (!currentOwner ||
       !currentStage ||
       currentStage === "unassigned" ||
@@ -298,7 +302,8 @@ export async function POST(
     record,
     assignedTo: nextAssignedTo,
     occurredAt,
-    resetClaimClock: isOasisSalesLead,
+    resetClaimClock: isOasisSalesLead && !isWarmInboundLead,
+    advanceResearchedLeadOnAssign: isWarmInboundLead,
   });
   if (!update.ok) {
     return NextResponse.json(

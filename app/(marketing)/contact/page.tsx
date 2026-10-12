@@ -3,7 +3,8 @@ import { Calendar, Mail, ShieldCheck } from "lucide-react";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, Eyebrow } from "@/components/marketing/Section";
 import { AuditForm } from "@/components/marketing/AuditForm";
-import { BOOKING_URL, CONTACT_EMAIL } from "@/lib/marketing/routes";
+import { AUDIT_FUNNEL, BOOKING_URL, CONTACT_EMAIL } from "@/lib/marketing/routes";
+import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
 
 /**
  * /contact — the conversion page.
@@ -53,6 +54,8 @@ const ALTERNATES = [
 ];
 
 export default function ContactPage() {
+  const consentIdentity = resolveConsentIdentity({ tenantSlug: AUDIT_FUNNEL.tenantSlug }).identity;
+
   return (
     <>
       <section className="m-edge relative overflow-hidden">
@@ -83,7 +86,7 @@ export default function ContactPage() {
               <h2 className="mb-7 font-data text-[11px] uppercase tracking-[0.22em] text-signal-dim">
                 Step 1 of 4
               </h2>
-              <AuditForm />
+              <AuditForm consentIdentity={consentIdentity} />
             </div>
           </Reveal>
 

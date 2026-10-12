@@ -69,6 +69,12 @@ type Props = {
   formName: string;
   branding: FormBranding;
   steps: FormStep[];
+  /**
+   * Optional zero-based starting step selected by the server route.
+   * Clamped again in this client because reusable/embedded callers may pass a
+   * stale value after a form definition changes.
+   */
+  initialStep?: number;
   redirectUrl: string | null;
   /**
    * Pre-signed HMAC token tied to a specific lead — used by Solara's
@@ -268,6 +274,7 @@ export function FormPublicClient({
   formName,
   branding,
   steps,
+  initialStep,
   redirectUrl,
   token: initialToken,
   anonymousInit,
@@ -321,7 +328,10 @@ export function FormPublicClient({
       ),
   );
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
-  const [currentStep, setCurrentStep] = useState(0);
+  const [currentStep, setCurrentStep] = useState(() => {
+    if (!Number.isInteger(initialStep)) return 0;
+    return Math.min(Math.max(initialStep ?? 0, 0), Math.max(steps.length - 1, 0));
+  });
   const [submitting, setSubmitting] = useState(false);
   // Address fields whose selected suggestion is still being resolved to a full
   // address (the ZIP arrives on a second round trip). Validating one of these

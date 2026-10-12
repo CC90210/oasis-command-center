@@ -195,7 +195,10 @@ async function main() {
     /stage\.key !== "researched"/,
     "/pipeline grew its own researched filter again — the board and create lists can drift",
   );
-  assert.match(pipelinePage, /salesMotion: boardFilter\.salesMotion/);
+  assert.match(
+    pipelinePage,
+    /salesMotion:\s*warmInbound\s*\?\s*OASIS_INBOUND_WARM_MOTION\s*:\s*boardFilter\.salesMotion/,
+  );
   run("(a) /pipeline reads its columns and its program filter from the shared module");
 
   // ───────────────────────────────────────────────────────────────────────
