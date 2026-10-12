@@ -326,20 +326,13 @@ export function LocalCliProvidersCard({
 
   }, []);
 
-  // O1: every hook above still runs (Rules of Hooks), but a non-owner sees
-  // this plain note instead of the live card — the route this card's
-  // buttons call fails closed on its own; this just stops showing a button
-  // that would always 403.
-  if (!isAgentsOwner) {
-    return (
-      <Card title="AI apps on your paired computer" subtitle={LOCAL_CLI_SCOPE}>
-        <p className="text-xs text-fg-muted leading-relaxed">
-          This runs on another team member&apos;s computer, so only they can use it.
-        </p>
-      </Card>
-    );
-  }
-
+  // AI1 (Adon, 2026-10-12): the report below is already THIS VIEWER's own
+  // devices (app/api/bridge/cli-status is scoped by the viewer's own
+  // profile_id) -- it must never say "another team member's computer" to
+  // someone looking at their own. isAgentsOwner (lib/agents-owner.ts) still
+  // gates only the MUTATING actions (Install, Connect, Reconnect), which
+  // reach the workspace's single shared bridge target and 403 for anyone
+  // else; the read-only status always renders.
   return (
     <Card
       title="AI apps on your paired computer"
@@ -514,31 +507,42 @@ export function LocalCliProvidersCard({
                 {/* Connect / Reconnect (CC, 2026-10-09): starts the app's own
                     sign-in on the paired computer, which opens the vendor's
                     page there. Every not-ready card has it, with the exact
-                    command for when it can't be started remotely. */}
+                    command for when it can't be started remotely. Gated to
+                    isAgentsOwner (AI1): the route it calls reaches the
+                    workspace's single shared bridge target and 403s for
+                    anyone else -- a non-owner still sees the exact command. */}
                 {cs !== "ready" && cs !== "unsupported" && (
                   <div className="space-y-1.5" data-testid={`cli-connect-${card.key}`}>
-                    <button
-                      type="button"
-                      disabled={busy.kind !== "idle"}
-                      onClick={() => void handleSignIn(card.key)}
-                      className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-md bg-accent text-bg-deep hover:bg-accent-bright disabled:opacity-50"
-                    >
-                      {busy.kind === "authing" && busy.provider === card.key ? (
+                    {isAgentsOwner && (
+                      <button
+                        type="button"
+                        disabled={busy.kind !== "idle"}
+                        onClick={() => void handleSignIn(card.key)}
+                        className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-md bg-accent text-bg-deep hover:bg-accent-bright disabled:opacity-50"
+                      >
+                        {busy.kind === "authing" && busy.provider === card.key ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            Starting sign-in...
+                          </>
+                        ) : (
+                          <>{cs === "needs_sign_in" ? "Connect" : "Reconnect"}</>
+                        )}
+                      </button>
+                    )}
+                    <p className="text-[11px] text-fg-muted leading-relaxed">
+                      {isAgentsOwner ? (
                         <>
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          Starting sign-in...
+                          Opens {CLI_SIGN_IN[card.key].label}&apos;s own sign-in in the browser on your paired computer. Or run there:{" "}
                         </>
                       ) : (
-                        <>{cs === "needs_sign_in" ? "Connect" : "Reconnect"}</>
+                        <>On that computer, run: </>
                       )}
-                    </button>
-                    <p className="text-[11px] text-fg-muted leading-relaxed">
-                      Opens {CLI_SIGN_IN[card.key].label}&apos;s own sign-in in the browser on your paired computer. Or run there:{" "}
                       <code className="text-fg-dim">{CLI_SIGN_IN[card.key].command}</code>
                     </p>
                   </div>
                 )}
-                {cs === "ready" && (
+                {cs === "ready" && isAgentsOwner && (
                   <button
                     type="button"
                     disabled={busy.kind !== "idle"}
@@ -554,11 +558,13 @@ export function LocalCliProvidersCard({
                     <p className="text-[11px] text-fg-muted leading-relaxed">
                       The computer did not report it. If it is installed there, its check may have timed out: Connect above, or
                       choose it in What powers your agents and use Test.{" "}
-                      {localActionsAvailable ? "If it isn't installed, click Install to run " : "If it isn't installed, run "}
+                      {isAgentsOwner && localActionsAvailable
+                        ? "If it isn't installed, click Install to run "
+                        : "If it isn't installed, run "}
                       <code className="text-fg-dim">{card.install_command}</code>
-                      {localActionsAvailable ? " on this machine." : " on the paired machine, then click Refresh."}
+                      {isAgentsOwner && localActionsAvailable ? " on this machine." : " on the paired machine, then click Refresh."}
                     </p>
-                    {localActionsAvailable && (
+                    {isAgentsOwner && localActionsAvailable && (
                       <button
                         type="button"
                         disabled={busy.kind !== "idle"}
