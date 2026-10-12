@@ -17,12 +17,25 @@
  */
 import "./_delivery-harness";
 import assert from "node:assert/strict";
-import { CLIENT_A, CLIENT_B, USERS, check, finish, login, setupDatabase } from "./_delivery-harness";
+import {
+  CLIENT_A,
+  CLIENT_A_CUSTOMER,
+  CLIENT_B,
+  OASIS_CUSTOMER_A,
+  OASIS_CUSTOMER_B,
+  USERS,
+  check,
+  finish,
+  login,
+  setupDatabase,
+  setupProjectCustomers,
+} from "./_delivery-harness";
 
 type Json = Record<string, unknown>;
 
 async function main() {
   const db = await setupDatabase();
+  await setupProjectCustomers(db);
   const { NextRequest } = await import("next/server");
   const projects = await import("../app/api/projects/route");
   const project = await import("../app/api/projects/[id]/route");
@@ -50,11 +63,11 @@ async function main() {
   // ── founders build the fixture through the API itself ──────────────────
   await login(USERS.cc);
   const pa = await call(projects.POST(req("POST", "/api/projects", {
-    title: "Client A website", client_tenant_id: CLIENT_A, client_name: "Alice", client_email: "OWNER@client-a.test",
-    stage: "building", assigned_to: USERS.adon.id,
+    title: "Client A website", client_name: "Alice", client_email: "OWNER@client-a.test",
+    customer_id: OASIS_CUSTOMER_A, stage: "building", assigned_to: USERS.adon.id,
   })));
   const pb = await call(projects.POST(req("POST", "/api/projects", {
-    title: "Client B automation", client_tenant_id: CLIENT_B, stage: "discovery",
+    title: "Client B automation", client_tenant_id: CLIENT_B, customer_id: OASIS_CUSTOMER_B, stage: "discovery",
   })));
   const projectA = String(pa.body.id);
   const projectB = String(pb.body.id);
@@ -64,8 +77,36 @@ async function main() {
     assert.equal(pb.status, 201, JSON.stringify(pb.body));
     const p = pa.body.project as Json;
     assert.equal(p.assigned_to, USERS.adon.id);
+    assert.equal(p.client_tenant_id, CLIENT_A, "the client record's linked workspace is authoritative");
     assert.equal(p.client_email, "owner@client-a.test");
     assert.ok(p.started_at, "a project created in Building has started");
+  });
+  await check("projects require a current client record and cannot be unlinked", async () => {
+    const missing = await call(projects.POST(req("POST", "/api/projects", { title: "Orphan" })));
+    assert.equal(missing.status, 400, JSON.stringify(missing.body));
+    assert.equal(missing.body.error, "customer_id_required");
+
+    const foreign = await call(projects.POST(req("POST", "/api/projects", { title: "Foreign", customer_id: CLIENT_A_CUSTOMER })));
+    assert.equal(foreign.status, 400, JSON.stringify(foreign.body));
+    assert.equal(foreign.body.error, "customer_not_found");
+
+    const mismatch = await call(projects.POST(req("POST", "/api/projects", {
+      title: "Cross-client mismatch", customer_id: OASIS_CUSTOMER_A, client_tenant_id: CLIENT_B,
+    })));
+    assert.equal(mismatch.status, 409, JSON.stringify(mismatch.body));
+    assert.equal(mismatch.body.error, "customer_workspace_mismatch");
+    const mismatchRows = await db.execute({ sql: "SELECT id FROM delivery_projects WHERE title = ?", args: ["Cross-client mismatch"] });
+    assert.equal(mismatchRows.rows.length, 0, "a mismatched project is never written");
+
+    await db.execute({ sql: "UPDATE customers SET lifecycle = 'paused' WHERE id = ?", args: [OASIS_CUSTOMER_B] });
+    const paused = await call(projects.POST(req("POST", "/api/projects", { title: "Paused", customer_id: OASIS_CUSTOMER_B })));
+    assert.equal(paused.status, 400, JSON.stringify(paused.body));
+    assert.equal(paused.body.error, "customer_not_found");
+    await db.execute({ sql: "UPDATE customers SET lifecycle = 'active' WHERE id = ?", args: [OASIS_CUSTOMER_B] });
+
+    const unlink = await call(project.PATCH(req("PATCH", `/api/projects/${projectA}`, { customer_id: null }), params({ id: projectA })));
+    assert.equal(unlink.status, 400, JSON.stringify(unlink.body));
+    assert.equal(unlink.body.error, "customer_id_required");
   });
 
   const ta = await call(tickets.POST(req("POST", "/api/tickets", {
@@ -82,6 +123,80 @@ async function main() {
     assert.equal(t.client_tenant_id, CLIENT_A);
     assert.equal(t.ticket_number, "T-0001");
     assert.equal((tb.body.ticket as Json).ticket_number, "T-0002");
+  });
+
+  const syncProjectResponse = await call(projects.POST(req("POST", "/api/projects", {
+    title: "Workspace sync project", customer_id: OASIS_CUSTOMER_A,
+  })));
+  const syncProjectId = String(syncProjectResponse.body.id);
+  const syncTicketResponse = await call(tickets.POST(req("POST", "/api/tickets", {
+    title: "Workspace sync ticket", project_id: syncProjectId,
+  })));
+  const syncTicketId = String(syncTicketResponse.body.id);
+  await check("project creation derives the client workspace from its customer", async () => {
+    assert.equal(syncProjectResponse.status, 201, JSON.stringify(syncProjectResponse.body));
+    assert.equal((syncProjectResponse.body.project as Json).client_tenant_id, CLIENT_A);
+    assert.equal(syncTicketResponse.status, 201, JSON.stringify(syncTicketResponse.body));
+    assert.equal((syncTicketResponse.body.ticket as Json).client_tenant_id, CLIENT_A);
+  });
+
+  const guardedProjectResponse = await call(projects.POST(req("POST", "/api/projects", {
+    title: "PATCH mismatch target", customer_id: OASIS_CUSTOMER_A, client_tenant_id: CLIENT_A,
+  })));
+  const guardedProjectId = String(guardedProjectResponse.body.id);
+  await check("project PATCH refuses a customer and client-workspace mismatch", async () => {
+    assert.equal(guardedProjectResponse.status, 201, JSON.stringify(guardedProjectResponse.body));
+    const mismatch = await call(project.PATCH(req("PATCH", `/api/projects/${guardedProjectId}`, {
+      customer_id: OASIS_CUSTOMER_B,
+      client_tenant_id: CLIENT_A,
+    }), params({ id: guardedProjectId })));
+    assert.equal(mismatch.status, 409, JSON.stringify(mismatch.body));
+    assert.equal(mismatch.body.error, "customer_workspace_mismatch");
+    const row = (await db.execute({
+      sql: "SELECT customer_id, client_tenant_id FROM delivery_projects WHERE id = ?",
+      args: [guardedProjectId],
+    })).rows[0];
+    assert.equal(row.customer_id, OASIS_CUSTOMER_A, "the rejected customer never lands");
+    assert.equal(row.client_tenant_id, CLIENT_A, "the rejected workspace never lands");
+  });
+
+  await check("project PATCH cannot move a workspace away from its client record", async () => {
+    const mismatch = await call(project.PATCH(req("PATCH", `/api/projects/${guardedProjectId}`, {
+      client_tenant_id: CLIENT_B,
+    }), params({ id: guardedProjectId })));
+    assert.equal(mismatch.status, 409, JSON.stringify(mismatch.body));
+    assert.equal(mismatch.body.error, "customer_workspace_mismatch");
+    const row = (await db.execute({
+      sql: "SELECT customer_id, client_tenant_id FROM delivery_projects WHERE id = ?",
+      args: [guardedProjectId],
+    })).rows[0];
+    assert.equal(row.customer_id, OASIS_CUSTOMER_A);
+    assert.equal(row.client_tenant_id, CLIENT_A);
+  });
+
+  await check("changing a project's customer derives the workspace and keeps its tickets synchronized", async () => {
+    const changed = await call(project.PATCH(req("PATCH", `/api/projects/${syncProjectId}`, {
+      customer_id: OASIS_CUSTOMER_B,
+    }), params({ id: syncProjectId })));
+    assert.equal(changed.status, 200, JSON.stringify(changed.body));
+    assert.equal((changed.body.project as Json).customer_id, OASIS_CUSTOMER_B);
+    assert.equal((changed.body.project as Json).client_tenant_id, CLIENT_B);
+    const row = (await db.execute({
+      sql: "SELECT customer_id, client_tenant_id FROM support_tickets WHERE id = ?",
+      args: [syncTicketId],
+    })).rows[0];
+    assert.equal(row.customer_id, OASIS_CUSTOMER_B, "the ticket follows the project's client record");
+    assert.equal(row.client_tenant_id, CLIENT_B, "client portal access follows the same workspace");
+    try {
+      await login(USERS.clientA);
+      assert.equal((await call(project.GET(req("GET", `/api/projects/${syncProjectId}`), params({ id: syncProjectId })))).status, 404);
+      assert.equal((await call(ticket.GET(req("GET", `/api/tickets/${syncTicketId}`), params({ id: syncTicketId })))).status, 404);
+      await login(USERS.clientB);
+      assert.equal((await call(project.GET(req("GET", `/api/projects/${syncProjectId}`), params({ id: syncProjectId })))).status, 200);
+      assert.equal((await call(ticket.GET(req("GET", `/api/tickets/${syncTicketId}`), params({ id: syncTicketId })))).status, 200);
+    } finally {
+      await login(USERS.cc);
+    }
   });
 
   await call(comments.POST(req("POST", `/api/tickets/${ticketA}/comments`, { body: "INTERNAL-NOTE: client is on the old plan" }), params({ id: ticketA })));
@@ -172,9 +287,9 @@ async function main() {
   await login(USERS.clientB);
   await check("client B's list and projects contain only client B", async () => {
     const t = await call(tickets.GET(req("GET", "/api/tickets?status=all")));
-    assert.deepEqual((t.body.tickets as Json[]).map((x) => x.id), [ticketB]);
+    assert.deepEqual((t.body.tickets as Json[]).map((x) => String(x.id)).sort(), [ticketB, syncTicketId].sort());
     const p = await call(projects.GET(req("GET", "/api/projects")));
-    assert.deepEqual((p.body.projects as Json[]).map((x) => x.id), [projectB]);
+    assert.deepEqual((p.body.projects as Json[]).map((x) => String(x.id)).sort(), [projectB, syncProjectId].sort());
   });
 
   // ── assignee validation, everywhere ─────────────────────────────────────

@@ -25,12 +25,23 @@ import "./_delivery-harness";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CLIENT_A, MIGRATION_PATH, OASIS, check, finish, setupDatabase, splitSql } from "./_delivery-harness";
+import {
+  CLIENT_A,
+  MIGRATION_PATH,
+  OASIS,
+  OASIS_CUSTOMER_A,
+  check,
+  finish,
+  setupDatabase,
+  setupProjectCustomers,
+  splitSql,
+} from "./_delivery-harness";
 
 type Json = Record<string, unknown>;
 
 async function main() {
   const db = await setupDatabase();
+  await setupProjectCustomers(db);
   const { NextRequest } = await import("next/server");
   const seed = await import("../lib/delivery/support-form");
   const { parseFormSteps } = await import("../lib/forms/types");
@@ -74,7 +85,8 @@ async function main() {
   const founder = { userId: "u-cc", name: "CC" };
   const projectA = await store.createProject(db, OASIS, {
     title: "Client A website", description: null, client_tenant_id: CLIENT_A, client_name: "Alice",
-    client_email: "owner@client-a.test", lead_id: null, stage: "live", priority: "medium", assigned_to: null, due_date: null,
+    client_email: "owner@client-a.test", lead_id: null, customer_id: OASIS_CUSTOMER_A,
+    stage: "live", priority: "medium", assigned_to: null, due_date: null,
   }, founder, now);
 
   const sent: Array<{ kind: string; to?: string; subject?: string; body: string }> = [];

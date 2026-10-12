@@ -411,26 +411,40 @@ function TicketsTab({ state }: { state: ClientRecordData["tickets"] }) {
 function ProjectsTab({ state }: { state: ClientRecordData["projects"] }) {
   if (state.state !== "ok") return <NotLoaded state={state.state} what="Projects" />;
   if (state.value.rows.length === 0) {
-    return <Card><EmptyState message="No projects for this client. A project from the deal this client came from, or linked on the project, appears here." /></Card>;
+    return <Card><EmptyState message="No projects for this client. Start one from the New project button above." /></Card>;
   }
+  const active = state.value.rows.filter(
+    (p) => !p.archived_at && (ACTIVE_PROJECT_STAGES as readonly string[]).includes(p.stage),
+  );
+  const history = state.value.rows.filter((p) => !active.includes(p));
+  const projectRows = (rows: typeof state.value.rows) => (
+    <ul className="divide-y divide-hairline">
+      {rows.map((p) => (
+        <li key={p.id}>
+          <Link href={`/projects/${p.id}`} prefetch={false} className="flex flex-col gap-1 px-4 py-3 hover:bg-active-hover sm:flex-row sm:items-center sm:gap-3">
+            <span className="min-w-0 flex-1 truncate text-sm text-fg">{p.title}</span>
+            {p.archived_at && <Tag>Archived</Tag>}
+            <StageTag stage={p.stage} />
+            <span className="text-xs text-fg-dim sm:w-40 sm:text-right">
+              {p.task_count > 0 ? `${p.tasks_done}/${p.task_count} tasks` : "No tasks"} · {p.open_ticket_count} open
+            </span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
   return (
-    <Card noPadding>
-      <ul className="divide-y divide-hairline">
-        {state.value.rows.map((p) => (
-          <li key={p.id}>
-            <Link href={`/projects/${p.id}`} prefetch={false} className="flex flex-col gap-1 px-4 py-3 hover:bg-active-hover sm:flex-row sm:items-center sm:gap-3">
-              <span className="min-w-0 flex-1 truncate text-sm text-fg">{p.title}</span>
-              {p.archived_at && <Tag>Archived</Tag>}
-              <StageTag stage={p.stage} />
-              <span className="text-xs text-fg-dim sm:w-40 sm:text-right">
-                {p.task_count > 0 ? `${p.tasks_done}/${p.task_count} tasks` : "No tasks"} · {p.open_ticket_count} open
-              </span>
-            </Link>
-          </li>
-        ))}
-      </ul>
-      {state.value.truncated && <p className="px-4 pb-3 text-xs text-fg-dim">Showing the first 500 projects.</p>}
-    </Card>
+    <div className="space-y-6">
+      <Card title="Active delivery" subtitle="Discovery, building and client review." noPadding={active.length > 0}>
+        {active.length > 0 ? projectRows(active) : <EmptyState message="No active delivery for this client." />}
+      </Card>
+      {history.length > 0 && (
+        <Card title="Project history" subtitle="Live, maintenance, paused and archived work." noPadding>
+          {projectRows(history)}
+        </Card>
+      )}
+      {state.value.truncated && <p className="text-xs text-fg-dim">Showing the first 500 projects.</p>}
+    </div>
   );
 }
 

@@ -27,7 +27,6 @@ import { isOasisDesk, type DeliveryViewer } from "@/lib/delivery/access";
 import { loadCustomerOptions, type CustomerOptions } from "@/lib/os/customers/session";
 import {
   getProject,
-  listClientTenants,
   listProjectTasks,
   listProjectUpdates,
   listTickets,
@@ -133,15 +132,12 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
   const oasis = isOasisDesk(viewer);
   let roster: Awaited<ReturnType<typeof loadAssignmentRoster>> = [];
   let directory: Awaited<ReturnType<typeof loadMemberDirectory>> = [];
-  let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
   let customers: CustomerOptions = { state: "not_set_up" };
   let sideFailure: string | null = null;
   try {
-    [roster, directory, tenants, customers] = await Promise.all([
+    [roster, directory, customers] = await Promise.all([
       loadAssignmentRoster(viewer.tenantId),
       loadMemberDirectory(viewer.tenantId),
-      // Client workspaces are OASIS's vendor relationship; no other desk has them.
-      oasis ? listClientTenants(db) : Promise.resolve([]),
       loadCustomerOptions(db, viewer.tenantId),
     ]);
   } catch (err) {
@@ -156,7 +152,12 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <Link href="/projects" className="text-xs text-fg-muted hover:text-fg">Back to projects</Link>
+      <Link
+        href={project.customer_id ? `/clients/${project.customer_id}?tab=projects` : "/projects"}
+        className="text-xs text-fg-muted hover:text-fg"
+      >
+        {project.customer_id ? "Back to client projects" : "Back to projects"}
+      </Link>
       <PageHeader
         title={project.title}
         subtitle={
@@ -176,7 +177,6 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
           <ProjectControls
             project={project}
             roster={rosterOptions}
-            clientTenants={tenants.map((t) => ({ value: t.id, label: t.name }))}
             customers={customerOptions}
           />
         </Card>
