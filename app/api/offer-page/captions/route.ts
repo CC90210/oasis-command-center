@@ -17,6 +17,7 @@
 import { NextResponse } from "next/server";
 import { offerPagesDb } from "@/lib/offer-pages/store";
 import { resolvePublishedVideo, uploadCaptionMediaRow } from "@/lib/offer-pages/video";
+import { offerUploadStorage } from "@/lib/offer-pages/upload";
 import { NOT_FOUND, limited, validIds } from "@/lib/offer-pages/public-http";
 import { captionsResponse } from "@/lib/offer-pages/captions";
 
@@ -32,7 +33,7 @@ export async function GET(req: Request) {
   if (!db) return NOT_FOUND();
   let hit;
   try {
-    hit = await resolvePublishedVideo(db, ids.formId, ids.ref);
+    hit = await resolvePublishedVideo(db, ids.formId, ids.ref, offerUploadStorage());
   } catch (err) {
     console.error("[offer-pages.captions] resolve failed", { form_id: ids.formId, error: err instanceof Error ? err.message : String(err) });
     return NextResponse.json({ ok: false, error: "unavailable" }, { status: 503 });

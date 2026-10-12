@@ -23,9 +23,9 @@ import { signMediaUrls } from "@/lib/founders/marketing-queries";
 import { findVideoRef, VIDEO_REF_RE } from "@/lib/offer-pages/providers";
 import { offerPagesDb, readOfferRow } from "@/lib/offer-pages/store";
 import { editableForm } from "@/lib/offer-pages/operator";
-import { mediaKey, resolveLibrary, uploadCaptionMediaRow, type ResolvedVideo } from "@/lib/offer-pages/video";
+import { mediaKey, resolveLibrary, uploadCaptionMediaRow, verifyUploadObject, type ResolvedVideo } from "@/lib/offer-pages/video";
 import { OFFER_UPLOAD_BUCKET, type UploadVideoRef } from "@/lib/offer-pages/types";
-import { pathBelongsToTenant } from "@/lib/storage-helpers";
+import { offerUploadStorage } from "@/lib/offer-pages/upload";
 import { NOT_FOUND } from "@/lib/offer-pages/public-http";
 import { captionsResponse } from "@/lib/offer-pages/captions";
 
@@ -56,7 +56,8 @@ async function draftVideo(tenantId: string, formId: string, ref: unknown): Promi
       return hit ? { ok: true, kind: "library", video: hit } : { ok: false, response: NOT_FOUND() };
     }
     if (video.source === "upload") {
-      if (!pathBelongsToTenant(tenantId, video.video_path)) return { ok: false, response: NOT_FOUND() };
+      const verified = await verifyUploadObject({ tenantId, path: video.video_path, kind: "video", storage: offerUploadStorage() });
+      if (!verified.ok) return { ok: false, response: NOT_FOUND() };
       return { ok: true, kind: "upload", video };
     }
     return { ok: false, response: NOT_FOUND() };

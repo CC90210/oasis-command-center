@@ -31,8 +31,15 @@ const STATUS: Record<string, number> = {
   not_found: 404,
   too_large: 400,
   wrong_type: 400,
+  swapped: 409,
   storage_unavailable: 503,
+  key_unavailable: 503,
 };
+
+/** key_unavailable is reported under the plain-language code the review asked for; everything else keeps its own reason. */
+function errorBody(error: string): { ok: false; error: string } {
+  return { ok: false, error: error === "key_unavailable" ? "upload_unavailable" : error };
+}
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const auth = await formsSession({ edit: true });
@@ -54,7 +61,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const storage = offerUploadStorage();
   const result = await confirmOfferUpload({ tenantId, formId: id, uploadToken: body.upload_token, storage });
   if (!result.ok) {
-    return NextResponse.json({ ok: false, error: result.error }, { status: STATUS[result.error] ?? 400, headers: { "cache-control": "no-store" } });
+    if (result.error === "key_unavailable") console.error("[offer-pages.video-upload.confirm] signing key unavailable");
+    return NextResponse.json(errorBody(result.error), { status: STATUS[result.error] ?? 400, headers: { "cache-control": "no-store" } });
   }
   return NextResponse.json(
     { ok: true, kind: result.upload.kind, path: result.upload.path, bytes: result.upload.bytes, mime: result.upload.mime },

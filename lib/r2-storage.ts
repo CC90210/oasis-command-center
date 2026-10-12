@@ -169,12 +169,24 @@ function objectKey(bucket: string, path: string): string {
  * server, so without a signed PUT there is no way to upload at all once
  * `.storage` points at R2.
  */
+/**
+ * `extraSignedHeaders` is additive and defaults to {}: with no extra headers
+ * this produces the EXACT same bytes as before (SignedHeaders stays "host",
+ * the canonical headers block stays "host:<host>\n") — every existing caller
+ * is unaffected. A caller that passes e.g. {"content-length": "123",
+ * "content-type": "video/mp4"} gets a PUT URL where those header VALUES are
+ * baked into the signature: R2 answers SignatureDoesNotMatch unless the real
+ * request sends exactly those values, which for a PUT's Content-Length is the
+ * real body's byte length a browser cannot override — so this is how a cap
+ * survives a client that ignores it (offer-page video uploads).
+ */
 function presign(
   method: "GET" | "PUT",
   bucket: string,
   path: string,
   expiresInSec: number,
   windowSec = 0,
+  extraSignedHeaders: Readonly<Record<string, string>> = {},
 ): string {
   const { key, secret, bucket: r2Bucket } = cfg();
   // Signed at the start of the window, alive for the window on top of the
@@ -183,19 +195,23 @@ function presign(
   const windowMs = windowSec * 1000;
   const { amz, date } = stamps(windowMs ? Math.floor(nowMs / windowMs) * windowMs : nowMs);
   const canonicalUri = `/${r2Bucket}/${encodePath(objectKey(bucket, path))}`;
+  const headerNames = ["host", ...Object.keys(extraSignedHeaders)].sort();
+  const signedHeaders = headerNames.join(";");
   const q = new URLSearchParams({
     "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
     "X-Amz-Credential": `${key}/${date}/${REGION}/${SERVICE}/aws4_request`,
     "X-Amz-Date": amz,
     "X-Amz-Expires": String(expiresInSec + windowSec),
-    "X-Amz-SignedHeaders": "host",
+    "X-Amz-SignedHeaders": signedHeaders,
   });
   const canonicalQuery = [...q.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join("&");
+  const headerValues: Record<string, string> = { host: host(), ...extraSignedHeaders };
+  const canonicalHeaders = headerNames.map((h) => `${h}:${headerValues[h]}\n`).join("");
   const canonicalRequest = [
-    method, canonicalUri, canonicalQuery, `host:${host()}\n`, "host", "UNSIGNED-PAYLOAD",
+    method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, "UNSIGNED-PAYLOAD",
   ].join("\n");
   const stringToSign = [
     "AWS4-HMAC-SHA256", amz, `${date}/${REGION}/${SERVICE}/aws4_request`,
@@ -407,6 +423,54 @@ function bucketApi(bucket: string) {
         return ok({ path, signedUrl, token });
       } catch (e) {
         return fail(e instanceof Error ? e.message : "presign upload failed");
+      }
+    },
+
+    /**
+     * Like createSignedUploadUrl, but Content-Length and Content-Type are
+     * part of the SIGNATURE: R2 answers SignatureDoesNotMatch for a PUT whose
+     * real body length or declared type differ from exactly what was minted.
+     * A browser cannot send a Content-Length other than its real body's byte
+     * count, so this is what makes a size cap hold even against a client that
+     * ignores it, not only a server-side check after the fact (offer-page
+     * video uploads — resource-cap-bypass finding). `ttlSec` lets a caller
+     * that wants a SHORT-LIVED upload window override the shared default.
+     */
+    async createSignedUploadUrlConstrained(path: string, opts: { contentLength: number; contentType: string; ttlSec?: number }) {
+      try {
+        const signedUrl = presign("PUT", bucket, path, opts.ttlSec ?? SIGNED_UPLOAD_TTL_SEC, 0, {
+          "content-length": String(opts.contentLength),
+          "content-type": opts.contentType,
+        });
+        return ok({ signedUrl });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : "constrained presign upload failed");
+      }
+    },
+
+    /**
+     * A server-side COPY (bytes never pass through this process), conditional
+     * on the SOURCE object's ETag at copy time via x-amz-copy-source-if-match:
+     * if the source changed since that ETag was read (a TOCTOU swap between a
+     * caller's own HEAD check and this copy), R2 answers 412 and nothing is
+     * copied. Lets a caller promote a verified upload to an immutable
+     * destination key that no presigned URL was ever minted for, so nothing
+     * already checked can be swapped out from under it afterward.
+     */
+    async copyIfMatch(sourcePath: string, destPath: string, etag: string) {
+      try {
+        const res = await signedFetch("PUT", bucket, destPath, undefined, undefined, {
+          "x-amz-copy-source": `/${cfg().bucket}/${encodePath(objectKey(bucket, sourcePath))}`,
+          "x-amz-copy-source-if-match": etag,
+        });
+        if (res.status === 412) return fail("precondition failed: the source object changed", 412);
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          return fail(`R2 copy failed (${res.status}): ${text.slice(0, 200)}`, res.status);
+        }
+        return ok({ path: destPath });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : "R2 copy failed");
       }
     },
 

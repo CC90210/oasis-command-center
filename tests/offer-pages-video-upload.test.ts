@@ -7,31 +7,43 @@
  *
  * WHAT IS PINNED:
  *   - mint refuses a type outside the kind's allowed set, and a declared size
- *     over the kind's cap, before any signed URL is minted;
- *   - confirm trusts nothing the caller says about the object: it re-reads the
- *     REAL size and content-type (the fake storage stands in for R2's HEAD),
- *     refuses an object that never landed, one over its kind's cap even when
- *     the DECLARED size at mint was within it (anti-spoof), and one of the
- *     wrong real type;
+ *     over the kind's cap, before any signed URL is minted; the SIGNED
+ *     Content-Length/Content-Type binding itself (so R2 refuses a mismatched
+ *     real PUT, not only a server-side check after the fact) is proven
+ *     independently in tests/r2-signed-url-constrained.test.ts;
+ *   - confirm trusts nothing the caller says about the STAGING object: it
+ *     re-reads the REAL size and content-type (the fake storage stands in
+ *     for R2's HEAD), refuses one that never landed, one over its kind's cap
+ *     even when the DECLARED size at mint was within it (anti-spoof), and
+ *     one of the wrong real type;
+ *   - confirm copies the verified staging object to an IMMUTABLE FINAL key,
+ *     conditional on the ETag it just read: a source that changed underneath
+ *     that ETag (TOCTOU - the presigned PUT stays valid after confirm reads
+ *     it) fails the copy, "swapped", and nothing is promoted; the staging
+ *     path is NEVER the one returned or ever servable;
  *   - confirm's token is tenant AND form bound: another workspace's session,
  *     or the right workspace but the wrong form, gets the same refusal as a
- *     missing object; an expired token is refused;
+ *     missing object; an expired (short) token is refused;
+ *   - a missing/short signing key fails CLOSED (key_unavailable -> 503
+ *     upload_unavailable), never a silent pass;
  *   - the PUT save route re-verifies a NEW upload path the same way (not a
  *     path already on record) before it ever reaches the draft;
- *   - a published upload ref whose object path does not belong to the form's
- *     own tenant is never signed for play, and neither are its captions;
+ *   - resolve/serve (play, and the page's initial poster) re-checks the FINAL
+ *     object's real size and type against the cap EVERY TIME, not only at
+ *     confirm; a published ref whose object path does not belong to the
+ *     form's own tenant is never signed for play, and neither are its
+ *     captions;
  *   - an upload VideoRef still requires the rights confirmation to parse, and
  *     a doc with no upload fields at all (an old doc) still parses unchanged.
  *
  * Run: node --conditions=react-server --import tsx tests/offer-pages-video-upload.test.ts
  */
 import assert from "node:assert/strict";
-// Read lazily, by lib/offer-pages/upload.ts, inside each mint/verify call: safe to set after the harness import above has already run.
-process.env.OFFER_UPLOAD_HMAC_KEY = "test-offer-upload-hmac-key-0001-not-a-real-secret";
 import {
   CLIENT_A,
   OASIS,
   USERS,
+  derivedKeySwitch,
   done,
   fakeOfferUploadStorage,
   formRow,
@@ -41,6 +53,7 @@ import {
   setupOfferDatabase,
   signCalls,
   step,
+  stubDerivedKeys,
   stubOfferUploadStorage,
   stubSigner,
   CONTACT_STEPS,
@@ -65,6 +78,7 @@ async function at<T>(ms: number, call: () => Promise<T>): Promise<T> {
 
 async function main() {
   await stubSigner();
+  await stubDerivedKeys();
   const db = await setupOfferDatabase();
   const fake = fakeOfferUploadStorage();
   await stubOfferUploadStorage(fake.storage);
@@ -86,6 +100,7 @@ async function main() {
   const videoRoute = await import("../app/api/offer-page/video/route");
   const captionsRoute = await import("../app/api/offer-page/captions/route");
   const { parseOfferPageDoc, OfferPageError, MAX_UPLOAD_BYTES } = await import("../lib/offer-pages/types");
+  const { UPLOAD_TOKEN_TTL_SEC } = await import("../lib/offer-pages/upload");
 
   const req = (method: string, url: string, body?: unknown) =>
     new NextRequest(`http://localhost${url}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -109,15 +124,22 @@ async function main() {
   });
 
   let videoToken = "";
-  let videoPath = "";
-  await step("a valid mint returns a storage path under this workspace's own prefix, and a presigned PUT", async () => {
+  let videoStagingPath = "";
+  let videoFinalPath = "";
+  await step("a valid mint returns a STAGING path under this workspace's own prefix, with Content-Length/Content-Type signed and a short TTL", async () => {
     await login(USERS.cc);
     const r = await json(await init(FORM, { kind: "video", filename: "vsl.mp4", mime_type: "video/mp4", size_bytes: 5_000_000 }));
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    videoPath = String(r.body.storage_path);
+    videoStagingPath = String(r.body.storage_path);
     videoToken = String(r.body.upload_token);
-    assert.match(videoPath, new RegExp(`^${OASIS}/offer-pages/video/[0-9a-f-]{36}\\.mp4$`));
-    assert.ok(String(r.body.signed_url).includes(videoPath), "the signed URL is for the minted path");
+    assert.match(videoStagingPath, new RegExp(`^${OASIS}/offer-pages/_staging/video/[0-9a-f-]{36}\\.mp4$`), "a STAGING path, never the final shape");
+    assert.ok(String(r.body.signed_url).includes(videoStagingPath), "the signed URL is for the minted staging path");
+    const signedCall = fake.signed.find((s) => s.path === videoStagingPath);
+    assert.ok(signedCall, "the constrained presign was asked for");
+    assert.equal(signedCall!.contentLength, 5_000_000, "the exact declared size is what gets signed");
+    assert.equal(signedCall!.contentType, "video/mp4");
+    assert.ok(signedCall!.ttlSec <= 600, "minutes, not the old 15-minute shared default");
+    assert.equal(r.body.expires_in, UPLOAD_TOKEN_TTL_SEC);
   });
 
   await step("confirm refuses an object that never landed (a mint with no matching upload)", async () => {
@@ -127,27 +149,58 @@ async function main() {
   });
 
   await step("confirm trusts the REAL head, not the declared size: a real object over the cap is refused even though the declared size at mint was fine", async () => {
-    fake.put(videoPath, MAX_UPLOAD_BYTES.video + 1, "video/mp4");
+    fake.put(videoStagingPath, MAX_UPLOAD_BYTES.video + 1, "video/mp4");
     const r = await json(await confirm(FORM, { upload_token: videoToken }));
     assert.equal(r.status, 400);
     assert.equal(r.body.error, "too_large");
+    assert.deepEqual(fake.copies, [], "an oversize staging object was ever copied to a final key");
   });
 
   await step("confirm refuses a real content-type outside the kind's allowed set", async () => {
-    fake.put(videoPath, 5_000_000, "text/html");
+    fake.put(videoStagingPath, 5_000_000, "text/html");
     const r = await json(await confirm(FORM, { upload_token: videoToken }));
     assert.equal(r.status, 400);
     assert.equal(r.body.error, "wrong_type");
+    assert.deepEqual(fake.copies, [], "a wrong-type staging object was ever copied");
   });
 
-  await step("confirm succeeds once the real object is within the cap and the right type, and returns the real bytes", async () => {
-    fake.put(videoPath, 5_000_000, "video/mp4");
+  await step("confirm succeeds once the real object is within the cap and the right type: copies to an IMMUTABLE FINAL key, removes the staging object, and returns only the final path", async () => {
+    fake.put(videoStagingPath, 5_000_000, "video/mp4");
     const r = await json(await confirm(FORM, { upload_token: videoToken }));
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(r.body.kind, "video");
-    assert.equal(r.body.path, videoPath);
+    videoFinalPath = String(r.body.path);
+    assert.notEqual(videoFinalPath, videoStagingPath, "the returned path is the FINAL key, never the staging one");
+    assert.match(videoFinalPath, new RegExp(`^${OASIS}/offer-pages/video/[0-9a-f-]{36}\\.mp4$`));
     assert.equal(r.body.bytes, 5_000_000);
     assert.equal(r.body.mime, "video/mp4");
+    assert.ok(fake.objects.has(videoFinalPath), "the final object exists");
+    assert.equal(fake.objects.has(videoStagingPath), false, "the staging object was removed after promotion");
+    assert.deepEqual(
+      fake.copies.map((c) => ({ source: c.source, dest: c.dest })),
+      [{ source: videoStagingPath, dest: videoFinalPath }],
+      "exactly one conditional copy, staging to final",
+    );
+  });
+
+  await step("a TOCTOU swap (the source changed between confirm's own HEAD and the copy) is refused, and nothing is promoted", async () => {
+    await login(USERS.cc);
+    const minted = await json(await init(FORM, { kind: "video", filename: "swap.mp4", mime_type: "video/mp4", size_bytes: 2_000_000 }));
+    assert.equal(minted.status, 200);
+    const stagingPath = String(minted.body.storage_path);
+    fake.put(stagingPath, 2_000_000, "video/mp4"); // the HEAD confirm reads still passes its own size/type gate
+    // Flips the SAME storage instance already wired into the route (re-stubbing
+    // the module here would have no effect: the route captured the first
+    // stub's exports at import time), modelling R2 reporting that the source
+    // changed underneath the ETag confirm just read.
+    fake.opts.forcePreconditionFailed = true;
+    const r = await json(await confirm(FORM, { upload_token: minted.body.upload_token }));
+    fake.opts.forcePreconditionFailed = false;
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "swapped");
+    const finalPath = stagingPath.replace("/offer-pages/_staging/", "/offer-pages/");
+    assert.equal(fake.objects.has(finalPath), false, "a swapped source was promoted to the final key anyway");
+    assert.equal(fake.objects.has(stagingPath), true, "a refused swap still removed the staging object it did not promote");
   });
 
   await step("another workspace's caller is refused: mint on someone else's form (404), and a token minted for OASIS confirmed under Client A's own form (404)", async () => {
@@ -155,6 +208,8 @@ async function main() {
     const mintOther = await json(await init(FORM, { kind: "video", filename: "x.mp4", mime_type: "video/mp4", size_bytes: 1000 }));
     assert.equal(mintOther.status, 404, "Client A minting against OASIS's form id");
 
+    const retry = await json(await init(FORM_B, { kind: "video", filename: "x.mp4", mime_type: "video/mp4", size_bytes: 1000 }));
+    assert.equal(retry.status, 200, "Client A may mint for its OWN form");
     const confirmOther = await json(await confirm(FORM_B, { upload_token: videoToken }));
     assert.equal(confirmOther.status, 404, "a token minted for OASIS/FORM, confirmed under Client A's own form");
     await login(USERS.cc);
@@ -172,10 +227,32 @@ async function main() {
     assert.equal(minted.status, 200);
     const posterPath = String(minted.body.storage_path);
     fake.put(posterPath, 1000, "image/png");
-    const future = Date.now() + 21 * 60 * 1000; // past the 20-minute token TTL
+    const future = Date.now() + (UPLOAD_TOKEN_TTL_SEC + 60) * 1000;
     const r = await json(await at(future, () => confirm(FORM, { upload_token: minted.body.upload_token })));
     assert.equal(r.status, 400);
     assert.equal(r.body.error, "token_expired");
+  });
+
+  await step("a missing signing key fails CLOSED: 503 upload_unavailable, never a silent pass (the key is HKDF-derived from AUTH_SESSION_SECRET, lib/crypto/derived-keys.ts)", async () => {
+    await login(USERS.cc);
+    derivedKeySwitch.failing = true;
+    try {
+      const mintFails = await json(await init(FORM, { kind: "video", filename: "x.mp4", mime_type: "video/mp4", size_bytes: 1000 }));
+      assert.equal(mintFails.status, 503, JSON.stringify(mintFails.body));
+      assert.equal(mintFails.body.error, "upload_unavailable");
+
+      derivedKeySwitch.failing = false;
+      const minted = await json(await init(FORM, { kind: "video", filename: "x.mp4", mime_type: "video/mp4", size_bytes: 1000 }));
+      assert.equal(minted.status, 200, "the key works again once it is available");
+      fake.put(String(minted.body.storage_path), 1000, "video/mp4");
+
+      derivedKeySwitch.failing = true;
+      const confirmFails = await json(await confirm(FORM, { upload_token: minted.body.upload_token }));
+      assert.equal(confirmFails.status, 503, JSON.stringify(confirmFails.body));
+      assert.equal(confirmFails.body.error, "upload_unavailable");
+    } finally {
+      derivedKeySwitch.failing = false;
+    }
   });
 
   // -- the offer PUT route re-verifies a NEW upload path --------------------
@@ -183,17 +260,17 @@ async function main() {
     minimalDoc({
       hero: {
         headline: "H",
-        video: { source: "upload", video_path: videoPath, video_bytes: 5_000_000, video_mime: "video/mp4", rights: OK, aspect: "16:9", ...overrides },
+        video: { source: "upload", video_path: videoFinalPath, video_bytes: 5_000_000, video_mime: "video/mp4", rights: OK, aspect: "16:9", ...overrides },
       },
     });
 
-  await step("the builder attaches a confirmed upload ref; another's path, or one that never landed, is refused (400)", async () => {
+  await step("the builder attaches a confirmed (FINAL) upload ref; another's path, a staging path, or one that never landed, is refused (400)", async () => {
     await login(USERS.cc);
     const params = { params: Promise.resolve({ id: FORM }) };
     const cur = await db.execute({ sql: "SELECT draft_version FROM form_offer_pages WHERE form_id = ?", args: [FORM] });
     const version = Number(cur.rows[0].draft_version);
 
-    const otherTenantPath = `${CLIENT_A}/offer-pages/video/${videoPath.split("/").pop()}`;
+    const otherTenantPath = `${CLIENT_A}/offer-pages/video/${videoFinalPath.split("/").pop()}`;
     fake.put(otherTenantPath, 5_000_000, "video/mp4");
     const crossTenant = await offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: draftWithUpload({ video_path: otherTenantPath }), version }), params);
     assert.equal(crossTenant.status, 400, "a path under another tenant's prefix");
@@ -202,6 +279,11 @@ async function main() {
     const neverLanded = `${OASIS}/offer-pages/video/${"0".repeat(8)}-0000-4000-8000-000000000000.mp4`;
     const missing = await offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: draftWithUpload({ video_path: neverLanded }), version }), params);
     assert.equal(missing.status, 400, "a path with no real object behind it");
+
+    // A STAGING path (even one that is a real object, same tenant) is never a valid ref: the parser's own path shape rejects it before any storage call.
+    const stagingAsRef = await offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: draftWithUpload({ video_path: `${OASIS}/offer-pages/_staging/video/aaaaaaaa-0000-4000-8000-000000000000.mp4` }), version }), params);
+    assert.equal(stagingAsRef.status, 400, "a staging path used directly as a ref");
+    assert.equal(((await stagingAsRef.json()) as { reason: string }).reason, "not an uploaded video this workspace stored");
 
     const good = await offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: draftWithUpload(), version }), params);
     assert.equal(good.status, 200, JSON.stringify(await good.json()));
@@ -213,14 +295,14 @@ async function main() {
     const cur = await db.execute({ sql: "SELECT draft, draft_version FROM form_offer_pages WHERE form_id = ?", args: [FORM] });
     const draft = JSON.parse(String(cur.rows[0].draft));
     const version = Number(cur.rows[0].draft_version);
-    fake.objects.delete(videoPath); // the object "disappears" after it was already attached once
+    fake.objects.delete(videoFinalPath); // the object "disappears" after it was already attached once
     const r = await offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: { ...draft, hero: { ...draft.hero, headline: "H2" } }, version }), params);
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
-    fake.put(videoPath, 5_000_000, "video/mp4"); // restore for the publish step below
+    fake.put(videoFinalPath, 5_000_000, "video/mp4"); // restore for the publish step below
   });
 
   // -- publish it, and play it -------------------------------------------
-  await step("publish, then play: the signed GET is for the private offer-page-uploads prefix, never a public host", async () => {
+  await step("publish, then play: the signed GET is for the private offer-page-uploads prefix, never a public host, and a re-check runs at every play", async () => {
     await login(USERS.cc);
     const cur = await db.execute({ sql: "SELECT draft, draft_version FROM form_offer_pages WHERE form_id = ?", args: [FORM] });
     const draft = JSON.parse(String(cur.rows[0].draft));
@@ -229,18 +311,29 @@ async function main() {
       args: [JSON.stringify(draft), FORM],
     });
     signCalls.length = 0;
-    const r = await json(
-      await videoRoute.POST(
+    const play = () =>
+      videoRoute.POST(
         new Request("http://localhost/api/offer-page/video", {
           method: "POST",
           headers: { "content-type": "application/json", host: "localhost", origin: "http://localhost", "x-forwarded-for": "198.51.100.50" },
           body: JSON.stringify({ form_id: FORM, ref: "hero" }),
         }),
-      ),
-    );
+      );
+    const r = await json(await play());
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.equal(r.body.url, `https://r2.test/offer-page-uploads/${videoPath}?ttl=7200&sig=fake`);
-    assert.deepEqual(signCalls, [{ bucket: "offer-page-uploads", path: videoPath, ttl: 7200 }]);
+    assert.equal(r.body.url, `https://r2.test/offer-page-uploads/${videoFinalPath}?ttl=7200&sig=fake`);
+    assert.deepEqual(signCalls, [{ bucket: "offer-page-uploads", path: videoFinalPath, ttl: 7200 }]);
+
+    // resource-cap-bypass finding: "not only confirm" - if the final object's
+    // REAL size is ever found to be over the cap (however that happened:
+    // nothing here claims how), play refuses it too, every time, not only
+    // once at confirm.
+    fake.put(videoFinalPath, MAX_UPLOAD_BYTES.video + 1, "video/mp4");
+    signCalls.length = 0;
+    const overCap = await json(await play());
+    assert.equal(overCap.status, 404, "an over-cap final object is never signed for play either");
+    assert.deepEqual(signCalls, []);
+    fake.put(videoFinalPath, 5_000_000, "video/mp4"); // restore
   });
 
   await step("a published upload ref whose path does not belong to the form's own tenant is never signed (defense in depth)", async () => {
@@ -268,7 +361,7 @@ async function main() {
     const withCaption = minimalDoc({
       hero: {
         headline: "H",
-        video: { source: "upload", video_path: videoPath, video_bytes: 5_000_000, video_mime: "video/mp4", caption_path: `${OASIS}/offer-pages/captions/aaaaaaaa-0000-4000-8000-000000000000.vtt`, rights: OK, aspect: "16:9" },
+        video: { source: "upload", video_path: videoFinalPath, video_bytes: 5_000_000, video_mime: "video/mp4", caption_path: `${OASIS}/offer-pages/captions/aaaaaaaa-0000-4000-8000-000000000000.vtt`, rights: OK, aspect: "16:9" },
       },
     });
     await db.execute({ sql: "UPDATE form_offer_pages SET published = ? WHERE form_id = ?", args: [JSON.stringify(withCaption), FORM] });
@@ -276,7 +369,7 @@ async function main() {
       captionsRoute.GET(new Request(`http://localhost/api/offer-page/captions?form_id=${FORM}&ref=hero`, { headers: { host: "localhost", "x-forwarded-for": "192.0.2.80" } }));
     // Past every check, only the object store (the real captions download, not this feature's stand-in) remains: 503.
     assert.equal((await get()).status, 503);
-    const noCaption = minimalDoc({ hero: { headline: "H", video: { source: "upload", video_path: videoPath, video_bytes: 5_000_000, video_mime: "video/mp4", rights: OK, aspect: "16:9" } } });
+    const noCaption = minimalDoc({ hero: { headline: "H", video: { source: "upload", video_path: videoFinalPath, video_bytes: 5_000_000, video_mime: "video/mp4", rights: OK, aspect: "16:9" } } });
     await db.execute({ sql: "UPDATE form_offer_pages SET published = ? WHERE form_id = ?", args: [JSON.stringify(noCaption), FORM] });
     assert.equal((await get()).status, 404, "a ref with no captions on record");
   });
@@ -285,7 +378,7 @@ async function main() {
   await step("an upload VideoRef still requires the rights confirmation to parse, and an old doc with no upload fields parses unchanged", async () => {
     const good = {
       ...minimalDoc(),
-      hero: { headline: "H", video: { source: "upload", video_path: videoPath, video_bytes: 5_000_000, video_mime: "video/mp4", rights: OK, aspect: "16:9" } },
+      hero: { headline: "H", video: { source: "upload", video_path: videoFinalPath, video_bytes: 5_000_000, video_mime: "video/mp4", rights: OK, aspect: "16:9" } },
     };
     assert.doesNotThrow(() => parseOfferPageDoc(good));
     const noRights = structuredClone(good) as Record<string, unknown>;

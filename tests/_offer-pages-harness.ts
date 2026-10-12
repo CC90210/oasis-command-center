@@ -80,23 +80,56 @@ export async function stubSigner(): Promise<void> {
   });
 }
 
-/** An object store that keeps uploaded-video objects in memory: the same shape lib/offer-pages/upload.ts's OfferUploadStorage expects. */
-export function fakeOfferUploadStorage(opts: { infoThrows?: boolean } = {}) {
-  const objects = new Map<string, { size: number; contentType: string | null }>();
-  const signed: string[] = [];
+/**
+ * An object store that keeps uploaded-video objects in memory: the same
+ * shape lib/offer-pages/upload.ts's OfferUploadStorage expects, ETag and
+ * conditional copy included, so a test can simulate a TOCTOU swap (call
+ * `put` a second time on the same path before confirm's copy runs - the
+ * fresh ETag that gets, the conditional copy no longer matches).
+ */
+export function fakeOfferUploadStorage(opts: { infoThrows?: boolean; copyThrows?: boolean; forcePreconditionFailed?: boolean } = {}) {
+  const objects = new Map<string, { size: number; contentType: string | null; etag: string }>();
+  const signed: Array<{ path: string; contentLength: number; contentType: string; ttlSec: number }> = [];
+  const copies: Array<{ source: string; dest: string; etag: string }> = [];
+  const removed: string[] = [];
+  let etagSeq = 0;
   const storage = {
-    async createSignedUploadUrl(path: string) {
-      signed.push(path);
-      return { signedUrl: `https://r2.test/offer-page-uploads/${path}?sig=fake` };
+    async createSignedUploadUrl(path: string, put: { contentLength: number; contentType: string; ttlSec: number }) {
+      signed.push({ path, ...put });
+      return { signedUrl: `https://r2.test/offer-page-uploads/${path}?sig=fake&len=${put.contentLength}&type=${encodeURIComponent(put.contentType)}&ttl=${put.ttlSec}` };
     },
     async info(path: string) {
       if (opts.infoThrows) throw new Error("storage unreachable");
-      return objects.get(path) ?? null;
+      const o = objects.get(path);
+      return o ? { size: o.size, contentType: o.contentType, etag: o.etag } : null;
+    },
+    async copyIfMatch(sourcePath: string, destPath: string, etag: string) {
+      copies.push({ source: sourcePath, dest: destPath, etag });
+      if (opts.copyThrows) throw new Error("copy unreachable");
+      // Models the ACTUAL race (the object changed between the caller's own
+      // HEAD and this call) without needing real concurrency: forced on, as
+      // if R2 itself just told us the source no longer matches.
+      if (opts.forcePreconditionFailed) return { ok: false as const, error: "precondition_failed" as const };
+      const src = objects.get(sourcePath);
+      if (!src || src.etag !== etag) return { ok: false as const, error: "precondition_failed" as const };
+      objects.set(destPath, { ...src });
+      return { ok: true as const };
+    },
+    async remove(path: string) {
+      removed.push(path);
+      objects.delete(path);
     },
   };
-  /** What a browser's PUT would leave behind, for a test to assert against without a real R2. */
-  const put = (path: string, size: number, contentType: string | null) => objects.set(path, { size, contentType });
-  return { storage, objects, signed, put };
+  /** What a browser's PUT would leave behind - a FRESH ETag every call, so calling this twice on the same path models the object being swapped underneath an ETag already read. */
+  const put = (path: string, size: number, contentType: string | null) => {
+    etagSeq += 1;
+    objects.set(path, { size, contentType, etag: `"fake-etag-${etagSeq}"` });
+  };
+  // `opts` itself (not a copy) is returned, so a test can flip e.g.
+  // `fake.opts.forcePreconditionFailed = true` on the SAME storage instance
+  // mid-test - re-stubbing the module instead would have no effect on a
+  // route file that already captured the first stub's exports at import time.
+  return { storage, objects, signed, copies, removed, put, opts };
 }
 
 /**
@@ -113,6 +146,30 @@ export async function stubOfferUploadStorage(storage: ReturnType<typeof fakeOffe
     ...real,
     offerUploadStorage: () => storage,
     offerUploadStorageConfigured: () => storage !== null,
+  });
+}
+
+/**
+ * A live, mutable switch on lib/crypto/derived-keys.ts's `deriveKey`: flip
+ * `.failing = true` to make it throw as it really does when AUTH_SESSION_SECRET
+ * is missing or too short, WITHOUT touching that env var (deleting it globally
+ * would also break every signed-in test call, since session verification
+ * reads the same secret). Call stubDerivedKeys() once, before any route file
+ * is imported - the same ordering constraint stubOfferUploadStorage carries,
+ * and for the same reason: a route that already captured the real module's
+ * export reference at import time would not see a LATER stub.
+ */
+export const derivedKeySwitch = { failing: false };
+
+export async function stubDerivedKeys(): Promise<void> {
+  const p = require.resolve(join(ROOT, "lib", "crypto", "derived-keys.ts"));
+  const real = await import("../lib/crypto/derived-keys");
+  stubPath(p, {
+    ...real,
+    deriveKey: async (label: string, deriveOpts?: { env?: Record<string, string | undefined> }) => {
+      if (derivedKeySwitch.failing) throw new Error("deriveKey: stubbed failure (derivedKeySwitch.failing)");
+      return real.deriveKey(label, deriveOpts);
+    },
   });
 }
 

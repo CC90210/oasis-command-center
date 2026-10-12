@@ -64,8 +64,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const minted = await mintOfferUpload({ tenantId, formId: id, kind: body.kind, mimeType, sizeBytes, storage });
   if (!minted.ok) {
     if (minted.error === "storage_unavailable") return UNAVAILABLE();
-    const status = minted.error === "too_large" ? 400 : 400;
-    return NextResponse.json({ ok: false, error: minted.error }, { status });
+    if (minted.error === "key_unavailable") {
+      console.error("[offer-pages.video-upload] signing key unavailable");
+      return NextResponse.json({ ok: false, error: "upload_unavailable" }, { status: 503 });
+    }
+    return NextResponse.json({ ok: false, error: minted.error }, { status: 400 });
   }
   return NextResponse.json(
     {

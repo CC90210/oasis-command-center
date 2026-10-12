@@ -37,7 +37,11 @@ function formatBytes(bytes: number): string {
 
 /** The browser's own file.type, or (for a .vtt a browser leaves blank) the one type that extension can mean. */
 function resolvedMime(kind: UploadKind, file: File): string {
-  if (file.type) return file.type;
+  // Normalized the same way the server normalizes the declared type before
+  // signing it into the PUT: this exact string becomes the Content-Type
+  // header the signature requires, so client and server must agree on it
+  // byte for byte, not just "the same type".
+  if (file.type) return file.type.trim().toLowerCase();
   if (kind === "caption" && file.name.toLowerCase().endsWith(".vtt")) return "text/vtt";
   return "";
 }
@@ -55,11 +59,23 @@ function clientUploadError(kind: UploadKind, file: File): string | null {
   return null;
 }
 
-/** PUT with upload progress - fetch() cannot report it, so this is the one place XHR is still the right tool. */
-function putWithProgress(url: string, file: File, onProgress: (pct: number) => void): Promise<void> {
+/**
+ * PUT with upload progress - fetch() cannot report it, so this is the one
+ * place XHR is still the right tool.
+ *
+ * The PUT's Content-Type MUST be exactly the value the server signed
+ * (lib/r2-storage.ts createSignedUploadUrlConstrained): R2 answers
+ * SignatureDoesNotMatch otherwise, so this is set explicitly rather than
+ * left to the browser's own guess from the file (empty for a .vtt in some
+ * browsers). Content-Length is never set here - it is a forbidden header for
+ * XHR, and the browser always sends the body's real byte count, which is
+ * exactly what makes the signed cap hold against a client that lies about it.
+ */
+function putWithProgress(url: string, file: File, contentType: string, onProgress: (pct: number) => void): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url);
+    xhr.setRequestHeader("content-type", contentType);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
     };
@@ -81,7 +97,7 @@ async function uploadOne(formId: string, kind: UploadKind, file: File, onProgres
   if (!initRes.ok || !init.ok || !init.signed_url || !init.upload_token) {
     throw new Error(init.message || "That upload couldn't start. Try again.");
   }
-  await putWithProgress(init.signed_url, file, onProgress);
+  await putWithProgress(init.signed_url, file, mimeType, onProgress);
   const confirmRes = await fetch(`/api/forms/${formId}/offer/video-upload/confirm`, {
     method: "POST",
     headers: { "content-type": "application/json" },

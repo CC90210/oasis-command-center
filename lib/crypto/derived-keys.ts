@@ -43,6 +43,7 @@ export const DERIVED_KEY_LABELS = {
   mcp: "oasis-mcp-token/d1",
   run: "oasis-run-token/v1",
   inferJob: "oasis-infer-job/v1",
+  offerUpload: "offer-upload-v1",
 } as const;
 
 export type DerivedKeyLabel = (typeof DERIVED_KEY_LABELS)[keyof typeof DERIVED_KEY_LABELS];

@@ -18,8 +18,8 @@ import type { Client } from "@libsql/client";
 import type { Aspect, OfferPageDoc, TemplateKey } from "./types";
 import { DEFAULT_ACCENT } from "./types";
 import { drawnPage, type DrawnPage, type MediaCheck } from "./visibility";
-import { embedUrl, formatDuration } from "./providers";
-import { imageKey, ownThumbPath, resolveDocLibrary, signPageMedia, signUploadPosters, type ResolvedLibrary, type Signer } from "./video";
+import { embedUrl, formatDuration, videoRefs } from "./providers";
+import { imageKey, ownThumbPath, resolveDocLibrary, signPageMedia, signUploadPosters, verifyUploadObject, type OfferUploadStorage, type ResolvedLibrary, type Signer } from "./video";
 
 export type FacadeMedia = {
   source:
@@ -65,6 +65,8 @@ export async function prepareOfferRender(input: {
   publicUrl: (path: string) => string | null;
   /** The owner's preview of the draft (app/f/.../page.tsx canPreview). */
   preview?: boolean;
+  /** null (R2 not configured) fails CLOSED for every upload-source video and poster: none are drawn. */
+  uploadStorage: OfferUploadStorage | null;
 }): Promise<PreparedOffer> {
   const { doc, formId, tenantId } = input;
   let resolved: ResolvedLibrary = { videos: new Map(), images: new Map() };
@@ -80,15 +82,25 @@ export async function prepareOfferRender(input: {
     }
   }
   const signed = await signPageMedia(resolved, input.sign);
-  const uploadPosters = await signUploadPosters(doc, input.sign);
+  const uploadPosters = await signUploadPosters(doc, tenantId, input.sign, input.uploadStorage);
+
+  // An upload video is drawn only when its REAL size and type are still
+  // within its kind's cap right now (resource-cap-bypass finding: "not only
+  // confirm") - the same re-check resolvePublishedVideo makes at play,
+  // precomputed here the way the Library Map above is, since MediaCheck
+  // itself must stay synchronous.
+  const verifiedUploads = new Set<string>();
+  for (const { ref, video } of videoRefs(doc)) {
+    if (video.source !== "upload") continue;
+    const verified = await verifyUploadObject({ tenantId, path: video.video_path, kind: "video", storage: input.uploadStorage });
+    if (verified.ok) verifiedUploads.add(ref);
+  }
 
   const media: MediaCheck = {
     // A Library video is drawn only when it resolves for this workspace; an
-    // upload is drawn by construction (the same posture as a link video: the
-    // object was checked when it was saved, and a since-deleted one simply
-    // fails to play, never a server-render error); a link is drawn when its
-    // id is valid.
-    video: (ref, video) => (video.source === "library" ? resolved.videos.has(ref) : video.source === "upload" ? true : embedUrl(video) !== null),
+    // upload is drawn only when verifiedUploads says so; a link is drawn
+    // when its id is valid.
+    video: (ref, video) => (video.source === "library" ? resolved.videos.has(ref) : video.source === "upload" ? verifiedUploads.has(ref) : embedUrl(video) !== null),
     image: (image) => signed.images.has(imageKey(image)),
   };
   const page = drawnPage(doc, { fallbackHeadline: input.fallbackHeadline, media });

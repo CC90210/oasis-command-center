@@ -34,8 +34,8 @@ import {
   type VideoRef,
 } from "@/lib/offer-pages/types";
 import { videoRefs } from "@/lib/offer-pages/providers";
-import { imageKey, imageRefs, resolveLibrary } from "@/lib/offer-pages/video";
-import { offerUploadStorage, verifyUploadObject } from "@/lib/offer-pages/upload";
+import { imageKey, imageRefs, resolveLibrary, verifyUploadObject } from "@/lib/offer-pages/video";
+import { offerUploadStorage } from "@/lib/offer-pages/upload";
 import { emptyDocForTemplate } from "@/lib/offer-pages/templates";
 import { applyClaimTicks, lintDoc, stampConfirmations } from "@/lib/offer-pages/claims";
 import { createOfferRow, isSupportDeskForm, offerPagesDb, readOfferRow, saveDraft } from "@/lib/offer-pages/store";
