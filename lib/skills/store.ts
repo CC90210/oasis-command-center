@@ -262,6 +262,8 @@ export type Library = {
   labels: LabelRow[];
   assignments: { skill: string; label: string; rank: "use-first" | "also-helps" }[];
   kinds: Record<string, TestRecord>;
+  /** The latest updated_at among this computer's skills_kind_score rows, or null when there are none. */
+  records_at: string | null;
 };
 
 /** One computer's skills, labels and scores, or null when the caller does not own that computer. */
@@ -278,6 +280,7 @@ export async function library(db: Client, owner: string, computerId: string): Pr
   const lb = await db.execute({ sql: "SELECT id, level, parent_id, name, meaning, examples_json FROM skills_label WHERE computer_id = ? ORDER BY rowid", args: [computerId] });
   const as = await db.execute({ sql: "SELECT skill, label_id, rank FROM skills_skill_label WHERE computer_id = ? ORDER BY label_id, skill", args: [computerId] });
   const ks = await db.execute({ sql: "SELECT label_id, n, ok FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
+  const ra = await db.execute({ sql: "SELECT MAX(updated_at) AS t FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
   return {
     skills: sk.rows.map((r) => ({
       name: String(r.name), description: String(r.description), kind: String(r.kind) === "library" ? "library" : "installed",
@@ -292,5 +295,38 @@ export async function library(db: Client, owner: string, computerId: string): Pr
     })),
     assignments: as.rows.map((r) => ({ skill: String(r.skill), label: String(r.label_id), rank: String(r.rank) === "use-first" ? "use-first" : "also-helps" })),
     kinds: Object.fromEntries(ks.rows.map((r) => [String(r.label_id), { n: num(r.n), ok: num(r.ok) }])),
+    records_at: str(ra.rows[0]?.t),
   };
+}
+
+/**
+ * Edit a HELD change (plan 3): in ONE batch (libSQL runs a batch as a transaction), queue the
+ * edited ops as a new change scoped to that computer and reject the held row with "edited into
+ * <new id>". Every statement is conditioned on the held row (owned by the caller) existing, so a
+ * change that moved on (applied, rejected, or someone else's) inserts nothing and moves nothing.
+ */
+export async function revise(
+  db: Client, owner: string, actor: string, changeId: string, computerId: string, ch: { description: string; ops: Op[] },
+): Promise<{ ok: true; id: string } | { ok: false; error: "not_found" | "not_held" }> {
+  const id = `ch-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+  const t = nowIso();
+  const heldMine = `EXISTS (SELECT 1 FROM skills_change_status s JOIN skills_computer k ON k.id = s.computer_id
+                    WHERE s.change_id = ? AND s.computer_id = ? AND s.status = 'held' AND k.owner_user_id = ?)`;
+  const rs = await db.batch(
+    [
+      { sql: `INSERT INTO skills_change (id, author, description, scope, ops_json, created_at) SELECT ?, ?, ?, ?, ?, ? WHERE ${heldMine}`,
+        args: [id, actor, ch.description, computerId, JSON.stringify(ch.ops), t, changeId, computerId, owner] },
+      { sql: "INSERT INTO skills_change_status (change_id, computer_id, status, updated_at) SELECT ?, ?, 'waiting', ? WHERE EXISTS (SELECT 1 FROM skills_change WHERE id = ?)",
+        args: [id, computerId, t, id] },
+      { sql: `UPDATE skills_change_status SET status = 'rejected', decided_by = ?, reason = ?, updated_at = ?
+              WHERE change_id = ? AND computer_id = ? AND status = 'held' AND EXISTS (SELECT 1 FROM skills_change WHERE id = ?)`,
+        args: [actor, `edited into ${id}`, t, changeId, computerId, id] },
+    ],
+    "write",
+  );
+  if (rs[2].rowsAffected === 1) return { ok: true, id };
+  const own = await db.execute({ sql: "SELECT 1 FROM skills_computer WHERE id = ? AND owner_user_id = ?", args: [computerId, owner] });
+  if (!own.rows.length) return { ok: false, error: "not_found" };
+  const ex = await db.execute({ sql: "SELECT 1 FROM skills_change_status WHERE change_id = ? AND computer_id = ?", args: [changeId, computerId] });
+  return { ok: false, error: ex.rows.length ? "not_held" : "not_found" };
 }

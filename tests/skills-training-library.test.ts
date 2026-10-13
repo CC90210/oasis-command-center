@@ -12,6 +12,9 @@
 import { check, extraMigrationPaths, finish, login, req, setupDb, splitStatements } from "./skills-training-harness";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { POST as createComputerRoute } from "../app/api/skills/computers/route";
+import { POST as createChangeRoute } from "../app/api/skills/changes/route";
+import { POST as reviseRoute } from "../app/api/skills/changes/[id]/revise/route";
 import { parseReport, parseSkillsPush } from "../lib/skills/contract";
 import { createChange, createComputer, library, overview, recordReport, storeSkills } from "../lib/skills/store";
 
@@ -92,6 +95,21 @@ async function main() {
     assert.equal(await library(db, "owner-a", "pc-00000000"), null);
   });
 
+  await check("records_at is the latest kind-score update: null before kinds, a timestamp after, unchanged without kinds", async () => {
+    const rc = await createComputer(db, "owner-a", "Records PC");
+    assert.equal((await library(db, "owner-a", rc.id))?.records_at, null);
+    const withKinds = parseSkillsPush({ skills_sha: "r1", skills: [skill("graft", { n: 1, ok: 1 })], kinds: [{ id: "debug", n: 1, ok: 1 }] });
+    assert.ok(withKinds.ok);
+    await storeSkills(db, rc.id, withKinds.value);
+    const after = await library(db, "owner-a", rc.id);
+    assert.equal(typeof after?.records_at, "string");
+    const stamped = after?.records_at;
+    const withoutKinds = parseSkillsPush({ skills_sha: "r2", skills: [skill("graft")] });
+    assert.ok(withoutKinds.ok);
+    await storeSkills(db, rc.id, withoutKinds.value);
+    assert.equal((await library(db, "owner-a", rc.id))?.records_at, stamped);
+  });
+
   await check("overview carries each change's ops", async () => {
     const ops = [{ op: "assign", skill: "graft", label: "debug", rank: "use-first" }];
     const ch = await createChange(db, "owner-a", "adon", { description: "Put graft first", scope: a.id, ops });
@@ -100,8 +118,54 @@ async function main() {
     assert.deepEqual(ov.changes.find((c) => c.change_id === (ch.ok ? ch.id : ""))?.ops, ops);
   });
 
-  void login;
-  void req;
+  const params = (id: string) => ({ params: Promise.resolve({ id }) });
+  const asJson = async (r: Response) => (await r.json()) as Record<string, unknown>;
+  await login("adon");
+  const pc = await asJson(await createComputerRoute(req("/api/skills/computers", { method: "POST", body: { display_name: "Adon's PC" } })));
+  const ops = [
+    { op: "add-sub", id: "sales-offer-outreach-script", parent: "sales-offer", name: "Outreach scripts", meaning: "write a cold email or call script", phrasings: ["cold email"], keywords: ["outreach"], examples: ["write a cold email"] },
+    { op: "assign", skill: "storybrand", label: "sales-offer-outreach-script", rank: "also-helps" },
+  ];
+  const queued = await asJson(await createChangeRoute(req("/api/skills/changes", { method: "POST", body: { description: "Outreach scripts", scope: pc.id, ops } })));
+  await db.execute({ sql: "UPDATE skills_change_status SET status = 'held' WHERE change_id = ?", args: [String(queued.id)] });
+  const reviseReq = (body: unknown, headers?: Record<string, string>) =>
+    reviseRoute(req(`/api/skills/changes/${queued.id}/revise`, { method: "POST", body, headers }), params(String(queued.id)));
+
+  await check("revise refuses a cross-origin write, an extra field and an empty change", async () => {
+    assert.equal((await reviseReq({ computer_id: pc.id, description: "x", ops: ops.slice(0, 1) }, { origin: "https://evil.test" })).status, 403);
+    assert.equal((await reviseReq({ computer_id: pc.id, description: "x", ops: ops.slice(0, 1), note: "hi" })).status, 400);
+    assert.equal((await reviseReq({ computer_id: pc.id, description: "x", ops: [] })).status, 400);
+  });
+
+  await check("another founder gets 404 and nothing moves", async () => {
+    await login("cc");
+    assert.equal((await reviseReq({ computer_id: pc.id, description: "x", ops: ops.slice(0, 1) })).status, 404);
+    await login("adon");
+    const st = await db.execute({ sql: "SELECT status FROM skills_change_status WHERE change_id = ?", args: [String(queued.id)] });
+    assert.equal(String(st.rows[0].status), "held");
+  });
+
+  await check("revise rejects the held change and queues the edited ops, atomically", async () => {
+    const r = await reviseReq({ computer_id: pc.id, description: "Outreach scripts (edited)", ops: ops.slice(0, 1) });
+    assert.equal(r.status, 201);
+    const out = await asJson(r);
+    const old = await db.execute({ sql: "SELECT status, reason FROM skills_change_status WHERE change_id = ?", args: [String(queued.id)] });
+    assert.equal(String(old.rows[0].status), "rejected");
+    assert.equal(String(old.rows[0].reason), `edited into ${out.id}`);
+    const fresh = await db.execute({ sql: "SELECT c.ops_json, c.scope, s.status FROM skills_change c JOIN skills_change_status s ON s.change_id = c.id WHERE c.id = ?", args: [String(out.id)] });
+    assert.equal(String(fresh.rows[0].status), "waiting");
+    assert.equal(String(fresh.rows[0].scope), String(pc.id));
+    assert.deepEqual(JSON.parse(String(fresh.rows[0].ops_json)), ops.slice(0, 1));
+  });
+
+  await check("a change that is no longer held answers 409 and nothing moves", async () => {
+    const before = await db.execute("SELECT COUNT(*) AS n FROM skills_change");
+    const r = await reviseReq({ computer_id: pc.id, description: "again", ops: ops.slice(0, 1) });
+    assert.equal(r.status, 409);
+    const after = await db.execute("SELECT COUNT(*) AS n FROM skills_change");
+    assert.equal(Number(after.rows[0].n), Number(before.rows[0].n));
+  });
+
   finish("skills-training-library");
 }
 
