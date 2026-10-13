@@ -204,6 +204,22 @@ sections.push(() => {
     assert.match(text(html.training), /Held for you 1/);
   });
 });
+// --- Task 10: Ctrl K ---
+sections.push(() => {
+  const hits = [{ kind: "skill", name: "graft", detail: "Find code by symbol." }, { kind: "group", id: "debug", name: "Fix something broken", detail: "3 skills" }];
+  const html = render([
+    { id: "hits", component: "PaletteResults", props: { hits, active: 1 } },
+    { id: "none", component: "PaletteResults", props: { hits: [], active: 0 } },
+  ]);
+  check("results are a listbox of options with the active one selected", () => {
+    assert.match(html.hits, /role="listbox"/);
+    assert.match(html.hits, /id="skills-hit-1"[^>]*role="option"[^>]*aria-selected="true"|role="option"[^>]*aria-selected="true"[^>]*id="skills-hit-1"/);
+    assert.match(text(html.hits), /Kind of work · 3 skills/);
+  });
+  check("no match says so", () => {
+    assert.match(text(html.none), /No skill or kind of work matches/);
+  });
+});
 // (later tasks push more sections here)
 
 console.log("skills-tab-render:");
