@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Apple, Download, MonitorDown } from "lucide-react";
 import { OasisLogo } from "@/components/brand/OasisLogo";
@@ -5,6 +6,33 @@ import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
+
+const PAGE_URL = "https://oasisai.work/download";
+const PAGE_TITLE = "OASIS Desktop for Mac, Windows and Linux (private beta) · OASIS AI";
+const PAGE_DESCRIPTION =
+  "OASIS Desktop is the desktop app for the OASIS Agent Command Center. It lets your agents work with the files and tools on your own computer. In private beta: OASIS sets it up with each client directly.";
+
+/**
+ * A real public page since 2026-10-13 (audit item 3): Google had indexed /download
+ * under the app's generic "Command Center" title while robots.txt blocked it.
+ * Now crawlable (robots.txt + sitemap via STANDALONE_PUBLIC_PATHS), with its own
+ * title and description. This route is outside app/(marketing), so the marketing
+ * layout's canonical/og:url does not reach it and the root layout has no
+ * metadataBase: both are absolute here. The URL is the same for operators.
+ */
+export const metadata: Metadata = {
+  title: { absolute: PAGE_TITLE },
+  description: PAGE_DESCRIPTION,
+  alternates: { canonical: PAGE_URL },
+  openGraph: {
+    type: "website",
+    siteName: "OASIS AI",
+    locale: "en_CA",
+    url: PAGE_URL,
+    title: PAGE_TITLE,
+    description: PAGE_DESCRIPTION,
+  },
+};
 
 /**
  * /download — cinematic single-purpose download surface.
@@ -263,7 +291,7 @@ function PrivateBeta({ signedOut }: { signedOut: boolean }) {
         )}
       </BrandHeader>
 
-      <section className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 pt-10 pb-24 text-center sm:pt-16">
+      <section className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 pt-10 pb-14 text-center sm:pt-16">
         <h1 className="text-5xl font-black leading-[1.02] tracking-tight text-fg sm:text-7xl">
           <span className="block">OASIS Desktop.</span>
           <span className="block text-accent">In private beta.</span>
@@ -280,9 +308,47 @@ function PrivateBeta({ signedOut }: { signedOut: boolean }) {
           Ask for access
         </a>
       </section>
+
+      {/* The indexed public page (audit 2026-10-12, item 3). Every fact below is
+          already stated elsewhere on this page or in the operator view: the
+          platforms are the three DownloadCards, the purpose is the paragraph
+          above. Text only: tests/f0-containment.test.ts fixes which links a
+          non-operator may see, and this block adds none. */}
+      <section
+        aria-labelledby="desktop-facts"
+        className="relative z-10 mx-auto max-w-2xl px-6 pb-24"
+      >
+        <h2 id="desktop-facts" className="text-lg font-bold tracking-tight text-fg">
+          About OASIS Desktop
+        </h2>
+        <dl className="mt-4 divide-y divide-hairline border-y border-hairline text-left text-sm leading-relaxed">
+          {DESKTOP_FACTS.map(([term, detail]) => (
+            <div key={term} className="grid gap-1 py-4 sm:grid-cols-[10rem_1fr] sm:gap-6">
+              <dt className="font-semibold text-fg">{term}</dt>
+              <dd className="text-fg-muted">{detail}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
     </main>
   );
 }
+
+const DESKTOP_FACTS = [
+  [
+    "What it is",
+    "The desktop app for the OASIS Agent Command Center, the system your OASIS agents run in.",
+  ],
+  [
+    "What it does",
+    "Lets your agents work with the files and tools on your own computer, not only the ones in a browser.",
+  ],
+  ["Runs on", "Mac (Apple Silicon and Intel), Windows and Linux."],
+  [
+    "How to get it",
+    "It is in private beta. OASIS sets it up with each client's workspace directly, so there is no public download yet.",
+  ],
+] as const;
 
 function Backdrop() {
   return (

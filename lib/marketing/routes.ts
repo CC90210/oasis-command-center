@@ -78,6 +78,26 @@ export const ALL_MARKETING_PATHS: readonly string[] = [
   ...MARKETING_LEGAL_PATHS,
 ];
 
+/**
+ * Public, crawlable pages the marketing shell does NOT own.
+ *
+ * /download renders outside app/(marketing) and branches per viewer (release
+ * links for a verified operator, a private-beta page for everyone else; see
+ * tests/f0-containment.test.ts). Adding it to ALL_MARKETING_PATHS would hand it
+ * the marketing shell and its full-bleed layout, which is a different page. It
+ * is listed here so robots.txt and the sitemap publish it and
+ * tests/robots-tiers.test.ts accepts the Allow line. Google already indexed it
+ * and shows it for "oasis ai" (audit 2026-10-12, item 3); Adon chose to make it
+ * a real public page rather than de-index it.
+ */
+export const STANDALONE_PUBLIC_PATHS = ["/download"] as const;
+
+/** Every path a crawler may fetch as a page: robots.txt and the sitemap. */
+export const ALL_PUBLIC_PATHS: readonly string[] = [
+  ...ALL_MARKETING_PATHS,
+  ...STANDALONE_PUBLIC_PATHS,
+];
+
 /** Canonical origin, used for metadata/sitemap/OG absolute URLs. */
 export const SITE_ORIGIN = "https://oasisai.work";
 

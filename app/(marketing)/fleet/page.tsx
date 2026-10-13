@@ -63,6 +63,13 @@ export default function FleetPage() {
       </section>
 
       <Section className="m-edge">
+        {/* FleetRoster's cards are h3. On "/" they sit under a SectionHead h2;
+            here they followed the h1 directly, a skipped level (Lighthouse
+            heading-order, 2026-10-13). The page design has no visible heading
+            for this block, so it is announced, not shown. sr-only is safe at
+            this depth: the marketing.css skip-link trap only hits direct
+            children of .marketing. */}
+        <h2 className="sr-only">AI agents on the OASIS roster</h2>
         <FleetRoster />
       </Section>
 

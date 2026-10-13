@@ -1,6 +1,6 @@
 import type { MetadataRoute } from "next";
 import {
-  ALL_MARKETING_PATHS,
+  ALL_PUBLIC_PATHS,
   MARKETING_HOME_PATH,
   SITE_ORIGIN,
 } from "@/lib/marketing/routes";
@@ -53,11 +53,13 @@ const PAGES: Record<string, PageMeta> = {
   "/privacy": { priority: 0.3, freq: "yearly", lastmod: "2026-09-28" },
   "/terms": { priority: 0.3, freq: "yearly", lastmod: "2026-07-31" },
   "/dmca": { priority: 0.2, freq: "yearly", lastmod: "2026-09-30" },
+  // Outside the marketing shell (lib/marketing/routes.ts STANDALONE_PUBLIC_PATHS).
+  "/download": { priority: 0.4, freq: "monthly", lastmod: "2026-10-13" },
 };
 
-/** Marketing paths as they should appear in the sitemap: "/home" collapses to "/". */
+/** Public paths (marketing + standalone) as they appear in the sitemap: "/home" collapses to "/". */
 export function sitemapPaths(): string[] {
-  return ALL_MARKETING_PATHS.map((p) => (p === MARKETING_HOME_PATH ? "/" : p));
+  return ALL_PUBLIC_PATHS.map((p) => (p === MARKETING_HOME_PATH ? "/" : p));
 }
 
 export { PAGES };
