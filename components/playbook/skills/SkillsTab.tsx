@@ -68,7 +68,7 @@ function MachinePills({ computers, current }: { computers: Computer[]; current: 
   );
 }
 
-export function SkillsTabView({ lib, computer, computers, changes, nowIso, initialView = "training", initialToast, onRefresh }: SkillsTabProps & {
+export function SkillsTabView({ lib, computer, computers, changes, nowIso, initialView = "training", initialToast, initialSheet, onRefresh }: SkillsTabProps & {
   onRefresh: () => void;
   /**
    * Fix round 2 (re-review, item c): seeds the toast state so the render harness
@@ -79,10 +79,17 @@ export function SkillsTabView({ lib, computer, computers, changes, nowIso, initi
    * page can pass it; defaults to no toast, identical to the prior behaviour.
    */
   initialToast?: Toast;
+  /**
+   * Codex fix round: seeds the sheet state (open to the named skill) so the render harness can
+   * assert where the toast markup lands relative to the sheet dialog without simulating a click.
+   * Test-only, same contract as `initialToast` above: never read by `SkillsTab` or declared on
+   * `SkillsTabProps`, so no real page can reach it.
+   */
+  initialSheet?: string | null;
 }) {
   const [view, setView] = useState<"training" | "library">(initialView);
   const [group, setGroup] = useState<string | null>(null);
-  const [sheet, setSheet] = useState<string | null>(null);
+  const [sheet, setSheet] = useState<string | null>(initialSheet ?? null);
   const [palette, setPalette] = useState(false);
   const [toast, setToast] = useState<Toast>(initialToast ?? null);
   const [rebuildBusy, setRebuildBusy] = useState(false);
@@ -186,12 +193,24 @@ export function SkillsTabView({ lib, computer, computers, changes, nowIso, initi
       </div>
 
       {/* No aria-live here (fix round 1, item c): ToastBanner's own role carries the ONE live
-          region (role="status" implies aria-live="polite"; role="alert" implies "assertive"). */}
-      <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-center">
-        <ToastBanner toast={toast} onUndo={() => queue.undo()} onDismiss={() => setToast(null)} />
-      </div>
+          region (role="status" implies aria-live="polite"; role="alert" implies "assertive").
+          Codex fix round (P2, unreachable control): while the sheet is open it opens with
+          `showModal()`, which makes this spot - outside the dialog - inert and visually beneath
+          the backdrop, so Undo could not be reached. The toast is rendered EITHER here (sheet
+          closed) OR inside SkillSheet's own subtree (sheet open), never both, so there is still
+          exactly one toast element and one live region in the composed tree at any time. */}
+      {sheet === null && (
+        <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-center">
+          <ToastBanner toast={toast} onUndo={() => queue.undo()} onDismiss={() => setToast(null)} />
+        </div>
+      )}
 
-      <SkillSheet open={sheet !== null} title={sheet ?? ""} onClose={closeSheet}>
+      <SkillSheet
+        open={sheet !== null}
+        title={sheet ?? ""}
+        onClose={closeSheet}
+        toast={sheet !== null ? <ToastBanner toast={toast} onUndo={() => queue.undo()} onDismiss={() => setToast(null)} /> : null}
+      >
         {/* Task 11 carry-list: keyed by skill name, so opening a different skill in an already-open
             sheet remounts the body's local state (the "Add to a group" select) instead of reusing it. */}
         {sheet && <SkillSheetBody key={sheet} lib={lib} name={sheet} onAction={onAction} />}

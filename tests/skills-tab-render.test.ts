@@ -3,6 +3,12 @@
  * PINNED (accessibility and honesty, not pixels): every control has a name, pressed/selected states
  * are exposed, numbers are tabular, "not tested" never renders as a score, held changes show their
  * totals and why Accept anyway is off, misses read "not checked yet", never "0 misses".
+ * Codex fix round (P2, unreachable control): SkillSheet.tsx opens with showModal(), which makes
+ * everything outside it inert and visually beneath the backdrop - a toast rendered as a sibling
+ * elsewhere (with Undo or a save error) could not be reached while the sheet was open. The toast
+ * now renders inside the sheet's own <dialog> subtree while it is open, and in its normal place
+ * otherwise, never both. `initialSheet` is a render-harness-only seed on SkillsTabView (never set
+ * by SkillsTab or SkillsTabProps) so these scenarios can open the sheet without simulating a click.
  * Run: node --import tsx tests/skills-tab-render.test.ts
  */
 import assert from "node:assert/strict";
@@ -319,6 +325,48 @@ sections.push(() => {
   check("item (c) re-check: the whole composed page is exactly one live region - no aria-live anywhere, ToastBanner's own role is present", () => {
     assert.match(html.shellWithToast, /role="status"/, "the toast's own role must still be there");
     assert.doesNotMatch(html.shellWithToast, /aria-live=/, "no wrapper or ancestor may add a SECOND live-region mechanism around it");
+  });
+});
+// --- Codex fix round (P2, unreachable control): the toast must render inside the open sheet
+// dialog (SkillSheet.tsx uses showModal(), which makes everything outside it inert and visually
+// beneath the backdrop), and in its normal place when the sheet is closed - never both at once. ---
+sections.push(() => {
+  const props = { lib: LIB, computer: COMPUTER, computers: [COMPUTER], changes: CHANGES, nowIso: NOW };
+  const toast = { key: "pending:x", tone: "ok" as const, text: "Queued: Put graft in debug.", undo: true };
+  // initialSheet is a render-harness-only seed (never set by SkillsTab or SkillsTabProps, same
+  // contract as initialToast) so this scenario can open the sheet without simulating a click.
+  const html = render([
+    { id: "sheetOpen", component: "SkillsTabView", props: { ...props, initialToast: toast, initialSheet: "graft" } },
+    { id: "sheetClosed", component: "SkillsTabView", props: { ...props, initialToast: toast } },
+  ]);
+  // Located by the toast's OWN text, not a bare `role="status"` search: TrainingView carries a
+  // second, unrelated, always-present role="status" live region (fix round 1 task 9 #7, for
+  // rebuild/busy announcements) that can sit earlier in the markup than the sheet's <dialog> and
+  // would otherwise be mistaken for the toast.
+  check("(a) sheet open with a toast: the toast markup sits inside the dialog element", () => {
+    const dialogStart = html.sheetOpen.indexOf("<dialog");
+    const dialogEnd = html.sheetOpen.indexOf("</dialog>");
+    const toastPos = html.sheetOpen.indexOf("Queued: Put graft in debug.");
+    assert.ok(dialogStart >= 0 && dialogEnd > dialogStart, "the sheet's dialog element must be present");
+    assert.ok(toastPos >= 0, "the toast must render somewhere");
+    assert.ok(toastPos > dialogStart && toastPos < dialogEnd, "the toast must sit between <dialog> and </dialog>");
+  });
+  check("(b) sheet closed: the toast is outside the dialog element", () => {
+    const dialogStart = html.sheetClosed.indexOf("<dialog");
+    const dialogEnd = html.sheetClosed.indexOf("</dialog>");
+    const toastPos = html.sheetClosed.indexOf("Queued: Put graft in debug.");
+    assert.ok(toastPos >= 0, "the toast must still render somewhere");
+    assert.ok(toastPos < dialogStart || toastPos > dialogEnd, "the toast must NOT sit inside the sheet's dialog when it is closed");
+  });
+  // TrainingView carries its own, separate, always-present role="status" live region (fix round 1
+  // task 9 #7, for rebuild/busy announcements) - counting every role="status" on the WHOLE page
+  // would wrongly flag that unrelated region too. Count the TOAST specifically, by its own text,
+  // to prove ToastBanner itself renders exactly once rather than twice (inside AND outside the
+  // sheet at once).
+  check("(c) the toast element itself renders exactly once in the composed output, open or closed", () => {
+    const toastCount = (html: string) => (html.match(/Queued: Put graft in debug\./g) ?? []).length;
+    assert.equal(toastCount(html.sheetOpen), 1, "exactly one toast when the sheet is open");
+    assert.equal(toastCount(html.sheetClosed), 1, "exactly one toast when the sheet is closed");
   });
 });
 // (later tasks push more sections here)

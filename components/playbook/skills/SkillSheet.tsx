@@ -9,7 +9,19 @@ import { X } from "lucide-react";
 import { addToValue, groupsOf, labelNames, type Action, type Library } from "@/lib/skills/view";
 import { Btn, focusRing, RankTag, Squares } from "./ui";
 
-export function SkillSheet({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: ReactNode }) {
+export function SkillSheet({ open, title, onClose, children, toast }: {
+  open: boolean; title: string; onClose: () => void; children: ReactNode;
+  /**
+   * Codex fix round (P2, unreachable control): this dialog opens with `showModal()`, which puts
+   * it in the browser's top layer and makes everything OUTSIDE it inert and visually underneath
+   * it - including a toast that was rendered as a sibling elsewhere in the tree. A toast with
+   * Undo (or a save-error message) raised while this sheet is open must be rendered AS PART OF
+   * this dialog's own subtree so it stays reachable and on top; the caller (SkillsTab.tsx) passes
+   * it only while the sheet is actually open, and renders it in its normal place otherwise, so the
+   * toast exists in exactly one place in the composed tree at any time.
+   */
+  toast?: ReactNode;
+}) {
   const ref = useRef<HTMLDialogElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const start = useRef<number | null>(null);
@@ -67,6 +79,13 @@ export function SkillSheet({ open, title, onClose, children }: { open: boolean; 
         </div>
         <div className="px-5 pb-6 pt-2">{children}</div>
       </div>
+      {/* Rendered as a descendant of the open <dialog>, not a sibling elsewhere in the page, so
+          Undo/Dismiss stay reachable and on top of the backdrop while the sheet has focus. */}
+      {toast && (
+        <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-center">
+          {toast}
+        </div>
+      )}
     </dialog>
   );
 }
