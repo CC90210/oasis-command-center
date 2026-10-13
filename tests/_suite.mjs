@@ -527,6 +527,9 @@ const TESTS = [
   // Plan 3 Task 7: server-rendered markup of the Skills tab's Library view (tiles, sub-label
   // chips, skill list). Grows in Tasks 8-11 (skill sheet, Training, Ctrl K, page shell).
   "tests/skills-tab-render.test.ts",
+  // Plan 3 Task 8: the skill sheet's 6-second Undo queue (fake timers, fake send). No I/O, so it
+  // needs no react-server condition and no database.
+  "tests/skills-tab-actions.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

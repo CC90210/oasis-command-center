@@ -96,6 +96,40 @@ sections.push(() => {
     assert.match(html.tiles, /tabular-nums/);
   });
 });
+// --- Task 8: skill sheet ---
+sections.push(() => {
+  const html = render([
+    { id: "graft", component: "SkillSheetBody", props: { lib: LIB, name: "graft" } },
+    { id: "turso", component: "SkillSheetBody", props: { lib: LIB, name: "turso-cloud" } },
+    { id: "gone", component: "SkillSheetBody", props: { lib: LIB, name: "not-installed-here" } },
+  ]);
+  check("the sheet shows the description, capabilities, an example and the test record", () => {
+    const t = text(html.graft);
+    assert.match(t, /Find code by symbol/);
+    assert.match(t, /What it can do for a prompt Finds the function behind a slow screen/);
+    // Ruling C5: no required space after "seconds" - the markup closes the quoted prompt with a
+    // closing curly quote right against the word, e.g. `...4 seconds"finds the query...`.
+    assert.match(t, /the owner search takes 4 seconds.*finds the query and every caller/);
+    assert.match(t, /3 of 4 test prompts routed here/);
+    assert.match(html.graft, /role="img" aria-label="3 of 4 test prompts routed here"/);
+  });
+  check("an untested skill says so and draws no squares", () => {
+    assert.match(text(html.turso), /Not tested, no evidence/);
+    assert.doesNotMatch(html.turso, /role="img"/);
+  });
+  check("each group offers rank and remove buttons with a full accessible name", () => {
+    assert.match(html.graft, /aria-label="Make graft also helps in Speed up a slow query"/);
+    assert.match(html.graft, /aria-label="Take graft out of Speed up a slow query"/);
+    assert.match(html.turso, /aria-label="Make turso-cloud use first in Speed up a slow query"/);
+  });
+  check("adding to a group uses a labelled select", () => {
+    assert.match(html.graft, /<label[^>]*for="skill-add-to"[^>]*>Add to a group/);
+    assert.match(html.graft, /<select[^>]*id="skill-add-to"/);
+  });
+  check("a skill no longer on this computer says so", () => {
+    assert.match(text(html.gone), /no longer on this computer/);
+  });
+});
 // (later tasks push more sections here)
 
 console.log("skills-tab-render:");
