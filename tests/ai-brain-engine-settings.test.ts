@@ -199,6 +199,24 @@ async function main() {
     assert.deepEqual(client.engineDevicesForScope([mine, teammate, owner], "workspace").map((item) => item.pairingId), ["pair-win", "pair-owner"]);
   });
 
+  await check("returning to a mode restores its saved exact computer instead of the first inventory device", () => {
+    const first = { ...DEVICE, pairingId: "pair-mac", label: "192.168.11.27 (Mac)" };
+    const state = {
+      engine: { mode: "subscription", provider: "codex", pairingId: "pair-win", fallback: "none" },
+      personEngine: { source: "workspace", selection: null },
+      devices: [first, DEVICE],
+      account: null,
+      savedProviders: [],
+      savedKeyReceipts: {},
+      bridgeReachable: true,
+      canManage: true,
+      oasis: true,
+      engineVersion: "workspace-v5",
+      engineVersions: { person: null, workspace: "workspace-v5" },
+    } satisfies Parameters<typeof client.draftForEngineMode>[1];
+    assert.deepEqual(client.draftForEngineMode("subscription", state, "workspace"), state.engine);
+  });
+
   await check("signed in never becomes execution verified without a successful probe", () => {
     assert.deepEqual(client.describeRuntime(DEVICE, "claude"), {
       label: "Needs test",

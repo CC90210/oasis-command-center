@@ -20,6 +20,7 @@ import {
   describeLocalModel,
   describeRuntime,
   connectorRestartCommand,
+  draftForEngineMode,
   engineDevicesForScope,
   inheritWorkspaceEngine,
   pollRuntimeJob,
@@ -78,16 +79,6 @@ function deviceFor(devices: EngineDevice[], selection: EngineSelection): EngineD
 
 function versionForScope(state: EngineState, scope: EngineScope): string | null {
   return state.engineVersions[scope];
-}
-
-function setupForMode(mode: EngineSelection["mode"], state: EngineState, scope: EngineScope): EngineSelection {
-  const available = engineDevicesForScope(state.devices, scope);
-  const target = available[0] ?? state.devices[0];
-  if (mode === "subscription") return { mode, pairingId: target?.pairingId ?? "", provider: "claude", fallback: "none" };
-  if (mode === "local") {
-    return { mode, pairingId: target?.pairingId ?? "", modelRef: target?.localModels[0]?.ref ?? "", fallback: "none" };
-  }
-  return { mode, provider: state.account?.provider ?? state.savedProviders[0] ?? "anthropic" };
 }
 
 function commandFor(device: EngineDevice, provider: CliEngine): string | null {
@@ -424,7 +415,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
         value={mode === "subscription" ? "cli" : mode === "local" ? "local" : "api"}
         checked={draft.mode === mode}
         disabled={!canEdit}
-        onChange={() => setDraft(setupForMode(mode, state, scope))}
+        onChange={() => setDraft(draftForEngineMode(mode, state, scope))}
         className="mt-1"
       />
       <span className="min-w-0">
