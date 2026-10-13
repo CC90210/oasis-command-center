@@ -520,6 +520,10 @@ const TESTS = [
   "tests/skills-training-checkin.test.ts",
   "tests/skills-training-admin.test.ts",
   "tests/skills-training-library.test.ts",
+  // Plan 3 Task 6: the Skills tab's pure view logic (lib/skills/view.ts) - tile names, test
+  // record squares and lines, the Toronto status line, training lists, totals, op toggling and
+  // search. No I/O, so it needs no react-server condition and no database.
+  "tests/skills-tab-view.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

@@ -11,7 +11,8 @@ import { randomBytes } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { sha256 } from "@/lib/api-helpers";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import type { KindScore, LabelRow, Op, Report, SkillRow, TestRecord } from "./contract";
+import type { KindScore, Op, Report, SkillRow } from "./contract";
+import type { Library } from "./view";
 
 export function skillsDb(): Client | null {
   return tursoConfigured() ? getTursoClient() : null;
@@ -251,21 +252,6 @@ export async function overview(db: Client, owner: string) {
   };
 }
 
-export type LibrarySkill = {
-  name: string; description: string; kind: "installed" | "library"; quarantined: boolean;
-  capabilities: string[]; example_prompts: { prompt: string; adds: string }[];
-  /** null = this computer has never sent a record for it: "not tested, no evidence". */
-  tests: TestRecord | null;
-};
-export type Library = {
-  skills: LibrarySkill[];
-  labels: LabelRow[];
-  assignments: { skill: string; label: string; rank: "use-first" | "also-helps" }[];
-  kinds: Record<string, TestRecord>;
-  /** The latest updated_at among this computer's skills_kind_score rows, or null when there are none. */
-  records_at: string | null;
-};
-
 /** One computer's skills, labels and scores, or null when the caller does not own that computer. */
 export async function library(db: Client, owner: string, computerId: string): Promise<Library | null> {
   const own = await db.execute({ sql: "SELECT 1 FROM skills_computer WHERE id = ? AND owner_user_id = ?", args: [computerId, owner] });
@@ -278,7 +264,7 @@ export async function library(db: Client, owner: string, computerId: string): Pr
   });
   // rowid order = the order the PC's snapshot listed them (labels.yaml order), not alphabetical.
   const lb = await db.execute({ sql: "SELECT id, level, parent_id, name, meaning, examples_json FROM skills_label WHERE computer_id = ? ORDER BY rowid", args: [computerId] });
-  const as = await db.execute({ sql: "SELECT skill, label_id, rank FROM skills_skill_label WHERE computer_id = ? ORDER BY label_id, skill", args: [computerId] });
+  const assignRows = await db.execute({ sql: "SELECT skill, label_id, rank FROM skills_skill_label WHERE computer_id = ? ORDER BY label_id, skill", args: [computerId] });
   const ks = await db.execute({ sql: "SELECT label_id, n, ok FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
   const ra = await db.execute({ sql: "SELECT MAX(updated_at) AS t FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
   return {
@@ -293,7 +279,7 @@ export async function library(db: Client, owner: string, computerId: string): Pr
       id: String(r.id), level: String(r.level) === "sub" ? "sub" : "broad", parent: str(r.parent_id), name: String(r.name),
       meaning: String(r.meaning ?? ""), examples: JSON.parse(String(r.examples_json ?? "[]")) as string[],
     })),
-    assignments: as.rows.map((r) => ({ skill: String(r.skill), label: String(r.label_id), rank: String(r.rank) === "use-first" ? "use-first" : "also-helps" })),
+    assignments: assignRows.rows.map((r) => ({ skill: String(r.skill), label: String(r.label_id), rank: String(r.rank) === "use-first" ? "use-first" : "also-helps" })),
     kinds: Object.fromEntries(ks.rows.map((r) => [String(r.label_id), { n: num(r.n), ok: num(r.ok) }])),
     records_at: str(ra.rows[0]?.t),
   };
