@@ -41,7 +41,15 @@ export function createPendingQueue(o: {
   type Pending = { description: string; change: NewChange; handle: unknown };
   let current: Pending | null = null;
 
-  const fire = async (keepalive: boolean) => {
+  /**
+   * Ruling (fix round 1): every queued send carries `keepalive: true`, whatever triggered it -
+   * the 6-second timer, an immediate send-the-old-one-now on a second edit, or the leaving-the-
+   * page flush. A send that is NOT marked keepalive can be cancelled by the browser mid-flight if
+   * the tab happens to be closing at that exact moment, and the edit is silently lost with no
+   * toast - the same hazard flush exists to guard against, just reachable from a different
+   * trigger. There is no call site left where `false` is actually safe.
+   */
+  const fire = async () => {
     if (!current) return;
     const { description, change, handle } = current;
     current = null;
@@ -49,7 +57,7 @@ export function createPendingQueue(o: {
     o.onState({ kind: "sending", description });
     let staleMessage: string | undefined;
     try {
-      await o.send(change, keepalive);
+      await o.send(change, true);
       o.onState({ kind: "sent", description });
     } catch (e) {
       staleMessage = (e as Error).message;
@@ -70,8 +78,8 @@ export function createPendingQueue(o: {
 
   return {
     add(description: string, change: NewChange) {
-      if (current) void fire(false);
-      current = { description, change, handle: timers.set(() => void fire(false), o.delayMs ?? 6000) };
+      if (current) void fire();
+      current = { description, change, handle: timers.set(() => void fire(), o.delayMs ?? 6000) };
       o.onState({ kind: "pending", description });
     },
     undo(): boolean {
@@ -83,7 +91,7 @@ export function createPendingQueue(o: {
       return true;
     },
     flush() {
-      void fire(true);
+      void fire();
     },
   };
 }

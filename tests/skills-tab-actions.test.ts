@@ -3,6 +3,11 @@
  * PINNED: Undo inside the window sends nothing; the timer sends once; flush (leaving the page)
  * sends once with keepalive and the timer never sends it again; a second edit sends the first at
  * once; a failed send says nothing changed.
+ * Fix round 1: every queued send carries keepalive:true, whatever triggered it (not only flush).
+ * Ruling C4 and the in-flight paths, with a controllable fake send that settles on demand: (a) A
+ * in flight, add B, A resolves - re-announces pending B; (b) same but A rejects - pending B
+ * carries A's error text; (c) undo while A is in flight returns false and A still settles;
+ * (d) flush while A is in flight sends only the current edit (B), once, with keepalive.
  * Run: node --import tsx tests/skills-tab-actions.test.ts
  */
 import assert from "node:assert/strict";
@@ -31,6 +36,33 @@ function harness(fail = false) {
 }
 const ch = (d: string) => ({ description: d, scope: "shared", ops: [{ op: "unassign", skill: "graft", label: "debug" }] });
 
+/**
+ * A harness whose `send` does not settle on its own: each call returns a promise the test
+ * resolves or rejects on demand, via `controls[i]`, so "A is still in flight when B is queued"
+ * can be driven precisely rather than hoped for from timing. Used for Ruling C4 / in-flight pins
+ * (fix round 1): a send only "finishes" when the test says so.
+ */
+function controllableHarness() {
+  const timers = new Map<number, () => void>();
+  let next = 1;
+  const sent: { description: string; keepalive: boolean }[] = [];
+  const states: QueueState[] = [];
+  const controls: { resolve: () => void; reject: (e: Error) => void }[] = [];
+  const q = createPendingQueue({
+    send: (c, keepalive) =>
+      new Promise<void>((resolve, reject) => {
+        controls.push({
+          resolve: () => { sent.push({ description: c.description, keepalive }); resolve(); },
+          reject,
+        });
+      }),
+    onState: (s) => states.push(s),
+    timers: { set: (fn) => { const h = next++; timers.set(h, fn); return h; }, clear: (h) => { timers.delete(h as number); } },
+  });
+  const fire = () => { for (const [h, fn] of [...timers]) { timers.delete(h); fn(); } };
+  return { q, sent, states, fire, controls };
+}
+
 async function main() {
   console.log("skills-tab-actions:");
   await check("undo inside the window sends nothing", async () => {
@@ -45,7 +77,10 @@ async function main() {
     const h = harness();
     h.q.add("A", ch("A"));
     h.fire(); await tick();
-    assert.deepEqual(h.sent, [{ description: "A", keepalive: false }]);
+    // Ruling (fix round 1): every queued send carries keepalive:true, not only flush - a
+    // non-keepalive in-flight send can be cancelled by the browser on unload and lost with no
+    // toast, so there is no safe case for `false` here any more.
+    assert.deepEqual(h.sent, [{ description: "A", keepalive: true }]);
     assert.equal(h.q.undo(), false);
   });
   await check("flush sends once with keepalive", async () => {
@@ -70,6 +105,53 @@ async function main() {
     assert.equal(last?.kind, "error");
     assert.match(String(last?.message), /500/);
   });
+  // --- Fix round 1, ruling 3: Ruling C4 and the in-flight paths, with a controllable fake send ---
+  await check("(a) A in flight, add B, A resolves: states re-announce pending B", async () => {
+    const h = controllableHarness();
+    h.q.add("A", ch("A"));
+    h.fire(); // A's send is now in flight (not yet settled)
+    h.q.add("B", ch("B"));
+    assert.equal(h.states.at(-1)?.description, "B"); // B's own pending, announced synchronously
+    h.controls[0].resolve(); // A settles now
+    await tick();
+    assert.deepEqual(h.sent.map((s) => s.description), ["A"]);
+    const last = h.states.at(-1);
+    assert.deepEqual(last, { kind: "pending", description: "B" });
+  });
+  await check("(b) same but A rejects: pending B carries A's error text as message", async () => {
+    const h = controllableHarness();
+    h.q.add("A", ch("A"));
+    h.fire();
+    h.q.add("B", ch("B"));
+    h.controls[0].reject(new Error("the server answered 500"));
+    await tick();
+    const last = h.states.at(-1);
+    assert.equal(last?.kind, "pending");
+    assert.equal(last?.description, "B");
+    assert.match(String(last?.message), /500/);
+  });
+  await check("(c) undo while A is in flight returns false and A still settles", async () => {
+    const h = controllableHarness();
+    h.q.add("A", ch("A"));
+    h.fire(); // current is now null: A's send is in flight, nothing left to undo
+    assert.equal(h.q.undo(), false);
+    h.controls[0].resolve();
+    await tick();
+    assert.deepEqual(h.sent, [{ description: "A", keepalive: true }]);
+    assert.equal(h.states.at(-1)?.kind, "sent");
+  });
+  await check("(d) flush while A is in flight sends only B, once, with keepalive", async () => {
+    const h = controllableHarness();
+    h.q.add("A", ch("A"));
+    h.fire(); // A in flight, unresolved
+    h.q.add("B", ch("B"));
+    h.q.flush(); // flushes the CURRENT edit (B); A's own in-flight send is untouched
+    h.controls[1].resolve(); // B settles
+    await tick();
+    assert.deepEqual(h.sent, [{ description: "B", keepalive: true }]);
+    assert.equal(h.controls.length, 2, "flush must not start a second send for A");
+  });
+
   console.log(`skills-tab-actions: ${passed} passed, ${failed} failed`);
   if (failed) process.exit(1);
 }

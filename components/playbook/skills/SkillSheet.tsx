@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
-import { groupsOf, labelNames, type Action, type Library } from "@/lib/skills/view";
+import { addToValue, groupsOf, labelNames, type Action, type Library } from "@/lib/skills/view";
 import { Btn, focusRing, RankTag, Squares } from "./ui";
 
 export function SkillSheet({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: ReactNode }) {
@@ -81,6 +81,10 @@ export function SkillSheetBody({ lib, name, onAction }: { lib: Library; name: st
   const names = labelNames(lib);
   const addable = lib.labels.filter((l) => !groups.some((g) => g.id === l.id));
   const [addTo, setAddTo] = useState(addable[0]?.id ?? "");
+  // Fix round 1: `addTo` can go stale if this same mounted body is shown a different skill/library
+  // without remounting - derive the one value both the select and Add use, falling back to the
+  // first addable option when the stored choice is no longer one (lib/skills/view.ts:addToValue).
+  const value = addToValue(addable, addTo);
 
   if (!skill) return <p className="text-sm text-fg-muted">This skill is no longer on this computer. The next check-in removes it from its labels.</p>;
 
@@ -149,11 +153,11 @@ export function SkillSheetBody({ lib, name, onAction }: { lib: Library; name: st
         <section className="space-y-2">
           <label htmlFor="skill-add-to" className="block text-xs font-medium text-fg-dim">Add to a group</label>
           <div className="flex gap-2">
-            <select id="skill-add-to" value={addTo} onChange={(e) => setAddTo(e.target.value)}
+            <select id="skill-add-to" value={value} onChange={(e) => setAddTo(e.target.value)}
               className={`min-h-11 min-w-0 flex-1 rounded-lg border border-hairline bg-bg-deep px-3 text-sm text-fg ${focusRing}`}>
               {addable.map((l) => <option key={l.id} value={l.id}>{l.level === "sub" ? `  ${names.get(l.id)} (${names.get(l.parent ?? "") ?? ""})` : names.get(l.id)}</option>)}
             </select>
-            <Btn onClick={() => addTo && onAction({ kind: "also-helps", skill: name, label: addTo })}>Add</Btn>
+            <Btn onClick={() => value && onAction({ kind: "also-helps", skill: name, label: value })}>Add</Btn>
           </div>
           <p className="text-xs text-fg-dim">Every change goes live after tonight&apos;s check, and only if no prompt routes worse.</p>
         </section>

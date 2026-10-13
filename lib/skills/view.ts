@@ -118,6 +118,23 @@ export function groupsOf(lib: Library, skill: string): { id: string; name: strin
     .map((a) => ({ id: a.label, name: names.get(a.label) ?? a.label, rank: a.rank, level: levels.get(a.label) === "sub" ? "sub" : "broad" }));
 }
 
+/**
+ * Task 8 fix round 1: the skill sheet's "Add to a group" select keeps its chosen id in React
+ * state (`addTo`), set once from `addable[0]` on first render. If the SAME mounted SkillSheetBody
+ * is later shown a different skill or library (name/lib change without a remount - e.g. the sheet
+ * stays open while a different row is opened from underneath it), the stored id can point at a
+ * label that is no longer one of THIS skill's addable options. A plain controlled `<select
+ * value={addTo}>` with no matching `<option>` silently falls back to showing the first option
+ * while `addTo` itself still holds the stale id - so Add would send the OLD id even though the
+ * screen shows the new first option selected. This derives the one value both the select and the
+ * Add button must use: the stored choice when it is still a real option, otherwise the first
+ * addable option (or "" when there are none), exactly matching what the select itself visibly
+ * shows.
+ */
+export function addToValue(addable: { id: string }[], addTo: string): string {
+  return addable.some((l) => l.id === addTo) ? addTo : (addable[0]?.id ?? "");
+}
+
 export function testLine(t: TestRecord | null): { text: string; tested: boolean } {
   if (!t || t.n === 0) return { text: "Not tested, no evidence", tested: false };
   return { text: `${t.ok} of ${t.n} test prompts routed here`, tested: true };

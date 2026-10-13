@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { CHANGES, COMPUTER, LIB, NOW } from "./skills-tab-fixture";
 import {
-  activeChip, changeFor, labelNames, members, recordsAgeLine, scoreText, search, sortTiles, squares, statusLine, testLine, tiles, toggleOp, totalsRows, training,
+  activeChip, addToValue, changeFor, labelNames, members, recordsAgeLine, scoreText, search, sortTiles, squares, statusLine, testLine, tiles, toggleOp, totalsRows, training,
 } from "../lib/skills/view";
 
 let passed = 0;
@@ -174,6 +174,18 @@ check("Task 4: a stale test record (older than the latest check-in) reads a plai
   assert.equal(recordsAgeLine("2026-10-11T10:00:00.000Z", COMPUTER.last_checkin_at), "Test record from Oct 11");
   // No records at all: "not tested yet" is said elsewhere, so no age line either.
   assert.equal(recordsAgeLine(null, COMPUTER.last_checkin_at), null);
+});
+
+check("fix round 1 (task 8) #1: addToValue falls back when the chosen id is no longer addable", () => {
+  const addable = [{ id: "a" }, { id: "b" }];
+  // The stored choice is still a real option: kept as-is.
+  assert.equal(addToValue(addable, "b"), "b");
+  // The screen moved to a different skill/library without a remount; "c" was addable there but
+  // is not one of THIS skill's options - must not keep pointing at it (the old bug: a bare
+  // `addTo` would return "c" here, while the <select> itself silently shows "a" selected).
+  assert.equal(addToValue(addable, "c"), "a");
+  // No addable options at all: falls back to "", never a stale id.
+  assert.equal(addToValue([], "a"), "");
 });
 
 console.log(`skills-tab-view: ${passed} passed, ${failed} failed`);
