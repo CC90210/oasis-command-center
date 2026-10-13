@@ -103,11 +103,12 @@ async function main() {
     await storeSkills(db, rc.id, withKinds.value);
     const after = await library(db, "owner-a", rc.id);
     assert.equal(typeof after?.records_at, "string");
-    const stamped = after?.records_at;
+    const fixedStamp = "2020-01-01T00:00:00.000Z";
+    await db.execute({ sql: "UPDATE skills_kind_score SET updated_at = ? WHERE computer_id = ?", args: [fixedStamp, rc.id] });
     const withoutKinds = parseSkillsPush({ skills_sha: "r2", skills: [skill("graft")] });
     assert.ok(withoutKinds.ok);
     await storeSkills(db, rc.id, withoutKinds.value);
-    assert.equal((await library(db, "owner-a", rc.id))?.records_at, stamped);
+    assert.equal((await library(db, "owner-a", rc.id))?.records_at, fixedStamp);
   });
 
   await check("overview carries each change's ops", async () => {
@@ -134,15 +135,23 @@ async function main() {
   await check("revise refuses a cross-origin write, an extra field and an empty change", async () => {
     assert.equal((await reviseReq({ computer_id: pc.id, description: "x", ops: ops.slice(0, 1) }, { origin: "https://evil.test" })).status, 403);
     assert.equal((await reviseReq({ computer_id: pc.id, description: "x", ops: ops.slice(0, 1), note: "hi" })).status, 400);
+    const before = await db.execute("SELECT COUNT(*) AS n FROM skills_change");
     assert.equal((await reviseReq({ computer_id: pc.id, description: "x", ops: [] })).status, 400);
+    const after = await db.execute("SELECT COUNT(*) AS n FROM skills_change");
+    assert.equal(Number(after.rows[0].n), Number(before.rows[0].n), "an empty change must queue nothing");
+    const st = await db.execute({ sql: "SELECT status FROM skills_change_status WHERE change_id = ?", args: [String(queued.id)] });
+    assert.equal(String(st.rows[0].status), "held", "the held row must stay held");
   });
 
   await check("another founder gets 404 and nothing moves", async () => {
+    const before = await db.execute("SELECT COUNT(*) AS n FROM skills_change");
     await login("cc");
     assert.equal((await reviseReq({ computer_id: pc.id, description: "x", ops: ops.slice(0, 1) })).status, 404);
     await login("adon");
     const st = await db.execute({ sql: "SELECT status FROM skills_change_status WHERE change_id = ?", args: [String(queued.id)] });
     assert.equal(String(st.rows[0].status), "held");
+    const after = await db.execute("SELECT COUNT(*) AS n FROM skills_change");
+    assert.equal(Number(after.rows[0].n), Number(before.rows[0].n));
   });
 
   await check("revise rejects the held change and queues the edited ops, atomically", async () => {
