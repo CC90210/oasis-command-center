@@ -530,6 +530,9 @@ const TESTS = [
   // Plan 3 Task 8: the skill sheet's 6-second Undo queue (fake timers, fake send). No I/O, so it
   // needs no react-server condition and no database.
   "tests/skills-tab-actions.test.ts",
+  // Plan 3 Task 11: the page shell's toast keying (lib/skills/view.ts toastFor) - a C4 re-announce
+  // of the same pending edit must not change its key. No I/O, no React import.
+  "tests/skills-tab-shell.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

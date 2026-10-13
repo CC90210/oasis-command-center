@@ -301,6 +301,32 @@ export function actionErrorMessage(e: { status?: number; code?: string; message?
   return "Something went wrong on the server.";
 }
 
+/**
+ * `key` identifies WHICH announcement this is, not WHEN it happened: two "pending" states for the
+ * SAME queued edit (description) always carry the same key, so the toast element SkillsTab
+ * renders never remounts on a re-announce. A re-announce happens on Ruling C4 - when an older
+ * edit's in-flight send settles while a newer edit is still queued, the queue (actions.ts) re-
+ * announces the newer edit's own "pending" state so its Undo toast stays the last word, not the
+ * older edit's "sent"/"error". If the toast element remounted on that re-announce, any mount-tied
+ * countdown or entrance motion would restart for an edit that was never actually re-queued - a
+ * cosmetic lie about how much time is left before it sends. Keying on (kind, description) instead
+ * of a counter means the SAME edit's toast is reused in place; a genuinely different announcement
+ * (a different edit, or the same edit moving to a different kind of state) gets a different key
+ * and legitimately swaps. Lives here (not in the "use client" SkillsTab.tsx) so it stays testable
+ * with no React import chain, the same reason actions.ts carries no React import either.
+ */
+export type Toast = { key: string; tone: "ok" | "error"; text: string; undo: boolean } | null;
+
+export function toastFor(s: { kind: "pending" | "sending" | "sent" | "undone" | "error"; description: string; message?: string }): Toast {
+  switch (s.kind) {
+    case "pending": return { key: `pending:${s.description}`, tone: "ok", text: `Queued: ${s.description}. Goes live after tonight's check.`, undo: true };
+    case "sending": return { key: `sending:${s.description}`, tone: "ok", text: `Sending: ${s.description}.`, undo: false };
+    case "sent": return { key: `sent:${s.description}`, tone: "ok", text: `Waiting for tonight's check: ${s.description}.`, undo: false };
+    case "undone": return { key: "undone", tone: "ok", text: "Undone. Nothing was sent.", undo: false };
+    case "error": return { key: `error:${s.description}`, tone: "error", text: `Could not queue "${s.description}": ${s.message ?? "unknown error"}. Nothing changed.`, undo: false };
+  }
+}
+
 export function changeFor(a: Action, names: Map<string, string>, scope: string): NewChange {
   const where = names.get(a.label) ?? a.label;
   if (a.kind === "remove") {

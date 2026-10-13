@@ -9,10 +9,10 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Search, Undo2 } from "lucide-react";
 import {
-  changeFor, labelNames, recordsAgeLine, scopeFor, statusLine, training,
-  type Action, type ChangeRow, type Computer, type Hit, type Library,
+  changeFor, labelNames, recordsAgeLine, scopeFor, statusLine, toastFor, training,
+  type Action, type ChangeRow, type Computer, type Hit, type Library, type Toast,
 } from "@/lib/skills/view";
-import { api, createPendingQueue, type QueueState } from "./actions";
+import { api, createPendingQueue } from "./actions";
 import { CommandPalette } from "./CommandPalette";
 import { LibraryView } from "./LibraryView";
 import { SkillSheet, SkillSheetBody } from "./SkillSheet";
@@ -22,29 +22,6 @@ import { Btn, focusRing } from "./ui";
 export type SkillsTabProps = {
   lib: Library; computer: Computer; computers: Computer[]; changes: ChangeRow[]; nowIso: string; initialView?: "training" | "library";
 };
-/**
- * `key` identifies WHICH announcement this is, not WHEN it happened: two "pending" states for the
- * SAME queued edit (description) always carry the same key, so the toast element never remounts
- * on a re-announce. A re-announce happens on Ruling C4 - when an older edit's in-flight send
- * settles while a newer edit is still queued, the queue re-announces the newer edit's own
- * "pending" state so its Undo toast stays the last word, not the older edit's "sent"/"error". If
- * the toast element remounted on that re-announce, any mount-tied countdown or entrance motion
- * would restart for an edit that was never actually re-queued - a cosmetic lie about how much
- * time is left before it sends. Keying on (kind, description) instead of a counter means the
- * SAME edit's toast is reused in place; a genuinely different announcement (a different edit, or
- * the same edit moving to a different kind of state) gets a different key and legitimately swaps.
- */
-export type Toast = { key: string; tone: "ok" | "error"; text: string; undo: boolean } | null;
-
-export function toastFor(s: QueueState): Toast {
-  switch (s.kind) {
-    case "pending": return { key: `pending:${s.description}`, tone: "ok", text: `Queued: ${s.description}. Goes live after tonight's check.`, undo: true };
-    case "sending": return { key: `sending:${s.description}`, tone: "ok", text: `Sending: ${s.description}.`, undo: false };
-    case "sent": return { key: `sent:${s.description}`, tone: "ok", text: `Waiting for tonight's check: ${s.description}.`, undo: false };
-    case "undone": return { key: "undone", tone: "ok", text: "Undone. Nothing was sent.", undo: false };
-    case "error": return { key: `error:${s.description}`, tone: "error", text: `Could not queue "${s.description}": ${s.message ?? "unknown error"}. Nothing changed.`, undo: false };
-  }
-}
 
 function MachinePills({ computers, current }: { computers: Computer[]; current: Computer }) {
   if (computers.length <= 1) {
