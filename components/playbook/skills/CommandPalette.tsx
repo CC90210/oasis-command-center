@@ -5,23 +5,29 @@ import { Search } from "lucide-react";
 import { search, tiles, type Hit, type Library } from "@/lib/skills/view";
 
 export function PaletteResults({ hits, active, onPick, onHover }: { hits: Hit[]; active: number; onPick: (h: Hit) => void; onHover: (i: number) => void }) {
-  if (!hits.length) return <p className="px-4 py-6 text-sm text-fg-muted">No skill or kind of work matches.</p>;
+  if (!hits.length) return <p id="skills-palette-list" className="px-4 py-6 text-sm text-fg-muted">No skill or kind of work matches.</p>;
   return (
     <ul id="skills-palette-list" role="listbox" aria-label="Results" className="max-h-[50vh] overflow-y-auto p-1">
-      {hits.map((h, i) => (
-        <li key={h.kind === "skill" ? `s-${h.name}` : `g-${h.id}`} id={`skills-hit-${i}`} role="option" aria-selected={i === active} tabIndex={-1}
-          onMouseMove={() => onHover(i)} onClick={() => onPick(h)} onKeyDown={(e) => { if (e.key === "Enter") onPick(h); }}
-          className={`flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-lg px-3 text-sm ${i === active ? "bg-active text-fg" : "text-fg-muted"}`}>
-          <span className={`shrink-0 ${h.kind === "skill" ? "font-mono" : "font-medium"}`}>{h.name}</span>
-          <span className="truncate text-xs text-fg-dim">{h.kind === "skill" ? h.detail : `Kind of work · ${h.detail}`}</span>
-        </li>
-      ))}
+      {hits.map((h, i) => {
+        const detail = h.kind === "skill" ? h.detail : `Kind of work · ${h.detail}`;
+        return (
+          <li key={h.kind === "skill" ? `s-${h.name}` : `g-${h.id}`} id={`skills-hit-${i}`} role="option" aria-selected={i === active} tabIndex={-1}
+            onMouseMove={() => onHover(i)} onClick={() => onPick(h)}
+            className={`flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-lg px-3 text-sm ${i === active ? "bg-active text-fg" : "text-fg-muted"}`}>
+            <span className="min-w-0 flex-1">
+              <span className={`block truncate ${h.kind === "skill" ? "font-mono" : "font-medium"}`} title={h.name}>{h.name}</span>
+            </span>
+            <span className="shrink-0 truncate text-xs text-fg-dim" title={detail}>{detail}</span>
+          </li>
+        );
+      })}
     </ul>
   );
 }
 
 export function CommandPalette({ open, lib, onClose, onPick }: { open: boolean; lib: Library; onClose: () => void; onPick: (h: Hit) => void }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
   const tileList = useMemo(() => tiles(lib), [lib]);
@@ -30,14 +36,18 @@ export function CommandPalette({ open, lib, onClose, onPick }: { open: boolean; 
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) { setQ(""); setActive(0); d.showModal(); }
+    if (open && !d.open) {
+      opener.current = document.activeElement as HTMLElement | null;
+      setQ(""); setActive(0); d.showModal();
+    }
     if (!open && d.open) d.close();
   }, [open]);
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    d.addEventListener("close", onClose);
-    return () => d.removeEventListener("close", onClose);
+    const closed = () => { onClose(); opener.current?.focus(); };
+    d.addEventListener("close", closed);
+    return () => d.removeEventListener("close", closed);
   }, [onClose]);
 
   const pick = (h: Hit) => { ref.current?.close(); onPick(h); };

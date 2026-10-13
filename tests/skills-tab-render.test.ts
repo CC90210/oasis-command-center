@@ -219,6 +219,17 @@ sections.push(() => {
   check("no match says so", () => {
     assert.match(text(html.none), /No skill or kind of work matches/);
   });
+  check("fix round 1 (task 10) #2: the no-match render has no dangling aria-controls", () => {
+    const emptyLib: Library = { skills: [], labels: [], assignments: [], kinds: {}, records_at: null };
+    const palette = render([{ id: "palette-empty", component: "CommandPalette", props: { open: true, lib: emptyLib } }]);
+    const controls = palette["palette-empty"].match(/aria-controls="([^"]+)"/);
+    if (controls) assert.match(palette["palette-empty"], new RegExp(`id="${controls[1]}"`), "aria-controls references an id that must exist");
+  });
+  check("fix round 1 (task 10) #1: truncated hit name and detail carry a title and a min-w-0 wrapper", () => {
+    assert.match(html.hits, /min-w-0 flex-1/);
+    assert.match(html.hits, /title="graft"/);
+    assert.match(html.hits, /title="Find code by symbol\."/);
+  });
 });
 // (later tasks push more sections here)
 
