@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Search, Undo2 } from "lucide-react";
+import { Search, Undo2, X } from "lucide-react";
 import {
   changeFor, labelNames, recordsAgeLine, scopeFor, statusLine, toastFor, training,
   type Action, type ChangeRow, type Computer, type Hit, type Library, type Toast,
@@ -22,6 +22,31 @@ import { Btn, focusRing } from "./ui";
 export type SkillsTabProps = {
   lib: Library; computer: Computer; computers: Computer[]; changes: ChangeRow[]; nowIso: string; initialView?: "training" | "library";
 };
+
+/**
+ * Fix round 1 (review item c): a toast with no Undo (a decision, a sent edit, an error) had no
+ * way to dismiss it except waiting - it also previously sat under an `aria-live="polite"` ANCESTOR
+ * while carrying its OWN `role="status"`/`role="alert"`, two live-region mechanisms announcing the
+ * same text. `role="status"` already implies `aria-live="polite"` and `role="alert"` already
+ * implies `aria-live="assertive"`, so the toast element itself is the one live region; the
+ * positioning wrapper in SkillsTabView carries no `aria-live` of its own any more.
+ * Extracted (like CommandPalette's PaletteResults) so it is directly render-testable without
+ * needing SkillsTabView's internal toast state, which no prop can seed from outside.
+ */
+export function ToastBanner({ toast, onUndo, onDismiss }: { toast: Toast; onUndo: () => void; onDismiss: () => void }) {
+  if (!toast) return null;
+  return (
+    <div key={toast.key} role={toast.tone === "error" ? "alert" : "status"}
+      className={`pointer-events-auto flex max-w-lg items-center gap-3 rounded-xl border bg-bg-elev px-4 py-2 text-sm shadow-elev ${toast.tone === "error" ? "border-status-hot/40 text-status-hot" : "border-hairline text-fg"}`}>
+      <span>{toast.text}</span>
+      {toast.undo ? (
+        <Btn variant="ghost" className="px-3" onClick={onUndo}><Undo2 className="h-4 w-4" aria-hidden="true" />Undo</Btn>
+      ) : (
+        <Btn variant="ghost" aria-label="Dismiss" className="px-3" onClick={onDismiss}><X className="h-4 w-4" aria-hidden="true" /></Btn>
+      )}
+    </div>
+  );
+}
 
 function MachinePills({ computers, current }: { computers: Computer[]; current: Computer }) {
   if (computers.length <= 1) {
@@ -118,8 +143,14 @@ export function SkillsTabView({ lib, computer, computers, changes, nowIso, initi
         <MachinePills computers={computers} current={computer} />
         <p className={`text-sm tabular-nums ${status.stale ? "text-status-warm" : "text-fg-muted"}`}>{status.text}</p>
         {recordsAge && <p className="text-xs tabular-nums text-fg-dim">{recordsAge}</p>}
-        <Btn variant="ghost" className="ml-auto px-3" aria-label="Search skills and kinds of work" aria-keyshortcuts="Control+K Meta+K" onClick={() => setPalette(true)}>
+        {/* Fix round 1 (review item d, WCAG 2.5.3 Label in Name): the control previously showed
+            only an icon and the "Ctrl K" hint, with no visible text matching its accessible name
+            ("Search skills and kinds of work") - a speech-input user saying "click Search" had
+            nothing visible to match against. "Search" is now visible text, and the accessible
+            name still starts with it. */}
+        <Btn variant="ghost" className="ml-auto gap-2 px-3" aria-label="Search skills and kinds of work" aria-keyshortcuts="Control+K Meta+K" onClick={() => setPalette(true)}>
           <Search className="h-4 w-4" aria-hidden="true" />
+          <span>Search</span>
           <kbd className="rounded border border-hairline px-1.5 font-sans text-[11px] text-fg-dim">Ctrl K</kbd>
         </Btn>
       </header>
@@ -143,16 +174,10 @@ export function SkillsTabView({ lib, computer, computers, changes, nowIso, initi
         )}
       </div>
 
-      <div aria-live="polite" className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-center">
-        {toast && (
-          <div key={toast.key} role={toast.tone === "error" ? "alert" : "status"}
-            className={`pointer-events-auto flex max-w-lg items-center gap-3 rounded-xl border bg-bg-elev px-4 py-2 text-sm shadow-elev ${toast.tone === "error" ? "border-status-hot/40 text-status-hot" : "border-hairline text-fg"}`}>
-            <span>{toast.text}</span>
-            {toast.undo && (
-              <Btn variant="ghost" className="px-3" onClick={() => queue.undo()}><Undo2 className="h-4 w-4" aria-hidden="true" />Undo</Btn>
-            )}
-          </div>
-        )}
+      {/* No aria-live here (fix round 1, item c): ToastBanner's own role carries the ONE live
+          region (role="status" implies aria-live="polite"; role="alert" implies "assertive"). */}
+      <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-center">
+        <ToastBanner toast={toast} onUndo={() => queue.undo()} onDismiss={() => setToast(null)} />
       </div>
 
       <SkillSheet open={sheet !== null} title={sheet ?? ""} onClose={closeSheet}>

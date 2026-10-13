@@ -40,7 +40,10 @@ export default async function SkillsPage({ searchParams }: { searchParams: Promi
   }
   return (
     <Frame>
-      <SkillsTab lib={data.lib} computer={data.computer} computers={data.computers} changes={data.changes} nowIso={new Date().toISOString()} />
+      {/* Fix round 1 (review item b): keyed by computer id, so switching the MachinePills link
+          (a full navigation, but one this same page handles) resets the open sheet and the open
+          group instead of carrying stale local state from the PREVIOUS computer into this one. */}
+      <SkillsTab key={data.computer.id} lib={data.lib} computer={data.computer} computers={data.computers} changes={data.changes} nowIso={new Date().toISOString()} />
     </Frame>
   );
 }

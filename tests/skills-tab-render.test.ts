@@ -268,6 +268,43 @@ sections.push(() => {
     assert.match(text(html.lib), /Kinds of work/);
   });
 });
+// --- Fix round 1 (review on Task 11) ---
+sections.push(() => {
+  const props = { lib: LIB, computer: COMPUTER, computers: [COMPUTER], changes: CHANGES, nowIso: NOW };
+  // Item (f): a fixture whose records_at is a Toronto calendar day older than last_checkin_at, so
+  // recordsAgeLine is non-null (LIB's own records_at is same-day as COMPUTER's check-in and so is
+  // null in every scenario above - this is the first scenario that exercises the "stale record"
+  // line at all).
+  const STALE_RECORDS_LIB = { ...LIB, records_at: "2026-10-09T05:00:00.000Z" };
+  const html = render([
+    { id: "shell", component: "SkillsTabView", props },
+    { id: "staleRecords", component: "SkillsTabView", props: { ...props, lib: STALE_RECORDS_LIB } },
+    { id: "toastUndo", component: "ToastBanner", props: { toast: { key: "pending:x", tone: "ok", text: "Queued: Put graft in debug.", undo: true } } },
+    { id: "toastPlain", component: "ToastBanner", props: { toast: { key: "sent:x", tone: "ok", text: "Waiting for tonight's check: Put graft in debug.", undo: false } } },
+    { id: "toastNone", component: "ToastBanner", props: { toast: null } },
+  ]);
+  check("item (f): a records_at older than the last check-in shows the 'Test record from' caveat", () => {
+    assert.match(text(html.staleRecords), /Test record from Oct 9/);
+  });
+  check("item (c): an Undo toast is the one live region (role only, no ancestor aria-live) and has no separate Dismiss", () => {
+    assert.match(html.toastUndo, /role="status"/);
+    assert.doesNotMatch(html.toastUndo, /aria-live=/, "the toast must be the ONLY live-region mechanism, not a second one layered on an ancestor");
+    assert.match(html.toastUndo, />Undo</);
+    assert.doesNotMatch(html.toastUndo, /aria-label="Dismiss"/, "an undoable toast does not also need a separate close button");
+  });
+  check("item (c): a toast with no Undo gets an accessible, 44px Dismiss button", () => {
+    assert.match(html.toastPlain, /role="status"/);
+    assert.doesNotMatch(html.toastPlain, /aria-live=/);
+    assert.match(html.toastPlain, /aria-label="Dismiss"[^>]*class="[^"]*min-h-11/);
+    assert.doesNotMatch(html.toastPlain, />Undo</);
+  });
+  check("item (c): no toast renders nothing (not an empty live region)", () => {
+    assert.equal(html.toastNone.trim(), "");
+  });
+  check("item (d): the search button shows visible 'Search' text, and its accessible name contains it (WCAG 2.5.3)", () => {
+    assert.match(text(html.shell), /Search Ctrl K/);
+  });
+});
 // (later tasks push more sections here)
 
 console.log("skills-tab-render:");

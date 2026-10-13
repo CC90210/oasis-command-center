@@ -16,7 +16,7 @@ import { POST as createComputerRoute } from "../app/api/skills/computers/route";
 import { POST as createChangeRoute } from "../app/api/skills/changes/route";
 import { POST as reviseRoute } from "../app/api/skills/changes/[id]/revise/route";
 import { parseReport, parseSkillsPush } from "../lib/skills/contract";
-import { createChange, createComputer, library, overview, recordReport, skillsPageData, storeSkills } from "../lib/skills/store";
+import { createChange, createComputer, library, overview, recordReport, revokeComputer, skillsPageData, storeSkills } from "../lib/skills/store";
 
 const skill = (name: string, tests?: { n: number; ok: number }) => ({
   name, description: `${name} does a thing`, kind: "installed", quarantined: false,
@@ -49,6 +49,9 @@ async function main() {
 
   const a = await createComputer(db, "owner-a", "A's PC");
   const b = await createComputer(db, "owner-b", "B's PC");
+  // owner-a's SECOND computer, not primary. Created here (not inline in the records_at check
+  // below) so it is also in scope for the skillsPageData check further down.
+  const rc = await createComputer(db, "owner-a", "Records PC");
 
   await check("library() returns one computer's skills, test records, labels, assignments and scores", async () => {
     const push = parseSkillsPush({ skills_sha: "s1", skills: [skill("graft", { n: 4, ok: 3 }), skill("hallmark", { n: 0, ok: 0 })], kinds: [{ id: "debug", n: 32, ok: 27 }] });
@@ -96,7 +99,6 @@ async function main() {
   });
 
   await check("records_at is the latest kind-score update: null before kinds, a timestamp after, unchanged without kinds", async () => {
-    const rc = await createComputer(db, "owner-a", "Records PC");
     assert.equal((await library(db, "owner-a", rc.id))?.records_at, null);
     const withKinds = parseSkillsPush({ skills_sha: "r1", skills: [skill("graft", { n: 1, ok: 1 })], kinds: [{ id: "debug", n: 1, ok: 1 }] });
     assert.ok(withKinds.ok);
@@ -176,12 +178,35 @@ async function main() {
   });
 
   await check("the page never shows another owner's computer", async () => {
+    // owner-a has TWO computers: `a` (primary) and `rc` (not primary). An explicit `asked` match
+    // returns exactly that computer, even when it is not the primary one.
+    const askedRc = await skillsPageData(db, "owner-a", rc.id);
+    assert.equal(askedRc.computer?.id, rc.id);
+    // No `asked` at all falls back to the primary.
+    const askedNothing = await skillsPageData(db, "owner-a");
+    assert.equal(askedNothing.computer?.id, a.id);
+    // Asking for someone ELSE's computer id falls back to the caller's OWN primary, never to that
+    // computer, and the caller's own computer/change lists carry none of the other owner's data.
     const asksForA = await skillsPageData(db, "owner-b", a.id);
     assert.equal(asksForA.computer?.id, b.id);
     assert.ok(asksForA.computers.every((c) => c.id !== a.id));
+    assert.ok(asksForA.changes.every((c) => c.computer_id !== a.id), "must carry none of owner-a's changes");
     const nothing = await skillsPageData(db, "owner-nobody", a.id);
     assert.equal(nothing.computer, null);
     assert.equal(nothing.lib, null);
+  });
+
+  await check("with no primary computer, the fallback never silently picks a revoked one", async () => {
+    const x1 = await createComputer(db, "owner-x", "X1 (will be revoked)");
+    const x2 = await createComputer(db, "owner-x", "X2");
+    assert.ok(await revokeComputer(db, "owner-x", x1.id));
+    // createComputer always makes the FIRST computer for an owner primary, and revoking never
+    // clears that flag - so "no primary computer" is a state the admin API cannot itself reach.
+    // It is still a state the store must answer safely (a stray row, a future bulk edit), the one
+    // case this check exercises directly.
+    await db.execute({ sql: "UPDATE skills_computer SET is_primary = 0 WHERE owner_user_id = ?", args: ["owner-x"] });
+    const data = await skillsPageData(db, "owner-x");
+    assert.equal(data.computer?.id, x2.id, "a revoked computer must never be the silent default");
   });
 
   finish("skills-training-library");

@@ -320,12 +320,18 @@ export async function revise(
 /**
  * The Skills page's data. Only the CALLER's computers are candidates: an id from the address bar
  * that is not theirs falls back to their primary (or first) computer, never to someone else's.
+ *
+ * Fix round 1 (review item e): when there is no primary at all (not reachable through the normal
+ * admin API - createComputer always makes an owner's FIRST computer primary, and revoking never
+ * clears that flag - but still a state a stray row or a future bulk edit could produce), the
+ * LAST-resort fallback skips a revoked computer rather than taking whichever one sorts first. A
+ * revoked computer must never become the page's silent default.
  */
 export async function skillsPageData(db: Client, owner: string, asked?: string): Promise<{
   computer: Computer | null; computers: Computer[]; changes: ChangeRow[]; lib: Library | null;
 }> {
   const ov = await overview(db, owner);
-  const computer = ov.computers.find((c) => c.id === asked) ?? ov.computers.find((c) => c.primary) ?? ov.computers[0] ?? null;
+  const computer = ov.computers.find((c) => c.id === asked) ?? ov.computers.find((c) => c.primary) ?? ov.computers.find((c) => !c.revoked) ?? null;
   if (!computer) return { computer: null, computers: [], changes: [], lib: null };
   return { computer, computers: ov.computers, changes: ov.changes, lib: await library(db, owner, computer.id) };
 }

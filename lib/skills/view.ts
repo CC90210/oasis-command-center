@@ -314,12 +314,26 @@ export function actionErrorMessage(e: { status?: number; code?: string; message?
  * (a different edit, or the same edit moving to a different kind of state) gets a different key
  * and legitimately swaps. Lives here (not in the "use client" SkillsTab.tsx) so it stays testable
  * with no React import chain, the same reason actions.ts carries no React import either.
+ *
+ * Fix round 1 (review, IMPORTANT - wrong data): a "pending" state can carry `message`, the text
+ * of an OLDER edit's send that just failed (actions.ts's `fire()` re-announces the newer edit's
+ * own pending state when a stale in-flight send settles while it is still queued, and for a
+ * REJECTED settle it attaches that stale failure as `message` so it is not lost). Showing only
+ * "Queued: <newer edit>" with the older failure silently dropped reads as "the older edit must
+ * have saved fine" when it did not - the user believes something was saved that was not. Said
+ * plainly, in the SAME toast (never a separate one, which could be missed), with the SAME key
+ * (the older edit's failure is not itself a new announcement of THIS edit, so it must not restart
+ * this edit's own countdown).
  */
 export type Toast = { key: string; tone: "ok" | "error"; text: string; undo: boolean } | null;
 
 export function toastFor(s: { kind: "pending" | "sending" | "sent" | "undone" | "error"; description: string; message?: string }): Toast {
   switch (s.kind) {
-    case "pending": return { key: `pending:${s.description}`, tone: "ok", text: `Queued: ${s.description}. Goes live after tonight's check.`, undo: true };
+    case "pending": {
+      const queued = `Queued: ${s.description}. Goes live after tonight's check.`;
+      const text = s.message ? `The earlier edit did not save: ${s.message}. Nothing changed for it. ${queued}` : queued;
+      return { key: `pending:${s.description}`, tone: "ok", text, undo: true };
+    }
     case "sending": return { key: `sending:${s.description}`, tone: "ok", text: `Sending: ${s.description}.`, undo: false };
     case "sent": return { key: `sent:${s.description}`, tone: "ok", text: `Waiting for tonight's check: ${s.description}.`, undo: false };
     case "undone": return { key: "undone", tone: "ok", text: "Undone. Nothing was sent.", undo: false };

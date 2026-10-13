@@ -58,5 +58,25 @@ check("sending/sent/error states key off the description too, not a counter", ()
   assert.match(err1!.text, /500/);
 });
 
+// Fix round 1 (review, IMPORTANT): a C4 re-announce can carry the OLDER edit's own failure as
+// `message` on the NEWER edit's "pending" state (actions.ts: the older send settles with an
+// error while the newer edit is still queued). Scenario: edit A is waiting, edit B is made, which
+// sends A right away; A's save fails, and the queue re-announces B's pending toast carrying A's
+// error text. Dropping that text silently (the behaviour before this fix) reads as "A must have
+// saved fine" when it did not - wrong data. The fix says so plainly, in the SAME toast, without
+// changing the key (no countdown restart for an edit that was never re-queued).
+check("a waiting toast carrying a stale send's error says the earlier edit did not save (wrong-data fix)", () => {
+  const plain = toastFor({ kind: "pending", description: "B" });
+  const withMsg = toastFor({ kind: "pending", description: "B", message: "Could not save (500)" });
+  assert.ok(plain && withMsg);
+  assert.equal(plain!.key, withMsg!.key, "the stale message must not change the key (no countdown restart)");
+  assert.equal(withMsg!.undo, true, "B is still a live, undoable pending edit");
+  assert.match(withMsg!.text, /did not save/i);
+  assert.match(withMsg!.text, /Could not save \(500\)/, "the earlier edit's own error text must be shown");
+  assert.match(withMsg!.text, /Nothing changed/);
+  assert.match(withMsg!.text, /Queued: B/, "B's own queued-edit text must still be present");
+  assert.doesNotMatch(withMsg!.text, /—/, "no em dash in user-facing copy");
+});
+
 console.log(`skills-tab-shell: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

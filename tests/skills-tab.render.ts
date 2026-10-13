@@ -18,9 +18,10 @@ const COMPONENTS: Record<string, Loader> = {
   PaletteResults: async () => (await import("../components/playbook/skills/CommandPalette")).PaletteResults,
   CommandPalette: async () => (await import("../components/playbook/skills/CommandPalette")).CommandPalette,
   SkillsTabView: async () => (await import("../components/playbook/skills/SkillsTab")).SkillsTabView,
+  ToastBanner: async () => (await import("../components/playbook/skills/SkillsTab")).ToastBanner,
   // (later tasks add components here)
 };
-const CALLBACKS = ["onGroup", "onOpenSkill", "onAction", "onClose", "onPick", "onDone", "onRebuild", "onRefresh", "onHover"];
+const CALLBACKS = ["onGroup", "onOpenSkill", "onAction", "onClose", "onPick", "onDone", "onRebuild", "onRefresh", "onHover", "onUndo", "onDismiss"];
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
