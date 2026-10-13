@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { ArrowLeft, ChevronRight } from "lucide-react";
-import { members, scoreText, sortTiles, testLine, tiles as buildTiles, type Library } from "@/lib/skills/view";
+import { activeChip, members, scoreText, sortTiles, testLine, tiles as buildTiles, type Library } from "@/lib/skills/view";
 import { focusRing, KindIcon, Meter, RankTag } from "./ui";
 
 function Chip({ pressed, onClick, label, n }: { pressed: boolean; onClick: () => void; label: string; n: number }) {
@@ -30,7 +30,8 @@ export function LibraryView({ lib, group, onGroup, onOpenSkill }: {
   const current = all.find((t) => t.id === group) ?? null;
 
   if (current) {
-    const list = members(lib, current.id, chip);
+    const active = activeChip(current, chip);
+    const list = members(lib, current.id, active);
     return (
       <section aria-labelledby="skills-group-title" className="space-y-4">
         <button type="button" onClick={() => { setChip(null); onGroup(null); }} className={`inline-flex min-h-11 items-center gap-1.5 text-sm text-fg-muted hover:text-fg ${focusRing}`}>
@@ -46,8 +47,8 @@ export function LibraryView({ lib, group, onGroup, onOpenSkill }: {
         </div>
         {current.subs.length > 0 && (
           <div role="group" aria-label="Filter by sub-label" className="flex flex-wrap gap-2">
-            <Chip pressed={chip === null} onClick={() => setChip(null)} label="All" n={current.skills} />
-            {current.subs.map((s) => <Chip key={s.id} pressed={chip === s.id} onClick={() => setChip(s.id)} label={s.name} n={s.skills} />)}
+            <Chip pressed={active === null} onClick={() => setChip(null)} label="All" n={current.skills} />
+            {current.subs.map((s) => <Chip key={s.id} pressed={active === s.id} onClick={() => setChip(s.id)} label={s.name} n={s.skills} />)}
           </div>
         )}
         {list.length === 0 ? (
@@ -61,10 +62,10 @@ export function LibraryView({ lib, group, onGroup, onOpenSkill }: {
                   <button type="button" onClick={() => onOpenSkill(m.skill.name)} className={`flex w-full min-h-11 items-center gap-3 px-4 py-3 text-left hover:bg-bg-hover ${focusRing}`}>
                     <span className="min-w-0 flex-1">
                       <span className="flex items-center gap-2">
-                        <span className="truncate font-mono text-sm text-fg">{m.skill.name}</span>
+                        <span className="truncate font-mono text-sm text-fg" title={m.skill.name}>{m.skill.name}</span>
                         <RankTag rank={m.rank} />
                       </span>
-                      <span className="mt-0.5 block truncate text-xs text-fg-muted">{m.skill.description}</span>
+                      <span className="mt-0.5 block truncate text-xs text-fg-muted" title={m.skill.description}>{m.skill.description}</span>
                     </span>
                     <span className={`shrink-0 text-right text-xs tabular-nums ${t.tested ? "text-fg-muted" : "text-status-warm"}`}>
                       {t.tested ? scoreText(m.skill.tests) : "Not tested"}

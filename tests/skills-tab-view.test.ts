@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { CHANGES, COMPUTER, LIB, NOW } from "./skills-tab-fixture";
 import {
-  changeFor, labelNames, members, recordsAgeLine, scoreText, search, sortTiles, squares, statusLine, testLine, tiles, toggleOp, totalsRows, training,
+  activeChip, changeFor, labelNames, members, recordsAgeLine, scoreText, search, sortTiles, squares, statusLine, testLine, tiles, toggleOp, totalsRows, training,
 } from "../lib/skills/view";
 
 let passed = 0;
@@ -153,6 +153,18 @@ check("search puts a name match first and an empty query lists kinds of work", (
   assert.equal(search(LIB, t, "graf")[0].name, "graft");
   assert.ok(search(LIB, t, "").every((h) => h.kind === "group"));
   assert.deepEqual(search(LIB, t, "zzzz"), []);
+});
+
+check("fix round 1 (task 7) #1: activeChip ignores a chip that does not belong to the current kind", () => {
+  const debugTile = tiles(LIB).find((t) => t.id === "debug") ?? null;
+  const uiTile = tiles(LIB).find((t) => t.id === "ui-build") ?? null;
+  // debugTile really has this sub-label: kept.
+  assert.equal(activeChip(debugTile, "debug-slow-query"), "debug-slow-query");
+  // The screen jumped from debug to ui-build without going through the back button; ui-build has
+  // no sub-labels at all in this fixture, so a chip picked under debug must not keep filtering here.
+  assert.equal(activeChip(uiTile, "debug-slow-query"), null);
+  assert.equal(activeChip(null, "debug-slow-query"), null);
+  assert.equal(activeChip(debugTile, null), null);
 });
 
 check("Task 4: a stale test record (older than the latest check-in) reads a plain date, otherwise null", () => {

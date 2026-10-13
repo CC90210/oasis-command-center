@@ -99,6 +99,17 @@ export function sortTiles(list: Tile[], by: "biggest" | "weakest"): Tile[] {
   return [...list].sort((a, b) => (by === "biggest" ? b.skills - a.skills : rate(a) - rate(b)) || a.title.localeCompare(b.title));
 }
 
+/**
+ * Task 7 fix round 1: a sub-label chip selected under one kind of work must not keep filtering
+ * once the screen jumps to a different kind (a skill-sheet group link, a Ctrl K group hit) without
+ * going through the back button that used to be the only thing clearing it. `chip` only means
+ * something when it names one of `tile`'s own sub-labels; otherwise it is stale and ignored.
+ */
+export function activeChip(tile: Tile | null, chip: string | null): string | null {
+  if (!tile || !chip) return null;
+  return tile.subs.some((s) => s.id === chip) ? chip : null;
+}
+
 export function groupsOf(lib: Library, skill: string): { id: string; name: string; rank: Rank; level: "broad" | "sub" }[] {
   const names = labelNames(lib);
   const levels = new Map(lib.labels.map((l) => [l.id, l.level]));

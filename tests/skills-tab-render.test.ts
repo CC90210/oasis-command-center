@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { CHANGES, COMPUTER, LIB, NOW } from "./skills-tab-fixture";
+import type { Library } from "../lib/skills/view";
 
 const ROOT = join(__dirname, "..");
 type Scenario = { id: string; component: string; props: Record<string, unknown> };
@@ -31,11 +32,30 @@ function check(name: string, fn: () => void) {
 const sections: (() => void)[] = [];
 void CHANGES; void COMPUTER; void NOW;
 
+// Fix round 1 (task 7) #3: a group where the use-first skill sorts LATER alphabetically than the
+// also-helps skill, so a regression to plain alphabetical order (instead of rank-then-alphabetical)
+// would actually be caught. Kept local to this test file so the shared fixture and its other
+// pinned assertions (tile/member counts in both render and view tests) are untouched.
+const RANK_LIB: Library = {
+  skills: [
+    { name: "aardvark-also-helps", description: "d", kind: "installed", quarantined: false, capabilities: [], example_prompts: [], tests: null },
+    { name: "zebra-use-first", description: "d", kind: "installed", quarantined: false, capabilities: [], example_prompts: [], tests: null },
+  ],
+  labels: [{ id: "rank-check", level: "broad", parent: null, name: "Rank check", meaning: "", examples: [] }],
+  assignments: [
+    { skill: "aardvark-also-helps", label: "rank-check", rank: "also-helps" },
+    { skill: "zebra-use-first", label: "rank-check", rank: "use-first" },
+  ],
+  kinds: {},
+  records_at: null,
+};
+
 // --- Task 7: Library ---
 sections.push(() => {
   const html = render([
     { id: "tiles", component: "LibraryView", props: { lib: LIB, group: null } },
     { id: "group", component: "LibraryView", props: { lib: LIB, group: "debug" } },
+    { id: "rank", component: "LibraryView", props: { lib: RANK_LIB, group: "rank-check" } },
   ]);
   check("tiles show plain names, skill counts and scores as prompt counts", () => {
     const t = text(html.tiles);
@@ -49,6 +69,10 @@ sections.push(() => {
   check("a meter is announced as a count, an untested kind has no meter value", () => {
     assert.match(html.tiles, /role="img" aria-label="27 of 32 test prompts routed right"/);
     assert.doesNotMatch(html.tiles, /aria-label="0 of 0/);
+    // Fix round 1 (task 7) #4: not just absent text - the untested kind ("brand-new-kind") carries
+    // no role="img" meter value at all. Only the two kinds with a real score (debug, ui-build) do.
+    const meters = html.tiles.match(/role="img" aria-label="\d+ of \d+ test prompts routed right"/g) ?? [];
+    assert.equal(meters.length, 2, "exactly the two tested kinds should carry a meter value, never the untested one");
   });
   check("a kind of work opens to its chips and its skills, use-first first", () => {
     const t = text(html.group);
@@ -56,6 +80,17 @@ sections.push(() => {
     assert.match(html.group, /role="group" aria-label="Filter by sub-label"/);
     assert.ok(t.indexOf("graft") < t.indexOf("turso-cloud"));
     assert.match(t, /turso-cloud Also helps .* Not tested/);
+  });
+  check("fix round 1 (task 7) #3: use-first sorts before also-helps even against alphabetical order", () => {
+    const t = text(html.rank);
+    assert.ok(t.indexOf("zebra-use-first") < t.indexOf("aardvark-also-helps"),
+      "zebra-use-first is ranked use-first and must sort before the alphabetically-earlier also-helps skill");
+  });
+  check("fix round 1 (task 7) #2: a truncated skill name and description can be read via title (D18)", () => {
+    assert.match(html.group, /title="graft"/);
+    assert.match(html.group, /title="Find code by symbol and trace who calls what\."/);
+    assert.match(html.group, /title="turso-cloud"/);
+    assert.match(html.group, /title="Turso Cloud databases and tokens\."/);
   });
   check("numbers are tabular", () => {
     assert.match(html.tiles, /tabular-nums/);
