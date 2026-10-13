@@ -29,6 +29,15 @@
  * second queued-but-unsent edit was still silently lost at teardown before this round, because only
  * `current` was forced. Each entry starts EXACTLY ONCE even when a forced start and its own place
  * on the chain race for it.
+ * Codex re-review round 3 (P2 x2): (1) `whenDrained()` - resolves once nothing is pending, nothing
+ * is taken-but-unstarted, and every started send has SETTLED - so a caller (SkillsTab.tsx's effect
+ * cleanup) can flush() on an ordinary unmount, keep the `pagehide` safety net registered, and only
+ * drop it once this resolves; dropping it right after a plain flush() left a deferred send with no
+ * teardown protection if the tab closed before it actually started. (2) a forced (teardown) send's
+ * promise is observed with a throwaway `.catch(() => {})` the instant it starts, independently of
+ * the chain, so a rejection reaching it before the chain's own `.then()` adopts it is never an
+ * unhandled rejection - it still reaches `fire()`'s own try/catch and reports that edit's "error"
+ * state, nothing is swallowed.
  * Run: node --import tsx tests/skills-tab-actions.test.ts
  */
 import assert from "node:assert/strict";
@@ -339,6 +348,92 @@ async function main() {
     h.controls[1].resolve(); // B settles
     await tick();
     assert.deepEqual(h.sent.map((s) => s.description), ["B"]); // A rejected, so it never pushed into `sent`
+  });
+
+  // --- Codex re-review round 3 (P2 x2): whenDrained(), and no unhandled rejection from a forced send ---
+  await check(
+    "whenDrained (a): A in flight, B pending, plain flush(): resolves only after BOTH have settled",
+    async () => {
+      const h = controllableHarness();
+      h.q.add("A", ch("A"));
+      h.fire(); // A in flight
+      await tick(); // let A's own send actually reach the network; controls[0] exists, unresolved
+      assert.equal(h.controls.length, 1, "sanity: only A has reached the network so far");
+      h.q.add("B", ch("B")); // B pending (current), never fired by its own timer
+      h.q.flush(); // a plain (unmount) flush: captures B, ordered behind A - does NOT force it
+      let drained = false;
+      void h.q.whenDrained().then(() => { drained = true; });
+      await tick(); await tick();
+      assert.equal(drained, false, "must not resolve while A is still unresolved (B cannot even start yet)");
+      assert.equal(h.controls.length, 1, "sanity: B is still ordered behind A, not yet started");
+      h.controls[0].resolve(); // A settles - this is what finally lets B's deferred send start
+      await tick(); await tick();
+      assert.equal(drained, false, "must not resolve while B is now in flight and unresolved");
+      assert.equal(h.controls.length, 2, "sanity: B has started now that A has settled");
+      h.controls[1].resolve(); // B settles
+      await tick(); await tick();
+      assert.equal(drained, true, "must resolve once both A and B have settled");
+    },
+  );
+  await check("whenDrained (b): an already-idle queue drains at once", async () => {
+    const h = controllableHarness();
+    let drained = false;
+    void h.q.whenDrained().then(() => { drained = true; });
+    await tick();
+    assert.equal(drained, true, "a queue with nothing pending, taken, or in flight must drain immediately");
+  });
+  await check("whenDrained (c): a send that FAILS still counts toward drained", async () => {
+    const h = controllableHarness();
+    h.q.add("A", ch("A"));
+    h.fire();
+    await tick();
+    let drained = false;
+    void h.q.whenDrained().then(() => { drained = true; });
+    await tick();
+    assert.equal(drained, false, "must not resolve while A is still in flight");
+    h.controls[0].reject(new Error("the server answered 500")); // A fails
+    await tick(); await tick();
+    assert.equal(drained, true, "a FAILED send must still count as settled for drain purposes");
+  });
+  await check("(d) a forced teardown send that rejects produces no unhandled rejection", async () => {
+    // Watched failing against 8ea4793e first: that code's `entry.start()` attaches no rejection
+    // observer of its own, so a forced (opts.now) send that rejects BEFORE the earlier edit's
+    // chain settles has zero handlers on it for that whole gap - Node reports it as unhandled.
+    const seenUnhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { seenUnhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const h = controllableHarness();
+      h.q.add("A", ch("A"));
+      h.fire(); // A in flight, unresolved
+      await tick();
+      assert.equal(h.controls.length, 1, "sanity: A's send has reached the network");
+      h.q.add("B", ch("B"));
+      h.q.flush({ teardown: true }); // forces B to start immediately while A is still unresolved
+      assert.equal(h.controls.length, 2, "sanity: B's send has started");
+      h.controls[1].reject(new Error("the server answered 500")); // B's forced send fails before A settles
+      await tick(); await tick(); await tick();
+      assert.deepEqual(seenUnhandled, [], "a forced teardown send's rejection must never surface as an unhandled rejection");
+      h.controls[0].resolve(); // let A settle too, so nothing is left dangling after the test
+      await tick();
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
+    }
+  });
+  await check("(e) a forced teardown send that rejects still reports the error state for that edit", async () => {
+    const h = controllableHarness();
+    h.q.add("A", ch("A"));
+    h.fire();
+    await tick();
+    h.q.add("B", ch("B"));
+    h.q.flush({ teardown: true });
+    h.controls[1].reject(new Error("the server answered 500")); // B fails before A settles
+    await tick(); await tick();
+    const errState = h.states.find((s) => s.kind === "error" && s.description === "B");
+    assert.ok(errState, "B's failure must still be reported as its own error state, not swallowed");
+    assert.match(String(errState?.message), /500/);
+    h.controls[0].resolve(); // let A settle too
+    await tick();
   });
 
   console.log(`skills-tab-actions: ${passed} passed, ${failed} failed`);

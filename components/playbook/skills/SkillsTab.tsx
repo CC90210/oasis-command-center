@@ -109,7 +109,17 @@ export function SkillsTabView({ lib, computer, computers, changes, nowIso, initi
     // reason to risk reordering a still-in-flight edit. See actions.ts's `flush()` comment.
     const onPageHide = () => queue.flush({ teardown: true });
     window.addEventListener("pagehide", onPageHide);
-    return () => { window.removeEventListener("pagehide", onPageHide); queue.flush(); };
+    return () => {
+      // Codex re-review round 3: `flush()` here only guarantees every edit has been CAPTURED and
+      // queued in order - a deferred one can still be waiting its turn behind an earlier send
+      // when this cleanup runs. Removing the `pagehide` listener right away would leave that
+      // still-queued edit with no safety net: if the user closes the tab before it actually
+      // starts, it is lost exactly like before this queue existed. So the listener stays
+      // registered - still able to force a real teardown through - until `whenDrained()` says
+      // nothing is left outstanding, and only then is it removed.
+      queue.flush();
+      void queue.whenDrained().then(() => window.removeEventListener("pagehide", onPageHide));
+    };
   }, [queue]);
 
   useEffect(() => {

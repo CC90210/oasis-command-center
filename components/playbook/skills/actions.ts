@@ -114,6 +114,14 @@ export function createPendingQueue(o: {
         if (!startedPromise) {
           unstarted = unstarted.filter((e) => e !== entry);
           startedPromise = o.send(change, true);
+          // Codex re-review round 3: observe a rejection on THIS promise immediately, as a side
+          // branch, independently of the chain. `thisSend` below only adopts `startedPromise` via
+          // `previousChain.catch(() => {}).then(() => entry.start())`, which does not actually
+          // attach a rejection handler until `previousChain` settles - when `opts.now` forces this
+          // edit to start early (teardown) while an earlier send is still unresolved, that gap is
+          // exactly long enough for Node to report an unhandled rejection if this one fails first.
+          // This `.catch` is a throwaway side promise; it never changes what `start()` returns.
+          startedPromise.catch(() => {});
         }
         return startedPromise;
       },
@@ -130,9 +138,16 @@ export function createPendingQueue(o: {
     // only queuing it behind the chain. A deferred send queued behind an earlier one would never
     // get the chance to start once the document is destroyed, which is lost data, not merely
     // out-of-order data.
-    if (opts?.now) entry.start();
+    // Codex re-review round 3 (found while testing the fix above): what THIS fire() call reports
+    // as "sent"/"error" must reflect when the real network call actually settles, not when
+    // `thisSend` settles - those are the same promise in the normal case, but NOT when `opts.now`
+    // forces an early start: `thisSend` still waits on `previousChain` first (that wait is what
+    // keeps `sendChain` correctly ordered for whoever comes after), so awaiting it here would
+    // report this edit's own outcome late, gated behind an unrelated earlier edit that might still
+    // be unsettled minutes from now. Report straight from the forced call's own promise instead.
+    const forcedStart = opts?.now ? entry.start() : null;
     try {
-      await thisSend;
+      await (forcedStart ?? thisSend);
       o.onState({ kind: "sent", description });
     } catch (e) {
       staleMessage = (e as Error).message;
@@ -201,6 +216,26 @@ export function createPendingQueue(o: {
         if (current) void fire({ now: true });
       } else {
         void fire();
+      }
+    },
+    /**
+     * Codex re-review round 3 (P2): `SkillsTab.tsx`'s effect cleanup (an ordinary unmount, not
+     * page teardown) calls plain `flush()` to keep ordering - but that only guarantees every edit
+     * has been CAPTURED and queued; a deferred one can still be waiting its turn behind an
+     * earlier send. If the `pagehide` listener is removed right away and the user closes the tab
+     * before that still-queued send actually settles, it is lost exactly like before this queue
+     * existed. `whenDrained()` resolves once there is truly nothing left outstanding: no `current`,
+     * nothing in `unstarted`, and every started send has SETTLED (not merely started) - so the
+     * caller can keep its teardown safety net registered until this resolves, then safely drop it.
+     * Loops on a fresh snapshot of `sendChain` each pass: if new work appears while waiting (the
+     * C4 re-announce can set `current` again), one more pass waits for that too, so this never
+     * reports "drained" against a stale snapshot. Already-idle resolves after one microtask.
+     */
+    async whenDrained(): Promise<void> {
+      for (;;) {
+        const snapshot = sendChain;
+        await snapshot.catch(() => {});
+        if (!current && unstarted.length === 0 && sendChain === snapshot) return;
       }
     },
   };
