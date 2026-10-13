@@ -63,7 +63,10 @@ export function MarketingFooter() {
             </p>
             <p className="mt-4 text-[13px] text-fg-dim">
               Working internationally
-              <span className="mt-1 block text-fg-faint">
+              {/* fg-dim, not fg-faint: faint is decorative-only (2.12:1 on
+                  ops-void, Lighthouse color-contrast fail on every page,
+                  2026-10-12). fg-dim is ~5.3:1. */}
+              <span className="mt-1 block text-fg-dim">
                 Registered in {LEGAL_PRINCIPAL_PLACE}
               </span>
             </p>

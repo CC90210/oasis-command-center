@@ -282,7 +282,7 @@ function Field({
           required={required}
           autoComplete={autoComplete}
           aria-describedby={helpId}
-          className="mt-2 w-full rounded-md border border-ops-edge bg-ops-void/60 px-3.5 py-2.5 text-[16px] text-fg outline-none transition-colors placeholder:text-fg-faint hover:border-fg-faint focus:border-signal sm:text-[15px]"
+          className="mt-2 w-full rounded-md border border-ops-edge bg-ops-void/60 px-3.5 py-2.5 text-[16px] text-fg outline-none transition-colors placeholder:text-fg-dim hover:border-fg-faint focus:border-signal sm:text-[15px]"
         />
       </label>
       {help ? (

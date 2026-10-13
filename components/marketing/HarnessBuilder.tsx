@@ -385,7 +385,7 @@ export function HarnessBuilder() {
               <button
                 type="button"
                 onClick={() => setFocus(null)}
-                className="-m-1 p-1 font-data text-[10px] uppercase tracking-[0.18em] text-fg-faint transition-colors hover:text-fg"
+                className="-m-1 p-1 font-data text-[10px] uppercase tracking-[0.18em] text-fg-dim transition-colors hover:text-fg"
               >
                 Close
               </button>
@@ -424,7 +424,7 @@ export function HarnessBuilder() {
             to work out what just happened in the bay. */}
         <p className="mb-6 text-center font-data text-[11px] uppercase tracking-[0.2em] text-fg-dim">
           {engine.spec}
-          <span className="mx-2 text-fg-faint">/</span>
+          <span aria-hidden="true" className="mx-2 text-fg-faint">/</span>
           Drag the car to turn it
         </p>
       </div>
