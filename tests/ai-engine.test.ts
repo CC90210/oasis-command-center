@@ -532,6 +532,30 @@ async function main() {
     assert.deepEqual(await store.readSavedProviders(ALPHA), ["anthropic"]);
   });
 
+  await check("stage-only rejects a local provider before probing or writing", async () => {
+    await login(USERS.alpha);
+    answer = () => {
+      throw new Error("a rejected local stage must not probe");
+    };
+    sent = [];
+    const before = JSON.stringify(await rowsOf(ALPHA));
+    const rejected = await jsonOf(
+      await bulk.POST(
+        req("/api/agent-config/bulk-provider", "POST", {
+          provider: "ollama",
+          api_key: "http://127.0.0.1:11434",
+          model: "llama3.3",
+          scope: "tenant",
+          stage_only: true,
+        }),
+      ),
+    );
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
+    assert.equal(rejected.body.error, "stage_unsupported_provider");
+    assert.equal(sent.length, 0, "a rejected local stage reached a provider or local-model server");
+    assert.equal(JSON.stringify(await rowsOf(ALPHA)), before, "a rejected local stage changed provider rows");
+  });
+
   await check("a first-time workspace key stays inactive until Use atomically switches the account and engine", async () => {
     await login(USERS.alpha);
     answer = (s) => (s.url.includes("openrouter.ai") ? openrouterOk("The staged key works.") : anthropicOk("The current key works."));

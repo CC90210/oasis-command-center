@@ -870,7 +870,7 @@ async function main() {
       ["queued", "worker", null, "subscription_auth_failure"],
     );
   });
-  await check("v2 subscription limits stay signed in and activate only the explicitly opted-in workspace API fallback", async () => {
+  await check("v2 subscription limits are runtime-scoped: limited Claude falls back while ready Codex still claims on the same pairing", async () => {
     const member = await freshMember();
     const pairing = await makePairing({ userId: member, scope: "connector" });
     await db.execute({
@@ -882,20 +882,20 @@ async function main() {
     const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
     const queued = await store.enqueueRun(db, scope, {
       conversationId: conv.id,
-      text: "use my explicit fallback while the subscription resets",
+      text: "use my explicit fallback while Claude's subscription resets",
       chatMode: "build",
       showThinking: false,
       now: new Date(),
       executor: "computer",
       targetPairingId: pairing.id,
       runtimeEngineKind: "cli",
-      runtimeEngineName: "codex",
+      runtimeEngineName: "claude",
       runtimeFallbackPolicy: "workspace_api",
       runtimeApiSnapshot: { provider: "google", model: "gemini-3.8-flash" },
     });
     assert.ok(queued.ok);
     const runtimeState = readyRuntimeState();
-    runtimeState.codex = { installed: true, authenticated: true, state: "rate_limited" };
+    runtimeState.claude = { installed: true, authenticated: true, state: "rate_limited" };
     const response = await claim(
       pairing.token,
       body(randomUUID(), { protocol: "department_task_v2", runtime_state: runtimeState }),
@@ -905,10 +905,10 @@ async function main() {
       sql: "SELECT claim_blocked_reason, claim_runtime_state FROM bridge_pairings WHERE id = ?",
       args: [pairing.id],
     });
-    assert.equal(pairingRow.rows[0].claim_blocked_reason, "subscription_limit");
+    assert.equal(pairingRow.rows[0].claim_blocked_reason, null, "one limited CLI must not block the whole pairing");
     const persisted = JSON.parse(String(pairingRow.rows[0].claim_runtime_state)) as Record<string, Record<string, unknown>>;
-    assert.equal(persisted.codex.authenticated, true, "a quota reset was relabeled as sign-out");
-    assert.equal(persisted.codex.state, "rate_limited");
+    assert.equal(persisted.claude.authenticated, true, "a quota reset was relabeled as sign-out");
+    assert.equal(persisted.claude.state, "rate_limited");
 
     const { computerStateForTarget } = await import("../lib/os/runs/send");
     const { fallbackQueueDecision } = await import("../lib/os/runs/fallback-dispatcher");
@@ -932,6 +932,41 @@ async function main() {
       [row.rows[0].status, row.rows[0].executor, row.rows[0].claimed_pairing_id, row.rows[0].runtime_fallback_reason],
       ["queued", "worker", null, "subscription_limit"],
     );
+
+    const codexConversation = await store.createConversation(db, scope, {
+      department: "sales",
+      agentSlug: "sdr",
+      now: new Date(),
+    });
+    const codexQueued = await store.enqueueRun(db, scope, {
+      conversationId: codexConversation.id,
+      text: "answer with Codex while Claude is rate limited",
+      chatMode: "build",
+      showThinking: false,
+      now: new Date(),
+      executor: "computer",
+      targetPairingId: pairing.id,
+      runtimeEngineKind: "cli",
+      runtimeEngineName: "codex",
+      runtimeFallbackPolicy: "none",
+    });
+    assert.ok(codexQueued.ok);
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    const codexResponse = await claim(
+      pairing.token,
+      body(randomUUID(), { protocol: "department_task_v2", runtime_state: runtimeState }),
+    );
+    assert.equal(codexResponse.status, 200, JSON.stringify(codexResponse.json));
+    assert.equal(
+      (codexResponse.json.run as Record<string, unknown>)?.id,
+      codexQueued.ok ? codexQueued.run.id : null,
+      "ready Codex must remain claimable on the same pairing",
+    );
+    const finalPairing = await db.execute({
+      sql: "SELECT claim_blocked_reason FROM bridge_pairings WHERE id = ?",
+      args: [pairing.id],
+    });
+    assert.equal(finalPairing.rows[0].claim_blocked_reason, null);
   });
   await check("Claude-account mismatch or collision never blocks Codex or pure-local department_task_v2 work", async () => {
     const cases: Array<{

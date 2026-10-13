@@ -79,7 +79,7 @@ import { probeProvider } from "@/lib/agents/provider-probe";
 import { billingForKey, modelCallMeter } from "@/lib/ai/usage";
 import { readConnectTest, signConnectTest, type ConnectTestSubject } from "@/lib/ai/connect-test-proof";
 import { decryptField, encryptField } from "@/lib/field-encryption";
-import { anyCanonicalEngineExists, keepSavedKey, readSavedKey } from "@/lib/ai/agent-engine-store";
+import { SWITCHABLE_PROVIDERS, anyCanonicalEngineExists, keepSavedKey, readSavedKey } from "@/lib/ai/agent-engine-store";
 import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
@@ -158,6 +158,9 @@ export async function POST(req: NextRequest) {
   const stageOnly = body?.stage_only === true;
   if (stageOnly && scope !== "tenant") {
     return NextResponse.json({ ok: false, error: "stage_requires_tenant_scope" }, { status: 400 });
+  }
+  if (stageOnly && !SWITCHABLE_PROVIDERS.includes(provider as Provider)) {
+    return NextResponse.json({ ok: false, error: "stage_unsupported_provider" }, { status: 400 });
   }
   if (scope === "tenant" && !canManageTenant) {
     return NextResponse.json({ ok: false, error: "admin_required" }, { status: 403 });

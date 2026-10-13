@@ -31,6 +31,7 @@ import { keepAlive } from "./keepalive";
 import { json } from "./scope";
 import { getOwnComputers, type OwnComputer } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { runtimeAvailability } from "@/lib/bridge/runtime-availability";
 import { bestComputerAnswerState, computerAnswerState, type ComputerAnswerState } from "@/lib/devices/presence";
 import type { WorkspaceApiFallbackReason } from "./types";
 
@@ -75,16 +76,20 @@ export function followRunResponse(args: {
   return sseResponse(frames, { prelude: args.prelude, onGone: () => (gone = true) });
 }
 
+type TargetComputer = OwnComputer & { claimRuntimeState?: unknown };
+
 type ComputerStateSource = {
-  readTarget: (tenantId: string, pairingId: string) => Promise<OwnComputer | null>;
+  readTarget: (tenantId: string, pairingId: string) => Promise<TargetComputer | null>;
   readOwn: (tenantId: string, userId: string) => Promise<OwnComputer[]>;
   now: () => number;
 };
 
-async function readTargetComputer(tenantId: string, pairingId: string): Promise<OwnComputer | null> {
+async function readTargetComputer(tenantId: string, pairingId: string): Promise<TargetComputer | null> {
   const { data, error } = await getServiceSupabase()
     .from("bridge_pairings")
-    .select("id, label, last_seen_at, revoked_at, scope, paired_via, claim_enabled_at, claim_state_at, claim_blocked_reason, claim_capacity")
+    .select(
+      "id, label, last_seen_at, revoked_at, scope, paired_via, claim_enabled_at, claim_state_at, claim_blocked_reason, claim_capacity, claim_runtime_state",
+    )
     .eq("tenant_id", tenantId)
     .eq("id", pairingId)
     .maybeSingle();
@@ -102,6 +107,7 @@ async function readTargetComputer(tenantId: string, pairingId: string): Promise<
     claimStateAt: typeof row.claim_state_at === "string" ? row.claim_state_at : null,
     claimBlockedReason: typeof row.claim_blocked_reason === "string" ? row.claim_blocked_reason : null,
     claimCapacity: typeof row.claim_capacity === "number" ? row.claim_capacity : row.claim_capacity == null ? null : Number(row.claim_capacity),
+    claimRuntimeState: row.claim_runtime_state,
   };
 }
 
@@ -114,13 +120,32 @@ async function readTargetComputer(tenantId: string, pairingId: string): Promise<
 export function computerStateForTarget(
   scope: RunScope,
   source: ComputerStateSource = { readTarget: readTargetComputer, readOwn: getOwnComputers, now: Date.now },
-): (run: Pick<Run, "targetPairingId">) => Promise<ComputerAnswerState> {
+): (
+  run: Pick<Run, "targetPairingId"> & Partial<Pick<Run, "runtimeEngineKind" | "runtimeEngineName">>,
+) => Promise<ComputerAnswerState> {
   return async (run) => {
     try {
       if (run.targetPairingId) {
         const computer = await source.readTarget(scope.tenantId, run.targetPairingId);
         if (!computer || computer.revokedAt) return "not_approved";
-        return computerAnswerState(computer, source.now());
+        const pairingState = computerAnswerState(computer, source.now());
+        if (
+          (pairingState === "can_answer" || pairingState === "busy") &&
+          (run.runtimeEngineKind === "cli" || run.runtimeEngineKind === "local") &&
+          run.runtimeEngineName
+        ) {
+          const exactRuntime = runtimeAvailability(computer.claimRuntimeState, {
+            engineKind: run.runtimeEngineKind === "cli" ? "subscription" : "local",
+            engineName: run.runtimeEngineName,
+          });
+          // Quota is intentionally absent from the pairing-wide block. Read
+          // it from this run's immutable engine snapshot so only that engine
+          // falls back while another ready runtime stays claimable.
+          if (!exactRuntime.ok && exactRuntime.fallbackReason === "subscription_limit") {
+            return "blocked:subscription_limit";
+          }
+        }
+        return pairingState;
       }
       const computers = await source.readOwn(scope.tenantId, scope.userId);
       return bestComputerAnswerState(computers.map((c) => computerAnswerState(c, source.now())));

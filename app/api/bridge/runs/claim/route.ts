@@ -443,11 +443,16 @@ async function recordRuntimeBlock(
   blockedReason: string,
   claimStateAt: string,
 ): Promise<boolean> {
+  // A subscription quota belongs to one CLI, not the whole computer. Keep
+  // the exact verdict in claim_runtime_state so the queued-run follower can
+  // activate that run's explicit fallback without making a ready sibling
+  // runtime (for example Codex while Claude is limited) unclaimable.
+  const pairingWideReason = blockedReason === "subscription_limit" ? null : blockedReason;
   const upd = await getServiceSupabase()
     .from("bridge_pairings")
     .update({
       claim_runtime_state: JSON.stringify(runtimeState),
-      claim_blocked_reason: blockedReason,
+      claim_blocked_reason: pairingWideReason,
     })
     .eq("tenant_id", pairing.tenantId)
     .eq("id", pairing.pairingId)
