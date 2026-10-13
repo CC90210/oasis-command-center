@@ -25,7 +25,7 @@ type Frames<P> = ((props: P) => El) & { unmount: () => void; discard: (props: P)
 /**
  * A component called as a plain function, frame after frame, with its hook
  * slots kept between calls (what React does across a router.refresh()). It
- * knows useState, useRef and useLayoutEffect (run, with its dependencies
+ * knows useState, useRef, useContext and useLayoutEffect (run, with its dependencies
  * honoured, as soon as the frame is drawn, which is when React runs it: at
  * commit), so any other new hook fails loudly here. `unmount` runs the
  * effects' cleanups, as React does when the component goes away. `discard`
@@ -40,6 +40,10 @@ function framesOf<P>(component: (props: P) => unknown): Frames<P> {
   const cleanups = new Map<number, () => void>();
   let cursor = 0;
   const dispatcher = {
+    useContext(context: unknown) {
+      if (!context || typeof context !== "object") return undefined;
+      return (context as { _currentValue?: unknown })._currentValue;
+    },
     useState(initial: unknown) {
       const at = cursor++;
       if (!(at in slots)) slots[at] = typeof initial === "function" ? (initial as () => unknown)() : initial;
@@ -162,7 +166,7 @@ async function main() {
       React.createElement("a", { href, ...rest }, children as React.ReactNode),
   });
   const { renderToStaticMarkup } = await import("react-dom/server");
-  const { ProviderAccountsCard, ConnectProviderDialog } = await import("../components/settings/ProviderAccountsCard");
+  const { ProviderAccountsCard, ConnectProviderDialog, providerOpenRequest } = await import("../components/settings/ProviderAccountsCard");
   const base = { bridgeOnline: true, canManageTeam: true, canInstallBridge: false };
   const card = (frame: El, provider: string) => find(frame, `the ${provider} card`, (el) => el.key === provider);
 
@@ -231,6 +235,10 @@ async function main() {
   // A CLIENT owner (not the platform operator: no bridge install offered).
   const client = { bridgeOnline: false, canManageTeam: true, canInstallBridge: false };
   const out: Record<string, string> = {
+    openRequests: JSON.stringify({
+      person: providerOpenRequest("openai", "person"),
+      workspace: providerOpenRequest("google", "workspace"),
+    }),
     // A client owner with nothing connected (the no-provider notice shows too),
     // and one whose account is on Anthropic.
     clientEmpty: renderToStaticMarkup(
@@ -250,6 +258,33 @@ async function main() {
     // The workspace's account is on OpenRouter, and the owner also has a personal OpenRouter key.
     connectedAndPersonal: renderToStaticMarkup(
       React.createElement(ProviderAccountsCard, { ...base, connectedServices: new Set(["openrouter"]), personalServices: new Set(["openrouter"]) }),
+    ),
+    // The canonical AI Brain scope decides which key this card describes.
+    // Both rows exist here so a workspace key can never mask the viewer's key
+    // (or make a personal replacement look like it did nothing).
+    personConnectedAndPersonal: renderToStaticMarkup(
+      React.createElement(ProviderAccountsCard, {
+        ...base,
+        engineScope: "person",
+        connectedServices: new Set(["openrouter"]),
+        personalServices: new Set(["openrouter"]),
+      }),
+    ),
+    personWorkspaceOnly: renderToStaticMarkup(
+      React.createElement(ProviderAccountsCard, {
+        ...base,
+        engineScope: "person",
+        connectedServices: new Set(["google"]),
+        personalServices: new Set<string>(),
+      }),
+    ),
+    workspaceConnectedAndPersonal: renderToStaticMarkup(
+      React.createElement(ProviderAccountsCard, {
+        ...base,
+        engineScope: "workspace",
+        connectedServices: new Set(["openrouter"]),
+        personalServices: new Set(["openrouter"]),
+      }),
     ),
   };
 

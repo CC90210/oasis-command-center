@@ -770,6 +770,10 @@ async function main() {
     html = renderHelper() as Record<string, string>;
   });
   await check("the card draws a personal key as the owner's own, never Connected", () => {
+    assert.deepEqual(JSON.parse(html.openRequests), {
+      person: { provider: "openai", scope: "user", lockScope: true },
+      workspace: { provider: "google", scope: "tenant", stageOnly: true, lockScope: true },
+    });
     const personal = plain(html.personalOnly);
     assert.match(personal, /Your personal key/);
     assert.match(personal, /This key is saved for you only\. Department chats and Slack mentions don't use it: connect it for the whole team so they can\./);
@@ -781,6 +785,21 @@ async function main() {
     assert.match(both, /This workspace API account is selected as the workspace default\./);
     assert.doesNotMatch(both, /Your personal key/, "the workspace account is Connected, not the owner's own");
     assert.match(both, /Cloud: 1 provider connected/);
+    const personBoth = plain(html.personConnectedAndPersonal);
+    assert.match(personBoth, /Your personal key/);
+    assert.match(personBoth, /Replace my key/);
+    assert.match(personBoth, /Remove my key/);
+    assert.match(personBoth, /Cloud: 1 personal key saved/);
+    assert.doesNotMatch(personBoth, /This workspace API account is/);
+    assert.doesNotMatch(personBoth, /\bTest\b/, "My setup offered the workspace-account test for a personal key");
+    const personWorkspaceOnly = plain(html.personWorkspaceOnly);
+    assert.match(personWorkspaceOnly, /Set my key/);
+    assert.match(personWorkspaceOnly, /Cloud: no personal key saved/);
+    assert.doesNotMatch(personWorkspaceOnly, /Replace key|Replace my key|Remove my key/);
+    const workspaceBoth = plain(html.workspaceConnectedAndPersonal);
+    assert.match(workspaceBoth, /\bConnected\b/);
+    assert.match(workspaceBoth, /Replace key/);
+    assert.doesNotMatch(workspaceBoth, /Replace my key|Remove my key|Your personal key/);
     for (const key of ["afterPersonalConnect", "afterPersonalConnectRefresh"]) {
       const after = plain(html[key]);
       assert.equal(count(after, /Your personal key/g), 1, `${key}: Google is the owner's own key`);
@@ -1030,6 +1049,36 @@ async function main() {
     assert.equal(sent[0].body?.model, "claude-haiku-4-5", "the key was tested on another model than it is saved with");
     const turn = await slackTurn(FRESH, "fresh-co", "sales", "sdr");
     assert.ok(turn.ok && turn.turn.apiKey === KEY_FRESH && turn.turn.model === "claude-haiku-4-5", JSON.stringify(turn));
+  });
+  await check("AI Brain stages a tested workspace key without activating it until the engine switch", async () => {
+    await login(USERS.fresh);
+    callsTo.length = 0;
+    sent = [];
+    provider = answering("ok");
+    const stagedKey = "sk-ant-fresh-staged-key-0002";
+    const result = await connectProviderKey(
+      {
+        provider: "anthropic",
+        apiKey: stagedKey,
+        model: "claude-sonnet-4-6",
+        scope: "tenant",
+        stageOnly: true,
+      },
+      viaRoutes,
+    );
+    assert.equal(result.kind, "saved");
+    assert.equal(result.kind === "saved" && result.staged, true);
+    assert.equal(typeof (result.kind === "saved" ? result.stagedKeyReceipt : undefined), "string");
+    assert.deepEqual(callsTo, ["/api/agent-config/test-connection", "/api/agent-config/bulk-provider"]);
+    const active = await account.readWorkspaceAiAccount(FRESH);
+    assert.ok(account.hasUsableKey(active) && decryptField(active.encryptedApiKey) === KEY_FRESH, "staging replaced the active workspace key");
+    const engineStore = await import("../lib/ai/agent-engine-store");
+    const kept = await engineStore.readSavedKey(FRESH, "anthropic");
+    assert.ok(kept?.source === "kept" && decryptField(kept.encryptedApiKey) === stagedKey, "the inactive tested key was not cached");
+    await db.execute({
+      sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND user_id IS NULL AND agent_key = ?",
+      args: [FRESH, engineStore.savedKeyAgentKey("anthropic")],
+    });
   });
   await check("a save that does not go through is one sentence, never a teammate name or an error code", async () => {
     await login(USERS.alphaRep); // a closer: may test, may not connect for the team
@@ -1506,7 +1555,9 @@ async function main() {
   const retireWrite = (tenant: string) => (sql: string, args: unknown[]) => has(args, tenant) && sql.startsWith("UPDATE agent_model_config SET enabled = 0");
   /** The read of the account a connect or disconnect is guarded on. */
   const stampRead = (tenant: string) => (sql: string, args: unknown[]) =>
-    has(args, tenant) && sql.startsWith("SELECT provider, model, encrypted_api_key, enabled FROM agent_model_config");
+    has(args, tenant) &&
+    (sql.startsWith("SELECT provider, model, encrypted_api_key, enabled FROM agent_model_config") ||
+      sql.startsWith("SELECT agent_key, provider, model, encrypted_api_key, enabled FROM agent_model_config"));
   /** A person's own save ("Just me"), one step. */
   const personalStep = (tenant: string, userId: string) => (sql: string, args: unknown[]) =>
     has(args, tenant, userId) && sql.includes("ON CONFLICT (tenant_id, user_id, agent_key)");
@@ -1738,7 +1789,7 @@ async function main() {
       "the connect after a lost answer",
       connectProviderKey({ provider: "anthropic", apiKey: KEY_LOOK[0], model: "claude-sonnet-4-6", scope: "tenant", timeoutMs: 1500 }, answerLost),
     );
-    assert.deepEqual(landed, { kind: "saved" }, "a save that landed was reported as failed");
+    assert.deepEqual(landed, { kind: "saved", staged: false }, "a save that landed was reported as failed");
     assert.deepEqual(await spending(LOOKCO, "look-co", USERS.look), answersWith(KEY_LOOK[0]));
     // This time the save never reaches the server at all.
     const neverArrived = async (url: string, init: RequestInit) => {
@@ -2337,7 +2388,7 @@ async function main() {
     };
     // The Worker stopped after the commit: the platform answered with an HTML page.
     const html502 = await run(() => new Response("<html>502 Bad Gateway</html>", { status: 502 }), { ok: true, saved: true });
-    assert.deepEqual([html502.result, html502.verified], [{ kind: "saved" }, 1]);
+    assert.deepEqual([html502.result, html502.verified], [{ kind: "saved", staged: false }, 1]);
     // The route's own 500 after it read back "not saved".
     const json500 = await run(() => new Response(JSON.stringify({ ok: false, message: "The key couldn't be saved just now. Nothing was changed. Try again in a moment." }), { status: 500 }), { ok: true, saved: false });
     assert.deepEqual([json500.result, json500.verified], [{ kind: "failed", message: "The key wasn't saved when we checked. Close this, look at the card in a moment, and connect again if it doesn't show it." }, 1]);

@@ -42,7 +42,18 @@ async function main() {
     }
     assert.doesNotMatch(panel, />\s*(?:An app on your paired computer|An AI account \(fallback\)|A local model)\s*</);
     assert.match(panel, /fallback/i, "the no-silent-fallback control is visible in the one panel");
-    assert.match(panel, /state\.canManage\s*\?\s*API_PROVIDERS\.filter/, "only managers can choose among saved API providers");
+    assert.match(panel, /state\.canManage\s*\?\s*API_PROVIDERS\s*:/, "managers can choose every API provider without being trapped on the active one");
+    assert.match(panel, /OPEN_AI_PROVIDER_ACCOUNT_EVENT/, "an unsaved provider opens its connection flow inside the engine panel");
+    assert.match(panel, /Connect \$\{PROVIDER_LABEL\[draft\.provider\]\} key/, "the selected unsaved provider has one direct repair action");
+    assert.match(panel, /Replace \$\{PROVIDER_LABEL\[draft\.provider\]\} key/, "the active provider key can be replaced without leaving the engine picker");
+    const accounts = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
+    assert.match(accounts, /addEventListener\(OPEN_AI_PROVIDER_ACCOUNT_EVENT/, "the provider account card receives the engine panel's requested provider");
+    assert.match(accounts, /engineScope === "person"\) return \{ provider, scope: "user", lockScope: true \}/, "My setup generic key actions are locked to the viewer");
+    assert.match(accounts, /engineScope === "workspace"[\s\S]*scope: "tenant", stageOnly: true, lockScope: true/, "Workspace default generic key actions only stage a tenant key");
+    assert.match(accounts, /canManageTeam=\{canManageTeam && engineScope !== "person"\}/, "My setup cannot switch the workspace API model");
+    assert.match(accounts, /const canManageWorkspaceAccount = canManageTeam && engineScope !== "person"/, "My setup cannot disconnect a workspace provider");
+    assert.match(accounts, /\{canManageWorkspaceAccount && \(/, "workspace disconnects use the scope-safe permission");
+    assert.match(panel, /AgentEngineScopeProvider key=\{scope\}/, "provider dialogs are remounted when the visible scope changes");
     assert.doesNotMatch(panel, /await switchProvider\(/, "the browser must not switch the API account before the engine CAS");
     const route = readFileSync(join(ROOT, "app/api/ai/engine/route.ts"), "utf8");
     assert.match(route, /connectWorkspaceAccountAndEngineInOneStep/, "provider activation and the engine CAS use one server transaction");
@@ -57,6 +68,7 @@ async function main() {
     assert.match(panel, /status\?\.label === "Unsupported"/, "an unsupported Gemini account disables reconnect and offers the API path");
     assert.match(panel, /provider === "gemini" \?/, "Gemini never renders the unsupported CLI auth action");
     assert.match(panel, /Managed Gemini CLI account detected/, "a connector-detected managed Gemini account keeps Test without a fake reconnect");
+    assert.match(panel, /subscriptionLimited[\s\S]*no reconnect is needed/, "a signed-in rate-limited runtime never starts a pointless reconnect loop");
     assert.match(panel, /Choose a computer to finish upgrading this saved setup\./, "legacy unbound rows explain the one required upgrade action");
     const connectFlow = panel.slice(panel.indexOf("async function connect"), panel.indexOf("const modeOption"));
     assert.match(connectFlow, /await pollRuntimeJob\(/, "the dashboard stays open and polls the selected computer's auth job");
@@ -93,6 +105,18 @@ async function main() {
     assert.match(route, /const visiblePairings = canManage \? pairings : pairings\.filter\(\(pairing\) => pairing\.user_id === ctx\.authUserId\)/, "members must never receive teammate device labels, owners, or inventory");
     assert.match(route, /inventoryByPairing\(tenantId, visiblePairings\)/, "even the inventory lookup is limited to devices visible to the caller");
     assert.match(route, /if \(scope !== "workspace"\)[\s\S]*api_provider_workspace_scope_required/, "a personal choice must never activate a workspace-wide API provider");
+  });
+
+  await check("provider connection keeps the selected AI Brain scope and stages workspace keys until Use", () => {
+    const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
+    const accounts = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
+    const bulk = readFileSync(join(ROOT, "app/api/agent-config/bulk-provider/route.ts"), "utf8");
+    assert.match(panel, /scope === "workspace" && state\.canManage[\s\S]*\? API_PROVIDERS/, "My setup still offers a workspace-wide provider switch");
+    assert.match(panel, /scope: "tenant",[\s\S]*stageOnly: true,[\s\S]*lockScope: true/, "the workspace provider dialog lost its fixed staged scope");
+    assert.match(panel, /Manage under Workspace default/, "My setup has no safe path to workspace provider management");
+    assert.match(accounts, /stage_only: true/, "the staged choice is not sent to the save route");
+    assert.match(bulk, /else if \(stageOnly\)[\s\S]*keepSavedKey/, "the save route activates a staged key instead of caching it inactive");
+    assert.match(bulk, /workspace_account: scope === "tenant" && !stageOnly/, "a staged key is still reported as the active workspace account");
   });
 
   await check("the old separately-mounted cards render nothing", () => {
@@ -140,6 +164,7 @@ async function main() {
           workspace: "oasis",
           account: null,
           savedProviders: [],
+          savedKeyReceipts: { openrouter: "receipt-or-1" },
         }),
         { status: 200 },
       ),
@@ -152,6 +177,7 @@ async function main() {
       assert.equal(next.state.devices[0].workspaceEligible, true);
       assert.equal(next.state.devices[0].runtimes.claude.executionReady, false, "signed in is not execution verified");
       assert.equal(next.state.devices[0].runtimes.codex.executionReady, true);
+      assert.equal(next.state.savedKeyReceipts.openrouter, "receipt-or-1");
     }
 
     const legacy = await client.readEngine(async () =>
@@ -209,6 +235,8 @@ async function main() {
     assert.match(client.repairForCode("cli_auth_required", "CCPC", "codex") ?? "", /codex login/);
     assert.match(client.repairForCode("auth_process_failed", "CCPC", "codex") ?? "", /codex login/);
     assert.match(client.repairForCode("auth_timeout", "Mac", "claude") ?? "", /claude\n\/login/);
+    assert.match(client.repairForCode("runtime_rate_limited", "CCPC", "claude") ?? "", /still signed in/);
+    assert.match(client.repairForCode("runtime_rate_limited", "CCPC", "claude") ?? "", /reconnecting will not help/);
     assert.match(client.repairForCode("account_unsupported", "Mac", "gemini") ?? "", /Google API key/);
     assert.match(client.repairForCode("cli_not_found", "CCPC", "codex") ?? "", /@openai\/codex/);
     assert.match(client.repairForCode("cli_timeout", "CCPC", "codex") ?? "", /did not finish in time/);
@@ -225,6 +253,16 @@ async function main() {
     assert.equal(client.describeRuntime({ ...DEVICE, approved: false }, "codex").label, "Approval needed");
     assert.equal(client.describeRuntime({ ...DEVICE, online: false }, "codex").label, "Offline");
     assert.equal(client.describeRuntime({ ...DEVICE, busy: true }, "codex").label, "Busy");
+    const limitedClaude = client.describeRuntime({
+      ...DEVICE,
+      runtimes: {
+        ...DEVICE.runtimes,
+        claude: { ...DEVICE.runtimes.claude, signedIn: true, executionReady: false, code: "rate_limited" },
+      },
+    }, "claude");
+    assert.equal(limitedClaude.label, "Subscription limit reached");
+    assert.match(limitedClaude.repair ?? "", /still signed in/);
+    assert.match(limitedClaude.repair ?? "", /reconnecting will not help/);
     assert.equal(
       client.describeRuntime(
         { ...DEVICE, runtimes: { ...DEVICE.runtimes, codex: { ...DEVICE.runtimes.codex, installed: false, executionReady: false } } },
@@ -394,13 +432,16 @@ async function main() {
     }
   });
 
-  await check("switching a saved API provider changes the workspace account before engine save", async () => {
+  await check("the legacy provider switch tells old tabs to use the atomic AI Brain flow", async () => {
     const calls: string[] = [];
     const switched = await client.switchProvider("google", async (url, init) => {
       calls.push(`${init.method} ${url} ${String(init.body)}`);
-      return new Response(JSON.stringify({ ok: true, label: "Google Gemini" }), { status: 200 });
+      return new Response(
+        JSON.stringify({ ok: false, error: "engine_upgrade_required", message: "Refresh Settings > AI brain, then Test and Use it. Nothing was changed." }),
+        { status: 409 },
+      );
     });
-    assert.deepEqual(switched, { ok: true, label: "Google Gemini" });
+    assert.deepEqual(switched, { ok: false, message: "Refresh Settings > AI brain, then Test and Use it. Nothing was changed." });
     assert.deepEqual(calls, ['POST /api/agent-config/workspace-provider {"provider":"google"}']);
   });
 
@@ -414,7 +455,7 @@ async function main() {
     assert.deepEqual(calls, ['PUT /api/ai/engine {"scope":"person","use_workspace_default":true,"expected_version":"v2"}']);
   });
 
-  await check("API key mode saves without a computer probe job", async () => {
+  await check("API key mode saves with the exact staged-key receipt and no computer probe job", async () => {
     const calls: string[] = [];
     const result = await client.saveEngine(
       { mode: "api", provider: "google" },
@@ -423,10 +464,10 @@ async function main() {
         calls.push(`${init.method} ${url} ${String(init.body)}`);
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       },
-      { scope: "workspace" },
+      { scope: "workspace", savedKeyReceipt: "receipt-google-5" },
     );
     assert.equal(result.ok, true);
-    assert.deepEqual(calls, ['PUT /api/ai/engine {"engine":{"mode":"api","provider":"google"},"scope":"workspace","expected_version":"workspace-v5"}']);
+    assert.deepEqual(calls, ['PUT /api/ai/engine {"engine":{"mode":"api","provider":"google"},"scope":"workspace","expected_version":"workspace-v5","expected_saved_key_receipt":"receipt-google-5"}']);
   });
 
   if (failures) {

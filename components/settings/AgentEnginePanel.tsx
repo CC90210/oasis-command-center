@@ -35,7 +35,14 @@ import {
   type RuntimeJob,
 } from "@/components/settings/agent-engine-client";
 import { startCliSignIn } from "@/components/settings/LocalCliProvidersCard";
+import {
+  OPEN_AI_PROVIDER_ACCOUNT_EVENT,
+  OASIS_PROVIDER_KEY_STAGED_EVENT,
+  type ProviderAccountOpenRequest,
+  type ProviderKeyStagedDetail,
+} from "@/components/settings/ProviderAccountsCard";
 import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
+import { AgentEngineScopeProvider } from "@/components/settings/agent-engine-scope-context";
 
 const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "gemini"];
 const API_PROVIDERS: ApiEngineProvider[] = ["anthropic", "openai", "google", "openrouter"];
@@ -140,6 +147,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const [job, setJob] = useState<RuntimeJob | null>(null);
   const [probeReceipt, setProbeReceipt] = useState<{ key: string; jobId: string } | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const [stagedKeyReceipts, setStagedKeyReceipts] = useState<Partial<Record<ApiEngineProvider, string>>>({});
   const stop = useRef<AbortController | null>(null);
   const noticeRef = useRef<HTMLDivElement | null>(null);
   const scopeRef = useRef<EngineScope>("person");
@@ -155,6 +163,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     }
     setReadError(null);
     setState(result.state);
+    setStagedKeyReceipts(result.state.savedKeyReceipts);
     if (!options.keepDraft || !draftRef.current) {
       const nextScope: EngineScope = scopeRef.current === "workspace" && result.state.canManage ? "workspace" : "person";
       const next =
@@ -174,9 +183,16 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   useEffect(() => {
     void load();
     const refreshAccount = () => void load({ keepDraft: true });
+    const rememberStagedKey = (event: Event) => {
+      const detail = (event as CustomEvent<ProviderKeyStagedDetail>).detail;
+      if (!detail || !API_PROVIDERS.includes(detail.provider as ApiEngineProvider) || !detail.receipt) return;
+      setStagedKeyReceipts((current) => ({ ...current, [detail.provider]: detail.receipt }));
+    };
     window.addEventListener("oasis:agent-configs-changed", refreshAccount);
+    window.addEventListener(OASIS_PROVIDER_KEY_STAGED_EVENT, rememberStagedKey);
     return () => {
       window.removeEventListener("oasis:agent-configs-changed", refreshAccount);
+      window.removeEventListener(OASIS_PROVIDER_KEY_STAGED_EVENT, rememberStagedKey);
       stop.current?.abort();
     };
     // The initial server truth is intentionally read once; refresh actions call load explicitly.
@@ -195,7 +211,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
             Retry
           </button>
         </div>
-        <AccountSection>{children}</AccountSection>
+        <AgentEngineScopeProvider scope={scope}>
+          <AccountSection>{children}</AccountSection>
+        </AgentEngineScopeProvider>
       </div>
     );
   }
@@ -225,9 +243,12 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     draft.mode === "local" ? selectedDevice?.localModels.find((model) => model.ref === draft.modelRef) : undefined;
   const draftKey = selectionKey(draft, scope);
   const apiConnected =
-    draft.mode === "api" && (state.savedProviders.includes(draft.provider) || state.account?.provider === draft.provider);
-  const apiProviderOptions = state.canManage
-    ? API_PROVIDERS.filter((provider) => state.account?.provider === provider || state.savedProviders.includes(provider))
+    draft.mode === "api" &&
+    (scope === "workspace"
+      ? state.savedProviders.includes(draft.provider) || state.account?.provider === draft.provider
+      : state.account?.provider === draft.provider);
+  const apiProviderOptions = scope === "workspace" && state.canManage
+    ? API_PROVIDERS
     : state.account
       ? [state.account.provider]
       : [];
@@ -242,6 +263,17 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     setProbeReceipt(null);
     setJob(null);
     setNotice(null);
+  }
+
+  function openProviderAccount(provider: ApiEngineProvider) {
+    if (scope !== "workspace" || !loadedState.canManage) return;
+    const detail: ProviderAccountOpenRequest = {
+      provider,
+      scope: "tenant",
+      stageOnly: true,
+      lockScope: true,
+    };
+    window.dispatchEvent(new CustomEvent(OPEN_AI_PROVIDER_ACCOUNT_EVENT, { detail }));
   }
 
   function changeScope(next: EngineScope) {
@@ -306,6 +338,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     setNotice(null);
     const result = await saveEngine(draftSelection, versionForScope(loadedState, scope), undefined, {
       scope,
+      ...(draftSelection.mode === "api" && scope === "workspace" && stagedKeyReceipts[draftSelection.provider]
+        ? { savedKeyReceipt: stagedKeyReceipts[draftSelection.provider] }
+        : {}),
       ...(probeReceipt?.key === draftKey ? { probeJobId: probeReceipt.jobId } : {}),
       signal: controller.signal,
     });
@@ -534,6 +569,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                   ? describeRuntime(selectedDevice, provider)
                   : null;
               const unsupported = status?.label === "Unsupported";
+              const subscriptionLimited = runtime?.code === "rate_limited";
               const selected = draft.provider === provider;
               return (
                 <div key={provider} className={`rounded-lg border p-3 ${selected ? "border-accent/60 bg-accent-soft" : "border-hairline bg-bg-deep/40"}`}>
@@ -554,6 +590,8 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       {provider === "gemini" ? (
                         <span className="text-[11px] text-fg-muted">Managed Gemini CLI account detected. Test it here; sign-in is managed on the computer.</span>
+                      ) : subscriptionLimited ? (
+                        <span className="text-[11px] text-fg-muted">Still signed in. Wait for the subscription usage window to reset, then Test again; no reconnect is needed.</span>
                       ) : selectedDevice.ownedByViewer ? (
                         <button
                           type="button"
@@ -647,14 +685,49 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
               </option>
             )}
             {apiProviderOptions.map((provider) => (
-              <option key={provider} value={provider}>{PROVIDER_LABEL[provider]}{state.account?.provider === provider ? " · active" : " · saved"}</option>
+              <option key={provider} value={provider}>
+                {PROVIDER_LABEL[provider]}
+                {state.account?.provider === provider
+                  ? " · active key"
+                  : state.savedProviders.includes(provider)
+                    ? " · saved key"
+                    : " · connect key"}
+              </option>
             ))}
           </select>
-          <p className="text-[11px] text-fg-muted">
-            {state.canManage
-              ? "Connect and test provider accounts below. Choosing a saved key makes it the workspace account when you press Use."
-              : "The workspace owner manages this API account. You can use the active provider or choose a computer-backed setup."}
-          </p>
+          {scope === "workspace" && state.canManage ? (
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
+              <span>
+                {apiConnected
+                  ? state.account?.provider === draft.provider
+                    ? "A workspace key is saved for this provider. Test or replace it at any time."
+                    : "A saved key is ready to be tested before OASIS switches the workspace account."
+                  : "No workspace key is saved for this provider yet."}
+              </span>
+              <button
+                type="button"
+                onClick={() => openProviderAccount(draft.provider)}
+                className="font-semibold text-accent underline underline-offset-2 hover:text-accent-bright focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                {apiConnected ? `Replace ${PROVIDER_LABEL[draft.provider]} key` : `Connect ${PROVIDER_LABEL[draft.provider]} key`}
+              </button>
+            </div>
+          ) : state.canManage ? (
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
+              <span>My setup uses the workspace API account; changing its provider affects the whole workspace.</span>
+              <button
+                type="button"
+                onClick={() => changeScope("workspace")}
+                className="font-semibold text-accent underline underline-offset-2 hover:text-accent-bright focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                Manage under Workspace default
+              </button>
+            </div>
+          ) : (
+            <p className="text-[11px] text-fg-muted">
+              The workspace owner manages this API account. You can use the active provider or choose a computer-backed setup.
+            </p>
+          )}
         </div>
       )}
 
@@ -809,7 +882,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
         )}
       </section>
 
-      <AccountSection>{children}</AccountSection>
+      <AgentEngineScopeProvider key={scope} scope={scope}>
+        <AccountSection>{children}</AccountSection>
+      </AgentEngineScopeProvider>
     </div>
   );
 }

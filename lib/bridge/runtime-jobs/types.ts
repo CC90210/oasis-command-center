@@ -17,6 +17,7 @@ export const RUNTIME_FAILURE_CODES = [
   "cli_not_found",
   "cli_timeout",
   "manual_auth_required",
+  "runtime_rate_limited",
   "runtime_action_failed",
   "runtime_engine_not_allowed",
   "runtime_probe_failed",
@@ -37,6 +38,7 @@ export type CliRuntimeStateCode =
   | "unsupported"
   | "probe_failed"
   | "probe_required"
+  | "rate_limited"
   | "account_identity_unavailable";
 export type RuntimeClaimState = {
   claude: { installed: boolean; authenticated: boolean; state: CliRuntimeStateCode };
@@ -92,6 +94,7 @@ const CLI_RUNTIME_STATES = new Set([
   "unsupported",
   "probe_failed",
   "probe_required",
+  "rate_limited",
   "account_identity_unavailable",
 ]);
 const LOCAL_RUNTIME_STATES = new Set(["ready", "unavailable", "probe_required"]);

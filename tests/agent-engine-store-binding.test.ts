@@ -241,6 +241,10 @@ async function main() {
         sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at) VALUES ('tenant-atomic', NULL, '__engine__', 'cli', 'codex', NULL, 1, 'pair-old', 'none', 'engine-choice-v1')",
         args: [],
       },
+      {
+        sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, computer_pairing_id, fallback_policy, updated_at) VALUES ('tenant-atomic', NULL, '__key:openai', 'openai', 'gpt-test', 'cipher-saved', 0, NULL, 'none', 'saved-key-v1')",
+        args: [],
+      },
     ],
     "write",
   );
@@ -253,6 +257,16 @@ async function main() {
     model: "gpt-test",
     encryptedApiKey: "cipher-new",
     agentKeys: [],
+    candidate: {
+      source: "kept",
+      agentKey: "__key:openai",
+      keptAgentKey: "__key:openai",
+      provider: "openai",
+      model: "gpt-test",
+      encryptedApiKey: "cipher-saved",
+      enabled: 0,
+      updatedAt: "saved-key-v1",
+    },
     engine: { userId: null, expectedVersion: "stale-version", choice: { kind: "api", provider: "openai" } },
   });
   assert.equal(stale.committed, false);
@@ -264,6 +278,7 @@ async function main() {
     atomicRows.rows.map((row) => [row.agent_key, row.provider, row.model, row.encrypted_api_key, row.updated_at]),
     [
       ["__engine__", "cli", "codex", null, "engine-choice-v1"],
+      ["__key:openai", "openai", "gpt-test", "cipher-saved", "saved-key-v1"],
       ["__workspace__", "google", "gemini-old", "cipher-old", "engine-account-v1"],
       ["sdr", "google", "gemini-old", "cipher-old", "engine-agent-v1"],
     ],
@@ -276,6 +291,16 @@ async function main() {
     model: "gpt-test",
     encryptedApiKey: "cipher-new",
     agentKeys: [],
+    candidate: {
+      source: "kept",
+      agentKey: "__key:openai",
+      keptAgentKey: "__key:openai",
+      provider: "openai",
+      model: "gpt-test",
+      encryptedApiKey: "cipher-saved",
+      enabled: 0,
+      updatedAt: "saved-key-v1",
+    },
     engine: { userId: null, expectedVersion: "engine-choice-v1", choice: { kind: "api", provider: "openai" } },
   });
   assert.equal(committed.committed, true);
@@ -287,6 +312,7 @@ async function main() {
     atomicRows.rows.map((row) => [row.agent_key, row.provider, row.model, row.encrypted_api_key]),
     [
       ["__engine__", "api", "openai", null],
+      ["__key:openai", "openai", "gpt-test", "cipher-saved"],
       ["__workspace__", "openai", "gpt-test", "cipher-new"],
       ["sdr", "openai", "gpt-test", "cipher-new"],
     ],

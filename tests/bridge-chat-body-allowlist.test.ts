@@ -167,6 +167,7 @@ async function main() {
 
   console.log("bridge-chat-body-allowlist:");
   const { POST } = await import("../app/api/bridge/chat/route");
+  const { runtimeAvailability } = await import("../lib/bridge/runtime-availability");
   const harness = await import("../lib/bridge/harness-jobs");
   await login(CC);
   let claimSequence = 0;
@@ -180,6 +181,20 @@ async function main() {
   };
   const post = (body: Record<string, unknown>) =>
     POST(new Request("http://localhost/api/bridge/chat", { method: "POST", body: JSON.stringify({ ...savedBinding, ...body }) }) as never);
+
+  await check("a connector rate limit maps to the canonical explicit-fallback reason, not sign-in or test failure", () => {
+    const availability = runtimeAvailability(
+      { codex: { installed: true, authenticated: true, state: "rate_limited" } },
+      {
+        mode: "cli",
+        pairingId: "pair-ccpc",
+        engineKind: "subscription",
+        engineName: "codex",
+        fallback: "workspace_api",
+      } as never,
+    );
+    assert.deepEqual(availability, { ok: false, error: "subscription_limit", fallbackReason: "subscription_limit" });
+  });
 
   await check("top-level JSON primitives are rejected as invalid_body, never 500", async () => {
     for (const value of [null, [], "text", 7, true]) {

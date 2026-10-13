@@ -60,7 +60,8 @@
  *     scope?: "tenant" | "user",          // default tenant
  *     tested?: string,                    // test-connection's proof of its test
  *     save_anyway?: boolean,              // save a key the provider could not test
- *     verify?: boolean                    // read-only check, see above
+ *     verify?: boolean,                   // read-only check, see above
+ *     stage_only?: boolean                // tenant only: cache without activation
  *   }
  *
  * Returns: { ok, scope, workspace_account, applied_to: [agent_key,...], failed: [], count }
@@ -77,7 +78,8 @@ import { defaultModelFor, isRegistryProvider, saveCheck } from "@/lib/ai/model-r
 import { probeProvider } from "@/lib/agents/provider-probe";
 import { billingForKey, modelCallMeter } from "@/lib/ai/usage";
 import { readConnectTest, signConnectTest, type ConnectTestSubject } from "@/lib/ai/connect-test-proof";
-import { encryptField } from "@/lib/field-encryption";
+import { decryptField, encryptField } from "@/lib/field-encryption";
+import { SWITCHABLE_PROVIDERS, anyCanonicalEngineExists, keepSavedKey, readSavedKey } from "@/lib/ai/agent-engine-store";
 import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
@@ -103,6 +105,8 @@ const COULD_NOT_TELL = "We couldn't check whether the key was saved. Close this 
 const DISCONNECT_FAILED = "The AI account couldn't be disconnected just now. Nothing was changed. Try again in a moment.";
 const DISCONNECT_CONFLICT = "The AI account was changed in another window, so nothing was disconnected. Check the card, then try again.";
 const SIGNED_OUT = "Your session ended. Sign in again, then try again.";
+const ENGINE_UPGRADE_REQUIRED =
+  "Refresh Settings > AI brain, add this provider under Workspace default, then Test and Use it. Nothing was changed.";
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -151,6 +155,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: `invalid_provider:${provider}` }, { status: 400 });
   }
   const scope = body?.scope === "user" ? "user" : "tenant";
+  const stageOnly = body?.stage_only === true;
+  if (stageOnly && scope !== "tenant") {
+    return NextResponse.json({ ok: false, error: "stage_requires_tenant_scope" }, { status: 400 });
+  }
+  if (stageOnly && !SWITCHABLE_PROVIDERS.includes(provider as Provider)) {
+    return NextResponse.json({ ok: false, error: "stage_unsupported_provider" }, { status: 400 });
+  }
   if (scope === "tenant" && !canManageTenant) {
     return NextResponse.json({ ok: false, error: "admin_required" }, { status: 403 });
   }
@@ -206,13 +217,47 @@ export async function POST(req: NextRequest) {
   // Read-only: is exactly this key saved now? The card asks this when a
   // connect's answer never came back (it timed out in the browser): the save
   // may have landed, so it says what is saved instead of guessing.
+  const stagedKeyOnFile = async () => {
+    const saved = await readSavedKey(tenantId, provider as Provider);
+    return saved && saved.source === "kept" && saved.model === model && decryptField(saved.encryptedApiKey) === apiKeyPlain ? saved : null;
+  };
   if (body?.verify === true) {
     try {
-      const saved = await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain });
-      return NextResponse.json({ ok: true, saved });
+      const staged = stageOnly ? await stagedKeyOnFile() : null;
+      const saved = stageOnly
+        ? !!staged
+        : await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain });
+      return NextResponse.json({
+        ok: true,
+        saved,
+        staged: stageOnly && saved,
+        ...(staged ? { staged_key_receipt: staged.receipt } : {}),
+      });
     } catch (err) {
       console.error("[bulk-provider.verify]", { tenantId, provider, error: errText(err) });
       return NextResponse.json({ ok: false, error: "verify_failed", message: COULD_NOT_TELL }, { status: 503 });
+    }
+  }
+
+  // Compatibility lane only. Once this workspace has a canonical engine row,
+  // every workspace-key activation must go through PUT /api/ai/engine with the
+  // current engine version and the exact staged-key receipt. Otherwise a stale
+  // pre-rollout tab could change __workspace__ (and therefore real spend)
+  // while __engine__ continued to name a different provider.
+  if (scope === "tenant" && !stageOnly) {
+    try {
+      if (await anyCanonicalEngineExists(tenantId)) {
+        return NextResponse.json(
+          { ok: false, error: "engine_upgrade_required", message: ENGINE_UPGRADE_REQUIRED },
+          { status: 409 },
+        );
+      }
+    } catch (err) {
+      console.error("[bulk-provider.engine_version]", { tenantId, provider, error: errText(err) });
+      return NextResponse.json(
+        { ok: false, error: "engine_state_unavailable", message: COULD_NOT_TELL },
+        { status: 503 },
+      );
     }
   }
 
@@ -287,6 +332,7 @@ export async function POST(req: NextRequest) {
   // lands together, or none does. Nothing is written row by row, so nothing
   // is ever left half-saved and nothing needs cleaning up after a race.
   let applied = targetAgents;
+  let stagedKeyReceipt: string | null = null;
   // A failed write is read back before it is answered (R5-M1): the batch may
   // have committed with only its answer lost (or the Worker stopped after the
   // commit). Saved is answered as saved; "Nothing was changed" only when the
@@ -294,7 +340,12 @@ export async function POST(req: NextRequest) {
   const readBack = async (err: unknown, where: string): Promise<NextResponse | null> => {
     console.error(`[bulk-provider.${where}]`, { tenantId, provider, error: errText(err) });
     try {
-      if (await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain })) return null;
+      const staged = stageOnly ? await stagedKeyOnFile() : null;
+      const saved = stageOnly
+        ? !!staged
+        : await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain });
+      if (staged) stagedKeyReceipt = staged.receipt;
+      if (saved) return null;
     } catch (readErr) {
       console.error("[bulk-provider.read_back]", { tenantId, provider, error: errText(readErr) });
       return NextResponse.json({ ok: false, error: "save_unknown", message: COULD_NOT_TELL }, { status: 503 });
@@ -308,12 +359,28 @@ export async function POST(req: NextRequest) {
       const answer = await readBack(err, "personal_save");
       if (answer) return answer;
     }
+  } else if (stageOnly) {
+    try {
+      stagedKeyReceipt = await keepSavedKey({ tenantId, provider: provider as Provider, model, encryptedApiKey: encryptedKey });
+      applied = [];
+    } catch (err) {
+      const answer = await readBack(err, "stage");
+      if (answer) return answer;
+    }
   } else {
     const thisKey = { provider, model, apiKey: apiKeyPlain };
     let outcome: { committed: boolean; legacyRowMoved: boolean; movedWithTeam: string[] } | null = null;
     try {
       let stamp = await readAccountStamp(tenantId);
-      outcome = await connectWorkspaceAccountInOneStep({ tenantId, stamp, provider, model, encryptedApiKey: encryptedKey, agentKeys: targetAgents });
+      outcome = await connectWorkspaceAccountInOneStep({
+        tenantId,
+        stamp,
+        provider,
+        model,
+        encryptedApiKey: encryptedKey,
+        agentKeys: targetAgents,
+        requireEngineAbsent: true,
+      });
       if (!outcome.committed) {
         // The account changed after the read. When it now holds this very key
         // (a retry of this connect, or another window saving the same key),
@@ -322,7 +389,15 @@ export async function POST(req: NextRequest) {
         // change, and it stands.
         stamp = await readAccountStamp(tenantId);
         if (stampHoldsKey(stamp, thisKey)) {
-          outcome = await connectWorkspaceAccountInOneStep({ tenantId, stamp, provider, model, encryptedApiKey: encryptedKey, agentKeys: targetAgents });
+          outcome = await connectWorkspaceAccountInOneStep({
+            tenantId,
+            stamp,
+            provider,
+            model,
+            encryptedApiKey: encryptedKey,
+            agentKeys: targetAgents,
+            requireEngineAbsent: true,
+          });
         }
       }
     } catch (err) {
@@ -330,6 +405,20 @@ export async function POST(req: NextRequest) {
       if (answer) return answer;
     }
     if (outcome && !outcome.committed) {
+      try {
+        if (await anyCanonicalEngineExists(tenantId)) {
+          return NextResponse.json(
+            { ok: false, error: "engine_upgrade_required", message: ENGINE_UPGRADE_REQUIRED },
+            { status: 409 },
+          );
+        }
+      } catch (err) {
+        console.error("[bulk-provider.engine_version_after_conflict]", { tenantId, provider, error: errText(err) });
+        return NextResponse.json(
+          { ok: false, error: "engine_state_unavailable", message: COULD_NOT_TELL },
+          { status: 503 },
+        );
+      }
       return NextResponse.json({ ok: false, error: "conflict", message: CONNECT_CONFLICT }, { status: 409 });
     }
     if (outcome) {
@@ -343,14 +432,15 @@ export async function POST(req: NextRequest) {
     const authed = await getAuthedSupabase();
     await authed.rpc("log_tenant_event", {
       p_tenant_id: tenantId,
-      p_action_type: scope === "user" ? "agent_config.user_update" : "agent_config.tenant_update",
+      p_action_type: scope === "user" ? "agent_config.user_update" : stageOnly ? "agent_config.tenant_key_staged" : "agent_config.tenant_update",
       p_target_table: "agent_model_config",
       p_target_id: `${tenantId}:${effectiveUserId || "tenant"}:${provider}:bulk`,
       p_after: {
         provider,
         model,
         scope,
-        workspace_account: scope === "tenant",
+        workspace_account: scope === "tenant" && !stageOnly,
+        staged: stageOnly,
         applied_to: applied,
         has_key: true,
       },
@@ -362,7 +452,9 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     ok: true,
     scope,
-    workspace_account: scope === "tenant",
+    workspace_account: scope === "tenant" && !stageOnly,
+    staged: stageOnly,
+    ...(stageOnly && stagedKeyReceipt ? { staged_key_receipt: stagedKeyReceipt } : {}),
     applied_to: applied,
     failed: [],
     count: applied.length,

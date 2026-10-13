@@ -120,6 +120,13 @@ stub("next/image", {
   __esModule: true,
   default: ({ src, alt }: { src: string; alt?: string }) => ReactNS.createElement("img", { src, alt }),
 });
+// This suite executes Server and Client modules in one react-server process.
+// React's server export intentionally has no createContext; the real browser
+// provider is irrelevant to F0 route containment, so keep this boundary opaque.
+stub("../components/settings/agent-engine-scope-context", {
+  AgentEngineScopeProvider: ({ children }: { children?: unknown }) => children,
+  useAgentEngineScope: () => undefined,
+});
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const SQUAT_TENANT = "5a5a5a5a-0000-4000-8000-00000000005a";

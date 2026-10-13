@@ -388,6 +388,7 @@ function runtimeBlockReason(run: Pick<Run, "runtimeEngineKind" | "runtimeEngineN
     if (runtime.state === "unsupported") return "cli_account_unsupported";
     if (!runtime.installed || runtime.state === "not_installed") return "cli_not_found";
     if (!runtime.authenticated || runtime.state === "needs_sign_in") return "subscription_auth_failure";
+    if (runtime.state === "rate_limited") return "subscription_limit";
     return runtime.state === "ready" ? null : "department_profile_unsupported";
   }
   if (run.runtimeEngineKind === "local" && name) {
@@ -442,11 +443,16 @@ async function recordRuntimeBlock(
   blockedReason: string,
   claimStateAt: string,
 ): Promise<boolean> {
+  // A subscription quota belongs to one CLI, not the whole computer. Keep
+  // the exact verdict in claim_runtime_state so the queued-run follower can
+  // activate that run's explicit fallback without making a ready sibling
+  // runtime (for example Codex while Claude is limited) unclaimable.
+  const pairingWideReason = blockedReason === "subscription_limit" ? null : blockedReason;
   const upd = await getServiceSupabase()
     .from("bridge_pairings")
     .update({
       claim_runtime_state: JSON.stringify(runtimeState),
-      claim_blocked_reason: blockedReason,
+      claim_blocked_reason: pairingWideReason,
     })
     .eq("tenant_id", pairing.tenantId)
     .eq("id", pairing.pairingId)

@@ -34,7 +34,7 @@ type El = ReactElement<Record<string, unknown>>;
  * that hands the same mounted card new props. renderToStaticMarkup draws a
  * single frame and there is no DOM in the test toolchain, so this stands in
  * for the reconciler for the card's OWN hooks only (it knows useState,
- * useRef and useLayoutEffect, which ProviderAccountsCard uses to lay its own
+ * useRef, useContext and useLayoutEffect, which ProviderAccountsCard uses to lay its own
  * changes over only the server answer they were made on, and nothing else, so
  * a new hook fails loudly here). A layout effect runs, its dependencies
  * honoured, as soon as the frame is drawn: React runs it at commit. What it
@@ -47,6 +47,9 @@ function framesOf<P>(component: (props: P) => unknown): (props: P) => El {
   const pending: Array<() => void> = [];
   let cursor = 0;
   const dispatcher = {
+    // This helper renders the legacy standalone card, outside the canonical
+    // engine provider, so the context's documented value is undefined.
+    useContext: () => undefined,
     useState(initial: unknown) {
       const at = cursor++;
       if (!(at in slots)) slots[at] = typeof initial === "function" ? (initial as () => unknown)() : initial;
@@ -97,6 +100,7 @@ function frameWithState<P>(component: (props: P) => unknown, props: P, states: u
   const internals = (require("react") as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
   let cursor = 0;
   const dispatcher = {
+    useContext: () => undefined,
     useState: () => [states[cursor++], () => undefined],
     useEffect: () => undefined,
   };

@@ -10,7 +10,7 @@
  * The workspace AI account holds ONE provider and key at a time, and a connect
  * moves every team row off the previous key, so switching from Google to
  * Anthropic and back meant pasting the Google key again. Now a switch made in
- * AI brain (app/api/agent-config/workspace-provider) keeps the key it moves
+ * AI Brain's canonical PUT /api/ai/engine transaction keeps the key it moves
  * away from (and the one it moves to) on its own row, agent_key
  * "__key:<provider>", user_id NULL, encrypted SEPARATELY (its own ciphertext).
  * A card's Connect / Replace key still REPLACES the account's key, as PR #535's
@@ -35,6 +35,7 @@
  * only when fallback_policy explicitly says workspace_api.
  */
 import "server-only";
+import { createHash } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { decryptField, encryptField } from "@/lib/field-encryption";
@@ -232,6 +233,18 @@ export async function readAgentEngineVersion(tenantId: string): Promise<string |
   if (error) throw new Error(`agent engine: version read failed: ${error.message}`);
   const at = (data as { updated_at?: unknown } | null)?.updated_at;
   return typeof at === "string" && at ? at : null;
+}
+
+/** Whether this tenant has adopted a canonical engine at either workspace or personal scope. */
+export async function anyCanonicalEngineExists(tenantId: string): Promise<boolean> {
+  const { data, error } = await getServiceSupabase()
+    .from("agent_model_config")
+    .select("agent_key")
+    .eq("tenant_id", tenantId)
+    .eq("agent_key", ENGINE_AGENT_KEY)
+    .limit(1);
+  if (error) throw new Error(`agent engine: adoption read failed: ${error.message}`);
+  return Array.isArray(data) && data.length > 0;
 }
 
 /**
@@ -675,21 +688,78 @@ export async function workspaceAllowsPersonApiChoice(tenantId: string): Promise<
   return (await readAgentEngine(tenantId)).kind === "api";
 }
 
-type KeyRow = { agent_key: string; provider: string; model: string; encrypted_api_key: string | null; enabled: unknown };
+type KeyRow = {
+  agent_key: string;
+  provider: string;
+  model: string;
+  encrypted_api_key: string | null;
+  enabled: unknown;
+  updated_at?: unknown;
+};
+
+export type SavedProviderKey = {
+  agentKey: string;
+  provider: Provider;
+  encryptedApiKey: string;
+  model: string;
+  enabled: number;
+  source: "kept" | "account" | "team";
+  updatedAt: string | null;
+  /** Opaque version for the exact row/key tested by the browser. */
+  receipt: string;
+};
+
+export type SavedKeySlot =
+  | { present: false; agentKey: string }
+  | {
+      present: true;
+      agentKey: string;
+      provider: Provider;
+      model: string;
+      encryptedApiKey: string | null;
+      enabled: number;
+      updatedAt: string | null;
+    };
 
 async function teamKeyRows(tenantId: string): Promise<KeyRow[]> {
   const { data, error } = await getServiceSupabase()
     .from("agent_model_config")
-    .select("agent_key, provider, model, encrypted_api_key, enabled")
+    .select("agent_key, provider, model, encrypted_api_key, enabled, updated_at")
     .eq("tenant_id", tenantId)
     .is("user_id", null);
   if (error) throw new Error(`saved AI keys: agent_model_config read failed: ${error.message}`);
-  return ((data || []) as KeyRow[]).filter(
-    (r) => !!r.encrypted_api_key && r.agent_key !== ENGINE_AGENT_KEY && r.provider !== LOCAL_MODEL_PROVIDER,
-  );
+  return ((data || []) as KeyRow[])
+    .filter((r) => !!r.encrypted_api_key && r.agent_key !== ENGINE_AGENT_KEY && r.provider !== LOCAL_MODEL_PROVIDER)
+    .sort((left, right) => left.agent_key.localeCompare(right.agent_key));
 }
 
 const on = (v: unknown) => v === true || Number(v) === 1;
+
+function keyReceipt(row: Pick<SavedProviderKey, "agentKey" | "provider" | "model" | "encryptedApiKey" | "enabled" | "updatedAt">): string {
+  return createHash("sha256")
+    .update([row.agentKey, row.provider, row.model, row.encryptedApiKey, String(row.enabled), row.updatedAt ?? ""].join("\0"))
+    .digest("base64url");
+}
+
+function savedKeyFromRows(rows: KeyRow[], provider: Provider): SavedProviderKey | null {
+  const providerRows = rows.filter((row) => row.provider === provider);
+  const kept = providerRows.find((row) => row.agent_key === savedKeyAgentKey(provider));
+  const account = providerRows.find((row) => row.agent_key === WORKSPACE_AI_AGENT_KEY && on(row.enabled));
+  const team = providerRows.find((row) => !row.agent_key.startsWith("__") && on(row.enabled));
+  const row = kept?.encrypted_api_key ? kept : account?.encrypted_api_key ? account : team?.encrypted_api_key ? team : null;
+  if (!row?.encrypted_api_key) return null;
+  const source = row === kept ? "kept" : row === account ? "account" : "team";
+  const result = {
+    agentKey: row.agent_key,
+    provider,
+    encryptedApiKey: row.encrypted_api_key,
+    model: row.model,
+    enabled: on(row.enabled) ? 1 : 0,
+    source,
+    updatedAt: typeof row.updated_at === "string" ? row.updated_at : null,
+  } satisfies Omit<SavedProviderKey, "receipt">;
+  return { ...result, receipt: keyReceipt(result) };
+}
 
 /**
  * The saved team key for a provider, as its ciphertext and the model it was
@@ -699,15 +769,43 @@ const on = (v: unknown) => v === true || Number(v) === 1;
 export async function readSavedKey(
   tenantId: string,
   provider: Provider,
-): Promise<{ encryptedApiKey: string; model: string; source: "kept" | "account" | "team" } | null> {
-  const rows = (await teamKeyRows(tenantId)).filter((r) => r.provider === provider);
-  const kept = rows.find((r) => r.agent_key === savedKeyAgentKey(provider));
-  if (kept?.encrypted_api_key) return { encryptedApiKey: kept.encrypted_api_key, model: kept.model, source: "kept" };
-  const account = rows.find((r) => r.agent_key === WORKSPACE_AI_AGENT_KEY && on(r.enabled));
-  if (account?.encrypted_api_key) return { encryptedApiKey: account.encrypted_api_key, model: account.model, source: "account" };
-  const team = rows.find((r) => !r.agent_key.startsWith("__") && on(r.enabled));
-  if (team?.encrypted_api_key) return { encryptedApiKey: team.encrypted_api_key, model: team.model, source: "team" };
-  return null;
+): Promise<SavedProviderKey | null> {
+  return savedKeyFromRows(await teamKeyRows(tenantId), provider);
+}
+
+/** Exact inactive cache slot, including an empty/retired row, for transaction CAS. */
+export async function readSavedKeySlot(tenantId: string, provider: Provider): Promise<SavedKeySlot> {
+  const agentKey = savedKeyAgentKey(provider);
+  const { data, error } = await getServiceSupabase()
+    .from("agent_model_config")
+    .select("agent_key, provider, model, encrypted_api_key, enabled, updated_at")
+    .eq("tenant_id", tenantId)
+    .is("user_id", null)
+    .eq("agent_key", agentKey)
+    .maybeSingle();
+  if (error) throw new Error(`saved AI key slot: agent_model_config read failed: ${error.message}`);
+  if (!data) return { present: false, agentKey };
+  const row = data as KeyRow;
+  return {
+    present: true,
+    agentKey,
+    provider: String(row.provider || provider) as Provider,
+    model: String(row.model || ""),
+    encryptedApiKey: row.encrypted_api_key || null,
+    enabled: on(row.enabled) ? 1 : 0,
+    updatedAt: typeof row.updated_at === "string" ? row.updated_at : null,
+  };
+}
+
+/** Opaque exact-row receipts used to reject stale provider selections. */
+export async function readSavedKeyReceipts(tenantId: string): Promise<Partial<Record<Provider, string>>> {
+  const rows = await teamKeyRows(tenantId);
+  return Object.fromEntries(
+    SWITCHABLE_PROVIDERS.flatMap((provider) => {
+      const saved = savedKeyFromRows(rows, provider);
+      return saved ? [[provider, saved.receipt]] : [];
+    }),
+  );
 }
 
 /** The cloud providers this workspace has a saved team key for. Throws when the read fails. */
@@ -729,15 +827,24 @@ export async function keepSavedKey(input: {
   provider: Provider;
   model: string;
   encryptedApiKey: string;
-}): Promise<void> {
-  if (!SWITCHABLE_PROVIDERS.includes(input.provider)) return;
+}): Promise<string | null> {
+  if (!SWITCHABLE_PROVIDERS.includes(input.provider)) return null;
   const fresh = encryptField(decryptField(input.encryptedApiKey));
+  const at = new Date().toISOString();
   await writeClient().execute({
     sql:
       "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
       " VALUES (?, NULL, ?, ?, ?, ?, 0, ?)" +
       " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL" +
       " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = excluded.encrypted_api_key, enabled = 0, updated_at = excluded.updated_at",
-    args: [input.tenantId, savedKeyAgentKey(input.provider), input.provider, input.model, fresh, new Date().toISOString()],
+    args: [input.tenantId, savedKeyAgentKey(input.provider), input.provider, input.model, fresh, at],
+  });
+  return keyReceipt({
+    agentKey: savedKeyAgentKey(input.provider),
+    provider: input.provider,
+    model: input.model,
+    encryptedApiKey: fresh,
+    enabled: 0,
+    updatedAt: at,
   });
 }
