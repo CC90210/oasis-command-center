@@ -230,6 +230,13 @@ sections.push(() => {
     assert.match(html.hits, /title="graft"/);
     assert.match(html.hits, /title="Find code by symbol\."/);
   });
+  check("fix round 2 (task 10) #1: the detail span can shrink instead of refusing to narrow", () => {
+    const detailSpan = html.hits.match(/<span class="([^"]*)" title="Find code by symbol\.">/);
+    assert.ok(detailSpan, "the detail span with title=\"Find code by symbol.\" must exist");
+    const classes = detailSpan![1];
+    assert.doesNotMatch(classes, /shrink-0/, "the detail span must not refuse to shrink");
+    assert.match(classes, /min-w-0/, "the detail span must allow shrinking below its content width");
+  });
 });
 // (later tasks push more sections here)
 

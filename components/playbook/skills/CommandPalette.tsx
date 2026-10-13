@@ -17,7 +17,7 @@ export function PaletteResults({ hits, active, onPick, onHover }: { hits: Hit[];
             <span className="min-w-0 flex-1">
               <span className={`block truncate ${h.kind === "skill" ? "font-mono" : "font-medium"}`} title={h.name}>{h.name}</span>
             </span>
-            <span className="shrink-0 truncate text-xs text-fg-dim" title={detail}>{detail}</span>
+            <span className="min-w-0 max-w-[55%] truncate text-xs text-fg-dim" title={detail}>{detail}</span>
           </li>
         );
       })}
