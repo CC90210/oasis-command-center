@@ -20,6 +20,15 @@
  * after the triggering call before that control exists - that extra tick is the ONLY change made to
  * the pre-existing (a)/(b)/(c) tests; (d) is rewritten because the behaviour it pinned (an immediate
  * concurrent second send) was the bug.
+ * Codex re-review round 2 (P2 + controller finding): `flush()` now takes an optional
+ * `{ teardown: true }`. Only the real `pagehide` signal passes it - a component unmount, client-side
+ * navigation, or the per-computer remount call plain `flush()`, which stays fully chained (like the
+ * timer), because none of those destroy the JS context and forcing them out of order reopened the
+ * original bug for completely ordinary in-app use. `flush({ teardown: true })` drains BOTH `current`
+ * AND every edit `fire()` already took but has not yet actually started (the `unstarted` list) - a
+ * second queued-but-unsent edit was still silently lost at teardown before this round, because only
+ * `current` was forced. Each entry starts EXACTLY ONCE even when a forced start and its own place
+ * on the chain race for it.
  * Run: node --import tsx tests/skills-tab-actions.test.ts
  */
 import assert from "node:assert/strict";
@@ -161,21 +170,19 @@ async function main() {
     assert.equal(h.states.at(-1)?.kind, "sent");
   });
   await check(
-    "(d) flush while A is in flight starts B's send at once (teardown exception) - nothing lost",
+    "(d) flush({teardown:true}) while A is in flight starts B's send at once - nothing lost",
     async () => {
-      // Codex re-review (P2): an earlier version of this test pinned flush() QUEUING B's send
-      // behind A's still-in-flight one - that was itself a bug (a deferred send queued behind an
-      // earlier one never gets the chance to start once the document is destroyed, so the edit
-      // would be lost outright, not merely reordered). This pins the corrected behaviour: flush()
-      // starts B's send immediately, even while A is still in flight, so it is never lost.
+      // Codex re-review round 2: `flush()` alone is no longer the teardown signal - only
+      // `flush({ teardown: true })` forces an immediate start now (see actions.ts's comment).
+      // B here is still just `current` (added, never fired) at the moment of flush.
       const h = controllableHarness();
       h.q.add("A", ch("A"));
       h.fire(); // A in flight, unresolved
       await tick(); // let A's own (always chain-deferred) send actually reach the network first
       assert.equal(h.controls.length, 1, "sanity: only A has reached the network so far");
       h.q.add("B", ch("B"));
-      h.q.flush(); // flushes the CURRENT edit (B) immediately - the page-teardown exception
-      assert.equal(h.controls.length, 2, "flush must start B's send at once, even while A is in flight");
+      h.q.flush({ teardown: true }); // the real page-teardown signal: starts the CURRENT edit (B) at once
+      assert.equal(h.controls.length, 2, "flush({teardown:true}) must start B's send at once, even while A is in flight");
       h.controls[0].resolve(); // A settles
       h.controls[1].resolve(); // B settles
       await tick();
@@ -183,7 +190,7 @@ async function main() {
     },
   );
   await check(
-    "Codex re-review: flush on teardown starts B's send synchronously, before A resolves, with keepalive true",
+    "Codex re-review: flush({teardown:true}) starts B's send synchronously, before A resolves, with keepalive true",
     async () => {
       const h = controllableHarness();
       h.q.add("A", ch("A"));
@@ -191,8 +198,8 @@ async function main() {
       await tick(); // let A's send actually reach the network; controls[0] now exists, unresolved
       assert.equal(h.controls.length, 1, "sanity: A's send has reached the network");
       h.q.add("B", ch("B")); // B queued behind A, with its own timer
-      h.q.flush(); // must start B's fetch SYNCHRONOUSLY, inside this very call - no await anywhere above
-      assert.equal(h.controls.length, 2, "flush must invoke B's send synchronously, before any await");
+      h.q.flush({ teardown: true }); // must start B's fetch SYNCHRONOUSLY, inside this very call - no await anywhere above
+      assert.equal(h.controls.length, 2, "flush({teardown:true}) must invoke B's send synchronously, before any await");
       // A has not been resolved at all yet - proves B's send started WHILE A was still in flight,
       // not merely "soon after". A deferred-but-not-yet-invoked send could not pass this check.
       assert.equal(h.sent.length, 0, "neither send has settled yet; reaching the network is what's under test here, not finishing");
@@ -200,6 +207,78 @@ async function main() {
       h.controls[1].resolve(); // B settles
       await tick();
       assert.deepEqual(h.sent.find((s) => s.description === "B"), { description: "B", keepalive: true });
+    },
+  );
+
+  // --- Codex re-review round 2 (P2 + controller finding): teardown drains `unstarted` too, exactly
+  // once per edit; a plain (unmount/navigation) flush() stays fully chained, unlike teardown. ---
+  await check(
+    "(a)/(c) flush({teardown:true}): B's ALREADY-DEFERRED send (its own timer fired) starts synchronously before A resolves; A resolving later never re-sends it",
+    async () => {
+      const h = controllableHarness();
+      h.q.add("A", ch("A"));
+      h.fire(); // A's timer fires -> A's own send is queued on the (initially empty) chain
+      await tick(); // let A's send actually reach the network; controls[0] now exists, unresolved
+      assert.equal(h.controls.length, 1, "sanity: only A has reached the network so far");
+      h.q.add("B", ch("B"));
+      h.fire(); // B's OWN timer fires too -> B is captured into `unstarted`, deferred behind A's chain
+      assert.equal(h.controls.length, 1, "sanity: B must not have started yet - A has not resolved");
+      h.q.flush({ teardown: true }); // page teardown: drain `unstarted` (B), then `current` (nothing here)
+      assert.equal(h.controls.length, 2, "teardown must start B's deferred send synchronously, before A resolves");
+      assert.equal(h.sent.length, 0, "neither send has settled yet - reaching the network is what's under test");
+      h.controls[0].resolve(); // A settles - this is what finally lets B's OWN chain .then() run too
+      await tick();
+      assert.equal(h.controls.length, 2, "A settling must not start a second send for B");
+      h.controls[1].resolve(); // B settles
+      await tick();
+      assert.deepEqual(h.sent.map((s) => s.description), ["A", "B"]);
+      assert.equal(h.controls.length, 2, "B's own deferred chain continuation (now unblocked) must not send a second time");
+    },
+  );
+  await check(
+    "(b)/(c) flush({teardown:true}): a deferred B AND a still-pending C both start synchronously, in order A, B, C; nothing ever double-sends",
+    async () => {
+      const h = controllableHarness();
+      h.q.add("A", ch("A"));
+      h.fire(); // A in flight
+      await tick(); // let A's own send actually reach the network first
+      assert.equal(h.controls.length, 1, "sanity: only A has reached the network so far");
+      h.q.add("B", ch("B")); // B queued, current was null so it just starts its own timer
+      h.q.add("C", ch("C")); // add() sees current=B, fires B right away (into `unstarted`, deferred behind A); C is current
+      assert.equal(h.controls.length, 1, "sanity: B is deferred in `unstarted`, C never even reached fire() yet");
+      h.q.flush({ teardown: true }); // drains `unstarted` (B) first, in order, THEN `current` (C)
+      assert.equal(h.controls.length, 3, "teardown must start B (deferred) and C (current) synchronously");
+      assert.equal(h.sent.length, 0, "none has settled yet");
+      h.controls[0].resolve(); // A settles - unblocks B's own deferred chain .then()
+      await tick();
+      assert.equal(h.controls.length, 3, "A settling must not start a second send for B or C");
+      h.controls[1].resolve(); // B settles - unblocks C's own deferred chain .then() too
+      await tick();
+      assert.equal(h.controls.length, 3, "B settling must not start a second send for C");
+      h.controls[2].resolve(); // C settles
+      await tick();
+      assert.deepEqual(h.sent.map((s) => s.description), ["A", "B", "C"], "sends land in the order A, B, C");
+      assert.equal(h.controls.length, 3, "nothing is ever sent a second time");
+    },
+  );
+  await check(
+    "(d) flush() with NO args (unmount/navigation) keeps B queued behind A's chain, unlike teardown",
+    async () => {
+      const h = controllableHarness();
+      h.q.add("A", ch("A"));
+      h.fire(); // A in flight
+      await tick(); // let A's own send actually reach the network first
+      assert.equal(h.controls.length, 1, "sanity: only A has reached the network so far");
+      h.q.add("B", ch("B")); // B queued, current=B with its own timer
+      h.q.flush(); // plain flush (unmount/navigation): must NOT force anything, unlike teardown
+      await tick();
+      assert.equal(h.controls.length, 1, "a plain flush() must not start B's send while A is still in flight");
+      h.controls[0].resolve(); // A settles
+      await tick();
+      assert.equal(h.controls.length, 2, "B's send starts only once A has settled, same as the timer would");
+      h.controls[1].resolve();
+      await tick();
+      assert.deepEqual(h.sent.map((s) => s.description), ["A", "B"]);
     },
   );
 

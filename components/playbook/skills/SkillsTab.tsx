@@ -102,9 +102,14 @@ export function SkillsTabView({ lib, computer, computers, changes, nowIso, initi
   }), []);
 
   useEffect(() => {
-    const leave = () => queue.flush();
-    window.addEventListener("pagehide", leave);
-    return () => { window.removeEventListener("pagehide", leave); leave(); };
+    // Codex re-review round 2: only the real page-teardown signal (`pagehide`) may skip the send
+    // chain - the cleanup below also runs on an ordinary component unmount (client-side
+    // navigation away from this page, or React remounting this component for a different
+    // computer), neither of which destroys the JS context, so there is no urgency there and no
+    // reason to risk reordering a still-in-flight edit. See actions.ts's `flush()` comment.
+    const onPageHide = () => queue.flush({ teardown: true });
+    window.addEventListener("pagehide", onPageHide);
+    return () => { window.removeEventListener("pagehide", onPageHide); queue.flush(); };
   }, [queue]);
 
   useEffect(() => {

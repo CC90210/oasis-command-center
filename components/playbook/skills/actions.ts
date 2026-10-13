@@ -75,6 +75,20 @@ export function createPendingQueue(o: {
   let sendChain: Promise<void> = Promise.resolve();
 
   /**
+   * Codex re-review round 2 (P2 + controller finding): every edit that `fire()` has captured from
+   * `current` but whose real `o.send` has not yet actually been invoked, in the order captured. An
+   * entry removes itself the moment its send starts - via its own place in `sendChain` (the normal
+   * case) OR via a forced start at page teardown, whichever happens FIRST - so a send is invoked
+   * EXACTLY ONCE even when both paths race for the same entry (a duplicate POST would create a
+   * duplicate change). This list exists because teardown needs to reach edits that `fire()` has
+   * already taken off `current` but has not yet started - the earlier fix only forced the
+   * still-pending `current` edit, so a second queued-but-not-yet-sent edit (B's own timer fired
+   * while A was in flight, or a third edit arriving) was still silently lost at teardown.
+   */
+  type Unstarted = { start: () => Promise<void> };
+  let unstarted: Unstarted[] = [];
+
+  /**
    * Ruling (fix round 1): every queued send carries `keepalive: true`, whatever triggered it -
    * the 6-second timer, an immediate send-the-old-one-now on a second edit, or the leaving-the-
    * page flush. A send that is NOT marked keepalive can be cancelled by the browser mid-flight if
@@ -89,17 +103,34 @@ export function createPendingQueue(o: {
     timers.clear(handle);
     o.onState({ kind: "sending", description });
     let staleMessage: string | undefined;
-    // Codex re-review (P2): `opts.now` (used only by `flush()` on page teardown, see its own
-    // comment) skips waiting on `sendChain` and calls `o.send` immediately, synchronously within
-    // this call - a deferred send queued behind an earlier one would never get the chance to
-    // start once the document is destroyed, which is lost data, not merely out-of-order data.
-    // Every other trigger (the timer, a second edit) still queues behind `previousChain` as
-    // before. Either way, `sendChain` is advanced to wait for BOTH the previous chain and this
-    // send, so a hypothetical later send still waits for everything already under way, even one
-    // that skipped ahead of it.
+    // Codex re-review round 2: a ONE-SHOT starter for this edit's real send. Whichever path
+    // reaches it FIRST - its own place in `sendChain` below (the normal case), or a forced
+    // immediate start at page teardown (`opts.now`, or `flush({ teardown: true })` reaching back
+    // into `unstarted` for an edit `fire()` already took earlier) - actually calls `o.send`; the
+    // other becomes a no-op that reuses the same promise, so the POST never goes out twice.
+    let startedPromise: Promise<void> | null = null;
+    const entry: Unstarted = {
+      start: () => {
+        if (!startedPromise) {
+          unstarted = unstarted.filter((e) => e !== entry);
+          startedPromise = o.send(change, true);
+        }
+        return startedPromise;
+      },
+    };
+    unstarted.push(entry);
+    // `previousChain` is captured before `sendChain` is reassigned, so a later edit's own place
+    // in the chain still waits for EVERYTHING already under way, including an entry that skipped
+    // ahead via a forced start - `allSettled` covers both the previous chain and this send.
     const previousChain = sendChain;
-    const thisSend = opts?.now ? o.send(change, true) : previousChain.catch(() => {}).then(() => o.send(change, true));
+    const thisSend = previousChain.catch(() => {}).then(() => entry.start());
     sendChain = Promise.allSettled([previousChain, thisSend]).then(() => undefined);
+    // `opts.now` (used only by `flush()`, see its own comment) forces this edit's send to start
+    // AT ONCE, synchronously, right here - bypassing the wait on `previousChain` - instead of
+    // only queuing it behind the chain. A deferred send queued behind an earlier one would never
+    // get the chance to start once the document is destroyed, which is lost data, not merely
+    // out-of-order data.
+    if (opts?.now) entry.start();
     try {
       await thisSend;
       o.onState({ kind: "sent", description });
@@ -135,26 +166,42 @@ export function createPendingQueue(o: {
       return true;
     },
     /**
-     * Codex re-review (P2, fixes a real data-loss bug in the first fix round): `flush()` fires on
-     * `pagehide`, when there is no time left to wait. The first version of this fix made `flush()`
-     * go through the SAME `sendChain` as every other trigger, reasoning that `keepalive: true`
-     * would still get the send delivered - that reasoning was wrong. If an earlier send was still
-     * in flight, the deferred send was queued behind a `.then()` callback waiting its turn; once
-     * the document is destroyed, that callback never runs, so the edit never starts at all.
-     * `keepalive` only protects a request that has already been handed to the network layer - it
-     * cannot start one that is still waiting in a promise chain.
+     * Codex re-review round 2 (P2 + controller finding, fixes two real bugs in the prior round):
      *
-     * The fix: `flush()` calls `fire({ now: true })`, which starts this send's `fetch` AT ONCE,
-     * synchronously within the `pagehide` handler, even while an earlier edit's send is still in
-     * flight. Nothing queued at teardown is ever lost. The accepted trade, and ONLY at teardown:
-     * this send may reach the server out of order relative to one still in flight (the server
-     * timestamps on arrival), where normal use (the 6s timer, a second edit) stays fully ordered
-     * because the page is not disappearing out from under the chain. Plan 3 makes no server
-     * change to close this; a later server-side ordered submission (e.g. a client sequence number
-     * on each change, so the server can re-order instead of trusting arrival time) could.
+     * (1) The first fix made EVERY `flush()` call - including the ones `SkillsTab.tsx` makes from
+     * a plain effect cleanup (component unmount, client-side navigation, the per-computer
+     * remount) - start its send at once. None of those destroy the JS context, so that reopened
+     * the original out-of-order bug for completely ordinary in-app use: an assign could be forced
+     * ahead of an in-flight unassign just because the user navigated to another tab. Only the
+     * true page-teardown signal (`pagehide`) may skip the chain; every other `flush()` call now
+     * goes through `fire()` with no `now` option, fully ordered, exactly like the 6-second timer.
+     *
+     * (2) Even restricted to `pagehide`, forcing only `current` (the edit that had not even been
+     * captured by `fire()` yet) was not enough: an edit whose timer already fired, or that a
+     * THIRD edit's arrival already pulled off `current`, sits in `unstarted` - taken, but with its
+     * real `o.send` still waiting its turn on `sendChain`. That deferred `.then()` callback would
+     * never get to run once the document is destroyed, so it was lost exactly like `current` used
+     * to be. `flush({ teardown: true })` now drains the WHOLE `unstarted` list, in the order each
+     * edit was captured, starting every one of them synchronously and immediately, THEN does the
+     * same for `current` if anything is still waiting there. Each entry's `start()` is idempotent
+     * (see `fire()` above), so when its own place in `sendChain` later gets a turn anyway, it is a
+     * no-op - every edit is still sent EXACTLY ONCE.
+     *
+     * The accepted trade, and ONLY at the literal moment of teardown: an edit forced out this way
+     * may reach the server out of order relative to one already genuinely in flight before it (the
+     * server timestamps on arrival). Normal use - the 6s timer, a second edit, an unmount/
+     * navigation flush - stays fully ordered, because the page is not disappearing out from under
+     * the chain in any of those cases. Plan 3 makes no server change to close this residual; a
+     * later server-side ordered submission (e.g. a client sequence number on each change, so the
+     * server can re-order instead of trusting arrival time) could.
      */
-    flush() {
-      void fire({ now: true });
+    flush(opts?: { teardown?: boolean }) {
+      if (opts?.teardown) {
+        for (const entry of [...unstarted]) entry.start();
+        if (current) void fire({ now: true });
+      } else {
+        void fire();
+      }
     },
   };
 }
