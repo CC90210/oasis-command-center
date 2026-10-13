@@ -117,12 +117,16 @@ export function testLine(t: TestRecord | null): { text: string; tested: boolean 
  * FLOORED, never rounded (D5) - rounding up can turn a real miss (ok=99 of n=100) into a row of
  * solid green squares, which reads as a perfect score that never happened. Flooring a share that
  * is strictly less than 1 always lands below the scaled length, so a real miss always draws at
- * least one miss square without a separate clamp.
+ * least one miss square without a separate clamp. Below the cap, `ok` is used as-is rather than
+ * re-derived through a ratio: `(t.ok / t.n) * n` divides BEFORE it multiplies, and plain
+ * floating-point division can land a hair under the true integer (15/22 * 22 computes to
+ * 14.999999999999998, not 15), silently under-counting a pass that actually happened. Scaled
+ * down (t.n > max), the multiply happens before the divide for the same reason.
  */
 export function squares(t: TestRecord | null, max = 40): ("ok" | "miss")[] {
   if (!t || t.n === 0) return [];
   const n = Math.min(t.n, max);
-  const ok = Math.floor((t.ok / t.n) * n);
+  const ok = t.n <= max ? t.ok : Math.floor((t.ok * max) / t.n);
   return Array.from({ length: n }, (_, i) => (i < ok ? "ok" : "miss"));
 }
 
@@ -143,6 +147,12 @@ const timeOf = (d: Date) =>
  * back. Anything that is neither today's nor yesterday's Toronto date reads "N day(s) ago" and is
  * always stale; the hour cap still guards the rare case where the SAME calendar date is more than
  * 26 hours old (practically never, but never allowed to print a false "Checked in at <time>").
+ *
+ * `diff` is computed ONCE from the two calendar-date strings via `dayNum` (the same pattern
+ * `recordsAgeLine` uses), never from subtracting a literal 24 hours of wall-clock milliseconds.
+ * Toronto observes DST: the day of a spring-forward is 23 hours and the day of a fall-back is 25,
+ * so "now minus 24h" can land on the WRONG calendar date on either transition day, making a real
+ * "yesterday" check-in miss the comparison and fall through to a wrong "N days ago".
  */
 export function statusLine(lastIso: string | null, now: Date): { text: string; stale: boolean } {
   if (!lastIso) return { text: "Not checked in yet", stale: true };
@@ -150,10 +160,10 @@ export function statusLine(lastIso: string | null, now: Date): { text: string; s
   const hours = (now.getTime() - at.getTime()) / 3600e3;
   const todayDay = dayOf(now);
   const atDay = dayOf(at);
-  const yesterdayDay = dayOf(new Date(now.getTime() - 24 * 3600e3));
-  if (atDay === todayDay && hours <= 26) return { text: `Checked in at ${timeOf(at)}`, stale: false };
-  if (atDay === yesterdayDay && hours <= 26) return { text: `Checked in yesterday at ${timeOf(at)}`, stale: false };
-  const days = Math.max(1, Math.round(dayNum(todayDay) - dayNum(atDay)));
+  const diff = Math.round(dayNum(todayDay) - dayNum(atDay));
+  if (diff === 0 && hours <= 26) return { text: `Checked in at ${timeOf(at)}`, stale: false };
+  if (diff === 1 && hours <= 26) return { text: `Checked in yesterday at ${timeOf(at)}`, stale: false };
+  const days = Math.max(1, diff);
   return { text: `Last checked in ${days} day${days === 1 ? "" : "s"} ago`, stale: true };
 }
 

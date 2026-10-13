@@ -69,6 +69,17 @@ check("D5: squares floors the ok share so a near-perfect score still shows a mis
   assert.equal(sq.filter((s) => s === "miss").length, 1);
 });
 
+check("fix round 1 #1: squares never under-counts below the cap (integer multiply-first, no float division)", () => {
+  // Plain `(ok/n)*n` floating-point division lands a hair under the true integer here.
+  assert.equal(squares({ n: 22, ok: 15 }).filter((s) => s === "ok").length, 15);
+  for (let n = 1; n <= 40; n += 1) {
+    for (let ok = 0; ok <= n; ok += 1) {
+      const got = squares({ n, ok }).filter((s) => s === "ok").length;
+      assert.equal(got, ok, `n=${n} ok=${ok} got ${got}`);
+    }
+  }
+});
+
 check("the status line is in Toronto time and turns amber after 26 hours", () => {
   assert.deepEqual(statusLine(COMPUTER.last_checkin_at, new Date(NOW)), { text: "Checked in at 2:04 am", stale: false });
   assert.deepEqual(statusLine("2026-10-11T20:04:00.000Z", new Date(NOW)), { text: "Checked in yesterday at 4:04 pm", stale: false });
@@ -82,6 +93,23 @@ check("D4: a check-in two Toronto calendar days back reads days-ago even under 2
   // (03:30 UTC on 2026-10-12), 25 hours earlier but two calendar dates back, not "yesterday".
   const now2 = new Date("2026-10-13T04:30:00.000Z");
   assert.deepEqual(statusLine("2026-10-12T03:30:00.000Z", now2), { text: "Last checked in 2 days ago", stale: true });
+});
+
+check("fix round 1 #2: yesterday survives both DST transition days (spring-forward and fall-back)", () => {
+  // Spring forward: clocks skip 2:00-3:00 am on 2026-03-08, so that Toronto day is 23 hours.
+  // Check-in 2026-03-08 22:00 Toronto (EDT, after the jump) = 2026-03-09T02:00:00.000Z.
+  // Read at 2026-03-09 00:30 Toronto (EDT) = 2026-03-09T04:30:00.000Z.
+  assert.deepEqual(
+    statusLine("2026-03-09T02:00:00.000Z", new Date("2026-03-09T04:30:00.000Z")),
+    { text: "Checked in yesterday at 10:00 pm", stale: false },
+  );
+  // Fall back: clocks repeat 1:00-2:00 am on 2026-11-01, so that Toronto day is 25 hours.
+  // Check-in 2026-10-31 23:00 Toronto (EDT) = 2026-11-01T03:00:00.000Z.
+  // Read at 2026-11-01 23:30 Toronto (EST, after the fallback) = 2026-11-02T04:30:00.000Z.
+  assert.deepEqual(
+    statusLine("2026-11-01T03:00:00.000Z", new Date("2026-11-02T04:30:00.000Z")),
+    { text: "Checked in yesterday at 11:00 pm", stale: false },
+  );
 });
 
 check("training lists only this computer's changes, recent ones, newest first", () => {
