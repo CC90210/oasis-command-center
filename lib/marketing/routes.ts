@@ -82,6 +82,23 @@ export const ALL_MARKETING_PATHS: readonly string[] = [
 export const SITE_ORIGIN = "https://oasisai.work";
 
 /**
+ * The canonical path for a request the marketing layout is rendering, or null
+ * when the path is not exactly one of the public marketing pages.
+ *
+ * The layout feeds this the x-pathname header, which for the home page is
+ * "/home" (middleware rewrites an anonymous "/"), so the one mapping that
+ * matters is /home -> "/". Anything unrecognised returns null and the layout
+ * emits no canonical at all: a missing canonical costs nothing, a wrong one
+ * tells Google to index a different URL. Pinned by
+ * tests/marketing-canonical.test.ts.
+ */
+export function marketingCanonicalPath(pathname: string): string | null {
+  const path = (pathname.split(/[?#]/)[0] ?? "").replace(/\/+$/, "") || "/";
+  if (path === "/" || path === MARKETING_HOME_PATH) return pathname ? "/" : null;
+  return ALL_MARKETING_PATHS.includes(path) ? path : null;
+}
+
+/**
  * CC's booking link — the one CTA that leaves the site. MAY BE EMPTY.
  *
  * It used to fall back to a hardcoded calendar.app.google URL. That schedule

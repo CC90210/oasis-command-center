@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import localFont from "next/font/local";
 import { Ambient } from "@/components/marketing/Ambient";
 import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
-import { CONTACT_EMAIL, SITE_ORIGIN } from "@/lib/marketing/routes";
+import { SITE_ORIGIN, marketingCanonicalPath } from "@/lib/marketing/routes";
+import { ORGANIZATION_JSONLD, WEBSITE_JSONLD } from "@/lib/marketing/entity";
 import "./marketing.css";
 
 /**
@@ -84,14 +86,14 @@ const data = localFont({
   display: "swap",
 });
 
-export const metadata: Metadata = {
+const BASE_METADATA: Metadata = {
   metadataBase: new URL(SITE_ORIGIN),
   title: {
-    default: "OASIS AI — Operational agentic systems",
+    default: "OASIS AI · Operational agentic systems",
     template: "%s · OASIS AI",
   },
   description:
-    "Operational Agentic Systems Increasing Scalability. OASIS builds AI agents that hold a seat in your business — operations, marketing, finance, legal — and the systems they run on.",
+    "Operational Agentic Systems Increasing Scalability. OASIS builds AI agents that hold a seat in your business: operations, marketing, finance, legal. Plus the systems they run on.",
   openGraph: {
     type: "website",
     siteName: "OASIS AI",
@@ -99,6 +101,27 @@ export const metadata: Metadata = {
   },
   twitter: { card: "summary_large_image" },
 };
+
+/**
+ * Canonical + og:url for every marketing page, from ONE place.
+ *
+ * Before 2026-10-12 each page set its own canonical (the legal pages none at
+ * all) and no page had og:url. og:url cannot be set per page: a page-level
+ * openGraph object REPLACES this one and drops the share image (see
+ * home/page.tsx). So the layout reads the path middleware stamps in
+ * x-pathname, and marketingCanonicalPath maps it (/home -> "/"). An
+ * unrecognised path gets neither tag rather than a wrong one. Relative values
+ * resolve against metadataBase. Pinned by tests/marketing-canonical.test.ts.
+ */
+export async function generateMetadata(): Promise<Metadata> {
+  const path = marketingCanonicalPath((await headers()).get("x-pathname") ?? "");
+  if (!path) return BASE_METADATA;
+  return {
+    ...BASE_METADATA,
+    alternates: { canonical: path },
+    openGraph: { ...BASE_METADATA.openGraph, url: path },
+  };
+}
 
 /**
  * Marks the document as script-capable BEFORE first paint, so marketing.css
@@ -109,58 +132,6 @@ export const metadata: Metadata = {
  * document. That is the fallback, not a degraded mode.
  */
 const JS_FLAG = `document.documentElement.classList.add('js')`;
-
-/**
- * Entity identity for search and AI assistants.
- *
- * The OG/Twitter metadata above tells a crawler how to RENDER a link. This
- * tells it WHO the link is about, which is the part an assistant needs before
- * it will name us in an answer. "OASIS AI" is a generic-sounding string that
- * collides with several unrelated products, so the job here is to pin the
- * entity to a domain and an email that nothing else shares.
- *
- * WHAT IS DELIBERATELY ABSENT:
- *   - `offers` / any price. Engagements are scoped individually and no public
- *     figure exists. Structured data that states a price we do not publish is
- *     how an assistant ends up quoting a number to a prospect that we then have
- *     to walk back.
- *   - `sameAs`. It should list the real GitHub / LinkedIn / X profiles, and
- *     guessing URLs that 404 actively damages entity resolution. Add them here
- *     once the handles are confirmed.
- */
-const ORGANIZATION_JSONLD = {
-  "@context": "https://schema.org",
-  "@type": "Organization",
-  "@id": `${SITE_ORIGIN}/#organization`,
-  name: "OASIS AI",
-  alternateName: "Operational Agentic Systems Increasing Scalability",
-  url: SITE_ORIGIN,
-  email: CONTACT_EMAIL,
-  description:
-    "OASIS builds AI agents that hold a seat in a business — operations, marketing, finance, legal — and the systems they run on.",
-  knowsAbout: [
-    "AI agents",
-    "business process automation",
-    "agentic systems",
-    "operations automation",
-  ],
-  contactPoint: {
-    "@type": "ContactPoint",
-    contactType: "sales",
-    email: CONTACT_EMAIL,
-    url: `${SITE_ORIGIN}/contact`,
-  },
-};
-
-const WEBSITE_JSONLD = {
-  "@context": "https://schema.org",
-  "@type": "WebSite",
-  "@id": `${SITE_ORIGIN}/#website`,
-  url: SITE_ORIGIN,
-  name: "OASIS AI",
-  publisher: { "@id": `${SITE_ORIGIN}/#organization` },
-  inLanguage: "en-CA",
-};
 
 export default function MarketingLayout({
   children,
