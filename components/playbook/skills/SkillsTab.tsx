@@ -68,12 +68,23 @@ function MachinePills({ computers, current }: { computers: Computer[]; current: 
   );
 }
 
-export function SkillsTabView({ lib, computer, computers, changes, nowIso, initialView = "training", onRefresh }: SkillsTabProps & { onRefresh: () => void }) {
+export function SkillsTabView({ lib, computer, computers, changes, nowIso, initialView = "training", initialToast, onRefresh }: SkillsTabProps & {
+  onRefresh: () => void;
+  /**
+   * Fix round 2 (re-review, item c): seeds the toast state so the render harness
+   * (tests/skills-tab.render.ts) can assert on the WHOLE composed tree with a real toast present
+   * - the "exactly one live region" property is about the composed page, and a standalone
+   * `ToastBanner` scenario cannot see this component's own wrapper markup around it. Never set by
+   * `SkillsTab` (the component the App Router actually mounts) or by `SkillsTabProps`, so no real
+   * page can pass it; defaults to no toast, identical to the prior behaviour.
+   */
+  initialToast?: Toast;
+}) {
   const [view, setView] = useState<"training" | "library">(initialView);
   const [group, setGroup] = useState<string | null>(null);
   const [sheet, setSheet] = useState<string | null>(null);
   const [palette, setPalette] = useState(false);
-  const [toast, setToast] = useState<Toast>(null);
+  const [toast, setToast] = useState<Toast>(initialToast ?? null);
   const [rebuildBusy, setRebuildBusy] = useState(false);
   const refresh = useRef(onRefresh);
   refresh.current = onRefresh;

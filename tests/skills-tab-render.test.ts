@@ -305,6 +305,22 @@ sections.push(() => {
     assert.match(text(html.shell), /Search Ctrl K/);
   });
 });
+// --- Fix round 2 (re-review on Task 11, item c): the composed tree, not ToastBanner alone ---
+sections.push(() => {
+  const props = { lib: LIB, computer: COMPUTER, computers: [COMPUTER], changes: CHANGES, nowIso: NOW };
+  // The round-1 checks above render ToastBanner in isolation, which cannot see SkillsTabView's
+  // OWN wrapper markup around it - a regression that puts aria-live back on that wrapper
+  // (SkillsTab.tsx, the div around <ToastBanner .../>) would pass every one of them. initialToast
+  // is a render-harness-only seed (never set by SkillsTab or SkillsTabProps) so this scenario has
+  // the toast's role AND the wrapper in the same output, the one render that can actually catch it.
+  const html = render([
+    { id: "shellWithToast", component: "SkillsTabView", props: { ...props, initialToast: { key: "pending:x", tone: "ok", text: "Queued: Put graft in debug.", undo: true } } },
+  ]);
+  check("item (c) re-check: the whole composed page is exactly one live region - no aria-live anywhere, ToastBanner's own role is present", () => {
+    assert.match(html.shellWithToast, /role="status"/, "the toast's own role must still be there");
+    assert.doesNotMatch(html.shellWithToast, /aria-live=/, "no wrapper or ancestor may add a SECOND live-region mechanism around it");
+  });
+});
 // (later tasks push more sections here)
 
 console.log("skills-tab-render:");
