@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { sha256 } from "@/lib/api-helpers";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import type { Op, Report, SkillRow } from "./contract";
+import type { KindScore, LabelRow, Op, Report, SkillRow, TestRecord } from "./contract";
 
 export function skillsDb(): Client | null {
   return tursoConfigured() ? getTursoClient() : null;
@@ -33,7 +33,9 @@ export async function pollState(db: Client, computerId: string): Promise<{ rebui
   return { rebuild_requested: Boolean(c.rows[0]?.rebuild_requested_at), pending: num(p.rows[0]?.n) };
 }
 
-export async function storeSkills(db: Client, computerId: string, push: { skills_sha: string; skills: SkillRow[] }): Promise<number> {
+export async function storeSkills(
+  db: Client, computerId: string, push: { skills_sha: string; skills: SkillRow[]; kinds?: KindScore[] | null },
+): Promise<number> {
   const t = nowIso();
   const stmts: InStatement[] = [
     { sql: "DELETE FROM skills_skill WHERE computer_id = ?", args: [computerId] },
@@ -44,6 +46,17 @@ export async function storeSkills(db: Client, computerId: string, push: { skills
     })),
     { sql: "UPDATE skills_computer SET skills_sha = ? WHERE id = ?", args: [push.skills_sha, computerId] },
   ];
+  // Plan 3: records are replaced only when the push carries them; otherwise the last one stays.
+  if (push.kinds) {
+    stmts.push({ sql: "DELETE FROM skills_skill_test WHERE computer_id = ?", args: [computerId] });
+    stmts.push({ sql: "DELETE FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
+    for (const s of push.skills) {
+      if (s.tests) stmts.push({ sql: "INSERT INTO skills_skill_test (computer_id, name, n, ok, updated_at) VALUES (?, ?, ?, ?, ?)", args: [computerId, s.name, s.tests.n, s.tests.ok, t] });
+    }
+    for (const k of push.kinds) {
+      stmts.push({ sql: "INSERT INTO skills_kind_score (computer_id, label_id, n, ok, updated_at) VALUES (?, ?, ?, ?, ?)", args: [computerId, k.id, k.n, k.ok, t] });
+    }
+  }
   await db.batch(stmts, "write");
   return push.skills.length;
 }
@@ -215,7 +228,7 @@ export async function overview(db: Client, owner: string) {
   });
   const ch = await db.execute({
     sql: `SELECT s.change_id, s.computer_id, s.status, s.reason, s.worse, s.better, s.totals_json, s.updated_at,
-                 c.description, c.author, c.scope, c.created_at
+                 c.description, c.author, c.scope, c.created_at, c.ops_json
           FROM skills_change_status s
           JOIN skills_change c ON c.id = s.change_id
           JOIN skills_computer k ON k.id = s.computer_id
@@ -231,9 +244,53 @@ export async function overview(db: Client, owner: string) {
     })),
     changes: ch.rows.map((r) => ({
       change_id: String(r.change_id), computer_id: String(r.computer_id), status: String(r.status), reason: String(r.reason),
-      worse: num(r.worse), better: num(r.better), totals: JSON.parse(String(r.totals_json)) as Record<string, unknown>,
+      worse: num(r.worse), better: num(r.better), totals: JSON.parse(String(r.totals_json)) as Record<string, { n: number; before: number; after: number }>,
       updated_at: String(r.updated_at), description: String(r.description), author: String(r.author), scope: String(r.scope),
-      created_at: String(r.created_at),
+      created_at: String(r.created_at), ops: JSON.parse(String(r.ops_json)) as Op[],
     })),
+  };
+}
+
+export type LibrarySkill = {
+  name: string; description: string; kind: "installed" | "library"; quarantined: boolean;
+  capabilities: string[]; example_prompts: { prompt: string; adds: string }[];
+  /** null = this computer has never sent a record for it: "not tested, no evidence". */
+  tests: TestRecord | null;
+};
+export type Library = {
+  skills: LibrarySkill[];
+  labels: LabelRow[];
+  assignments: { skill: string; label: string; rank: "use-first" | "also-helps" }[];
+  kinds: Record<string, TestRecord>;
+};
+
+/** One computer's skills, labels and scores, or null when the caller does not own that computer. */
+export async function library(db: Client, owner: string, computerId: string): Promise<Library | null> {
+  const own = await db.execute({ sql: "SELECT 1 FROM skills_computer WHERE id = ? AND owner_user_id = ?", args: [computerId, owner] });
+  if (!own.rows.length) return null;
+  const sk = await db.execute({
+    sql: `SELECT s.name, s.description, s.kind, s.quarantined, s.capabilities_json, s.example_prompts_json, t.n, t.ok
+          FROM skills_skill s LEFT JOIN skills_skill_test t ON t.computer_id = s.computer_id AND t.name = s.name
+          WHERE s.computer_id = ? ORDER BY s.name`,
+    args: [computerId],
+  });
+  // rowid order = the order the PC's snapshot listed them (labels.yaml order), not alphabetical.
+  const lb = await db.execute({ sql: "SELECT id, level, parent_id, name, meaning, examples_json FROM skills_label WHERE computer_id = ? ORDER BY rowid", args: [computerId] });
+  const as = await db.execute({ sql: "SELECT skill, label_id, rank FROM skills_skill_label WHERE computer_id = ? ORDER BY label_id, skill", args: [computerId] });
+  const ks = await db.execute({ sql: "SELECT label_id, n, ok FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
+  return {
+    skills: sk.rows.map((r) => ({
+      name: String(r.name), description: String(r.description), kind: String(r.kind) === "library" ? "library" : "installed",
+      quarantined: num(r.quarantined) === 1,
+      capabilities: JSON.parse(String(r.capabilities_json)) as string[],
+      example_prompts: JSON.parse(String(r.example_prompts_json)) as { prompt: string; adds: string }[],
+      tests: r.n === null || r.n === undefined ? null : { n: num(r.n), ok: num(r.ok) },
+    })),
+    labels: lb.rows.map((r) => ({
+      id: String(r.id), level: String(r.level) === "sub" ? "sub" : "broad", parent: str(r.parent_id), name: String(r.name),
+      meaning: String(r.meaning ?? ""), examples: JSON.parse(String(r.examples_json ?? "[]")) as string[],
+    })),
+    assignments: as.rows.map((r) => ({ skill: String(r.skill), label: String(r.label_id), rank: String(r.rank) === "use-first" ? "use-first" : "also-helps" })),
+    kinds: Object.fromEntries(ks.rows.map((r) => [String(r.label_id), { n: num(r.n), ok: num(r.ok) }])),
   };
 }

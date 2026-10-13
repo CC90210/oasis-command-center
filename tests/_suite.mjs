@@ -519,6 +519,7 @@ const TESTS = [
   "tests/skills-training-store.test.ts",
   "tests/skills-training-checkin.test.ts",
   "tests/skills-training-admin.test.ts",
+  "tests/skills-training-library.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
