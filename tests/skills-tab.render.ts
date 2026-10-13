@@ -17,6 +17,7 @@ const COMPONENTS: Record<string, Loader> = {
   HeldChange: async () => (await import("../components/playbook/skills/HeldChange")).HeldChange,
   PaletteResults: async () => (await import("../components/playbook/skills/CommandPalette")).PaletteResults,
   CommandPalette: async () => (await import("../components/playbook/skills/CommandPalette")).CommandPalette,
+  SkillsTabView: async () => (await import("../components/playbook/skills/SkillsTab")).SkillsTabView,
   // (later tasks add components here)
 };
 const CALLBACKS = ["onGroup", "onOpenSkill", "onAction", "onClose", "onPick", "onDone", "onRebuild", "onRefresh", "onHover"];

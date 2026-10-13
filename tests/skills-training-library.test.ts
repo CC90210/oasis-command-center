@@ -16,7 +16,7 @@ import { POST as createComputerRoute } from "../app/api/skills/computers/route";
 import { POST as createChangeRoute } from "../app/api/skills/changes/route";
 import { POST as reviseRoute } from "../app/api/skills/changes/[id]/revise/route";
 import { parseReport, parseSkillsPush } from "../lib/skills/contract";
-import { createChange, createComputer, library, overview, recordReport, storeSkills } from "../lib/skills/store";
+import { createChange, createComputer, library, overview, recordReport, skillsPageData, storeSkills } from "../lib/skills/store";
 
 const skill = (name: string, tests?: { n: number; ok: number }) => ({
   name, description: `${name} does a thing`, kind: "installed", quarantined: false,
@@ -173,6 +173,15 @@ async function main() {
     assert.equal(r.status, 409);
     const after = await db.execute("SELECT COUNT(*) AS n FROM skills_change");
     assert.equal(Number(after.rows[0].n), Number(before.rows[0].n));
+  });
+
+  await check("the page never shows another owner's computer", async () => {
+    const asksForA = await skillsPageData(db, "owner-b", a.id);
+    assert.equal(asksForA.computer?.id, b.id);
+    assert.ok(asksForA.computers.every((c) => c.id !== a.id));
+    const nothing = await skillsPageData(db, "owner-nobody", a.id);
+    assert.equal(nothing.computer, null);
+    assert.equal(nothing.lib, null);
   });
 
   finish("skills-training-library");

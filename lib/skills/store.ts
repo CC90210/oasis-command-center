@@ -12,7 +12,7 @@ import type { Client, InStatement } from "@libsql/client";
 import { sha256 } from "@/lib/api-helpers";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import type { KindScore, Op, Report, SkillRow } from "./contract";
-import type { Library } from "./view";
+import type { ChangeRow, Computer, Library } from "./view";
 
 export function skillsDb(): Client | null {
   return tursoConfigured() ? getTursoClient() : null;
@@ -315,4 +315,17 @@ export async function revise(
   if (!own.rows.length) return { ok: false, error: "not_found" };
   const ex = await db.execute({ sql: "SELECT 1 FROM skills_change_status WHERE change_id = ? AND computer_id = ?", args: [changeId, computerId] });
   return { ok: false, error: ex.rows.length ? "not_held" : "not_found" };
+}
+
+/**
+ * The Skills page's data. Only the CALLER's computers are candidates: an id from the address bar
+ * that is not theirs falls back to their primary (or first) computer, never to someone else's.
+ */
+export async function skillsPageData(db: Client, owner: string, asked?: string): Promise<{
+  computer: Computer | null; computers: Computer[]; changes: ChangeRow[]; lib: Library | null;
+}> {
+  const ov = await overview(db, owner);
+  const computer = ov.computers.find((c) => c.id === asked) ?? ov.computers.find((c) => c.primary) ?? ov.computers[0] ?? null;
+  if (!computer) return { computer: null, computers: [], changes: [], lib: null };
+  return { computer, computers: ov.computers, changes: ov.changes, lib: await library(db, owner, computer.id) };
 }

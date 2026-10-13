@@ -238,6 +238,36 @@ sections.push(() => {
     assert.match(classes, /min-w-0/, "the detail span must allow shrinking below its content width");
   });
 });
+// --- Task 11: the shell ---
+sections.push(() => {
+  const props = { lib: LIB, computer: COMPUTER, computers: [COMPUTER], changes: CHANGES, nowIso: NOW };
+  const html = render([
+    { id: "shell", component: "SkillsTabView", props },
+    { id: "lib", component: "SkillsTabView", props: { ...props, initialView: "library" } },
+    { id: "stale", component: "SkillsTabView", props: { ...props, computer: { ...COMPUTER, last_checkin_at: "2026-10-09T06:04:00.000Z" } } },
+  ]);
+  check("Training opens first, with the machine and the check-in time", () => {
+    assert.match(html.shell, /role="tab"[^>]*aria-selected="true"[^>]*>[^<]*Training|aria-selected="true"[^>]*role="tab"[^>]*>[^<]*Training/);
+    const t = text(html.shell);
+    assert.match(t, /Adon's PC/);
+    assert.match(t, /Checked in at 2:04 am/);
+    assert.match(t, /Misses to fix/);
+  });
+  check("the Training tab carries the needs-you count (held + did not go live)", () => {
+    assert.match(text(html.shell), /Training 2/);
+  });
+  check("a stale check-in is called out", () => {
+    assert.match(text(html.stale), /Last checked in 3 days ago/);
+    assert.match(html.stale, /text-status-warm[^>]*>Last checked in/);
+  });
+  check("the search button names its shortcut", () => {
+    assert.match(html.shell, /aria-label="Search skills and kinds of work"/);
+    assert.match(html.shell, /aria-keyshortcuts="Control\+K Meta\+K"/);
+  });
+  check("Library opens to the kinds of work", () => {
+    assert.match(text(html.lib), /Kinds of work/);
+  });
+});
 // (later tasks push more sections here)
 
 console.log("skills-tab-render:");

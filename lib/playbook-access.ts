@@ -62,7 +62,7 @@ export async function requirePlaybookReader(): Promise<void> {
  * make true for anyone else (lib/os/agent-names.ts). The index and the drills
  * link them for the founders only.
  */
-export const FOUNDER_PLAYBOOK_PATHS: readonly string[] = ["/playbook/prompts", "/playbook/client-deploy"];
+export const FOUNDER_PLAYBOOK_PATHS: readonly string[] = ["/playbook/prompts", "/playbook/client-deploy", "/playbook/skills"];
 
 /** True for a link to one of FOUNDER_PLAYBOOK_PATHS (with or without a query, a fragment or a sub-path). */
 export function isFounderPlaybookHref(href: string | null | undefined): boolean {

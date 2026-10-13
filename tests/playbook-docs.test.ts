@@ -96,6 +96,16 @@ stub("next/image", {
   __esModule: true,
   default: ({ src, alt }: { src: string; alt?: string }) => ReactNS.createElement("img", { src, alt }),
 });
+// /playbook/skills (components/playbook/skills/LibraryView.tsx) is the only file in the repo that
+// imports framer-motion. framer-motion calls React.createContext at MODULE SCOPE (twice, in its
+// own index.js), which crashes the instant `require()` below reaches it, before any component
+// function (and so the real `motion`/`useReducedMotion`) is ever called - loading every /playbook
+// page module here only needs the import graph to resolve, not the real animation behaviour.
+stub("framer-motion", {
+  motion: new Proxy({}, { get: () => (p: Record<string, unknown>) => ReactNS.createElement("div", p, (p as { children?: unknown }).children) }),
+  useReducedMotion: () => true,
+  AnimatePresence: ({ children }: { children?: unknown }) => children,
+});
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
@@ -516,6 +526,11 @@ async function main() {
     INSERT INTO fin_settings (entity_id, legal_name, gst_qst_registered, gst_number, qst_number, updated_at) VALUES ('stray-biz', 'Stray', 1, 'X', 'Y', '2026-01-01T00:00:00.000Z');
   `);
   for (const stmt of splitStatements(readFileSync(join(ROOT, "database", "turso", "182_revenue_goals.turso.sql"), "utf8"))) await db.execute(stmt);
+  // /playbook/skills (lib/skills/store.ts skillsDb/skillsPageData) reads the real skills_* tables.
+  // Without these applied here, rendering it below for the founder throws "no such table:
+  // skills_computer" instead of answering with the empty state (no computer registered yet).
+  for (const stmt of splitStatements(readFileSync(join(ROOT, "database", "turso", "bravo__202_skills_training.sql"), "utf8"))) await db.execute(stmt);
+  for (const stmt of splitStatements(readFileSync(join(ROOT, "database", "turso", "bravo__222_skills_training_records.sql"), "utf8"))) await db.execute(stmt);
 
   const catalogMod = await import("../lib/playbook/catalog");
   const { CATALOG } = catalogMod;
@@ -544,7 +559,10 @@ async function main() {
           continue;
         }
         const slug = /business[\\/]\[slug\]/.test(f) ? "privacy-policy" : "10-oasis-loop";
-        const out = await page(f.includes("[slug]") ? params(slug) : {});
+        // /playbook/skills reads `computer` off `searchParams` (a Promise, like every Next 15
+        // page prop here); every other page ignores the extra prop, so passing it unconditionally
+        // is safe for all of them.
+        const out = await page(f.includes("[slug]") ? params(slug) : { searchParams: Promise.resolve({}) });
         assert.ok(isValidElement(out), `${name} did not render`);
       }
     });

@@ -56,6 +56,12 @@ const SECTIONS: PlaybookSection[] = [
       "Reusable prompts for daily operations, reviews, system work, and client deployment. Hand one to the department that answers for it, or copy it unchanged for your IDE. Universal agent tools appear once instead of repeating across audiences.",
   },
   {
+    href: "/playbook/skills",
+    title: "Skills",
+    subtitle: "Every skill on your computers, what it is for, and how often routing finds it",
+    body: "Train the router: review held label changes, put skills in the right kinds of work, and see which kinds of work route right.",
+  },
+  {
     href: "/playbook/security",
     title: "Security Model",
     subtitle: "Application-level tenant isolation - AES-256-GCM at rest - SHA-256 bridge tokens",
