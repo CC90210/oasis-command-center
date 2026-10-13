@@ -82,19 +82,24 @@ export function createPendingQueue(o: {
    * toast - the same hazard flush exists to guard against, just reachable from a different
    * trigger. There is no call site left where `false` is actually safe.
    */
-  const fire = async () => {
+  const fire = async (opts?: { now?: boolean }) => {
     if (!current) return;
     const { description, change, handle } = current;
     current = null;
     timers.clear(handle);
     o.onState({ kind: "sending", description });
     let staleMessage: string | undefined;
-    // Queue the real network call behind every earlier one on the chain (see `sendChain` above),
-    // then advance the chain past THIS send once it settles (success or failure) so the next
-    // queued fire can take its turn.
-    const waitForEarlierSends = sendChain.catch(() => {});
-    const thisSend = waitForEarlierSends.then(() => o.send(change, true));
-    sendChain = thisSend.then(() => undefined, () => undefined);
+    // Codex re-review (P2): `opts.now` (used only by `flush()` on page teardown, see its own
+    // comment) skips waiting on `sendChain` and calls `o.send` immediately, synchronously within
+    // this call - a deferred send queued behind an earlier one would never get the chance to
+    // start once the document is destroyed, which is lost data, not merely out-of-order data.
+    // Every other trigger (the timer, a second edit) still queues behind `previousChain` as
+    // before. Either way, `sendChain` is advanced to wait for BOTH the previous chain and this
+    // send, so a hypothetical later send still waits for everything already under way, even one
+    // that skipped ahead of it.
+    const previousChain = sendChain;
+    const thisSend = opts?.now ? o.send(change, true) : previousChain.catch(() => {}).then(() => o.send(change, true));
+    sendChain = Promise.allSettled([previousChain, thisSend]).then(() => undefined);
     try {
       await thisSend;
       o.onState({ kind: "sent", description });
@@ -130,19 +135,26 @@ export function createPendingQueue(o: {
       return true;
     },
     /**
-     * Accepted residual (plan 3, no server change): `flush()` fires on `pagehide`, when there is
-     * no time left to wait. It still goes through the SAME `sendChain` as every other trigger, so
-     * in the ordinary case (nothing else in flight) it is sent immediately and in order. But if an
-     * earlier send is still in flight at the exact moment the page is actually torn down, the JS
-     * runtime can be destroyed before the chained `.then(() => o.send(...))` callback that is
-     * waiting its turn ever gets to run - there is no way to literally wait for another network
-     * call to finish once the page is gone. `keepalive: true` on every send (above) is what keeps
-     * this edit from being lost outright in that moment; it may still reach the server close to
-     * the earlier one rather than strictly after it. Normal use (second edits, the 6s timer) stays
-     * fully ordered because the page is not disappearing out from under the chain.
+     * Codex re-review (P2, fixes a real data-loss bug in the first fix round): `flush()` fires on
+     * `pagehide`, when there is no time left to wait. The first version of this fix made `flush()`
+     * go through the SAME `sendChain` as every other trigger, reasoning that `keepalive: true`
+     * would still get the send delivered - that reasoning was wrong. If an earlier send was still
+     * in flight, the deferred send was queued behind a `.then()` callback waiting its turn; once
+     * the document is destroyed, that callback never runs, so the edit never starts at all.
+     * `keepalive` only protects a request that has already been handed to the network layer - it
+     * cannot start one that is still waiting in a promise chain.
+     *
+     * The fix: `flush()` calls `fire({ now: true })`, which starts this send's `fetch` AT ONCE,
+     * synchronously within the `pagehide` handler, even while an earlier edit's send is still in
+     * flight. Nothing queued at teardown is ever lost. The accepted trade, and ONLY at teardown:
+     * this send may reach the server out of order relative to one still in flight (the server
+     * timestamps on arrival), where normal use (the 6s timer, a second edit) stays fully ordered
+     * because the page is not disappearing out from under the chain. Plan 3 makes no server
+     * change to close this; a later server-side ordered submission (e.g. a client sequence number
+     * on each change, so the server can re-order instead of trusting arrival time) could.
      */
     flush() {
-      void fire();
+      void fire({ now: true });
     },
   };
 }
