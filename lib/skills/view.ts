@@ -165,8 +165,11 @@ export function scoreText(s: TestRecord | null): string {
 const TZ = "America/Toronto";
 const dayOf = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 const dayNum = (s: string) => Date.parse(`${s}T00:00:00Z`) / 86_400_000;
+// Node's ICU puts U+202F (narrow no-break space) before AM/PM, not a plain space; the Worker
+// bundle check (tests/worker-source-one-byte.test.ts) refuses any regex literal with a
+// character above U+00FF, so it is written as an escape here rather than typed literally.
 const timeOf = (d: Date) =>
-  new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit", hour12: true }).format(d).replace(/ /g, " ").toLowerCase();
+  new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit", hour12: true }).format(d).replace(/\u202f/g, " ").toLowerCase();
 
 /**
  * D4: "today" and "yesterday" are Toronto CALENDAR dates, not a raw hour count. A pure hour
