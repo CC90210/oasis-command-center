@@ -61,6 +61,20 @@ export function createPendingQueue(o: {
   let current: Pending | null = null;
 
   /**
+   * Codex fix round (P2, wrong data): every actual `o.send` call is chained through this promise,
+   * so a later edit's send cannot begin until every earlier edit's send has SETTLED (resolved or
+   * rejected) - never while one is still in flight. Before this chain existed, a second edit's
+   * timer, a third edit arriving, or `flush()` could each call `fire()` and reach `o.send`
+   * immediately, concurrently with an already-in-flight send; the server timestamps a change on
+   * arrival and `pendingChanges()` applies that arrival order, so whichever request happened to
+   * land on the wire last would win even though the user queued it first - an assign-then-remove
+   * could be stored as remove-then-assign. `.catch(() => {})` on the wait means an earlier send's
+   * FAILURE never blocks a later one from running (requirement (c): B still sends after A fails);
+   * each fire's own try/catch below still reports that fire's own success or failure.
+   */
+  let sendChain: Promise<void> = Promise.resolve();
+
+  /**
    * Ruling (fix round 1): every queued send carries `keepalive: true`, whatever triggered it -
    * the 6-second timer, an immediate send-the-old-one-now on a second edit, or the leaving-the-
    * page flush. A send that is NOT marked keepalive can be cancelled by the browser mid-flight if
@@ -75,8 +89,14 @@ export function createPendingQueue(o: {
     timers.clear(handle);
     o.onState({ kind: "sending", description });
     let staleMessage: string | undefined;
+    // Queue the real network call behind every earlier one on the chain (see `sendChain` above),
+    // then advance the chain past THIS send once it settles (success or failure) so the next
+    // queued fire can take its turn.
+    const waitForEarlierSends = sendChain.catch(() => {});
+    const thisSend = waitForEarlierSends.then(() => o.send(change, true));
+    sendChain = thisSend.then(() => undefined, () => undefined);
     try {
-      await o.send(change, true);
+      await thisSend;
       o.onState({ kind: "sent", description });
     } catch (e) {
       staleMessage = (e as Error).message;
@@ -109,6 +129,18 @@ export function createPendingQueue(o: {
       o.onState({ kind: "undone", description });
       return true;
     },
+    /**
+     * Accepted residual (plan 3, no server change): `flush()` fires on `pagehide`, when there is
+     * no time left to wait. It still goes through the SAME `sendChain` as every other trigger, so
+     * in the ordinary case (nothing else in flight) it is sent immediately and in order. But if an
+     * earlier send is still in flight at the exact moment the page is actually torn down, the JS
+     * runtime can be destroyed before the chained `.then(() => o.send(...))` callback that is
+     * waiting its turn ever gets to run - there is no way to literally wait for another network
+     * call to finish once the page is gone. `keepalive: true` on every send (above) is what keeps
+     * this edit from being lost outright in that moment; it may still reach the server close to
+     * the earlier one rather than strictly after it. Normal use (second edits, the 6s timer) stays
+     * fully ordered because the page is not disappearing out from under the chain.
+     */
     flush() {
       void fire();
     },

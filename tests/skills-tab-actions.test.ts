@@ -7,7 +7,19 @@
  * Ruling C4 and the in-flight paths, with a controllable fake send that settles on demand: (a) A
  * in flight, add B, A resolves - re-announces pending B; (b) same but A rejects - pending B
  * carries A's error text; (c) undo while A is in flight returns false and A still settles;
- * (d) flush while A is in flight sends only the current edit (B), once, with keepalive.
+ * (d) flush while A is in flight queues B's send BEHIND A's (Codex fix round: see below) - it no
+ * longer starts a concurrent second send the instant flush is called.
+ * Codex fix round (P2, wrong data): every real `o.send` call is now serialized through one promise
+ * chain in actions.ts, so a later edit cannot reach the network until every earlier edit's send has
+ * settled. Before this fix, A's timer, a second/third edit, or flush() could each call `fire()` and
+ * reach `o.send` while an earlier send was still in flight - the server timestamps on arrival, so
+ * an assign-then-remove could persist as remove-then-assign. The controllable harness below never
+ * auto-settles a send, so these tests can prove ordering precisely rather than hope for it from
+ * timing. NOTE: because the real send is now reached via a `.then()` on the chain rather than
+ * called synchronously inside `fire()`, tests that inspect `controls[i]` must `await tick()` once
+ * after the triggering call before that control exists - that extra tick is the ONLY change made to
+ * the pre-existing (a)/(b)/(c) tests; (d) is rewritten because the behaviour it pinned (an immediate
+ * concurrent second send) was the bug.
  * Run: node --import tsx tests/skills-tab-actions.test.ts
  */
 import assert from "node:assert/strict";
@@ -40,7 +52,10 @@ const ch = (d: string) => ({ description: d, scope: "shared", ops: [{ op: "unass
  * A harness whose `send` does not settle on its own: each call returns a promise the test
  * resolves or rejects on demand, via `controls[i]`, so "A is still in flight when B is queued"
  * can be driven precisely rather than hoped for from timing. Used for Ruling C4 / in-flight pins
- * (fix round 1): a send only "finishes" when the test says so.
+ * (fix round 1) and for the Codex fix round's ordering pins: a new `controls` entry only appears
+ * once `o.send` is ACTUALLY invoked, which (after the Codex fix) only happens once every earlier
+ * send on the chain has settled - so `controls.length` at any point is a precise count of how many
+ * sends have actually reached the network so far, independent of which have resolved.
  */
 function controllableHarness() {
   const timers = new Map<number, () => void>();
@@ -112,6 +127,9 @@ async function main() {
     h.fire(); // A's send is now in flight (not yet settled)
     h.q.add("B", ch("B"));
     assert.equal(h.states.at(-1)?.description, "B"); // B's own pending, announced synchronously
+    // Codex fix round: A's real send is reached via the chain's `.then()`, not called synchronously
+    // inside `fire()` any more - give it one tick to actually land on `controls` before resolving.
+    await tick();
     h.controls[0].resolve(); // A settles now
     await tick();
     assert.deepEqual(h.sent.map((s) => s.description), ["A"]);
@@ -123,6 +141,7 @@ async function main() {
     h.q.add("A", ch("A"));
     h.fire();
     h.q.add("B", ch("B"));
+    await tick(); // Codex fix round: let A's deferred send actually reach `controls` first.
     h.controls[0].reject(new Error("the server answered 500"));
     await tick();
     const last = h.states.at(-1);
@@ -133,23 +152,94 @@ async function main() {
   await check("(c) undo while A is in flight returns false and A still settles", async () => {
     const h = controllableHarness();
     h.q.add("A", ch("A"));
-    h.fire(); // current is now null: A's send is in flight, nothing left to undo
+    h.fire(); // current is now null: A's send is captured and queued on the chain
     assert.equal(h.q.undo(), false);
+    await tick(); // Codex fix round: let A's deferred send actually reach `controls` first.
     h.controls[0].resolve();
     await tick();
     assert.deepEqual(h.sent, [{ description: "A", keepalive: true }]);
     assert.equal(h.states.at(-1)?.kind, "sent");
   });
-  await check("(d) flush while A is in flight sends only B, once, with keepalive", async () => {
+  await check(
+    "(d) flush while A is in flight queues B's send BEHIND A's, not a concurrent second send",
+    async () => {
+      // Codex fix round: this test previously pinned flush() starting B's send immediately,
+      // concurrently with A's still-in-flight send - that was the P2 bug (actions.ts:99-102). It
+      // now pins the fixed behaviour: B's send is only reached once A's has settled.
+      const h = controllableHarness();
+      h.q.add("A", ch("A"));
+      h.fire(); // A in flight, unresolved
+      h.q.add("B", ch("B"));
+      h.q.flush(); // flushes the CURRENT edit (B); its real send is queued behind A's on the chain
+      await tick();
+      assert.equal(h.controls.length, 1, "B must not reach the network while A is still in flight");
+      h.controls[0].resolve(); // A settles
+      await tick();
+      assert.equal(h.controls.length, 2, "B reaches the network only once A has settled");
+      h.controls[1].resolve(); // B settles
+      await tick();
+      assert.deepEqual(h.sent.map((s) => s.description), ["A", "B"]);
+      assert.equal(h.controls.length, 2, "flush must not start a second send for A");
+    },
+  );
+
+  // --- Codex fix round (P2): every send is serialized through one promise chain ---
+  await check(
+    "serialized sends (a): A in flight, B added and its timer fires: B's send waits for A, order A then B",
+    async () => {
+      const h = controllableHarness();
+      h.q.add("A", ch("A"));
+      h.fire(); // A's timer fires -> A's send is reached, in flight
+      h.q.add("B", ch("B")); // B queued behind A, with its own timer
+      h.fire(); // B's timer fires too -> B is captured, but must wait its turn on the chain
+      await tick();
+      assert.equal(h.controls.length, 1, "B's send must not be invoked while A is still in flight");
+      h.controls[0].resolve(); // A settles
+      await tick();
+      assert.equal(h.controls.length, 2, "B's send is invoked only once A has settled");
+      h.controls[1].resolve(); // B settles
+      await tick();
+      assert.deepEqual(h.sent.map((s) => s.description), ["A", "B"]);
+    },
+  );
+  await check(
+    "serialized sends (b): A in flight, then B added, then C added: the order is A, B, C",
+    async () => {
+      const h = controllableHarness();
+      h.q.add("A", ch("A"));
+      h.fire(); // A in flight
+      h.q.add("B", ch("B")); // current was null (A already taken) - B just starts its own timer
+      h.q.add("C", ch("C")); // add() sees current=B, fires B right away (still queued behind A); C is current
+      h.fire(); // C's own timer fires -> C is captured too (queued behind B)
+      await tick();
+      assert.equal(h.controls.length, 1, "only A may have reached the network while it is still in flight");
+      h.controls[0].resolve(); // A settles
+      await tick();
+      assert.equal(h.controls.length, 2, "B reaches the network only once A has settled");
+      h.controls[1].resolve(); // B settles
+      await tick();
+      assert.equal(h.controls.length, 3, "C reaches the network only once B has settled too");
+      h.controls[2].resolve(); // C settles
+      await tick();
+      assert.deepEqual(h.sent.map((s) => s.description), ["A", "B", "C"]);
+    },
+  );
+  await check("serialized sends (c): A fails, B still sends after it, and the error state is reported", async () => {
     const h = controllableHarness();
     h.q.add("A", ch("A"));
-    h.fire(); // A in flight, unresolved
+    h.fire(); // A in flight
     h.q.add("B", ch("B"));
-    h.q.flush(); // flushes the CURRENT edit (B); A's own in-flight send is untouched
+    h.fire(); // B's timer fires too -> queued behind A's chain
+    await tick();
+    h.controls[0].reject(new Error("the server answered 500")); // A fails
+    await tick();
+    const errState = h.states.find((s) => s.kind === "error");
+    assert.ok(errState, "A's failure must be reported as an error state");
+    assert.match(String(errState?.message), /500/);
+    assert.equal(h.controls.length, 2, "B's send must still be invoked after A's failure");
     h.controls[1].resolve(); // B settles
     await tick();
-    assert.deepEqual(h.sent, [{ description: "B", keepalive: true }]);
-    assert.equal(h.controls.length, 2, "flush must not start a second send for A");
+    assert.deepEqual(h.sent.map((s) => s.description), ["B"]); // A rejected, so it never pushed into `sent`
   });
 
   console.log(`skills-tab-actions: ${passed} passed, ${failed} failed`);
