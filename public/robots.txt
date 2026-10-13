@@ -3,7 +3,7 @@
 # THE APP IS PRIVATE; THE MARKETING SITE IS NOT.
 # Almost every path here is an authenticated operator surface holding merchant
 # PII. So the posture is default-deny: `Disallow: /` first, then allow back the
-# eight public marketing pages by name, plus the few files those pages need:
+# eight public marketing pages and /download by name, plus the files they need:
 # llms.txt, the sitemap, /_next/static/ (CSS, JS, fonts; Google cannot render a
 # page without them), the favicon and the link-preview image.
 # Adding a page to lib/marketing/routes.ts
@@ -40,6 +40,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -75,6 +76,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -103,6 +105,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -131,6 +134,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -159,6 +163,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -187,6 +192,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -215,6 +221,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -243,6 +250,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -271,6 +279,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -299,6 +308,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -327,6 +337,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -355,6 +366,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/
@@ -383,6 +395,7 @@ Allow: /contact
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /download
 Allow: /llms.txt
 Allow: /sitemap.xml
 Allow: /_next/static/

@@ -123,6 +123,16 @@ export default function WorkPage() {
             </Reveal>
           ))}
         </div>
+
+        {/* A body link, not just the nav: /fleet sat "Discovered - currently not
+            indexed" (audit 2026-10-12), and an in-content link from a related
+            page is a stronger crawl signal than a sitewide nav item. */}
+        <Reveal>
+          <Link href="/fleet" className={`mt-10 ${CTA_INLINE}`}>
+            See the agents already running
+            <ArrowRight className="h-4 w-4" aria-hidden="true" />
+          </Link>
+        </Reveal>
       </Section>
 
       {/* ── Engagements ──────────────────────────────────────────────── */}

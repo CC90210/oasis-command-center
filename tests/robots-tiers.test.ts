@@ -28,7 +28,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert";
-import { ALL_MARKETING_PATHS, CONTACT_EMAIL, MARKETING_HOME_PATH, SITE_ORIGIN } from "../lib/marketing/routes";
+import { ALL_PUBLIC_PATHS, CONTACT_EMAIL, MARKETING_HOME_PATH, SITE_ORIGIN } from "../lib/marketing/routes";
 import { PAGES, sitemapPaths } from "../app/sitemap";
 
 const robots = readFileSync(join(process.cwd(), "public", "robots.txt"), "utf8");
@@ -137,7 +137,7 @@ for (const agent of TIER3) {
 }
 
 check("every marketing route is allowed in every non-tier-3 group", () => {
-  const expected = ALL_MARKETING_PATHS.map((p) => (p === MARKETING_HOME_PATH ? "/home" : p));
+  const expected = ALL_PUBLIC_PATHS.map((p) => (p === MARKETING_HOME_PATH ? "/home" : p));
   for (const [agent, rules] of byAgent) {
     if (TIER3.includes(agent)) continue;
     for (const path of expected) {
@@ -162,7 +162,7 @@ check("the AI briefing and the render assets are reachable in every non-tier-3 g
 });
 
 check("no group allows a path that is not a public marketing route", () => {
-  const allowed = new Set([...ALL_MARKETING_PATHS.map((p) => String(p)), "/", "/$", ...ASSET_ALLOWS]);
+  const allowed = new Set([...ALL_PUBLIC_PATHS.map((p) => String(p)), "/", "/$", ...ASSET_ALLOWS]);
   for (const [agent, rules] of byAgent) {
     for (const r of rules) {
       if (!r.startsWith("allow:")) continue;

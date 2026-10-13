@@ -17,6 +17,7 @@ OASIS is a consultancy and product studio, not a self-serve SaaS signup. Engagem
 - [Work](https://oasisai.work/work): engagements and what was built.
 - [About](https://oasisai.work/about): the team and how the firm operates.
 - [Contact](https://oasisai.work/contact): how to reach OASIS. Email support@oasisai.work.
+- [OASIS Desktop](https://oasisai.work/download): the desktop app for Mac, Windows and Linux. In private beta, with no public download; access is arranged per client.
 
 ## Legal
 
