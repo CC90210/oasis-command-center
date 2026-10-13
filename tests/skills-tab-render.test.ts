@@ -133,12 +133,19 @@ sections.push(() => {
 // --- Task 9: Training ---
 sections.push(() => {
   const held = CHANGES.find((c) => c.change_id === "ch-held");
+  // Fix round 1 (task 9) #6: a revoked computer must say why its rebuild button is off, and must
+  // never offer "ask now" (asking is not actually possible once access is revoked).
+  const REVOKED_COMPUTER = { ...COMPUTER, revoked: true };
+  // Fix round 1 (task 9) #6: a held change with nothing to edit must say why "Edit change" is off.
+  const NO_OPS_CHANGE = { ...held!, change_id: "ch-held-noops", ops: [] };
   const html = render([
     { id: "training", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: CHANGES, nowIso: NOW, rebuildBusy: false } },
     { id: "empty", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: [], nowIso: NOW, rebuildBusy: false } },
     // Ruling D10: HeldChange is tested directly here (not only through TrainingView), so it must
     // carry computerName itself rather than relying on the parent to resolve a display name.
     { id: "held", component: "HeldChange", props: { change: held, lib: LIB, computerId: COMPUTER.id, computerName: COMPUTER.display_name } },
+    { id: "revoked", component: "TrainingView", props: { lib: LIB, computer: REVOKED_COMPUTER, changes: CHANGES, nowIso: NOW, rebuildBusy: false } },
+    { id: "noops", component: "HeldChange", props: { change: NO_OPS_CHANGE, lib: LIB, computerId: COMPUTER.id, computerName: COMPUTER.display_name } },
   ]);
   check("misses read not checked yet, never zero", () => {
     const t = text(html.training);
@@ -177,6 +184,24 @@ sections.push(() => {
   });
   check("nothing held reads as a clear all-good line", () => {
     assert.match(text(html.empty), /Nothing is held/);
+  });
+  check("fix round 1 (task 9) #6: a revoked computer's rebuild button states why, never offering to ask now", () => {
+    const t = text(html.revoked);
+    assert.match(t, /revoked/i);
+    assert.doesNotMatch(t, /or now if you ask/);
+    assert.match(html.revoked, /<button[^>]*disabled=""[^>]*aria-describedby="rebuild-reason-pc-66997cf1"[^>]*>/);
+    assert.match(html.revoked, /id="rebuild-reason-pc-66997cf1"[^>]*>[^<]*revoked/i);
+  });
+  check("fix round 1 (task 9) #6: Edit change states why it is off when there is nothing to edit", () => {
+    assert.match(html.noops, /<button[^>]*disabled=""[^>]*aria-describedby="edit-reason-ch-held-noops"[^>]*>Edit change/);
+    assert.match(text(html.noops), /nothing to edit/i);
+  });
+  check("fix round 1 (task 9) #7: the status live region is always present, not mounted only while busy", () => {
+    assert.match(html.held, /role="status"/);
+  });
+  check("fix round 1 (task 9) #8: the held count badge carries hidden context for screen readers", () => {
+    assert.match(html.training, /class="sr-only"[^>]*> waiting for you/);
+    assert.match(text(html.training), /Held for you 1/);
   });
 });
 // (later tasks push more sections here)

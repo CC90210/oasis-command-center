@@ -8,14 +8,33 @@
 import type { Op } from "@/lib/skills/contract";
 import type { NewChange } from "@/lib/skills/view";
 
-export class ActionError extends Error {}
+/**
+ * Fix round 1 (task 9): carries the HTTP status and the server's error code alongside the raw
+ * message, so a caller can map to a plain sentence (lib/skills/view.ts's `actionErrorMessage`)
+ * instead of showing the server's own text - which is sometimes a snake_case code
+ * ("not_held", "storage_not_ready") and sometimes contract/validation developer text
+ * ("ops[0].label must be a kebab-case id"), neither fit for a user to read.
+ */
+export class ActionError extends Error {
+  status?: number;
+  code?: string;
+  constructor(message: string, info?: { status?: number; code?: string }) {
+    super(message);
+    this.status = info?.status;
+    this.code = info?.code;
+  }
+}
 
 async function post(url: string, body: unknown, keepalive = false): Promise<Record<string, unknown>> {
   const r = await fetch(url, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), keepalive, credentials: "same-origin",
   });
   const j = (await r.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!r.ok) throw new ActionError(String(j.message ?? j.error ?? `the server answered ${r.status}`));
+  if (!r.ok) {
+    throw new ActionError(String(j.message ?? j.error ?? `the server answered ${r.status}`), {
+      status: r.status, code: typeof j.error === "string" ? j.error : undefined,
+    });
+  }
   return j;
 }
 

@@ -270,11 +270,35 @@ export function toggleOp(ops: Op[], keep: boolean[], i: number): boolean[] {
  * original at a glance. Strips an exact trailing marker first, so editing an already-edited
  * change never grows "(edited) (edited)" - a mid-string lookalike (not at the end) is left alone,
  * since that is part of the description itself, not a marker this function added.
+ *
+ * Fix round 1 (task 9) #3: the base is sliced to `300 - suffix.length` BEFORE the suffix is
+ * appended, not the other way around. Slicing the already-concatenated string to 300 can cut
+ * partway through the suffix itself on a long description (a 295-character base plus the 9-
+ * character suffix is 304 characters, and a plain `.slice(0, 300)` on that keeps only the first
+ * 5 of the suffix's 9 characters - `"...x (edi"` - a visibly broken marker, not a truncated one).
+ * Slicing the base first guarantees the full suffix always survives and the total never exceeds 300.
  */
 export function markEdited(description: string): string {
   const suffix = " (edited)";
   const base = description.endsWith(suffix) ? description.slice(0, -suffix.length) : description;
-  return `${base}${suffix}`.slice(0, 300);
+  return `${base.slice(0, 300 - suffix.length)}${suffix}`;
+}
+
+/**
+ * Fix round 1 (task 9) #1/#2: what a failed `/api/skills` call should say, in plain English, never
+ * a raw HTTP status, a snake_case error code, or contract/validation developer text - all of which
+ * the server legitimately returns (`not_found`, `storage_not_ready`, `rate_limited`, "ops[0].label
+ * must be a kebab-case id") but none of which are fit for Adon to read. `status === undefined`
+ * means `fetch` itself never got a response (a thrown network error, not a server answer) - that
+ * reads differently from a server that DID answer, just not with success. The one status Training
+ * tells apart is 409/"not_held": a Reject or Edit landing on a change that already moved on
+ * (accepted, rejected or edited by someone else, or by this same computer's own check-in) - every
+ * other failure collapses to one generic sentence.
+ */
+export function actionErrorMessage(e: { status?: number; code?: string; message?: string } | null | undefined): string {
+  if (!e || e.status === undefined) return "Could not reach the command center.";
+  if (e.status === 409 || e.code === "not_held") return "This change is no longer held.";
+  return "Something went wrong on the server.";
 }
 
 export function changeFor(a: Action, names: Map<string, string>, scope: string): NewChange {

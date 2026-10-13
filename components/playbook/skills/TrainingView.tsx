@@ -9,12 +9,20 @@ import { shortDate, training, type ChangeRow, type Computer, type Library } from
 import { HeldChange } from "./HeldChange";
 import { Btn } from "./ui";
 
-function Section({ id, title, count, children }: { id: string; title: string; count?: number; children: ReactNode }) {
+function Section({ id, title, count, countLabel, children }: { id: string; title: string; count?: number; countLabel?: string; children: ReactNode }) {
   return (
     <section aria-labelledby={id} className="space-y-3">
       <h3 id={id} className="flex items-center gap-2 text-sm font-semibold text-fg">
         {title}
-        {count !== undefined && count > 0 && <span className="rounded-full bg-unread px-2 py-0.5 text-[11px] font-semibold tabular-nums text-white">{count}</span>}
+        {count !== undefined && count > 0 && (
+          <span className="rounded-full bg-unread px-2 py-0.5 text-[11px] font-semibold tabular-nums text-white">
+            {count}
+            {/* Fix round 1 (task 9) #8: the number alone ("1") reads as a bare digit to a screen
+                reader with no context for what it counts - the visible badge stays just the
+                number, legible at a glance, and this hidden span carries the rest. */}
+            {countLabel && <span className="sr-only"> {countLabel}</span>}
+          </span>
+        )}
       </h3>
       {children}
     </section>
@@ -34,6 +42,17 @@ export function TrainingView({ lib, computer, changes, nowIso, proofReady = fals
   onDone: (message: string) => void; onRebuild: () => void;
 }) {
   const l = training(changes, computer.id, new Date(nowIso));
+  const rebuildDisabled = rebuildBusy || computer.rebuild_requested || computer.revoked;
+  const rebuildReasonId = `rebuild-reason-${computer.id}`;
+  // Fix round 1 (task 9) #6: revoked gets its own sentence, never "or now if you ask" - asking is
+  // not actually possible once this computer's access is revoked.
+  const rebuildReason = computer.revoked
+    ? "This computer's access was revoked, so no check can run here."
+    : computer.rebuild_requested
+      ? "Your PC picks it up within 5 minutes."
+      : l.waiting.length
+        ? `${l.waiting.length} waiting. Your PC checks them tonight, or now if you ask.`
+        : "Nothing waiting.";
   return (
     <div className="space-y-8">
       <Section id="skills-misses" title="Misses to fix">
@@ -42,7 +61,7 @@ export function TrainingView({ lib, computer, changes, nowIso, proofReady = fals
         </p>
       </Section>
 
-      <Section id="skills-held" title="Held for you" count={l.held.length}>
+      <Section id="skills-held" title="Held for you" count={l.held.length} countLabel="waiting for you">
         {l.held.length === 0 ? (
           <p className="text-sm text-fg-muted">Nothing is held. Every change passed its check.</p>
         ) : (
@@ -69,12 +88,10 @@ export function TrainingView({ lib, computer, changes, nowIso, proofReady = fals
           </ul>
         )}
         <div className="flex flex-wrap items-center gap-3">
-          <Btn onClick={onRebuild} disabled={rebuildBusy || computer.rebuild_requested || computer.revoked}>
-            {computer.rebuild_requested ? "Check requested" : rebuildBusy ? "Asking your PC." : "Run the check now"}
+          <Btn onClick={onRebuild} disabled={rebuildDisabled} aria-describedby={rebuildDisabled ? rebuildReasonId : undefined}>
+            {computer.revoked ? "Access revoked" : computer.rebuild_requested ? "Check requested" : rebuildBusy ? "Asking your PC." : "Run the check now"}
           </Btn>
-          <p className="text-xs text-fg-dim">
-            {computer.rebuild_requested ? "Your PC picks it up within 5 minutes." : l.waiting.length ? `${l.waiting.length} waiting. Your PC checks them tonight, or now if you ask.` : "Nothing waiting."}
-          </p>
+          <p id={rebuildReasonId} className="text-xs text-fg-dim">{rebuildReason}</p>
         </div>
       </Section>
 

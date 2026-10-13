@@ -12,8 +12,9 @@
 import assert from "node:assert/strict";
 import { CHANGES, COMPUTER, LIB, NOW } from "./skills-tab-fixture";
 import {
-  activeChip, addToValue, changeFor, labelNames, markEdited, members, recordsAgeLine, scoreText, search, sortTiles, squares, statusLine, testLine, tiles, toggleOp, totalsRows, training,
+  activeChip, actionErrorMessage, addToValue, changeFor, labelNames, markEdited, members, recordsAgeLine, scoreText, search, sortTiles, squares, statusLine, testLine, tiles, toggleOp, totalsRows, training,
 } from "../lib/skills/view";
+import { editedDescription } from "../components/playbook/skills/HeldChange";
 
 let passed = 0;
 let failed = 0;
@@ -193,6 +194,36 @@ check("D10: editing strips an existing (edited) marker before appending one, so 
   assert.equal(markEdited("Outreach scripts (edited)"), "Outreach scripts (edited)");
   // Only an exact trailing "(edited)" marker is stripped - a lookalike mid-string occurrence is left alone.
   assert.equal(markEdited("Something (edited) extra"), "Something (edited) extra (edited)");
+});
+
+check("fix round 1 (task 9) #3: markEdited slices the base first so a long description never truncates mid-marker", () => {
+  const long = "x".repeat(295);
+  const out = markEdited(long);
+  assert.equal(out.length, 300);
+  assert.ok(out.endsWith(" (edited)"), `the full marker must survive truncation, got "${out.slice(-12)}"`);
+  assert.equal(out, "x".repeat(291) + " (edited)");
+});
+
+check("fix round 1 (task 9) #4: HeldChange's Save path goes through markEdited, not an inline template", () => {
+  const held = CHANGES.find((c) => c.change_id === "ch-held")!;
+  assert.equal(editedDescription(held), "Outreach scripts (edited)");
+  // The same call site, fed an already-edited description, never doubles the marker.
+  assert.equal(editedDescription({ ...held, description: "Outreach scripts (edited)" }), "Outreach scripts (edited)");
+});
+
+check("fix round 1 (task 9) #1: an action failure never echoes a raw status, error code or developer message", () => {
+  // 409 / not_held: the one case Training distinguishes in plain English.
+  assert.equal(actionErrorMessage({ status: 409, code: "not_held", message: "This change is no longer held. Refresh to see where it is now." }), "This change is no longer held.");
+  assert.equal(actionErrorMessage({ status: 409, code: "not_held", message: "Only a held change can be accepted or rejected." }), "This change is no longer held.");
+  // Any other server answer collapses to one generic sentence - never the raw code or message.
+  assert.equal(actionErrorMessage({ status: 404, code: "not_found" }), "Something went wrong on the server.");
+  assert.equal(actionErrorMessage({ status: 400, code: "bad_request", message: "ops[0].label must be a kebab-case id" }), "Something went wrong on the server.");
+  assert.equal(actionErrorMessage({ status: 503, code: "storage_not_ready" }), "Something went wrong on the server.");
+  assert.equal(actionErrorMessage({ status: 429, code: "rate_limited" }), "Something went wrong on the server.");
+  // No status at all (fetch itself never got a response): a network failure, not a server answer.
+  assert.equal(actionErrorMessage({ message: "Failed to fetch" }), "Could not reach the command center.");
+  assert.equal(actionErrorMessage({}), "Could not reach the command center.");
+  assert.equal(actionErrorMessage(undefined), "Could not reach the command center.");
 });
 
 console.log(`skills-tab-view: ${passed} passed, ${failed} failed`);
