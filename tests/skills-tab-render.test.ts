@@ -130,6 +130,55 @@ sections.push(() => {
     assert.match(text(html.gone), /no longer on this computer/);
   });
 });
+// --- Task 9: Training ---
+sections.push(() => {
+  const held = CHANGES.find((c) => c.change_id === "ch-held");
+  const html = render([
+    { id: "training", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: CHANGES, nowIso: NOW, rebuildBusy: false } },
+    { id: "empty", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: [], nowIso: NOW, rebuildBusy: false } },
+    // Ruling D10: HeldChange is tested directly here (not only through TrainingView), so it must
+    // carry computerName itself rather than relying on the parent to resolve a display name.
+    { id: "held", component: "HeldChange", props: { change: held, lib: LIB, computerId: COMPUTER.id, computerName: COMPUTER.display_name } },
+  ]);
+  check("misses read not checked yet, never zero", () => {
+    const t = text(html.training);
+    assert.match(t, /Misses to fix/);
+    assert.match(t, /not checked yet/i);
+    assert.doesNotMatch(t, /\b0 misses\b/i);
+    assert.match(text(html.empty), /not checked yet/i);
+  });
+  check("a held change shows who, how many got worse and better, and totals worst first", () => {
+    const t = text(html.held);
+    assert.match(t, /Outreach scripts/);
+    assert.match(t, /By apex/);
+    assert.match(t, /1 got worse/);
+    assert.match(t, /1 got better/);
+    assert.ok(t.indexOf("Sell, price and pitch") < t.indexOf("Plan a new feature"));
+    assert.match(html.held, /<table/);
+    assert.match(html.held, /<th[^>]*scope="col"[^>]*>Before/);
+  });
+  check("D10: a held change also names which computer it is for", () => {
+    const t = text(html.held);
+    assert.match(t, /Adon's PC/);
+    // Still through TrainingView's own resolution (computer.display_name), not just the direct prop.
+    assert.match(text(html.training), /Adon's PC/);
+  });
+  check("Accept anyway is off and says why", () => {
+    assert.match(html.held, /<button[^>]*disabled=""[^>]*aria-describedby="proof-ch-held"[^>]*>Accept anyway/);
+    assert.match(html.held, /id="proof-ch-held"[^>]*>[^<]*not uploaded yet/);
+  });
+  check("did not go live, queued and applied sections show only this computer's changes", () => {
+    const t = text(html.training);
+    assert.match(t, /Did not go live .*Put tanstack-table in Charts .*the router build refused it/);
+    assert.match(t, /Queued for tonight's check .*Put graft in Fix something broken as use first/);
+    assert.match(t, /Applied this week .*Speed up a slow query/);
+    assert.doesNotMatch(t, /Someone else's change/);
+    assert.doesNotMatch(t, /An old change/);
+  });
+  check("nothing held reads as a clear all-good line", () => {
+    assert.match(text(html.empty), /Nothing is held/);
+  });
+});
 // (later tasks push more sections here)
 
 console.log("skills-tab-render:");

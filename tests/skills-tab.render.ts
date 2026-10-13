@@ -13,6 +13,8 @@ type Loader = () => Promise<unknown>;
 const COMPONENTS: Record<string, Loader> = {
   LibraryView: async () => (await import("../components/playbook/skills/LibraryView")).LibraryView,
   SkillSheetBody: async () => (await import("../components/playbook/skills/SkillSheet")).SkillSheetBody,
+  TrainingView: async () => (await import("../components/playbook/skills/TrainingView")).TrainingView,
+  HeldChange: async () => (await import("../components/playbook/skills/HeldChange")).HeldChange,
   // (later tasks add components here)
 };
 const CALLBACKS = ["onGroup", "onOpenSkill", "onAction", "onClose", "onPick", "onDone", "onRebuild", "onRefresh", "onHover"];

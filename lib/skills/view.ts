@@ -265,6 +265,18 @@ export function toggleOp(ops: Op[], keep: boolean[], i: number): boolean[] {
   return next;
 }
 
+/**
+ * D10: editing a held change appends "(edited)" so Training can tell a revised change from the
+ * original at a glance. Strips an exact trailing marker first, so editing an already-edited
+ * change never grows "(edited) (edited)" - a mid-string lookalike (not at the end) is left alone,
+ * since that is part of the description itself, not a marker this function added.
+ */
+export function markEdited(description: string): string {
+  const suffix = " (edited)";
+  const base = description.endsWith(suffix) ? description.slice(0, -suffix.length) : description;
+  return `${base}${suffix}`.slice(0, 300);
+}
+
 export function changeFor(a: Action, names: Map<string, string>, scope: string): NewChange {
   const where = names.get(a.label) ?? a.label;
   if (a.kind === "remove") {

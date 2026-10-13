@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { CHANGES, COMPUTER, LIB, NOW } from "./skills-tab-fixture";
 import {
-  activeChip, addToValue, changeFor, labelNames, members, recordsAgeLine, scoreText, search, sortTiles, squares, statusLine, testLine, tiles, toggleOp, totalsRows, training,
+  activeChip, addToValue, changeFor, labelNames, markEdited, members, recordsAgeLine, scoreText, search, sortTiles, squares, statusLine, testLine, tiles, toggleOp, totalsRows, training,
 } from "../lib/skills/view";
 
 let passed = 0;
@@ -186,6 +186,13 @@ check("fix round 1 (task 8) #1: addToValue falls back when the chosen id is no l
   assert.equal(addToValue(addable, "c"), "a");
   // No addable options at all: falls back to "", never a stale id.
   assert.equal(addToValue([], "a"), "");
+});
+
+check("D10: editing strips an existing (edited) marker before appending one, so repeats never double it", () => {
+  assert.equal(markEdited("Outreach scripts"), "Outreach scripts (edited)");
+  assert.equal(markEdited("Outreach scripts (edited)"), "Outreach scripts (edited)");
+  // Only an exact trailing "(edited)" marker is stripped - a lookalike mid-string occurrence is left alone.
+  assert.equal(markEdited("Something (edited) extra"), "Something (edited) extra (edited)");
 });
 
 console.log(`skills-tab-view: ${passed} passed, ${failed} failed`);
