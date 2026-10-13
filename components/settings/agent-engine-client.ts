@@ -264,6 +264,37 @@ export function engineDevicesForScope(devices: EngineDevice[], scope: EngineScop
   return devices.filter((item) => (scope === "person" ? item.ownedByViewer : item.workspaceEligible));
 }
 
+/** Re-entering a mode starts from the saved selection for this scope when it
+ * is still usable. This keeps the computer shown in the editor aligned with
+ * the computer named by "In use" instead of silently choosing the first
+ * device returned by the inventory. */
+export function draftForEngineMode(
+  mode: EngineSelection["mode"],
+  state: EngineState,
+  scope: EngineScope,
+): EngineSelection {
+  const available = engineDevicesForScope(state.devices, scope);
+  const configured =
+    scope === "workspace"
+      ? state.engine
+      : state.personEngine.source === "person" && state.personEngine.selection
+        ? state.personEngine.selection
+        : state.engine;
+  if (
+    configured.mode === mode
+    && (configured.mode === "api" || available.some((device) => device.pairingId === configured.pairingId))
+  ) {
+    return configured;
+  }
+
+  const target = available[0] ?? state.devices[0];
+  if (mode === "subscription") return { mode, pairingId: target?.pairingId ?? "", provider: "claude", fallback: "none" };
+  if (mode === "local") {
+    return { mode, pairingId: target?.pairingId ?? "", modelRef: target?.localModels[0]?.ref ?? "", fallback: "none" };
+  }
+  return { mode, provider: state.account?.provider ?? state.savedProviders[0] ?? "anthropic" };
+}
+
 function failureSentence(result: CallResult, fallback: string): string {
   if (typeof result.body.message === "string" && result.body.message.trim()) return result.body.message;
   if (result.status === 408 || result.status === 504 || result.status === 524) return TOO_SLOW;
