@@ -42,6 +42,12 @@ export function TrainingView({ lib, computer, changes, nowIso, proofReady = fals
   onDone: (message: string) => void; onRebuild: () => void;
 }) {
   const l = training(changes, computer.id, new Date(nowIso));
+  // Final fix round, item (c): "Every change passed its check" used to show whenever `held` was
+  // empty, with no regard for whether anything had actually FAILED or was still waiting - an empty
+  // list was read as a clean sweep even while a recent failure or a queued-but-undecided change
+  // sat right below it. The stronger claim now needs real passing evidence to back it: at least
+  // one applied change this week, and nothing that failed or is still waiting for a decision.
+  const heldEmptyAllPassed = l.held.length === 0 && l.applied.length > 0 && l.failed.length === 0 && l.waiting.length === 0;
   const rebuildDisabled = rebuildBusy || computer.rebuild_requested || computer.revoked;
   const rebuildReasonId = `rebuild-reason-${computer.id}`;
   // Fix round 1 (task 9) #6: revoked gets its own sentence, never "or now if you ask" - asking is
@@ -63,7 +69,9 @@ export function TrainingView({ lib, computer, changes, nowIso, proofReady = fals
 
       <Section id="skills-held" title="Held for you" count={l.held.length} countLabel="waiting for you">
         {l.held.length === 0 ? (
-          <p className="text-sm text-fg-muted">Nothing is held. Every change passed its check.</p>
+          <p className="text-sm text-fg-muted">
+            {heldEmptyAllPassed ? "Nothing is held. Every change passed its check." : "Nothing is waiting for you."}
+          </p>
         ) : (
           <div className="space-y-3">
             {l.held.map((c) => (

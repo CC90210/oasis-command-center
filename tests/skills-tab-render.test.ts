@@ -144,6 +144,13 @@ sections.push(() => {
   const REVOKED_COMPUTER = { ...COMPUTER, revoked: true };
   // Fix round 1 (task 9) #6: a held change with nothing to edit must say why "Edit change" is off.
   const NO_OPS_CHANGE = { ...held!, change_id: "ch-held-noops", ops: [] };
+  // Final fix round, item (c): held is empty in BOTH of these, but they must read differently.
+  // A recent failed change with nothing held, waiting or applied must never read as "every change
+  // passed its check" - that claim needs at least one real passing (applied) result to back it.
+  const FAILED_ONLY_CHANGES = [CHANGES.find((c) => c.change_id === "ch-failed")!];
+  // The true-positive case the stronger claim still needs to cover: held empty, nothing failed or
+  // waiting, and at least one applied change - "every change passed its check" stays true here.
+  const APPLIED_ONLY_CHANGES = [CHANGES.find((c) => c.change_id === "ch-applied")!];
   const html = render([
     { id: "training", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: CHANGES, nowIso: NOW, rebuildBusy: false } },
     { id: "empty", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: [], nowIso: NOW, rebuildBusy: false } },
@@ -152,6 +159,8 @@ sections.push(() => {
     { id: "held", component: "HeldChange", props: { change: held, lib: LIB, computerId: COMPUTER.id, computerName: COMPUTER.display_name } },
     { id: "revoked", component: "TrainingView", props: { lib: LIB, computer: REVOKED_COMPUTER, changes: CHANGES, nowIso: NOW, rebuildBusy: false } },
     { id: "noops", component: "HeldChange", props: { change: NO_OPS_CHANGE, lib: LIB, computerId: COMPUTER.id, computerName: COMPUTER.display_name } },
+    { id: "heldEmptyFailed", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: FAILED_ONLY_CHANGES, nowIso: NOW, rebuildBusy: false } },
+    { id: "heldEmptyApplied", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: APPLIED_ONLY_CHANGES, nowIso: NOW, rebuildBusy: false } },
   ]);
   check("misses read not checked yet, never zero", () => {
     const t = text(html.training);
@@ -188,8 +197,19 @@ sections.push(() => {
     assert.doesNotMatch(t, /Someone else's change/);
     assert.doesNotMatch(t, /An old change/);
   });
-  check("nothing held reads as a clear all-good line", () => {
-    assert.match(text(html.empty), /Nothing is held/);
+  check("final fix round, item (c): nothing held and nothing else pending reads as a neutral line, not the stronger claim", () => {
+    // Held empty with NOTHING else (no failed, waiting or applied change) has no passing result
+    // to back "every change passed its check" - this was the exact AI-tell bug: that sentence used
+    // to show here unconditionally whenever held was empty, regardless of what else was going on.
+    assert.match(text(html.empty), /Nothing is waiting for you/);
+    assert.doesNotMatch(text(html.empty), /Every change passed its check/);
+  });
+  check("final fix round, item (c): held empty with a recent failed change reads as neutral, never the stronger claim", () => {
+    assert.match(text(html.heldEmptyFailed), /Nothing is waiting for you/);
+    assert.doesNotMatch(text(html.heldEmptyFailed), /Every change passed its check/);
+  });
+  check("final fix round, item (c): held empty with only a passing (applied) change keeps the stronger claim", () => {
+    assert.match(text(html.heldEmptyApplied), /Every change passed its check/);
   });
   check("fix round 1 (task 9) #6: a revoked computer's rebuild button states why, never offering to ask now", () => {
     const t = text(html.revoked);
