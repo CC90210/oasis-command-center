@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHECKOUT_OFFERS, resolveCheckoutOffer } from "../lib/checkout/catalog";
 import { createOfferCheckout, verifyOfferCheckout } from "../lib/checkout/stripe";
-import { GOOGLE_ADS_TAG_ID, purchaseConversionPayload } from "../components/marketing/PurchaseConversion";
+import { GOOGLE_ADS_TAG_ID, purchaseConversionPayload } from "../lib/marketing/google-ads";
 
 const root = join(__dirname, "..");
 const read = (path: string) => readFileSync(join(root, path), "utf8");
@@ -82,12 +82,22 @@ const receipt = await verifyOfferCheckout({
   fetchImpl: (async () => Response.json(paid)) as typeof fetch,
 });
 assert.equal(receipt.valueCad, 1);
-assert.deepEqual(purchaseConversionPayload({ valueCad: receipt.valueCad, transactionId: receipt.transactionId }), {
-  send_to: "AW-18509362419",
+const conversionDestination = "AW-18509362419/test_purchase_label";
+assert.deepEqual(purchaseConversionPayload({
+  valueCad: receipt.valueCad,
+  transactionId: receipt.transactionId,
+  sendTo: conversionDestination,
+}), {
+  send_to: conversionDestination,
   value: 1,
   currency: "CAD",
   transaction_id: "cs_test_paid_canary_123",
 });
+assert.equal(purchaseConversionPayload({
+  valueCad: receipt.valueCad,
+  transactionId: receipt.transactionId,
+  sendTo: "AW-18509362419",
+}), null, "a bare tag id must not masquerade as a purchase conversion action");
 
 await assert.rejects(
   verifyOfferCheckout({

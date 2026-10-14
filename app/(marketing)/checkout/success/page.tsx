@@ -5,6 +5,7 @@ import { PurchaseConversion } from "@/components/marketing/PurchaseConversion";
 import { Reveal } from "@/components/marketing/Reveal";
 import { resolveCheckoutOffer } from "@/lib/checkout/catalog";
 import { verifyOfferCheckout } from "@/lib/checkout/stripe";
+import { googleAdsPurchaseDestination } from "@/lib/marketing/google-ads";
 
 export const dynamic = "force-dynamic";
 
@@ -20,10 +21,16 @@ export default async function CheckoutSuccessPage({ searchParams }: { searchPara
   const raw = (await searchParams).session_id;
   const checkoutSessionId = typeof raw === "string" ? raw : "";
   const secretKey = (process.env.STRIPE_SECRET_KEY ?? "").trim();
+  const conversionDestination = googleAdsPurchaseDestination(
+    process.env.GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION,
+  );
 
   try {
     if (!secretKey) throw new Error("stripe_not_connected");
     const receipt = await verifyOfferCheckout({ secretKey, checkoutSessionId, resolveOffer: resolveCheckoutOffer });
+    if (!conversionDestination) {
+      console.error("[public-checkout.success] Google Ads purchase conversion destination is not configured");
+    }
     return (
       <section className="relative overflow-hidden px-5 py-24 sm:px-8 sm:py-32">
         <Reveal>
@@ -43,7 +50,13 @@ export default async function CheckoutSuccessPage({ searchParams }: { searchPara
             <div className="mt-8"><CtaLink href="/onboarding">View the 7-day onboarding plan</CtaLink></div>
           </div>
         </Reveal>
-        <PurchaseConversion valueCad={receipt.valueCad} transactionId={receipt.transactionId} />
+        {conversionDestination ? (
+          <PurchaseConversion
+            valueCad={receipt.valueCad}
+            transactionId={receipt.transactionId}
+            sendTo={conversionDestination}
+          />
+        ) : null}
       </section>
     );
   } catch (error) {

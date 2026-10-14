@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { purchaseConversionPayload } from "@/lib/marketing/google-ads";
 
-export const GOOGLE_ADS_TAG_ID = "AW-18509362419";
 const STORAGE_PREFIX = "oasis:google-ads:purchase:";
 
 declare global {
@@ -12,25 +12,15 @@ declare global {
   }
 }
 
-export function purchaseConversionPayload(input: {
-  valueCad: number;
-  transactionId: string;
-}) {
-  return {
-    send_to: GOOGLE_ADS_TAG_ID,
-    value: input.valueCad,
-    currency: "CAD" as const,
-    transaction_id: input.transactionId,
-  };
-}
-
 /** Fire once per browser tab and Stripe session, after the server verified payment. */
 export function PurchaseConversion({
   valueCad,
   transactionId,
+  sendTo,
 }: {
   valueCad: number;
   transactionId: string;
+  sendTo: string;
 }) {
   const started = useRef(false);
 
@@ -53,7 +43,9 @@ export function PurchaseConversion({
         if (attempts < 40) timer = setTimeout(send, 100);
         return;
       }
-      window.gtag("event", "conversion", purchaseConversionPayload({ valueCad, transactionId }));
+      const payload = purchaseConversionPayload({ valueCad, transactionId, sendTo });
+      if (!payload) return;
+      window.gtag("event", "conversion", payload);
       try {
         window.sessionStorage.setItem(storageKey, "sent");
       } catch {
@@ -65,7 +57,7 @@ export function PurchaseConversion({
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [transactionId, valueCad]);
+  }, [sendTo, transactionId, valueCad]);
 
   return null;
 }

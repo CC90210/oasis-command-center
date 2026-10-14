@@ -216,7 +216,7 @@ export default function WorkPage() {
               is &ldquo;nowhere yet&rdquo;.
             </p>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-              <CtaLink href="/pricing">Start your build</CtaLink>
+              <CtaLink href="/audit">Start the audit</CtaLink>
               {/* Rendered only when a booking link exists. The hardcoded one
                   this used to point at had been deleted, so "Book a call
                   instead" led to "Appointment not found". /contact stays as
