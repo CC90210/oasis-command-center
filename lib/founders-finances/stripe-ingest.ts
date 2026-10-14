@@ -1191,7 +1191,7 @@ async function insertRefund(
       cap,
     ],
   };
-  const [rs] = await writeWithLedger([
+  const statements: InStatement[] = [
     insert,
     ledgerStatement(
       tenant,
@@ -1211,7 +1211,28 @@ async function insertRefund(
       },
       { ifChanged: true },
     ),
-  ]);
+  ];
+  if (parent.invoice_id) {
+    statements.push(
+      recomputeInvoicePaidStatement(parent.invoice_id, new Date(r.created * 1000).toISOString(), {
+        // Recompute on a first delivery and harmlessly repair stale lifecycle
+        // truth on a replay. The parent relationship is authoritative, so a
+        // refund can never alter an unrelated invoice even if a copied
+        // refund.invoice_id were malformed.
+        sql: `EXISTS (
+                SELECT 1
+                  FROM fin_payments refund
+                  JOIN fin_payments payment ON payment.id = refund.parent_payment_id
+                 WHERE refund.kind = 'refund'
+                   AND refund.parent_payment_id = ?
+                   AND payment.kind = 'payment'
+                   AND payment.invoice_id = ?
+              )`,
+        args: [parent.id, parent.invoice_id],
+      }),
+    );
+  }
+  const [rs] = await writeWithLedger(statements);
   if (rs.rowsAffected !== 1) return false;
   await postRefundEntry(id);
   return true;

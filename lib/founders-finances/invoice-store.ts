@@ -14,7 +14,7 @@ import { crossCurrencySettlementLines, type JournalLineInput } from "./ledger";
 import { accountId, SYS } from "./chart";
 import { finDb, query, queryOne, type InStatement } from "./db";
 import { buildPosting, type Posting } from "./ledger-io";
-import { usdToCadCents, parseRateMicro } from "./fx";
+import { usdToCadCents, parseRateMicro, torontoToday } from "./fx";
 import { storedLineBilling, type InvoiceStatus } from "./invoice";
 
 export type InvoiceRow = {
@@ -276,13 +276,32 @@ export async function buildSettlementPosting(args: {
   });
 }
 
-const PAID_SUM = `(SELECT COALESCE(SUM(p.amount_cents), 0) FROM fin_payments p
-                    WHERE p.invoice_id = fin_invoices.id AND p.kind = 'payment' AND p.currency = fin_invoices.currency)`;
+const PAYMENT_SUM = `(SELECT COALESCE(SUM(p.amount_cents), 0) FROM fin_payments p
+                       WHERE p.invoice_id = fin_invoices.id AND p.kind = 'payment' AND p.currency = fin_invoices.currency)`;
+
+// The parent payment owns a refund's invoice relationship. Using that
+// relationship (instead of trusting the refund row's copied invoice_id) also
+// makes a refund received before a later payment-to-invoice link take effect
+// when that link recomputes the invoice.
+const REFUND_SUM = `(SELECT COALESCE(SUM(r.amount_cents), 0)
+                      FROM fin_payments r
+                      JOIN fin_payments parent ON parent.id = r.parent_payment_id
+                     WHERE r.kind = 'refund'
+                       AND parent.kind = 'payment'
+                       AND parent.invoice_id = fin_invoices.id
+                       AND parent.currency = fin_invoices.currency
+                       AND r.currency = parent.currency)`;
+
+const NET_PAID = `MAX(0, ${PAYMENT_SUM} - ${REFUND_SUM})`;
+const APPLIED_PAID = `MIN(total_cents, ${NET_PAID})`;
 
 /**
- * Recompute amount_paid from the linked payment rows and flip to paid when
- * covered. A RECOMPUTE, not an increment: running it twice (a retried
- * webhook, two events for one charge) cannot count a payment twice.
+ * Recompute amount_paid from linked payments less their refunds and derive
+ * the stored lifecycle from the resulting balance. A RECOMPUTE, not an
+ * increment: running it twice (a retried webhook, two events for one charge
+ * or refund) cannot count money twice. Payment and refund rows remain the
+ * immutable history; paid_at describes the current paid state and is cleared
+ * when a refund reopens the invoice.
  */
 export function recomputeInvoicePaidStatement(
   invoiceId: string,
@@ -291,11 +310,15 @@ export function recomputeInvoicePaidStatement(
 ): InStatement {
   return {
     sql: `UPDATE fin_invoices
-             SET amount_paid_cents = ${PAID_SUM},
-                 status = CASE WHEN ${PAID_SUM} >= total_cents AND total_cents > 0 THEN 'paid' ELSE status END,
-                 paid_at = CASE WHEN ${PAID_SUM} >= total_cents AND total_cents > 0 THEN COALESCE(paid_at, ?) ELSE paid_at END,
+             SET amount_paid_cents = ${APPLIED_PAID},
+                 status = CASE
+                   WHEN ${NET_PAID} >= total_cents AND total_cents > 0 THEN 'paid'
+                   WHEN total_cents > 0 AND due_date < ? THEN 'overdue'
+                   ELSE 'sent'
+                 END,
+                 paid_at = CASE WHEN ${NET_PAID} >= total_cents AND total_cents > 0 THEN COALESCE(paid_at, ?) ELSE NULL END,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
            WHERE id = ? AND status IN ('sent', 'overdue', 'paid')${gate ? ` AND (${gate.sql})` : ""}`,
-    args: [paidAtIso, invoiceId, ...(gate?.args || [])],
+    args: [torontoToday(), paidAtIso, invoiceId, ...(gate?.args || [])],
   };
 }
