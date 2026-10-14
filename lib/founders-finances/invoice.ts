@@ -243,6 +243,39 @@ export function isOpenListStatus(s: InvoiceListStatus): boolean {
   return s === "sent" || s === "overdue";
 }
 
+/** Founder-facing lifecycle. Stored/list statuses remain the accounting contract. */
+export const INVOICE_DISPLAY_STATUSES = ["draft", "issued", "partially_paid", "paid", "void", "retainer"] as const;
+export type InvoiceDisplayStatus = (typeof INVOICE_DISPLAY_STATUSES)[number];
+
+/**
+ * Turn accounting facts into the lifecycle a founder sees. Overdue stays a
+ * warning on an issued or partially-paid invoice instead of replacing its
+ * lifecycle state.
+ */
+export function invoiceDisplayState(
+  inv: {
+    status: InvoiceStatus;
+    dueDate: string;
+    totalCents: number;
+    amountPaidCents: number;
+    retainerMonthlyCents: number;
+  },
+  today: string,
+): { displayStatus: InvoiceDisplayStatus; isOverdue: boolean } {
+  const effective = effectiveInvoiceStatus(inv, today);
+  let displayStatus: InvoiceDisplayStatus;
+  if (effective === "draft" || effective === "void" || effective === "paid") {
+    displayStatus = effective;
+  } else if (!hasAmountDueNow(inv)) {
+    displayStatus = "retainer";
+  } else if (inv.amountPaidCents > 0 && inv.amountPaidCents < inv.totalCents) {
+    displayStatus = "partially_paid";
+  } else {
+    displayStatus = "issued";
+  }
+  return { displayStatus, isOverdue: effective === "overdue" && (displayStatus === "issued" || displayStatus === "partially_paid") };
+}
+
 const TRANSITIONS: Record<InvoiceStatus, InvoiceStatus[]> = {
   draft: ["sent", "void"],
   sent: ["overdue", "paid", "void"],

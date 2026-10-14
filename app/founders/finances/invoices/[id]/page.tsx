@@ -20,7 +20,15 @@ import { Card, PageHeader, Tag } from "@/components/Card";
 import { ActionButton } from "@/components/founders/finances/ActionButton";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
 import { InvoiceEditor } from "@/components/founders/finances/InvoiceEditor";
-import { INVOICE_STATUS_TONE, numClass, quietButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
+import {
+  INVOICE_DISPLAY_STATUS_LABEL,
+  INVOICE_DISPLAY_STATUS_TONE,
+  numClass,
+  quietButton,
+  tableClass,
+  tdClass,
+  thClass,
+} from "@/components/founders/finances/ui";
 import { FinanceNotFound, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
 import { loadInvoiceDetailPage } from "@/lib/founders-finances/page-context";
 import { retainerLinkStatus, type RetainerLinkStatus } from "@/lib/founders-finances/invoices-io";
@@ -115,7 +123,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
     if (e instanceof FinanceNotFound) notFound();
     throw e;
   }
-  const { invoice: inv, lines, contact, payments, settings, effectiveStatus, listStatus, accounts, contacts, retainerMonthlyCents: retainer, retainerLinkUrl } = d;
+  const { invoice: inv, lines, contact, payments, settings, effectiveStatus, displayStatus, isOverdue, accounts, contacts, retainerMonthlyCents: retainer, retainerLinkUrl } = d;
   // Stripe's live view of the retainer link (never throws; `none` without asking Stripe when there is no link).
   const linkStatus = await retainerLinkStatus(inv);
   const balance = inv.status === "void" ? 0 : balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents });
@@ -132,7 +140,8 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
         title={inv.number || "Draft invoice"}
         subtitle={
           <span className="flex flex-wrap items-center gap-2">
-            <Tag tone={listStatus === "retainer" ? "accent" : INVOICE_STATUS_TONE[listStatus]}>{listStatus === "retainer" ? "retainer set up" : listStatus}</Tag>
+            <Tag tone={INVOICE_DISPLAY_STATUS_TONE[displayStatus]}>{INVOICE_DISPLAY_STATUS_LABEL[displayStatus]}</Tag>
+            {isOverdue && <Tag tone="hot">Overdue</Tag>}
             <span>{contact?.name}</span>
             <span className="text-fg-dim">·</span>
             {retainer > 0 ? (

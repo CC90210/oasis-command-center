@@ -8,7 +8,15 @@ import { after } from "next/server";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { InvoiceEditor } from "@/components/founders/finances/InvoiceEditor";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
-import { INVOICE_STATUS_TONE as STATUS_TONE, numClass, primaryButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
+import {
+  INVOICE_DISPLAY_STATUS_LABEL as STATUS_LABEL,
+  INVOICE_DISPLAY_STATUS_TONE as STATUS_TONE,
+  numClass,
+  primaryButton,
+  tableClass,
+  tdClass,
+  thClass,
+} from "@/components/founders/finances/ui";
 import { financePage, loadInvoicesPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { sweepOverdue } from "@/lib/founders-finances/invoices-io";
 import { retainerColumnsReady } from "@/lib/founders-finances/invoice-store";
@@ -32,8 +40,16 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
       (e: unknown) => console.error("[finances:invoices] overdue sweep failed", e instanceof Error ? e.message : e),
     ),
   );
-  // "sent" and "overdue" are invoices with money owed now; an issued invoice that only sets up a retainer is under "retainer".
-  const filters = ["", "draft", "sent", "overdue", "retainer", "paid", "void"];
+  const filters = [
+    { value: "", label: "All" },
+    { value: "draft", label: STATUS_LABEL.draft },
+    { value: "issued", label: STATUS_LABEL.issued },
+    { value: "partially_paid", label: STATUS_LABEL.partially_paid },
+    { value: "paid", label: STATUS_LABEL.paid },
+    { value: "void", label: STATUS_LABEL.void },
+    { value: "retainer", label: STATUS_LABEL.retainer },
+  ] as const;
+  const selectedFilterLabel = filters.find((filter) => filter.value === status)?.label;
   const retainerNote = { none: "no link yet", not_emailed: "link not emailed yet", emailed: "link emailed" } as const;
 
   return (
@@ -50,19 +66,19 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
 
       <Card noPadding>
         <div className="flex flex-wrap gap-1 border-b border-bg-border px-4 py-2">
-          {filters.map((f) => (
+          {filters.map((filter) => (
             <Link
-              key={f || "all"}
-              href={f ? `/founders/finances/invoices?status=${f}` : "/founders/finances/invoices"}
-              className={`rounded-md px-2.5 py-1 text-xs font-semibold ${status === f ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
+              key={filter.value || "all"}
+              href={filter.value ? `/founders/finances/invoices?status=${filter.value}` : "/founders/finances/invoices"}
+              className={`rounded-md px-2.5 py-1 text-xs font-semibold ${status === filter.value ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
             >
-              {f ? f[0].toUpperCase() + f.slice(1) : "All"}
+              {filter.label}
             </Link>
           ))}
         </div>
         {invoices.length === 0 ? (
           <p className="p-5 text-sm text-fg-muted">
-            No {status ? `${status} ` : ""}invoices yet.{" "}
+            No {selectedFilterLabel && status ? `${selectedFilterLabel.toLowerCase()} ` : ""}invoices yet.{" "}
             <a href="#new-invoice" className="text-[#1FE3F0] hover:underline">
               Create one below
             </a>
@@ -99,17 +115,10 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
                     </td>
                     <td className={`${tdClass} ${numClass}`}>{formatCents(i.balance_cents, i.currency)}</td>
                     <td className={tdClass}>
-                      {i.list_status === "retainer" ? (
-                        <>
-                          <Tag tone="accent">retainer set up</Tag>
-                          <div className="mt-0.5 text-[11px] text-fg-dim">nothing due now · {retainerNote[i.retainer_link]}</div>
-                        </>
-                      ) : (
-                        <>
-                          <Tag tone={STATUS_TONE[i.list_status]}>{i.list_status}</Tag>
-                          {i.status !== "draft" && i.status !== "void" && !i.sent_at && <span className="ml-2 text-[11px] text-status-warm">not emailed</span>}
-                        </>
-                      )}
+                      <Tag tone={STATUS_TONE[i.display_status]}>{STATUS_LABEL[i.display_status]}</Tag>
+                      {i.is_overdue && <span className="ml-2 text-[11px] font-semibold text-status-hot">Overdue</span>}
+                      {i.status !== "draft" && i.status !== "void" && !i.sent_at && <span className="ml-2 text-[11px] text-status-warm">not emailed</span>}
+                      {i.display_status === "retainer" && <div className="mt-0.5 text-[11px] text-fg-dim">nothing due now · {retainerNote[i.retainer_link]}</div>}
                     </td>
                   </tr>
                 ))}

@@ -3,6 +3,8 @@
  * React, no hooks). Kept here so every form on every tab looks the same.
  */
 
+import type { InvoiceDisplayStatus } from "@/lib/founders-finances/invoice";
+
 export const inputClass =
   "w-full rounded-md border border-bg-border bg-bg-deep px-2.5 py-1.5 text-sm text-fg placeholder:text-fg-dim focus:border-[rgba(31,227,240,0.5)] focus:outline-none";
 
@@ -21,6 +23,24 @@ export const tdClass = "border-b border-bg-border/60 px-3 py-2 align-top";
 export const numClass = "text-right tabular-nums";
 
 export const INVOICE_STATUS_TONE = { draft: "neutral", sent: "info", overdue: "hot", paid: "engaged", void: "neutral" } as const;
+
+export const INVOICE_DISPLAY_STATUS_LABEL: Readonly<Record<InvoiceDisplayStatus, string>> = {
+  draft: "Draft",
+  issued: "Issued",
+  partially_paid: "Partially paid",
+  paid: "Paid",
+  void: "Void",
+  retainer: "Retainer set up",
+};
+
+export const INVOICE_DISPLAY_STATUS_TONE = {
+  draft: "neutral",
+  issued: "info",
+  partially_paid: "warm",
+  paid: "engaged",
+  void: "neutral",
+  retainer: "accent",
+} as const satisfies Readonly<Record<InvoiceDisplayStatus, "neutral" | "info" | "warm" | "engaged" | "accent">>;
 
 export function amountTone(cents: number): string {
   return cents < 0 ? "text-status-hot" : cents > 0 ? "text-status-engaged" : "text-fg-muted";

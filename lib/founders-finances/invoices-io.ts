@@ -44,6 +44,7 @@ import {
   dueDateFor,
   effectiveInvoiceStatus,
   hasAmountDueNow as hasAmountDueNowRule,
+  invoiceDisplayState,
   invoiceListStatus,
   parseLineBilling,
   retainerTaxRefusal,
@@ -51,6 +52,7 @@ import {
   totalsFromStoredLines,
   validateInvoiceCurrency,
   type InvoiceLineInput,
+  type InvoiceDisplayStatus,
   type InvoiceListStatus,
   type InvoiceStatus,
   type InvoiceTotals,
@@ -326,6 +328,10 @@ export type InvoiceListRow = InvoiceRow & {
    * an open "sent" or "overdue" one (invoice.ts invoiceListStatus).
    */
   list_status: InvoiceListStatus;
+  /** The founder-facing lifecycle; unlike list_status, overdue never replaces the lifecycle state. */
+  display_status: InvoiceDisplayStatus;
+  /** Secondary warning for an issued or partially-paid invoice past its due date. */
+  is_overdue: boolean;
   /** The ONE-TIME balance still owed (the retainer is never a balance). */
   balance_cents: number;
   /** The monthly retainer the invoice sets up (0 = none). */
@@ -341,8 +347,8 @@ function localRetainerLink(r: InvoiceRow): InvoiceListRow["retainer_link"] {
 }
 
 /**
- * `status` filters on list_status: "sent" and "overdue" are invoices with money
- * owed now; a retainer-only invoice is found under "retainer".
+ * Founder-facing filters use display_status. Legacy "sent" and "overdue"
+ * continue to filter list_status for internal callers.
  */
 export async function listInvoices(viewer: FinanceViewer, entityRef: string, status?: string): Promise<InvoiceListRow[]> {
   const entity = await requireEntity(viewer, entityRef);
@@ -354,20 +360,27 @@ export async function listInvoices(viewer: FinanceViewer, entityRef: string, sta
   );
   const today = torontoToday();
   const out = rows.map((r): InvoiceListRow => {
+    const retainerCents = retainerMonthlyCents(r);
     const effective = effectiveInvoiceStatus(
       { status: r.status, dueDate: r.due_date, totalCents: r.total_cents, amountPaidCents: r.amount_paid_cents },
+      today,
+    );
+    const display = invoiceDisplayState(
+      { status: r.status, dueDate: r.due_date, totalCents: r.total_cents, amountPaidCents: r.amount_paid_cents, retainerMonthlyCents: retainerCents },
       today,
     );
     return {
       ...r,
       effective_status: effective,
       list_status: invoiceListStatus(effective, hasAmountDueNow(r)),
+      display_status: display.displayStatus,
+      is_overdue: display.isOverdue,
       balance_cents: r.status === "void" ? 0 : balanceDueCents({ totalCents: r.total_cents, amountPaidCents: r.amount_paid_cents }),
-      retainer_cents: retainerMonthlyCents(r),
+      retainer_cents: retainerCents,
       retainer_link: localRetainerLink(r),
     };
   });
-  return status ? out.filter((r) => r.list_status === status) : out;
+  return status ? out.filter((r) => r.display_status === status || r.list_status === status) : out;
 }
 
 export async function getInvoiceDetail(viewer: FinanceViewer, invoiceId: string) {
@@ -384,16 +397,29 @@ export async function getInvoiceDetail(viewer: FinanceViewer, invoiceId: string)
     ),
     loadSettings(entity.id),
   ]);
+  const today = torontoToday();
   const effectiveStatus = effectiveInvoiceStatus(
     { status: inv.status, dueDate: inv.due_date, totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents },
-    torontoToday(),
+    today,
+  );
+  const display = invoiceDisplayState(
+    {
+      status: inv.status,
+      dueDate: inv.due_date,
+      totalCents: inv.total_cents,
+      amountPaidCents: inv.amount_paid_cents,
+      retainerMonthlyCents: retainerMonthlyCents(inv),
+    },
+    today,
   );
   return {
     entity,
     invoice: inv,
     effectiveStatus,
-    /** What the page labels it: `retainer` for an issued invoice with nothing due now (never "open"). */
+    /** Backward-compatible internal/list status used by finance summaries. */
     listStatus: invoiceListStatus(effectiveStatus, hasAmountDueNow(inv)),
+    displayStatus: display.displayStatus,
+    isOverdue: display.isOverdue,
     lines,
     contact,
     payments,

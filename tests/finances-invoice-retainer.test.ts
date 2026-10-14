@@ -296,6 +296,25 @@ async function main() {
     );
   });
 
+  await check("founder lifecycle: Draft, Issued, Partially paid, Paid, Void, retainer-only, and overdue as a warning", async () => {
+    const state = (
+      status: "draft" | "sent" | "overdue" | "paid" | "void",
+      totalCents: number,
+      amountPaidCents: number,
+      retainerMonthlyCents = 0,
+      dueDate = "2026-10-20",
+    ) => inv.invoiceDisplayState({ status, dueDate, totalCents, amountPaidCents, retainerMonthlyCents }, "2026-10-14");
+
+    assert.deepEqual(state("draft", 10000, 0), { displayStatus: "draft", isOverdue: false });
+    assert.deepEqual(state("sent", 10000, 0), { displayStatus: "issued", isOverdue: false });
+    assert.deepEqual(state("sent", 10000, 2500), { displayStatus: "partially_paid", isOverdue: false });
+    assert.deepEqual(state("sent", 10000, 10000), { displayStatus: "paid", isOverdue: false });
+    assert.deepEqual(state("void", 10000, 0), { displayStatus: "void", isOverdue: false });
+    assert.deepEqual(state("sent", 0, 0, 50000), { displayStatus: "retainer", isOverdue: false });
+    assert.deepEqual(state("sent", 10000, 0, 0, "2026-10-13"), { displayStatus: "issued", isOverdue: true });
+    assert.deepEqual(state("sent", 10000, 2500, 0, "2026-10-13"), { displayStatus: "partially_paid", isOverdue: true });
+  });
+
   await check("email/PDF composer: no retainer = byte-for-byte today's email", async () => {
     const args = {
       kind: "invoice" as const,
@@ -388,6 +407,63 @@ async function main() {
     assert.equal(Number((await row(preId)).retainer_monthly_cents), 0);
     await assert.rejects(raw.execute({ sql: `UPDATE fin_invoice_lines SET billing = 'weekly' WHERE invoice_id = ?`, args: [preId] }), /CHECK constraint/);
     await assert.rejects(raw.execute({ sql: `UPDATE fin_invoices SET retainer_monthly_cents = -1 WHERE id = ?`, args: [preId] }), /CHECK constraint/);
+  });
+
+  await check("invoice list/detail expose founder lifecycle and founder plus legacy filters stay valid", async () => {
+    const make = async (name: string, monthly = false) =>
+      invoices.createDraftInvoice(cc, "oasis", {
+        new_contact: { name, email: `${name.toLowerCase().replace(/\s+/g, "-")}@example.test` },
+        currency: "CAD",
+        lines: [{ description: monthly ? "Monthly service" : "Project", quantity: 1, unit_price: "100.00", ...(monthly ? { billing: "monthly" } : {}) }],
+      });
+    const issuedId = await make("Lifecycle Issued");
+    const partialId = await make("Lifecycle Partial");
+    const paidId = await make("Lifecycle Paid");
+    const retainerId = await make("Lifecycle Retainer", true);
+    try {
+      await raw.batch([
+        { sql: `UPDATE fin_invoices SET status = 'sent', due_date = ?, amount_paid_cents = 0 WHERE id = ?`, args: [addDays(today, 1), issuedId] },
+        { sql: `UPDATE fin_invoices SET status = 'sent', due_date = ?, amount_paid_cents = 2500 WHERE id = ?`, args: [addDays(today, -1), partialId] },
+        { sql: `UPDATE fin_invoices SET status = 'sent', due_date = ?, amount_paid_cents = total_cents WHERE id = ?`, args: [addDays(today, -1), paidId] },
+        { sql: `UPDATE fin_invoices SET status = 'sent', due_date = ?, amount_paid_cents = 0 WHERE id = ?`, args: [addDays(today, -1), retainerId] },
+      ]);
+
+      const all = await invoices.listInvoices(cc, "oasis");
+      const lifecycle = (id: string) => {
+        const found = all.find((item) => item.id === id);
+        assert.ok(found);
+        return found;
+      };
+      assert.deepEqual(
+        [lifecycle(issuedId).display_status, lifecycle(issuedId).is_overdue, lifecycle(issuedId).list_status],
+        ["issued", false, "sent"],
+      );
+      assert.deepEqual(
+        [lifecycle(partialId).display_status, lifecycle(partialId).is_overdue, lifecycle(partialId).list_status],
+        ["partially_paid", true, "overdue"],
+      );
+      assert.deepEqual(
+        [lifecycle(paidId).display_status, lifecycle(paidId).is_overdue, lifecycle(paidId).list_status],
+        ["paid", false, "paid"],
+      );
+      assert.deepEqual(
+        [lifecycle(retainerId).display_status, lifecycle(retainerId).is_overdue, lifecycle(retainerId).list_status],
+        ["retainer", false, "retainer"],
+      );
+
+      assert.ok((await invoices.listInvoices(cc, "oasis", "issued")).some((item) => item.id === issuedId), "founder Issued filter");
+      assert.ok((await invoices.listInvoices(cc, "oasis", "partially_paid")).some((item) => item.id === partialId), "founder Partially paid filter");
+      assert.ok((await invoices.listInvoices(cc, "oasis", "sent")).some((item) => item.id === issuedId), "legacy sent filter");
+      assert.ok((await invoices.listInvoices(cc, "oasis", "overdue")).some((item) => item.id === partialId), "legacy overdue filter");
+
+      const detail = await invoices.getInvoiceDetail(cc, partialId);
+      assert.deepEqual([detail.displayStatus, detail.isOverdue, detail.listStatus], ["partially_paid", true, "overdue"]);
+    } finally {
+      await raw.execute({
+        sql: `UPDATE fin_invoices SET status = 'draft', amount_paid_cents = 0 WHERE id IN (?, ?, ?, ?)`,
+        args: [issuedId, partialId, paidId, retainerId],
+      });
+    }
   });
 
   // ── mixed invoice: implementation + retainer ─────────────────────────────
@@ -988,7 +1064,9 @@ async function main() {
     const detail = await invoices.getInvoiceDetail(cc, onlyId);
     assert.equal(detail.listStatus, "retainer");
     const listPage = readFileSync(join(root, "app/founders/finances/invoices/page.tsx"), "utf8");
-    assert.match(listPage, /"retainer set up"|>retainer set up</, "the list labels it plainly");
+    const financeUi = readFileSync(join(root, "components/founders/finances/ui.ts"), "utf8");
+    assert.match(listPage, /STATUS_LABEL\[i\.display_status\]/, "the list renders the founder-facing label");
+    assert.match(financeUi, /retainer: "Retainer set up"/, "the list labels it plainly");
     const plan = await invoices.remindOverdue(cc, { send: false });
     assert.equal(plan.some((p) => p.invoice_id === onlyId), false, "never chased");
     await assert.rejects(invoices.markInvoicePaidManually(cc, onlyId, {}), (e: unknown) => e instanceof access.FinanceInputError && /nothing due now/.test(e.message));
