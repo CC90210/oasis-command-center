@@ -57,6 +57,8 @@ const FRAME_TAGS = new Set(["PageFrame", "PageHeader"]);
  * reviewer can check, and an entry whose page gains a frame must be deleted.
  */
 const NO_FRAME_EXCEPTIONS: Readonly<Record<string, string>> = {
+  "app/(marketing)/funnel/[funnel]/page.tsx":
+    "Internal rewrite target for the public checkout funnel. Its parent marketing layout owns the full canvas with the public navigation and footer; next.config.js exposes only its full-bleed marketing URLs.",
   "app/agent/page.tsx":
     "Admin > Coding harness. MainShell draws the persistent ChatWidget full-screen over this route (isChatShellPath); the page body is only the fallback shown if that chat cannot mount.",
   "app/schedule/page.tsx":
