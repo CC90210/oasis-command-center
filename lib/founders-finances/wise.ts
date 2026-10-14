@@ -4,11 +4,10 @@
  * deposits to open invoices. No I/O; wise-io.ts fetches, wise-reconcile.ts
  * writes.
  *
- * WHY WISE AND STRIPE BOTH. Wise is where money lands: a one-off or lump-sum
- * invoice is paid by bank transfer into the Wise account for its currency,
- * with the invoice number as the payment reference. Stripe is the card
- * processor and stays the path for recurring (MRR) billing, where automatic
- * payment matters. An invoice can offer either or both.
+ * PAYMENT MODES. Wise is the one-time bank rail. Stripe can collect one-time
+ * and/or recurring card payments. The compatibility value `wise_stripe` is the
+ * Hybrid product: one-time implementation by bank plus a monthly retainer by
+ * card. It never means two ways to pay the same one-time balance.
  *
  * RESPONSE SHAPES were probed live against OASIS's business profile
  * (Bravo's scripts/integrations/wise_tool.py, 2026-09-24), not taken from
@@ -25,7 +24,7 @@ export type InvoicePaymentMethod = (typeof INVOICE_PAYMENT_METHODS)[number];
 export const PAYMENT_METHOD_LABEL: Readonly<Record<InvoicePaymentMethod, string>> = {
   wise: "Bank transfer (Wise)",
   stripe: "Card (Stripe)",
-  wise_stripe: "Bank transfer (Wise) or card (Stripe)",
+  wise_stripe: "Hybrid — implementation by bank + monthly retainer by card",
 };
 
 /** A new one-off invoice asks for a bank transfer; recurring billing stays on Stripe subscriptions. */
@@ -45,7 +44,32 @@ export function storedPaymentMethod(value: unknown): InvoicePaymentMethod {
 }
 
 export const offersBankTransfer = (m: InvoicePaymentMethod): boolean => m === "wise" || m === "wise_stripe";
-export const offersCard = (m: InvoicePaymentMethod): boolean => m === "stripe" || m === "wise_stripe";
+/** A one-time card rail. Hybrid's card rail is recurring only. */
+export const offersCard = (m: InvoicePaymentMethod): boolean => m === "stripe";
+
+/**
+ * Pure product-contract validation shared by draft writes and issue/send.
+ * `oneTimeCents` is the receivable due now; `monthlyCents` is the recurring
+ * retainer and is never part of that receivable.
+ */
+export function invoicePaymentModeError(
+  method: InvoicePaymentMethod,
+  amounts: { oneTimeCents: number; monthlyCents: number },
+): string | null {
+  const oneTime = Number.isSafeInteger(amounts.oneTimeCents) && amounts.oneTimeCents > 0;
+  const monthly = Number.isSafeInteger(amounts.monthlyCents) && amounts.monthlyCents > 0;
+  if (method === "stripe") {
+    return oneTime || monthly ? null : "Card (Stripe) needs a one-time amount, a monthly retainer, or both.";
+  }
+  if (method === "wise") {
+    if (!oneTime) return "Bank transfer (Wise) needs a one-time amount greater than zero.";
+    if (monthly) return "Bank transfer (Wise) cannot include a monthly retainer; choose Hybrid for implementation by bank plus a monthly retainer by card.";
+    return null;
+  }
+  return oneTime && monthly
+    ? null
+    : "Hybrid needs both a one-time implementation amount and a monthly retainer: implementation is paid by bank and the retainer by card.";
+}
 
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : null);

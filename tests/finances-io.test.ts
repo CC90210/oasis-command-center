@@ -81,6 +81,26 @@ async function check(name: string, fn: () => Promise<void>) {
   }
 }
 
+/** Insert `race` immediately before the first matching app write batch. */
+async function withRace<T>(match: (batchJson: string) => boolean, race: () => Promise<void>, fn: () => Promise<T>): Promise<{ result: T; raced: boolean }> {
+  const { getTursoClient } = await import("../lib/turso");
+  const client = getTursoClient() as unknown as Record<string, unknown>;
+  const original = (Object.getPrototypeOf(client) as { batch: (...a: unknown[]) => Promise<unknown> }).batch;
+  let raced = false;
+  client.batch = async function (this: unknown, stmts: unknown, ...rest: unknown[]) {
+    if (!raced && match(JSON.stringify(stmts))) {
+      raced = true;
+      await race();
+    }
+    return original.call(this, stmts, ...rest);
+  };
+  try {
+    return { result: await fn(), raced };
+  } finally {
+    delete client.batch;
+  }
+}
+
 const cc = { kind: "founder" as const, ownerKey: "cc" as const, email: "conaugh@oasisai.work", userId: "u-cc" };
 const adon = { kind: "founder" as const, ownerKey: "adon" as const, email: "adon@oasisai.work", userId: "u-adon" };
 const atlas = { kind: "agent" as const, name: "atlas" as const };
@@ -264,6 +284,108 @@ async function main() {
     await assert.rejects(invoices.createDraftInvoice(cc, "oasis", input(vendorId)), generic);
     await assert.rejects(invoices.createDraftInvoice(cc, "oasis", input("con_foreign_customer")), generic);
     await invoices.setContactArchived(cc, archivedId, false);
+  });
+
+  await check("a customer with a draft cannot be archived; after reassignment or void it can be archived without losing history", async () => {
+    const blocked = await invoices.createContact(cc, "oasis", { name: "Draft-bound", email: "draft-bound@example.test" });
+    const replacement = await invoices.createContact(cc, "oasis", { name: "Replacement", email: "replacement@example.test" });
+    const draft = await invoices.createDraftInvoice(cc, "oasis", {
+      contact_id: blocked,
+      currency: "CAD",
+      lines: [{ description: "Project", quantity: 1, unit_price: "100" }],
+    });
+    const auditsBefore = await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'contact.archived'`, [blocked]);
+    await assert.rejects(
+      invoices.setContactArchived(cc, blocked, true),
+      (e: unknown) => e instanceof access.FinanceInputError && /draft invoice/.test(e.message) && /Reassign or void/.test(e.message),
+    );
+    assert.equal(Number((await raw.execute({ sql: `SELECT archived FROM fin_contacts WHERE id = ?`, args: [blocked] })).rows[0].archived), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'contact.archived'`, [blocked]), auditsBefore, "a refused archive has no audit side effect");
+
+    await invoices.updateDraftInvoice(cc, draft, {
+      contact_id: replacement,
+      currency: "CAD",
+      lines: [{ description: "Project", quantity: 1, unit_price: "100" }],
+    });
+    await invoices.setContactArchived(cc, blocked, true);
+    assert.equal(Number((await raw.execute({ sql: `SELECT archived FROM fin_contacts WHERE id = ?`, args: [blocked] })).rows[0].archived), 1);
+    assert.equal((await invoices.getInvoiceDetail(cc, draft)).invoice.contact_id, replacement);
+
+    const voidable = await invoices.createContact(cc, "oasis", { name: "Voidable", email: "voidable@example.test" });
+    const voidDraft = await invoices.createDraftInvoice(cc, "oasis", {
+      contact_id: voidable,
+      currency: "CAD",
+      lines: [{ description: "Project", quantity: 1, unit_price: "100" }],
+    });
+    await invoices.voidInvoice(cc, voidDraft);
+    await invoices.setContactArchived(cc, voidable, true);
+    assert.equal((await invoices.getInvoiceDetail(cc, voidDraft)).contact?.archived, 1, "void history remains readable");
+  });
+
+  await check("draft creation re-checks active customer in its write; a legacy archived-customer draft cannot issue or send", async () => {
+    const source = readFileSync(join(__dirname, "../lib/founders-finances/invoices-io.ts"), "utf8");
+    assert.match(source, /INSERT INTO fin_invoices[\s\S]*WHERE EXISTS \(\s*SELECT 1 FROM fin_contacts/, "the insert itself closes create-vs-archive TOCTOU");
+    assert.match(source, /WHERE id = \? AND entity_id = \? AND archived = 0 AND kind IN \('customer', 'both'\)/, "the insert requires an active customer in the same write");
+    assert.match(source, /INSERT INTO fin_invoice_lines[\s\S]*WHERE EXISTS \(SELECT 1 FROM fin_invoices WHERE id = \? AND status = 'draft'\)/, "line writes stay gated on a draft parent");
+    assert.match(source, /const out = await writeBatch\([\s\S]*if \(out\[0\]\?\.rowsAffected !== 1\) throw new FinanceInputError\("only a draft can be edited/, "draft updates inspect the conditional parent write");
+
+    const customer = await invoices.createContact(cc, "oasis", { name: "Legacy archived", email: "legacy-archived@example.test" });
+    const draft = await invoices.createDraftInvoice(cc, "oasis", {
+      contact_id: customer,
+      currency: "CAD",
+      lines: [{ description: "Project", quantity: 1, unit_price: "100" }],
+    });
+    await raw.execute({ sql: `UPDATE fin_contacts SET archived = 1 WHERE id = ?`, args: [customer] });
+    const generic = (e: unknown) => e instanceof access.FinanceInputError && e.message === "choose an active customer from this book";
+    await assert.rejects(invoices.finalizeInvoice(cc, draft), generic);
+    await assert.rejects(invoices.sendInvoice(cc, draft), generic);
+    const after = (await raw.execute({ sql: `SELECT status, number, recognition_entry_id FROM fin_invoices WHERE id = ?`, args: [draft] })).rows[0];
+    assert.deepEqual([after.status, after.number, after.recognition_entry_id], ["draft", null, null]);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source_ref = ?`, [draft]), 0);
+  });
+
+  await check("archive races cannot mutate a draft or issue it after its customer becomes inactive", async () => {
+    const editCustomer = await invoices.createContact(cc, "oasis", { name: "Edit race", email: "edit-race@example.test" });
+    const editDraft = await invoices.createDraftInvoice(cc, "oasis", {
+      contact_id: editCustomer,
+      currency: "CAD",
+      lines: [{ description: "Original", quantity: 1, unit_price: "100" }],
+    });
+    const editRace = await withRace(
+      (batch) => batch.includes("invoice.draft_updated") && batch.includes(editDraft),
+      () => raw.execute({ sql: `UPDATE fin_contacts SET archived = 1 WHERE id = ?`, args: [editCustomer] }).then(() => undefined),
+      () => assert.rejects(
+        invoices.updateDraftInvoice(cc, editDraft, {
+          contact_id: editCustomer,
+          currency: "CAD",
+          lines: [{ description: "Raced replacement", quantity: 1, unit_price: "900" }],
+        }),
+        access.FinanceInputError,
+      ),
+    );
+    assert.equal(editRace.raced, true);
+    const editAfter = (await raw.execute({ sql: `SELECT description, amount_cents FROM fin_invoice_lines WHERE invoice_id = ?`, args: [editDraft] })).rows[0];
+    assert.deepEqual([editAfter.description, Number(editAfter.amount_cents)], ["Original", 10000]);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.draft_updated'`, [editDraft]), 0);
+
+    const issueCustomer = await invoices.createContact(cc, "oasis", { name: "Issue race", email: "issue-race@example.test" });
+    const issueDraft = await invoices.createDraftInvoice(cc, "oasis", {
+      contact_id: issueCustomer,
+      currency: "CAD",
+      lines: [{ description: "Project", quantity: 1, unit_price: "200" }],
+    });
+    const nextBefore = Number((await raw.execute({ sql: `SELECT invoice_next_number FROM fin_settings WHERE entity_id = ?`, args: [B] })).rows[0].invoice_next_number);
+    const issueRace = await withRace(
+      (batch) => batch.includes("invoice.issued") && batch.includes(issueDraft),
+      () => raw.execute({ sql: `UPDATE fin_contacts SET archived = 1 WHERE id = ?`, args: [issueCustomer] }).then(() => undefined),
+      () => assert.rejects(invoices.finalizeInvoice(cc, issueDraft), (e: unknown) => e instanceof access.FinanceInputError && e.message === "choose an active customer from this book"),
+    );
+    assert.equal(issueRace.raced, true);
+    const issueAfter = (await raw.execute({ sql: `SELECT status, number, recognition_entry_id FROM fin_invoices WHERE id = ?`, args: [issueDraft] })).rows[0];
+    assert.deepEqual([issueAfter.status, issueAfter.number, issueAfter.recognition_entry_id], ["draft", null, null]);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source_ref = ?`, [issueDraft]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.issued'`, [issueDraft]), 0);
+    assert.equal(Number((await raw.execute({ sql: `SELECT invoice_next_number FROM fin_settings WHERE entity_id = ?`, args: [B] })).rows[0].invoice_next_number), nextBefore);
   });
 
   await check("ledger: balanced entries post atomically, unbalanced and foreign accounts are refused", async () => {

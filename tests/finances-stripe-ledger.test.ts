@@ -128,6 +128,26 @@ async function check(name: string, fn: () => Promise<void>) {
   }
 }
 
+/** Insert `race` immediately before the first matching app write batch. */
+async function withRace<T>(match: (batchJson: string) => boolean, race: () => Promise<void>, fn: () => Promise<T>): Promise<{ result: T; raced: boolean }> {
+  const { getTursoClient } = await import("../lib/turso");
+  const client = getTursoClient() as unknown as Record<string, unknown>;
+  const original = (Object.getPrototypeOf(client) as { batch: (...a: unknown[]) => Promise<unknown> }).batch;
+  let raced = false;
+  client.batch = async function (this: unknown, stmts: unknown, ...rest: unknown[]) {
+    if (!raced && match(JSON.stringify(stmts))) {
+      raced = true;
+      await race();
+    }
+    return original.call(this, stmts, ...rest);
+  };
+  try {
+    return { result: await fn(), raced };
+  } finally {
+    delete client.batch;
+  }
+}
+
 const cc = { kind: "founder" as const, ownerKey: "cc" as const, email: "conaugh@oasisai.work", userId: "u-cc" };
 
 async function main() {
@@ -159,7 +179,7 @@ async function main() {
 
   const payment = async (chargeId: string) =>
     (await raw.execute({ sql: `SELECT * FROM fin_payments WHERE kind = 'payment' AND stripe_charge_id = ?`, args: [chargeId] })).rows[0] as unknown as
-      | { id: string; fee_status: string; fee_cad_cents: number | null; income_account_id: string; stripe_invoice_id: string | null; entry_id: string | null }
+      | { id: string; fee_status: string; fee_cad_cents: number | null; income_account_id: string; stripe_invoice_id: string | null; invoice_id: string | null; entry_id: string | null }
       | undefined;
   const feeEntry = async (chargeId: string) =>
     (
@@ -385,6 +405,93 @@ async function main() {
     assert.equal(retry.status, "processed", "Stripe's redelivery of the failed event succeeds");
     assert.equal((await payment(W3.id))!.income_account_id, SUBSCRIPTION);
     assert.equal(await feeEntries(W3.id), 1);
+  });
+
+  await check("invoice metadata can never attach an overpayment, on either the new-row or existing-row path", async () => {
+    const contactId = "fc_stripe_overpay";
+    await raw.execute({
+      sql: `INSERT INTO fin_contacts (id, entity_id, kind, name, email) VALUES (?, ?, 'customer', 'Overpay Client', 'overpay@example.test')`,
+      args: [contactId, B],
+    });
+    const makeInvoice = async (id: string, price: string, link: string) => {
+      await raw.execute({
+        sql: `INSERT INTO fin_invoices
+                (id, entity_id, contact_id, number, status, issue_date, due_date, currency, subtotal_cents, total_cents,
+                 amount_paid_cents, stripe_price_id, stripe_payment_link_id, stripe_payment_link_url, created_by)
+              VALUES (?, ?, ?, ?, 'sent', '2026-09-20', '2026-10-04', 'CAD', 10000, 10000, 7500, ?, ?, ?, 'test')`,
+        args: [id, B, contactId, `OASIS-${id}`, price, link, `https://buy.stripe.com/${link}`],
+      });
+    };
+    const recorded = async (id: string) => raw.execute({ sql: `SELECT status, amount_paid_cents FROM fin_invoices WHERE id = ?`, args: [id] });
+
+    const freshInvoice = "inv_overpay_fresh";
+    await makeInvoice(freshInvoice, "price_overpay_fresh", "plink_overpay_fresh");
+    const freshCharge = liveCharge({ id: "ch_overpay_fresh", pi: "pi_overpay_fresh", at: "2026-09-23T17:00:00Z", amount: 5000, bt: null });
+    freshCharge.metadata = { fin_invoice_id: freshInvoice, fin_entity_id: B, fin_invoice_price_id: "price_overpay_fresh" };
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      await ingest.recordStripeCharge(chargeFacts(freshCharge)!, { fetchFees: false });
+    } finally {
+      console.error = logged;
+    }
+    assert.equal((await payment("ch_overpay_fresh"))!.invoice_id, null, "the new payment stays recorded but unlinked");
+    const freshRow = (await recorded(freshInvoice)).rows[0];
+    assert.deepEqual([freshRow.status, Number(freshRow.amount_paid_cents)], ["sent", 7500]);
+
+    const existingInvoice = "inv_overpay_existing";
+    await makeInvoice(existingInvoice, "price_overpay_existing", "plink_overpay_existing");
+    const existingCharge = liveCharge({ id: "ch_overpay_existing", pi: "pi_overpay_existing", at: "2026-09-23T17:30:00Z", amount: 5000, bt: null });
+    await ingest.recordStripeCharge(chargeFacts(existingCharge)!, { fetchFees: false });
+    existingCharge.metadata = { fin_invoice_id: existingInvoice, fin_entity_id: B, fin_invoice_price_id: "price_overpay_existing" };
+    console.error = () => {};
+    try {
+      await ingest.recordStripeCharge(chargeFacts(existingCharge)!, { fetchFees: false });
+    } finally {
+      console.error = logged;
+    }
+    assert.equal((await payment("ch_overpay_existing"))!.invoice_id, null, "an existing payment is not re-linked above the balance");
+    const invoice = (await recorded(existingInvoice)).rows[0];
+    assert.deepEqual([invoice.status, Number(invoice.amount_paid_cents)], ["sent", 7500]);
+    await booksBalance();
+  });
+
+  await check("a concurrent balance change makes both Stripe link writes lose their invoice CAS and stay unlinked", async () => {
+    const makeInvoice = async (id: string, contactId: string, price: string, link: string) => {
+      await raw.execute({ sql: `INSERT INTO fin_contacts (id, entity_id, kind, name, email) VALUES (?, ?, 'customer', 'Race Client', 'race@example.test')`, args: [contactId, B] });
+      await raw.execute({
+        sql: `INSERT INTO fin_invoices
+                (id, entity_id, contact_id, number, status, issue_date, due_date, currency, subtotal_cents, total_cents,
+                 stripe_price_id, stripe_payment_link_id, stripe_payment_link_url, created_by)
+              VALUES (?, ?, ?, ?, 'sent', '2026-09-20', '2026-10-04', 'CAD', 10000, 10000, ?, ?, ?, 'test')`,
+        args: [id, B, contactId, `OASIS-${id}`, price, link, `https://buy.stripe.com/${link}`],
+      });
+    };
+    const newInvoice = "inv_stripe_race_new";
+    await makeInvoice(newInvoice, "fc_stripe_race_new", "price_stripe_race_new", "plink_stripe_race_new");
+    const newCharge = liveCharge({ id: "ch_stripe_race_new", pi: "pi_stripe_race_new", at: "2026-09-23T18:00:00Z", amount: 10000, bt: null });
+    newCharge.metadata = { fin_invoice_id: newInvoice, fin_entity_id: B, fin_invoice_price_id: "price_stripe_race_new" };
+    const newRace = await withRace(
+      (batch) => batch.includes("ch_stripe_race_new") && batch.includes("INSERT OR IGNORE INTO fin_payments"),
+      () => raw.execute({ sql: `UPDATE fin_invoices SET amount_paid_cents = 5000 WHERE id = ?`, args: [newInvoice] }).then(() => undefined),
+      () => ingest.recordStripeCharge(chargeFacts(newCharge)!, { fetchFees: false }),
+    );
+    assert.equal(newRace.raced, true);
+    assert.equal((await payment("ch_stripe_race_new"))!.invoice_id, null, "the new-row CASE rechecked the invoice snapshot");
+
+    const existingInvoice = "inv_stripe_race_existing";
+    await makeInvoice(existingInvoice, "fc_stripe_race_existing", "price_stripe_race_existing", "plink_stripe_race_existing");
+    const existingCharge = liveCharge({ id: "ch_stripe_race_existing", pi: "pi_stripe_race_existing", at: "2026-09-23T18:30:00Z", amount: 10000, bt: null });
+    await ingest.recordStripeCharge(chargeFacts(existingCharge)!, { fetchFees: false });
+    existingCharge.metadata = { fin_invoice_id: existingInvoice, fin_entity_id: B, fin_invoice_price_id: "price_stripe_race_existing" };
+    const existingRace = await withRace(
+      (batch) => batch.includes("stripe_invoice_link") && batch.includes(existingInvoice),
+      () => raw.execute({ sql: `UPDATE fin_invoices SET amount_paid_cents = 5000 WHERE id = ?`, args: [existingInvoice] }).then(() => undefined),
+      () => ingest.recordStripeCharge(chargeFacts(existingCharge)!, { fetchFees: false }),
+    );
+    assert.equal(existingRace.raced, true);
+    assert.equal((await payment("ch_stripe_race_existing"))!.invoice_id, null, "the existing-row UPDATE rechecked the invoice snapshot");
+    await booksBalance();
   });
 
   await check("books still balance after everything; Stripe was only ever read", async () => {

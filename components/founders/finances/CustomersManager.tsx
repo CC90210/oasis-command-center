@@ -53,7 +53,7 @@ export function CustomersManager({ entity, contacts }: { entity: string; contact
                       payload={{ contact_id: customer.id }}
                       label="Archive"
                       ariaLabel={`Archive ${customer.name}`}
-                      confirm={`Archive ${customer.name}? This leaves new-invoice choices while preserving existing invoices and Stripe linkage.`}
+                      confirm={`Archive ${customer.name}? This removes the customer from new-invoice choices while preserving existing invoices and Stripe linkage.`}
                     />
                   </div>
                 </div>

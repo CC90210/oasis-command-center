@@ -284,14 +284,18 @@ const PAID_SUM = `(SELECT COALESCE(SUM(p.amount_cents), 0) FROM fin_payments p
  * covered. A RECOMPUTE, not an increment: running it twice (a retried
  * webhook, two events for one charge) cannot count a payment twice.
  */
-export function recomputeInvoicePaidStatement(invoiceId: string, paidAtIso: string): InStatement {
+export function recomputeInvoicePaidStatement(
+  invoiceId: string,
+  paidAtIso: string,
+  gate?: { sql: string; args: Array<string | number | null> },
+): InStatement {
   return {
     sql: `UPDATE fin_invoices
              SET amount_paid_cents = ${PAID_SUM},
                  status = CASE WHEN ${PAID_SUM} >= total_cents AND total_cents > 0 THEN 'paid' ELSE status END,
                  paid_at = CASE WHEN ${PAID_SUM} >= total_cents AND total_cents > 0 THEN COALESCE(paid_at, ?) ELSE paid_at END,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-           WHERE id = ? AND status IN ('sent', 'overdue', 'paid')`,
-    args: [paidAtIso, invoiceId],
+           WHERE id = ? AND status IN ('sent', 'overdue', 'paid')${gate ? ` AND (${gate.sql})` : ""}`,
+    args: [paidAtIso, invoiceId, ...(gate?.args || [])],
   };
 }

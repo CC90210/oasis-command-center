@@ -36,7 +36,7 @@ import { FinanceInputError, FinanceNotFound, requireEntity } from "./access-io";
 import { buildPosting } from "./ledger-io";
 import { usdCadRate } from "./fx-io";
 import { buildSettlementPosting, loadContact, loadInvoice, recomputeInvoicePaidStatement, type InvoiceRow } from "./invoice-store";
-import { deactivatePaymentLinkIfPaid } from "./stripe-ingest";
+import { retireOneTimePaymentLinkForExternalPayment } from "./stripe-ingest";
 import { dismissKey, proposeWiseMatches, settlementFor, type OpenInvoiceForMatch, type WiseDeposit } from "./wise";
 import { WISE_PAYMENT_SOURCE, wiseFitid } from "./wise-feed";
 import { recentWiseDeposits } from "./wise-io";
@@ -194,6 +194,7 @@ async function recordWisePayment(
   const memo = `Wise ${deposit.ref} for invoice ${inv.number}`;
   const contact = await loadContact(inv.contact_id);
   const paymentId = newId("pay");
+  const paymentGate = { sql: `EXISTS (SELECT 1 FROM fin_payments WHERE id = ?)`, args: [paymentId] };
   // A USD payment STAYS USD at Wise, but the settlement (the manual mark-paid
   // shape) books its receipt in CAD. So a foreign-currency settlement lands in
   // FX clearing, and a second entry moves the USD itself onto chequing at the
@@ -211,16 +212,23 @@ async function recordWisePayment(
     sourceRef: deposit.ref,
     memo,
     createdBy,
+    gate: paymentGate,
   });
   const statements: InStatement[] = [
     {
       sql: `INSERT INTO fin_payments (id, entity_id, kind, source, occurred_at, occurred_on, amount_cents, currency, settlement_cad_cents,
               fee_status, settlement_estimated, invoice_id, contact_id, customer_name, customer_email, deposit_account_id, description, livemode, created_by)
-            VALUES (?, ?, 'payment', 'manual', ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+            SELECT ?, ?, 'payment', 'manual', ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, 1, ?
+             WHERE EXISTS (
+               SELECT 1 FROM fin_invoices
+                WHERE id = ? AND status = ? AND total_cents = ? AND amount_paid_cents = ? AND currency = ?
+                  AND stripe_price_id IS NULL AND stripe_payment_link_id IS NULL AND stripe_payment_link_url IS NULL
+             )`,
       args: [
         paymentId, e, deposit.occurredAt, date, settle.amountCents, inv.currency, receivedCad, estimated, inv.id, inv.contact_id,
         contact?.name || deposit.sender, contact?.email || "", bank,
         `Wise ${deposit.ref}${deposit.sender ? ` from ${deposit.sender}` : ""}`.slice(0, 200), createdBy,
+        inv.id, inv.status, inv.total_cents, inv.amount_paid_cents, inv.currency,
       ],
     },
     ...settlement.statements,
@@ -234,6 +242,7 @@ async function recordWisePayment(
       source: WISE_PAYMENT_SOURCE,
       sourceRef: `${deposit.ref}:${inv.currency}`,
       createdBy,
+      gate: paymentGate,
       lines: [
         { accountId: bank, currency: inv.currency, debitCents: settle.amountCents, contactId: inv.contact_id, memo },
         { accountId: fxClearing, currency: inv.currency, creditCents: settle.amountCents, memo },
@@ -249,6 +258,7 @@ async function recordWisePayment(
       source: WISE_FEE_SOURCE,
       sourceRef: deposit.ref,
       createdBy,
+      gate: paymentGate,
       lines: [
         { accountId: accountId(e, BANK_FEES_CODE), currency: inv.currency, debitCents: settle.feeCents, memo: "Wise fee" },
         { accountId: bank, currency: inv.currency, creditCents: settle.feeCents, memo: "Wise fee" },
@@ -257,28 +267,35 @@ async function recordWisePayment(
     statements.push(...fee.statements);
   }
   statements.push(
-    recomputeInvoicePaidStatement(inv.id, deposit.occurredAt),
+    recomputeInvoicePaidStatement(inv.id, deposit.occurredAt, paymentGate),
     {
       sql: `UPDATE fin_bank_transactions SET status = 'excluded', memo = ?
-             WHERE entity_id = ? AND account_id = ? AND fitid = ? AND status IN ('unreviewed', 'draft') AND entry_id IS NULL`,
-      args: [`Recorded as payment of invoice ${inv.number} (Wise reconcile)`, e, bank, fitid],
+             WHERE entity_id = ? AND account_id = ? AND fitid = ? AND status IN ('unreviewed', 'draft') AND entry_id IS NULL
+               AND EXISTS (SELECT 1 FROM fin_payments WHERE id = ?)`,
+      args: [`Recorded as payment of invoice ${inv.number} (Wise reconcile)`, e, bank, fitid, paymentId],
     },
-    auditStatement({
-      entityId: e,
-      actor: createdBy,
-      action,
-      objectType: "invoice",
-      objectId: inv.id,
-      detail: { wise_ref: deposit.ref, amount: settle.amountCents, fee: settle.feeCents, receivedCad, estimated: estimated === 1 },
-    }),
+    {
+      sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+            SELECT ?, ?, ?, ?, 'invoice', ?, ? WHERE EXISTS (SELECT 1 FROM fin_payments WHERE id = ?)`,
+      args: [
+        newId("aud"), e, createdBy.slice(0, 200), action, inv.id,
+        JSON.stringify({ wise_ref: deposit.ref, amount: settle.amountCents, fee: settle.feeCents, receivedCad, estimated: estimated === 1 }),
+        paymentId,
+      ],
+    },
   );
+  // A stale full-balance card link must be off before a bank receipt reduces
+  // the balance. This is a no-op for normal Wise/Hybrid invoices with no link.
+  await retireOneTimePaymentLinkForExternalPayment(inv);
   try {
-    await writeBatch(statements);
+    const out = await writeBatch(statements);
+    if (out[0]?.rowsAffected !== 1) {
+      throw new FinanceInputError(`invoice ${inv.number || inv.id} changed while its Wise payment was being recorded; refresh and try again`);
+    }
   } catch (err) {
     if (isUniqueViolation(err)) return null;
     throw err;
   }
-  await deactivatePaymentLinkIfPaid(inv.id).catch((err) => console.error("[finances:wise] link deactivate failed", err instanceof Error ? err.message : err));
   return paymentId;
 }
 

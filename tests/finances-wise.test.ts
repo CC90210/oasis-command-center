@@ -310,7 +310,7 @@ async function main() {
     );
   });
 
-  await check("migration 184 applies additively: old rows read 'stripe', new drafts default to 'wise', the CHECK holds", async () => {
+  await check("migration 184 applies additively: old rows read 'stripe', new drafts default to 'wise', and legacy Hybrid-without-retainer is refused", async () => {
     await raw.executeMultiple(readFileSync(join(root, "database/turso/184_finance_wise_payments.turso.sql"), "utf8"));
     store.resetPaymentMethodColumnMemo();
     assert.equal(await store.paymentMethodColumnReady(), true);
@@ -319,8 +319,11 @@ async function main() {
     assert.equal((await invoices.getInvoiceDetail(cc, fresh)).paymentMethod, "wise", "a new one-off invoice asks for a bank transfer");
     await invoices.updateDraftInvoice(cc, fresh, { contact_id: (await store.loadInvoice(fresh))!.contact_id, currency: "USD", lines: [{ description: "y", quantity: 1, unit_price: "12" }] });
     assert.equal((await invoices.getInvoiceDetail(cc, fresh)).paymentMethod, "wise", "an edit that does not mention the method keeps it");
-    await invoices.updateDraftInvoice(cc, fresh, { contact_id: (await store.loadInvoice(fresh))!.contact_id, currency: "USD", payment_method: "wise_stripe", lines: [{ description: "y", quantity: 1, unit_price: "12" }] });
-    assert.equal((await invoices.getInvoiceDetail(cc, fresh)).paymentMethod, "wise_stripe");
+    await assert.rejects(
+      invoices.updateDraftInvoice(cc, fresh, { contact_id: (await store.loadInvoice(fresh))!.contact_id, currency: "USD", payment_method: "wise_stripe", lines: [{ description: "y", quantity: 1, unit_price: "12" }] }),
+      /Hybrid needs both a one-time implementation amount and a monthly retainer/,
+    );
+    assert.equal((await invoices.getInvoiceDetail(cc, fresh)).paymentMethod, "wise", "a refused mode change writes nothing");
     await assert.rejects(invoices.updateDraftInvoice(cc, fresh, { contact_id: (await store.loadInvoice(fresh))!.contact_id, payment_method: "paypal", lines: [{ description: "y", quantity: 1, unit_price: "12" }] }), access.FinanceInputError);
     await assert.rejects(raw.execute({ sql: `UPDATE fin_invoices SET payment_method = 'paypal' WHERE id = ?`, args: [fresh] }), /CHECK constraint/);
   });
@@ -331,6 +334,7 @@ async function main() {
     const st = await wiseIo.wiseStatus();
     assert.equal(st.configured, false);
     assert.match(String(st.error), /Wise isn't connected yet/);
+    assert.doesNotMatch(String(st.error), /card link|fallback/i, "Wise readiness never promises a different payment rail");
     assert.doesNotMatch(String(st.error), /WISE_|env|server/, "founder copy never names settings or infrastructure");
     const r = await wiseIo.receivingDetailsOrReason("CAD");
     assert.equal(r.ok, false);
@@ -345,7 +349,10 @@ async function main() {
 
   await check("not configured: a Wise invoice still goes out with the instructions — and is refused when there is no way to pay at all", async () => {
     const id = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Hooli", email: "ap@hooli.test" }, currency: "CAD", lines: [{ description: "Build", quantity: 1, unit_price: "500" }] });
-    await assert.rejects(invoices.sendInvoice(cc, id), (e: unknown) => e instanceof access.FinanceInputError && /Wise isn't connected/.test(e.message) && /NOT emailed/.test(e.message));
+    await assert.rejects(
+      invoices.sendInvoice(cc, id),
+      (e: unknown) => e instanceof access.FinanceInputError && /Wise isn't connected/.test(e.message) && /NOT emailed/.test(e.message) && !/card link|fallback/i.test(e.message),
+    );
     await raw.execute({ sql: `UPDATE fin_settings SET payment_instructions = 'Interac e-Transfer to billing@oasisai.work' WHERE entity_id = ?`, args: [B] });
     await assert.rejects(invoices.sendInvoice(cc, id), /mailbox/i, "with instructions it gets as far as the mailer (none configured in tests)");
     await raw.execute({ sql: `UPDATE fin_settings SET payment_instructions = '' WHERE entity_id = ?`, args: [B] });

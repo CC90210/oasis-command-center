@@ -53,7 +53,7 @@ export function wiseConfig(): { token: string; profileId: string } | null {
   return token && /^\d+$/.test(profileId) ? { token, profileId } : null;
 }
 
-const NOT_CONFIGURED = "Wise isn't connected yet, so invoices go out with the card link and your payment instructions.";
+const NOT_CONFIGURED = "Wise isn't connected yet, so bank-transfer invoices need written payment instructions or must wait until Wise is connected.";
 
 function requireConfig(): { token: string; profileId: string } {
   const cfg = wiseConfig();

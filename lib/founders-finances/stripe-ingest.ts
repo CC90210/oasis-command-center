@@ -90,6 +90,7 @@ import {
   balanceTxnFacts,
   type BalanceTxnFacts,
   type ChargeFacts,
+  type FinMetadata,
   type InvoicePaidFacts,
   type RefundFacts,
   type StripeEventEnvelope,
@@ -100,9 +101,10 @@ import { auditStatement, finDb, isUniqueViolation, newId, query, queryOne, write
 import { buildPosting } from "./ledger-io";
 import { LedgerError } from "./ledger";
 import { rateLookupFor, usdCadRate } from "./fx-io";
-import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement } from "./invoice-store";
+import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement, type InvoiceRow } from "./invoice-store";
 import { financeTenantId, getStripeClient, listAll, pinnedStripeAccount, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
 import { recordStripePayout, retryUnbookedPayouts, unbookedPayouts } from "./stripe-payouts-io";
+import { FinanceInputError } from "./access-io";
 
 const ACTOR = "stripe";
 const E = BUSINESS_ENTITY_ID;
@@ -363,15 +365,80 @@ async function readyKey(): Promise<string | null> {
   }
 }
 
+function mergedFinMetadata(primary: FinMetadata, fallback: FinMetadata): FinMetadata {
+  return {
+    finInvoiceId: primary.finInvoiceId || fallback.finInvoiceId,
+    finEntityId: primary.finEntityId || fallback.finEntityId,
+    finInvoicePriceId: primary.finInvoicePriceId || fallback.finInvoicePriceId,
+  };
+}
+
+/** Turn a Payment Link off, then prove from Stripe's live state that it is off. */
+export async function deactivateAndConfirmPaymentLink(key: string, linkId: string): Promise<void> {
+  await stripeRequest(key, "POST", `/v1/payment_links/${encodeURIComponent(linkId)}`, { active: "false" });
+  const confirmed = await stripeRequest(key, "GET", `/v1/payment_links/${encodeURIComponent(linkId)}`);
+  if (confirmed.active !== false) throw new Error(`Stripe still reports payment link ${linkId} as active`);
+}
+
+export const EXTERNAL_PAYMENT_LINK_RETIRE_FAILED =
+  "Stripe couldn't safely turn off this invoice's card link, so the external payment was not recorded. Check Stripe and try again.";
+export const DRAFT_EDIT_LINK_RETIRE_FAILED =
+  "Stripe couldn't safely turn off this draft's old card link, so the draft was not changed. Check Stripe and try again.";
+
+/**
+ * Before money received outside Stripe is recorded, retire the exact one-time
+ * link seen by the caller and clear only its one-time fields. The compare-and-
+ * set makes a concurrent invoice/link change fail closed; retainer fields are
+ * deliberately untouched.
+ */
+async function retireOneTimePaymentLink(inv: InvoiceRow, failureMessage: string): Promise<void> {
+  if (!inv.stripe_payment_link_id && !inv.stripe_price_id && !inv.stripe_payment_link_url) return;
+  try {
+    if (!inv.stripe_payment_link_id) throw new Error(`invoice ${inv.id} has stored card-link fields but no Payment Link id`);
+    const { key } = await getStripeClient();
+    await deactivateAndConfirmPaymentLink(key, inv.stripe_payment_link_id);
+    const cleared = await finDb().execute({
+      sql: `UPDATE fin_invoices
+               SET stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ? AND status = ? AND total_cents = ? AND amount_paid_cents = ? AND currency = ?
+               AND stripe_price_id IS ? AND stripe_payment_link_id IS ? AND stripe_payment_link_url IS ?`,
+      args: [
+        inv.id,
+        inv.status,
+        inv.total_cents,
+        inv.amount_paid_cents,
+        inv.currency,
+        inv.stripe_price_id,
+        inv.stripe_payment_link_id,
+        inv.stripe_payment_link_url,
+      ],
+    });
+    if (cleared.rowsAffected !== 1) throw new Error(`invoice ${inv.id} changed while its card link was being retired`);
+  } catch (e) {
+    console.error("[finances:stripe] could not safely retire invoice payment link", inv.id, e instanceof Error ? e.message : e);
+    throw new FinanceInputError(failureMessage);
+  }
+}
+
+export async function retireOneTimePaymentLinkForExternalPayment(inv: InvoiceRow): Promise<void> {
+  await retireOneTimePaymentLink(inv, EXTERNAL_PAYMENT_LINK_RETIRE_FAILED);
+}
+
+/** Editing a draft may change the amount/currency/rail; retire its now-wrong live link before changing those fields. */
+export async function retireOneTimePaymentLinkForDraftEdit(inv: InvoiceRow): Promise<void> {
+  await retireOneTimePaymentLink(inv, DRAFT_EDIT_LINK_RETIRE_FAILED);
+}
+
 async function fetchChargeExpanded(key: string, chargeId: string): Promise<ChargeFacts | null> {
   const u = new URLSearchParams();
   u.append("expand[]", "balance_transaction");
   u.append("expand[]", "payment_intent");
   const raw = await stripeRequest(key, "GET", `/v1/charges/${encodeURIComponent(chargeId)}`, u);
   const facts = chargeFacts(raw);
-  if (facts && !facts.metadata.finInvoiceId) {
+  if (facts) {
     const piMeta = finMetadata(raw.payment_intent);
-    if (piMeta.finInvoiceId) facts.metadata = piMeta;
+    facts.metadata = mergedFinMetadata(facts.metadata, piMeta);
   }
   return facts;
 }
@@ -385,7 +452,26 @@ async function contactForCustomer(customerId: string | null): Promise<string | n
   return row?.id ?? null;
 }
 
-async function linkableInvoice(invoiceId: string | null, currency: string): Promise<string | null> {
+function invoiceLinkSnapshot(inv: InvoiceRow): { sql: string; args: Array<string | number | null> } {
+  return {
+    sql: `EXISTS (
+            SELECT 1 FROM fin_invoices
+             WHERE id = ? AND status = ? AND total_cents = ? AND amount_paid_cents = ? AND currency = ?
+               AND stripe_price_id IS ? AND stripe_payment_link_id IS ?
+          )`,
+    args: [inv.id, inv.status, inv.total_cents, inv.amount_paid_cents, inv.currency, inv.stripe_price_id, inv.stripe_payment_link_id],
+  };
+}
+
+/**
+ * A metadata link is only a candidate: the write repeats this row snapshot so
+ * a concurrent external payment cannot make a formerly-safe charge overpay
+ * the invoice. New Payment Links pin their Price id in PaymentIntent metadata.
+ * Older Checkout/Payment Link payloads may not expose that marker, so legacy
+ * charges fall back to status/currency/balance safety instead of pretending a
+ * Checkout Session id is available on Charge or PaymentIntent webhooks.
+ */
+async function linkableInvoice(invoiceId: string | null, currency: string, amountCents: number, priceId: string | null): Promise<InvoiceRow | null> {
   if (!invoiceId) return null;
   const inv = await loadInvoice(invoiceId);
   if (!inv || inv.entity_id !== E) {
@@ -397,10 +483,19 @@ async function linkableInvoice(invoiceId: string | null, currency: string): Prom
     return null;
   }
   if (inv.currency !== currency) {
-    console.warn("[finances:stripe] payment currency does not match invoice", invoiceId, currency, inv.currency);
+    console.error("[finances:stripe] refusing invoice link: payment currency does not match invoice", invoiceId, currency, inv.currency);
     return null;
   }
-  return inv.id;
+  const due = Math.max(0, inv.total_cents - inv.amount_paid_cents);
+  if (!Number.isSafeInteger(amountCents) || amountCents <= 0 || amountCents > due) {
+    console.error("[finances:stripe] refusing invoice link: payment exceeds the remaining balance", invoiceId, amountCents, due);
+    return null;
+  }
+  if (priceId && priceId !== inv.stripe_price_id) {
+    console.error("[finances:stripe] refusing invoice link: payment came from a stale invoice price", invoiceId, priceId, inv.stripe_price_id);
+    return null;
+  }
+  return inv;
 }
 
 /** CAD settlement from a balance transaction, or null. */
@@ -483,7 +578,7 @@ export async function recordStripeCharge(
     await recordOnExistingPayment(
       existing,
       { chargeId: charge.chargeId, paymentIntentId: charge.paymentIntentId, stripeInvoiceId: charge.stripeInvoiceId, balanceTxnId: charge.balanceTxnId },
-      charge.metadata.finInvoiceId,
+      charge.metadata,
       facts,
     );
     if (existing.fee_status === "pending" || existing.entry_id === null) {
@@ -506,8 +601,14 @@ export async function recordStripeCharge(
       estimated = 1;
     }
   }
-  const invoiceId = await linkableInvoice(charge.metadata.finInvoiceId, charge.currency);
-  const contactId = invoiceId ? (await loadInvoice(invoiceId))?.contact_id ?? null : await contactForCustomer(charge.customerId);
+  const linkedInvoice = await linkableInvoice(
+    charge.metadata.finInvoiceId,
+    charge.currency,
+    charge.amountCents,
+    charge.metadata.finInvoicePriceId,
+  );
+  const invoiceId = linkedInvoice?.id ?? null;
+  const contactId = linkedInvoice?.contact_id ?? (await contactForCustomer(charge.customerId));
   const paymentId = newId("pay");
   // Only a payment booked as revenue needs its revenue account; a fin
   // invoice's payment settles AR.
@@ -520,6 +621,8 @@ export async function recordStripeCharge(
   // The client record this Stripe customer is (the ledger's customer_id join); the Stripe id rides on the payment row.
   const customerRecord = await customerRecordFor(tenant, charge.customerId);
   const providerPaymentId = charge.chargeId || charge.paymentIntentId || charge.stripeInvoiceId || paymentId;
+  const invoiceSnapshot = linkedInvoice ? invoiceLinkSnapshot(linkedInvoice) : null;
+  const invoiceValueSql = invoiceSnapshot ? `CASE WHEN ${invoiceSnapshot.sql} THEN ? ELSE NULL END` : "NULL";
   const statements: InStatement[] = [
     {
       sql: `INSERT OR IGNORE INTO fin_payments
@@ -527,7 +630,7 @@ export async function recordStripeCharge(
                fee_cad_cents, fee_status, settlement_estimated, invoice_id, contact_id, customer_name, customer_email,
                stripe_customer_id, stripe_charge_id, stripe_payment_intent_id, stripe_invoice_id, stripe_balance_txn_id,
                deposit_account_id, income_account_id, description, livemode, created_by)
-            VALUES (?, ?, 'payment', 'stripe', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+            SELECT ?, ?, 'payment', 'stripe', ?, ?, ?, ?, ?, ?, ?, ?, ${invoiceValueSql}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?`,
       args: [
         paymentId,
         E,
@@ -539,7 +642,7 @@ export async function recordStripeCharge(
         fromBt ? fromBt.fee : null,
         "pending",
         estimated,
-        invoiceId,
+        ...(invoiceSnapshot && linkedInvoice ? [...invoiceSnapshot.args, linkedInvoice.id] : []),
         contactId,
         charge.customerName.slice(0, 200),
         charge.customerEmail.slice(0, 254),
@@ -571,8 +674,23 @@ export async function recordStripeCharge(
       { ifChanged: true },
     ),
   ];
-  if (invoiceId) statements.push(recomputeInvoicePaidStatement(invoiceId, new Date(charge.created * 1000).toISOString()));
-  statements.push(auditStatement({ entityId: E, actor: ACTOR, action: "stripe.payment_recorded", objectType: "payment", objectId: paymentId, detail: { charge: charge.chargeId, invoice: invoiceId, income: invoiceId ? null : incomeCode, subscription: charge.subscriptionInvoice } }));
+  if (invoiceId) {
+    statements.push(
+      recomputeInvoicePaidStatement(invoiceId, new Date(charge.created * 1000).toISOString(), {
+        sql: `EXISTS (SELECT 1 FROM fin_payments WHERE id = ? AND invoice_id = ?)`,
+        args: [paymentId, invoiceId],
+      }),
+    );
+  }
+  statements.push({
+    sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+          SELECT ?, ?, ?, 'stripe.payment_recorded', 'payment', ?, ? WHERE EXISTS (SELECT 1 FROM fin_payments WHERE id = ?)`,
+    args: [
+      newId("aud"), E, ACTOR, paymentId,
+      JSON.stringify({ charge: charge.chargeId, invoice: invoiceId, income: invoiceId ? null : incomeCode, subscription: charge.subscriptionInvoice }).slice(0, 8000),
+      paymentId,
+    ],
+  });
   await writeWithLedger([...statements, ...facts]);
 
   // OR IGNORE may have lost a race to a concurrent delivery: re-read by key.
@@ -581,7 +699,9 @@ export async function recordStripeCharge(
   const created = row.id === paymentId;
   await postPaymentEntries(row.id);
   if (bt) await postFee(row.id, bt);
-  if (created && invoiceId) await deactivatePaymentLinkIfPaid(invoiceId);
+  // Any linked payment changes the balance. Retire the prior full-balance link
+  // even when the charge was partial; resend can create the exact remainder.
+  if (created && row.invoice_id) await deactivatePaymentLinkIfPaid(row.invoice_id, true);
   if (charge.amountRefundedCents > 0) await recordRefundsForCharge(row.id, charge, charge.refunds, opts);
   return { paymentId: row.id, created };
 }
@@ -613,8 +733,8 @@ async function commitFacts(facts: InStatement[]): Promise<void> {
  * link (the invoice becomes paid) when there is one, else the key fill (the
  * payment now carries this invoice's id), else on their own.
  */
-async function recordOnExistingPayment(existing: PaymentRow, keys: PaymentKeys, finInvoiceId: string | null, facts: InStatement[]): Promise<void> {
-  if (finInvoiceId && !existing.invoice_id && (await linkPaymentToInvoice(existing.id, finInvoiceId, facts))) {
+async function recordOnExistingPayment(existing: PaymentRow, keys: PaymentKeys, metadata: FinMetadata, facts: InStatement[]): Promise<void> {
+  if (metadata.finInvoiceId && !existing.invoice_id && (await linkPaymentToInvoice(existing.id, metadata.finInvoiceId, facts, metadata.finInvoicePriceId))) {
     await fillMissingKeys(existing, keys);
     return;
   }
@@ -848,14 +968,28 @@ async function completeSettlement(paymentId: string, bt: BalanceTxnFacts | null)
  * committed in the same batch as the link; true = linked (and they were
  * written), false = nothing was written (and neither were they).
  */
-export async function linkPaymentToInvoice(paymentId: string, invoiceId: string, facts: InStatement[] = []): Promise<boolean> {
+export async function linkPaymentToInvoice(
+  paymentId: string,
+  invoiceId: string,
+  facts: InStatement[] = [],
+  expectedPriceId: string | null = null,
+): Promise<boolean> {
   const p = await loadPayment(paymentId);
   if (!p || p.kind !== "payment" || p.invoice_id) return false;
-  const linkId = await linkableInvoice(invoiceId, p.currency);
-  if (!linkId) return false;
-  const inv = await loadInvoice(linkId);
+  const inv = await linkableInvoice(invoiceId, p.currency, p.amount_cents, expectedPriceId);
   if (!inv) return false;
-  const statements: InStatement[] = [];
+  const snapshot = invoiceLinkSnapshot(inv);
+  const linkedGate = {
+    sql: `(SELECT invoice_id FROM fin_payments WHERE id = ?) = ?`,
+    args: [p.id, inv.id],
+  };
+  const statements: InStatement[] = [
+    {
+      sql: `UPDATE fin_payments SET invoice_id = ?, contact_id = COALESCE(contact_id, ?)
+             WHERE id = ? AND invoice_id IS NULL AND entry_id IS ? AND (${snapshot.sql})`,
+      args: [inv.id, inv.contact_id, p.id, p.entry_id, ...snapshot.args],
+    },
+  ];
   if (p.entry_id && p.settlement_cad_cents !== null) {
     const posting = await buildSettlementPosting({
       inv,
@@ -867,20 +1001,22 @@ export async function linkPaymentToInvoice(paymentId: string, invoiceId: string,
       sourceRef: p.id,
       memo: `Reclass Stripe payment to invoice ${inv.number || inv.id}`,
       createdBy: ACTOR,
+      gate: linkedGate,
     });
     statements.push(...posting.statements);
   }
   statements.push(
+    recomputeInvoicePaidStatement(inv.id, p.occurred_at, linkedGate),
     {
-      sql: `UPDATE fin_payments SET invoice_id = ?, contact_id = COALESCE(contact_id, ?) WHERE id = ? AND invoice_id IS NULL AND entry_id IS ?`,
-      args: [inv.id, inv.contact_id, p.id, p.entry_id],
+      sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+            SELECT ?, ?, ?, 'stripe.payment_linked', 'invoice', ?, ? WHERE ${linkedGate.sql}`,
+      args: [newId("aud"), E, ACTOR, inv.id, JSON.stringify({ payment: p.id }), ...linkedGate.args],
     },
-    recomputeInvoicePaidStatement(inv.id, p.occurred_at),
-    auditStatement({ entityId: E, actor: ACTOR, action: "stripe.payment_linked", objectType: "invoice", objectId: inv.id, detail: { payment: p.id } }),
     ...facts,
   );
   try {
-    await (facts.length > 0 ? writeWithLedger(statements) : writeBatch(statements));
+    const out = await (facts.length > 0 ? writeWithLedger(statements) : writeBatch(statements));
+    if (out[0]?.rowsAffected !== 1) return false;
   } catch (e) {
     if (isUniqueViolation(e)) return false;
     throw e;
@@ -888,18 +1024,16 @@ export async function linkPaymentToInvoice(paymentId: string, invoiceId: string,
   // If a concurrent postPaymentEntries lost its gate to this link, nothing
   // posted the income; post the settlement now (a no-op when already posted).
   await postPaymentEntries(p.id);
-  await deactivatePaymentLinkIfPaid(inv.id);
+  await deactivatePaymentLinkIfPaid(inv.id, true);
   return true;
 }
 
 export async function deactivatePaymentLinkIfPaid(invoiceId: string, force = false): Promise<void> {
   const inv = await loadInvoice(invoiceId);
-  if (!inv || !inv.stripe_payment_link_id) return;
+  if (!inv || (!inv.stripe_payment_link_id && !inv.stripe_price_id && !inv.stripe_payment_link_url)) return;
   if (inv.status !== "paid" && !force) return;
-  const key = await readyKey();
-  if (!key) return;
   try {
-    await stripeRequest(key, "POST", `/v1/payment_links/${encodeURIComponent(inv.stripe_payment_link_id)}`, { active: "false" });
+    await retireOneTimePaymentLinkForExternalPayment(inv);
   } catch (e) {
     console.error("[finances:stripe] could not deactivate paid invoice's payment link", invoiceId, e instanceof Error ? e.message : e);
   }
@@ -1085,7 +1219,7 @@ export async function applyStripeInvoicePaid(facts: InvoicePaidFacts, ledger: In
   if (facts.amountPaidCents <= 0) return "zero_amount";
   const existing = await findPaymentByKeys({ chargeId: facts.chargeId, paymentIntentId: facts.paymentIntentId, stripeInvoiceId: facts.stripeInvoiceId });
   if (existing) {
-    await recordOnExistingPayment(existing, { chargeId: facts.chargeId, paymentIntentId: facts.paymentIntentId, stripeInvoiceId: facts.stripeInvoiceId }, facts.metadata.finInvoiceId, ledger);
+    await recordOnExistingPayment(existing, { chargeId: facts.chargeId, paymentIntentId: facts.paymentIntentId, stripeInvoiceId: facts.stripeInvoiceId }, facts.metadata, ledger);
     return "linked_existing";
   }
   if (!facts.chargeId && !facts.paymentIntentId) {
@@ -1132,7 +1266,7 @@ export async function applyStripeInvoicePaid(facts: InvoicePaidFacts, ledger: In
   charge.stripeInvoiceId = charge.stripeInvoiceId || facts.stripeInvoiceId;
   // This invoice is what the charge paid, so it decides subscription vs one-off.
   charge.subscriptionInvoice = facts.forSubscription;
-  if (!charge.metadata.finInvoiceId && facts.metadata.finInvoiceId) charge.metadata = facts.metadata;
+  charge.metadata = mergedFinMetadata(charge.metadata, facts.metadata);
   const res = await recordStripeCharge(charge, { fetchFees: true, ledger });
   return res.created ? "recorded" : "linked_existing";
 }
@@ -1380,7 +1514,7 @@ async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promis
         };
       }
       charge.paymentIntentId = charge.paymentIntentId || pi.paymentIntentId;
-      if (!charge.metadata.finInvoiceId && pi.metadata.finInvoiceId) charge.metadata = pi.metadata;
+      charge.metadata = mergedFinMetadata(charge.metadata, pi.metadata);
       const r = await recordStripeCharge(charge, { fetchFees: true });
       return r.paymentId ? `payment ${r.created ? "recorded" : "matched"} ${r.paymentId}` : `ignored: ${r.reason}`;
     }
@@ -1525,10 +1659,7 @@ export async function reconcileStripe(args: { days: number }): Promise<Reconcile
     const c = chargeFacts(raw);
     if (!c || !c.succeeded || !c.livemode) continue;
     summary.charges_seen += 1;
-    if (!c.metadata.finInvoiceId) {
-      const piMeta = finMetadata(raw.payment_intent);
-      if (piMeta.finInvoiceId) c.metadata = piMeta;
-    }
+    c.metadata = mergedFinMetadata(c.metadata, finMetadata(raw.payment_intent));
     const r = await recordStripeCharge(c, { fetchFees: false });
     if (r.created) summary.payments_recorded += 1;
   }

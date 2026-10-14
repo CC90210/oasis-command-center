@@ -28,11 +28,15 @@ function idOf(v: unknown): string | null {
   return str(v) ?? str(asObj(v)?.id);
 }
 
-export type FinMetadata = { finInvoiceId: string | null; finEntityId: string | null };
+export type FinMetadata = { finInvoiceId: string | null; finEntityId: string | null; finInvoicePriceId: string | null };
 
 export function finMetadata(obj: unknown): FinMetadata {
   const md = asObj(asObj(obj)?.metadata);
-  return { finInvoiceId: str(md?.fin_invoice_id), finEntityId: str(md?.fin_entity_id) };
+  return {
+    finInvoiceId: str(md?.fin_invoice_id),
+    finEntityId: str(md?.fin_entity_id),
+    finInvoicePriceId: str(md?.fin_invoice_price_id),
+  };
 }
 
 export type ChargeFacts = {

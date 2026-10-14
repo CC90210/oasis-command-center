@@ -231,6 +231,7 @@ async function main() {
   const { addDays, torontoToday } = await import("../lib/founders-finances/fx");
   const today = torontoToday();
   const inv = await import("../lib/founders-finances/invoice");
+  const paymentMethods = await import("../lib/founders-finances/wise");
   const { composeInvoiceEmail } = await import("../lib/founders-finances/invoice-email");
   const { renderInvoicePdf } = await import("../lib/founders-finances/invoice-pdf");
   const { ensureFinanceSeed } = await import("../lib/founders-finances/seed-io");
@@ -249,6 +250,23 @@ async function main() {
   const lastMail = () => mails[mails.length - 1];
   const pdfOf = async (m: SentMail) => pdfText(new Uint8Array(m.attachments[0].content));
   const stripeSince = (mark: number, path?: string) => stripeCalls.slice(mark).filter((c) => (path ? c.path === path : true));
+
+  await check("payment modes: Stripe supports one-time/monthly/both, Wise is one-time only, Hybrid requires both rails", async () => {
+    const valid = (method: "wise" | "stripe" | "wise_stripe", oneTimeCents: number, monthlyCents: number) =>
+      paymentMethods.invoicePaymentModeError(method, { oneTimeCents, monthlyCents });
+    assert.equal(valid("stripe", 100, 0), null);
+    assert.equal(valid("stripe", 0, 100), null);
+    assert.equal(valid("stripe", 100, 100), null);
+    assert.equal(valid("wise", 100, 0), null);
+    assert.match(String(valid("wise", 0, 100)), /one-time amount/i);
+    assert.match(String(valid("wise", 100, 100)), /monthly retainer.*Hybrid/i);
+    assert.match(String(valid("wise_stripe", 100, 0)), /both.*one-time implementation.*monthly retainer/i);
+    assert.match(String(valid("wise_stripe", 0, 100)), /both.*one-time implementation.*monthly retainer/i);
+    assert.equal(valid("wise_stripe", 100, 100), null);
+    assert.equal(paymentMethods.PAYMENT_METHOD_LABEL.wise_stripe, "Hybrid — implementation by bank + monthly retainer by card");
+    assert.equal(paymentMethods.offersCard("wise_stripe"), false);
+    assert.equal(paymentMethods.offersBankTransfer("wise_stripe"), true);
+  });
 
   // ── pure: the split ─────────────────────────────────────────────────────
   await check("totals: one-time and monthly are totalled separately; with no monthly line nothing changes", async () => {
@@ -409,11 +427,41 @@ async function main() {
     await assert.rejects(raw.execute({ sql: `UPDATE fin_invoices SET retainer_monthly_cents = -1 WHERE id = ?`, args: [preId] }), /CHECK constraint/);
   });
 
+  await check("draft writes reject dishonest payment-mode and line combinations; an old invalid draft cannot issue until corrected", async () => {
+    const base = (name: string, payment_method: "wise" | "stripe" | "wise_stripe", lines: Json[]) => ({
+      new_contact: { name, email: `${name.toLowerCase().replace(/\s+/g, "-")}@example.test` },
+      currency: "CAD",
+      payment_method,
+      lines,
+    });
+    const oneTime = [{ description: "Implementation", quantity: 1, unit_price: "100" }];
+    const monthly = [{ description: "Retainer", quantity: 1, unit_price: "50", billing: "monthly" }];
+    const both = [...oneTime, ...monthly];
+    await assert.rejects(invoices.createDraftInvoice(cc, "oasis", base("Wise monthly", "wise", monthly)), /one-time amount/i);
+    await assert.rejects(invoices.createDraftInvoice(cc, "oasis", base("Wise mixed", "wise", both)), /monthly retainer.*Hybrid/i);
+    await assert.rejects(invoices.createDraftInvoice(cc, "oasis", base("Hybrid once", "wise_stripe", oneTime)), /both.*one-time implementation.*monthly retainer/i);
+    await assert.rejects(invoices.createDraftInvoice(cc, "oasis", base("Hybrid monthly", "wise_stripe", monthly)), /both.*one-time implementation.*monthly retainer/i);
+
+    const legacy = await invoices.createDraftInvoice(cc, "oasis", base("Legacy invalid", "wise", oneTime));
+    await raw.execute({ sql: `UPDATE fin_invoices SET payment_method = 'wise_stripe' WHERE id = ?`, args: [legacy] });
+    await assert.rejects(invoices.finalizeInvoice(cc, legacy), /both.*one-time implementation.*monthly retainer/i);
+    await assert.rejects(invoices.sendInvoice(cc, legacy), /both.*one-time implementation.*monthly retainer/i);
+    const legacyRow = await row(legacy);
+    await invoices.updateDraftInvoice(cc, legacy, {
+      contact_id: legacyRow.contact_id,
+      currency: "CAD",
+      payment_method: "wise_stripe",
+      lines: both,
+    });
+    assert.equal((await row(legacy)).status, "draft", "an invalid old draft remains editable so it can be corrected");
+  });
+
   await check("invoice list/detail expose founder lifecycle and founder plus legacy filters stay valid", async () => {
     const make = async (name: string, monthly = false) =>
       invoices.createDraftInvoice(cc, "oasis", {
         new_contact: { name, email: `${name.toLowerCase().replace(/\s+/g, "-")}@example.test` },
         currency: "CAD",
+        payment_method: monthly ? "stripe" : "wise",
         lines: [{ description: monthly ? "Monthly service" : "Project", quantity: 1, unit_price: "100.00", ...(monthly ? { billing: "monthly" } : {}) }],
       });
     const issuedId = await make("Lifecycle Issued");
@@ -473,11 +521,11 @@ async function main() {
   ];
   let mixedId = "";
   await check("a mixed draft stores the one-time total as the invoice total and the retainer separately", async () => {
-    mixedId = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Acme Dental", email: "ap@acme.test" }, currency: "CAD", lines: mixedLines });
+    mixedId = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Acme Dental", email: "ap@acme.test" }, currency: "CAD", payment_method: "wise_stripe", lines: mixedLines });
     const d = await row(mixedId);
     assert.equal(d.total_cents, 200000);
     assert.equal(Number(d.retainer_monthly_cents), 50000);
-    assert.equal(d.payment_method, "wise");
+    assert.equal(d.payment_method, "wise_stripe");
     assert.deepEqual((await store.loadInvoiceLines(mixedId)).map((l) => l.billing), ["one_time", "monthly"]);
     const list = await invoices.listInvoices(cc, "oasis");
     const r = list.find((x) => x.id === mixedId)!;
@@ -524,7 +572,7 @@ async function main() {
   });
 
   await check("every other Stripe failure (400/401/404/409/429/5xx) reaches the founder as one plain sentence; Stripe's own words stay in the server log", async () => {
-    const id = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Massive Dynamic", email: "ap@massive.test" }, currency: "CAD", lines: mixedLines });
+    const id = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Massive Dynamic", email: "ap@massive.test" }, currency: "CAD", payment_method: "wise_stripe", lines: mixedLines });
     const RAW = "Invalid API Key provided: rk_live_*********only";
     const logged: string[] = [];
     const consoleError = console.error;
@@ -712,25 +760,26 @@ async function main() {
     assert.equal(stripe.links.get(mixedRetainerLink)!.active, false, "the first link stays off");
   });
 
-  await check("card too when the method includes card: Wise details, a one-off card link for the implementation, and the retainer link", async () => {
+  await check("Hybrid is honest: implementation by bank and monthly retainer by card, never a one-time card link", async () => {
     const id = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Globex", email: "ap@globex.test" }, currency: "CAD", payment_method: "wise_stripe", lines: mixedLines });
     const mark = stripeCalls.length;
     const sent = await invoices.sendInvoice(cc, id);
     const prices = stripeSince(mark, "/v1/prices");
-    assert.equal(prices.length, 2);
-    const oneOff = prices.find((p) => !p.params["recurring[interval]"])!;
-    assert.equal(oneOff.params.unit_amount, "200000", "the card link is for the amount due now, never the retainer");
-    assert.equal(oneOff.params["metadata[fin_invoice_id]"], id);
-    assert.ok(sent.paymentLinkUrl && sent.retainerLinkUrl && sent.paymentLinkUrl !== sent.retainerLinkUrl);
+    assert.equal(prices.length, 1);
+    assert.equal(prices[0].params["recurring[interval]"], "month");
+    assert.equal(prices[0].params.unit_amount, "50000");
+    assert.equal(sent.paymentLinkUrl, null, "Hybrid never creates a one-time card link");
+    assert.ok(sent.retainerLinkUrl);
     const m = lastMail();
-    assert.match(m.text, /Implementation — CA\$2,000\.00 due by .*: pay by bank transfer or card/);
-    assert.ok(m.text.includes(`Or pay by card: ${sent.paymentLinkUrl}`));
+    assert.match(m.text, /Implementation — CA\$2,000\.00 due by .*: pay by bank transfer/);
+    assert.doesNotMatch(m.text, /Or pay by card:/);
     assert.ok(m.text.includes(sent.retainerLinkUrl as string));
     const pdf = await pdfOf(m);
-    assert.ok(pdf.includes(sent.paymentLinkUrl as string) && pdf.includes(sent.retainerLinkUrl as string), "both links on the PDF");
+    assert.ok(pdf.includes(sent.retainerLinkUrl as string), "the recurring link is on the PDF");
+    assert.doesNotMatch(pdf, /PAY BY CARD.*implementation/i);
   });
 
-  await check("card + retainer: a key without Payment Links write leaves a draft; once allowed, BOTH links are made before the number (id only) and get the number after", async () => {
+  await check("Hybrid: a key without Payment Links write leaves a draft; once allowed, only the recurring link is made before the number", async () => {
     const id = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Tyrell", email: "ap@tyrell.test" }, currency: "CAD", payment_method: "wise_stripe", lines: mixedLines });
     stripe.denyLinksOnly = true;
     const before = mails.length;
@@ -754,25 +803,21 @@ async function main() {
     } finally {
       stripe.onWrite = null;
     }
-    assert.deepEqual(statusAtWrite, ["draft", "draft", "draft"], "retainer link, card price, card link: all made while it was a draft");
+    assert.deepEqual(statusAtWrite, ["draft"], "the recurring link is made while it is a draft; its saved product/price were kept from the refused attempt");
     d = await row(id);
     assert.equal(d.status, "sent");
     const made = stripeSince(mark, "/v1/payment_links");
-    assert.equal(made.length, 2);
+    assert.equal(made.length, 1);
     for (const c of made) assert.equal(Object.keys(c.params).some((k) => /number/.test(k)), false, "made before the number existed: the invoice id only");
-    const card = made.find((c) => c.params["metadata[fin_invoice_id]"] === id)!;
-    assert.equal(card.params["payment_intent_data[metadata][fin_invoice_id]"], id, "the ingest still matches the card payment to the invoice");
-    const numberedCard = stripeSince(mark, `/v1/payment_links/${d.stripe_payment_link_id}`);
     const numberedRetainer = stripeSince(mark, `/v1/payment_links/${d.stripe_retainer_link_id}`);
-    assert.equal(numberedCard.length, 1);
-    assert.equal(numberedCard[0].params["metadata[fin_invoice_number]"], d.number);
-    assert.equal(numberedCard[0].params["after_completion[hosted_confirmation][custom_message]"], `Thank you — payment for invoice ${d.number} received.`);
+    assert.equal(d.stripe_payment_link_id, null);
     assert.equal(numberedRetainer.length, 1);
     assert.equal(numberedRetainer[0].params["metadata[fin_retainer_invoice_number]"], d.number);
-    assert.ok(lastMail().text.includes(sent.paymentLinkUrl as string) && lastMail().text.includes(sent.retainerLinkUrl as string));
+    assert.equal(sent.paymentLinkUrl, null);
+    assert.ok(lastMail().text.includes(sent.retainerLinkUrl as string));
   });
 
-  await check("a draft's card link is re-checked with Stripe before it is emailed: another amount replaces it (old one off); Issue without emailing drops an unchecked one", async () => {
+  await check("editing a draft retires a now-wrong live card link immediately; send creates the replacement; Issue without emailing drops an unchecked one", async () => {
     const { InvoiceMailerNotConfigured } = await import("../lib/founders-finances/invoice-email");
     const withoutMailbox = async (id: string) => {
       const saved = process.env.OASIS_MAIL_APP_PASSWORD;
@@ -795,11 +840,18 @@ async function main() {
     const first = { id: d.stripe_payment_link_id as string, url: d.stripe_payment_link_url as string, price: d.stripe_price_id as string };
     assert.ok(first.id && first.url);
 
+    const editReads = stripeReads.length;
+    const editWrites = stripeCalls.length;
     await invoices.updateDraftInvoice(cc, id, { contact_id: d.contact_id, currency: "CAD", payment_method: "stripe", lines: [{ description: "Audit", quantity: 1, unit_price: "400" }] });
+    d = await row(id);
+    assert.equal(stripe.links.get(first.id)!.active, false, "the old amount stops being payable as part of the edit");
+    assert.deepEqual([d.stripe_price_id, d.stripe_payment_link_id, d.stripe_payment_link_url], [null, null, null]);
+    assert.deepEqual(stripeSince(editWrites).map((c) => [c.path, c.params.active]), [[`/v1/payment_links/${first.id}`, "false"]]);
+    assert.deepEqual(stripeReads.slice(editReads), [`/v1/payment_links/${first.id}`], "the edit confirms Stripe reports the old link inactive");
     const reads = stripeReads.length;
     const mark = stripeCalls.length;
     const sent = await invoices.sendInvoice(cc, id);
-    assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${first.id}`, `/v1/prices/${first.price}`], "the draft's link and its price are asked of Stripe");
+    assert.deepEqual(stripeReads.slice(reads), [], "send has no stale link left to inspect");
     assert.equal(stripeSince(mark, "/v1/prices")[0].params.unit_amount, "40000");
     assert.ok(sent.paymentLinkUrl && sent.paymentLinkUrl !== first.url, "a new link for the new amount");
     assert.equal(stripe.links.get(first.id)!.active, false, "the old amount's link is switched off");
@@ -840,6 +892,98 @@ async function main() {
     assert.equal(stripeSince(mark3, "/v1/payment_links")[0].params["metadata[fin_invoice_number]"], f.number, "made after issue: carries the number from the start");
   });
 
+  await check("an issued Stripe link is live-checked before every reuse and a stale one is retired before its replacement is created", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Waystar", email: "ap@waystar.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Audit", quantity: 1, unit_price: "900" }],
+    });
+    await invoices.sendInvoice(cc, id);
+    let d = await row(id);
+    const original = { link: d.stripe_payment_link_id as string, price: d.stripe_price_id as string, url: d.stripe_payment_link_url as string };
+    const reads = stripeReads.length;
+    const mark = stripeCalls.length;
+    const reused = await invoices.sendInvoice(cc, id);
+    assert.equal(reused.paymentLinkUrl, original.url);
+    assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${original.link}`, `/v1/prices/${original.price}`]);
+    assert.equal(stripeSince(mark).length, 0, "a verified exact issued link is reused without a write");
+
+    stripe.prices.get(original.price)!.unit_amount = 99999;
+    let sawOldOffBeforeCreate = false;
+    stripe.onWrite = async (path) => {
+      if (path === "/v1/prices") sawOldOffBeforeCreate = stripe.links.get(original.link)?.active === false;
+    };
+    try {
+      const replaced = await invoices.sendInvoice(cc, id);
+      assert.ok(replaced.paymentLinkUrl && replaced.paymentLinkUrl !== original.url);
+    } finally {
+      stripe.onWrite = null;
+    }
+    d = await row(id);
+    assert.equal(sawOldOffBeforeCreate, true, "the old link is confirmed off before Stripe is asked to create the replacement");
+    assert.equal(stripe.links.get(original.link)!.active, false);
+    assert.equal(stripe.prices.get(d.stripe_price_id as string)!.unit_amount, 90000);
+  });
+
+  await check("an out-of-band partial payment retires and clears the full-value link; resend makes an exact remaining-balance link", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Soylent Bank", email: "ap@soylent-bank.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "1000" }],
+    });
+    await invoices.sendInvoice(cc, id);
+    const before = await row(id);
+    const oldLink = before.stripe_payment_link_id as string;
+    const oldUrl = before.stripe_payment_link_url as string;
+    const oldRetainer = [before.stripe_retainer_link_id, before.stripe_retainer_link_url];
+    const mark = stripeCalls.length;
+    const reads = stripeReads.length;
+    await invoices.markInvoicePaidManually(cc, id, { amount: "250", reference: "Interac PARTIAL" });
+    const partial = await row(id);
+    assert.equal(partial.amount_paid_cents, 25000);
+    assert.equal(partial.status, "sent");
+    assert.equal(stripe.links.get(oldLink)!.active, false, "the full-value link cannot remain live");
+    assert.deepEqual([partial.stripe_price_id, partial.stripe_payment_link_id, partial.stripe_payment_link_url], [null, null, null]);
+    assert.deepEqual([partial.stripe_retainer_link_id, partial.stripe_retainer_link_url], oldRetainer, "one-time retirement never touches retainer fields");
+    assert.deepEqual(stripeSince(mark).map((c) => [c.path, c.params.active]), [[`/v1/payment_links/${oldLink}`, "false"]]);
+    assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${oldLink}`], "Stripe confirms the link is inactive before the payment is written");
+
+    const resent = await invoices.sendInvoice(cc, id);
+    const after = await row(id);
+    assert.ok(resent.paymentLinkUrl && resent.paymentLinkUrl !== oldUrl);
+    assert.equal(stripe.prices.get(after.stripe_price_id as string)!.unit_amount, 75000, "the fresh link equals the remaining balance exactly");
+  });
+
+  await check("if Stripe cannot confirm link retirement, an external payment has no bookkeeping effects", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Massive Bank", email: "ap@massive-bank.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "600" }],
+    });
+    await invoices.sendInvoice(cc, id);
+    const before = await row(id);
+    const paymentCount = await count(`SELECT COUNT(*) FROM fin_payments WHERE invoice_id = ?`, [id]);
+    stripe.failWith = { status: 503, message: "upstream unavailable" };
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      await assert.rejects(
+        invoices.markInvoicePaidManually(cc, id, { amount: "100", reference: "Wire PARTIAL" }),
+        (e: unknown) => e instanceof access.FinanceInputError && /couldn't safely turn off.*card link/i.test(e.message) && /not recorded/i.test(e.message),
+      );
+    } finally {
+      console.error = logged;
+      stripe.failWith = null;
+    }
+    const after = await row(id);
+    assert.deepEqual([after.status, after.amount_paid_cents, after.stripe_payment_link_id], [before.status, before.amount_paid_cents, before.stripe_payment_link_id]);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE invoice_id = ?`, [id]), paymentCount);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'invoice_payment' AND source_ref IN (SELECT id FROM fin_payments WHERE invoice_id = ?)`, [id]), 0);
+  });
+
   await check("a draft whose lines change while its links are being made is NOT issued (the link would charge another amount); sent again, the link is remade", async () => {
     const id = await invoices.createDraftInvoice(cc, "oasis", {
       new_contact: { name: "Hanso", email: "ap@hanso.test" },
@@ -870,7 +1014,7 @@ async function main() {
   // ── Prices write granted, Payment Links not: the price is kept, not re-made ──
   let keptId = "";
   await check("a price Stripe made before it refused the link is saved and reused on the retry, even after the idempotency window", async () => {
-    keptId = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Hooli", email: "ap@hooli.test" }, currency: "CAD", lines: mixedLines });
+    keptId = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Hooli", email: "ap@hooli.test" }, currency: "CAD", payment_method: "wise_stripe", lines: mixedLines });
     stripe.denyLinksOnly = true;
     const before = mails.length;
     let mark = stripeCalls.length;
@@ -945,7 +1089,7 @@ async function main() {
 
   await check("a retainer-only invoice whose link was used has nothing left to send; a link switched off UNUSED gets a fresh one; a link whose use Stripe can't report is refused — a dead link is never emailed", async () => {
     const onlyLines = [{ description: "Monthly retainer", quantity: 1, unit_price: "400", billing: "monthly" }];
-    const usedId = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Pied Piper", email: "ap@piedpiper.test" }, currency: "CAD", lines: onlyLines });
+    const usedId = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Pied Piper", email: "ap@piedpiper.test" }, currency: "CAD", payment_method: "stripe", lines: onlyLines });
     await invoices.sendInvoice(cc, usedId);
     clientSubscribes((await row(usedId)).stripe_retainer_link_id as string);
     const before = mails.length;
@@ -955,7 +1099,7 @@ async function main() {
     );
     assert.equal(mails.length, before);
 
-    const offId = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Aviato", email: "ap@aviato.test" }, currency: "CAD", lines: onlyLines });
+    const offId = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Aviato", email: "ap@aviato.test" }, currency: "CAD", payment_method: "stripe", lines: onlyLines });
     await invoices.sendInvoice(cc, offId);
     const off = await row(offId);
     const deadUrl = off.stripe_retainer_link_url as string;
@@ -984,7 +1128,7 @@ async function main() {
 
   await check("the invoice page's retainer block reads Stripe's live link state, and the downloadable PDF never prints a dead link", async () => {
     const lines = [{ description: "Monthly retainer", quantity: 1, unit_price: "350", billing: "monthly" }];
-    const id = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Soylent", email: "ap@soylent.test" }, currency: "CAD", lines });
+    const id = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Soylent", email: "ap@soylent.test" }, currency: "CAD", payment_method: "stripe", lines });
     assert.deepEqual(await invoices.retainerLinkStatus(await row(id)), { state: "none" }, "a draft has no link until it is sent");
     const reads = stripeReads.length;
     await invoices.retainerLinkStatus(await row(id));
@@ -1040,6 +1184,7 @@ async function main() {
       issue_date: addDays(today, -40),
       due_date: addDays(today, -26),
       currency: "USD",
+      payment_method: "stripe",
       lines: [{ description: "Monthly retainer", quantity: 1, unit_price: "750", billing: "monthly" }],
     });
     const f = await invoices.finalizeInvoice(cc, onlyId);
@@ -1127,6 +1272,7 @@ async function main() {
     const earlyId = await invoices.createDraftInvoice(cc, "oasis", {
       new_contact: { name: "Stark", email: "ap@stark.test" },
       currency: "CAD",
+      payment_method: "stripe",
       lines: [{ description: "Monthly retainer", quantity: 1, unit_price: "300", billing: "monthly" }],
     });
     await raw.execute({ sql: `UPDATE fin_settings SET gst_qst_registered = 1, gst_number = '123456789RT0001', qst_number = '1234567890TQ0001' WHERE entity_id = ?`, args: [B] });
@@ -1135,6 +1281,7 @@ async function main() {
         invoices.createDraftInvoice(cc, "oasis", {
           new_contact: { name: "Wayne", email: "ap@wayne.test" },
           currency: "CAD",
+          payment_method: "stripe",
           lines: [{ description: "Monthly retainer", quantity: 1, unit_price: "300", billing: "monthly" }],
         }),
         (e: unknown) => e instanceof access.FinanceInputError && e.message === TAX_REFUSED,
@@ -1153,6 +1300,7 @@ async function main() {
       const zeroId = await invoices.createDraftInvoice(cc, "oasis", {
         new_contact: { name: "Wonka Inc", email: "ap@wonka.test" },
         currency: "USD",
+        payment_method: "stripe",
         lines: [{ description: "Monthly retainer (zero-rated export)", quantity: 1, unit_price: "300", billing: "monthly", taxable: false }],
       });
       const f = await invoices.finalizeInvoice(cc, zeroId);
@@ -1171,6 +1319,7 @@ async function main() {
       issue_date: addDays(today, -40),
       due_date: addDays(today, -10),
       currency: "CAD",
+      payment_method: "wise_stripe",
       lines: [
         { description: "Implementation", quantity: 1, unit_price: "1200" },
         { description: "Retainer", quantity: 1, unit_price: "300", billing: "monthly" },
@@ -1195,6 +1344,7 @@ async function main() {
       issue_date: addDays(today, -30),
       due_date: addDays(today, -5),
       currency: "CAD",
+      payment_method: "wise_stripe",
       lines: [
         { description: "Implementation", quantity: 1, unit_price: "1800" },
         { description: "Hosting and support", quantity: 1, unit_price: "450", billing: "monthly" },

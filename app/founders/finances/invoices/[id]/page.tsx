@@ -37,6 +37,7 @@ import { retainerColumnsReady } from "@/lib/founders-finances/invoice-store";
 import { centsToDecimalString, formatCents } from "@/lib/founders-finances/money";
 import { CASH_SUBTYPES } from "@/lib/founders-finances/chart";
 import { torontoToday } from "@/lib/founders-finances/fx";
+import { offersCard, storedPaymentMethod } from "@/lib/founders-finances/wise";
 
 export const dynamic = "force-dynamic";
 
@@ -129,6 +130,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
   const balance = inv.status === "void" ? 0 : balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents });
   // A retainer-only invoice has nothing due now: nothing to record, and no one-time card link to offer.
   const dueNow = hasAmountDueNow({ totalCents: inv.total_cents, retainerMonthlyCents: retainer });
+  const paymentMethod = storedPaymentMethod(inv.payment_method);
   const depositAccounts = accounts.filter((a) => CASH_SUBTYPES.has(a.subtype));
   const isDraft = inv.status === "draft";
   const open = effectiveStatus === "sent" || effectiveStatus === "overdue";
@@ -180,7 +182,9 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
           subtitle={
             retainer > 0
               ? `Emails the PDF from the OASIS mailbox with two parts: ${dueNow ? "the amount due now (paid as the invoice says) and " : ""}the monthly retainer's Stripe link, which the client uses once to set up automatic monthly card payments.`
-              : "Emails the PDF from the OASIS mailbox. A card payment link is created in OASIS's Stripe account unless you untick it."
+              : offersCard(paymentMethod)
+                ? "Emails the PDF from the OASIS mailbox. A card payment link is created in OASIS's Stripe account unless you untick it."
+                : "Emails the PDF with bank-transfer instructions. No one-time card link is created."
           }
         >
           <div className="space-y-4">
@@ -193,7 +197,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
               columns={2}
               fields={[
                 { name: "to", label: "Send to", type: "email", defaultValue: contact?.email || "", required: true },
-                ...(dueNow
+                ...(dueNow && offersCard(paymentMethod)
                   ? [
                       {
                         name: "payment_link",
@@ -297,7 +301,14 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
       </Card>
 
       {open && dueNow && (
-        <Card title="Record a payment" subtitle="E-transfer, cheque or wire. Posts to the bank account you choose and clears the receivable.">
+        <Card
+          title="Record a payment"
+          subtitle={
+            paymentMethod === "stripe"
+              ? "E-transfer, cheque or wire. Recording it turns off the current full-balance card link first; send the invoice again afterward to create a new link for the exact remaining balance."
+              : "E-transfer, cheque or wire. Posts to the bank account you choose and clears the receivable."
+          }
+        >
           <ActionForm
             action="invoice.mark_paid"
             hidden={{ invoice_id: inv.id }}

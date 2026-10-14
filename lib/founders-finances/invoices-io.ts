@@ -14,10 +14,10 @@
  * HOW THE CLIENT PAYS (payment_method, migration 184): "wise" prints the Wise
  * receiving details for the invoice currency with the invoice number as the
  * payment reference (the default for a new one-off invoice); "stripe" attaches
- * a card Payment Link (every invoice from before 184); "wise_stripe" offers
- * both. A Wise invoice whose details cannot be read (not connected, Wise down)
- * still goes out — with the card link, or the founders' payment instructions
- * — and the send result says why.
+ * a card Payment Link (every invoice from before 184); "wise_stripe" is
+ * Hybrid: implementation by bank plus a monthly retainer by card. A bank-mode
+ * invoice whose Wise details cannot be read needs written payment instructions
+ * or stays unsent; it never silently changes to a one-time card rail.
  *
  * ONE-TIME + MONTHLY RETAINER (migration 185). A line is billed once (the
  * implementation price) or monthly (the retainer). The invoice's receivable,
@@ -88,6 +88,7 @@ import { stripeErrorSentence } from "./http";
 import {
   bankTransferLines,
   DEFAULT_NEW_INVOICE_METHOD,
+  invoicePaymentModeError,
   offersBankTransfer,
   offersCard,
   parsePaymentMethod,
@@ -97,7 +98,12 @@ import {
   type WiseReceivingDetails,
 } from "./wise";
 import { receivingDetailsOrReason } from "./wise-io";
-import { deactivatePaymentLinkIfPaid } from "./stripe-ingest";
+import {
+  deactivateAndConfirmPaymentLink,
+  deactivatePaymentLinkIfPaid,
+  retireOneTimePaymentLinkForDraftEdit,
+  retireOneTimePaymentLinkForExternalPayment,
+} from "./stripe-ingest";
 import { validateEmail } from "./validation";
 
 function businessOnly(entity: EntityRow): void {
@@ -106,6 +112,32 @@ function businessOnly(entity: EntityRow): void {
 
 function text(v: unknown, max: number): string {
   return typeof v === "string" ? v.trim().slice(0, max) : "";
+}
+
+const ACTIVE_CUSTOMER_REQUIRED = "choose an active customer from this book";
+const DRAFT_CUSTOMER_ARCHIVE_BLOCKED =
+  "This customer has a draft invoice. Reassign or void the draft invoice before archiving the customer.";
+
+/** An audit insert gated by a SQL fact in the same transaction. */
+function conditionalAuditStatement(
+  input: Parameters<typeof auditStatement>[0],
+  condition: string,
+  conditionArgs: Array<string | number | null> = [],
+): InStatement {
+  return {
+    sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+          SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${condition}`,
+    args: [
+      newId("aud"),
+      input.entityId,
+      input.actor.slice(0, 200),
+      input.action,
+      input.objectType,
+      input.objectId,
+      JSON.stringify(input.detail || {}).slice(0, 8000),
+      ...conditionArgs,
+    ],
+  };
 }
 
 // ── contacts ─────────────────────────────────────────────────────────────
@@ -168,19 +200,37 @@ export async function updateContact(viewer: FinanceViewer, contactId: string, ra
 export async function setContactArchived(viewer: FinanceViewer, contactId: string, archived: boolean): Promise<void> {
   const entity = await requireRowEntity(viewer, "fin_contacts", contactId);
   businessOnly(entity);
-  await writeBatch([
+  const desired = archived ? 1 : 0;
+  const out = await writeBatch([
     {
-      sql: `UPDATE fin_contacts SET archived = ? WHERE id = ? AND entity_id = ?`,
-      args: [archived ? 1 : 0, contactId, entity.id],
+      sql: `UPDATE fin_contacts SET archived = ?
+             WHERE id = ? AND entity_id = ? AND archived <> ?
+               AND (? = 0 OR NOT EXISTS (
+                 SELECT 1 FROM fin_invoices WHERE contact_id = fin_contacts.id AND entity_id = fin_contacts.entity_id AND status = 'draft'
+               ))`,
+      args: [desired, contactId, entity.id, desired, desired],
     },
-    auditStatement({
-      entityId: entity.id,
-      actor: viewerLabel(viewer),
-      action: archived ? "contact.archived" : "contact.restored",
-      objectType: "contact",
-      objectId: contactId,
-    }),
+    conditionalAuditStatement(
+      {
+        entityId: entity.id,
+        actor: viewerLabel(viewer),
+        action: archived ? "contact.archived" : "contact.restored",
+        objectType: "contact",
+        objectId: contactId,
+      },
+      "changes() = 1",
+    ),
   ]);
+  if (out[0]?.rowsAffected === 1) return;
+  const current = await queryOne<{ archived: number; drafts: number }>(
+    `SELECT c.archived,
+            (SELECT COUNT(*) FROM fin_invoices i WHERE i.contact_id = c.id AND i.entity_id = c.entity_id AND i.status = 'draft') AS drafts
+       FROM fin_contacts c WHERE c.id = ? AND c.entity_id = ?`,
+    [contactId, entity.id],
+  );
+  if (current?.archived === desired) return;
+  if (archived && Number(current?.drafts ?? 0) > 0) throw new FinanceInputError(DRAFT_CUSTOMER_ARCHIVE_BLOCKED);
+  throw new FinanceInputError(ACTIVE_CUSTOMER_REQUIRED);
 }
 
 // ── drafts ───────────────────────────────────────────────────────────────
@@ -206,7 +256,7 @@ async function parseDraftInput(entity: EntityRow, raw: Record<string, unknown>, 
   } else {
     const c = await loadContact(contactId);
     if (!c || c.entity_id !== entity.id || c.archived === 1 || (c.kind !== "customer" && c.kind !== "both")) {
-      throw new FinanceInputError("choose an active customer from this book");
+      throw new FinanceInputError(ACTIVE_CUSTOMER_REQUIRED);
     }
   }
   const issueDate = text(raw.issue_date, 10) || torontoToday();
@@ -242,7 +292,7 @@ async function parseDraftInput(entity: EntityRow, raw: Record<string, unknown>, 
   let paymentMethod: InvoicePaymentMethod | null = null;
   if (raw.payment_method !== undefined && raw.payment_method !== null && raw.payment_method !== "") {
     paymentMethod = parsePaymentMethod(raw.payment_method);
-    if (!paymentMethod) throw new FinanceInputError("payment method must be bank transfer (Wise), card (Stripe) or both");
+    if (!paymentMethod) throw new FinanceInputError("payment method must be bank transfer (Wise), card (Stripe), or Hybrid");
   }
   return { contactId, issueDate, dueDate, currency, notes: text(raw.notes, 2000), lines, paymentMethod };
 }
@@ -252,13 +302,17 @@ async function parseDraftInput(entity: EntityRow, raw: Record<string, unknown>, 
  * migration 184 there is no column: asking for anything but the card flow
  * then is refused rather than silently dropped.
  */
-async function paymentMethodStatement(invoiceId: string, method: InvoicePaymentMethod | null): Promise<InStatement[]> {
+async function paymentMethodStatement(
+  invoiceId: string,
+  method: InvoicePaymentMethod | null,
+  gate?: { sql: string; args: Array<string | number | null> },
+): Promise<InStatement[]> {
   if (method === null) return [];
   if (!(await paymentMethodColumnReady())) {
     if (method === "stripe") return [];
     throw new FinanceInputError("Bank transfer (Wise) isn't available on invoices yet, so choose the card link for now.");
   }
-  return [{ sql: `UPDATE fin_invoices SET payment_method = ? WHERE id = ? AND status = 'draft'`, args: [method, invoiceId] }];
+  return [{ sql: `UPDATE fin_invoices SET payment_method = ? WHERE id = ? AND status = 'draft'${gate ? ` AND (${gate.sql})` : ""}`, args: [method, invoiceId, ...(gate?.args || [])] }];
 }
 
 /**
@@ -279,18 +333,19 @@ function lineStatements(
   lines: DraftInput["lines"],
   computed: ReturnType<typeof computeInvoiceTotals>,
   withBilling: boolean,
+  gate?: { sql: string; args: Array<string | number | null> },
 ): InStatement[] {
   return computed.lines.map((l, i) =>
     withBilling
       ? {
           sql: `INSERT INTO fin_invoice_lines (id, invoice_id, line_no, description, quantity_milli, unit_price_cents, amount_cents, taxable, revenue_account_id, billing)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [newId("il"), invoiceId, i + 1, l.description, l.quantityMilli, l.unitPriceCents, l.amountCents, l.taxable ? 1 : 0, lines[i].revenueAccountId, l.billing],
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM fin_invoices WHERE id = ? AND status = 'draft')${gate ? ` AND (${gate.sql})` : ""}`,
+          args: [newId("il"), invoiceId, i + 1, l.description, l.quantityMilli, l.unitPriceCents, l.amountCents, l.taxable ? 1 : 0, lines[i].revenueAccountId, l.billing, invoiceId, ...(gate?.args || [])],
         }
       : {
           sql: `INSERT INTO fin_invoice_lines (id, invoice_id, line_no, description, quantity_milli, unit_price_cents, amount_cents, taxable, revenue_account_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [newId("il"), invoiceId, i + 1, l.description, l.quantityMilli, l.unitPriceCents, l.amountCents, l.taxable ? 1 : 0, lines[i].revenueAccountId],
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM fin_invoices WHERE id = ? AND status = 'draft')${gate ? ` AND (${gate.sql})` : ""}`,
+          args: [newId("il"), invoiceId, i + 1, l.description, l.quantityMilli, l.unitPriceCents, l.amountCents, l.taxable ? 1 : 0, lines[i].revenueAccountId, invoiceId, ...(gate?.args || [])],
         },
   );
 }
@@ -308,10 +363,21 @@ function draftTotals(lines: DraftInput["lines"], registered: boolean): ReturnTyp
   return totals;
 }
 
+/** Refuse a payment label whose line mix would promise a rail it does not provide. */
+function assertPaymentMode(method: InvoicePaymentMethod, totals: { totalCents: number; monthly: { totalCents: number } }): void {
+  const error = invoicePaymentModeError(method, { oneTimeCents: totals.totalCents, monthlyCents: totals.monthly.totalCents });
+  if (error) throw new FinanceInputError(error);
+}
+
 /** The draft's retainer per month (its monthly lines). Only once migration 185 is there. */
-function retainerStatement(invoiceId: string, totals: ReturnType<typeof computeInvoiceTotals>, ready: boolean): InStatement[] {
+function retainerStatement(
+  invoiceId: string,
+  totals: ReturnType<typeof computeInvoiceTotals>,
+  ready: boolean,
+  gate?: { sql: string; args: Array<string | number | null> },
+): InStatement[] {
   if (!ready) return [];
-  return [{ sql: `UPDATE fin_invoices SET retainer_monthly_cents = ? WHERE id = ? AND status = 'draft'`, args: [totals.monthly.totalCents, invoiceId] }];
+  return [{ sql: `UPDATE fin_invoices SET retainer_monthly_cents = ? WHERE id = ? AND status = 'draft'${gate ? ` AND (${gate.sql})` : ""}`, args: [totals.monthly.totalCents, invoiceId, ...(gate?.args || [])] }];
 }
 
 export async function createDraftInvoice(viewer: FinanceViewer, entityRef: string, raw: Record<string, unknown>): Promise<string> {
@@ -323,18 +389,28 @@ export async function createDraftInvoice(viewer: FinanceViewer, entityRef: strin
   const id = newId("inv");
   const method = input.paymentMethod ?? ((await paymentMethodColumnReady()) ? DEFAULT_NEW_INVOICE_METHOD : null);
   const retainerReady = await retainerReadyFor(input.lines);
-  await writeBatch([
+  if (method) assertPaymentMode(method, totals);
+  const out = await writeBatch([
     {
       sql: `INSERT INTO fin_invoices (id, entity_id, contact_id, status, issue_date, due_date, currency, subtotal_cents, gst_cents,
               qst_cents, total_cents, tax_registered_snapshot, notes, created_by)
-            VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [id, entity.id, input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, viewerLabel(viewer)],
+            SELECT ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             WHERE EXISTS (
+               SELECT 1 FROM fin_contacts
+                WHERE id = ? AND entity_id = ? AND archived = 0 AND kind IN ('customer', 'both')
+             )`,
+      args: [id, entity.id, input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, viewerLabel(viewer), input.contactId, entity.id],
     },
     ...(await paymentMethodStatement(id, method)),
     ...retainerStatement(id, totals, retainerReady),
     ...lineStatements(id, input.lines, totals, retainerReady),
-    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.draft_created", objectType: "invoice", objectId: id, detail: { total: totals.totalCents, monthly: totals.monthly.totalCents, currency: input.currency } }),
+    conditionalAuditStatement(
+      { entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.draft_created", objectType: "invoice", objectId: id, detail: { total: totals.totalCents, monthly: totals.monthly.totalCents, currency: input.currency } },
+      "EXISTS (SELECT 1 FROM fin_invoices WHERE id = ?)",
+      [id],
+    ),
   ]);
+  if (out[0]?.rowsAffected !== 1) throw new FinanceInputError(ACTIVE_CUSTOMER_REQUIRED);
   return id;
 }
 
@@ -347,19 +423,39 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
   const settings = await loadSettings(entity.id);
   const totals = draftTotals(input.lines, settings.gst_qst_registered === 1);
   const retainerReady = await retainerReadyFor(input.lines);
-  await writeBatch([
-    { sql: `DELETE FROM fin_invoice_lines WHERE invoice_id = ? AND (SELECT status FROM fin_invoices WHERE id = ?) = 'draft'`, args: [invoiceId, invoiceId] },
-    ...lineStatements(invoiceId, input.lines, totals, retainerReady),
+  const method = input.paymentMethod ?? storedPaymentMethod(inv.payment_method);
+  assertPaymentMode(method, totals);
+  const linkWouldBeWrong =
+    Boolean(inv.stripe_price_id || inv.stripe_payment_link_id || inv.stripe_payment_link_url) &&
+    (method !== "stripe" || totals.totalCents !== inv.total_cents || input.currency !== inv.currency);
+  if (linkWouldBeWrong) await retireOneTimePaymentLinkForDraftEdit(inv);
+  const writeSnapshot = linkWouldBeWrong ? await loadInvoice(invoiceId) : inv;
+  if (!writeSnapshot || writeSnapshot.status !== "draft") throw new FinanceInputError("only a draft can be edited; void it and create a new one");
+  const updateAuditId = newId("aud");
+  const updateGate = { sql: `EXISTS (SELECT 1 FROM fin_audit_log WHERE id = ?)`, args: [updateAuditId] };
+  const out = await writeBatch([
     {
       sql: `UPDATE fin_invoices SET contact_id = ?, issue_date = ?, due_date = ?, currency = ?, subtotal_cents = ?, gst_cents = ?, qst_cents = ?,
                    total_cents = ?, tax_registered_snapshot = ?, notes = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE id = ? AND status = 'draft'`,
-      args: [input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, invoiceId],
+             WHERE id = ? AND status = 'draft'
+               AND updated_at = ?
+               AND EXISTS (
+                 SELECT 1 FROM fin_contacts
+                  WHERE id = ? AND entity_id = ? AND archived = 0 AND kind IN ('customer', 'both')
+               )`,
+      args: [input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, invoiceId, writeSnapshot.updated_at, input.contactId, entity.id],
     },
-    ...(await paymentMethodStatement(invoiceId, input.paymentMethod)),
-    ...retainerStatement(invoiceId, totals, retainerReady),
-    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.draft_updated", objectType: "invoice", objectId: invoiceId }),
+    {
+      sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+            SELECT ?, ?, ?, 'invoice.draft_updated', 'invoice', ?, '{}' WHERE changes() = 1`,
+      args: [updateAuditId, entity.id, viewerLabel(viewer).slice(0, 200), invoiceId],
+    },
+    { sql: `DELETE FROM fin_invoice_lines WHERE invoice_id = ? AND (SELECT status FROM fin_invoices WHERE id = ?) = 'draft' AND (${updateGate.sql})`, args: [invoiceId, invoiceId, ...updateGate.args] },
+    ...lineStatements(invoiceId, input.lines, totals, retainerReady, updateGate),
+    ...(await paymentMethodStatement(invoiceId, input.paymentMethod, updateGate)),
+    ...retainerStatement(invoiceId, totals, retainerReady, updateGate),
   ]);
+  if (out[0]?.rowsAffected !== 1) throw new FinanceInputError("only a draft can be edited; void it and create a new one");
 }
 
 // ── reads ────────────────────────────────────────────────────────────────
@@ -524,6 +620,16 @@ function hasAmountDueNow(inv: InvoiceRow): boolean {
   return hasAmountDueNowRule({ totalCents: inv.total_cents, retainerMonthlyCents: retainerMonthlyCents(inv) });
 }
 
+function isActiveInvoiceCustomer(inv: InvoiceRow, contact: ContactRow | null): boolean {
+  return Boolean(
+    contact &&
+      contact.id === inv.contact_id &&
+      contact.entity_id === inv.entity_id &&
+      contact.archived === 0 &&
+      (contact.kind === "customer" || contact.kind === "both"),
+  );
+}
+
 /** Re-total stored lines (one-time and monthly apart) under the given registration. */
 function storedTotals(lines: readonly InvoiceLineRow[], registered: boolean) {
   return totalsFromStoredLines(
@@ -656,8 +762,10 @@ export async function finalizeInvoice(viewer: FinanceViewer, invoiceId: string, 
     const inv = await loadInvoice(invoiceId);
     if (!inv) throw new FinanceNotFound();
     if (inv.status !== "draft") return inv;
+    if (!isActiveInvoiceCustomer(inv, await loadContact(inv.contact_id))) throw new FinanceInputError(ACTIVE_CUSTOMER_REQUIRED);
     const lines = await loadInvoiceLines(invoiceId);
     const { settings, registered, totals } = await issueTotals(entity.id, lines);
+    assertPaymentMode(storedPaymentMethod(inv.payment_method), totals);
     if (
       expect &&
       (expect.totalCents !== totals.totalCents || expect.monthlyCents !== totals.monthly.totalCents || expect.currency !== inv.currency || expect.contactId !== inv.contact_id)
@@ -689,45 +797,68 @@ export async function finalizeInvoice(viewer: FinanceViewer, invoiceId: string, 
     const recognition =
       totals.totalCents > 0
         ? await buildRecognitionPosting(finalized, lines, viewerLabel(viewer), {
-            sql: `(SELECT status FROM fin_invoices WHERE id = ?) = 'draft'`,
-            args: [invoiceId],
+            sql: `(SELECT status FROM fin_invoices WHERE id = ?) = 'draft'
+                  AND EXISTS (
+                    SELECT 1 FROM fin_invoices issue_i
+                    JOIN fin_contacts issue_c ON issue_c.id = issue_i.contact_id AND issue_c.entity_id = issue_i.entity_id
+                    WHERE issue_i.id = ? AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both')
+                  )`,
+            args: [invoiceId, invoiceId],
           })
         : null;
     try {
       await writeBatch([
         {
           sql: `UPDATE fin_settings SET invoice_next_number = ?, invoice_number_year = ?
-                 WHERE entity_id = ? AND invoice_next_number = ? AND COALESCE(invoice_number_year, -1) = ?`,
-          args: [alloc.nextNumber, alloc.numberYear, entity.id, settings.invoice_next_number, settings.invoice_number_year ?? -1],
+                 WHERE entity_id = ? AND invoice_next_number = ? AND COALESCE(invoice_number_year, -1) = ?
+                   AND EXISTS (
+                     SELECT 1 FROM fin_invoices issue_i
+                     JOIN fin_contacts issue_c ON issue_c.id = issue_i.contact_id AND issue_c.entity_id = issue_i.entity_id
+                     WHERE issue_i.id = ? AND issue_i.status = 'draft' AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both')
+                   )`,
+          args: [alloc.nextNumber, alloc.numberYear, entity.id, settings.invoice_next_number, settings.invoice_number_year ?? -1, invoiceId],
         },
         ...(recognition ? recognition.statements : []),
         ...(hasMonthly
-          ? [{ sql: `UPDATE fin_invoices SET retainer_monthly_cents = ? WHERE id = ? AND status = 'draft'`, args: [totals.monthly.totalCents, invoiceId] }]
+          ? [{
+              sql: `UPDATE fin_invoices SET retainer_monthly_cents = ? WHERE id = ? AND status = 'draft'
+                      AND EXISTS (SELECT 1 FROM fin_contacts issue_c WHERE issue_c.id = fin_invoices.contact_id AND issue_c.entity_id = fin_invoices.entity_id AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both'))`,
+              args: [totals.monthly.totalCents, invoiceId],
+            }]
           : []),
         ...(dropCardLink
-          ? [{ sql: `UPDATE fin_invoices SET stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL WHERE id = ? AND status = 'draft'`, args: [invoiceId] }]
+          ? [{
+              sql: `UPDATE fin_invoices SET stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL WHERE id = ? AND status = 'draft'
+                      AND EXISTS (SELECT 1 FROM fin_contacts issue_c WHERE issue_c.id = fin_invoices.contact_id AND issue_c.entity_id = fin_invoices.entity_id AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both'))`,
+              args: [invoiceId],
+            }]
           : []),
         recognition
           ? {
               sql: `UPDATE fin_invoices SET number = ?, status = 'sent', subtotal_cents = ?, gst_cents = ?, qst_cents = ?, total_cents = ?,
                            tax_registered_snapshot = ?, recognition_entry_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                     WHERE id = ? AND status = 'draft' AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+                     WHERE id = ? AND status = 'draft' AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)
+                       AND EXISTS (SELECT 1 FROM fin_contacts issue_c WHERE issue_c.id = fin_invoices.contact_id AND issue_c.entity_id = fin_invoices.entity_id AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both'))`,
               args: [alloc.number, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, registered ? 1 : 0, recognition.entryId, invoiceId, recognition.entryId],
             }
           : {
               sql: `UPDATE fin_invoices SET number = ?, status = 'sent', subtotal_cents = ?, gst_cents = ?, qst_cents = ?, total_cents = ?,
                            tax_registered_snapshot = ?, recognition_entry_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                     WHERE id = ? AND status = 'draft'`,
+                     WHERE id = ? AND status = 'draft'
+                       AND EXISTS (SELECT 1 FROM fin_contacts issue_c WHERE issue_c.id = fin_invoices.contact_id AND issue_c.entity_id = fin_invoices.entity_id AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both'))`,
               args: [alloc.number, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, registered ? 1 : 0, invoiceId],
             },
-        auditStatement({
-          entityId: entity.id,
-          actor: viewerLabel(viewer),
-          action: "invoice.issued",
-          objectType: "invoice",
-          objectId: invoiceId,
-          detail: { number: alloc.number, total: totals.totalCents, ...(hasMonthly ? { monthly: totals.monthly.totalCents } : {}) },
-        }),
+        conditionalAuditStatement(
+          {
+            entityId: entity.id,
+            actor: viewerLabel(viewer),
+            action: "invoice.issued",
+            objectType: "invoice",
+            objectId: invoiceId,
+            detail: { number: alloc.number, total: totals.totalCents, ...(hasMonthly ? { monthly: totals.monthly.totalCents } : {}) },
+          },
+          "changes() = 1",
+        ),
       ]);
     } catch (e) {
       if (isUniqueViolation(e)) continue; // lost a numbering race: re-read settings and try again
@@ -774,17 +905,19 @@ export const DRAFT_CARD_LINK_UNKNOWN =
   "Stripe no longer reports whether this invoice's card link was used (its one-payment limit was removed in Stripe), so the app can't tell whether the client already paid with it: check Stripe → Payments, set the link's payment limit back to 1 in Stripe → Payment links, then send again. Nothing was emailed.";
 
 /**
- * A card link made while the invoice was still a draft: never emailed, and the
- * draft may have changed since. Reused only while Stripe says it is live,
- * unused and for exactly the amount and currency due now.
+ * A stored one-time card link, whether made on a draft or already emailed, is
+ * reusable only while Stripe says it is live, unused and for exactly the
+ * current unpaid balance and currency.
  */
-async function draftCardLinkReusable(key: string, inv: InvoiceRow, due: number): Promise<boolean> {
+async function storedCardLinkReusable(key: string, inv: InvoiceRow, due: number): Promise<boolean> {
   const link = await stripeRequest(key, "GET", `/v1/payment_links/${encodeURIComponent(inv.stripe_payment_link_id as string)}`);
+  if (link.livemode !== true) throw new FinanceInputError("the stored Stripe card link is in test mode; refusing to email it to a real customer");
   const used = completedSessions(link);
   if (used === null) throw new FinanceInputError(DRAFT_CARD_LINK_UNKNOWN);
   if (used > 0) throw new FinanceInputError(DRAFT_CARD_LINK_USED);
   if (link.active !== true || !inv.stripe_price_id) return false;
   const price = await stripeRequest(key, "GET", `/v1/prices/${encodeURIComponent(inv.stripe_price_id)}`);
+  if (price.livemode !== true) throw new FinanceInputError("the stored Stripe price is in test mode; refusing to email its link to a real customer");
   return Number(price.unit_amount) === due && String(price.currency || "").toUpperCase() === inv.currency;
 }
 
@@ -798,21 +931,21 @@ async function draftCardLinkReusable(key: string, inv: InvoiceRow, due: number):
  * "Invoice dated {issue date}": renaming it afterwards would need Products
  * write, which the card flow does not otherwise ask of the key, so it stays.
  *
- * An issued invoice's link is reused as it is: its amount was fixed at issue
- * (finalizeInvoice drops a draft link it did not verify). A draft's link is
- * reused only while Stripe says it is live, unused and for exactly this amount
- * (draftCardLinkReusable); otherwise a new one replaces it and the old one —
- * never emailed — is switched off.
+ * Every stored link, including an issued one, is reused only while Stripe says
+ * it is live, unused and for exactly the current balance and currency. Otherwise
+ * the old link is confirmed off before a replacement is made.
  */
-export async function ensurePaymentLink(inv: InvoiceRow): Promise<string> {
-  if (inv.status !== "draft" && inv.stripe_payment_link_url) return inv.stripe_payment_link_url;
+export async function ensurePaymentLink(inv: InvoiceRow, storeSnapshot: InvoiceRow = inv): Promise<string> {
   const due = balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents });
   if (due <= 0) throw new FinanceInputError("nothing is due on this invoice");
   const { key } = await getStripeClient();
   let replacing: string | null = null;
   if (inv.stripe_payment_link_id) {
-    if (inv.stripe_payment_link_url && (await draftCardLinkReusable(key, inv, due))) return inv.stripe_payment_link_url;
+    if (inv.stripe_payment_link_url && (await storedCardLinkReusable(key, inv, due))) return inv.stripe_payment_link_url;
     replacing = inv.stripe_payment_link_id;
+    // The old amount must be impossible to pay before Stripe is asked to make
+    // its replacement. The GET proves the POST took effect.
+    await deactivateAndConfirmPaymentLink(key, replacing);
   }
   // Objects made before the number exists differ in name/metadata: their own idempotency keys, so a later numbered request never collides with one.
   const draft = inv.number ? "" : "-d";
@@ -826,7 +959,7 @@ export async function ensurePaymentLink(inv: InvoiceRow): Promise<string> {
       "product_data[name]": inv.number ? `Invoice ${inv.number}` : `Invoice dated ${inv.issue_date}`,
       "metadata[fin_invoice_id]": inv.id,
     },
-    { idempotencyKey: `fin-price-${inv.id}-${due}-${inv.currency}${draft}` },
+    { idempotencyKey: `fin-price-${inv.id}-${due}-${inv.currency}${draft}-${replacing || "first"}` },
   );
   const priceId = typeof price.id === "string" ? price.id : "";
   if (!priceId.startsWith("price_")) throw new Error("Stripe did not return a price id");
@@ -841,9 +974,11 @@ export async function ensurePaymentLink(inv: InvoiceRow): Promise<string> {
       "line_items[0][quantity]": 1,
       "metadata[fin_invoice_id]": inv.id,
       "metadata[fin_entity_id]": inv.entity_id,
+      "metadata[fin_invoice_price_id]": priceId,
       ...numbered("metadata[fin_invoice_number]"),
       "payment_intent_data[metadata][fin_invoice_id]": inv.id,
       "payment_intent_data[metadata][fin_entity_id]": inv.entity_id,
+      "payment_intent_data[metadata][fin_invoice_price_id]": priceId,
       ...numbered("payment_intent_data[metadata][fin_invoice_number]"),
       "restrictions[completed_sessions][limit]": 1,
       "after_completion[type]": "hosted_confirmation",
@@ -855,11 +990,30 @@ export async function ensurePaymentLink(inv: InvoiceRow): Promise<string> {
   const linkId = typeof link.id === "string" ? link.id : "";
   const url = typeof link.url === "string" ? link.url : "";
   if (!linkId.startsWith("plink_") || !url.startsWith("https://")) throw new Error("Stripe did not return a payment link");
-  if (replacing && replacing !== linkId) await switchOffPaymentLink(key, replacing);
-  await finDb().execute({
-    sql: `UPDATE fin_invoices SET stripe_price_id = ?, stripe_payment_link_id = ?, stripe_payment_link_url = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
-    args: [priceId, linkId, url, inv.id],
+  const stored = await finDb().execute({
+    sql: `UPDATE fin_invoices
+             SET stripe_price_id = ?, stripe_payment_link_id = ?, stripe_payment_link_url = ?,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+           WHERE id = ? AND status = ? AND total_cents = ? AND amount_paid_cents = ? AND currency = ?
+             AND stripe_price_id IS ? AND stripe_payment_link_id IS ? AND stripe_payment_link_url IS ?`,
+    args: [
+      priceId,
+      linkId,
+      url,
+      inv.id,
+      storeSnapshot.status,
+      storeSnapshot.total_cents,
+      storeSnapshot.amount_paid_cents,
+      storeSnapshot.currency,
+      storeSnapshot.stripe_price_id,
+      storeSnapshot.stripe_payment_link_id,
+      storeSnapshot.stripe_payment_link_url,
+    ],
   });
+  if (stored.rowsAffected !== 1) {
+    await deactivateAndConfirmPaymentLink(key, linkId);
+    throw new FinanceInputError("This invoice changed while its card link was being made, so the new link was switched off. Reload the invoice and send again. Nothing was emailed.");
+  }
   return url;
 }
 
@@ -1198,8 +1352,8 @@ export type SendResult = {
  *
  * ORDER. Everything that can refuse happens BEFORE the draft is numbered and
  * its receivable booked: the issue checks (issueTotals), every Stripe link the
- * email needs (the retainer's, and the one-off card link when the method
- * includes card), whether Wise can supply its details, "is there any way to
+ * email needs (the retainer's, and the one-off link only in Stripe mode),
+ * whether Wise can supply its details, "is there any way to
  * pay", and the mailbox. So a key without Prices / Payment Links write, a Wise
  * outage with no fallback, or a missing mailbox leaves a DRAFT with one plain
  * sentence — never an issued, booked invoice nobody was sent. finalizeInvoice
@@ -1207,11 +1361,10 @@ export type SendResult = {
  * (Once issued, only the SMTP send itself can still fail; the invoice then
  * shows "issued, not emailed" and is re-sent without renumbering.)
  *
- * Card link: attached when the method offers card (unless the sender turned
- * it off — the flow every invoice before migration 184 used, unchanged), and
- * as the fallback when a bank-transfer invoice cannot show Wise details. A
- * bank-transfer invoice with neither Wise nor Stripe nor written payment
- * instructions is refused: it would ask for money with no way to pay.
+ * A one-time card link is attached only in Stripe mode (unless the sender turns
+ * it off — the flow every invoice before migration 184 used). Wise and Hybrid
+ * never fall back to one; without Wise details or written payment instructions,
+ * the invoice is refused because it would ask for money with no way to pay.
  *
  * Both of those are about the ONE-TIME amount. A monthly retainer always gets
  * its Stripe recurring link (ensureRetainerLink) first; if Stripe refuses it,
@@ -1230,6 +1383,7 @@ export async function sendInvoice(
   if (!before) throw new FinanceNotFound();
   if (before.status === "void" || before.status === "paid") throw new FinanceInputError(`a ${before.status} invoice cannot be sent`);
   const contact = await loadContact(before.contact_id);
+  if (before.status === "draft" && !isActiveInvoiceCustomer(before, contact)) throw new FinanceInputError(ACTIVE_CUSTOMER_REQUIRED);
   const to = opts.to ? validateEmail(opts.to) : contact?.email ? validateEmail(contact.email) : null;
   if (!to) throw new FinanceInputError("the customer has no valid email address; add one or enter a recipient");
   const lines = await loadInvoiceLines(invoiceId);
@@ -1251,6 +1405,7 @@ export async function sendInvoice(
     };
   }
   const method = storedPaymentMethod(planned.payment_method);
+  assertPaymentMode(method, { totalCents: planned.total_cents, monthly: { totalCents: retainerMonthlyCents(planned) } });
 
   // 2. Every Stripe link the email needs, made or checked while the invoice can still stay a draft.
   const retainerCents = retainerMonthlyCents(planned);
@@ -1270,26 +1425,19 @@ export async function sendInvoice(
   const dueNow = hasAmountDueNow(planned);
   const wise = await wiseDetailsFor(planned);
   const settings = await loadSettings(entity.id);
-  const cardWanted = dueNow && opts.paymentLink !== false && (offersCard(method) || (offersBankTransfer(method) && !wise.details));
+  // Only Stripe mode offers a one-time card rail. Wise and Hybrid never fall
+  // back to a card link for the implementation amount.
+  const cardWanted = dueNow && opts.paymentLink !== false && offersCard(method);
   let url: string | null = null;
   if (cardWanted) {
     try {
-      url = await ensurePaymentLink(planned);
+      url = await ensurePaymentLink(planned, before);
     } catch (e) {
-      // A card invoice needs its link: that failure stays loud. The FALLBACK
-      // link for a Wise invoice may be skipped when the founders wrote their
-      // own payment instructions.
-      if (offersCard(method) || !(e instanceof StripeNotReady)) throw refusedByStripe(e, "card");
-      if (!settings.payment_instructions.trim()) {
-        throw new FinanceInputError(
-          `${wise.notice} Stripe is not ready either (${stripeNotReadyPlain(e)}). Add payment instructions in Finances > Settings, or connect one of them. The invoice was NOT emailed.`,
-        );
-      }
-      url = null;
+      throw refusedByStripe(e, "card");
     }
   }
   if (dueNow && offersBankTransfer(method) && !wise.details && !url && !settings.payment_instructions.trim()) {
-    throw new FinanceInputError(`${wise.notice} No card link and no payment instructions either, so the client would have no way to pay. The invoice was NOT emailed.`);
+    throw new FinanceInputError(`${wise.notice} There are no written payment instructions either, so the client would have no way to pay. The invoice was NOT emailed.`);
   }
   // 3. The mailbox it leaves from (InvoiceMailerNotConfigured, still a draft).
   await resolveInvoiceMailbox(financeTenantId());
@@ -1392,6 +1540,7 @@ export async function markInvoicePaidManually(viewer: FinanceViewer, invoiceId: 
   }
   const contact = await loadContact(inv.contact_id);
   const paymentId = newId("pay");
+  const paymentGate = { sql: `EXISTS (SELECT 1 FROM fin_payments WHERE id = ?)`, args: [paymentId] };
   const posting = await buildSettlementPosting({
     inv,
     amountCents: amount,
@@ -1402,20 +1551,39 @@ export async function markInvoicePaidManually(viewer: FinanceViewer, invoiceId: 
     sourceRef: paymentId,
     memo: `Payment for invoice ${inv.number}${text(raw.reference, 60) ? ` (${text(raw.reference, 60)})` : ""}`,
     createdBy: viewerLabel(viewer),
+    gate: paymentGate,
   });
-  await writeBatch([
+  // A full-value card link must be impossible to use before an out-of-band
+  // payment reduces the balance. Stripe failure stops here with no book entry.
+  await retireOneTimePaymentLinkForExternalPayment(inv);
+  const out = await writeBatch([
     {
       sql: `INSERT INTO fin_payments (id, entity_id, kind, source, occurred_at, occurred_on, amount_cents, currency, settlement_cad_cents,
               fee_status, settlement_estimated, invoice_id, contact_id, customer_name, customer_email, deposit_account_id, description, livemode, created_by)
-            VALUES (?, ?, 'payment', 'manual', ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-      args: [paymentId, entity.id, `${date}T12:00:00.000Z`, date, amount, inv.currency, receivedCad, estimated, inv.id, inv.contact_id, contact?.name || "", contact?.email || "", depositId, text(raw.reference, 200) || "Manual payment", viewerLabel(viewer)],
+            SELECT ?, ?, 'payment', 'manual', ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, 1, ?
+             WHERE EXISTS (
+               SELECT 1 FROM fin_invoices
+                WHERE id = ? AND status = ? AND total_cents = ? AND amount_paid_cents = ? AND currency = ?
+                  AND stripe_price_id IS NULL AND stripe_payment_link_id IS NULL AND stripe_payment_link_url IS NULL
+             )`,
+      args: [
+        paymentId, entity.id, `${date}T12:00:00.000Z`, date, amount, inv.currency, receivedCad, estimated, inv.id, inv.contact_id,
+        contact?.name || "", contact?.email || "", depositId, text(raw.reference, 200) || "Manual payment", viewerLabel(viewer),
+        inv.id, inv.status, inv.total_cents, inv.amount_paid_cents, inv.currency,
+      ],
     },
     ...posting.statements,
-    { sql: `UPDATE fin_payments SET entry_id = ? WHERE id = ?`, args: [posting.entryId, paymentId] },
-    recomputeInvoicePaidStatement(inv.id, new Date().toISOString()),
-    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.paid_manually", objectType: "invoice", objectId: inv.id, detail: { amount, receivedCad, estimated: estimated === 1 } }),
+    { sql: `UPDATE fin_payments SET entry_id = ? WHERE id = ? AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`, args: [posting.entryId, paymentId, posting.entryId] },
+    recomputeInvoicePaidStatement(inv.id, new Date().toISOString(), paymentGate),
+    conditionalAuditStatement(
+      { entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.paid_manually", objectType: "invoice", objectId: inv.id, detail: { amount, receivedCad, estimated: estimated === 1 } },
+      "EXISTS (SELECT 1 FROM fin_payments WHERE id = ?)",
+      [paymentId],
+    ),
   ]);
-  await deactivatePaymentLinkIfPaid(inv.id).catch((e) => console.error("[finances:invoices] link deactivate failed", e instanceof Error ? e.message : e));
+  if (out[0]?.rowsAffected !== 1) {
+    throw new FinanceInputError("This invoice changed while the payment was being recorded. Reload it and try again; no payment was recorded.");
+  }
   return paymentId;
 }
 
@@ -1521,7 +1689,7 @@ export async function remindOverdue(viewer: FinanceViewer, opts: { send: boolean
         // Same rule as sendInvoice: never ask for money with no way to pay.
         if (offersBankTransfer(storedPaymentMethod(r.payment_method)) && !wise.lines && !r.stripe_payment_link_url && !settings.payment_instructions.trim()) {
           throw new FinanceInputError(
-            `${wise.notice || "Wise bank details are unavailable."} There is no card link or payment instructions either, so the reminder was NOT sent.`,
+            `${wise.notice || "Wise bank details are unavailable."} There are no written payment instructions either, so the reminder was NOT sent.`,
           );
         }
         // A reminder chases the ONE-TIME balance only: its PDF leaves off the retainer (lines, totals, section and link),

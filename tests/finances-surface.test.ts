@@ -120,7 +120,7 @@ async function main() {
   assert.match(customers, /action="contact\.restore"/);
   assert.match(customers, /<details/);
   assert.match(customers, /Archived \(\{archived\.length\}\)/);
-  assert.match(customers, /leaves new-invoice choices while preserving existing invoices and Stripe linkage/);
+  assert.match(customers, /removes the customer from new-invoice choices while preserving existing invoices and Stripe linkage/);
   assert.match(customers, /aria-expanded=\{editing\}/);
   assert.match(customers, /aria-controls=\{editId\}/);
   assert.match(customers, /ariaLabel=\{`Archive \$\{customer\.name\}`\}/);
@@ -128,6 +128,18 @@ async function main() {
   assert.match(actionButton, /ariaLabel\?: string/);
   assert.match(actionButton, /aria-label=\{ariaLabel\}/);
   assert.match(actionButton, /role="status"/, "async button feedback is announced");
+
+  // Payment-method language must match the product contract: Hybrid is bank
+  // for implementation + card only for the monthly retainer. It must never
+  // promise a one-time card fallback when Wise is unavailable.
+  const invoiceEditor = readFileSync(join(root, "components/founders/finances/InvoiceEditor.tsx"), "utf8");
+  const invoiceDetail = readFileSync(join(root, "app/founders/finances/invoices/[id]/page.tsx"), "utf8");
+  assert.doesNotMatch(invoiceEditor, /bank transfer or card/, "Hybrid never offers two rails for the one-time balance");
+  assert.doesNotMatch(invoiceEditor, /falls back to the card link|sent with the card link or/, "Wise failure never silently changes the product");
+  assert.match(invoiceEditor, /no one-time card fallback is created/);
+  assert.match(invoiceDetail, /offersCard\(paymentMethod\)/, "only Stripe mode gets the one-time card-link checkbox");
+  assert.match(invoiceDetail, /turns off the current full-balance card link first/,
+    "Stripe-only invoices warn what an external payment does before recording it");
 
   // Legacy deep links still filter through list_status and now remain visible.
   assert.match(invoicePage, /Issued \(legacy sent filter\)/);

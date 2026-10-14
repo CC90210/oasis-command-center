@@ -6,10 +6,11 @@
  * stored — the server still recomputes and is the only authority.
  *
  * "How the client pays" — bank transfer (Wise, the default for a one-off
- * invoice), card (Stripe) or both. Whether Wise can supply details for the
+ * invoice), card (Stripe), or Hybrid: implementation by bank plus a monthly
+ * retainer by card. Whether Wise can supply details for the
  * chosen currency is asked of the server (GET /api/founders/finances/wise
  * ?view=editor) after render, so the form never waits on Wise; when it
- * cannot, the reason is shown and the invoice falls back to the card link.
+ * cannot, the reason is shown and the bank method stays selected.
  *
  * One-time / Monthly per line (migration 185): one-time lines are the
  * implementation price, due now and paid as chosen above; monthly lines are
@@ -27,6 +28,7 @@ import {
   DEFAULT_NEW_INVOICE_METHOD,
   INVOICE_PAYMENT_METHODS,
   PAYMENT_METHOD_LABEL,
+  invoicePaymentModeError,
   offersBankTransfer,
   parsePaymentMethod,
   type InvoicePaymentMethod,
@@ -126,7 +128,11 @@ export function InvoiceEditor({
   // The server refuses a retainer that would carry GST/QST; say so before Save, in the same words.
   const taxedRetainer = hasMonthly && preview.ok ? retainerTaxRefusal(preview.t) : null;
   // How the one-time part gets paid, in the words the summary uses.
-  const oneTimeHow = method === "stripe" ? "card" : method === "wise_stripe" ? "bank transfer or card" : "bank transfer";
+  const oneTimeHow = method === "stripe" ? "card" : "bank transfer";
+  const paymentModeError =
+    method && preview.ok
+      ? invoicePaymentModeError(method, { oneTimeCents: preview.t.totalCents, monthlyCents: preview.t.monthly.totalCents })
+      : null;
 
   async function save() {
     setBusy(true);
@@ -218,9 +224,9 @@ export function InvoiceEditor({
           {!wise ? (
             "Checking Wise…"
           ) : !wise.methodSupported ? (
-            <span className="text-status-warm">{wise.reason || "Bank transfer isn't available right now."} The invoice goes out with the card link.</span>
+            <span className="text-status-warm">{wise.reason || "Bank transfer isn't available right now."} Only Stripe card payment is available.</span>
           ) : method && offersBankTransfer(method) && !wise.available ? (
-            <span className="text-status-warm">Wise unavailable: {wise.reason} It will be sent with the card link or your payment instructions instead.</span>
+            <span className="text-status-warm">Wise unavailable: {wise.reason} Add written payment instructions or try again; no one-time card fallback is created.</span>
           ) : method && offersBankTransfer(method) ? (
             `The invoice prints the Wise ${currency} bank details with its number as the payment reference.${
               retainerSupported ? " Mark a line Monthly to bill it as a retainer, paid by card through Stripe every month." : " Recurring billing stays on Stripe subscriptions."
@@ -228,6 +234,7 @@ export function InvoiceEditor({
           ) : (
             `A Stripe card payment link is attached when the invoice is sent.${retainerSupported ? " Mark a line Monthly to bill it as a retainer." : ""}`
           )}
+          {paymentModeError && <div className="mt-1 text-status-warm">{paymentModeError}</div>}
         </div>
       </div>
 
