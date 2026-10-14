@@ -63,6 +63,7 @@ async function main(): Promise<void> {
     "185_finance_invoice_retainer.turso.sql",
     "bravo__190_ledger_core.sql",
     "bravo__193_stripe_payouts.sql",
+    "bravo__226_finance_invoice_send_claim.sql",
   ]) {
     await raw.executeMultiple(readFileSync(join(root, "database/turso", migration), "utf8"));
   }
@@ -74,6 +75,7 @@ async function main(): Promise<void> {
   const settings = await import("../lib/founders-finances/settings-io");
   const payouts = await import("../lib/founders-finances/stripe-payouts-io");
   const stripeIo = await import("../lib/founders-finances/stripe-io");
+  const { linkLineToEntryStatements } = await import("../lib/founders-finances/transactions-io");
   const { buildPosting } = await import("../lib/founders-finances/ledger-io");
   const { writeBatch } = await import("../lib/founders-finances/db");
   const { getTursoClient } = await import("../lib/turso");
@@ -121,6 +123,63 @@ async function main(): Promise<void> {
       ],
     });
     await writeBatch(posting.statements);
+  }
+
+  async function accountBalance(account: string): Promise<number> {
+    return count(
+      `SELECT COALESCE(SUM(l.cad_debit_cents - l.cad_credit_cents), 0)
+         FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id
+        WHERE l.account_id = ? AND e.status = 'posted'`,
+      [account],
+    );
+  }
+
+  async function addUnreviewedBankLine(id: string, amountCents: number, date: string): Promise<void> {
+    await raw.execute({
+      sql: `INSERT INTO fin_bank_transactions
+              (id, entity_id, account_id, posted_date, description, amount_cents, currency, status, dedupe_hash, source, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, 'CAD', 'unreviewed', ?, 'import', 'test')`,
+      args: [id, B, CHEQUING, date, `Stripe payout ${id}`, amountCents, `hash-${id}`],
+    });
+  }
+
+  async function linkBankLine(id: string, entryId: string): Promise<void> {
+    const out = await writeBatch(
+      linkLineToEntryStatements({
+        entityId: B,
+        txnId: id,
+        entryId,
+        categoryId: categoryId(B, SYS.stripeClearing),
+        memo: `Stripe payout linked for ${id}`,
+        actor: "test",
+      }),
+    );
+    assert.equal(out[0]?.rowsAffected, 1, `${id}: bank line linked`);
+  }
+
+  async function postBankReturn(id: string, amountCents: number, date: string): Promise<void> {
+    const posting = await buildPosting({
+      entityId: B,
+      entryDate: date,
+      memo: `Stripe returned failed payout ${id}`,
+      source: "bank_txn",
+      sourceRef: id,
+      createdBy: "test",
+      lines: [
+        { accountId: CLEARING, currency: "CAD", debitCents: amountCents },
+        { accountId: CHEQUING, currency: "CAD", creditCents: amountCents },
+      ],
+    });
+    await writeBatch([
+      ...posting.statements,
+      {
+        sql: `INSERT INTO fin_bank_transactions
+                (id, entity_id, account_id, posted_date, description, amount_cents, currency, status, entry_id, dedupe_hash, source, created_by)
+              SELECT ?, ?, ?, ?, ?, ?, 'CAD', 'posted', ?, ?, 'import', 'test'
+               WHERE EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+        args: [id, B, CHEQUING, date, `Stripe payout return ${id}`, -amountCents, posting.entryId, `hash-${id}`, posting.entryId],
+      },
+    ]);
   }
 
   const payoutFacts = (id: string, status: "paid" | "failed" | "canceled", amountCents: number, arrivalDate: string) => ({
@@ -287,6 +346,35 @@ async function main(): Promise<void> {
     assert.equal((await settings.loadSettings(B)).invoice_next_number, 3, "the rejected rewind changed nothing");
   });
 
+  await check("a prefix-only settings update resumes after that prefix's highest issued invoice", async () => {
+    await settings.updateSettings(cc, B, { invoice_prefix: "LEGACY", invoice_next_number: 1 });
+    const firstId = await invoices.createDraftInvoice(cc, B, {
+      new_contact: { name: "Legacy sequence", email: "legacy-sequence@example.test" },
+      issue_date: "2026-10-01",
+      currency: "CAD",
+      lines: [{ description: "Sequence fixture", quantity: 1, unit_price: "10.00" }],
+    });
+    assert.equal((await invoices.finalizeInvoice(cc, firstId)).number, "LEGACY-2026-0001");
+
+    await settings.updateSettings(cc, B, { invoice_prefix: "CURRENT", invoice_next_number: 1 });
+    const beforePatch = await settings.loadSettings(B);
+    const resumed = await settings.updateSettings(cc, B, { invoice_prefix: "LEGACY" });
+    assert.equal(resumed.invoice_next_number, 2, "prefix-only save advanced past LEGACY-2026-0001");
+    assert.deepEqual(
+      [resumed.gst_qst_registered, resumed.registration_effective_date],
+      [beforePatch.gst_qst_registered, beforePatch.registration_effective_date],
+      "a partial sequence update did not change tax registration",
+    );
+
+    const secondId = await invoices.createDraftInvoice(cc, B, {
+      new_contact: { name: "Resumed sequence", email: "resumed-sequence@example.test" },
+      issue_date: "2026-10-02",
+      currency: "CAD",
+      lines: [{ description: "Sequence fixture", quantity: 1, unit_price: "10.00" }],
+    });
+    assert.equal((await invoices.finalizeInvoice(cc, secondId)).number, "LEGACY-2026-0002", "finalize did not exhaust retries on an old number");
+  });
+
   await check("paid-to-failed payout race cannot leave a failed payout booked", async () => {
     const id = "po_status_race";
     const amount = 2_100;
@@ -340,6 +428,61 @@ async function main(): Promise<void> {
     assert.deepEqual([row?.stripe_status, row?.booking], ["failed", "not_booked"]);
     assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'stripe_payout' AND source_ref = ? AND status = 'posted'`, [id]), 0);
     assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE action = 'stripe.payout_booked' AND object_id = ?`, [id]), 0);
+  });
+
+  await check("a failed or canceled payout already linked to its bank line stays bank-observed until the return line", async () => {
+    await settings.setStripePayoutAccount(cc, B, CHEQUING);
+    for (const [status, day, amount] of [
+      ["failed", "2026-10-09", 2_300],
+      ["canceled", "2026-10-10", 2_400],
+    ] as const) {
+      const id = `po_linked_${status}`;
+      const lineId = `txn_linked_${status}`;
+      const returnId = `txn_return_${status}`;
+      const bankBefore = await accountBalance(CHEQUING);
+      const clearingBefore = await accountBalance(CLEARING);
+      await addClearing(`linked-${status}`, amount, day);
+      const paid = await payouts.recordStripePayout(payoutFacts(id, "paid", amount, day));
+      assert.equal(paid?.booking, "booked");
+      assert.ok(paid?.entryId);
+      await addUnreviewedBankLine(lineId, amount, day);
+      await linkBankLine(lineId, String(paid?.entryId));
+
+      const terminal = await payouts.recordStripePayout(payoutFacts(id, status, amount, day), { reportedOn: "2026-10-11" });
+      const stored = await payouts.loadPayout(id);
+      assert.deepEqual([stored?.stripe_status, terminal?.booking], [status, "booked"]);
+      assert.match(String(terminal?.reason), /bank line was booked/);
+      assert.equal((await raw.execute({ sql: `SELECT status FROM fin_journal_entries WHERE id = ?`, args: [String(paid?.entryId)] })).rows[0].status, "posted");
+      assert.equal((await raw.execute({ sql: `SELECT status, entry_id FROM fin_bank_transactions WHERE id = ?`, args: [lineId] })).rows[0].entry_id, paid?.entryId);
+      assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'reversal' AND source_ref = ?`, [String(paid?.entryId)]), 0);
+
+      await postBankReturn(returnId, amount, "2026-10-12");
+      assert.equal(await accountBalance(CHEQUING), bankBefore, `${status}: bank deposit and return net to zero`);
+      assert.equal(await accountBalance(CLEARING), clearingBefore + amount, `${status}: failed payout is back in Stripe clearing once`);
+    }
+  });
+
+  await check("a bank line linking during payout failure wins the reversal CAS", async () => {
+    await settings.setStripePayoutAccount(cc, B, CHEQUING);
+    const id = "po_link_failure_race";
+    const lineId = "txn_link_failure_race";
+    const amount = 2_500;
+    const day = "2026-10-13";
+    await addClearing("link-failure-race", amount, day);
+    const paid = await payouts.recordStripePayout(payoutFacts(id, "paid", amount, day));
+    assert.ok(paid?.entryId);
+    await addUnreviewedBankLine(lineId, amount, day);
+
+    const raced = await withBatchRace(
+      (batch) => batch.includes(id) && batch.includes("stripe.payout_reversed"),
+      () => linkBankLine(lineId, String(paid?.entryId)),
+      () => payouts.recordStripePayout(payoutFacts(id, "failed", amount, day), { reportedOn: "2026-10-14" }),
+    );
+    assert.equal(raced.raced, true, "bank line linked after the reversal was planned but before its transaction");
+    assert.deepEqual([(await payouts.loadPayout(id))?.stripe_status, raced.result?.booking], ["failed", "booked"]);
+    assert.equal((await raw.execute({ sql: `SELECT status FROM fin_journal_entries WHERE id = ?`, args: [String(paid?.entryId)] })).rows[0].status, "posted");
+    assert.equal((await raw.execute({ sql: `SELECT entry_id FROM fin_bank_transactions WHERE id = ?`, args: [lineId] })).rows[0].entry_id, paid?.entryId);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'reversal' AND source_ref = ?`, [String(paid?.entryId)]), 0);
   });
 
   await check("payout booking is pinned to the payout-account setting snapshot", async () => {

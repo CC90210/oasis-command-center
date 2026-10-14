@@ -687,8 +687,12 @@ async function unbookPayout(row: PayoutRow, reportedOn: string): Promise<PayoutO
         sql: `EXISTS (
           SELECT 1 FROM fin_stripe_payouts
            WHERE id = ? AND stripe_status IN ('failed', 'canceled') AND booking = 'booked' AND entry_id = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM fin_bank_transactions
+           WHERE entity_id = ? AND entry_id = ? AND status = 'posted'
         )`,
-        args: [id, row.entry_id],
+        args: [id, row.entry_id, E, row.entry_id],
       };
       const reversal = await buildReversal({ entityId: E, entryId: row.entry_id, date: reportedOn, memo: `Stripe payout ${id} ${status}: reversed`, createdBy: ACTOR, gate });
       try {
@@ -704,6 +708,22 @@ async function unbookPayout(row: PayoutRow, reportedOn: string): Promise<PayoutO
         ]);
       } catch (e) {
         if (!isUniqueViolation(e)) throw e;
+      }
+      // A bank line can link to the payout after the entry read above but
+      // before this batch. The reversal gate then refuses the reversal: the
+      // bank observation stays on the books and its later return line records
+      // the money going back, exactly like a payout adopted from the feed.
+      const after = await loadPayout(id);
+      if (after?.booking === "booked" && after.entry_id === row.entry_id) {
+        await finDb().execute({
+          sql: `UPDATE fin_stripe_payouts SET reason = ?, updated_at = ${NOW_SQL}
+                 WHERE id = ? AND stripe_status IN ('failed', 'canceled') AND booking = 'booked' AND entry_id = ?
+                   AND EXISTS (
+                     SELECT 1 FROM fin_bank_transactions
+                      WHERE entity_id = ? AND entry_id = ? AND status = 'posted'
+                   )`,
+          args: [`Stripe reports this payout ${status} after its bank line was booked; the bank shows it returned`, id, row.entry_id, E, row.entry_id],
+        });
       }
     } else {
       // Booked from its Wise bank line: the bank shows the money coming back

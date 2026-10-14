@@ -58,7 +58,10 @@ function text(v: unknown, max: number): string {
 export async function updateSettings(viewer: FinanceViewer, entityRef: string, raw: Record<string, unknown>): Promise<SettingsRow> {
   const entity = await requireEntity(viewer, entityRef);
   const cur = await loadSettings(entity.id);
-  const registered = raw.gst_qst_registered === true || raw.gst_qst_registered === "true" || raw.gst_qst_registered === "on";
+  const registered =
+    raw.gst_qst_registered === undefined
+      ? cur.gst_qst_registered === 1
+      : raw.gst_qst_registered === true || raw.gst_qst_registered === "true" || raw.gst_qst_registered === "on";
   const reg = validateRegistration({
     registered,
     gstNumber: text(raw.gst_number ?? cur.gst_number, 40),
@@ -66,19 +69,20 @@ export async function updateSettings(viewer: FinanceViewer, entityRef: string, r
   });
   if (!reg.ok) throw new FinanceInputError(reg.error);
   if (registered && entity.kind !== "business") throw new FinanceInputError("only the business can be GST/QST registered");
-  const effective = text(raw.registration_effective_date, 10) || null;
+  const effective = raw.registration_effective_date === undefined ? cur.registration_effective_date : text(raw.registration_effective_date, 10) || null;
   if (effective && !isIsoDate(effective)) throw new FinanceInputError("registration date must be YYYY-MM-DD");
   const email = raw.contact_email === undefined ? cur.contact_email : text(raw.contact_email, 254);
   if (email && !validateEmail(email)) throw new FinanceInputError("contact email is not valid");
   const terms = raw.payment_terms_days === undefined ? cur.payment_terms_days : Number(raw.payment_terms_days);
   if (!Number.isInteger(terms) || terms < 0 || terms > 365) throw new FinanceInputError("payment terms must be 0-365 days");
-  const nextNumber = raw.invoice_next_number === undefined || raw.invoice_next_number === "" ? cur.invoice_next_number : Number(raw.invoice_next_number);
+  const nextNumberWasProvided = raw.invoice_next_number !== undefined && raw.invoice_next_number !== "";
+  let nextNumber = nextNumberWasProvided ? Number(raw.invoice_next_number) : cur.invoice_next_number;
   if (!Number.isInteger(nextNumber) || nextNumber < 1) throw new FinanceInputError("next invoice number must be a positive integer");
   const legalName = raw.legal_name === undefined ? cur.legal_name : text(raw.legal_name, 200);
   if (!legalName) throw new FinanceInputError("legal name is required");
   const pick = (k: keyof SettingsRow, max: number) => (raw[k] === undefined ? (cur[k] as string) : text(raw[k], max));
   const invoicePrefix = raw.invoice_prefix === undefined ? cur.invoice_prefix : sanitizePrefix(text(raw.invoice_prefix, 20));
-  if (raw.invoice_next_number !== undefined && raw.invoice_next_number !== "") {
+  if (nextNumberWasProvided || invoicePrefix !== cur.invoice_prefix) {
     const sequenceYear = cur.invoice_number_year ?? Number(torontoToday().slice(0, 4));
     const prefix = `${invoicePrefix}-${sequenceYear}-`;
     const issued = await query<{ number: string }>(`SELECT number FROM fin_invoices WHERE entity_id = ? AND number LIKE ?`, [entity.id, `${prefix}%`]);
@@ -86,9 +90,12 @@ export async function updateSettings(viewer: FinanceViewer, entityRef: string, r
       const tail = row.number.startsWith(prefix) ? row.number.slice(prefix.length) : "";
       return /^\d+$/.test(tail) ? Math.max(max, Number(tail)) : max;
     }, 0);
-    if (nextNumber <= maxIssued) {
+    if (nextNumber <= maxIssued && nextNumberWasProvided) {
       throw new FinanceInputError(`next invoice number must be at least ${maxIssued + 1}; ${invoicePrefix}-${sequenceYear}-${String(maxIssued).padStart(4, "0")} was already issued`);
     }
+    // A prefix-only update is a partial settings update, not a request to
+    // rewind that prefix's sequence. Resume after its highest issued number.
+    if (nextNumber <= maxIssued) nextNumber = maxIssued + 1;
   }
   const auditId = newId("aud");
   const out = await writeBatch([
