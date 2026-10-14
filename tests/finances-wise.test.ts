@@ -613,6 +613,46 @@ async function main() {
     assert.equal(await entries(), posted.lines.filter((l) => l.entry_id).length);
   });
 
+  await check("one deposit, inverse race: Wise reconcile wins after categorisation reads, so the bank line cannot post it again", async () => {
+    const inv = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Inverse Race Deposit", email: "ap@inverse-race.test" },
+      issue_date: addDays(today, -1),
+      currency: "USD",
+      lines: [{ description: "Project", quantity: 1, unit_price: "420.00" }],
+    });
+    const number = (await invoices.finalizeInvoice(cc, inv)).number as string;
+    const ref = "TRANSFER-9006";
+    usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at(0), value: 420, cur: "USD", ref, running: 2372.38, sender: "Inverse Race Deposit", payref: number, desc: `Received money from Inverse Race Deposit with reference ${number}` });
+    fixtures.statements.USD = statementOf("USD", usdTx, 0, [usdDetails]);
+    await feedIo.syncWiseFeed(cc, { since }, { dryRun: false });
+    const fitid = `WISE-USD-CREDIT-${ref}`;
+    const bankRow = (await raw.execute({ sql: `SELECT id, status FROM fin_bank_transactions WHERE fitid = ?`, args: [fitid] })).rows[0];
+    assert.equal(bankRow.status, "unreviewed");
+    const txnId = String(bankRow.id);
+    const beforeUsd = await nativeBalance("USD");
+    let reconcileRun: Awaited<ReturnType<typeof reconcile.reconcileWise>> | null = null;
+    const txns = await import("../lib/founders-finances/transactions-io");
+    const raced = await withRace(
+      (batch) => batch.includes("txn.categorized") && batch.includes(txnId),
+      async () => {
+        reconcileRun = await reconcile.reconcileWise(cc, { days: 30, dryRun: false });
+      },
+      () => txns.categorizeTransaction(cc, txnId, `${B}:cat:4000`).then(() => null, (error: unknown) => error),
+    );
+    assert.equal(raced.raced, true);
+    assert.equal(reconcileRun?.recorded, 1);
+    assert.ok(raced.result instanceof access.FinanceInputError, "the stale categorisation loses its atomic claim");
+    assert.match((raced.result as Error).message, /changed while you were editing/);
+    const after = (await raw.execute({ sql: `SELECT status, category_id, entry_id FROM fin_bank_transactions WHERE id = ?`, args: [txnId] })).rows[0];
+    assert.deepEqual([after.status, after.category_id, after.entry_id], ["excluded", null, null]);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE invoice_id = ?`, [inv]), 1);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'wise_payment' AND source_ref = ?`, [ref]), 1, "the Wise settlement was posted once");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'wise_payment' AND source_ref = ?`, [`${ref}:USD`]), 1, "the one receipt has one foreign-currency holding entry");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'bank_txn' AND source_ref = ?`, [txnId]), 0, "categorisation did not add a second receipt");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'txn.categorized'`, [txnId]), 0, "a lost categorisation claim leaves no false audit");
+    assert.equal(await nativeBalance("USD"), beforeUsd + 42000, "the deposit reaches Wise exactly once");
+  });
+
   await check("books still balance after everything", async () => {
     const tb = (await reportsIo.runReport(cc, "oasis", "trial", { to: "2099-12-31" })).data as { balanced: boolean };
     assert.equal(tb.balanced, true);

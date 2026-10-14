@@ -235,21 +235,44 @@ async function statementsToPost(
 ): Promise<{ statements: InStatement[]; entryId: string }> {
   const statements: InStatement[] = [];
   const old = txn.entry_id || "";
+  const wise = parseWiseFitid(txn.fitid);
+  const gate = {
+    sql: [
+      `(SELECT COALESCE(entry_id, '') FROM fin_bank_transactions WHERE id = ?) = ?`,
+      `(SELECT status FROM fin_bank_transactions WHERE id = ?) = ?`,
+      ...(wise?.direction === "CREDIT"
+        ? [`NOT EXISTS (SELECT 1 FROM fin_journal_entries WHERE entity_id = ? AND source = ? AND source_ref = ? AND status = 'posted')`]
+        : []),
+      ...(extraGate ? [extraGate.sql] : []),
+    ].join(" AND "),
+    args: [
+      txn.id,
+      old,
+      txn.id,
+      txn.status,
+      ...(wise?.direction === "CREDIT" ? [txn.entity_id, WISE_PAYMENT_SOURCE, wise.ref] : []),
+      ...(extraGate?.args ?? []),
+    ],
+  };
   if (txn.entry_id) {
-    const rev = await buildReversal({ entityId: txn.entity_id, entryId: txn.entry_id, date: txn.posted_date, memo: "Re-categorised", createdBy: actor });
+    const rev = await buildReversal({
+      entityId: txn.entity_id,
+      entryId: txn.entry_id,
+      date: txn.posted_date,
+      memo: "Re-categorised",
+      createdBy: actor,
+      gate,
+    });
     statements.push(...rev.statements);
   }
   const posting = await buildPosting({
     ...txnPostingInput(txn, category, actor, txn.entry_id ? `${txn.id}:${newId("r")}` : txn.id),
-    gate: {
-      sql: `(SELECT COALESCE(entry_id, '') FROM fin_bank_transactions WHERE id = ?) = ?${extraGate ? ` AND ${extraGate.sql}` : ""}`,
-      args: [txn.id, old, ...(extraGate?.args ?? [])],
-    },
+    gate,
   });
   statements.push(...posting.statements, {
     sql: `UPDATE fin_bank_transactions SET category_id = ?, entry_id = ?, status = 'posted'
-           WHERE id = ? AND COALESCE(entry_id, '') = ? AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
-    args: [category.id, posting.entryId, txn.id, old, posting.entryId],
+           WHERE id = ? AND (${gate.sql}) AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+    args: [category.id, posting.entryId, txn.id, ...gate.args, posting.entryId],
   });
   return { statements, entryId: posting.entryId };
 }
@@ -345,13 +368,13 @@ export async function categorizeTransaction(viewer: FinanceViewer, txnId: string
   if (twice) throw new FinanceInputError(twice);
   if (await linkToBookedPayout(viewer, txn, category)) return;
   // A payout booked from Stripe between that check and this write stops the line's own entry.
-  const { statements } = await statementsToPost(
+  const { statements, entryId } = await statementsToPost(
     txn,
     category,
     viewerLabel(viewer),
     isPayoutShaped(txn, category) ? { sql: `NOT EXISTS (SELECT 1 FROM fin_stripe_payouts p WHERE ${BOOKED_PAYOUT_WHERE})`, args: bookedPayoutArgs(txn) } : undefined,
   );
-  statements.push(auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "txn.categorized", objectType: "transaction", objectId: txnId, detail: { category: category.name } }));
+  statements.push(auditIfLinked({ entityId: entity.id, actor: viewerLabel(viewer), action: "txn.categorized", txnId, entryId, detail: { category: category.name } }));
   try {
     await writeBatch(statements);
   } catch (e) {
