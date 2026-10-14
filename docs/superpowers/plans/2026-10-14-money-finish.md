@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Finish the Money invoicing workflow with maintainable customers, a clear founder-facing lifecycle, and safe bank-plus-card split payments.
+**Goal:** Finish the Money invoicing workflow with maintainable customers, a clear founder-facing lifecycle, the specified bank-implementation-plus-Stripe-retainer hybrid mode, and safe one-time card links.
 
-**Architecture:** Preserve the existing accounting status and ledger model. Add pure presentation-state derivation, soft-archive contact mutations, and a strict Stripe-link retirement/reissue invariant around external partial payments. Reuse the existing founder gate, entity checks, action route, invoice balance arithmetic, Stripe pinning, and finance test harness.
+**Architecture:** Preserve the existing accounting status and ledger model. Add pure presentation-state derivation, soft-archive contact mutations, explicit validation for Stripe-only / bank-only / hybrid invoice rails, and a strict Stripe-link retirement/reissue invariant around out-of-band payments. Reuse the existing founder gate, entity checks, action route, invoice balance arithmetic, Stripe pinning, retainer link, and finance test harness.
 
 **Tech Stack:** Next.js 15 App Router, React 19, TypeScript, Turso/libSQL, Stripe Payment Links, `node --import tsx` tests.
 
@@ -43,17 +43,19 @@
 - [ ] Prove invoice-page round trips remain inside the acceptance ceiling.
 - [ ] Run focused tests and commit.
 
-## Task 3: Reproduce and close the stale Stripe-link overcharge path
+## Task 3: Make the three payment modes honest and close the stale-link overcharge path
 
 **Files:** Modify `lib/founders-finances/invoices-io.ts`, `lib/founders-finances/wise-reconcile.ts`, and `lib/founders-finances/stripe-ingest.ts` only if the shared helper belongs there; test `tests/finances-invoice-retainer.test.ts` and `tests/finances-wise.test.ts`.
 
-- [ ] Add a failing test: issue a hybrid invoice with a full-value one-time link, record a partial manual/bank payment, and prove the original link cannot remain active or be reused.
+- [ ] Add failing tests for the product contract: Stripe only creates the one-time card link; Bank/Wise only requires one-time bank-paid lines and creates no card link; Hybrid requires a one-time implementation amount plus a monthly retainer, prints bank instructions for the former, and creates only the recurring Stripe link for the latter.
+- [ ] Keep the stored `wise_stripe` value for compatibility but change its label/behavior to Hybrid; reject incomplete mode/line combinations in plain English.
+- [ ] Add a failing safety test: issue a Stripe-only invoice with a full-value one-time link, record an out-of-band partial payment, and prove the original link cannot remain active or be reused.
 - [ ] Add a failing test: after that partial payment, sending again creates a link for exactly the remaining balance and switches off/rejects the old link.
 - [ ] Add a failing test: when Stripe cannot confirm link deactivation, the external payment is not recorded and the invoice balance is unchanged.
 - [ ] Generalise link validation so issued links are checked for active/unused state, exact current balance, and currency before reuse.
 - [ ] Add a shared pre-payment retirement helper: disable the one-time link, clear its stored fields only after confirmation, and fail closed on Stripe errors.
 - [ ] Call it before manual and Wise payment writes. Keep retainer fields untouched.
-- [ ] Update `wise_stripe` copy to “Bank + card (split payments)” and surface the resend-new-balance step.
+- [ ] Update `wise_stripe` copy to “Hybrid — implementation by bank + monthly retainer by card” and surface the resend-new-balance step for out-of-band payments on Stripe-only invoices.
 - [ ] Run focused retainer/Wise tests and commit.
 
 ## Task 4: Money regression and acceptance gates
@@ -72,6 +74,7 @@
 
 - A founder can add, edit, archive, restore, and select active customers.
 - Invoices visibly progress Draft → Issued → Partially paid → Paid, with overdue shown as a warning and Void preserved.
-- A partial bank/manual/Wise payment cannot leave a known full-value card link live.
+- Hybrid visibly combines a bank-paid one-time implementation with a card-paid monthly retainer on one invoice.
+- A partial out-of-band payment cannot leave a known full-value one-time card link live.
 - A replacement card link charges exactly the remaining balance.
 - Finance tests, typecheck, lint, build, acceptance checks, browser smoke, independent review, and production verification all pass.

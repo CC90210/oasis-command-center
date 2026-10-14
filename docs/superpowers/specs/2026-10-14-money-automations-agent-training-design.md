@@ -11,7 +11,7 @@
 
 Three unfinished operator surfaces become usable workflows:
 
-1. **Money** becomes safe enough to run invoicing from: customers can be maintained, invoice state reads like a real billing lifecycle, and a client may pay partly by bank and partly by card without an old Stripe link charging the original total.
+1. **Money** becomes safe enough to run invoicing from: customers can be maintained, invoice state reads like a real billing lifecycle, and a hybrid invoice cleanly separates the high-ticket bank payment from the monthly Stripe retainer.
 2. **Automations** becomes a guided builder instead of a chat box plus a technical cron inventory.
 3. **Agent training** lets an operator choose an actual agent, attach a URL or text resource with a purpose, review it, and apply it to that agent's runtime context.
 
@@ -52,9 +52,19 @@ Accounting storage stays compatible. A pure presentation rule derives:
 
 “Overdue” is a secondary warning on Issued or Partially paid, not a competing lifecycle state. Filters use the founder-facing labels while internal finance-summary compatibility keeps the existing stored/list status.
 
-### 3.3 Split bank + card payments
+### 3.3 Three explicit payment modes
 
-Split payment is flexible rather than pre-allocating arbitrary bank/card amounts. An invoice balance may be reduced by one or more verified bank/manual payments, then the remaining balance may be paid by card.
+The original directive defines the modes precisely:
+
+- **Stripe only:** the one-time amount is paid through a Stripe Payment Link; monthly lines, if present, use the separate recurring Stripe link.
+- **Wise / bank wire only:** the invoice contains one-time lines paid by bank transfer. It does not silently create a card checkout.
+- **Hybrid (split payment):** the high-ticket one-time implementation amount is paid by Wise/wire, while the monthly retainer is started through its recurring Stripe link on the same invoice.
+
+The stored `wise_stripe` value remains for database compatibility but its product meaning becomes **Hybrid**, not “choose bank or card for the same one-time amount.” Hybrid requires both a one-time amount and a monthly retainer; a bank-only invoice cannot contain a Stripe monthly line. Existing drafts that do not satisfy the selected mode stay editable and receive a plain-English validation message rather than silently changing rail.
+
+### 3.4 One-time card-link safety
+
+A separate safety guard covers the real-world case where an out-of-band bank/manual payment is recorded against a Stripe-only invoice. Such a payment may reduce the balance even though a full-value card link was previously sent.
 
 Safety invariant:
 
@@ -66,12 +76,12 @@ Implementation rules:
 2. If Stripe cannot confirm the link is disabled, fail closed with a plain-English instruction. Do not write a payment while a known full-value card link may remain live.
 3. After Stripe confirms deactivation, clear the stored one-time link/price fields, then record the payment atomically with the ledger posting.
 4. “Send again” creates a fresh one-time link for the new balance. Issued links are verified for active/unused state, amount, and currency before reuse; issued status is never a reason to reuse blindly.
-5. The UI labels `wise_stripe` as **Bank + card (split payments)** and tells the founder when an updated balance link must be sent.
+5. The UI labels `wise_stripe` as **Hybrid — implementation by bank + monthly retainer by card**. A Stripe-only invoice tells the founder when an updated remaining-balance link must be sent after an out-of-band payment.
 6. Monthly retainer links remain separate and untouched.
 
 This does not require a schema migration: the invoice already stores total paid, the live balance is derived, and link replacement fields already exist.
 
-### 3.4 Money operational readiness
+### 3.5 Money operational readiness
 
 Code must not silently mutate live payout-account choices, payment instructions, or move money. The UI may show their readiness, but those production choices remain explicit founder actions.
 
