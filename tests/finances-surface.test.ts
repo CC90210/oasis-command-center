@@ -129,6 +129,53 @@ async function main() {
   assert.match(actionButton, /aria-label=\{ariaLabel\}/);
   assert.match(actionButton, /role="status"/, "async button feedback is announced");
 
+  // Optimistic intent, confirmed money: customer metadata may be projected
+  // locally, but archival eligibility and every accounting surface wait for
+  // the server. Shared action controls keep their pending lock through the
+  // router refresh and expose that state to assistive technology.
+  const actionForm = readFileSync(join(root, "components/founders/finances/ActionForm.tsx"), "utf8");
+  const categorizeCell = readFileSync(join(root, "components/founders/finances/CategorizeCell.tsx"), "utf8");
+  const reportsPage = readFileSync(join(root, "app/founders/finances/reports/page.tsx"), "utf8");
+  const optimisticHelperPath = join(root, "lib/founders-finances/optimistic-ui.ts");
+  assert.ok(existsSync(optimisticHelperPath), "customer projections have a pure, testable boundary");
+  assert.match(actionForm, /useTransition/, "forms remain locked while the confirmed server view refreshes");
+  assert.match(actionForm, /onPendingChange\?:/, "forms expose reusable pending-state callbacks");
+  assert.match(actionForm, /onOptimistic\?:/, "forms expose a reversible optimistic callback");
+  assert.match(actionForm, /rollback\?\.\(\)/, "failed writes run the caller's exact rollback");
+  assert.match(actionForm, /aria-busy=\{pending\}/, "form pending state is announced");
+  assert.match(actionButton, /useTransition/, "buttons remain locked while the confirmed server view refreshes");
+  assert.match(actionButton, /onPendingChange\?:/, "buttons expose reusable pending-state callbacks");
+  assert.match(actionButton, /aria-busy=\{pending\}/, "button pending state is announced");
+  assert.match(customers, /Pending confirmation/, "projected customer details are visibly provisional");
+  assert.match(customers, /onOptimistic=/, "customer edits project immediately through the shared form contract");
+  assert.match(customers, /Archive pending confirmation/, "archive stays visibly pending in its current list");
+  assert.match(customers, /Restore pending confirmation/, "restore stays visibly pending in its current list");
+  assert.match(categorizeCell, /Posting \u2014 not in ledger or reports yet/, "category intent cannot masquerade as posted money");
+  assert.match(categorizeCell, /setSelectedCategoryId\(previousCategoryId\)/, "a rejected category write restores the exact prior selection");
+  assert.match(categorizeCell, /useTransition/, "category selection remains locked through refresh");
+  assert.match(categorizeCell, /aria-busy=\{pending\}/, "category pending state is announced");
+  assert.doesNotMatch(reportsPage, /["']use client["']/, "reports remain server-rendered confirmed ledger truth");
+  assert.match(reportsPage, /Confirmed ledger entries only\./, "reports state their confirmation boundary explicitly");
+  assert.match(reportsPage, /Pending postings never change these figures\./, "reports never imply a projected total");
+
+  const { customerMetadataProjection } = await import("../lib/founders-finances/optimistic-ui");
+  const customerBefore = Object.freeze({ id: "cust-1", name: "Old name", email: "old@example.test", company: "Old Co", address: "1 Old St", archived: 0 });
+  const projection = customerMetadataProjection(customerBefore, {
+    name: "New name",
+    email: "new@example.test",
+    company: "New Co",
+    address: "2 New St",
+    archived: 1,
+  });
+  assert.deepEqual(
+    projection.projected,
+    { ...customerBefore, name: "New name", email: "new@example.test", company: "New Co", address: "2 New St" },
+    "only editable metadata is projected",
+  );
+  assert.equal(projection.projected.archived, 0, "archive eligibility never changes optimistically");
+  assert.deepEqual(projection.rollback, customerBefore, "failure restores the exact prior customer snapshot");
+  assert.notEqual(projection.rollback, customerBefore, "the rollback snapshot cannot be mutated through the original object");
+
   // Payment-method language must match the product contract: Hybrid is bank
   // for implementation + card only for the monthly retainer. It must never
   // promise a one-time card fallback when Wise is unavailable.
@@ -140,6 +187,12 @@ async function main() {
   assert.match(invoiceDetail, /offersCard\(paymentMethod\)/, "only Stripe mode gets the one-time card-link checkbox");
   assert.match(invoiceDetail, /turns off the current full-balance card link first/,
     "Stripe-only invoices warn what an external payment does before recording it");
+  assert.match(actionsRoute, /"invoice\.delete"/);
+  assert.match(actionsRoute, /deleteDraftInvoice\(v, str\(b\.invoice_id\)\)/);
+  assert.match(actionsRoute, /redirect: "\/founders\/finances\/invoices"/);
+  assert.match(invoiceDetail, /action="invoice\.delete"/);
+  assert.match(invoiceDetail, /label="Delete draft"/);
+  assert.match(invoiceDetail, /Delete this draft permanently/);
 
   // Legacy deep links still filter through list_status and now remain visible.
   assert.match(invoicePage, /Issued \(legacy sent filter\)/);

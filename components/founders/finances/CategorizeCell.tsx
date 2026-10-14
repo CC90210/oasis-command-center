@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { postFinanceAction } from "./ActionForm";
 
 /**
@@ -21,24 +21,57 @@ export function CategorizeCell({
   status: string;
 }) {
   const router = useRouter();
-  const [busy, setBusy] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [transitionPending, startTransition] = useTransition();
+  const [selectedCategoryId, setSelectedCategoryId] = useState(current || "");
   const [err, setErr] = useState<string | null>(null);
+  const inFlight = useRef(false);
+  const pending = submitting || transitionPending;
   const groups = ["income", "expense", "transfer"] as const;
+
+  useEffect(() => {
+    if (!pending) setSelectedCategoryId(current || "");
+  }, [current, pending]);
+
+  async function postCategory(categoryId: string, includeCategory: boolean) {
+    if (!categoryId || pending || inFlight.current) return;
+    const previousCategoryId = selectedCategoryId;
+    setSelectedCategoryId(categoryId);
+    setSubmitting(true);
+    setErr(null);
+    inFlight.current = true;
+    try {
+      const r = await postFinanceAction({
+        action: status === "draft" ? "txn.approve" : "txn.categorize",
+        txn_id: txnId,
+        ...(includeCategory ? { category_id: categoryId } : {}),
+      });
+      if (!r.ok) {
+        setSelectedCategoryId(previousCategoryId);
+        setErr(r.message || "Failed");
+        return;
+      }
+      startTransition(() => router.refresh());
+    } catch (error) {
+      setSelectedCategoryId(previousCategoryId);
+      setErr(error instanceof Error ? error.message : "Network error.");
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
+    }
+  }
+
   return (
-    <div className="min-w-[180px]">
+    <div className="min-w-[180px]" aria-busy={pending}>
       <select
         className="w-full rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-xs text-fg focus:outline-none"
-        value={current || ""}
-        disabled={busy}
-        onChange={async (e) => {
+        value={selectedCategoryId}
+        disabled={pending}
+        aria-describedby={pending ? `category-pending-${txnId}` : undefined}
+        onChange={(e) => {
           const categoryId = e.target.value;
           if (!categoryId) return;
-          setBusy(true);
-          setErr(null);
-          const r = await postFinanceAction({ action: status === "draft" ? "txn.approve" : "txn.categorize", txn_id: txnId, category_id: categoryId });
-          setBusy(false);
-          if (!r.ok) setErr(r.message || "Failed");
-          else router.refresh();
+          void postCategory(categoryId, true);
         }}
       >
         <option value="">{status === "draft" ? "Approve as…" : "Categorise…"}</option>
@@ -58,19 +91,18 @@ export function CategorizeCell({
         <button
           type="button"
           className="mt-1 text-[11px] text-[#1FE3F0] hover:underline"
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            const r = await postFinanceAction({ action: "txn.approve", txn_id: txnId });
-            setBusy(false);
-            if (!r.ok) setErr(r.message || "Failed");
-            else router.refresh();
-          }}
+          disabled={pending}
+          onClick={() => void postCategory(selectedCategoryId, false)}
         >
           Approve suggestion
         </button>
       )}
-      {err && <p className="mt-1 text-[11px] text-status-hot">{err}</p>}
+      {pending && (
+        <p id={`category-pending-${txnId}`} role="status" aria-live="polite" className="mt-1 text-[11px] text-fg-muted">
+          Posting — not in ledger or reports yet
+        </p>
+      )}
+      {err && <p role="alert" className="mt-1 text-[11px] text-status-hot">{err}</p>}
     </div>
   );
 }

@@ -78,6 +78,10 @@ export default async function ReportsPage({ searchParams }: { searchParams: Sear
 
       <BooksCoverageBanner coverage={coverage} figures="These statements" />
 
+      <p className="text-xs text-fg-muted">
+        Confirmed ledger entries only. Pending postings never change these figures.
+      </p>
+
       <Card>
         <div className="mb-4 flex flex-wrap gap-1">
           {REPORT_KINDS.map((k) => (
