@@ -17,9 +17,11 @@
  * invoice-store's settlement, with realised FX for USD). Fee: Dr Stripe fees
  * / Cr Stripe clearing, from the charge's balance transaction, in ITS
  * currency (the settlement currency — USD for OASIS's account) on the day the
- * balance moved. Refund: Dr Refunds / Cr Stripe clearing. A charge booked as
- * revenue and matched to an invoice later gets a reclass (Dr revenue / Cr AR)
- * instead of a second income entry.
+ * balance moved. Refund of an invoice settlement: Dr AR / Cr Stripe clearing,
+ * reopening the receivable until a credit note or void cancels the sale. A
+ * refund of an unlinked charge remains Dr Refunds / Cr Stripe clearing. A
+ * charge booked as revenue and matched to an invoice later gets both its gross
+ * reclass (Dr revenue / Cr AR) and any refund reclass (Dr AR / Cr Refunds).
  *
  * SUBSCRIPTION OR NOT. From API 2025-03-31 (basil; the account default) a
  * charge no longer names its invoice, so a new payment asks Stripe which
@@ -101,7 +103,13 @@ import { auditStatement, finDb, isUniqueViolation, newId, query, queryOne, write
 import { buildPosting } from "./ledger-io";
 import { LedgerError } from "./ledger";
 import { rateLookupFor, usdCadRate } from "./fx-io";
-import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement, type InvoiceRow } from "./invoice-store";
+import {
+  buildSettlementPosting,
+  buildSettlementReversalPosting,
+  loadInvoice,
+  recomputeInvoicePaidStatement,
+  type InvoiceRow,
+} from "./invoice-store";
 import { financeTenantId, getStripeClient, listAll, pinnedStripeAccount, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
 import { recordStripePayout, retryUnbookedPayouts, unbookedPayouts } from "./stripe-payouts-io";
 import { FinanceInputError } from "./access-io";
@@ -1042,6 +1050,11 @@ export async function linkPaymentToInvoice(
     });
     statements.push(...posting.statements);
   }
+  // A refund that arrived before Stripe supplied invoice metadata was booked
+  // as contra-revenue. Linking the gross payment must move those refunds onto
+  // AR in the same transaction, otherwise the invoice row reopens while the
+  // balance sheet still says the customer owes nothing.
+  statements.push(...(await refundReclassStatementsForLink(p, inv, linkedGate)));
   statements.push(
     recomputeInvoicePaidStatement(inv.id, p.occurred_at, linkedGate),
     {
@@ -1061,6 +1074,9 @@ export async function linkPaymentToInvoice(
   // If a concurrent postPaymentEntries lost its gate to this link, nothing
   // posted the income; post the settlement now (a no-op when already posted).
   await postPaymentEntries(p.id);
+  // Close the refund/link interleaving where a refund committed immediately
+  // after the transaction above took its snapshot.
+  await reconcileRefundAccounting(p.id);
   await deactivatePaymentLinkIfPaid(inv.id, true);
   return true;
 }
@@ -1130,6 +1146,9 @@ export async function recordRefundsForCharge(
   } else if (cap > (await refundedSoFar(parent.id))) {
     console.warn("[finances:stripe] refund amount known but refunds not itemised; left for the charge.refunded event or a reconcile", charge.chargeId);
   }
+  // Repair an older delivery that committed the immutable refund fact but
+  // failed before its journal entry, and close refund/metadata-link races.
+  await reconcileRefundAccounting(parent.id);
   return inserted;
 }
 
@@ -1158,6 +1177,20 @@ async function insertRefund(
   // A refund Stripe itemised is keyed by its re_ id; one known only as an
   // amount (the charge.refunded delta) by the row that records it.
   const providerRefundId = r.refundId || id;
+  const refundRow: RefundJournalRow = {
+    id,
+    entity_id: parent.entity_id,
+    occurred_on: occurredOn,
+    amount_cents: r.amountCents,
+    settlement_cad_cents: cad,
+    parent_payment_id: parent.id,
+    contact_id: parent.contact_id,
+    customer_name: parent.customer_name,
+    stripe_refund_id: r.refundId,
+    deposit_account_id: parent.deposit_account_id,
+    income_account_id: accountId(E, SYS.refunds),
+    entry_id: null,
+  };
   const customerRecord = await customerRecordFor(tenant, parent.stripe_customer_id);
   const insert: InStatement = {
     sql: `INSERT OR IGNORE INTO fin_payments
@@ -1232,35 +1265,239 @@ async function insertRefund(
       }),
     );
   }
+  // The refund row, event, invoice lifecycle and journal land in one write
+  // transaction. A replay still runs reconcileRefundAccounting below so rows
+  // created by older code with a missing entry can heal.
+  const posting = await buildRefundPosting(parent, refundRow);
+  if (posting) {
+    statements.push(
+      ...posting.statements,
+      {
+        sql: `UPDATE fin_payments SET entry_id = ?
+               WHERE id = ? AND entry_id IS NULL
+                 AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+        args: [posting.entryId, id, posting.entryId],
+      },
+    );
+  }
   const [rs] = await writeWithLedger(statements);
   if (rs.rowsAffected !== 1) return false;
-  await postRefundEntry(id);
   return true;
 }
 
-async function postRefundEntry(refundRowId: string): Promise<void> {
-  const r = await loadPayment(refundRowId);
-  if (!r || r.kind !== "refund" || r.entry_id || r.settlement_cad_cents === null) return;
-  const posting = await buildPosting({
-    entityId: r.entity_id,
-    entryDate: r.occurred_on,
-    memo: `Stripe refund${r.customer_name ? ` — ${r.customer_name}` : ""}`,
+type RefundJournalRow = Pick<
+  PaymentRow,
+  | "id"
+  | "entity_id"
+  | "occurred_on"
+  | "amount_cents"
+  | "settlement_cad_cents"
+  | "parent_payment_id"
+  | "contact_id"
+  | "customer_name"
+  | "stripe_refund_id"
+  | "deposit_account_id"
+  | "income_account_id"
+  | "entry_id"
+>;
+
+function refundJournalGate(parent: PaymentRow, refund: RefundJournalRow) {
+  return {
+    sql: `EXISTS (
+            SELECT 1
+              FROM fin_payments refund
+              JOIN fin_payments payment ON payment.id = refund.parent_payment_id
+             WHERE refund.id = ?
+               AND refund.kind = 'refund'
+               AND refund.entry_id IS NULL
+               AND refund.parent_payment_id = ?
+               AND payment.kind = 'payment'
+               AND payment.invoice_id IS ?
+          )`,
+    args: [refund.id, parent.id, parent.invoice_id],
+  };
+}
+
+/** Build the journal shape that agrees with the parent's invoice link. */
+async function buildRefundPosting(parent: PaymentRow, refund: RefundJournalRow) {
+  if (refund.settlement_cad_cents === null) return null;
+  const memo = `Stripe refund${refund.customer_name ? ` — ${refund.customer_name}` : ""}`;
+  const sourceRef = refund.stripe_refund_id || refund.id;
+  const gate = refundJournalGate(parent, refund);
+  if (parent.invoice_id) {
+    const inv = await loadInvoice(parent.invoice_id);
+    if (!inv) throw new Error(`invoice ${parent.invoice_id} linked to payment ${parent.id} does not exist`);
+    return buildSettlementReversalPosting({
+      inv,
+      amountCents: refund.amount_cents,
+      refundedCadCents: refund.settlement_cad_cents,
+      creditAccountId: refund.deposit_account_id || accountId(E, SYS.stripeClearing),
+      date: refund.occurred_on,
+      source: "stripe_refund",
+      sourceRef,
+      memo: `Refund reopened invoice ${inv.number || inv.id}`,
+      createdBy: ACTOR,
+      gate,
+    });
+  }
+  return buildPosting({
+    entityId: refund.entity_id,
+    entryDate: refund.occurred_on,
+    memo,
     source: "stripe_refund",
-    sourceRef: r.stripe_refund_id || r.id,
+    sourceRef,
     createdBy: ACTOR,
+    gate,
     lines: [
-      { accountId: r.income_account_id || accountId(E, SYS.refunds), currency: "CAD", debitCents: r.settlement_cad_cents, contactId: r.contact_id },
-      { accountId: r.deposit_account_id || accountId(E, SYS.stripeClearing), currency: "CAD", creditCents: r.settlement_cad_cents, contactId: r.contact_id },
+      {
+        accountId: refund.income_account_id || accountId(E, SYS.refunds),
+        currency: "CAD",
+        debitCents: refund.settlement_cad_cents,
+        contactId: refund.contact_id,
+      },
+      {
+        accountId: refund.deposit_account_id || accountId(E, SYS.stripeClearing),
+        currency: "CAD",
+        creditCents: refund.settlement_cad_cents,
+        contactId: refund.contact_id,
+      },
     ],
   });
+}
+
+async function refundEntryRestoresAr(entryId: string, inv: InvoiceRow): Promise<boolean> {
+  const row = await queryOne<{ present: number }>(
+    `SELECT 1 AS present
+       FROM fin_journal_lines
+      WHERE entry_id = ? AND account_id = ? AND debit_cents > 0
+      LIMIT 1`,
+    [entryId, accountId(inv.entity_id, SYS.ar)],
+  );
+  return row !== null;
+}
+
+/**
+ * An unlinked refund starts as Dr Refunds / Cr clearing. Once its parent is
+ * linked to an invoice, Dr AR / Cr Refunds removes the contra-revenue leg and
+ * makes the pair the same settlement reversal as a linked-first refund.
+ */
+async function buildRefundInvoiceReclass(
+  parent: PaymentRow,
+  refund: RefundJournalRow,
+  inv: InvoiceRow,
+  gate?: { sql: string; args: Array<string | number | null> },
+) {
+  if (refund.settlement_cad_cents === null || !refund.entry_id) return null;
+  const currentGate = gate ?? {
+    sql: `EXISTS (
+            SELECT 1 FROM fin_payments payment
+             WHERE payment.id = ? AND payment.kind = 'payment' AND payment.invoice_id = ?
+          ) AND (SELECT entry_id FROM fin_payments WHERE id = ?) = ?`,
+    args: [parent.id, inv.id, refund.id, refund.entry_id],
+  };
+  return buildSettlementReversalPosting({
+    inv,
+    amountCents: refund.amount_cents,
+    refundedCadCents: refund.settlement_cad_cents,
+    creditAccountId: refund.income_account_id || accountId(E, SYS.refunds),
+    date: refund.occurred_on,
+    source: "stripe_refund_invoice_link",
+    sourceRef: refund.stripe_refund_id || refund.id,
+    memo: `Reclass refund to invoice ${inv.number || inv.id}`,
+    createdBy: ACTOR,
+    gate: currentGate,
+  });
+}
+
+/** Existing refund reclasses ride atomically with a newly linked payment. */
+async function refundReclassStatementsForLink(
+  parent: PaymentRow,
+  inv: InvoiceRow,
+  linkedGate: { sql: string; args: Array<string | number | null> },
+): Promise<InStatement[]> {
+  const refunds = await query<PaymentRow>(
+    `SELECT * FROM fin_payments
+      WHERE kind = 'refund' AND parent_payment_id = ? AND entry_id IS NOT NULL
+      ORDER BY occurred_at, id`,
+    [parent.id],
+  );
+  const statements: InStatement[] = [];
+  for (const refund of refunds) {
+    if (await refundEntryRestoresAr(refund.entry_id as string, inv)) continue;
+    const posting = await buildRefundInvoiceReclass(parent, refund, inv, linkedGate);
+    if (posting) statements.push(...posting.statements);
+  }
+  return statements;
+}
+
+async function postRefundEntry(refundRowId: string): Promise<void> {
+  const refund = await loadPayment(refundRowId);
+  if (!refund || refund.kind !== "refund" || refund.entry_id || refund.settlement_cad_cents === null || !refund.parent_payment_id) return;
+  const parent = await loadPayment(refund.parent_payment_id);
+  if (!parent || parent.kind !== "payment") return;
+  const posting = await buildRefundPosting(parent, refund);
+  if (!posting) return;
   try {
     await writeBatch([
       ...posting.statements,
-      { sql: `UPDATE fin_payments SET entry_id = ? WHERE id = ? AND entry_id IS NULL`, args: [posting.entryId, r.id] },
+      {
+        sql: `UPDATE fin_payments SET entry_id = ?
+               WHERE id = ? AND entry_id IS NULL
+                 AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+        args: [posting.entryId, refund.id, posting.entryId],
+      },
     ]);
   } catch (e) {
     if (!isUniqueViolation(e)) throw e;
+    const sourceRef = refund.stripe_refund_id || refund.id;
+    const existing = await queryOne<{ id: string }>(
+      `SELECT id FROM fin_journal_entries WHERE entity_id = ? AND source = 'stripe_refund' AND source_ref = ?`,
+      [refund.entity_id, sourceRef],
+    );
+    if (existing) {
+      await finDb().execute({
+        sql: `UPDATE fin_payments SET entry_id = ? WHERE id = ? AND entry_id IS NULL`,
+        args: [existing.id, refund.id],
+      });
+    }
   }
+}
+
+/**
+ * Make refund rows, invoice lifecycle and the double-entry books converge
+ * after retries and after either ordering of refund vs invoice metadata link.
+ */
+async function reconcileRefundAccounting(parentPaymentId: string): Promise<void> {
+  const firstParent = await loadPayment(parentPaymentId);
+  if (!firstParent || firstParent.kind !== "payment") return;
+  let refunds = await query<PaymentRow>(
+    `SELECT * FROM fin_payments WHERE kind = 'refund' AND parent_payment_id = ? ORDER BY occurred_at, id`,
+    [firstParent.id],
+  );
+  for (const refund of refunds) if (!refund.entry_id) await postRefundEntry(refund.id);
+
+  const parent = await loadPayment(firstParent.id);
+  if (!parent || parent.kind !== "payment") return;
+  refunds = await query<PaymentRow>(
+    `SELECT * FROM fin_payments WHERE kind = 'refund' AND parent_payment_id = ? ORDER BY occurred_at, id`,
+    [parent.id],
+  );
+  if (!parent.invoice_id || refunds.length === 0) return;
+  const inv = await loadInvoice(parent.invoice_id);
+  if (!inv) throw new Error(`invoice ${parent.invoice_id} linked to payment ${parent.id} does not exist`);
+
+  for (const refund of refunds) {
+    if (!refund.entry_id || (await refundEntryRestoresAr(refund.entry_id, inv))) continue;
+    const posting = await buildRefundInvoiceReclass(parent, refund, inv);
+    if (!posting) continue;
+    try {
+      await writeBatch(posting.statements);
+    } catch (e) {
+      if (!isUniqueViolation(e)) throw e;
+    }
+  }
+  const newest = refunds[refunds.length - 1]?.occurred_at || parent.occurred_at;
+  await finDb().execute(recomputeInvoicePaidStatement(inv.id, newest));
 }
 
 // ── Stripe invoices & subscriptions ─────────────────────────────────────

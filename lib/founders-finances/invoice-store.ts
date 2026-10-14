@@ -10,7 +10,7 @@
  */
 import "server-only";
 
-import { crossCurrencySettlementLines, type JournalLineInput } from "./ledger";
+import { crossCurrencySettlementLines, reversalLines, type JournalLineInput } from "./ledger";
 import { accountId, SYS } from "./chart";
 import { finDb, query, queryOne, type InStatement } from "./db";
 import { buildPosting, type Posting } from "./ledger-io";
@@ -276,6 +276,74 @@ export async function buildSettlementPosting(args: {
     gate: args.gate,
     fixedRates: { [inv.currency]: rate },
     lines: [...legs.foreignLeg, ...legs.cadLeg],
+  });
+}
+
+/**
+ * Put a refunded invoice payment back onto AR. This is the exact inverse of
+ * buildSettlementPosting for the refunded slice: Dr AR / Cr the settlement
+ * account in CAD, or the mirrored two-currency legs (including realised FX)
+ * for a foreign-currency invoice.
+ *
+ * A Stripe refund does not cancel the issued invoice. Until a credit note or
+ * void reverses the sale, it reverses the settlement and re-opens the amount
+ * the customer owes. Keeping this beside buildSettlementPosting makes the
+ * invoice row and the double-entry ledger use one accounting definition.
+ */
+export async function buildSettlementReversalPosting(args: {
+  inv: InvoiceRow;
+  amountCents: number;
+  refundedCadCents: number;
+  creditAccountId: string;
+  date: string;
+  source: string;
+  sourceRef: string;
+  memo: string;
+  createdBy: string;
+  gate?: { sql: string; args: Array<string | number | null> };
+}): Promise<Posting> {
+  const { inv } = args;
+  const e = inv.entity_id;
+  const ar = accountId(e, SYS.ar);
+  if (inv.currency === "CAD") {
+    return buildPosting({
+      entityId: e,
+      entryDate: args.date,
+      memo: args.memo,
+      source: args.source,
+      sourceRef: args.sourceRef,
+      createdBy: args.createdBy,
+      gate: args.gate,
+      lines: [
+        { accountId: ar, currency: "CAD", debitCents: args.amountCents, contactId: inv.contact_id, memo: args.memo },
+        { accountId: args.creditAccountId, currency: "CAD", creditCents: args.amountCents, contactId: inv.contact_id, memo: args.memo },
+      ],
+    });
+  }
+  const rate = await recognitionRate(inv);
+  if (!rate) throw new Error(`invoice ${inv.id} has no recognition rate; its settlement refund cannot be posted`);
+  const carrying = usdToCadCents(args.amountCents, parseRateMicro(rate));
+  const legs = crossCurrencySettlementLines({
+    foreignCurrency: inv.currency,
+    foreignCents: args.amountCents,
+    arAccountId: ar,
+    fxClearingAccountId: accountId(e, SYS.fxClearing),
+    depositAccountId: args.creditAccountId,
+    fxGainLossAccountId: accountId(e, SYS.fxGainLoss),
+    receivedCadCents: args.refundedCadCents,
+    arCadCarryingCents: carrying,
+    memo: args.memo,
+  });
+  return buildPosting({
+    entityId: e,
+    entryDate: args.date,
+    memo: args.memo,
+    source: args.source,
+    sourceRef: args.sourceRef,
+    createdBy: args.createdBy,
+    gate: args.gate,
+    fixedRates: { [inv.currency]: rate },
+    lines: reversalLines([...legs.foreignLeg, ...legs.cadLeg]),
   });
 }
 
