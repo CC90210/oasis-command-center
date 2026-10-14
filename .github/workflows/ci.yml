@@ -187,6 +187,13 @@ jobs:
           # the not-built apps' requests, the setup step and AI brain on the
           # same drawer and statuses as Settings > Connections.
           npm run test:connections
+      # Money's browser fixture uses a disposable local libSQL file, a signed
+      # test-only session and blank provider credentials. It exercises the real
+      # Next page/API while remaining incapable of sending or moving money.
+      - name: Install Chromium for the Money browser fixture
+        run: npx playwright install --with-deps chromium
+      - name: Run the Money browser fixture
+        run: npm run test:finances:browser
       # THE ARTIFACT THE DEPLOY SHIPS (2026-09-29, F0 release gate).
       # deploy-cloudflare.yml runs exactly this command with this NODE_OPTIONS
       # and CF_MIGRATION_BUILD. CF_MIGRATION_BUILD is not cosmetic:
