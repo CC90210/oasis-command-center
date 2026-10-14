@@ -20,7 +20,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  ALL_MARKETING_PATHS,
+  MARKETING_LEGAL_PATHS,
+  MARKETING_PATHS,
   MARKETING_HOME_PATH,
   marketingCanonicalPath,
 } from "../lib/marketing/routes";
@@ -32,7 +33,7 @@ const root = join(__dirname, "..");
 // 1. Request path -> canonical path.
 assert.equal(marketingCanonicalPath(MARKETING_HOME_PATH), "/", "the home page is canonical at /, never /home");
 assert.equal(marketingCanonicalPath("/"), "/");
-for (const path of ALL_MARKETING_PATHS) {
+for (const path of [...MARKETING_PATHS, ...MARKETING_LEGAL_PATHS]) {
   if (path === MARKETING_HOME_PATH) continue;
   assert.equal(marketingCanonicalPath(path), path, `${path} is its own canonical`);
 }
@@ -40,7 +41,7 @@ assert.equal(marketingCanonicalPath("/privacy"), "/privacy", "legal pages get a 
 assert.equal(marketingCanonicalPath("/fleet/"), "/fleet", "trailing slash normalises");
 assert.equal(marketingCanonicalPath("/fleet?utm_source=x"), "/fleet", "query strings never reach a canonical");
 // Not a marketing page: emit nothing rather than a wrong URL.
-for (const path of ["", "/login", "/pipeline", "/fleet/anything", "/homepage", "/download"]) {
+for (const path of ["", "/login", "/pipeline", "/fleet/anything", "/homepage", "/download", "/checkout/success"]) {
   assert.equal(marketingCanonicalPath(path), null, `${JSON.stringify(path)} gets no canonical`);
 }
 
@@ -55,7 +56,8 @@ assert.doesNotMatch(layout, /export const metadata\b/, "no second, static metada
 
 // 3. No page states a canonical that disagrees with the helper.
 const pageFiles: Record<string, string> = {
-  "/": "home", "/fleet": "fleet", "/work": "work", "/about": "about",
+  "/": "home", "/audit": "audit", "/fleet": "fleet", "/work": "work",
+  "/command-center": "command-center", "/pricing": "pricing", "/onboarding": "onboarding", "/about": "about",
   "/contact": "contact", "/privacy": "privacy", "/terms": "terms", "/dmca": "dmca",
 };
 for (const [path, dir] of Object.entries(pageFiles)) {

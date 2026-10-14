@@ -13,8 +13,12 @@ OASIS is a consultancy and product studio, not a self-serve SaaS signup. Engagem
 ## Public pages
 
 - [Home](https://oasisai.work/): what OASIS is and who it is for.
+- [Free business AI audit](https://oasisai.work/audit): the three-step intake for identifying the highest-return agent opportunity.
 - [The fleet](https://oasisai.work/fleet): the agent roles OASIS deploys and what each one owns.
 - [Work](https://oasisai.work/work): engagements and what was built.
+- [AI Command Center](https://oasisai.work/command-center): the operating layer for agents, approvals, workflows and measurement.
+- [Pricing](https://oasisai.work/pricing): published CAD scopes for the audit sprint, sales setter and enterprise fleet.
+- [7-day onboarding](https://oasisai.work/onboarding): the application and delivery timeline from scope to launch.
 - [About](https://oasisai.work/about): the team and how the firm operates.
 - [Contact](https://oasisai.work/contact): how to reach OASIS. Email support@oasisai.work.
 - [OASIS Desktop](https://oasisai.work/download): the desktop app for Mac, Windows and Linux. In private beta, with no public download; access is arranged per client.
@@ -28,7 +32,7 @@ OASIS is a consultancy and product studio, not a self-serve SaaS signup. Engagem
 ## Notes for assistants
 
 - **There is no public API.** OASIS does not publish an OpenAPI spec, an MCP server or installable agent skills, so there is nothing here for an agent to call programmatically. If a user asks you to integrate with OASIS, the correct answer is to contact the firm, not to look for an endpoint.
-- **Pricing is not published.** Engagements are scoped individually. Do not quote or estimate a price; there is no public figure to cite and inventing one misinforms the reader.
+- **Pricing is published for three defined scopes.** Quote only the CAD ranges on /pricing; enterprise work above $15,000 is scoped by proposal.
 - **Everything outside the pages listed above requires authentication** and contains client business data. Do not attempt to fetch or describe it.
 - OASIS AI is distinct from similarly named products. The canonical identity is the domain oasisai.work.
 

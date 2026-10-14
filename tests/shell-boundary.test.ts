@@ -181,10 +181,10 @@ for (const prefix of PUBLIC_PATH_PREFIXES) {
 }
 
 // The other direction: a full-bleed page that is NOT public is a signed-in
-// screen that draws its own header. There are exactly two, by decision; a
-// third is a deliberate edit here, never drift.
+// screen that draws its own header. /onboarding itself is now public, while
+// its wizard children remain signed-in and full-bleed.
 {
-  const SIGNED_IN_FULL_BLEED = ["/onboarding", "/desktop-link"];
+  const SIGNED_IN_FULL_BLEED = ["/desktop-link"];
   const sample = (prefix: string) => (prefix.endsWith("/") ? `${prefix}x` : prefix);
   assert.deepEqual(
     FULL_BLEED_PREFIXES.filter((p) => !isPublic(sample(p))),
@@ -192,6 +192,8 @@ for (const prefix of PUBLIC_PATH_PREFIXES) {
     "a full-bleed prefix that middleware does not make public renders a signed-in page with no rail",
   );
 }
+assert.ok(isPublic("/onboarding") && isFullBleedPath("/onboarding"), "/onboarding is the public application page");
+assert.ok(!isPublic("/onboarding/wizard") && isFullBleedPath("/onboarding/wizard"), "/onboarding/wizard stays signed-in and full-bleed");
 
 // /link-expired is the neutral landing for an unattributable tracking click
 // (app/api/track/click): public AND full-bleed, owned by no company (U1-18).
@@ -303,7 +305,13 @@ function headImports(source: string, fileName: string): { names: string[]; fromC
   for (const name of names) {
     const spec = importedFrom.get(name) as string;
     const file = resolveModule(spec, fileName);
-    assert.ok(file, `${rel(fileName)}: <head> uses ${name} from "${spec}", which does not resolve to a file in the repo`);
+    // next/script is the framework-owned, Server-Component-safe way to place
+    // the Google tag in <head>. Every repo-local import still has to resolve so
+    // this test can inspect its directive prologue.
+    if (!file) {
+      assert.equal(spec, "next/script", `${rel(fileName)}: <head> uses ${name} from unreviewed external module "${spec}"`);
+      continue;
+    }
     if (isClientModule(file)) fromClient.push(`${name} from "${spec}"`);
   }
   return { names: [...names].sort(), fromClient, heads };
@@ -315,6 +323,7 @@ function headImports(source: string, fileName: string): { names: string[]; fromC
   // anti-vacuity: the scan found the one <head> and the boot script inside it.
   assert.equal(head.heads, 1, "app/layout.tsx should draw exactly one <head>; the scan found " + head.heads);
   assert.ok(head.names.includes("SIDEBAR_BOOT_SCRIPT"), `the scan did not see SIDEBAR_BOOT_SCRIPT inside <head> (saw: ${head.names.join(", ") || "nothing"})`);
+  assert.ok(head.names.includes("Script"), "the scan did not see next/script inside <head>");
   assert.deepEqual(
     head.fromClient,
     [],

@@ -316,13 +316,9 @@ const nextConfig = {
         permanent: true,
       },
       // Inbound links from the previous marketing site
-      // (oasis-ai-platform-iota.vercel.app). Both of its commercial pages
-      // are consolidated into /work.
-      {
-        source: "/pricing",
-        destination: "/work",
-        permanent: true,
-      },
+      // (oasis-ai-platform-iota.vercel.app). /pricing is a first-class
+      // checkout route again; only the retired /services URL consolidates
+      // into /work.
       {
         source: "/services",
         destination: "/work",

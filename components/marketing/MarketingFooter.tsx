@@ -18,13 +18,17 @@ import { CONTACT_EMAIL } from "@/lib/marketing/routes";
  */
 
 const SITE_LINKS = [
+  { href: "/audit", label: "Free AI audit" },
   { href: "/fleet", label: "The fleet" },
   { href: "/work", label: "What we build" },
+  { href: "/pricing", label: "Pricing" },
   { href: "/about", label: "About" },
   { href: "/contact", label: "Contact" },
 ];
 
 const PLATFORM_LINKS = [
+  { href: "/command-center", label: "Command Center" },
+  { href: "/onboarding", label: "7-day onboarding" },
   { href: "/login", label: "Sign in" },
   { href: "/download", label: "Desktop app" },
 ];

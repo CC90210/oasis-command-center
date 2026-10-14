@@ -124,10 +124,10 @@ export default function FleetPage() {
                 invoice.
               </p>
               <Link
-                href="/contact"
+                href="/pricing#enterprise-fleet"
                 className={CTA_INLINE}
               >
-                Describe the job
+                Staff your fleet
                 <ArrowRight className="h-4 w-4" aria-hidden="true" />
               </Link>
             </div>
