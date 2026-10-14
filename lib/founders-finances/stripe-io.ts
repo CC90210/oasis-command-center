@@ -22,6 +22,7 @@
  */
 import "server-only";
 
+import { createHash } from "node:crypto";
 import { getTenantIntegrationValue } from "@/lib/tenant-integration-store";
 import { parseFoundersAllowlist } from "@/lib/founders-marketing-core";
 import { BUSINESS_ENTITY_ID } from "./chart";
@@ -110,11 +111,13 @@ export async function stripeRequest(
   }
 }
 
-let accountCache: { keyTail: string; at: number; account: { id: string; name: string | null } } | null = null;
+let accountCache: { keyDigest: string; at: number; account: { id: string; name: string | null } } | null = null;
 
 export async function stripeAccountForKey(key: string): Promise<{ id: string; name: string | null }> {
-  const tail = key.slice(-6);
-  if (accountCache && accountCache.keyTail === tail && Date.now() - accountCache.at < 10 * 60_000) return accountCache.account;
+  // Hash the complete credential: two unrelated keys can share a visible
+  // suffix, while the digest is safe to retain and never exposes the key.
+  const keyDigest = createHash("sha256").update(key).digest("hex");
+  if (accountCache && accountCache.keyDigest === keyDigest && Date.now() - accountCache.at < 10 * 60_000) return accountCache.account;
   const acct = await stripeRequest(key, "GET", "/v1/account");
   const id = typeof acct.id === "string" ? acct.id : "";
   if (!id.startsWith("acct_")) throw new StripeNotReady("stripe_account_unreachable", "Stripe did not return an account id for this key");
@@ -125,7 +128,7 @@ export async function stripeAccountForKey(key: string): Promise<{ id: string; na
     (typeof dashboard?.display_name === "string" && dashboard.display_name) ||
     (typeof profile?.name === "string" && profile.name) ||
     null;
-  accountCache = { keyTail: tail, at: Date.now(), account: { id, name } };
+  accountCache = { keyDigest, at: Date.now(), account: { id, name } };
   return accountCache.account;
 }
 
