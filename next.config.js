@@ -285,6 +285,17 @@ const nextConfig = {
   // self-contained server.js + trimmed node_modules. No effect on Vercel
   // (Vercel uses its own builder).
   output: "standalone",
+  // Public URLs stay stable. Internally these pages share the allow-listed
+  // funnel route so Cloudflare does not carry duplicate App Router manifests.
+  async rewrites() {
+    return [
+      { source: "/audit", destination: "/funnel/audit" },
+      { source: "/command-center", destination: "/funnel/command-center" },
+      { source: "/pricing", destination: "/funnel/pricing" },
+      { source: "/onboarding", destination: "/funnel/onboarding" },
+      { source: "/checkout/success", destination: "/funnel/checkout-success" },
+    ];
+  },
   // Cached / external links to retired routes land cleanly on a live page
   // instead of bouncing through middleware (which would return 307→/login
   // for unauthenticated visitors because the path is no longer in
@@ -316,13 +327,9 @@ const nextConfig = {
         permanent: true,
       },
       // Inbound links from the previous marketing site
-      // (oasis-ai-platform-iota.vercel.app). Both of its commercial pages
-      // are consolidated into /work.
-      {
-        source: "/pricing",
-        destination: "/work",
-        permanent: true,
-      },
+      // (oasis-ai-platform-iota.vercel.app). /pricing is a first-class
+      // checkout route again; only the retired /services URL consolidates
+      // into /work.
       {
         source: "/services",
         destination: "/work",

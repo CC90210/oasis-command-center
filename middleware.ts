@@ -11,7 +11,7 @@ import { createServerClient } from "@supabase/ssr";
 import { verifySessionEdge } from "@/lib/turso-auth-edge";
 import { matchesPathPrefix } from "./lib/path-prefix";
 import { destinationForClaim, onboardingGateApplies, shouldRedirectToOnboarding } from "./lib/onboarding-gate";
-import { MARKETING_PATHS, MARKETING_HOME_PATH } from "./lib/marketing/routes";
+import { MARKETING_PATHS, MARKETING_HOME_PATH, MARKETING_UTILITY_PATHS } from "./lib/marketing/routes";
 import { OS_REDIRECTS } from "./lib/os/redirects";
 
 export const PUBLIC_PATH_PREFIXES = [
@@ -22,6 +22,7 @@ export const PUBLIC_PATH_PREFIXES = [
   // legal pages are listed individually further down — they predate the
   // marketing site and their comments explain why each must stay public.
   ...MARKETING_PATHS,
+  ...MARKETING_UTILITY_PATHS,
   "/welcome",              // Legacy landing URL. app/welcome/ no longer exists — next.config.js 308s it to "/", and config redirects run BEFORE middleware, so this entry is never actually consulted today. Kept as a backstop: if that redirect is ever removed, /welcome should 404 rather than bounce an anonymous visitor to /login.
   "/download",             // OASIS Desktop page. Public, but the page decides what it shows: the release links for a verified platform operator, a "private beta" notice with no links for everyone else (the release repo is private).
   // /configure, /start and /demo/sun removed 2026-09-29 (F0 containment): the
@@ -103,6 +104,7 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/forms/upload-url", // POST HMAC-token file upload signer for public form direct-to-Storage uploads.
   "/api/forms/view",       // POST on form-page mount → records form_views + fires viewed_application drip.
   "/api/forms/address-autocomplete", // GET ?q=… → server-side address-autocomplete proxy for the public form. Public (the personalized form isn't session-authed) and IP rate-limited; returns only formatted-address strings, never provider keys (those stay server-side). See app/api/forms/address-autocomplete/route.ts.
+  "/api/checkout/session", // Public Stripe Checkout creator. Same-origin, byte-capped, rate-limited, and resolves every amount from the server catalogue before using the Worker-held Stripe key.
   "/api/client-errors",    // POST browser-crash report (app/error.tsx, app/global-error.tsx, components/ClientErrorReporter.tsx). Same rules as /api/perf/vitals below: sent from pages with no session (login, a public form), so it must not 401 here; the route self-gates on same-origin, a byte cap, a strict schema and a rate cap, and takes tenant/user from the session only. Exact path only.
   "/api/perf/vitals",      // POST web-vitals beacon. The MERCHANT'S browser sends this from the public form, where no session exists, so middleware answered 401 and every merchant filling in an application collected console errors on a funding form — measured live 2026-09-14. The route is built to be a public surface and defends itself fail-closed BEFORE reading anything: same-origin gate on Origin/Referer vs Host (403, and false when any of them is missing or unparseable), a 1 KB cap enforced through a byte-limited reader rather than after buffering, an allowlisted key/metric/rating schema, and a per-instance 600/min cap that answers 204 so a flooder learns nothing. It is log-only — no database write, no PII, nothing echoed back. Same rule as the internal HMAC routes above: the route owns its own auth, so middleware must let it reach it.
   "/api/offer-page/",      // Offer pages' two public endpoints, called from a visitor's browser on an offer page (no session): POST /api/offer-page/video signs a Library video on tap, GET /api/offer-page/captions serves its captions same-origin. Each refuses everything but a ref in the PUBLISHED copy of a live offer page on an enabled form, resolving to its own workspace's asset (one 404 for every refusal); video is same-origin, 1 KB capped and rate-capped per address. Trailing slash: covers exactly the /api/offer-page/* sub-paths, never /api/offer-pages or the session-gated /api/forms/[id]/offer routes.
@@ -194,6 +196,10 @@ const METADATA_IMAGE_ROUTE =
 const RUN_PRODUCER_ROUTE = /^\/api\/os\/runs\/[A-Za-z0-9-]{8,64}\/events$/;
 
 export function isPublic(pathname: string): boolean {
+  // /onboarding is the public seven-day application page. Its existing
+  // /onboarding/wizard and /onboarding/welcome children remain authenticated
+  // setup flows even though matchesPathPrefix normally includes descendants.
+  if (pathname.startsWith("/onboarding/")) return false;
   if (PUBLIC_PATH_PREFIXES.some((p) => matchesPathPrefix(pathname, p))) return true;
   if (METADATA_IMAGE_ROUTE.test(pathname)) return true;
   if (RUN_PRODUCER_ROUTE.test(pathname)) return true;

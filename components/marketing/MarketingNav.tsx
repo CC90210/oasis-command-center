@@ -14,9 +14,11 @@ import { OasisLogo } from "@/components/brand/OasisLogo";
  */
 
 const LINKS = [
+  { href: "/audit", label: "Audit" },
   { href: "/fleet", label: "Fleet" },
   { href: "/work", label: "Work" },
-  { href: "/about", label: "About" },
+  { href: "/command-center", label: "Command center" },
+  { href: "/pricing", label: "Pricing" },
   { href: "/contact", label: "Contact" },
 ] as const;
 

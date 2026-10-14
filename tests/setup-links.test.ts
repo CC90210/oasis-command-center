@@ -49,7 +49,46 @@ function split(href: string): { path: string; query: string; hash: string } {
 }
 
 function routeFile(path: string): string {
-  return path === "/" ? "app/page.tsx" : `app${path}/page.tsx`;
+  const direct = path === "/" ? "app/page.tsx" : `app${path}/page.tsx`;
+  if (existsSync(join(ROOT, direct))) return direct;
+
+  // Route groups such as app/(marketing)/onboarding do not contribute a URL
+  // segment. Resolve their page files the same way Next.js resolves the route.
+  const matches: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (!statSync(full).isDirectory()) continue;
+      walk(full);
+    }
+
+    const page = join(dir, "page.tsx");
+    if (!existsSync(page)) return;
+    const segments = relative(join(ROOT, "app"), dir)
+      .split(sep)
+      .filter((segment) => segment && !/^\(.+\)$/.test(segment));
+    const requested = path.split("/").filter(Boolean);
+    const catchAllAt = segments.findIndex((segment) => /^\[\[?\.\.\.[^\]]+\]\]?$/.test(segment));
+    const fixedSegments = catchAllAt === -1 ? segments : segments.slice(0, catchAllAt);
+    const fixedMatch = fixedSegments.every(
+      (segment, index) => /^\[[^\].]+\]$/.test(segment) || segment === requested[index],
+    );
+    const resolvesPath = catchAllAt === -1
+      ? segments.length === requested.length && fixedMatch
+      : fixedMatch && requested.length > fixedSegments.length;
+    if (resolvesPath) matches.push(relative(ROOT, page).split(sep).join("/"));
+  };
+  walk(join(ROOT, "app"));
+
+  if (matches.length === 0) {
+    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rewrite = new RegExp(`source:\\s*"${escaped}"\\s*,\\s*destination:\\s*"([^"]+)"`)
+      .exec(read("next.config.js"))?.[1];
+    if (rewrite && rewrite !== path) return routeFile(rewrite);
+  }
+
+  assert.ok(matches.length <= 1, `${path} resolves to multiple page files: ${matches.join(", ")}`);
+  return matches[0] ?? direct;
 }
 
 test("every registry href resolves to an app route file", () => {

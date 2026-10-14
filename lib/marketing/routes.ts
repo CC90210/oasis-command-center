@@ -56,8 +56,12 @@ export const MARKETING_HOME_PATH = "/home";
 /** Public marketing pages. Order is irrelevant; both consumers use a matcher. */
 export const MARKETING_PATHS = [
   MARKETING_HOME_PATH,
+  "/audit",
   "/fleet", // the agent fleet. NOT "/agents" — that's the auth-gated dashboard.
   "/work",
+  "/command-center",
+  "/pricing",
+  "/onboarding",
   "/about",
   "/contact",
   // "/start" (the former /welcome entry-path page) was removed 2026-09-29 (F0
@@ -72,10 +76,14 @@ export const MARKETING_PATHS = [
  */
 export const MARKETING_LEGAL_PATHS = ["/privacy", "/terms", "/dmca"] as const;
 
+/** Public pages that use the marketing shell but must never enter the sitemap. */
+export const MARKETING_UTILITY_PATHS = ["/checkout/success"] as const;
+
 /** Everything the marketing shell owns. */
 export const ALL_MARKETING_PATHS: readonly string[] = [
   ...MARKETING_PATHS,
   ...MARKETING_LEGAL_PATHS,
+  ...MARKETING_UTILITY_PATHS,
 ];
 
 /**
@@ -94,7 +102,8 @@ export const STANDALONE_PUBLIC_PATHS = ["/download"] as const;
 
 /** Every path a crawler may fetch as a page: robots.txt and the sitemap. */
 export const ALL_PUBLIC_PATHS: readonly string[] = [
-  ...ALL_MARKETING_PATHS,
+  ...MARKETING_PATHS,
+  ...MARKETING_LEGAL_PATHS,
   ...STANDALONE_PUBLIC_PATHS,
 ];
 
@@ -115,7 +124,7 @@ export const SITE_ORIGIN = "https://oasisai.work";
 export function marketingCanonicalPath(pathname: string): string | null {
   const path = (pathname.split(/[?#]/)[0] ?? "").replace(/\/+$/, "") || "/";
   if (path === "/" || path === MARKETING_HOME_PATH) return pathname ? "/" : null;
-  return ALL_MARKETING_PATHS.includes(path) ? path : null;
+  return [...MARKETING_PATHS, ...MARKETING_LEGAL_PATHS].includes(path as never) ? path : null;
 }
 
 /**

@@ -45,7 +45,9 @@ export const FULL_BLEED_PREFIXES: readonly string[] = [
   "/forgot-password",
   "/auth/callback",
   "/auth/reset-password",
-  "/onboarding", // signed in, but the wizard owns the screen
+  // /onboarding and its signed-in wizard children are covered by the marketing
+  // registry's /onboarding prefix. The exact page is public; middleware keeps
+  // /onboarding/wizard and /onboarding/welcome authenticated.
   "/f/", // public form pages (anonymous + personalized)
   "/invite/", // pre-signup invite landing
   "/sign/", // public e-signature page: the signer may never have an account

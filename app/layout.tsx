@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { cookies, headers } from "next/headers";
+import Script from "next/script";
 import "./globals.css";
 import { SidebarShell } from "@/components/SidebarShell";
 import { MainShell } from "@/components/MainShell";
@@ -25,6 +26,7 @@ import { getTenantManifestForUser, ownsSlug } from "@/lib/manifest/tenant-scope"
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
 import { isFullBleedPath } from "@/lib/os/full-bleed";
+import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
 // NOTE: the PUBLIC marketing SITE (/home, /work, ...) is lib/marketing/*, read
 // here through lib/os/full-bleed.ts. lib/founders/* below is the private
 // founders portal. Different concerns, similar words - keep them apart.
@@ -101,6 +103,10 @@ export default async function RootLayout({
   // sidebar shell. The pathname is set as a header by middleware.ts.
   const hdrs = await headers();
   const pathname = hdrs.get("x-pathname") || hdrs.get("x-invoke-path") || "";
+  // Advertising measurement belongs to the public acquisition funnel. Keep
+  // Google off authenticated tenant/operator routes so private dashboard URLs
+  // and page locations are never sent to a third party.
+  const shouldLoadGoogleAdsTag = ALL_MARKETING_PATHS.includes(pathname as never);
   // P0 instrumentation (instant-load plan): time the layout's own data
   // fetches — the "session tax" every navigation pays before any page
   // content or loading state can stream. Additive only; spans wrap the
@@ -497,6 +503,17 @@ export default async function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
+        {shouldLoadGoogleAdsTag ? (
+          <>
+            <Script
+              src="https://www.googletagmanager.com/gtag/js?id=AW-18509362419"
+              strategy="afterInteractive"
+            />
+            <Script id="google-tag-init" strategy="afterInteractive">
+              {`window.dataLayer = window.dataLayer || []; function gtag(){dataLayer.push(arguments);} gtag('js', new Date()); gtag('config', 'AW-18509362419');`}
+            </Script>
+          </>
+        ) : null}
         {/* Synchronous boot script — reads localStorage and writes
             data-sidebar=collapsed|expanded on <html> before paint. CSS
             below keys main element's left margin off that attribute.

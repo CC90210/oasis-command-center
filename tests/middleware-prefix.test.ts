@@ -21,6 +21,7 @@ assert.equal(isPublic("/api/forms/submit"), true, "public form submit bypasses s
 assert.equal(isPublic("/api/forms/upload-url"), true, "public form upload signer bypasses session middleware");
 assert.equal(isPublic("/api/forms/view"), true, "public form view tracker bypasses session middleware");
 assert.equal(isPublic("/api/forms/address-autocomplete"), true, "public form address autocomplete bypasses session middleware");
+assert.equal(isPublic("/api/checkout/session"), true, "public checkout creator bypasses session middleware");
 assert.equal(isPublic("/api/forms"), false, "operator forms list remains session-gated");
 assert.equal(isPublic("/api/forms/abc/mint-link"), false, "operator link minting remains session-gated");
 assert.equal(isPublic("/oasis-loop/index.html"), true, "OASIS Loop diagram is public static HTML");
@@ -54,8 +55,13 @@ for (const gated of ["/pipeline", "/settings", "/agents", "/operations", "/leads
 // Every marketing route is reachable without a session.
 for (const open of [
   "/home", // rewrite target for "/"
+  "/audit",
   "/fleet",
   "/work",
+  "/command-center",
+  "/pricing",
+  "/onboarding",
+  "/checkout/success",
   "/about",
   "/contact",
   "/privacy",
@@ -64,6 +70,8 @@ for (const open of [
 ]) {
   assert.equal(isPublic(open), true, `${open} is public marketing`);
 }
+assert.equal(isPublic("/onboarding/wizard"), false, "the signed-in setup wizard is not opened by the public /onboarding page");
+assert.equal(isPublic("/onboarding/welcome"), false, "the signed-in onboarding welcome stays gated");
 
 // /start left the marketing site on 2026-09-29 (F0 containment): it fed the
 // developer install funnel, whose repo went private. It is a 404 now, and off
