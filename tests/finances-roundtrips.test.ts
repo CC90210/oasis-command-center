@@ -100,6 +100,7 @@ async function main() {
   // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
   await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
   await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__226_finance_invoice_send_claim.sql"), "utf8"));
 
   const { torontoToday, addDays, FX_LOOKBACK_DAYS } = await import("../lib/founders-finances/fx");
   const today = torontoToday();

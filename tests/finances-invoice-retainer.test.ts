@@ -36,6 +36,7 @@ process.env.OASIS_MAIL_APP_PASSWORD = "test-only-password";
 // ── the mailer: record, never send ─────────────────────────────────────────
 type SentMail = { to: string; subject: string; text: string; html: string; attachments: Array<{ filename: string; content: Buffer }> };
 const mails: SentMail[] = [];
+let beforeMailSend: (() => Promise<void>) | null = null;
 {
   const path = require.resolve("nodemailer");
   require.cache[path] = {
@@ -48,6 +49,7 @@ const mails: SentMail[] = [];
     exports: {
       createTransport: () => ({
         sendMail: async (m: SentMail) => {
+          if (beforeMailSend) await beforeMailSend();
           mails.push(m);
           return { messageId: `<test-${mails.length}@oasisai.work>` };
         },
@@ -72,6 +74,8 @@ const stripe = {
   onWrite: null as null | ((path: string) => Promise<void>),
   seq: 0,
   replay: new Map<string, Json>(),
+  /** Every product Stripe made, including whether cleanup archived it. */
+  products: new Map<string, Json>(),
   /** Every price Stripe made, as GET /v1/prices/:id returns it. */
   prices: new Map<string, Json>(),
   /** Stripe's live state of every payment link, as GET returns it. */
@@ -125,6 +129,11 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       if (method === "POST") stripeCalls.push({ method, path: url.pathname, params, idem });
       return json({ error: { type: "api_error", message: stripe.failWith.message } }, stripe.failWith.status);
     }
+    if (method === "GET" && url.pathname.startsWith("/v1/products/")) {
+      stripeReads.push(url.pathname);
+      const p = stripe.products.get(url.pathname.split("/").pop() as string);
+      return p ? json(structuredClone(p)) : json({ error: { message: "No such product" } }, 404);
+    }
     if (method === "GET" && url.pathname.startsWith("/v1/prices/")) {
       stripeReads.push(url.pathname);
       const p = stripe.prices.get(url.pathname.split("/").pop() as string);
@@ -163,15 +172,20 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     }
     let body: Json;
     const n = ++stripe.seq;
-    if (url.pathname === "/v1/products") body = { id: `prod_${n}`, object: "product", name: params.name, livemode: true };
+    if (url.pathname === "/v1/products") {
+      body = { id: `prod_${n}`, object: "product", name: params.name, livemode: true, active: true };
+      stripe.products.set(body.id as string, body);
+    }
     else if (url.pathname === "/v1/prices") {
       body = {
         id: `price_${n}`,
         object: "price",
         livemode: true,
+        active: true,
         unit_amount: Number(params.unit_amount),
         currency: params.currency,
-        recurring: params["recurring[interval]"] ? { interval: params["recurring[interval]"] } : null,
+        product: params.product || null,
+        recurring: params["recurring[interval]"] ? { interval: params["recurring[interval]"], interval_count: Number(params["recurring[interval_count]"] || 1) } : null,
       };
       stripe.prices.set(body.id as string, body);
     } else if (url.pathname === "/v1/payment_links") {
@@ -184,6 +198,16 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const l = stripe.links.get(id);
       if (l && params.active !== undefined) l.active = params.active !== "false";
       body = { id, object: "payment_link", active: l ? l.active : params.active !== "false" };
+    } else if (url.pathname.startsWith("/v1/prices/")) {
+      const id = url.pathname.split("/").pop() as string;
+      const p = stripe.prices.get(id);
+      if (p && params.active !== undefined) p.active = params.active !== "false";
+      body = { id, object: "price", active: p?.active ?? params.active !== "false" };
+    } else if (url.pathname.startsWith("/v1/products/")) {
+      const id = url.pathname.split("/").pop() as string;
+      const p = stripe.products.get(id);
+      if (p && params.active !== undefined) p.active = params.active !== "false";
+      body = { id, object: "product", active: p?.active ?? params.active !== "false" };
     } else return json({ error: { message: `unexpected ${url.pathname}` } }, 404);
     if (idem) stripe.replay.set(idem, body);
     return json(body);
@@ -222,6 +246,26 @@ async function withRace<T>(match: (batchJson: string) => boolean, race: () => Pr
   }
 }
 
+/** Run one mutation immediately before the first matching single DB execute. */
+async function withExecuteRace<T>(match: (statementJson: string) => boolean, race: () => Promise<void>, fn: () => Promise<T>): Promise<{ result: T; raced: boolean }> {
+  const { getTursoClient } = await import("../lib/turso");
+  const client = getTursoClient() as unknown as Record<string, unknown>;
+  const original = (Object.getPrototypeOf(client) as { execute: (...a: unknown[]) => Promise<unknown> }).execute;
+  let raced = false;
+  client.execute = async function (this: unknown, statement: unknown, ...rest: unknown[]) {
+    if (!raced && match(JSON.stringify(statement))) {
+      raced = true;
+      await race();
+    }
+    return original.call(this, statement, ...rest);
+  };
+  try {
+    return { result: await fn(), raced };
+  } finally {
+    delete client.execute;
+  }
+}
+
 const cc = { kind: "founder" as const, ownerKey: "cc" as const, email: "conaugh@oasisai.work", userId: "u-cc" };
 
 async function pdfText(bytes: Uint8Array): Promise<string> {
@@ -253,6 +297,7 @@ async function main() {
   await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
   await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
   await raw.executeMultiple(readFileSync(join(root, "database/turso/184_finance_wise_payments.turso.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__226_finance_invoice_send_claim.sql"), "utf8"));
 
   const { addDays, torontoToday } = await import("../lib/founders-finances/fx");
   const today = torontoToday();
@@ -446,7 +491,7 @@ async function main() {
 
   // ── migration 185 ────────────────────────────────────────────────────────
   await check("migration 185 applies additively: old lines read one-time, old invoices have no retainer, the CHECKs hold", async () => {
-    await raw.executeMultiple(readFileSync(join(root, "database/turso/185_finance_invoice_retainer.turso.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/185_finance_invoice_retainer.turso.sql"), "utf8"));
     store.resetRetainerColumnMemo();
     assert.equal(await store.retainerColumnsReady(), true);
     assert.equal((await store.loadInvoiceLines(preId))[0].billing, "one_time");
@@ -654,6 +699,7 @@ async function main() {
 
   let mixedRetainerUrl = "";
   let mixedRetainerLink = "";
+  let mixedRetainerPrice = "";
   await check("send: AR and revenue at issue are the one-time part only; the retainer link is a recurring monthly price with the invoice's metadata", async () => {
     const mark = stripeCalls.length;
     const before = mails.length;
@@ -721,6 +767,7 @@ async function main() {
     assert.equal(sent.paymentLinkUrl, null);
     mixedRetainerUrl = d.stripe_retainer_link_url as string;
     mixedRetainerLink = d.stripe_retainer_link_id as string;
+    mixedRetainerPrice = d.stripe_retainer_price_id as string;
   });
 
   await check("email + PDF: two separate sections, both links, Due now and Monthly retainer shown apart", async () => {
@@ -752,7 +799,13 @@ async function main() {
     const reads = stripeReads.length;
     await invoices.sendInvoice(cc, mixedId);
     assert.equal(stripeSince(mark).length, 0, "same amount + currency: no Stripe write at all");
-    assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${mixedRetainerLink}`], "the stored link's state is asked of Stripe before it is emailed again");
+    const exactReads = [
+      `/v1/payment_links/${mixedRetainerLink}`,
+      `/v1/payment_links/${mixedRetainerLink}/line_items`,
+      `/v1/prices/${(await row(mixedId)).stripe_retainer_price_id}`,
+      `/v1/products/${(await row(mixedId)).stripe_retainer_product_id}`,
+    ];
+    assert.deepEqual(stripeReads.slice(reads), [...exactReads, ...exactReads], "the full recurring chain is checked on reuse and immediately before SMTP");
     assert.ok(lastMail().text.includes(mixedRetainerUrl));
 
     // A retainer corrected after issue (the stored figure is what the link must charge).
@@ -762,12 +815,13 @@ async function main() {
     const calls = stripeSince(mark);
     assert.deepEqual(
       calls.map((c) => c.path),
-      ["/v1/prices", "/v1/payment_links", `/v1/payment_links/${mixedRetainerLink}`],
-      "new price + link on the SAME product, then the old link off",
+      [`/v1/payment_links/${mixedRetainerLink}`, `/v1/prices/${mixedRetainerPrice}`, "/v1/prices", "/v1/payment_links"],
+      "the old checkout and stale Price are confirmed off before their replacements are created",
     );
-    assert.equal(calls[0].params.unit_amount, "60000");
-    assert.equal(calls[0].params["recurring[interval]"], "month");
-    assert.equal(calls[2].params.active, "false");
+    assert.equal(calls[0].params.active, "false");
+    assert.equal(calls[1].params.active, "false");
+    assert.equal(calls[2].params.unit_amount, "60000");
+    assert.equal(calls[2].params["recurring[interval]"], "month");
     const d = await row(mixedId);
     assert.notEqual(d.stripe_retainer_link_url, mixedRetainerUrl);
     assert.equal(Number(d.stripe_retainer_link_cents), 60000);
@@ -845,6 +899,273 @@ async function main() {
     assert.ok(lastMail().text.includes(sent.retainerLinkUrl as string));
   });
 
+  await check("a pre-issuance failure strictly retires every new checkout and a draft PDF/status exposes no payable URL", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Cleanup before issue", email: "ap@cleanup-before-issue.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [
+        { description: "Implementation", quantity: 1, unit_price: "800" },
+        { description: "Support", quantity: 1, unit_price: "95", billing: "monthly" },
+      ],
+    });
+    const linksBefore = new Set(stripe.links.keys());
+    const mailsBefore = mails.length;
+    const saved = process.env.OASIS_MAIL_APP_PASSWORD;
+    delete process.env.OASIS_MAIL_APP_PASSWORD;
+    try {
+      await assert.rejects(invoices.sendInvoice(cc, id));
+    } finally {
+      process.env.OASIS_MAIL_APP_PASSWORD = saved;
+    }
+    const made = [...stripe.links.values()].filter((link) => !linksBefore.has(link.id));
+    assert.equal(made.length, 2, "one one-time and one recurring checkout were created before mailbox validation failed");
+    assert.ok(made.every((link) => link.active === false), "every newly created checkout is confirmed off");
+    const draft = await row(id);
+    assert.deepEqual([draft.status, draft.number, draft.stripe_payment_link_id, draft.stripe_payment_link_url], ["draft", null, null, null]);
+    assert.deepEqual([draft.stripe_retainer_link_id, draft.stripe_retainer_link_url], [null, null]);
+    assert.equal(mails.length, mailsBefore);
+    assert.deepEqual(await invoices.retainerLinkStatus(draft), { state: "none" });
+    const pdf = await pdfText((await invoices.invoicePdfBytes(cc, id)).bytes);
+    for (const link of made) assert.ok(!pdf.includes(link.url), "a draft PDF never prints a checkout URL");
+  });
+
+  await check("Stripe-only money due cannot be emailed without its required card checkout", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "No rail opt-out", email: "ap@no-rail-opt-out.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "650" }],
+    });
+    const before = mails.length;
+    const writes = stripeCalls.length;
+    await assert.rejects(
+      invoices.sendInvoice(cc, id, { paymentLink: false }),
+      (e: unknown) => e instanceof access.FinanceInputError && /card payment link is required/i.test(e.message) && /nothing was emailed/i.test(e.message),
+    );
+    assert.equal(mails.length, before);
+    assert.equal(stripeCalls.length, writes, "the invalid opt-out is refused before Stripe writes");
+    assert.equal((await row(id)).status, "draft");
+  });
+
+  await check("the durable email claim makes a concurrent void lose visibly before SMTP in every payment mode", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Claimed Wise", email: "ap@claimed-wise.test" },
+      currency: "CAD",
+      payment_method: "wise",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "710" }],
+    });
+    const before = mails.length;
+    let voidError: unknown;
+    beforeMailSend = async () => {
+      try {
+        await invoices.voidInvoice(cc, id);
+      } catch (e) {
+        voidError = e;
+      }
+    };
+    try {
+      await invoices.sendInvoice(cc, id);
+    } finally {
+      beforeMailSend = null;
+    }
+    assert.ok(voidError instanceof access.FinanceInputError);
+    assert.match((voidError as Error).message, /email attempt.*unresolved/i);
+    assert.match((voidError as Error).message, /since \d{4}-\d{2}-\d{2}T/);
+    assert.doesNotMatch((voidError as Error).message, /send_[a-z0-9]/i, "the private claim token is never shown");
+    const sent = await row(id);
+    assert.equal(sent.status, "sent");
+    assert.equal(sent.send_claim_token, null);
+    assert.equal(mails.length, before + 1);
+  });
+
+  await check("an old unresolved email claim never expires silently and blocks send, void, delete, and edit with one diagnostic", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Stuck claim", email: "ap@stuck-claim.test" },
+      currency: "CAD",
+      payment_method: "wise",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "720" }],
+    });
+    await raw.execute({
+      sql: `UPDATE fin_invoices SET send_claim_token = 'private_never_show', send_claimed_at = '2020-01-02T03:04:05.000Z' WHERE id = ?`,
+      args: [id],
+    });
+    const expected = /email attempt.*unresolved since 2020-01-02T03:04:05\.000Z.*verify the mailbox/i;
+    for (const run of [
+      () => invoices.sendInvoice(cc, id),
+      () => invoices.voidInvoice(cc, id),
+      () => invoices.deleteDraftInvoice(cc, id),
+      () => invoices.updateDraftInvoice(cc, id, { contact_id: (row(id) as unknown), currency: "CAD", lines: [] }),
+    ]) {
+      await assert.rejects(run, (e: unknown) => e instanceof access.FinanceInputError && expected.test(e.message) && !e.message.includes("private_never_show"));
+    }
+    assert.equal((await row(id)).send_claim_token, "private_never_show");
+  });
+
+  await check("finalize with a send expectation never returns a raced non-draft invoice", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Finalize race", email: "ap@finalize-race.test" },
+      currency: "CAD",
+      payment_method: "wise",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "730" }],
+    });
+    const draft = await row(id);
+    await raw.execute({ sql: `UPDATE fin_invoices SET status = 'void' WHERE id = ?`, args: [id] });
+    await assert.rejects(
+      invoices.finalizeInvoice(cc, id, {
+        totalCents: draft.total_cents,
+        monthlyCents: 0,
+        currency: draft.currency,
+        contactId: draft.contact_id,
+        cardLinkVerified: false,
+        sendClaimToken: "send_expected",
+      }),
+      (e: unknown) => e instanceof access.FinanceInputError && e.message === invoices.ISSUE_CHANGED_DURING_SEND,
+    );
+  });
+
+  await check("recurring object writes lose safely to delete/void and retire every orphan", async () => {
+    const run = async (terminal: "delete" | "void") => {
+      const id = await invoices.createDraftInvoice(cc, "oasis", {
+        new_contact: { name: `Retainer ${terminal}`, email: `ap@retainer-${terminal}.test` },
+        currency: "CAD",
+        payment_method: "stripe",
+        lines: [{ description: "Support", quantity: 1, unit_price: "120", billing: "monthly" }],
+      });
+      if (terminal === "void") await invoices.finalizeInvoice(cc, id);
+      const snapshot = await row(id);
+      const productsBefore = new Set(stripe.products.keys());
+      const pricesBefore = new Set(stripe.prices.keys());
+      const linksBefore = new Set(stripe.links.keys());
+      stripe.onWrite = async (path) => {
+        if (path !== "/v1/payment_links") return;
+        stripe.onWrite = null;
+        if (terminal === "delete") await invoices.deleteDraftInvoice(cc, id);
+        else await invoices.voidInvoice(cc, id);
+      };
+      try {
+        await assert.rejects(invoices.ensureRetainerLink(snapshot), /changed|deleted|void/i);
+      } finally {
+        stripe.onWrite = null;
+      }
+      const madeProducts = [...stripe.products.values()].filter((p) => !productsBefore.has(String(p.id)));
+      const madePrices = [...stripe.prices.values()].filter((p) => !pricesBefore.has(String(p.id)));
+      const madeLinks = [...stripe.links.values()].filter((l) => !linksBefore.has(l.id));
+      assert.equal(madeProducts.length, 1);
+      assert.equal(madePrices.length, 1);
+      assert.equal(madeLinks.length, 1);
+      assert.equal(madeProducts[0].active, false, "orphan product archived");
+      assert.equal(madePrices[0].active, false, "orphan price archived");
+      assert.equal(madeLinks[0].active, false, "orphan checkout strictly retired");
+      if (terminal === "delete") assert.equal(await count(`SELECT COUNT(*) FROM fin_invoices WHERE id = ?`, [id]), 0);
+      else assert.equal((await row(id)).status, "void");
+    };
+    await run("delete");
+    await run("void");
+  });
+
+  await check("identical concurrent recurring-link callers adopt one idempotent winner and never switch it off", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Concurrent recurring", email: "ap@concurrent-recurring.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Support", quantity: 1, unit_price: "140", billing: "monthly" }],
+    });
+    const snapshot = await row(id);
+    const waiters = new Map<string, { count: number; release: () => void; promise: Promise<void> }>();
+    const pair = (path: string) => {
+      let state = waiters.get(path);
+      if (!state) {
+        let release = () => {};
+        const promise = new Promise<void>((resolve) => { release = resolve; });
+        state = { count: 0, release, promise };
+        waiters.set(path, state);
+      }
+      return state;
+    };
+    stripe.onWrite = async (path) => {
+      if (!["/v1/products", "/v1/prices", "/v1/payment_links"].includes(path)) return;
+      const state = pair(path);
+      state.count += 1;
+      if (state.count === 1) await state.promise;
+      else state.release();
+    };
+    const mark = stripeCalls.length;
+    let results: [Awaited<ReturnType<typeof invoices.ensureRetainerLink>>, Awaited<ReturnType<typeof invoices.ensureRetainerLink>>];
+    try {
+      results = await Promise.all([invoices.ensureRetainerLink(snapshot), invoices.ensureRetainerLink(snapshot)]);
+    } finally {
+      stripe.onWrite = null;
+    }
+    assert.deepEqual(results[0], results[1]);
+    const winner = await row(id);
+    assert.equal(results[0].kind, "link");
+    assert.ok(results[0].kind === "link" && results[0].url === winner.stripe_retainer_link_url);
+    assert.equal(stripe.links.get(winner.stripe_retainer_link_id as string)?.active, true);
+    assert.equal(
+      stripeSince(mark).filter((c) => c.path === `/v1/payment_links/${winner.stripe_retainer_link_id}` && c.params.active === "false").length,
+      0,
+      "the shared winner is never deactivated",
+    );
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.retainer_link_created'`, [id]), 1);
+  });
+
+  await check("recurring links are exposed only after exact live Link -> Price -> Product proof", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Exact recurring", email: "ap@exact-recurring.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Support", quantity: 1, unit_price: "175", billing: "monthly" }],
+    });
+    const sent = await invoices.sendInvoice(cc, id);
+    let stored = await row(id);
+    const originalLink = stored.stripe_retainer_link_id as string;
+    const originalUrl = stored.stripe_retainer_link_url as string;
+    const originalPrice = stored.stripe_retainer_price_id as string;
+    const originalProduct = stored.stripe_retainer_product_id as string;
+    assert.equal(sent.retainerLinkUrl, originalUrl);
+
+    stripe.links.get(originalLink)!.priceId = "price_wrong_binding";
+    let status = await invoices.retainerLinkStatus(await row(id));
+    assert.equal(status.state, "unknown");
+    assert.ok(status.state !== "none" && status.url === null && /does not match|verify/i.test(status.reason || ""));
+    assert.ok(!(await pdfText((await invoices.invoicePdfBytes(cc, id)).bytes)).includes(originalUrl));
+    const reads = stripeReads.length;
+    const replaced = await invoices.sendInvoice(cc, id);
+    stored = await row(id);
+    assert.ok(replaced.retainerLinkUrl && replaced.retainerLinkUrl !== originalUrl);
+    assert.equal(stripe.links.get(originalLink)!.active, false);
+    assert.ok(stripeReads.slice(reads).filter((path) => path === `/v1/payment_links/${originalLink}`).length >= 2, "replacement GET-confirms shutdown");
+    assert.equal(stripe.products.get(originalProduct)?.active, true, "a bad link never archives its still-valid Product");
+    assert.equal(stripe.prices.get(originalPrice)?.active, true, "a bad link never archives its still-valid Price");
+
+    const wrongAmountLink = stored.stripe_retainer_link_id as string;
+    const wrongAmountUrl = stored.stripe_retainer_link_url as string;
+    const wrongAmountPrice = stored.stripe_retainer_price_id as string;
+    stripe.prices.get(wrongAmountPrice)!.unit_amount = 17501;
+    status = await invoices.retainerLinkStatus(await row(id));
+    assert.equal(status.state, "unknown");
+    assert.ok(status.state !== "none" && status.url === null);
+    const fixed = await invoices.sendInvoice(cc, id);
+    stored = await row(id);
+    assert.ok(fixed.retainerLinkUrl && fixed.retainerLinkUrl !== wrongAmountUrl);
+    assert.notEqual(stored.stripe_retainer_price_id, wrongAmountPrice, "a wrong-amount Price is never reused");
+    assert.equal(stripe.prices.get(wrongAmountPrice)!.active, false, "the orphan wrong Price is archived");
+    assert.equal(stripe.links.get(wrongAmountLink)!.active, false);
+
+    const product = stripe.products.get(stored.stripe_retainer_product_id as string)!;
+    product.livemode = false;
+    status = await invoices.retainerLinkStatus(await row(id));
+    assert.equal(status.state, "unknown");
+    assert.ok(status.state !== "none" && status.url === null, "a test-mode/mismatched Product never releases the stored URL");
+    product.livemode = true;
+
+    const page = readFileSync(join(root, "app/founders/finances/invoices/[id]/page.tsx"), "utf8");
+    assert.match(page, /verifiedOneTimePaymentLink/);
+    assert.doesNotMatch(page, /href=\{inv\.stripe_payment_link_url\}/, "the detail page never renders raw one-time storage");
+    assert.equal(stripe.products.get(originalProduct)?.active, true, "replacing a bad link never archives a still-shared valid Product");
+  });
+
   await check("editing a draft retires a now-wrong live card link immediately; send creates the replacement; Issue without emailing drops an unchecked one", async () => {
     const { InvoiceMailerNotConfigured } = await import("../lib/founders-finances/invoice-email");
     const withoutMailbox = async (id: string) => {
@@ -862,24 +1183,29 @@ async function main() {
       payment_method: "stripe",
       lines: [{ description: "Audit", quantity: 1, unit_price: "300" }],
     });
+    const linksBeforeFailure = new Set(stripe.links.keys());
     await withoutMailbox(id);
     let d = await row(id);
     assert.deepEqual([d.status, d.number], ["draft", null], "no mailbox: refused before it was numbered");
-    const first = { id: d.stripe_payment_link_id as string, url: d.stripe_payment_link_url as string, price: d.stripe_price_id as string };
-    assert.ok(first.id && first.url);
+    const firstLink = [...stripe.links.values()].find((link) => !linksBeforeFailure.has(link.id))!;
+    const first = { id: firstLink.id, url: firstLink.url };
+    assert.equal(firstLink.active, false, "the failed pre-issue attempt strictly retires its checkout");
+    assert.deepEqual([d.stripe_price_id, d.stripe_payment_link_id, d.stripe_payment_link_url], [null, null, null]);
 
     const editReads = stripeReads.length;
     const editWrites = stripeCalls.length;
     await invoices.updateDraftInvoice(cc, id, { contact_id: d.contact_id, currency: "CAD", payment_method: "stripe", lines: [{ description: "Audit", quantity: 1, unit_price: "400" }] });
     d = await row(id);
-    assert.equal(stripe.links.get(first.id)!.active, false, "the old amount stops being payable as part of the edit");
+    assert.equal(stripe.links.get(first.id)!.active, false, "the failed attempt's checkout stays off");
     assert.deepEqual([d.stripe_price_id, d.stripe_payment_link_id, d.stripe_payment_link_url], [null, null, null]);
-    assert.deepEqual(stripeSince(editWrites).map((c) => [c.path, c.params.active]), [[`/v1/payment_links/${first.id}`, "false"]]);
-    assert.deepEqual(stripeReads.slice(editReads), [`/v1/payment_links/${first.id}`], "the edit confirms Stripe reports the old link inactive");
+    assert.deepEqual(stripeSince(editWrites), [], "editing has no stale local checkout to retire again");
+    assert.deepEqual(stripeReads.slice(editReads), []);
     const reads = stripeReads.length;
     const mark = stripeCalls.length;
     const sent = await invoices.sendInvoice(cc, id);
-    assert.deepEqual(stripeReads.slice(reads), [], "send has no stale link left to inspect");
+    const sendReads = stripeReads.slice(reads);
+    assert.equal(sendReads.some((path) => path.includes(first.id)), false, "send never inspects or reuses the retired checkout");
+    assert.equal(sendReads.length, 3, "the fresh Link -> Price chain is checked immediately before SMTP");
     assert.equal(stripeSince(mark, "/v1/prices")[0].params.unit_amount, "40000");
     assert.ok(sent.paymentLinkUrl && sent.paymentLinkUrl !== first.url, "a new link for the new amount");
     assert.equal(stripe.links.get(first.id)!.active, false, "the old amount's link is switched off");
@@ -887,19 +1213,22 @@ async function main() {
     d = await row(id);
     assert.equal(d.total_cents, 40000);
 
-    // Same amount: reused as it is after the check (no new price, no new link).
+    // Same amount: a failed pre-issue attempt was retired, so retry makes a fresh link.
     const id2 = await invoices.createDraftInvoice(cc, "oasis", {
       new_contact: { name: "Gringotts", email: "ap@gringotts.test" },
       currency: "CAD",
       payment_method: "stripe",
       lines: [{ description: "Audit", quantity: 1, unit_price: "250" }],
     });
+    const linksBeforeSecondFailure = new Set(stripe.links.keys());
     await withoutMailbox(id2);
-    const kept = (await row(id2)).stripe_payment_link_url as string;
+    const retired = [...stripe.links.values()].find((link) => !linksBeforeSecondFailure.has(link.id))!;
+    assert.equal(retired.active, false);
+    assert.equal((await row(id2)).stripe_payment_link_url, null);
     const mark2 = stripeCalls.length;
     const sent2 = await invoices.sendInvoice(cc, id2);
-    assert.equal(sent2.paymentLinkUrl, kept);
-    assert.deepEqual(stripeSince(mark2).map((c) => c.path), [`/v1/payment_links/${(await row(id2)).stripe_payment_link_id}`], "only the number is added to it");
+    assert.ok(sent2.paymentLinkUrl && sent2.paymentLinkUrl !== retired.url);
+    assert.deepEqual(stripeSince(mark2).map((c) => c.path), ["/v1/prices", "/v1/payment_links", `/v1/payment_links/${(await row(id2)).stripe_payment_link_id}`]);
 
     // Issue without emailing: the draft's unchecked link is dropped (and switched off), the next send makes a numbered one.
     const id3 = await invoices.createDraftInvoice(cc, "oasis", {
@@ -908,7 +1237,8 @@ async function main() {
       payment_method: "stripe",
       lines: [{ description: "Audit", quantity: 1, unit_price: "275" }],
     });
-    await withoutMailbox(id3);
+    const draftBefore = await row(id3);
+    await invoices.ensurePaymentLink(draftBefore, draftBefore);
     const draftLink = await row(id3);
     const f = await invoices.finalizeInvoice(cc, id3);
     assert.equal(f.status, "sent");
@@ -925,7 +1255,8 @@ async function main() {
       payment_method: "stripe",
       lines: [{ description: "Audit", quantity: 1, unit_price: "325" }],
     });
-    await withoutMailbox(id4);
+    const strictDraft = await row(id4);
+    await invoices.ensurePaymentLink(strictDraft, strictDraft);
     stripe.failWith = { status: 503, message: "cannot confirm shutdown", reads: true };
     const logged = console.error;
     console.error = () => {};
@@ -954,7 +1285,8 @@ async function main() {
     const mark = stripeCalls.length;
     const reused = await invoices.sendInvoice(cc, id);
     assert.equal(reused.paymentLinkUrl, original.url);
-    assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${original.link}`, `/v1/payment_links/${original.link}/line_items`, `/v1/prices/${original.price}`]);
+    const exactReads = [`/v1/payment_links/${original.link}`, `/v1/payment_links/${original.link}/line_items`, `/v1/prices/${original.price}`];
+    assert.deepEqual(stripeReads.slice(reads), [...exactReads, ...exactReads], "the one-time chain is checked on reuse and immediately before SMTP");
     assert.equal(stripeSince(mark).length, 0, "a verified exact issued link is reused without a write");
 
     stripe.prices.get(original.price)!.unit_amount = 99999;
@@ -1190,6 +1522,7 @@ async function main() {
       payment_method: "stripe",
       lines: [{ description: "Audit", quantity: 1, unit_price: "500" }],
     });
+    const linksBefore = new Set(stripe.links.keys());
     stripe.onWrite = async (path) => {
       if (path === "/v1/payment_links") await raw.execute({ sql: `UPDATE fin_invoice_lines SET unit_price_cents = 60000, amount_cents = 60000 WHERE invoice_id = ?`, args: [id] });
     };
@@ -1201,13 +1534,16 @@ async function main() {
     }
     const d = await row(id);
     assert.deepEqual([d.status, d.number, d.recognition_entry_id], ["draft", null, null]);
+    assert.deepEqual([d.stripe_price_id, d.stripe_payment_link_id, d.stripe_payment_link_url], [null, null, null]);
     assert.equal(mails.length, before, "nothing was emailed");
+    const retired = [...stripe.links.values()].find((link) => !linksBefore.has(link.id))!;
+    assert.equal(retired.active, false, "the checkout made for the old line total was retired during cleanup");
     const sent = await invoices.sendInvoice(cc, id);
     const f = await row(id);
     assert.equal(f.total_cents, 60000);
     assert.equal(stripe.prices.get(f.stripe_price_id as string)?.unit_amount, 60000, "the link emailed charges what was issued");
-    assert.equal(stripe.links.get(d.stripe_payment_link_id as string)!.active, false, "the 500 link is off");
-    assert.ok(sent.paymentLinkUrl !== d.stripe_payment_link_url);
+    assert.equal(stripe.links.get(retired.id)!.active, false, "the 500 link stays off");
+    assert.ok(sent.paymentLinkUrl !== retired.url);
   });
 
   // ── Prices write granted, Payment Links not: the price is kept, not re-made ──
@@ -1342,14 +1678,14 @@ async function main() {
 
     // The page shows it whatever the invoice's status: the block is not inside the draft/open-only send card.
     const page = readFileSync(join(root, "app/founders/finances/invoices/[id]/page.tsx"), "utf8");
-    assert.match(page, /const linkStatus = await retainerLinkStatus\(inv\)/);
+    assert.match(page, /Promise\.all\(\[retainerLinkStatus\(inv\), verifiedOneTimePaymentLink\(inv\)\]\)/);
     assert.match(page, /\{\(retainer > 0 \|\| linkStatus\.state !== "none"\) && \(\s*<RetainerBlock /);
     assert.match(page, /client has subscribed/);
 
     // Amount changed since the link was made: stale, not offered.
     await raw.execute({ sql: `UPDATE fin_invoices SET retainer_monthly_cents = 36000 WHERE id = ?`, args: [id] });
     const stale = await invoices.retainerLinkStatus(await row(id));
-    assert.ok(stale.state === "active" && stale.stale === true);
+    assert.ok(stale.state === "unknown" && stale.stale === true && stale.url === null);
     assert.ok(!(await pdfText((await invoices.invoicePdfBytes(cc, id)).bytes)).includes(url), "a link for another amount is not printed");
     await raw.execute({ sql: `UPDATE fin_invoices SET retainer_monthly_cents = 35000 WHERE id = ?`, args: [id] });
 
@@ -1537,6 +1873,38 @@ async function main() {
     assert.doesNotMatch(m.text, /retainer|CA\$300/i, "the reminder asks for the implementation only");
   });
 
+  await check("an overdue reminder claim loses safely when payment or void wins after the initial query", async () => {
+    const run = async (winner: "payment" | "void") => {
+      const email = `ap@reminder-${winner}-race.test`;
+      const id = await invoices.createDraftInvoice(cc, "oasis", {
+        new_contact: { name: `Reminder ${winner} race`, email },
+        issue_date: addDays(today, -30),
+        due_date: addDays(today, -5),
+        currency: "CAD",
+        payment_method: "wise",
+        lines: [{ description: "Implementation", quantity: 1, unit_price: "815" }],
+      });
+      await invoices.finalizeInvoice(cc, id);
+      const mailMark = mails.length;
+      const raced = await withExecuteRace(
+        (statement) => statement.includes("send_claim_token") && statement.includes(id),
+        async () => {
+          if (winner === "payment") await invoices.markInvoicePaidManually(cc, id, {});
+          else await invoices.voidInvoice(cc, id);
+        },
+        () => invoices.remindOverdue(cc, { send: true }),
+      );
+      assert.equal(raced.raced, true);
+      const plan = raced.result.find((p) => p.invoice_id === id)!;
+      assert.equal(plan.action, "failed", JSON.stringify(plan));
+      assert.match(plan.reason || "", /changed before.*claim|cannot be sent|changed/i);
+      assert.equal(mails.slice(mailMark).some((m) => m.to === email), false, "the stale reminder never reaches the customer");
+      assert.equal((await row(id)).status, winner === "payment" ? "paid" : "void");
+    };
+    await run("payment");
+    await run("void");
+  });
+
   await check("an overdue reminder's email AND its attached PDF carry the one-time balance only — no retainer section, total or link — while the invoice email kept both", async () => {
     const id = await invoices.createDraftInvoice(cc, "oasis", {
       new_contact: { name: "Cyberdyne", email: "ap@cyberdyne.test" },
@@ -1617,14 +1985,11 @@ async function main() {
         { description: "Support", quantity: 1, unit_price: "90", billing: "monthly" },
       ],
     });
-    const savedPassword = process.env.OASIS_MAIL_APP_PASSWORD;
-    delete process.env.OASIS_MAIL_APP_PASSWORD;
-    try {
-      await assert.rejects(invoices.sendInvoice(cc, id));
-    } finally {
-      process.env.OASIS_MAIL_APP_PASSWORD = savedPassword;
-    }
-    const linked = await row(id);
+    let linked = await row(id);
+    await invoices.ensureRetainerLink(linked);
+    linked = await row(id);
+    await invoices.ensurePaymentLink(linked, linked);
+    linked = await row(id);
     assert.equal(linked.status, "draft");
     assert.ok(linked.stripe_payment_link_id && linked.stripe_retainer_link_id);
     stripe.failWith = { status: 503, message: "shutdown unavailable", reads: true };
@@ -1689,6 +2054,28 @@ async function main() {
     );
     assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${d.stripe_retainer_link_id}`], "void GET-confirms the link is really off");
     assert.equal((await row(onlyId)).status, "void");
+  });
+
+  await check("a void PDF says VOID and exposes no Wise, card, retainer, or amount-due rail", async () => {
+    for (const method of ["stripe", "wise_stripe"] as const) {
+      const id = await invoices.createDraftInvoice(cc, "oasis", {
+        new_contact: { name: `Void PDF ${method}`, email: `ap@void-pdf-${method}.test` },
+        currency: "CAD",
+        payment_method: method,
+        lines: [
+          { description: "Implementation", quantity: 1, unit_price: "925" },
+          { description: "Support", quantity: 1, unit_price: "85", billing: "monthly" },
+        ],
+      });
+      const sent = await invoices.sendInvoice(cc, id);
+      const urls = [sent.paymentLinkUrl, sent.retainerLinkUrl].filter(Boolean) as string[];
+      await invoices.voidInvoice(cc, id);
+      const pdf = await pdfText((await invoices.invoicePdfBytes(cc, id)).bytes);
+      assert.match(pdf, /VOID/);
+      assert.match(pdf, /VOID . amount due CAD CA\$0\.00/);
+      assert.doesNotMatch(pdf, /PAY BY BANK TRANSFER|Institution number|PAY ONLINE|MONTHLY CARD PAYMENTS|set up automatic monthly/i);
+      for (const url of urls) assert.ok(!pdf.includes(url));
+    }
   });
 
   await check("void strictly shuts down both links before a CAS-gated reversal; Stripe failure and a DB race have zero bookkeeping effects", async () => {

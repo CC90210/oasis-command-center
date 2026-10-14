@@ -34,6 +34,7 @@ const FINANCE_MIGRATIONS = [
   "185_finance_invoice_retainer.turso.sql",
   "bravo__190_ledger_core.sql",
   "bravo__193_stripe_payouts.sql",
+  "bravo__226_finance_invoice_send_claim.sql",
 ] as const;
 
 const SHELL_SUPPORT_MIGRATIONS = [

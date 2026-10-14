@@ -31,7 +31,12 @@ import {
 } from "@/components/founders/finances/ui";
 import { FinanceNotFound, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
 import { loadInvoiceDetailPage } from "@/lib/founders-finances/page-context";
-import { retainerLinkStatus, type RetainerLinkStatus } from "@/lib/founders-finances/invoices-io";
+import {
+  retainerLinkStatus,
+  unresolvedInvoiceEmailMessage,
+  verifiedOneTimePaymentLink,
+  type RetainerLinkStatus,
+} from "@/lib/founders-finances/invoices-io";
 import { balanceDueCents, hasAmountDueNow, quantityMilliToString, storedLineBilling } from "@/lib/founders-finances/invoice";
 import { retainerColumnsReady } from "@/lib/founders-finances/invoice-store";
 import { centsToDecimalString, formatCents } from "@/lib/founders-finances/money";
@@ -76,7 +81,7 @@ function RetainerBlock({
           {status.stale && <span className="text-status-warm"> The retainer on this invoice now says {now}/month: change the amount on their subscription in Stripe.</span>}
         </>
       );
-    } else if (status.state === "active" && !status.stale) {
+    } else if (status.state === "active" && !status.stale && status.url) {
       tag = { tone: "info", label: "active, not used yet" };
       body = (
         <>
@@ -124,9 +129,9 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
     if (e instanceof FinanceNotFound) notFound();
     throw e;
   }
-  const { invoice: inv, lines, contact, payments, settings, effectiveStatus, displayStatus, isOverdue, accounts, contacts, retainerMonthlyCents: retainer, retainerLinkUrl } = d;
-  // Stripe's live view of the retainer link (never throws; `none` without asking Stripe when there is no link).
-  const linkStatus = await retainerLinkStatus(inv);
+  const { invoice: inv, lines, contact, payments, settings, effectiveStatus, displayStatus, isOverdue, accounts, contacts, retainerMonthlyCents: retainer } = d;
+  // Neither stored URL is rendered until Stripe proves its complete live object chain.
+  const [linkStatus, oneTimeLink] = await Promise.all([retainerLinkStatus(inv), verifiedOneTimePaymentLink(inv)]);
   const balance = inv.status === "void" ? 0 : balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents });
   // A retainer-only invoice has nothing due now: nothing to record, and no one-time card link to offer.
   const dueNow = hasAmountDueNow({ totalCents: inv.total_cents, retainerMonthlyCents: retainer });
@@ -176,14 +181,20 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
         }
       />
 
-      {(isDraft || open) && (
+      {inv.send_claim_token && (
+        <Card title="Email attempt unresolved" subtitle="Sending, voiding, deleting and editing stay blocked until this is reconciled.">
+          <p className="text-sm text-status-warm">{unresolvedInvoiceEmailMessage(inv, "changed")}</p>
+        </Card>
+      )}
+
+      {(isDraft || open) && !inv.send_claim_token && (
         <Card
           title={isDraft ? "Issue and send" : "Send again"}
           subtitle={
             retainer > 0
               ? `Emails the PDF from the OASIS mailbox with two parts: ${dueNow ? "the amount due now (paid as the invoice says) and " : ""}the monthly retainer's Stripe link, which the client uses once to set up automatic monthly card payments.`
               : offersCard(paymentMethod)
-                ? "Emails the PDF from the OASIS mailbox. A card payment link is created in OASIS's Stripe account unless you untick it."
+                ? "Emails the PDF from the OASIS mailbox with the required Stripe card payment link."
                 : "Emails the PDF with bank-transfer instructions. No one-time card link is created."
           }
         >
@@ -195,19 +206,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
               confirm={isDraft ? "Issue this invoice (it gets its number and is booked as a receivable) and email it?" : undefined}
               resetOnSuccess={false}
               columns={2}
-              fields={[
-                { name: "to", label: "Send to", type: "email", defaultValue: contact?.email || "", required: true },
-                ...(dueNow && offersCard(paymentMethod)
-                  ? [
-                      {
-                        name: "payment_link",
-                        label: retainer > 0 ? "Include a card link for the amount due now (Stripe)" : "Include a card payment link (Stripe)",
-                        type: "checkbox" as const,
-                        defaultValue: true,
-                      },
-                    ]
-                  : []),
-              ]}
+              fields={[{ name: "to", label: "Send to", type: "email", defaultValue: contact?.email || "", required: true }]}
             />
             {isDraft && (
               <div className="flex items-center gap-3 border-t border-bg-border pt-3 text-xs text-fg-muted">
@@ -216,9 +215,9 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
               </div>
             )}
             {/* A draft's card link was never emailed and may be for an old amount: only an issued invoice's link is shown. */}
-            {!isDraft && inv.stripe_payment_link_url && (
+            {!isDraft && oneTimeLink && (
               <p className="text-xs text-fg-muted">
-                Payment link: <a className="text-[#1FE3F0] hover:underline" href={inv.stripe_payment_link_url} target="_blank" rel="noreferrer">{inv.stripe_payment_link_url}</a>
+                Payment link: <a className="text-[#1FE3F0] hover:underline" href={oneTimeLink} target="_blank" rel="noreferrer">{oneTimeLink}</a>
               </p>
             )}
           </div>
@@ -372,7 +371,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
         </Card>
       )}
 
-      {isDraft && (
+      {isDraft && !inv.send_claim_token && (
         <div className="flex justify-end">
           <ActionButton
             action="invoice.delete"
@@ -384,7 +383,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
         </div>
       )}
 
-      {!isDraft && open && inv.amount_paid_cents === 0 && (
+      {!isDraft && open && inv.amount_paid_cents === 0 && !inv.send_claim_token && (
         <div className="flex justify-end">
           <ActionButton
             action="invoice.void"
@@ -392,7 +391,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
             label="Void invoice"
             tone="danger"
             confirm={`Void this invoice? An issued invoice's receivable is reversed; the number stays used.${
-              retainerLinkUrl ? " Its retainer link stops working; a subscription the client already started keeps running until you cancel it in Stripe." : ""
+              retainer > 0 || linkStatus.state !== "none" ? " Its retainer link stops working; a subscription the client already started keeps running until you cancel it in Stripe." : ""
             }`}
           />
         </div>

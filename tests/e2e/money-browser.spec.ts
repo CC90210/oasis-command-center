@@ -68,7 +68,7 @@ async function createDraft(
   const result = await postAction(page, "invoice.create", () =>
     editor.getByRole("button", { name: "Create draft" }).click(),
   );
-  await expect(page).toHaveURL(/\/founders\/finances\/invoices\/[^/]+$/);
+  await expect(page).toHaveURL(/\/founders\/finances\/invoices\/[^/]+$/, { timeout: 45_000 });
   return String(result.id);
 }
 

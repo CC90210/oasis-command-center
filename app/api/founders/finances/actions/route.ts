@@ -85,7 +85,7 @@ const HANDLERS: Record<string, Handler> = {
     return { number: inv.number, message: `Issued as ${inv.number}.` };
   },
   "invoice.send": async (v, b) => {
-    const r = await invoices.sendInvoice(v, str(b.invoice_id), { to: str(b.to) || undefined, paymentLink: b.payment_link !== false && b.payment_link !== "false" });
+    const r = await invoices.sendInvoice(v, str(b.invoice_id), { to: str(b.to) || undefined });
     const links = [r.paymentLinkUrl ? "a card payment link" : "", r.retainerLinkUrl ? "the monthly retainer's Stripe link" : ""].filter(Boolean);
     const setUp = r.retainerAlreadySetUp ? " The client's monthly retainer is already set up, so the email says so instead of sending its link again." : "";
     return { ...r, message: `Emailed ${r.number} to ${r.emailedTo}${links.length ? ` with ${links.join(" and ")}` : ""}.${setUp}` };

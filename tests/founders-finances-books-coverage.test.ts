@@ -178,7 +178,7 @@ async function main() {
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
   `);
-  for (const f of ["180_founders_finances.turso.sql", "184_finance_wise_payments.turso.sql", "185_finance_invoice_retainer.turso.sql", "bravo__190_ledger_core.sql", "bravo__193_stripe_payouts.sql"]) {
+  for (const f of ["180_founders_finances.turso.sql", "184_finance_wise_payments.turso.sql", "185_finance_invoice_retainer.turso.sql", "bravo__190_ledger_core.sql", "bravo__193_stripe_payouts.sql", "bravo__226_finance_invoice_send_claim.sql"]) {
     await raw.executeMultiple(readFileSync(join(ROOT, "database/turso", f), "utf8"));
   }
   for (let d = 1; d <= 28; d++) {

@@ -1,6 +1,6 @@
 /**
  * tests/finances-io.test.ts — FOUNDERS > Finances I/O against a REAL local
- * libSQL database with migration 180 applied.
+ * libSQL database with the invoice payment-mode and send-claim migrations applied.
  *
  * Drives the real modules and the real route handlers (webhook, internal API)
  * — no mocks of our own code. Network is disabled (global fetch throws), and
@@ -111,6 +111,8 @@ async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
   await raw.executeMultiple(readFileSync(join(__dirname, "../database/turso/180_founders_finances.turso.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(__dirname, "../database/turso/184_finance_wise_payments.turso.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(__dirname, "../database/turso/bravo__226_finance_invoice_send_claim.sql"), "utf8"));
   // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
   await raw.executeMultiple(readFileSync(join(__dirname, "../database/turso/bravo__190_ledger_core.sql"), "utf8"));
   await raw.executeMultiple(readFileSync(join(__dirname, "../database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
@@ -327,7 +329,7 @@ async function main() {
     assert.match(source, /INSERT INTO fin_invoices[\s\S]*WHERE EXISTS \(\s*SELECT 1 FROM fin_contacts/, "the insert itself closes create-vs-archive TOCTOU");
     assert.match(source, /WHERE id = \? AND entity_id = \? AND archived = 0 AND kind IN \('customer', 'both'\)/, "the insert requires an active customer in the same write");
     assert.match(source, /INSERT INTO fin_invoice_lines[\s\S]*WHERE EXISTS \(SELECT 1 FROM fin_invoices WHERE id = \? AND status = 'draft'\)/, "line writes stay gated on a draft parent");
-    assert.match(source, /const out = await writeBatch\([\s\S]*if \(out\[0\]\?\.rowsAffected !== 1\) throw new FinanceInputError\("only a draft can be edited/, "draft updates inspect the conditional parent write");
+    assert.match(source, /const out = await writeBatch\([\s\S]*if \(out\[0\]\?\.rowsAffected !== 1\) \{[\s\S]*throw new FinanceInputError\("only a draft can be edited/, "draft updates inspect the conditional parent write");
 
     const customer = await invoices.createContact(cc, "oasis", { name: "Legacy archived", email: "legacy-archived@example.test" });
     const draft = await invoices.createDraftInvoice(cc, "oasis", {
@@ -612,7 +614,8 @@ async function main() {
     assert.equal(fin.gst_cents + fin.qst_cents, 0, "unregistered: no tax");
     const again = await invoices.finalizeInvoice(cc, id);
     assert.equal(again.number, "OASIS-2026-0001", "finalising twice does not renumber");
-    await assert.rejects(invoices.sendInvoice(cc, id, { paymentLink: false }), InvoiceMailerNotConfigured, "no mailbox -> a loud error, never a silent skip");
+    await raw.execute({ sql: "UPDATE fin_settings SET payment_instructions = 'Use the account details on file' WHERE entity_id = ?", args: [fin.entity_id] });
+    await assert.rejects(invoices.sendInvoice(cc, id), InvoiceMailerNotConfigured, "no mailbox -> a loud error, never a silent skip");
     assert.equal((await raw.execute({ sql: `SELECT sent_at FROM fin_invoices WHERE id = ?`, args: [id] })).rows[0].sent_at, null);
     const second = await invoices.createDraftInvoice(cc, "oasis", { contact_id: fin.contact_id, issue_date: "2026-09-16", currency: "CAD", lines: [{ description: "x", quantity: 1, unit_price: "10" }] });
     assert.equal((await invoices.finalizeInvoice(cc, second)).number, "OASIS-2026-0002");
@@ -807,7 +810,7 @@ async function main() {
     const real = (await (await remind({ send: true })).json()) as { mode: string; reminders: Array<{ action: string; reason: string }> };
     assert.equal(real.mode, "sent");
     assert.equal(real.reminders[0].action, "failed", "no mailbox configured -> reported as failed, not as sent");
-    assert.match(real.reminders[0].reason, /No Stripe secret key/, "a Stripe reminder refuses before email when it cannot verify or create the exact current link");
+    assert.match(real.reminders[0].reason, /No OASIS mailbox is configured/, "a reminder without a mailbox fails before email");
   });
 
   await check("books still balance after everything", async () => {

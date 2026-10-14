@@ -203,7 +203,7 @@ async function withRace<T>(match: (batchJson: string) => boolean, race: () => Pr
 async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
-  for (const f of ["180_founders_finances.turso.sql", "184_finance_wise_payments.turso.sql", "185_finance_invoice_retainer.turso.sql", "bravo__190_ledger_core.sql", "bravo__193_stripe_payouts.sql"]) {
+  for (const f of ["180_founders_finances.turso.sql", "184_finance_wise_payments.turso.sql", "185_finance_invoice_retainer.turso.sql", "bravo__190_ledger_core.sql", "bravo__193_stripe_payouts.sql", "bravo__226_finance_invoice_send_claim.sql"]) {
     await raw.executeMultiple(readFileSync(join(root, "database/turso", f), "utf8"));
   }
   for (let d = 1; d <= 30; d++) {

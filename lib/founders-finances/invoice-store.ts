@@ -46,6 +46,9 @@ export type InvoiceRow = {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** Migration 226. A durable all-payment-mode claim held across SMTP. */
+  send_claim_token?: string | null;
+  send_claimed_at?: string | null;
   /** Migration 184. Absent until it is applied: read it through wise.ts storedPaymentMethod(). */
   payment_method?: string | null;
   /** Migration 185 (all absent until it is applied). The retainer per month, incl. its GST/QST; read it through retainerMonthlyCents(). */

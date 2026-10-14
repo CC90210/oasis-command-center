@@ -136,7 +136,7 @@ const cc = { kind: "founder" as const, ownerKey: "cc" as const, email: "conaugh@
 async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
-  for (const f of ["180_founders_finances.turso.sql", "184_finance_wise_payments.turso.sql", "185_finance_invoice_retainer.turso.sql", "bravo__190_ledger_core.sql", "bravo__193_stripe_payouts.sql"]) {
+  for (const f of ["180_founders_finances.turso.sql", "184_finance_wise_payments.turso.sql", "185_finance_invoice_retainer.turso.sql", "bravo__190_ledger_core.sql", "bravo__193_stripe_payouts.sql", "bravo__226_finance_invoice_send_claim.sql"]) {
     await raw.executeMultiple(readFileSync(join(root, "database/turso", f), "utf8"));
   }
   // bravo__188 (client records) alters migration 183's delivery tables, so those come first (as os-honest-numbers does).

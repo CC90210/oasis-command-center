@@ -120,6 +120,16 @@ const ACTIVE_CUSTOMER_REQUIRED = "choose an active customer from this book";
 const DRAFT_CUSTOMER_ARCHIVE_BLOCKED =
   "This customer has a draft invoice. Reassign or void the draft invoice before archiving the customer.";
 
+/** Plain diagnostic for a deliberately non-expiring email claim; never expose its token. */
+export function unresolvedInvoiceEmailMessage(inv: Pick<InvoiceRow, "send_claimed_at">, action = "changed"): string {
+  const when = inv.send_claimed_at ? ` since ${inv.send_claimed_at}` : "";
+  return `An email attempt for this invoice is unresolved${when}. Verify the mailbox before clearing the send claim manually; the invoice was not ${action}.`;
+}
+
+function assertNoUnresolvedInvoiceEmail(inv: InvoiceRow, action: string): void {
+  if (inv.send_claim_token) throw new FinanceInputError(unresolvedInvoiceEmailMessage(inv, action));
+}
+
 /** An audit insert gated by a SQL fact in the same transaction. */
 function conditionalAuditStatement(
   input: Parameters<typeof auditStatement>[0],
@@ -421,6 +431,7 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
   const inv = await loadInvoice(invoiceId);
   if (!inv) throw new FinanceNotFound();
   if (inv.status !== "draft") throw new FinanceInputError("only a draft can be edited; void it and create a new one");
+  assertNoUnresolvedInvoiceEmail(inv, "edited");
   const input = await parseDraftInput(entity, raw, viewer);
   const settings = await loadSettings(entity.id);
   const totals = draftTotals(input.lines, settings.gst_qst_registered === 1);
@@ -439,7 +450,7 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
       sql: `UPDATE fin_invoices SET contact_id = ?, issue_date = ?, due_date = ?, currency = ?, subtotal_cents = ?, gst_cents = ?, qst_cents = ?,
                    total_cents = ?, tax_registered_snapshot = ?, notes = ?${linkWouldBeWrong ? ", stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL" : ""},
                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE ${writeSnapshot.sql}
+             WHERE ${writeSnapshot.sql} AND send_claim_token IS NULL
                AND EXISTS (
                  SELECT 1 FROM fin_contacts
                   WHERE id = ? AND entity_id = ? AND archived = 0 AND kind IN ('customer', 'both')
@@ -456,7 +467,11 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
     ...(await paymentMethodStatement(invoiceId, input.paymentMethod, updateGate)),
     ...retainerStatement(invoiceId, totals, retainerReady, updateGate),
   ]);
-  if (out[0]?.rowsAffected !== 1) throw new FinanceInputError("only a draft can be edited; void it and create a new one");
+  if (out[0]?.rowsAffected !== 1) {
+    const current = await loadInvoice(invoiceId);
+    if (current?.send_claim_token) throw new FinanceInputError(unresolvedInvoiceEmailMessage(current, "edited"));
+    throw new FinanceInputError("only a draft can be edited; void it and create a new one");
+  }
 }
 
 /** Delete a never-issued invoice after every checkout URL is proved inactive. */
@@ -465,16 +480,38 @@ export async function deleteDraftInvoice(viewer: FinanceViewer, invoiceId: strin
   const inv = await loadInvoice(invoiceId);
   if (!inv) throw new FinanceNotFound();
   if (inv.status !== "draft") throw new FinanceInputError("only a draft invoice can be deleted; issued invoices must be voided");
+  assertNoUnresolvedInvoiceEmail(inv, "deleted");
   await deactivateInvoiceLinksStrict(inv, "delete");
   const hasRetainerColumns = await retainerColumnsReady();
   const snapshot = oneTimeLinkSnapshot(inv);
   const exact = `${snapshot.sql}
     AND recognition_entry_id IS ?
-    ${hasRetainerColumns ? "AND stripe_retainer_link_id IS ? AND stripe_retainer_link_url IS ?" : ""}`;
+    AND send_claim_token IS NULL
+    ${
+      hasRetainerColumns
+        ? `AND stripe_retainer_product_id IS ? AND stripe_retainer_price_id IS ?
+           AND stripe_retainer_price_cents IS ? AND stripe_retainer_price_currency IS ?
+           AND stripe_retainer_link_id IS ? AND stripe_retainer_link_url IS ?
+           AND stripe_retainer_link_cents IS ? AND stripe_retainer_link_currency IS ?`
+        : ""
+    }`;
   const exactArgs = [
     ...snapshot.args,
     inv.recognition_entry_id,
-    ...(hasRetainerColumns ? [inv.stripe_retainer_link_id ?? null, inv.stripe_retainer_link_url ?? null] : []),
+    ...(
+      hasRetainerColumns
+        ? [
+            inv.stripe_retainer_product_id ?? null,
+            inv.stripe_retainer_price_id ?? null,
+            inv.stripe_retainer_price_cents ?? null,
+            inv.stripe_retainer_price_currency ?? null,
+            inv.stripe_retainer_link_id ?? null,
+            inv.stripe_retainer_link_url ?? null,
+            inv.stripe_retainer_link_cents ?? null,
+            inv.stripe_retainer_link_currency ?? null,
+          ]
+        : []
+    ),
   ];
   const out = await writeBatch([
     {
@@ -495,6 +532,8 @@ export async function deleteDraftInvoice(viewer: FinanceViewer, invoiceId: strin
     },
   ]);
   if (out[1]?.rowsAffected !== 1) {
+    const current = await loadInvoice(invoiceId);
+    if (current?.send_claim_token) throw new FinanceInputError(unresolvedInvoiceEmailMessage(current, "deleted"));
     throw new FinanceInputError("This draft changed while it was being deleted. Reload it and try again; it was kept.");
   }
 }
@@ -622,7 +661,11 @@ export async function getInvoiceDetail(viewer: FinanceViewer, invoiceId: string)
  */
 export async function invoicePdfBytes(viewer: FinanceViewer, invoiceId: string): Promise<{ bytes: Uint8Array; filename: string }> {
   const d = await getInvoiceDetail(viewer, invoiceId);
-  const [wise, link, oneTimeUrl] = await Promise.all([bankTransferFor(d.invoice), retainerLinkStatus(d.invoice), verifiedOneTimeLinkForDocument(d.invoice)]);
+  const [wise, link, oneTimeUrl] = await Promise.all([
+    d.invoice.status === "void" ? Promise.resolve({ lines: null, notice: null }) : bankTransferFor(d.invoice),
+    retainerLinkStatus(d.invoice),
+    verifiedOneTimePaymentLink(d.invoice),
+  ]);
   const printable = {
     ...d.invoice,
     stripe_payment_link_url: oneTimeUrl,
@@ -683,17 +726,13 @@ function storedTotals(lines: readonly InvoiceLineRow[], registered: boolean) {
   );
 }
 
-/** Stop a Stripe Payment Link taking new checkouts. */
-async function switchOffPaymentLink(key: string, linkId: string): Promise<void> {
-  await stripeRequest(key, "POST", `/v1/payment_links/${encodeURIComponent(linkId)}`, { active: "false" });
-}
-
 /**
  * The retainer block the PDF prints (null = no retainer: the PDF is exactly
  * what it was before 185). `setUp`: Stripe says the client already started the
  * subscription, so the PDF says so instead of printing the used-up link.
  */
 function retainerForPdf(inv: InvoiceRow, lines: readonly InvoiceLineRow[], setUp: boolean) {
+  if (inv.status === "void") return null;
   const monthlyCents = retainerMonthlyCents(inv);
   if (monthlyCents <= 0) return null;
   const monthly = storedTotals(lines, inv.tax_registered_snapshot === 1).monthly;
@@ -788,7 +827,14 @@ async function issueTotals(entityId: string, lines: readonly InvoiceLineRow[]): 
  * refused (the invoice stays a draft). `cardLinkVerified`: the card link now on
  * the row was checked by this send for exactly this amount, so it is kept.
  */
-type IssueExpectation = { totalCents: number; monthlyCents: number; currency: string; contactId: string; cardLinkVerified: boolean };
+type IssueExpectation = {
+  totalCents: number;
+  monthlyCents: number;
+  currency: string;
+  contactId: string;
+  cardLinkVerified: boolean;
+  sendClaimToken: string;
+};
 
 /** One SQL fact proving every row used to compute an issue is still byte-for-byte current. */
 function issueSnapshotGate(
@@ -816,6 +862,7 @@ function issueSnapshotGate(
     "issue_i.stripe_price_id IS ?",
     "issue_i.stripe_payment_link_id IS ?",
     "issue_i.stripe_payment_link_url IS ?",
+    "issue_i.send_claim_token IS ?",
   ];
   const invoiceArgs: Array<string | number | null> = [
     inv.id,
@@ -835,6 +882,7 @@ function issueSnapshotGate(
     inv.stripe_price_id,
     inv.stripe_payment_link_id,
     inv.stripe_payment_link_url,
+    inv.send_claim_token ?? null,
   ];
   if (opts.paymentMethodReady) {
     invoiceParts.push("issue_i.payment_method IS ?");
@@ -933,14 +981,21 @@ export async function finalizeInvoice(viewer: FinanceViewer, invoiceId: string, 
   for (let attempt = 0; attempt < 3; attempt++) {
     const inv = await loadInvoice(invoiceId);
     if (!inv) throw new FinanceNotFound();
-    if (inv.status !== "draft") return inv;
+    if (inv.status !== "draft") {
+      if (expect) throw new FinanceInputError(ISSUE_CHANGED_DURING_SEND);
+      return inv;
+    }
     if (!isActiveInvoiceCustomer(inv, await loadContact(inv.contact_id))) throw new FinanceInputError(ACTIVE_CUSTOMER_REQUIRED);
     const lines = await loadInvoiceLines(invoiceId);
     const { settings, registered, totals } = await issueTotals(entity.id, lines);
     assertPaymentMode(storedPaymentMethod(inv.payment_method), totals);
     if (
       expect &&
-      (expect.totalCents !== totals.totalCents || expect.monthlyCents !== totals.monthly.totalCents || expect.currency !== inv.currency || expect.contactId !== inv.contact_id)
+      (expect.totalCents !== totals.totalCents ||
+        expect.monthlyCents !== totals.monthly.totalCents ||
+        expect.currency !== inv.currency ||
+        expect.contactId !== inv.contact_id ||
+        expect.sendClaimToken !== inv.send_claim_token)
     ) {
       throw new FinanceInputError(ISSUE_CHANGED_DURING_SEND);
     }
@@ -1105,7 +1160,8 @@ async function storedCardLinkReusable(key: string, inv: InvoiceRow, due: number)
 }
 
 /** Read-only, fail-closed link selection for downloaded PDFs. */
-async function verifiedOneTimeLinkForDocument(inv: InvoiceRow): Promise<string | null> {
+export async function verifiedOneTimePaymentLink(inv: InvoiceRow): Promise<string | null> {
+  if (inv.status !== "sent" && inv.status !== "overdue") return null;
   if (!offersCard(storedPaymentMethod(inv.payment_method))) return null;
   const due = balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents });
   if (due <= 0 || !inv.stripe_payment_link_id || !inv.stripe_payment_link_url || !inv.stripe_price_id) return null;
@@ -1113,7 +1169,7 @@ async function verifiedOneTimeLinkForDocument(inv: InvoiceRow): Promise<string |
     const { key } = await getStripeClient();
     return (await storedCardLinkReusable(key, inv, due)) ? inv.stripe_payment_link_url : null;
   } catch (e) {
-    console.error("[finances:invoices] omitted an unverified one-time link from a PDF", inv.id, e instanceof Error ? e.message : e);
+    console.error("[finances:invoices] omitted an unverified one-time link", inv.id, e instanceof Error ? e.message : e);
     return null;
   }
 }
@@ -1146,6 +1202,7 @@ export async function ensurePaymentLink(inv: InvoiceRow, storeSnapshot: InvoiceR
   }
   // Objects made before the number exists differ in name/metadata: their own idempotency keys, so a later numbered request never collides with one.
   const draft = inv.number ? "" : "-d";
+  const sendAttempt = inv.send_claim_token ? `-${inv.send_claim_token}` : "";
   const price = await stripeRequest(
     key,
     "POST",
@@ -1156,7 +1213,7 @@ export async function ensurePaymentLink(inv: InvoiceRow, storeSnapshot: InvoiceR
       "product_data[name]": inv.number ? `Invoice ${inv.number}` : `Invoice dated ${inv.issue_date}`,
       "metadata[fin_invoice_id]": inv.id,
     },
-    { idempotencyKey: `fin-price-${inv.id}-${due}-${inv.currency}${draft}-${replacing || "first"}` },
+    { idempotencyKey: `fin-price-${inv.id}-${due}-${inv.currency}${draft}-${replacing || "first"}${sendAttempt}` },
   );
   const priceId = typeof price.id === "string" ? price.id : "";
   if (!priceId.startsWith("price_")) throw new Error("Stripe did not return a price id");
@@ -1182,7 +1239,7 @@ export async function ensurePaymentLink(inv: InvoiceRow, storeSnapshot: InvoiceR
       "after_completion[hosted_confirmation][custom_message]": cardThanks(inv.number),
     },
     // + the link it replaces: going back to an earlier amount must make a NEW link, not replay the switched-off one.
-    { idempotencyKey: `fin-plink-${inv.id}-${priceId}${draft}${replacing ? `-${replacing}` : ""}` },
+    { idempotencyKey: `fin-plink-${inv.id}-${priceId}${draft}${replacing ? `-${replacing}` : ""}${sendAttempt}` },
   );
   const linkId = typeof link.id === "string" ? link.id : "";
   const url = typeof link.url === "string" ? link.url : "";
@@ -1238,79 +1295,279 @@ export type RetainerLink = { kind: "link"; url: string } | { kind: "set_up" };
 export const RETAINER_LINK_STATE_UNKNOWN =
   "Stripe no longer reports whether the client used this invoice's retainer link (its one-payment limit was removed in Stripe), so the app can't tell whether they already subscribed and won't email that link or a new one: check the client's subscriptions in Stripe → Customers, set the link's payment limit back to 1 in Stripe → Payment links, then send again. Nothing was emailed.";
 
-/**
- * Create (idempotently, keyed to the invoice) the Stripe RECURRING Payment
- * Link for the invoice's monthly retainer: a Product for the invoice's
- * retainer, a monthly Price for the retainer amount in the invoice currency,
- * and a Payment Link for it. sendInvoice asks for it BEFORE the invoice is
- * numbered, so on a draft it carries the invoice id only; the number is added
- * to the link once issued (numberPaymentLinks). Reused while the amount and
- * currency are the ones it was made for; replaced (the old link switched off)
- * when they change.
- *
- * Metadata ties the link and every subscription it starts back to the
- * invoice and the contact under fin_retainer_* keys — deliberately NOT
- * fin_invoice_id, which the Stripe ingest reads as "this charge settles the
- * invoice's receivable". A retainer charge is subscription revenue in its own
- * month and must never clear the one-time AR.
- *
- * A stored link is checked with Stripe before it is handed out again, so a
- * dead link is never emailed. The link allows one completed checkout, and
- * Stripe switches it off once the client has used it, so: used at this amount
- * -> `set_up` (the email says the monthly payments are already set up); used
- * at an OLD amount -> the send is refused (a new link would start a second
- * subscription and charge the client twice a month); switched off UNUSED (the
- * client has not subscribed with it) -> a fresh link replaces it; Stripe no
- * longer reporting its checkouts -> refused (RETAINER_LINK_STATE_UNKNOWN): the
- * app can't tell whether the client subscribed.
- *
- * The price is saved the moment Stripe creates it, so a send whose link Stripe
- * refuses (Prices write granted, Payment Links not) is retried with the same
- * price instead of leaving an unused recurring price behind each attempt.
- */
+type RetainerInspection = {
+  state: LinkState;
+  exact: boolean;
+  productExact: boolean;
+  priceExact: boolean;
+  reason: string | null;
+};
+
+/** Exact local snapshot used for every recurring Product/Price/Link persistence write. */
+function retainerSnapshot(inv: InvoiceRow, alias = "fin_invoices"): { sql: string; args: Array<string | number | null> } {
+  const fields: Array<[string, string | number | null]> = [
+    ["id", inv.id],
+    ["status", inv.status],
+    ["updated_at", inv.updated_at],
+    ["entity_id", inv.entity_id],
+    ["contact_id", inv.contact_id],
+    ["number", inv.number],
+    ["issue_date", inv.issue_date],
+    ["due_date", inv.due_date],
+    ["currency", inv.currency],
+    ["total_cents", inv.total_cents],
+    ["amount_paid_cents", inv.amount_paid_cents],
+    ["payment_method", inv.payment_method ?? null],
+    ["retainer_monthly_cents", inv.retainer_monthly_cents ?? null],
+    ["stripe_retainer_product_id", inv.stripe_retainer_product_id ?? null],
+    ["stripe_retainer_price_id", inv.stripe_retainer_price_id ?? null],
+    ["stripe_retainer_price_cents", inv.stripe_retainer_price_cents ?? null],
+    ["stripe_retainer_price_currency", inv.stripe_retainer_price_currency ?? null],
+    ["stripe_retainer_link_id", inv.stripe_retainer_link_id ?? null],
+    ["stripe_retainer_link_url", inv.stripe_retainer_link_url ?? null],
+    ["stripe_retainer_link_cents", inv.stripe_retainer_link_cents ?? null],
+    ["stripe_retainer_link_currency", inv.stripe_retainer_link_currency ?? null],
+    ["send_claim_token", inv.send_claim_token ?? null],
+  ];
+  return { sql: fields.map(([name]) => `${alias}.${name} IS ?`).join(" AND "), args: fields.map(([, value]) => value) };
+}
+
+/** A concurrent writer is adoptable only while it is still making the same invoice request. */
+function sameRetainerRequest(current: InvoiceRow | null, expected: InvoiceRow): current is InvoiceRow {
+  return Boolean(
+    current &&
+      current.status === expected.status &&
+      current.status !== "void" &&
+      current.status !== "paid" &&
+      current.entity_id === expected.entity_id &&
+      current.contact_id === expected.contact_id &&
+      current.number === expected.number &&
+      current.issue_date === expected.issue_date &&
+      current.due_date === expected.due_date &&
+      current.currency === expected.currency &&
+      current.total_cents === expected.total_cents &&
+      current.amount_paid_cents === expected.amount_paid_cents &&
+      (current.payment_method ?? null) === (expected.payment_method ?? null) &&
+      retainerMonthlyCents(current) === retainerMonthlyCents(expected) &&
+      (current.send_claim_token ?? null) === (expected.send_claim_token ?? null),
+  );
+}
+
+/** Products and Prices have no delete API; archive, then GET-prove the exact object is inactive. */
+async function retireStripeCatalogObject(key: string, kind: "products" | "prices", id: string): Promise<void> {
+  await stripeRequest(key, "POST", `/v1/${kind}/${encodeURIComponent(id)}`, { active: "false" });
+  const checked = await stripeRequest(key, "GET", `/v1/${kind}/${encodeURIComponent(id)}`);
+  if (checked.id !== id || checked.active !== false) throw new Error(`Stripe did not confirm ${kind.slice(0, -1)} ${id} inactive`);
+}
+
+type MadeRetainerObjects = { productId?: string; priceId?: string; linkId?: string };
+
+/** Retire only objects this caller made and which no compatible winning row adopted. */
+async function cleanupRetainerLoser(key: string, made: MadeRetainerObjects, winner: InvoiceRow | null): Promise<void> {
+  const protects = winner && winner.status !== "void" && winner.status !== "paid" ? winner : null;
+  const failures: string[] = [];
+  const run = async (label: string, fn: () => Promise<void>) => {
+    try {
+      await fn();
+    } catch (e) {
+      failures.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  if (made.linkId && protects?.stripe_retainer_link_id !== made.linkId) {
+    await run(`Payment Link ${made.linkId}`, () => deactivateAndConfirmPaymentLink(key, made.linkId as string));
+  }
+  if (made.priceId && protects?.stripe_retainer_price_id !== made.priceId) {
+    await run(`Price ${made.priceId}`, () => retireStripeCatalogObject(key, "prices", made.priceId as string));
+  }
+  if (made.productId && protects?.stripe_retainer_product_id !== made.productId) {
+    await run(`Product ${made.productId}`, () => retireStripeCatalogObject(key, "products", made.productId as string));
+  }
+  if (failures.length) throw new Error(`could not retire Stripe objects from a lost invoice race (${failures.join("; ")})`);
+}
+
+function recurringMismatchReason(): string {
+  return "Stripe's live Payment Link, Price, or Product does not match this invoice, so the stored URL cannot be verified or shown.";
+}
+
+/** Prove stored Link -> only line item -> monthly Price -> live Product exactly. */
+async function inspectRetainerObjects(key: string, inv: InvoiceRow): Promise<RetainerInspection> {
+  const monthly = retainerMonthlyCents(inv);
+  const productId = inv.stripe_retainer_product_id || "";
+  const priceId = inv.stripe_retainer_price_id || "";
+  const linkId = inv.stripe_retainer_link_id || "";
+  let state: LinkState = linkId ? "unknown" : "switched_off";
+  let linkIdentity = false;
+  let linkIdExact = false;
+  let linkUrlExact = false;
+  let linkModeExact = false;
+  let lineExact = false;
+
+  if (linkId) {
+    const link = await stripeRequest(key, "GET", `/v1/payment_links/${encodeURIComponent(linkId)}`);
+    const used = completedSessions(link);
+    state = used === null ? "unknown" : used > 0 ? "used" : link.active === true ? "active" : "switched_off";
+    linkIdExact = link.id === linkId;
+    linkUrlExact = link.url === inv.stripe_retainer_link_url;
+    linkModeExact = link.livemode === true;
+    linkIdentity =
+      linkIdExact &&
+      linkUrlExact &&
+      linkModeExact &&
+      Number(inv.stripe_retainer_link_cents) === monthly &&
+      inv.stripe_retainer_link_currency === inv.currency;
+    const lineItems = await stripeRequest(key, "GET", `/v1/payment_links/${encodeURIComponent(linkId)}/line_items`, { limit: 2 });
+    const data = Array.isArray(lineItems.data) ? lineItems.data : [];
+    const only = data.length === 1 && lineItems.has_more === false && data[0] && typeof data[0] === "object" ? (data[0] as Record<string, unknown>) : null;
+    const linked = only?.price;
+    const linkedPriceId = typeof linked === "string" ? linked : linked && typeof linked === "object" ? (linked as Record<string, unknown>).id : null;
+    lineExact = Number(only?.quantity) === 1 && linkedPriceId === priceId;
+  }
+
+  let rawPriceExact = false;
+  if (priceId) {
+    const price = await stripeRequest(key, "GET", `/v1/prices/${encodeURIComponent(priceId)}`);
+    const recurring = price.recurring && typeof price.recurring === "object" ? (price.recurring as Record<string, unknown>) : null;
+    const product = price.product;
+    const priceProductId = typeof product === "string" ? product : product && typeof product === "object" ? (product as Record<string, unknown>).id : null;
+    rawPriceExact =
+      price.id === priceId &&
+      price.livemode === true &&
+      price.active === true &&
+      Number(price.unit_amount) === monthly &&
+      String(price.currency || "").toUpperCase() === inv.currency &&
+      priceProductId === productId &&
+      recurring?.interval === "month" &&
+      Number(recurring.interval_count) === 1 &&
+      Number(inv.stripe_retainer_price_cents) === monthly &&
+      inv.stripe_retainer_price_currency === inv.currency;
+  }
+
+  let productExact = false;
+  if (productId) {
+    const product = await stripeRequest(key, "GET", `/v1/products/${encodeURIComponent(productId)}`);
+    productExact = product.id === productId && product.livemode === true && product.active === true;
+  }
+
+  const priceExact = rawPriceExact && productExact;
+  const exact = Boolean(linkId && inv.stripe_retainer_link_url && linkIdentity && lineExact && priceExact);
+  const mismatch = !linkIdentity
+    ? linkId && Number(inv.stripe_retainer_link_cents) !== monthly
+      ? "Stripe's stored Payment Link amount does not match this invoice."
+      : linkId && inv.stripe_retainer_link_currency !== inv.currency
+        ? "Stripe's stored Payment Link currency does not match this invoice."
+        : !linkIdExact
+          ? "Stripe's live Payment Link identity does not match this invoice."
+          : !linkUrlExact
+            ? "Stripe's live Payment Link URL does not match this invoice."
+            : !linkModeExact
+              ? "Stripe's live Payment Link mode does not match this invoice."
+              : "Stripe's live Payment Link could not be verified against this invoice."
+    : !lineExact
+      ? "Stripe's live Payment Link does not match exactly one unit of this invoice's stored Price."
+      : !rawPriceExact
+        ? "Stripe's live recurring Price does not match this invoice's amount, currency, Product, or monthly cadence."
+        : !productExact
+          ? "Stripe's live Product identity, mode, or active state does not match this invoice."
+          : recurringMismatchReason();
+  return {
+    state,
+    exact,
+    productExact,
+    priceExact,
+    reason:
+      state === "unknown" && linkIdentity
+        ? "Stripe no longer reports whether it was used (its one-payment limit was removed in Stripe), so the app can't tell whether the client subscribed."
+        : exact
+          ? null
+          : mismatch,
+  };
+}
+
+async function recurringCasLost(key: string, expected: InvoiceRow, made: MadeRetainerObjects): Promise<InvoiceRow> {
+  const current = await loadInvoice(expected.id);
+  const adoptable = sameRetainerRequest(current, expected);
+  await cleanupRetainerLoser(key, made, adoptable ? current : null);
+  if (!adoptable) {
+    throw new FinanceInputError("This invoice changed, was voided, or was deleted while its retainer link was being made. Every new Stripe object was switched off. Reload it and try again. Nothing was emailed.");
+  }
+  return current;
+}
+
+/** Persist an intermediate recurring-object winner with a full invoice CAS. */
+async function persistRetainerObject(expected: InvoiceRow, setSql: string, setArgs: Array<string | number | null>): Promise<InvoiceRow | null> {
+  const snapshot = retainerSnapshot(expected);
+  const out = await finDb().execute({
+    sql: `UPDATE fin_invoices SET ${setSql}, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE ${snapshot.sql}`,
+    args: [...setArgs, ...snapshot.args],
+  });
+  return out.rowsAffected === 1 ? await loadInvoice(expected.id) : null;
+}
+
+/** Exact, race-safe recurring Product/Price/Payment-Link provisioning. */
 export async function ensureRetainerLink(inv: InvoiceRow, actor = "finances"): Promise<RetainerLink> {
   const monthly = retainerMonthlyCents(inv);
   if (monthly <= 0) throw new FinanceInputError("this invoice has no monthly retainer");
   const { key } = await getStripeClient();
-  let oldIsOff = false;
+  const inspection = await inspectRetainerObjects(key, inv);
+
   if (inv.stripe_retainer_link_id) {
-    const sameAmount = Number(inv.stripe_retainer_link_cents) === monthly && inv.stripe_retainer_link_currency === inv.currency;
-    const state = await retainerLinkState(key, inv.stripe_retainer_link_id);
-    if (state === "unknown") throw new FinanceInputError(RETAINER_LINK_STATE_UNKNOWN);
-    if (state === "used") {
-      if (sameAmount) return { kind: "set_up" };
+    if (inspection.state === "unknown") throw new FinanceInputError(RETAINER_LINK_STATE_UNKNOWN);
+    if (inspection.state === "used") {
+      if (inspection.exact) return { kind: "set_up" };
       const was = formatCents(Number(inv.stripe_retainer_link_cents), inv.stripe_retainer_link_currency || inv.currency);
+      if (Number(inv.stripe_retainer_link_cents) !== monthly || inv.stripe_retainer_link_currency !== inv.currency) {
+        throw new FinanceInputError(
+          `The client already set up monthly card payments of ${was}/month with this invoice's retainer link, so a new link would charge them twice a month: change the amount on their subscription in Stripe instead. Nothing was emailed.`,
+        );
+      }
       throw new FinanceInputError(
-        `The client already set up monthly card payments of ${was}/month with this invoice's retainer link, so a new link would charge them twice a month: change the amount on their subscription in Stripe instead. Nothing was emailed.`,
+        `The client may already have set up monthly card payments of ${was}/month with this invoice's retainer link, but its Stripe objects no longer match (${inspection.reason}). A new link could charge them twice a month: inspect the subscription in Stripe first. Nothing was emailed.`,
       );
     }
-    if (state === "active" && sameAmount && inv.stripe_retainer_link_url) return { kind: "link", url: inv.stripe_retainer_link_url };
-    // Switched off before the client used it (nobody subscribed with it), or made for another amount: a fresh link replaces it.
-    oldIsOff = state === "switched_off";
+    if (inspection.state === "active" && inspection.exact && inv.stripe_retainer_link_url) return { kind: "link", url: inv.stripe_retainer_link_url };
+    if (inspection.state === "active") await deactivateAndConfirmPaymentLink(key, inv.stripe_retainer_link_id);
   }
+
+  if (inv.stripe_retainer_price_id && !inspection.priceExact) {
+    await retireStripeCatalogObject(key, "prices", inv.stripe_retainer_price_id);
+  }
+  if (inv.stripe_retainer_product_id && !inspection.productExact) {
+    await retireStripeCatalogObject(key, "products", inv.stripe_retainer_product_id);
+  }
+
   const number = inv.number || null;
   const draft = number ? "" : "-d";
   const metadata: Record<string, string> = {
     "metadata[fin_retainer_invoice_id]": inv.id,
     ...(number ? { "metadata[fin_retainer_invoice_number]": number } : {}),
   };
-  let productId = inv.stripe_retainer_product_id || "";
-  if (!productId) {
+  let current = inv;
+  const made: MadeRetainerObjects = {};
+
+  if (!inspection.productExact) {
     const product = await stripeRequest(
       key,
       "POST",
       "/v1/products",
       { name: number ? `Monthly retainer — invoice ${number}` : `Monthly retainer (invoice dated ${inv.issue_date})`, ...metadata },
-      { idempotencyKey: `fin-rprod-${inv.id}${draft}` },
+      { idempotencyKey: `fin-rprod-${inv.id}${draft}-${inv.stripe_retainer_product_id || "first"}` },
     );
-    productId = typeof product.id === "string" ? product.id : "";
-    if (!productId.startsWith("prod_")) throw new Error("Stripe did not return a product id");
-    await finDb().execute({ sql: `UPDATE fin_invoices SET stripe_retainer_product_id = ? WHERE id = ?`, args: [productId, inv.id] });
+    const productId = typeof product.id === "string" ? product.id : "";
+    if (!productId.startsWith("prod_") || product.livemode !== true || product.active !== true) throw new Error("Stripe did not return a live active product");
+    made.productId = productId;
+    const stored = await persistRetainerObject(
+      current,
+      `stripe_retainer_product_id = ?, stripe_retainer_price_id = NULL, stripe_retainer_price_cents = NULL,
+       stripe_retainer_price_currency = NULL, stripe_retainer_link_id = NULL, stripe_retainer_link_url = NULL,
+       stripe_retainer_link_cents = NULL, stripe_retainer_link_currency = NULL`,
+      [productId],
+    );
+    if (!stored) return ensureRetainerLink(await recurringCasLost(key, current, made), actor);
+    current = stored;
   }
-  let priceId = "";
-  if (inv.stripe_retainer_price_id && Number(inv.stripe_retainer_price_cents) === monthly && inv.stripe_retainer_price_currency === inv.currency) {
-    priceId = inv.stripe_retainer_price_id;
-  } else {
+
+  const productId = current.stripe_retainer_product_id || "";
+  if (!inspection.priceExact || !current.stripe_retainer_price_id || current.stripe_retainer_product_id !== inv.stripe_retainer_product_id) {
     const price = await stripeRequest(
       key,
       "POST",
@@ -1323,16 +1580,23 @@ export async function ensureRetainerLink(inv: InvoiceRow, actor = "finances"): P
         product: productId,
         ...metadata,
       },
-      { idempotencyKey: `fin-rprice-${inv.id}-${monthly}-${inv.currency}${draft}` },
+      { idempotencyKey: `fin-rprice-${inv.id}-${monthly}-${inv.currency}${draft}-${productId}-${inv.stripe_retainer_price_id || "first"}` },
     );
-    priceId = typeof price.id === "string" ? price.id : "";
-    if (!priceId.startsWith("price_")) throw new Error("Stripe did not return a price id");
-    if (price.livemode !== true) throw new FinanceInputError("the Stripe key is in test mode; refusing to email a test retainer link to a real customer");
-    await finDb().execute({
-      sql: `UPDATE fin_invoices SET stripe_retainer_price_id = ?, stripe_retainer_price_cents = ?, stripe_retainer_price_currency = ? WHERE id = ?`,
-      args: [priceId, monthly, inv.currency, inv.id],
-    });
+    const priceId = typeof price.id === "string" ? price.id : "";
+    if (!priceId.startsWith("price_") || price.livemode !== true || price.active !== true) throw new Error("Stripe did not return a live active recurring price");
+    made.priceId = priceId;
+    const stored = await persistRetainerObject(
+      current,
+      `stripe_retainer_price_id = ?, stripe_retainer_price_cents = ?, stripe_retainer_price_currency = ?,
+       stripe_retainer_link_id = NULL, stripe_retainer_link_url = NULL, stripe_retainer_link_cents = NULL,
+       stripe_retainer_link_currency = NULL`,
+      [priceId, monthly, inv.currency],
+    );
+    if (!stored) return ensureRetainerLink(await recurringCasLost(key, current, made), actor);
+    current = stored;
   }
+
+  const priceId = current.stripe_retainer_price_id || "";
   const link = await stripeRequest(
     key,
     "POST",
@@ -1344,57 +1608,47 @@ export async function ensureRetainerLink(inv: InvoiceRow, actor = "finances"): P
       "subscription_data[metadata][fin_retainer_invoice_id]": inv.id,
       ...(number ? { "subscription_data[metadata][fin_retainer_invoice_number]": number } : {}),
       "subscription_data[metadata][fin_contact_id]": inv.contact_id,
-      // One subscription per retainer link: a second checkout would bill the client twice a month.
       "restrictions[completed_sessions][limit]": 1,
       "after_completion[type]": "hosted_confirmation",
       "after_completion[hosted_confirmation][custom_message]": retainerThanks(number),
       inactive_message: retainerInactive(number),
     },
-    // + the link it replaces: going back to an earlier amount must make a NEW link, not replay the switched-off one.
-    { idempotencyKey: `fin-rplink-${inv.id}-${priceId}-${inv.stripe_retainer_link_id || "first"}${draft}` },
+    {
+      idempotencyKey: `fin-rplink-${inv.id}-${priceId}-${inv.stripe_retainer_link_id || "first"}${draft}${
+        inv.send_claim_token ? `-${inv.send_claim_token}` : ""
+      }`,
+    },
   );
   const linkId = typeof link.id === "string" ? link.id : "";
   const url = typeof link.url === "string" ? link.url : "";
-  if (!linkId.startsWith("plink_") || !url.startsWith("https://")) throw new Error("Stripe did not return a payment link");
-  // The amount changed: the old link must stop taking subscriptions at the old price before the new one is handed out.
-  if (inv.stripe_retainer_link_id && inv.stripe_retainer_link_id !== linkId && !oldIsOff) {
-    await switchOffPaymentLink(key, inv.stripe_retainer_link_id);
+  if (!linkId.startsWith("plink_") || !url.startsWith("https://") || link.livemode !== true || link.active !== true) {
+    throw new Error("Stripe did not return a live active payment link");
   }
-  await writeBatch([
+  made.linkId = linkId;
+  const snapshot = retainerSnapshot(current);
+  const out = await writeBatch([
     {
-      // The price is already saved (above, or on the attempt that made it).
       sql: `UPDATE fin_invoices SET stripe_retainer_link_id = ?, stripe_retainer_link_url = ?, stripe_retainer_link_cents = ?,
-                   stripe_retainer_link_currency = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
-      args: [linkId, url, monthly, inv.currency, inv.id],
+                   stripe_retainer_link_currency = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE ${snapshot.sql}`,
+      args: [linkId, url, monthly, inv.currency, ...snapshot.args],
     },
-    auditStatement({
-      entityId: inv.entity_id,
-      actor,
-      action: inv.stripe_retainer_link_id ? "invoice.retainer_link_replaced" : "invoice.retainer_link_created",
-      objectType: "invoice",
-      objectId: inv.id,
-      detail: { link: linkId, price: priceId, monthly, currency: inv.currency, replaced: inv.stripe_retainer_link_id || null, replaced_was_off: oldIsOff },
-    }),
+    conditionalAuditStatement(
+      {
+        entityId: inv.entity_id,
+        actor,
+        action: inv.stripe_retainer_link_id ? "invoice.retainer_link_replaced" : "invoice.retainer_link_created",
+        objectType: "invoice",
+        objectId: inv.id,
+        detail: { link: linkId, price: priceId, monthly, currency: inv.currency, replaced: inv.stripe_retainer_link_id || null },
+      },
+      "changes() = 1",
+    ),
   ]);
+  if (out[0]?.rowsAffected !== 1) return ensureRetainerLink(await recurringCasLost(key, current, made), actor);
   return { kind: "link", url };
 }
 
 type LinkState = "active" | "used" | "switched_off" | "unknown";
-
-/**
- * Stripe's view of a retainer link already handed out: `used` once a checkout
- * completed on it (the client started the subscription; Stripe then switches
- * the one-checkout link off itself), else `active` or `switched_off`; and
- * `unknown` when Stripe no longer reports its checkouts (the one-checkout
- * limit was removed in Stripe), so whether the client subscribed can't be told.
- */
-async function retainerLinkState(key: string, linkId: string): Promise<LinkState> {
-  const link = await stripeRequest(key, "GET", `/v1/payment_links/${encodeURIComponent(linkId)}`);
-  const used = completedSessions(link);
-  if (used === null) return "unknown";
-  if (used > 0) return "used";
-  return link.active === true ? "active" : "switched_off";
-}
 
 /**
  * The retainer link as a founder should see it on the invoice page (and as
@@ -1407,28 +1661,30 @@ async function retainerLinkState(key: string, linkId: string): Promise<LinkState
  */
 export type RetainerLinkStatus =
   | { state: "none" }
-  | { state: LinkState; url: string; linkCents: number; linkCurrency: string; stale: boolean; reason: string | null };
+  | { state: LinkState; url: string | null; linkCents: number; linkCurrency: string; stale: boolean; reason: string | null };
 
 class StripeCheckTimedOut extends Error {}
 
 export async function retainerLinkStatus(inv: InvoiceRow, timeoutMs = 5_000): Promise<RetainerLinkStatus> {
-  if (!inv.stripe_retainer_link_id || !inv.stripe_retainer_link_url) return { state: "none" };
+  if (inv.status === "draft" || !inv.stripe_retainer_link_id || !inv.stripe_retainer_link_url) return { state: "none" };
   const linkCents = Number(inv.stripe_retainer_link_cents ?? 0);
   const linkCurrency = inv.stripe_retainer_link_currency || inv.currency;
-  const base = { url: inv.stripe_retainer_link_url, linkCents, linkCurrency, stale: linkCents !== retainerMonthlyCents(inv) || linkCurrency !== inv.currency };
+  const base = { url: null as string | null, linkCents, linkCurrency, stale: linkCents !== retainerMonthlyCents(inv) || linkCurrency !== inv.currency };
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const { key } = await getStripeClient();
-    const state = await Promise.race([
-      retainerLinkState(key, inv.stripe_retainer_link_id),
+    const inspection = await Promise.race([
+      inspectRetainerObjects(key, inv),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new StripeCheckTimedOut()), timeoutMs);
       }),
     ]);
+    if (!inspection.exact) return { ...base, state: "unknown", reason: inspection.reason || recurringMismatchReason() };
     return {
       ...base,
-      state,
-      reason: state === "unknown" ? "Stripe no longer reports whether it was used (its one-payment limit was removed in Stripe), so the app can't tell whether the client subscribed." : null,
+      state: inspection.state,
+      url: inspection.state === "active" ? inv.stripe_retainer_link_url : null,
+      reason: inspection.reason,
     };
   } catch (e) {
     console.error("[finances:invoices] could not read the retainer link's state", inv.id, e instanceof StripeApiError ? `${e.status} ${e.message}` : e instanceof Error ? e.message : e);
@@ -1550,6 +1806,199 @@ export type SendResult = {
   notice: string | null;
 };
 
+/** Exact invoice state a send claim protects; optional post-184/185 fields are included only when present. */
+function sendSnapshot(inv: InvoiceRow, alias = "fin_invoices"): { sql: string; args: Array<string | number | null> } {
+  const fields: Array<[string, string | number | null]> = [
+    ["id", inv.id],
+    ["entity_id", inv.entity_id],
+    ["contact_id", inv.contact_id],
+    ["number", inv.number],
+    ["status", inv.status],
+    ["issue_date", inv.issue_date],
+    ["due_date", inv.due_date],
+    ["currency", inv.currency],
+    ["subtotal_cents", inv.subtotal_cents],
+    ["gst_cents", inv.gst_cents],
+    ["qst_cents", inv.qst_cents],
+    ["total_cents", inv.total_cents],
+    ["amount_paid_cents", inv.amount_paid_cents],
+    ["tax_registered_snapshot", inv.tax_registered_snapshot],
+    ["recognition_entry_id", inv.recognition_entry_id],
+    ["stripe_price_id", inv.stripe_price_id],
+    ["stripe_payment_link_id", inv.stripe_payment_link_id],
+    ["stripe_payment_link_url", inv.stripe_payment_link_url],
+    ["sent_at", inv.sent_at],
+    ["sent_to", inv.sent_to],
+    ["updated_at", inv.updated_at],
+    ["send_claim_token", inv.send_claim_token ?? null],
+  ];
+  if ("payment_method" in inv) fields.push(["payment_method", inv.payment_method ?? null]);
+  if ("retainer_monthly_cents" in inv) {
+    fields.push(
+      ["retainer_monthly_cents", inv.retainer_monthly_cents ?? null],
+      ["stripe_retainer_product_id", inv.stripe_retainer_product_id ?? null],
+      ["stripe_retainer_price_id", inv.stripe_retainer_price_id ?? null],
+      ["stripe_retainer_price_cents", inv.stripe_retainer_price_cents ?? null],
+      ["stripe_retainer_price_currency", inv.stripe_retainer_price_currency ?? null],
+      ["stripe_retainer_link_id", inv.stripe_retainer_link_id ?? null],
+      ["stripe_retainer_link_url", inv.stripe_retainer_link_url ?? null],
+      ["stripe_retainer_link_cents", inv.stripe_retainer_link_cents ?? null],
+      ["stripe_retainer_link_currency", inv.stripe_retainer_link_currency ?? null],
+    );
+  }
+  return { sql: fields.map(([name]) => `${alias}.${name} IS ?`).join(" AND "), args: fields.map(([, value]) => value) };
+}
+
+function sameSendSnapshot(current: InvoiceRow, expected: InvoiceRow): boolean {
+  const a = sendSnapshot(current);
+  const b = sendSnapshot(expected);
+  return a.sql === b.sql && a.args.length === b.args.length && a.args.every((value, i) => value === b.args[i]);
+}
+
+async function acquireInvoiceSendClaim(expected: InvoiceRow): Promise<{ token: string; invoice: InvoiceRow }> {
+  assertNoUnresolvedInvoiceEmail(expected, "sent again");
+  const token = newId("send");
+  const snapshot = sendSnapshot(expected);
+  const out = await finDb().execute({
+    sql: `UPDATE fin_invoices
+             SET send_claim_token = ?, send_claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+           WHERE ${snapshot.sql} AND send_claim_token IS NULL`,
+    args: [token, ...snapshot.args],
+  });
+  if (out.rowsAffected !== 1) {
+    const current = await loadInvoice(expected.id);
+    if (!current) throw new FinanceNotFound();
+    if (current.send_claim_token) throw new FinanceInputError(unresolvedInvoiceEmailMessage(current, "sent again"));
+    throw new FinanceInputError("This invoice changed before its email attempt could be claimed. Reload it and send again. Nothing was emailed.");
+  }
+  const invoice = await loadInvoice(expected.id);
+  if (!invoice || invoice.send_claim_token !== token) {
+    throw new Error(`invoice ${expected.id} send claim was written but could not be read back`);
+  }
+  return { token, invoice };
+}
+
+async function releaseInvoiceSendClaim(invoiceId: string, token: string): Promise<void> {
+  const out = await finDb().execute({
+    sql: `UPDATE fin_invoices SET send_claim_token = NULL, send_claimed_at = NULL WHERE id = ? AND send_claim_token = ?`,
+    args: [invoiceId, token],
+  });
+  if (out.rowsAffected !== 1) {
+    const current = await loadInvoice(invoiceId);
+    throw new Error(unresolvedInvoiceEmailMessage(current || {}, "released for another email attempt"));
+  }
+}
+
+/** A draft failure retires both checkout URLs and clears them with this claim in one CAS. */
+async function cleanupDraftSendFailure(invoiceId: string, token: string): Promise<void> {
+  const current = await loadInvoice(invoiceId);
+  if (!current || current.send_claim_token !== token) {
+    throw new Error(unresolvedInvoiceEmailMessage(current || {}, "cleaned up after the failed email attempt"));
+  }
+  if (current.status !== "draft") {
+    await releaseInvoiceSendClaim(invoiceId, token);
+    return;
+  }
+  await deactivateInvoiceLinksStrict(current, "send");
+  const hasRetainerColumns = await retainerColumnsReady();
+  const out = await finDb().execute({
+    sql: `UPDATE fin_invoices
+             SET stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL,
+                 ${
+                   hasRetainerColumns
+                     ? `stripe_retainer_link_id = NULL, stripe_retainer_link_url = NULL,
+                        stripe_retainer_link_cents = NULL, stripe_retainer_link_currency = NULL,`
+                     : ""
+                 }
+                 send_claim_token = NULL, send_claimed_at = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+           WHERE id = ? AND status = 'draft' AND send_claim_token = ?
+             AND stripe_price_id IS ? AND stripe_payment_link_id IS ? AND stripe_payment_link_url IS ?
+             ${
+               hasRetainerColumns
+                 ? `AND stripe_retainer_link_id IS ? AND stripe_retainer_link_url IS ?
+                    AND stripe_retainer_link_cents IS ? AND stripe_retainer_link_currency IS ?`
+                 : ""
+             }`,
+    args: [
+      invoiceId,
+      token,
+      current.stripe_price_id,
+      current.stripe_payment_link_id,
+      current.stripe_payment_link_url,
+      ...(
+        hasRetainerColumns
+          ? [
+              current.stripe_retainer_link_id ?? null,
+              current.stripe_retainer_link_url ?? null,
+              current.stripe_retainer_link_cents ?? null,
+              current.stripe_retainer_link_currency ?? null,
+            ]
+          : []
+      ),
+    ],
+  });
+  if (out.rowsAffected !== 1) {
+    throw new Error(unresolvedInvoiceEmailMessage((await loadInvoice(invoiceId)) || current, "cleaned up after the failed email attempt"));
+  }
+}
+
+/** Last app/provider check immediately before SMTP. */
+async function invoiceReadyForSmtp(
+  expected: InvoiceRow,
+  token: string,
+  cardUrl: string | null,
+  retainer: RetainerLink | null,
+): Promise<InvoiceRow> {
+  const current = await loadInvoice(expected.id);
+  if (!current || current.send_claim_token !== token || !sameSendSnapshot(current, expected)) {
+    throw new FinanceInputError("This invoice changed after it was prepared, so the email was stopped. Verify the invoice and send it again. Nothing was emailed.");
+  }
+  if (current.status !== "sent" && current.status !== "overdue") {
+    throw new FinanceInputError(`a ${current.status} invoice cannot be emailed`);
+  }
+  const method = storedPaymentMethod(current.payment_method);
+  const dueNow = hasAmountDueNow(current);
+  if (dueNow && method === "stripe" && !cardUrl) {
+    throw new FinanceInputError("A card payment link is required for the amount due on a Stripe invoice. Nothing was emailed.");
+  }
+  if (cardUrl) {
+    if (current.stripe_payment_link_url !== cardUrl) throw new FinanceInputError("The invoice's card link changed before email. Nothing was emailed.");
+    const { key } = await getStripeClient();
+    const due = balanceDueCents({ totalCents: current.total_cents, amountPaidCents: current.amount_paid_cents });
+    if (!(await storedCardLinkReusable(key, current, due))) throw new FinanceInputError("The invoice's card link could not be verified immediately before email. Nothing was emailed.");
+  }
+  if (retainerMonthlyCents(current) > 0) {
+    if (!retainer) throw new FinanceInputError("The invoice's monthly-retainer link is missing. Nothing was emailed.");
+    const { key } = await getStripeClient();
+    const inspection = await inspectRetainerObjects(key, current);
+    const exactKind =
+      inspection.exact &&
+      ((retainer.kind === "link" && inspection.state === "active" && current.stripe_retainer_link_url === retainer.url) ||
+        (retainer.kind === "set_up" && inspection.state === "used"));
+    if (!exactKind) throw new FinanceInputError("The invoice's monthly-retainer Link, Price, and Product could not be verified immediately before email. Nothing was emailed.");
+  }
+  return current;
+}
+
+/** Reminder-specific last check: exact overdue row and exact remaining balance/card link. */
+async function reminderReadyForSmtp(expected: InvoiceRow, token: string, cardUrl: string | null): Promise<InvoiceRow> {
+  const current = await loadInvoice(expected.id);
+  if (!current || current.send_claim_token !== token || !sameSendSnapshot(current, expected) || current.status !== "overdue") {
+    throw new FinanceInputError("This invoice changed before the overdue reminder could be emailed. Nothing was emailed.");
+  }
+  const due = balanceDueCents({ totalCents: current.total_cents, amountPaidCents: current.amount_paid_cents });
+  if (due <= 0) throw new FinanceInputError("This invoice no longer has an overdue balance. Nothing was emailed.");
+  if (cardUrl) {
+    if (current.stripe_payment_link_url !== cardUrl) throw new FinanceInputError("The reminder's card link changed before email. Nothing was emailed.");
+    const { key } = await getStripeClient();
+    if (!(await storedCardLinkReusable(key, current, due))) {
+      throw new FinanceInputError("The reminder's card link could not be verified immediately before email. Nothing was emailed.");
+    }
+  }
+  return current;
+}
+
 /**
  * Attach the payment options the invoice's method asks for, finalise it (if
  * draft), render the PDF and email it from the OASIS mailbox. Every failure
@@ -1611,6 +2060,21 @@ export async function sendInvoice(
   }
   const method = storedPaymentMethod(planned.payment_method);
   assertPaymentMode(method, { totalCents: planned.total_cents, monthly: { totalCents: retainerMonthlyCents(planned) } });
+  const dueNow = hasAmountDueNow(planned);
+  if (dueNow && method === "stripe" && opts.paymentLink === false) {
+    throw new FinanceInputError("A card payment link is required for the amount due on a Stripe invoice. Nothing was emailed.");
+  }
+  const claim = await acquireInvoiceSendClaim(before);
+  planned = {
+    ...planned,
+    ...claim.invoice,
+    subtotal_cents: planned.subtotal_cents,
+    gst_cents: planned.gst_cents,
+    qst_cents: planned.qst_cents,
+    total_cents: planned.total_cents,
+  };
+  let smtpStarted = false;
+  try {
 
   // 2. Every Stripe link the email needs, made or checked while the invoice can still stay a draft.
   const retainerCents = retainerMonthlyCents(planned);
@@ -1627,12 +2091,11 @@ export async function sendInvoice(
       );
     }
   }
-  const dueNow = hasAmountDueNow(planned);
   const wise = await wiseDetailsFor(planned);
   const settings = await loadSettings(entity.id);
   // Only Stripe mode offers a one-time card rail. Wise and Hybrid never fall
   // back to a card link for the implementation amount.
-  const cardWanted = dueNow && opts.paymentLink !== false && offersCard(method);
+  const cardWanted = dueNow && offersCard(method);
   let url: string | null = null;
   if (cardWanted) {
     try {
@@ -1648,28 +2111,40 @@ export async function sendInvoice(
   await resolveInvoiceMailbox(financeTenantId());
 
   // 4. Only now: number it and book the receivable — exactly what the links were made for.
-  const inv = await finalizeInvoice(
-    viewer,
-    invoiceId,
-    wasDraft ? { totalCents: planned.total_cents, monthlyCents: retainerCents, currency: planned.currency, contactId: planned.contact_id, cardLinkVerified: url !== null } : undefined,
-  );
+  const inv = wasDraft
+    ? await finalizeInvoice(viewer, invoiceId, {
+        totalCents: planned.total_cents,
+        monthlyCents: retainerCents,
+        currency: planned.currency,
+        contactId: planned.contact_id,
+        cardLinkVerified: url !== null,
+        sendClaimToken: claim.token,
+      })
+    : await loadInvoice(invoiceId);
+  if (!inv) throw new FinanceNotFound();
+  if (inv.send_claim_token !== claim.token || (inv.status !== "sent" && inv.status !== "overdue")) {
+    throw new FinanceInputError(ISSUE_CHANGED_DURING_SEND);
+  }
   if (wasDraft) {
     await numberPaymentLinks(inv, { card: url ? inv.stripe_payment_link_id : null, retainer: retainer?.kind === "link" ? inv.stripe_retainer_link_id ?? null : null });
   }
+  const prepared = await loadInvoice(invoiceId);
+  if (!prepared) throw new FinanceNotFound();
+  const ready = await invoiceReadyForSmtp(prepared, claim.token, url, retainer);
   const retainerUrl = retainer?.kind === "link" ? retainer.url : null;
   const retainerSetUp = retainer?.kind === "set_up";
-  const bankLines = wiseLines(wise.details, inv);
+  const bankLines = wiseLines(wise.details, ready);
   // The PDF carries the card link this send verified, never another one stored on the row.
-  const pdf = await pdfFor({ ...inv, stripe_payment_link_url: url }, lines, contact, settings, { bankTransfer: bankLines, retainerSetUp });
+  const pdf = await pdfFor({ ...ready, stripe_payment_link_url: url, stripe_retainer_link_url: retainerUrl }, lines, contact, settings, { bankTransfer: bankLines, retainerSetUp });
   const mail = composeInvoiceEmail({
     kind: "invoice",
     sellerName: settings.legal_name,
     customerName: contact?.name || "",
-    number: inv.number as string,
-    totalCents: inv.total_cents,
-    balanceCents: balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents }),
-    currency: inv.currency,
-    dueDate: inv.due_date,
+    number: ready.number as string,
+    totalCents: ready.total_cents,
+    balanceCents: balanceDueCents({ totalCents: ready.total_cents, amountPaidCents: ready.amount_paid_cents }),
+    currency: ready.currency,
+    dueDate: ready.due_date,
     paymentLinkUrl: url,
     paymentInstructions: dueNow ? settings.payment_instructions : "",
     bankTransfer: bankLines,
@@ -1677,21 +2152,34 @@ export async function sendInvoice(
       ? { retainer: retainer.kind === "link" ? { monthlyCents: retainerCents, linkUrl: retainer.url } : { monthlyCents: retainerCents, setUp: true as const } }
       : {}),
   });
-  const sent = await sendInvoiceEmail({ tenantId: financeTenantId(), to, ...mail, pdf, filename: `${inv.number}.pdf` });
-  await writeBatch([
-    { sql: `UPDATE fin_invoices SET sent_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), sent_to = ? WHERE id = ?`, args: [to, invoiceId] },
-    auditStatement({
-      entityId: entity.id,
-      actor: viewerLabel(viewer),
-      action: "invoice.emailed",
-      objectType: "invoice",
-      objectId: invoiceId,
-      detail: { to, from: sent.from, link: Boolean(url), method, wise: Boolean(bankLines), notice: wise.notice, ...(retainerCents > 0 ? { retainer: retainerCents, retainer_link: Boolean(retainerUrl), retainer_set_up: retainerSetUp } : {}) },
-    }),
+  smtpStarted = true;
+  const sent = await sendInvoiceEmail({ tenantId: financeTenantId(), to, ...mail, pdf, filename: `${ready.number}.pdf` });
+  const sentSnapshot = sendSnapshot(ready);
+  const sentOut = await writeBatch([
+    {
+      sql: `UPDATE fin_invoices
+               SET sent_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), sent_to = ?, send_claim_token = NULL, send_claimed_at = NULL
+             WHERE ${sentSnapshot.sql} AND send_claim_token = ?`,
+      args: [to, ...sentSnapshot.args, claim.token],
+    },
+    conditionalAuditStatement(
+      {
+        entityId: entity.id,
+        actor: viewerLabel(viewer),
+        action: "invoice.emailed",
+        objectType: "invoice",
+        objectId: invoiceId,
+        detail: { to, from: sent.from, link: Boolean(url), method, wise: Boolean(bankLines), notice: wise.notice, ...(retainerCents > 0 ? { retainer: retainerCents, retainer_link: Boolean(retainerUrl), retainer_set_up: retainerSetUp } : {}) },
+      },
+      "changes() = 1",
+    ),
   ]);
+  if (sentOut[0]?.rowsAffected !== 1) {
+    throw new Error(unresolvedInvoiceEmailMessage((await loadInvoice(invoiceId)) || ready, "marked as emailed"));
+  }
   return {
     invoiceId,
-    number: inv.number as string,
+    number: ready.number as string,
     emailedTo: to,
     paymentLinkUrl: url,
     retainerLinkUrl: retainerUrl,
@@ -1700,6 +2188,17 @@ export async function sendInvoice(
     bankTransfer: Boolean(bankLines),
     notice: wise.notice,
   };
+  } catch (error) {
+    if (!smtpStarted) {
+      try {
+        await cleanupDraftSendFailure(invoiceId, claim.token);
+      } catch (cleanupError) {
+        console.error("[finances:invoices] failed to clean up a pre-SMTP invoice attempt", invoiceId, cleanupError);
+        throw cleanupError;
+      }
+    }
+    throw error;
+  }
 }
 
 // ── manual payment ───────────────────────────────────────────────────────
@@ -1716,6 +2215,7 @@ export async function markInvoicePaidManually(viewer: FinanceViewer, invoiceId: 
   businessOnly(entity);
   const inv = await loadInvoice(invoiceId);
   if (!inv) throw new FinanceNotFound();
+  assertNoUnresolvedInvoiceEmail(inv, "paid manually");
   const status = effectiveInvoiceStatus({ status: inv.status, dueDate: inv.due_date, totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents }, torontoToday());
   if (status !== "sent" && status !== "overdue") throw new FinanceInputError(`a ${status} invoice cannot take a payment${status === "draft" ? " — issue it first" : ""}`);
   if (!hasAmountDueNow(inv)) {
@@ -1768,8 +2268,8 @@ export async function markInvoicePaidManually(viewer: FinanceViewer, invoiceId: 
               fee_status, settlement_estimated, invoice_id, contact_id, customer_name, customer_email, deposit_account_id, description, livemode, created_by)
             SELECT ?, ?, 'payment', 'manual', ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, 1, ?
              WHERE EXISTS (
-               SELECT 1 FROM fin_invoices payment_i
-                WHERE ${invoiceSnapshot.sql}
+              SELECT 1 FROM fin_invoices payment_i
+                WHERE ${invoiceSnapshot.sql} AND payment_i.send_claim_token IS NULL
              )`,
       args: [
         paymentId, entity.id, `${date}T12:00:00.000Z`, date, amount, inv.currency, receivedCad, estimated, inv.id, inv.contact_id,
@@ -1788,6 +2288,8 @@ export async function markInvoicePaidManually(viewer: FinanceViewer, invoiceId: 
     ),
   ]);
   if (out[0]?.rowsAffected !== 1) {
+    const current = await loadInvoice(invoiceId);
+    if (current?.send_claim_token) throw new FinanceInputError(unresolvedInvoiceEmailMessage(current, "paid manually"));
     throw new FinanceInputError("This invoice changed while the payment was being recorded. Reload it and try again; no payment was recorded.");
   }
   return paymentId;
@@ -1801,6 +2303,7 @@ export async function voidInvoice(viewer: FinanceViewer, invoiceId: string): Pro
   if (!inv) throw new FinanceNotFound();
   if (!canTransition(inv.status, "void")) throw new FinanceInputError(`a ${inv.status} invoice cannot be voided`);
   if (inv.amount_paid_cents > 0) throw new FinanceInputError("this invoice has payments; refund them before voiding");
+  assertNoUnresolvedInvoiceEmail(inv, "voided");
   await deactivateInvoiceLinksStrict(inv, "void");
   const hasRetainerColumns = await retainerColumnsReady();
   const operationId = newId("aud");
@@ -1810,9 +2313,33 @@ export async function voidInvoice(viewer: FinanceViewer, invoiceId: string): Pro
     {
       sql: `UPDATE fin_invoices
                SET status = 'void', voided_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE ${snapshot.sql} AND amount_paid_cents = 0 AND recognition_entry_id IS ?
-               ${hasRetainerColumns ? "AND stripe_retainer_link_id IS ? AND stripe_retainer_link_url IS ?" : ""}`,
-      args: [...snapshot.args, inv.recognition_entry_id, ...(hasRetainerColumns ? [inv.stripe_retainer_link_id ?? null, inv.stripe_retainer_link_url ?? null] : [])],
+             WHERE ${snapshot.sql} AND amount_paid_cents = 0 AND recognition_entry_id IS ? AND send_claim_token IS NULL
+               ${
+                 hasRetainerColumns
+                   ? `AND stripe_retainer_product_id IS ? AND stripe_retainer_price_id IS ?
+                      AND stripe_retainer_price_cents IS ? AND stripe_retainer_price_currency IS ?
+                      AND stripe_retainer_link_id IS ? AND stripe_retainer_link_url IS ?
+                      AND stripe_retainer_link_cents IS ? AND stripe_retainer_link_currency IS ?`
+                   : ""
+               }`,
+      args: [
+        ...snapshot.args,
+        inv.recognition_entry_id,
+        ...(
+          hasRetainerColumns
+            ? [
+                inv.stripe_retainer_product_id ?? null,
+                inv.stripe_retainer_price_id ?? null,
+                inv.stripe_retainer_price_cents ?? null,
+                inv.stripe_retainer_price_currency ?? null,
+                inv.stripe_retainer_link_id ?? null,
+                inv.stripe_retainer_link_url ?? null,
+                inv.stripe_retainer_link_cents ?? null,
+                inv.stripe_retainer_link_currency ?? null,
+              ]
+            : []
+        ),
+      ],
     },
     {
       sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
@@ -1833,6 +2360,8 @@ export async function voidInvoice(viewer: FinanceViewer, invoiceId: string): Pro
   }
   const out = await writeBatch(statements);
   if (out[0]?.rowsAffected !== 1) {
+    const current = await loadInvoice(invoiceId);
+    if (current?.send_claim_token) throw new FinanceInputError(unresolvedInvoiceEmailMessage(current, "voided"));
     throw new FinanceInputError("This invoice changed while it was being voided. Reload it and try again; no bookkeeping changes were made.");
   }
 }
@@ -1849,7 +2378,7 @@ async function deactivateRetainerLink(inv: InvoiceRow): Promise<void> {
 }
 
 /** Every persisted checkout URL is proved off before void/delete changes local state. */
-async function deactivateInvoiceLinksStrict(inv: InvoiceRow, action: "void" | "delete"): Promise<void> {
+async function deactivateInvoiceLinksStrict(inv: InvoiceRow, action: "void" | "delete" | "send"): Promise<void> {
   try {
     const hasOneTime = Boolean(inv.stripe_price_id || inv.stripe_payment_link_id || inv.stripe_payment_link_url);
     if (hasOneTime) {
@@ -1862,7 +2391,8 @@ async function deactivateInvoiceLinksStrict(inv: InvoiceRow, action: "void" | "d
     if (hasRetainerLink) await deactivateRetainerLink(inv);
   } catch (e) {
     console.error(`[finances:invoices] could not shut down Stripe links before invoice ${action}`, inv.id, e instanceof Error ? e.message : e);
-    throw new FinanceInputError(`Stripe couldn't confirm every payment link was off, so the invoice was not ${action === "void" ? "voided" : "deleted"}. Check Stripe and try again.`);
+    const outcome = action === "void" ? "voided" : action === "delete" ? "deleted" : "cleaned up after the failed send";
+    throw new FinanceInputError(`Stripe couldn't confirm every payment link was off, so the invoice was not ${outcome}. Check Stripe and try again.`);
   }
 }
 
@@ -1927,21 +2457,29 @@ export async function remindOverdue(viewer: FinanceViewer, opts: { send: boolean
       plan.action = "skipped";
       plan.reason = `reminded within the last ${minDays} days`;
     } else if (opts.send === true) {
+      let claimToken: string | null = null;
+      let smtpStarted = false;
       try {
-        const lines = await loadInvoiceLines(r.id);
-        const contact = await loadContact(r.contact_id);
-        const wise = await bankTransferFor(r);
-        const method = storedPaymentMethod(r.payment_method);
+        const claim = await acquireInvoiceSendClaim(r);
+        claimToken = claim.token;
+        const claimed = claim.invoice;
+        const lines = await loadInvoiceLines(claimed.id);
+        const contact = await loadContact(claimed.contact_id);
+        const wise = await bankTransferFor(claimed);
+        const method = storedPaymentMethod(claimed.payment_method);
         let oneTimeUrl: string | null = null;
         if (offersCard(method)) {
-          oneTimeUrl = await ensurePaymentLink(r, r);
+          oneTimeUrl = await ensurePaymentLink(claimed, claimed);
         } else {
           // Old rows may predate payment_method. A bank/Hybrid reminder never
           // leaks that legacy full-balance card rail back into an email/PDF.
-          await retireLegacyOneTimePaymentLink(r);
+          await retireLegacyOneTimePaymentLink(claimed);
         }
-        const printable = { ...r, stripe_payment_link_url: oneTimeUrl };
-        if (wise.notice) console.error("[finances:invoices] reminder without Wise details", r.number, wise.notice);
+        const prepared = await loadInvoice(claimed.id);
+        if (!prepared) throw new FinanceNotFound();
+        const ready = await reminderReadyForSmtp(prepared, claim.token, oneTimeUrl);
+        const printable = { ...ready, stripe_payment_link_url: oneTimeUrl, stripe_retainer_link_url: null };
+        if (wise.notice) console.error("[finances:invoices] reminder without Wise details", ready.number, wise.notice);
         // Same rule as sendInvoice: never ask for money with no way to pay.
         if (offersBankTransfer(method) && !wise.lines && !oneTimeUrl && !settings.payment_instructions.trim()) {
           throw new FinanceInputError(
@@ -1955,22 +2493,44 @@ export async function remindOverdue(viewer: FinanceViewer, opts: { send: boolean
           kind: "reminder",
           sellerName: settings.legal_name,
           customerName: r.contact_name,
-          number: r.number || "",
-          totalCents: r.total_cents,
-          balanceCents: plan.balance_cents,
-          currency: r.currency,
-          dueDate: r.due_date,
+          number: ready.number || "",
+          totalCents: ready.total_cents,
+          balanceCents: balanceDueCents({ totalCents: ready.total_cents, amountPaidCents: ready.amount_paid_cents }),
+          currency: ready.currency,
+          dueDate: ready.due_date,
           paymentLinkUrl: oneTimeUrl,
           paymentInstructions: settings.payment_instructions,
           bankTransfer: wise.lines,
         });
-        await sendInvoiceEmail({ tenantId: financeTenantId(), to, ...mail, pdf, filename: `${r.number}.pdf` });
-        await writeBatch([
-          { sql: `UPDATE fin_invoices SET last_reminded_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), reminder_count = reminder_count + 1 WHERE id = ?`, args: [r.id] },
-          auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.reminder_sent", objectType: "invoice", objectId: r.id, detail: { to } }),
+        smtpStarted = true;
+        await sendInvoiceEmail({ tenantId: financeTenantId(), to, ...mail, pdf, filename: `${ready.number}.pdf` });
+        const snapshot = sendSnapshot(ready);
+        const out = await writeBatch([
+          {
+            sql: `UPDATE fin_invoices
+                     SET last_reminded_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), reminder_count = reminder_count + 1,
+                         send_claim_token = NULL, send_claimed_at = NULL
+                   WHERE ${snapshot.sql} AND send_claim_token = ?`,
+            args: [...snapshot.args, claim.token],
+          },
+          conditionalAuditStatement(
+            { entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.reminder_sent", objectType: "invoice", objectId: r.id, detail: { to } },
+            "changes() = 1",
+          ),
         ]);
+        if (out[0]?.rowsAffected !== 1) {
+          throw new Error(unresolvedInvoiceEmailMessage((await loadInvoice(r.id)) || ready, "marked as reminded"));
+        }
         plan.action = "sent";
       } catch (e) {
+        if (claimToken && !smtpStarted) {
+          try {
+            await releaseInvoiceSendClaim(r.id, claimToken);
+          } catch (releaseError) {
+            console.error("[finances:invoices] failed to release a pre-SMTP reminder claim", r.id, releaseError);
+            e = releaseError;
+          }
+        }
         plan.action = "failed";
         plan.reason = e instanceof Error ? e.message.slice(0, 300) : "send failed";
       }

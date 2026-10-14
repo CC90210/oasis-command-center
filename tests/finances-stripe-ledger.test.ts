@@ -157,6 +157,7 @@ async function main() {
   // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
   await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
   await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__226_finance_invoice_send_claim.sql"), "utf8"));
   const rates: Array<[string, string]> = [];
   for (let d = 12; d <= 22; d++) rates.push([`2026-06-${d}`, "1.3700"]);
   for (let d = 1; d <= 24; d++) rates.push([`2026-09-${String(d).padStart(2, "0")}`, "1.3800"]);

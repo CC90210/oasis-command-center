@@ -156,8 +156,8 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
     right(k, W - M - 110, my, 9, regular, MUTED);
     my -= 14;
   }
-  if (input.invoice.status === "paid") {
-    right("PAID", W - M, my - 4, 14, bold, ACCENT);
+  if (input.invoice.status === "paid" || input.invoice.status === "void") {
+    right(input.invoice.status === "void" ? "VOID" : "PAID", W - M, my - 4, 14, bold, ACCENT);
     my -= 18;
   }
   y = Math.min(sy, my) - 18;
@@ -226,8 +226,12 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
     totalRow(`GST 5%${input.seller.gstNumber ? ` (${input.seller.gstNumber})` : ""}`, money(input.invoice.gstCents));
     totalRow(`QST 9.975%${input.seller.qstNumber ? ` (${input.seller.qstNumber})` : ""}`, money(input.invoice.qstCents));
   }
-  totalRow(retainer ? `Due now ${input.invoice.currency}` : `Total ${input.invoice.currency}`, money(input.invoice.totalCents), true);
-  if (input.invoice.amountPaidCents > 0) {
+  if (input.invoice.status === "void") {
+    totalRow(`VOID — amount due ${input.invoice.currency}`, money(0), true);
+  } else {
+    totalRow(retainer ? `Due now ${input.invoice.currency}` : `Total ${input.invoice.currency}`, money(input.invoice.totalCents), true);
+  }
+  if (input.invoice.status !== "void" && input.invoice.amountPaidCents > 0) {
     totalRow("Paid", `-${money(input.invoice.amountPaidCents)}`);
     totalRow("Balance due", money(Math.max(0, input.invoice.totalCents - input.invoice.amountPaidCents)), true);
   }
@@ -291,7 +295,7 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
   };
   if (retainer) {
     const balance = Math.max(0, input.invoice.totalCents - input.invoice.amountPaidCents);
-    if (balance > 0 && input.invoice.status !== "paid") {
+    if (balance > 0 && input.invoice.status !== "paid" && input.invoice.status !== "void") {
       const bank = input.invoice.bankTransfer?.length ? input.invoice.bankTransfer : null;
       const card = input.invoice.paymentLinkUrl;
       heading(`Implementation — ${money(balance)} due by ${input.invoice.dueDate}: ${oneTimePayVerb(Boolean(bank), Boolean(card))}`);
@@ -311,13 +315,13 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
     }
     block("NOTES", input.invoice.notes);
   } else {
-    if (input.invoice.bankTransfer?.length && input.invoice.status !== "paid") {
+    if (input.invoice.bankTransfer?.length && input.invoice.status !== "paid" && input.invoice.status !== "void") {
       rows("PAY BY BANK TRANSFER (WISE)", input.invoice.bankTransfer);
     }
-    if (input.invoice.paymentLinkUrl && input.invoice.status !== "paid") {
+    if (input.invoice.paymentLinkUrl && input.invoice.status !== "paid" && input.invoice.status !== "void") {
       block("PAY ONLINE", input.invoice.paymentLinkUrl);
     }
-    block("PAYMENT", input.invoice.paymentInstructions);
+    if (input.invoice.status !== "void") block("PAYMENT", input.invoice.paymentInstructions);
     block("NOTES", input.invoice.notes);
   }
 
