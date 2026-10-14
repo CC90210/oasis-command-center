@@ -209,6 +209,27 @@ async function main() {
     assert.equal(data.computer?.id, x2.id, "a revoked computer must never be the silent default");
   });
 
+  // Final fix round, item (b): the actually-reachable case - revokeComputer never clears
+  // is_primary, so a revoked computer that WAS primary stays flagged primary forever. The old
+  // fallback chain tried `.find(c => c.primary)` BEFORE it ever checked `!c.revoked`, so that
+  // revoked-but-still-primary row won the fallback and the page opened on stale, disabled data.
+  await check("a revoked PRIMARY computer is never the default; an explicit ask for it by id still works", async () => {
+    const y1 = await createComputer(db, "owner-y", "Y1 (primary, will be revoked)");
+    const y2 = await createComputer(db, "owner-y", "Y2 (active, not primary)");
+    // Force y1 to actually be the primary: createComputer's "first computer is primary" rule
+    // checks for ANY existing primary row rather than scoping to this owner, so which computer
+    // lands primary can depend on what earlier checks in this file already created. Forcing it
+    // here makes this check exercise the real shape every time, regardless of ordering.
+    await db.execute({ sql: "UPDATE skills_computer SET is_primary = 0 WHERE owner_user_id = ?", args: ["owner-y"] });
+    await db.execute({ sql: "UPDATE skills_computer SET is_primary = 1 WHERE id = ?", args: [y1.id] });
+    assert.ok(await revokeComputer(db, "owner-y", y1.id));
+    const data = await skillsPageData(db, "owner-y");
+    assert.equal(data.computer?.id, y2.id, "the active non-primary computer must be the default, not the revoked primary");
+    assert.equal(data.computer?.revoked, false);
+    const asked = await skillsPageData(db, "owner-y", y1.id);
+    assert.equal(asked.computer?.id, y1.id, "an explicit ask for the revoked computer by id must still return it");
+  });
+
   finish("skills-training-library");
 }
 

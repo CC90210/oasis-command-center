@@ -326,12 +326,22 @@ export async function revise(
  * clears that flag - but still a state a stray row or a future bulk edit could produce), the
  * LAST-resort fallback skips a revoked computer rather than taking whichever one sorts first. A
  * revoked computer must never become the page's silent default.
+ *
+ * Final fix round, item (b): the actually-reachable case this still missed - `revokeComputer`
+ * never clears `is_primary`, so a computer that WAS primary when it got revoked stays flagged
+ * primary forever. The `.find((c) => c.primary)` fallback matched that row BEFORE the code ever
+ * checked `!c.revoked`, so a revoked primary opened the page on stale data with a disabled check
+ * button. The primary fallback itself must exclude a revoked computer; an explicit `asked` id
+ * still returns a revoked computer when that is genuinely what was asked for.
  */
 export async function skillsPageData(db: Client, owner: string, asked?: string): Promise<{
   computer: Computer | null; computers: Computer[]; changes: ChangeRow[]; lib: Library | null;
 }> {
   const ov = await overview(db, owner);
-  const computer = ov.computers.find((c) => c.id === asked) ?? ov.computers.find((c) => c.primary) ?? ov.computers.find((c) => !c.revoked) ?? null;
+  const computer = ov.computers.find((c) => c.id === asked)
+    ?? ov.computers.find((c) => c.primary && !c.revoked)
+    ?? ov.computers.find((c) => !c.revoked)
+    ?? null;
   if (!computer) return { computer: null, computers: [], changes: [], lib: null };
   return { computer, computers: ov.computers, changes: ov.changes, lib: await library(db, owner, computer.id) };
 }
