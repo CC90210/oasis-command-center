@@ -577,6 +577,10 @@ function LeadContactBand({ data }: { data: Record<string, unknown> }) {
       <ContactCell label="Industry" value={nonEmptyString(data.industry)} />
       <ContactCell label="Location" value={location} />
       <ContactCell label="Source" value={nonEmptyString(data.source)} />
+      <ContactCell label="Revenue band" value={humanize(nonEmptyString(data.revenue_band))} />
+      <ContactCell label="Team size" value={humanize(nonEmptyString(data.team_size))} />
+      <ContactCell label="Primary bottleneck" value={nonEmptyString(data.primary_bottleneck)} />
+      <ContactCell label="Current tools" value={nonEmptyString(data.current_tools)} />
     </div>
   );
 }

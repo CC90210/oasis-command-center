@@ -85,6 +85,43 @@ assert.doesNotMatch(tierMessages.reminder.subject, /60 minutes/i);
 assert.match(tierMessages.reminder.sms, /^OASIS AI:/);
 assert.match(tierMessages.reminder.sms, /meet\.google\.com\/abc-defg-hij/);
 
+const discoveryMessages = buildFounderMeetingMessages({
+  company: "North Star Dental",
+  contactName: "Taylor",
+  meetingAt: "2026-09-01T15:15:00.000Z",
+  timezone: "America/Toronto",
+  meetLink: "https://meet.google.com/abc-defg-hij",
+  clientAgenda: "Review the current site and booking workflow.",
+  durationMinutes: 45,
+  offerLabel: "COMMAND discovery call",
+  reminderMinutesBefore: 30,
+});
+assert.match(discoveryMessages.confirmationSms, /45-minute COMMAND discovery call/i);
+assert.match(discoveryMessages.reminder.subject, /COMMAND discovery call/i);
+assert.match(discoveryMessages.reminder.body, /45-minute OASIS COMMAND discovery call/i);
+assert.doesNotMatch(
+  `${discoveryMessages.confirmationSms}\n${discoveryMessages.reminder.subject}\n${discoveryMessages.reminder.body}`,
+  /15-minute website audit/i,
+);
+
+const aiAuditMessages = buildFounderMeetingMessages({
+  company: "North Star Dental",
+  contactName: "Taylor",
+  meetingAt: "2026-09-01T15:15:00.000Z",
+  timezone: "America/Toronto",
+  meetLink: "https://meet.google.com/abc-defg-hij",
+  clientAgenda: "Review the current automation stack.",
+  durationMinutes: 15,
+  offerLabel: "AI automation audit",
+  reminderMinutesBefore: 10,
+});
+assert.match(aiAuditMessages.confirmationSms, /15-minute AI automation audit/i);
+assert.match(aiAuditMessages.reminder.subject, /AI automation audit/i);
+assert.doesNotMatch(
+  `${aiAuditMessages.confirmationSms}\n${aiAuditMessages.reminder.subject}\n${aiAuditMessages.reminder.body}`,
+  /website audit/i,
+);
+
 const firstSms = withSmsFooter(tierMessages.reminder.sms, { firstInConversation: true });
 assert.match(firstSms, /^OASIS AI:/);
 assert(firstSms.endsWith(SMS_STOP_FOOTER));

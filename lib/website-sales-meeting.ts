@@ -15,6 +15,12 @@ export const SMS_STOP_FOOTER =
   "Reply STOP to opt out. HELP for help. Msg & data rates may apply.";
 const SMS_BRAND_PREFIX = "OASIS AI:";
 
+export function founderMeetingOfferLabel(durationMinutes: number, explicitLabel?: string | null): string {
+  const normalized = explicitLabel?.trim();
+  if (normalized) return normalized;
+  return durationMinutes === FOUNDER_MEETING_DURATION_MINUTES ? "website audit" : "discovery call";
+}
+
 /** Who an automated meeting text speaks for, and the clock its times read in. */
 export type MeetingSmsVoice = { prefix: string; timeZone: string };
 
@@ -254,12 +260,18 @@ export function buildFounderMeetingMessages(input: {
   timezone: string;
   meetLink: string;
   clientAgenda: string;
+  durationMinutes?: number;
+  offerLabel?: string | null;
   reminderMinutesBefore?: number;
 }) {
   const meetLink = validateGoogleMeetLink(input.meetLink);
   const when = displayMeetingTime(input.meetingAt, input.timezone);
   const label = input.company || input.contactName || "your business";
   const greeting = input.contactName ? `Hi ${input.contactName},` : "Hello,";
+  const durationMinutes = Number.isInteger(input.durationMinutes) && Number(input.durationMinutes) >= 15
+    ? Number(input.durationMinutes)
+    : FOUNDER_MEETING_DURATION_MINUTES;
+  const offerLabel = founderMeetingOfferLabel(durationMinutes, input.offerLabel);
   const reminderMinutes = Number.isInteger(input.reminderMinutesBefore) && Number(input.reminderMinutesBefore) > 0
     ? Number(input.reminderMinutesBefore)
     : 10;
@@ -269,17 +281,17 @@ export function buildFounderMeetingMessages(input: {
   const reminderBody = [
     greeting,
     "",
-    `Your 15-minute OASIS website audit for ${label} starts in ${reminderWindow} (${when}).`,
+    `Your ${durationMinutes}-minute OASIS ${offerLabel} for ${label} starts in ${reminderWindow} (${when}).`,
     `Join Google Meet: ${meetLink}`,
     "",
     `We will cover: ${input.clientAgenda}`,
   ].join("\n");
-  const confirmationSms = `${SMS_BRAND_PREFIX} Your 15-minute website audit is booked for ${when}. Google Meet: ${meetLink}`;
-  const reminderSms = `${SMS_BRAND_PREFIX} Reminder: your website audit starts in ${reminderWindow}. Join: ${meetLink}`;
+  const confirmationSms = `${SMS_BRAND_PREFIX} Your ${durationMinutes}-minute ${offerLabel} is booked for ${when}. Google Meet: ${meetLink}`;
+  const reminderSms = `${SMS_BRAND_PREFIX} Reminder: your ${offerLabel} starts in ${reminderWindow}. Join: ${meetLink}`;
   return {
     confirmationSms,
     reminder: {
-      subject: `Your OASIS website audit starts in ${reminderWindow}`,
+      subject: `Your OASIS ${offerLabel} starts in ${reminderWindow}`,
       body: reminderBody,
       sms: reminderSms,
     },

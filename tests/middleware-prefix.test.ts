@@ -21,6 +21,9 @@ assert.equal(isPublic("/api/forms/submit"), true, "public form submit bypasses s
 assert.equal(isPublic("/api/forms/upload-url"), true, "public form upload signer bypasses session middleware");
 assert.equal(isPublic("/api/forms/view"), true, "public form view tracker bypasses session middleware");
 assert.equal(isPublic("/api/forms/address-autocomplete"), true, "public form address autocomplete bypasses session middleware");
+assert.equal(isPublic("/api/forms/booking"), true, "public audit booking bypasses session middleware and authenticates with the lead token");
+assert.equal(isPublic("/api/forms/booking/availability"), true, "public audit availability bypasses session middleware and authenticates with the lead token");
+assert.equal(isPublic("/api/forms/booking-admin"), false, "the public booking allowlist does not open adjacent operator routes");
 assert.equal(isPublic("/api/forms"), false, "operator forms list remains session-gated");
 assert.equal(isPublic("/api/forms/abc/mint-link"), false, "operator link minting remains session-gated");
 assert.equal(isPublic("/oasis-loop/index.html"), true, "OASIS Loop diagram is public static HTML");

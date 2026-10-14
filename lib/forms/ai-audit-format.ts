@@ -162,6 +162,10 @@ export function buildAiAuditAlert(
     lines.push("", `✅ <b>ASKED TO BOOK A CALL</b>`);
   }
 
+  // Completion happens immediately before the inline calendar opens. The
+  // separate booked event carries the selected time once one exists.
+  lines.push("", "📅 <b>Meeting:</b> not booked yet");
+
   if (s.reasons.length) {
     lines.push("", `<b>Why this score:</b> ${e(s.reasons.join(" · "))}`);
   }
@@ -206,10 +210,10 @@ export function composeAiAuditWelcome(a: Record<string, unknown>): Composed {
     : `Thanks for filling that out — you gave me enough detail to actually be useful rather than guess.`;
 
   const next = askedForCall
-    ? `You asked for a call, so that's the next thing that happens. I'll come back to you with a couple of times that work — and I'll have read your answers before we talk, not during.`
+    ? `You asked for a call, so use the live calendar on the page to pick the time that works. The Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
     : urgent
-      ? `You said you want this moving soon, so I'll come back to you shortly with where I'd start and what it would take. If it's faster to just talk, reply to this email and say so.`
-      : `I'll come back to you with where I'd start and roughly what it would take. No pitch deck, no discovery-call maze — just the honest read.`;
+      ? `You said you want this moving soon, so I'll come back to you shortly with where I'd start and what it would take. The live calendar on the page is there if talking is faster.`
+      : `I'll come back to you with where I'd start and roughly what it would take. If talking is easier, the live calendar on the page has the times that work for both founders.`;
 
   // Quote their own bottleneck back at them. This is the single most
   // personal thing in the form — they typed it — and the email was

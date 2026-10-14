@@ -6,6 +6,7 @@ import {
   backfillFounderMeetingNotifications,
   cancelVerifiedFounderMeeting,
   closeVerifiedFounderMeeting,
+  compensatePendingFounderMeetingBooking,
   createVerifiedFounderMeeting,
   founderMeetingSmsConsentErrorResponse,
   founderMeetingBackfillChunkStart,
@@ -58,10 +59,17 @@ const BASE_SCHEMA = `
     agent_source TEXT,
     metadata TEXT
   );
+  CREATE TABLE calendar_events (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    appointment_id TEXT
+  );
 `;
 
 type CalendarCalls = {
   created: number;
+  createdDurations: number[];
+  createdOfferLabels: string[];
   updated: string[];
   cancelled: string[];
 };
@@ -130,18 +138,21 @@ function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
 
 async function fixture() {
   const raw = createClient({ url: ":memory:" });
-  const [migration167, migration169] = await import("node:fs").then(({ readFileSync }) => [
+  const [migration167, migration169, migration224] = await import("node:fs").then(({ readFileSync }) => [
     readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8"),
     readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8"),
+    readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8"),
   ]);
-  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}`);
+  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}\n${migration224}`);
   const db = createTursoPostgrest(raw);
-  const calls: CalendarCalls = { created: 0, updated: [], cancelled: [] };
+  const calls: CalendarCalls = { created: 0, createdDurations: [], createdOfferLabels: [], updated: [], cancelled: [] };
   const deps = {
     db: db as never,
     now: () => NOW,
-    createCalendar: async () => {
+    createCalendar: async (input: { durationMinutes: number; offerLabel?: string }) => {
       calls.created += 1;
+      calls.createdDurations.push(input.durationMinutes);
+      calls.createdOfferLabels.push(input.offerLabel || "");
       return {
         calendarId: "primary",
         eventId: "event12345",
@@ -258,6 +269,7 @@ async function testCreateAuditAndFullIdempotency() {
   const { raw, deps, calls } = await fixture();
   const meeting = await createVerifiedFounderMeeting(bookingInput(), deps);
   assert.equal(calls.created, 1);
+  assert.deepEqual(calls.createdDurations, [15]);
   const row = await appointment(raw, meeting.appointmentId);
   assert.equal(row.organizer_email_snapshot, ORGANIZER);
   assert.equal(row.confirmed_by, ACTOR);
@@ -296,6 +308,122 @@ async function testCreateAuditAndFullIdempotency() {
   await assert.rejects(
     createVerifiedFounderMeeting({ ...bookingInput(), smsConsent: false }, deps),
     /booking_request_mismatch/,
+  );
+  await raw.close();
+}
+
+async function testCreatePreservesCustomDuration() {
+  const { raw, deps, calls } = await fixture();
+  const meeting = await createVerifiedFounderMeeting({
+    ...bookingInput("book-request-45"),
+    durationMinutes: 45,
+    offerLabel: "COMMAND discovery call",
+  }, deps);
+  const row = await appointment(raw, meeting.appointmentId);
+  assert.equal(Number(row.duration_minutes), 45);
+  assert.equal(meeting.durationMinutes, 45);
+  assert.equal(meeting.offerLabel, "COMMAND discovery call");
+  assert.equal(row.offer_label, "COMMAND discovery call");
+  assert.deepEqual(calls.createdDurations, [45]);
+  assert.deepEqual(calls.createdOfferLabels, ["COMMAND discovery call"]);
+  await raw.close();
+}
+
+async function testReceiptWriteCompensationInvalidatesTheRequestId() {
+  const { raw, deps, calls } = await fixture();
+  await raw.execute(`CREATE TRIGGER reject_verified_receipt_once
+    BEFORE UPDATE ON call_appointments
+    WHEN OLD.booking_request_id = 'book-receipt-failure'
+      AND OLD.calendar_status = 'creating'
+      AND NEW.calendar_status = 'verified'
+    BEGIN SELECT RAISE(ABORT, 'receipt-write-failure'); END`);
+  const input = bookingInput("book-receipt-failure");
+  await assert.rejects(
+    createVerifiedFounderMeeting(input, deps),
+    /booking_compensated:meeting_receipt_write_failed/,
+  );
+  assert.deepEqual(calls.cancelled, ["event12345"], "the provider invite is rolled back");
+  const cancelled = await raw.execute({
+    sql: "SELECT status, workflow_status, calendar_status FROM call_appointments WHERE booking_request_id = ?",
+    args: ["book-receipt-failure"],
+  });
+  assert.deepEqual(
+    { ...cancelled.rows[0] },
+    { status: "cancelled", workflow_status: "cancelled", calendar_status: "cancelled" },
+  );
+  await assert.rejects(
+    createVerifiedFounderMeeting(input, deps),
+    /booking_request_cancelled/,
+    "a lost retry_required response remains classifiable on the next request",
+  );
+  await raw.close();
+}
+
+async function testPendingBookingCompensationCancelsProviderAndMirror() {
+  const { raw, deps, calls } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-pending-compensation",
+    pendingRequestId: "book-pending-compensation",
+    pendingOperation: "book",
+    pendingMeetingAt: FUTURE,
+    pendingStartedAt: "2026-09-01T13:59:00.000Z",
+    pendingLeaseToken: "pending-worker",
+    workflowStatus: "pending_transition",
+  });
+  await raw.execute({
+    sql: "INSERT INTO calendar_events (id, tenant_id, appointment_id) VALUES (?, ?, ?)",
+    args: ["mirror-pending", TENANT, "meeting-pending-compensation"],
+  });
+  await compensatePendingFounderMeetingBooking({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: "meeting-pending-compensation",
+    requestId: "book-pending-compensation",
+  }, deps);
+  assert(calls.cancelled.includes("event-meeting-pending-compensation"));
+  assert.equal((await appointment(raw, "meeting-pending-compensation")).workflow_status, "cancelled");
+  const mirrors = await raw.execute({
+    sql: "SELECT COUNT(*) AS n FROM calendar_events WHERE appointment_id = ?",
+    args: ["meeting-pending-compensation"],
+  });
+  assert.equal(Number(mirrors.rows[0].n), 0);
+  await raw.close();
+}
+
+async function testCompensationStaysDurableWhenMirrorCleanupFails() {
+  const { raw, deps } = await fixture();
+  const input = bookingInput("book-cleanup-failure");
+  const meeting = await createVerifiedFounderMeeting(input, deps);
+  await raw.execute({
+    sql: "INSERT INTO calendar_events (id, tenant_id, appointment_id) VALUES (?, ?, ?)",
+    args: ["mirror-cleanup-failure", TENANT, meeting.appointmentId],
+  });
+  await raw.execute(`CREATE TRIGGER reject_compensated_mirror_delete
+    BEFORE DELETE ON calendar_events
+    WHEN OLD.appointment_id = '${meeting.appointmentId}'
+    BEGIN SELECT RAISE(ABORT, 'mirror-cleanup-failure'); END`);
+  const logs: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => { logs.push(args); };
+  try {
+    await compensatePendingFounderMeetingBooking({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: meeting.appointmentId,
+      requestId: input.requestId,
+    }, deps);
+  } finally {
+    console.error = originalConsoleError;
+  }
+  const row = await appointment(raw, meeting.appointmentId);
+  assert.equal(row.status, "cancelled");
+  assert.equal(row.workflow_status, "cancelled");
+  assert.equal(row.calendar_status, "cancelled");
+  assert.match(JSON.stringify(logs), /mirror cleanup failed/);
+  await assert.rejects(
+    createVerifiedFounderMeeting(input, deps),
+    /booking_request_cancelled/,
+    "best-effort cleanup cannot resurrect a provider-cancelled receipt",
   );
   await raw.close();
 }
@@ -885,12 +1013,21 @@ async function testSagaReconciliation() {
     pendingStartedAt: "2026-09-01T13:30:00.000Z", pendingLeaseToken: "book-orphan-worker",
     workflowStatus: "pending_transition",
   });
+  await raw.execute({
+    sql: "INSERT INTO calendar_events (id, tenant_id, appointment_id) VALUES (?, ?, ?)",
+    args: ["mirror-orphan", TENANT, "meeting-book-orphan"],
+  });
   const compensated = await reconcileFounderMeetingSagas({
     tenantId: TENANT, now: new Date(NOW), staleAfterMs: 60_000,
   }, deps);
   assert.equal(compensated.cancelled, 1);
   assert(calls.cancelled.includes("event-meeting-book-orphan"));
   assert.equal((await appointment(raw, "meeting-book-orphan")).workflow_status, "cancelled");
+  const orphanMirrors = await raw.execute({
+    sql: "SELECT COUNT(*) AS n FROM calendar_events WHERE appointment_id = ?",
+    args: ["meeting-book-orphan"],
+  });
+  assert.equal(Number(orphanMirrors.rows[0].n), 0);
 
   await insertVerifiedAppointment(raw, {
     id: "meeting-reschedule-orphan", scheduledFor: LATER, revision: 2,
@@ -1100,6 +1237,10 @@ async function main() {
   testBackfillChunkRotatesBeyondFirstFiveHundred();
   testConsentReplayErrorResponseClassification();
   await testCreateAuditAndFullIdempotency();
+  await testCreatePreservesCustomDuration();
+  await testReceiptWriteCompensationInvalidatesTheRequestId();
+  await testPendingBookingCompensationCancelsProviderAndMirror();
+  await testCompensationStaysDurableWhenMirrorCleanupFails();
   await testBackfillHydratesLatePhoneAndRepairsTiers();
   await testBackfillLimitScansPastAlreadyCompleteAppointments();
   await testBackfillLimitIsGlobalAcrossTenants();

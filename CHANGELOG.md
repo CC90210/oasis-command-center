@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-12 — OASIS funnel capture and inline founder booking
+
+### Added
+- AI Audit, COMMAND, and FLEET funnel completions can reveal live CC-and-Adon availability inline, create a verified Google Meet event, and mirror the appointment into Command Center Schedule.
+- Funnel submissions now carry explicit `inbound_lead`, `audit_requested`, and `meeting_booked` lifecycle receipts, plus durable Sales events and `calendar_booking` interactions.
+- Turso migrations `bravo__222` and `bravo__223` link Schedule rows to their provider receipt and serialize every active OASIS founder interval, including overlapping 45-minute calls on the 30-minute grid.
+
+### Fixed
+- Public funnel answers now normalize revenue band, website, team size, bottleneck, and current tools into the CRM lead record and expose them in Pipeline detail.
+- The audit form includes current tools, `/vsl` resolves to the live OASIS router, and the unbooked community fallback keeps its tracked save-basin event.
+- Public booking duration now follows the offer: 15 minutes for AI Audit and 45 minutes for COMMAND/FLEET discovery calls.
+
 ## 2026-09-16 — Complete automation inventory and verified controls
 
 ### Added

@@ -28,7 +28,7 @@ async function main() {
   await seed.batch([
     {
       sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
-      args: [LEAD, OASIS, JSON.stringify({ stage: "researched", status: "open", company: "Acme" })],
+      args: [LEAD, OASIS, JSON.stringify({ stage: "researched", status: "open", company: "Acme", funnel_stage: "meeting_booked" })],
     },
     {
       sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
@@ -92,6 +92,7 @@ async function main() {
     assert.equal(data.stage, "researched");
     assert.equal(data.status, "open");
     assert.ok(data.ai_audit_scored_at);
+    assert.equal(data.funnel_stage, "meeting_booked", "late score repair cannot downgrade a booked lead");
   });
 
   await check("repeat ingestion repairs the canonical score but never duplicates the timeline", async () => {
@@ -286,6 +287,7 @@ async function main() {
     assert.match(route, /repStartsWarmWork[\s\S]{0,300}stage:\s*repStartsWarmWork\s*\?\s*"assigned"/);
     const config = readFileSync(join(ROOT, "next.config.js"), "utf8");
     assert.match(config, /source:\s*["']\/ai-audit["'][\s\S]{0,180}destination:\s*["']\/f\/oasis-ai-cc\/ai-audit["'][\s\S]{0,80}permanent:\s*true/);
+    assert.match(config, /source:\s*["']\/vsl["'][\s\S]{0,180}destination:\s*["']\/f\/oasis-ai-cc\/vsl["'][\s\S]{0,80}permanent:\s*true/);
   });
 
   await check("the Pipeline exposes a warm-inbound queue without the cold assignment-cycle filter", async () => {
