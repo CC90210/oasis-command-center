@@ -126,6 +126,11 @@ stub("next/link", {
 // Client components (they cannot load under react-server). The trees under
 // test only mount them, and their props are what is asserted.
 const Mounted = (name: string) => Object.assign((_props: Record<string, unknown>) => null, { displayName: name });
+// app/layout.tsx owns the public-funnel Google tag through Next's Script
+// component. This suite exercises shell selection under the react-server
+// export condition, where importing Next's client Script runtime is invalid;
+// its rendered output is unrelated to the shell assertions below.
+stub("next/script", { __esModule: true, default: Mounted("Script") });
 const SidebarShell = Mounted("SidebarShell");
 const MainShell = Mounted("MainShell");
 const CustomAgentBuilder = Mounted("CustomAgentBuilder");
