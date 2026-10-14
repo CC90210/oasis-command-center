@@ -362,6 +362,7 @@ async function existingPayoutEntry(row: PayoutRow): Promise<{ entry_id: string; 
  * that entry first).
  */
 async function adoptExistingBooking(row: PayoutRow): Promise<PayoutOutcome | null> {
+  if (row.stripe_status !== "paid") return null;
   const fed = await bankFeedBooking(row.id);
   const found = fed
     ? { entryId: fed.entry_id, accountId: fed.account_id, reason: "booked from its Wise bank line" }
@@ -371,7 +372,8 @@ async function adoptExistingBooking(row: PayoutRow): Promise<PayoutOutcome | nul
   if (!found) return null;
   const upd = await finDb().execute({
     sql: `UPDATE fin_stripe_payouts SET booking = 'booked', entry_id = ?, bank_account_id = ?, reason = ?, updated_at = ${NOW_SQL}
-           WHERE id = ? AND booking IN ('held', 'unmapped') AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts o WHERE o.entry_id = ? AND o.id <> ?)`,
+           WHERE id = ? AND stripe_status = 'paid' AND booking IN ('held', 'unmapped')
+             AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts o WHERE o.entry_id = ? AND o.id <> ?)`,
     args: [found.entryId, found.accountId, found.reason, row.id, found.entryId, row.id],
   });
   if (upd.rowsAffected !== 1) return null;
@@ -503,7 +505,8 @@ async function entryPosted(entryId: string | null): Promise<boolean> {
 /** Back to held, still naming the entry that was undone (so bookPayout never posts it from Stripe). */
 async function reopenUndoneBooking(row: PayoutRow): Promise<PayoutRow> {
   await finDb().execute({
-    sql: `UPDATE fin_stripe_payouts SET booking = 'held', reason = ?, updated_at = ${NOW_SQL} WHERE id = ? AND ${UNDONE_WHERE}`,
+    sql: `UPDATE fin_stripe_payouts SET booking = 'held', reason = ?, updated_at = ${NOW_SQL}
+           WHERE id = ? AND stripe_status = 'paid' AND ${UNDONE_WHERE}`,
     args: [UNDONE_REASON, row.id],
   });
   return (await loadPayout(row.id)) ?? row;
@@ -511,12 +514,15 @@ async function reopenUndoneBooking(row: PayoutRow): Promise<PayoutRow> {
 
 async function setUnbooked(id: string, booking: "held" | "unmapped", reason: string): Promise<void> {
   await finDb().execute({
-    sql: `UPDATE fin_stripe_payouts SET booking = ?, reason = ?, updated_at = ${NOW_SQL} WHERE id = ? AND booking IN ('held', 'unmapped')`,
+    sql: `UPDATE fin_stripe_payouts SET booking = ?, reason = ?, updated_at = ${NOW_SQL}
+           WHERE id = ? AND stripe_status = 'paid' AND booking IN ('held', 'unmapped')`,
     args: [booking, reason.slice(0, 500), id],
   });
 }
 
-async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
+async function bookPayout(row: PayoutRow, retrySettingChange = true): Promise<PayoutOutcome> {
+  row = (await loadPayout(row.id)) ?? row;
+  if (row.stripe_status !== "paid") return outcomeOf(row);
   // Booked from a bank line whose entry was reversed since: a gap again (UNDONE_REASON).
   if (row.booking === "booked" && !(await entryPosted(row.entry_id))) row = await reopenUndoneBooking(row);
   if (row.booking !== "held" && row.booking !== "unmapped") return outcomeOf(row);
@@ -576,10 +582,14 @@ async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
   // its Wise tag or its shape): one that did is adopted below instead.
   const fixedRates = rate ? { USD: rate.rate } : undefined;
   const gate = {
-    sql: `(SELECT booking FROM fin_stripe_payouts WHERE id = ?) IN ('held', 'unmapped')
+    sql: `EXISTS (
+            SELECT 1 FROM fin_stripe_payouts
+             WHERE id = ? AND stripe_status = 'paid' AND booking IN ('held', 'unmapped')
+          )
+          AND (SELECT stripe_payout_account_id FROM fin_settings WHERE entity_id = ?) IS ?
           AND NOT EXISTS (SELECT 1 FROM fin_bank_transactions t WHERE ${BANK_LINE_WHERE})
           AND NOT EXISTS (SELECT 1 FROM fin_journal_entries e WHERE ${SHAPE_WHERE})`,
-    args: [id, ...bankLineArgs(id), ...shapeArgs(row)],
+    args: [id, E, bank.id, ...bankLineArgs(id), ...shapeArgs(row)],
   };
   const statements: InStatement[] = [];
   try {
@@ -613,8 +623,10 @@ async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
       ...posting.statements,
       {
         sql: `UPDATE fin_stripe_payouts SET booking = 'booked', entry_id = ?, bank_account_id = ?, reason = NULL, updated_at = ${NOW_SQL}
-               WHERE id = ? AND booking IN ('held', 'unmapped') AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
-        args: [posting.entryId, bank.id, id, posting.entryId],
+               WHERE id = ? AND stripe_status = 'paid' AND booking IN ('held', 'unmapped')
+                 AND (SELECT stripe_payout_account_id FROM fin_settings WHERE entity_id = ?) IS ?
+                 AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+        args: [posting.entryId, bank.id, id, E, bank.id, posting.entryId],
       },
       auditIfPosted(posting.entryId, "stripe.payout_booked", id, {
         entry: posting.entryId,
@@ -642,29 +654,51 @@ async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
   }
   const after = (await loadPayout(id)) ?? row;
   // The gate refused because a bank line booked it between the check and the write: adopt that line's entry.
-  if (after.booking === "held" || after.booking === "unmapped") return (await adoptExistingBooking(after)) ?? outcomeOf(after);
+  if (after.booking === "held" || after.booking === "unmapped") {
+    const adopted = await adoptExistingBooking(after);
+    if (adopted) return adopted;
+    if (after.stripe_status === "paid" && retrySettingChange) {
+      const currentBank = await payoutBankAccount();
+      if (currentBank.id !== bank.id) return bookPayout(after, false);
+    }
+  }
   return outcomeOf(after);
 }
 
 async function unbookPayout(row: PayoutRow, reportedOn: string): Promise<PayoutOutcome> {
   const id = row.id;
+  row = (await loadPayout(id)) ?? row;
   const status = row.stripe_status;
+  if (status !== "failed" && status !== "canceled") return outcomeOf(row);
   if (row.booking === "held" || row.booking === "unmapped") {
     await finDb().execute({
-      sql: `UPDATE fin_stripe_payouts SET booking = 'not_booked', reason = ?, updated_at = ${NOW_SQL} WHERE id = ? AND booking IN ('held', 'unmapped')`,
+      sql: `UPDATE fin_stripe_payouts SET booking = 'not_booked', reason = ?, updated_at = ${NOW_SQL}
+             WHERE id = ? AND stripe_status IN ('failed', 'canceled') AND booking IN ('held', 'unmapped')`,
       args: [`Stripe reports this payout ${status}; nothing was booked`, id],
     });
-  } else if (row.booking === "booked" && row.entry_id) {
+    // A paid-event booking may have won between the read and this CAS. Reload
+    // and reverse it below instead of returning a failed-but-booked payout.
+    row = (await loadPayout(id)) ?? row;
+  }
+  if (row.booking === "booked" && row.entry_id) {
     const entry = await queryOne<{ source: string; status: string }>(`SELECT source, status FROM fin_journal_entries WHERE id = ? AND entity_id = ?`, [row.entry_id, E]);
     if (entry?.source === PAYOUT_SOURCE && entry.status === "posted") {
-      const reversal = await buildReversal({ entityId: E, entryId: row.entry_id, date: reportedOn, memo: `Stripe payout ${id} ${status}: reversed`, createdBy: ACTOR });
+      const gate = {
+        sql: `EXISTS (
+          SELECT 1 FROM fin_stripe_payouts
+           WHERE id = ? AND stripe_status IN ('failed', 'canceled') AND booking = 'booked' AND entry_id = ?
+        )`,
+        args: [id, row.entry_id],
+      };
+      const reversal = await buildReversal({ entityId: E, entryId: row.entry_id, date: reportedOn, memo: `Stripe payout ${id} ${status}: reversed`, createdBy: ACTOR, gate });
       try {
         await writeBatch([
           ...reversal.statements,
           {
             sql: `UPDATE fin_stripe_payouts SET booking = 'reversed', reversal_entry_id = ?, reason = ?, updated_at = ${NOW_SQL}
-                   WHERE id = ? AND booking = 'booked' AND entry_id = ?`,
-            args: [reversal.entryId, `Stripe reported this payout ${status} on ${reportedOn}; its booking was reversed`, id, row.entry_id],
+                   WHERE id = ? AND stripe_status IN ('failed', 'canceled') AND booking = 'booked' AND entry_id = ?
+                     AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+            args: [reversal.entryId, `Stripe reported this payout ${status} on ${reportedOn}; its booking was reversed`, id, row.entry_id, reversal.entryId],
           },
           auditIfPosted(reversal.entryId, "stripe.payout_reversed", id, { entry: row.entry_id, reversal: reversal.entryId, status }),
         ]);
@@ -675,8 +709,9 @@ async function unbookPayout(row: PayoutRow, reportedOn: string): Promise<PayoutO
       // Booked from its Wise bank line: the bank shows the money coming back
       // as its own line, so nothing is reversed here.
       await finDb().execute({
-        sql: `UPDATE fin_stripe_payouts SET reason = ?, updated_at = ${NOW_SQL} WHERE id = ? AND booking = 'booked'`,
-        args: [`Stripe reports this payout ${status} after its bank line was booked; the bank shows it returned`, id],
+        sql: `UPDATE fin_stripe_payouts SET reason = ?, updated_at = ${NOW_SQL}
+               WHERE id = ? AND stripe_status IN ('failed', 'canceled') AND booking = 'booked' AND entry_id = ?`,
+        args: [`Stripe reports this payout ${status} after its bank line was booked; the bank shows it returned`, id, row.entry_id],
       });
     }
   }

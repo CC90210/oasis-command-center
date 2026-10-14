@@ -6,8 +6,8 @@ import "server-only";
 
 import { validateRegistration } from "./tax";
 import { sanitizePrefix } from "./invoice";
-import { isIsoDate } from "./fx";
-import { auditStatement, queryOne, writeBatch } from "./db";
+import { isIsoDate, torontoToday } from "./fx";
+import { auditStatement, newId, query, queryOne, writeBatch } from "./db";
 import { requireEntity, FinanceInputError } from "./access-io";
 import { viewerLabel, type FinanceViewer } from "./access";
 import { stripeConnectionStatus } from "./stripe-io";
@@ -77,13 +77,28 @@ export async function updateSettings(viewer: FinanceViewer, entityRef: string, r
   const legalName = raw.legal_name === undefined ? cur.legal_name : text(raw.legal_name, 200);
   if (!legalName) throw new FinanceInputError("legal name is required");
   const pick = (k: keyof SettingsRow, max: number) => (raw[k] === undefined ? (cur[k] as string) : text(raw[k], max));
-  await writeBatch([
+  const invoicePrefix = raw.invoice_prefix === undefined ? cur.invoice_prefix : sanitizePrefix(text(raw.invoice_prefix, 20));
+  if (raw.invoice_next_number !== undefined && raw.invoice_next_number !== "") {
+    const sequenceYear = cur.invoice_number_year ?? Number(torontoToday().slice(0, 4));
+    const prefix = `${invoicePrefix}-${sequenceYear}-`;
+    const issued = await query<{ number: string }>(`SELECT number FROM fin_invoices WHERE entity_id = ? AND number LIKE ?`, [entity.id, `${prefix}%`]);
+    const maxIssued = issued.reduce((max, row) => {
+      const tail = row.number.startsWith(prefix) ? row.number.slice(prefix.length) : "";
+      return /^\d+$/.test(tail) ? Math.max(max, Number(tail)) : max;
+    }, 0);
+    if (nextNumber <= maxIssued) {
+      throw new FinanceInputError(`next invoice number must be at least ${maxIssued + 1}; ${invoicePrefix}-${sequenceYear}-${String(maxIssued).padStart(4, "0")} was already issued`);
+    }
+  }
+  const auditId = newId("aud");
+  const out = await writeBatch([
     {
       sql: `UPDATE fin_settings SET legal_name = ?, address_line1 = ?, address_line2 = ?, city = ?, region = ?, postal_code = ?,
                    country = ?, contact_email = ?, gst_qst_registered = ?, gst_number = ?, qst_number = ?,
                    registration_effective_date = ?, invoice_prefix = ?, invoice_next_number = ?, payment_terms_days = ?,
                    payment_instructions = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_by = ?
-             WHERE entity_id = ?`,
+             WHERE entity_id = ? AND updated_at = ? AND invoice_prefix = ?
+               AND invoice_next_number = ? AND invoice_number_year IS ?`,
       args: [
         legalName,
         pick("address_line1", 200),
@@ -97,23 +112,31 @@ export async function updateSettings(viewer: FinanceViewer, entityRef: string, r
         reg.gstNumber,
         reg.qstNumber,
         effective,
-        raw.invoice_prefix === undefined ? cur.invoice_prefix : sanitizePrefix(text(raw.invoice_prefix, 20)),
+        invoicePrefix,
         nextNumber,
         terms,
         raw.payment_instructions === undefined ? cur.payment_instructions : text(raw.payment_instructions, 1000),
         viewerLabel(viewer),
         entity.id,
+        cur.updated_at,
+        cur.invoice_prefix,
+        cur.invoice_next_number,
+        cur.invoice_number_year,
       ],
     },
-    auditStatement({
-      entityId: entity.id,
-      actor: viewerLabel(viewer),
-      action: "settings.updated",
-      objectType: "settings",
-      objectId: entity.id,
-      detail: { registered, registration_changed: registered !== (cur.gst_qst_registered === 1) },
-    }),
+    {
+      sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+            SELECT ?, ?, ?, 'settings.updated', 'settings', ?, ? WHERE changes() = 1`,
+      args: [
+        auditId,
+        entity.id,
+        viewerLabel(viewer).slice(0, 200),
+        entity.id,
+        JSON.stringify({ registered, registration_changed: registered !== (cur.gst_qst_registered === 1) }),
+      ],
+    },
   ]);
+  if (out[0]?.rowsAffected !== 1) throw new FinanceInputError("settings changed while you were saving; reload and try again");
   return loadSettings(entity.id);
 }
 

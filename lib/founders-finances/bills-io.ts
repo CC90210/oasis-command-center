@@ -41,7 +41,7 @@ import { parseMoneyToCents } from "./money";
 import { ownerParity, type EquityEvent } from "./parity";
 import { validateBillInput, validateEquityInput } from "./validation";
 import { viewerLabel, type FinanceViewer } from "./access";
-import { auditStatement, newId, query, queryOne, writeBatch, type InStatement } from "./db";
+import { auditStatement, isUniqueViolation, newId, query, queryOne, writeBatch, type InStatement } from "./db";
 import {
   FinanceInputError,
   FinanceNotFound,
@@ -53,6 +53,7 @@ import {
 } from "./access-io";
 import { buildPosting, buildReversal } from "./ledger-io";
 import { loadSettings } from "./settings-io";
+import { taxRegistrationAppliesOn } from "./tax";
 import type { JournalLineInput } from "./ledger";
 
 export type BillRow = {
@@ -129,8 +130,35 @@ export async function listBills(viewer: FinanceViewer, entityRef: string) {
   );
 }
 
-export async function createBill(viewer: FinanceViewer, entityRef: string, raw: Record<string, unknown>): Promise<string> {
-  const entity = await requireEntity(viewer, entityRef);
+function conditionalAudit(
+  input: { entityId: string; actor: string; action: string; objectType: string; objectId: string; detail?: Record<string, unknown> },
+  gate: { sql: string; args: Array<string | number | null> },
+): InStatement {
+  return {
+    sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+          SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${gate.sql}`,
+    args: [
+      newId("aud"),
+      input.entityId,
+      input.actor.slice(0, 200),
+      input.action,
+      input.objectType,
+      input.objectId,
+      JSON.stringify(input.detail || {}).slice(0, 8000),
+      ...gate.args,
+    ],
+  };
+}
+
+type PreparedBill = { id: string; statements: InStatement[] };
+
+/** Build a bill and its posting without writing, so recurring can add its schedule CAS to the same transaction. */
+async function prepareBill(
+  viewer: FinanceViewer,
+  entity: EntityRow,
+  raw: Record<string, unknown>,
+  options: { source?: string; sourceRef?: string | null; gate?: { sql: string; args: Array<string | number | null> } } = {},
+): Promise<PreparedBill> {
   const v = validateBillInput(raw);
   if (!v.ok) throw new FinanceInputError(v.error);
   const input = v.value;
@@ -138,7 +166,7 @@ export async function createBill(viewer: FinanceViewer, entityRef: string, raw: 
   const category = await requireCategoryOf(entity.id, input.categoryId);
   if (category.kind !== "expense") throw new FinanceInputError("choose an expense category");
   const settings = await loadSettings(entity.id);
-  const registered = entity.kind === "business" && settings.gst_qst_registered === 1;
+  const registered = entity.kind === "business" && taxRegistrationAppliesOn(input.billDate, settings);
   const taxTotal = input.gstCents + input.qstCents;
   const total = input.subtotalCents + taxTotal;
   const lines: JournalLineInput[] = [
@@ -153,20 +181,25 @@ export async function createBill(viewer: FinanceViewer, entityRef: string, raw: 
   } else creditAccount = accountId(entity.id, SYS.ap);
   lines.push({ accountId: creditAccount, currency: input.currency, creditCents: total, memo: input.vendorName });
   const id = newId("bill");
+  const actor = viewerLabel(viewer);
   const posting = await buildPosting({
     entityId: entity.id,
     entryDate: input.billDate,
     memo: `${input.kind === "bill" ? "Bill" : "Expense"}: ${input.vendorName}`,
     source: input.kind,
     sourceRef: id,
-    createdBy: viewerLabel(viewer),
+    createdBy: actor,
+    gate: { sql: `EXISTS (SELECT 1 FROM fin_bills WHERE id = ?)`, args: [id] },
     lines,
   });
+  const source = options.source ?? "manual";
+  const sourceRef = options.sourceRef ?? null;
+  const insertGate = options.gate ? ` WHERE (${options.gate.sql})` : "";
   const statements: InStatement[] = [
     {
       sql: `INSERT INTO fin_bills (id, entity_id, kind, contact_id, vendor_name, reference, bill_date, due_date, currency, subtotal_cents, gst_cents,
-              qst_cents, total_cents, status, paid_at, paid_from_account_id, memo, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              qst_cents, total_cents, status, paid_at, paid_from_account_id, memo, source, source_ref, created_by)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${insertGate}`,
       args: [
         id,
         entity.id,
@@ -185,19 +218,33 @@ export async function createBill(viewer: FinanceViewer, entityRef: string, raw: 
         input.kind === "expense" ? input.billDate : null,
         input.kind === "expense" ? creditAccount : null,
         input.memo,
-        viewerLabel(viewer),
+        source,
+        sourceRef,
+        actor,
+        ...(options.gate?.args || []),
       ],
     },
     {
-      sql: `INSERT INTO fin_bill_lines (id, bill_id, line_no, description, account_id, amount_cents) VALUES (?, ?, 1, ?, ?, ?)`,
-      args: [newId("bl"), id, input.memo || input.vendorName, category.account_id, registered ? input.subtotalCents : total],
+      sql: `INSERT INTO fin_bill_lines (id, bill_id, line_no, description, account_id, amount_cents)
+            SELECT ?, ?, 1, ?, ?, ? WHERE EXISTS (SELECT 1 FROM fin_bills WHERE id = ?)`,
+      args: [newId("bl"), id, input.memo || input.vendorName, category.account_id, registered ? input.subtotalCents : total, id],
     },
     ...posting.statements,
-    { sql: `UPDATE fin_bills SET entry_id = ? WHERE id = ?`, args: [posting.entryId, id] },
-    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: `${input.kind}.created`, objectType: "bill", objectId: id, detail: { total, currency: input.currency } }),
+    { sql: `UPDATE fin_bills SET entry_id = ? WHERE id = ? AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`, args: [posting.entryId, id, posting.entryId] },
+    conditionalAudit(
+      { entityId: entity.id, actor, action: `${input.kind}.created`, objectType: "bill", objectId: id, detail: { total, currency: input.currency } },
+      { sql: `EXISTS (SELECT 1 FROM fin_bills WHERE id = ? AND entry_id = ?)`, args: [id, posting.entryId] },
+    ),
   ];
-  await writeBatch(statements);
-  return id;
+  return { id, statements };
+}
+
+export async function createBill(viewer: FinanceViewer, entityRef: string, raw: Record<string, unknown>): Promise<string> {
+  const entity = await requireEntity(viewer, entityRef);
+  const prepared = await prepareBill(viewer, entity, raw);
+  const out = await writeBatch(prepared.statements);
+  if (out[0]?.rowsAffected !== 1) throw new FinanceInputError("the bill could not be created; reload and try again");
+  return prepared.id;
 }
 
 export async function payBill(viewer: FinanceViewer, billId: string, raw: Record<string, unknown>): Promise<void> {
@@ -213,6 +260,14 @@ export async function payBill(viewer: FinanceViewer, billId: string, raw: Record
   const from = { id: (await resolvePaidFrom(entity, ref)).accountId };
   const date = typeof raw.date === "string" && raw.date ? raw.date : torontoToday();
   if (!isIsoDate(date)) throw new FinanceInputError("date must be YYYY-MM-DD");
+  const snapshot = {
+    sql: `EXISTS (
+      SELECT 1 FROM fin_bills
+       WHERE id = ? AND entity_id = ? AND kind = 'bill' AND status = 'open'
+         AND entry_id IS ? AND payment_entry_id IS ? AND total_cents = ? AND currency = ?
+    )`,
+    args: [bill.id, entity.id, bill.entry_id, bill.payment_entry_id, bill.total_cents, bill.currency],
+  };
   const posting = await buildPosting({
     entityId: entity.id,
     entryDate: date,
@@ -220,20 +275,28 @@ export async function payBill(viewer: FinanceViewer, billId: string, raw: Record
     source: "bill_payment",
     sourceRef: bill.id,
     createdBy: viewerLabel(viewer),
-    gate: { sql: `(SELECT status FROM fin_bills WHERE id = ?) = 'open'`, args: [bill.id] },
+    gate: snapshot,
     lines: [
       { accountId: accountId(entity.id, SYS.ap), currency: bill.currency, debitCents: bill.total_cents },
       { accountId: from.id, currency: bill.currency, creditCents: bill.total_cents },
     ],
   });
-  await writeBatch([
+  const updateIndex = posting.statements.length;
+  const out = await writeBatch([
     ...posting.statements,
     {
-      sql: `UPDATE fin_bills SET status = 'paid', paid_at = ?, paid_from_account_id = ?, payment_entry_id = ? WHERE id = ? AND status = 'open' AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
-      args: [date, from.id, posting.entryId, bill.id, posting.entryId],
+      sql: `UPDATE fin_bills SET status = 'paid', paid_at = ?, paid_from_account_id = ?, payment_entry_id = ?
+             WHERE id = ? AND entity_id = ? AND kind = 'bill' AND status = 'open'
+               AND entry_id IS ? AND payment_entry_id IS ? AND total_cents = ? AND currency = ?
+               AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+      args: [date, from.id, posting.entryId, bill.id, entity.id, bill.entry_id, bill.payment_entry_id, bill.total_cents, bill.currency, posting.entryId],
     },
-    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "bill.paid", objectType: "bill", objectId: bill.id }),
+    conditionalAudit(
+      { entityId: entity.id, actor: viewerLabel(viewer), action: "bill.paid", objectType: "bill", objectId: bill.id, detail: { date, account_id: from.id } },
+      { sql: "changes() = 1", args: [] },
+    ),
   ]);
+  if (out[updateIndex]?.rowsAffected !== 1) throw new FinanceInputError("this bill changed while it was being paid; reload and try again");
 }
 
 export async function voidBill(viewer: FinanceViewer, billId: string): Promise<void> {
@@ -241,17 +304,49 @@ export async function voidBill(viewer: FinanceViewer, billId: string): Promise<v
   const bill = await queryOne<BillRow>(`SELECT * FROM fin_bills WHERE id = ?`, [billId]);
   if (!bill) throw new FinanceNotFound();
   if (bill.status === "void") return;
+  const snapshot = {
+    sql: `EXISTS (
+      SELECT 1 FROM fin_bills
+       WHERE id = ? AND entity_id = ? AND kind = ? AND status = ?
+         AND entry_id IS ? AND payment_entry_id IS ?
+    )`,
+    args: [bill.id, entity.id, bill.kind, bill.status, bill.entry_id, bill.payment_entry_id],
+  };
   const statements: InStatement[] = [];
+  const reversalEntryIds: string[] = [];
   for (const entryId of [bill.payment_entry_id, bill.entry_id]) {
     if (!entryId) continue;
-    const rev = await buildReversal({ entityId: entity.id, entryId, date: torontoToday(), memo: `Void ${bill.kind}: ${bill.vendor_name}`, createdBy: viewerLabel(viewer) });
+    const rev = await buildReversal({
+      entityId: entity.id,
+      entryId,
+      date: torontoToday(),
+      memo: `Void ${bill.kind}: ${bill.vendor_name}`,
+      createdBy: viewerLabel(viewer),
+      gate: snapshot,
+    });
     statements.push(...rev.statements);
+    reversalEntryIds.push(rev.entryId);
   }
+  const reversalsPresent = reversalEntryIds.map(() => "EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)").join(" AND ");
+  const updateIndex = statements.length;
   statements.push(
-    { sql: `UPDATE fin_bills SET status = 'void' WHERE id = ? AND status = ?`, args: [bill.id, bill.status] },
-    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "bill.voided", objectType: "bill", objectId: bill.id }),
+    {
+      sql: `UPDATE fin_bills SET status = 'void'
+             WHERE id = ? AND entity_id = ? AND kind = ? AND status = ?
+               AND entry_id IS ? AND payment_entry_id IS ?${reversalsPresent ? ` AND ${reversalsPresent}` : ""}`,
+      args: [bill.id, entity.id, bill.kind, bill.status, bill.entry_id, bill.payment_entry_id, ...reversalEntryIds],
+    },
+    conditionalAudit(
+      { entityId: entity.id, actor: viewerLabel(viewer), action: "bill.voided", objectType: "bill", objectId: bill.id },
+      { sql: "changes() = 1", args: [] },
+    ),
   );
-  await writeBatch(statements);
+  const out = await writeBatch(statements);
+  if (out[updateIndex]?.rowsAffected !== 1) {
+    const current = await queryOne<{ status: string }>(`SELECT status FROM fin_bills WHERE id = ?`, [bill.id]);
+    if (current?.status === "void") return;
+    throw new FinanceInputError("this bill changed while it was being voided; reload and try again");
+  }
 }
 
 // ── owner equity ─────────────────────────────────────────────────────────
@@ -577,7 +672,34 @@ export async function recordRecurringNow(viewer: FinanceViewer, itemId: string):
   if (!confirmed && entity.kind !== "business") {
     throw new FinanceInputError(`Confirm which account pays "${item.name}" first: a personal book records it as an expense paid from that account, never as a bill.`);
   }
-  const billId = await createBill(viewer, entity.id, {
+  const sourceRef = `${item.id}:${item.next_run_on}`;
+  const itemGate = {
+    sql: `EXISTS (
+      SELECT 1 FROM fin_recurring_items r
+       WHERE r.id = ? AND r.entity_id = ? AND r.active = 1
+         AND r.name = ? AND r.category_id = ? AND r.paid_from_account_id IS ?
+         AND r.amount_cents = ? AND r.currency = ? AND r.cadence = ? AND r.next_run_on = ?
+         AND (${CONFIRMED_ACCOUNT_SQL}) IS ?
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM fin_bills WHERE entity_id = ? AND source = 'recurring' AND source_ref = ?
+    )`,
+    args: [
+      item.id,
+      entity.id,
+      item.name,
+      item.category_id,
+      item.paid_from_account_id,
+      item.amount_cents,
+      item.currency,
+      item.cadence,
+      item.next_run_on,
+      item.confirmed_account_id,
+      entity.id,
+      sourceRef,
+    ],
+  };
+  const prepared = await prepareBill(viewer, entity, {
     kind: confirmed ? "expense" : "bill",
     vendor_name: item.name,
     bill_date: item.next_run_on,
@@ -587,10 +709,27 @@ export async function recordRecurringNow(viewer: FinanceViewer, itemId: string):
     category_id: item.category_id,
     paid_from_account_id: confirmed ? item.paid_from_account_id : null,
     memo: `Recurring (${item.cadence})`,
-  });
-  await writeBatch([
-    { sql: `UPDATE fin_bills SET source = 'recurring', source_ref = ? WHERE id = ?`, args: [`${item.id}:${item.next_run_on}`, billId] },
-    { sql: `UPDATE fin_recurring_items SET next_run_on = ? WHERE id = ? AND next_run_on = ?`, args: [advanceDate(item.next_run_on, item.cadence), item.id, item.next_run_on] },
-  ]);
-  return billId;
+  }, { source: "recurring", sourceRef, gate: itemGate });
+  try {
+    const out = await writeBatch([
+      ...prepared.statements,
+      {
+        sql: `UPDATE fin_recurring_items SET next_run_on = ?
+               WHERE id = ? AND entity_id = ? AND active = 1 AND next_run_on = ?
+                 AND EXISTS (SELECT 1 FROM fin_bills WHERE id = ? AND entity_id = ? AND source = 'recurring' AND source_ref = ?)`,
+        args: [advanceDate(item.next_run_on, item.cadence), item.id, entity.id, item.next_run_on, prepared.id, entity.id, sourceRef],
+      },
+    ]);
+    if (out[0]?.rowsAffected === 1) return prepared.id;
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    // A concurrent materializer may have won the unique (item, due date)
+    // claim. Its transaction is complete before this lookup.
+  }
+  const concurrent = await queryOne<{ id: string }>(
+    `SELECT id FROM fin_bills WHERE entity_id = ? AND source = 'recurring' AND source_ref = ?`,
+    [entity.id, sourceRef],
+  );
+  if (concurrent) return concurrent.id;
+  throw new FinanceInputError("this recurring item changed while it was being recorded; reload and try again");
 }

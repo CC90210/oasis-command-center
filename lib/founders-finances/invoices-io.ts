@@ -60,7 +60,7 @@ import {
 } from "./invoice";
 import { isIsoDate, torontoToday, usdToCadCents } from "./fx";
 import { formatCents, parseMoneyToCents } from "./money";
-import { validateRegistration } from "./tax";
+import { taxRegistrationAppliesOn, validateRegistration } from "./tax";
 import { viewerLabel, type FinanceViewer } from "./access";
 import { auditStatement, finDb, isUniqueViolation, newId, query, queryOne, writeBatch, type InStatement } from "./db";
 import { FinanceInputError, FinanceNotFound, requireEntity, requireRowEntity, type EntityRow } from "./access-io";
@@ -397,7 +397,8 @@ export async function createDraftInvoice(viewer: FinanceViewer, entityRef: strin
   businessOnly(entity);
   const input = await parseDraftInput(entity, raw, viewer);
   const settings = await loadSettings(entity.id);
-  const totals = draftTotals(input.lines, settings.gst_qst_registered === 1);
+  const registered = taxRegistrationAppliesOn(input.issueDate, settings);
+  const totals = draftTotals(input.lines, registered);
   const id = newId("inv");
   const method = input.paymentMethod ?? ((await paymentMethodColumnReady()) ? DEFAULT_NEW_INVOICE_METHOD : null);
   const retainerReady = await retainerReadyFor(input.lines);
@@ -411,7 +412,7 @@ export async function createDraftInvoice(viewer: FinanceViewer, entityRef: strin
                SELECT 1 FROM fin_contacts
                 WHERE id = ? AND entity_id = ? AND archived = 0 AND kind IN ('customer', 'both')
              )`,
-      args: [id, entity.id, input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, viewerLabel(viewer), input.contactId, entity.id],
+      args: [id, entity.id, input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, registered ? 1 : 0, input.notes, viewerLabel(viewer), input.contactId, entity.id],
     },
     ...(await paymentMethodStatement(id, method)),
     ...retainerStatement(id, totals, retainerReady),
@@ -434,7 +435,8 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
   assertNoUnresolvedInvoiceEmail(inv, "edited");
   const input = await parseDraftInput(entity, raw, viewer);
   const settings = await loadSettings(entity.id);
-  const totals = draftTotals(input.lines, settings.gst_qst_registered === 1);
+  const registered = taxRegistrationAppliesOn(input.issueDate, settings);
+  const totals = draftTotals(input.lines, registered);
   const retainerReady = await retainerReadyFor(input.lines);
   const method = input.paymentMethod ?? storedPaymentMethod(inv.payment_method);
   assertPaymentMode(method, totals);
@@ -455,7 +457,7 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
                  SELECT 1 FROM fin_contacts
                   WHERE id = ? AND entity_id = ? AND archived = 0 AND kind IN ('customer', 'both')
                )`,
-      args: [input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, ...writeSnapshot.args, input.contactId, entity.id],
+      args: [input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, registered ? 1 : 0, input.notes, ...writeSnapshot.args, input.contactId, entity.id],
     },
     {
       sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
@@ -807,9 +809,9 @@ async function pdfFor(
  * sendInvoice runs it first so that nothing (no Stripe link, no number) is made
  * for an invoice that would be refused.
  */
-async function issueTotals(entityId: string, lines: readonly InvoiceLineRow[]): Promise<{ settings: Awaited<ReturnType<typeof loadSettings>>; registered: boolean; totals: InvoiceTotals }> {
+async function issueTotals(entityId: string, issueDate: string, lines: readonly InvoiceLineRow[]): Promise<{ settings: Awaited<ReturnType<typeof loadSettings>>; registered: boolean; totals: InvoiceTotals }> {
   const settings = await loadSettings(entityId);
-  const registered = settings.gst_qst_registered === 1;
+  const registered = taxRegistrationAppliesOn(issueDate, settings);
   if (registered) {
     const reg = validateRegistration({ registered, gstNumber: settings.gst_number, qstNumber: settings.qst_number });
     if (!reg.ok) throw new FinanceInputError(reg.error);
@@ -945,6 +947,7 @@ function issueSnapshotGate(
            WHERE issue_s.entity_id = ? AND issue_s.updated_at = ? AND issue_s.invoice_prefix = ?
              AND issue_s.invoice_next_number = ? AND issue_s.invoice_number_year IS ?
              AND issue_s.gst_qst_registered = ? AND issue_s.gst_number = ? AND issue_s.qst_number = ?
+             AND issue_s.registration_effective_date IS ?
         )
         AND (SELECT COUNT(*) FROM fin_invoice_lines count_l WHERE count_l.invoice_id = ?) = ?
         ${linePredicates.length ? `AND ${linePredicates.join(" AND ")}` : ""}
@@ -959,6 +962,7 @@ function issueSnapshotGate(
       settings.gst_qst_registered,
       settings.gst_number,
       settings.qst_number,
+      settings.registration_effective_date,
       ...lineArgs,
     ],
   };
@@ -987,7 +991,7 @@ export async function finalizeInvoice(viewer: FinanceViewer, invoiceId: string, 
     }
     if (!isActiveInvoiceCustomer(inv, await loadContact(inv.contact_id))) throw new FinanceInputError(ACTIVE_CUSTOMER_REQUIRED);
     const lines = await loadInvoiceLines(invoiceId);
-    const { settings, registered, totals } = await issueTotals(entity.id, lines);
+    const { settings, registered, totals } = await issueTotals(entity.id, inv.issue_date, lines);
     assertPaymentMode(storedPaymentMethod(inv.payment_method), totals);
     if (
       expect &&
@@ -2047,7 +2051,7 @@ export async function sendInvoice(
   //    issuing makes happens here, before Stripe is asked for anything.
   let planned: InvoiceRow = before;
   if (wasDraft) {
-    const { totals } = await issueTotals(entity.id, lines);
+    const { totals } = await issueTotals(entity.id, before.issue_date, lines);
     planned = {
       ...before,
       subtotal_cents: totals.subtotalCents,

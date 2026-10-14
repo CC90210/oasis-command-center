@@ -32,6 +32,18 @@ export function taxAtPpm(amountCents: number, ratePpm: number): number {
 
 export type SalesTax = { gstCents: number; qstCents: number; taxCents: number };
 
+/**
+ * Whether GST/QST registration applies to a dated transaction. A registered
+ * book with no effective date keeps the legacy behaviour (tax applies); once
+ * a date is stored, transactions before it remain pre-registration.
+ */
+export function taxRegistrationAppliesOn(
+  date: string,
+  settings: { gst_qst_registered: number; registration_effective_date: string | null },
+): boolean {
+  return settings.gst_qst_registered === 1 && (!settings.registration_effective_date || date >= settings.registration_effective_date);
+}
+
 export function computeSalesTax(taxableSubtotalCents: number, registered: boolean): SalesTax {
   if (!registered || taxableSubtotalCents === 0) return { gstCents: 0, qstCents: 0, taxCents: 0 };
   const gstCents = taxAtPpm(taxableSubtotalCents, GST_RATE_PPM);
