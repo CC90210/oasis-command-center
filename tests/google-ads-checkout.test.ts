@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHECKOUT_OFFERS, resolveCheckoutOffer } from "../lib/checkout/catalog";
 import { createOfferCheckout, verifyOfferCheckout } from "../lib/checkout/stripe";
-import { GOOGLE_ADS_TAG_ID, purchaseConversionPayload } from "../lib/marketing/google-ads";
+import {
+  GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION,
+  GOOGLE_ADS_TAG_ID,
+  purchaseConversionPayload,
+} from "../lib/marketing/google-ads";
 
 const root = join(__dirname, "..");
 const read = (path: string) => readFileSync(join(root, path), "utf8");
@@ -13,6 +17,7 @@ async function main() {
 // 1-3: tag id, loader, and init are one corrected value in the root <head>.
 const layout = read("app/layout.tsx");
 assert.equal(GOOGLE_ADS_TAG_ID, "AW-18509362419");
+assert.equal(GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION, "AW-18509362419/waCmCKH86ZsdEPPp-flE");
 assert.match(layout, /googletagmanager\.com\/gtag\/js\?id=AW-18509362419/);
 assert.match(layout, /gtag\('config', 'AW-18509362419'\)/);
 assert.match(layout, /shouldLoadGoogleAdsTag = ALL_MARKETING_PATHS\.includes/);
@@ -82,7 +87,7 @@ const receipt = await verifyOfferCheckout({
   fetchImpl: (async () => Response.json(paid)) as typeof fetch,
 });
 assert.equal(receipt.valueCad, 1);
-const conversionDestination = "AW-18509362419/test_purchase_label";
+const conversionDestination = GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION;
 assert.deepEqual(purchaseConversionPayload({
   valueCad: receipt.valueCad,
   transactionId: receipt.transactionId,
@@ -129,6 +134,7 @@ assert.ok(conversion.indexOf("window.gtag") < conversion.indexOf("sessionStorage
 // allow-listed dynamic entry to avoid duplicating route manifests in the
 // size-constrained Cloudflare Worker; fleet and work keep their static pages.
 const funnelPage = read("app/(marketing)/funnel/[funnel]/page.tsx");
+assert.match(funnelPage, /GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION/, "the verified Purchase destination is the production fallback");
 for (const route of ["audit", "command-center", "pricing", "onboarding"]) {
   const key = route === "audit" ? "audit:" : `"${route}":`;
   assert.ok(funnelPage.includes(key), `/${route} is allow-listed by the funnel route`);

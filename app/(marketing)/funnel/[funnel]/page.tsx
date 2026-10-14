@@ -10,7 +10,10 @@ import { CHECKOUT_OFFERS, resolveCheckoutOffer } from "@/lib/checkout/catalog";
 import { verifyOfferCheckout } from "@/lib/checkout/stripe";
 import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
 import { AUDIT_FUNNEL, BOOKING_URL } from "@/lib/marketing/routes";
-import { googleAdsPurchaseDestination } from "@/lib/marketing/google-ads";
+import {
+  GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION,
+  googleAdsPurchaseDestination,
+} from "@/lib/marketing/google-ads";
 import { getSessionUser } from "@/lib/supabase-server";
 
 const PUBLIC_FUNNEL_METADATA = {
@@ -268,7 +271,8 @@ async function CheckoutSuccessPage({ searchParams }: { searchParams: SearchParam
   const checkoutSessionId = typeof raw === "string" ? raw : "";
   const secretKey = (process.env.STRIPE_SECRET_KEY ?? "").trim();
   const conversionDestination = googleAdsPurchaseDestination(
-    process.env.GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION,
+    process.env.GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION ??
+      GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION,
   );
 
   try {

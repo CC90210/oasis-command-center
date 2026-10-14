@@ -1,4 +1,7 @@
 export const GOOGLE_ADS_TAG_ID = "AW-18509362419";
+/** Public destination from Google's Purchase conversion-action snippet. */
+export const GOOGLE_ADS_PURCHASE_CONVERSION_DESTINATION =
+  "AW-18509362419/waCmCKH86ZsdEPPp-flE";
 
 const PURCHASE_DESTINATION_RE = /^AW-18509362419\/[A-Za-z0-9_-]{4,128}$/;
 
