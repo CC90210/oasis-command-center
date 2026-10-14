@@ -89,6 +89,34 @@ export function createPendingQueue(o: {
   let unstarted: Unstarted[] = [];
 
   /**
+   * Final fix round, item (a): a wake signal for `whenDrained()`. `signal()` resolves whichever
+   * promise is currently held as `notified` and immediately installs a fresh pending one, so every
+   * caller that was already waiting on the old one wakes exactly once, and a caller that captures
+   * `notified` right before it waits can never miss a signal that fires after the capture (the
+   * capture and the next check of `current`/`unstarted` happen back-to-back with no `await`
+   * between them, so nothing can slip through in between on a single-threaded runtime).
+   *
+   * Without this, `whenDrained()` had to re-await a snapshot of `sendChain` on every pass - fine
+   * while a real send is in flight (that snapshot is a genuinely pending promise), but while
+   * `current` is merely waiting on its own 6-second timer and nothing has actually been sent yet,
+   * `sendChain` is already-settled (`Promise.resolve()`), so re-awaiting it resolves in a plain
+   * microtask and the loop immediately goes around again - forever, with no `await` that ever
+   * yields to a macrotask. That starves every macrotask on the page, including the 6-second send
+   * timer itself, which can then never fire: a page freeze, not merely a slow caller. `signal()` is
+   * called at every point below that changes what `whenDrained()` cares about (`current`,
+   * `unstarted`, or a send settling), so waiting on `notified` instead of busy-polling lets the
+   * event loop actually run macrotasks while nothing has changed yet, and still wakes promptly the
+   * moment something does.
+   */
+  let wake: () => void = () => {};
+  let notified: Promise<void> = new Promise((resolve) => { wake = resolve; });
+  function signal() {
+    const resolve = wake;
+    notified = new Promise((r) => { wake = r; });
+    resolve();
+  }
+
+  /**
    * Ruling (fix round 1): every queued send carries `keepalive: true`, whatever triggered it -
    * the 6-second timer, an immediate send-the-old-one-now on a second edit, or the leaving-the-
    * page flush. A send that is NOT marked keepalive can be cancelled by the browser mid-flight if
@@ -101,6 +129,7 @@ export function createPendingQueue(o: {
     const { description, change, handle } = current;
     current = null;
     timers.clear(handle);
+    signal(); // `current` just went to null - wake any whenDrained() waiting on that
     o.onState({ kind: "sending", description });
     let staleMessage: string | undefined;
     // Codex re-review round 2: a ONE-SHOT starter for this edit's real send. Whichever path
@@ -113,6 +142,7 @@ export function createPendingQueue(o: {
       start: () => {
         if (!startedPromise) {
           unstarted = unstarted.filter((e) => e !== entry);
+          signal(); // `unstarted` just shrank - wake any whenDrained() waiting on that
           startedPromise = o.send(change, true);
           // Codex re-review round 3: observe a rejection on THIS promise immediately, as a side
           // branch, independently of the chain. `thisSend` below only adopts `startedPromise` via
@@ -127,6 +157,7 @@ export function createPendingQueue(o: {
       },
     };
     unstarted.push(entry);
+    signal(); // `unstarted` just grew - wake any whenDrained() waiting on that
     // `previousChain` is captured before `sendChain` is reassigned, so a later edit's own place
     // in the chain still waits for EVERYTHING already under way, including an entry that skipped
     // ahead via a forced start - `allSettled` covers both the previous chain and this send.
@@ -164,6 +195,7 @@ export function createPendingQueue(o: {
     if (pending) {
       o.onState({ kind: "pending", description: pending.description, ...(staleMessage ? { message: staleMessage } : {}) });
     }
+    signal(); // this send has settled and every state change above is in - wake whenDrained() last
   };
 
   return {
@@ -177,6 +209,7 @@ export function createPendingQueue(o: {
       timers.clear(current.handle);
       const { description } = current;
       current = null;
+      signal(); // `current` just went to null - wake any whenDrained() waiting on that
       o.onState({ kind: "undone", description });
       return true;
     },
@@ -230,12 +263,28 @@ export function createPendingQueue(o: {
      * Loops on a fresh snapshot of `sendChain` each pass: if new work appears while waiting (the
      * C4 re-announce can set `current` again), one more pass waits for that too, so this never
      * reports "drained" against a stale snapshot. Already-idle resolves after one microtask.
+     *
+     * Final fix round, item (a): while `current` is pending but nothing has actually been sent yet,
+     * `sendChain` is already-settled, so re-awaiting that same settled snapshot on every pass used
+     * to resolve in a plain microtask and loop straight back around - forever, never yielding to a
+     * macrotask. That starves every macrotask on the page, including the 6-second send timer that
+     * is the only thing that can ever make `current` not-pending, so the old loop could never
+     * actually finish: a page freeze. The fast path below (nothing queued or taken-but-unstarted)
+     * still awaits the real `sendChain` snapshot directly, because that snapshot is a genuinely
+     * pending promise whenever a send is actually in flight. Only when there IS something queued
+     * but `sendChain` has nothing new to report does it wait on `notified` instead of busy-polling -
+     * a promise that only resolves when `signal()` is called, which yields control back to the
+     * event loop (letting macrotasks run) until real progress happens.
      */
     async whenDrained(): Promise<void> {
       for (;;) {
-        const snapshot = sendChain;
-        await snapshot.catch(() => {});
-        if (!current && unstarted.length === 0 && sendChain === snapshot) return;
+        if (!current && unstarted.length === 0) {
+          const snapshot = sendChain;
+          await snapshot.catch(() => {});
+          if (!current && unstarted.length === 0 && sendChain === snapshot) return;
+          continue;
+        }
+        await notified;
       }
     },
   };

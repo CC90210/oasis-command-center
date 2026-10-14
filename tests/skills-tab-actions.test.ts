@@ -436,6 +436,31 @@ async function main() {
     await tick();
   });
 
+  // --- Final fix round, item (a): whenDrained() must never spin on an already-settled `sendChain`
+  // while `current` is still pending its own 6s timer - that is a microtask-only loop, which
+  // starves every macrotask (including the real send timer itself), i.e. a page freeze. PLACED
+  // LAST in this file: on the unfixed code this check's dangling whenDrained() call never settles
+  // and keeps regenerating microtasks forever, which would starve every later check's own `tick()`
+  // (a real setTimeout) - there is nothing after it here that needs one. ---
+  await check(
+    "whenDrained does not spin while current is pending; it yields to a real macrotask and resolves only once the timer fires and the send settles",
+    async () => {
+      const h = harness();
+      h.q.add("A", ch("A")); // current is pending; its fake timer is never fired in this check
+      let macrotaskRan = false;
+      setTimeout(() => { macrotaskRan = true; }, 0); // a REAL macrotask - must get a turn regardless
+      let drained = false;
+      const drainedPromise = h.q.whenDrained().then(() => { drained = true; });
+      await tick(); // one real event-loop turn: on the unfixed code this never resolves (the bug)
+      assert.equal(macrotaskRan, true, "a real setTimeout(0) macrotask must run even while whenDrained() awaits a pending `current` - it must not starve the event loop with a microtask-only spin");
+      assert.equal(drained, false, "must not report drained before the timer has fired and the send has settled");
+      h.fire(); // fires A's fake timer -> its send runs and settles
+      await tick(); await tick();
+      assert.equal(drained, true, "whenDrained() must resolve once the timer fires and the send settles");
+      await drainedPromise;
+    },
+  );
+
   console.log(`skills-tab-actions: ${passed} passed, ${failed} failed`);
   if (failed) process.exit(1);
 }
