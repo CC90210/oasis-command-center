@@ -519,6 +519,20 @@ const TESTS = [
   "tests/skills-training-store.test.ts",
   "tests/skills-training-checkin.test.ts",
   "tests/skills-training-admin.test.ts",
+  "tests/skills-training-library.test.ts",
+  // Plan 3 Task 6: the Skills tab's pure view logic (lib/skills/view.ts) - tile names, test
+  // record squares and lines, the Toronto status line, training lists, totals, op toggling and
+  // search. No I/O, so it needs no react-server condition and no database.
+  "tests/skills-tab-view.test.ts",
+  // Plan 3 Task 7: server-rendered markup of the Skills tab's Library view (tiles, sub-label
+  // chips, skill list). Grows in Tasks 8-11 (skill sheet, Training, Ctrl K, page shell).
+  "tests/skills-tab-render.test.ts",
+  // Plan 3 Task 8: the skill sheet's 6-second Undo queue (fake timers, fake send). No I/O, so it
+  // needs no react-server condition and no database.
+  "tests/skills-tab-actions.test.ts",
+  // Plan 3 Task 11: the page shell's toast keying (lib/skills/view.ts toastFor) - a C4 re-announce
+  // of the same pending edit must not change its key. No I/O, no React import.
+  "tests/skills-tab-shell.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

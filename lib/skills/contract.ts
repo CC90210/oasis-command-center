@@ -71,25 +71,42 @@ function parsed<T>(fn: () => T): Parsed<T> {
   }
 }
 
+export type TestRecord = { n: number; ok: number };
+export type KindScore = { id: string; n: number; ok: number };
 export type SkillRow = {
   name: string; description: string; kind: "installed" | "library"; quarantined: boolean;
   capabilities: string[]; example_prompts: { prompt: string; adds: string }[];
+  /** Plan 3: present on every skill exactly when the push carries `kinds`. Counts only. */
+  tests?: TestRecord;
 };
 
-export function parseSkillsPush(body: unknown): Parsed<{ skills_sha: string; skills: SkillRow[] }> {
+function record(v: unknown, where: string): TestRecord {
+  const o = obj(v, where);
+  only(o, ["n", "ok"], where);
+  const n = count(o.n, `${where}.n`);
+  const ok = count(o.ok, `${where}.ok`);
+  if (ok > n) throw new ContractError(`${where}.ok cannot be more than ${where}.n`);
+  return { n, ok };
+}
+
+export function parseSkillsPush(body: unknown): Parsed<{ skills_sha: string; skills: SkillRow[]; kinds: KindScore[] | null }> {
   return parsed(() => {
     const b = obj(body, "body");
-    only(b, ["skills_sha", "skills"], "body");
+    only(b, ["skills_sha", "skills", "kinds"], "body");
     const skillsSha = text(b.skills_sha, 64, "skills_sha", true);
+    // Test records and kind scores travel together (plan 3): either every skill carries `tests`
+    // and the push carries `kinds`, or neither. A push without them keeps the last record.
+    const withRecords = b.kinds !== undefined;
     const seen = new Set<string>();
     const skills = list(b.skills, 2000, "skills").map((raw, i): SkillRow => {
       const w = `skills[${i}]`;
       const s = obj(raw, w);
-      only(s, ["name", "description", "kind", "quarantined", "capabilities", "example_prompts"], w);
+      only(s, ["name", "description", "kind", "quarantined", "capabilities", "example_prompts", "tests"], w);
       const name = text(s.name, 120, `${w}.name`, true);
       if (seen.has(name)) throw new ContractError(`${w}.name ${name} appears twice`);
       seen.add(name);
       if (typeof s.quarantined !== "boolean") throw new ContractError(`${w}.quarantined must be true or false`);
+      if (withRecords !== ("tests" in s)) throw new ContractError(`${w}: tests and kinds travel together`);
       return {
         name,
         description: text(s.description, 1200, `${w}.description`),
@@ -101,9 +118,22 @@ export function parseSkillsPush(body: unknown): Parsed<{ skills_sha: string; ski
           only(e, ["prompt", "adds"], `${w}.example_prompts[${j}]`);
           return { prompt: text(e.prompt, 300, `${w}.example_prompts[${j}].prompt`, true), adds: text(e.adds, 300, `${w}.example_prompts[${j}].adds`, true) };
         }),
+        ...(withRecords ? { tests: record(s.tests, `${w}.tests`) } : {}),
       };
     });
-    return { skills_sha: skillsSha, skills };
+    let kinds: KindScore[] | null = null;
+    if (withRecords) {
+      const ids = new Set<string>();
+      kinds = list(b.kinds, 60, "kinds").map((raw, i) => {
+        const x = obj(raw, `kinds[${i}]`);
+        only(x, ["id", "n", "ok"], `kinds[${i}]`);
+        const kid = id(x.id, `kinds[${i}].id`);
+        if (ids.has(kid)) throw new ContractError(`kinds[${i}].id ${kid} appears twice`);
+        ids.add(kid);
+        return { id: kid, ...record({ n: x.n, ok: x.ok }, `kinds[${i}]`) };
+      });
+    }
+    return { skills_sha: skillsSha, skills, kinds };
   });
 }
 

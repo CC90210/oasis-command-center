@@ -127,6 +127,18 @@ stub("../components/settings/agent-engine-scope-context", {
   AgentEngineScopeProvider: ({ children }: { children?: unknown }) => children,
   useAgentEngineScope: () => undefined,
 });
+// /playbook/skills (components/playbook/skills/LibraryView.tsx) is the only file in the repo that
+// imports framer-motion. framer-motion calls React.createContext at MODULE SCOPE (twice, in its
+// own index.js), which crashes the instant `require()` reaches it under this process's
+// `--conditions=react-server`, before any component function (and so framer-motion's real
+// `motion`/`useReducedMotion`) is ever called - the page itself is never invoked deeply enough to
+// need the real animation behaviour, only the import graph has to resolve. Same opaque-boundary
+// reasoning as the stub above.
+stub("framer-motion", {
+  motion: new Proxy({}, { get: () => (p: Record<string, unknown>) => ReactNS.createElement("div", p, (p as { children?: unknown }).children) }),
+  useReducedMotion: () => true,
+  AnimatePresence: ({ children }: { children?: unknown }) => children,
+});
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const SQUAT_TENANT = "5a5a5a5a-0000-4000-8000-00000000005a";
@@ -281,6 +293,11 @@ async function main() {
   // needs a real owner row here too, the same migration-seeded shape
   // tests/bridge-owner-gate.test.ts uses for the same person.
   await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__210_workspace_agents_owner.sql"), "utf8"));
+  // Ruling C7: /playbook/skills (lib/skills/store.ts skillsDb/skillsPageData) reads from the real
+  // skills_* tables. Without these two migrations applied here, rendering that page for a founder
+  // viewer below throws "no such table: skills_computer" instead of answering with the empty state.
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__202_skills_training.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__222_skills_training_records.sql"), "utf8"));
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (user: U, tenant: string, role: string) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner,
@@ -787,7 +804,12 @@ async function main() {
   const renderPlaybookPage = async (file: string) => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS test harness, absolute Windows path
     const page = (require(file) as { default: (props: unknown) => unknown }).default;
-    if (!file.includes("[slug]")) return page({});
+    if (!file.includes("[slug]")) {
+      // Ruling C7: /playbook/skills reads `computer` off `searchParams` (a Promise, like every
+      // other Next 15 page prop here). Every other page under app/playbook ignores extra props,
+      // so passing it unconditionally is safe and keeps this one call site for all of them.
+      return page({ searchParams: Promise.resolve({}) });
+    }
     const slug = /[\\/]business[\\/]\[slug\]/.test(file) ? businessDocSlug : playbookSlug;
     return page({ params: Promise.resolve({ slug }) });
   };
@@ -813,8 +835,8 @@ async function main() {
   // founder and are the 404 for every other OASIS member: they drive OASIS's
   // own agents by name (tests/agent-names.test.ts).
   const founderOnly = (file: string) => playbookAccess.FOUNDER_PLAYBOOK_PATHS.includes(`/${playbookName(file).replace(/\/page\.tsx$/, "")}`);
-  await check("the founders' Playbook pages are exactly the prompts library and the client-deploy runbook", () => {
-    assert.deepEqual(playbookPages.filter(founderOnly).map(playbookName).sort(), ["playbook/client-deploy/page.tsx", "playbook/prompts/page.tsx"]);
+  await check("the founders' Playbook pages are exactly the prompts library, the client-deploy runbook and the Skills tab", () => {
+    assert.deepEqual(playbookPages.filter(founderOnly).map(playbookName).sort(), ["playbook/client-deploy/page.tsx", "playbook/prompts/page.tsx", "playbook/skills/page.tsx"]);
   });
   for (const viewer of ["cc", "rep"] as const) {
     await check(`${viewer} (OASIS member): every /playbook page renders${viewer === "rep" ? ", but a founders' page is the 404" : ""}`, async () => {

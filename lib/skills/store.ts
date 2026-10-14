@@ -11,7 +11,8 @@ import { randomBytes } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { sha256 } from "@/lib/api-helpers";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import type { Op, Report, SkillRow } from "./contract";
+import type { KindScore, Op, Report, SkillRow } from "./contract";
+import type { ChangeRow, Computer, Library } from "./view";
 
 export function skillsDb(): Client | null {
   return tursoConfigured() ? getTursoClient() : null;
@@ -33,7 +34,9 @@ export async function pollState(db: Client, computerId: string): Promise<{ rebui
   return { rebuild_requested: Boolean(c.rows[0]?.rebuild_requested_at), pending: num(p.rows[0]?.n) };
 }
 
-export async function storeSkills(db: Client, computerId: string, push: { skills_sha: string; skills: SkillRow[] }): Promise<number> {
+export async function storeSkills(
+  db: Client, computerId: string, push: { skills_sha: string; skills: SkillRow[]; kinds?: KindScore[] | null },
+): Promise<number> {
   const t = nowIso();
   const stmts: InStatement[] = [
     { sql: "DELETE FROM skills_skill WHERE computer_id = ?", args: [computerId] },
@@ -44,6 +47,17 @@ export async function storeSkills(db: Client, computerId: string, push: { skills
     })),
     { sql: "UPDATE skills_computer SET skills_sha = ? WHERE id = ?", args: [push.skills_sha, computerId] },
   ];
+  // Plan 3: records are replaced only when the push carries them; otherwise the last one stays.
+  if (push.kinds) {
+    stmts.push({ sql: "DELETE FROM skills_skill_test WHERE computer_id = ?", args: [computerId] });
+    stmts.push({ sql: "DELETE FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
+    for (const s of push.skills) {
+      if (s.tests) stmts.push({ sql: "INSERT INTO skills_skill_test (computer_id, name, n, ok, updated_at) VALUES (?, ?, ?, ?, ?)", args: [computerId, s.name, s.tests.n, s.tests.ok, t] });
+    }
+    for (const k of push.kinds) {
+      stmts.push({ sql: "INSERT INTO skills_kind_score (computer_id, label_id, n, ok, updated_at) VALUES (?, ?, ?, ?, ?)", args: [computerId, k.id, k.n, k.ok, t] });
+    }
+  }
   await db.batch(stmts, "write");
   return push.skills.length;
 }
@@ -215,7 +229,7 @@ export async function overview(db: Client, owner: string) {
   });
   const ch = await db.execute({
     sql: `SELECT s.change_id, s.computer_id, s.status, s.reason, s.worse, s.better, s.totals_json, s.updated_at,
-                 c.description, c.author, c.scope, c.created_at
+                 c.description, c.author, c.scope, c.created_at, c.ops_json
           FROM skills_change_status s
           JOIN skills_change c ON c.id = s.change_id
           JOIN skills_computer k ON k.id = s.computer_id
@@ -231,9 +245,103 @@ export async function overview(db: Client, owner: string) {
     })),
     changes: ch.rows.map((r) => ({
       change_id: String(r.change_id), computer_id: String(r.computer_id), status: String(r.status), reason: String(r.reason),
-      worse: num(r.worse), better: num(r.better), totals: JSON.parse(String(r.totals_json)) as Record<string, unknown>,
+      worse: num(r.worse), better: num(r.better), totals: JSON.parse(String(r.totals_json)) as Record<string, { n: number; before: number; after: number }>,
       updated_at: String(r.updated_at), description: String(r.description), author: String(r.author), scope: String(r.scope),
-      created_at: String(r.created_at),
+      created_at: String(r.created_at), ops: JSON.parse(String(r.ops_json)) as Op[],
     })),
   };
+}
+
+/** One computer's skills, labels and scores, or null when the caller does not own that computer. */
+export async function library(db: Client, owner: string, computerId: string): Promise<Library | null> {
+  const own = await db.execute({ sql: "SELECT 1 FROM skills_computer WHERE id = ? AND owner_user_id = ?", args: [computerId, owner] });
+  if (!own.rows.length) return null;
+  const sk = await db.execute({
+    sql: `SELECT s.name, s.description, s.kind, s.quarantined, s.capabilities_json, s.example_prompts_json, t.n, t.ok
+          FROM skills_skill s LEFT JOIN skills_skill_test t ON t.computer_id = s.computer_id AND t.name = s.name
+          WHERE s.computer_id = ? ORDER BY s.name`,
+    args: [computerId],
+  });
+  // rowid order = the order the PC's snapshot listed them (labels.yaml order), not alphabetical.
+  const lb = await db.execute({ sql: "SELECT id, level, parent_id, name, meaning, examples_json FROM skills_label WHERE computer_id = ? ORDER BY rowid", args: [computerId] });
+  const assignRows = await db.execute({ sql: "SELECT skill, label_id, rank FROM skills_skill_label WHERE computer_id = ? ORDER BY label_id, skill", args: [computerId] });
+  const ks = await db.execute({ sql: "SELECT label_id, n, ok FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
+  const ra = await db.execute({ sql: "SELECT MAX(updated_at) AS t FROM skills_kind_score WHERE computer_id = ?", args: [computerId] });
+  return {
+    skills: sk.rows.map((r) => ({
+      name: String(r.name), description: String(r.description), kind: String(r.kind) === "library" ? "library" : "installed",
+      quarantined: num(r.quarantined) === 1,
+      capabilities: JSON.parse(String(r.capabilities_json)) as string[],
+      example_prompts: JSON.parse(String(r.example_prompts_json)) as { prompt: string; adds: string }[],
+      tests: r.n === null || r.n === undefined ? null : { n: num(r.n), ok: num(r.ok) },
+    })),
+    labels: lb.rows.map((r) => ({
+      id: String(r.id), level: String(r.level) === "sub" ? "sub" : "broad", parent: str(r.parent_id), name: String(r.name),
+      meaning: String(r.meaning ?? ""), examples: JSON.parse(String(r.examples_json ?? "[]")) as string[],
+    })),
+    assignments: assignRows.rows.map((r) => ({ skill: String(r.skill), label: String(r.label_id), rank: String(r.rank) === "use-first" ? "use-first" : "also-helps" })),
+    kinds: Object.fromEntries(ks.rows.map((r) => [String(r.label_id), { n: num(r.n), ok: num(r.ok) }])),
+    records_at: str(ra.rows[0]?.t),
+  };
+}
+
+/**
+ * Edit a HELD change (plan 3): in ONE batch (libSQL runs a batch as a transaction), queue the
+ * edited ops as a new change scoped to that computer and reject the held row with "edited into
+ * <new id>". Every statement is conditioned on the held row (owned by the caller) existing, so a
+ * change that moved on (applied, rejected, or someone else's) inserts nothing and moves nothing.
+ */
+export async function revise(
+  db: Client, owner: string, actor: string, changeId: string, computerId: string, ch: { description: string; ops: Op[] },
+): Promise<{ ok: true; id: string } | { ok: false; error: "not_found" | "not_held" }> {
+  const id = `ch-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+  const t = nowIso();
+  const heldMine = `EXISTS (SELECT 1 FROM skills_change_status s JOIN skills_computer k ON k.id = s.computer_id
+                    WHERE s.change_id = ? AND s.computer_id = ? AND s.status = 'held' AND k.owner_user_id = ?)`;
+  const rs = await db.batch(
+    [
+      { sql: `INSERT INTO skills_change (id, author, description, scope, ops_json, created_at) SELECT ?, ?, ?, ?, ?, ? WHERE ${heldMine}`,
+        args: [id, actor, ch.description, computerId, JSON.stringify(ch.ops), t, changeId, computerId, owner] },
+      { sql: "INSERT INTO skills_change_status (change_id, computer_id, status, updated_at) SELECT ?, ?, 'waiting', ? WHERE EXISTS (SELECT 1 FROM skills_change WHERE id = ?)",
+        args: [id, computerId, t, id] },
+      { sql: `UPDATE skills_change_status SET status = 'rejected', decided_by = ?, reason = ?, updated_at = ?
+              WHERE change_id = ? AND computer_id = ? AND status = 'held' AND EXISTS (SELECT 1 FROM skills_change WHERE id = ?)`,
+        args: [actor, `edited into ${id}`, t, changeId, computerId, id] },
+    ],
+    "write",
+  );
+  if (rs[2].rowsAffected === 1) return { ok: true, id };
+  const own = await db.execute({ sql: "SELECT 1 FROM skills_computer WHERE id = ? AND owner_user_id = ?", args: [computerId, owner] });
+  if (!own.rows.length) return { ok: false, error: "not_found" };
+  const ex = await db.execute({ sql: "SELECT 1 FROM skills_change_status WHERE change_id = ? AND computer_id = ?", args: [changeId, computerId] });
+  return { ok: false, error: ex.rows.length ? "not_held" : "not_found" };
+}
+
+/**
+ * The Skills page's data. Only the CALLER's computers are candidates: an id from the address bar
+ * that is not theirs falls back to their primary (or first) computer, never to someone else's.
+ *
+ * Fix round 1 (review item e): when there is no primary at all (not reachable through the normal
+ * admin API - createComputer always makes an owner's FIRST computer primary, and revoking never
+ * clears that flag - but still a state a stray row or a future bulk edit could produce), the
+ * LAST-resort fallback skips a revoked computer rather than taking whichever one sorts first. A
+ * revoked computer must never become the page's silent default.
+ *
+ * Final fix round, item (b): the actually-reachable case this still missed - `revokeComputer`
+ * never clears `is_primary`, so a computer that WAS primary when it got revoked stays flagged
+ * primary forever. The `.find((c) => c.primary)` fallback matched that row BEFORE the code ever
+ * checked `!c.revoked`, so a revoked primary opened the page on stale data with a disabled check
+ * button. The primary fallback itself must exclude a revoked computer; an explicit `asked` id
+ * still returns a revoked computer when that is genuinely what was asked for.
+ */
+export async function skillsPageData(db: Client, owner: string, asked?: string): Promise<{
+  computer: Computer | null; computers: Computer[]; changes: ChangeRow[]; lib: Library | null;
+}> {
+  const ov = await overview(db, owner);
+  const computer = ov.computers.find((c) => c.id === asked)
+    ?? ov.computers.find((c) => c.primary && !c.revoked)
+    ?? ov.computers.find((c) => !c.revoked)
+    ?? null;
+  if (!computer) return { computer: null, computers: [], changes: [], lib: null };
+  return { computer, computers: ov.computers, changes: ov.changes, lib: await library(db, owner, computer.id) };
 }

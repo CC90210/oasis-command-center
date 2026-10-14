@@ -1,0 +1,397 @@
+/**
+ * skills-tab-render.test.ts - server-rendered markup of the Skills tab (JARVIS plan 3, Tasks 7-11).
+ * PINNED (accessibility and honesty, not pixels): every control has a name, pressed/selected states
+ * are exposed, numbers are tabular, "not tested" never renders as a score, held changes show their
+ * totals and why Accept anyway is off, misses read "not checked yet", never "0 misses".
+ * Codex fix round (P2, unreachable control): SkillSheet.tsx opens with showModal(), which makes
+ * everything outside it inert and visually beneath the backdrop - a toast rendered as a sibling
+ * elsewhere (with Undo or a save error) could not be reached while the sheet was open. The toast
+ * now renders inside the sheet's own <dialog> subtree while it is open, and in its normal place
+ * otherwise, never both. `initialSheet` is a render-harness-only seed on SkillsTabView (never set
+ * by SkillsTab or SkillsTabProps) so these scenarios can open the sheet without simulating a click.
+ * Run: node --import tsx tests/skills-tab-render.test.ts
+ */
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { CHANGES, COMPUTER, LIB, NOW } from "./skills-tab-fixture";
+import type { Library } from "../lib/skills/view";
+
+const ROOT = join(__dirname, "..");
+type Scenario = { id: string; component: string; props: Record<string, unknown> };
+function render(scenarios: Scenario[]): Record<string, string> {
+  const r = spawnSync(process.execPath, ["--import", "tsx", "tests/skills-tab.render.ts"], {
+    encoding: "utf8", cwd: ROOT, env: { ...process.env, NODE_OPTIONS: "" }, input: JSON.stringify(scenarios),
+  });
+  assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
+  return JSON.parse(r.stdout) as Record<string, string>;
+}
+const text = (html: string) =>
+  html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
+
+let passed = 0;
+let failed = 0;
+function check(name: string, fn: () => void) {
+  try { fn(); passed += 1; console.log(`  ok    ${name}`); }
+  catch (e) { failed += 1; console.log(`  FAIL  ${name}\n        ${(e as Error).message}`); }
+}
+const sections: (() => void)[] = [];
+void CHANGES; void COMPUTER; void NOW;
+
+// Fix round 1 (task 7) #3: a group where the use-first skill sorts LATER alphabetically than the
+// also-helps skill, so a regression to plain alphabetical order (instead of rank-then-alphabetical)
+// would actually be caught. Kept local to this test file so the shared fixture and its other
+// pinned assertions (tile/member counts in both render and view tests) are untouched.
+const RANK_LIB: Library = {
+  skills: [
+    { name: "aardvark-also-helps", description: "d", kind: "installed", quarantined: false, capabilities: [], example_prompts: [], tests: null },
+    { name: "zebra-use-first", description: "d", kind: "installed", quarantined: false, capabilities: [], example_prompts: [], tests: null },
+  ],
+  labels: [{ id: "rank-check", level: "broad", parent: null, name: "Rank check", meaning: "", examples: [] }],
+  assignments: [
+    { skill: "aardvark-also-helps", label: "rank-check", rank: "also-helps" },
+    { skill: "zebra-use-first", label: "rank-check", rank: "use-first" },
+  ],
+  kinds: {},
+  records_at: null,
+};
+
+// --- Task 7: Library ---
+sections.push(() => {
+  const html = render([
+    { id: "tiles", component: "LibraryView", props: { lib: LIB, group: null } },
+    { id: "group", component: "LibraryView", props: { lib: LIB, group: "debug" } },
+    { id: "rank", component: "LibraryView", props: { lib: RANK_LIB, group: "rank-check" } },
+  ]);
+  check("tiles show plain names, skill counts and scores as prompt counts", () => {
+    const t = text(html.tiles);
+    assert.match(t, /Fix something broken 3 skills 27 of 32 routed right/);
+    assert.match(t, /A kind with no short name yet 0 skills Not tested yet/);
+  });
+  check("the sort control exposes its pressed state", () => {
+    assert.match(html.tiles, /aria-pressed="true"[^>]*>Biggest/);
+    assert.match(html.tiles, /aria-pressed="false"[^>]*>Weakest/);
+  });
+  check("a meter is announced as a count, an untested kind has no meter value", () => {
+    assert.match(html.tiles, /role="img" aria-label="27 of 32 test prompts routed right"/);
+    assert.doesNotMatch(html.tiles, /aria-label="0 of 0/);
+    // Fix round 1 (task 7) #4: not just absent text - the untested kind ("brand-new-kind") carries
+    // no role="img" meter value at all. Only the two kinds with a real score (debug, ui-build) do.
+    const meters = html.tiles.match(/role="img" aria-label="\d+ of \d+ test prompts routed right"/g) ?? [];
+    assert.equal(meters.length, 2, "exactly the two tested kinds should carry a meter value, never the untested one");
+  });
+  check("a kind of work opens to its chips and its skills, use-first first", () => {
+    const t = text(html.group);
+    assert.match(t, /All kinds of work/);
+    assert.match(html.group, /role="group" aria-label="Filter by sub-label"/);
+    assert.ok(t.indexOf("graft") < t.indexOf("turso-cloud"));
+    assert.match(t, /turso-cloud Also helps .* Not tested/);
+  });
+  check("fix round 1 (task 7) #3: use-first sorts before also-helps even against alphabetical order", () => {
+    const t = text(html.rank);
+    assert.ok(t.indexOf("zebra-use-first") < t.indexOf("aardvark-also-helps"),
+      "zebra-use-first is ranked use-first and must sort before the alphabetically-earlier also-helps skill");
+  });
+  check("fix round 1 (task 7) #2: a truncated skill name and description can be read via title (D18)", () => {
+    assert.match(html.group, /title="graft"/);
+    assert.match(html.group, /title="Find code by symbol and trace who calls what\."/);
+    assert.match(html.group, /title="turso-cloud"/);
+    assert.match(html.group, /title="Turso Cloud databases and tokens\."/);
+  });
+  check("numbers are tabular", () => {
+    assert.match(html.tiles, /tabular-nums/);
+  });
+});
+// --- Task 8: skill sheet ---
+sections.push(() => {
+  const html = render([
+    { id: "graft", component: "SkillSheetBody", props: { lib: LIB, name: "graft" } },
+    { id: "turso", component: "SkillSheetBody", props: { lib: LIB, name: "turso-cloud" } },
+    { id: "gone", component: "SkillSheetBody", props: { lib: LIB, name: "not-installed-here" } },
+  ]);
+  check("the sheet shows the description, capabilities, an example and the test record", () => {
+    const t = text(html.graft);
+    assert.match(t, /Find code by symbol/);
+    assert.match(t, /What it can do for a prompt Finds the function behind a slow screen/);
+    // Ruling C5: no required space after "seconds" - the markup closes the quoted prompt with a
+    // closing curly quote right against the word, e.g. `...4 seconds"finds the query...`.
+    assert.match(t, /the owner search takes 4 seconds.*finds the query and every caller/);
+    assert.match(t, /3 of 4 test prompts routed here/);
+    assert.match(html.graft, /role="img" aria-label="3 of 4 test prompts routed here"/);
+  });
+  check("an untested skill says so and draws no squares", () => {
+    assert.match(text(html.turso), /Not tested, no evidence/);
+    assert.doesNotMatch(html.turso, /role="img"/);
+  });
+  check("each group offers rank and remove buttons with a full accessible name", () => {
+    assert.match(html.graft, /aria-label="Make graft also helps in Speed up a slow query"/);
+    assert.match(html.graft, /aria-label="Take graft out of Speed up a slow query"/);
+    assert.match(html.turso, /aria-label="Make turso-cloud use first in Speed up a slow query"/);
+  });
+  check("adding to a group uses a labelled select", () => {
+    assert.match(html.graft, /<label[^>]*for="skill-add-to"[^>]*>Add to a group/);
+    assert.match(html.graft, /<select[^>]*id="skill-add-to"/);
+  });
+  check("a skill no longer on this computer says so", () => {
+    assert.match(text(html.gone), /no longer on this computer/);
+  });
+});
+// --- Task 9: Training ---
+sections.push(() => {
+  const held = CHANGES.find((c) => c.change_id === "ch-held");
+  // Fix round 1 (task 9) #6: a revoked computer must say why its rebuild button is off, and must
+  // never offer "ask now" (asking is not actually possible once access is revoked).
+  const REVOKED_COMPUTER = { ...COMPUTER, revoked: true };
+  // Fix round 1 (task 9) #6: a held change with nothing to edit must say why "Edit change" is off.
+  const NO_OPS_CHANGE = { ...held!, change_id: "ch-held-noops", ops: [] };
+  // Final fix round, item (c): held is empty in BOTH of these, but they must read differently.
+  // A recent failed change with nothing held, waiting or applied must never read as "every change
+  // passed its check" - that claim needs at least one real passing (applied) result to back it.
+  const FAILED_ONLY_CHANGES = [CHANGES.find((c) => c.change_id === "ch-failed")!];
+  // The true-positive case the stronger claim still needs to cover: held empty, nothing failed or
+  // waiting, and at least one applied change - "every change passed its check" stays true here.
+  const APPLIED_ONLY_CHANGES = [CHANGES.find((c) => c.change_id === "ch-applied")!];
+  const html = render([
+    { id: "training", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: CHANGES, nowIso: NOW, rebuildBusy: false } },
+    { id: "empty", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: [], nowIso: NOW, rebuildBusy: false } },
+    // Ruling D10: HeldChange is tested directly here (not only through TrainingView), so it must
+    // carry computerName itself rather than relying on the parent to resolve a display name.
+    { id: "held", component: "HeldChange", props: { change: held, lib: LIB, computerId: COMPUTER.id, computerName: COMPUTER.display_name } },
+    { id: "revoked", component: "TrainingView", props: { lib: LIB, computer: REVOKED_COMPUTER, changes: CHANGES, nowIso: NOW, rebuildBusy: false } },
+    { id: "noops", component: "HeldChange", props: { change: NO_OPS_CHANGE, lib: LIB, computerId: COMPUTER.id, computerName: COMPUTER.display_name } },
+    { id: "heldEmptyFailed", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: FAILED_ONLY_CHANGES, nowIso: NOW, rebuildBusy: false } },
+    { id: "heldEmptyApplied", component: "TrainingView", props: { lib: LIB, computer: COMPUTER, changes: APPLIED_ONLY_CHANGES, nowIso: NOW, rebuildBusy: false } },
+  ]);
+  check("misses read not checked yet, never zero", () => {
+    const t = text(html.training);
+    assert.match(t, /Misses to fix/);
+    assert.match(t, /not checked yet/i);
+    assert.doesNotMatch(t, /\b0 misses\b/i);
+    assert.match(text(html.empty), /not checked yet/i);
+  });
+  check("a held change shows who, how many got worse and better, and totals worst first", () => {
+    const t = text(html.held);
+    assert.match(t, /Outreach scripts/);
+    assert.match(t, /By apex/);
+    assert.match(t, /1 got worse/);
+    assert.match(t, /1 got better/);
+    assert.ok(t.indexOf("Sell, price and pitch") < t.indexOf("Plan a new feature"));
+    assert.match(html.held, /<table/);
+    assert.match(html.held, /<th[^>]*scope="col"[^>]*>Before/);
+  });
+  check("D10: a held change also names which computer it is for", () => {
+    const t = text(html.held);
+    assert.match(t, /Adon's PC/);
+    // Still through TrainingView's own resolution (computer.display_name), not just the direct prop.
+    assert.match(text(html.training), /Adon's PC/);
+  });
+  check("Accept anyway is off and says why", () => {
+    assert.match(html.held, /<button[^>]*disabled=""[^>]*aria-describedby="proof-ch-held"[^>]*>Accept anyway/);
+    assert.match(html.held, /id="proof-ch-held"[^>]*>[^<]*not uploaded yet/);
+  });
+  check("did not go live, queued and applied sections show only this computer's changes", () => {
+    const t = text(html.training);
+    assert.match(t, /Did not go live .*Put tanstack-table in Charts .*the router build refused it/);
+    assert.match(t, /Queued for tonight's check .*Put graft in Fix something broken as use first/);
+    assert.match(t, /Applied this week .*Speed up a slow query/);
+    assert.doesNotMatch(t, /Someone else's change/);
+    assert.doesNotMatch(t, /An old change/);
+  });
+  check("final fix round, item (c): nothing held and nothing else pending reads as a neutral line, not the stronger claim", () => {
+    // Held empty with NOTHING else (no failed, waiting or applied change) has no passing result
+    // to back "every change passed its check" - this was the exact AI-tell bug: that sentence used
+    // to show here unconditionally whenever held was empty, regardless of what else was going on.
+    assert.match(text(html.empty), /Nothing is waiting for you/);
+    assert.doesNotMatch(text(html.empty), /Every change passed its check/);
+  });
+  check("final fix round, item (c): held empty with a recent failed change reads as neutral, never the stronger claim", () => {
+    assert.match(text(html.heldEmptyFailed), /Nothing is waiting for you/);
+    assert.doesNotMatch(text(html.heldEmptyFailed), /Every change passed its check/);
+  });
+  check("final fix round, item (c): held empty with only a passing (applied) change keeps the stronger claim", () => {
+    assert.match(text(html.heldEmptyApplied), /Every change passed its check/);
+  });
+  check("fix round 1 (task 9) #6: a revoked computer's rebuild button states why, never offering to ask now", () => {
+    const t = text(html.revoked);
+    assert.match(t, /revoked/i);
+    assert.doesNotMatch(t, /or now if you ask/);
+    assert.match(html.revoked, /<button[^>]*disabled=""[^>]*aria-describedby="rebuild-reason-pc-66997cf1"[^>]*>/);
+    assert.match(html.revoked, /id="rebuild-reason-pc-66997cf1"[^>]*>[^<]*revoked/i);
+  });
+  check("fix round 1 (task 9) #6: Edit change states why it is off when there is nothing to edit", () => {
+    assert.match(html.noops, /<button[^>]*disabled=""[^>]*aria-describedby="edit-reason-ch-held-noops"[^>]*>Edit change/);
+    assert.match(text(html.noops), /nothing to edit/i);
+  });
+  check("fix round 1 (task 9) #7: the status live region is always present, not mounted only while busy", () => {
+    assert.match(html.held, /role="status"/);
+  });
+  check("fix round 1 (task 9) #8: the held count badge carries hidden context for screen readers", () => {
+    assert.match(html.training, /class="sr-only"[^>]*> waiting for you/);
+    assert.match(text(html.training), /Held for you 1/);
+  });
+});
+// --- Task 10: Ctrl K ---
+sections.push(() => {
+  const hits = [{ kind: "skill", name: "graft", detail: "Find code by symbol." }, { kind: "group", id: "debug", name: "Fix something broken", detail: "3 skills" }];
+  const html = render([
+    { id: "hits", component: "PaletteResults", props: { hits, active: 1 } },
+    { id: "none", component: "PaletteResults", props: { hits: [], active: 0 } },
+  ]);
+  check("results are a listbox of options with the active one selected", () => {
+    assert.match(html.hits, /role="listbox"/);
+    assert.match(html.hits, /id="skills-hit-1"[^>]*role="option"[^>]*aria-selected="true"|role="option"[^>]*aria-selected="true"[^>]*id="skills-hit-1"/);
+    assert.match(text(html.hits), /Kind of work · 3 skills/);
+  });
+  check("no match says so", () => {
+    assert.match(text(html.none), /No skill or kind of work matches/);
+  });
+  check("fix round 1 (task 10) #2: the no-match render has no dangling aria-controls", () => {
+    const emptyLib: Library = { skills: [], labels: [], assignments: [], kinds: {}, records_at: null };
+    const palette = render([{ id: "palette-empty", component: "CommandPalette", props: { open: true, lib: emptyLib } }]);
+    const controls = palette["palette-empty"].match(/aria-controls="([^"]+)"/);
+    if (controls) assert.match(palette["palette-empty"], new RegExp(`id="${controls[1]}"`), "aria-controls references an id that must exist");
+  });
+  check("fix round 1 (task 10) #1: truncated hit name and detail carry a title and a min-w-0 wrapper", () => {
+    assert.match(html.hits, /min-w-0 flex-1/);
+    assert.match(html.hits, /title="graft"/);
+    assert.match(html.hits, /title="Find code by symbol\."/);
+  });
+  check("fix round 2 (task 10) #1: the detail span can shrink instead of refusing to narrow", () => {
+    const detailSpan = html.hits.match(/<span class="([^"]*)" title="Find code by symbol\.">/);
+    assert.ok(detailSpan, "the detail span with title=\"Find code by symbol.\" must exist");
+    const classes = detailSpan![1];
+    assert.doesNotMatch(classes, /shrink-0/, "the detail span must not refuse to shrink");
+    assert.match(classes, /min-w-0/, "the detail span must allow shrinking below its content width");
+  });
+});
+// --- Task 11: the shell ---
+sections.push(() => {
+  const props = { lib: LIB, computer: COMPUTER, computers: [COMPUTER], changes: CHANGES, nowIso: NOW };
+  const html = render([
+    { id: "shell", component: "SkillsTabView", props },
+    { id: "lib", component: "SkillsTabView", props: { ...props, initialView: "library" } },
+    { id: "stale", component: "SkillsTabView", props: { ...props, computer: { ...COMPUTER, last_checkin_at: "2026-10-09T06:04:00.000Z" } } },
+  ]);
+  check("Training opens first, with the machine and the check-in time", () => {
+    assert.match(html.shell, /role="tab"[^>]*aria-selected="true"[^>]*>[^<]*Training|aria-selected="true"[^>]*role="tab"[^>]*>[^<]*Training/);
+    const t = text(html.shell);
+    assert.match(t, /Adon's PC/);
+    assert.match(t, /Checked in at 2:04 am/);
+    assert.match(t, /Misses to fix/);
+  });
+  check("the Training tab carries the needs-you count (held + did not go live)", () => {
+    assert.match(text(html.shell), /Training 2/);
+  });
+  check("a stale check-in is called out", () => {
+    assert.match(text(html.stale), /Last checked in 3 days ago/);
+    assert.match(html.stale, /text-status-warm[^>]*>Last checked in/);
+  });
+  check("the search button names its shortcut", () => {
+    assert.match(html.shell, /aria-label="Search skills and kinds of work"/);
+    assert.match(html.shell, /aria-keyshortcuts="Control\+K Meta\+K"/);
+  });
+  check("Library opens to the kinds of work", () => {
+    assert.match(text(html.lib), /Kinds of work/);
+  });
+});
+// --- Fix round 1 (review on Task 11) ---
+sections.push(() => {
+  const props = { lib: LIB, computer: COMPUTER, computers: [COMPUTER], changes: CHANGES, nowIso: NOW };
+  // Item (f): a fixture whose records_at is a Toronto calendar day older than last_checkin_at, so
+  // recordsAgeLine is non-null (LIB's own records_at is same-day as COMPUTER's check-in and so is
+  // null in every scenario above - this is the first scenario that exercises the "stale record"
+  // line at all).
+  const STALE_RECORDS_LIB = { ...LIB, records_at: "2026-10-09T05:00:00.000Z" };
+  const html = render([
+    { id: "shell", component: "SkillsTabView", props },
+    { id: "staleRecords", component: "SkillsTabView", props: { ...props, lib: STALE_RECORDS_LIB } },
+    { id: "toastUndo", component: "ToastBanner", props: { toast: { key: "pending:x", tone: "ok", text: "Queued: Put graft in debug.", undo: true } } },
+    { id: "toastPlain", component: "ToastBanner", props: { toast: { key: "sent:x", tone: "ok", text: "Waiting for tonight's check: Put graft in debug.", undo: false } } },
+    { id: "toastNone", component: "ToastBanner", props: { toast: null } },
+  ]);
+  check("item (f): a records_at older than the last check-in shows the 'Test record from' caveat", () => {
+    assert.match(text(html.staleRecords), /Test record from Oct 9/);
+  });
+  check("item (c): an Undo toast is the one live region (role only, no ancestor aria-live) and has no separate Dismiss", () => {
+    assert.match(html.toastUndo, /role="status"/);
+    assert.doesNotMatch(html.toastUndo, /aria-live=/, "the toast must be the ONLY live-region mechanism, not a second one layered on an ancestor");
+    assert.match(html.toastUndo, />Undo</);
+    assert.doesNotMatch(html.toastUndo, /aria-label="Dismiss"/, "an undoable toast does not also need a separate close button");
+  });
+  check("item (c): a toast with no Undo gets an accessible, 44px Dismiss button", () => {
+    assert.match(html.toastPlain, /role="status"/);
+    assert.doesNotMatch(html.toastPlain, /aria-live=/);
+    assert.match(html.toastPlain, /aria-label="Dismiss"[^>]*class="[^"]*min-h-11/);
+    assert.doesNotMatch(html.toastPlain, />Undo</);
+  });
+  check("item (c): no toast renders nothing (not an empty live region)", () => {
+    assert.equal(html.toastNone.trim(), "");
+  });
+  check("item (d): the search button shows visible 'Search' text, and its accessible name contains it (WCAG 2.5.3)", () => {
+    assert.match(text(html.shell), /Search Ctrl K/);
+  });
+});
+// --- Fix round 2 (re-review on Task 11, item c): the composed tree, not ToastBanner alone ---
+sections.push(() => {
+  const props = { lib: LIB, computer: COMPUTER, computers: [COMPUTER], changes: CHANGES, nowIso: NOW };
+  // The round-1 checks above render ToastBanner in isolation, which cannot see SkillsTabView's
+  // OWN wrapper markup around it - a regression that puts aria-live back on that wrapper
+  // (SkillsTab.tsx, the div around <ToastBanner .../>) would pass every one of them. initialToast
+  // is a render-harness-only seed (never set by SkillsTab or SkillsTabProps) so this scenario has
+  // the toast's role AND the wrapper in the same output, the one render that can actually catch it.
+  const html = render([
+    { id: "shellWithToast", component: "SkillsTabView", props: { ...props, initialToast: { key: "pending:x", tone: "ok", text: "Queued: Put graft in debug.", undo: true } } },
+  ]);
+  check("item (c) re-check: the whole composed page is exactly one live region - no aria-live anywhere, ToastBanner's own role is present", () => {
+    assert.match(html.shellWithToast, /role="status"/, "the toast's own role must still be there");
+    assert.doesNotMatch(html.shellWithToast, /aria-live=/, "no wrapper or ancestor may add a SECOND live-region mechanism around it");
+  });
+});
+// --- Codex fix round (P2, unreachable control): the toast must render inside the open sheet
+// dialog (SkillSheet.tsx uses showModal(), which makes everything outside it inert and visually
+// beneath the backdrop), and in its normal place when the sheet is closed - never both at once. ---
+sections.push(() => {
+  const props = { lib: LIB, computer: COMPUTER, computers: [COMPUTER], changes: CHANGES, nowIso: NOW };
+  const toast = { key: "pending:x", tone: "ok" as const, text: "Queued: Put graft in debug.", undo: true };
+  // initialSheet is a render-harness-only seed (never set by SkillsTab or SkillsTabProps, same
+  // contract as initialToast) so this scenario can open the sheet without simulating a click.
+  const html = render([
+    { id: "sheetOpen", component: "SkillsTabView", props: { ...props, initialToast: toast, initialSheet: "graft" } },
+    { id: "sheetClosed", component: "SkillsTabView", props: { ...props, initialToast: toast } },
+  ]);
+  // Located by the toast's OWN text, not a bare `role="status"` search: TrainingView carries a
+  // second, unrelated, always-present role="status" live region (fix round 1 task 9 #7, for
+  // rebuild/busy announcements) that can sit earlier in the markup than the sheet's <dialog> and
+  // would otherwise be mistaken for the toast.
+  check("(a) sheet open with a toast: the toast markup sits inside the dialog element", () => {
+    const dialogStart = html.sheetOpen.indexOf("<dialog");
+    const dialogEnd = html.sheetOpen.indexOf("</dialog>");
+    const toastPos = html.sheetOpen.indexOf("Queued: Put graft in debug.");
+    assert.ok(dialogStart >= 0 && dialogEnd > dialogStart, "the sheet's dialog element must be present");
+    assert.ok(toastPos >= 0, "the toast must render somewhere");
+    assert.ok(toastPos > dialogStart && toastPos < dialogEnd, "the toast must sit between <dialog> and </dialog>");
+  });
+  check("(b) sheet closed: the toast is outside the dialog element", () => {
+    const dialogStart = html.sheetClosed.indexOf("<dialog");
+    const dialogEnd = html.sheetClosed.indexOf("</dialog>");
+    const toastPos = html.sheetClosed.indexOf("Queued: Put graft in debug.");
+    assert.ok(toastPos >= 0, "the toast must still render somewhere");
+    assert.ok(toastPos < dialogStart || toastPos > dialogEnd, "the toast must NOT sit inside the sheet's dialog when it is closed");
+  });
+  // TrainingView carries its own, separate, always-present role="status" live region (fix round 1
+  // task 9 #7, for rebuild/busy announcements) - counting every role="status" on the WHOLE page
+  // would wrongly flag that unrelated region too. Count the TOAST specifically, by its own text,
+  // to prove ToastBanner itself renders exactly once rather than twice (inside AND outside the
+  // sheet at once).
+  check("(c) the toast element itself renders exactly once in the composed output, open or closed", () => {
+    const toastCount = (html: string) => (html.match(/Queued: Put graft in debug\./g) ?? []).length;
+    assert.equal(toastCount(html.sheetOpen), 1, "exactly one toast when the sheet is open");
+    assert.equal(toastCount(html.sheetClosed), 1, "exactly one toast when the sheet is closed");
+  });
+});
+// (later tasks push more sections here)
+
+console.log("skills-tab-render:");
+for (const s of sections) s();
+console.log(`skills-tab-render: ${passed} passed, ${failed} failed`);
+if (failed) process.exit(1);

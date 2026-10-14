@@ -103,6 +103,12 @@ export function migrationPath(): string {
   return join(dir, hits[0]);
 }
 
+/** Later skills migrations (bravo__NNN_skills_training_<what>.sql), oldest first. */
+export function extraMigrationPaths(): string[] {
+  const dir = join(ROOT, "database", "turso");
+  return readdirSync(dir).filter((f) => /^bravo__\d+_skills_training_[a-z_]+\.sql$/.test(f)).sort().map((f) => join(dir, f));
+}
+
 export async function setupDb(): Promise<Client> {
   const db = createClient({ url: `file:${dbFile}` });
   await db.executeMultiple(`
@@ -133,6 +139,7 @@ export async function setupDb(): Promise<Client> {
     "write",
   );
   for (const stmt of splitStatements(readFileSync(migrationPath(), "utf8"))) await db.execute(stmt);
+  for (const p of extraMigrationPaths()) for (const stmt of splitStatements(readFileSync(p, "utf8"))) await db.execute(stmt);
   return db;
 }
 
