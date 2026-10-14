@@ -180,14 +180,15 @@ export async function loadInvoicesPage(viewer: FinanceViewer, entity: EntityRow,
   const status = param(sp, "status");
   const [invoices, contacts, settings, revenueAccounts] = await Promise.all([
     listInvoices(viewer, entity.id, status || undefined),
-    listContacts(viewer, entity.id, "customer"),
+    listContacts(viewer, entity.id, "customer", { includeArchived: true }),
     loadSettings(entity.id),
     query<{ id: string; name: string }>(
       `SELECT id, name FROM fin_accounts WHERE entity_id = ? AND type = 'revenue' AND subtype = 'revenue' AND archived = 0 ORDER BY code`,
       [entity.id],
     ),
   ]);
-  return { status, invoices, contacts, settings, revenueAccounts };
+  const activeContacts = contacts.filter((contact) => contact.archived === 0);
+  return { status, invoices, contacts, activeContacts, settings, revenueAccounts };
 }
 
 /**

@@ -110,33 +110,77 @@ function text(v: unknown, max: number): string {
 
 // ── contacts ─────────────────────────────────────────────────────────────
 
-export async function listContacts(viewer: FinanceViewer, entityRef: string, kind?: "customer" | "vendor"): Promise<ContactRow[]> {
+export async function listContacts(
+  viewer: FinanceViewer,
+  entityRef: string,
+  kind?: "customer" | "vendor",
+  opts: { includeArchived?: boolean } = {},
+): Promise<ContactRow[]> {
   const entity = await requireEntity(viewer, entityRef);
   const kinds = kind === "customer" ? ["customer", "both"] : kind === "vendor" ? ["vendor", "both"] : ["customer", "vendor", "both"];
   return query<ContactRow>(
-    `SELECT id, entity_id, kind, name, email, company, address, stripe_customer_id FROM fin_contacts
-      WHERE entity_id = ? AND archived = 0 AND kind IN (${kinds.map(() => "?").join(",")}) ORDER BY name`,
+    `SELECT id, entity_id, kind, name, email, company, address, stripe_customer_id, archived FROM fin_contacts
+      WHERE entity_id = ? ${opts.includeArchived ? "" : "AND archived = 0"} AND kind IN (${kinds.map(() => "?").join(",")}) ORDER BY archived, name`,
     [entity.id, ...kinds],
   );
 }
 
-export async function createContact(viewer: FinanceViewer, entityRef: string, raw: Record<string, unknown>): Promise<string> {
-  const entity = await requireEntity(viewer, entityRef);
-  const kind = raw.kind === "vendor" || raw.kind === "both" ? raw.kind : "customer";
+type ContactFields = { name: string; email: string; company: string; address: string };
+
+function validateContactFields(raw: Record<string, unknown>): ContactFields {
   const name = text(raw.name, 200);
   if (!name) throw new FinanceInputError("contact name is required");
   const emailRaw = text(raw.email, 254);
   const email = emailRaw ? validateEmail(emailRaw) : "";
   if (emailRaw && !email) throw new FinanceInputError("contact email is not valid");
+  return { name, email: email || "", company: text(raw.company, 200), address: text(raw.address, 500) };
+}
+
+export async function createContact(viewer: FinanceViewer, entityRef: string, raw: Record<string, unknown>): Promise<string> {
+  const entity = await requireEntity(viewer, entityRef);
+  businessOnly(entity);
+  const kind = raw.kind === "vendor" || raw.kind === "both" ? raw.kind : "customer";
+  const fields = validateContactFields(raw);
   const id = newId("con");
   await writeBatch([
     {
       sql: `INSERT INTO fin_contacts (id, entity_id, kind, name, email, company, address, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [id, entity.id, kind, name, email || "", text(raw.company, 200), text(raw.address, 500), text(raw.notes, 1000)],
+      args: [id, entity.id, kind, fields.name, fields.email, fields.company, fields.address, text(raw.notes, 1000)],
     },
     auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "contact.created", objectType: "contact", objectId: id }),
   ]);
   return id;
+}
+
+export async function updateContact(viewer: FinanceViewer, contactId: string, raw: Record<string, unknown>): Promise<void> {
+  const entity = await requireRowEntity(viewer, "fin_contacts", contactId);
+  businessOnly(entity);
+  const fields = validateContactFields(raw);
+  await writeBatch([
+    {
+      sql: `UPDATE fin_contacts SET name = ?, email = ?, company = ?, address = ? WHERE id = ? AND entity_id = ?`,
+      args: [fields.name, fields.email, fields.company, fields.address, contactId, entity.id],
+    },
+    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "contact.updated", objectType: "contact", objectId: contactId }),
+  ]);
+}
+
+export async function setContactArchived(viewer: FinanceViewer, contactId: string, archived: boolean): Promise<void> {
+  const entity = await requireRowEntity(viewer, "fin_contacts", contactId);
+  businessOnly(entity);
+  await writeBatch([
+    {
+      sql: `UPDATE fin_contacts SET archived = ? WHERE id = ? AND entity_id = ?`,
+      args: [archived ? 1 : 0, contactId, entity.id],
+    },
+    auditStatement({
+      entityId: entity.id,
+      actor: viewerLabel(viewer),
+      action: archived ? "contact.archived" : "contact.restored",
+      objectType: "contact",
+      objectId: contactId,
+    }),
+  ]);
 }
 
 // ── drafts ───────────────────────────────────────────────────────────────
@@ -161,7 +205,9 @@ async function parseDraftInput(entity: EntityRow, raw: Record<string, unknown>, 
     contactId = await createContact(viewer, entity.id, { ...nc, kind: "customer" });
   } else {
     const c = await loadContact(contactId);
-    if (!c || c.entity_id !== entity.id) throw new FinanceInputError("customer does not belong to this book");
+    if (!c || c.entity_id !== entity.id || c.archived === 1 || (c.kind !== "customer" && c.kind !== "both")) {
+      throw new FinanceInputError("choose an active customer from this book");
+    }
   }
   const issueDate = text(raw.issue_date, 10) || torontoToday();
   if (!isIsoDate(issueDate)) throw new FinanceInputError("issue date must be YYYY-MM-DD");

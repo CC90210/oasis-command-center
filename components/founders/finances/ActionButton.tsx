@@ -10,12 +10,14 @@ export function ActionButton({
   action,
   payload,
   label,
+  ariaLabel,
   confirm,
   tone = "quiet",
 }: {
   action: string;
   payload: Record<string, unknown>;
   label: string;
+  ariaLabel?: string;
   confirm?: string;
   tone?: "quiet" | "primary" | "danger";
 }) {
@@ -28,6 +30,7 @@ export function ActionButton({
     <span className="inline-flex items-center gap-2">
       <button
         type="button"
+        aria-label={ariaLabel}
         disabled={busy}
         className={cls}
         onClick={async () => {
@@ -49,8 +52,11 @@ export function ActionButton({
       >
         {busy ? "Working…" : label}
       </button>
-      {err && <span className="text-xs text-status-hot">{err}</span>}
-      {note && <span className="text-xs text-status-engaged">{note}</span>}
+      {(err || note) && (
+        <span role="status" className={`text-xs ${err ? "text-status-hot" : "text-status-engaged"}`}>
+          {err || note}
+        </span>
+      )}
     </span>
   );
 }

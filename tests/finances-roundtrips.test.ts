@@ -139,6 +139,10 @@ async function main() {
           VALUES ('pay_no_rate', ?, 'payment', 'manual', ?, ?, 10000, 'USD', 1, 'Acme', 'test')`,
     args: [B, `${today}T15:00:00Z`, today],
   });
+  await raw.execute({
+    sql: `INSERT INTO fin_contacts (id, entity_id, kind, name, email, archived) VALUES ('con_archived_roundtrip', ?, 'customer', 'Archived Customer', 'archived@example.test', 1)`,
+    args: [B],
+  });
   assert.equal(networkCalls, 0, "the fixture itself made no network call");
 
   // ── latency injection: every trip waits DELAY ms, and its start is kept ──
@@ -222,6 +226,18 @@ async function main() {
     });
   }
   console.table(table);
+
+  await check("invoices: exactly four trips in one wave, one customer read, and all plus active customer arrays", async () => {
+    const m = await measure(() => pc.loadInvoicesPage(cc, entity, sp));
+    assert.equal(m.trips, 4, m.sql.join("\n"));
+    assert.equal(m.depth, 1, m.sql.join("\n"));
+    assert.equal(m.network, 0);
+    assert.equal(m.sql.filter((sql) => /\bFROM fin_contacts\b/i.test(sql)).length, 1, m.sql.join("\n"));
+    const page = m.result as Awaited<ReturnType<typeof pc.loadInvoicesPage>>;
+    assert.equal(page.contacts.some((contact) => contact.id === "con_archived_roundtrip" && contact.archived === 1), true, "all customers includes archived");
+    assert.equal(page.activeContacts.some((contact) => contact.id === "con_archived_roundtrip"), false, "new invoice choices exclude archived");
+    assert.equal(page.activeContacts.every((contact) => contact.archived === 0), true);
+  });
 
   await check("the Overview reports a USD payment's missing rate instead of fetching it", async () => {
     const net0 = networkCalls;

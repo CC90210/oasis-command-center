@@ -6,8 +6,8 @@
 import Link from "next/link";
 import { after } from "next/server";
 import { Card, PageHeader, Tag } from "@/components/Card";
+import { CustomersManager } from "@/components/founders/finances/CustomersManager";
 import { InvoiceEditor } from "@/components/founders/finances/InvoiceEditor";
-import { ActionForm } from "@/components/founders/finances/ActionForm";
 import {
   INVOICE_DISPLAY_STATUS_LABEL as STATUS_LABEL,
   INVOICE_DISPLAY_STATUS_TONE as STATUS_TONE,
@@ -28,7 +28,7 @@ export const dynamic = "force-dynamic";
 export default async function InvoicesPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, entity, sp } = await financePage(searchParams);
   // The migration-185 check runs beside the loader (memoised once it is there), so it adds no wait.
-  const [{ status, invoices, contacts, settings, revenueAccounts }, retainerSupported] = await Promise.all([
+  const [{ status, invoices, contacts, activeContacts, settings, revenueAccounts }, retainerSupported] = await Promise.all([
     loadInvoicesPage(viewer, entity, sp),
     retainerColumnsReady(),
   ]);
@@ -49,7 +49,8 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
     { value: "void", label: STATUS_LABEL.void },
     { value: "retainer", label: STATUS_LABEL.retainer },
   ] as const;
-  const selectedFilterLabel = filters.find((filter) => filter.value === status)?.label;
+  const legacyFilterLabel = status === "sent" ? "Issued (legacy sent filter)" : status === "overdue" ? "Overdue (legacy filter)" : null;
+  const selectedFilterLabel = filters.find((filter) => filter.value === status)?.label ?? legacyFilterLabel;
   const retainerNote = { none: "no link yet", not_emailed: "link not emailed yet", emailed: "link emailed" } as const;
 
   return (
@@ -66,6 +67,7 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
 
       <Card noPadding>
         <div className="flex flex-wrap gap-1 border-b border-bg-border px-4 py-2">
+          {legacyFilterLabel && <span className="rounded-md bg-bg-elev px-2.5 py-1 text-xs font-semibold text-fg">{legacyFilterLabel}</span>}
           {filters.map((filter) => (
             <Link
               key={filter.value || "all"}
@@ -131,7 +133,7 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
       <Card id="new-invoice" title="New invoice" subtitle={`Numbered ${settings.invoice_prefix}-YYYY-NNNN when issued. Terms: ${settings.payment_terms_days} days.`}>
         <InvoiceEditor
           entity={entity.slug}
-          contacts={contacts.map((c) => ({ id: c.id, name: c.name, email: c.email }))}
+          contacts={activeContacts.map((c) => ({ id: c.id, name: c.name, email: c.email }))}
           revenueAccounts={revenueAccounts}
           registered={settings.gst_qst_registered === 1}
           today={torontoToday()}
@@ -139,30 +141,8 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
         />
       </Card>
 
-      <Card title="Customers" subtitle={`${contacts.length} on file`}>
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <ul className="divide-y divide-bg-border/60 text-sm">
-            {contacts.length === 0 && <li className="py-2 text-fg-muted">No customers yet. Add your first one with the form.</li>}
-            {contacts.map((c) => (
-              <li key={c.id} className="flex justify-between gap-3 py-2">
-                <span>{c.name}</span>
-                <span className="truncate text-fg-muted">{c.email || "no email"}</span>
-              </li>
-            ))}
-          </ul>
-          <ActionForm
-            action="contact.create"
-            hidden={{ entity: entity.slug, kind: "customer" }}
-            submitLabel="Add customer"
-            columns={2}
-            fields={[
-              { name: "name", label: "Name", required: true },
-              { name: "email", label: "Billing email", type: "email" },
-              { name: "company", label: "Company" },
-              { name: "address", label: "Address", span: 2 },
-            ]}
-          />
-        </div>
+      <Card title="Customers" subtitle={`${activeContacts.length} active · ${contacts.length - activeContacts.length} archived`}>
+        <CustomersManager entity={entity.slug} contacts={contacts} />
       </Card>
     </div>
   );

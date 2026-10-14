@@ -195,6 +195,77 @@ async function main() {
     );
   });
 
+  await check("customers: update is normalized, invalid input writes nothing, archive/restore is scoped and audited", async () => {
+    await assert.rejects(
+      invoices.createContact(cc, "cc-personal", { name: "Personal customer" }),
+      access.FinanceInputError,
+      "a personal book cannot create invoice contacts",
+    );
+    await raw.batch([
+      {
+        sql: `INSERT INTO fin_contacts (id, entity_id, kind, name, notes) VALUES ('con_personal_customer', 'fin_ent_cc', 'customer', 'Personal', 'keep personal')`,
+        args: [],
+      },
+      {
+        sql: `INSERT INTO fin_contacts (id, entity_id, kind, name, notes) VALUES ('con_foreign_customer', 'fin_ent_adon', 'customer', 'Foreign', 'keep foreign')`,
+        args: [],
+      },
+    ]);
+
+    const id = await invoices.createContact(cc, "oasis", {
+      kind: "both",
+      name: "  Acme Dental  ",
+      email: "  BILLING@ACME.TEST  ",
+      company: "  Acme Holdings  ",
+      address: "  10 Main Street  ",
+      notes: "preserve this note",
+    });
+    await raw.execute({ sql: `UPDATE fin_contacts SET stripe_customer_id = 'cus_keep_me' WHERE id = ?`, args: [id] });
+    await invoices.updateContact(cc, id, {
+      name: "  Acme Dental Group  ",
+      email: "  Accounts@Acme.Test  ",
+      company: "  Acme Group  ",
+      address: "  20 Main Street  ",
+      kind: "vendor",
+      notes: "overwrite attempt",
+      stripe_customer_id: "cus_replace_attempt",
+    });
+    const updated = (await raw.execute({ sql: `SELECT * FROM fin_contacts WHERE id = ?`, args: [id] })).rows[0];
+    assert.deepEqual(
+      [updated.name, updated.email, updated.company, updated.address],
+      ["Acme Dental Group", "accounts@acme.test", "Acme Group", "20 Main Street"],
+    );
+    assert.deepEqual([updated.kind, updated.notes, updated.stripe_customer_id], ["both", "preserve this note", "cus_keep_me"], "non-editable linkage fields survive");
+
+    const beforeInvalid = JSON.stringify(updated);
+    await assert.rejects(invoices.updateContact(cc, id, { name: "Changed", email: "not-an-email" }), /email is not valid/);
+    assert.equal(JSON.stringify((await raw.execute({ sql: `SELECT * FROM fin_contacts WHERE id = ?`, args: [id] })).rows[0]), beforeInvalid, "invalid input writes nothing");
+    await assert.rejects(invoices.updateContact(cc, "con_personal_customer", { name: "No" }), access.FinanceInputError);
+    await assert.rejects(invoices.setContactArchived(cc, "con_foreign_customer", true), access.FinanceNotFound);
+
+    await invoices.setContactArchived(cc, id, true);
+    assert.equal((await invoices.listContacts(cc, "oasis", "customer")).some((contact) => contact.id === id), false, "default list is active-only");
+    const withArchived = await invoices.listContacts(cc, "oasis", "customer", { includeArchived: true });
+    assert.equal(withArchived.find((contact) => contact.id === id)?.archived, 1);
+    await invoices.setContactArchived(cc, id, false);
+    assert.equal((await invoices.listContacts(cc, "oasis", "customer")).some((contact) => contact.id === id), true, "restore returns it to active choices");
+
+    const actions = (await raw.execute({ sql: `SELECT action FROM fin_audit_log WHERE object_id = ?`, args: [id] })).rows.map((row) => String(row.action)).sort();
+    assert.deepEqual(actions, ["contact.archived", "contact.created", "contact.restored", "contact.updated"]);
+  });
+
+  await check("invoice customer selection rejects archived, vendor-only, and foreign crafted ids with one message", async () => {
+    const archivedId = await invoices.createContact(cc, "oasis", { name: "Archived customer", email: "archived@example.test" });
+    const vendorId = await invoices.createContact(cc, "oasis", { kind: "vendor", name: "Vendor only", email: "vendor@example.test" });
+    await invoices.setContactArchived(cc, archivedId, true);
+    const input = (contactId: string) => ({ contact_id: contactId, currency: "CAD", lines: [{ description: "Project", quantity: 1, unit_price: "100" }] });
+    const generic = (e: unknown) => e instanceof access.FinanceInputError && e.message === "choose an active customer from this book";
+    await assert.rejects(invoices.createDraftInvoice(cc, "oasis", input(archivedId)), generic);
+    await assert.rejects(invoices.createDraftInvoice(cc, "oasis", input(vendorId)), generic);
+    await assert.rejects(invoices.createDraftInvoice(cc, "oasis", input("con_foreign_customer")), generic);
+    await invoices.setContactArchived(cc, archivedId, false);
+  });
+
   await check("ledger: balanced entries post atomically, unbalanced and foreign accounts are refused", async () => {
     const before = await count(`SELECT COUNT(*) FROM fin_journal_entries`);
     const ok = await ledgerIo.postJournalEntry({
@@ -386,6 +457,23 @@ async function main() {
     assert.equal(day2.payments, 2);
     assert.equal(day2.cad_cents, invoiceStripeTotal + 40000);
     assert.equal(await count(`SELECT fee_status = 'pending' FROM fin_payments WHERE stripe_charge_id = 'ch_inv2'`), 1, "no balance transaction and no key: fee left pending, not guessed");
+  });
+
+  await check("archiving a paid invoice customer preserves invoice history and Stripe linkage", async () => {
+    const invoice = (await raw.execute({ sql: `SELECT contact_id, status FROM fin_invoices WHERE id = ?`, args: [invoiceStripe] })).rows[0];
+    assert.equal(invoice.status, "paid");
+    await raw.execute({ sql: `UPDATE fin_contacts SET stripe_customer_id = 'cus_historical_keep' WHERE id = ?`, args: [invoice.contact_id as string] });
+    await invoices.setContactArchived(cc, invoice.contact_id as string, true);
+    try {
+      const detail = await invoices.getInvoiceDetail(cc, invoiceStripe);
+      assert.equal(detail.invoice.status, "paid");
+      assert.equal(detail.contact?.id, invoice.contact_id);
+      assert.equal(detail.contact?.archived, 1);
+      assert.equal(detail.contact?.stripe_customer_id, "cus_historical_keep");
+      assert.equal((await invoices.listContacts(cc, "oasis", "customer")).some((contact) => contact.id === invoice.contact_id), false);
+    } finally {
+      await invoices.setContactArchived(cc, invoice.contact_id as string, false);
+    }
   });
 
   await check("manual mark-paid: one payment row, invoice paid, collected once", async () => {

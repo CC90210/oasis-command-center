@@ -55,7 +55,19 @@ const HANDLERS: Record<string, Handler> = {
     return {};
   },
   "rules.apply": async (v, b) => ({ applied: await txns.applyRulesToUnreviewed(v, str(b.entity)), message: "Rules applied." }),
-  "contact.create": async (v, b) => ({ id: await invoices.createContact(v, str(b.entity), b), message: "Contact added." }),
+  "contact.create": async (v, b) => ({ id: await invoices.createContact(v, str(b.entity), b), message: "Customer added." }),
+  "contact.update": async (v, b) => {
+    await invoices.updateContact(v, str(b.contact_id), b);
+    return { message: "Customer saved." };
+  },
+  "contact.archive": async (v, b) => {
+    await invoices.setContactArchived(v, str(b.contact_id), true);
+    return { message: "Customer archived." };
+  },
+  "contact.restore": async (v, b) => {
+    await invoices.setContactArchived(v, str(b.contact_id), false);
+    return { message: "Customer restored." };
+  },
   "invoice.create": async (v, b) => {
     const id = await invoices.createDraftInvoice(v, str(b.entity), b);
     return { id, redirect: `/founders/finances/invoices/${id}` };

@@ -14,7 +14,7 @@
  * Run: node --conditions=react-server --import tsx tests/finances-surface.test.ts
  */
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { FOUNDERS_NAV, FOUNDERS_PORTAL, portalForPath, visibleFoundersSections } from "../lib/portals/registry";
@@ -97,6 +97,42 @@ async function main() {
   assert.equal(isPublic("/api/internal/financials"), false);
   assert.equal(isPublic("/api/founders/finances/actions"), false, "the UI routes stay behind the session");
   assert.equal(isPublic("/api/webhooks/stripe-finance"), true);
+
+  // ── customer lifecycle surface ─────────────────────────────────────────
+  const customersPath = join(root, "components/founders/finances/CustomersManager.tsx");
+  assert.ok(existsSync(customersPath), "the invoice page has a customer manager");
+  const customers = readFileSync(customersPath, "utf8");
+  const invoicePage = readFileSync(join(root, "app/founders/finances/invoices/page.tsx"), "utf8");
+  const actionsRoute = readFileSync(join(root, "app/api/founders/finances/actions/route.ts"), "utf8");
+  const actionButton = readFileSync(join(root, "components/founders/finances/ActionButton.tsx"), "utf8");
+  assert.match(actionsRoute, /"contact\.update"/);
+  assert.match(actionsRoute, /setContactArchived\(v, str\(b\.contact_id\), true\)/, "archive passes a server-owned literal");
+  assert.match(actionsRoute, /setContactArchived\(v, str\(b\.contact_id\), false\)/, "restore passes a server-owned literal");
+  assert.match(actionsRoute, /Customer saved\./);
+  assert.match(actionsRoute, /Customer archived\./);
+  assert.match(actionsRoute, /Customer restored\./);
+  assert.match(invoicePage, /<CustomersManager entity=\{entity\.slug\} contacts=\{contacts\}/);
+  assert.match(invoicePage, /contacts=\{activeContacts\.map/, "new invoices receive active customers only");
+  assert.doesNotMatch(invoicePage, /action="contact\.create"/, "the old direct customer form is removed from the page");
+  assert.match(customers, /action="contact\.create"/, "customer creation remains in the manager");
+  assert.match(customers, /action="contact\.update"/);
+  assert.match(customers, /action="contact\.archive"/);
+  assert.match(customers, /action="contact\.restore"/);
+  assert.match(customers, /<details/);
+  assert.match(customers, /Archived \(\{archived\.length\}\)/);
+  assert.match(customers, /leaves new-invoice choices while preserving existing invoices and Stripe linkage/);
+  assert.match(customers, /aria-expanded=\{editing\}/);
+  assert.match(customers, /aria-controls=\{editId\}/);
+  assert.match(customers, /ariaLabel=\{`Archive \$\{customer\.name\}`\}/);
+  assert.match(customers, /ariaLabel=\{`Restore \$\{customer\.name\}`\}/);
+  assert.match(actionButton, /ariaLabel\?: string/);
+  assert.match(actionButton, /aria-label=\{ariaLabel\}/);
+  assert.match(actionButton, /role="status"/, "async button feedback is announced");
+
+  // Legacy deep links still filter through list_status and now remain visible.
+  assert.match(invoicePage, /Issued \(legacy sent filter\)/);
+  assert.match(invoicePage, /Overdue \(legacy filter\)/);
+  assert.match(invoicePage, /legacyFilterLabel &&/);
 
   const token = "x".repeat(32);
   assert.equal(bearerMatches(`Bearer ${token}`, token), true);
