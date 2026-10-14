@@ -311,6 +311,13 @@ const nextConfig = {
         permanent: true,
       },
       {
+        // The colorful master router. Next preserves ?cat=p1..p4 so the
+        // canonical form can preselect the visitor's route.
+        source: "/vsl",
+        destination: "/f/oasis-ai-cc/vsl",
+        permanent: true,
+      },
+      {
         // The entry-path page moved off the brand apex when the marketing
         // site took over "/" (2026-07-31). /welcome had been shared
         // directly, so the old URL has to keep resolving. It pointed at

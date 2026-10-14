@@ -42,7 +42,7 @@ export const AI_AUDIT_WELCOME_SOURCE = TRANSACTIONAL_OUTBOX_SOURCE;
  */
 export const AI_AUDIT_ALERT_SOURCE = "ai_audit_alert";
 
-type AiAuditSalesEvent = "started" | "completed";
+type AiAuditSalesEvent = "started" | "completed" | "booked";
 
 function deterministicEventId(input: {
   tenantId: string;
@@ -69,6 +69,7 @@ export async function ensureAiAuditSalesEvent(input: {
   event: AiAuditSalesEvent;
   submissionId?: string;
   score?: ScoreBreakdown;
+  booking?: { startsAt: string; meetUrl: string; appointmentId: string };
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const payload: Record<string, unknown> = {
@@ -82,11 +83,22 @@ export async function ensureAiAuditSalesEvent(input: {
       payload.score = input.score.score;
       payload.qualification = input.score.status;
     }
+    if (input.event === "completed") payload.booking_status = "unbooked";
+    if (input.booking) {
+      payload.booking_status = "booked";
+      payload.starts_at = input.booking.startsAt;
+      payload.meet_url = input.booking.meetUrl;
+      payload.appointment_id = input.booking.appointmentId;
+    }
     const result = await input.db.from("agent_events").upsert(
       {
         id: deterministicEventId(input),
         event_type:
-          input.event === "started" ? "OASIS_AI_AUDIT_STARTED" : "OASIS_AI_AUDIT_COMPLETED",
+          input.event === "started"
+            ? "OASIS_AI_AUDIT_STARTED"
+            : input.event === "booked"
+              ? "OASIS_AI_AUDIT_BOOKED"
+              : "OASIS_AI_AUDIT_COMPLETED",
         publisher_agent: "dept:sales",
         target_agent: "dept:sales",
         severity: input.score?.status === "qualified" ? "warn" : "info",

@@ -62,6 +62,8 @@ import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
 import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { buildPublicFunnelLeadPatch } from "@/lib/forms/public-booking";
+import { isPublicBookingForm } from "@/lib/forms/public-booking-config";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
 import {
   ensureAiAuditSubmissionDelivery,
@@ -1737,6 +1739,39 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
 
+  // Every OASIS form whose next step is the inline founder calendar writes the
+  // same normalized CRM vocabulary before the response reveals that calendar.
+  // AI-audit scoring repeats this merge in its background ingestion so a
+  // retry can repair either half independently; the patch RPC is idempotent.
+  if (
+    isLastStep &&
+    isPublicBookingForm({ tenantId: form.tenant_id, formSlug: form.slug })
+  ) {
+    const completedPatch = buildPublicFunnelLeadPatch(
+      { ...mergedAnswers },
+      "audit_requested",
+    );
+    const completed = await db.rpc("patch_tenant_record_data", {
+      p_id: link.lead_id,
+      p_tenant_id: form.tenant_id,
+      p_patch: completedPatch,
+    });
+    if (completed.error) {
+      console.error("[forms.submit.public_booking_completion.failed]", {
+        lead_id: link.lead_id,
+        form_slug: form.slug,
+        error: completed.error.message,
+      });
+      // Do not reveal the calendar while the canonical lead still says only
+      // inbound_lead. The form row is already durable, so the browser can retry
+      // this same final step and repair the idempotent lead patch.
+      return NextResponse.json(
+        { ok: false, error: "funnel_stage_write_unavailable" },
+        { status: 503 },
+      );
+    }
+  }
+
   // AI-audit funnel, FIRST step. Same exact tenant+slug gate as the
   // completion block below — no prefix matching, for the reason recorded
   // there. Fires on step 0 only, so it can never double up with the
@@ -2114,6 +2149,10 @@ async function initAnonymousLead(input: {
     { email, phone, business },
     { matchOnBusinessName: false },
   );
+  const isBookableOasisIntake = isPublicBookingForm({ tenantId: form.tenant_id, formSlug: form.slug });
+  const inboundFunnelPatch = isBookableOasisIntake
+    ? buildPublicFunnelLeadPatch(input.payload, "inbound_lead")
+    : {};
 
   let lead: { id: string; data: Record<string, unknown> };
   if (existing) {
@@ -2121,7 +2160,11 @@ async function initAnonymousLead(input: {
     // application_url — a re-submission shouldn't steal the deal from the
     // original agent or reset pipeline progress. Adopt a rep only if the
     // existing lead was never assigned.
-    const merged: Record<string, unknown> = { ...existing.data, ...contactFields };
+    const merged: Record<string, unknown> = {
+      ...existing.data,
+      ...contactFields,
+      ...(!existing.data.funnel_stage ? inboundFunnelPatch : {}),
+    };
     // Preserve the website-sales product classification for downstream intake,
     // while sales_motion keeps this warm form response out of the cold claimed-
     // lead Pipeline. stampSalesProgram never overwrites an established program.
@@ -2192,6 +2235,7 @@ async function initAnonymousLead(input: {
       created_from_form_id: form.id,
       created_from_ip_hash: input.ip ? hashIp(input.ip) : null,
       ...contactFields,
+      ...inboundFunnelPatch,
       // The product is website sales, but the motion is warm inbound. Forms and
       // the cold claimed-lead Pipeline deliberately remain separate operating
       // queues. SunBiz's funding funnel is a different program and is untouched.
