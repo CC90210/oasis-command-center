@@ -13,7 +13,7 @@ import { AUDIT_FUNNEL, BOOKING_URL } from "@/lib/marketing/routes";
 import { googleAdsPurchaseDestination } from "@/lib/marketing/google-ads";
 import { getSessionUser } from "@/lib/supabase-server";
 
-const FUNNEL_METADATA = {
+const PUBLIC_FUNNEL_METADATA = {
   audit: {
     title: "Free business AI audit",
     description: "A practical three-step intake that finds where AI can remove delay, recover leads, and create measurable capacity in your business.",
@@ -37,13 +37,13 @@ const FUNNEL_METADATA = {
   },
 } as const;
 
-type FunnelRoute = keyof typeof FUNNEL_METADATA;
+type FunnelRoute = keyof typeof PUBLIC_FUNNEL_METADATA;
 
 export const dynamic = "force-dynamic";
 
 export async function generateMetadata({ params }: { params: Promise<{ funnel: string }> }): Promise<Metadata> {
   const route = (await params).funnel;
-  const meta = FUNNEL_METADATA[route as FunnelRoute];
+  const meta = PUBLIC_FUNNEL_METADATA[route as FunnelRoute];
   if (!meta) return {};
   if (route === "checkout-success") return meta;
   return { ...meta, alternates: { canonical: `/${route}` } };

@@ -128,7 +128,7 @@ assert.ok(conversion.indexOf("window.gtag") < conversion.indexOf("sessionStorage
 // 9-10: all six ad sitelinks resolve to real App Router pages. Four share one
 // allow-listed dynamic entry to avoid duplicating route manifests in the
 // size-constrained Cloudflare Worker; fleet and work keep their static pages.
-const funnelPage = read("app/(marketing)/[funnel]/page.tsx");
+const funnelPage = read("app/(marketing)/funnel/[funnel]/page.tsx");
 for (const route of ["audit", "command-center", "pricing", "onboarding"]) {
   const key = route === "audit" ? "audit:" : `"${route}":`;
   assert.ok(funnelPage.includes(key), `/${route} is allow-listed by the funnel route`);
@@ -137,8 +137,12 @@ for (const route of ["fleet", "work"]) {
   assert.ok(read(`app/(marketing)/${route}/page.tsx`).length > 200, `/${route} is a real page`);
 }
 assert.ok(funnelPage.includes('case "checkout-success"'), "/checkout/success shares the size-safe public route");
-assert.match(read("next.config.js"), /source:\s*"\/checkout\/success"[\s\S]*destination:\s*"\/checkout-success"/);
-assert.doesNotMatch(read("next.config.js"), /source:\s*"\/pricing"/, "/pricing must render instead of redirecting");
+const nextConfig = read("next.config.js");
+for (const route of ["audit", "command-center", "pricing", "onboarding"]) {
+  assert.match(nextConfig, new RegExp(`source:\\s*"/${route}"[\\s\\S]*destination:\\s*"/funnel/${route}"`));
+}
+assert.match(nextConfig, /source:\s*"\/checkout\/success"[\s\S]*destination:\s*"\/funnel\/checkout-success"/);
+assert.doesNotMatch(nextConfig, /redirects\(\)[\s\S]*source:\s*"\/pricing"/, "/pricing must render instead of redirecting");
 const middleware = read("middleware.ts");
 assert.match(middleware, /"\/api\/checkout\/session"/);
 assert.match(middleware, /pathname\.startsWith\("\/onboarding\/"\)/);

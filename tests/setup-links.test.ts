@@ -80,6 +80,13 @@ function routeFile(path: string): string {
   };
   walk(join(ROOT, "app"));
 
+  if (matches.length === 0) {
+    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rewrite = new RegExp(`source:\\s*"${escaped}"\\s*,\\s*destination:\\s*"([^"]+)"`)
+      .exec(read("next.config.js"))?.[1];
+    if (rewrite && rewrite !== path) return routeFile(rewrite);
+  }
+
   assert.ok(matches.length <= 1, `${path} resolves to multiple page files: ${matches.join(", ")}`);
   return matches[0] ?? direct;
 }

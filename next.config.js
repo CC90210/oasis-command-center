@@ -289,7 +289,11 @@ const nextConfig = {
   // funnel route so Cloudflare does not carry duplicate App Router manifests.
   async rewrites() {
     return [
-      { source: "/checkout/success", destination: "/checkout-success" },
+      { source: "/audit", destination: "/funnel/audit" },
+      { source: "/command-center", destination: "/funnel/command-center" },
+      { source: "/pricing", destination: "/funnel/pricing" },
+      { source: "/onboarding", destination: "/funnel/onboarding" },
+      { source: "/checkout/success", destination: "/funnel/checkout-success" },
     ];
   },
   // Cached / external links to retired routes land cleanly on a live page
