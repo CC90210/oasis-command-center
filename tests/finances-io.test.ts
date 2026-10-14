@@ -388,6 +388,85 @@ async function main() {
     assert.equal(Number((await raw.execute({ sql: `SELECT invoice_next_number FROM fin_settings WHERE entity_id = ?`, args: [B] })).rows[0].invoice_next_number), nextBefore);
   });
 
+  await check("finalize atomically refuses concurrent invoice, line, and tax-setting edits without consuming a number or posting", async () => {
+    const cases: Array<{ name: string; race: (id: string) => Promise<void>; restore?: () => Promise<void> }> = [
+      {
+        name: "invoice",
+        race: (id) => raw.execute({ sql: `UPDATE fin_invoices SET currency = 'USD' WHERE id = ?`, args: [id] }).then(() => undefined),
+      },
+      {
+        name: "line",
+        race: (id) => raw.execute({ sql: `UPDATE fin_invoice_lines SET unit_price_cents = 99900, amount_cents = 99900 WHERE invoice_id = ?`, args: [id] }).then(() => undefined),
+      },
+      {
+        name: "settings",
+        race: () => raw.execute({ sql: `UPDATE fin_settings SET gst_qst_registered = 1, gst_number = '123456789RT0001', qst_number = '1234567890TQ0001' WHERE entity_id = ?`, args: [B] }).then(() => undefined),
+        restore: () => raw.execute({ sql: `UPDATE fin_settings SET gst_qst_registered = 0, gst_number = '', qst_number = '' WHERE entity_id = ?`, args: [B] }).then(() => undefined),
+      },
+    ];
+    for (const c of cases) {
+      const id = await invoices.createDraftInvoice(cc, "oasis", {
+        new_contact: { name: `Finalize ${c.name}`, email: `finalize-${c.name}@example.test` },
+        currency: "CAD",
+        lines: [{ description: "Project", quantity: 1, unit_price: "321" }],
+      });
+      const nextBefore = Number((await raw.execute({ sql: `SELECT invoice_next_number FROM fin_settings WHERE entity_id = ?`, args: [B] })).rows[0].invoice_next_number);
+      try {
+        const raced = await withRace(
+          (batch) => batch.includes("invoice.issued") && batch.includes(id),
+          () => c.race(id),
+          () => assert.rejects(invoices.finalizeInvoice(cc, id), (e: unknown) => e instanceof access.FinanceInputError && e.message === invoices.ISSUE_CHANGED_DURING_FINALIZE),
+        );
+        assert.equal(raced.raced, true, `${c.name} race reached the issue batch`);
+        const after = (await raw.execute({ sql: `SELECT status, number, recognition_entry_id FROM fin_invoices WHERE id = ?`, args: [id] })).rows[0];
+        assert.deepEqual([after.status, after.number, after.recognition_entry_id], ["draft", null, null], c.name);
+        assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source_ref = ?`, [id]), 0, c.name);
+        assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.issued'`, [id]), 0, c.name);
+        assert.equal(Number((await raw.execute({ sql: `SELECT invoice_next_number FROM fin_settings WHERE entity_id = ?`, args: [B] })).rows[0].invoice_next_number), nextBefore, c.name);
+      } finally {
+        await c.restore?.();
+      }
+    }
+  });
+
+  await check("draft deletion removes its lines and parent atomically, audits once, refuses issued invoices, and loses cleanly to a status race", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Delete me", email: "delete-me@example.test" },
+      currency: "CAD",
+      lines: [
+        { description: "One", quantity: 1, unit_price: "10" },
+        { description: "Two", quantity: 1, unit_price: "20" },
+      ],
+    });
+    await invoices.deleteDraftInvoice(cc, id);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoices WHERE id = ?`, [id]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoice_lines WHERE invoice_id = ?`, [id]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.draft_deleted'`, [id]), 1);
+
+    const issued = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Keep issued", email: "keep-issued@example.test" },
+      currency: "CAD",
+      lines: [{ description: "Work", quantity: 1, unit_price: "40" }],
+    });
+    await raw.execute({ sql: `UPDATE fin_invoices SET status = 'sent', number = 'TEST-ISSUED-DELETE' WHERE id = ?`, args: [issued] });
+    await assert.rejects(invoices.deleteDraftInvoice(cc, issued), /only a draft invoice can be deleted/);
+
+    const racedId = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Delete race", email: "delete-race@example.test" },
+      currency: "CAD",
+      lines: [{ description: "Keep", quantity: 1, unit_price: "50" }],
+    });
+    const raced = await withRace(
+      (batch) => batch.includes("invoice.draft_deleted") && batch.includes(racedId),
+      () => raw.execute({ sql: `UPDATE fin_invoices SET status = 'sent' WHERE id = ?`, args: [racedId] }).then(() => undefined),
+      () => assert.rejects(invoices.deleteDraftInvoice(cc, racedId), /changed while it was being deleted/),
+    );
+    assert.equal(raced.raced, true);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoices WHERE id = ?`, [racedId]), 1);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoice_lines WHERE invoice_id = ?`, [racedId]), 1);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.draft_deleted'`, [racedId]), 0);
+  });
+
   await check("ledger: balanced entries post atomically, unbalanced and foreign accounts are refused", async () => {
     const before = await count(`SELECT COUNT(*) FROM fin_journal_entries`);
     const ok = await ledgerIo.postJournalEntry({
@@ -728,7 +807,7 @@ async function main() {
     const real = (await (await remind({ send: true })).json()) as { mode: string; reminders: Array<{ action: string; reason: string }> };
     assert.equal(real.mode, "sent");
     assert.equal(real.reminders[0].action, "failed", "no mailbox configured -> reported as failed, not as sent");
-    assert.match(real.reminders[0].reason, /No OASIS mailbox is configured/);
+    assert.match(real.reminders[0].reason, /No Stripe secret key/, "a Stripe reminder refuses before email when it cannot verify or create the exact current link");
   });
 
   await check("books still balance after everything", async () => {

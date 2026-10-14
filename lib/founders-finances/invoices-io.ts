@@ -80,7 +80,7 @@ import {
   type InvoiceLineRow,
   type InvoiceRow,
 } from "./invoice-store";
-import { addressLines, loadSettings } from "./settings-io";
+import { addressLines, loadSettings, type SettingsRow } from "./settings-io";
 import { renderInvoicePdf } from "./invoice-pdf";
 import { composeInvoiceEmail, resolveInvoiceMailbox, sendInvoiceEmail } from "./invoice-email";
 import { getStripeClient, stripeRequest, financeTenantId, StripeApiError, StripeNotReady } from "./stripe-io";
@@ -99,8 +99,10 @@ import {
 } from "./wise";
 import { receivingDetailsOrReason } from "./wise-io";
 import {
+  clearOneTimePaymentLinkStatement,
   deactivateAndConfirmPaymentLink,
-  deactivatePaymentLinkIfPaid,
+  oneTimeLinkSnapshot,
+  retireLegacyOneTimePaymentLink,
   retireOneTimePaymentLinkForDraftEdit,
   retireOneTimePaymentLinkForExternalPayment,
 } from "./stripe-ingest";
@@ -429,21 +431,20 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
     Boolean(inv.stripe_price_id || inv.stripe_payment_link_id || inv.stripe_payment_link_url) &&
     (method !== "stripe" || totals.totalCents !== inv.total_cents || input.currency !== inv.currency);
   if (linkWouldBeWrong) await retireOneTimePaymentLinkForDraftEdit(inv);
-  const writeSnapshot = linkWouldBeWrong ? await loadInvoice(invoiceId) : inv;
-  if (!writeSnapshot || writeSnapshot.status !== "draft") throw new FinanceInputError("only a draft can be edited; void it and create a new one");
+  const writeSnapshot = oneTimeLinkSnapshot(inv);
   const updateAuditId = newId("aud");
   const updateGate = { sql: `EXISTS (SELECT 1 FROM fin_audit_log WHERE id = ?)`, args: [updateAuditId] };
   const out = await writeBatch([
     {
       sql: `UPDATE fin_invoices SET contact_id = ?, issue_date = ?, due_date = ?, currency = ?, subtotal_cents = ?, gst_cents = ?, qst_cents = ?,
-                   total_cents = ?, tax_registered_snapshot = ?, notes = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE id = ? AND status = 'draft'
-               AND updated_at = ?
+                   total_cents = ?, tax_registered_snapshot = ?, notes = ?${linkWouldBeWrong ? ", stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL" : ""},
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE ${writeSnapshot.sql}
                AND EXISTS (
                  SELECT 1 FROM fin_contacts
                   WHERE id = ? AND entity_id = ? AND archived = 0 AND kind IN ('customer', 'both')
                )`,
-      args: [input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, invoiceId, writeSnapshot.updated_at, input.contactId, entity.id],
+      args: [input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, ...writeSnapshot.args, input.contactId, entity.id],
     },
     {
       sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
@@ -456,6 +457,46 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
     ...retainerStatement(invoiceId, totals, retainerReady, updateGate),
   ]);
   if (out[0]?.rowsAffected !== 1) throw new FinanceInputError("only a draft can be edited; void it and create a new one");
+}
+
+/** Delete a never-issued invoice after every checkout URL is proved inactive. */
+export async function deleteDraftInvoice(viewer: FinanceViewer, invoiceId: string): Promise<void> {
+  const entity = await requireRowEntity(viewer, "fin_invoices", invoiceId);
+  const inv = await loadInvoice(invoiceId);
+  if (!inv) throw new FinanceNotFound();
+  if (inv.status !== "draft") throw new FinanceInputError("only a draft invoice can be deleted; issued invoices must be voided");
+  await deactivateInvoiceLinksStrict(inv, "delete");
+  const hasRetainerColumns = await retainerColumnsReady();
+  const snapshot = oneTimeLinkSnapshot(inv);
+  const exact = `${snapshot.sql}
+    AND recognition_entry_id IS ?
+    ${hasRetainerColumns ? "AND stripe_retainer_link_id IS ? AND stripe_retainer_link_url IS ?" : ""}`;
+  const exactArgs = [
+    ...snapshot.args,
+    inv.recognition_entry_id,
+    ...(hasRetainerColumns ? [inv.stripe_retainer_link_id ?? null, inv.stripe_retainer_link_url ?? null] : []),
+  ];
+  const out = await writeBatch([
+    {
+      sql: `DELETE FROM fin_invoice_lines
+             WHERE invoice_id = ? AND EXISTS (SELECT 1 FROM fin_invoices WHERE ${exact})`,
+      args: [invoiceId, ...exactArgs],
+    },
+    {
+      sql: `DELETE FROM fin_invoices
+             WHERE ${exact}
+               AND NOT EXISTS (SELECT 1 FROM fin_invoice_lines WHERE invoice_id = ?)`,
+      args: [...exactArgs, invoiceId],
+    },
+    {
+      sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+            SELECT ?, ?, ?, 'invoice.draft_deleted', 'invoice', ?, ? WHERE changes() = 1`,
+      args: [newId("aud"), entity.id, viewerLabel(viewer).slice(0, 200), invoiceId, JSON.stringify({ total: inv.total_cents, currency: inv.currency })],
+    },
+  ]);
+  if (out[1]?.rowsAffected !== 1) {
+    throw new FinanceInputError("This draft changed while it was being deleted. Reload it and try again; it was kept.");
+  }
 }
 
 // ── reads ────────────────────────────────────────────────────────────────
@@ -581,8 +622,12 @@ export async function getInvoiceDetail(viewer: FinanceViewer, invoiceId: string)
  */
 export async function invoicePdfBytes(viewer: FinanceViewer, invoiceId: string): Promise<{ bytes: Uint8Array; filename: string }> {
   const d = await getInvoiceDetail(viewer, invoiceId);
-  const [wise, link] = await Promise.all([bankTransferFor(d.invoice), retainerLinkStatus(d.invoice)]);
-  const printable = link.state === "active" && !link.stale ? d.invoice : { ...d.invoice, stripe_retainer_link_url: null };
+  const [wise, link, oneTimeUrl] = await Promise.all([bankTransferFor(d.invoice), retainerLinkStatus(d.invoice), verifiedOneTimeLinkForDocument(d.invoice)]);
+  const printable = {
+    ...d.invoice,
+    stripe_payment_link_url: oneTimeUrl,
+    ...(link.state === "active" && !link.stale ? {} : { stripe_retainer_link_url: null }),
+  };
   return {
     bytes: await pdfFor(printable, d.lines, d.contact, d.settings, { bankTransfer: wise.lines, retainerSetUp: link.state === "used" && !link.stale }),
     filename: `${d.invoice.number || "DRAFT"}.pdf`,
@@ -745,8 +790,136 @@ async function issueTotals(entityId: string, lines: readonly InvoiceLineRow[]): 
  */
 type IssueExpectation = { totalCents: number; monthlyCents: number; currency: string; contactId: string; cardLinkVerified: boolean };
 
+/** One SQL fact proving every row used to compute an issue is still byte-for-byte current. */
+function issueSnapshotGate(
+  inv: InvoiceRow,
+  lines: readonly InvoiceLineRow[],
+  settings: SettingsRow,
+  opts: { paymentMethodReady: boolean; retainerReady: boolean },
+): { sql: string; args: Array<string | number | null> } {
+  const invoiceParts = [
+    "issue_i.id = ?",
+    "issue_i.status = 'draft'",
+    "issue_i.updated_at = ?",
+    "issue_i.contact_id = ?",
+    "issue_i.number IS ?",
+    "issue_i.issue_date = ?",
+    "issue_i.due_date = ?",
+    "issue_i.currency = ?",
+    "issue_i.subtotal_cents = ?",
+    "issue_i.gst_cents = ?",
+    "issue_i.qst_cents = ?",
+    "issue_i.total_cents = ?",
+    "issue_i.amount_paid_cents = ?",
+    "issue_i.tax_registered_snapshot = ?",
+    "issue_i.recognition_entry_id IS ?",
+    "issue_i.stripe_price_id IS ?",
+    "issue_i.stripe_payment_link_id IS ?",
+    "issue_i.stripe_payment_link_url IS ?",
+  ];
+  const invoiceArgs: Array<string | number | null> = [
+    inv.id,
+    inv.updated_at,
+    inv.contact_id,
+    inv.number,
+    inv.issue_date,
+    inv.due_date,
+    inv.currency,
+    inv.subtotal_cents,
+    inv.gst_cents,
+    inv.qst_cents,
+    inv.total_cents,
+    inv.amount_paid_cents,
+    inv.tax_registered_snapshot,
+    inv.recognition_entry_id,
+    inv.stripe_price_id,
+    inv.stripe_payment_link_id,
+    inv.stripe_payment_link_url,
+  ];
+  if (opts.paymentMethodReady) {
+    invoiceParts.push("issue_i.payment_method IS ?");
+    invoiceArgs.push(inv.payment_method ?? null);
+  }
+  if (opts.retainerReady) {
+    invoiceParts.push(
+      "issue_i.retainer_monthly_cents IS ?",
+      "issue_i.stripe_retainer_product_id IS ?",
+      "issue_i.stripe_retainer_price_id IS ?",
+      "issue_i.stripe_retainer_price_cents IS ?",
+      "issue_i.stripe_retainer_price_currency IS ?",
+      "issue_i.stripe_retainer_link_id IS ?",
+      "issue_i.stripe_retainer_link_url IS ?",
+      "issue_i.stripe_retainer_link_cents IS ?",
+      "issue_i.stripe_retainer_link_currency IS ?",
+    );
+    invoiceArgs.push(
+      inv.retainer_monthly_cents ?? null,
+      inv.stripe_retainer_product_id ?? null,
+      inv.stripe_retainer_price_id ?? null,
+      inv.stripe_retainer_price_cents ?? null,
+      inv.stripe_retainer_price_currency ?? null,
+      inv.stripe_retainer_link_id ?? null,
+      inv.stripe_retainer_link_url ?? null,
+      inv.stripe_retainer_link_cents ?? null,
+      inv.stripe_retainer_link_currency ?? null,
+    );
+  }
+  const linePredicates: string[] = [];
+  const lineArgs: Array<string | number | null> = [inv.id, lines.length];
+  for (const line of lines) {
+    linePredicates.push(`EXISTS (
+      SELECT 1 FROM fin_invoice_lines issue_l
+       WHERE issue_l.invoice_id = ? AND issue_l.id = ? AND issue_l.line_no = ? AND issue_l.description = ?
+         AND issue_l.quantity_milli = ? AND issue_l.unit_price_cents = ? AND issue_l.amount_cents = ?
+         AND issue_l.taxable = ? AND issue_l.revenue_account_id = ?${opts.retainerReady ? " AND issue_l.billing IS ?" : ""}
+    )`);
+    lineArgs.push(
+      inv.id,
+      line.id,
+      line.line_no,
+      line.description,
+      line.quantity_milli,
+      line.unit_price_cents,
+      line.amount_cents,
+      line.taxable,
+      line.revenue_account_id,
+      ...(opts.retainerReady ? [line.billing ?? null] : []),
+    );
+  }
+  return {
+    sql: `EXISTS (
+      SELECT 1 FROM fin_invoices issue_i
+      JOIN fin_contacts issue_c ON issue_c.id = issue_i.contact_id AND issue_c.entity_id = issue_i.entity_id
+      WHERE ${invoiceParts.join(" AND ")}
+        AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both')
+        AND EXISTS (
+          SELECT 1 FROM fin_settings issue_s
+           WHERE issue_s.entity_id = ? AND issue_s.updated_at = ? AND issue_s.invoice_prefix = ?
+             AND issue_s.invoice_next_number = ? AND issue_s.invoice_number_year IS ?
+             AND issue_s.gst_qst_registered = ? AND issue_s.gst_number = ? AND issue_s.qst_number = ?
+        )
+        AND (SELECT COUNT(*) FROM fin_invoice_lines count_l WHERE count_l.invoice_id = ?) = ?
+        ${linePredicates.length ? `AND ${linePredicates.join(" AND ")}` : ""}
+    )`,
+    args: [
+      ...invoiceArgs,
+      settings.entity_id,
+      settings.updated_at,
+      settings.invoice_prefix,
+      settings.invoice_next_number,
+      settings.invoice_number_year,
+      settings.gst_qst_registered,
+      settings.gst_number,
+      settings.qst_number,
+      ...lineArgs,
+    ],
+  };
+}
+
 export const ISSUE_CHANGED_DURING_SEND =
   "This invoice changed while it was being sent (its lines, customer or currency, or the GST/QST settings, were edited at the same moment), so it was not issued and nothing was emailed: open it again and send it.";
+export const ISSUE_CHANGED_DURING_FINALIZE =
+  "This invoice changed while it was being issued, so no number or bookkeeping entry was created. Open it again and issue it once more.";
 
 /**
  * Number the draft, re-total it under current registration, recognise the
@@ -757,7 +930,6 @@ export const ISSUE_CHANGED_DURING_SEND =
 export async function finalizeInvoice(viewer: FinanceViewer, invoiceId: string, expect?: IssueExpectation): Promise<InvoiceRow> {
   const entity = await requireRowEntity(viewer, "fin_invoices", invoiceId);
   businessOnly(entity);
-  let droppedCardLink: string | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     const inv = await loadInvoice(invoiceId);
     if (!inv) throw new FinanceNotFound();
@@ -776,8 +948,13 @@ export async function finalizeInvoice(viewer: FinanceViewer, invoiceId: string, 
     const hasMonthly = lines.some((l) => storedLineBilling(l.billing) === "monthly");
     // A card link made on the draft that this issue did not verify (Issue without emailing, or a send that no
     // longer attaches it) may charge another amount: it is dropped, so no later send or reminder hands it out.
-    const dropCardLink = inv.stripe_payment_link_id && !expect?.cardLinkVerified ? inv.stripe_payment_link_id : null;
-    if (dropCardLink) droppedCardLink = dropCardLink;
+    const dropCardLink = Boolean(inv.stripe_price_id || inv.stripe_payment_link_id || inv.stripe_payment_link_url) && !expect?.cardLinkVerified;
+    if (dropCardLink) {
+      // Issuing without a send must not leave an unchecked draft checkout in
+      // the wild. Prove it off before numbering/bookkeeping; the gated issue
+      // batch below clears the local fields atomically with issuance.
+      await retireOneTimePaymentLinkForDraftEdit(inv);
+    }
     const year = Number(torontoToday().slice(0, 4));
     const alloc = allocateInvoiceNumber(
       { prefix: settings.invoice_prefix, nextNumber: settings.invoice_next_number, numberYear: settings.invoice_number_year },
@@ -794,43 +971,46 @@ export async function finalizeInvoice(viewer: FinanceViewer, invoiceId: string, 
     };
     // The receivable is the ONE-TIME part. A retainer-only invoice books
     // nothing at issue: its revenue arrives with each Stripe charge.
+    const paymentMethodReady = await paymentMethodColumnReady();
+    const retainerReady = await retainerColumnsReady();
+    const snapshot = issueSnapshotGate(inv, lines, settings, { paymentMethodReady, retainerReady });
+    const operationId = newId("aud");
+    const operationGate = { sql: `EXISTS (SELECT 1 FROM fin_audit_log WHERE id = ?)`, args: [operationId] };
     const recognition =
       totals.totalCents > 0
-        ? await buildRecognitionPosting(finalized, lines, viewerLabel(viewer), {
-            sql: `(SELECT status FROM fin_invoices WHERE id = ?) = 'draft'
-                  AND EXISTS (
-                    SELECT 1 FROM fin_invoices issue_i
-                    JOIN fin_contacts issue_c ON issue_c.id = issue_i.contact_id AND issue_c.entity_id = issue_i.entity_id
-                    WHERE issue_i.id = ? AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both')
-                  )`,
-            args: [invoiceId, invoiceId],
-          })
+        ? await buildRecognitionPosting(finalized, lines, viewerLabel(viewer), operationGate)
         : null;
     try {
-      await writeBatch([
+      const out = await writeBatch([
+        {
+          sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+                SELECT ?, ?, ?, 'invoice.issued', 'invoice', ?, ? WHERE ${snapshot.sql}`,
+          args: [
+            operationId,
+            entity.id,
+            viewerLabel(viewer).slice(0, 200),
+            invoiceId,
+            JSON.stringify({ number: alloc.number, total: totals.totalCents, ...(hasMonthly ? { monthly: totals.monthly.totalCents } : {}) }),
+            ...snapshot.args,
+          ],
+        },
         {
           sql: `UPDATE fin_settings SET invoice_next_number = ?, invoice_number_year = ?
-                 WHERE entity_id = ? AND invoice_next_number = ? AND COALESCE(invoice_number_year, -1) = ?
-                   AND EXISTS (
-                     SELECT 1 FROM fin_invoices issue_i
-                     JOIN fin_contacts issue_c ON issue_c.id = issue_i.contact_id AND issue_c.entity_id = issue_i.entity_id
-                     WHERE issue_i.id = ? AND issue_i.status = 'draft' AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both')
-                   )`,
-          args: [alloc.nextNumber, alloc.numberYear, entity.id, settings.invoice_next_number, settings.invoice_number_year ?? -1, invoiceId],
+                 WHERE entity_id = ? AND invoice_next_number = ? AND invoice_number_year IS ? AND (${operationGate.sql})`,
+          args: [alloc.nextNumber, alloc.numberYear, entity.id, settings.invoice_next_number, settings.invoice_number_year, ...operationGate.args],
         },
         ...(recognition ? recognition.statements : []),
         ...(hasMonthly
           ? [{
-              sql: `UPDATE fin_invoices SET retainer_monthly_cents = ? WHERE id = ? AND status = 'draft'
-                      AND EXISTS (SELECT 1 FROM fin_contacts issue_c WHERE issue_c.id = fin_invoices.contact_id AND issue_c.entity_id = fin_invoices.entity_id AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both'))`,
-              args: [totals.monthly.totalCents, invoiceId],
+              sql: `UPDATE fin_invoices SET retainer_monthly_cents = ? WHERE id = ? AND status = 'draft' AND (${operationGate.sql})`,
+              args: [totals.monthly.totalCents, invoiceId, ...operationGate.args],
             }]
           : []),
         ...(dropCardLink
           ? [{
-              sql: `UPDATE fin_invoices SET stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL WHERE id = ? AND status = 'draft'
-                      AND EXISTS (SELECT 1 FROM fin_contacts issue_c WHERE issue_c.id = fin_invoices.contact_id AND issue_c.entity_id = fin_invoices.entity_id AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both'))`,
-              args: [invoiceId],
+              sql: `UPDATE fin_invoices SET stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL
+                     WHERE id = ? AND status = 'draft' AND (${operationGate.sql})`,
+              args: [invoiceId, ...operationGate.args],
             }]
           : []),
         recognition
@@ -838,35 +1018,27 @@ export async function finalizeInvoice(viewer: FinanceViewer, invoiceId: string, 
               sql: `UPDATE fin_invoices SET number = ?, status = 'sent', subtotal_cents = ?, gst_cents = ?, qst_cents = ?, total_cents = ?,
                            tax_registered_snapshot = ?, recognition_entry_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
                      WHERE id = ? AND status = 'draft' AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)
-                       AND EXISTS (SELECT 1 FROM fin_contacts issue_c WHERE issue_c.id = fin_invoices.contact_id AND issue_c.entity_id = fin_invoices.entity_id AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both'))`,
-              args: [alloc.number, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, registered ? 1 : 0, recognition.entryId, invoiceId, recognition.entryId],
+                       AND (${operationGate.sql})`,
+              args: [alloc.number, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, registered ? 1 : 0, recognition.entryId, invoiceId, recognition.entryId, ...operationGate.args],
             }
           : {
               sql: `UPDATE fin_invoices SET number = ?, status = 'sent', subtotal_cents = ?, gst_cents = ?, qst_cents = ?, total_cents = ?,
                            tax_registered_snapshot = ?, recognition_entry_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                     WHERE id = ? AND status = 'draft'
-                       AND EXISTS (SELECT 1 FROM fin_contacts issue_c WHERE issue_c.id = fin_invoices.contact_id AND issue_c.entity_id = fin_invoices.entity_id AND issue_c.archived = 0 AND issue_c.kind IN ('customer', 'both'))`,
-              args: [alloc.number, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, registered ? 1 : 0, invoiceId],
+                     WHERE id = ? AND status = 'draft' AND (${operationGate.sql})`,
+              args: [alloc.number, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, registered ? 1 : 0, invoiceId, ...operationGate.args],
             },
-        conditionalAuditStatement(
-          {
-            entityId: entity.id,
-            actor: viewerLabel(viewer),
-            action: "invoice.issued",
-            objectType: "invoice",
-            objectId: invoiceId,
-            detail: { number: alloc.number, total: totals.totalCents, ...(hasMonthly ? { monthly: totals.monthly.totalCents } : {}) },
-          },
-          "changes() = 1",
-        ),
       ]);
+      if (out[0]?.rowsAffected !== 1) {
+        const current = await loadInvoice(invoiceId);
+        if (current && !isActiveInvoiceCustomer(current, await loadContact(current.contact_id))) throw new FinanceInputError(ACTIVE_CUSTOMER_REQUIRED);
+        throw new FinanceInputError(expect ? ISSUE_CHANGED_DURING_SEND : ISSUE_CHANGED_DURING_FINALIZE);
+      }
     } catch (e) {
       if (isUniqueViolation(e)) continue; // lost a numbering race: re-read settings and try again
       throw e;
     }
     const after = await loadInvoice(invoiceId);
     if (after && after.status !== "draft") {
-      if (droppedCardLink) await switchOffUnsentLink(invoiceId, droppedCardLink);
       return after;
     }
   }
@@ -915,10 +1087,35 @@ async function storedCardLinkReusable(key: string, inv: InvoiceRow, due: number)
   const used = completedSessions(link);
   if (used === null) throw new FinanceInputError(DRAFT_CARD_LINK_UNKNOWN);
   if (used > 0) throw new FinanceInputError(DRAFT_CARD_LINK_USED);
-  if (link.active !== true || !inv.stripe_price_id) return false;
+  if (link.active !== true || !inv.stripe_price_id || link.id !== inv.stripe_payment_link_id || link.url !== inv.stripe_payment_link_url) return false;
+  const lineItems = await stripeRequest(
+    key,
+    "GET",
+    `/v1/payment_links/${encodeURIComponent(inv.stripe_payment_link_id as string)}/line_items`,
+    { limit: 2 },
+  );
+  const data = Array.isArray(lineItems.data) ? lineItems.data : [];
+  const only = data.length === 1 && lineItems.has_more === false && data[0] && typeof data[0] === "object" ? (data[0] as Record<string, unknown>) : null;
+  const linkedPrice = only?.price;
+  const linkedPriceId = typeof linkedPrice === "string" ? linkedPrice : linkedPrice && typeof linkedPrice === "object" ? (linkedPrice as Record<string, unknown>).id : null;
+  if (Number(only?.quantity) !== 1 || linkedPriceId !== inv.stripe_price_id) return false;
   const price = await stripeRequest(key, "GET", `/v1/prices/${encodeURIComponent(inv.stripe_price_id)}`);
   if (price.livemode !== true) throw new FinanceInputError("the stored Stripe price is in test mode; refusing to email its link to a real customer");
   return Number(price.unit_amount) === due && String(price.currency || "").toUpperCase() === inv.currency;
+}
+
+/** Read-only, fail-closed link selection for downloaded PDFs. */
+async function verifiedOneTimeLinkForDocument(inv: InvoiceRow): Promise<string | null> {
+  if (!offersCard(storedPaymentMethod(inv.payment_method))) return null;
+  const due = balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents });
+  if (due <= 0 || !inv.stripe_payment_link_id || !inv.stripe_payment_link_url || !inv.stripe_price_id) return null;
+  try {
+    const { key } = await getStripeClient();
+    return (await storedCardLinkReusable(key, inv, due)) ? inv.stripe_payment_link_url : null;
+  } catch (e) {
+    console.error("[finances:invoices] omitted an unverified one-time link from a PDF", inv.id, e instanceof Error ? e.message : e);
+    return null;
+  }
 }
 
 /**
@@ -1011,6 +1208,24 @@ export async function ensurePaymentLink(inv: InvoiceRow, storeSnapshot: InvoiceR
     ],
   });
   if (stored.rowsAffected !== 1) {
+    const winner = await loadInvoice(inv.id);
+    const winnerDue = winner ? balanceDueCents({ totalCents: winner.total_cents, amountPaidCents: winner.amount_paid_cents }) : -1;
+    if (
+      winner?.stripe_payment_link_id === linkId &&
+      winner.stripe_price_id === priceId &&
+      winner.stripe_payment_link_url === url &&
+      winner.status === storeSnapshot.status &&
+      winner.currency === inv.currency &&
+      winnerDue === due &&
+      offersCard(storedPaymentMethod(winner.payment_method))
+    ) {
+      return url;
+    }
+    // Stripe idempotency can hand concurrent callers the SAME object. Never
+    // switch off an id that another caller just stored as the invoice winner.
+    if (winner?.stripe_payment_link_id === linkId) {
+      throw new FinanceInputError("This invoice changed while its card link was being made. Reload the invoice and send again. Nothing was emailed.");
+    }
     await deactivateAndConfirmPaymentLink(key, linkId);
     throw new FinanceInputError("This invoice changed while its card link was being made, so the new link was switched off. Reload the invoice and send again. Nothing was emailed.");
   }
@@ -1280,16 +1495,6 @@ async function numberPaymentLinks(inv: InvoiceRow, links: { card: string | null;
   }
 }
 
-/** Switch off a card link that was never emailed (a draft's, dropped at issue). Best effort. */
-async function switchOffUnsentLink(invoiceId: string, linkId: string): Promise<void> {
-  try {
-    const { key } = await getStripeClient();
-    await switchOffPaymentLink(key, linkId);
-  } catch (e) {
-    console.error("[finances:invoices] could not switch off an unsent card link", invoiceId, linkId, e instanceof Error ? e.message : e);
-  }
-}
-
 /** What the founders see when Stripe refuses to create a link: one sentence saying what to change, never a raw API error. */
 export const STRIPE_LINK_REFUSED = {
   retainer:
@@ -1541,6 +1746,7 @@ export async function markInvoicePaidManually(viewer: FinanceViewer, invoiceId: 
   const contact = await loadContact(inv.contact_id);
   const paymentId = newId("pay");
   const paymentGate = { sql: `EXISTS (SELECT 1 FROM fin_payments WHERE id = ?)`, args: [paymentId] };
+  const invoiceSnapshot = oneTimeLinkSnapshot(inv, "payment_i");
   const posting = await buildSettlementPosting({
     inv,
     amountCents: amount,
@@ -1562,16 +1768,16 @@ export async function markInvoicePaidManually(viewer: FinanceViewer, invoiceId: 
               fee_status, settlement_estimated, invoice_id, contact_id, customer_name, customer_email, deposit_account_id, description, livemode, created_by)
             SELECT ?, ?, 'payment', 'manual', ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, 1, ?
              WHERE EXISTS (
-               SELECT 1 FROM fin_invoices
-                WHERE id = ? AND status = ? AND total_cents = ? AND amount_paid_cents = ? AND currency = ?
-                  AND stripe_price_id IS NULL AND stripe_payment_link_id IS NULL AND stripe_payment_link_url IS NULL
+               SELECT 1 FROM fin_invoices payment_i
+                WHERE ${invoiceSnapshot.sql}
              )`,
       args: [
         paymentId, entity.id, `${date}T12:00:00.000Z`, date, amount, inv.currency, receivedCad, estimated, inv.id, inv.contact_id,
         contact?.name || "", contact?.email || "", depositId, text(raw.reference, 200) || "Manual payment", viewerLabel(viewer),
-        inv.id, inv.status, inv.total_cents, inv.amount_paid_cents, inv.currency,
+        ...invoiceSnapshot.args,
       ],
     },
+    clearOneTimePaymentLinkStatement(inv, paymentGate),
     ...posting.statements,
     { sql: `UPDATE fin_payments SET entry_id = ? WHERE id = ? AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`, args: [posting.entryId, paymentId, posting.entryId] },
     recomputeInvoicePaidStatement(inv.id, new Date().toISOString(), paymentGate),
@@ -1595,18 +1801,40 @@ export async function voidInvoice(viewer: FinanceViewer, invoiceId: string): Pro
   if (!inv) throw new FinanceNotFound();
   if (!canTransition(inv.status, "void")) throw new FinanceInputError(`a ${inv.status} invoice cannot be voided`);
   if (inv.amount_paid_cents > 0) throw new FinanceInputError("this invoice has payments; refund them before voiding");
-  const statements: InStatement[] = [];
+  await deactivateInvoiceLinksStrict(inv, "void");
+  const hasRetainerColumns = await retainerColumnsReady();
+  const operationId = newId("aud");
+  const operationGate = { sql: `EXISTS (SELECT 1 FROM fin_audit_log WHERE id = ?)`, args: [operationId] };
+  const snapshot = oneTimeLinkSnapshot(inv);
+  const statements: InStatement[] = [
+    {
+      sql: `UPDATE fin_invoices
+               SET status = 'void', voided_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE ${snapshot.sql} AND amount_paid_cents = 0 AND recognition_entry_id IS ?
+               ${hasRetainerColumns ? "AND stripe_retainer_link_id IS ? AND stripe_retainer_link_url IS ?" : ""}`,
+      args: [...snapshot.args, inv.recognition_entry_id, ...(hasRetainerColumns ? [inv.stripe_retainer_link_id ?? null, inv.stripe_retainer_link_url ?? null] : [])],
+    },
+    {
+      sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+            SELECT ?, ?, ?, 'invoice.voided', 'invoice', ?, '{}' WHERE changes() = 1`,
+      args: [operationId, entity.id, viewerLabel(viewer).slice(0, 200), invoiceId],
+    },
+  ];
   if (inv.recognition_entry_id) {
-    const rev = await buildReversal({ entityId: entity.id, entryId: inv.recognition_entry_id, date: torontoToday(), memo: `Void invoice ${inv.number}`, createdBy: viewerLabel(viewer) });
+    const rev = await buildReversal({
+      entityId: entity.id,
+      entryId: inv.recognition_entry_id,
+      date: torontoToday(),
+      memo: `Void invoice ${inv.number}`,
+      createdBy: viewerLabel(viewer),
+      gate: operationGate,
+    });
     statements.push(...rev.statements);
   }
-  statements.push(
-    { sql: `UPDATE fin_invoices SET status = 'void', voided_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ? AND status = ? AND amount_paid_cents = 0`, args: [invoiceId, inv.status] },
-    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.voided", objectType: "invoice", objectId: invoiceId }),
-  );
-  await writeBatch(statements);
-  await deactivatePaymentLinkIfPaid(invoiceId, true).catch((e) => console.error("[finances:invoices] link deactivate failed", e instanceof Error ? e.message : e));
-  await deactivateRetainerLink(inv).catch((e) => console.error("[finances:invoices] retainer link deactivate failed", e instanceof Error ? e.message : e));
+  const out = await writeBatch(statements);
+  if (out[0]?.rowsAffected !== 1) {
+    throw new FinanceInputError("This invoice changed while it was being voided. Reload it and try again; no bookkeeping changes were made.");
+  }
 }
 
 /**
@@ -1617,7 +1845,25 @@ export async function voidInvoice(viewer: FinanceViewer, invoiceId: string): Pro
 async function deactivateRetainerLink(inv: InvoiceRow): Promise<void> {
   if (!inv.stripe_retainer_link_id) return;
   const { key } = await getStripeClient();
-  await switchOffPaymentLink(key, inv.stripe_retainer_link_id);
+  await deactivateAndConfirmPaymentLink(key, inv.stripe_retainer_link_id);
+}
+
+/** Every persisted checkout URL is proved off before void/delete changes local state. */
+async function deactivateInvoiceLinksStrict(inv: InvoiceRow, action: "void" | "delete"): Promise<void> {
+  try {
+    const hasOneTime = Boolean(inv.stripe_price_id || inv.stripe_payment_link_id || inv.stripe_payment_link_url);
+    if (hasOneTime) {
+      if (!inv.stripe_payment_link_id) throw new Error(`invoice ${inv.id} has one-time link fields without a Payment Link id`);
+      const { key } = await getStripeClient();
+      await deactivateAndConfirmPaymentLink(key, inv.stripe_payment_link_id);
+    }
+    const hasRetainerLink = Boolean(inv.stripe_retainer_link_id || inv.stripe_retainer_link_url);
+    if (hasRetainerLink && !inv.stripe_retainer_link_id) throw new Error(`invoice ${inv.id} has retainer link fields without a Payment Link id`);
+    if (hasRetainerLink) await deactivateRetainerLink(inv);
+  } catch (e) {
+    console.error(`[finances:invoices] could not shut down Stripe links before invoice ${action}`, inv.id, e instanceof Error ? e.message : e);
+    throw new FinanceInputError(`Stripe couldn't confirm every payment link was off, so the invoice was not ${action === "void" ? "voided" : "deleted"}. Check Stripe and try again.`);
+  }
 }
 
 /** Persist overdue status for issued, unpaid invoices past their due date. `total_cents` is the one-time part, so a retainer-only invoice (total 0) is never overdue. */
@@ -1685,16 +1931,26 @@ export async function remindOverdue(viewer: FinanceViewer, opts: { send: boolean
         const lines = await loadInvoiceLines(r.id);
         const contact = await loadContact(r.contact_id);
         const wise = await bankTransferFor(r);
+        const method = storedPaymentMethod(r.payment_method);
+        let oneTimeUrl: string | null = null;
+        if (offersCard(method)) {
+          oneTimeUrl = await ensurePaymentLink(r, r);
+        } else {
+          // Old rows may predate payment_method. A bank/Hybrid reminder never
+          // leaks that legacy full-balance card rail back into an email/PDF.
+          await retireLegacyOneTimePaymentLink(r);
+        }
+        const printable = { ...r, stripe_payment_link_url: oneTimeUrl };
         if (wise.notice) console.error("[finances:invoices] reminder without Wise details", r.number, wise.notice);
         // Same rule as sendInvoice: never ask for money with no way to pay.
-        if (offersBankTransfer(storedPaymentMethod(r.payment_method)) && !wise.lines && !r.stripe_payment_link_url && !settings.payment_instructions.trim()) {
+        if (offersBankTransfer(method) && !wise.lines && !oneTimeUrl && !settings.payment_instructions.trim()) {
           throw new FinanceInputError(
             `${wise.notice || "Wise bank details are unavailable."} There are no written payment instructions either, so the reminder was NOT sent.`,
           );
         }
         // A reminder chases the ONE-TIME balance only: its PDF leaves off the retainer (lines, totals, section and link),
         // and composeInvoiceEmail never puts the retainer in a reminder.
-        const pdf = await pdfFor(r, lines, contact, settings, { bankTransfer: wise.lines, oneTimeOnly: true });
+        const pdf = await pdfFor(printable, lines, contact, settings, { bankTransfer: wise.lines, oneTimeOnly: true });
         const mail = composeInvoiceEmail({
           kind: "reminder",
           sellerName: settings.legal_name,
@@ -1704,7 +1960,7 @@ export async function remindOverdue(viewer: FinanceViewer, opts: { send: boolean
           balanceCents: plan.balance_cents,
           currency: r.currency,
           dueDate: r.due_date,
-          paymentLinkUrl: r.stripe_payment_link_url,
+          paymentLinkUrl: oneTimeUrl,
           paymentInstructions: settings.payment_instructions,
           bankTransfer: wise.lines,
         });

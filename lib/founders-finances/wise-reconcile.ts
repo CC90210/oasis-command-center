@@ -36,7 +36,7 @@ import { FinanceInputError, FinanceNotFound, requireEntity } from "./access-io";
 import { buildPosting } from "./ledger-io";
 import { usdCadRate } from "./fx-io";
 import { buildSettlementPosting, loadContact, loadInvoice, recomputeInvoicePaidStatement, type InvoiceRow } from "./invoice-store";
-import { retireOneTimePaymentLinkForExternalPayment } from "./stripe-ingest";
+import { clearOneTimePaymentLinkStatement, oneTimeLinkSnapshot, retireOneTimePaymentLinkForExternalPayment } from "./stripe-ingest";
 import { dismissKey, proposeWiseMatches, settlementFor, type OpenInvoiceForMatch, type WiseDeposit } from "./wise";
 import { WISE_PAYMENT_SOURCE, wiseFitid } from "./wise-feed";
 import { recentWiseDeposits } from "./wise-io";
@@ -195,6 +195,7 @@ async function recordWisePayment(
   const contact = await loadContact(inv.contact_id);
   const paymentId = newId("pay");
   const paymentGate = { sql: `EXISTS (SELECT 1 FROM fin_payments WHERE id = ?)`, args: [paymentId] };
+  const invoiceSnapshot = oneTimeLinkSnapshot(inv, "payment_i");
   // A USD payment STAYS USD at Wise, but the settlement (the manual mark-paid
   // shape) books its receipt in CAD. So a foreign-currency settlement lands in
   // FX clearing, and a second entry moves the USD itself onto chequing at the
@@ -220,17 +221,21 @@ async function recordWisePayment(
               fee_status, settlement_estimated, invoice_id, contact_id, customer_name, customer_email, deposit_account_id, description, livemode, created_by)
             SELECT ?, ?, 'payment', 'manual', ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, 1, ?
              WHERE EXISTS (
-               SELECT 1 FROM fin_invoices
-                WHERE id = ? AND status = ? AND total_cents = ? AND amount_paid_cents = ? AND currency = ?
-                  AND stripe_price_id IS NULL AND stripe_payment_link_id IS NULL AND stripe_payment_link_url IS NULL
-             )`,
+               SELECT 1 FROM fin_invoices payment_i
+                WHERE ${invoiceSnapshot.sql}
+             )
+               AND NOT EXISTS (
+                 SELECT 1 FROM fin_bank_transactions
+                  WHERE entity_id = ? AND account_id = ? AND fitid = ? AND status = 'posted'
+               )`,
       args: [
         paymentId, e, deposit.occurredAt, date, settle.amountCents, inv.currency, receivedCad, estimated, inv.id, inv.contact_id,
         contact?.name || deposit.sender, contact?.email || "", bank,
         `Wise ${deposit.ref}${deposit.sender ? ` from ${deposit.sender}` : ""}`.slice(0, 200), createdBy,
-        inv.id, inv.status, inv.total_cents, inv.amount_paid_cents, inv.currency,
+        ...invoiceSnapshot.args, e, bank, fitid,
       ],
     },
+    clearOneTimePaymentLinkStatement(inv, paymentGate),
     ...settlement.statements,
     { sql: `UPDATE fin_payments SET entry_id = ? WHERE id = ?`, args: [settlement.entryId, paymentId] },
   ];

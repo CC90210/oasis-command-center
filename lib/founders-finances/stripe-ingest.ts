@@ -384,12 +384,51 @@ export const EXTERNAL_PAYMENT_LINK_RETIRE_FAILED =
   "Stripe couldn't safely turn off this invoice's card link, so the external payment was not recorded. Check Stripe and try again.";
 export const DRAFT_EDIT_LINK_RETIRE_FAILED =
   "Stripe couldn't safely turn off this draft's old card link, so the draft was not changed. Check Stripe and try again.";
+export const STRIPE_PAYMENT_LINK_RETIRE_FAILED =
+  "Stripe recorded the payment, but the invoice's old card link could not be safely retired. Check Stripe and retry the event before sending the invoice again.";
+export const NON_CARD_LINK_RETIRE_FAILED =
+  "Stripe couldn't safely retire this invoice's legacy card link, so it was not shown or emailed. Check Stripe and try again.";
+
+/** The exact invoice/link fields an external-payment writer read before touching Stripe. */
+export function oneTimeLinkSnapshot(inv: InvoiceRow, alias = "fin_invoices"): { sql: string; args: Array<string | number | null> } {
+  return {
+    sql: `${alias}.id = ? AND ${alias}.status = ? AND ${alias}.total_cents = ? AND ${alias}.amount_paid_cents = ?
+          AND ${alias}.currency = ? AND ${alias}.updated_at = ?
+          AND ${alias}.stripe_price_id IS ? AND ${alias}.stripe_payment_link_id IS ? AND ${alias}.stripe_payment_link_url IS ?`,
+    args: [
+      inv.id,
+      inv.status,
+      inv.total_cents,
+      inv.amount_paid_cents,
+      inv.currency,
+      inv.updated_at,
+      inv.stripe_price_id,
+      inv.stripe_payment_link_id,
+      inv.stripe_payment_link_url,
+    ],
+  };
+}
+
+/** Clear exactly the one-time fields that were deactivated at Stripe, inside the caller's atomic batch. */
+export function clearOneTimePaymentLinkStatement(
+  inv: InvoiceRow,
+  gate?: { sql: string; args: Array<string | number | null> },
+): InStatement {
+  const snapshot = oneTimeLinkSnapshot(inv);
+  return {
+    sql: `UPDATE fin_invoices
+             SET stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+           WHERE ${snapshot.sql}${gate ? ` AND (${gate.sql})` : ""}`,
+    args: [...snapshot.args, ...(gate?.args || [])],
+  };
+}
 
 /**
  * Before money received outside Stripe is recorded, retire the exact one-time
- * link seen by the caller and clear only its one-time fields. The compare-and-
- * set makes a concurrent invoice/link change fail closed; retainer fields are
- * deliberately untouched.
+ * link seen by the caller. The caller clears the fields in the SAME database
+ * batch as the payment/edit it is protecting; Stripe cannot join that local
+ * transaction, so its shutdown necessarily happens first.
  */
 async function retireOneTimePaymentLink(inv: InvoiceRow, failureMessage: string): Promise<void> {
   if (!inv.stripe_payment_link_id && !inv.stripe_price_id && !inv.stripe_payment_link_url) return;
@@ -397,24 +436,6 @@ async function retireOneTimePaymentLink(inv: InvoiceRow, failureMessage: string)
     if (!inv.stripe_payment_link_id) throw new Error(`invoice ${inv.id} has stored card-link fields but no Payment Link id`);
     const { key } = await getStripeClient();
     await deactivateAndConfirmPaymentLink(key, inv.stripe_payment_link_id);
-    const cleared = await finDb().execute({
-      sql: `UPDATE fin_invoices
-               SET stripe_price_id = NULL, stripe_payment_link_id = NULL, stripe_payment_link_url = NULL,
-                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE id = ? AND status = ? AND total_cents = ? AND amount_paid_cents = ? AND currency = ?
-               AND stripe_price_id IS ? AND stripe_payment_link_id IS ? AND stripe_payment_link_url IS ?`,
-      args: [
-        inv.id,
-        inv.status,
-        inv.total_cents,
-        inv.amount_paid_cents,
-        inv.currency,
-        inv.stripe_price_id,
-        inv.stripe_payment_link_id,
-        inv.stripe_payment_link_url,
-      ],
-    });
-    if (cleared.rowsAffected !== 1) throw new Error(`invoice ${inv.id} changed while its card link was being retired`);
   } catch (e) {
     console.error("[finances:stripe] could not safely retire invoice payment link", inv.id, e instanceof Error ? e.message : e);
     throw new FinanceInputError(failureMessage);
@@ -428,6 +449,17 @@ export async function retireOneTimePaymentLinkForExternalPayment(inv: InvoiceRow
 /** Editing a draft may change the amount/currency/rail; retire its now-wrong live link before changing those fields. */
 export async function retireOneTimePaymentLinkForDraftEdit(inv: InvoiceRow): Promise<void> {
   await retireOneTimePaymentLink(inv, DRAFT_EDIT_LINK_RETIRE_FAILED);
+}
+
+/** A Wise/Hybrid document must never expose a legacy one-time card rail. */
+export async function retireLegacyOneTimePaymentLink(inv: InvoiceRow): Promise<void> {
+  if (!inv.stripe_payment_link_id && !inv.stripe_price_id && !inv.stripe_payment_link_url) return;
+  await retireOneTimePaymentLink(inv, NON_CARD_LINK_RETIRE_FAILED);
+  const cleared = await finDb().execute(clearOneTimePaymentLinkStatement(inv));
+  if (cleared.rowsAffected !== 1) {
+    console.error("[finances:stripe] invoice changed while its legacy non-card link fields were being cleared", inv.id);
+    throw new FinanceInputError(NON_CARD_LINK_RETIRE_FAILED);
+  }
 }
 
 async function fetchChargeExpanded(key: string, chargeId: string): Promise<ChargeFacts | null> {
@@ -585,6 +617,11 @@ export async function recordStripeCharge(
       const bt = charge.balanceTxn ?? (opts.fetchFees ? await fetchBalanceTxnSafe(charge.balanceTxnId) : null);
       await completeSettlement(existing.id, bt);
     }
+    // A prior delivery may have committed the payment before Stripe or the
+    // network let us confirm the old full-balance link was off. Every replay
+    // retries that strict retirement until the invoice fields are clear.
+    const refreshed = await loadPayment(existing.id);
+    if (refreshed?.invoice_id) await deactivatePaymentLinkIfPaid(refreshed.invoice_id, true);
     if (charge.amountRefundedCents > 0) await recordRefundsForCharge(existing.id, charge, charge.refunds, opts);
     return { paymentId: existing.id, created: false };
   }
@@ -701,7 +738,7 @@ export async function recordStripeCharge(
   if (bt) await postFee(row.id, bt);
   // Any linked payment changes the balance. Retire the prior full-balance link
   // even when the charge was partial; resend can create the exact remainder.
-  if (created && row.invoice_id) await deactivatePaymentLinkIfPaid(row.invoice_id, true);
+  if (row.invoice_id) await deactivatePaymentLinkIfPaid(row.invoice_id, true);
   if (charge.amountRefundedCents > 0) await recordRefundsForCharge(row.id, charge, charge.refunds, opts);
   return { paymentId: row.id, created };
 }
@@ -1032,10 +1069,11 @@ export async function deactivatePaymentLinkIfPaid(invoiceId: string, force = fal
   const inv = await loadInvoice(invoiceId);
   if (!inv || (!inv.stripe_payment_link_id && !inv.stripe_price_id && !inv.stripe_payment_link_url)) return;
   if (inv.status !== "paid" && !force) return;
-  try {
-    await retireOneTimePaymentLinkForExternalPayment(inv);
-  } catch (e) {
-    console.error("[finances:stripe] could not deactivate paid invoice's payment link", invoiceId, e instanceof Error ? e.message : e);
+  await retireOneTimePaymentLink(inv, STRIPE_PAYMENT_LINK_RETIRE_FAILED);
+  const cleared = await finDb().execute(clearOneTimePaymentLinkStatement(inv));
+  if (cleared.rowsAffected !== 1) {
+    console.error("[finances:stripe] invoice changed while its paid link fields were being cleared", invoiceId);
+    throw new FinanceInputError(STRIPE_PAYMENT_LINK_RETIRE_FAILED);
   }
 }
 

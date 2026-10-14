@@ -75,7 +75,7 @@ const stripe = {
   /** Every price Stripe made, as GET /v1/prices/:id returns it. */
   prices: new Map<string, Json>(),
   /** Stripe's live state of every payment link, as GET returns it. */
-  links: new Map<string, { id: string; url: string; active: boolean; restrictions: { completed_sessions: { count: number; limit: number } } }>(),
+  links: new Map<string, { id: string; url: string; active: boolean; priceId: string; restrictions: { completed_sessions: { count: number; limit: number } } }>(),
 };
 /** What Stripe does when the client completes the checkout on a one-checkout link: counts it and switches the link off. */
 function clientSubscribes(linkId: string) {
@@ -130,6 +130,12 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const p = stripe.prices.get(url.pathname.split("/").pop() as string);
       return p ? json(structuredClone(p)) : json({ error: { message: "No such price" } }, 404);
     }
+    if (method === "GET" && /\/v1\/payment_links\/[^/]+\/line_items$/.test(url.pathname)) {
+      stripeReads.push(url.pathname);
+      const id = url.pathname.split("/").at(-2) as string;
+      const l = stripe.links.get(id);
+      return l ? json({ object: "list", data: [{ object: "item", quantity: 1, price: { id: l.priceId } }], has_more: false }) : json({ error: { message: "No such payment_link" } }, 404);
+    }
     if (method === "GET" && url.pathname.startsWith("/v1/payment_links/")) {
       stripeReads.push(url.pathname);
       const l = stripe.links.get(url.pathname.split("/").pop() as string);
@@ -170,7 +176,7 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       stripe.prices.set(body.id as string, body);
     } else if (url.pathname === "/v1/payment_links") {
       const limit = Number(params["restrictions[completed_sessions][limit]"] || 0);
-      const l = { id: `plink_${n}`, url: `https://buy.stripe.com/link_${n}`, active: true, restrictions: { completed_sessions: { count: 0, limit } } };
+      const l = { id: `plink_${n}`, url: `https://buy.stripe.com/link_${n}`, active: true, priceId: params["line_items[0][price]"] || "", restrictions: { completed_sessions: { count: 0, limit } } };
       stripe.links.set(l.id, l);
       body = { object: "payment_link", livemode: true, ...structuredClone(l) };
     } else if (url.pathname.startsWith("/v1/payment_links/")) {
@@ -193,6 +199,26 @@ async function check(name: string, fn: () => Promise<void>) {
   } catch (e) {
     failures += 1;
     console.log(`  FAIL  ${name}\n        ${(e as Error).stack?.split("\n").slice(0, 24).join("\n        ")}`);
+  }
+}
+
+/** Run one mutation immediately before the first matching local write batch. */
+async function withRace<T>(match: (batchJson: string) => boolean, race: () => Promise<void>, fn: () => Promise<T>): Promise<{ result: T; raced: boolean }> {
+  const { getTursoClient } = await import("../lib/turso");
+  const client = getTursoClient() as unknown as Record<string, unknown>;
+  const original = (Object.getPrototypeOf(client) as { batch: (...a: unknown[]) => Promise<unknown> }).batch;
+  let raced = false;
+  client.batch = async function (this: unknown, stmts: unknown, ...rest: unknown[]) {
+    if (!raced && match(JSON.stringify(stmts))) {
+      raced = true;
+      await race();
+    }
+    return original.call(this, stmts, ...rest);
+  };
+  try {
+    return { result: await fn(), raced };
+  } finally {
+    delete client.batch;
   }
 }
 
@@ -237,6 +263,8 @@ async function main() {
   const { ensureFinanceSeed } = await import("../lib/founders-finances/seed-io");
   const access = await import("../lib/founders-finances/access-io");
   const invoices = await import("../lib/founders-finances/invoices-io");
+  const stripeIngest = await import("../lib/founders-finances/stripe-ingest");
+  const { chargeFacts } = await import("../lib/founders-finances/stripe-map");
   const store = await import("../lib/founders-finances/invoice-store");
   const { accountId, SYS, BUSINESS_ENTITY_ID: B } = await import("../lib/founders-finances/chart");
 
@@ -890,6 +918,26 @@ async function main() {
     const sent3 = await invoices.sendInvoice(cc, id3);
     assert.ok(sent3.paymentLinkUrl && sent3.paymentLinkUrl !== draftLink.stripe_payment_link_url);
     assert.equal(stripeSince(mark3, "/v1/payment_links")[0].params["metadata[fin_invoice_number]"], f.number, "made after issue: carries the number from the start");
+
+    const id4 = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Strict issue", email: "ap@strict-issue.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Audit", quantity: 1, unit_price: "325" }],
+    });
+    await withoutMailbox(id4);
+    stripe.failWith = { status: 503, message: "cannot confirm shutdown", reads: true };
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      await assert.rejects(invoices.finalizeInvoice(cc, id4), /old card link.*draft was not changed/i);
+    } finally {
+      console.error = logged;
+      stripe.failWith = null;
+    }
+    const unissued = await row(id4);
+    assert.deepEqual([unissued.status, unissued.number, unissued.recognition_entry_id], ["draft", null, null], "failed shutdown consumes no number and posts nothing");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.issued'`, [id4]), 0);
   });
 
   await check("an issued Stripe link is live-checked before every reuse and a stale one is retired before its replacement is created", async () => {
@@ -906,7 +954,7 @@ async function main() {
     const mark = stripeCalls.length;
     const reused = await invoices.sendInvoice(cc, id);
     assert.equal(reused.paymentLinkUrl, original.url);
-    assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${original.link}`, `/v1/prices/${original.price}`]);
+    assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${original.link}`, `/v1/payment_links/${original.link}/line_items`, `/v1/prices/${original.price}`]);
     assert.equal(stripeSince(mark).length, 0, "a verified exact issued link is reused without a write");
 
     stripe.prices.get(original.price)!.unit_amount = 99999;
@@ -924,6 +972,61 @@ async function main() {
     assert.equal(sawOldOffBeforeCreate, true, "the old link is confirmed off before Stripe is asked to create the replacement");
     assert.equal(stripe.links.get(original.link)!.active, false);
     assert.equal(stripe.prices.get(d.stripe_price_id as string)!.unit_amount, 90000);
+  });
+
+  await check("a stored Payment Link must actually point at its stored Price before a PDF or email can expose it", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Tyrell", email: "ap@tyrell.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "725" }],
+    });
+    await invoices.sendInvoice(cc, id);
+    const before = await row(id);
+    const oldId = before.stripe_payment_link_id as string;
+    const oldUrl = before.stripe_payment_link_url as string;
+    stripe.links.get(oldId)!.priceId = "price_for_some_other_invoice";
+    const downloaded = await pdfText((await invoices.invoicePdfBytes(cc, id)).bytes);
+    assert.ok(!downloaded.includes(oldUrl), "the read-only PDF fails closed when Stripe says the link binds another Price");
+    const resent = await invoices.sendInvoice(cc, id);
+    assert.ok(resent.paymentLinkUrl && resent.paymentLinkUrl !== oldUrl, "send replaces rather than reusing the mismatched link");
+    assert.equal(stripe.links.get(oldId)!.active, false);
+  });
+
+  await check("concurrent identical card-link requests adopt Stripe's idempotent winner and never deactivate it", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Stark", email: "ap@stark.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "810" }],
+    });
+    const snapshot = await row(id);
+    let arrivals = 0;
+    let release!: () => void;
+    const bothAtLink = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    stripe.onWrite = async (path) => {
+      if (path !== "/v1/payment_links") return;
+      arrivals += 1;
+      if (arrivals === 2) release();
+      else await bothAtLink;
+    };
+    const mark = stripeCalls.length;
+    try {
+      const urls = await Promise.all([invoices.ensurePaymentLink(snapshot, snapshot), invoices.ensurePaymentLink(snapshot, snapshot)]);
+      assert.equal(urls[0], urls[1]);
+      const stored = await row(id);
+      assert.equal(stored.stripe_payment_link_url, urls[0]);
+      assert.equal(stripe.links.get(stored.stripe_payment_link_id as string)!.active, true);
+      assert.equal(
+        stripeSince(mark).filter((c) => c.path === `/v1/payment_links/${stored.stripe_payment_link_id}` && c.params.active === "false").length,
+        0,
+        "the CAS loser must not switch off the same idempotent object the winner stored",
+      );
+    } finally {
+      stripe.onWrite = null;
+    }
   });
 
   await check("an out-of-band partial payment retires and clears the full-value link; resend makes an exact remaining-balance link", async () => {
@@ -982,6 +1085,102 @@ async function main() {
     assert.deepEqual([after.status, after.amount_paid_cents, after.stripe_payment_link_id], [before.status, before.amount_paid_cents, before.stripe_payment_link_id]);
     assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE invoice_id = ?`, [id]), paymentCount);
     assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'invoice_payment' AND source_ref IN (SELECT id FROM fin_payments WHERE invoice_id = ?)`, [id]), 0);
+  });
+
+  await check("link clearing and manual payment bookkeeping share one atomic batch and a retry records exactly once", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Globex Bank", email: "ap@globex-bank.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "640" }],
+    });
+    await invoices.sendInvoice(cc, id);
+    const before = await row(id);
+    const oldLink = before.stripe_payment_link_id as string;
+    const { getTursoClient } = await import("../lib/turso");
+    const client = getTursoClient() as unknown as Record<string, unknown>;
+    const original = (Object.getPrototypeOf(client) as { batch: (...a: unknown[]) => Promise<unknown> }).batch;
+    let injected = false;
+    client.batch = async function (this: unknown, stmts: unknown, ...rest: unknown[]) {
+      if (!injected && JSON.stringify(stmts).includes("invoice.paid_manually")) {
+        injected = true;
+        throw new Error("forced payment batch failure");
+      }
+      return original.call(this, stmts, ...rest);
+    };
+    try {
+      await assert.rejects(invoices.markInvoicePaidManually(cc, id, { amount: "100", reference: "atomic" }), /forced payment batch failure/);
+    } finally {
+      delete client.batch;
+    }
+    const failed = await row(id);
+    assert.equal(stripe.links.get(oldLink)!.active, false, "Stripe shutdown necessarily happens first");
+    assert.deepEqual(
+      [failed.amount_paid_cents, failed.stripe_payment_link_id, failed.stripe_payment_link_url],
+      [before.amount_paid_cents, before.stripe_payment_link_id, before.stripe_payment_link_url],
+      "the failed DB transaction retains the exact link reference and changes no balance",
+    );
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE invoice_id = ?`, [id]), 0);
+    await invoices.markInvoicePaidManually(cc, id, { amount: "100", reference: "atomic retry" });
+    const retried = await row(id);
+    assert.equal(retried.amount_paid_cents, 10000);
+    assert.deepEqual([retried.stripe_price_id, retried.stripe_payment_link_id, retried.stripe_payment_link_url], [null, null, null]);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE invoice_id = ?`, [id]), 1);
+  });
+
+  await check("a partial Stripe payment retries strict old-link retirement on the existing-payment path", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Stripe Retry", email: "ap@stripe-retry.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "1000" }],
+    });
+    await invoices.sendInvoice(cc, id);
+    const before = await row(id);
+    const charge = chargeFacts({
+      id: "ch_partial_retire_retry",
+      object: "charge",
+      amount: 25000,
+      amount_captured: 25000,
+      amount_refunded: 0,
+      currency: "cad",
+      created: Math.floor(Date.now() / 1000),
+      status: "succeeded",
+      paid: true,
+      livemode: true,
+      payment_intent: "pi_partial_retire_retry",
+      customer: null,
+      description: "Partial invoice payment",
+      billing_details: { name: "Stripe Retry", email: "ap@stripe-retry.test" },
+      payment_method_details: { type: "card" },
+      balance_transaction: null,
+      metadata: { fin_invoice_id: id, fin_entity_id: B, fin_invoice_price_id: before.stripe_price_id },
+      refunds: { object: "list", data: [], has_more: false },
+    })!;
+    charge.subscriptionInvoice = false;
+    stripe.failWith = { status: 503, message: "cannot retire old link", reads: true };
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      await assert.rejects(
+        stripeIngest.recordStripeCharge(charge, { fetchFees: false }),
+        (e: unknown) => e instanceof Error && /Stripe recorded the payment, but the invoice's old card link could not be safely retired/.test(e.message),
+      );
+    } finally {
+      console.error = logged;
+      stripe.failWith = null;
+    }
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = 'ch_partial_retire_retry'`), 1);
+    assert.equal((await row(id)).amount_paid_cents, 25000);
+    assert.equal((await row(id)).stripe_payment_link_id, before.stripe_payment_link_id, "failed retirement remains retryable from the stored reference");
+    const retry = await stripeIngest.recordStripeCharge(charge, { fetchFees: false });
+    assert.equal(retry.created, false);
+    const after = await row(id);
+    assert.equal(after.amount_paid_cents, 25000);
+    assert.deepEqual([after.stripe_price_id, after.stripe_payment_link_id, after.stripe_payment_link_url], [null, null, null]);
+    assert.equal(stripe.links.get(before.stripe_payment_link_id as string)!.active, false);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = 'ch_partial_retire_retry'`), 1);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'stripe_charge' AND source_ref = 'ch_partial_retire_retry'`), 1);
   });
 
   await check("a draft whose lines change while its links are being made is NOT issued (the link would charge another amount); sent again, the link is remade", async () => {
@@ -1379,6 +1578,95 @@ async function main() {
     assert.match(pdf, /Institution number/, "it still says how to pay the one-time balance");
   });
 
+  await check("Wise reminders retire legacy one-time links and downloaded PDFs never print them", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Legacy Wise", email: "ap@legacy-wise.test" },
+      issue_date: addDays(today, -30),
+      due_date: addDays(today, -4),
+      currency: "CAD",
+      payment_method: "wise",
+      lines: [{ description: "Implementation", quantity: 1, unit_price: "990" }],
+    });
+    await invoices.finalizeInvoice(cc, id);
+    const priceId = `price_legacy_${stripe.seq + 1}`;
+    const linkId = `plink_legacy_${stripe.seq + 1}`;
+    const url = `https://buy.stripe.com/legacy_${stripe.seq + 1}`;
+    stripe.prices.set(priceId, { id: priceId, object: "price", livemode: true, unit_amount: 99000, currency: "cad" });
+    stripe.links.set(linkId, { id: linkId, url, active: true, priceId, restrictions: { completed_sessions: { count: 0, limit: 1 } } });
+    await raw.execute({ sql: `UPDATE fin_invoices SET stripe_price_id = ?, stripe_payment_link_id = ?, stripe_payment_link_url = ? WHERE id = ?`, args: [priceId, linkId, url, id] });
+    assert.ok(!(await pdfText((await invoices.invoicePdfBytes(cc, id)).bytes)).includes(url), "wrong-mode PDF omits without trusting the stored URL");
+    const before = mails.length;
+    const plan = (await invoices.remindOverdue(cc, { send: true })).find((p) => p.invoice_id === id)!;
+    assert.equal(plan.action, "sent", JSON.stringify(plan));
+    assert.equal(mails.length, before + 1);
+    const mail = lastMail();
+    assert.ok(!mail.text.includes(url) && !mail.html.includes(url));
+    assert.ok(!(await pdfOf(mail)).includes(url));
+    assert.equal(stripe.links.get(linkId)!.active, false);
+    const after = await row(id);
+    assert.deepEqual([after.stripe_price_id, after.stripe_payment_link_id, after.stripe_payment_link_url], [null, null, null]);
+  });
+
+  await check("deleting a linked draft strictly shuts down and confirms both links; uncertainty preserves it", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Delete linked", email: "ap@delete-linked.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [
+        { description: "Implementation", quantity: 1, unit_price: "700" },
+        { description: "Support", quantity: 1, unit_price: "90", billing: "monthly" },
+      ],
+    });
+    const savedPassword = process.env.OASIS_MAIL_APP_PASSWORD;
+    delete process.env.OASIS_MAIL_APP_PASSWORD;
+    try {
+      await assert.rejects(invoices.sendInvoice(cc, id));
+    } finally {
+      process.env.OASIS_MAIL_APP_PASSWORD = savedPassword;
+    }
+    const linked = await row(id);
+    assert.equal(linked.status, "draft");
+    assert.ok(linked.stripe_payment_link_id && linked.stripe_retainer_link_id);
+    stripe.failWith = { status: 503, message: "shutdown unavailable", reads: true };
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      await assert.rejects(invoices.deleteDraftInvoice(cc, id), /not deleted/);
+    } finally {
+      console.error = logged;
+      stripe.failWith = null;
+    }
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoices WHERE id = ?`, [id]), 1);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoice_lines WHERE invoice_id = ?`, [id]), 2);
+
+    const reads = stripeReads.length;
+    await invoices.deleteDraftInvoice(cc, id);
+    assert.equal(stripe.links.get(linked.stripe_payment_link_id as string)!.active, false);
+    assert.equal(stripe.links.get(linked.stripe_retainer_link_id as string)!.active, false);
+    assert.deepEqual(stripeReads.slice(reads), [
+      `/v1/payment_links/${linked.stripe_payment_link_id}`,
+      `/v1/payment_links/${linked.stripe_retainer_link_id}`,
+    ]);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoices WHERE id = ?`, [id]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoice_lines WHERE invoice_id = ?`, [id]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.draft_deleted'`, [id]), 1);
+
+    const partial = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Partial retainer", email: "ap@partial-retainer.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [{ description: "Support", quantity: 1, unit_price: "50", billing: "monthly" }],
+    });
+    await raw.execute({ sql: `UPDATE fin_invoices SET stripe_retainer_link_url = 'https://buy.stripe.com/missing-id' WHERE id = ?`, args: [partial] });
+    console.error = () => {};
+    try {
+      await assert.rejects(invoices.deleteDraftInvoice(cc, partial), /not deleted/);
+    } finally {
+      console.error = logged;
+    }
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_invoices WHERE id = ?`, [partial]), 1, "a URL without its Stripe id fails closed");
+  });
+
   // ── paid, void, books ────────────────────────────────────────────────────
   await check("paid = the one-time balance paid; the retainer link stays live", async () => {
     const mark = stripeCalls.length;
@@ -1393,12 +1681,56 @@ async function main() {
   await check("voiding a retainer invoice switches its link off", async () => {
     const d = await row(onlyId);
     const mark = stripeCalls.length;
+    const reads = stripeReads.length;
     await invoices.voidInvoice(cc, onlyId);
     assert.deepEqual(
       stripeSince(mark).map((c) => [c.path, c.params.active]),
       [[`/v1/payment_links/${d.stripe_retainer_link_id}`, "false"]],
     );
+    assert.deepEqual(stripeReads.slice(reads), [`/v1/payment_links/${d.stripe_retainer_link_id}`], "void GET-confirms the link is really off");
     assert.equal((await row(onlyId)).status, "void");
+  });
+
+  await check("void strictly shuts down both links before a CAS-gated reversal; Stripe failure and a DB race have zero bookkeeping effects", async () => {
+    const id = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Strict Void", email: "ap@strict-void.test" },
+      currency: "CAD",
+      payment_method: "stripe",
+      lines: [
+        { description: "Implementation", quantity: 1, unit_price: "1100" },
+        { description: "Support", quantity: 1, unit_price: "125", billing: "monthly" },
+      ],
+    });
+    await invoices.sendInvoice(cc, id);
+    const before = await row(id);
+    const auditBefore = await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.voided'`, [id]);
+    stripe.failWith = { status: 503, message: "shutdown unavailable", reads: true };
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      await assert.rejects(invoices.voidInvoice(cc, id), /not voided/);
+    } finally {
+      console.error = logged;
+      stripe.failWith = null;
+    }
+    assert.equal((await row(id)).status, "sent");
+    assert.equal((await raw.execute({ sql: `SELECT status FROM fin_journal_entries WHERE id = ?`, args: [before.recognition_entry_id] })).rows[0].status, "posted");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.voided'`, [id]), auditBefore);
+
+    const raced = await withRace(
+      (batch) => batch.includes("invoice.voided") && batch.includes(id),
+      () => raw.execute({ sql: `UPDATE fin_invoices SET updated_at = '2099-01-01T00:00:00.000Z' WHERE id = ?`, args: [id] }).then(() => undefined),
+      () => assert.rejects(invoices.voidInvoice(cc, id), /changed while it was being voided/),
+    );
+    assert.equal(raced.raced, true);
+    assert.equal(stripe.links.get(before.stripe_payment_link_id as string)!.active, false);
+    assert.equal(stripe.links.get(before.stripe_retainer_link_id as string)!.active, false);
+    assert.equal((await row(id)).status, "sent");
+    assert.equal((await raw.execute({ sql: `SELECT status FROM fin_journal_entries WHERE id = ?`, args: [before.recognition_entry_id] })).rows[0].status, "posted");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'reversal' AND source_ref = ?`, [before.recognition_entry_id]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.voided'`, [id]), auditBefore);
+    await invoices.voidInvoice(cc, id);
+    assert.equal((await row(id)).status, "void");
   });
 
   await check("the books balance, and AR is exactly the open one-time balances", async () => {

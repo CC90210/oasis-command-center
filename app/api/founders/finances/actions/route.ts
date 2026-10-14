@@ -76,6 +76,10 @@ const HANDLERS: Record<string, Handler> = {
     await invoices.updateDraftInvoice(v, str(b.invoice_id), b);
     return { message: "Draft saved." };
   },
+  "invoice.delete": async (v, b) => {
+    await invoices.deleteDraftInvoice(v, str(b.invoice_id));
+    return { redirect: "/founders/finances/invoices", message: "Draft deleted." };
+  },
   "invoice.finalize": async (v, b) => {
     const inv = await invoices.finalizeInvoice(v, str(b.invoice_id));
     return { number: inv.number, message: `Issued as ${inv.number}.` };

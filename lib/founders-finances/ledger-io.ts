@@ -164,6 +164,7 @@ export async function buildReversal(args: {
   date: string;
   memo: string;
   createdBy: string;
+  gate?: { sql: string; args: Array<string | number | null> };
 }): Promise<Posting> {
   const lines = await entryLines(args.entryId);
   if (lines.length === 0) throw new LedgerError("missing_entry", "nothing to reverse");
@@ -176,6 +177,7 @@ export async function buildReversal(args: {
     source: "reversal",
     sourceRef: args.entryId,
     createdBy: args.createdBy,
+    gate: args.gate,
     fixedRates,
     lines: reversalLines(
       lines.map((l) => ({
@@ -189,8 +191,9 @@ export async function buildReversal(args: {
     ),
   });
   posting.statements.push({
-    sql: `UPDATE fin_journal_entries SET status = 'reversed' WHERE id = ? AND entity_id = ?`,
-    args: [args.entryId, args.entityId],
+    sql: `UPDATE fin_journal_entries SET status = 'reversed' WHERE id = ? AND entity_id = ?${args.gate ? ` AND (${args.gate.sql})` : ""}
+            AND EXISTS (SELECT 1 FROM fin_journal_entries reversed_entry WHERE reversed_entry.id = ?)`,
+    args: [args.entryId, args.entityId, ...(args.gate?.args || []), posting.entryId],
   });
   return posting;
 }

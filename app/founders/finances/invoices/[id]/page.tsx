@@ -372,7 +372,19 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
         </Card>
       )}
 
-      {(isDraft || (open && inv.amount_paid_cents === 0)) && (
+      {isDraft && (
+        <div className="flex justify-end">
+          <ActionButton
+            action="invoice.delete"
+            payload={{ invoice_id: inv.id }}
+            label="Delete draft"
+            tone="danger"
+            confirm="Delete this draft permanently? Any unused Stripe payment links are switched off first."
+          />
+        </div>
+      )}
+
+      {!isDraft && open && inv.amount_paid_cents === 0 && (
         <div className="flex justify-end">
           <ActionButton
             action="invoice.void"

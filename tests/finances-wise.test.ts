@@ -67,6 +67,25 @@ async function check(name: string, fn: () => Promise<void>) {
   }
 }
 
+async function withRace<T>(match: (batchJson: string) => boolean, race: () => Promise<void>, fn: () => Promise<T>): Promise<{ result: T; raced: boolean }> {
+  const { getTursoClient } = await import("../lib/turso");
+  const client = getTursoClient() as unknown as Record<string, unknown>;
+  const original = (Object.getPrototypeOf(client) as { batch: (...a: unknown[]) => Promise<unknown> }).batch;
+  let raced = false;
+  client.batch = async function (this: unknown, stmts: unknown, ...rest: unknown[]) {
+    if (!raced && match(JSON.stringify(stmts))) {
+      raced = true;
+      await race();
+    }
+    return original.call(this, stmts, ...rest);
+  };
+  try {
+    return { result: await fn(), raced };
+  } finally {
+    delete client.batch;
+  }
+}
+
 const cc = { kind: "founder" as const, ownerKey: "cc" as const, email: "conaugh@oasisai.work", userId: "u-cc" };
 
 // ── Wise statement fixtures (the live shape, invented values) ─────────────
@@ -525,6 +544,40 @@ async function main() {
     assert.equal(run.recorded, 1);
     assert.equal((await raw.execute({ sql: `SELECT status FROM fin_bank_transactions WHERE fitid = ?`, args: [fitid] })).rows[0].status, "excluded");
     assert.equal(await nativeBalance("USD"), beforeUsd + 40000, "the money is in the books once");
+  });
+
+  await check("a bank-feed row posted after Wise's precheck wins the atomic claim and no invoice payment is booked", async () => {
+    const inv = await invoices.createDraftInvoice(cc, "oasis", {
+      new_contact: { name: "Race Deposit", email: "ap@race-deposit.test" },
+      issue_date: addDays(today, -2),
+      currency: "USD",
+      lines: [{ description: "Project", quantity: 1, unit_price: "410.00" }],
+    });
+    const number = (await invoices.finalizeInvoice(cc, inv)).number as string;
+    const ref = "TRANSFER-9005";
+    usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at(1), value: 410, cur: "USD", ref, running: 2362.38, sender: "Race Deposit", payref: number, desc: `Received money from Race Deposit with reference ${number}` });
+    fixtures.statements.USD = statementOf("USD", usdTx, 0, [usdDetails]);
+    await feedIo.syncWiseFeed(cc, { since }, { dryRun: false });
+    const fitid = `WISE-USD-CREDIT-${ref}`;
+    const before = (await raw.execute({ sql: `SELECT status, amount_paid_cents FROM fin_invoices WHERE id = ?`, args: [inv] })).rows[0];
+    const raced = await withRace(
+      (batch) => batch.includes("invoice.paid_wise") && batch.includes(inv),
+      () => raw.execute({ sql: `UPDATE fin_bank_transactions SET status = 'posted' WHERE entity_id = ? AND account_id = ? AND fitid = ?`, args: [B, chequing, fitid] }).then(() => undefined),
+      () => reconcile.reconcileWise(cc, { days: 30, dryRun: false }),
+    );
+    assert.equal(raced.raced, true);
+    assert.equal(raced.result.recorded, 0);
+    assert.ok(raced.result.errors.some((e) => e.wise_ref === ref));
+    assert.equal((await raw.execute({ sql: `SELECT status FROM fin_bank_transactions WHERE fitid = ?`, args: [fitid] })).rows[0].status, "posted");
+    const after = (await raw.execute({ sql: `SELECT status, amount_paid_cents FROM fin_invoices WHERE id = ?`, args: [inv] })).rows[0];
+    assert.deepEqual([after.status, Number(after.amount_paid_cents)], [before.status, Number(before.amount_paid_cents)]);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE invoice_id = ?`, [inv]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'wise_payment' AND source_ref = ?`, [ref]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'wise_fee' AND source_ref = ?`, [ref]), 0);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_audit_log WHERE object_id = ? AND action = 'invoice.paid_wise'`, [inv]), 0);
+    usdTx.pop();
+    fixtures.statements.USD = statementOf("USD", usdTx, 0, [usdDetails]);
+    await raw.execute({ sql: `DELETE FROM fin_bank_transactions WHERE fitid = ?`, args: [fitid] });
   });
 
   await check("opening balance: preview only, then an explicit post makes chequing equal Wise on that day, per currency — and it stays equal once the waiting lines are categorised", async () => {
