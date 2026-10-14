@@ -125,4 +125,4 @@ Training resources and agent assignments are separate records so one resource ca
 2. **Automations:** wizard, templates/payload, preview test, dispatcher/activation, production verification.
 3. **Agent Training:** resource/assignment storage, workbench, runtime consumption, production verification.
 
-The Google Ads purchase conversion label is a separate deployment dependency. The repository and prior handoffs contain the corrected tag ID `AW-18509362419` but no conversion-action label suffix. The success page must not invent one; it remains explicit configuration once recovered from Google Ads.
+The Google Ads purchase destination was recovered from the authorized Google Ads setup email and is pinned as `AW-18509362419/waCmCKH86ZsdEPPp-flE`. The success page may accept a validated environment override, but its verified default must remain this exact destination and must fire only after the server verifies a paid Stripe Checkout Session.
