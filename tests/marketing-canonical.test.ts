@@ -56,8 +56,8 @@ assert.doesNotMatch(layout, /export const metadata\b/, "no second, static metada
 
 // 3. No page states a canonical that disagrees with the helper.
 const pageFiles: Record<string, string> = {
-  "/": "home", "/audit": "audit", "/fleet": "fleet", "/work": "work",
-  "/command-center": "command-center", "/pricing": "pricing", "/onboarding": "onboarding", "/about": "about",
+  "/": "home", "/audit": "[funnel]", "/fleet": "fleet", "/work": "work",
+  "/command-center": "[funnel]", "/pricing": "[funnel]", "/onboarding": "[funnel]", "/about": "about",
   "/contact": "contact", "/privacy": "privacy", "/terms": "terms", "/dmca": "dmca",
 };
 for (const [path, dir] of Object.entries(pageFiles)) {

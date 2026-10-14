@@ -67,8 +67,16 @@ function routeFile(path: string): string {
     const segments = relative(join(ROOT, "app"), dir)
       .split(sep)
       .filter((segment) => segment && !/^\(.+\)$/.test(segment));
-    const route = segments.length === 0 ? "/" : `/${segments.join("/")}`;
-    if (route === path) matches.push(relative(ROOT, page).split(sep).join("/"));
+    const requested = path.split("/").filter(Boolean);
+    const catchAllAt = segments.findIndex((segment) => /^\[\[?\.\.\.[^\]]+\]\]?$/.test(segment));
+    const fixedSegments = catchAllAt === -1 ? segments : segments.slice(0, catchAllAt);
+    const fixedMatch = fixedSegments.every(
+      (segment, index) => /^\[[^\].]+\]$/.test(segment) || segment === requested[index],
+    );
+    const resolvesPath = catchAllAt === -1
+      ? segments.length === requested.length && fixedMatch
+      : fixedMatch && requested.length > fixedSegments.length;
+    if (resolvesPath) matches.push(relative(ROOT, page).split(sep).join("/"));
   };
   walk(join(ROOT, "app"));
 

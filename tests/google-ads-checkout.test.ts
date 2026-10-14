@@ -125,11 +125,19 @@ assert.match(conversion, /sessionStorage\.getItem\(storageKey\)/);
 assert.match(conversion, /window\.gtag\("event", "conversion"/);
 assert.ok(conversion.indexOf("window.gtag") < conversion.indexOf("sessionStorage.setItem"));
 
-// 9-10: all six ad sitelinks are real page files and the checkout surfaces are
-// public without opening the signed-in setup wizard.
-for (const route of ["audit", "fleet", "work", "command-center", "pricing", "onboarding"]) {
+// 9-10: all six ad sitelinks resolve to real App Router pages. Four share one
+// allow-listed dynamic entry to avoid duplicating route manifests in the
+// size-constrained Cloudflare Worker; fleet and work keep their static pages.
+const funnelPage = read("app/(marketing)/[funnel]/page.tsx");
+for (const route of ["audit", "command-center", "pricing", "onboarding"]) {
+  const key = route === "audit" ? "audit:" : `"${route}":`;
+  assert.ok(funnelPage.includes(key), `/${route} is allow-listed by the funnel route`);
+}
+for (const route of ["fleet", "work"]) {
   assert.ok(read(`app/(marketing)/${route}/page.tsx`).length > 200, `/${route} is a real page`);
 }
+assert.ok(funnelPage.includes('case "checkout-success"'), "/checkout/success shares the size-safe public route");
+assert.match(read("next.config.js"), /source:\s*"\/checkout\/success"[\s\S]*destination:\s*"\/checkout-success"/);
 assert.doesNotMatch(read("next.config.js"), /source:\s*"\/pricing"/, "/pricing must render instead of redirecting");
 const middleware = read("middleware.ts");
 assert.match(middleware, /"\/api\/checkout\/session"/);

@@ -285,6 +285,13 @@ const nextConfig = {
   // self-contained server.js + trimmed node_modules. No effect on Vercel
   // (Vercel uses its own builder).
   output: "standalone",
+  // Public URLs stay stable. Internally these pages share the allow-listed
+  // funnel route so Cloudflare does not carry duplicate App Router manifests.
+  async rewrites() {
+    return [
+      { source: "/checkout/success", destination: "/checkout-success" },
+    ];
+  },
   // Cached / external links to retired routes land cleanly on a live page
   // instead of bouncing through middleware (which would return 307→/login
   // for unauthenticated visitors because the path is no longer in
