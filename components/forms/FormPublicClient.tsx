@@ -77,6 +77,15 @@ type Props = {
    * stale value after a form definition changes.
    */
   initialStep?: number;
+  /**
+   * Open on the inline calendar instead of the first step: the visitor
+   * already finished the form and is returning through the signed link in
+   * their confirmation email. Set by the server page only after it verified
+   * the token and that the lead's funnel stage says the form was completed;
+   * the booking API checks the same thing again, so this is a convenience,
+   * never the gate.
+   */
+  resumeBooking?: boolean;
   redirectUrl: string | null;
   /**
    * Pre-signed HMAC token tied to a specific lead — used by Solara's
@@ -277,6 +286,7 @@ export function FormPublicClient({
   branding,
   steps,
   initialStep,
+  resumeBooking,
   redirectUrl,
   token: initialToken,
   anonymousInit,
@@ -351,7 +361,7 @@ export function FormPublicClient({
     if (resolving) addressResolvingRef.current.add(fieldName);
     else addressResolvingRef.current.delete(fieldName);
   }, []);
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState(Boolean(resumeBooking));
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
   // rendered as "continue now" buttons on the thank-you screen.

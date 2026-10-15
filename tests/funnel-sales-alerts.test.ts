@@ -183,6 +183,42 @@ async function main(): Promise<void> {
   assert.equal(auditAnswerLabel("team", undefined), null);
   console.log("  ok - stored audit answers read as labels");
 
+  // 11. The confirmation email stands on its own for someone who closed the tab.
+  const { composeAiAuditWelcome } = await import("../lib/forms/ai-audit-format");
+  const lead = { name: "Dana", company: "Dana Co", wants_call: "yes", team_size: "6_20" };
+  const bookUrl = "https://oasisai.work/f/oasis-ai-cc/ai-audit/TOKEN?book=1";
+  const plain = composeAiAuditWelcome(lead);
+  assert.match(plain.body, /live calendar on the page/, "without a link the copy is unchanged");
+  assert.ok(!plain.body.includes("go/community"), "no community line unless the consent gate allowed it");
+  const withLink = composeAiAuditWelcome(lead, { bookingUrl: bookUrl });
+  assert.ok(withLink.body.includes(bookUrl), "the booking link is in the email");
+  assert.ok(!withLink.body.includes("live calendar on the page"), "and the email no longer points at a page they have closed");
+  for (const wants of ["yes", "no"]) {
+    for (const timeframe of ["immediate", "exploring"]) {
+      const body = composeAiAuditWelcome({ ...lead, wants_call: wants, timeframe }, { bookingUrl: bookUrl }).body;
+      assert.ok(body.includes(bookUrl), `every variant carries the link (wants_call=${wants}, ${timeframe})`);
+    }
+  }
+  const community = "https://oasisai.work/go/community?from=audit_email";
+  const withCommunity = composeAiAuditWelcome(lead, { bookingUrl: bookUrl, communityUrl: community });
+  assert.ok(withCommunity.body.includes(community));
+  assert.match(withCommunity.body, /free OASIS community/);
+  console.log("  ok - the confirmation email carries a booking link, and the community line only when passed");
+
+  // 12. The signed link reopens the calendar only for a finished form, on the one form.
+  const page = readFileSync(join(__dirname, "..", "app", "f", "[tenant_slug]", "[form_slug]", "[lead_token]", "page.tsx"), "utf8");
+  assert.match(page, /sp\.book === "1"/);
+  assert.match(page, /result\.bookingReady/);
+  assert.match(page, /isPublicFunnelReadyForBooking\(ld\)/);
+  assert.match(page, /result\.tenant_slug === AI_AUDIT_TENANT_SLUG/);
+  assert.match(page, /isPublicBookingFormSlug\(result\.form\.slug\)/);
+  const client = readFileSync(join(__dirname, "..", "components", "forms", "FormPublicClient.tsx"), "utf8");
+  assert.match(client, /useState\(Boolean\(resumeBooking\)\)/);
+  const notify = readFileSync(join(__dirname, "..", "lib", "forms", "ai-audit-notify.ts"), "utf8");
+  assert.match(notify, /marketingSendAllowed\([\s\S]{0,200}channel:\s*"email"/, "the community line is behind the consent gate");
+  assert.match(notify, /verdict\.allow\)\s*links\.communityUrl/);
+  console.log("  ok - ?book=1 reopens the calendar only for a finished audit lead; the community line is consent-gated");
+
   console.log("funnel-sales-alerts: all passed");
 }
 

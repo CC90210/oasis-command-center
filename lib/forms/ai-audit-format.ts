@@ -217,11 +217,23 @@ export type Composed = { subject: string; body: string };
  * your journey". It references what they actually told us so it does not read
  * like an autoresponder, without needing a model to do it.
  */
-export function composeAiAuditWelcome(a: Record<string, unknown>): Composed {
+export type WelcomeLinks = {
+  /** Signed link that opens the founder calendar for THIS lead (the page is long gone from a closed tab). */
+  bookingUrl?: string;
+  /**
+   * Link to the free community. Present ONLY when marketingSendAllowed passed
+   * for this address: it is an invitation, so the confirmation of their own
+   * enquiry must never carry it for someone who declined marketing email.
+   */
+  communityUrl?: string;
+};
+
+export function composeAiAuditWelcome(a: Record<string, unknown>, links: WelcomeLinks = {}): Composed {
   const first = (str(a.name).trim().split(/\s+/)[0] || "there").slice(0, 40);
   const goal = label(GOAL_LABELS, a.automation_goal);
   const urgent = str(a.timeframe) === "immediate" || str(a.timeframe) === "30_days";
   const askedForCall = str(a.wants_call) === "yes";
+  const { bookingUrl, communityUrl } = links;
 
   const subject = askedForCall
     ? `${first} — booking your AI audit call`
@@ -231,11 +243,20 @@ export function composeAiAuditWelcome(a: Record<string, unknown>): Composed {
     ? `Thanks for filling that out — you're looking at ${goal}, and you gave me enough detail to actually be useful rather than guess.`
     : `Thanks for filling that out — you gave me enough detail to actually be useful rather than guess.`;
 
+  // With a signed link the email stands on its own: someone who closed the tab
+  // before picking a time still has a way to book. Without one (the signing key
+  // is unset) the copy keeps pointing at the page, as before.
   const next = askedForCall
-    ? `You asked for a call, so use the live calendar on the page to pick the time that works. The Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
+    ? bookingUrl
+      ? `You asked for a call, so pick the time that works here: ${bookingUrl}\nThe Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
+      : `You asked for a call, so use the live calendar on the page to pick the time that works. The Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
     : urgent
-      ? `You said you want this moving soon, so I'll come back to you shortly with where I'd start and what it would take. The live calendar on the page is there if talking is faster.`
-      : `I'll come back to you with where I'd start and roughly what it would take. If talking is easier, the live calendar on the page has the times that work for both founders.`;
+      ? bookingUrl
+        ? `You said you want this moving soon, so I'll come back to you shortly with where I'd start and what it would take. If talking is faster, pick a time here: ${bookingUrl}`
+        : `You said you want this moving soon, so I'll come back to you shortly with where I'd start and what it would take. The live calendar on the page is there if talking is faster.`
+      : bookingUrl
+        ? `I'll come back to you with where I'd start and roughly what it would take. If talking is easier, pick a time that works for both founders here: ${bookingUrl}`
+        : `I'll come back to you with where I'd start and roughly what it would take. If talking is easier, the live calendar on the page has the times that work for both founders.`;
 
   // Quote their own bottleneck back at them. This is the single most
   // personal thing in the form — they typed it — and the email was
@@ -275,6 +296,7 @@ export function composeAiAuditWelcome(a: Record<string, unknown>): Composed {
     ...(context ? ["", context] : []),
     "",
     next,
+    ...(communityUrl ? ["", `If now is not the right time, the free OASIS community is open to you: ${communityUrl}`] : []),
     "",
     // Replaces "if I don't think automation is the right spend for you
     // right now, I'll tell you that." That line was conditional and meant

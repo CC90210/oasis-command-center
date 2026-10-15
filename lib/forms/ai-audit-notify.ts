@@ -17,8 +17,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
-import { AI_AUDIT_STEP_COUNT } from "@/lib/forms/oasis-ai-audit-seed";
-import { buildAiAuditAlert, composeAiAuditWelcome } from "@/lib/forms/ai-audit-format";
+import { AI_AUDIT_SLUG, AI_AUDIT_STEP_COUNT, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
+import { buildAiAuditAlert, composeAiAuditWelcome, type WelcomeLinks } from "@/lib/forms/ai-audit-format";
+import { signFormLink } from "@/lib/form-links";
+import { buildResumeUrl } from "@/lib/forms/resume-link";
+import { marketingSendAllowed } from "@/lib/consent/marketing-send-gate";
+import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import { isFirstSubmissionForLead } from "@/lib/forms/first-submission";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
@@ -238,6 +242,57 @@ export type AiAuditNotifyInput = {
   score: ScoreBreakdown;
 };
 
+/**
+ * The links the confirmation email carries beyond its words.
+ *
+ * bookingUrl: a signed, personal link back to the calendar
+ *   (/f/oasis-ai-cc/ai-audit/<token>?book=1). The visitor may have closed the
+ *   tab before picking a time; without this the email only pointed at a page
+ *   they no longer have. Omitted when the signing key is unset (dev).
+ *
+ * communityUrl: the free community, tracked through /go/community. It is an
+ *   INVITATION, so it rides this transactional email only when email marketing
+ *   consent was ticked for this exact address (marketingSendAllowed). A visitor
+ *   who declined still gets their confirmation, just not the invitation.
+ *
+ * Neither can fail the delivery: each is best-effort and the email goes without it.
+ */
+async function buildWelcomeLinks(input: {
+  db: SupabaseClient;
+  tenantId: string;
+  formId: string;
+  leadId: string;
+  toEmail: string;
+}): Promise<WelcomeLinks> {
+  const links: WelcomeLinks = {};
+  try {
+    const token = signFormLink({ tenant: AI_AUDIT_TENANT_SLUG, form_id: input.formId, lead_id: input.leadId });
+    if (token) {
+      links.bookingUrl = `${buildResumeUrl({
+        appBaseUrl: SITE_ORIGIN,
+        tenantSlug: AI_AUDIT_TENANT_SLUG,
+        formSlug: AI_AUDIT_SLUG,
+        token,
+      })}?book=1`;
+    }
+  } catch (err) {
+    console.error("[ai-audit.notify] booking link not minted:", err);
+  }
+  if (input.toEmail) {
+    try {
+      const verdict = await marketingSendAllowed(input.db, {
+        tenantId: input.tenantId,
+        channel: "email",
+        destination: input.toEmail,
+      });
+      if (verdict.allow) links.communityUrl = `${SITE_ORIGIN}/go/community?from=audit_email`;
+    } catch (err) {
+      console.error("[ai-audit.notify] consent check failed, no community line:", err);
+    }
+  }
+  return links;
+}
+
 export async function ensureAiAuditSubmissionDelivery(
   input: AiAuditNotifyInput,
 ): Promise<{ emailNote: string; salesEventOk: boolean }> {
@@ -255,7 +310,10 @@ export async function ensureAiAuditSubmissionDelivery(
   }
 
   const toEmail = String(answers.email ?? "").trim().toLowerCase();
-  const { subject, body } = composeAiAuditWelcome(answers);
+  const { subject, body } = composeAiAuditWelcome(
+    answers,
+    await buildWelcomeLinks({ db, tenantId, formId, leadId, toEmail }),
+  );
   let emailNote = "";
   try {
     const firstName = String(answers.name ?? "there").trim().split(/\s+/)[0] || "there";
