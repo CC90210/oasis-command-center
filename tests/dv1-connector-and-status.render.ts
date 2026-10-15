@@ -45,7 +45,7 @@ async function main() {
     msgQueuedWorker: msg({ status: "queued", executor: null }, null),
     msgQueuedComputerWaiting: msg({ status: "queued", executor: "computer" }, computerStatusLine({ executor: "computer", status: "queued", label, busy: false })),
     msgQueuedComputerBusy: msg({ status: "queued", executor: "computer" }, computerStatusLine({ executor: "computer", status: "queued", label, busy: true })),
-    msgRunningComputer: msg({ status: "running", executor: "computer", view: { ...emptyRunView(), text: "" } }, computerStatusLine({ executor: "computer", status: "running", label, busy: false })),
+    msgRunningComputer: msg({ status: "running", executor: "computer", view: { ...emptyRunView(), text: "" } }, computerStatusLine({ executor: "computer", status: "running", label, busy: false, engine: "Codex" })),
     msgRunningWorker: msg({ status: "running", executor: "worker", view: { ...emptyRunView(), text: "" } }, null),
   };
   console.log(JSON.stringify(out));

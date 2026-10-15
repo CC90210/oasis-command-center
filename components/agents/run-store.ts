@@ -55,6 +55,8 @@ export type ChatItem = {
   live: boolean;
   /** O4: who may claim this run (lib/os/runs/types.ts). Null until the server says (a reopened saved run that never set it). */
   executor: RunExecutor | null;
+  /** For a run on a person's own computer, the app it runs on ("Codex"), from the run head. Null until the server says. */
+  engine: string | null;
 };
 
 export type ConversationSummary = { id: string; title: string; lastMessageAt: string; activeRuns: number };
@@ -160,6 +162,7 @@ function itemFromHead(head: Record<string, unknown>): ChatItem {
     stopping: false,
     live: true,
     executor: isRunExecutor(head.executor) ? head.executor : null,
+    engine: text(head.engine) || null,
   };
 }
 
@@ -192,6 +195,7 @@ function itemFromSaved(run: Record<string, unknown>): ChatItem {
     // reopened still active learns it moments later from the live "run"
     // frame the re-attach stream sends on connect (follow.ts headOf).
     executor: isRunExecutor(run.executor) ? run.executor : null,
+    engine: text(run.engine) || null,
   };
 }
 
@@ -226,6 +230,7 @@ function onRun(department: string, conversationId: string, head: Record<string, 
         seq: Number(head.seq) || i.seq,
         status: i.status === "running" ? i.status : status,
         executor: isRunExecutor(head.executor) ? head.executor : i.executor,
+        engine: text(head.engine) || i.engine,
       }),
     );
   } else {
@@ -473,6 +478,7 @@ export async function sendMessage(department: string, input: SendInput): Promise
     stopping: false,
     live: true,
     executor: null,
+    engine: null,
   };
   set(department, (s) => ({ ...s, items: [...s.items, item], notice: null }));
   let conversationId = before.conversationId;
