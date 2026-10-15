@@ -252,6 +252,18 @@ jobs:
           set -o pipefail
           npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run 2>&1 | tee "$RUNNER_TEMP/wrangler-dry-run.log"
           node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log" .wrangler/ci-dry-run
+      # WHAT THE WORKER IS MADE OF (2026-10-15). The upload is at ~99% of Cloudflare's cap, so
+      # "what made it grow" is the question every large feature has to answer. This prints the
+      # biggest packages, server chunks and route files OpenNext puts into the handler
+      # (scripts/worker-composition.mjs; handler.mjs itself is minified, so the report reads the
+      # tree it is built from) so the answer is in every build log. Diagnostic only: it never
+      # fails the build.
+      - name: Worker composition report (diagnostic)
+        if: always()
+        continue-on-error: true
+        run: |
+          node scripts/worker-composition.mjs .open-next/server-functions/default/handler.mjs.meta.json --top 45
+          node scripts/worker-composition.mjs .open-next/server-functions/default --top 15
       # EVERY CHUNK THE WORKER CAN ASK FOR IS IN IT (2026-10-02, #531 review).
       # workerd has no file system, so OpenNext turns webpack's
       # require("./chunks/" + id) into a switch over the numbered files in
