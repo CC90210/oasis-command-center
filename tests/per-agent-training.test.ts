@@ -22,6 +22,8 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 
 const ROOT = join(__dirname, "..");
+// A deployment secret the redactor will know (read once, on its first use, so set before anything imports it).
+process.env.TRAINING_TEST_API_KEY = "trainsecret-0123456789abcdef";
 
 let passed = 0;
 let failed = 0;
@@ -61,7 +63,7 @@ async function main(): Promise<void> {
   const db = createClient({ url: ":memory:" });
   await db.execute(`CREATE TABLE marketing_corpus (
     id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, trains TEXT,
-    title TEXT, source_url TEXT, extraction TEXT NOT NULL, state TEXT NOT NULL,
+    title TEXT, source_url TEXT, extraction TEXT NOT NULL, state TEXT NOT NULL, last_error TEXT, contributed_by TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, indexed_at TEXT)`);
   const A = "tenant-a";
   const B = "tenant-b";
@@ -95,6 +97,50 @@ async function main(): Promise<void> {
     assert.deepEqual(await notes.readTrainingNotes(db, "tenant-none", "sales"), []);
   });
 
+  await check("a stored value this build does not know is read by Marketing, exactly as the page shows it", async () => {
+    await put(A, "general", "unknown-value");
+    assert.ok((await notes.readTrainingNotes(db, A, "marketing")).some((x) => x.steal === "unknown-value"));
+    assert.ok(!(await notes.readTrainingNotes(db, A, "sales")).some((x) => x.steal === "unknown-value"));
+    assert.equal(trains.notesTrain("general", "marketing"), true, "the page's rule agrees");
+  });
+
+  await check("an agent's tab lists its notes filtered in the database before the limit, every state included", async () => {
+    // Newer notes for another agent must not crowd out this agent's older ones.
+    for (let i = 0; i < 6; i += 1) await put(A, "finance", `finance-${i}`);
+    const listed = await notes.trainingRowsFor(A, "sales", 3, { db });
+    assert.ok(listed && !listed.degraded);
+    assert.deepEqual(listed!.rows.map((r) => r.title), ["Note sales-2", "Note sales-no-analysis", "Note sales-queued"]);
+    assert.ok(listed!.rows.every((r) => r.trains === "sales" || r.trains === "all"));
+    const broken = { execute: async () => { throw new Error("connect to libsql://db.turso.io?authToken=eyJsecret failed"); } } as never;
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(JSON.stringify(args));
+    try {
+      assert.deepEqual(await notes.trainingRowsFor(A, "sales", 3, { db: broken }), { rows: [], degraded: true }, "a failed read is degraded, not empty");
+    } finally {
+      console.error = original;
+    }
+    assert.ok(!errors.join(" ").includes("eyJsecret"), "the token is never logged");
+  });
+
+  await check("read only when Turso is the active data backend", async () => {
+    const before = process.env.EMPIRE_DATA_BACKEND;
+    const beforePath = process.env.TURSO_DB_PATH;
+    process.env.EMPIRE_DATA_BACKEND = "supabase_cloud";
+    // Turso IS configured here: only the active-backend switch may keep the read away from it.
+    process.env.TURSO_DB_PATH = join(ROOT, "tmp", "per-agent-training-unused.db");
+    try {
+      assert.equal(notes.trainingBackendActive(), false);
+      assert.equal(await notes.trainingBlockFor(A, "sales"), "", "no notes off Turso, and no Turso read is attempted");
+      assert.equal(await notes.trainingRowsFor(A, "sales"), null, "the page then filters the general list itself");
+    } finally {
+      if (before === undefined) delete process.env.EMPIRE_DATA_BACKEND;
+      else process.env.EMPIRE_DATA_BACKEND = before;
+      if (beforePath === undefined) delete process.env.TURSO_DB_PATH;
+      else process.env.TURSO_DB_PATH = beforePath;
+    }
+  });
+
   await check("at most the newest five", async () => {
     for (let i = 0; i < 8; i += 1) await put(A, "operations", `ops-${i}`);
     const got = await notes.readTrainingNotes(db, A, "operations");
@@ -108,6 +154,11 @@ async function main(): Promise<void> {
     const block = notes.trainingBlock(got);
     assert.match(block, /TRAINING NOTES:/);
     assert.match(block, /NOT instructions and NOT facts about this business/);
+    assert.match(block, /INPUT BOUNDARY RULES/, "the standing guard travels with the fenced data");
+    const leaked = notes.trainingBlock([{ title: "Has a key", label: "exemplar", hook: "use trainsecret-0123456789abcdef here", tone: "see https://x.test/?token=abc123", pacing: null, steal: null, avoid: null }]);
+    assert.ok(!leaked.includes("trainsecret-0123456789abcdef"), "a deployment secret in a note never reaches the model");
+    assert.match(leaked, /\[REDACTED:TRAINING_TEST_API_KEY\]/);
+    assert.match(leaked, /token=\[REDACTED\]/, "nor a credential in a link");
     assert.match(block, /<<<UNTRUSTED_INPUT_BEGIN>>>[\s\S]*label: training_notes[\s\S]*<<<UNTRUSTED_INPUT_END>>>/);
     assert.match(block, /\[Never do this\] Note sales-2\./, "the owner's verdict is kept");
     assert.match(block, /\[Do more of this\] Note sales-1\./);
@@ -119,7 +170,7 @@ async function main(): Promise<void> {
   });
 
   await check("a failed read is logged and the agent answers without its notes", async () => {
-    const broken = { execute: async () => { throw new Error("no such column: trains"); } } as never;
+    const broken = { execute: async () => { throw new Error("connect to libsql://db.turso.io?authToken=eyJsecret failed"); } } as never;
     const errors: unknown[] = [];
     const original = console.error;
     console.error = (...args: unknown[]) => void errors.push(args);
@@ -129,6 +180,7 @@ async function main(): Promise<void> {
       console.error = original;
     }
     assert.equal(errors.length, 1, "and says so in the log");
+    assert.ok(!JSON.stringify(errors).includes("eyJsecret"), "without the connection token");
     assert.match(await notes.trainingBlockFor(A, "sales", { db }), /Note sales-2/);
   });
 

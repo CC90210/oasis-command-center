@@ -40,6 +40,7 @@ import {
   getCorpusStats,
 } from "@/lib/founders/marketing-queries";
 import { TRAINS_ALL, TRAINS_VALUES, isTrains, trainsLabel } from "@/lib/training/trains";
+import { trainingRowsFor } from "@/lib/os/training-notes";
 import type { DepartmentKey } from "@/lib/os/types";
 
 export const dynamic = "force-dynamic";
@@ -68,10 +69,12 @@ async function safely<T>(label: string, read: Promise<T>, fallback: T): Promise<
  * long as the slowest corpus query takes (Codex review of #612).
  */
 async function LearnedNotesLoader({ tenantId, agent }: { tenantId: string; agent: DepartmentKey | null }) {
-  const [stats, items] = await Promise.all([
+  const [stats, agentItems] = await Promise.all([
     safely("stats", getCorpusStats(tenantId), { ...EMPTY_CORPUS_STATS, degraded: true }),
-    safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }),
+    // One agent's tab: filtered in the database by the rule the agent's own read uses (null off Turso).
+    agent ? safely("agent_items", trainingRowsFor(tenantId, agent), { rows: [], degraded: true }) : Promise.resolve(null),
   ]);
+  const items = agentItems ?? (await safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }));
   return <LearnedNotes stats={stats} items={items} agent={agent} />;
 }
 
@@ -103,11 +106,11 @@ function AgentTabs({ current }: { current: DepartmentKey | null }) {
   );
 }
 
-export default async function AgentTrainingPage(props: { searchParams?: Promise<{ agent?: string | string[] }> } = {}) {
+export default async function AgentTrainingPage({ searchParams }: { searchParams?: Promise<{ agent?: string | string[] }> }) {
   await requireOperator();
   const founder = await resolveFounder();
   if (!founder) notFound();
-  const raw = (await props.searchParams)?.agent;
+  const raw = (await searchParams)?.agent;
   const agent: DepartmentKey | null = typeof raw === "string" && isTrains(raw) && raw !== TRAINS_ALL ? raw : null;
 
   return (
