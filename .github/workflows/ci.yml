@@ -261,7 +261,9 @@ jobs:
       - name: Worker composition report (diagnostic)
         if: always()
         continue-on-error: true
-        run: node scripts/worker-composition.mjs .open-next/server-functions/default --top 40
+        run: |
+          node scripts/worker-composition.mjs .open-next/server-functions/default/handler.mjs.meta.json --top 45
+          node scripts/worker-composition.mjs .open-next/server-functions/default --top 15
       # EVERY CHUNK THE WORKER CAN ASK FOR IS IN IT (2026-10-02, #531 review).
       # workerd has no file system, so OpenNext turns webpack's
       # require("./chunks/" + id) into a switch over the numbered files in

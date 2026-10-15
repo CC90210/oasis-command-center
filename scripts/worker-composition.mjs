@@ -13,6 +13,10 @@
  *     This is the input to the handler's esbuild step, so it is a RANKING of what goes in, not
  *     the exact upload size (which is what check-worker-bundle.ts gates).
  *
+ *   node scripts/worker-composition.mjs .open-next/server-functions/default/handler.mjs.meta.json
+ *     The EXACT composition of the handler: OpenNext's esbuild metafile says how many bytes each
+ *     source module put into handler.mjs. Use this one to decide what to cut.
+ *
  *   node scripts/worker-composition.mjs <bundle.mjs>
  *     For an esbuild bundle that keeps a `// <source path>` comment before each module (OpenNext's
  *     own handler.mjs does not: it is minified), adds up the bytes after each header.
@@ -66,6 +70,23 @@ export function measure(text) {
     files.set(current, (files.get(current) || 0) + Buffer.byteLength(line) + newline);
   });
   return summarize(files);
+}
+
+/**
+ * An esbuild metafile (OpenNext writes handler.mjs.meta.json next to handler.mjs): the bytes each
+ * input module contributes to the biggest output, which is the handler. This is the exact ranking
+ * of what is in the bundle; the other two modes are approximations.
+ */
+export function measureMeta(meta) {
+  const outputs = Object.entries((meta && meta.outputs) || {});
+  const biggest = outputs.sort((a, b) => (b[1].bytes || 0) - (a[1].bytes || 0))[0];
+  const files = new Map();
+  if (biggest) {
+    for (const [path, info] of Object.entries(biggest[1].inputs || {})) {
+      if (info && info.bytesInOutput > 0) files.set(path, info.bytesInOutput);
+    }
+  }
+  return { ...summarize(files), output: biggest ? biggest[0] : null };
 }
 
 /** Bytes of every file under `root` (paths relative to it, with forward slashes). */
@@ -122,6 +143,10 @@ function main() {
     return;
   }
   if (stat.isDirectory()) return report(input, measureTree(input), topN);
+  if (input.endsWith(".meta.json")) {
+    const meta = measureMeta(JSON.parse(readFileSync(input, "utf8")));
+    return report(`${input} (bytes in ${meta.output ?? "no output"})`, meta, topN);
+  }
   const result = measure(readFileSync(input, "utf8"));
   report(input, result, topN);
   if (result.files.size <= 2) {

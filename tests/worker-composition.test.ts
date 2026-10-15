@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // @ts-expect-error - a plain .mjs script with no type declarations
-import { groupOf, measure, measureTree } from "../scripts/worker-composition.mjs";
+import { groupOf, measure, measureMeta, measureTree } from "../scripts/worker-composition.mjs";
 
 // ── grouping rules ──────────────────────────────────────────────────────
 assert.equal(groupOf("node_modules/next/dist/server/app-render.js"), "next");
@@ -55,6 +55,31 @@ const crlf = measure("// lib/a.ts\r\nx\r\n");
 assert.ok(crlf.files.has("lib/a.ts"), "CRLF headers are found");
 const noNewline = measure("// lib/a.ts\nxyz");
 assert.equal(noNewline.total, Buffer.byteLength("// lib/a.ts\nxyz"), "no trailing newline: no byte invented");
+
+// ── an esbuild metafile ─────────────────────────────────────────────────
+const metafile = {
+  inputs: {},
+  outputs: {
+    "small.js": { bytes: 10, inputs: { "lib/x.ts": { bytesInOutput: 10 } } },
+    "handler.mjs": {
+      bytes: 6000,
+      inputs: {
+        "node_modules/zod/index.js": { bytesInOutput: 4000 },
+        "node_modules/.pnpm/zod@4/node_modules/zod/v4/core.js": { bytesInOutput: 500 },
+        "lib/forms/public-booking.ts": { bytesInOutput: 900 },
+        "lib/empty.ts": { bytesInOutput: 0 },
+        "app/api/forms/booking/route.ts": { bytesInOutput: 600 },
+      },
+    },
+  },
+};
+const meta = measureMeta(metafile);
+assert.equal(meta.output, "handler.mjs", "the biggest output is the handler");
+assert.equal(meta.total, 6000, "only the handler's bytes, each module once");
+assert.equal(meta.groups.get("zod"), 4500, "two paths of one package add up");
+assert.equal(meta.groups.get("lib/"), 900);
+assert.ok(!meta.files.has("lib/empty.ts"), "a module that put nothing in the bundle is not listed");
+assert.deepEqual(measureMeta({}).total, 0, "an empty metafile does not throw");
 
 // ── a directory tree, as OpenNext assembles it ──────────────────────────
 const root = mkdtempSync(join(tmpdir(), "worker-composition-"));
