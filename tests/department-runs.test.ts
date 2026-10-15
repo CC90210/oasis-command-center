@@ -965,7 +965,20 @@ async function main() {
   async function automationRun(scope = scopeA, conversationId?: string, text = "Run the morning check") {
     const convId = conversationId ?? (await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", title: "Automation: Morning check (Oct 2026)", now: now() })).id;
     const id = autoId();
-    const q = await store.enqueueRun(db, scope, { conversationId: convId, text, chatMode: "build", showThinking: false, now: now(), id, source: "automation" });
+    const scheduledFor = now();
+    const q = await store.enqueueRun(db, scope, {
+      conversationId: convId,
+      text,
+      chatMode: "build",
+      showThinking: false,
+      now: scheduledFor,
+      id,
+      source: "automation",
+      origin: "automation",
+      automationId: id,
+      scheduledFor,
+      deadlineAt: new Date(scheduledFor.getTime() + 60_000),
+    });
     assert.ok(q.ok, "the automation run was not queued");
     assert.equal(q.ok && q.run.id, id, "the run did not keep the id the automation chose");
     assert.equal(q.ok && q.run.source, "automation");

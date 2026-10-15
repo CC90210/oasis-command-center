@@ -90,7 +90,10 @@ export function runFailureSentence(code: string, opts: { canManageAi: boolean; m
  * yet. `label` is the computer's own name (set by whoever paired it,
  * run-store.ts DeptChatState.computerLabel, learned from the SSE prelude's
  * `computer_label`); unknown only on a reopened chat this browser did not
- * send into, so it falls back to a plain "your computer". `busy` is whether
+ * send into, so it falls back to a plain "your computer". `engine` is the app
+ * the run was queued to run on ("Codex", lib/os/runs/engine-label.ts); unknown,
+ * the running line says only that the computer is answering, never a guessed
+ * app. `busy` is whether
  * another message in this SAME conversation is already running (the
  * computer can only answer one at a time): that is the one case the
  * question "why hasn't it answered" has a better sentence than "waiting".
@@ -98,11 +101,14 @@ export function runFailureSentence(code: string, opts: { canManageAi: boolean; m
  * its ordinary "Queued - goes next" / activity-trail copy, and this line
  * never names a house agent.
  */
-export function computerStatusLine(args: { executor: string | null; status: string; label: string | null; busy: boolean }): string | null {
+export function computerStatusLine(args: { executor: string | null; status: string; label: string | null; busy: boolean; engine?: string | null }): string | null {
   if (args.executor !== "computer") return null;
   if (args.status === "queued") {
     return args.busy ? `${args.label || "Your computer"} is busy with another reply` : `Waiting for ${args.label || "your computer"} to pick this up`;
   }
-  if (args.status === "running") return `${args.label || "Your computer"} · Claude Code`;
+  if (args.status === "running") {
+    const engine = args.engine?.trim();
+    return engine ? `${args.label || "Your computer"} · ${engine}` : `${args.label || "Your computer"} is answering`;
+  }
   return null;
 }

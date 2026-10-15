@@ -230,12 +230,30 @@ async function main() {
   await check("queued, busy with another reply in the same chat: {label} is busy with another reply", () => {
     assert.equal(computerStatusLine({ executor: "computer", status: "queued", label: LABEL, busy: true }), `${LABEL} is busy with another reply`);
   });
-  await check("running: {label} · Claude Code", () => {
-    assert.equal(computerStatusLine({ executor: "computer", status: "running", label: LABEL, busy: false }), `${LABEL} · Claude Code`);
+  await check("running: {label} · the app the run was queued to run on (Codex, Claude Code, a local model), never a fixed name", () => {
+    assert.equal(computerStatusLine({ executor: "computer", status: "running", label: LABEL, busy: false, engine: "Codex" }), `${LABEL} · Codex`);
+    assert.equal(computerStatusLine({ executor: "computer", status: "running", label: LABEL, busy: false, engine: "Claude Code" }), `${LABEL} · Claude Code`);
+    assert.equal(computerStatusLine({ executor: "computer", status: "running", label: LABEL, busy: false, engine: "llama3 (local model)" }), `${LABEL} · llama3 (local model)`);
+    assert.equal(computerStatusLine({ executor: "computer", status: "running", label: LABEL, busy: false }), `${LABEL} is answering`, "an unknown app is not guessed");
+    assert.equal(computerStatusLine({ executor: "computer", status: "running", label: LABEL, busy: false, engine: "  " }), `${LABEL} is answering`);
   });
   await check("unknown label falls back to a plain, truthful 'your computer' / 'Your computer' (never empty, never a guess at a name)", () => {
     assert.equal(computerStatusLine({ executor: "computer", status: "queued", label: null, busy: false }), "Waiting for your computer to pick this up");
-    assert.equal(computerStatusLine({ executor: "computer", status: "running", label: null, busy: false }), "Your computer · Claude Code");
+    assert.equal(computerStatusLine({ executor: "computer", status: "running", label: null, busy: false, engine: "Codex" }), "Your computer · Codex");
+  });
+  await check("the run head names the app from the engine the run was queued with, and only for a computer run", async () => {
+    const { runEngineLabel } = await import("../lib/os/runs/engine-label");
+    const base = { executor: "computer" as const, targetPairingId: "pair-1" };
+    assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "codex" }), "Codex");
+    assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "claude" }), "Claude Code");
+    assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "gemini" }), "Gemini CLI");
+    assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "local", runtimeEngineName: "ollama/llama3:8b" }), "llama3:8b (local model)");
+    assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "something-new" }), null, "an app this build does not know is not guessed");
+    assert.equal(runEngineLabel({ executor: "computer", targetPairingId: null, runtimeEngineKind: null, runtimeEngineName: null }), "Claude Code", "the first computer contract only ever ran Claude Code");
+    assert.equal(runEngineLabel({ executor: "worker", targetPairingId: null, runtimeEngineKind: "api", runtimeEngineName: "openai" }), null, "a reply on the AI account names its own model");
+    assert.equal(runEngineLabel({ executor: "worker", targetPairingId: "pair-1", runtimeEngineKind: "cli", runtimeEngineName: "codex" }), null, "a computer run that fell back to the AI account is not a computer run");
+    const src = (await import("node:fs")).readFileSync("lib/os/runs/follow.ts", "utf8");
+    assert.match(src, /engine: runEngineLabel\(run\)/, "every run head carries it");
   });
   await check("null for any run not dispatched to a person's own computer, and for a finished run", () => {
     assert.equal(computerStatusLine({ executor: "worker", status: "queued", label: LABEL, busy: false }), null);
@@ -283,8 +301,9 @@ async function main() {
   await check("a computer-dispatched queued message behind a running one: '{label} is busy with another reply'", () => {
     assert.match(text(html.msgQueuedComputerBusy), new RegExp(`${LABEL.replace(/[().]/g, "\\$&")} is busy with another reply`));
   });
-  await check("a computer-dispatched running message shows '{label} · Claude Code'", () => {
-    assert.match(text(html.msgRunningComputer), new RegExp(`${LABEL.replace(/[().]/g, "\\$&")} · Claude Code`));
+  await check("a computer-dispatched running message shows '{label} · {the app it runs on}'", () => {
+    assert.match(text(html.msgRunningComputer), new RegExp(`${LABEL.replace(/[().]/g, "\\$&")} · Codex`));
+    assert.doesNotMatch(text(html.msgRunningComputer), /Claude Code/, "not a fixed name");
   });
   await check("a worker-dispatched running message carries no computer status line", () => {
     assert.doesNotMatch(text(html.msgRunningWorker), /Claude Code/);

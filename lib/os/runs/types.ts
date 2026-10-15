@@ -12,8 +12,23 @@
  * PURE: no server imports. Safe in client code and in bare-node tests.
  */
 
-export const RUN_STATUSES = ["queued", "running", "done", "failed", "cancelled", "interrupted"] as const;
+export const RUN_STATUSES = ["queued", "running", "done", "failed", "cancelled", "interrupted", "missed"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
+
+/** Plain words used anywhere a durable run state is shown. */
+export const RUN_STATUS_LABELS: Readonly<Record<RunStatus, string>> = {
+  queued: "Waiting",
+  running: "Running",
+  done: "Finished",
+  failed: "Failed",
+  cancelled: "Stopped",
+  interrupted: "Interrupted",
+  missed: "Missed",
+};
+
+export function runStatusLabel(status: RunStatus): string {
+  return RUN_STATUS_LABELS[status];
+}
 
 export function isRunStatus(value: unknown): value is RunStatus {
   return typeof value === "string" && (RUN_STATUSES as readonly string[]).includes(value);
@@ -153,7 +168,16 @@ export function isRunOrigin(value: unknown): value is RunOrigin {
  * Neither is a verdict on the workspace's AI account or the department chat, so
  * neither is recorded as the channel's last turn.
  */
-export const RUN_FAILURE_CODES = ["run_timeout", "sources_unavailable"] as const;
+export const RUN_FAILURE_CODES = [
+  "run_timeout",
+  "sources_unavailable",
+  "ai_account_unavailable",
+  "department_unavailable",
+  "template_version_unknown",
+  "tools_invalid",
+  "automation_busy",
+  "owner_not_manager",
+] as const;
 export type RunFailureCode = (typeof RUN_FAILURE_CODES)[number];
 
 export function isRunFailureCode(code: unknown): code is RunFailureCode {

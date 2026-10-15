@@ -227,7 +227,7 @@ export function DepartmentChat({
               item={item}
               canManageAi={canManageAi}
               onStop={() => item.runId && void stopRun(department, item.runId)}
-              computerStatus={computerStatusLine({ executor: item.executor, status: item.status, label: state.computerLabel, busy: computerBusy })}
+              computerStatus={computerStatusLine({ executor: item.executor, status: item.status, label: state.computerLabel, busy: computerBusy, engine: item.engine })}
             />
           ))}
           {notes.map((n, i) => (
