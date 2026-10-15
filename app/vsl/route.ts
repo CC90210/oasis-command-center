@@ -26,8 +26,12 @@ import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** The router form's slug. Its definition is content/offers/oasis/vsl.json. */
-export const VSL_ROUTER_SLUG = "vsl";
+/**
+ * The router form's slug. Its definition is content/offers/oasis/vsl.json. Not
+ * exported: a Next.js route module may export only its HTTP handlers and route
+ * config, and `next build` rejects anything else.
+ */
+const VSL_ROUTER_SLUG = "vsl";
 
 /** Longest query string carried across. A real ad URL is a few hundred bytes. */
 const MAX_QUERY_LENGTH = 1500;
