@@ -128,8 +128,16 @@ const iso = (offsetSeconds: number) => new Date(NOW + offsetSeconds * 1000).toIS
   const paused = describeNextRun({
     nextRunAt: iso(-30 * DAY), schedule: "*/5 * * * *", enabled: false, now: NOW,
   });
-  assert.match(paused.text, /\(paused\)$/);
+  // A paused job whose bookmark is in the past says only "Paused": "Stored next
+  // Sep 28 (paused)" on Oct 15 was a past date dressed as a schedule.
+  assert.equal(paused.text, "Paused");
   assert.equal(paused.overdue, false);
+  // A paused job with a bookmark still ahead shows when it WOULD run.
+  const pausedAhead = describeNextRun({
+    nextRunAt: iso(2 * DAY), schedule: "0 7 * * 1", enabled: false, now: NOW,
+  });
+  assert.match(pausedAhead.text, /^Paused · would run /);
+  assert.equal(pausedAhead.overdue, false);
 }
 
 assert.equal(

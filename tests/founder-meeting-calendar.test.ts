@@ -7,6 +7,7 @@ import {
   founderMeetingEventId,
   operatorCalendarStatus,
   hasRequiredScope,
+  listGoogleCalendarBusy,
   updateGoogleFounderMeeting,
   type GoogleCalendarDependencies,
 } from "../lib/integrations/google-calendar";
@@ -668,6 +669,142 @@ async function testCancelRefreshesTokenAndFailsClosedWithoutCalendarScope() {
   assert.equal(fetchCount, 0);
 }
 
+async function testCreatesFortyFiveMinuteDiscoveryCallInvite() {
+  const calls: FetchCall[] = [];
+  const args = { ...requestArgs(), durationMinutes: 45, offerLabel: "COMMAND discovery call" };
+
+  await createGoogleFounderMeeting(
+    args,
+    baseDependencies(async (input, init) => {
+      calls.push({ url: String(input), init });
+      const payload = JSON.parse(String(init?.body)) as {
+        id: string;
+        summary: string;
+        description: string;
+        start: { dateTime: string; timeZone: string };
+        end: { dateTime: string; timeZone: string };
+      };
+      return jsonResponse({
+        ...eventResponse(payload.id),
+        summary: payload.summary,
+        description: payload.description,
+        start: payload.start,
+        end: payload.end,
+      });
+    }),
+  );
+
+  assert.equal(calls.length, 1);
+  const payload = JSON.parse(String(calls[0].init?.body)) as {
+    summary: string;
+    description: string;
+    start: { dateTime: string };
+    end: { dateTime: string };
+  };
+  assert.equal(payload.summary, "OASIS 45-minute COMMAND discovery call — Lakeside Montessori School");
+  assert.match(payload.description, /^A 45-minute COMMAND discovery call with OASIS AI Solutions\./);
+  assert.doesNotMatch(payload.description, /15-minute website audit/i);
+  assert.equal(Date.parse(payload.end.dateTime) - Date.parse(payload.start.dateTime), 45 * 60 * 1000);
+}
+
+async function testCreatesAiAutomationAuditInviteWithExplicitOfferName() {
+  const calls: FetchCall[] = [];
+  await createGoogleFounderMeeting(
+    { ...requestArgs(), offerLabel: "AI automation audit" },
+    baseDependencies(async (input, init) => {
+      calls.push({ url: String(input), init });
+      const payload = JSON.parse(String(init?.body)) as {
+        id: string;
+        summary: string;
+        description: string;
+      };
+      return jsonResponse({
+        ...eventResponse(payload.id),
+        summary: payload.summary,
+        description: payload.description,
+      });
+    }),
+  );
+  const payload = JSON.parse(String(calls[0].init?.body)) as { summary: string; description: string };
+  assert.equal(payload.summary, "OASIS 15-minute AI automation audit — Lakeside Montessori School");
+  assert.match(payload.description, /^A 15-minute AI automation audit with OASIS AI Solutions\./);
+  assert.doesNotMatch(payload.description, /website audit/i);
+}
+
+async function testAvailabilityReadsTheFoundersOwnCalendarAndNeverFallsBack() {
+  const calls: FetchCall[] = [];
+  const busy = await listGoogleCalendarBusy(
+    {
+      tenantId: TENANT_ID,
+      organizerUserId: ORGANIZER_USER_ID,
+      expectedOrganizerEmail: "founder@oasisai.work",
+      timeMin: "2026-08-26T12:00:00.000Z",
+      timeMax: "2026-08-27T12:00:00.000Z",
+    },
+    baseDependencies(async (input, init) => {
+      calls.push({ url: String(input), init });
+      return jsonResponse({
+        items: [
+          { start: { dateTime: START_AT }, end: { dateTime: "2026-08-26T20:15:00.000Z" } },
+          { transparency: "transparent", start: { dateTime: START_AT }, end: { dateTime: "2026-08-26T21:00:00.000Z" } },
+        ],
+      });
+    }),
+  );
+  assert.deepEqual(busy, [{ start: START_AT, end: "2026-08-26T20:15:00.000Z" }]);
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0].url).pathname, "/calendar/v3/calendars/primary/events");
+  assert.equal(new URL(calls[0].url).searchParams.get("singleEvents"), "true");
+
+  const previous = process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN;
+  process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN = "system-refresh-token";
+  let providerCalls = 0;
+  try {
+    await assert.rejects(
+      listGoogleCalendarBusy(
+        {
+          tenantId: TENANT_ID,
+          organizerUserId: ORGANIZER_USER_ID,
+          expectedOrganizerEmail: "founder@oasisai.work",
+          timeMin: "2026-08-26T12:00:00.000Z",
+          timeMax: "2026-08-27T12:00:00.000Z",
+        },
+        baseDependencies(async () => {
+          providerCalls += 1;
+          return jsonResponse({ items: [] });
+        }, { getBundle: async () => ({}) }),
+      ),
+      (error: unknown) => error instanceof GoogleCalendarIntegrationError && error.code === "google_calendar_not_connected",
+    );
+    assert.equal(providerCalls, 0, "availability cannot substitute the shared calendar for this founder");
+  } finally {
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN", previous);
+  }
+}
+
+async function testAvailabilityRefusesATruncatedPage() {
+  // A first page that says there is more (nextPageToken) hides busy time; offering slots
+  // from it would double-book a founder. It must fail, not return a short list.
+  await assert.rejects(
+    listGoogleCalendarBusy(
+      {
+        tenantId: TENANT_ID,
+        organizerUserId: ORGANIZER_USER_ID,
+        expectedOrganizerEmail: "founder@oasisai.work",
+        timeMin: "2026-08-26T12:00:00.000Z",
+        timeMax: "2026-08-27T12:00:00.000Z",
+      },
+      baseDependencies(async () =>
+        jsonResponse({
+          items: [{ start: { dateTime: START_AT }, end: { dateTime: "2026-08-26T20:15:00.000Z" } }],
+          nextPageToken: "more-events-exist",
+        }),
+      ),
+    ),
+    (error: unknown) => error instanceof GoogleCalendarIntegrationError && error.code === "calendar_availability_failed",
+  );
+}
+
 async function main() {
   const connected = await operatorCalendarStatus(
     TENANT_ID,
@@ -700,6 +837,8 @@ async function main() {
     deterministicEventId("22222222-2222-4222-8222-222222222222"),
   );
   await testCreatesFifteenMinuteMeetInviteWithoutInternalNotes();
+  await testCreatesFortyFiveMinuteDiscoveryCallInvite();
+  await testCreatesAiAutomationAuditInviteWithExplicitOfferName();
   await testCopiesOpenerAndCentralInboxAndToleratesOrganizerEcho();
   await testRejectsBundleWithoutCalendarScope();
   await testRejectsWrongGoogleIdentityBeforeProviderCall();
@@ -716,6 +855,8 @@ async function main() {
   await testRescheduleFailsIfExistingMeetCannotBeVerified();
   await testCancelSendsUpdatesAndTreatsMissingEventAsSuccess();
   await testCancelRefreshesTokenAndFailsClosedWithoutCalendarScope();
+  await testAvailabilityReadsTheFoundersOwnCalendarAndNeverFallsBack();
+  await testAvailabilityRefusesATruncatedPage();
   console.log("founder-meeting-calendar: OK");
 }
 

@@ -218,7 +218,13 @@ export function describeNextRun(input: {
   const lateSeconds = (now - due) / 1000;
 
   if (!enabled) {
-    return { text: `Stored next ${stamp} (paused)`, overdue_by_seconds: null, overdue: false };
+    // A paused job's stored time is a bookmark. Once it is in the past it says
+    // nothing true ("Stored next Sep 28" on Oct 15), so only a FUTURE one is shown.
+    return {
+      text: lateSeconds < 0 ? `Paused · would run ${stamp}` : "Paused",
+      overdue_by_seconds: null,
+      overdue: false,
+    };
   }
   if (lateSeconds <= 0) {
     return { text: `Next ${stamp}`, overdue_by_seconds: lateSeconds, overdue: false };

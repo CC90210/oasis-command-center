@@ -3,8 +3,7 @@
  *
  * Operator only (F0 containment, 2026-09-29). Imported by the two surfaces a
  * verified platform operator alone reaches: the /settings/devices/install
- * wizard (InstallBridgeWizard) and the Settings › Devices modal
- * (InstallBridgeModal). The client pair-only page (PairBridgeOnly) does not
+ * wizard (InstallBridgeWizard). The client pair-only page (PairBridgeOnly) does not
  * import this module, so the full-install command is in no module a client's
  * page loads. The repository is never a constant here: it arrives as `repo`,
  * a prop from an operator-gated server component (HARNESS_REPO).

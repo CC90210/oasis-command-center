@@ -250,11 +250,48 @@ function scanJsonForFailure(value: unknown, depth = 0): string | null {
 
 export type LastResultVerdict = {
   text: string;
-  /** `unknown` means the stored tail cannot carry a verdict — never a green tick. */
-  status: "success" | "error" | "unknown" | null;
+  /**
+   * `unknown` means the stored tail cannot carry a verdict — never a green tick.
+   * `skipped` means the scheduler chose not to run this slot (the PC was off, a
+   * run was deferred): it is not a verdict on the job, so it is neither the
+   * success tick it used to fall through to nor a failure.
+   */
+  status: "success" | "error" | "unknown" | "skipped" | null;
   /** Why the shape scan called it a failure. Null when the text says so itself. */
   reason: string | null;
 };
+
+/**
+ * What the scheduler writes into `last_result` when it did not run a slot at all
+ * (`skipped-stale: …` from scripts/scheduler.py, `deferred: …`). It leaves
+ * `last_run_at` and `run_count` alone, so the card's "ran 1d ago" is the last
+ * time the job REALLY ran, and this is a separate, newer fact.
+ */
+const SKIPPED_RESULT_RE = /^(?:skipped(?:-[a-z]+)?|deferred)\s*:/i;
+
+function humanizeMinutes(minutes: number): string {
+  if (minutes < 90) return `${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 36) return `${hours} h`;
+  return `${Math.round(hours / 24)} days`;
+}
+
+/**
+ * The sentence the card shows for a skipped result, in the words of the person
+ * reading it. The raw scheduler text stays available under "Details": it is the
+ * evidence, not the message.
+ */
+export function explainSkippedResult(text: string): string {
+  const lateMatch = /was\s+(\d+)\s*min\s+behind/i.exec(text);
+  const late = lateMatch ? humanizeMinutes(Number(lateMatch[1])) : null;
+  if (/skipped-stale/i.test(text)) {
+    return late
+      ? `Skipped: this was due about ${late} before the PC that runs it was back on, so it waited for its next slot.`
+      : "Skipped: the PC that runs this was off when it was due, so it waited for its next slot.";
+  }
+  if (/^deferred/i.test(text.trim())) return "Deferred: held back until something it waits on is ready.";
+  return "Skipped this slot; it runs again at its next scheduled time.";
+}
 
 export function classifyLastResult(raw: unknown): LastResultVerdict {
   // The shim already decoded it. Scan the object we were handed rather than its
@@ -273,6 +310,10 @@ export function classifyLastResult(raw: unknown): LastResultVerdict {
   const upper = text.toUpperCase();
   if (upper.startsWith("ERROR") || upper.startsWith("FAILED")) {
     return { text, status: "error", reason: null };
+  }
+
+  if (SKIPPED_RESULT_RE.test(text.trim())) {
+    return { text, status: "skipped", reason: null };
   }
 
   if (OPAQUE_RESULTS.has(text.trim())) {
@@ -334,7 +375,9 @@ export function normalizeEmpireRow(row: EmpireCronRow) {
     last_run_status: status,
     // `unknown` still shows its text — un-verdicted output, not a hidden row.
     // Hiding an opaque tail is how the blind spot stops being visible at all.
-    last_run_output: status === "success" || status === "unknown" ? lastResult : null,
+    // `skipped` keeps its raw text as evidence and adds the plain sentence.
+    last_run_output: status === "success" || status === "unknown" || status === "skipped" ? lastResult : null,
+    last_run_note: status === "skipped" ? explainSkippedResult(lastResult) : null,
     last_run_error: unresolvedError ?? (status === "error" ? shapeError : null),
     run_count: asCount(row.run_count),
     unresolved_failures: unresolvedFailures,

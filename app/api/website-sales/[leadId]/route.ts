@@ -857,6 +857,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             "google_calendar_not_connected",
             "calendar_scope_required",
             "meeting_host_deactivated",
+            "founder_slot_overlap",
           ].includes(code) ? 409 : 503; // incl. meeting_host_check_failed: retryable
           return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status});
         }

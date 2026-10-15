@@ -29,6 +29,7 @@ import {
   type ComputerAnswerState,
 } from "@/lib/devices/presence";
 import { departmentInventoryLine, type CliProvider, type CliStatusInfo } from "@/lib/bridge-cli-status";
+import { DEVICE_LABEL_MAX, deviceLabelProblem, deviceLabelProblemWords } from "@/lib/devices/label";
 
 type DeviceRow = {
   id: string;
@@ -70,7 +71,13 @@ function timeAgo(iso: string | null): string {
   if (ms < 0) return "just now";
   if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} s ago`;
   if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)} min ago`;
-  return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  // Older than an hour: a bare "5:20 AM" could be yesterday's, last week's or
+  // last month's. Say which day when it is not today.
+  const at = new Date(iso);
+  if (at.toDateString() === new Date().toDateString()) {
+    return at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  return at.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 /** The exact row line (ui_changes section 1), from the one state. */
@@ -122,6 +129,40 @@ export function YourComputersCard() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // One computer being renamed at a time: its id and the text in the box.
+  const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
+
+  async function rename(id: string, value: string) {
+    const problem = deviceLabelProblem(value);
+    if (problem) {
+      setNotice(deviceLabelProblemWords(problem));
+      return;
+    }
+    setBusyId(id);
+    setNotice(null);
+    try {
+      const r = await fetch("/api/devices", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, label: value.trim() }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!r.ok || !j.ok) {
+        setNotice(
+          j.error === "not_your_computer"
+            ? "Only the person who connected a computer can rename it."
+            : deviceLabelProblemWords(j.error ?? ""),
+        );
+      } else {
+        setRenaming(null);
+        await load();
+      }
+    } catch {
+      setNotice("Could not rename this computer. Check your connection and try again.");
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function load() {
     setError(null);
@@ -250,7 +291,37 @@ export function YourComputersCard() {
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <Monitor className={`w-4 h-4 mt-0.5 ${fresh ? "text-accent" : "text-fg-dim"}`} aria-hidden="true" />
                   <div className="min-w-0">
-                    <div className="text-sm text-fg">{rowLine(label, state, d.claim_state_at, d.last_seen_at)}</div>
+                    {renaming?.id === d.id ? (
+                      <form
+                        className="flex flex-wrap items-center gap-2"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void rename(d.id, renaming.value);
+                        }}
+                      >
+                        <label className="sr-only" htmlFor={`rename-${d.id}`}>Computer name</label>
+                        <input
+                          id={`rename-${d.id}`}
+                          className="input !py-1 text-sm"
+                          value={renaming.value}
+                          maxLength={DEVICE_LABEL_MAX}
+                          autoFocus
+                          disabled={busyId === d.id}
+                          onChange={(e) => setRenaming({ id: d.id, value: e.target.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") setRenaming(null);
+                          }}
+                        />
+                        <button type="submit" disabled={busyId === d.id} className="btn-primary text-xs">
+                          {busyId === d.id ? "Saving" : "Save name"}
+                        </button>
+                        <button type="button" onClick={() => setRenaming(null)} className="text-xs text-fg-dim underline underline-offset-2">
+                          Cancel
+                        </button>
+                      </form>
+                    ) : (
+                      <div className="text-sm text-fg">{rowLine(label, state, d.claim_state_at, d.last_seen_at)}</div>
+                    )}
                     {inventoryFor(d.id).length > 0 && (
                       <div className="text-[11px] text-fg-dim mt-1 space-y-0.5">
                         {inventoryFor(d.id).map((line) => (
@@ -271,6 +342,16 @@ export function YourComputersCard() {
                       Use this computer
                     </button>
                   )}
+                  {renaming?.id !== d.id && (
+                    <button
+                      type="button"
+                      onClick={() => setRenaming({ id: d.id, value: d.label || "" })}
+                      disabled={busyId === d.id}
+                      className="text-xs text-fg-dim underline underline-offset-2 hover:text-fg disabled:opacity-50"
+                    >
+                      Rename
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => void disconnect(d.id, label)}
@@ -285,9 +366,17 @@ export function YourComputersCard() {
           })}
         </ul>
       )}
+      {mine.some((d) => inventoryFor(d.id).length > 0) && (
+        <p className="text-[11px] leading-relaxed text-fg-dim" data-testid="signed-in-caption">
+          &ldquo;Signed in&rdquo; is what the app reports on that computer. Whether it can take department work is
+          confirmed by a Test in Settings &gt; AI brain.
+        </p>
+      )}
       {theirs.length > 0 && (
         <details className="text-xs text-fg-dim">
-          <summary className="cursor-pointer hover:text-fg-muted">Team computers ({theirs.length})</summary>
+          <summary className="cursor-pointer hover:text-fg-muted">
+            Team computers ({theirs.length}) · {Array.from(new Set(theirs.map((d) => d.owner_name || "a teammate"))).join(", ")}
+          </summary>
           <ul className="mt-2 divide-y divide-bg-border">
             {theirs.map((d) => {
               const state = computerAnswerState(
@@ -304,6 +393,9 @@ export function YourComputersCard() {
               return (
                 <li key={d.id} className="py-2 text-fg-muted">
                   {teamRowLine(label, ownerName, state, d.claim_state_at, d.last_seen_at, now)}
+                  {/* A "not yet approved" row already names the owner; every other
+                      state said nothing about whose computer it is. */}
+                  {state !== "not_approved" && <span className="text-fg-dim"> · {ownerName}&apos;s computer</span>}
                 </li>
               );
             })}

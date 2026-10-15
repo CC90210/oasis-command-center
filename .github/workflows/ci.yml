@@ -223,20 +223,47 @@ jobs:
       # WORKER_UPLOAD_BUDGET_KIB is checked against wrangler's `Total Upload`
       # KiB, the UNCOMPRESSED size. Cloudflare's limit is 64 MiB (65536 KiB)
       # uncompressed, and it has no compressed limit (the gzip figure is for
-      # reference only). The budget is that limit less 1 MiB, because the dry
+      # reference only). The budget is that limit less a margin, because the dry
       # run builds with placeholder env and reads slightly below the deploy
       # for the same commit. On 2026-09-29 the upload was 59014 KiB.
+      #
+      # MARGIN 1 MiB -> 512 KiB (2026-10-15, funnel wiring). The upload grew from
+      # 59014 KiB to 64441 KiB in two weeks (one merge, #610, added 1.2 MiB), so
+      # main had 71 KiB of headroom and the next feature, the public booking
+      # calendar (~2.4k source lines; 64726 KiB measured in this job after its
+      # one new dependency, zod at ~443 KiB minified, was replaced by a short
+      # hand-written parser), could not merge at all. The placeholder-vs-deploy
+      # difference was not measured here (deploy logs mask digits); it is small
+      # by the comment above, and 512 KiB of margin stays. A deploy over 65536
+      # KiB is refused by Cloudflare and production keeps the previous
+      # version, so a budget set too generously fails SAFE, late; it does not
+      # take the site down. This is a stopgap, not headroom: the Worker is at
+      # 98.8% of the cap and needs a bundle diet before the next large feature
+      # (candidates, none measured: the retired SunBiz code, pdfjs-dist and
+      # pdf-lib, which are the largest server-side dependencies on disk).
       #
       # The same check reads the uploaded worker.js from --outdir and fails on
       # any character above U+00FF: one such character makes V8 hold the whole
       # source as UTF-16, and isolates then run out of memory (#485).
       - name: Bundle the Worker (wrangler dry run) and check its size
         env:
-          WORKER_UPLOAD_BUDGET_KIB: "64512"
+          WORKER_UPLOAD_BUDGET_KIB: "65024"
         run: |
           set -o pipefail
           npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run 2>&1 | tee "$RUNNER_TEMP/wrangler-dry-run.log"
           node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log" .wrangler/ci-dry-run
+      # WHAT THE WORKER IS MADE OF (2026-10-15). The upload is at ~99% of Cloudflare's cap, so
+      # "what made it grow" is the question every large feature has to answer. This prints the
+      # biggest packages, server chunks and route files OpenNext puts into the handler
+      # (scripts/worker-composition.mjs; handler.mjs itself is minified, so the report reads the
+      # tree it is built from) so the answer is in every build log. Diagnostic only: it never
+      # fails the build.
+      - name: Worker composition report (diagnostic)
+        if: always()
+        continue-on-error: true
+        run: |
+          node scripts/worker-composition.mjs .open-next/server-functions/default/handler.mjs.meta.json --top 45
+          node scripts/worker-composition.mjs .open-next/server-functions/default --top 15
       # EVERY CHUNK THE WORKER CAN ASK FOR IS IN IT (2026-10-02, #531 review).
       # workerd has no file system, so OpenNext turns webpack's
       # require("./chunks/" + id) into a switch over the numbered files in

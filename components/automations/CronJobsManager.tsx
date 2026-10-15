@@ -679,9 +679,10 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) 
               `${activeCount} active`,
             ];
             if (empireCount > 0) {
-              parts.push(
-                `${tenantCount} for this workspace · ${empireCount} OASIS platform (operators only)`,
-              );
+              // Yours first, then the house schedules, each as a count of the same
+              // things: "4 for this workspace · 38 OASIS platform (operators
+              // only)" read as two unrelated sentences in OASIS's own workspace.
+              parts.push(`Yours ${tenantCount} · OASIS platform ${empireCount} (operators only)`);
             }
             return parts.join(" · ");
           })()}
@@ -906,6 +907,10 @@ function JobRow({
   // without a verdict rather than inheriting the success tick it used to get by
   // falling through the else.
   const ranUnclear = job.last_run_status === "unknown";
+  // The scheduler did not run the latest slot (the PC was off). `last_run_at`
+  // is then the last time it REALLY ran, so the line says "Last ran", and the
+  // skip is a separate, neutral note below: not a tick, not a failure.
+  const ranSkipped = job.last_run_status === "skipped";
   // What the promised next fire actually means now that the clock has passed it.
   // Daemon-backed rows are excluded by construction: their cron twin is parked,
   // so its next_run_at is not a promise anyone made.
@@ -1076,7 +1081,9 @@ function JobRow({
                         ? "Failed"
                         : ranUnclear
                           ? "Ran, result unclear"
-                          : "Ran"}{" "}
+                          : ranSkipped
+                            ? "Last ran"
+                            : "Ran"}{" "}
                   {relativeTimeShort(job.last_run_at)}
                 </span>
                 <span className="text-fg-faint">·</span>
@@ -1142,7 +1149,20 @@ function JobRow({
           {job.last_run_error.slice(0, 240)}
         </div>
       )}
-      {!job.last_run_error && job.last_run_output && (
+      {/* A skipped slot: one plain sentence, the scheduler's own words kept as
+          evidence under Details. Raw machine text is never the message. */}
+      {!job.last_run_error && job.last_run_note && (
+        <div className="mt-3 rounded border border-bg-border bg-bg-deep/50 px-2.5 py-1.5 text-xs text-fg-muted" data-testid="cron-skipped-note">
+          <div>{job.last_run_note}</div>
+          {job.last_run_output && (
+            <details className="mt-1 text-[11px] text-fg-dim">
+              <summary className="cursor-pointer select-none">Details</summary>
+              <div className="mt-1 break-words font-mono">{job.last_run_output.slice(0, 240)}</div>
+            </details>
+          )}
+        </div>
+      )}
+      {!job.last_run_error && !job.last_run_note && job.last_run_output && (
         <div className="mt-3 text-[11px] rounded px-2.5 py-1.5 font-mono break-words text-fg-muted bg-bg-deep/50 border border-bg-border">
           <span className="font-bold text-fg-muted">Last result: </span>
           {job.last_run_output.slice(0, 240)}

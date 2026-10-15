@@ -2276,10 +2276,16 @@ function readableError(code: string): string {
     calendar_organizer_mismatch: "The selected host connected a different Google account. Reconnect with their OASIS work email before booking.",
     google_meet_link_missing: "Google created the event but has not returned its Meet link yet. Retry this booking; it will reconcile the same event.",
     calendar_create_failed: "Google Calendar could not verify this booking. Nothing moved; retry after checking the host connection.",
+    // The public booking page reads both founders' calendars for open times
+    // (lib/integrations/google-calendar.ts listGoogleCalendarBusy). A rep never
+    // books through that read, but the code lives in the same union, so it needs
+    // its words here like every other one.
+    calendar_availability_failed: "Google Calendar could not be read for open times. Nothing was booked; retry in a moment, and check the host connection if it keeps failing.",
     calendar_update_failed: "Google Calendar could not verify the new time, so the lead was not changed. Check the host connection and retry.",
     calendar_cancel_failed: "The deal outcome was saved, but Google could not finish the invitation cleanup. Retry the same action; the background worker will also reconcile it.",
     verified_meeting_required: "This older booking has no verified Calendar receipt. Return it to Qualified and book it through the guided handoff.",
     meeting_no_longer_reschedulable: "This meeting is already completed or cancelled and cannot be rescheduled.",
+    founder_slot_overlap: "Another founder call is already booked in that time. Nothing was changed and no invite went out; pick a different time.",
     meeting_transition_pending: "A Calendar change is already waiting for its lifecycle update. Refresh and retry the same action.",
     meeting_host_deactivated: "This meeting's host has been deactivated, so it can't be rescheduled. Once its time has passed, mark it no-show; before then, cancel it. Then book a new audit with an active host.",
     meeting_host_check_failed: "We could not confirm this meeting's host just now. Nothing was changed. Retry in a moment.",
