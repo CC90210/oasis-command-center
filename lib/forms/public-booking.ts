@@ -2,7 +2,6 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { z } from "zod";
 import { verifyFormLink } from "@/lib/form-links";
 import { normalizePhoneE164 } from "@/lib/conversation-threading";
 import { AI_AUDIT_TENANT_ID, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
@@ -46,14 +45,57 @@ export function isPublicFunnelReadyForBooking(lead: Record<string, unknown>): bo
   return false;
 }
 
-const tokenField = z.string().trim().min(1).max(4_096);
+type PublicBookingParse<T> = { success: true; data: T } | { success: false };
 
-export const publicBookingAvailabilitySchema = z.object({ token: tokenField }).strict();
-export const publicBookingCreateSchema = z.object({
-  token: tokenField,
-  starts_at: z.string().trim().min(1).max(64),
-  request_id: z.string().trim().refine(isBookingRequestId),
-}).strict();
+/** A string field, trimmed, 1..max characters long once trimmed. */
+function trimmedField(max: number): (value: unknown) => string | undefined {
+  return (value) => {
+    if (typeof value !== "string") return undefined;
+    const text = value.trim();
+    return text.length >= 1 && text.length <= max ? text : undefined;
+  };
+}
+
+/**
+ * An anonymous request body must be a plain object holding exactly the named
+ * fields and nothing else: an extra key (a smuggled `tenant_id`) fails the parse
+ * rather than being ignored. Hand-rolled instead of zod: two three-field shapes
+ * did not justify ~420 KiB of Worker bundle, which pushed the build past its
+ * size budget.
+ */
+function strictBody<K extends string>(
+  input: unknown,
+  fields: Record<K, (value: unknown) => string | undefined>,
+): PublicBookingParse<Record<K, string>> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { success: false };
+  const record = input as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !Object.prototype.hasOwnProperty.call(fields, key))) {
+    return { success: false };
+  }
+  const data = {} as Record<K, string>;
+  for (const key of Object.keys(fields) as K[]) {
+    const value = fields[key](record[key]);
+    if (value === undefined) return { success: false };
+    data[key] = value;
+  }
+  return { success: true, data };
+}
+
+const tokenField = trimmedField(4_096);
+
+export const publicBookingAvailabilitySchema = {
+  safeParse: (input: unknown) => strictBody(input, { token: tokenField }),
+};
+export const publicBookingCreateSchema = {
+  safeParse: (input: unknown) => strictBody(input, {
+    token: tokenField,
+    starts_at: trimmedField(64),
+    request_id: (value) => {
+      const text = typeof value === "string" ? value.trim() : "";
+      return isBookingRequestId(text) ? text : undefined;
+    },
+  }),
+};
 
 /** Read an anonymous request through a byte cap before JSON parsing. */
 export async function readPublicBookingJson(req: Request): Promise<unknown> {

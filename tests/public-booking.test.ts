@@ -273,6 +273,25 @@ await check("strictly validates both anonymous booking request bodies", () => {
   }).success, false);
 });
 
+await check("the request-body parser trims, bounds, and rejects anything that is not exactly the shape", () => {
+  const requestId = "8d5a9a7f-98f2-4b63-9ad7-f2c6f5586063";
+  const created = publicBookingCreateSchema.safeParse({ token: "  t  ", starts_at: " 2026-10-14T15:00:00.000Z ", request_id: ` ${requestId} ` });
+  assert.deepEqual(created.success && created.data, { token: "t", starts_at: "2026-10-14T15:00:00.000Z", request_id: requestId });
+  for (const bad of [undefined, null, "text", 7, [], [{ token: "t" }]]) {
+    assert.equal(publicBookingAvailabilitySchema.safeParse(bad).success, false, `body ${JSON.stringify(bad)}`);
+  }
+  assert.equal(publicBookingAvailabilitySchema.safeParse({}).success, false, "a missing token");
+  assert.equal(publicBookingAvailabilitySchema.safeParse({ token: "   " }).success, false, "a blank token");
+  assert.equal(publicBookingAvailabilitySchema.safeParse({ token: 42 }).success, false, "a non-string token");
+  assert.equal(publicBookingAvailabilitySchema.safeParse({ token: "x".repeat(4_096) }).success, true);
+  assert.equal(publicBookingAvailabilitySchema.safeParse({ token: "x".repeat(4_097) }).success, false);
+  assert.equal(publicBookingCreateSchema.safeParse({ token: "t", starts_at: "x".repeat(65), request_id: requestId }).success, false);
+  assert.equal(publicBookingCreateSchema.safeParse({ token: "t", starts_at: "2026-10-14T15:00:00.000Z" }).success, false, "a missing request_id");
+  // JSON.parse makes "__proto__" an OWN key; it must count as an unknown key, not vanish.
+  const smuggled = JSON.parse('{"token":"t","__proto__":{"tenant_id":"attacker"}}') as unknown;
+  assert.equal(publicBookingAvailabilitySchema.safeParse(smuggled).success, false);
+});
+
 await check("applies the Schedule-link migration and serializes one OASIS founder appointment per slot", async () => {
   const dbFile = join(mkdtempSync(join(tmpdir(), "public-booking-")), "test.db");
   const db = createClient({ url: `file:${dbFile}` });
