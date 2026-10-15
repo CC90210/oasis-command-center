@@ -339,29 +339,11 @@ export function planFor(template: GuidedTemplate, choice: ScheduleChoice | null)
   return base;
 }
 
-const DAY_PLURAL = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"] as const;
 export const DAY_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
 
 export function joinWords(words: readonly string[]): string {
   if (words.length <= 1) return words.join("");
   return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
-}
-
-/** The chip's text: the catalogue's wording until the person changes the time or days, then the same sentence with their change. */
-export function chipLabel(preset: SchedulePreset, choice: ScheduleChoice | null): string {
-  if (!choice || choice.presetId !== preset.id) return preset.label;
-  const p = preset.plan;
-  if (p.mode !== "daily" && p.mode !== "weekdays" && p.mode !== "weekly") return preset.label;
-  const time = choice.time !== undefined && TIME_RE.test(choice.time) ? choice.time : p.time;
-  const clock = formatClock(time);
-  if (p.mode === "weekly") {
-    const days = choice.days ?? p.days;
-    if (days.length === 0) return preset.label;
-    const same = time === p.time && days.length === p.days.length && days.every((d, i) => d === p.days[i]);
-    return same ? preset.label : `${joinWords(days.map((d) => DAY_PLURAL[d] ?? "A day"))} at ${clock}`;
-  }
-  if (time === p.time) return preset.label;
-  return p.mode === "daily" ? `Every day at ${clock}` : `Weekdays at ${clock}`;
 }
 
 /**

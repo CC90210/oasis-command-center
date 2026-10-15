@@ -31,7 +31,6 @@ import {
   canEditTime,
   canVisit,
   choiceStyle,
-  chipLabel,
   connectionRows,
   counterText,
   defaultName,
@@ -308,17 +307,9 @@ async function main() {
     assert.deepEqual(days.schedule?.days, [1, 4], "days are kept in order");
   });
 
-  await check("chips keep the catalogue's wording until the time or days change, then say the change", () => {
+  await check("a time question for every answer but Only when I ask; a days question only for certain days of the week", () => {
     const t = templateById("daily_brief", "chief_of_staff")!;
-    const [weekdays, daily, mondays, manual] = t.schedulePresets;
-    assert.equal(chipLabel(weekdays, { presetId: weekdays.id }), "Weekdays at 7:30 AM");
-    assert.equal(chipLabel(weekdays, { presetId: weekdays.id, time: "06:00" }), "Weekdays at 6:00 AM");
-    assert.equal(chipLabel(daily, { presetId: daily.id, time: "18:45" }), "Every day at 6:45 PM");
-    assert.equal(chipLabel(mondays, { presetId: mondays.id, days: [1, 4], time: "09:00" }), "Mondays and Thursdays at 9:00 AM");
-    assert.equal(chipLabel(mondays, { presetId: mondays.id, days: [] }), mondays.label, "no day left: the catalogue's label, and the validator says why");
-    assert.equal(chipLabel(weekdays, { presetId: weekdays.id, time: "" }), weekdays.label, "a cleared time never prints NaN");
-    assert.equal(chipLabel(weekdays, { presetId: "other", time: "06:00" }), weekdays.label, "another chip's change is not this chip's");
-    assert.equal(chipLabel(manual, { presetId: manual.id }), "Only when I run it");
+    const [weekdays, , mondays, manual] = t.schedulePresets;
     assert.ok(canEditTime(weekdays) && canEditTime(mondays) && !canEditTime(manual));
     assert.ok(canEditTime(templateById("ops_check", "operations")!.schedulePresets.find((p) => p.plan.mode === "every_n_hours")!), "several times a day: the time of the first run");
     assert.ok(canEditDays(mondays) && !canEditDays(weekdays));
@@ -725,8 +716,8 @@ async function main() {
     for (const d of ALL_DEPARTMENTS) assertPlainCopy(departmentLabel(d), d);
     for (const t of ALL_TEMPLATES.filter((x) => !x.custom)) {
       for (const p of t.schedulePresets) {
-        const choice = { presetId: p.id, time: "13:05" };
-        assertPlainCopy(chipLabel(p, choice), `${t.id}/${p.id}`);
+        const plan = planFor(t, { presetId: p.id, time: "13:05" });
+        if (plan) assertPlainCopy(whenText(plan), `${t.id}/${p.id}`);
       }
     }
     for (const [code, text] of [["a", GENERIC_FAILURE], ["b", sentenceFor("server_error", "")], ["c", sentenceFor("cloud_unavailable", "")]]) assertPlainCopy(text, code);

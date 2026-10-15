@@ -25,7 +25,6 @@ import type { GuidedAutomationView, GuidedContextView } from "../lib/automations
 import { readToolsFor, templateById, templatesFor } from "../lib/automations/guided/templates";
 import { toFailure } from "../lib/automations/guided/flow";
 import {
-  chipLabel,
   departmentLabel,
   departmentPurpose,
   editSession,
@@ -559,8 +558,6 @@ async function main() {
     assert.match(flat(r), /Which days\?/);
     assert.equal(byId(r, "gb-when-time")!.attrs.value, "09:15");
     assert.equal(flat(closest(radios(r, "gb-when").find((c) => c.checked)!.node, "label")), "On certain days of the week");
-    const t = templateById("daily_brief", "chief_of_staff")!;
-    assert.equal(chipLabel(t.schedulePresets[2], { presetId: "monday_0800", days: [1, 4], time: "09:15" }), "Mondays and Thursdays at 9:15 AM");
   });
 
   await check("When: Several times a day asks for the first time and How many times a day?, each answer with its times", () => {

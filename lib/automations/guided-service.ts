@@ -33,6 +33,7 @@ import { toggleCronWithAudit } from "@/lib/automations/cron-toggle-transaction";
 import { GUIDED_ACTION_TYPE, GUIDED_PAYLOAD_VERSION, type GuidedPayload, type InputValues } from "@/lib/automations/guided/types";
 import { ALL_TEMPLATES, templateById } from "@/lib/automations/guided/templates";
 import { GUIDED_ZONE, hasControlChars, requiredConnectors, validateGuidedPayload } from "@/lib/automations/guided/validate";
+import { whenText } from "@/lib/automations/guided/view";
 import type {
   ApiFailure,
   CloudState,
@@ -48,7 +49,7 @@ import type {
   RunReceipt,
   TestResult,
 } from "@/lib/automations/guided/api-types";
-import { describePlan, nextRuns, planToCron, validatePlan } from "@/lib/automations/schedule-plan";
+import { nextRuns, planToCron, validatePlan } from "@/lib/automations/schedule-plan";
 import type { DeskToolName } from "@/lib/os/desk/catalog";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { connectorBySlug } from "@/lib/os/connectors";
@@ -372,7 +373,7 @@ function viewOf(row: CronRow, ctx: GuidedContextView, last: LastRunView | null, 
   const upcoming = enabled && plan.mode !== "manual" ? nextRuns(planToCron(plan), plan.timezone, now, 3).map((d) => d.toISOString()) : [];
   const unhealthy = enabled && (problems.length > 0 || last?.status === "failed");
   const status: GuidedStatus = unhealthy ? "needs_attention" : enabled ? "on" : "paused";
-  return { ...base, status, payload, scheduleSentence: describePlan(plan), nextRuns: upcoming, problems };
+  return { ...base, status, payload, scheduleSentence: whenText(plan), nextRuns: upcoming, problems };
 }
 
 export async function listAutomations(s: GuidedSession, now = new Date()): Promise<ServiceResult<{ items: GuidedAutomationView[] }>> {
