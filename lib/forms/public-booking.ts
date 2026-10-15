@@ -325,8 +325,17 @@ export async function loadPublicBookingSlots(input: {
   now?: number;
 }): Promise<string[]> {
   const now = input.now ?? Date.now();
+  const durationMinutes = input.durationMinutes ?? PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES;
   const timeMin = new Date(now + PUBLIC_BOOKING_MIN_LEAD_MINUTES * 60_000).toISOString();
-  const timeMax = new Date(now + PUBLIC_BOOKING_DAYS * 24 * 60 * 60_000).toISOString();
+  // Google's events.list `timeMax` bounds an event's START. The last bookable
+  // slot starts at about now + PUBLIC_BOOKING_DAYS and runs `durationMinutes`
+  // past that, so a founder event starting inside that tail would not be
+  // returned and the slot would be offered, then accepted again by the booking
+  // route (it re-reads with this same window): a client booked over a founder's
+  // event. The window therefore reaches one meeting length past the last start.
+  const timeMax = new Date(
+    now + PUBLIC_BOOKING_DAYS * 24 * 60 * 60_000 + durationMinutes * 60_000,
+  ).toISOString();
   const busy = await Promise.all([
     listGoogleCalendarBusy({
       tenantId: input.tenantId,
@@ -346,7 +355,7 @@ export async function loadPublicBookingSlots(input: {
   return buildPublicBookingSlots({
     now,
     busy: busy.flat(),
-    durationMinutes: input.durationMinutes ?? PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES,
+    durationMinutes,
   });
 }
 
