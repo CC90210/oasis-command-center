@@ -342,7 +342,7 @@ function visibleTo(s: GuidedSession, row: CronRow, raw: Record<string, unknown> 
   return !(template?.companyFinancialsOnly && !s.viewer.surface.capabilities.canSeeCompanyFinancials);
 }
 
-function viewOf(row: CronRow, ctx: GuidedContextView, last: LastRunView | null, now: Date): GuidedAutomationView | null {
+function viewOf(row: CronRow, ctx: GuidedContextView, last: LastRunView | null, now: Date, viewerId: string): GuidedAutomationView | null {
   const raw = parsePayload(row.action_payload);
   if (!raw) return null;
   const validated = validateGuidedPayload(raw, { companyFinancials: ctx.companyFinancials });
@@ -356,6 +356,7 @@ function viewOf(row: CronRow, ctx: GuidedContextView, last: LastRunView | null, 
     templateId: template?.id ?? shown.template.id,
     templateTitle: template?.title ?? "Saved automation",
     lastRun: last,
+    mine: row.owner_user_id === viewerId,
   };
   if (!validated.ok) {
     return {
@@ -382,7 +383,7 @@ export async function listAutomations(s: GuidedSession, now = new Date()): Promi
   const last = await lastRuns(s.db, s.tenantId, visible.map((r) => r.id));
   const items: GuidedAutomationView[] = [];
   for (const row of visible) {
-    const view = viewOf(row, ctx, last.get(row.id) ?? null, now);
+    const view = viewOf(row, ctx, last.get(row.id) ?? null, now, s.userId);
     if (view) items.push(view);
     else console.error("[guided.list] unreadable payload", { tenantId: s.tenantId, id: row.id });
   }
@@ -393,7 +394,7 @@ async function viewFor(s: GuidedSession, id: string, now: Date): Promise<GuidedA
   const [rows, ctx] = await Promise.all([loadRows(s.db, s.tenantId, id), contextOf(s, now)]);
   if (rows.length === 0) return null;
   const last = await lastRuns(s.db, s.tenantId, [id]);
-  return viewOf(rows[0], ctx, last.get(id) ?? null, now);
+  return viewOf(rows[0], ctx, last.get(id) ?? null, now, s.userId);
 }
 
 // ── create / update ──────────────────────────────────────────────────────
@@ -447,20 +448,25 @@ async function prepare(s: GuidedSession, body: { name?: unknown; payload?: unkno
 export async function createAutomation(s: GuidedSession, body: { name?: unknown; payload?: unknown }, now = new Date()): Promise<ServiceResult<{ item: GuidedAutomationView }>> {
   const prepared = await prepare(s, body, null);
   if (!prepared.ok) return prepared;
-  const count = await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_cron_jobs WHERE tenant_id = ? AND action_type = ?", args: [s.tenantId, GUIDED_ACTION_TYPE] });
-  if (Number((count.rows[0] as unknown as { n?: unknown })?.n ?? 0) >= MAX_GUIDED_PER_WORKSPACE) {
-    return { status: 409, body: fail("limit_reached", `This workspace already has ${MAX_GUIDED_PER_WORKSPACE} guided automations. Delete one you no longer use first.`) };
-  }
   const v = prepared.value;
   const id = randomUUID();
   const stamp = now.toISOString();
-  await s.db.execute({
+  // The count and the insert are ONE statement: two saves at the same moment cannot both pass a cap
+  // they each read as 29.
+  const inserted = await s.db.execute({
     sql: `INSERT INTO tenant_cron_jobs
             (id, tenant_id, agent_key, name, description, schedule, action_type, action_payload, enabled,
              created_by, owner_user_id, last_scheduled_for, tz, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
-    args: [id, s.tenantId, v.agentSlug, v.name, v.description, v.schedule, GUIDED_ACTION_TYPE, JSON.stringify(v.payload), s.userId, s.userId, stamp, v.payload.schedule.plan.timezone, stamp, stamp],
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?
+          WHERE (SELECT COUNT(*) FROM tenant_cron_jobs WHERE tenant_id = ? AND action_type = ?) < ?`,
+    args: [
+      id, s.tenantId, v.agentSlug, v.name, v.description, v.schedule, GUIDED_ACTION_TYPE, JSON.stringify(v.payload), s.userId, s.userId, stamp, v.payload.schedule.plan.timezone, stamp, stamp,
+      s.tenantId, GUIDED_ACTION_TYPE, MAX_GUIDED_PER_WORKSPACE,
+    ],
   });
+  if (inserted.rowsAffected !== 1) {
+    return { status: 409, body: fail("limit_reached", `This workspace already has ${MAX_GUIDED_PER_WORKSPACE} guided automations. Delete one you no longer use first.`) };
+  }
   const item = await viewFor(s, id, now);
   if (!item) return { status: 500, body: fail("server_error", "It was saved but could not be read back. Reload the page.") };
   return { status: 201, body: { ok: true, item } };
@@ -598,8 +604,21 @@ export async function activateAutomation(s: GuidedSession, id: string, now = new
   }
   const toggled = await toggleCronWithAudit(s.db, { source: "tenant", id, tenantId: s.tenantId, enabled: true, actorEmail: s.email, actorUserId: s.userId });
   if (!toggled.ok) return { status: toggled.status, body: fail(String(toggled.body.error ?? "server_error"), String(toggled.body.message ?? "We could not turn it on. Nothing was changed.")) };
+  // What was switched on must be the version that was just checked. An edit saved in another tab
+  // while the check ran writes a new payload (and switches it off); the switch above would then turn
+  // on a version nobody checked. Compare what the switch read back, and undo it if they differ.
+  if (canonicalPayload(toggled.row.action_payload) !== canonicalPayload(owned.row.action_payload)) {
+    await toggleCronWithAudit(s.db, { source: "tenant", id, tenantId: s.tenantId, enabled: false, actorEmail: s.email, actorUserId: s.userId });
+    return { status: 409, body: fail("changed_while_checking", "This automation was changed while we were checking it, so it was not turned on. Look it over and turn it on again.") };
+  }
   const item = await viewFor(s, id, now);
   return item ? { status: 200, body: { ok: true, item } } : notFound();
+}
+
+/** A stored payload as one comparable string, whether the driver handed back text or an object. */
+function canonicalPayload(raw: unknown): string {
+  const value = typeof raw === "string" ? safeJson(raw) : raw;
+  return JSON.stringify(value ?? null);
 }
 
 export async function pauseAutomation(s: GuidedSession, id: string, now = new Date()): Promise<ServiceResult<{ item: GuidedAutomationView }>> {

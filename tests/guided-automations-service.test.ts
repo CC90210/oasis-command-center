@@ -58,6 +58,8 @@ const world = {
   cloud: "ready" as "ready" | "none" | "local",
   preflight: { ok: true } as { ok: boolean; code?: string; detail?: string },
   preflightThrows: false,
+  /** Runs while the Turn on check is in progress (an edit saved in another tab, say). */
+  duringPreflight: null as null | (() => Promise<void>),
   financeAgent: false,
   blockedSlugs: [] as string[],
   run: { status: "done", finalText: "Three leads are quiet. Call Dana first.", wouldDraft: [{ to: "dana@acme.test", subject: "Checking in", title: "t", body: "Hi Dana." }], errorCode: null as string | null },
@@ -137,6 +139,7 @@ async function main(): Promise<void> {
     ...realRun,
     preflightGuidedAutomation: async () => {
       if (world.preflightThrows) throw new realRun.GuidedPreflightUnavailable("connector");
+      if (world.duringPreflight) await world.duringPreflight();
       return world.preflight;
     },
     runGuidedAutomation: async (input: { mode: string }) => {
@@ -152,14 +155,23 @@ async function main(): Promise<void> {
   });
 
   const service = await import("../lib/automations/guided-service");
-  const listRoute = await import("../app/api/automations/guided/route");
-  const contextRoute = await import("../app/api/automations/guided/context/route");
-  const itemRoute = await import("../app/api/automations/guided/[id]/route");
-  const testRoute = await import("../app/api/automations/guided/[id]/test/route");
-  const activateRoute = await import("../app/api/automations/guided/[id]/activate/route");
-  const pauseRoute = await import("../app/api/automations/guided/[id]/pause/route");
-  const runsRoute = await import("../app/api/automations/guided/[id]/runs/route");
-  const receiptRoute = await import("../app/api/automations/guided/[id]/runs/[runId]/route");
+  // Every guided request goes through ONE route module (app/api/automations/guided/[[...path]]). The
+  // adapters below call it the way Next does, with the path segments, so each case reads as the URL it hits.
+  const guided = await import("../app/api/automations/guided/[[...path]]/route");
+  const at = (path: string[]) => ({ params: Promise.resolve({ path }) });
+  type IdCtx = { params: Promise<{ id: string; runId?: string }> };
+  const listRoute = { GET: (r: Request) => guided.GET(r, at([])), POST: (r: Request) => guided.POST(r, at([])) };
+  const contextRoute = { GET: (r: Request) => guided.GET(r, at(["context"])) };
+  const itemRoute = {
+    PATCH: async (r: Request, c: IdCtx) => guided.PATCH(r, at([(await c.params).id])),
+    DELETE: async (r: Request, c: IdCtx) => guided.DELETE(r, at([(await c.params).id])),
+  };
+  const action = (name: string) => ({ POST: async (r: Request, c: IdCtx) => guided.POST(r, at([(await c.params).id, name])) });
+  const testRoute = action("test");
+  const activateRoute = action("activate");
+  const pauseRoute = action("pause");
+  const runsRoute = { GET: async (r: Request, c: IdCtx) => guided.GET(r, at([(await c.params).id, "runs"])) };
+  const receiptRoute = { GET: async (r: Request, c: IdCtx) => { const { id, runId } = await c.params; return guided.GET(r, at([id, "runs", String(runId)])); } };
   const { validateGuidedPayload } = await import("../lib/automations/guided/validate");
   const { templateById, defaultInputs } = await import("../lib/automations/guided/templates");
 
@@ -192,6 +204,7 @@ async function main(): Promise<void> {
     world.cloud = "ready";
     world.preflight = { ok: true };
     world.preflightThrows = false;
+    world.duringPreflight = null;
     world.financeAgent = false;
     world.blockedSlugs = [];
     world.run = { status: "done", finalText: "Three leads are quiet. Call Dana first.", wouldDraft: [{ to: "dana@acme.test", subject: "Checking in", title: "t", body: "Hi Dana." }], errorCode: null };
@@ -705,6 +718,66 @@ async function main(): Promise<void> {
     const demoted = await turnOn();
     assert.equal(demoted.status, 403);
     assert.equal(demoted.body.error, "forbidden");
+  });
+
+  await check("the workspace cap holds under concurrent saves: the count and the insert are one statement", async () => {
+    await reset();
+    for (let i = 0; i < service.MAX_GUIDED_PER_WORKSPACE - 1; i += 1) {
+      await db.execute({ sql: "INSERT INTO tenant_cron_jobs (id, tenant_id, action_type, name, owner_user_id, enabled) VALUES (?, ?, 'department_task', 'x', ?, 0)", args: [`cap-${i}`, TENANT, OWNER] });
+    }
+    const results = await Promise.all(Array.from({ length: 4 }, () => create({})));
+    const statuses = results.map((r) => r.res.status).sort();
+    assert.deepEqual(statuses, [201, 409, 409, 409], `statuses: ${statuses.join(",")}`);
+    assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_cron_jobs WHERE tenant_id = ? AND action_type = 'department_task'", args: [TENANT] })).rows[0].n, service.MAX_GUIDED_PER_WORKSPACE);
+  });
+
+  await check("Turn on never switches on a version that was edited while it was being checked", async () => {
+    await reset();
+    const id = (await create({})).body.item.id as string;
+    // While the check runs, the owner saves an edit in another tab: a new payload, switched off.
+    world.duringPreflight = async () => {
+      await listRoute.GET(req("GET", "/api/automations/guided"));
+      const edited = await itemRoute.PATCH(req("PATCH", `/api/automations/guided/${id}`, { payload: payloadFor({ inputs: { max_drafts: 1, goal: "check_in", tone: "direct" } }) }), idCtx(id));
+      assert.equal(edited.status, 200);
+      world.duringPreflight = null;
+    };
+    const res = await activateRoute.POST(req("POST", `/api/automations/guided/${id}/activate`), idCtx(id));
+    assert.equal(res.status, 409);
+    const body = await json(res);
+    assert.equal(body.error, "changed_while_checking");
+    assert.match(body.message, /changed while we were checking/);
+    const row = (await db.execute({ sql: "SELECT enabled, action_payload FROM tenant_cron_jobs WHERE id = ?", args: [id] })).rows[0] as Record<string, any>;
+    assert.equal(row.enabled, 0, "the unchecked version is not left on");
+    assert.equal(JSON.parse(row.action_payload).inputs.max_drafts, 1, "the edit is kept");
+    // Checked as it is now, it turns on.
+    assert.equal((await activateRoute.POST(req("POST", `/api/automations/guided/${id}/activate`), idCtx(id))).status, 200);
+  });
+
+  await check("each listed automation says whether the viewer made it; only the owner's own is theirs to change", async () => {
+    await reset();
+    const id = (await create({})).body.item.id as string;
+    assert.equal((await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items[0].mine, true);
+    world.session = { ...world.session!, authUserId: OTHER, teamRole: "admin", isOwner: false };
+    const theirs = (await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items;
+    assert.equal(theirs[0].id, id);
+    assert.equal(theirs[0].mine, false);
+  });
+
+  await check("the one route module: an unknown path or method is a 404 and reaches no handler", async () => {
+    await reset();
+    const id = (await create({})).body.item.id as string;
+    world.runCalls = [];
+    const statusOf = async (res: Promise<Response>) => (await res).status;
+    assert.equal(await statusOf(guided.GET(req("GET", "/api/automations/guided/nope"), at(["nope"]))), 404);
+    assert.equal(await statusOf(guided.GET(req("GET", `/api/automations/guided/${id}`), at([id]))), 404, "an automation is read through the list");
+    assert.equal(await statusOf(guided.POST(req("POST", `/api/automations/guided/${id}/launch`), at([id, "launch"]))), 404);
+    assert.equal(await statusOf(guided.POST(req("POST", `/api/automations/guided/${id}`), at([id]))), 404);
+    assert.equal(await statusOf(guided.PATCH(req("PATCH", "/api/automations/guided", {}), at([]))), 404);
+    assert.equal(await statusOf(guided.DELETE(req("DELETE", `/api/automations/guided/${id}/runs`), at([id, "runs"]))), 404);
+    assert.equal(await statusOf(guided.GET(req("GET", `/api/automations/guided/${id}/runs/x/y`), at([id, "runs", "x", "y"]))), 404);
+    assert.equal(await statusOf(guided.GET(req("GET", `/api/automations/guided/context/runs`), at(["context", "runs"]))), 404, "context is not an id");
+    assert.equal(world.runCalls.length, 0);
+    assert.equal((await db.execute("SELECT COUNT(*) AS n FROM tenant_cron_jobs")).rows[0].n, 1, "nothing was changed");
   });
 
   console.log(`guided-automations-service: ${passed} passed, ${failed} failed`);

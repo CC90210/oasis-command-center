@@ -204,14 +204,20 @@ function Row({
         </div>
       )}
 
+      {!item.mine && <p className="mt-3 text-sm text-fg-muted">A teammate made this one. Only they can change, test, turn on or delete it. You can pause it.</p>}
+
       <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-hairline pt-3">
-        <button type="button" className={BUTTON} disabled={!idle} onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}>
-          Edit
-        </button>
-        <button type="button" className={BUTTON} disabled={!idle} onClick={() => void test()} aria-label={`Test now: ${item.name}`}>
-          {busy === "test" ? "Testing..." : "Test now"}
-        </button>
-        {item.status !== "on" && (
+        {item.mine && (
+          <>
+            <button type="button" className={BUTTON} disabled={!idle} onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}>
+              Edit
+            </button>
+            <button type="button" className={BUTTON} disabled={!idle} onClick={() => void test()} aria-label={`Test now: ${item.name}`}>
+              {busy === "test" ? "Testing..." : "Test now"}
+            </button>
+          </>
+        )}
+        {item.mine && item.status !== "on" && (
           <button type="button" className={BUTTON} disabled={!idle} onClick={() => void turnOn()} aria-label={`Turn on: ${item.name}`}>
             {busy === "activate" ? "Turning on..." : "Turn on"}
           </button>
@@ -221,7 +227,7 @@ function Row({
             {busy === "pause" ? "Pausing..." : "Pause"}
           </button>
         )}
-        {confirmDelete ? (
+        {!item.mine ? null : confirmDelete ? (
           <span role="group" aria-label={`Delete ${item.name}?`} className="flex flex-wrap items-center gap-2 sm:ml-auto">
             <span className="text-sm text-fg">Delete this automation?</span>
             <button type="button" className={`btn-danger ${TAP} px-4 disabled:cursor-not-allowed disabled:opacity-50`} disabled={!idle} onClick={() => void remove()}>

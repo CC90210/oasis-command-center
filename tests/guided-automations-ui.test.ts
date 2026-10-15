@@ -1561,6 +1561,65 @@ async function main() {
     assert.deepEqual(removed, ["i4"]);
   });
 
+  await check("driven: a teammate's automation offers only Pause, and says why", async () => {
+    const { api, calls } = fakeApi();
+    const teammate = { ...LIST_ITEMS[0], mine: false };
+    const view = mount(GuidedAutomationsList, () => ({
+      state: { kind: "ready" as const, data: [teammate] },
+      api,
+      nowMs: NOW,
+      onEdit: () => undefined,
+      onItem: () => undefined,
+      onRemoved: () => undefined,
+      onTested: () => undefined,
+      onRetry: () => undefined,
+    }));
+    const f = frame(view);
+    assert.match(f.words, /A teammate made this one\. Only they can change, test, turn on or delete it\. You can pause it\./);
+    for (const re of [/^Edit /, /^Test now: /, /^Turn on: /, /^Delete: /]) assert.equal(f.buttons(re).length, 0, `${re} is not offered`);
+    await press(f.button(/^Pause: Morning brief$/));
+    assert.deepEqual(calls.map((c) => c.method), ["pause"]);
+  });
+
+  await check("driven: a slow receipt for one run never lands under another run opened after it", async () => {
+    const runs = [
+      { id: "r2", at: "2026-10-15T13:00:00.000Z", origin: "test", status: "done", summary: "Second." },
+      { id: "r1", at: "2026-10-15T12:00:00.000Z", origin: "scheduled", status: "done", summary: "First." },
+    ];
+    const pending: Record<string, (v: unknown) => void> = {};
+    const receiptFor = (id: string, text: string) => ({ ok: true, receipt: { ...runs.find((r) => r.id === id)!, scheduledFor: null, finishedAt: null, text, steps: [], failure: null } });
+    const { api } = fakeApi({
+      runs: () => ({ ok: true, runs }),
+      receipt: ((_id: string, runId: string) => new Promise((resolve) => (pending[runId] = resolve))) as never,
+    });
+    const view = mount(GuidedAutomationsList, () => ({
+      state: { kind: "ready" as const, data: [LIST_ITEMS[0]] },
+      api,
+      nowMs: NOW,
+      onEdit: () => undefined,
+      onItem: () => undefined,
+      onRemoved: () => undefined,
+      onTested: () => undefined,
+      onRetry: () => undefined,
+    }));
+    let f = frame(view);
+    (f.els.find((e) => e.type === "details")!.props.onToggle as (e: unknown) => void)({ currentTarget: { open: true } });
+    await settle();
+    f = frame(view);
+    const runButton = (i: number) => f.els.filter((e) => e.type === "button" && e.props["aria-expanded"] !== undefined)[i];
+    // Open the older run, then the newer one before the first answer arrives.
+    (runButton(1).props.onClick as () => void)();
+    f = frame(view);
+    (runButton(0).props.onClick as () => void)();
+    pending.r2(receiptFor("r2", "The newer run's text."));
+    await settle();
+    pending.r1(receiptFor("r1", "The older run's text."));
+    await settle();
+    f = frame(view);
+    assert.match(f.words, /The newer run's text\./);
+    assert.doesNotMatch(f.words, /The older run's text\./, "the slower, older answer was dropped");
+  });
+
   await check("driven: a refused delete or turn on in the list says so and removes nothing", async () => {
     const { api } = fakeApi({
       remove: () => failure({ error: "forbidden", message: "Only owners and admins can delete automations." }),

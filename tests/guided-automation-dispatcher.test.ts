@@ -247,6 +247,24 @@ async function main(): Promise<void> {
     assert.equal(await lastStamp("broken"), "2026-10-14T13:00:00.000Z");
   });
 
+  await check("the scan pages past rows that are not due: a due row after a full page of them still runs", async () => {
+    await wipe();
+    // Six weekly rows that are not due, with ids that sort BEFORE the due row, and a page size of 2:
+    // a single page (or any fixed slice) would never reach the due row.
+    for (let i = 0; i < 6; i += 1) await addRow(`a-weekly-${i}`, payload(WEEKLY_MONDAY), "2026-10-12T13:00:00.000Z");
+    await addRow("z-due-daily", payload(DAILY), "2026-10-14T13:00:00.000Z");
+    const live: string[] = [];
+    const summary = await dispatchGuidedAutomations({
+      db,
+      now: new Date("2026-10-15T13:05:00.000Z"),
+      pageSize: 2,
+      deps: { run: async ({ row, scheduledFor }: RunInput) => { live.push(row.id); return done(row, scheduledFor); }, recordMissed: async () => { throw new Error("nothing is missed"); } } as never,
+    });
+    assert.equal(summary.scanned, 7, "every enabled row was read, page by page");
+    assert.equal(summary.overLimit, false);
+    assert.deepEqual(live, ["z-due-daily"]);
+  });
+
   await check("the scan is capped and says so when it is hit", async () => {
     await wipe();
     for (let i = 0; i < 6; i += 1) await addRow(`future-${i}`, payload({ mode: "daily", time: "23:59", timezone: "America/Toronto" }), "2026-10-15T14:00:00.000Z");

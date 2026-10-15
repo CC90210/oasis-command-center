@@ -10,8 +10,13 @@ import {
   type GuidedAutomationRow,
 } from "@/lib/os/runs/guided-run";
 
-/** Enabled guided rows read per tick. Reading a row is cheap; running one is not (see DUE_ROWS_LIMIT). */
-const SCAN_LIMIT = 500;
+/** Enabled guided rows read per query; the scan pages until every enabled row has been read. */
+const PAGE_SIZE = 500;
+/**
+ * A ceiling on the rows one tick reads, far above any real fleet (30 per workspace). Reaching it is
+ * logged as an incident: a row past it would not be read that minute.
+ */
+const SCAN_LIMIT = 10_000;
 /** Due rows worked per tick, oldest due slot first. */
 const DUE_ROWS_LIMIT = 25;
 /** Slots read for one row per tick. */
@@ -154,8 +159,10 @@ async function claimedSlots(db: Client, candidates: Candidate[], now: Date): Pro
 export async function dispatchGuidedAutomations(input: {
   db: Client;
   now?: Date;
-  /** Enabled rows read per tick (default 500). */
+  /** The most enabled rows one tick reads (default 10,000). */
   scanLimit?: number;
+  /** Rows per page of the scan (default 500). */
+  pageSize?: number;
   /** Due rows worked per tick (default 25). */
   dueLimit?: number;
   runsPerTick?: number;
@@ -174,26 +181,41 @@ export async function dispatchGuidedAutomations(input: {
   const dueLimit = Math.max(1, Math.min(input.dueLimit ?? DUE_ROWS_LIMIT, DUE_ROWS_LIMIT));
   const runsPerTick = Math.max(1, Math.min(input.runsPerTick ?? RUNS_PER_TICK, RUNS_PER_TICK));
 
-  // 1. Read every enabled guided row, cheaply: its schedule and stamps, not its objective or history.
-  //    A slice taken by age would let a few long-period rows hide every newer row behind them.
-  const scan = await input.db.execute({
-    sql: `SELECT id, tenant_id, last_scheduled_for, created_at, updated_at,
-                 CASE WHEN json_valid(action_payload) = 1 THEN json_extract(action_payload, '$.schedule.plan') END AS plan_json
-          FROM tenant_cron_jobs
-          WHERE enabled = 1 AND action_type = 'department_task'
-            AND CASE
-                  WHEN json_valid(action_payload) = 1 THEN COALESCE(json_extract(action_payload, '$.schedule.plan.mode'), '')
-                  ELSE ''
-                END <> 'manual'
-          ORDER BY COALESCE(last_scheduled_for, created_at, updated_at) ASC, id ASC
-          LIMIT ?`,
-    args: [scanLimit + 1],
-  });
-  const read = scan.rows.map((raw) => raw as unknown as Record<string, unknown>);
-  const scanned = read.slice(0, scanLimit);
+  // 1. Read EVERY enabled guided row, cheaply (its schedule and stamps, not its objective or history),
+  //    page by page in id order. Any one slice (the oldest by stamp, the first N) lets rows that are not
+  //    due hide every row behind them, and a due row there would be missed.
+  const pageSize = Math.max(1, Math.min(input.pageSize ?? PAGE_SIZE, PAGE_SIZE));
+  const scanned: Record<string, unknown>[] = [];
+  let overLimit = false;
+  let after = "";
+  for (;;) {
+    const page = await input.db.execute({
+      sql: `SELECT id, tenant_id, last_scheduled_for, created_at, updated_at,
+                   CASE WHEN json_valid(action_payload) = 1 THEN json_extract(action_payload, '$.schedule.plan') END AS plan_json
+            FROM tenant_cron_jobs
+            WHERE enabled = 1 AND action_type = 'department_task' AND id > ?
+              AND CASE
+                    WHEN json_valid(action_payload) = 1 THEN COALESCE(json_extract(action_payload, '$.schedule.plan.mode'), '')
+                    ELSE ''
+                  END <> 'manual'
+            ORDER BY id ASC
+            LIMIT ?`,
+      args: [after, pageSize],
+    });
+    const rows = page.rows.map((raw) => raw as unknown as Record<string, unknown>);
+    for (const row of rows) {
+      if (scanned.length >= scanLimit) {
+        overLimit = true;
+        break;
+      }
+      scanned.push(row);
+    }
+    if (overLimit || rows.length < pageSize) break;
+    after = String(rows[rows.length - 1].id ?? "");
+  }
   const summary: GuidedDispatchSummary = {
     scanned: scanned.length,
-    overLimit: read.length > scanLimit,
+    overLimit,
     started: [],
     alreadyClaimed: [],
     missed: [],

@@ -81,8 +81,9 @@ export function GuidedAutomations({ api = guidedApi, nowMs, initialContext, init
   }
 
   const onItem = (item: GuidedAutomationView) => {
-    if (list.kind === "ready") setList({ kind: "ready", data: upsertItem(list.data, item) });
-    else void loadItems(false);
+    // Merge into the list as it is NOW: two rows finishing close together each see the other's change.
+    setList((prev) => (prev.kind === "ready" ? { kind: "ready", data: upsertItem(prev.data, item) } : prev));
+    if (list.kind !== "ready") void loadItems(false);
   };
 
   const reset = () => setSession((s) => ({ key: s.key + 1, edit: null }));

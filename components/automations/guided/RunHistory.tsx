@@ -21,6 +21,7 @@ export function RunHistory({ api, automationId, refreshKey }: { api: GuidedApi; 
   const [picked, setPicked] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<Loaded<RunReceipt>>({ kind: "idle" });
   const latest = useRef(0);
+  const latestReceipt = useRef(0);
   const seenKey = useRef(refreshKey);
 
   function load() {
@@ -46,7 +47,10 @@ export function RunHistory({ api, automationId, refreshKey }: { api: GuidedApi; 
     }
     setPicked(runId);
     setReceipt({ kind: "loading" });
+    // Only the answer for the run opened last is shown: an earlier, slower answer is dropped.
+    const token = ++latestReceipt.current;
     void api.receipt(automationId, runId).then((out) => {
+      if (token !== latestReceipt.current) return;
       setReceipt(out.ok ? { kind: "ready", data: out.receipt } : { kind: "error", message: out.message });
     });
   }

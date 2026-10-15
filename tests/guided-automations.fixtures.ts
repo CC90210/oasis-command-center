@@ -68,6 +68,7 @@ export function itemFrom(draft: Draft, status: GuidedStatus = "paused", extra: P
     nextRuns: status === "on" && plan.mode !== "manual" ? nextRuns(planToCron(plan), GUIDED_ZONE, NOW, 3).map((d) => d.toISOString()) : [],
     lastRun: null,
     problems: [],
+    mine: true,
     ...extra,
   };
 }

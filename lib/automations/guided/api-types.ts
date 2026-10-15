@@ -67,6 +67,11 @@ export type GuidedAutomationView = {
   lastRun: LastRunView | null;
   /** Empty when it can be turned on and is healthy. */
   problems: Problem[];
+  /**
+   * Whether the person looking made it. Only its owner may edit, test, turn on or delete it; anyone
+   * who manages the workspace may pause it.
+   */
+  mine: boolean;
 };
 
 export type PreviewDraft = { to: string; subject: string; body: string };
