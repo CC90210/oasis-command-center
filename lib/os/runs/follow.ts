@@ -42,6 +42,7 @@ import {
   type WorkspaceApiFallbackReason,
 } from "./types";
 import { blockedReasonCode } from "@/lib/os/channel/outcome";
+import { runEngineLabel } from "./engine-label";
 import type { ComputerAnswerState } from "@/lib/devices/presence";
 
 export type RunHead = {
@@ -54,6 +55,8 @@ export type RunHead = {
   errorCode: string | null;
   source: RunSource;
   executor: RunExecutor;
+  /** For a run on a person's own computer, the app it runs on ("Codex"); null otherwise (./engine-label.ts). */
+  engine: string | null;
 };
 
 export type Frame =
@@ -75,6 +78,7 @@ export function headOf(run: Run): RunHead {
     errorCode: run.errorCode,
     source: run.source,
     executor: run.executor,
+    engine: runEngineLabel(run),
   };
 }
 
