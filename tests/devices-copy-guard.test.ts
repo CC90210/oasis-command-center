@@ -510,16 +510,20 @@ check("the install wizard matches the modal", () => {
     assert.ok(shows(rel, needle), `${rel}: missing "${needle}"`);
   }
 });
-check("Settings > Devices: the empty state, both buttons and the pair-code line", () => {
+check("Settings > Devices: the advanced list points at Add a device and carries no pairing controls of its own", () => {
   const rel = "components/settings/DevicesEditor.tsx";
   for (const needle of [
     "No computers connected yet. Connect one so your agents can use its files, tools and scheduled jobs. Chat works without one.",
-    "Connect this computer",
-    "Connect another computer",
-    "Enter this code in the OASIS installer on the other computer.",
+    "To connect one, use Add a device at the top of Settings > Devices.",
   ]) {
     assert.ok(shows(rel, needle), `${rel}: missing "${needle}"`);
   }
+  // One way to add a computer (2026-10-15): the second and third buttons, the pair-code
+  // block and the install modal live on the Add a device card and the Full install page.
+  for (const gone of ["Connect this computer", "Connect another computer", "Enter this code in the OASIS installer"]) {
+    assert.ok(!shows(rel, gone), `${rel}: still shows "${gone}"`);
+  }
+  assert.ok(!/InstallBridgeModal|\/api\/auth\/pair-code/.test(readFileSync(join(ROOT, rel), "utf8")), `${rel}: still mints a pair code`);
 });
 check("Settings > Devices: every truncated name or fingerprint carries its full text as a tooltip", () => {
   const rel = "components/settings/DevicesEditor.tsx";
