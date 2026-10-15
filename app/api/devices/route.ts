@@ -1,5 +1,6 @@
 /**
  * GET    /api/devices             — list paired machines for the authed tenant
+ * PATCH  /api/devices {id,label}  — rename one of YOUR computers (owner only)
  * DELETE /api/devices?id=<uuid>   — revoke a pairing (sets revoked_at, the
  *                                   bridge daemon will see 403 on next ping
  *                                   and self-stop)
@@ -17,6 +18,8 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
+import { sameOrigin } from "@/lib/calendar/http";
+import { deviceLabelProblem } from "@/lib/devices/label";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 
@@ -88,6 +91,63 @@ export async function GET() {
       owner_name: r.user_id && r.user_id !== session.userId ? ownerNameById.get(r.user_id) || null : null,
     })),
   });
+}
+
+/**
+ * PATCH /api/devices  { id, label }  - rename one of YOUR computers.
+ *
+ * A Mac with no hostname set reports the router's DHCP address as its name, so a
+ * pairing could be called "192.168.11.27 (Mac)" with no way to change it. The
+ * owner (and only the owner: an admin has no business renaming a teammate's
+ * computer) sets a name they recognise. Tenant-scoped on the read AND the
+ * write; a revoked pairing cannot be renamed. The machine fingerprint is not
+ * touched, so the computer does not have to pair again.
+ */
+export async function PATCH(req: NextRequest) {
+  const session = await resolveSessionContext();
+  if (!session.ok) return bad(401, "unauthorized");
+  if (!sameOrigin(req)) return bad(403, "cross_origin_refused");
+
+  let body: { id?: unknown; label?: unknown } | null = null;
+  try {
+    body = (await req.json()) as { id?: unknown; label?: unknown };
+  } catch {
+    return bad(400, "invalid_json");
+  }
+  const id = typeof body?.id === "string" ? body.id.trim() : "";
+  if (!id) return bad(400, "id required");
+  const problem = deviceLabelProblem(body?.label);
+  if (problem) return bad(400, problem);
+  const label = (body!.label as string).trim();
+
+  const tenantId = session.tenantId;
+  const db = getServiceSupabase();
+  const row = await db
+    .from("bridge_pairings")
+    .select("id, user_id, revoked_at")
+    .eq("id", id)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (row.error) {
+    console.error("[devices.PATCH.lookup]", { tenantId, userId: session.userId, pairingId: id, error: row.error.message });
+    return bad(503, "device_lookup_unavailable");
+  }
+  if (!row.data) return bad(404, "pairing_not_found");
+  const pairing = row.data as { id: string; user_id: string | null; revoked_at: string | null };
+  if (pairing.user_id !== session.userId) return bad(403, "not_your_computer");
+  if (pairing.revoked_at) return bad(409, "pairing_revoked");
+
+  const { error } = await db
+    .from("bridge_pairings")
+    .update({ label })
+    .eq("id", id)
+    .eq("tenant_id", tenantId)
+    .eq("user_id", session.userId);
+  if (error) {
+    console.error("[devices.PATCH.rename]", { tenantId, userId: session.userId, pairingId: id, error: error.message });
+    return bad(503, "device_rename_unavailable");
+  }
+  return NextResponse.json({ ok: true, label });
 }
 
 export async function DELETE(req: NextRequest) {

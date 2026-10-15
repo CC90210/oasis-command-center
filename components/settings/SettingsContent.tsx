@@ -628,7 +628,7 @@ export async function SettingsContent({
               id="devices"
               defaultOpen={focused}
               title="Devices (advanced)"
-              subtitle="Pair a machine on your network to run the local bridge. Gives your agents file-system, bash, and full MCP access. Optional: a connected AI provider account under AI brain is enough for chat without ever pairing a machine."
+              subtitle="For the OASIS operator's own computers only: the full install that gives your agents file-system, bash, and full MCP access. To connect a computer for department chats, use Add a device above. Optional: a connected AI provider account under AI brain is enough for chat without ever pairing a machine."
               action={
                 // O1: pairing names this workspace's own private harness repo,
                 // which only its AGENTS OWNER (lib/agents-owner.ts) can read.
@@ -639,7 +639,7 @@ export async function SettingsContent({
                     href="/settings/devices/install"
                     className="btn-primary inline-flex items-center gap-1 !px-3 !py-1.5 !text-xs"
                   >
-                    Pair a machine →
+                    Full install →
                   </Link>
                 ) : undefined
               }
