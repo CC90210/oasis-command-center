@@ -14,6 +14,7 @@ import {
   AD_CONSENT_OPEN_EVENT,
   installGoogleAdsTag,
   readAdConsent,
+  recordAdDenial,
   withdrawGoogleAdsConsent,
   writeAdConsent,
   type AdConsent as Choice,
@@ -87,16 +88,22 @@ export function AdConsent() {
   }
 
   function decline() {
-    writeAdConsent(storage(), "denied");
+    const recorded = recordAdDenial(storage());
     if (loaded.current) {
       // A loaded tag told "denied" can still send cookieless pings, so
       // withdrawal ends with a reload: the page comes back with no Google code.
       withdrawGoogleAdsConsent(window, document, window.location.hostname);
       announce("denied");
-      window.location.reload();
-      return;
+      // If the denial could not be recorded, an old "granted" may still be
+      // stored and a reload would reinstall the tag: stay on this page,
+      // which is now in denied mode with the _gcl_* cookies gone.
+      if (recorded !== "failed") {
+        window.location.reload();
+        return;
+      }
+    } else {
+      announce("denied");
     }
-    announce("denied");
     close();
   }
 

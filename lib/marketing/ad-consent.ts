@@ -59,6 +59,25 @@ export function writeAdConsent(storage: KeyValueStore | null | undefined, value:
   }
 }
 
+/**
+ * Record "No thanks" so that no earlier "granted" can survive it. If saving
+ * "denied" fails (storage full), the stored grant is deleted instead, so the
+ * next load asks again with the tag off. "failed" means neither worked and an
+ * old grant may still be readable: the caller must not reload onto it.
+ */
+export function recordAdDenial(
+  storage: (KeyValueStore & Pick<Storage, "removeItem">) | null | undefined,
+): "saved" | "cleared" | "failed" {
+  if (writeAdConsent(storage, "denied")) return "saved";
+  try {
+    if (!storage) return "failed";
+    storage.removeItem(AD_CONSENT_STORAGE_KEY);
+    return readAdConsent(storage) === "granted" ? "failed" : "cleared";
+  } catch {
+    return "failed";
+  }
+}
+
 type Gtag = (...args: unknown[]) => void;
 export type TagWindow = { dataLayer?: unknown[]; gtag?: Gtag };
 export type TagDocument = {

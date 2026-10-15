@@ -16,6 +16,7 @@ import {
   installGoogleAdsTag,
   parseAdConsent,
   readAdConsent,
+  recordAdDenial,
   withdrawGoogleAdsConsent,
   writeAdConsent,
   type TagDocument,
@@ -83,6 +84,30 @@ for (const junk of [null, undefined, "", "yes", "GRANTED", 1, true]) {
   assert.equal(writeAdConsent(throwingStorage, "granted"), false, "a failed save is reported, not thrown");
   assert.equal(readAdConsent(null), null);
   assert.equal(writeAdConsent(undefined, "denied"), false);
+}
+
+// 2b. Recording "No thanks" never leaves an old grant readable (Codex P2,
+//     2026-10-15): if saving "denied" fails, the stored grant is deleted; if
+//     even that fails, the caller is told so it does not reload into the grant.
+{
+  const ok = fakeStorage({ [AD_CONSENT_STORAGE_KEY]: "granted" });
+  assert.equal(recordAdDenial({ ...ok, removeItem: (k: string) => void ok.data.delete(k) }), "saved");
+  assert.equal(readAdConsent(ok), "denied");
+
+  const full = new Map([[AD_CONSENT_STORAGE_KEY, "granted"]]);
+  const quota = {
+    getItem: (k: string) => full.get(k) ?? null,
+    setItem: () => {
+      throw new Error("QuotaExceededError");
+    },
+    removeItem: (k: string) => void full.delete(k),
+  };
+  assert.equal(recordAdDenial(quota), "cleared", "a failed save deletes the old grant");
+  assert.equal(readAdConsent(quota), null, "the old grant is gone: next load asks again, tag stays off");
+
+  const locked = { ...throwingStorage, removeItem: () => { throw new Error("SecurityError"); } };
+  assert.equal(recordAdDenial(locked), "failed");
+  assert.equal(recordAdDenial(null), "failed");
 }
 
 // 3. Installing the tag: one script, the right tag id, consent declared before config.
@@ -180,9 +205,14 @@ for (const junk of [null, undefined, "", "yes", "GRANTED", 1, true]) {
   // cookieless pings, so withdrawing reloads the page into a tag-free state.
   assert.match(
     component,
-    /function decline\(\)[\s\S]{0,400}if \(loaded\.current\) \{[\s\S]{0,200}withdrawGoogleAdsConsent\([\s\S]{0,120}window\.location\.reload\(\)/,
+    /function decline\(\)[\s\S]{0,400}if \(loaded\.current\) \{[\s\S]{0,200}withdrawGoogleAdsConsent\([\s\S]{0,600}window\.location\.reload\(\)/,
     "No thanks after the tag loaded withdraws, then reloads so no Google code keeps running",
   );
+  // ...but only when the denial was recorded: reloading onto a stale stored
+  // grant would reinstall the tag the visitor just refused.
+  assert.match(component, /const recorded = recordAdDenial\(storage\(\)\)/, "No thanks records the denial through recordAdDenial");
+  assert.match(component, /if \(recorded !== "failed"\) \{[\s\S]{0,80}window\.location\.reload\(\)/, "the reload is skipped when the denial could not be recorded");
+  assert.doesNotMatch(component, /function decline\(\)[\s\S]{0,200}writeAdConsent\(/, "decline does not use the plain write, which can leave an old grant");
 
   // The purchase conversion never fires once the visitor said No thanks, even
   // if a gtag function is still on the page.
