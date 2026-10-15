@@ -21,8 +21,15 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getClientIp } from "@/lib/api-helpers";
+import { rateLimit } from "@/lib/rate-limit";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { communityUrlForTenant } from "@/lib/offers/community-link";
+import {
+  AI_AUDIT_SLUG,
+  AI_AUDIT_TENANT_ID,
+  AI_AUDIT_TENANT_SLUG,
+} from "@/lib/forms/oasis-ai-audit-seed";
 import { recordSaveBasinEnrolled } from "@/lib/offers/save-basin";
 import {
   offerPagesDb,
@@ -44,33 +51,61 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // destination.
   try {
     const sp = req.nextUrl.searchParams;
-    const formSlug = sp.get("form") || "";
-    const tenantSlug = sp.get("t") || "";
+    // A bare /go/community is what ads, emails and bios link to. With no
+    // ?form/?t it belongs to OASIS's own audit funnel instead of a 404, so
+    // the free lounge is never a dead link. Defaults are OASIS's own constants,
+    // not request input, and the destination below still comes from server
+    // config only.
+    const bare = !sp.get("form") && !sp.get("t");
+    const formSlug = bare ? AI_AUDIT_SLUG : sp.get("form") || "";
+    const tenantSlug = bare ? AI_AUDIT_TENANT_SLUG : sp.get("t") || "";
     if (!formSlug || !tenantSlug) return NOT_FOUND();
 
     const resolved = await resolvePublicForm(getServiceSupabase(), tenantSlug, formSlug);
-    if (!resolved.ok) return NOT_FOUND();
+    if (!resolved.ok) {
+      // A bare link must still reach the lounge even if the audit form is
+      // switched off; only the click log is lost. An explicit ?form/?t that
+      // does not resolve stays a 404 (a stale link to someone else's offer).
+      const fallback = bare ? communityUrlForTenant(AI_AUDIT_TENANT_ID) : null;
+      return fallback ? NextResponse.redirect(fallback, 302) : NOT_FOUND();
+    }
 
     // Resolved from server config, by tenant_id — never from the query string.
     const destination = communityUrlForTenant(resolved.tenant_id);
     if (!destination) return NOT_FOUND();
 
     const rawVisit = sp.get("v");
-    const visitId = isValidVisitId(rawVisit) ? rawVisit : null;
+    // No visit id (an email or ad link opened outside a tracked page) still
+    // counts: a one-off server-made id keeps the click without any IP, cookie
+    // or fingerprint. It matches no lead, so no save_basin row is written.
+    const visitId = isValidVisitId(rawVisit) ? rawVisit : crypto.randomUUID();
     const stepIndex = sanitizeStepIndex(sp.get("step"));
+    const rawFrom = sp.get("from") || "";
+    const from = /^[a-z0-9_-]{1,40}$/.test(rawFrom) ? rawFrom : bare ? "direct" : null;
+
+    // Without a visit id every GET writes a fresh row, so a link scanner or a bot
+    // would fill the funnel-events table (review of #611). Same buckets the beacon
+    // /api/offer-events uses, in memory and keyed by IP only for the life of the
+    // process, never stored. Over the limit the click is simply not logged: the
+    // visitor is still sent to the lounge, which is the whole point of the link.
+    const ip = getClientIp(req);
+    const trackable =
+      rateLimit({ key: `go-community:ip:${ip}`, capacity: 60, refillPerSec: 1 }).allowed &&
+      rateLimit({ key: `go-community:form:${resolved.form.id}`, capacity: 600, refillPerSec: 10 }).allowed;
 
     // Tracking is best-effort: every helper below swallows its own errors
     // (lib/offers/tracking-store.ts, lib/offers/save-basin.ts), so nothing
     // here can turn into a failed redirect for the visitor.
-    if (visitId) {
+    {
       const db = offerPagesDb();
-      if (db) {
+      if (db && trackable) {
         await insertFunnelEvent(db, {
           tenantId: resolved.tenant_id,
           formId: resolved.form.id,
           visitId,
           event: "community_click",
           stepIndex,
+          detail: from ? JSON.stringify({ from }) : null,
         });
         const leadId = await findLeadForVisit(db, resolved.tenant_id, visitId);
         if (leadId) {

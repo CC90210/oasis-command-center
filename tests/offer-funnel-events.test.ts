@@ -69,6 +69,7 @@ const FORM_A = "f1000000-0000-4000-8000-00000000000a"; // CLIENT_A / "intake"
 const FORM_B = "f2000000-0000-4000-8000-00000000000b"; // CLIENT_B / "intake" (same slug, different tenant)
 const FORM_DISABLED = "f3000000-0000-4000-8000-00000000000c"; // CLIENT_A / "off"
 const FORM_OASIS = "f4000000-0000-4000-8000-00000000000d"; // OASIS / "lounge"
+const FORM_AI_AUDIT = "f7000000-0000-4000-8000-000000000010"; // OASIS / "ai-audit" -- what a bare /go/community resolves to
 const FORM_TWO_STEP = "f5000000-0000-4000-8000-00000000000e"; // CLIENT_A / "two-step"
 const FORM_FLOOD = "f6000000-0000-4000-8000-00000000000f"; // CLIENT_A / "flood-target" -- isolated for the IP-flood test, never touched by any other check
 
@@ -133,6 +134,7 @@ async function main() {
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'lounge', 'Lounge', ?, 1)`, args: [FORM_OASIS, OASIS_TENANT, JSON.stringify(STEPS)] },
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'two-step', 'Two Step', ?, 1)`, args: [FORM_TWO_STEP, CLIENT_A, JSON.stringify(STEPS_TWO)] },
       { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'flood-target', 'Flood Target', ?, 1)`, args: [FORM_FLOOD, CLIENT_A, JSON.stringify(STEPS)] },
+      { sql: `INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, 'ai-audit', 'AI Audit', ?, 1)`, args: [FORM_AI_AUDIT, OASIS_TENANT, JSON.stringify(STEPS)] },
     ],
     "write",
   );
@@ -415,11 +417,75 @@ async function main() {
     ).rows as unknown as Array<{ type: string; lead_id: string }>;
     assert.ok(interactions.some((r) => r.type === "save_basin.enrolled"), "save_basin.enrolled must be recorded for a visit that already has a lead");
   });
-  await check("/go/community without a resolvable visit still redirects, recording nothing", async () => {
-    const before = await allEventsCount();
-    const res = await getCommunity("?form=lounge&t=oasis-ai-cc");
+  // 2026-10-15: a click with no ?v used to record nothing. But an email, an ad
+  // or a bio link is never opened through a tracked page, so none of them ever
+  // carries a visit id -- the very clicks the save-basin exists to count were
+  // the ones that could not be counted. A server-made one-off id keeps the click
+  // with no IP, cookie or fingerprint; it matches no lead, so no interaction.
+  await check("/go/community without a visit id still redirects and records ONE anonymous click (server-made id, no lead)", async () => {
+    const before = await eventsFor(OASIS_TENANT, FORM_OASIS);
+    const res = await getCommunity("?form=lounge&t=oasis-ai-cc&from=email_footer");
     assert.equal(res.status, 302);
-    assert.equal(await allEventsCount(), before, "no visit id means nothing to record -- but the redirect must still happen");
+    assert.equal(res.headers.get("location"), "https://t.me/+w_8rgh8YBWg4YmM5");
+    const seen = new Set(before.map((r) => String(r.id)));
+    const fresh = (await eventsFor(OASIS_TENANT, FORM_OASIS)).filter((r) => !seen.has(String(r.id)));
+    assert.equal(fresh.length, 1, "exactly one new row");
+    assert.equal(fresh[0].event, "community_click");
+    assert.equal(fresh[0].lead_id, null, "an anonymous click belongs to no lead");
+    assert.match(String(fresh[0].visit_id), /^[0-9a-f-]{36}$/, "the visit id is a server-made UUID");
+    assert.deepEqual(JSON.parse(String(fresh[0].detail)), { from: "email_footer" });
+    assert.ok(!JSON.stringify(fresh[0]).includes("203.0.113"), "no IP is stored");
+  });
+  await check("/go/community ignores a hostile ?from: it is stored only when it is a short [a-z0-9_-] token", async () => {
+    const before = await eventsFor(OASIS_TENANT, FORM_OASIS);
+    const res = await getCommunity("?form=lounge&t=oasis-ai-cc&from=" + encodeURIComponent('<script>alert(1)</script>'));
+    assert.equal(res.status, 302);
+    const seen = new Set(before.map((r) => String(r.id)));
+    const fresh = (await eventsFor(OASIS_TENANT, FORM_OASIS)).filter((r) => !seen.has(String(r.id)));
+    assert.equal(fresh.length, 1);
+    assert.equal(fresh[0].detail, null, "a value that is not a plain token is dropped, never stored");
+  });
+  await check("a bare /go/community (no ?form, no ?t) lands on the community and is logged against the AI audit as from=direct", async () => {
+    const before = await eventsFor(OASIS_TENANT, FORM_AI_AUDIT);
+    const res = await getCommunity("");
+    assert.equal(res.status, 302, "an ad, a bio or an email link must never be a 404");
+    assert.equal(res.headers.get("location"), "https://t.me/+w_8rgh8YBWg4YmM5");
+    const seen = new Set(before.map((r) => String(r.id)));
+    const fresh = (await eventsFor(OASIS_TENANT, FORM_AI_AUDIT)).filter((r) => !seen.has(String(r.id)));
+    assert.equal(fresh.length, 1);
+    assert.equal(fresh[0].event, "community_click");
+    assert.deepEqual(JSON.parse(String(fresh[0].detail)), { from: "direct" });
+  });
+  // Review of #611: with no visit id every GET writes a fresh row, so a link scanner could
+  // fill the table. The visitor is always sent on; only the logging is capped per address.
+  await check("/go/community redirects every click but stops logging one address after its allowance", async () => {
+    const before = (await eventsFor(OASIS_TENANT, FORM_AI_AUDIT)).length;
+    for (let i = 0; i < 80; i++) {
+      const res = await communityRoute.GET(
+        new NextRequest("http://localhost/go/community", { headers: { "x-forwarded-for": "198.51.100.77" } }),
+      );
+      assert.equal(res.status, 302, `click ${i + 1} must still reach the lounge`);
+      assert.equal(res.headers.get("location"), "https://t.me/+w_8rgh8YBWg4YmM5");
+    }
+    const logged = (await eventsFor(OASIS_TENANT, FORM_AI_AUDIT)).length - before;
+    assert.ok(logged >= 55 && logged < 80, `80 clicks from one address logged ${logged} rows`);
+  });
+  await check("a bare /go/community still reaches the lounge when the AI audit form is switched off (only the click log is lost)", async () => {
+    await db.execute({ sql: "UPDATE forms SET enabled = 0 WHERE id = ?", args: [FORM_AI_AUDIT] });
+    try {
+      const before = await allEventsCount();
+      const res = await getCommunity("");
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get("location"), "https://t.me/+w_8rgh8YBWg4YmM5");
+      assert.equal(await allEventsCount(), before, "nothing resolvable to log against");
+    } finally {
+      await db.execute({ sql: "UPDATE forms SET enabled = 1 WHERE id = ?", args: [FORM_AI_AUDIT] });
+    }
+  });
+  await check("an explicit ?form that does not resolve stays a 404 even though a bare link now lands", async () => {
+    const res = await getCommunity("?form=no-such-form&t=oasis-ai-cc");
+    assert.equal(res.status, 404);
+    assert.equal(res.headers.get("location"), null);
   });
 
   // -- 9. funnel counts are tenant-isolated ----------------------------------

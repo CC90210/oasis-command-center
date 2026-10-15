@@ -120,7 +120,26 @@ test("welcome email addresses them by first name and states the next step", () =
   assert.ok(subject.includes("Dana"), subject);
   assert.ok(body.startsWith("Dana,"), body.slice(0, 40));
   assert.ok(/booking your AI audit call|asked for a call/i.test(subject + body));
-  assert.ok(body.includes("— CC"));
+  // Public material signs as Conaugh; "CC" is the internal name (Maven, 2026-10-15).
+  assert.ok(body.includes("— Conaugh"));
+  assert.ok(!/—\s*CC\b/.test(body), "the internal name never reaches a prospect");
+});
+
+test("the no-call email promises only what is cleared: it never says it will come back with a written answer", () => {
+  // CC, 2026-10-08: there is no texted findings or custom report. The only
+  // promises cleared for this funnel are the free audit and that he reads every
+  // one himself, so the copy points at the call instead of an answer to come.
+  for (const timeframe of ["immediate", "exploring"]) {
+    for (const links of [{}, { bookingUrl: "https://oasisai.work/f/oasis-ai-cc/ai-audit/T?book=1" }]) {
+      const body = composeAiAuditWelcome({ ...COLD, timeframe, wants_call: "no" }, links).body;
+      assert.ok(!/I'll come back to you/i.test(body), `an unbacked promise is back (${timeframe}, ${JSON.stringify(links)})`);
+      assert.match(body, /I read every one of these myself/);
+    }
+  }
+  const noLink = composeAiAuditWelcome({ ...COLD, timeframe: "exploring", wants_call: "no" }).body;
+  assert.match(noLink, /reply with two times that work and I'll send the invite\./, "no link: ask for two times (lib/booking-link.ts's rule)");
+  const withLink = composeAiAuditWelcome({ ...COLD, timeframe: "exploring", wants_call: "no" }, { bookingUrl: "https://x.test/b" }).body;
+  assert.ok(withLink.includes("pick a time that works for both founders here: https://x.test/b"));
 });
 
 test("welcome email degrades gracefully with no name", () => {

@@ -169,6 +169,13 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         ],
         help: "No wrong answer. It tells me what NOT to repeat.",
       },
+      {
+        name: "current_tools",
+        label: "What tools are you using now?",
+        type: "text",
+        placeholder: "e.g. HubSpot, GoHighLevel, Zapier, spreadsheets",
+        help: "Optional. A short list helps me avoid recommending what you already have.",
+      },
     ],
   },
 
