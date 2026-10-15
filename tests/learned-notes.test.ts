@@ -51,18 +51,32 @@ async function main(): Promise<void> {
 
   const page = read("app/admin/agent-training/page.tsx");
   assert.match(page, /await requireOperator\(\);/, "still gated first");
-  assert.match(page, /getCorpusStats\(founder\.tenantId\)/);
-  assert.match(page, /getCorpusItems\(founder\.tenantId, 16\)/);
+  assert.match(page, /getCorpusStats\(tenantId\)/);
+  assert.match(page, /getCorpusItems\(tenantId, 16\)/);
   assert.match(page, /async function safely/, "a rejected read becomes degraded instead of a crashed page");
   assert.match(page, /\{ \.\.\.EMPTY_CORPUS_STATS, degraded: true \}/);
   assert.match(page, /<LearnedNotes stats=\{stats\} items=\{items\} \/>/);
   assert.ok(page.indexOf("requireOperator()") < page.indexOf("getCorpusStats("), "the gate runs before any read");
   console.log("  ok - the page is gated first and degrades a failed read");
 
+  // Codex review of #612: the history reads must not hold back the Learn control, and a
+  // finished run must make the list re-read.
+  const body = page.slice(page.indexOf("export default async function AgentTrainingPage"));
+  assert.doesNotMatch(body, /getCorpus(Stats|Items)\(/, "the page body awaits no corpus read: they live in the Suspense child");
+  assert.match(body, /<Suspense[\s\S]*<LearnedNotesLoader tenantId=\{founder\.tenantId\} \/>[\s\S]*<\/Suspense>/);
+  assert.ok(body.indexOf("<ToolsSection") < body.indexOf("<Suspense"), "the Learn control is drawn before the streamed list");
+  const refresher = read("components/tools/RefreshOnToolRun.tsx");
+  assert.match(refresher, /addEventListener\(TOOL_RUN_FINISHED_EVENT/);
+  assert.match(refresher, /router\.refresh\(\)/);
+  assert.match(body, /<RefreshOnToolRun \/>/, "the page mounts the listener");
+  console.log("  ok - the list streams behind Suspense and re-reads when a run finishes");
+
   const grid = read("components/tools/ToolGrid.tsx");
   assert.match(grid, /data-testid=\{`tool-\$\{tool\.key\}-needs-input`\}/);
   assert.match(grid, /!\(values\[validation\.field\] \?\? ""\)\.trim\(\)/, "the hint shows only while the field is empty");
   assert.match(grid, /to turn \$\{tool\.runLabel\} on/);
+  assert.match(grid, /window\.dispatchEvent\(new CustomEvent\(TOOL_RUN_FINISHED_EVENT/, "a settled run announces itself");
+  assert.match(grid, /if \(!wasInFlight\.current\) return;/, "a mount with no run in flight announces nothing");
   console.log("  ok - a disabled Learn button says which field it is waiting for");
 
   console.log("learned-notes: all passed");

@@ -29,6 +29,7 @@ import {
   RUN_STOPPED,
   SAVED_TO_TRAINING,
   SEEN_REFRESH_MS,
+  TOOL_RUN_FINISHED_EVENT,
   isInFlight,
   nextPollIn,
   refusalLine,
@@ -161,6 +162,19 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
     const timer = window.setTimeout(() => void load(), wait);
     return () => window.clearTimeout(timer);
   }, [inFlight, jobs, reads, load]);
+
+  // The moment the last in-flight run settles, tell the page. A mount with no run in
+  // flight never fires it.
+  const wasInFlight = useRef(false);
+  useEffect(() => {
+    if (inFlight) {
+      wasInFlight.current = true;
+      return;
+    }
+    if (!wasInFlight.current) return;
+    wasInFlight.current = false;
+    window.dispatchEvent(new CustomEvent(TOOL_RUN_FINISHED_EVENT, { detail: { tool: tool.key } }));
+  }, [inFlight, tool.key]);
 
   const validation = def ? def.validate(values) : null;
   const canRun = ready && !busy && validation?.ok === true;

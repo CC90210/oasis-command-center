@@ -36,12 +36,14 @@
  * not made here - flagged for Adon, not silently decided.
  */
 
+import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { PageFrame } from "@/components/os/PageFrame";
 import { resolveFounder } from "@/lib/founders/gate";
 import { requireOperator } from "@/lib/role-surfaces-session";
 import { ToolsSection } from "@/components/tools/ToolsSection";
 import { LearnedNotes } from "@/components/tools/LearnedNotes";
+import { RefreshOnToolRun } from "@/components/tools/RefreshOnToolRun";
 import {
   EMPTY_CORPUS_STATS,
   getCorpusItems,
@@ -65,15 +67,23 @@ async function safely<T>(label: string, read: Promise<T>, fallback: T): Promise<
   }
 }
 
+/**
+ * The history reads sit in their own async child behind Suspense: awaited in the page
+ * body they would hold back the Learn control (the page's reason to exist) for as
+ * long as the slowest corpus query takes (Codex review of #612).
+ */
+async function LearnedNotesLoader({ tenantId }: { tenantId: string }) {
+  const [stats, items] = await Promise.all([
+    safely("stats", getCorpusStats(tenantId), { ...EMPTY_CORPUS_STATS, degraded: true }),
+    safely("items", getCorpusItems(tenantId, 16), { rows: [], degraded: true }),
+  ]);
+  return <LearnedNotes stats={stats} items={items} />;
+}
+
 export default async function AgentTrainingPage() {
   await requireOperator();
   const founder = await resolveFounder();
   if (!founder) notFound();
-
-  const [stats, items] = await Promise.all([
-    safely("stats", getCorpusStats(founder.tenantId), { ...EMPTY_CORPUS_STATS, degraded: true }),
-    safely("items", getCorpusItems(founder.tenantId, 16), { rows: [], degraded: true }),
-  ]);
 
   return (
     <PageFrame
@@ -82,7 +92,12 @@ export default async function AgentTrainingPage() {
     >
       <div className="space-y-8">
         <ToolsSection tenantId={founder.tenantId} audience="operator" className="" />
-        <LearnedNotes stats={stats} items={items} />
+        <RefreshOnToolRun />
+        <Suspense
+          fallback={<p className="rounded-xl border border-bg-border bg-bg-panel p-4 text-sm text-fg-muted">Loading what it has learned…</p>}
+        >
+          <LearnedNotesLoader tenantId={founder.tenantId} />
+        </Suspense>
       </div>
     </PageFrame>
   );
