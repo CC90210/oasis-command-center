@@ -1,5 +1,6 @@
 /**
- * components/automations/guided/ReviewStep.tsx - step 5: what will happen, then Save, Test now, Turn on.
+ * components/automations/guided/ReviewStep.tsx - the last step: what will happen, what it needs, then Save,
+ * Test now and Turn on.
  *
  * The three buttons are the whole safety story, so each says why it is unavailable, in a sentence, and
  * exactly one of them is the primary action at any time. Success lines are built from what the server
@@ -10,7 +11,7 @@ import type { CloudState, GuidedAutomationView, TestResult } from "@/lib/automat
 import { activatedLine, savedLine, type Failure } from "@/lib/automations/guided/flow";
 import type { GuidedTemplate } from "@/lib/automations/guided/types";
 import type { ConnectionRow, Draft, ReviewActions } from "@/lib/automations/guided/view";
-import { Check, Field, Notice, RepairAnchor, TAP } from "./ui";
+import { Check, ConnectionMark, Field, Notice, RepairAnchor, TAP } from "./ui";
 import { FailureView, TestResultView } from "./TestResultView";
 
 export type ReviewProps = {
@@ -39,7 +40,12 @@ export type ReviewProps = {
   showSkip: boolean;
   onSkip: (value: boolean) => void;
   blockedApps: readonly ConnectionRow[];
+  /** Every app this job needs, connected or not. */
+  neededApps: readonly ConnectionRow[];
   cloud: CloudState;
+  /** Read the connections and the AI account again (the person fixed one in another tab). */
+  onRecheck: () => void;
+  rechecking: boolean;
   onSave: () => void;
   onTest: () => void;
   onActivate: () => void;
@@ -74,10 +80,7 @@ export function ReviewStep(p: ReviewProps) {
   const btn = (key: "save" | "test" | "activate") =>
     `${actions.primary === key ? "btn-primary" : "btn-secondary"} ${TAP} disabled:cursor-not-allowed disabled:opacity-50`;
   const isOn = p.savedItem?.status === "on" && !p.dirty;
-  const repairLinks = [
-    ...p.blockedApps.flatMap((r) => (r.repair ? [r.repair] : [])),
-    ...(!p.cloud.ready && p.cloud.repair ? [p.cloud.repair] : []),
-  ];
+  const allReady = p.cloud.ready && p.blockedApps.length === 0;
   return (
     <div className="space-y-6">
       <Field id="gb-name" label="Name" help="How it appears in your list." error={p.nameError}>
@@ -105,10 +108,51 @@ export function ReviewStep(p: ReviewProps) {
         ) : (
           <p className="text-sm text-fg-muted">Finish the earlier steps and this will say exactly what the automation does.</p>
         )}
-        {p.template && (
-          <p className="text-sm leading-relaxed text-fg-muted">
-            <span className="font-medium text-fg">Never:</span> {p.template.never}
-          </p>
+        {p.template && <p className="text-sm leading-relaxed text-fg-muted">{p.template.never}</p>}
+      </section>
+
+      <section aria-labelledby="gb-needs-h" className="space-y-3">
+        <h4 id="gb-needs-h" className="text-sm font-semibold text-fg">
+          Before it can run
+        </h4>
+        <ul className="divide-y divide-hairline rounded-xl border border-hairline bg-bg-panel">
+          <li className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-3">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm font-semibold text-fg">Your AI account</p>
+              {p.cloud.ready ? (
+                <ConnectionMark state="connected" label="Ready" />
+              ) : (
+                <>
+                  <ConnectionMark state="not_connected" label="Not ready" />
+                  {p.cloud.reason && <p className="text-xs text-fg-muted">{p.cloud.reason}</p>}
+                </>
+              )}
+            </div>
+            {!p.cloud.ready && p.cloud.repair && <RepairAnchor link={p.cloud.repair} />}
+          </li>
+          {p.neededApps.map((r) => (
+            <li key={r.slug} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-3">
+              <div className="min-w-0 space-y-0.5">
+                <p className="text-sm font-semibold text-fg">{r.label}</p>
+                <ConnectionMark state={r.state} label={r.stateLabel} />
+              </div>
+              {r.repair ? (
+                <RepairAnchor link={r.repair} />
+              ) : r.state !== "connected" ? (
+                <p className="text-xs text-fg-muted">Connect it from Settings, under Connections.</p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+        <p className="text-sm text-fg-muted">
+          {allReady
+            ? "Everything it needs is ready. It runs on OASIS's servers, so your computer can be off."
+            : "You can save it now and connect what is missing later. It can only be turned on once everything above is ready."}
+        </p>
+        {!allReady && (
+          <button type="button" className={`btn-secondary ${TAP} disabled:cursor-not-allowed disabled:opacity-50`} onClick={p.onRecheck} disabled={p.rechecking}>
+            {p.rechecking ? "Checking..." : "I fixed it, check again"}
+          </button>
         )}
       </section>
 
@@ -171,15 +215,6 @@ export function ReviewStep(p: ReviewProps) {
                     <input type="checkbox" checked={p.skipTest} onChange={(e) => p.onSkip(e.target.checked)} className="h-4 w-4 shrink-0 accent-accent" />
                     <span>Turn it on without testing it first.</span>
                   </label>
-                )}
-                {p.savedItem && repairLinks.length > 0 && (
-                  <ul className="space-y-0.5">
-                    {repairLinks.map((link) => (
-                      <li key={link.href}>
-                        <RepairAnchor link={link} />
-                      </li>
-                    ))}
-                  </ul>
                 )}
               </>
             )}

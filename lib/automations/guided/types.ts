@@ -92,6 +92,11 @@ export type GuidedTemplate = {
   reads: string;
   /** What it will never do. Shown on the card and on Review. */
   never: string;
+  /**
+   * A short made-up example of what a run hands back, so a person sees the result before choosing.
+   * Shown under "Example" and always labelled as made up: it is never workspace data.
+   */
+  example: string;
   /** The lookups it may use: fixed here, and a subset of the department's palette. */
   tools: readonly DeskToolName[];
   output: GuidedOutput;

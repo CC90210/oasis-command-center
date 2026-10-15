@@ -1,9 +1,11 @@
 "use client";
 
 /**
- * components/automations/guided/GuidedBuilder.tsx - the five-step "New automation" wizard.
+ * components/automations/guided/GuidedBuilder.tsx - the four-step "New automation" wizard.
  *
- * Department, Job (with its typed settings and schedule), Connections, Runs on, Review. A person can
+ * Area, Job (a ready-made job with an example of what it hands back, and its few details), When (how
+ * often, what time, which days or how many times a day), and Turn on (what it needs, then Save, Test
+ * now and Turn on). A person can
  * only move on when the step is complete (lib/automations/guided/view.ts gateFor), and the reason Next
  * is waiting is said beside it. Review holds the three real actions: Save (always paused), Test now (a
  * preview) and Turn on (explicit). The wizard takes its `GuidedApi` as a prop, so it never touches
@@ -37,7 +39,7 @@ import {
   type Draft,
   type StepId,
 } from "@/lib/automations/guided/view";
-import { ConnectionsStep, DepartmentStep, JobStep, RunsOnStep } from "./steps";
+import { DepartmentStep, JobStep, WhenStep } from "./steps";
 import { ReviewStep } from "./ReviewStep";
 import { SummaryRail } from "./SummaryRail";
 import { Check, Notice, TAP } from "./ui";
@@ -212,7 +214,7 @@ export function GuidedBuilder({ api, context: ctx, onRecheck, rechecking, onItem
     });
 
   // ── navigation ──
-  const index = stepIndex(step);
+  const index = Math.max(0, stepIndex(step));
   const gate = gateFor(step, draft, ctx);
   const current = STEPS[index];
   const next = STEPS[Math.min(index + 1, STEPS.length - 1)];
@@ -230,7 +232,7 @@ export function GuidedBuilder({ api, context: ctx, onRecheck, rechecking, onItem
               {editing ? "Edit automation" : "New automation"}
             </h2>
             <p className="mt-1 max-w-prose text-sm leading-relaxed text-fg-muted">
-              Choose a department and a job, set when it runs, and test it before you turn it on. It reads your workspace and writes you a summary or drafts emails for your approval. Nothing goes out without you.
+              Pick a job, say when it should run, and try it once before you turn it on. It writes you a summary or drafts emails for you to approve. Nothing is sent without you.
             </p>
           </div>
           {editing && (
@@ -296,9 +298,8 @@ export function GuidedBuilder({ api, context: ctx, onRecheck, rechecking, onItem
           {showNote && <Notice tone="warn">{initial?.note}</Notice>}
 
           {step === "department" && <DepartmentStep draft={draft} ctx={ctx} update={update} />}
-          {step === "job" && <JobStep draft={draft} ctx={ctx} validation={validation} touched={touched} touch={touch} update={update} now={new Date(clock)} />}
-          {step === "connections" && <ConnectionsStep draft={draft} ctx={ctx} onRecheck={onRecheck} rechecking={rechecking} />}
-          {step === "runs_on" && <RunsOnStep ctx={ctx} />}
+          {step === "job" && <JobStep draft={draft} ctx={ctx} validation={validation} touched={touched} touch={touch} update={update} />}
+          {step === "when" && <WhenStep draft={draft} validation={validation} touched={touched} touch={touch} update={update} now={new Date(clock)} />}
           {step === "review" && (
             <ReviewStep
               draft={draft}
@@ -326,7 +327,10 @@ export function GuidedBuilder({ api, context: ctx, onRecheck, rechecking, onItem
               showSkip={saved !== null && !dirty && !testPassed}
               onSkip={(on) => setSkipFor(on && saved ? saved.snapshot : null)}
               blockedApps={blockedApps}
+              neededApps={rows}
               cloud={ctx.cloud}
+              onRecheck={onRecheck}
+              rechecking={rechecking}
               onSave={() => void save()}
               onTest={() => void runPreview()}
               onActivate={() => void turnOn()}

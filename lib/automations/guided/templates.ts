@@ -68,6 +68,7 @@ const DAILY_BRIEF: GuidedTemplate = {
   promise: "Every morning, a short brief of where the business stands and what is waiting on you.",
   reads: "Department numbers, approvals waiting, the pipeline and your calendar",
   never: "Sends nothing and changes nothing. It only reads and writes you a brief.",
+  example: "Sales are steady: 4 new leads this week and 2 calls booked.\n- 3 approvals are waiting on you.\n- One invoice is 5 days late. Send a reminder today.",
   tools: ["department_numbers", "approvals_list", "pipeline_summary", "calendar_upcoming"],
   output: "digest",
   inputs: [
@@ -104,6 +105,7 @@ const FOLLOWUP_DRAFTS: GuidedTemplate = {
   promise: "Finds leads whose follow-up is overdue and drafts the emails for you to approve.",
   reads: "The pipeline, your leads and each lead's history",
   never: "Never sends an email. Each draft waits in Needs you until a person approves it.",
+  example: "To: dana@example.com\nSubject: A quick call this week?\nHi Dana, it has been two weeks since we spoke. Would a 15 minute call on Thursday work for you?",
   tools: ["pipeline_summary", "leads_search", "lead_timeline", "propose_email"],
   output: "email_drafts",
   inputs: [
@@ -155,6 +157,7 @@ const STALLED_DIGEST: GuidedTemplate = {
   promise: "Lists the leads that have gone quiet and which one to call first.",
   reads: "The pipeline and your leads",
   never: "Sends nothing and changes nothing.",
+  example: "5 leads have been quiet for 7 days or more.\n- Proposal sent: Dana Lee (Example Co), 9 days\n- New: Sam Roy, 12 days\nCall Dana first: she asked for pricing and has not heard back.",
   tools: ["pipeline_summary", "leads_search"],
   output: "digest",
   inputs: [{ kind: "number", name: "days_quiet", label: "Count a lead as stalled after", min: 3, max: 30, default: 7, unit: "days with no activity" }],
@@ -177,6 +180,7 @@ const SUPPORT_RISK: GuidedTemplate = {
   promise: "Flags the support tickets that are late or about to be, and projects with work still open.",
   reads: "Support tickets, client projects and the Support page numbers",
   never: "Replies to no one and changes no ticket. It only reads and reports.",
+  example: "2 tickets are late:\n- Login page broken (Example Co), 6 hours past its reply target\n- Invoice question, 2 hours past\nMost urgent: the login page. Reply to it first.",
   tools: ["tickets_list", "projects_list", "department_numbers"],
   output: "digest",
   inputs: [{ kind: "choice", name: "projects", label: "Include client projects", options: YES_NO, default: "yes" }],
@@ -200,6 +204,7 @@ const MARKETING_NUMBERS: GuidedTemplate = {
   promise: "A weekly read of the numbers the Marketing page shows and what is waiting on you.",
   reads: "The Marketing page numbers and approvals waiting",
   never: "Posts nothing and changes nothing.",
+  example: "This week: 18 new leads and 7 replies to your campaigns.\n2 posts are waiting for your approval.",
   tools: ["department_numbers", "approvals_list"],
   output: "digest",
   inputs: [],
@@ -222,6 +227,7 @@ const MONEY_SUMMARY: GuidedTemplate = {
   promise: "Money collected in the last 7 days, progress toward the revenue goal and recurring revenue.",
   reads: "The Finance page figures",
   never: "Moves no money and changes no invoice or ledger entry.",
+  example: "Collected in the last 7 days: $4,200\nGoal for the month: 62% reached\nRecurring revenue: $3,100 a month, updated this morning",
   tools: ["finance_get_metric", "department_numbers"],
   output: "digest",
   inputs: [
@@ -258,6 +264,7 @@ const OPS_CHECK: GuidedTemplate = {
   promise: "Tells you which routines failed or did not run, and which connections need attention.",
   reads: "Scheduled routines, connections and the Operations page numbers",
   never: "Restarts nothing and changes nothing.",
+  example: "2 things need you:\n- The morning backup did not run at 6:30 AM.\n- Gmail needs to be reconnected.\nEverything else ran on time.",
   tools: ["routines_status", "connections_status", "department_numbers"],
   output: "digest",
   inputs: [{ kind: "choice", name: "only_problems", label: "Only tell me about problems", options: YES_NO, default: "yes" }],
@@ -290,6 +297,7 @@ function customTemplate(department: DepartmentKey): GuidedTemplate {
     promise: "Describe one thing to look into, choose what it may read, and get a short written result.",
     reads: "Only what you tick",
     never: "Sends nothing. If you ask for emails, they wait in Needs you for approval.",
+    example: "A short written answer to your question, using only what you let it look at.",
     tools: readToolsFor(department),
     output: "digest",
     inputs: [

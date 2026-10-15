@@ -41,6 +41,7 @@ import {
   editSession,
   emptyDraft,
   errorAt,
+  frequencyOptions,
   furthestStep,
   gateFor,
   instantText,
@@ -57,6 +58,11 @@ import {
   reviewSentence,
   runStatusLabel,
   scheduleChoiceFromPlan,
+  scheduleEveryHours,
+  setFrequency,
+  setTimesADay,
+  timesADayOptions,
+  whenText,
   sentenceFor,
   setInput,
   setName,
@@ -156,7 +162,7 @@ async function main() {
   await check("gating: cannot leave Department without one, and a department that is not yours does not count", () => {
     const g = gateFor("department", emptyDraft(), CTX);
     assert.equal(g.open, false);
-    assert.equal(g.blocker, "Pick a department to continue.");
+    assert.equal(g.blocker, "Pick an area of your business to continue.");
     assert.equal(gateFor("department", pickDepartment(emptyDraft(), "sales"), CTX).open, true);
     const limited = { ...CTX, departments: ["sales"] as DepartmentKey[] };
     const bad = gateFor("department", pickDepartment(emptyDraft(), "marketing"), limited);
@@ -191,17 +197,25 @@ async function main() {
     assert.equal(gateFor("job", ok, CTX).open, true);
   });
 
-  await check("gating: Connections and Runs on never block moving on, even with an app missing and Cloud not ready", () => {
+  await check("gating: a missing app or an AI account that is not ready never blocks moving on; the schedule is the When step's", () => {
     const d = draftOf("followup_drafts", "sales");
     const worst: GuidedContextView = { ...CTX, cloud: { ready: false, reason: "No AI account is connected.", repair: null }, connections: [{ slug: "google-workspace", label: "Google Workspace", state: "not_connected", repair: { label: "Connect Google Workspace", href: "/settings/connections" } }] };
-    assert.equal(gateFor("connections", d, worst).open, true);
-    assert.equal(gateFor("runs_on", d, worst).open, true);
+    assert.equal(gateFor("job", d, worst).open, true);
+    assert.equal(gateFor("when", d, worst).open, true);
     assert.equal(gateFor("review", d, worst).open, false, "Review is the last step");
+    // A cleared time is the When step's problem: Job lets the person move on, When holds them with the reason.
+    const cleared = setScheduleTime(draftOf("daily_brief", "chief_of_staff"), "");
+    assert.equal(gateFor("job", cleared, CTX).open, true);
+    const when = gateFor("when", cleared, CTX);
+    assert.equal(when.open, false);
+    assert.equal(when.field, "schedule");
+    assert.match(when.blocker ?? "", /time of day/i);
   });
 
   await check("gating: furthest reachable step follows the draft, and a step is visitable only when all before it are open", () => {
     const order = STEPS.map((s) => s.id);
-    assert.deepEqual(order, ["department", "job", "connections", "runs_on", "review"]);
+    assert.deepEqual(order, ["department", "job", "when", "review"]);
+    assert.deepEqual(STEPS.map((s) => s.label), ["Area", "Job", "When", "Finish"]);
     assert.equal(furthestStep(emptyDraft(), CTX), "department");
     assert.equal(furthestStep(pickDepartment(emptyDraft(), "sales"), CTX), "job");
     assert.equal(furthestStep(draftOf("stalled_digest", "sales"), CTX), "review");
@@ -306,6 +320,7 @@ async function main() {
     assert.equal(chipLabel(weekdays, { presetId: "other", time: "06:00" }), weekdays.label, "another chip's change is not this chip's");
     assert.equal(chipLabel(manual, { presetId: manual.id }), "Only when I run it");
     assert.ok(canEditTime(weekdays) && canEditTime(mondays) && !canEditTime(manual));
+    assert.ok(canEditTime(templateById("ops_check", "operations")!.schedulePresets.find((p) => p.plan.mode === "every_n_hours")!), "several times a day: the time of the first run");
     assert.ok(canEditDays(mondays) && !canEditDays(weekdays));
   });
 
@@ -322,7 +337,71 @@ async function main() {
     assert.equal(scheduleChoiceFromPlan(t, { mode: "monthly", time: "09:00", day_of_month: 3, timezone: GUIDED_ZONE }), null);
     assert.equal(scheduleChoiceFromPlan(t, { mode: "custom", cron: "5 4 * * *", timezone: GUIDED_ZONE }), null);
     const ops = templateById("ops_check", "operations")!;
-    assert.equal(scheduleChoiceFromPlan(ops, { mode: "every_n_hours", time: "06:00", every_hours: 3, timezone: GUIDED_ZONE }), null, "an interval the chips do not offer");
+    assert.deepEqual(
+      scheduleChoiceFromPlan(ops, { mode: "every_n_hours", time: "08:00", every_hours: 3, timezone: GUIDED_ZONE }),
+      { presetId: "every_6h", time: "08:00", everyHours: 3 },
+      "several times a day reads back as its first run and how often",
+    );
+    assert.equal(scheduleChoiceFromPlan(templateById("followup_drafts", "sales")!, { mode: "every_n_hours", time: "08:00", every_hours: 12, timezone: GUIDED_ZONE }), null, "a job that does not offer it");
+  });
+
+  // ── the When step's questions ──
+  await check("How often: one plain answer per kind of schedule the job offers; email drafts are never 'only when I ask'", () => {
+    const brief = templateById("daily_brief", "chief_of_staff")!;
+    assert.deepEqual(frequencyOptions(brief, "digest").map((o) => o.label), ["Monday to Friday", "Every day", "On certain days of the week", "Only when I ask"]);
+    const ops = templateById("ops_check", "operations")!;
+    assert.deepEqual(frequencyOptions(ops, "digest").map((o) => o.label), ["Every day", "Monday to Friday", "Several times a day", "Only when I ask"]);
+    const custom = templateById("custom", "sales")!;
+    assert.ok(!frequencyOptions(custom, "email_drafts").some((o) => o.label === "Only when I ask"));
+    assert.ok(frequencyOptions(custom, "digest").some((o) => o.label === "Only when I ask"));
+    for (const t of ALL_TEMPLATES) for (const o of frequencyOptions(t, t.output)) assertPlainCopy(o.label, `${t.id}/${o.value}`);
+  });
+
+  await check("How often: changing the answer keeps the time already chosen when the new answer has a time", () => {
+    const d = setScheduleTime(draftOf("daily_brief", "chief_of_staff"), "06:45");
+    const daily = setFrequency(d, "daily_0800");
+    assert.deepEqual(daily.schedule, { presetId: "daily_0800", time: "06:45" });
+    assert.deepEqual(planFor(templateById("daily_brief", "chief_of_staff")!, daily.schedule), { mode: "daily", time: "06:45", timezone: GUIDED_ZONE });
+    assert.deepEqual(setFrequency(d, "manual").schedule, { presetId: "manual" }, "only when I ask has no time");
+    assert.deepEqual(setFrequency(setScheduleTime(d, ""), "daily_0800").schedule, { presetId: "daily_0800" }, "a cleared time is not carried");
+  });
+
+  await check("How many times a day: each answer is the number of runs and their times, from the first run until midnight", () => {
+    const ops = templateById("ops_check", "operations")!;
+    const at8 = { presetId: "every_6h", time: "08:00" };
+    const options = timesADayOptions(ops, at8, "digest");
+    const byCount = Object.fromEntries(options.map((o) => [o.count, o]));
+    assert.deepEqual(options.map((o) => o.count), [2, 3, 4, 6, 8, 16]);
+    // Twice a day from 8:00: every 8 hours (8 AM, 4 PM) and every 12 (8 AM, 8 PM) both run twice; the shorter one ends earlier and wins.
+    assert.equal(byCount[2].everyHours, 8);
+    assert.equal(byCount[2].detail, "8:00 AM and 4:00 PM");
+    assert.equal(byCount[3].everyHours, 6);
+    assert.equal(byCount[3].detail, "8:00 AM, 2:00 PM and 8:00 PM");
+    assert.equal(byCount[16].detail, "every hour from 8:00 AM to 11:00 PM");
+    for (const o of options) {
+      const plan = planFor(ops, { ...at8, everyHours: o.everyHours })!;
+      assert.equal(plan.mode, "every_n_hours");
+      // The count shown is the count the schedule library will run in one day.
+      const day = nextRunsView(plan, new Date(Date.UTC(2026, 9, 16, 4, 0, 0)), 40);
+      assert.ok(day.kind === "runs");
+      if (day.kind === "runs") assert.equal(day.lines.filter((l) => l.startsWith("Fri, Oct 16")).length, o.count, `${o.label}: ${o.detail}`);
+      assertPlainCopy(`${o.label} ${o.detail}`, o.label);
+    }
+    // The person's own answer stays on the list even where another interval gives the same count.
+    assert.ok(timesADayOptions(ops, { ...at8, everyHours: 12 }, "digest").some((o) => o.everyHours === 12 && o.count === 2));
+    // Drafts may run at most twice a day: only the 12 hour answer.
+    assert.deepEqual(timesADayOptions(ops, at8, "email_drafts").map((o) => o.everyHours), [12]);
+    assert.deepEqual(timesADayOptions(ops, { presetId: "daily_0630" }, "digest"), [], "not a several-times-a-day schedule");
+    assert.deepEqual(timesADayOptions(ops, { ...at8, time: "" }, "digest"), [], "no first time, no answers");
+    assert.equal(scheduleEveryHours(ops, at8), 6, "the job's own interval until the person answers");
+    // The summary and the Review sentence say it the way the question asked it.
+    assert.equal(whenText({ mode: "every_n_hours", time: "08:00", every_hours: 6, timezone: GUIDED_ZONE }), "3 times a day at 8:00 AM, 2:00 PM and 8:00 PM, Toronto time");
+    assert.equal(whenText({ mode: "every_n_hours", time: "08:00", every_hours: 1, timezone: GUIDED_ZONE }), "16 times a day, every hour from 8:00 AM to 11:00 PM, Toronto time");
+    assert.equal(whenText({ mode: "every_n_hours", time: "22:00", every_hours: 4, timezone: GUIDED_ZONE }), "Once a day at 10:00 PM, Toronto time");
+    assert.equal(whenText({ mode: "manual", timezone: GUIDED_ZONE }), "Only when you press Test now");
+    assert.equal(whenText({ mode: "daily", time: "09:00", timezone: GUIDED_ZONE }), "Every day at 9:00 AM, Toronto time");
+    assert.match(reviewSentence(setTimesADay(setScheduleTime(setSchedulePreset(draftOf("ops_check", "operations"), "every_6h"), "08:00"), 6))!, /^3 times a day at 8:00 AM, 2:00 PM and 8:00 PM, Toronto time, your "Routines and connections check" automation will/);
+    assert.equal(scheduleEveryHours(ops, setTimesADay({ ...emptyDraft(), schedule: at8 }, 12).schedule), 12);
   });
 
   await check("next runs: three instants in Toronto time from the one schedule library, with the zone's abbreviation", () => {
@@ -339,8 +418,8 @@ async function main() {
 
   await check("next runs: a manual schedule says it runs only when you press Test now, and a plan with no runs says so", () => {
     const manual = planFor(templateById("daily_brief", "chief_of_staff")!, { presetId: "manual" })!;
-    assert.deepEqual(nextRunsView(manual, new Date(NOW)), { kind: "manual", text: "Runs only when you press Test now." });
-    assert.equal(MANUAL_RUNS_TEXT, "Runs only when you press Test now.");
+    assert.deepEqual(nextRunsView(manual, new Date(NOW)), { kind: "manual", text: "Runs only when you press Test now on its card." });
+    assert.equal(MANUAL_RUNS_TEXT, "Runs only when you press Test now on its card.");
     const broken = nextRunsView({ mode: "daily", time: "", timezone: GUIDED_ZONE }, new Date(NOW));
     assert.equal(broken.kind, "none");
   });
@@ -412,17 +491,16 @@ async function main() {
   // ── the summary rail ──
   await check("summary rail: Not chosen yet until chosen, then the settings in the person's words", () => {
     const empty = summaryRows(emptyDraft());
-    assert.deepEqual(empty.map((r) => r.label), ["Department", "Job", "Result", "When", "Apps", "Runs on"]);
+    assert.deepEqual(empty.map((r) => r.label), ["Area", "Job", "Result", "When", "Needs"]);
     assert.ok(empty.every((r) => r.value === null));
     const rows = summaryRows(draftOf("followup_drafts", "sales"));
     const get = (l: string) => rows.find((r) => r.label === l)!;
-    assert.equal(get("Department").value, "Sales");
+    assert.equal(get("Area").value, "Sales");
     assert.equal(get("Job").value, "Follow-up drafts");
     assert.deepEqual(get("Job").lines, ["At most this many drafts per run: 3 drafts", "What each email is for: Invite them to book a short call", "Tone: Friendly"]);
     assert.equal(get("Result").value, "Email drafts for your approval");
-    assert.equal(get("Apps").value, "Google Workspace");
-    assert.equal(get("Runs on").value, "Cloud");
-    assert.equal(summaryRows(draftOf("stalled_digest", "sales")).find((r) => r.label === "Apps")!.value, "None needed");
+    assert.equal(get("Needs").value, "Google Workspace");
+    assert.equal(summaryRows(draftOf("stalled_digest", "sales")).find((r) => r.label === "Needs")!.value, "Nothing to connect");
     const custom = summaryRows(customDraft("sales", "Why is it quiet?", ["pipeline_summary"]));
     assert.ok(custom.find((r) => r.label === "Job")!.lines.includes("May read: pipeline"));
     assert.ok(custom.find((r) => r.label === "Job")!.lines.includes("What should it look into? Why is it quiet?"), "a label that is a question takes no colon");
@@ -518,7 +596,7 @@ async function main() {
     assert.equal(reviewActions(facts({ missingApps: ["Google Workspace"] })).save.enabled, true, "saving needs no connection");
     const cloud = reviewActions(facts({ saved: true, status: "paused", testPassed: true, cloudReady: false, cloudReason: "No AI account is connected." }));
     assert.equal(cloud.activate.enabled, false);
-    assert.equal(cloud.activate.why, "Cloud is not ready yet: No AI account is connected.");
+    assert.equal(cloud.activate.why, "Your AI account is not ready yet: No AI account is connected.");
   });
 
   await check("Review buttons: nothing is available while a call is in flight, and an automation that is on cannot be turned on again", () => {
@@ -608,7 +686,7 @@ async function main() {
     assert.equal(runStatusLabel("something_new"), "Unknown");
     assert.equal(nextRunLine({ ...on, nextRuns: [] }, NOW), "The next run could not be worked out.");
     const manual = itemFrom(draftOf("daily_brief", "chief_of_staff", (d) => setSchedulePreset(d, "manual")), "on");
-    assert.equal(nextRunLine(manual, NOW), "Runs only when you press Test now.");
+    assert.equal(nextRunLine(manual, NOW), "Runs only when you press Test now on its card.");
   });
 
   await check("the last-run head names the result and the time, and a bad time is not printed", () => {

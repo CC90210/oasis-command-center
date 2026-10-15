@@ -43,11 +43,13 @@ const NEW_AUTOMATIONS_COMING = "New automations are coming to this page.";
 
 /** What the header says when the guided builder is on: only what a guided automation really does. */
 const GUIDED_SUBTITLE =
-  "Choose a job, set when it runs and test it before you turn it on. Automations read your workspace and write you a summary or draft emails that wait for your approval. Nothing goes out on its own.";
+  "Pick a job, say when it should run and try it once before you turn it on. Automations write you a summary or draft emails that wait for your approval. Nothing goes out on its own.";
 
 /**
- * The guided builder is the page; the script composer and the technical inventory fold away under one
- * "Advanced" disclosure, closed, with their contents unchanged. With the builder off this renders its
+ * With the guided builder on it is the ONE way to make an automation: the "describe it and AI writes a
+ * script" box and the script form are not offered (CC, 2026-10-15: one onboarding path, built from the
+ * templates). Jobs that already exist (and, for operators, OASIS's own system jobs) stay listed under one
+ * closed disclosure, so they can still be switched on or off. With the builder off this renders its
  * children exactly where they were, so the page is the one it always was.
  */
 function AdvancedFold({ guided, children }: { guided: boolean; children: ReactNode }) {
@@ -55,8 +57,8 @@ function AdvancedFold({ guided, children }: { guided: boolean; children: ReactNo
   return (
     <details className="rounded-xl border border-bg-border bg-bg-elev/30 text-sm">
       <summary className="cursor-pointer select-none px-4 py-3 font-bold text-fg">
-        Advanced: scripts and technical jobs
-        <span className="ml-2 text-xs font-normal text-fg-dim">Script automations, background workers and every scheduled job</span>
+        Other scheduled jobs
+        <span className="ml-2 text-xs font-normal text-fg-dim">Jobs made before this builder, and system jobs. Switch them on or off here.</span>
       </summary>
       <div className="space-y-6 border-t border-bg-border p-4">{children}</div>
     </details>
@@ -267,18 +269,21 @@ export async function AutomationsContent({
           )}
           <p>
             <span className="text-fg font-bold">Making your own.</span>{" "}
-            {scriptAccess === "allowed"
-              ? "Describe what you want in the box below and your agent writes the script, shows you what it does, and saves it switched-off so nothing fires until you read it."
-              : NEW_AUTOMATIONS_COMING}
+            {guided
+              ? "Use New automation at the top of this page."
+              : scriptAccess === "allowed"
+                ? "Describe what you want in the box below and your agent writes the script, shows you what it does, and saves it switched-off so nothing fires until you read it."
+                : NEW_AUTOMATIONS_COMING}
           </p>
         </div>
       </details>
 
       {profile ? (
         <>
-          {scriptAccess === "allowed" ? (
+          {guided ? null : scriptAccess === "allowed" ? (
             // Drafting and saving a script is for verified platform operators
             // only; the routes refuse everyone else, so nobody else is offered it.
+            // With the guided builder on, the builder is the only way to make one.
             <DescribeAutomationFlow />
           ) : (
             <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-4 text-sm text-fg-muted">
@@ -288,7 +293,7 @@ export async function AutomationsContent({
             </div>
           )}
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
-          <CronJobsManager agentKeys={automationAgentKeys} canCreateScripts={scriptAccess === "allowed"} />
+          <CronJobsManager agentKeys={automationAgentKeys} canCreateScripts={!guided && scriptAccess === "allowed"} />
           {isOasisSurfaceTenant(tenantSlug) && (
             // The panel existed and rendered for exactly one tenant: "sun".
             // OASIS's own workspace — where the empire daemons actually run —

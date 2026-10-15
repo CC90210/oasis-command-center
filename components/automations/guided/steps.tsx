@@ -1,5 +1,5 @@
 /**
- * components/automations/guided/steps.tsx - the body of steps 1 to 4: Department, Job, Connections, Runs on.
+ * components/automations/guided/steps.tsx - the body of steps 1 to 3: Area, Job, When.
  *
  * Presentation only. What is allowed, what is refused and in which words all come from
  * lib/automations/guided/view.ts, which wraps the same validator the API runs, so the sentence under a
@@ -15,47 +15,33 @@ import {
   canDraftEmails,
   canEditDays,
   canEditTime,
-  chipLabel,
-  connectionRows,
   departmentLabel,
   departmentPurpose,
   draftTemplate,
   errorAt,
+  frequencyOptions,
   nextRunsView,
   pickDepartment,
   pickTemplate,
   planFor,
   presetOf,
   readyMadeCount,
-  requiredSlugs,
   scheduleDays,
+  scheduleEveryHours,
   scheduleTime,
+  setFrequency,
   setInput,
   setOutput,
-  setSchedulePreset,
   setScheduleDays,
   setScheduleTime,
+  setTimesADay,
   setTool,
+  timesADayOptions,
   choiceStyle,
   DAY_FULL,
   type Draft,
 } from "@/lib/automations/guided/view";
-import {
-  Check,
-  ChipGroup,
-  ChoiceControl,
-  CheckRow,
-  ConnectionMark,
-  Field,
-  GroupField,
-  NumberControl,
-  Notice,
-  OptionCard,
-  RepairAnchor,
-  Segmented,
-  TAP,
-  TextControl,
-} from "./ui";
+import { ChipGroup, ChoiceControl, CheckRow, Field, GroupField, NumberControl, Notice, OptionCard, Segmented, TAP, TextControl } from "./ui";
 
 export type StepProps = {
   draft: Draft;
@@ -69,14 +55,14 @@ export type StepProps = {
 /** What the panels inside the Job step need: the same as a step, without the workspace. */
 type PanelProps = Omit<StepProps, "ctx">;
 
-// ── 1. Department ────────────────────────────────────────────────────────
+// ── 1. Area ──────────────────────────────────────────────────────────────
 
 export function DepartmentStep({ draft, ctx, update }: Pick<StepProps, "draft" | "ctx" | "update">) {
   const departments = availableDepartments(ctx);
   if (departments.length === 0) {
     return (
       <Notice tone="info" live={false}>
-        You do not have access to a department here yet, so there is nothing to automate. Ask the owner of this workspace to give you access.
+        You do not have access to any part of this workspace yet, so there is nothing to automate. Ask the owner of this workspace to give you access.
       </Notice>
     );
   }
@@ -102,12 +88,12 @@ export function DepartmentStep({ draft, ctx, update }: Pick<StepProps, "draft" |
 
 // ── 2. Job ───────────────────────────────────────────────────────────────
 
-export function JobStep({ draft, ctx, validation, touched, touch, update, now }: StepProps & { now: Date }) {
+export function JobStep({ draft, ctx, validation, touched, touch, update }: StepProps) {
   const department = draft.department;
   if (!department) {
     return (
       <Notice tone="info" live={false}>
-        Pick a department first, then come back to choose the job.
+        Pick an area of your business first, then come back to choose the job.
       </Notice>
     );
   }
@@ -133,12 +119,11 @@ export function JobStep({ draft, ctx, validation, touched, touch, update, now }:
               title={t.title}
             >
               <span className="block text-fg">{t.promise}</span>
-              <span className="block text-xs">
-                <span className="font-medium">Reads:</span> {t.reads}
+              <span className="mt-1 block rounded-md border border-hairline bg-bg-deep px-3 py-2">
+                <span className="block text-[11px] font-medium text-fg-dim">Example of what you get (made-up names and numbers)</span>
+                <span className="mt-0.5 block whitespace-pre-line text-xs leading-relaxed text-fg-muted">{t.example}</span>
               </span>
-              <span className="block text-xs">
-                <span className="font-medium">Never:</span> {t.never}
-              </span>
+              <span className="block text-xs">{t.never}</span>
             </OptionCard>
           ))}
         </div>
@@ -150,7 +135,6 @@ export function JobStep({ draft, ctx, validation, touched, touch, update, now }:
       </fieldset>
 
       {template && <JobSettings draft={draft} validation={validation} touched={touched} touch={touch} update={update} />}
-      {template && <SchedulePanel draft={draft} validation={validation} touched={touched} touch={touch} update={update} now={now} />}
     </div>
   );
 }
@@ -161,9 +145,9 @@ function JobSettings({ draft, validation, touched, touch, update }: PanelProps) 
   return (
     <section aria-labelledby="gb-settings-h" className="space-y-5 border-t border-hairline pt-6">
       <h4 id="gb-settings-h" className="text-sm font-semibold text-fg">
-        Settings
+        A few details
       </h4>
-      {template.inputs.length === 0 && <p className="text-sm text-fg-muted">This job has nothing to set up. Choose when it runs below.</p>}
+      {template.inputs.length === 0 && <p className="text-sm text-fg-muted">This job has nothing to set up. Choose when it runs on the next step.</p>}
       {template.inputs.map((f) => (
         <InputFieldView key={f.name} field={f} draft={draft} error={errorAt(validation, f.name, touched)} touch={touch} update={update} />
       ))}
@@ -286,77 +270,113 @@ function CustomExtras({ draft, validation, touched, touch, update }: PanelProps)
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0] as const;
 const DAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
-function SchedulePanel({ draft, validation, touched, touch, update, now }: PanelProps & { now: Date }) {
+// ── 3. When ──────────────────────────────────────────────────────────────
+
+/**
+ * "When should it run?" as the questions a person would ask: how often, then what time, and for the
+ * answers that need it, which days or how many times a day. Every answer maps onto one of the job's own
+ * schedules, so nothing here can make a schedule the job does not offer.
+ */
+export function WhenStep({ draft, validation, touched, touch, update, now }: Omit<StepProps, "ctx"> & { now: Date }) {
   const template = draftTemplate(draft);
-  if (!template) return null;
+  if (!template) {
+    return (
+      <Notice tone="info" live={false}>
+        Pick a job first, then come back to choose when it runs.
+      </Notice>
+    );
+  }
   const preset = presetOf(template, draft.schedule);
   const plan = planFor(template, draft.schedule);
   const error = errorAt(validation, "schedule", touched);
   const days = scheduleDays(template, draft.schedule);
+  const several = preset?.plan.mode === "every_n_hours";
+  const counts = timesADayOptions(template, draft.schedule, draft.output);
+  const every = scheduleEveryHours(template, draft.schedule);
   return (
-    <section aria-labelledby="gb-when-h" className="space-y-4 border-t border-hairline pt-6">
-      <h4 id="gb-when-h" className="text-sm font-semibold text-fg">
-        When should it run?
-      </h4>
-      <GroupField id="gb-when" legend="Schedule" error={error} hideLegend>
+    <div className="space-y-6">
+      <GroupField id="gb-when" legend="How often should it run?" error={error}>
         {() => (
           <ChipGroup
             name="gb-when"
             type="radio"
-            options={template.schedulePresets
-              .filter((p) => !(p.plan.mode === "manual" && draft.output === "email_drafts"))
-              .map((p) => ({ value: p.id, label: chipLabel(p, draft.schedule) }))}
+            options={frequencyOptions(template, draft.output)}
             isChecked={(v) => draft.schedule?.presetId === v}
             onToggle={(v) => {
               touch("schedule");
-              update(setSchedulePreset(draft, v));
+              update(setFrequency(draft, v));
             }}
           />
         )}
       </GroupField>
 
-      {preset && (canEditTime(preset) || canEditDays(preset)) && (
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-4">
-          {canEditTime(preset) && (
-            <Field id="gb-when-time" label="Time of day" help="In Toronto time." error={null}>
-              {(describedBy) => (
-                <input
-                  id="gb-when-time"
-                  type="time"
-                  step={60}
-                  value={scheduleTime(template, draft.schedule)}
-                  aria-describedby={describedBy}
-                  onChange={(e) => {
-                    touch("schedule");
-                    update(setScheduleTime(draft, e.target.value));
-                  }}
-                  className={`input ${TAP} w-auto`}
-                />
-              )}
-            </Field>
+      {preset && canEditDays(preset) && (
+        <GroupField id="gb-when-days" legend="Which days?" help="Pick one or more." error={null}>
+          {() => (
+            <ChipGroup
+              name="gb-when-days"
+              type="checkbox"
+              options={WEEK_ORDER.map((d) => ({ value: String(d), label: DAY_SHORT[d], srLabel: DAY_FULL[d] }))}
+              isChecked={(v) => days.includes(Number(v))}
+              onToggle={(v) => {
+                const d = Number(v);
+                touch("schedule");
+                update(setScheduleDays(draft, days.includes(d) ? days.filter((x) => x !== d) : [...days, d]));
+              }}
+            />
           )}
-          {canEditDays(preset) && (
-            <GroupField id="gb-when-days" legend="Days" error={null}>
-              {() => (
-                <ChipGroup
-                  name="gb-when-days"
-                  type="checkbox"
-                  options={WEEK_ORDER.map((d) => ({ value: String(d), label: DAY_SHORT[d], srLabel: DAY_FULL[d] }))}
-                  isChecked={(v) => days.includes(Number(v))}
-                  onToggle={(v) => {
-                    const d = Number(v);
-                    touch("schedule");
-                    update(setScheduleDays(draft, days.includes(d) ? days.filter((x) => x !== d) : [...days, d]));
-                  }}
-                />
-              )}
-            </GroupField>
+        </GroupField>
+      )}
+
+      {preset && canEditTime(preset) && (
+        <Field id="gb-when-time" label={several ? "What time is the first one?" : "What time of day?"} help="Toronto time." error={null}>
+          {(describedBy) => (
+            <input
+              id="gb-when-time"
+              type="time"
+              step={60}
+              value={scheduleTime(template, draft.schedule)}
+              aria-describedby={describedBy}
+              onChange={(e) => {
+                touch("schedule");
+                update(setScheduleTime(draft, e.target.value));
+              }}
+              className={`input ${TAP} w-auto`}
+            />
           )}
-        </div>
+        </Field>
+      )}
+
+      {several && counts.length > 0 && (
+        <GroupField id="gb-when-count" legend="How many times a day?" error={null}>
+          {() => (
+            <div className="space-y-2">
+              {counts.map((o) => (
+                <label key={o.everyHours} className={`flex ${TAP} cursor-pointer items-center gap-3 rounded-md border border-hairline bg-bg-deep px-3 text-sm`}>
+                  <input
+                    type="radio"
+                    name="gb-when-count"
+                    value={String(o.everyHours)}
+                    checked={every === o.everyHours}
+                    onChange={() => {
+                      touch("schedule");
+                      update(setTimesADay(draft, o.everyHours));
+                    }}
+                    className="h-4 w-4 shrink-0 accent-accent"
+                  />
+                  <span className="min-w-0">
+                    <span className="font-medium text-fg">{o.label}</span>
+                    <span className="ml-2 text-fg-muted">{o.detail}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+        </GroupField>
       )}
 
       {plan && <NextRuns plan={plan} now={now} />}
-    </section>
+    </div>
   );
 }
 
@@ -371,71 +391,6 @@ function NextRuns({ plan, now }: { plan: NonNullable<ReturnType<typeof planFor>>
           <li key={line}>{line}</li>
         ))}
       </ol>
-    </div>
-  );
-}
-
-// ── 3. Connections ───────────────────────────────────────────────────────
-
-export function ConnectionsStep({ draft, ctx, onRecheck, rechecking }: { draft: Draft; ctx: GuidedContextView; onRecheck: () => void; rechecking: boolean }) {
-  const rows = connectionRows(requiredSlugs(draft), ctx.connections);
-  if (rows.length === 0) {
-    return <p className="rounded-lg border border-hairline bg-bg-deep px-4 py-3 text-sm text-fg">This one needs no connected apps.</p>;
-  }
-  return (
-    <div className="space-y-4">
-      <ul className="divide-y divide-hairline rounded-xl border border-hairline bg-bg-panel">
-        {rows.map((r) => (
-          <li key={r.slug} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-3">
-            <div className="min-w-0 space-y-0.5">
-              <p className="text-sm font-semibold text-fg">{r.label}</p>
-              <ConnectionMark state={r.state} label={r.stateLabel} />
-            </div>
-            {r.repair ? (
-              <RepairAnchor link={r.repair} />
-            ) : r.state !== "connected" ? (
-              <p className="text-xs text-fg-muted">Connect it from Settings, under Connections.</p>
-            ) : null}
-          </li>
-        ))}
-      </ul>
-      <p className="text-sm text-fg-muted">You can save this without connecting these apps. Turning it on needs every app above to be connected.</p>
-      <button type="button" className={`btn-secondary ${TAP} disabled:cursor-not-allowed disabled:opacity-50`} onClick={onRecheck} disabled={rechecking}>
-        {rechecking ? "Checking..." : "Check again"}
-      </button>
-    </div>
-  );
-}
-
-// ── 4. Runs on ───────────────────────────────────────────────────────────
-
-export function RunsOnStep({ ctx }: { ctx: GuidedContextView }) {
-  const cloud = ctx.cloud;
-  const noop = () => undefined;
-  return (
-    <div className="space-y-4">
-      <fieldset className="min-w-0 space-y-3">
-        <legend className="sr-only">Where it runs</legend>
-        <OptionCard name="runs-on" value="cloud" checked onSelect={noop} title="Cloud">
-          <span className="block text-fg">Runs in the cloud using your workspace&apos;s AI account.</span>
-        </OptionCard>
-        <OptionCard name="runs-on" value="computers" checked={false} disabled onSelect={noop} title="Your computers">
-          <span className="block">Computers run advanced scripts today. Guided automations run in the cloud so they can never touch your files.</span>
-        </OptionCard>
-      </fieldset>
-      {cloud.ready ? (
-        <p className="inline-flex items-center gap-1.5 text-sm font-medium text-status-engaged">
-          <Check />
-          Cloud is ready.
-        </p>
-      ) : (
-        <div className="space-y-1">
-          <Notice tone="warn">
-            Cloud is not ready: {cloud.reason ?? "it cannot run automations right now."} You can still save this. It cannot be turned on until Cloud is ready.
-          </Notice>
-          {cloud.repair && <RepairAnchor link={cloud.repair} />}
-        </div>
-      )}
     </div>
   );
 }

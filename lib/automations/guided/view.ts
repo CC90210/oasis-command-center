@@ -13,9 +13,9 @@
  */
 import type { DepartmentKey } from "@/lib/os/types";
 import { DEPARTMENT_PALETTES, DESK_TOOLS, type DeskToolName } from "@/lib/os/desk/catalog";
-import { describePlan, formatClock, formatRunInstant, nextRuns, planToCron, type SchedulePlan } from "@/lib/automations/schedule-plan";
+import { EVERY_HOURS, describePlan, formatClock, formatRunInstant, nextRuns, planToCron, type SchedulePlan } from "@/lib/automations/schedule-plan";
 import { defaultInputs, readToolsFor, templateById, templatesFor } from "./templates";
-import { GUIDED_ZONE, requiredConnectors, validateGuidedPayload } from "./validate";
+import { GUIDED_ZONE, MIN_GAP_MINUTES, requiredConnectors, validateGuidedPayload } from "./validate";
 import {
   GUIDED_PAYLOAD_VERSION,
   type GuidedOutput,
@@ -72,8 +72,11 @@ export function readyMadeCount(department: DepartmentKey, ctx: Pick<GuidedContex
 
 // ── the draft the wizard edits ───────────────────────────────────────────
 
-/** A schedule as one tap plus, for the modes that have them, a changed time or changed days. */
-export type ScheduleChoice = { presetId: string; time?: string; days?: number[] };
+/**
+ * A schedule as the answers to the When step's questions: how often (one of the job's own schedules),
+ * and for the answers that have them, what time, which days, and how many times a day.
+ */
+export type ScheduleChoice = { presetId: string; time?: string; days?: number[]; everyHours?: number };
 
 export type Draft = {
   department: DepartmentKey | null;
@@ -180,15 +183,122 @@ export function setScheduleDays(draft: Draft, days: number[]): Draft {
   return draft.schedule ? { ...draft, schedule: { ...draft.schedule, days: [...days].sort((a, b) => a - b) } } : draft;
 }
 
+/** Answer "How often should it run?". A time already chosen carries over to an answer that has a time. */
+export function setFrequency(draft: Draft, presetId: string): Draft {
+  const template = draftTemplate(draft);
+  const preset = template?.schedulePresets.find((p) => p.id === presetId);
+  const keep = draft.schedule?.time;
+  const carry = preset && preset.plan.mode !== "manual" && keep !== undefined && TIME_RE.test(keep);
+  return { ...draft, schedule: { presetId, ...(carry ? { time: keep } : {}) } };
+}
+
+/** Answer "How many times a day?" for a job that runs several times a day. */
+export function setTimesADay(draft: Draft, everyHours: number): Draft {
+  return draft.schedule ? { ...draft, schedule: { ...draft.schedule, everyHours } } : draft;
+}
+
+/** "How often should it run?" in a person's words, one answer per kind of schedule a job offers. */
+const FREQUENCY_LABEL: Readonly<Record<SchedulePlan["mode"], string>> = {
+  daily: "Every day",
+  weekdays: "Monday to Friday",
+  weekly: "On certain days of the week",
+  every_n_hours: "Several times a day",
+  monthly: "Once a month",
+  manual: "Only when I ask",
+  custom: "A custom schedule",
+};
+
+export function frequencyLabel(preset: SchedulePreset): string {
+  return FREQUENCY_LABEL[preset.plan.mode] ?? preset.label;
+}
+
+/**
+ * The answers to "How often should it run?" for this job. Email drafts are never "only when I ask":
+ * a run a person starts only previews, so it would never file a draft.
+ */
+export function frequencyOptions(template: GuidedTemplate, output: GuidedOutput): { value: string; label: string }[] {
+  return template.schedulePresets
+    .filter((p) => !(p.plan.mode === "manual" && output === "email_drafts"))
+    .map((p) => ({ value: p.id, label: frequencyLabel(p) }));
+}
+
+/** The interval a several-times-a-day schedule uses: the person's answer, else the job's own. Null for any other schedule. */
+export function scheduleEveryHours(template: GuidedTemplate, choice: ScheduleChoice | null): number | null {
+  const preset = presetOf(template, choice);
+  if (!preset || preset.plan.mode !== "every_n_hours" || !choice) return null;
+  return choice.everyHours ?? preset.plan.every_hours;
+}
+
+export type TimesADayOption = { everyHours: number; count: number; label: string; detail: string };
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** The runs of one day for "every N hours from HH:MM", as clock times (the schedule library's rule: until midnight). */
+function runClocks(time: string, every: number): string[] {
+  const [h, m] = time.split(":").map(Number);
+  const clocks: string[] = [];
+  for (let x = h; x <= 23; x += every) clocks.push(formatClock(`${pad2(x)}:${pad2(m)}`));
+  return clocks;
+}
+
+/** A day's runs in words: the times themselves, or for many runs the interval with the first and last. */
+function clocksText(clocks: readonly string[], every: number): string {
+  return clocks.length <= 6
+    ? joinWords(clocks)
+    : `every ${every === 1 ? "hour" : `${every} hours`} from ${clocks[0]} to ${clocks[clocks.length - 1]}`;
+}
+
+/**
+ * When a plan runs, in a person's words. Several times a day is said as how many times and when
+ * ("3 times a day at 8:00 AM, 2:00 PM and 8:00 PM, Toronto time"), the way the When step asked it;
+ * every other schedule is the schedule library's own sentence.
+ */
+export function whenText(plan: SchedulePlan): string {
+  if (plan.mode === "manual") return "Only when you press Test now";
+  if (plan.mode === "every_n_hours" && TIME_RE.test(plan.time)) {
+    const clocks = runClocks(plan.time, plan.every_hours);
+    const zone = "Toronto time";
+    if (clocks.length === 1) return `Once a day at ${clocks[0]}, ${zone}`;
+    const text = clocksText(clocks, plan.every_hours);
+    return clocks.length <= 6 ? `${clocks.length} times a day at ${text}, ${zone}` : `${clocks.length} times a day, ${text}, ${zone}`;
+  }
+  return describePlan(plan);
+}
+
+/**
+ * The answers to "How many times a day?": every interval the job's result allows (a digest at most
+ * hourly, drafts at most twice a day), each said as the number of runs and the times they fall at,
+ * from the first run until midnight (the schedule library's rule). Two intervals that give the same
+ * number of runs show once, as the one that finishes earlier in the day.
+ */
+export function timesADayOptions(template: GuidedTemplate, choice: ScheduleChoice | null, output: GuidedOutput): TimesADayOption[] {
+  const current = scheduleEveryHours(template, choice);
+  if (current === null) return [];
+  const time = scheduleTime(template, choice);
+  if (!TIME_RE.test(time)) return [];
+  const byCount = new Map<number, TimesADayOption>();
+  for (const every of EVERY_HOURS) {
+    if (every * 60 < MIN_GAP_MINUTES[output]) continue;
+    const clocks = runClocks(time, every);
+    if (clocks.length < 2) continue;
+    const option = { everyHours: every, count: clocks.length, label: `${clocks.length} times a day`, detail: clocksText(clocks, every) };
+    const seen = byCount.get(clocks.length);
+    // The person's own answer always stays on the list; otherwise the shorter interval (it ends earlier) wins.
+    if (!seen || (seen.everyHours !== current && (every === current || every < seen.everyHours))) byCount.set(clocks.length, option);
+  }
+  return [...byCount.values()].sort((a, b) => a.count - b.count);
+}
+
 export function presetOf(template: GuidedTemplate, choice: ScheduleChoice | null): SchedulePreset | null {
   return (choice && template.schedulePresets.find((p) => p.id === choice.presetId)) || null;
 }
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-/** A preset's time of day can be changed when it is a daily, weekday or weekly one. */
+/** A schedule's time of day can be chosen for every kind but "only when I ask" (several times a day: the first run). */
 export function canEditTime(preset: SchedulePreset): boolean {
-  return preset.plan.mode === "daily" || preset.plan.mode === "weekdays" || preset.plan.mode === "weekly";
+  const mode = preset.plan.mode;
+  return mode === "daily" || mode === "weekdays" || mode === "weekly" || mode === "every_n_hours";
 }
 
 export function canEditDays(preset: SchedulePreset): boolean {
@@ -218,6 +328,13 @@ export function planFor(template: GuidedTemplate, choice: ScheduleChoice | null)
   if (base.mode === "daily" || base.mode === "weekdays") return choice.time !== undefined ? { ...base, time: choice.time } : base;
   if (base.mode === "weekly") {
     return { ...base, ...(choice.time !== undefined ? { time: choice.time } : {}), ...(choice.days ? { days: choice.days } : {}) };
+  }
+  if (base.mode === "every_n_hours") {
+    return {
+      ...base,
+      ...(choice.time !== undefined ? { time: choice.time } : {}),
+      ...(choice.everyHours !== undefined ? { every_hours: choice.everyHours as typeof base.every_hours } : {}),
+    };
   }
   return base;
 }
@@ -259,11 +376,8 @@ export function scheduleChoiceFromPlan(template: GuidedTemplate, plan: ScheduleP
   const preset = sameMode[0];
   if (plan.mode === "daily" || plan.mode === "weekdays") return { presetId: preset.id, time: plan.time };
   if (plan.mode === "weekly") return { presetId: preset.id, time: plan.time, days: [...plan.days] };
-  // every_n_hours with another interval or start is not a chip: it is not offered.
-  if (plan.mode === "every_n_hours" && preset.plan.mode === "every_n_hours") {
-    const match = sameMode.find((p) => p.plan.mode === "every_n_hours" && p.plan.every_hours === plan.every_hours && p.plan.time === plan.time);
-    return match ? { presetId: match.id } : null;
-  }
+  // Several times a day: the first run and how many, as the person answered them.
+  if (plan.mode === "every_n_hours") return { presetId: preset.id, time: plan.time, everyHours: plan.every_hours };
   return null;
 }
 
@@ -273,7 +387,7 @@ export type NextRunsView =
   | { kind: "runs"; lines: string[] }
   | { kind: "none"; text: string };
 
-export const MANUAL_RUNS_TEXT = "Runs only when you press Test now.";
+export const MANUAL_RUNS_TEXT = "Runs only when you press Test now on its card.";
 
 /** The next three run times in Toronto time, computed by the one schedule library. */
 export function nextRunsView(plan: SchedulePlan, now: Date, count = 3): NextRunsView {
@@ -301,7 +415,7 @@ export function toRaw(draft: Draft): unknown {
 
 /** The draft checked by the same validator the API runs. */
 export function validateDraft(draft: Draft, ctx: Pick<GuidedContextView, "companyFinancials">): GuidedValidation {
-  if (!draft.department) return { ok: false, error: "template_unknown", message: "Pick a department to continue.", field: "department" };
+  if (!draft.department) return { ok: false, error: "template_unknown", message: "Pick an area of your business to continue.", field: "department" };
   if (!draftTemplate(draft)) return { ok: false, error: "template_unknown", message: "Pick a job to continue.", field: "template" };
   return validateGuidedPayload(toRaw(draft), { companyFinancials: ctx.companyFinancials });
 }
@@ -326,14 +440,13 @@ export function nameProblem(name: string): string | null {
 
 // ── steps and gating ─────────────────────────────────────────────────────
 
-export type StepId = "department" | "job" | "connections" | "runs_on" | "review";
+export type StepId = "department" | "job" | "when" | "review";
 
 export const STEPS: readonly { id: StepId; label: string; title: string; lead: string }[] = [
-  { id: "department", label: "Department", title: "Which department is this for?", lead: "Pick the part of the business the job is about. You can only choose from the departments you have access to." },
-  { id: "job", label: "Job", title: "What should it do?", lead: "Pick a ready-made job and set it up with the choices below, or describe your own." },
-  { id: "connections", label: "Connections", title: "Which apps does it need?", lead: "Some jobs work through a connected app. Here is what this one needs and whether it is ready." },
-  { id: "runs_on", label: "Runs on", title: "Where does it run?", lead: "Automations run in the cloud, so they never touch the files on a computer." },
-  { id: "review", label: "Review", title: "Check it, then save, test and turn it on", lead: "Nothing runs until you turn it on. Saving always keeps it paused." },
+  { id: "department", label: "Area", title: "What part of your business is this for?", lead: "Pick one. You choose the job on the next step." },
+  { id: "job", label: "Job", title: "What should it do?", lead: "Pick a ready-made job. Each one shows an example of what you get. Or describe your own." },
+  { id: "when", label: "When", title: "When should it run?", lead: "Two quick questions. Times are Toronto time." },
+  { id: "review", label: "Finish", title: "Check it, then turn it on", lead: "Nothing runs until you turn it on. Saving keeps it paused." },
 ];
 
 export function stepIndex(id: StepId): number {
@@ -346,15 +459,16 @@ export type Gate = { open: boolean; blocker: string | null; field: string | null
 export function gateFor(step: StepId, draft: Draft, ctx: GuidedContextView): Gate {
   if (step === "review") return { open: false, blocker: null, field: null };
   if (step === "department") {
-    if (!draft.department) return { open: false, blocker: "Pick a department to continue.", field: "department" };
+    if (!draft.department) return { open: false, blocker: "Pick an area of your business to continue.", field: "department" };
     if (!availableDepartments(ctx).includes(draft.department)) {
-      return { open: false, blocker: "That department is not available to you. Pick another.", field: "department" };
+      return { open: false, blocker: "That area is not available to you. Pick another.", field: "department" };
     }
     return { open: true, blocker: null, field: null };
   }
   const v = validateDraft(draft, ctx);
-  if (!v.ok) return { open: false, blocker: v.message, field: v.field ?? null };
-  // Connections and Runs on are information: a missing app or an unready Cloud never blocks moving on or saving.
+  // The schedule is the When step's question: it never holds up leaving the Job step.
+  if (!v.ok && !(step === "job" && v.field === "schedule")) return { open: false, blocker: v.message, field: v.field ?? null };
+  // A missing app or an AI account that is not ready never blocks moving on or saving: Review says what to fix.
   return { open: true, blocker: null, field: null };
 }
 
@@ -513,7 +627,7 @@ export function reviewSentence(draft: Draft): string | null {
   const plan = planFor(template, draft.schedule);
   if (!plan) return null;
   const output = template.custom ? draft.output : template.output;
-  const when = plan.mode === "manual" ? "Only when you press Test now" : describePlan(plan);
+  const when = whenText(plan);
   const who = template.custom ? "your custom automation" : `your "${template.title}" automation`;
   const where =
     output === "email_drafts"
@@ -553,12 +667,11 @@ export function summaryRows(draft: Draft): SummaryRow[] {
   }
   const output = template ? (template.custom ? draft.output : template.output) : null;
   return [
-    { label: "Department", value: draft.department ? departmentLabel(draft.department) : null, lines: [] },
+    { label: "Area", value: draft.department ? departmentLabel(draft.department) : null, lines: [] },
     { label: "Job", value: template ? template.title : null, lines: settings },
     { label: "Result", value: output ? outputLabel(output) : null, lines: [] },
-    { label: "When", value: plan ? (plan.mode === "manual" ? "Only when you press Test now" : describePlan(plan)) : null, lines: [] },
-    { label: "Apps", value: template ? (slugs.length ? joinWords(slugs.map(slugLabel)) : "None needed") : null, lines: [] },
-    { label: "Runs on", value: template ? "Cloud" : null, lines: [] },
+    { label: "When", value: plan ? whenText(plan) : null, lines: [] },
+    { label: "Needs", value: template ? (slugs.length ? joinWords(slugs.map(slugLabel)) : "Nothing to connect") : null, lines: [] },
   ];
 }
 
@@ -628,7 +741,7 @@ export function reviewActions(f: ReviewFacts): ReviewActions {
           : alreadyOn
             ? "It is already on."
             : !f.cloudReady
-              ? `Cloud is not ready yet${f.cloudReason ? `: ${f.cloudReason}` : "."}`
+              ? `Your AI account is not ready yet${f.cloudReason ? `: ${f.cloudReason}` : "."}`
               : missing
                 ? `Connect ${joinWords(f.missingApps)} first. You can keep it saved until then.`
                 : !tested
@@ -666,7 +779,7 @@ export function draftFromItem(item: GuidedAutomationView): { draft: Draft; note:
       name: item.name,
       nameTouched: true,
     },
-    note: schedule ? null : "This automation has a schedule the builder does not offer. Pick one of the schedules below to save changes.",
+    note: schedule ? null : "This automation has a schedule the builder does not offer. Answer When should it run? again to save changes.",
   };
 }
 
@@ -679,7 +792,7 @@ export function editSession(
   const checked = validateDraft(draft, ctx);
   return {
     draft,
-    step: checked.ok ? "review" : "job",
+    step: checked.ok ? "review" : checked.field === "schedule" ? "when" : "job",
     note,
     saved: { item, snapshot: snapshotOf(draft.name, checked.ok ? checked.payload : null) },
   };

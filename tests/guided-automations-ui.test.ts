@@ -6,7 +6,7 @@
  *      where react-dom/server loads) for every step and state, and the Automations page with the builder
  *      on and off. The markup is parsed and checked: real catalogue content on each step, the gating, the
  *      validation sentence at the field it names, the Review sentence, the list in every state, the
- *      Advanced fold keeping the old page byte for byte, no jargon / dash / arrow, an accessible name on
+ *      builder as the only way to make one (the old AI box and form gone), no jargon / dash / arrow, an accessible name on
  *      every control, 44 px targets, errors tied to their fields, reduced-motion safe.
  *   2. DRIVEN. The real GuidedBuilder and list run in this process with a stand-in for React's state
  *      hooks (the technique tests/automation-draft-schedule.test.ts uses), a fake GuidedApi that records
@@ -43,6 +43,7 @@ import {
   setScheduleTime,
   setTool,
   snapshotOf,
+  timesADayOptions,
   validateDraft,
   type Draft,
 } from "../lib/automations/guided/view";
@@ -252,22 +253,26 @@ const CASES: Case[] = [
   { id: "job_custom_ready", kind: "section", props: base(at("job", setOutput(customDraft("sales", "Who needs a nudge this week?", ["pipeline_summary", "leads_search"]), "email_drafts"))) },
   { id: "job_custom_marketing", kind: "section", props: base(at("job", customDraft("marketing", "How are the numbers moving?", ["department_numbers"]))) },
   { id: "job_custom_cos", kind: "section", props: base(at("job", draftOf("custom", "chief_of_staff"))) },
-  { id: "job_manual", kind: "section", props: base(at("job", setSchedulePreset(draftOf("daily_brief", "chief_of_staff"), "manual"))) },
-  { id: "job_time_cleared", kind: "section", props: base(at("job", setScheduleTime(FOLLOWUP, ""), { touched: ["schedule"] })) },
-  { id: "job_weekly", kind: "section", props: base(at("job", setScheduleTime(setScheduleDays(setSchedulePreset(draftOf("daily_brief", "chief_of_staff"), "monday_0800"), [1, 4]), "09:15"))) },
-  { id: "job_dst", kind: "section", props: { ...base(at("job", draftOf("support_risk", "client_success", (d) => setSchedulePreset(d, "daily_0730")))), nowMs: Date.UTC(2026, 9, 30, 20, 0, 0) } },
 
-  // steps 3 and 4
-  { id: "conn_missing", kind: "section", props: base(at("connections", FOLLOWUP), CTX_NO_GOOGLE) },
-  { id: "conn_attention", kind: "section", props: base(at("connections", FOLLOWUP), { ...CTX, connections: [{ slug: "google-workspace", label: "Google Workspace", state: "attention", repair: REPAIR_GOOGLE }] }) },
-  { id: "conn_ok", kind: "section", props: base(at("connections", FOLLOWUP)) },
-  { id: "conn_unknown", kind: "section", props: base(at("connections", FOLLOWUP), { ...CTX, connections: [] }) },
-  { id: "conn_none", kind: "section", props: base(at("connections", draftOf("daily_brief", "chief_of_staff"))) },
-  { id: "conn_custom_drafts", kind: "section", props: base(at("connections", setOutput(customDraft("sales"), "email_drafts")), CTX_NO_GOOGLE) },
-  { id: "runs_ready", kind: "section", props: base(at("runs_on", FOLLOWUP)) },
-  { id: "runs_not_ready", kind: "section", props: base(at("runs_on", FOLLOWUP), { ...CTX, cloud: { ready: false, reason: "No AI account is connected to this workspace.", repair: { label: "Connect an AI account", href: "/settings/ai" } } }) },
+  // step 3: When
+  { id: "when_followup", kind: "section", props: base(at("when", FOLLOWUP)) },
+  { id: "when_no_google", kind: "section", props: base(at("when", FOLLOWUP), CTX_NO_GOOGLE) },
+  { id: "when_manual", kind: "section", props: base(at("when", setSchedulePreset(draftOf("daily_brief", "chief_of_staff"), "manual"))) },
+  { id: "when_time_cleared", kind: "section", props: base(at("when", setScheduleTime(FOLLOWUP, ""), { touched: ["schedule"] })) },
+  { id: "when_weekly", kind: "section", props: base(at("when", setScheduleTime(setScheduleDays(setSchedulePreset(draftOf("daily_brief", "chief_of_staff"), "monday_0800"), [1, 4]), "09:15"))) },
+  { id: "when_dst", kind: "section", props: { ...base(at("when", draftOf("support_risk", "client_success", (d) => setSchedulePreset(d, "daily_0730")))), nowMs: Date.UTC(2026, 9, 30, 20, 0, 0) } },
+  { id: "when_several", kind: "section", props: base(at("when", setScheduleTime(setSchedulePreset(draftOf("ops_check", "operations"), "every_6h"), "08:00"))) },
 
-  // step 5
+  // step 4: what it needs, on the last step
+  { id: "needs_missing", kind: "section", props: base(at("review", FOLLOWUP), CTX_NO_GOOGLE) },
+  { id: "needs_attention", kind: "section", props: base(at("review", FOLLOWUP), { ...CTX, connections: [{ slug: "google-workspace", label: "Google Workspace", state: "attention", repair: REPAIR_GOOGLE }] }) },
+  { id: "needs_ok", kind: "section", props: base(at("review", FOLLOWUP)) },
+  { id: "needs_unknown", kind: "section", props: base(at("review", FOLLOWUP), { ...CTX, connections: [] }) },
+  { id: "needs_none", kind: "section", props: base(at("review", draftOf("daily_brief", "chief_of_staff"))) },
+  { id: "needs_custom_drafts", kind: "section", props: base(at("review", setOutput(customDraft("sales"), "email_drafts")), CTX_NO_GOOGLE) },
+  { id: "needs_ai_not_ready", kind: "section", props: base(at("review", FOLLOWUP), { ...CTX, cloud: { ready: false, reason: "No AI account is connected to this workspace.", repair: { label: "Connect an AI account", href: "/settings/ai" } } }) },
+
+  // step 4
   { id: "review_new", kind: "section", props: base(at("review", FOLLOWUP)) },
   { id: "review_daily", kind: "section", props: base(at("review", draftOf("daily_brief", "chief_of_staff"))) },
   { id: "review_stalled", kind: "section", props: base(at("review", draftOf("stalled_digest", "sales", (d) => setInput(d, "days_quiet", 10)))) },
@@ -446,13 +451,13 @@ async function main() {
     assert.ok(!radios(dom.dept_nofin, "department").some((c) => c.value === "finance"));
     assert.deepEqual(radios(dom.dept_limited, "department").map((c) => c.value), ["sales", "operations"]);
     assert.equal(radios(dom.dept_none, "department").length, 0);
-    assert.match(flat(dom.dept_none), /You do not have access to a department here yet/);
+    assert.match(flat(dom.dept_none), /You do not have access to any part of this workspace yet/);
   });
 
   await check("Department: the chosen one is checked, and the heading names the step", () => {
     assert.deepEqual(radios(dom.dept_picked, "department").filter((c) => c.checked).map((c) => c.value), ["client_success"]);
     const h3 = tags(dom.dept, "h3")[0];
-    assert.equal(flat(h3), "Which department is this for?");
+    assert.equal(flat(h3), "What part of your business is this for?");
   });
 
   // ── step 2 ──
@@ -466,8 +471,9 @@ async function main() {
       assert.equal(flat(byId(r, `gb-job-${t.id}-t`)), t.title);
       const body = flat(byId(r, `gb-job-${t.id}-d`));
       assert.ok(body.includes(t.promise), `${t.id}: promise`);
-      assert.ok(body.includes(`Reads: ${t.reads}`), `${t.id}: Reads line`);
-      assert.ok(body.includes(`Never: ${t.never}`), `${t.id}: Never line`);
+      assert.ok(body.includes("Example of what you get (made-up names and numbers)"), `${t.id}: the example is labelled as made up`);
+      assert.ok(body.includes(t.example.replace(/\s+/g, " ")), `${t.id}: the example itself`);
+      assert.ok(body.includes(t.never), `${t.id}: what it never does`);
     }
     assert.ok(cards.every((c) => !c.checked));
     assert.equal(tags(r, "h4").length, 0, "no settings or schedule before a job is chosen");
@@ -509,50 +515,68 @@ async function main() {
     assert.match(flat(dom.job_marketing), /This job has nothing to set up/);
   });
 
-  await check("Job: the schedule offers the template's presets as chips and always shows the next three runs in Toronto time", () => {
-    const r = dom.job_followup;
+  await check("When: How often offers one plain answer per kind of schedule, with What time of day and the next three runs", () => {
+    const r = dom.when_followup;
     const t = templateById("followup_drafts", "sales")!;
-    const chips = radios(r, "gb-when");
-    assert.deepEqual(chips.map((c) => c.value), t.schedulePresets.map((p) => p.id));
-    assert.deepEqual(chips.map((c) => flat(closest(c.node, "label"))), t.schedulePresets.map((p) => p.label));
-    assert.equal(chips.filter((c) => c.checked).length, 1);
+    assert.equal(flat(tags(r, "h3")[0]), "When should it run?");
+    const often = radios(r, "gb-when");
+    assert.deepEqual(often.map((c) => c.value), t.schedulePresets.map((p) => p.id));
+    assert.deepEqual(often.map((c) => flat(closest(c.node, "label"))), ["Monday to Friday", "On certain days of the week"]);
+    assert.equal(often.filter((c) => c.checked).length, 1);
+    assert.match(flat(r), /How often should it run\?/);
     const heading = all(r, (x) => x.tag === "p" && flat(x) === "Next runs:");
     assert.equal(heading.length, 1);
     const items = tags(heading[0].parent!, "li").map((li) => flat(li));
     const expected = nextRunsView(planFor(t, { presetId: t.schedulePresets[0].id })!, new Date(NOW));
-    assert.equal(expected.kind, "runs");
     assert.deepEqual(items, expected.kind === "runs" ? expected.lines : []);
-    assert.equal(items.length, 3);
     assert.deepEqual(items, ["Thu, Oct 15, 9:00 AM EDT", "Fri, Oct 16, 9:00 AM EDT", "Mon, Oct 19, 9:00 AM EDT"]);
-    assert.ok(byId(r, "gb-when-time"), "a time picker for a daily schedule");
-    assert.equal(byId(r, "gb-when-time")!.attrs.value, "09:00");
-    assert.equal(byId(r, "gb-when-days"), null, "no day picker for a weekday schedule");
+    const time = byId(r, "gb-when-time")!;
+    assert.equal(time.attrs.value, "09:00");
+    assert.equal(flat(all(r, (x) => x.tag === "label" && x.attrs.for === "gb-when-time")[0]), "What time of day?");
+    assert.equal(byId(r, "gb-when-days"), null, "no day question for Monday to Friday");
+    assert.equal(radios(r, "gb-when-count").length, 0, "no times-a-day question for a once-a-day job");
   });
 
-  await check("Job: next runs follow the clock across the fall-back weekend (EDT then EST)", () => {
-    const items = tags(all(dom.job_dst, (x) => x.tag === "p" && flat(x) === "Next runs:")[0].parent!, "li").map(flat);
+  await check("When: next runs follow the clock across the fall-back weekend (EDT then EST)", () => {
+    const items = tags(all(dom.when_dst, (x) => x.tag === "p" && flat(x) === "Next runs:")[0].parent!, "li").map(flat);
     assert.deepEqual(items, ["Sat, Oct 31, 7:30 AM EDT", "Sun, Nov 1, 7:30 AM EST", "Mon, Nov 2, 7:30 AM EST"]);
   });
 
-  await check("Job: a manual schedule says it runs only when you press Test now, with no times", () => {
-    const r = dom.job_manual;
-    assert.match(flat(r), /Runs only when you press Test now\./);
+  await check("When: Only when I ask says it runs when you press Test now, with no time question", () => {
+    const r = dom.when_manual;
+    assert.equal(radios(r, "gb-when").find((c) => c.checked)!.value, "manual");
+    assert.equal(flat(closest(radios(r, "gb-when").find((c) => c.checked)!.node, "label")), "Only when I ask");
+    assert.match(flat(r), /Runs only when you press Test now on its card\./);
     assert.equal(all(r, (x) => x.tag === "p" && flat(x) === "Next runs:").length, 0);
-    assert.equal(byId(r, "gb-when-time"), null, "a manual schedule has no time");
+    assert.equal(byId(r, "gb-when-time"), null);
   });
 
-  await check("Job: a weekly schedule shows day chips and the changed time in the chip's own words", () => {
-    const r = dom.job_weekly;
-    const days = radios(r, "x");
-    assert.equal(days.length, 0);
+  await check("When: On certain days of the week asks Which days? and keeps the time chosen", () => {
+    const r = dom.when_weekly;
     const dayInputs = all(r, (x) => x.tag === "input" && x.attrs.name === "gb-when-days");
     assert.equal(dayInputs.length, 7);
     assert.deepEqual(dayInputs.filter((d) => "checked" in d.attrs).map((d) => accName(r, d)), ["Monday", "Thursday"]);
+    assert.match(flat(r), /Which days\?/);
     assert.equal(byId(r, "gb-when-time")!.attrs.value, "09:15");
-    const chip = radios(r, "gb-when").find((c) => c.checked)!;
-    assert.equal(flat(closest(chip.node, "label")), "Mondays and Thursdays at 9:15 AM");
+    assert.equal(flat(closest(radios(r, "gb-when").find((c) => c.checked)!.node, "label")), "On certain days of the week");
     const t = templateById("daily_brief", "chief_of_staff")!;
     assert.equal(chipLabel(t.schedulePresets[2], { presetId: "monday_0800", days: [1, 4], time: "09:15" }), "Mondays and Thursdays at 9:15 AM");
+  });
+
+  await check("When: Several times a day asks for the first time and How many times a day?, each answer with its times", () => {
+    const r = dom.when_several;
+    assert.equal(flat(closest(radios(r, "gb-when").find((c) => c.checked)!.node, "label")), "Several times a day");
+    assert.equal(flat(all(r, (x) => x.tag === "label" && x.attrs.for === "gb-when-time")[0]), "What time is the first one?");
+    assert.match(flat(r), /How many times a day\?/);
+    const counts = radios(r, "gb-when-count");
+    const t = templateById("ops_check", "operations")!;
+    const expected = timesADayOptions(t, { presetId: "every_6h", time: "08:00" }, "digest");
+    assert.deepEqual(counts.map((c) => c.value), expected.map((o) => String(o.everyHours)));
+    assert.deepEqual(counts.filter((c) => c.checked).map((c) => c.value), ["6"], "the job's own interval until the person answers");
+    const three = closest(counts.find((c) => c.value === "6")!.node, "label")!;
+    assert.equal(flat(three), "3 times a day 8:00 AM, 2:00 PM and 8:00 PM");
+    const items = tags(all(r, (x) => x.tag === "p" && flat(x) === "Next runs:")[0].parent!, "li").map(flat);
+    assert.deepEqual(items, ["Thu, Oct 15, 2:00 PM EDT", "Thu, Oct 15, 8:00 PM EDT", "Fri, Oct 16, 8:00 AM EDT"]);
   });
 
   await check("Job: the custom brief has an objective with a live counter, the department's reads as a checklist, and the result choice", () => {
@@ -593,7 +617,7 @@ async function main() {
     };
     const noDept = why("dept");
     assert.ok(noDept.next.disabled);
-    assert.equal(noDept.why, "Pick a department to continue.");
+    assert.equal(noDept.why, "Pick an area of your business to continue.");
     assert.equal(noDept.next.name, "Next: Job");
     assert.equal(noDept.next.node.attrs["aria-describedby"], "gb-next-why");
     assert.ok(!why("dept_picked").next.disabled, "a department is chosen");
@@ -603,6 +627,7 @@ async function main() {
     assert.ok(noJob.next.disabled, "cannot go Next without a template");
     assert.equal(noJob.why, "Pick a job to continue.");
     assert.ok(!why("job_followup").next.disabled);
+    assert.equal(why("job_followup").next.name, "Next: When");
     assert.ok(!why("job_marketing").next.disabled, "a job with nothing to set up is complete");
   });
 
@@ -617,13 +642,17 @@ async function main() {
     assert.ok(!ok.disabled);
   });
 
-  await check("gating: Connections and Runs on always let the person move on, even with an app missing or Cloud not ready", () => {
-    for (const id of ["conn_missing", "conn_attention", "conn_unknown", "conn_none", "runs_ready", "runs_not_ready"]) {
+  await check("gating: When lets the person move on with an app missing; a cleared time holds them with the reason", () => {
+    for (const id of ["when_followup", "when_no_google", "when_manual", "when_weekly", "when_several"]) {
       const next = buttonsOf(dom[id]).find((b) => /^Next:/.test(b.name))!;
       assert.ok(next, id);
+      assert.equal(next.name, "Next: Finish", id);
       assert.equal(next.disabled, false, id);
     }
-    assert.equal(buttonsOf(dom.review_new).filter((b) => /^Next:/.test(b.name)).length, 0, "Review has no Next");
+    const cleared = buttonsOf(dom.when_time_cleared).find((b) => /^Next:/.test(b.name))!;
+    assert.ok(cleared.disabled);
+    assert.match(flat(byId(dom.when_time_cleared, "gb-next-why")), /Pick a time of day/);
+    assert.equal(buttonsOf(dom.review_new).filter((b) => /^Next:/.test(b.name)).length, 0, "the last step has no Next");
   });
 
   // ── validation sentences at the field ──
@@ -668,7 +697,7 @@ async function main() {
     assert.equal(flat(tools), "Tick at least one thing it may read.");
     assert.equal(tools.parent!.tag, "fieldset", "the error sits in the reads group");
     assert.equal(byId(dom.job_custom_notools, "gb-in-objective-error"), null, "not under the objective");
-    const sched = byId(dom.job_time_cleared, "gb-when-error");
+    const sched = byId(dom.when_time_cleared, "gb-when-error");
     assert.match(flat(sched), /Pick a time of day, written like 09:00\./);
     assert.equal(sched.attrs.role, "alert");
   });
@@ -682,46 +711,46 @@ async function main() {
     assert.equal(byId(r, "gb-in-objective")!.attrs.maxlength, undefined, "typing past the limit is told, never silently cut");
   });
 
-  // ── step 3 and 4 ──
-  await check("Connections: each required app shows Connected, Needs attention or Not connected, with its repair link as a real link", () => {
-    const missing = dom.conn_missing;
-    const row = appRows(missing)[0];
-    assert.match(flat(row), /Google Workspace/);
-    assert.match(flat(row), /Not connected/);
-    const link = tags(row, "a")[0];
+  // ── what it needs, on the last step ──
+  await check("Finish: Before it can run lists the AI account and every app the job needs, each with its state and a real repair link", () => {
+    const missing = dom.needs_missing;
+    assert.match(flat(missing), /Before it can run/);
+    const [ai, google] = appRows(missing);
+    assert.match(flat(ai), /Your AI account\s*Ready/);
+    assert.match(flat(google), /Google Workspace/);
+    assert.match(flat(google), /Not connected/);
+    const link = tags(google, "a")[0];
     assert.equal(link.attrs.href, REPAIR_GOOGLE.href);
     assert.equal(link.attrs.target, "_blank");
     assert.match(link.attrs.rel, /noopener/);
     assert.match(flat(link), /^Connect Google Workspace \(opens in a new tab\)$/);
-    const att = appRows(dom.conn_attention)[0];
+    assert.match(flat(missing), /You can save it now and connect what is missing later\. It can only be turned on once everything above is ready\./);
+    assert.ok(buttonsOf(missing).some((b) => b.name === "I fixed it, check again"));
+    const att = appRows(dom.needs_attention)[1];
     assert.match(flat(att), /Needs attention/);
     assert.equal(tags(att, "a")[0].attrs.href, REPAIR_GOOGLE.href);
-    const ok = appRows(dom.conn_ok)[0];
-    assert.match(flat(ok), /Connected/);
-    assert.equal(tags(ok, "a").length, 0, "a connected app needs no repair link");
-    assert.match(flat(dom.conn_missing), /You can save this without connecting these apps\. Turning it on needs every app above to be connected\./);
-    assert.ok(buttonsOf(dom.conn_missing).some((b) => b.name === "Check again"));
+    const ok = dom.needs_ok;
+    assert.match(flat(appRows(ok)[1]), /Connected/);
+    assert.equal(tags(appRows(ok)[1], "a").length, 0, "a connected app needs no repair link");
+    assert.match(flat(ok), /Everything it needs is ready\. It runs on OASIS's servers, so your computer can be off\./);
+    assert.ok(!buttonsOf(ok).some((b) => b.name === "I fixed it, check again"), "nothing to check again");
   });
 
-  await check("Connections: a job with no apps says so; an app the list did not name is shown as unchecked, not hidden; custom drafts need Google Workspace", () => {
-    assert.equal(flat(dom.conn_none).includes("This one needs no connected apps."), true);
-    assert.equal(appRows(dom.conn_none).length, 0);
-    const unknown = appRows(dom.conn_unknown)[0];
+  await check("Finish: a job with no apps lists only the AI account; an app the list did not name is unchecked, not hidden; custom drafts need Google Workspace", () => {
+    assert.equal(appRows(dom.needs_none).length, 1);
+    assert.match(flat(appRows(dom.needs_none)[0]), /Your AI account/);
+    const unknown = appRows(dom.needs_unknown)[1];
     assert.match(flat(unknown), /Google Workspace/);
     assert.match(flat(unknown), /We could not check this app/);
-    assert.match(flat(appRows(dom.conn_custom_drafts)[0]), /Google Workspace.*Not connected/);
+    assert.match(flat(appRows(dom.needs_custom_drafts)[1]), /Google Workspace.*Not connected/);
   });
 
-  await check("Runs on: Cloud is chosen with the honest line; Your computers is disabled with the reason", () => {
-    const r = dom.runs_ready;
-    assert.deepEqual(radios(r, "runs-on").map((c) => [c.value, c.checked, c.disabled]), [["cloud", true, false], ["computers", false, true]]);
-    assert.match(flat(r), /Runs in the cloud using your workspace's AI account\./);
-    assert.match(flat(r), /Computers run advanced scripts today\. Guided automations run in the cloud so they can never touch your files\./);
-    assert.match(flat(r), /Cloud is ready\./);
-    const bad = dom.runs_not_ready;
-    assert.match(flat(bad), /Cloud is not ready: No AI account is connected to this workspace\./);
-    assert.match(flat(bad), /You can still save this\. It cannot be turned on until Cloud is ready\./);
-    assert.equal(tags(bad, "a")[0].attrs.href, "/settings/ai");
+  await check("Finish: an AI account that is not ready says so in plain words, with the reason and the link to fix it", () => {
+    const r = dom.needs_ai_not_ready;
+    const ai = appRows(r)[0];
+    assert.match(flat(ai), /Your AI account\s*Not ready\s*No AI account is connected to this workspace\./);
+    assert.equal(tags(ai, "a")[0].attrs.href, "/settings/ai");
+    assert.doesNotMatch(flat(r), /\bCloud\b/, "no Cloud jargon");
   });
 
   // ── step 5 ──
@@ -730,7 +759,7 @@ async function main() {
     const sentence = flat(byId(r, "gb-happen-h")!.parent!.kids.find((k) => k.tag === "p")!);
     assert.equal(sentence, reviewSentence(FOLLOWUP));
     assert.match(sentence, /^Every weekday \(Monday to Friday\) at 9:00 AM, Toronto time, your "Follow-up drafts" automation will find up to 3 leads/);
-    assert.match(flat(byId(r, "gb-happen-h")!.parent), /Never: Never sends an email\. Each draft waits in Needs you until a person approves it\./);
+    assert.match(flat(byId(r, "gb-happen-h")!.parent), /Never sends an email\. Each draft waits in Needs you until a person approves it\./);
     const order = tags(r, "h5").map(flat);
     assert.deepEqual(order, ["Save", "Test now", "Turn on"]);
     const names = buttonsOf(r).filter((b) => ["Save", "Test now", "Turn on"].includes(b.name)).map((b) => b.name);
@@ -855,7 +884,7 @@ async function main() {
     assert.ok(buttonNamed(apps, /^Test now$/).disabled === false, "a missing app does not stop Test now");
     const cloud = dom.review_cloud_blocked;
     assert.ok(buttonNamed(cloud, /^Turn on$/).disabled);
-    assert.equal(flat(byId(cloud, "gb-activate-why")), "Cloud is not ready yet: No AI account is connected to this workspace.");
+    assert.equal(flat(byId(cloud, "gb-activate-why")), "Your AI account is not ready yet: No AI account is connected to this workspace.");
     assert.equal(tags(cloud, "a").filter((l) => l.attrs.href === "/settings/ai").length, 1);
   });
 
@@ -879,7 +908,7 @@ async function main() {
   await check("Review: editing a saved automation opens on Review with its values and nothing changed", () => {
     const r = dom.review_edit;
     assert.equal(tags(r, "h3")[0].kids.length > 0, true);
-    assert.equal(flat(tags(r, "h3")[0]), "Check it, then save, test and turn it on");
+    assert.equal(flat(tags(r, "h3")[0]), "Check it, then turn it on");
     assert.equal(byId(r, "gb-name")!.attrs.value, "Overdue follow-ups");
     assert.match(flat(r), /Saved and paused\./);
     assert.ok(buttonNamed(r, /^Saved$/).disabled, "no change since the save");
@@ -891,12 +920,12 @@ async function main() {
 
   // ── steps nav, summary, focus ──
   await check("the steps are an ordered list with aria-current=step on the current one, and the heading can take focus", () => {
-    const expectCurrent: Array<[string, string]> = [["dept", "Department"], ["job_followup", "Job"], ["conn_ok", "Connections"], ["runs_ready", "Runs on"], ["review_new", "Review"]];
+    const expectCurrent: Array<[string, string]> = [["dept", "Area"], ["job_followup", "Job"], ["when_followup", "When"], ["review_new", "Finish"]];
     for (const [id, label] of expectCurrent) {
       const r = dom[id];
       const nav = tags(r, "nav").find((n) => n.attrs["aria-label"] === "Steps")!;
       const ol = tags(nav, "ol")[0];
-      assert.equal(tags(ol, "li").length, 5, id);
+      assert.equal(tags(ol, "li").length, 4, id);
       const current = tags(ol, "li").filter((li) => li.attrs["aria-current"] === "step");
       assert.equal(current.length, 1, id);
       assert.match(flat(current[0]), new RegExp(`${label}`), id);
@@ -908,7 +937,7 @@ async function main() {
     const r = dom.review_new;
     const nav = tags(r, "nav").find((n) => n.attrs["aria-label"] === "Steps")!;
     const names = tags(nav, "button").map((b) => accName(r, b));
-    assert.deepEqual(names, ["Step 1: Department, done", "Step 2: Job, done", "Step 3: Connections, done", "Step 4: Runs on, done"]);
+    assert.deepEqual(names, ["Step 1: Area, done", "Step 2: Job, done", "Step 3: When, done"]);
     const first = dom.dept;
     const navFirst = tags(first, "nav").find((n) => n.attrs["aria-label"] === "Steps")!;
     assert.equal(tags(navFirst, "button").length, 0, "nothing to go back to, and nothing ahead is open");
@@ -923,13 +952,13 @@ async function main() {
     const column = aside.kids.find((k) => k.tag === "div")!;
     assert.ok(hasClass(column, "hidden") && hasClass(column, "lg:block"));
     const rows = (n: HNode) => tags(n, "dt").map(flat);
-    assert.deepEqual(rows(details), ["Department", "Job", "Result", "When", "Apps", "Runs on"]);
-    assert.match(flat(column), /Department Sales Job Follow-up drafts/);
+    assert.deepEqual(rows(details), ["Area", "Job", "Result", "When", "Needs"]);
+    assert.match(flat(column), /Area Sales Job Follow-up drafts/);
     assert.match(flat(column), /At most this many drafts per run: 3 drafts/);
     assert.match(flat(column), /Result Email drafts for your approval/);
-    assert.match(flat(column), /Apps Google Workspace/);
-    assert.match(flat(dom.dept), /Department Not chosen yet Job Not chosen yet/);
-    assert.match(flat(tags(details, "summary")[0]), /Your choices so far\s*\d of 6 chosen/);
+    assert.match(flat(column), /Needs Google Workspace/);
+    assert.match(flat(dom.dept), /Area Not chosen yet Job Not chosen yet/);
+    assert.match(flat(tags(details, "summary")[0]), /Your choices so far\s*\d of 5 chosen/);
   });
 
   // ── the list ──
@@ -1024,52 +1053,42 @@ async function main() {
   // ── the page ──
   await check("integration: with the builder off, the page is exactly what it was (no fold, no builder, the old header)", () => {
     const off = markup.page_off;
-    assert.ok(!off.includes("Advanced: scripts and technical jobs"));
-    assert.ok(!off.includes("guided-builder-h") && !off.includes("Choose a department and a job"));
+    assert.ok(!off.includes("Other scheduled jobs"));
+    assert.ok(!off.includes("guided-builder-h") && !off.includes("Pick a job, say when it should run"));
     assert.ok(!off.includes("guided-list-h") && !off.includes("Your automations"));
     assert.ok(off.includes("Scheduled jobs your agents run for you"));
     assert.ok(off.includes("Draft with AI"), "the composer is on the page");
     assert.ok(off.includes("How automations work, in plain English"));
   });
 
-  await check("integration: with the builder on, the guided builder and list lead, and the composer and the technical inventory fold under one closed Advanced section", () => {
+  await check("integration: with the builder on, it is the ONE way to make an automation: no AI box, no script form, older jobs folded away", () => {
     const on = dom.page_on;
     const top = on.kids[0];
     const children = top.kids;
     const idxGuided = children.findIndex((k) => k.tag === "div" && tags(k, "section").some((s) => s.attrs["aria-labelledby"] === "guided-list-h"));
-    const idxAdvanced = children.findIndex((k) => k.tag === "details");
-    assert.ok(idxGuided > 0 && idxAdvanced > idxGuided, "the guided half comes before the fold");
-    const fold = children[idxAdvanced];
+    const idxFold = children.findIndex((k) => k.tag === "details");
+    assert.ok(idxGuided > 0 && idxFold > idxGuided, "the builder and the list come before the fold");
+    const fold = children[idxFold];
     assert.ok(!("open" in fold.attrs), "closed by default");
-    assert.equal(tags(fold, "summary")[0].kids[0].text, "Advanced: scripts and technical jobs");
-    assert.equal(all(on, (x) => x.tag === "summary" && /^Advanced: scripts and technical jobs/.test(flat(x))).length, 1, "one Advanced section");
+    assert.equal(tags(fold, "summary")[0].kids[0].text, "Other scheduled jobs");
+    assert.equal(all(on, (x) => x.tag === "summary" && /^Other scheduled jobs/.test(flat(x))).length, 1, "one fold");
+    for (const html of [markup.page_on, markup.page_on_not_allowed]) {
+      assert.ok(!html.includes("Draft with AI"), "the AI box is gone");
+      assert.ok(!html.includes("Describe what you want"), "and its heading");
+      assert.ok(!html.includes("New automations are coming to this page."), "no placeholder for a path that is not offered");
+      assert.ok(!html.includes("Run a Python script"), "no script form");
+    }
     const inside = flat(fold);
-    assert.ok(inside.includes("Draft with AI"), "the old composer is inside Advanced");
     assert.ok(inside.includes("How automations work, in plain English"));
-    assert.ok(!flat(top.kids.slice(0, idxAdvanced).reduce((acc, k) => ({ ...acc, kids: [...acc.kids, k] }), { tag: "x", attrs: {}, kids: [] as HNode[], text: "", parent: null } as HNode)).includes("Draft with AI"), "and not outside it");
-    assert.ok(markup.page_on.includes("Choose a job, set when it runs and test it before you turn it on."));
+    assert.ok(markup.page_on.includes("Use New automation at the top of this page."));
+    assert.ok(markup.page_on.includes("Pick a job, say when it should run and try it once before you turn it on."));
     assert.ok(!markup.page_on.includes("lead scoring"), "the header no longer promises what no tenant job does");
-  });
-
-  await check("integration: everything the old page showed is inside Advanced, byte for byte", () => {
-    const off = markup.page_off;
-    const afterHeader = off.split("</header></div>")[1];
-    assert.ok(afterHeader && afterHeader.endsWith("</div>"));
-    const oldBody = afterHeader.slice(0, afterHeader.length - "</div>".length);
-    assert.ok(oldBody.length > 2000, "a real body to compare");
-    const on = markup.page_on;
-    const foldAt = on.indexOf("Advanced: scripts and technical jobs");
-    assert.ok(on.indexOf(oldBody) > foldAt, "the old markup is present, after the fold's summary");
-    // And for a viewer who may not create scripts, the placeholder sentence is the old one.
-    const notAllowed = markup.page_off_not_allowed.split("</header></div>")[1];
-    assert.ok(markup.page_on_not_allowed.includes(notAllowed.slice(0, notAllowed.length - "</div>".length)));
-    assert.ok(markup.page_on_not_allowed.includes("New automations are coming to this page."));
   });
 
   await check("integration: signed out, the builder is not offered and the page is the old one", () => {
     const html = markup.page_on_signed_out;
-    assert.ok(!html.includes("guided-builder-h") && !html.includes("Choose a department and a job"));
-    assert.ok(!html.includes("Advanced: scripts and technical jobs"));
+    assert.ok(!html.includes("guided-builder-h") && !html.includes("Pick a job, say when it should run"));
+    assert.ok(!html.includes("Other scheduled jobs"));
     assert.ok(html.includes("Sign in to manage your automations."));
   });
 
@@ -1141,7 +1160,7 @@ async function main() {
   });
 
   await check("one clear primary action per step (and none competing on the list)", () => {
-    for (const id of ["dept_picked", "job_followup", "conn_ok", "runs_ready", "review_new", "review_saved", "review_tested"]) {
+    for (const id of ["dept_picked", "job_followup", "when_followup", "review_new", "review_saved", "review_tested"]) {
       const primaries = tags(dom[id], "button").filter((b) => hasClass(b, "btn-primary")).filter((b) => !("disabled" in b.attrs));
       assert.equal(primaries.length, 1, `${id}: ${primaries.map(flat).join(" | ")}`);
     }
@@ -1182,41 +1201,44 @@ async function main() {
     return h;
   }
 
-  await check("driven: the wizard walks Department, Job, Connections, Runs on, Review and every Next is earned", async () => {
+  await check("driven: the wizard walks Area, Job, When, Finish and every Next is earned", async () => {
     const h = build();
     let f = h.f();
-    assert.match(f.words, /Which department is this for\?/);
+    assert.match(f.words, /What part of your business is this for\?/);
     assert.equal(isDisabled(f.button(/^Next: Job$/)), true);
-    assert.match(f.words, /Pick a department to continue\./);
+    assert.match(f.words, /Pick an area of your business to continue\./);
     pick(f.radio("department", "sales"));
     f = h.f();
-    assert.match(f.words, /Department Sales/, "the summary follows the choice");
+    assert.match(f.words, /Area Sales/, "the summary follows the choice");
     await press(f.button(/^Next: Job$/));
 
     f = h.f();
     assert.match(f.words, /What should it do\?/);
-    assert.equal(isDisabled(f.button(/^Next: Connections$/)), true, "no job yet");
+    assert.match(f.words, /Example of what you get \(made-up names and numbers\)/);
+    assert.equal(isDisabled(f.button(/^Next: When$/)), true, "no job yet");
     assert.match(f.words, /Pick a job to continue\./);
     pick(f.radio("job", "followup_drafts"));
     f = h.f();
     assert.match(f.words, /Job Follow-up drafts/);
-    assert.equal(isDisabled(f.button(/^Next: Connections$/)), false);
-    assert.match(f.words, /Next runs:/);
-    await press(f.button(/^Next: Connections$/));
+    assert.equal(isDisabled(f.button(/^Next: When$/)), false);
+    assert.doesNotMatch(f.words, /How often should it run\?/, "the schedule is its own step");
+    await press(f.button(/^Next: When$/));
 
     f = h.f();
-    assert.match(f.words, /Google Workspace/);
-    assert.match(f.words, /Not connected/);
-    await press(f.button(/^Next: Runs on$/));
-    f = h.f();
-    assert.match(f.words, /Where does it run\?/);
-    await press(f.button(/^Next: Review$/));
+    assert.match(f.words, /When should it run\?/);
+    assert.match(f.words, /How often should it run\?/);
+    assert.match(f.words, /What time of day\?/);
+    assert.match(f.words, /Next runs:/);
+    await press(f.button(/^Next: Finish$/));
     f = h.f();
     assert.match(f.words, /What will happen/);
+    assert.match(f.words, /Before it can run/);
+    assert.match(f.words, /Google Workspace/);
+    assert.match(f.words, /Not connected/);
     assert.equal(h.calls.length, 0, "walking the steps calls nothing");
   });
 
-  await check("driven: a typed setting, a changed time and a day pick change the summary, the chip and the Review sentence", async () => {
+  await check("driven: a typed setting, a changed time, a different How often and a day pick change the summary and the Review sentence", async () => {
     const h = build();
     let f = h.f();
     pick(f.radio("department", "chief_of_staff"));
@@ -1228,24 +1250,49 @@ async function main() {
     f = h.f();
     assert.match(f.words, /How long: Full \(up to 12 lines\)/);
     assert.match(f.words, /Include today's calendar: No/);
+    await press(f.button(/^Next: When$/));
+    f = h.f();
     typeInto(f.input("gb-when-time"), "06:15");
     f = h.f();
-    assert.match(f.words, /Weekdays at 6:15 AM/, "the chip says the new time");
+    assert.match(f.words, /Every weekday \(Monday to Friday\) at 6:15 AM/, "the summary says the new time");
     assert.match(f.words, /Next runs: Fri, Oct 16, 6:15 AM EDT/);
     pick(f.radio("gb-when", "monday_0800"));
     f = h.f();
+    assert.equal(f.input("gb-when-time").props.value, "06:15", "the time chosen carries over to the new answer");
     const dayBoxes = f.els.filter((e) => e.type === "input" && e.props.name === "gb-when-days");
     assert.equal(dayBoxes.length, 7);
-    const thursday = dayBoxes.find((e) => e.props.value === "4")!;
-    pick(thursday);
+    pick(dayBoxes.find((e) => e.props.value === "4")!);
     f = h.f();
-    assert.match(f.words, /Mondays and Thursdays at 8:00 AM/);
-    await press(f.button(/^Next: Connections$/));
-    assert.match(h.f().words, /This one needs no connected apps\./);
-    await press(h.f().button(/^Next: Runs on$/));
-    await press(h.f().button(/^Next: Review$/));
-    assert.match(h.f().words, /every Monday and Thursday at 8:00 AM, Toronto time|Every Monday and Thursday at 8:00 AM, Toronto time/);
-    assert.match(h.f().words, /a full brief \(up to 12 lines\) from your department numbers, the approvals waiting and the pipeline/);
+    assert.match(f.words, /Every Monday and Thursday at 6:15 AM/);
+    await press(f.button(/^Next: Finish$/));
+    f = h.f();
+    assert.match(f.words, /Every Monday and Thursday at 6:15 AM, Toronto time/);
+    assert.match(f.words, /a full brief \(up to 12 lines\) from your department numbers, the approvals waiting and the pipeline/);
+    assert.match(f.words, /Everything it needs is ready\./, "a brief needs no app, and the AI account is ready");
+  });
+
+  await check("driven: Several times a day asks How many times a day?, and the answer changes the runs", async () => {
+    const h = build({}, CTX);
+    pick(h.f().radio("department", "operations"));
+    await press(h.f().button(/^Next: Job$/));
+    pick(h.f().radio("job", "ops_check"));
+    await press(h.f().button(/^Next: When$/));
+    let f = h.f();
+    pick(f.radio("gb-when", "every_6h"));
+    f = h.f();
+    assert.match(f.words, /What time is the first one\?/);
+    assert.match(f.words, /How many times a day\?/);
+    typeInto(f.input("gb-when-time"), "08:00");
+    f = h.f();
+    const twice = f.els.find((e) => e.type === "input" && e.props.name === "gb-when-count" && e.props.value === "8")!;
+    pick(twice);
+    f = h.f();
+    assert.match(f.words, /2 times a day at 8:00 AM and 4:00 PM, Toronto time/, "the summary says it the way the question asked it");
+    assert.match(f.words, /Next runs: Thu, Oct 15, 4:00 PM EDT Fri, Oct 16, 8:00 AM EDT Fri, Oct 16, 4:00 PM EDT/);
+    await press(f.button(/^Next: Finish$/));
+    await press(h.f().button(/^Save$/));
+    const sent = h.calls[0].args[0] as { payload: { schedule: { plan: unknown } } };
+    assert.deepEqual(sent.payload.schedule.plan, { mode: "every_n_hours", time: "08:00", every_hours: 8, timezone: "America/Toronto" });
   });
 
   await check("driven: the custom brief cannot move on without an objective and a ticked read; the stepper stays in range", async () => {
@@ -1254,18 +1301,18 @@ async function main() {
     await press(h.f().button(/^Next: Job$/));
     pick(h.f().radio("job", "custom"));
     let f = h.f();
-    assert.equal(isDisabled(f.button(/^Next: Connections$/)), true);
+    assert.equal(isDisabled(f.button(/^Next: When$/)), true);
     typeInto(f.input("gb-in-objective"), "ab");
     f = h.f();
-    assert.equal(isDisabled(f.button(/^Next: Connections$/)), true, "two characters is not an objective");
+    assert.equal(isDisabled(f.button(/^Next: When$/)), true, "two characters is not an objective");
     assert.match(f.words, /Tell us a little more in "What should it look into\?" \(at least 5 characters\)\./, "the sentence appears once the field has been touched");
     typeInto(f.input("gb-in-objective"), "Which leads have gone quiet?");
     f = h.f();
-    assert.equal(isDisabled(f.button(/^Next: Connections$/)), true, "still no read ticked");
+    assert.equal(isDisabled(f.button(/^Next: When$/)), true, "still no read ticked");
     assert.match(f.words, /Tick at least one thing it may read\./);
     tick(f.els.find((e) => e.type === "input" && e.props.id === "gb-tool-pipeline_summary")!, true);
     f = h.f();
-    assert.equal(isDisabled(f.button(/^Next: Connections$/)), false);
+    assert.equal(isDisabled(f.button(/^Next: When$/)), false);
     assert.match(f.words, /May read: pipeline/);
 
     // The stepper never leaves the template's range.
@@ -1279,7 +1326,7 @@ async function main() {
     assert.equal(isDisabled(up()), true);
     typeInto(h2.f().input("gb-in-days_quiet"), "99");
     assert.match(h2.f().words, /"Count a lead as stalled after" must be a whole number from 3 to 30\./);
-    assert.equal(isDisabled(h2.f().button(/^Next: Connections$/)), true);
+    assert.equal(isDisabled(h2.f().button(/^Next: When$/)), true);
   });
 
   await check("driven: Save creates paused, Test now runs the saved one, Turn on waits for the app and then works, and each line is the server's", async () => {
@@ -1287,9 +1334,8 @@ async function main() {
     pick(h.f().radio("department", "sales"));
     await press(h.f().button(/^Next: Job$/));
     pick(h.f().radio("job", "followup_drafts"));
-    await press(h.f().button(/^Next: Connections$/));
-    await press(h.f().button(/^Next: Runs on$/));
-    await press(h.f().button(/^Next: Review$/));
+    await press(h.f().button(/^Next: When$/));
+    await press(h.f().button(/^Next: Finish$/));
 
     let f = h.f();
     assert.equal(isDisabled(f.button(/^Test now$/)), true);
@@ -1341,17 +1387,16 @@ async function main() {
     pick(h.f().radio("department", "sales"));
     await press(h.f().button(/^Next: Job$/));
     pick(h.f().radio("job", "stalled_digest"));
-    for (const next of [/^Next: Connections$/, /^Next: Runs on$/, /^Next: Review$/]) await press(h.f().button(next));
+    for (const next of [/^Next: When$/, /^Next: Finish$/]) await press(h.f().button(next));
     await press(h.f().button(/^Save$/));
     await press(h.f().button(/^Test now$/));
     assert.equal(isDisabled(h.f().button(/^Turn on$/)), false, "tested, so ready");
 
     await press(h.f().button(/^Back$/));
     await press(h.f().button(/^Back$/));
-    await press(h.f().button(/^Back$/));
     assert.match(h.f().words, /What should it do\?/);
     typeInto(h.f().input("gb-in-days_quiet"), "12");
-    for (const next of [/^Next: Connections$/, /^Next: Runs on$/, /^Next: Review$/]) await press(h.f().button(next));
+    for (const next of [/^Next: When$/, /^Next: Finish$/]) await press(h.f().button(next));
     const f = h.f();
     assert.match(f.words, /You have changes that are not saved yet\./);
     assert.equal(isDisabled(f.button(/^Test now$/)), true);
@@ -1372,7 +1417,7 @@ async function main() {
     pick(h.f().radio("department", "chief_of_staff"));
     await press(h.f().button(/^Next: Job$/));
     pick(h.f().radio("job", "daily_brief"));
-    for (const next of [/^Next: Connections$/, /^Next: Runs on$/, /^Next: Review$/]) await press(h.f().button(next));
+    for (const next of [/^Next: When$/, /^Next: Finish$/]) await press(h.f().button(next));
     await press(h.f().button(/^Save$/));
     let f = h.f();
     assert.equal(isDisabled(f.button(/^Turn on$/)), true);
@@ -1396,7 +1441,7 @@ async function main() {
     pick(h.f().radio("department", "chief_of_staff"));
     await press(h.f().button(/^Next: Job$/));
     pick(h.f().radio("job", "daily_brief"));
-    for (const next of [/^Next: Connections$/, /^Next: Runs on$/, /^Next: Review$/]) await press(h.f().button(next));
+    for (const next of [/^Next: When$/, /^Next: Finish$/]) await press(h.f().button(next));
     await press(h.f().button(/^Save$/));
     let f = h.f();
     assert.match(f.words, /Only owners and admins can save automations\./);
@@ -1412,7 +1457,7 @@ async function main() {
     pick(h2.f().radio("department", "chief_of_staff"));
     await press(h2.f().button(/^Next: Job$/));
     pick(h2.f().radio("job", "daily_brief"));
-    for (const next of [/^Next: Connections$/, /^Next: Runs on$/, /^Next: Review$/]) await press(h2.f().button(next));
+    for (const next of [/^Next: When$/, /^Next: Finish$/]) await press(h2.f().button(next));
     await press(h2.f().button(/^Save$/));
     await press(h2.f().button(/^Test now$/));
     f = h2.f();
@@ -1436,7 +1481,7 @@ async function main() {
     pick(h.f().radio("department", "chief_of_staff"));
     await press(h.f().button(/^Next: Job$/));
     pick(h.f().radio("job", "daily_brief"));
-    for (const next of [/^Next: Connections$/, /^Next: Runs on$/, /^Next: Review$/]) await press(h.f().button(next));
+    for (const next of [/^Next: When$/, /^Next: Finish$/]) await press(h.f().button(next));
     const save = h.f().button(/^Save$/);
     const onClick = save.props.onClick as () => unknown;
     onClick();
