@@ -126,9 +126,9 @@ async function main() {
       };
     },
   };
-  const reschedule = (appointmentId: string, requestId: string) =>
+  const reschedule = (appointmentId: string, requestId: string, meetingAt = MOVE_TO) =>
     rescheduleVerifiedFounderMeeting(
-      { tenantId: TENANT, leadId: LEAD, appointmentId, requestId, meetingAt: MOVE_TO },
+      { tenantId: TENANT, leadId: LEAD, appointmentId, requestId, meetingAt },
       deps as never,
     );
   const row = async (id: string) =>
@@ -184,14 +184,19 @@ async function main() {
     ]);
   });
 
+  // The OASIS founder calendar never holds two overlapping calls (bravo__222's
+  // unique index and bravo__223's triggers, and the reschedule's own pre-check),
+  // so this call moves to a time of its own rather than onto the read-error
+  // call's MOVE_TO, which the earlier check already took.
+  const ACTIVE_MOVE_TO = "2026-09-25T19:00:00.000Z";
   await check("an active host reschedules exactly as before: patched as the host, rows queued as the host", async () => {
-    const meeting = await reschedule("meeting-active", "reschedule-active");
-    assert.equal(meeting.meetingAt, MOVE_TO);
+    const meeting = await reschedule("meeting-active", "reschedule-active", ACTIVE_MOVE_TO);
+    assert.equal(meeting.meetingAt, ACTIVE_MOVE_TO);
     assert.deepEqual(patched.splice(0), [
-      { hostUserId: ACTIVE_HOST, eventId: "event-meeting-active", meetingAt: MOVE_TO },
+      { hostUserId: ACTIVE_HOST, eventId: "event-meeting-active", meetingAt: ACTIVE_MOVE_TO },
     ]);
     const appointment = await row("meeting-active");
-    assert.equal(appointment.scheduled_for, MOVE_TO);
+    assert.equal(appointment.scheduled_for, ACTIVE_MOVE_TO);
     assert.equal(Number(appointment.revision), 2);
     assert.equal(appointment.last_reschedule_request_id, "reschedule-active");
     assert.deepEqual(await queuedSenders("meeting-active"), [ACTIVE_HOST]);
@@ -200,8 +205,8 @@ async function main() {
   await check("a replay of an applied reschedule returns its receipt before any standing read", async () => {
     await seed.execute("ALTER TABLE user_profiles RENAME TO user_profiles_offline");
     try {
-      const replay = await reschedule("meeting-active", "reschedule-active");
-      assert.equal(replay.meetingAt, MOVE_TO);
+      const replay = await reschedule("meeting-active", "reschedule-active", ACTIVE_MOVE_TO);
+      assert.equal(replay.meetingAt, ACTIVE_MOVE_TO);
     } finally {
       await seed.execute("ALTER TABLE user_profiles_offline RENAME TO user_profiles");
     }

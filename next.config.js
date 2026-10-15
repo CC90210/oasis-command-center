@@ -346,6 +346,15 @@ const nextConfig = {
         destination: "/opengraph-image-pwu6ef.png",
         permanent: true,
       },
+      // The Schedule lives at /schedule. The booking brief, a few chat replies and a
+      // founder's muscle memory say /team/schedule, which is where the departments
+      // live (/team/sales, ...) and answered 404. Temporary on purpose (an
+      // authenticated page; nothing to teach search engines).
+      {
+        source: "/team/schedule",
+        destination: "/schedule",
+        permanent: false,
+      },
     ];
   },
   // Production security headers — applied to every response (including

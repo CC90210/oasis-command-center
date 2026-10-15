@@ -67,18 +67,31 @@ export function oasisLaneOutcome(sent: LaneResult, token?: string | null): strin
 }
 
 /**
+ * What an alert is about, for OASIS's own workspaces only. A new lead on
+ * oasisai.work is the sales desk's (CC and Adon, who split every inbound lead),
+ * not just the operator's: it goes to the sales group. A client workspace has
+ * no desks of OASIS's: it always reaches its own bot, whatever it asks for.
+ */
+export type AlertDesk = "sales";
+
+/**
  * Push one alert (Telegram HTML, already escaped) to this workspace's own
  * audience. Never throws, never reaches another workspace's chat.
  */
-export async function pushWorkspaceAlert(tenantId: string, text: string): Promise<AlertPush> {
+export async function pushWorkspaceAlert(
+  tenantId: string,
+  text: string,
+  opts?: { desk?: AlertDesk },
+): Promise<AlertPush> {
   const audience = alertAudienceFor(tenantId);
   if (audience === "card_only") return { delivered: false, outcome: "Not sent: this workspace is retired" };
   if (audience === "oasis_operator") {
-    const sent: LaneResult = await sendTelegram(text, { lane: "operator" }).catch((err: unknown) => ({
+    const lane = opts?.desk === "sales" ? "sales" : "operator";
+    const sent: LaneResult = await sendTelegram(text, { lane }).catch((err: unknown) => ({
       ok: false,
       reason: err instanceof Error ? err.message : "telegram_error",
     }));
-    return { delivered: sent.ok, outcome: oasisLaneOutcome(sent, laneCredentials("operator")?.token) };
+    return { delivered: sent.ok, outcome: oasisLaneOutcome(sent, laneCredentials(lane)?.token) };
   }
   const result = await sendWorkspaceTelegram(tenantId, text);
   return { delivered: result.ok, outcome: workspaceTelegramOutcome(result) };

@@ -192,8 +192,13 @@ async function main() {
     assert.deepEqual(body.job.task, { kind: "coding", repo_scope: { kind: "agent_root", agent: "bravo" } });
     assert.equal(body.job.events_url, `/api/bridge/harness-jobs/${body.job.job_id}/events`);
     assert.equal(body.job.heartbeat_url, `/api/bridge/harness-jobs/${body.job.job_id}/heartbeat`);
-    const serialized = JSON.stringify(body.job);
+    // The run token is a random signed credential, not part of the payload's meaning: its
+    // base64url signature contained "Cwd" by chance (2026-10-15, ~0.1% of runs) and failed
+    // CI. Scan everything the connector is told to do, not the opaque secret.
+    const { run_token: _runToken, ...visibleJob } = body.job;
+    const serialized = JSON.stringify(visibleJob);
     assert.doesNotMatch(serialized, /(?:command|cwd|repo_path|shell)/i);
+    assert.equal(typeof _runToken, "string", "the claim still carries a run token");
 
     const jobId = String(body.job.job_id);
     const token = String(body.job.run_token);

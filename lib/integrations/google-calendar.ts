@@ -1,5 +1,5 @@
 /**
- * Server-side Google Calendar adapter for the 15-minute founder audit.
+ * Server-side Google Calendar adapter for verified founder calls.
  *
  * The adapter deliberately accepts no notes or free-form description. Internal
  * qualification and handoff context belongs in Turso, never in a client-visible
@@ -15,16 +15,15 @@ import {
   setUserIntegrationValue,
   type UserIntegrationSetResult,
 } from "@/lib/user-integration-store";
+import { FOUNDER_MEETING_DURATION_MINUTES, founderMeetingOfferLabel } from "@/lib/website-sales-meeting";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 const WORK_OAUTH_SERVICE = "gmail_oauth";
 const PRIMARY_CALENDAR_ID = "primary";
 const ACCESS_TOKEN_REFRESH_SKEW_MS = 60_000;
-const MEETING_DURATION_MS = 15 * 60 * 1000;
 const DEFAULT_POLL_ATTEMPTS = 4;
 const DEFAULT_POLL_INTERVAL_MS = 500;
-const PUBLIC_EVENT_DESCRIPTION = "A 15-minute website audit with OASIS AI Solutions.";
 
 export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 /** The parent scope. Strictly contains CALENDAR_EVENTS_SCOPE — see hasRequiredScope. */
@@ -42,6 +41,7 @@ export type GoogleCalendarErrorCode =
   | "calendar_cancel_failed"
   | "calendar_reconcile_failed"
   | "calendar_read_failed"
+  | "calendar_availability_failed"
   | "google_meet_link_missing"
   // The host's token AND the shared workspace token both rejected. Distinct
   // from token_refresh_failed on purpose: that one means "this host must
@@ -91,6 +91,7 @@ export type FounderMeetingCalendarRequest = {
   website?: string;
   clientAgenda?: string;
   durationMinutes?: number;
+  offerLabel?: string;
 };
 
 /**
@@ -232,6 +233,7 @@ export type CreateGoogleFounderMeetingInput = {
   meetingAt: string;
   timezone: string;
   durationMinutes: number;
+  offerLabel?: string;
   clientEmail: string;
   clientName?: string;
   /** Opener rep copied on the invite when they are not the host/closer. */
@@ -251,6 +253,7 @@ export type UpdateGoogleFounderMeetingInput = {
   meetingAt: string;
   timezone: string;
   durationMinutes: number;
+  offerLabel?: string;
   clientEmail: string;
   clientName?: string;
   /** Opener rep copied on the invite when they are not the host/closer. */
@@ -301,6 +304,15 @@ type GoogleCalendarEvent = {
   conferenceData?: {
     entryPoints?: Array<{ entryPointType?: string; uri?: string }>;
   };
+};
+
+export type GoogleBusyInterval = { start: string; end: string };
+
+type GoogleCalendarListEvent = {
+  status?: string;
+  transparency?: string;
+  start?: { date?: string; dateTime?: string };
+  end?: { date?: string; dateTime?: string };
 };
 
 export type GoogleCalendarDependencies = {
@@ -437,6 +449,8 @@ function validateRequest(args: FounderMeetingCalendarRequest): {
   timeZone: string;
   clientEmail: string;
   website?: string;
+  durationMinutes: number;
+  offerLabel: string;
 } {
   if (!args.tenantId.trim() || !args.organizerUserId.trim() || !args.bookingRequestId.trim()) {
     throw new GoogleCalendarIntegrationError(
@@ -461,10 +475,18 @@ function validateRequest(args: FounderMeetingCalendarRequest): {
     );
   }
 
-  if (args.durationMinutes !== undefined && args.durationMinutes !== 15) {
+  const durationMinutes = args.durationMinutes ?? FOUNDER_MEETING_DURATION_MINUTES;
+  if (!Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 120) {
     throw new GoogleCalendarIntegrationError(
       "invalid_request",
-      "founder audit meetings must be exactly 15 minutes",
+      "founder meeting duration must be an integer from 15 to 120 minutes",
+    );
+  }
+  const offerLabel = founderMeetingOfferLabel(durationMinutes, args.offerLabel);
+  if (offerLabel.length > 80 || /[\r\n]/u.test(offerLabel)) {
+    throw new GoogleCalendarIntegrationError(
+      "invalid_request",
+      "founder meeting offer label must be a single line of at most 80 characters",
     );
   }
 
@@ -502,10 +524,12 @@ function validateRequest(args: FounderMeetingCalendarRequest): {
 
   return {
     startAt: new Date(startMilliseconds).toISOString(),
-    endAt: new Date(startMilliseconds + MEETING_DURATION_MS).toISOString(),
+    endAt: new Date(startMilliseconds + durationMinutes * 60_000).toISOString(),
     timeZone,
     clientEmail,
     website,
+    durationMinutes,
+    offerLabel,
   };
 }
 
@@ -734,16 +758,16 @@ function assertFounderMeetingEventIdentity(
   if (event.description !== expected.description) fail("description");
 }
 
-function eventTitle(businessName?: string): string {
+function eventTitle(durationMinutes: number, offerLabel: string, businessName?: string): string {
   const business = businessName?.trim();
   return business
-    ? `OASIS 15-minute website audit — ${business}`
-    : "OASIS 15-minute website audit";
+    ? `OASIS ${durationMinutes}-minute ${offerLabel} — ${business}`
+    : `OASIS ${durationMinutes}-minute ${offerLabel}`;
 }
 
-function publicEventDescription(clientAgenda?: string, website?: string): string {
+function publicEventDescription(durationMinutes: number, offerLabel: string, clientAgenda?: string, website?: string): string {
   const agenda = clientAgenda?.trim();
-  const sections = [PUBLIC_EVENT_DESCRIPTION];
+  const sections = [`A ${durationMinutes}-minute ${offerLabel} with OASIS AI Solutions.`];
   if (agenda) sections.push(`Agenda:\n${agenda}`);
   if (website) sections.push(`Website: ${website}`);
   return sections.join("\n\n");
@@ -790,6 +814,8 @@ async function openAuthorizedCalendarSession(args: {
   tenantId: string;
   organizerUserId: string;
   expectedOrganizerEmail?: string;
+  /** Availability must never substitute a different account for the founder whose free time is being checked. */
+  allowSystemFallback?: boolean;
   dependencyOverrides?: Partial<GoogleCalendarDependencies>;
 }): Promise<{
   dependencies: GoogleCalendarDependencies;
@@ -820,7 +846,7 @@ async function openAuthorizedCalendarSession(args: {
   let sessionClientSecret: string | undefined;
   if (!bundle.refresh_token || !hasRequiredScope(bundle.scope)) {
     const system = systemCalendarConfig();
-    if (system) {
+    if (system && args.allowSystemFallback !== false) {
       systemFallback = true;
       calendarId = system.calendarId;
       sessionClientId = system.clientId;
@@ -911,7 +937,9 @@ async function openAuthorizedCalendarSession(args: {
     } catch (error) {
       const revoked =
         error instanceof GoogleCalendarIntegrationError && error.code === "token_refresh_failed";
-      const system = revoked && !systemFallback ? systemCalendarConfig() : null;
+      const system = revoked && !systemFallback && args.allowSystemFallback !== false
+        ? systemCalendarConfig()
+        : null;
       if (!system) throw error;
       systemFallback = true;
       calendarId = system.calendarId;
@@ -1092,8 +1120,8 @@ export async function createFounderMeetingCalendarEvent(
     clientEmail: normalized.clientEmail,
     attendeeEmails: attendees.map((attendee) => attendee.email),
     organizerEmail: bundle.gmail_address || undefined,
-    summary: eventTitle(args.businessName),
-    description: publicEventDescription(args.clientAgenda, normalized.website),
+    summary: eventTitle(normalized.durationMinutes, normalized.offerLabel, args.businessName),
+    description: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, args.clientAgenda, normalized.website),
   };
   const eventPayload = {
     id: eventId,
@@ -1196,6 +1224,84 @@ export async function createFounderMeetingCalendarEvent(
   };
 }
 
+/**
+ * Read one founder's live Google Calendar and return only periods that block a
+ * booking. We intentionally use events.list instead of Google's freeBusy RPC:
+ * the existing work connection grants calendar.events (the scope used for
+ * verified Meet creation), while freeBusy requires a separate read scope and
+ * would force both founders through a new OAuth consent screen. This produces
+ * the same availability result from the canonical calendar without widening
+ * access.
+ */
+export async function listGoogleCalendarBusy(
+  args: {
+    tenantId: string;
+    organizerUserId: string;
+    expectedOrganizerEmail: string;
+    timeMin: string;
+    timeMax: string;
+  },
+  dependencyOverrides: Partial<GoogleCalendarDependencies> = {},
+): Promise<GoogleBusyInterval[]> {
+  const timeMinMs = Date.parse(args.timeMin);
+  const timeMaxMs = Date.parse(args.timeMax);
+  if (
+    !Number.isFinite(timeMinMs) ||
+    !Number.isFinite(timeMaxMs) ||
+    timeMaxMs <= timeMinMs ||
+    timeMaxMs - timeMinMs > 31 * 24 * 60 * 60_000
+  ) {
+    throw new GoogleCalendarIntegrationError("invalid_request", "availability range is invalid");
+  }
+  const { authorizedFetch, calendarId } = await openAuthorizedCalendarSession({
+    tenantId: args.tenantId,
+    organizerUserId: args.organizerUserId,
+    expectedOrganizerEmail: args.expectedOrganizerEmail,
+    allowSystemFallback: false,
+    dependencyOverrides,
+  });
+  const url = new URL(`${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`);
+  url.searchParams.set("timeMin", new Date(timeMinMs).toISOString());
+  url.searchParams.set("timeMax", new Date(timeMaxMs).toISOString());
+  url.searchParams.set("singleEvents", "true");
+  url.searchParams.set("showDeleted", "false");
+  url.searchParams.set("orderBy", "startTime");
+  url.searchParams.set("maxResults", "2500");
+  const response = await authorizedFetch(
+    url.toString(),
+    { method: "GET", headers: { accept: "application/json" } },
+    "calendar_availability_failed",
+  );
+  if (!response.ok) {
+    throw new GoogleCalendarIntegrationError(
+      "calendar_availability_failed",
+      `Google Calendar availability read failed: ${await responseText(response)}`,
+      { httpStatus: response.status },
+    );
+  }
+  const payload = await responseJson<{ items?: GoogleCalendarListEvent[]; nextPageToken?: string }>(
+    response,
+    "calendar_availability_failed",
+  );
+  // maxResults is 2500 and only the first page is read. A page that says there is more
+  // means busy time we did not see, and offering slots over it double-books a founder.
+  // Refuse instead of guessing (review of #611).
+  if (payload.nextPageToken) {
+    throw new GoogleCalendarIntegrationError(
+      "calendar_availability_failed",
+      "Google Calendar availability has more events than one page; refusing to offer slots over unseen busy time",
+    );
+  }
+  const dateBoundary = (value: string): string => `${value}T00:00:00.000Z`;
+  return (payload.items || []).flatMap((event) => {
+    if (event.status === "cancelled" || event.transparency === "transparent") return [];
+    const start = event.start?.dateTime || (event.start?.date ? dateBoundary(event.start.date) : "");
+    const end = event.end?.dateTime || (event.end?.date ? dateBoundary(event.end.date) : "");
+    if (!Number.isFinite(Date.parse(start)) || !Number.isFinite(Date.parse(end))) return [];
+    return [{ start: new Date(start).toISOString(), end: new Date(end).toISOString() }];
+  });
+}
+
 export function createGoogleFounderMeeting(
   input: CreateGoogleFounderMeetingInput,
 ): Promise<GoogleCalendarReceipt>;
@@ -1223,6 +1329,7 @@ export async function createGoogleFounderMeeting(
       startAt: input.meetingAt,
       timeZone: input.timezone,
       durationMinutes: input.durationMinutes,
+      offerLabel: input.offerLabel,
       clientEmail: input.clientEmail,
       clientName: input.clientName,
       openerEmail: input.openerEmail,
@@ -1283,6 +1390,7 @@ export async function updateGoogleFounderMeeting(
     startAt: input.meetingAt,
     timeZone: input.timezone,
     durationMinutes: input.durationMinutes,
+    offerLabel: input.offerLabel,
     clientEmail: input.clientEmail,
     clientName: input.clientName,
     openerEmail: input.openerEmail,
@@ -1323,8 +1431,8 @@ export async function updateGoogleFounderMeeting(
     clientEmail: normalized.clientEmail,
     attendeeEmails: attendees.map((attendee) => attendee.email),
     organizerEmail: bundle.gmail_address || undefined,
-    summary: eventTitle(input.company),
-    description: publicEventDescription(input.clientAgenda, normalized.website),
+    summary: eventTitle(normalized.durationMinutes, normalized.offerLabel, input.company),
+    description: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, input.clientAgenda, normalized.website),
   };
   const response = await authorizedFetch(
     patchUrl.toString(),

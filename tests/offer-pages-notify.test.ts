@@ -177,7 +177,8 @@ async function main() {
     assert.equal(calls[0].chatId, "5550001");
     assert.match(calls[0].text, /New lead from the offer page "Growth Offer"/);
     assert.match(calls[0].text, /Dana &amp; Co &lt;script&gt;/, "visitor-typed values are escaped for Telegram HTML");
-    assert.match(calls[0].text, /no booking yet/);
+    assert.match(calls[0].text, /unbooked, needs follow-up/);
+    assert.match(calls[0].text, new RegExp(`https://oasisai\\.work/pipeline/${L}`), "the alert links to the lead");
     // A later step-0 by the same lead is a repeat.
     const later = await submission("s-race-c", OFFER_OASIS, OASIS, L, "2026-10-08T13:00:00.000Z");
     assert.equal(await notifyOfferLead({ db: supa, offers, tenantId: OASIS, formId: OFFER_OASIS, formName: "Growth Offer", leadId: L, submissionId: later, answers }), "repeat");

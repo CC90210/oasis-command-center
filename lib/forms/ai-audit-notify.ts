@@ -14,10 +14,15 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
-import { AI_AUDIT_STEP_COUNT } from "@/lib/forms/oasis-ai-audit-seed";
-import { buildAiAuditAlert, composeAiAuditWelcome } from "@/lib/forms/ai-audit-format";
+import { pipelineLeadUrl } from "@/lib/forms/lead-link";
+import { AI_AUDIT_SLUG, AI_AUDIT_STEP_COUNT, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
+import { buildAiAuditAlert, composeAiAuditWelcome, type WelcomeLinks } from "@/lib/forms/ai-audit-format";
+import { signFormLink } from "@/lib/form-links";
+import { buildResumeUrl } from "@/lib/forms/resume-link";
+import { marketingSendAllowed } from "@/lib/consent/marketing-send-gate";
+import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import { isFirstSubmissionForLead } from "@/lib/forms/first-submission";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
@@ -42,17 +47,24 @@ export const AI_AUDIT_WELCOME_SOURCE = TRANSACTIONAL_OUTBOX_SOURCE;
  */
 export const AI_AUDIT_ALERT_SOURCE = "ai_audit_alert";
 
-type AiAuditSalesEvent = "started" | "completed";
+type AiAuditSalesEvent = "started" | "completed" | "booked";
 
 function deterministicEventId(input: {
   tenantId: string;
   formId: string;
   leadId: string;
   event: AiAuditSalesEvent;
+  /**
+   * A booked call is one event PER APPOINTMENT. Keyed by lead alone, a cancelled and
+   * rebooked lead kept its first event (the upsert ignores duplicates) and the Sales
+   * handoff carried the old time and Meet link (review of #611).
+   */
+  appointmentId?: string;
 }): string {
   const digest = createHash("sha256")
     .update(
-      `oasis-ai-audit-sales-event:v1:${input.tenantId}:${input.formId}:${input.leadId}:${input.event}`,
+      `oasis-ai-audit-sales-event:v1:${input.tenantId}:${input.formId}:${input.leadId}:${input.event}` +
+        (input.appointmentId ? `:${input.appointmentId}` : ""),
       "utf8",
     )
     .digest("hex");
@@ -69,6 +81,7 @@ export async function ensureAiAuditSalesEvent(input: {
   event: AiAuditSalesEvent;
   submissionId?: string;
   score?: ScoreBreakdown;
+  booking?: { startsAt: string; meetUrl: string; appointmentId: string };
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const payload: Record<string, unknown> = {
@@ -82,11 +95,22 @@ export async function ensureAiAuditSalesEvent(input: {
       payload.score = input.score.score;
       payload.qualification = input.score.status;
     }
+    if (input.event === "completed") payload.booking_status = "unbooked";
+    if (input.booking) {
+      payload.booking_status = "booked";
+      payload.starts_at = input.booking.startsAt;
+      payload.meet_url = input.booking.meetUrl;
+      payload.appointment_id = input.booking.appointmentId;
+    }
     const result = await input.db.from("agent_events").upsert(
       {
-        id: deterministicEventId(input),
+        id: deterministicEventId({ ...input, appointmentId: input.booking?.appointmentId }),
         event_type:
-          input.event === "started" ? "OASIS_AI_AUDIT_STARTED" : "OASIS_AI_AUDIT_COMPLETED",
+          input.event === "started"
+            ? "OASIS_AI_AUDIT_STARTED"
+            : input.event === "booked"
+              ? "OASIS_AI_AUDIT_BOOKED"
+              : "OASIS_AI_AUDIT_COMPLETED",
         publisher_agent: "dept:sales",
         target_agent: "dept:sales",
         severity: input.score?.status === "qualified" ? "warn" : "info",
@@ -191,12 +215,15 @@ export async function notifyAiAuditStarted(input: {
     // Derived from the seed, so the alert cannot drift out of step with
     // the funnel the way the hardcoded version did.
     `Step 1 of ${AI_AUDIT_STEP_COUNT} complete. Score arrives if they finish.`,
+    `📅 <b>Meeting:</b> unbooked - needs follow-up`,
+    `<a href="${pipelineLeadUrl(leadId)}">Open the lead in Command Center →</a>`,
   ].filter(Boolean);
 
-  // operator: this is CC's own funnel — a lead submitted on oasisai.work.
-  const r = await sendTelegram(lines.join("\n"), { lane: "operator" });
-  if (!r.ok) {
-    console.error("[ai-audit.started] telegram:", r.reason);
+  // The sales desk: a lead submitted on oasisai.work is for CC AND Adon. The
+  // audience is chosen from the workspace (lib/notify/alert-route.ts), not here.
+  const r = await pushWorkspaceAlert(tenantId, lines.join("\n"), { desk: "sales" });
+  if (!r.delivered) {
+    console.error("[ai-audit.started] telegram:", r.outcome);
     // The step-0 alert matters MORE than the completion one, not less: it
     // fires for someone who filled in their details and then bounced at
     // step 2. There is no welcome email and no score for that visitor, so
@@ -206,7 +233,7 @@ export async function notifyAiAuditStarted(input: {
       db, tenantId, leadId,
       source: AI_AUDIT_ALERT_SOURCE,
       label: "AI audit (started)",
-      reason: r.reason ?? "unknown",
+      reason: r.outcome,
       extra: "This visitor started the funnel but has not completed it.",
       tag: "ai-audit.started",
     });
@@ -221,6 +248,57 @@ export type AiAuditNotifyInput = {
   answers: Record<string, unknown>;
   score: ScoreBreakdown;
 };
+
+/**
+ * The links the confirmation email carries beyond its words.
+ *
+ * bookingUrl: a signed, personal link back to the calendar
+ *   (/f/oasis-ai-cc/ai-audit/<token>?book=1). The visitor may have closed the
+ *   tab before picking a time; without this the email only pointed at a page
+ *   they no longer have. Omitted when the signing key is unset (dev).
+ *
+ * communityUrl: the free community, tracked through /go/community. It is an
+ *   INVITATION, so it rides this transactional email only when email marketing
+ *   consent was ticked for this exact address (marketingSendAllowed). A visitor
+ *   who declined still gets their confirmation, just not the invitation.
+ *
+ * Neither can fail the delivery: each is best-effort and the email goes without it.
+ */
+async function buildWelcomeLinks(input: {
+  db: SupabaseClient;
+  tenantId: string;
+  formId: string;
+  leadId: string;
+  toEmail: string;
+}): Promise<WelcomeLinks> {
+  const links: WelcomeLinks = {};
+  try {
+    const token = signFormLink({ tenant: AI_AUDIT_TENANT_SLUG, form_id: input.formId, lead_id: input.leadId });
+    if (token) {
+      links.bookingUrl = `${buildResumeUrl({
+        appBaseUrl: SITE_ORIGIN,
+        tenantSlug: AI_AUDIT_TENANT_SLUG,
+        formSlug: AI_AUDIT_SLUG,
+        token,
+      })}?book=1`;
+    }
+  } catch (err) {
+    console.error("[ai-audit.notify] booking link not minted:", err);
+  }
+  if (input.toEmail) {
+    try {
+      const verdict = await marketingSendAllowed(input.db, {
+        tenantId: input.tenantId,
+        channel: "email",
+        destination: input.toEmail,
+      });
+      if (verdict.allow) links.communityUrl = `${SITE_ORIGIN}/go/community?from=audit_email`;
+    } catch (err) {
+      console.error("[ai-audit.notify] consent check failed, no community line:", err);
+    }
+  }
+  return links;
+}
 
 export async function ensureAiAuditSubmissionDelivery(
   input: AiAuditNotifyInput,
@@ -239,7 +317,10 @@ export async function ensureAiAuditSubmissionDelivery(
   }
 
   const toEmail = String(answers.email ?? "").trim().toLowerCase();
-  const { subject, body } = composeAiAuditWelcome(answers);
+  const { subject, body } = composeAiAuditWelcome(
+    answers,
+    await buildWelcomeLinks({ db, tenantId, formId, leadId, toEmail }),
+  );
   let emailNote = "";
   try {
     const firstName = String(answers.name ?? "there").trim().split(/\s+/)[0] || "there";
@@ -285,15 +366,15 @@ export async function notifyAiAuditSubmission(
     inboxUrl: toEmail
       ? `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(toEmail)}`
       : "",
+    leadUrl: pipelineLeadUrl(leadId),
   });
 
-  const tg = await sendTelegram(alert, { lane: "operator" }).catch((err) => ({
-    ok: false as const,
-    reason: err instanceof Error ? err.message : String(err),
-  }));
+  // The sales desk (CC + Adon), chosen from the workspace in alert-route.ts.
+  // pushWorkspaceAlert never throws, so there is no catch to forget here.
+  const tg = await pushWorkspaceAlert(tenantId, alert, { desk: "sales" });
 
-  if (!tg.ok) {
-    console.error("[ai-audit.notify] telegram:", tg.reason);
+  if (!tg.delivered) {
+    console.error("[ai-audit.notify] telegram:", tg.outcome);
     // A LEAD ALERT THAT FAILS SILENTLY IS THE WORST FAILURE MODE HERE.
     // console.error goes to a Vercel log nobody reads; CC's actual
     // experience was a lead arriving with no notification and no trace of
@@ -304,7 +385,7 @@ export async function notifyAiAuditSubmission(
       db, tenantId, leadId,
       source: AI_AUDIT_ALERT_SOURCE,
       label: "AI audit",
-      reason: tg.reason ?? "unknown",
+      reason: tg.outcome,
       extra: `The welcome email was ${emailNote}.`,
       tag: "ai-audit.notify",
     });

@@ -1,12 +1,14 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
+import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
   buildFounderMeetingMessages,
   FOUNDER_MEETING_DURATION_MINUTES,
   FOUNDER_MEETING_TIMEZONE,
+  founderMeetingOfferLabel,
   founderMeetingDedupeKey,
   normalizeFounderMeetingContact,
   normalizeFounderMeetingPhone,
@@ -53,6 +55,9 @@ type AppointmentRow = {
   assigned_to: string | null;
   created_by: string;
   status: string;
+  meeting_kind?: string | null;
+  duration_minutes: number | null;
+  offer_label: string | null;
   client_name_snapshot: string | null;
   company_snapshot: string | null;
   client_email_snapshot: string | null;
@@ -117,6 +122,8 @@ export type VerifiedFounderMeeting = {
   appointmentId: string;
   requestId: string;
   meetingAt: string;
+  durationMinutes: number;
+  offerLabel: string;
   timezone: string;
   contact: FounderMeetingContact;
   receipt: GoogleCalendarReceipt;
@@ -176,6 +183,23 @@ function boundedRequired(value: unknown, max: number, error: string): string {
   if (!normalized) throw new Error(error);
   if (normalized.length > max) throw new Error(`${error}_too_long`);
   return normalized;
+}
+
+function normalizedMeetingDuration(value: unknown): number {
+  const duration = value === undefined || value === null
+    ? FOUNDER_MEETING_DURATION_MINUTES
+    : Number(value);
+  if (!Number.isInteger(duration) || duration < 15 || duration > 120) {
+    throw new Error("meeting_duration_invalid");
+  }
+  return duration;
+}
+
+function normalizedOfferLabel(value: unknown, durationMinutes: number): string {
+  const explicit = value === undefined || value === null ? undefined : String(value).trim();
+  const label = founderMeetingOfferLabel(durationMinutes, explicit);
+  if (!label || label.length > 80 || /[\r\n]/u.test(label)) throw new Error("meeting_offer_label_invalid");
+  return label;
 }
 
 function normalizedEmail(value: unknown, error: string): string {
@@ -240,6 +264,8 @@ function assertSameRequest(row: AppointmentRow, input: {
   actorUserId: string;
   hostUserId: string;
   meetingAt: string;
+  durationMinutes: number;
+  offerLabel: string;
   contact: FounderMeetingContact;
   clientAgenda: string;
   handoffNote: string;
@@ -251,6 +277,8 @@ function assertSameRequest(row: AppointmentRow, input: {
     row.created_by === input.actorUserId &&
     row.assigned_to === input.hostUserId &&
     row.scheduled_for === input.meetingAt &&
+    normalizedMeetingDuration(row.duration_minutes) === input.durationMinutes &&
+    normalizedOfferLabel(row.offer_label, input.durationMinutes) === input.offerLabel &&
     row.client_name_snapshot === input.contact.name &&
     row.company_snapshot === input.contact.company &&
     row.client_email_snapshot === input.contact.email &&
@@ -321,6 +349,19 @@ async function cancelOutstandingNotifications(
   if (result.error) throw new Error(`meeting_notification_cancel_failed:${result.error.message}`);
 }
 
+async function removeAppointmentScheduleMirrors(
+  db: Db,
+  tenantId: string,
+  appointmentId: string,
+): Promise<void> {
+  const removed = await db
+    .from("calendar_events")
+    .delete()
+    .eq("tenant_id", tenantId)
+    .eq("appointment_id", appointmentId);
+  if (removed.error) throw new Error(`meeting_schedule_compensation_failed:${removed.error.message}`);
+}
+
 const FOUNDER_SMS_CONSENT_STATE_ERRORS = new Set([
   "client_phone_required",
   "meeting_host_missing",
@@ -371,6 +412,8 @@ async function ensureNotificationRows(
     timezone: meeting.timezone,
     meetLink: meeting.receipt.meetLink,
     clientAgenda: agenda,
+    durationMinutes: meeting.durationMinutes,
+    offerLabel: meeting.offerLabel,
   });
   const rows: Array<Record<string, unknown>> = [
     {
@@ -394,6 +437,8 @@ async function ensureNotificationRows(
       timezone: meeting.timezone,
       meetLink: meeting.receipt.meetLink,
       clientAgenda: agenda,
+      durationMinutes: meeting.durationMinutes,
+      offerLabel: meeting.offerLabel,
       reminderMinutesBefore: tier,
     });
     rows.push({
@@ -426,6 +471,8 @@ async function ensureNotificationRows(
         timezone: meeting.timezone,
         meetLink: meeting.receipt.meetLink,
         clientAgenda: agenda,
+        durationMinutes: meeting.durationMinutes,
+        offerLabel: meeting.offerLabel,
         reminderMinutesBefore: tier,
       });
       rows.push({
@@ -532,6 +579,8 @@ function meetingFromAppointment(
     appointmentId: appointment.id,
     requestId,
     meetingAt: appointment.scheduled_for,
+    durationMinutes: normalizedMeetingDuration(appointment.duration_minutes),
+    offerLabel: normalizedOfferLabel(appointment.offer_label, normalizedMeetingDuration(appointment.duration_minutes)),
     timezone: FOUNDER_MEETING_TIMEZONE,
     contact: contactFromAppointment(appointment),
     receipt,
@@ -1037,6 +1086,105 @@ async function markPendingError(
   }
 }
 
+/**
+ * Keep the founders' Schedule copies of a call in step with the call.
+ *
+ * A booking from the public calendar is mirrored into each founder's private
+ * Schedule (calendar_events, keyed by appointment_id). Reschedules and
+ * cancellations then updated Google and call_appointments but never those copies,
+ * so Schedule kept the original time after a reschedule and kept showing a
+ * cancelled call (Codex review of PR #611).
+ *
+ * Reads the AUTHORITATIVE call_appointments row and makes the copies match it:
+ * the times follow scheduled_for, and a cancelled call's copies are removed.
+ * Reading the row (rather than trusting the caller's argument) makes it correct
+ * from every saga path that calls it: a completed reschedule, a reschedule
+ * compensated back to its old time, a finalized cancellation. An appointment
+ * with no mirror rows (a rep-booked call) matches nothing. Best-effort by
+ * design: the call itself is already durable, so a failure here is logged for
+ * the next sync to repair and never fails or rolls back the meeting change.
+ */
+async function syncScheduleMirrors(db: Db, tenantId: string, appointmentId: string): Promise<void> {
+  try {
+    const row = await db
+      .from("call_appointments")
+      .select("scheduled_for,duration_minutes,status,workflow_status,calendar_status")
+      .eq("tenant_id", tenantId)
+      .eq("id", appointmentId)
+      .maybeSingle();
+    if (row.error || !row.data) return;
+    const call = row.data as {
+      scheduled_for: string;
+      duration_minutes: number | null;
+      status: string;
+      workflow_status: string;
+      calendar_status: string;
+    };
+    if (call.status === "cancelled" || call.workflow_status === "cancelled" || call.calendar_status === "cancelled") {
+      const removed = await db.from("calendar_events").delete().eq("tenant_id", tenantId).eq("appointment_id", appointmentId);
+      if (removed.error) console.error("[founder-meeting.schedule-mirror] remove failed", removed.error.message);
+      return;
+    }
+    const start = Date.parse(call.scheduled_for);
+    if (!Number.isFinite(start)) return;
+    const updated = await db
+      .from("calendar_events")
+      .update({
+        start_at: new Date(start).toISOString(),
+        end_at: new Date(start + (Number(call.duration_minutes) || 15) * 60_000).toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("tenant_id", tenantId)
+      .eq("appointment_id", appointmentId);
+    if (updated.error) console.error("[founder-meeting.schedule-mirror] update failed", updated.error.message);
+  } catch (error) {
+    console.error("[founder-meeting.schedule-mirror] sync failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * The OASIS workspace books two founders on one calendar, and bravo__223's
+ * triggers refuse to write a founder_audit appointment that overlaps another.
+ * That refusal happens at the FINAL database write, which a reschedule reaches
+ * only after Google has already moved the event: a reschedule into an occupied
+ * interval left the client's invite on the new time while the database kept the
+ * old one (Codex review of PR #611). So ask first, before anything is reserved
+ * or sent to Google. Same predicate as the trigger: the OASIS workspace only
+ * (other workspaces may run several founder-audit calendars), scheduled rows
+ * whose calendar is creating or verified, any overlap of the two intervals.
+ * Throws `founder_slot_overlap`; the trigger stays as the race-proof backstop.
+ */
+async function assertFounderSlotFree(
+  db: Db,
+  appointment: AppointmentRow,
+  meetingAtIso: string,
+  durationMinutes: number,
+): Promise<void> {
+  if (appointment.tenant_id !== AI_AUDIT_TENANT_ID || appointment.meeting_kind !== "founder_audit") return;
+  const start = Date.parse(meetingAtIso);
+  const end = start + durationMinutes * 60_000;
+  // A meeting can be up to 120 minutes (normalizedMeetingDuration), so one that
+  // starts up to two hours before ours can still overlap it.
+  const windowStart = new Date(start - 120 * 60_000).toISOString();
+  const windowEnd = new Date(end).toISOString();
+  const others = await db
+    .from("call_appointments")
+    .select("id,scheduled_for,duration_minutes")
+    .eq("tenant_id", appointment.tenant_id)
+    .eq("meeting_kind", "founder_audit")
+    .eq("status", "scheduled")
+    .in("calendar_status", ["creating", "verified"])
+    .gte("scheduled_for", windowStart)
+    .lte("scheduled_for", windowEnd);
+  if (others.error) throw new Error("founder_slot_check_failed", { cause: others.error });
+  for (const other of (others.data || []) as Array<{ id: string; scheduled_for: string; duration_minutes: number | null }>) {
+    if (other.id === appointment.id) continue;
+    const otherStart = Date.parse(other.scheduled_for);
+    const otherEnd = otherStart + (Number(other.duration_minutes) || 15) * 60_000;
+    if (otherStart < end && otherEnd > start) throw new Error("founder_slot_overlap");
+  }
+}
+
 export async function createVerifiedFounderMeeting(input: {
   tenantId: string;
   leadId: string;
@@ -1044,6 +1192,8 @@ export async function createVerifiedFounderMeeting(input: {
   hostUserId: string;
   requestId: string;
   meetingAt: string;
+  durationMinutes?: number;
+  offerLabel?: string;
   contact: Record<string, unknown>;
   clientAgenda: unknown;
   handoffNote: unknown;
@@ -1068,6 +1218,8 @@ export async function createVerifiedFounderMeeting(input: {
   }
   if (input.smsConsent && !contact.phone) throw new Error("sms_consent_requires_phone");
   const meetingAt = new Date(meetingEpoch).toISOString();
+  const durationMinutes = normalizedMeetingDuration(input.durationMinutes);
+  const offerLabel = normalizedOfferLabel(input.offerLabel, durationMinutes);
   const nowIso = new Date(deps.now()).toISOString();
   let leaseToken: string | null = null;
 
@@ -1078,6 +1230,8 @@ export async function createVerifiedFounderMeeting(input: {
       actorUserId: input.actorUserId,
       hostUserId: input.hostUserId,
       meetingAt,
+      durationMinutes,
+      offerLabel,
       contact,
       clientAgenda,
       handoffNote,
@@ -1085,6 +1239,12 @@ export async function createVerifiedFounderMeeting(input: {
       expectedOrganizerEmail,
     });
     if (appointment.workflow_status === "cancelled" || appointment.status === "cancelled") {
+      throw new Error("booking_request_cancelled");
+    }
+    if (
+      appointment.pending_operation === "compensating_book" ||
+      Boolean(appointment.pending_compensation_applied_at)
+    ) {
       throw new Error("booking_request_cancelled");
     }
     if (!asReceipt(appointment)) {
@@ -1110,7 +1270,8 @@ export async function createVerifiedFounderMeeting(input: {
       pre_call_note: handoffNote,
       created_by: input.actorUserId,
       meeting_kind: "founder_audit",
-      duration_minutes: FOUNDER_MEETING_DURATION_MINUTES,
+      duration_minutes: durationMinutes,
+      offer_label: offerLabel,
       timezone: FOUNDER_MEETING_TIMEZONE,
       client_name_snapshot: contact.name,
       company_snapshot: contact.company,
@@ -1146,6 +1307,8 @@ export async function createVerifiedFounderMeeting(input: {
         actorUserId: input.actorUserId,
         hostUserId: input.hostUserId,
         meetingAt,
+        durationMinutes,
+        offerLabel,
         contact,
         clientAgenda,
         handoffNote,
@@ -1172,7 +1335,8 @@ export async function createVerifiedFounderMeeting(input: {
         requestId: input.requestId,
         meetingAt,
         timezone: FOUNDER_MEETING_TIMEZONE,
-        durationMinutes: FOUNDER_MEETING_DURATION_MINUTES,
+        durationMinutes,
+        offerLabel,
         clientEmail: contact.email,
         clientName: contact.name || undefined,
         ...normalizedOpenerAttendee(input.openerAttendee),
@@ -1252,7 +1416,7 @@ export async function createVerifiedFounderMeeting(input: {
       if (failure.error) {
         throw new Error(`meeting_failure_write_failed:${failure.error.message}`, { cause: error });
       }
-      throw new Error(reason, { cause: error });
+      throw new Error(compensated ? `booking_compensated:${reason}` : reason, { cause: error });
     }
   }
 
@@ -1261,6 +1425,8 @@ export async function createVerifiedFounderMeeting(input: {
     appointmentId: appointment.id,
     requestId: input.requestId,
     meetingAt,
+    durationMinutes,
+    offerLabel,
     timezone: FOUNDER_MEETING_TIMEZONE,
     contact,
     receipt,
@@ -1392,6 +1558,135 @@ export async function activateVerifiedFounderMeeting(
   }
 }
 
+/** Cancel a provider event that is still in the pre-lead-transition booking saga. */
+export async function compensatePendingFounderMeetingBooking(input: {
+  tenantId: string;
+  leadId: string;
+  appointmentId: string;
+  requestId: string;
+}, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<void> {
+  const deps = dependencies(dependencyOverrides);
+  let appointment = await loadById(deps.db, input.tenantId, input.appointmentId, input.leadId);
+  if (
+    appointment.status === "cancelled" &&
+    appointment.workflow_status === "cancelled"
+  ) return;
+  if (
+    appointment.workflow_status !== "pending_transition" ||
+    !["book", "compensating_book"].includes(appointment.pending_operation || "") ||
+    appointment.pending_request_id !== input.requestId ||
+    !appointment.pending_lease_token ||
+    !appointment.assigned_to ||
+    !appointment.google_event_id ||
+    !appointment.organizer_email_snapshot
+  ) {
+    throw new Error("meeting_booking_compensation_conflict");
+  }
+  const nowIso = new Date(deps.now()).toISOString();
+  if (appointment.pending_operation === "book") {
+    const compensationLease = randomUUID();
+    const reserved = await deps.db.from("call_appointments").update({
+      pending_operation: "compensating_book",
+      pending_started_at: nowIso,
+      pending_lease_token: compensationLease,
+      updated_at: nowIso,
+    }).eq("tenant_id", input.tenantId)
+      .eq("id", appointment.id)
+      .eq("lead_id", input.leadId)
+      .eq("revision", Number(appointment.revision))
+      .eq("workflow_status", "pending_transition")
+      .eq("pending_request_id", input.requestId)
+      .eq("pending_operation", "book")
+      .eq("pending_lease_token", appointment.pending_lease_token)
+      .select("*")
+      .maybeSingle();
+    if (reserved.error || !reserved.data) {
+      const raced = await loadById(deps.db, input.tenantId, input.appointmentId, input.leadId);
+      if (raced.status === "cancelled" && raced.workflow_status === "cancelled") return;
+      if (raced.pending_operation !== "compensating_book" || raced.pending_request_id !== input.requestId) {
+        throw new Error(`meeting_booking_compensation_failed:${reserved.error?.message || "row_changed"}`);
+      }
+      appointment = raced;
+    } else {
+      appointment = reserved.data as AppointmentRow;
+    }
+  }
+  if (
+    !appointment.assigned_to ||
+    !appointment.google_event_id ||
+    !appointment.organizer_email_snapshot ||
+    !appointment.pending_lease_token
+  ) {
+    throw new Error("meeting_booking_compensation_conflict");
+  }
+  const hostUserId = appointment.assigned_to;
+  const googleEventId = appointment.google_event_id;
+  const organizerEmail = appointment.organizer_email_snapshot;
+  const leaseToken = appointment.pending_lease_token;
+  try {
+    await deps.cancelCalendar({
+      tenantId: input.tenantId,
+      hostUserId,
+      eventId: googleEventId,
+      expectedOrganizerEmail: organizerEmail,
+    });
+  } catch (error) {
+    const code = errorCode(error, "calendar_cancel_failed");
+    await markPendingError(deps.db, appointment, leaseToken, code, nowIso);
+    throw new Error(code, { cause: error });
+  }
+  const providerApplied = await deps.db.from("call_appointments").update({
+    pending_compensation_applied_at: nowIso,
+    updated_at: nowIso,
+  }).eq("tenant_id", input.tenantId)
+    .eq("id", appointment.id)
+    .eq("lead_id", input.leadId)
+    .eq("revision", Number(appointment.revision))
+    .eq("pending_request_id", input.requestId)
+    .eq("pending_operation", "compensating_book")
+    .eq("pending_lease_token", appointment.pending_lease_token)
+    .select("*")
+    .maybeSingle();
+  if (providerApplied.error || !providerApplied.data) {
+    throw new Error(`meeting_booking_compensation_mark_failed:${providerApplied.error?.message || "row_changed"}`);
+  }
+  appointment = providerApplied.data as AppointmentRow;
+  const cancelled = await deps.db.from("call_appointments").update({
+    status: "cancelled",
+    workflow_status: "cancelled",
+    calendar_status: "cancelled",
+    last_compensated_request_id: input.requestId,
+    cancelled_at: nowIso,
+    ...clearPendingFields(nowIso),
+  }).eq("tenant_id", input.tenantId)
+    .eq("id", appointment.id)
+    .eq("lead_id", input.leadId)
+    .eq("revision", Number(appointment.revision))
+    .eq("pending_request_id", input.requestId)
+    .eq("pending_operation", "compensating_book")
+    .eq("pending_lease_token", appointment.pending_lease_token)
+    .eq("pending_compensation_applied_at", appointment.pending_compensation_applied_at)
+    .select("id")
+    .maybeSingle();
+  if (cancelled.error || !cancelled.data) {
+    throw new Error(`meeting_booking_compensation_failed:${cancelled.error?.message || "row_changed"}`);
+  }
+  try {
+    await removeAppointmentScheduleMirrors(deps.db, input.tenantId, appointment.id);
+  } catch (error) {
+    console.error("[founder-meeting] compensated booking mirror cleanup failed", {
+      code: errorCode(error, "meeting_schedule_compensation_failed"),
+    });
+  }
+  try {
+    await cancelOutstandingNotifications(deps.db, appointment, "booking_compensated", nowIso);
+  } catch (error) {
+    console.error("[founder-meeting] compensated booking notification cleanup failed", {
+      code: errorCode(error, "meeting_notification_cancel_failed"),
+    });
+  }
+}
+
 export async function rescheduleVerifiedFounderMeeting(input: {
   tenantId: string;
   leadId: string;
@@ -1458,6 +1753,9 @@ export async function rescheduleVerifiedFounderMeeting(input: {
     throw new Error("meeting_host_check_failed", { cause: error });
   }
   if (hostStanding === "deactivated") throw new Error("meeting_host_deactivated");
+  // Before anything is reserved, patched or queued: a target that overlaps
+  // another founder call is refused here, not after Google has moved the invite.
+  await assertFounderSlotFree(db, appointment, meetingAt, normalizedMeetingDuration(appointment.duration_minutes));
   const reservation = await reserveOperation(
     db,
     appointment,
@@ -1481,7 +1779,8 @@ export async function rescheduleVerifiedFounderMeeting(input: {
       eventId: googleEventId,
       meetingAt,
       timezone: FOUNDER_MEETING_TIMEZONE,
-      durationMinutes: FOUNDER_MEETING_DURATION_MINUTES,
+      durationMinutes: normalizedMeetingDuration(appointment.duration_minutes),
+      offerLabel: normalizedOfferLabel(appointment.offer_label, normalizedMeetingDuration(appointment.duration_minutes)),
       clientEmail: contact.email,
       clientName: contact.name || undefined,
       ...normalizedOpenerAttendee(input.openerAttendee),
@@ -1545,6 +1844,8 @@ export async function rescheduleVerifiedFounderMeeting(input: {
     clientAgenda,
     deps.now(),
   );
+  // The Schedule copies follow the new time (best-effort; see syncScheduleMirrors).
+  await syncScheduleMirrors(db, input.tenantId, appointment.id);
   return meeting;
 }
 
@@ -1585,6 +1886,8 @@ async function finalizeCancellation(
     .select("*")
     .maybeSingle();
   if (cancelled.error || !cancelled.data) return null;
+  // A cancelled call must leave the founders' Schedule (best-effort; see syncScheduleMirrors).
+  await syncScheduleMirrors(db, appointment.tenant_id, appointment.id);
   return cancelled.data as AppointmentRow;
 }
 
@@ -1978,7 +2281,8 @@ async function compensateReschedule(
     eventId: appointment.google_event_id,
     meetingAt: appointment.previous_scheduled_for,
     timezone: FOUNDER_MEETING_TIMEZONE,
-    durationMinutes: FOUNDER_MEETING_DURATION_MINUTES,
+    durationMinutes: normalizedMeetingDuration(appointment.duration_minutes),
+    offerLabel: normalizedOfferLabel(appointment.offer_label, normalizedMeetingDuration(appointment.duration_minutes)),
     clientEmail: contact.email,
     clientName: contact.name || undefined,
     company: contact.company || undefined,
@@ -2041,6 +2345,8 @@ async function compensateReschedule(
         appointmentId: working.id,
         requestId: working.pending_request_id!,
         meetingAt: working.previous_scheduled_for!,
+        durationMinutes: normalizedMeetingDuration(working.duration_minutes),
+        offerLabel: normalizedOfferLabel(working.offer_label, normalizedMeetingDuration(working.duration_minutes)),
         timezone: FOUNDER_MEETING_TIMEZONE,
         contact,
         receipt,
@@ -2068,6 +2374,8 @@ async function compensateReschedule(
     .select("*")
     .maybeSingle();
   if (restored.error || !restored.data) return false;
+  // The call is back on its old time, so the Schedule copies go back with it.
+  await syncScheduleMirrors(deps.db, working.tenant_id, working.id);
   return true;
 }
 
@@ -2119,7 +2427,11 @@ async function reconcileTenantFounderMeetingSagas(
       const lead = leadData((leadResult.data as { data?: unknown } | null)?.data);
       const confirmed = Boolean(leadResult.data) && leadConfirmsAppointment(appointment, lead, operation);
       const nowIso = new Date(nowMs).toISOString();
-      if (confirmed && (operation === "book" || operation === "reschedule")) {
+      if (
+        confirmed &&
+        !appointment.pending_compensation_applied_at &&
+        (operation === "book" || operation === "reschedule")
+      ) {
         if (!await finalizeConfirmedSaga(deps.db, appointment, operation, nowIso)) {
           throw new Error("meeting_saga_activation_conflict");
         }
@@ -2140,12 +2452,22 @@ async function reconcileTenantFounderMeetingSagas(
           };
           await deps.cancelCalendar(cancelInput);
         }
-        await cancelOutstandingNotifications(
-          deps.db,
-          appointment,
-          "booking_saga_compensated",
-          nowIso,
-        );
+        const providerApplied = await deps.db.from("call_appointments").update({
+          pending_compensation_applied_at: nowIso,
+          updated_at: nowIso,
+        }).eq("tenant_id", tenantId)
+          .eq("id", appointment.id)
+          .eq("lead_id", appointment.lead_id)
+          .eq("revision", Number(appointment.revision))
+          .eq("pending_request_id", appointment.pending_request_id)
+          .eq("pending_operation", "compensating_book")
+          .eq("pending_lease_token", appointment.pending_lease_token)
+          .select("*")
+          .maybeSingle();
+        if (providerApplied.error || !providerApplied.data) {
+          throw new Error("meeting_saga_compensation_mark_failed");
+        }
+        appointment = providerApplied.data as AppointmentRow;
         const cancelled = await deps.db.from("call_appointments").update({
           status: "cancelled",
           workflow_status: "cancelled",
@@ -2160,9 +2482,29 @@ async function reconcileTenantFounderMeetingSagas(
           .eq("pending_request_id", appointment.pending_request_id)
           .eq("pending_operation", "compensating_book")
           .eq("pending_lease_token", appointment.pending_lease_token)
+          .eq("pending_compensation_applied_at", appointment.pending_compensation_applied_at)
           .select("id")
           .maybeSingle();
         if (cancelled.error || !cancelled.data) throw new Error("meeting_saga_compensation_conflict");
+        try {
+          await cancelOutstandingNotifications(
+            deps.db,
+            appointment,
+            "booking_saga_compensated",
+            nowIso,
+          );
+        } catch (error) {
+          console.error("[founder-meeting] reconciled booking notification cleanup failed", {
+            code: errorCode(error, "meeting_notification_cancel_failed"),
+          });
+        }
+        try {
+          await removeAppointmentScheduleMirrors(deps.db, tenantId, appointment.id);
+        } catch (error) {
+          console.error("[founder-meeting] reconciled booking mirror cleanup failed", {
+            code: errorCode(error, "meeting_schedule_compensation_failed"),
+          });
+        }
         result.cancelled += 1;
         continue;
       }

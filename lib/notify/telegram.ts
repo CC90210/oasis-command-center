@@ -74,12 +74,16 @@ export type TelegramLane =
   /** CC — OASIS funnel leads, his own business alerts. */
   | "operator"
   /** Adon / APEX — SunBiz operational alerts (scrapers, bounces, dialer). */
-  | "sunbiz-ops";
+  | "sunbiz-ops"
+  /** CC and Adon together — new inbound leads on oasisai.work, the people who answer them. */
+  | "sales";
 
 type LaneSpec = {
   tokenKeys: string[];
   chatKeys: string[];
   audience: string;
+  /** What the primary chat is called, for the "primary unreachable" note. Default "ops group". */
+  groupLabel?: string;
   /**
    * A SECOND chat in the SAME lane, tried only when the primary send fails.
    *
@@ -115,6 +119,20 @@ const LANES: Record<TelegramLane, LaneSpec> = {
     // Adon's own DM. Same audience as the ops group, different address.
     fallbackChatKeys: ["SUNBIZ_OPS_TELEGRAM_FALLBACK_CHAT_ID"],
     audience: "SunBiz operations (Adon / APEX)",
+  },
+  sales: {
+    // The sales desk is CC AND Adon, so a lead lands in a group both of them
+    // read (OASIS_SALES_TELEGRAM_CHAT_ID) instead of one person's DM, where the
+    // other never saw it. CC is a member of that audience, so his DM is the SAME
+    // lane's second address, not another lane's: it is what the group falls back
+    // to when the bot is not in it, and what the lane uses outright until the
+    // group id is set. Either way a lead alert is delivered, never silenced.
+    // The bot is CC's own, unless a dedicated one is configured.
+    tokenKeys: ["OASIS_SALES_TELEGRAM_BOT_TOKEN", "OASIS_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"],
+    chatKeys: ["OASIS_SALES_TELEGRAM_CHAT_ID", "OASIS_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"],
+    fallbackChatKeys: ["OASIS_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"],
+    groupLabel: "sales group",
+    audience: "OASIS sales desk (CC + Adon)",
   },
 };
 
@@ -168,7 +186,7 @@ export function laneCredentials(
 }
 
 function resolve(target: TelegramTarget):
-  | { ok: true; token: string; chatId: string; fallbackChatId?: string }
+  | { ok: true; token: string; chatId: string; fallbackChatId?: string; groupLabel?: string }
   | { ok: false; reason: string } {
   if ("token" in target) {
     if (!target.token || !target.chatId) {
@@ -200,7 +218,13 @@ function resolve(target: TelegramTarget):
   // A fallback pointing at the primary is not a second address. Dropping it
   // keeps "delivered to the fallback" meaning something.
   const usableFallback = fallbackChatId && fallbackChatId !== chatId.trim() ? fallbackChatId : undefined;
-  return { ok: true, token: token.trim(), chatId: chatId.trim(), fallbackChatId: usableFallback };
+  return {
+    ok: true,
+    token: token.trim(),
+    chatId: chatId.trim(),
+    fallbackChatId: usableFallback,
+    groupLabel: spec.groupLabel,
+  };
 }
 
 export async function sendTelegram(
@@ -221,7 +245,7 @@ export async function sendTelegram(
 
   const note =
     `⚠️ Primary alert channel unreachable (${primary.reason}). ` +
-    `Delivered here instead — the ops group needs the bot re-added.\n\n`;
+    `Delivered here instead — the ${r.groupLabel ?? "ops group"} needs the bot re-added.\n\n`;
   const second = await postMessage(r.token, r.fallbackChatId, note + text);
   if (second.ok) {
     // ok:true because a human WAS reached; degraded:true because the channel

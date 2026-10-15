@@ -41,7 +41,8 @@ import { founderBoardSummary } from "@/lib/oasis-board-summary";
 import { summarizeBoardCounts, type BoardSummary } from "@/lib/oasis-board-summary-rules";
 import { listOasisPipelineWindow } from "@/lib/oasis-pipeline-query";
 import { oasisBoardProgramFilter, oasisBoardStages } from "@/lib/oasis-lead-create";
-import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
+import { isOasisPipelineAdmin, stagesForOasisWarmInboundRole } from "@/lib/oasis-sales-pipeline-policy";
+import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
 import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
@@ -60,6 +61,7 @@ import {
 } from "@/components/os/today/brief-load";
 import { isReviewItem, needsYouTotal } from "@/components/os/today/model";
 import { tileCount } from "./count-rules";
+import { inboundAttention, inboundTiles, inboundWaiting, type InboundFigures } from "./inbound-rules";
 import { mrrTile } from "./money-rules";
 import {
   empireReadFor,
@@ -378,8 +380,47 @@ function failureAttention(h: RoutineHealth): AttentionItem[] {
 
 // ── Per department ────────────────────────────────────────────────────────
 
+/**
+ * Leads that arrived through the oasisai.work funnel and are waiting on a
+ * person. The Sales board above is the cold-prospecting book, so without this
+ * a founder opening Sales saw nothing about the inbound leads the alerts were
+ * announcing. The same call /pipeline?motion=inbound makes, for the same
+ * viewers (founders and pipeline admins, who already see every stage); anyone
+ * else gets no tile rather than a number from a narrower scope.
+ */
+async function loadInboundQueue(viewer: OsViewer): Promise<Read<InboundFigures> | null> {
+  if (!viewer.oasis) return null;
+  const { surface } = viewer;
+  const founder = surface.persona === "founder";
+  if (!founder && !isOasisPipelineAdmin(surface.teamRole)) return null;
+  return read("pipeline.inbound", async () => {
+    const filter = oasisBoardProgramFilter(surface.tenantSlug);
+    const window = await listOasisPipelineWindow({
+      tenantId: surface.tenantId,
+      stageKeys: stagesForOasisWarmInboundRole(surface.teamRole, founder).map((s) => s.key),
+      salesProgram: filter.salesProgram,
+      salesMotion: OASIS_INBOUND_WARM_MOTION,
+      includeUnassigned: true,
+      // Warm form leads carry no assignment-cycle stamp (app/pipeline/page.tsx).
+      cycle: undefined,
+    });
+    return {
+      total: window.total,
+      untouched: window.stageCounts.researched ?? 0,
+      booked: window.stageCounts.founder_meeting_booked ?? 0,
+      waiting: inboundWaiting(window.rows, Date.now(), window.stageCounts.researched ?? 0),
+    };
+  });
+}
+
 async function salesNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
-  return { tiles: pipelineTiles(await loadPipeline(viewer), false), attention: [] };
+  const [pipeline, inbound] = await Promise.all([loadPipeline(viewer), loadInboundQueue(viewer)]);
+  return {
+    tiles: [...pipelineTiles(pipeline, false), ...inboundTiles(inbound)],
+    // The new inbound leads nobody has picked up, by name: "Needs you" is where a
+    // founder opening Sales looks, and each line opens the lead.
+    attention: inboundAttention(inbound),
+  };
 }
 
 type FormFigures = { submissions: number; capped: boolean };
