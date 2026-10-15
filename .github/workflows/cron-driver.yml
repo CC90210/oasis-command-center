@@ -67,10 +67,10 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    # Manual rollback includes one 840s engine-fallback call plus six ordinary
-    # 330s routes (47 minutes worst case), with runner/network margin. A lower
+    # Manual rollback includes two 840s dispatchers plus six ordinary 330s
+    # routes (61 minutes worst case), with runner/network margin. A lower
     # job timeout would kill a still-succeeding route and report false failure.
-    timeout-minutes: 55
+    timeout-minutes: 70
     steps:
       - name: Drive the due cron routes
         env:
@@ -114,7 +114,8 @@ jobs:
           # exported and deleted. See workers/oasis-cc-cron/src/index.ts.
           case "${SCHEDULE}" in
             "* * * * *")
-              ROUTES="/api/cron/dispatch-engine-fallbacks" ;;
+              ROUTES="/api/cron/dispatch-engine-fallbacks
+                      /api/cron/dispatch-automations" ;;
             "*/5 * * * *")
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
@@ -147,6 +148,7 @@ jobs:
               # not fire daily sweeps out of band.
               echo "manual run: driving the fast paths + health-check"
               ROUTES="/api/cron/dispatch-engine-fallbacks
+                      /api/cron/dispatch-automations
                       /api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders
@@ -182,7 +184,7 @@ jobs:
             # body, because that is the truth.
             : > /tmp/out.json
             timeout_s=330
-            if [ "${path}" = "/api/cron/dispatch-engine-fallbacks" ]; then
+            if [ "${path}" = "/api/cron/dispatch-engine-fallbacks" ] || [ "${path}" = "/api/cron/dispatch-automations" ]; then
               timeout_s=840
             fi
             code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m "${timeout_s}" \
