@@ -2784,6 +2784,7 @@ export async function record_tenant_cron_run(client: Client, args: Record<string
   const p_status = (args.p_status ?? null) as string | null;
   const p_output = (args.p_output ?? null) as string | null;
   const p_error = (args.p_error ?? null) as string | null;
+  const p_increment_count = args.p_increment_count === undefined ? true : args.p_increment_count === true;
 
   // PL/pgSQL: IF p_status NOT IN ('success','error') THEN ... — with a NULL
   // p_status the predicate evaluates to NULL, which IF treats as false, so a
@@ -2806,12 +2807,12 @@ export async function record_tenant_cron_run(client: Client, args: Record<string
                  last_run_status = ?,
                  last_run_output = ?,
                  last_run_error = ?,
-                 run_count = COALESCE(run_count, 0) + 1,
+                 run_count = COALESCE(run_count, 0) + ?,
                  updated_at = ?
            WHERE id = ?
              AND tenant_id = ?
        RETURNING run_count`,
-    args: [nowIso, p_status, p_output, p_error, nowIso, p_job_id, p_tenant_id],
+    args: [nowIso, p_status, p_output, p_error, p_increment_count ? 1 : 0, nowIso, p_job_id, p_tenant_id],
   });
 
   const row = result.rows[0];

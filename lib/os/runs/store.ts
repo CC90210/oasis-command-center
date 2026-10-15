@@ -130,6 +130,8 @@ export type Conversation = {
   lastMessageAt: string;
   /** Runs still queued or running: the list marks a chat that is still working. */
   activeRuns: number;
+  origin: RunOrigin;
+  automationId: string | null;
 };
 
 function conversationOf(r: Record<string, unknown>): Conversation {
@@ -143,10 +145,12 @@ function conversationOf(r: Record<string, unknown>): Conversation {
     updatedAt: s(r.updated_at),
     lastMessageAt: s(r.last_message_at),
     activeRuns: Number(r.active_runs ?? 0),
+    origin: originOf(r.origin),
+    automationId: sOrNull(r.automation_id),
   };
 }
 
-const CONVERSATION_COLUMNS = `c.id, c.department_key, c.agent_slug, c.title, c.title_source, c.created_at, c.updated_at, c.last_message_at,
+const CONVERSATION_COLUMNS = `c.id, c.department_key, c.agent_slug, c.title, c.title_source, c.created_at, c.updated_at, c.last_message_at, c.origin, c.automation_id,
   (SELECT COUNT(*) FROM dept_chat_runs r WHERE r.conversation_id = c.id AND r.status IN ('queued','running')) AS active_runs`;
 
 /** A title for a conversation: the first message, one line, cut short. */
@@ -162,17 +166,54 @@ export function cleanTitle(raw: unknown): string {
 export async function createConversation(
   db: Client,
   scope: RunScope,
-  input: { department: string; agentSlug: string; title?: string; now: Date },
+  input: { department: string; agentSlug: string; title?: string; now: Date; origin?: RunOrigin; automationId?: string | null },
 ): Promise<Conversation> {
   const id = newId();
   const at = iso(input.now);
   const title = cleanTitle(input.title);
   await exec(db, {
-    sql: `INSERT INTO dept_chat_conversations (id, tenant_id, user_id, department_key, agent_slug, title, title_source, created_at, updated_at, last_message_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'auto', ?, ?, ?)`,
-    args: [id, scope.tenantId, scope.userId, input.department, input.agentSlug, title, at, at, at],
+    sql: `INSERT INTO dept_chat_conversations (id, tenant_id, user_id, department_key, agent_slug, title, title_source, created_at, updated_at, last_message_at, origin, automation_id)
+          VALUES (?, ?, ?, ?, ?, ?, 'auto', ?, ?, ?, ?, ?)`,
+    args: [id, scope.tenantId, scope.userId, input.department, input.agentSlug, title, at, at, at, input.origin ?? "chat", input.automationId ?? null],
   });
-  return { id, department: input.department, agentSlug: input.agentSlug, title, titleSource: "auto", createdAt: at, updatedAt: at, lastMessageAt: at, activeRuns: 0 };
+  return { id, department: input.department, agentSlug: input.agentSlug, title, titleSource: "auto", createdAt: at, updatedAt: at, lastMessageAt: at, activeRuns: 0, origin: input.origin ?? "chat", automationId: input.automationId ?? null };
+}
+
+/** Find or create the one hidden conversation that is an automation's durable record. */
+export async function ensureAutomationConversation(
+  db: Client,
+  scope: RunScope,
+  input: { automationId: string; department: string; agentSlug: string; title: string; now: Date },
+): Promise<Conversation> {
+  const at = iso(input.now);
+  const title = cleanTitle(input.title);
+  const id = newId();
+  try {
+    await db.execute({
+      sql: `INSERT OR IGNORE INTO dept_chat_conversations
+              (id, tenant_id, user_id, department_key, agent_slug, title, title_source, created_at, updated_at, last_message_at, origin, automation_id)
+            VALUES (?, ?, ?, ?, ?, ?, 'auto', ?, ?, ?, 'automation', ?)`,
+      args: [id, scope.tenantId, scope.userId, input.department, input.agentSlug, title, at, at, at, input.automationId],
+    });
+    // A payload repaired after a preflight failure replaces only internal
+    // receipt metadata; the conversation is never a chat surface.
+    await db.execute({
+      sql: `UPDATE dept_chat_conversations
+            SET department_key = ?, agent_slug = ?, title = ?, updated_at = ?
+            WHERE tenant_id = ? AND user_id = ? AND origin = 'automation' AND automation_id = ?`,
+      args: [input.department, input.agentSlug, title, at, scope.tenantId, scope.userId, input.automationId],
+    });
+  } catch (err) {
+    return guard(err);
+  }
+  const rs = await exec(db, {
+    sql: `SELECT ${CONVERSATION_COLUMNS} FROM dept_chat_conversations c
+          WHERE c.tenant_id = ? AND c.user_id = ? AND c.origin = 'automation' AND c.automation_id = ?`,
+    args: [scope.tenantId, scope.userId, input.automationId],
+  });
+  const row = rows(rs)[0];
+  if (!row) throw new Error("os.runs.ensure_automation_conversation: conversation collision");
+  return conversationOf(row);
 }
 
 /**
@@ -219,6 +260,7 @@ export async function listConversations(db: Client, scope: RunScope, department:
   const rs = await exec(db, {
     sql: `SELECT ${CONVERSATION_COLUMNS} FROM dept_chat_conversations c
           WHERE c.tenant_id = ? AND c.user_id = ? AND c.department_key = ?
+            AND c.origin = 'chat'
           ORDER BY c.last_message_at DESC LIMIT ?`,
     args: [scope.tenantId, scope.userId, department, Math.max(1, Math.min(limit, 200))],
   });
@@ -309,6 +351,9 @@ export type Run = {
   /** The exact workspace API provider/model this run may spend, if any. */
   runtimeApiProvider: ApiEngineProvider | null;
   runtimeApiModel: string | null;
+  /** O5: the guided automation and exact wall-clock occurrence this run receipts. */
+  automationId: string | null;
+  scheduledFor: string | null;
 };
 
 function parseObject(raw: unknown): Record<string, unknown> | null {
@@ -366,6 +411,8 @@ function runOf(r: Record<string, unknown>): Run {
     runtimeFallbackReason: sOrNull(r.runtime_fallback_reason),
     runtimeApiProvider: isApiEngineProvider(r.runtime_api_provider) ? r.runtime_api_provider : null,
     runtimeApiModel: sOrNull(r.runtime_api_model),
+    automationId: sOrNull(r.automation_id),
+    scheduledFor: sOrNull(r.scheduled_for),
   };
 }
 
@@ -376,6 +423,104 @@ export async function getRun(db: Client, scope: RunScope, runId: string): Promis
   });
   const r = rows(rs)[0];
   return r ? runOf(r) : null;
+}
+
+export async function getAutomationRunForSlot(
+  db: Client,
+  scope: RunScope,
+  automationId: string,
+  scheduledFor: Date,
+): Promise<Run | null> {
+  const rs = await exec(db, {
+    sql: `SELECT * FROM dept_chat_runs
+          WHERE tenant_id = ? AND user_id = ? AND automation_id = ? AND scheduled_for = ?
+          ORDER BY created_at ASC LIMIT 1`,
+    args: [scope.tenantId, scope.userId, automationId, iso(scheduledFor)],
+  });
+  const row = rows(rs)[0];
+  return row ? runOf(row) : null;
+}
+
+export type TerminalAutomationRunInput = {
+  id: string;
+  conversationId: string;
+  automationId: string;
+  scheduledFor: Date;
+  origin: "automation" | "test";
+  status: "failed" | "missed";
+  text: string;
+  finalText: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  now: Date;
+};
+
+/** A durable receipt for work refused before queueing, or for an old slot that
+ * must be recorded but never replayed. No driver or model touches this row. */
+export async function recordTerminalAutomationRun(
+  db: Client,
+  scope: RunScope,
+  input: TerminalAutomationRunInput,
+): Promise<{ run: Run; created: boolean }> {
+  if (!RUN_ID_RE.test(input.id)) throw new Error("os.runs.terminal_automation: invalid run id");
+  const at = iso(input.now);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const inserted = await db.execute({
+        sql: `INSERT INTO dept_chat_runs
+                (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status,
+                 user_text, chat_mode, source, show_thinking, final_text, error_code, created_at,
+                 finished_at, executor, origin, automation_id, scheduled_for, deadline_at)
+              SELECT ?, c.tenant_id, c.user_id, c.id, c.department_key, c.agent_slug,
+                     COALESCE((SELECT MAX(r.seq) FROM dept_chat_runs r WHERE r.conversation_id = c.id), 0) + 1,
+                     ?, ?, 'build', 'automation', 0, ?, ?, ?, ?, 'worker', ?, ?, ?, ?
+              FROM dept_chat_conversations c
+              WHERE c.id = ? AND c.tenant_id = ? AND c.user_id = ? AND c.origin = 'automation'`,
+        args: [
+          input.id,
+          input.status,
+          input.text,
+          input.finalText,
+          input.errorCode,
+          at,
+          at,
+          input.origin,
+          input.automationId,
+          iso(input.scheduledFor),
+          at,
+          input.conversationId,
+          scope.tenantId,
+          scope.userId,
+        ],
+      });
+      if (inserted.rowsAffected === 0) throw new Error("os.runs.terminal_automation: conversation not found");
+      const events: RunEvent[] = [];
+      let seq = 1;
+      if (input.errorCode && input.errorMessage) {
+        events.push({ seq: seq++, kind: "error", data: { code: input.errorCode, message: input.errorMessage } });
+      }
+      events.push({ seq, kind: "done", data: { status: input.status } });
+      await appendEvents(db, scope, input.id, events, input.now);
+      const run = await getRun(db, scope, input.id);
+      if (!run) throw new Error("os.runs.terminal_automation: run just written cannot be read");
+      return { run, created: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/UNIQUE constraint failed:\s*dept_chat_runs\.automation_id,\s*dept_chat_runs\.scheduled_for/i.test(message)) {
+        const existing = await getAutomationRunForSlot(db, scope, input.automationId, input.scheduledFor);
+        if (existing) return { run: existing, created: false };
+      }
+      if (/UNIQUE constraint failed:\s*dept_chat_runs\.id/i.test(message)) {
+        const existing = await getRun(db, scope, input.id);
+        if (existing && existing.automationId === input.automationId && existing.scheduledFor === iso(input.scheduledFor)) {
+          return { run: existing, created: false };
+        }
+      }
+      if (/UNIQUE constraint failed:\s*dept_chat_runs\.conversation_id/i.test(message)) continue;
+      return guard(err);
+    }
+  }
+  throw new Error("os.runs.terminal_automation: could not take a place after 3 tries");
 }
 
 /**
@@ -403,7 +548,9 @@ export async function hasAutomationRun(db: Client, scope: RunScope, conversation
 /** A run id minted by the caller (crypto.randomUUID): checked before it is stored, never trusted. */
 const RUN_ID_RE = UUID_RE;
 
-export type EnqueueResult = { ok: true; run: Run; created: boolean } | { ok: false; reason: "no_conversation" | "queue_full" };
+export type EnqueueResult =
+  | { ok: true; run: Run; created: boolean }
+  | { ok: false; reason: "no_conversation" | "queue_full" | "already_claimed" };
 
 /**
  * Add a message to a conversation as a QUEUED run. One statement computes its
@@ -437,6 +584,9 @@ export async function enqueueRun(
     source?: "automation";
     executor?: RunExecutor;
     origin?: RunOrigin;
+    automationId?: string;
+    scheduledFor?: Date;
+    deadlineAt?: Date;
     targetPairingId?: string;
     runtimeEngineKind?: "api" | "cli" | "local";
     runtimeEngineName?: string;
@@ -452,6 +602,17 @@ export async function enqueueRun(
   if (input.source !== undefined && input.source !== "automation") throw new Error("os.runs.enqueue: unknown run source");
   if (input.executor !== undefined && !isRunExecutor(input.executor)) throw new Error("os.runs.enqueue: unknown executor");
   if (input.origin !== undefined && !isRunOrigin(input.origin)) throw new Error("os.runs.enqueue: unknown origin");
+  if (input.source === "automation") {
+    if (!input.automationId?.trim() || !input.scheduledFor || !input.deadlineAt) {
+      throw new Error("os.runs.enqueue: an automation run requires automationId, scheduledFor and deadlineAt");
+    }
+    const automationOrigin = input.origin ?? "automation";
+    if (automationOrigin !== "automation" && automationOrigin !== "test") {
+      throw new Error("os.runs.enqueue: an automation run needs automation or test origin");
+    }
+  } else if (input.automationId !== undefined || input.scheduledFor !== undefined || input.deadlineAt !== undefined) {
+    throw new Error("os.runs.enqueue: automation metadata requires automation source");
+  }
   const hasRuntimeSnapshot =
     input.targetPairingId !== undefined ||
     input.runtimeEngineKind !== undefined ||
@@ -519,6 +680,8 @@ export async function enqueueRun(
   const executor: RunExecutor = input.executor ?? "worker";
   const origin: RunOrigin = input.origin ?? "chat";
   const at = iso(input.now);
+  const scheduledFor = input.scheduledFor ? iso(input.scheduledFor) : null;
+  const deadlineAt = input.deadlineAt ? iso(input.deadlineAt) : null;
   const matchesRetry = (run: Run): boolean =>
     run.conversationId === input.conversationId &&
     run.userText === input.text &&
@@ -533,7 +696,10 @@ export async function enqueueRun(
     run.runtimeFallbackPolicy === (input.runtimeFallbackPolicy ?? (hasRuntimeSnapshot ? "none" : null)) &&
     run.runtimeFallbackReason === (input.runtimeFallbackReason ?? null) &&
     run.runtimeApiProvider === (input.runtimeApiSnapshot?.provider ?? null) &&
-    run.runtimeApiModel === (input.runtimeApiSnapshot?.model.trim() ?? null);
+    run.runtimeApiModel === (input.runtimeApiSnapshot?.model.trim() ?? null) &&
+    run.automationId === (input.automationId ?? null) &&
+    run.scheduledFor === scheduledFor &&
+    run.deadlineAt === deadlineAt;
   if (input.idempotent) {
     const existing = await getRun(db, scope, id);
     if (existing) {
@@ -545,10 +711,10 @@ export async function enqueueRun(
     let affected = 0;
     try {
       const rs = await db.execute({
-        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, chat_mode, source, show_thinking, executor, origin, target_pairing_id, runtime_engine_kind, runtime_engine_name, runtime_fallback_policy, runtime_fallback_reason, runtime_api_provider, runtime_api_model, created_at)
+        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, chat_mode, source, show_thinking, executor, origin, automation_id, scheduled_for, deadline_at, target_pairing_id, runtime_engine_kind, runtime_engine_name, runtime_fallback_policy, runtime_fallback_reason, runtime_api_provider, runtime_api_model, created_at)
               SELECT ?, c.tenant_id, c.user_id, c.id, c.department_key, c.agent_slug,
                      COALESCE((SELECT MAX(r.seq) FROM dept_chat_runs r WHERE r.conversation_id = c.id), 0) + 1,
-                     'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                     'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
               FROM dept_chat_conversations c
               WHERE c.id = ? AND c.tenant_id = ? AND c.user_id = ?
                 AND (SELECT COUNT(*) FROM dept_chat_runs q WHERE q.conversation_id = c.id AND q.status = 'queued') < ?`,
@@ -560,6 +726,9 @@ export async function enqueueRun(
           input.showThinking ? 1 : 0,
           executor,
           origin,
+          input.automationId ?? null,
+          scheduledFor,
+          deadlineAt,
           input.targetPairingId ?? null,
           input.runtimeEngineKind ?? null,
           input.runtimeEngineName ?? null,
@@ -580,6 +749,9 @@ export async function enqueueRun(
         const existing = await getRun(db, scope, id);
         if (existing && matchesRetry(existing)) return { ok: true, run: existing, created: false };
         throw new Error("os.runs.enqueue: idempotency key collision");
+      }
+      if (/UNIQUE constraint failed:\s*dept_chat_runs\.automation_id,\s*dept_chat_runs\.scheduled_for/i.test(err instanceof Error ? err.message : String(err))) {
+        return { ok: false, reason: "already_claimed" };
       }
       if (/UNIQUE constraint failed: dept_chat_runs\.conversation_id/i.test(err instanceof Error ? err.message : String(err))) continue;
       return guard(err);

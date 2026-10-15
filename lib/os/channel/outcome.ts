@@ -267,6 +267,22 @@ const RUN_FAILURES = {
     sentence: "This run couldn't read the department's data, so it didn't ask the AI anything.",
     short: "the department's data could not be read",
   },
+  ai_account_unavailable: {
+    sentence: "This run couldn't use the workspace's AI account, so it stopped before doing any work.",
+    short: "the workspace AI account was unavailable",
+  },
+  department_unavailable: {
+    sentence: "This run stopped because this department's AI teammate is no longer available to its owner.",
+    short: "the department teammate was unavailable",
+  },
+  template_version_unknown: {
+    sentence: "This run stopped because its template version is no longer supported. Rebuild it from the template.",
+    short: "the template version is no longer supported",
+  },
+  tools_invalid: {
+    sentence: "This run stopped because one of its saved lookups is no longer allowed.",
+    short: "a saved lookup is no longer allowed",
+  },
 } as const;
 
 export const RUN_FAILURE_COPY_CODES: readonly string[] = Object.keys(RUN_FAILURES);
