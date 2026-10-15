@@ -155,7 +155,6 @@ const recoverySurfaces = [
   join("app", "api", "chat", "route.ts"),
   join("app", "api", "bridge", "health", "route.ts"),
   join("lib", "cloud-tool-runner.ts"),
-  join("components", "settings", "InstallBridgeModal.tsx"),
   join("app", "settings", "devices", "install", "InstallBridgeWizard.tsx"),
   join("lib", "prompts-library.ts"),
 ];

@@ -431,10 +431,9 @@ check("the catalogue allowance covers only the claude entry's label, install com
 });
 
 // -- This repository -----------------------------------------------------------
-const OPERATOR_SURFACES = ["components/settings/InstallBridgeModal.tsx", "app/settings/devices/install/InstallBridgeWizard.tsx"];
+const OPERATOR_SURFACES = ["app/settings/devices/install/InstallBridgeWizard.tsx"];
 const CATALOGUE_FILE = "components/settings/LocalCliProvidersCard.tsx";
 const FILES = [
-  "components/settings/InstallBridgeModal.tsx",
   "components/settings/DevicesEditor.tsx",
   "app/settings/devices/install/page.tsx",
   "app/settings/devices/install/InstallBridgeWizard.tsx",
@@ -485,20 +484,7 @@ check("the retired CLI compatibility card no longer owns a visible product catal
 });
 
 // The new names, so a revert to other wording fails too.
-check("the install modal: Connect this computer, OASIS AI Command Center, the two modes and the success line", () => {
-  const rel = "components/settings/InstallBridgeModal.tsx";
-  for (const needle of [
-    "Connect this computer",
-    "Installs the OASIS AI Command Center bridge so your agents can use this computer's files, tools and scheduled jobs.",
-    "New computer: full install",
-    "Already installed: connect only",
-    "This computer is connected to OASIS AI Command Center.",
-    "Agents can now use this computer for files, tools and scheduled jobs.",
-  ]) {
-    assert.ok(shows(rel, needle), `${rel}: missing "${needle}"`);
-  }
-});
-check("the install wizard matches the modal", () => {
+check("the install wizard: Connect this computer, the two modes and the success line", () => {
   const rel = "app/settings/devices/install/InstallBridgeWizard.tsx";
   for (const needle of [
     "Connect this computer",
@@ -510,16 +496,20 @@ check("the install wizard matches the modal", () => {
     assert.ok(shows(rel, needle), `${rel}: missing "${needle}"`);
   }
 });
-check("Settings > Devices: the empty state, both buttons and the pair-code line", () => {
+check("Settings > Devices: the advanced list points at Add a device and carries no pairing controls of its own", () => {
   const rel = "components/settings/DevicesEditor.tsx";
   for (const needle of [
     "No computers connected yet. Connect one so your agents can use its files, tools and scheduled jobs. Chat works without one.",
-    "Connect this computer",
-    "Connect another computer",
-    "Enter this code in the OASIS installer on the other computer.",
+    "To connect one, use Add a device at the top of Settings > Devices.",
   ]) {
     assert.ok(shows(rel, needle), `${rel}: missing "${needle}"`);
   }
+  // One way to add a computer (2026-10-15): the second and third buttons, the pair-code
+  // block and the install modal (deleted) live on the Add a device card and the Full install page.
+  for (const gone of ["Connect this computer", "Connect another computer", "Enter this code in the OASIS installer"]) {
+    assert.ok(!shows(rel, gone), `${rel}: still shows "${gone}"`);
+  }
+  assert.ok(!/\/api\/auth\/pair-code/.test(readFileSync(join(ROOT, rel), "utf8")), `${rel}: still mints a pair code`);
 });
 check("Settings > Devices: every truncated name or fingerprint carries its full text as a tooltip", () => {
   const rel = "components/settings/DevicesEditor.tsx";

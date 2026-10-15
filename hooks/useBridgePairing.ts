@@ -11,8 +11,6 @@
  *     the moment the code was minted; flip to "connected" on detection
  *
  * Consumers:
- *   - components/settings/InstallBridgeModal.tsx — modal opened from
- *     Settings → Devices (operator)
  *   - app/settings/devices/install/InstallBridgeWizard.tsx — dedicated
  *     /settings/devices/install page (operator)
  *   - app/settings/devices/install/PairBridgeOnly.tsx — the same page for

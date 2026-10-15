@@ -1,17 +1,24 @@
 "use client";
 
 /**
- * DevicesEditor — list paired machines for this tenant + revoke action.
+ * DevicesEditor — the advanced, read-mostly list of paired machines for this
+ * tenant + the revoke action.
  *
  * Each row in bridge_pairings is a local install (`oasis bridge start`
  * pinging /api/bridge/ping every 60s). Revoking sets revoked_at; the daemon
  * sees 403 on its next ping, exits, and the computer must be connected again
- * from this section to bring it back online.
+ * to bring it back online.
+ *
+ * It does NOT pair anything. A computer is added one way: "Add a device" at
+ * the top of Settings > Devices (the connector code), plus the section's
+ * "Full install" page for the operator's own harness. This list used to carry
+ * its own "Connect this computer" / "Connect another computer" buttons, a
+ * second and third way to do the same job, which left people unsure which one
+ * to press (2026-10-15).
  */
 
 import { useEffect, useState } from "react";
-import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Plus, Copy, Clock, Download, Info } from "lucide-react";
-import { InstallBridgeModal } from "./InstallBridgeModal";
+import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Info } from "lucide-react";
 import { machineState } from "@/lib/devices/presence";
 
 type Device = {
@@ -23,80 +30,6 @@ type Device = {
   created_at: string;
   revoked_at: string | null;
 };
-
-type PairCode = {
-  code: string;
-  expires_at: string;
-  ttl_minutes: number;
-};
-
-function PairCodeBlock({
-  code,
-  onClear,
-}: {
-  code: PairCode;
-  onClear: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(() =>
-    Math.max(0, Math.floor((new Date(code.expires_at).getTime() - Date.now()) / 1000))
-  );
-
-  useEffect(() => {
-    const t = setInterval(() => {
-      setSecondsLeft((s) => Math.max(0, s - 1));
-    }, 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  function handleCopy() {
-    if (typeof navigator === "undefined" || !navigator.clipboard) return;
-    navigator.clipboard.writeText(code.code).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }
-
-  const mm = Math.floor(secondsLeft / 60).toString().padStart(2, "0");
-  const ss = (secondsLeft % 60).toString().padStart(2, "0");
-
-  return (
-    <div className="rounded-lg border border-accent/40 bg-accent/5 p-4 space-y-3">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="text-[11px] uppercase tracking-wider font-bold text-accent">
-          Your pair code
-        </div>
-        <div className="text-[11px] text-fg-dim font-mono inline-flex items-center gap-1">
-          <Clock className="w-3 h-3" /> expires in {mm}:{ss}
-        </div>
-      </div>
-      <div className="flex items-center gap-2">
-        <code className="flex-1 text-2xl font-black tracking-[0.2em] text-fg text-center bg-bg-deep rounded-md px-3 py-2.5 select-all">
-          {code.code}
-        </code>
-        <button
-          type="button"
-          onClick={handleCopy}
-          className="btn-secondary inline-flex items-center gap-1 shrink-0"
-          title="Copy code"
-        >
-          {copied ? <Check className="w-3 h-3 text-status-engaged" /> : <Copy className="w-3 h-3" />}
-          {copied ? "copied" : "copy"}
-        </button>
-      </div>
-      <div className="text-xs text-fg-muted leading-relaxed">
-        Enter this code in the OASIS installer on the other computer. Single-use; expires in {code.ttl_minutes} minutes.
-      </div>
-      <button
-        type="button"
-        onClick={onClear}
-        className="text-[11px] text-fg-dim hover:text-fg-muted underline"
-      >
-        Cancel, generate a different code
-      </button>
-    </div>
-  );
-}
 
 function timeAgo(iso: string | null): string {
   if (!iso) return "never";
@@ -162,12 +95,6 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // device id being revoked
   const [error, setError] = useState<string | null>(null);
-  const [pairCode, setPairCode] = useState<PairCode | null>(null);
-  const [generating, setGenerating] = useState(false);
-  // Install-flow modal — promoted in 2026-05-10 from a buried <details>
-  // toggle to a primary CTA. Mints its own pair-code internally and
-  // polls until the bridge is online.
-  const [installerOpen, setInstallerOpen] = useState(false);
 
   async function load() {
     try {
@@ -183,50 +110,6 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
   useEffect(() => {
     load();
   }, []);
-
-  // Auto-clear an expired code so the operator doesn't keep staring at
-  // a useless one. Refreshes the device list when a pairing might have
-  // happened (a new device showing up flips this).
-  useEffect(() => {
-    if (!pairCode) return;
-    const expiresMs = new Date(pairCode.expires_at).getTime();
-    const remaining = Math.max(0, expiresMs - Date.now());
-    const t = setTimeout(() => {
-      setPairCode(null);
-      load();
-    }, remaining + 500);
-    return () => clearTimeout(t);
-  }, [pairCode]);
-
-  // Poll the device list every 5s while a code is live so the new
-  // machine shows up the moment it pairs.
-  useEffect(() => {
-    if (!pairCode) return;
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, [pairCode]);
-
-  async function generatePairCode() {
-    setGenerating(true);
-    setError(null);
-    try {
-      const r = await fetch("/api/auth/pair-code", { method: "POST" });
-      const j = await r.json();
-      if (!j.ok) {
-        setError(j.error || `http_${r.status}`);
-        return;
-      }
-      setPairCode({
-        code: j.code,
-        expires_at: j.expires_at,
-        ttl_minutes: j.ttl_minutes,
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "code_failed");
-    } finally {
-      setGenerating(false);
-    }
-  }
 
   async function revoke(id: string) {
     if (!confirm("Revoke this computer? Its bridge stops working within 60 seconds. To use it again, connect it from this page.")) return;
@@ -272,31 +155,9 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
               No computers connected yet. Connect one so your agents can use its
               files, tools and scheduled jobs. Chat works without one.
             </div>
-            {pairCode ? (
-              <PairCodeBlock code={pairCode} onClear={() => setPairCode(null)} />
-            ) : (
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setInstallerOpen(true)}
-                  className="btn-primary inline-flex items-center gap-2"
-                >
-                  <Download className="w-4 h-4" />
-                  Connect this computer
-                </button>
-                <button
-                  type="button"
-                  onClick={generatePairCode}
-                  disabled={generating}
-                  className="btn-secondary inline-flex items-center gap-2"
-                  title="Makes a one-time code to enter in the OASIS installer on another computer"
-                >
-                  {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                  Connect another computer
-                </button>
-              </div>
-            )}
-            {installerOpen && <InstallBridgeModal installRepo={installRepo} onClose={() => { setInstallerOpen(false); load(); }} />}
+            <div className="text-fg-muted text-sm">
+              To connect one, use Add a device at the top of Settings &gt; Devices.
+            </div>
           </>
         ) : (
           <>
@@ -324,39 +185,10 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
         <div className="text-xs text-fg-muted">
           {active.length} active{revoked.length > 0 ? ` · ${revoked.length} revoked` : ""}
         </div>
-        <div className="flex items-center gap-2">
-          {installRepo && !pairCode && (
-            <>
-              <button
-                type="button"
-                onClick={() => setInstallerOpen(true)}
-                className="btn-primary text-xs inline-flex items-center gap-1"
-                title="Install the OASIS bridge on this computer with one guided command"
-              >
-                <Download className="w-3 h-3" />
-                Connect this computer
-              </button>
-              <button
-                type="button"
-                onClick={generatePairCode}
-                disabled={generating}
-                className="btn-secondary text-xs inline-flex items-center gap-1"
-                title="Makes a one-time code to enter in the OASIS installer on another computer"
-              >
-                {generating ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                Connect another computer
-              </button>
-            </>
-          )}
-          <button onClick={load} className="text-fg-dim hover:text-accent text-xs inline-flex items-center gap-1" title="Refresh">
-            <RefreshCw className="w-3 h-3" /> refresh
-          </button>
-        </div>
+        <button onClick={load} className="text-fg-dim hover:text-accent text-xs inline-flex items-center gap-1" title="Refresh">
+          <RefreshCw className="w-3 h-3" /> refresh
+        </button>
       </div>
-      {installRepo && installerOpen && <InstallBridgeModal installRepo={installRepo} onClose={() => { setInstallerOpen(false); load(); }} />}
-      {installRepo && pairCode && (
-        <PairCodeBlock code={pairCode} onClear={() => setPairCode(null)} />
-      )}
       {!installRepo && <OwnerOnlyConnectNotice />}
       <ul className="divide-y divide-bg-border">
         {active.map((d) => {
