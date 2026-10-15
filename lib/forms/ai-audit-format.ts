@@ -111,6 +111,8 @@ export type AlertLoop = {
   emailStatus?: string;
   /** Deep link that opens the thread with this lead in Gmail. */
   inboxUrl?: string;
+  /** Link that opens this lead in Command Center (lib/forms/lead-link.ts). */
+  leadUrl?: string;
 };
 
 export function buildAiAuditAlert(
@@ -164,7 +166,7 @@ export function buildAiAuditAlert(
 
   // Completion happens immediately before the inline calendar opens. The
   // separate booked event carries the selected time once one exists.
-  lines.push("", "📅 <b>Meeting:</b> not booked yet");
+  lines.push("", "📅 <b>Meeting:</b> unbooked - needs follow-up");
 
   if (s.reasons.length) {
     lines.push("", `<b>Why this score:</b> ${e(s.reasons.join(" · "))}`);
@@ -179,6 +181,9 @@ export function buildAiAuditAlert(
   }
   if (loop?.inboxUrl) {
     lines.push(`<a href="${loop.inboxUrl}">Open the thread in Gmail →</a>`);
+  }
+  if (loop?.leadUrl) {
+    lines.push(`<a href="${loop.leadUrl}">Open the lead in Command Center →</a>`);
   }
 
   return lines.join("\n");

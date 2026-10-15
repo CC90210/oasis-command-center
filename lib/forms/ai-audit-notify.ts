@@ -14,8 +14,9 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { AI_AUDIT_STEP_COUNT } from "@/lib/forms/oasis-ai-audit-seed";
 import { buildAiAuditAlert, composeAiAuditWelcome } from "@/lib/forms/ai-audit-format";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
@@ -203,12 +204,15 @@ export async function notifyAiAuditStarted(input: {
     // Derived from the seed, so the alert cannot drift out of step with
     // the funnel the way the hardcoded version did.
     `Step 1 of ${AI_AUDIT_STEP_COUNT} complete. Score arrives if they finish.`,
+    `📅 <b>Meeting:</b> unbooked - needs follow-up`,
+    `<a href="${pipelineLeadUrl(leadId)}">Open the lead in Command Center →</a>`,
   ].filter(Boolean);
 
-  // operator: this is CC's own funnel — a lead submitted on oasisai.work.
-  const r = await sendTelegram(lines.join("\n"), { lane: "operator" });
-  if (!r.ok) {
-    console.error("[ai-audit.started] telegram:", r.reason);
+  // The sales desk: a lead submitted on oasisai.work is for CC AND Adon. The
+  // audience is chosen from the workspace (lib/notify/alert-route.ts), not here.
+  const r = await pushWorkspaceAlert(tenantId, lines.join("\n"), { desk: "sales" });
+  if (!r.delivered) {
+    console.error("[ai-audit.started] telegram:", r.outcome);
     // The step-0 alert matters MORE than the completion one, not less: it
     // fires for someone who filled in their details and then bounced at
     // step 2. There is no welcome email and no score for that visitor, so
@@ -218,7 +222,7 @@ export async function notifyAiAuditStarted(input: {
       db, tenantId, leadId,
       source: AI_AUDIT_ALERT_SOURCE,
       label: "AI audit (started)",
-      reason: r.reason ?? "unknown",
+      reason: r.outcome,
       extra: "This visitor started the funnel but has not completed it.",
       tag: "ai-audit.started",
     });
@@ -297,15 +301,15 @@ export async function notifyAiAuditSubmission(
     inboxUrl: toEmail
       ? `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(toEmail)}`
       : "",
+    leadUrl: pipelineLeadUrl(leadId),
   });
 
-  const tg = await sendTelegram(alert, { lane: "operator" }).catch((err) => ({
-    ok: false as const,
-    reason: err instanceof Error ? err.message : String(err),
-  }));
+  // The sales desk (CC + Adon), chosen from the workspace in alert-route.ts.
+  // pushWorkspaceAlert never throws, so there is no catch to forget here.
+  const tg = await pushWorkspaceAlert(tenantId, alert, { desk: "sales" });
 
-  if (!tg.ok) {
-    console.error("[ai-audit.notify] telegram:", tg.reason);
+  if (!tg.delivered) {
+    console.error("[ai-audit.notify] telegram:", tg.outcome);
     // A LEAD ALERT THAT FAILS SILENTLY IS THE WORST FAILURE MODE HERE.
     // console.error goes to a Vercel log nobody reads; CC's actual
     // experience was a lead arriving with no notification and no trace of
@@ -316,7 +320,7 @@ export async function notifyAiAuditSubmission(
       db, tenantId, leadId,
       source: AI_AUDIT_ALERT_SOURCE,
       label: "AI audit",
-      reason: tg.reason ?? "unknown",
+      reason: tg.outcome,
       extra: `The welcome email was ${emailNote}.`,
       tag: "ai-audit.notify",
     });

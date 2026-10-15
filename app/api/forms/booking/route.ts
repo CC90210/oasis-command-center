@@ -15,8 +15,9 @@ import {
   resolvePublicFunnelBooking,
 } from "@/lib/forms/public-booking";
 import { publicBookingDurationMinutes, publicBookingOfferLabel } from "@/lib/forms/public-booking-config";
-import { sendTelegram } from "@/lib/notify/telegram";
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
+import { buildBookedLeadAlert } from "@/lib/forms/public-booking-alert";
+import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { rateLimit } from "@/lib/rate-limit";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_PRE_HANDOFF_STAGE_KEYS } from "@/lib/oasis-stage-meta";
@@ -375,19 +376,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       });
       if (!salesEvent.ok) console.error("[public-booking.sales-event]", salesEvent.error);
     }
-    const e = escapeTelegramHtml;
-    const alert = [
-      `📅 <b>${e(context.formName)} booked</b>`,
-      `<b>${e(prospectName || "New lead")}</b>${company ? ` - ${e(company)}` : ""}`,
-      text(combined.revenue_band) || text(combined.monthly_revenue)
-        ? `Revenue: ${e(text(combined.revenue_band) || text(combined.monthly_revenue))}`
-        : "Revenue: not provided",
-      bottleneck ? `Bottleneck: ${e(bottleneck.slice(0, 500))}` : "Bottleneck: not provided",
-      `Time: ${e(startsAt)}`,
-      `<a href="${meeting.receipt.meetLink}">Open Google Meet</a>`,
-    ].join("\n");
-    const sent = await sendTelegram(alert, { lane: "operator" });
-    if (!sent.ok) console.error("[public-booking.telegram]", sent.reason);
+    // The sales desk (CC + Adon). Which chat that is comes from the workspace in
+    // lib/notify/alert-route.ts; a call booked is the alert they most need fast.
+    const sent = await pushWorkspaceAlert(
+      context.tenantId,
+      buildBookedLeadAlert({
+        offerName: context.formName,
+        name: prospectName,
+        company,
+        revenue: text(combined.revenue_band) || text(combined.monthly_revenue),
+        bottleneck,
+        startsAt,
+        meetUrl: meeting.receipt.meetLink,
+        leadUrl: pipelineLeadUrl(context.leadId),
+      }),
+      { desk: "sales" },
+    );
+    if (!sent.delivered) console.error("[public-booking.telegram]", sent.outcome);
   });
 
   return NextResponse.json({

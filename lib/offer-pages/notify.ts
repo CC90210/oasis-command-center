@@ -24,7 +24,8 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Client } from "@libsql/client";
-import { alertAudienceFor, pushWorkspaceAlert, type AlertPush } from "@/lib/notify/alert-route";
+import { alertAudienceFor, pushWorkspaceAlert, type AlertDesk, type AlertPush } from "@/lib/notify/alert-route";
+import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { workspaceTelegramOutcome } from "@/lib/notify/workspace-telegram";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { isFirstSubmissionForLead } from "@/lib/forms/first-submission";
@@ -50,7 +51,11 @@ export function hasOwnFunnelAlert(form: { tenant_id: string; slug: string }): bo
 }
 
 /** The alert, Telegram HTML with every visitor-typed value escaped. */
-export function buildOfferLeadAlert(offerName: string, answers: Record<string, unknown>): string {
+export function buildOfferLeadAlert(
+  offerName: string,
+  answers: Record<string, unknown>,
+  leadUrl?: string,
+): string {
   const e = escapeTelegramHtml;
   const pick = (...keys: string[]) => {
     for (const k of keys) {
@@ -72,7 +77,8 @@ export function buildOfferLeadAlert(offerName: string, answers: Record<string, u
     phone ? `Phone: ${phone}` : "",
     website ? `Website: ${website}` : "",
     "",
-    "Lead - no booking yet. They are in the pipeline now.",
+    "Lead - unbooked, needs follow-up. They are in the pipeline now.",
+    leadUrl ? `<a href="${leadUrl}">Open the lead in Command Center</a>` : "",
   ]
     .filter((line, i, all) => line !== "" || (i > 0 && all[i - 1] !== ""))
     .join("\n")
@@ -96,7 +102,7 @@ export async function notifyOfferLead(input: {
   leadId: string;
   submissionId: string;
   answers: Record<string, unknown>;
-  push?: (tenantId: string, text: string) => Promise<AlertPush>;
+  push?: (tenantId: string, text: string, opts?: { desk?: AlertDesk }) => Promise<AlertPush>;
 }): Promise<OfferAlertResult> {
   const { db, offers, tenantId, formId, leadId, submissionId } = input;
   if (!offers) return "not_offer";
@@ -112,7 +118,9 @@ export async function notifyOfferLead(input: {
   if (!(await isFirstSubmissionForLead({ db, tenantId, formId, leadId, submissionId }))) return "repeat";
 
   const push = input.push ?? pushWorkspaceAlert;
-  const sent = await push(tenantId, buildOfferLeadAlert(input.formName, input.answers)).catch(
+  // A new lead on an offer page is the sales desk's (CC + Adon). A client
+  // workspace has no such desk and keeps reaching its own bot.
+  const sent = await push(tenantId, buildOfferLeadAlert(input.formName, input.answers, pipelineLeadUrl(leadId)), { desk: "sales" }).catch(
     (err: unknown): AlertPush => ({ delivered: false, outcome: `Not sent: ${err instanceof Error ? err.message : "error"}` }),
   );
   if (sent.delivered) return "sent";
