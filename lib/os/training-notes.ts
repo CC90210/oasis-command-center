@@ -31,6 +31,11 @@ import { TRAINING_NOTES_MAX, TRAINS_ALL, TRAINS_LEGACY, TRAINS_VALUES } from "@/
 import type { CorpusItems, CorpusRow } from "@/lib/founders/marketing-queries";
 import type { DepartmentKey } from "@/lib/os/types";
 
+/** A failed read's message for the log: a driver error can carry the connection URL with its token. */
+function loggable(err: unknown): string {
+  return redactAll(err instanceof Error ? err.message : String(err));
+}
+
 /** Whether this deployment reads Turso (the active data backend), as every Turso-only read here checks. */
 export function trainingBackendActive(): boolean {
   return process.env.EMPIRE_DATA_BACKEND === "turso_cloud" && tursoConfigured();
@@ -158,8 +163,7 @@ export async function trainingBlockFor(
     console.error("[os.training-notes] could not read this agent's training notes; it answers without them", {
       tenantId,
       department,
-      // A driver error can carry the connection URL with its token: never logged raw.
-      error: redactAll(err instanceof Error ? err.message : String(err)),
+      error: loggable(err),
     });
     return "";
   }
@@ -205,7 +209,7 @@ export async function trainingRowsFor(
     });
     return { rows, degraded: false };
   } catch (err) {
-    console.error("[os.training-notes.rows]", { tenantId, department, error: redactAll(err instanceof Error ? err.message : String(err)) });
+    console.error("[os.training-notes.rows]", { tenantId, department, error: loggable(err) });
     return { rows: [], degraded: true };
   }
 }

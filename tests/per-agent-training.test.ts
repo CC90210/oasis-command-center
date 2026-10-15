@@ -104,6 +104,21 @@ async function main(): Promise<void> {
     assert.equal(trains.notesTrain("general", "marketing"), true, "the page's rule agrees");
   });
 
+  await check("the SQL rule and the page's rule agree for every stored value and every agent", async () => {
+    const grid = createClient({ url: ":memory:" });
+    await grid.execute("CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, trains TEXT)");
+    const stored: (string | null)[] = [null, "", "general", "ALL", ...trains.TRAINS_VALUES];
+    for (const [i, value] of stored.entries()) await grid.execute({ sql: "INSERT INTO marketing_corpus (id, trains) VALUES (?, ?)", args: [`s${i}`, value] });
+    for (const department of trains.TRAINS_VALUES.filter((v) => v !== trains.TRAINS_ALL) as Parameters<typeof notes.trainsWhere>[0][]) {
+      const where = notes.trainsWhere(department);
+      const rs = await grid.execute({ sql: `SELECT id FROM marketing_corpus WHERE ${where.sql}`, args: where.args });
+      const read = new Set(rs.rows.map((r) => String(r.id)));
+      for (const [i, value] of stored.entries()) {
+        assert.equal(read.has(`s${i}`), trains.notesTrain(value, department), `${department} reading a note stored as ${JSON.stringify(value)}`);
+      }
+    }
+  });
+
   await check("an agent's tab lists its notes filtered in the database before the limit, every state included", async () => {
     // Newer notes for another agent must not crowd out this agent's older ones.
     for (let i = 0; i < 6; i += 1) await put(A, "finance", `finance-${i}`);
