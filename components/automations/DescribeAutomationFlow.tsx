@@ -34,7 +34,7 @@
  *     signed-in owner, not just whoever is sitting at it.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Sparkles, Loader2, AlertCircle, Save, RotateCcw, X, CheckCircle2 } from "lucide-react";
 
 type Draft = {
@@ -61,6 +61,9 @@ const EXAMPLES = [
   "Daily at noon, check my Calendly for tomorrow's bookings and Telegram me the list so I can prep.",
   "Every Friday at 4pm, run our lead scorer over any leads created in the last 7 days and email me the top 5.",
 ];
+
+/** Fewer characters than this is not an automation: the button stays off and says so. */
+const MIN_DESCRIPTION_CHARS = 10;
 
 /**
  * Plain-English reason the /api/bridge/exec-tool write failed, keyed on the
@@ -112,6 +115,17 @@ export function describeBridgeWriteError(
 
 export function DescribeAutomationFlow() {
   const [state, setState] = useState<State>({ kind: "input", description: "" });
+  // The server and the first client render must agree, so the placeholder starts
+  // as the first example and is shuffled after mount. A Math.random() inside the
+  // render made them differ, a hydration mismatch React reports and then repairs.
+  const [placeholder, setPlaceholder] = useState(EXAMPLES[0]);
+  useEffect(() => {
+    setPlaceholder(EXAMPLES[Math.floor(Math.random() * EXAMPLES.length)]);
+  }, []);
+  // "Draft with AI" stays off until there is something to draft. It used to dim
+  // to 40% with no word on why, which read as a broken button.
+  const typed = "description" in state ? state.description : "";
+  const tooShort = typed.trim().length < MIN_DESCRIPTION_CHARS;
 
   async function draft() {
     // The error view is the input view with the message under it and the
@@ -120,7 +134,7 @@ export function DescribeAutomationFlow() {
     // asks for ("Click Draft with AI to write it again") a dead button.
     if (state.kind !== "input" && state.kind !== "error") return;
     const description = state.description.trim();
-    if (description.length < 10) {
+    if (description.length < MIN_DESCRIPTION_CHARS) {
       setState({ kind: "error", message: "Describe at least one full sentence — what should happen, when, and where the output goes.", description: state.description });
       return;
     }
@@ -228,19 +242,26 @@ export function DescribeAutomationFlow() {
         <textarea
           value={state.description}
           onChange={(e) => setState({ kind: "input", description: e.target.value })}
-          placeholder={EXAMPLES[Math.floor(Math.random() * EXAMPLES.length)]}
+          placeholder={placeholder}
           rows={3}
           className="w-full rounded-lg border border-bg-border bg-bg-deep px-3 py-2 text-sm text-fg placeholder-fg-dim focus:outline-none focus:border-accent transition-colors resize-y"
         />
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] text-fg-dim leading-snug">
+          <span id="describe-automation-help" className="text-[11px] text-fg-dim leading-snug">
             Your agent writes the code and picks the schedule. You read it, tweak if needed, then save.
             New automations land switched off, so nothing runs until you flip it on yourself.
+            {tooShort && (
+              <span className="mt-1 block text-fg-muted" data-testid="describe-automation-min-hint">
+                Write a sentence or two ({MIN_DESCRIPTION_CHARS}+ characters) and Draft with AI turns on.
+              </span>
+            )}
           </span>
           <button
             type="button"
             onClick={draft}
-            disabled={state.description.trim().length < 10}
+            disabled={tooShort}
+            aria-describedby="describe-automation-help"
+            title={tooShort ? `Describe it in at least ${MIN_DESCRIPTION_CHARS} characters first` : undefined}
             className="btn-send inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs shrink-0 disabled:opacity-40"
           >
             <Sparkles className="w-3.5 h-3.5" />

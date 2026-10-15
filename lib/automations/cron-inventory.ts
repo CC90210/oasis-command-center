@@ -17,9 +17,13 @@ export type CronInventoryJob = {
   // result that cannot carry one (a truncated `}` tail). It must survive the
   // wire, because collapsing it into `success` is exactly the green tick the
   // row has not earned.
-  last_run_status: "success" | "error" | "unknown" | null;
+  // `skipped`: the scheduler did not run the slot (the PC was off). Not a verdict
+  // on the job, so it must not collapse into `success` (a tick) or `error`.
+  last_run_status: "success" | "error" | "unknown" | "skipped" | null;
   last_run_output: string | null;
   last_run_error: string | null;
+  /** Plain-English line for a `skipped` result (lib/cron-empire-row.ts explainSkippedResult). */
+  last_run_note?: string | null;
   run_count: number;
   unresolved_failures?: number;
   created_at: string;
@@ -240,9 +244,11 @@ function isCronInventoryJob(value: unknown): value is CronInventoryJob {
     isNullableString(value.last_run_at) &&
     (value.next_run_at === undefined || isNullableString(value.next_run_at)) &&
     (value.last_run_status === null || value.last_run_status === "success" ||
-      value.last_run_status === "error" || value.last_run_status === "unknown") &&
+      value.last_run_status === "error" || value.last_run_status === "unknown" ||
+      value.last_run_status === "skipped") &&
     isNullableString(value.last_run_output) &&
     isNullableString(value.last_run_error) &&
+    (value.last_run_note === undefined || isNullableString(value.last_run_note)) &&
     typeof value.run_count === "number" && Number.isFinite(value.run_count) &&
     (value.unresolved_failures === undefined ||
       (typeof value.unresolved_failures === "number" &&

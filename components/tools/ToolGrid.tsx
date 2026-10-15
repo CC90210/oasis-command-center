@@ -298,6 +298,13 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
           <button type="submit" className={`btn-primary disabled:cursor-not-allowed disabled:opacity-40 ${TAP}`} disabled={!canRun}>
             {tool.runLabel}
           </button>
+          {/* A dimmed button with no word on why reads as broken. While the one
+              thing it needs is still empty, say which thing. */}
+          {!busy && validation && !validation.ok && !(values[validation.field] ?? "").trim() && (
+            <p className="text-[11px] text-fg-dim" data-testid={`tool-${tool.key}-needs-input`}>
+              {`Add the ${(tool.fields.find((f) => f.name === validation.field)?.label ?? "details").toLowerCase()} above to turn ${tool.runLabel} on.`}
+            </p>
+          )}
           {refusal && (
             <p role="alert" className="text-xs text-status-hot">
               {refusal}
