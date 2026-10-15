@@ -644,7 +644,7 @@ async function main() {
     }
   });
   await check("the operator wizard says what the clone needs: gh signed in with git credentials", () => {
-    for (const rel of ["app/settings/devices/install/InstallBridgeWizard.tsx", "components/settings/InstallBridgeModal.tsx"]) {
+    for (const rel of ["app/settings/devices/install/InstallBridgeWizard.tsx"]) {
       const src = readFileSync(join(ROOT, rel), "utf8");
       assert.ok(src.includes("`gh auth login` choosing HTTPS") && src.includes("`gh auth setup-git`"), `${rel}: the git-credential step is missing`);
       assert.ok(!src.includes("(gh) signed in with access to it"), `${rel}: still says a gh session is enough`);

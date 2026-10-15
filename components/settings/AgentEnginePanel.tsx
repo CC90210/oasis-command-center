@@ -221,12 +221,26 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const loadedState = state;
   const draftSelection = draft;
   const eligibleDevices = engineDevicesForScope(state.devices, scope);
+  // The "Installed apps" list follows the SAME scope as the computer picker. It
+  // used to show every pairing in the workspace to any manager, whatever tab was
+  // selected, so a teammate's computer (with its "Needs test" runtimes, which
+  // you cannot act on) sat on CC's own "My setup" page. "My setup" lists only
+  // your computers; "Workspace default" lists the workspace-eligible ones, each
+  // already labelled with its owner.
+  const inventoryDevices =
+    scope === "person"
+      ? state.devices.filter((device) => device.ownedByViewer)
+      : engineDevicesForScope(state.devices, "workspace");
   const current =
     scope === "workspace"
       ? state.engine
       : state.personEngine.source === "person" && state.personEngine.selection
         ? state.personEngine.selection
         : state.engine;
+  // On "My setup" with no engine of your own: what is in use is the workspace's,
+  // and the line says so instead of "In use for you: <the workspace's key>".
+  const inheritsWorkspaceDefault =
+    scope === "person" && !(state.personEngine.source === "person" && state.personEngine.selection);
   const legacyNeedsComputer = current.mode !== "api" && !current.pairingId;
   const selectedDevice = deviceFor(state.devices, draft);
   const selectedCli = draft.mode === "subscription" ? draft.provider : undefined;
@@ -470,8 +484,15 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
         <div>
           <p className="text-sm text-fg">
             In use for {scope === "workspace" ? "the workspace default" : "you"}: <span className="font-semibold">{engineTitle(current, state.devices)}</span>
+            {inheritsWorkspaceDefault && (
+              <span className="text-fg-muted" data-testid="engine-inherited"> (the workspace default)</span>
+            )}
           </p>
-          <p className="mt-1 text-xs text-fg-muted">Choose where the model runs, verify that exact connection, then put it in use.</p>
+          <p className="mt-1 text-xs text-fg-muted">
+            {inheritsWorkspaceDefault
+              ? "You have not chosen your own, so you use the workspace default. Choose one below to change only your setup."
+              : "Choose where the model runs, verify that exact connection, then put it in use."}
+          </p>
         </div>
         <button
           type="button"
@@ -826,9 +847,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
           <h3 id="engine-inventory-title" className="text-sm font-semibold text-fg">Installed apps and local models</h3>
           <p className="mt-1 text-xs text-fg-muted">What each paired computer last reported. Installed or signed in is not agent-ready until a real Test passes.</p>
         </div>
-        {(state.canManage ? state.devices : state.devices.filter((device) => device.ownedByViewer)).length ? (
+        {inventoryDevices.length ? (
           <div className="grid gap-3 lg:grid-cols-2">
-            {(state.canManage ? state.devices : state.devices.filter((device) => device.ownedByViewer)).map((device) => (
+            {inventoryDevices.map((device) => (
               <div key={device.pairingId} className="rounded-lg border border-hairline bg-bg-panel p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-0">

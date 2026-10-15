@@ -19,7 +19,7 @@
  *
  * Run: node --conditions=react-server --import tsx tests/offer-pages-access.test.ts
  */
-import { AT, CLIENT_A, CLIENT_B, OASIS, USERS, done, formRow, login, setupOfferDatabase, step, CONTACT_STEPS, minimalDoc, offerRow } from "./_offer-pages-harness";
+import { CLIENT_A, CLIENT_B, OASIS, USERS, done, formRow, login, setupOfferDatabase, step, CONTACT_STEPS, minimalDoc, offerRow } from "./_offer-pages-harness";
 import assert from "node:assert/strict";
 
 // A saved Telegram bot is stored encrypted (lib/field-encryption.ts).
@@ -191,10 +191,13 @@ async function main() {
     let l = await line();
     assert.equal(l.connected, false);
     assert.ok(l.line.includes(`"${c!.label}"`), `the line does not quote the card: ${l.line}`);
-    // The last Test failed: Telegram refused the token.
+    // The last Test failed: Telegram refused the token. "Now", not the harness's
+    // pinned date: a passing check counts as "Connected" only inside
+    // KEY_CHECK_FRESH_MS (7 days), so a fixed 2026-10-08 timestamp made the
+    // "connected" assertion below fail from 2026-10-15 on, for every PR.
     await db.execute({
       sql: "UPDATE tenant_integration_credentials SET last_tested_at = ?, last_test_ok = 0, last_test_error = 'telegram_http_401' WHERE tenant_id = ?",
-      args: [AT, CLIENT_A],
+      args: [new Date().toISOString(), CLIENT_A],
     });
     c = await card();
     assert.equal(c?.kind, "attention", JSON.stringify(c));
