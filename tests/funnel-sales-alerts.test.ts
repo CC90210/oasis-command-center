@@ -157,6 +157,32 @@ async function main(): Promise<void> {
   assert.match(msg, /pipeline\/L3/);
   console.log("  ok - the completed-lead alert says unbooked and links the lead");
 
+  // 9. The Sales tab's inbound tile: honest in every state.
+  const { inboundTiles, INBOUND_QUEUE_HREF } = await import("../components/os/department/inbound-rules");
+  assert.deepEqual(inboundTiles(null), [], "a viewer with no warm-inbound scope gets no tile");
+  const failedTile = inboundTiles({ ok: false })[0];
+  assert.equal(failedTile.status, "error", "a failed read says so instead of showing 0");
+  const emptyTile = inboundTiles({ ok: true, value: { total: 0, untouched: 0, booked: 0 } })[0];
+  assert.equal(emptyTile.status, "no_data", "no leads is 'None yet', not a live 0");
+  const liveTile = inboundTiles({ ok: true, value: { total: 1234, untouched: 20, booked: 7 } })[0];
+  assert.equal(liveTile.status, "live");
+  assert.equal(liveTile.value, "1,234");
+  assert.equal(liveTile.hint, "20 untouched · 7 booked");
+  assert.equal(liveTile.action?.href, INBOUND_QUEUE_HREF);
+  assert.equal(INBOUND_QUEUE_HREF, "/pipeline?motion=inbound");
+  console.log("  ok - the Sales inbound tile is honest when empty, failed and live");
+
+  // 10. The lead page reads stored answers as labels, never raw option keys.
+  const { auditAnswerLabel } = await import("../lib/forms/ai-audit-format");
+  assert.equal(auditAnswerLabel("revenue", "10k_50k"), "$10-50K/mo");
+  assert.equal(auditAnswerLabel("budget", "2k_5k"), "$2-5K");
+  assert.equal(auditAnswerLabel("timeframe", "30_days"), "within 30 days");
+  assert.equal(auditAnswerLabel("team", "6_20"), "6-20 people");
+  assert.equal(auditAnswerLabel("revenue", "renamed_option"), "renamed option", "an unknown key still shows, never blanks");
+  assert.equal(auditAnswerLabel("team", ""), null);
+  assert.equal(auditAnswerLabel("team", undefined), null);
+  console.log("  ok - stored audit answers read as labels");
+
   console.log("funnel-sales-alerts: all passed");
 }
 

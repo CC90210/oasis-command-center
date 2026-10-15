@@ -39,6 +39,8 @@ import { mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { buildMemberNameMap } from "@/lib/assigned-names";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { auditAnswerLabel } from "@/lib/forms/ai-audit-format";
+import { formatBookedTime } from "@/lib/forms/public-booking-alert";
 import { websiteBuildBriefIsReady } from "@/lib/website-sales-build-brief";
 import {
   canReadOasisSalesTeamPipeline,
@@ -356,6 +358,7 @@ export default async function PipelineLeadDetailPage({
       >
         <div className="space-y-3">
           <LeadContactBand data={activeRecord.data} />
+          <LeadFunnelBand data={activeRecord.data} />
           <LeadWebsiteAuditBand data={activeRecord.data} />
         </div>
       </CollapsibleSection>
@@ -577,10 +580,55 @@ function LeadContactBand({ data }: { data: Record<string, unknown> }) {
       <ContactCell label="Industry" value={nonEmptyString(data.industry)} />
       <ContactCell label="Location" value={location} />
       <ContactCell label="Source" value={nonEmptyString(data.source)} />
-      <ContactCell label="Revenue band" value={humanize(nonEmptyString(data.revenue_band))} />
-      <ContactCell label="Team size" value={humanize(nonEmptyString(data.team_size))} />
+      <ContactCell label="Revenue band" value={auditAnswerLabel("revenue", data.revenue_band)} />
+      <ContactCell label="Team size" value={auditAnswerLabel("team", data.team_size)} />
       <ContactCell label="Primary bottleneck" value={nonEmptyString(data.primary_bottleneck)} />
       <ContactCell label="Current tools" value={nonEmptyString(data.current_tools)} />
+    </div>
+  );
+}
+
+/** The four offers a lead can arrive for (lib/offer-pages: cat=p1..p4). */
+const PILLAR_LABELS: Record<string, string> = {
+  p1: "Protocol",
+  p2: "Command",
+  p3: "Community",
+  p4: "Fleet",
+};
+
+/**
+ * What the lead told the funnel and where they came from: stage, budget,
+ * timeline, campaign, keyword, offer and the call they booked. Rendered only
+ * for a lead that has any of it, so a cold lead gets no row of empty cells.
+ */
+function LeadFunnelBand({ data }: { data: Record<string, unknown> }) {
+  const stage = nonEmptyString(data.funnel_stage);
+  const budget = auditAnswerLabel("budget", data.budget);
+  const timeframe = auditAnswerLabel("timeframe", data.timeframe);
+  const campaign = [data.utm_source, data.utm_medium, data.utm_campaign]
+    .map(nonEmptyString)
+    .filter(Boolean)
+    .join(" / ");
+  const keyword = nonEmptyString(data.kw);
+  const cat = nonEmptyString(data.cat);
+  const pillar = cat ? PILLAR_LABELS[cat] ?? cat : null;
+  const meetingAt = nonEmptyString(data.founder_meeting_at);
+  const meetUrl = safeExternalUrl(nonEmptyString(data.google_meet_link));
+  if (!stage && !budget && !timeframe && !campaign && !keyword && !pillar && !meetingAt) return null;
+  return (
+    <div className="grid gap-3 rounded-lg border border-bg-border bg-bg-elev/40 p-4 sm:grid-cols-2 xl:grid-cols-4">
+      <ContactCell label="Funnel stage" value={humanize(stage)} />
+      <ContactCell
+        label="Booked call"
+        value={meetingAt ? formatBookedTime(meetingAt) : "Unbooked - needs follow-up"}
+        href={meetingAt ? meetUrl : null}
+        external
+      />
+      <ContactCell label="Budget" value={budget} />
+      <ContactCell label="Timeline" value={timeframe} />
+      <ContactCell label="Campaign" value={campaign || null} />
+      <ContactCell label="Keyword" value={keyword} />
+      <ContactCell label="Offer" value={pillar} />
     </div>
   );
 }

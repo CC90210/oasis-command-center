@@ -75,6 +75,23 @@ function label(table: Record<string, string>, v: unknown): string {
   return table[k] || k.replace(/_/g, " ");
 }
 
+const ANSWER_TABLES = {
+  revenue: REVENUE_LABELS,
+  budget: BUDGET_LABELS,
+  timeframe: TIMELINE_LABELS,
+  team: TEAM_LABELS,
+} as const;
+
+/**
+ * A stored audit answer as the lead page should read it: "$10-50K/mo", not the
+ * option key "10k_50k". Unknown keys fall back to the key with underscores
+ * removed, so a renamed form option never renders as nothing. Null when empty.
+ */
+export function auditAnswerLabel(kind: keyof typeof ANSWER_TABLES, value: unknown): string | null {
+  const text = label(ANSWER_TABLES[kind], value);
+  return text || null;
+}
+
 /**
  * Label for CUSTOMER-FACING copy: known keys only, empty otherwise.
  *

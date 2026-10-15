@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { verifyFormLink } from "@/lib/form-links";
+import { normalizePhoneE164 } from "@/lib/conversation-threading";
 import { AI_AUDIT_TENANT_ID, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
 import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
 import { listGoogleCalendarBusy, type GoogleBusyInterval } from "@/lib/integrations/google-calendar";
@@ -83,9 +84,19 @@ export function buildPublicFunnelLeadPatch(
   const bottleneck = clean(answers.primary_bottleneck) || clean(answers.bottleneck_detail) ||
     clean(answers.leak_detail) || clean(answers.leak) || clean(answers.automation_goal);
   const currentTools = clean(answers.current_tools);
+  const budget = clean(answers.budget);
+  const timeframe = clean(answers.timeframe);
   if (name) patch.name = name;
   if (email) patch.email = email;
-  if (phone) patch.phone = phone;
+  if (phone) {
+    // `phone` stays as typed: lead matching and the call screens read it. The
+    // canonical +1... form rides alongside for anything that dials or texts.
+    patch.phone = phone;
+    const e164 = normalizePhoneE164(phone);
+    if (e164) patch.phone_e164 = e164;
+  }
+  if (budget) patch.budget = budget;
+  if (timeframe) patch.timeframe = timeframe;
   if (company) {
     patch.company = company;
     patch.company_name = company;
