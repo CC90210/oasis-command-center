@@ -39,6 +39,14 @@ function friendlyError(code: string | undefined): string {
   if (code === "retry_required") return "The first attempt was safely rolled back. Please try that time again.";
   if (code === "already_booked") return "This request already has a meeting on the calendar.";
   if (code === "rate_limited") return "Too many attempts at once. Wait a moment and try again.";
+  // The visitor's own details cannot make a call, and no retry changes that: say so, and
+  // say how it gets fixed, instead of "availability is unavailable".
+  if (code === "invalid_client_phone" || code === "client_phone_required") {
+    return "We couldn't use the phone number you entered, so we couldn't book this time. Your details are saved. Reply to your confirmation email with a good number and we'll book you in.";
+  }
+  if (code === "lead_stage_not_bookable") {
+    return "Your request is already with our team. Reply to your confirmation email and we'll set the time with you.";
+  }
   return "Live availability is temporarily unavailable. Your details are saved, and the OASIS team will follow up.";
 }
 

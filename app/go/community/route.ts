@@ -21,6 +21,8 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getClientIp } from "@/lib/api-helpers";
+import { rateLimit } from "@/lib/rate-limit";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { communityUrlForTenant } from "@/lib/offers/community-link";
 import {
@@ -81,12 +83,22 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const rawFrom = sp.get("from") || "";
     const from = /^[a-z0-9_-]{1,40}$/.test(rawFrom) ? rawFrom : bare ? "direct" : null;
 
+    // Without a visit id every GET writes a fresh row, so a link scanner or a bot
+    // would fill the funnel-events table (review of #611). Same buckets the beacon
+    // /api/offer-events uses, in memory and keyed by IP only for the life of the
+    // process, never stored. Over the limit the click is simply not logged: the
+    // visitor is still sent to the lounge, which is the whole point of the link.
+    const ip = getClientIp(req);
+    const trackable =
+      rateLimit({ key: `go-community:ip:${ip}`, capacity: 60, refillPerSec: 1 }).allowed &&
+      rateLimit({ key: `go-community:form:${resolved.form.id}`, capacity: 600, refillPerSec: 10 }).allowed;
+
     // Tracking is best-effort: every helper below swallows its own errors
     // (lib/offers/tracking-store.ts, lib/offers/save-basin.ts), so nothing
     // here can turn into a failed redirect for the visitor.
     {
       const db = offerPagesDb();
-      if (db) {
+      if (db && trackable) {
         await insertFunnelEvent(db, {
           tenantId: resolved.tenant_id,
           formId: resolved.form.id,

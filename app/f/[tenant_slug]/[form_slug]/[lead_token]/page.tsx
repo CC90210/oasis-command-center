@@ -241,7 +241,10 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
       .maybeSingle();
     const ld = (leadRow.data as { data?: Record<string, unknown> } | null)?.data;
     if (ld) {
-      bookingReady = isPublicFunnelReadyForBooking(ld);
+      // Only a lead that finished the form and has NOT booked. One already at
+      // meeting_booked would get a calendar whose availability answers
+      // already_booked, so it showed "already has a meeting" over an empty grid.
+      bookingReady = ld.funnel_stage === "audit_requested" && isPublicFunnelReadyForBooking(ld);
       for (const k of PREFILL_LEAD_KEYS) {
         const v = ld[k];
         if (v !== undefined && v !== null && v !== "") prefill[k] = v;

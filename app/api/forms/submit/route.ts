@@ -1743,6 +1743,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // same normalized CRM vocabulary before the response reveals that calendar.
   // AI-audit scoring repeats this merge in its background ingestion so a
   // retry can repair either half independently; the patch RPC is idempotent.
+  let funnelStageWriteFailed = false;
   if (
     isLastStep &&
     isPublicBookingForm({ tenantId: form.tenant_id, formSlug: form.slug })
@@ -1763,12 +1764,14 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         error: completed.error.message,
       });
       // Do not reveal the calendar while the canonical lead still says only
-      // inbound_lead. The form row is already durable, so the browser can retry
-      // this same final step and repair the idempotent lead patch.
-      return NextResponse.json(
-        { ok: false, error: "funnel_stage_write_unavailable" },
-        { status: 503 },
-      );
+      // inbound_lead: the 503 is returned at the END of this handler. It must
+      // not be returned here. The scoring, the sales alert and the welcome email
+      // below are scheduled with after() and all repeat this merge themselves
+      // (ingestAiAuditSubmission), so an early return used to drop the whole
+      // speed-to-lead pipeline for a visitor who then closed the tab (review
+      // of #611). The form row is already durable and every step is idempotent,
+      // so the browser can retry this same final step.
+      funnelStageWriteFailed = true;
     }
   }
 
@@ -1940,6 +1943,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         routeTo = null;
       }
     }
+  }
+
+  if (funnelStageWriteFailed) {
+    return NextResponse.json(
+      { ok: false, error: "funnel_stage_write_unavailable" },
+      { status: 503 },
+    );
   }
 
   return NextResponse.json({

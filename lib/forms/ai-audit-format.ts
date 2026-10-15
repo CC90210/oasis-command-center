@@ -75,6 +75,17 @@ function label(table: Record<string, string>, v: unknown): string {
   return table[k] || k.replace(/_/g, " ");
 }
 
+/**
+ * The bottleneck as a person reads it. A lead who leaves the optional detail box
+ * empty is stored with the required goal's option key ("sales_leadgen"); this turns
+ * exactly those keys into their words and leaves anything a person typed untouched
+ * (unlike auditAnswerLabel, it never rewrites underscores in free text).
+ */
+export function bottleneckLabel(value: unknown): string {
+  const text = str(value).trim();
+  return GOAL_LABELS[text] ?? text;
+}
+
 const ANSWER_TABLES = {
   revenue: REVENUE_LABELS,
   budget: BUDGET_LABELS,

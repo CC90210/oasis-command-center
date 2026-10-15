@@ -70,6 +70,10 @@ export function normalizeFounderMeetingPhone(value: unknown): string | null {
   return normalizePhone(value);
 }
 
+export function normalizeFounderMeetingWebsite(value: unknown): string | null {
+  return normalizeWebsite(value);
+}
+
 function normalizeWebsite(value: unknown): string | null {
   const raw = optionalText(value, 500);
   if (!raw) return null;

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import {
+  bookedLeadFacts,
+  buildPublicBookingContact,
   buildPublicFunnelLeadPatch,
   buildPublicBookingSlots,
   ensurePublicFunnelBookingEvent,
@@ -73,9 +75,21 @@ await check("normalizes every CRM field named in the funnel brief", () => {
 });
 
 await check("does not reveal booking when the audit_requested write failed", () => {
-  assert.match(
-    submitRoute,
-    /forms\.submit\.public_booking_completion\.failed[\s\S]{0,500}funnel_stage_write_unavailable[\s\S]{0,100}503/,
+  // The calendar stays hidden (503 at the end of the handler) ...
+  assert.match(submitRoute, /funnelStageWriteFailed = true;/);
+  assert.match(submitRoute, /if \(funnelStageWriteFailed\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \},\s*\{ status: 503 \},/);
+  // ... but a failed stage write must NOT drop the speed-to-lead pipeline: the failure path
+  // does not return, and the 503 comes after the scoring/alert/email after() blocks (#611 review).
+  const failedBlock = submitRoute
+    .slice(
+      submitRoute.indexOf("forms.submit.public_booking_completion.failed"),
+      submitRoute.indexOf("funnelStageWriteFailed = true;"),
+    )
+    .replace(/\/\/.*$/gm, "");
+  assert.doesNotMatch(failedBlock, /\breturn\b/, "the failure path returns early again");
+  assert.ok(
+    submitRoute.indexOf("ingestAiAuditSubmission({") < submitRoute.indexOf("if (funnelStageWriteFailed) {"),
+    "the 503 must come after the completion pipeline is scheduled",
   );
   assert.equal(isPublicFunnelReadyForBooking({ funnel_stage: "inbound_lead" }), false);
   assert.equal(isPublicFunnelReadyForBooking({ funnel_stage: "audit_requested" }), false);
@@ -137,7 +151,8 @@ await check("falls back to the selected automation goal for the bottleneck", () 
   assert.equal(
     buildPublicFunnelLeadPatch({ automation_goal: "workflow_automation" }, "inbound_lead", "2026-10-12T12:00:00.000Z")
       .primary_bottleneck,
-    "workflow_automation",
+    "workflow automation",
+    "the required goal's key is stored as words, never as the option key",
   );
 });
 
@@ -271,6 +286,74 @@ await check("strictly validates both anonymous booking request bodies", () => {
     starts_at: "2026-10-14T15:00:00.000Z",
     request_id: "not-a-uuid",
   }).success, false);
+});
+
+await check("a website the form invited but the calendar cannot parse never blocks the booking (review of #611)", async () => {
+  const { normalizeFounderMeetingContact } = await import("../lib/website-sales-meeting");
+  const base = { name: "Ada", company_name: "Acme", email: "ADA@acme.com", phone: "(514) 555-0142", phone_e164: "+15145550142" };
+  // The service REFUSES these raw ("Website or social handle: @acmehvac · n/a · none")...
+  for (const typed of ["@acmehvac", "none", "n/a", "no website"]) {
+    assert.throws(() => normalizeFounderMeetingContact({ ...base, website: typed }), /invalid_client_website/, typed);
+    // ... the contact built for the booking drops it and normalizes.
+    const built = normalizeFounderMeetingContact(buildPublicBookingContact({ ...base, website: typed }));
+    assert.equal(built.website, null, typed);
+    assert.equal(built.phone, "+15145550142");
+    assert.equal(built.email, "ada@acme.com");
+    assert.equal(built.company, "Acme");
+  }
+  assert.equal(normalizeFounderMeetingContact(buildPublicBookingContact({ ...base, website: "acme.com" })).website, "https://acme.com/");
+  assert.equal(normalizeFounderMeetingContact(buildPublicBookingContact({ ...base, website: "" })).website, null);
+  // A phone that cannot be dialled still fails, with its own code (the route answers 422 with it).
+  assert.throws(
+    () => normalizeFounderMeetingContact(buildPublicBookingContact({ ...base, phone: "555-1212", phone_e164: "" })),
+    /invalid_client_phone/,
+  );
+  assert.match(bookingRoute, /contact: buildPublicBookingContact\(combined\)/);
+  assert.match(bookingRoute, /CONTACT_ERRORS\.has\(errorCode\)[\s\S]{0,260}status: 422/);
+});
+
+await check("the booked-call alert and the lead read in words, never option keys (review of #611)", () => {
+  assert.deepEqual(bookedLeadFacts({ monthly_revenue: "10k_50k", automation_goal: "sales_leadgen" }), {
+    revenue: "$10-50K/mo",
+    bottleneck: "sales / lead gen",
+  });
+  // A key already stored on an older lead is still read in words; free text is untouched.
+  assert.equal(bookedLeadFacts({ primary_bottleneck: "sales_leadgen" }).bottleneck, "sales / lead gen");
+  assert.equal(bookedLeadFacts({ primary_bottleneck: "Quotes wait_for days", automation_goal: "sales_leadgen" }).bottleneck, "Quotes wait_for days");
+  assert.equal(bookedLeadFacts({ bottleneck_detail: " Leads wait. ", automation_goal: "sales_leadgen" }).bottleneck, "Leads wait.");
+  assert.deepEqual(bookedLeadFacts({}), { revenue: "", bottleneck: "" });
+  assert.match(bookingRoute, /const \{ revenue, bottleneck \} = bookedLeadFacts\(combined\);/);
+});
+
+await check("/team/schedule lands on the Schedule instead of a 404", async () => {
+  const config = (await import("../next.config.js")) as { default: { redirects: () => Promise<Array<{ source: string; destination: string; permanent: boolean }>> } };
+  const redirects = await config.default.redirects();
+  const hit = redirects.find((r) => r.source === "/team/schedule");
+  assert.deepEqual(hit && { destination: hit.destination, permanent: hit.permanent }, { destination: "/schedule", permanent: false });
+});
+
+await check("a failed booked-call alert leaves a durable marker on the lead", () => {
+  assert.match(bookingRoute, /if \(!sent\.delivered\) \{[\s\S]{0,200}await recordAlertFailure\(/);
+});
+
+await check("a rebooked lead gets a fresh Sales event: the id is per appointment", async () => {
+  const db = createClient({ url: ":memory:" });
+  await db.execute(`CREATE TABLE agent_events (id TEXT PRIMARY KEY, event_type TEXT, payload TEXT)`);
+  const upserts: string[] = [];
+  const fake = {
+    from: () => ({
+      upsert: async (row: { id: string }) => {
+        upserts.push(row.id);
+        return { error: null };
+      },
+    }),
+  };
+  const base = { db: fake as never, tenantId: "t", formId: "f", formSlug: "command", leadId: "l", startsAt: "2026-10-20T14:00:00.000Z", meetUrl: "https://meet.google.com/aaa-bbbb-ccc" };
+  await ensurePublicFunnelBookingEvent({ ...base, appointmentId: "appt-1" });
+  await ensurePublicFunnelBookingEvent({ ...base, appointmentId: "appt-1" });
+  await ensurePublicFunnelBookingEvent({ ...base, appointmentId: "appt-2" });
+  assert.equal(upserts[0], upserts[1], "the same appointment is the same event");
+  assert.notEqual(upserts[0], upserts[2], "a rebooking is a new event");
 });
 
 await check("the request-body parser trims, bounds, and rejects anything that is not exactly the shape", () => {

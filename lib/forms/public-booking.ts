@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { verifyFormLink } from "@/lib/form-links";
 import { normalizePhoneE164 } from "@/lib/conversation-threading";
+import { auditAnswerLabel, bottleneckLabel } from "@/lib/forms/ai-audit-format";
+import { normalizeFounderMeetingWebsite } from "@/lib/website-sales-meeting";
 import { AI_AUDIT_TENANT_ID, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
 import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
 import { listGoogleCalendarBusy, type GoogleBusyInterval } from "@/lib/integrations/google-calendar";
@@ -140,8 +142,10 @@ export function buildPublicFunnelLeadPatch(
   const website = clean(answers.website);
   const revenue = clean(answers.revenue_band) || clean(answers.monthly_revenue);
   const teamSize = clean(answers.team_size);
-  const bottleneck = clean(answers.primary_bottleneck) || clean(answers.bottleneck_detail) ||
-    clean(answers.leak_detail) || clean(answers.leak) || clean(answers.automation_goal);
+  const bottleneck = bottleneckLabel(
+    clean(answers.primary_bottleneck) || clean(answers.bottleneck_detail) ||
+      clean(answers.leak_detail) || clean(answers.leak) || clean(answers.automation_goal),
+  );
   const currentTools = clean(answers.current_tools);
   const budget = clean(answers.budget);
   const timeframe = clean(answers.timeframe);
@@ -172,6 +176,48 @@ export function buildPublicFunnelLeadPatch(
   if (stage === "audit_requested") patch.audit_requested_at = occurredAt;
   if (stage === "meeting_booked") patch.meeting_booked_at = occurredAt;
   return patch;
+}
+
+/**
+ * What the booked-call alert and the founders' handoff note say about the lead, as a
+ * person reads it: "$10-50K/mo" and "sales / lead gen", never the option keys
+ * "10k_50k" / "sales_leadgen" (review of #611).
+ */
+export function bookedLeadFacts(lead: Record<string, unknown>): { revenue: string; bottleneck: string } {
+  return {
+    revenue: auditAnswerLabel("revenue", clean(lead.revenue_band) || clean(lead.monthly_revenue)) ?? "",
+    bottleneck: bottleneckLabel(
+      clean(lead.primary_bottleneck) || clean(lead.bottleneck_detail) || clean(lead.automation_goal),
+    ),
+  };
+}
+
+/**
+ * The contact handed to the founder-meeting service. That service REFUSES a website
+ * it cannot parse, and the audit form invites exactly such answers ("Website or social
+ * handle": "@acmehvac", "none", "n/a"), so passing the raw lead made the booking fail
+ * for those visitors with a misleading "availability unavailable" and no way out. The
+ * website is optional and already stored on the lead as typed; an unparseable one is
+ * left off the calendar invite. The phone, which the call needs, is passed through so a
+ * bad one fails with its own code (invalid_client_phone).
+ */
+export function buildPublicBookingContact(lead: Record<string, unknown>): Record<string, unknown> {
+  let website = "";
+  const typed = clean(lead.website);
+  if (typed) {
+    try {
+      website = normalizeFounderMeetingWebsite(typed) ?? "";
+    } catch {
+      website = "";
+    }
+  }
+  return {
+    name: clean(lead.name),
+    company: clean(lead.company) || clean(lead.company_name),
+    email: clean(lead.email),
+    phone: clean(lead.phone_e164) || clean(lead.phone),
+    website,
+  };
 }
 
 const torontoParts = new Intl.DateTimeFormat("en-CA", {
@@ -501,7 +547,8 @@ export async function ensurePublicFunnelBookingEvent(input: {
   try {
     const digest = createHash("sha256")
       .update(
-        `oasis-public-funnel-booked:v1:${input.tenantId}:${input.formId}:${input.leadId}`,
+        // Per appointment, so a cancelled-and-rebooked lead gets a fresh event.
+        `oasis-public-funnel-booked:v1:${input.tenantId}:${input.formId}:${input.leadId}:${input.appointmentId}`,
         "utf8",
       )
       .digest("hex");

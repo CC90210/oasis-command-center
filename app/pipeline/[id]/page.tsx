@@ -39,7 +39,7 @@ import { mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { buildMemberNameMap } from "@/lib/assigned-names";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
-import { auditAnswerLabel } from "@/lib/forms/ai-audit-format";
+import { auditAnswerLabel, bottleneckLabel } from "@/lib/forms/ai-audit-format";
 import { formatBookedTime } from "@/lib/forms/public-booking-alert";
 import { websiteBuildBriefIsReady } from "@/lib/website-sales-build-brief";
 import {
@@ -582,7 +582,8 @@ function LeadContactBand({ data }: { data: Record<string, unknown> }) {
       <ContactCell label="Source" value={nonEmptyString(data.source)} />
       <ContactCell label="Revenue band" value={auditAnswerLabel("revenue", data.revenue_band)} />
       <ContactCell label="Team size" value={auditAnswerLabel("team", data.team_size)} />
-      <ContactCell label="Primary bottleneck" value={nonEmptyString(data.primary_bottleneck)} />
+      {/* Leads saved before the key-to-words fix hold the goal's option key ("sales_leadgen"). */}
+      <ContactCell label="Primary bottleneck" value={bottleneckLabel(nonEmptyString(data.primary_bottleneck)) || null} />
       <ContactCell label="Current tools" value={nonEmptyString(data.current_tools)} />
     </div>
   );

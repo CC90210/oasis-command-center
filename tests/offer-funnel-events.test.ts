@@ -456,6 +456,20 @@ async function main() {
     assert.equal(fresh[0].event, "community_click");
     assert.deepEqual(JSON.parse(String(fresh[0].detail)), { from: "direct" });
   });
+  // Review of #611: with no visit id every GET writes a fresh row, so a link scanner could
+  // fill the table. The visitor is always sent on; only the logging is capped per address.
+  await check("/go/community redirects every click but stops logging one address after its allowance", async () => {
+    const before = (await eventsFor(OASIS_TENANT, FORM_AI_AUDIT)).length;
+    for (let i = 0; i < 80; i++) {
+      const res = await communityRoute.GET(
+        new NextRequest("http://localhost/go/community", { headers: { "x-forwarded-for": "198.51.100.77" } }),
+      );
+      assert.equal(res.status, 302, `click ${i + 1} must still reach the lounge`);
+      assert.equal(res.headers.get("location"), "https://t.me/+w_8rgh8YBWg4YmM5");
+    }
+    const logged = (await eventsFor(OASIS_TENANT, FORM_AI_AUDIT)).length - before;
+    assert.ok(logged >= 55 && logged < 80, `80 clicks from one address logged ${logged} rows`);
+  });
   await check("a bare /go/community still reaches the lounge when the AI audit form is switched off (only the click log is lost)", async () => {
     await db.execute({ sql: "UPDATE forms SET enabled = 0 WHERE id = ?", args: [FORM_AI_AUDIT] });
     try {

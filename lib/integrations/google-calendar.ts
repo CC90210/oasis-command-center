@@ -1279,10 +1279,19 @@ export async function listGoogleCalendarBusy(
       { httpStatus: response.status },
     );
   }
-  const payload = await responseJson<{ items?: GoogleCalendarListEvent[] }>(
+  const payload = await responseJson<{ items?: GoogleCalendarListEvent[]; nextPageToken?: string }>(
     response,
     "calendar_availability_failed",
   );
+  // maxResults is 2500 and only the first page is read. A page that says there is more
+  // means busy time we did not see, and offering slots over it double-books a founder.
+  // Refuse instead of guessing (review of #611).
+  if (payload.nextPageToken) {
+    throw new GoogleCalendarIntegrationError(
+      "calendar_availability_failed",
+      "Google Calendar availability has more events than one page; refusing to offer slots over unseen busy time",
+    );
+  }
   const dateBoundary = (value: string): string => `${value}T00:00:00.000Z`;
   return (payload.items || []).flatMap((event) => {
     if (event.status === "cancelled" || event.transparency === "transparent") return [];

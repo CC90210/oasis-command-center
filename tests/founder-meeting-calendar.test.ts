@@ -782,6 +782,29 @@ async function testAvailabilityReadsTheFoundersOwnCalendarAndNeverFallsBack() {
   }
 }
 
+async function testAvailabilityRefusesATruncatedPage() {
+  // A first page that says there is more (nextPageToken) hides busy time; offering slots
+  // from it would double-book a founder. It must fail, not return a short list.
+  await assert.rejects(
+    listGoogleCalendarBusy(
+      {
+        tenantId: TENANT_ID,
+        organizerUserId: ORGANIZER_USER_ID,
+        expectedOrganizerEmail: "founder@oasisai.work",
+        timeMin: "2026-08-26T12:00:00.000Z",
+        timeMax: "2026-08-27T12:00:00.000Z",
+      },
+      baseDependencies(async () =>
+        jsonResponse({
+          items: [{ start: { dateTime: START_AT }, end: { dateTime: "2026-08-26T20:15:00.000Z" } }],
+          nextPageToken: "more-events-exist",
+        }),
+      ),
+    ),
+    (error: unknown) => error instanceof GoogleCalendarIntegrationError && error.code === "calendar_availability_failed",
+  );
+}
+
 async function main() {
   const connected = await operatorCalendarStatus(
     TENANT_ID,
@@ -833,6 +856,7 @@ async function main() {
   await testCancelSendsUpdatesAndTreatsMissingEventAsSuccess();
   await testCancelRefreshesTokenAndFailsClosedWithoutCalendarScope();
   await testAvailabilityReadsTheFoundersOwnCalendarAndNeverFallsBack();
+  await testAvailabilityRefusesATruncatedPage();
   console.log("founder-meeting-calendar: OK");
 }
 

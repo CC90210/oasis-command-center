@@ -61,7 +61,7 @@ import {
 } from "@/components/os/today/brief-load";
 import { isReviewItem, needsYouTotal } from "@/components/os/today/model";
 import { tileCount } from "./count-rules";
-import { inboundTiles, type InboundFigures } from "./inbound-rules";
+import { inboundAttention, inboundTiles, inboundWaiting, type InboundFigures } from "./inbound-rules";
 import { mrrTile } from "./money-rules";
 import {
   empireReadFor,
@@ -408,13 +408,19 @@ async function loadInboundQueue(viewer: OsViewer): Promise<Read<InboundFigures> 
       total: window.total,
       untouched: window.stageCounts.researched ?? 0,
       booked: window.stageCounts.founder_meeting_booked ?? 0,
+      waiting: inboundWaiting(window.rows, Date.now(), window.stageCounts.researched ?? 0),
     };
   });
 }
 
 async function salesNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
   const [pipeline, inbound] = await Promise.all([loadPipeline(viewer), loadInboundQueue(viewer)]);
-  return { tiles: [...pipelineTiles(pipeline, false), ...inboundTiles(inbound)], attention: [] };
+  return {
+    tiles: [...pipelineTiles(pipeline, false), ...inboundTiles(inbound)],
+    // The new inbound leads nobody has picked up, by name: "Needs you" is where a
+    // founder opening Sales looks, and each line opens the lead.
+    attention: inboundAttention(inbound),
+  };
 }
 
 type FormFigures = { submissions: number; capped: boolean };

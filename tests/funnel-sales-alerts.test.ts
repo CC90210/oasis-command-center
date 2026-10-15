@@ -172,6 +172,44 @@ async function main(): Promise<void> {
   assert.equal(INBOUND_QUEUE_HREF, "/pipeline?motion=inbound");
   console.log("  ok - the Sales inbound tile is honest when empty, failed and live");
 
+  // 9b. The Sales tab lists the new inbound leads by name in "Needs you".
+  const { inboundWaiting, inboundAttention, inboundLeadLine } = await import("../components/os/department/inbound-rules");
+  const NOW = Date.parse("2026-10-20T15:00:00.000Z");
+  const day = (n: number) => new Date(NOW - n * 86_400_000).toISOString();
+  const inboundRow = (id: string, ageDays: number, data: Record<string, unknown>) => ({ id, created_at: day(ageDays), data: { stage: "researched", ...data } });
+  const rows = [
+    inboundRow("a", 1, { name: "Ada Lovelace", company_name: "Acme", monthly_revenue: "10k_50k", funnel_stage: "audit_requested", primary_bottleneck: "Leads wait days" }),
+    inboundRow("b", 0.2, { name: "Bo Chen", company: "Bo Co", funnel_stage: "inbound_lead" }),
+    inboundRow("booked", 2, { name: "Already Booked", funnel_stage: "meeting_booked" }),
+    inboundRow("old", 15, { name: "Too Old", funnel_stage: "audit_requested" }),
+    { id: "worked", created_at: day(1), data: { stage: "attempting_contact", name: "Being Worked" } },
+    ...Array.from({ length: 5 }, (_, i) => inboundRow(`x${i}`, 3 + i * 0.1, { name: `Filler ${i}`, funnel_stage: "audit_requested" })),
+  ];
+  assert.equal(inboundWaiting(rows, NOW, 9).truncated, false, "the stage count matches the rows read: nothing missing");
+  const waiting = inboundWaiting(rows, NOW, 12);
+  assert.equal(waiting.total, 7, "researched, not booked, inside 14 days: a, b and five fillers");
+  assert.deepEqual(waiting.leads.map((l) => l.id).slice(0, 2), ["b", "a"], "newest first");
+  assert.equal(waiting.leads.length, 5, "five named, the rest one line");
+  assert.equal(waiting.truncated, true, "12 researched exist, the window held 9: the total is a floor");
+  assert.equal(
+    inboundLeadLine(rows[0].data),
+    "Ada Lovelace · Acme · $10-50K/mo · Leads wait days · audit done, unbooked - needs follow-up",
+    "words, not option keys, and what the lead did",
+  );
+  assert.equal(inboundLeadLine(rows[1].data), "Bo Chen · Bo Co · started the form, did not finish");
+  const items = inboundAttention({ ok: true, value: { total: 9, untouched: 9, booked: 1, waiting } });
+  assert.equal(items.length, 6, "five leads and one 'more' line");
+  assert.equal(items[0].href, "/pipeline/b");
+  assert.ok(items.every((i) => !/[_]\d|10k_50k|sales_leadgen/.test(i.label)), "no raw option keys on screen");
+  assert.equal(items.reduce((s, i) => s + i.count, 0), 7, "the header's Needs you counts each waiting lead once");
+  assert.equal(items[5].capped, true, "a truncated window makes the sum a floor");
+  assert.match(items[5].label, /^2 new inbound leads waiting in Warm inbound$/);
+  assert.deepEqual(inboundAttention(null), []);
+  assert.deepEqual(inboundAttention({ ok: false }), []);
+  assert.deepEqual(inboundAttention({ ok: true, value: { total: 3, untouched: 0, booked: 0 } }), [], "no list where it was not read");
+  assert.deepEqual(inboundAttention({ ok: true, value: { total: 0, untouched: 0, booked: 0, waiting: inboundWaiting([], NOW, 0) } }), []);
+  console.log("  ok - the Sales tab names the new inbound leads waiting for a person");
+
   // 10. The lead page reads stored answers as labels, never raw option keys.
   const { auditAnswerLabel } = await import("../lib/forms/ai-audit-format");
   assert.equal(auditAnswerLabel("revenue", "10k_50k"), "$10-50K/mo");

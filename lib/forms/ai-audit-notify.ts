@@ -54,10 +54,17 @@ function deterministicEventId(input: {
   formId: string;
   leadId: string;
   event: AiAuditSalesEvent;
+  /**
+   * A booked call is one event PER APPOINTMENT. Keyed by lead alone, a cancelled and
+   * rebooked lead kept its first event (the upsert ignores duplicates) and the Sales
+   * handoff carried the old time and Meet link (review of #611).
+   */
+  appointmentId?: string;
 }): string {
   const digest = createHash("sha256")
     .update(
-      `oasis-ai-audit-sales-event:v1:${input.tenantId}:${input.formId}:${input.leadId}:${input.event}`,
+      `oasis-ai-audit-sales-event:v1:${input.tenantId}:${input.formId}:${input.leadId}:${input.event}` +
+        (input.appointmentId ? `:${input.appointmentId}` : ""),
       "utf8",
     )
     .digest("hex");
@@ -97,7 +104,7 @@ export async function ensureAiAuditSalesEvent(input: {
     }
     const result = await input.db.from("agent_events").upsert(
       {
-        id: deterministicEventId(input),
+        id: deterministicEventId({ ...input, appointmentId: input.booking?.appointmentId }),
         event_type:
           input.event === "started"
             ? "OASIS_AI_AUDIT_STARTED"

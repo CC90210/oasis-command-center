@@ -7,7 +7,8 @@
 - Alerts read "unbooked - needs follow-up" until a time is picked, show a booked call in Toronto time, and link the lead in Command Center.
 - The audit confirmation email carries a signed link (`/f/oasis-ai-cc/ai-audit/<token>?book=1`) that reopens the inline calendar for a lead who finished the form and closed the tab. The free-community invitation rides the same email only when email marketing consent was ticked for that address.
 - Lead page: a Funnel band (stage, booked call with Meet link or "Unbooked", budget, timeline, campaign, keyword, offer) and readable revenue / team labels. Leads also store `budget`, `timeframe` and `phone_e164` (the canonical form, beside the phone as typed).
-- Sales department: an "Inbound leads" tile for the warm-inbound queue (untouched vs booked), for the viewers who already see that queue.
+- Sales department: an "Inbound leads" tile for the warm-inbound queue (untouched vs booked), and "Needs you" lines naming the newest inbound leads still waiting for a first touch (name, company, revenue, what they did, a link to the lead), for the viewers who already see that queue.
+- `/team/schedule` redirects to `/schedule` (it answered 404).
 - Migration `bravo__224` adds `call_appointments.offer_label` so a booking keeps the offer's name across retries and reschedules.
 
 ### Changed
@@ -16,6 +17,13 @@
 
 ### Fixed
 - `offer-pages-access` pinned a 2026-10-08 timestamp against a 7-day freshness window and went red for every PR on 2026-10-15.
+- Booking no longer fails for a visitor who typed a handle, "n/a" or "none" as their website (the form invites that): the calendar invite leaves an unparseable website off, and a phone the call cannot use answers its own message instead of "availability is unavailable".
+- Alerts and the lead page say "$10-50K/mo" and "sales / lead gen", never the option keys `10k_50k` / `sales_leadgen`.
+- A failed final-step stage write no longer drops the scoring, the sales alert and the welcome email (the calendar stays hidden and the visitor is asked to press submit again); a failed booked-call alert leaves a marker on the lead like the other alerts.
+- A cancelled-and-rebooked lead gets a fresh Sales event; a lead already booked is not shown the calendar from the email link; a Google Calendar page that reports more events than it returned is refused instead of offering slots over unseen busy time; `/go/community` stops logging one address's clicks after its allowance (the redirect still happens).
+
+### Changed (build)
+- The booking bodies are validated by a short hand-written parser instead of zod (~443 KiB minified in the Worker), and CI's Worker upload margin is 512 KiB instead of 1 MiB (main had 71 KiB of headroom; the upload is at 98.8% of Cloudflare's cap and needs a bundle diet before the next large feature).
 
 ## 2026-10-12 — OASIS funnel capture and inline founder booking
 

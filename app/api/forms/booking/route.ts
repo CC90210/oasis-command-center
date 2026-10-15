@@ -1,8 +1,11 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
 import { sameOrigin } from "@/lib/calendar/http";
-import { ensureAiAuditSalesEvent } from "@/lib/forms/ai-audit-notify";
+import { AI_AUDIT_ALERT_SOURCE, ensureAiAuditSalesEvent } from "@/lib/forms/ai-audit-notify";
+import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import {
+  bookedLeadFacts,
+  buildPublicBookingContact,
   buildPublicFunnelLeadPatch,
   ensurePublicFunnelBookingEvent,
   isPublicBookingStageBookable,
@@ -48,6 +51,12 @@ const PROVIDER_ERRORS = new Set([
   "public_booking_schedule_calendar_missing",
   "public_booking_schedule_write_failed",
 ]);
+/**
+ * The visitor's own details cannot make a call: refused BEFORE anything is written, with
+ * a code the calendar can explain, instead of the generic "availability unavailable" that
+ * no retry could ever fix.
+ */
+const CONTACT_ERRORS = new Set(["invalid_client_phone", "client_phone_required", "client_email_required"]);
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -133,7 +142,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const company = text(combined.company_name) || text(combined.company);
   const prospectName = text(combined.name);
   const prospectEmail = text(combined.email).toLowerCase();
-  const bottleneck = text(combined.primary_bottleneck) || text(combined.bottleneck_detail) || text(combined.automation_goal);
+  const { revenue, bottleneck } = bookedLeadFacts(combined);
 
   const priorAppointment = text(context.lead.calendar_appointment_id);
   const priorRequest = text(context.lead.public_booking_request_id);
@@ -222,7 +231,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       meetingAt: startsAt,
       durationMinutes,
       offerLabel,
-      contact: combined,
+      contact: buildPublicBookingContact(combined),
       clientAgenda: `A ${durationMinutes}-minute ${context.formName} call with OASIS AI Solutions.`,
       handoffNote: bottleneck || `Public ${context.formSlug} booking.`,
       smsConsent: false,
@@ -254,6 +263,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   } catch (error) {
     const errorCode = error instanceof Error ? error.message.split(":", 1)[0] : "";
+    if (CONTACT_ERRORS.has(errorCode)) {
+      // Thrown by the service's own validation before any row or event exists:
+      // nothing to compensate.
+      return NextResponse.json({ ok: false, error: errorCode }, { status: 422 });
+    }
     const compensated = await compensatePublicBooking({
       db,
       tenantId: context.tenantId,
@@ -383,7 +397,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         offerName: context.formName,
         name: prospectName,
         company,
-        revenue: text(combined.revenue_band) || text(combined.monthly_revenue),
+        revenue,
         bottleneck,
         startsAt,
         meetUrl: meeting.receipt.meetLink,
@@ -391,7 +405,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }),
       { desk: "sales" },
     );
-    if (!sent.delivered) console.error("[public-booking.telegram]", sent.outcome);
+    if (!sent.delivered) {
+      // Same durable marker the started and completed alerts leave: on the lead's own
+      // timeline, where it is seen, not in a log nobody reads.
+      await recordAlertFailure({
+        db,
+        tenantId: context.tenantId,
+        leadId: context.leadId,
+        source: AI_AUDIT_ALERT_SOURCE,
+        label: `${context.formName} (booked)`,
+        reason: sent.outcome,
+        extra: "The call is on the calendar; the Meet link is on the lead.",
+        tag: "public-booking.telegram",
+      });
+    }
   });
 
   return NextResponse.json({
