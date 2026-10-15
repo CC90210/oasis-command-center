@@ -106,7 +106,9 @@ for (const junk of [null, undefined, "", "yes", "GRANTED", 1, true]) {
 
   installGoogleAdsTag(win, doc);
   assert.equal(doc.appended.length, 1, "a second install adds no second script");
-  assert.equal(calls(win).length, 3, "a second install queues nothing");
+  const again = calls(win);
+  assert.equal(again.length, 4, "a second install queues only a consent update: no second js/config");
+  assert.deepEqual(again[3].slice(0, 2), ["consent", "update"]);
 }
 
 // 4. Withdrawal: an already-loaded tag is told to stop, _gcl_* cookies are
@@ -137,6 +139,20 @@ for (const junk of [null, undefined, "", "yes", "GRANTED", 1, true]) {
   );
   assert.ok(!sub.writes.some((w) => /Domain=\.?work(;|$)/.test(w)), "never targets the bare TLD");
 
+  // Allow -> No thanks -> Allow on one page (Codex P2, 2026-10-15): the script
+  // is already there, so the second Allow must still put Google back to granted.
+  {
+    const w: TagWindow = {};
+    const d = fakeDocument();
+    installGoogleAdsTag(w, d);
+    withdrawGoogleAdsConsent(w, d, "oasisai.work");
+    installGoogleAdsTag(w, d);
+    assert.equal(d.appended.length, 1, "re-allowing adds no second script");
+    const final = calls(w).at(-1)!;
+    assert.deepEqual(final.slice(0, 2), ["consent", "update"], "re-allowing sends a consent update");
+    assert.equal((final[2] as Record<string, string>).ad_storage, "granted", "re-allowing ends granted, not stuck denied");
+  }
+
   // Withdrawal before the tag ever loaded must not create a gtag.
   const fresh: TagWindow = {};
   withdrawGoogleAdsConsent(fresh, fakeDocument(""), "oasisai.work");
@@ -160,6 +176,22 @@ for (const junk of [null, undefined, "", "yes", "GRANTED", 1, true]) {
   assert.match(component, /readAdConsent\(storage\(\)\) === "granted"[\s\S]{0,80}installGoogleAdsTag/, "a stored choice installs the tag only when it is exactly granted");
   assert.match(component, /function allow\(\)[\s\S]{0,200}installGoogleAdsTag/, "the Allow button installs the tag");
   assert.doesNotMatch(component, /function decline\(\)[\s\S]{0,300}installGoogleAdsTag/, "No thanks never installs the tag");
+  // Codex P1 (2026-10-15): a loaded tag in "denied" mode can still send
+  // cookieless pings, so withdrawing reloads the page into a tag-free state.
+  assert.match(
+    component,
+    /function decline\(\)[\s\S]{0,400}if \(loaded\.current\) \{[\s\S]{0,200}withdrawGoogleAdsConsent\([\s\S]{0,120}window\.location\.reload\(\)/,
+    "No thanks after the tag loaded withdraws, then reloads so no Google code keeps running",
+  );
+
+  // The purchase conversion never fires once the visitor said No thanks, even
+  // if a gtag function is still on the page.
+  const conversion = read("components/marketing/PurchaseConversion.tsx");
+  assert.match(
+    conversion,
+    /const send = \(\) => \{[\s\S]{0,200}readAdConsent\([\s\S]{0,60}=== "denied"\) return;/,
+    "PurchaseConversion refuses to send when the stored choice is denied",
+  );
   // Equal-weight choices: refusing must be as easy as accepting.
   const buttonClasses = [...component.matchAll(/<button[\s\S]*?className=\{([A-Z_]+)\}/g)].map((m) => m[1]);
   assert.deepEqual(buttonClasses, ["CHOICE_BUTTON", "CHOICE_BUTTON"], "Allow and No thanks share one style");

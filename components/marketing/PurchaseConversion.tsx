@@ -2,9 +2,17 @@
 
 import { useEffect, useRef } from "react";
 import { purchaseConversionPayload } from "@/lib/marketing/google-ads";
-import { AD_CONSENT_CHANGED_EVENT } from "@/lib/marketing/ad-consent";
+import { AD_CONSENT_CHANGED_EVENT, readAdConsent } from "@/lib/marketing/ad-consent";
 
 const STORAGE_PREFIX = "oasis:google-ads:purchase:";
+
+function localStore(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 declare global {
   interface Window {
@@ -41,6 +49,8 @@ export function PurchaseConversion({
     let timer: ReturnType<typeof setTimeout> | null = null;
     const send = () => {
       if (sent) return;
+      // A gtag left on the page after No thanks is not permission to send.
+      if (readAdConsent(localStore()) === "denied") return;
       if (typeof window.gtag !== "function") {
         attempts += 1;
         if (attempts < 40) timer = setTimeout(send, 100);

@@ -88,7 +88,14 @@ export function AdConsent() {
 
   function decline() {
     writeAdConsent(storage(), "denied");
-    if (loaded.current) withdrawGoogleAdsConsent(window, document, window.location.hostname);
+    if (loaded.current) {
+      // A loaded tag told "denied" can still send cookieless pings, so
+      // withdrawal ends with a reload: the page comes back with no Google code.
+      withdrawGoogleAdsConsent(window, document, window.location.hostname);
+      announce("denied");
+      window.location.reload();
+      return;
+    }
     announce("denied");
     close();
   }

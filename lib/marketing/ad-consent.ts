@@ -84,10 +84,14 @@ const DENIED = {
 
 /**
  * Load the Google Ads tag. Call ONLY after the visitor chose "Allow".
- * Idempotent: a second call (re-render, a later Allow) adds nothing.
+ * Idempotent: a second call adds no second script. If the tag is already on
+ * the page (Allow, No thanks, Allow again), Google is put back to granted.
  */
 export function installGoogleAdsTag(win: TagWindow, doc: TagDocument): void {
-  if (doc.getElementById(TAG_SCRIPT_ID)) return;
+  if (doc.getElementById(TAG_SCRIPT_ID)) {
+    if (typeof win.gtag === "function") win.gtag("consent", "update", GRANTED);
+    return;
+  }
   win.dataLayer = win.dataLayer || [];
   const dataLayer = win.dataLayer;
   // gtag.js reads the arguments object itself, not an array copy of it.
