@@ -23,8 +23,8 @@
   "tracking": {
     "usedForTracking": false,
     "thirdPartyAnalyticsSdks": [],
-    "advertisingPixels": [],
-    "note": "No Google Analytics, Meta Pixel, PostHog, Mixpanel, or @vercel/analytics is present in this application as of the lastVerified date. Cookies are limited to authentication and session state."
+    "advertisingPixels": ["Google Ads tag (AW-18509362419): public marketing website only, loaded only after the visitor presses Allow on the ad-cookie banner"],
+    "note": "usedForTracking stays false for the signed-in application and the desktop app, which never load the Google Ads tag. The public marketing website loads it only with opt-in consent (see the Website Ad Measurement category). No Google Analytics, Meta Pixel, PostHog, Mixpanel, or @vercel/analytics is present. Needs human legal review before any app-store declaration relies on it."
   },
 
   "security": {
@@ -87,6 +87,16 @@
       "sharedWith": ["Cloudflare"],
       "formerRecipients": ["Vercel, Inc. (request logs from the period it hosted the application, until September 2026)"],
       "retention": "Up to 30 days (Cloudflare). Vercel request logs from before September 2026 remain under Vercel's own retention until the Vercel account is closed; see legacyDataLocations."
+    },
+    {
+      "category": "Website Ad Measurement (public marketing site, opt-in)",
+      "fields": ["pages_visited", "gclid", "ip_address", "user_agent", "_gcl_au_cookie"],
+      "purposes": ["Third-Party Advertising measurement"],
+      "linkedToUser": false,
+      "usedForTracking": true,
+      "sensitive": false,
+      "sharedWith": ["Google (Google Ads), only after the visitor presses Allow on the ad-cookie banner"],
+      "retention": "_gcl_au expires after 90 days in the browser; Google retains Google Ads data under its own policy. Withdraw via 'Ad cookie choices' in the site footer."
     }
   ],
 
@@ -124,7 +134,7 @@
     },
     {
       "name": "Google LLC",
-      "role": "Google Workspace APIs (Gmail send and inbox monitoring, Calendar events); Gemini inference when selected",
+      "role": "Google Workspace APIs (Gmail send and inbox monitoring, Calendar events); Gemini inference when selected; Google Ads measurement on the public website for visitors who allow ad cookies",
       "region": "United States",
       "dpaInPlace": false
     },

@@ -191,16 +191,37 @@ export default function PrivacyPage() {
 
       <LegalSection n={5} title="Analytics and tracking">
         <p>
-          The Command Center does <strong>not</strong> load third-party analytics
-          SDKs, advertising pixels, or cross-site trackers. There is no Google
-          Analytics, Meta Pixel, PostHog, or similar tag in this application.
+          The signed-in Command Center and the desktop app do <strong>not</strong>{" "}
+          load third-party analytics SDKs, advertising pixels, or cross-site
+          trackers. There is no Google Analytics, Meta Pixel, PostHog, or similar
+          analytics tag anywhere in this application.
         </p>
         <p>
-          We use strictly necessary cookies for authentication and session state,
-          and our hosting provider records standard server logs (IP address,
-          request path, timestamp, user agent) for security and debugging. If we
-          add an analytics provider in future, this section and the data matrix
-          above will be updated in the same release.
+          Our public website (the pages you can read without signing in) can use
+          one advertising tag: <strong>Google Ads</strong>, which tells us which
+          of our ads brought a visitor and whether they went on to buy. It is off
+          by default. Nothing is requested from Google until you press{" "}
+          <strong>Allow</strong> on the ad-cookie banner. If you allow it, Google
+          receives the pages you visit on our site, the ad click identifier, your
+          IP address, and browser and device details, and sets cookies including{" "}
+          <code>_gcl_au</code> on our site and its own cookies on Google&apos;s
+          domains. If you choose <strong>No thanks</strong>, or never answer,
+          nothing loads.
+        </p>
+        <p>
+          You can change your choice at any time with{" "}
+          <strong>Ad cookie choices</strong> in the site footer. Withdrawing stops
+          the tag on that page and deletes the <code>_gcl_*</code> cookies it set
+          on our domain; cookies Google set on its own domains can only be
+          cleared from your browser or your Google account settings.
+        </p>
+        <p>
+          Apart from that, we use strictly necessary cookies for authentication
+          and session state, and our hosting provider records standard server
+          logs (IP address, request path, timestamp, user agent) for security and
+          debugging. If we add an analytics or advertising provider in future,
+          this section and the data matrix above will be updated in the same
+          release.
         </p>
       </LegalSection>
 

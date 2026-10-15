@@ -103,11 +103,45 @@ assert.deepEqual(
   "PRIVACY_NUTRITION_LABEL.json lists an analytics SDK while /privacy claims there is none.",
 );
 
-assert.deepEqual(
-  label.tracking.advertisingPixels,
-  [],
-  "PRIVACY_NUTRITION_LABEL.json lists an advertising pixel while /privacy claims there is none.",
-);
+// 1b. Browser tags and pixels. The package check above could not see the
+// Google Ads tag: it shipped on 2026-10-14 as a <script> URL in the root
+// layout, loaded on every marketing page with no consent, while /privacy said
+// "no advertising pixels". So scan the source for tag hosts too. Each one must
+// be (a) declared in the nutrition label, (b) named on /privacy, and (c) loaded
+// ONLY from the consent module, never from a layout or page directly.
+{
+  const TAG_HOSTS: Record<string, { name: RegExp; consentModule: string }> = {
+    "googletagmanager.com": { name: /Google Ads/, consentModule: "lib/marketing/ad-consent.ts" },
+    "google-analytics.com": { name: /Google Analytics/, consentModule: "" },
+    "connect.facebook.net": { name: /Meta Pixel/, consentModule: "" },
+    "snap.licdn.com": { name: /LinkedIn Insight/, consentModule: "" },
+    "static.ads-twitter.com": { name: /X Pixel/, consentModule: "" },
+    "analytics.tiktok.com": { name: /TikTok Pixel/, consentModule: "" },
+    "bat.bing.com": { name: /Microsoft Advertising/, consentModule: "" },
+    "clarity.ms": { name: /Microsoft Clarity/, consentModule: "" },
+    "static.hotjar.com": { name: /Hotjar/, consentModule: "" },
+  };
+  const privacyPage = readFileSync(join(root, "app/(marketing)/privacy/page.tsx"), "utf8");
+  const declared = [...label.tracking.advertisingPixels, ...label.tracking.thirdPartyAnalyticsSdks].map(String).join(" | ");
+  const found = new Map<string, string[]>();
+  for (const dir of ["app", "lib", "components"]) {
+    for (const file of walk(dir)) {
+      const src = readFileSync(file, "utf8");
+      for (const host of Object.keys(TAG_HOSTS)) {
+        if (src.includes(host)) found.set(host, [...(found.get(host) ?? []), file.slice(root.length + 1).replace(/\\/g, "/")]);
+      }
+    }
+  }
+  assert.ok(found.has("googletagmanager.com"), "The tag scan no longer finds the Google Ads loader: the scan is broken, or the tag was removed (then drop it from the label and /privacy).");
+  for (const [host, files] of found) {
+    const rule = TAG_HOSTS[host];
+    assert.match(declared, rule.name, `${files.join(", ")} loads ${host}, but ${LABEL_PATH} tracking does not declare it.`);
+    assert.match(privacyPage, rule.name, `${files.join(", ")} loads ${host}, but /privacy section 5 does not name it.`);
+    for (const f of files) {
+      assert.equal(f, rule.consentModule, `${f} references ${host}. Tags load only from their consent module, after the visitor allows them (Law 25).`);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 2. The rendered subprocessor table and the JSON manifest must agree.

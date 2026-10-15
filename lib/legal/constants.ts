@@ -19,10 +19,13 @@
  *     per-row database policies, so the legal pages must never describe the
  *     isolation as database-enforced; the drift test (npm run test:legal)
  *     fails if they do.
- *   - There is currently NO third-party analytics/pixel SDK in this app.
- *     Do not add one to this file speculatively — if you wire GA/PostHog/Meta,
- *     add it HERE in the same commit or the nutrition label goes stale and
- *     the privacy page becomes a false statement.
+ *   - There is NO third-party analytics SDK. There is ONE advertising tag:
+ *     Google Ads (AW-18509362419) on the public marketing pages, loaded only
+ *     after the visitor presses "Allow" on the ad-cookie banner
+ *     (lib/marketing/ad-consent.ts). It shipped on 2026-10-14 without this
+ *     file or /privacy being updated; tests/legal-compliance-drift.test.ts now
+ *     scans for tag and pixel hosts, not only npm packages, so the next one
+ *     fails the build until it is disclosed HERE in the same commit.
  *
  * If you change what the app collects or who it sends data to, change this
  * file. The pages render from it, so the pages cannot drift from it.
@@ -51,7 +54,7 @@ export const LEGAL_EFFECTIVE_DATE = "July 27, 2026";
  * changed when they did not. /privacy promises to update this date whenever
  * it changes, so bump it in the same commit as any edit to the policy.
  */
-export const PRIVACY_LAST_UPDATED = "October 1, 2026";
+export const PRIVACY_LAST_UPDATED = "October 15, 2026";
 
 /**
  * OASIS's one published contact address: support@oasisai.work.
@@ -215,9 +218,9 @@ export const SUBPROCESSORS: Subprocessor[] = [
   {
     name: "Google LLC",
     role:
-      "Google Workspace APIs (Gmail sending and inbox monitoring, Calendar events) and Gemini model inference when a workspace selects it",
+      "Google Workspace APIs (Gmail sending and inbox monitoring, Calendar events), Gemini model inference when a workspace selects it, and Google Ads measurement on our public website for visitors who allow ad cookies",
     dataReceived:
-      "Outbound email content and recipient addresses, connected inbox messages, meeting details and attendee addresses, and prompts sent to Gemini",
+      "Outbound email content and recipient addresses, connected inbox messages, meeting details and attendee addresses, and prompts sent to Gemini. From website visitors who allow ad cookies only: pages visited, the ad click identifier, IP address, and browser and device details",
     region: "United States",
     dpaInPlace: false,
   },
@@ -313,6 +316,15 @@ export const DATA_MATRIX: DataCategory[] = [
     sensitive: false,
     retention:
       "Up to 30 days (platform logs). Request logs from before September 2026 remain with our former hosting provider until that account is closed (section 6).",
+  },
+  {
+    category: "Website ad measurement (only if you allow ad cookies)",
+    examples: "pages visited, ad click identifier (gclid), IP address, browser and device details, the _gcl_au cookie",
+    purpose: "Measuring which of our Google ads bring visitors and purchases",
+    sharedWith: "Google (Google Ads), and only after you press Allow on the ad-cookie banner",
+    sensitive: false,
+    retention:
+      "The _gcl_au cookie expires after 90 days in your browser. Google keeps Google Ads data under its own retention policy. You can withdraw at any time with Ad cookie choices in the site footer.",
   },
 ];
 
