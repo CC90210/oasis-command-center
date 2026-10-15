@@ -66,6 +66,10 @@ R.useState = (init: unknown) => {
   if (!(i in own)) own[i] = typeof init === "function" ? (init as () => unknown)() : init;
   return [own[i], (v: unknown) => (own[i] = typeof v === "function" ? (v as (p: unknown) => unknown)(own[i]) : v)];
 };
+// Effects need a DOM and never run here. The component's one effect only shuffles
+// the placeholder text after mount (it was a Math.random() inside render, a
+// hydration mismatch), so a no-op is the faithful stand-in.
+R.useEffect = () => undefined;
 function mount(render: () => unknown) {
   slots = [];
   return () => {
