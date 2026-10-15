@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-15 — Funnel wiring: sales desk alerts, resume link, honest redirects
+
+### Added
+- New-lead alerts (started, completed, call booked, offer-page lead) go to the **sales desk**, a Telegram group CC and Adon both read, through a new `sales` lane reached only via `pushWorkspaceAlert(tenant, text, { desk: "sales" })`. With `OASIS_SALES_TELEGRAM_CHAT_ID` unset the lane delivers to CC's chat as before; a group the bot was removed from falls back to CC's DM in the same lane and says what to fix.
+- Alerts read "unbooked - needs follow-up" until a time is picked, show a booked call in Toronto time, and link the lead in Command Center.
+- The audit confirmation email carries a signed link (`/f/oasis-ai-cc/ai-audit/<token>?book=1`) that reopens the inline calendar for a lead who finished the form and closed the tab. The free-community invitation rides the same email only when email marketing consent was ticked for that address.
+- Lead page: a Funnel band (stage, booked call with Meet link or "Unbooked", budget, timeline, campaign, keyword, offer) and readable revenue / team labels. Leads also store `budget`, `timeframe` and `phone_e164` (the canonical form, beside the phone as typed).
+- Sales department: an "Inbound leads" tile for the warm-inbound queue (untouched vs booked), for the viewers who already see that queue.
+- Migration `bravo__224` adds `call_appointments.offer_label` so a booking keeps the offer's name across retries and reschedules.
+
+### Changed
+- `/vsl` is a temporary (302) redirect decided on every request: the router form when it is live, the AI audit otherwise, query string (utm_*, kw, cat, gclid) carried through. It replaces the 10-12 permanent redirect, which sent ad traffic to a disabled draft and would have been cached by browsers for good.
+- A bare `/go/community` no longer 404s: it defaults to OASIS's audit funnel, logs the click even with no visit id (server-made id, no IP), records `?from=`, and still reaches the lounge if the form is switched off.
+
+### Fixed
+- `offer-pages-access` pinned a 2026-10-08 timestamp against a 7-day freshness window and went red for every PR on 2026-10-15.
+
 ## 2026-10-12 — OASIS funnel capture and inline founder booking
 
 ### Added
