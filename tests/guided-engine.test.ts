@@ -129,7 +129,7 @@ async function main(): Promise<void> {
         startTurn: async (turn) => {
           assert.equal(turn.mode, "preview");
           assert.deepEqual(turn.payload.tools, payload.tools);
-          turn.wouldDraft.push({ to: "lead@customer.test", subject: "Checking in", title: "Automation Follow-up drafts: Email to lead@customer.test: Checking in" });
+          turn.wouldDraft.push({ to: "lead@customer.test", subject: "Checking in", title: "Automation Follow-up drafts: Email to lead@customer.test: Checking in", body: "Hi there, checking in." });
           async function* stream() {
             yield { type: "delta" as const, text: `Draft ready ${process.env.GUIDED_TEST_SECRET}` };
             yield { type: "done" as const, inputTokens: 10, outputTokens: 4 };

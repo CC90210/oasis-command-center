@@ -211,7 +211,8 @@ export async function proposeAutomationEmail(
       sent: false,
       filed: false,
       test_run: true,
-      would_draft: { to: payload.value.to, subject: payload.value.subject, title },
+      // The body too: the Test now screen shows the owner exactly what would be filed.
+      would_draft: { to: payload.value.to, subject: payload.value.subject, title, body: payload.value.body },
       note: "Test run: this draft passed every check but was not filed. Nothing was sent and nothing is waiting in Needs you.",
     };
   }

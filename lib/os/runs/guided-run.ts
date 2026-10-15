@@ -7,8 +7,8 @@ import { departmentChannelFor } from "@/components/os/department/config";
 import { departmentGate } from "@/components/os/department/gate";
 import { loadWorkspaceConnectorStatus } from "@/components/os/connections/connector-facts";
 import { resolveOsViewerFor, type OsViewer } from "@/components/os/department/viewer";
-import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
-import { isApiEngineProvider } from "@/lib/ai/agent-engine";
+import { hasUsableKey, readWorkspaceAiAccount, type UsableAiAccount } from "@/lib/ai/workspace-account";
+import { isApiEngineProvider, type ApiEngineProvider } from "@/lib/ai/agent-engine";
 import { requiredConnectors, taskMessageFor, validateGuidedPayload } from "@/lib/automations/guided/validate";
 import type { GuidedPayload } from "@/lib/automations/guided/types";
 import { decryptField } from "@/lib/field-encryption";
@@ -134,7 +134,8 @@ async function receiptFor(db: Client, scope: RunScope, run: Run): Promise<Guided
   };
 }
 
-function plainFailure(code: string, detail?: string): string {
+/** The sentence a person reads for a refusal or failure code (preview result, last-run line, receipts). */
+export function plainFailure(code: string, detail?: string): string {
   switch (code) {
     case "owner_inactive": return "This automation's owner no longer has an active seat.";
     case "department_unavailable": return "This department or its AI teammate is no longer available to the owner.";
@@ -210,6 +211,102 @@ async function terminalFailure(input: {
   };
 }
 
+type OwnerSeat = Extract<Awaited<ReturnType<typeof liveSeat>>, { live: true }>;
+type AgentBinding = Extract<ReturnType<typeof departmentChannelFor>, { kind: "agent" }>;
+type UsableAccount = UsableAiAccount & { provider: ApiEngineProvider };
+
+export type GuidedPreflight =
+  | {
+      ok: true;
+      seat: OwnerSeat;
+      viewer: OsViewer;
+      payload: GuidedPayload;
+      department: (typeof OS_DEPARTMENTS)[number];
+      binding: AgentBinding;
+      account: UsableAccount;
+      task: string;
+      /** The workspace's slug, never empty (a viewer without one is refused above). */
+      tenantSlug: string;
+    }
+  | { ok: false; code: string; detail?: string; department?: string; agentSlug?: string };
+
+/**
+ * Everything that must still be true for this automation to run NOW, checked against its OWNER's
+ * current rights and the workspace's current state: the live seat, the payload (re-validated with the
+ * owner's own company-financials right), the department and its AI teammate, every required
+ * connection, every lookup, and the workspace AI account. Nothing is queued or written.
+ *
+ * ONE function for both callers: a scheduled or test run (runGuidedAutomation) and Turn on
+ * (app/api/automations/guided/[id]/activate), so the rules that let a person switch it on are exactly
+ * the rules that let it run.
+ */
+export async function preflightGuidedAutomation(input: {
+  row: GuidedAutomationRow;
+  now: Date;
+  deps?: Partial<GuidedRunDeps>;
+}): Promise<GuidedPreflight> {
+  const { row, now } = input;
+  const deps = { ...DEFAULT_DEPS, ...input.deps };
+  const no = (code: string, detail?: string, department?: string, agentSlug?: string): GuidedPreflight => ({ ok: false, code, detail, department, agentSlug });
+
+  if (row.action_type !== "department_task" || !row.tenant_id || !row.owner_user_id) return no("payload_invalid");
+
+  let checked: Awaited<ReturnType<typeof liveSeat>>;
+  try {
+    checked = await deps.seat(row.tenant_id, row.owner_user_id);
+  } catch {
+    console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "owner_seat", code: "unavailable" });
+    return no("owner_inactive");
+  }
+  if (!checked.live) return no("owner_inactive");
+  const seat: OwnerSeat = checked;
+
+  const viewerResult = await deps.viewer(row.tenant_id, row.owner_user_id);
+  if (!viewerResult.ok) return no("owner_inactive");
+  const viewer: OsViewer = viewerResult;
+  const tenantSlug = viewer.surface.tenantSlug;
+  if (!tenantSlug) return no("owner_inactive");
+  const validation = validateGuidedPayload(parsePayload(row.action_payload), {
+    companyFinancials: viewer.surface.capabilities.canSeeCompanyFinancials,
+  });
+  if (!validation.ok) return no(validation.error, validation.message);
+  const payload: GuidedPayload = validation.payload;
+  const department = OS_DEPARTMENTS.find((candidate) => candidate.key === payload.department);
+  if (!department || !departmentGate(department.slug, viewer.navInput)) return no("department_unavailable", undefined, payload.department);
+  const binding = departmentChannelFor(payload.department, { oasis: viewer.oasis, manifest: viewer.manifest });
+  if (binding.kind !== "agent") return no("department_unavailable", undefined, payload.department);
+
+  for (const connector of requiredConnectors(payload)) {
+    let status;
+    try {
+      status = await deps.connector(row.tenant_id, connector, now.getTime());
+    } catch {
+      console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "connector", connector, code: "unavailable" });
+      status = null;
+    }
+    if (status?.kind !== "connected") return no(`missing_connection:${connector}`, connector, payload.department, binding.agentSlug);
+  }
+  for (const tool of payload.tools) {
+    if (!deskToolAvailability(tool, viewer).ok) return no(`tool_unavailable:${tool}`, undefined, payload.department, binding.agentSlug);
+  }
+
+  let account;
+  try {
+    account = await deps.account(row.tenant_id);
+    if (!hasUsableKey(account) || !isApiEngineProvider(account.provider) || !account.model.trim()) account = null;
+    else if (!deps.decrypt(account.encryptedApiKey)) account = null;
+  } catch {
+    console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "ai_account", code: "unavailable" });
+    account = null;
+  }
+  if (!account || !hasUsableKey(account) || !isApiEngineProvider(account.provider)) {
+    return no("ai_account_unavailable", undefined, payload.department, binding.agentSlug);
+  }
+  const task = taskMessageFor(payload);
+  if (!task) return no("template_version_unknown", undefined, payload.department, binding.agentSlug);
+  return { ok: true, seat, viewer, payload, department, binding, account: account as UsableAccount, task, tenantSlug };
+}
+
 /** Revalidate, claim, and execute one exact wall-clock occurrence. */
 export async function runGuidedAutomation(input: {
   db: Client;
@@ -226,59 +323,9 @@ export async function runGuidedAutomation(input: {
     db, deps, row, scope, scheduledFor, now, mode, code, message: plainFailure(code, detail), department, agentSlug,
   });
 
-  if (row.action_type !== "department_task" || !row.tenant_id || !row.owner_user_id) return fail("payload_invalid");
-
-  let seat;
-  try {
-    seat = await deps.seat(row.tenant_id, row.owner_user_id);
-  } catch {
-    console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "owner_seat", code: "unavailable" });
-    return fail("owner_inactive");
-  }
-  if (!seat.live) return fail("owner_inactive");
-
-  const viewerResult = await deps.viewer(row.tenant_id, row.owner_user_id);
-  if (!viewerResult.ok) return fail("owner_inactive");
-  const viewer: OsViewer = viewerResult;
-  if (!viewer.surface.tenantSlug) return fail("owner_inactive");
-  const validation = validateGuidedPayload(parsePayload(row.action_payload), {
-    companyFinancials: viewer.surface.capabilities.canSeeCompanyFinancials,
-  });
-  if (!validation.ok) return fail(validation.error, validation.message);
-  const payload: GuidedPayload = validation.payload;
-  const department = OS_DEPARTMENTS.find((candidate) => candidate.key === payload.department);
-  if (!department || !departmentGate(department.slug, viewer.navInput)) return fail("department_unavailable", undefined, payload.department);
-  const binding = departmentChannelFor(payload.department, { oasis: viewer.oasis, manifest: viewer.manifest });
-  if (binding.kind !== "agent") return fail("department_unavailable", undefined, payload.department);
-
-  for (const connector of requiredConnectors(payload)) {
-    let status;
-    try {
-      status = await deps.connector(row.tenant_id, connector, now.getTime());
-    } catch {
-      console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "connector", connector, code: "unavailable" });
-      status = null;
-    }
-    if (status?.kind !== "connected") return fail(`missing_connection:${connector}`, connector, payload.department, binding.agentSlug);
-  }
-  for (const tool of payload.tools) {
-    if (!deskToolAvailability(tool, viewer).ok) return fail(`tool_unavailable:${tool}`, undefined, payload.department, binding.agentSlug);
-  }
-
-  let account;
-  try {
-    account = await deps.account(row.tenant_id);
-    if (!hasUsableKey(account) || !isApiEngineProvider(account.provider) || !account.model.trim()) account = null;
-    else if (!deps.decrypt(account.encryptedApiKey)) account = null;
-  } catch {
-    console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "ai_account", code: "unavailable" });
-    account = null;
-  }
-  if (!account || !hasUsableKey(account) || !isApiEngineProvider(account.provider)) {
-    return fail("ai_account_unavailable", undefined, payload.department, binding.agentSlug);
-  }
-  const task = taskMessageFor(payload);
-  if (!task) return fail("template_version_unknown", undefined, payload.department, binding.agentSlug);
+  const pre = await preflightGuidedAutomation({ row, now, deps: input.deps });
+  if (!pre.ok) return fail(pre.code, pre.detail, pre.department, pre.agentSlug);
+  const { seat, viewer, payload, department, binding, account, task, tenantSlug } = pre;
 
   const conversation = await ensureAutomationConversation(db, scope, {
     automationId: row.id,
@@ -323,7 +370,7 @@ export async function runGuidedAutomation(input: {
   const session: RunSession = {
     scope,
     email: viewer.email ?? seat.profile.email ?? "",
-    tenantSlug: viewer.surface.tenantSlug,
+    tenantSlug,
     dept: department,
     operatorName: seat.profile.email?.split("@")[0] || "Owner",
     isOperator: false,

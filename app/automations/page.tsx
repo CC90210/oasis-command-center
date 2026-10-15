@@ -10,6 +10,7 @@
 import { AutomationsContent } from "@/components/automations/AutomationsContent";
 import { requireOperator, resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import { resolveScriptAutomationAccess } from "@/lib/automations/script-access";
+import { guidedBuilderAllowed } from "@/lib/automations/guided-access";
 
 export const dynamic = "force-dynamic";
 
@@ -30,5 +31,8 @@ export default async function AutomationsPage() {
   // team, which is exactly the bug O2 closes: Adon manages OASIS's team too,
   // but CCPC is CC's computer, so only CC may create a script automation here.
   const scriptAccess = await resolveScriptAutomationAccess(await resolvePlatformOperator());
-  return <AutomationsContent scriptAccess={scriptAccess} />;
+  // The guided builder (templates, a test run, then Turn on) is for any owner or admin of the workspace:
+  // the routes enforce the same rule, so the page never offers a control that would answer 403.
+  const guidedEnabled = await guidedBuilderAllowed();
+  return <AutomationsContent scriptAccess={scriptAccess} guidedEnabled={guidedEnabled} />;
 }

@@ -20,7 +20,7 @@ import type { Run } from "./store";
 import type { TurnStart } from "./executor";
 import { engineMetadataForTurn } from "./turn-starter";
 
-export type WouldDraft = { to: string; subject: string; title: string };
+export type WouldDraft = { to: string; subject: string; title: string; body: string };
 
 type AutomationTurnDeps = {
   prepare?: typeof prepareAgentTurn;
@@ -65,7 +65,7 @@ function collectWouldDraft(target: WouldDraft[], name: string, content: string):
     if (!draft || typeof draft !== "object" || Array.isArray(draft)) return;
     const value = draft as Record<string, unknown>;
     if (typeof value.to !== "string" || typeof value.subject !== "string" || typeof value.title !== "string") return;
-    target.push({ to: value.to, subject: value.subject, title: value.title });
+    target.push({ to: value.to, subject: value.subject, title: value.title, body: typeof value.body === "string" ? value.body.slice(0, 4_000) : "" });
   } catch {
     // A malformed tool result remains a tool failure; it never widens rights.
   }

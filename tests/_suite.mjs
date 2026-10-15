@@ -291,6 +291,9 @@ const TESTS = [
   // preview files nothing, atomic slot claim, misses recorded and never replayed.
   "tests/guided-engine.test.ts",
   "tests/guided-automation-dispatcher.test.ts",
+  // The routes and their service: who may build, what a hostile body cannot change, Turn on refused
+  // with the fix, Test now capped, the owner rule, same-origin writes.
+  "tests/guided-automations-service.test.ts",
   // A drafted schedule the runner cannot run (day names like MON-FRI) is
   // refused at the draft step in a sentence, save-draft's refusal is a
   // sentence, and Draft with AI works straight from the error.
