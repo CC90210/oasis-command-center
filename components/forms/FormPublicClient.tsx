@@ -253,6 +253,11 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
   server_error: "Something went wrong on our end. Please try submitting again.",
   consent_record_unavailable:
     "We couldn't save your contact preferences just now. Please try submitting again.",
+  // The last step of an audit that opens the calendar. Your answers are already
+  // saved; only the step that marks you ready to book failed, and pressing
+  // submit again repairs it.
+  funnel_stage_write_unavailable:
+    "Your answers are saved, but we couldn't open the calendar just now. Please press submit again.",
   form_corrupt: "This form is temporarily unavailable. We have been notified, please try again shortly.",
   form_definition_corrupt:
     "This form is temporarily unavailable. We have been notified, please try again shortly.",
