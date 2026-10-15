@@ -10,6 +10,7 @@ import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
 import { listGoogleCalendarBusy, type GoogleBusyInterval } from "@/lib/integrations/google-calendar";
 import { getOasisPipelineAssignmentRoster, OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
 import { listCalendars } from "@/lib/calendar/store";
+import { OASIS_PRE_HANDOFF_STAGE_KEYS } from "@/lib/oasis-stage-meta";
 
 export const PUBLIC_BOOKING_TIME_ZONE = "America/Toronto";
 export const PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES = 15;
@@ -21,6 +22,22 @@ const PUBLIC_BOOKING_START_HOUR = 9;
 const PUBLIC_BOOKING_END_HOUR = 17;
 
 export type PublicFunnelStage = "inbound_lead" | "audit_requested" | "meeting_booked";
+
+const BOOKABLE_PIPELINE_STAGES = new Set<string>(OASIS_PRE_HANDOFF_STAGE_KEYS);
+
+/**
+ * May a lead at this pipeline stage book through the public calendar?
+ *
+ * Only a prospect still before the founder handoff. A returning lead already at
+ * a later stage (a founder meeting booked, won, lost, in delivery) must not get
+ * a fresh booking from a form re-submit: the transition would be refused anyway
+ * (`lead_stage_not_bookable`). BOTH public routes ask this one function, so the
+ * availability endpoint can never advertise slots the booking endpoint will
+ * categorically reject (Codex review of PR #611).
+ */
+export function isPublicBookingStageBookable(stage: unknown): boolean {
+  return typeof stage === "string" && BOOKABLE_PIPELINE_STAGES.has(stage.trim());
+}
 
 export function isPublicFunnelReadyForBooking(lead: Record<string, unknown>): boolean {
   const stage = clean(lead.funnel_stage);

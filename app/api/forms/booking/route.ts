@@ -5,6 +5,7 @@ import { ensureAiAuditSalesEvent } from "@/lib/forms/ai-audit-notify";
 import {
   buildPublicFunnelLeadPatch,
   ensurePublicFunnelBookingEvent,
+  isPublicBookingStageBookable,
   loadPublicBookingSlots,
   mirrorPublicBookingToSchedules,
   publicBookingCreateSchema,
@@ -20,7 +21,6 @@ import { buildBookedLeadAlert } from "@/lib/forms/public-booking-alert";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { rateLimit } from "@/lib/rate-limit";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { OASIS_PRE_HANDOFF_STAGE_KEYS } from "@/lib/oasis-stage-meta";
 import {
   activateVerifiedFounderMeeting,
   compensatePendingFounderMeetingBooking,
@@ -30,7 +30,6 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const BOOKABLE_STAGES = new Set<string>(OASIS_PRE_HANDOFF_STAGE_KEYS);
 const RESOLUTION_ERRORS = new Set([
   "booking_form_not_found",
   "booking_form_not_completed",
@@ -192,7 +191,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const currentStage = text(context.lead.stage);
-  if (!BOOKABLE_STAGES.has(currentStage)) {
+  if (!isPublicBookingStageBookable(currentStage)) {
     return NextResponse.json({ ok: false, error: "lead_stage_not_bookable" }, { status: 409 });
   }
 

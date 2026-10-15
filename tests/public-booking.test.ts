@@ -331,6 +331,28 @@ await check("applies the Schedule-link migration and serializes one OASIS founde
   db.close();
 });
 
+// Codex review of PR #611: availability advertised slots to a returning lead whose
+// pipeline stage the booking endpoint then refuses (`lead_stage_not_bookable`).
+await check("only a prospect before the founder handoff may book; both public routes ask the same function", async () => {
+  const { isPublicBookingStageBookable } = await import("../lib/forms/public-booking");
+  for (const stage of ["researched", "assigned", "attempting_contact", "connected", "qualified", " researched "]) {
+    assert.equal(isPublicBookingStageBookable(stage), true, `${stage} may book`);
+  }
+  for (const stage of ["founder_meeting_booked", "demo_completed", "proposal_sent", "won", "lost", "onboarding", "in_build", "launched", "", "   ", undefined, null, 7]) {
+    assert.equal(isPublicBookingStageBookable(stage), false, `${String(stage)} must not book`);
+  }
+  const { readFileSync } = await import("node:fs");
+  const availability = readFileSync("app/api/forms/booking/availability/route.ts", "utf8");
+  const booking = readFileSync("app/api/forms/booking/route.ts", "utf8");
+  assert.match(availability, /isPublicBookingStageBookable\(context\.lead\.stage\)[\s\S]{0,160}lead_stage_not_bookable/);
+  assert.ok(
+    availability.indexOf("isPublicBookingStageBookable(context.lead.stage)") < availability.indexOf("loadPublicBookingSlots({"),
+    "the stage is checked BEFORE two calendars are read",
+  );
+  assert.match(booking, /isPublicBookingStageBookable\(currentStage\)[\s\S]{0,160}lead_stage_not_bookable/);
+  assert.ok(!/BOOKABLE_STAGES/.test(booking), "the booking route no longer keeps its own copy of the stage list");
+});
+
 console.log("\nAll public-booking checks passed.");
 }
 

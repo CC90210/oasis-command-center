@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
 import { sameOrigin } from "@/lib/calendar/http";
 import {
+  isPublicBookingStageBookable,
   loadPublicBookingSlots,
   publicBookingAvailabilitySchema,
   publicBookingFounders,
@@ -52,6 +53,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const context = await resolvePublicFunnelBooking(getServiceSupabase(), parsed.data.token);
     if (typeof context.lead.calendar_appointment_id === "string" && context.lead.calendar_appointment_id) {
       return NextResponse.json({ ok: false, error: "already_booked" }, { status: 409 });
+    }
+    // The booking endpoint refuses a lead past the founder handoff. Say so HERE,
+    // before reading two calendars, instead of showing slots no selection can book.
+    if (!isPublicBookingStageBookable(context.lead.stage)) {
+      return NextResponse.json({ ok: false, error: "lead_stage_not_bookable" }, { status: 409 });
     }
     const founders = await publicBookingFounders(context.tenantId);
     const durationMinutes = publicBookingDurationMinutes(context.formSlug);

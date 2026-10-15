@@ -2285,6 +2285,7 @@ function readableError(code: string): string {
     calendar_cancel_failed: "The deal outcome was saved, but Google could not finish the invitation cleanup. Retry the same action; the background worker will also reconcile it.",
     verified_meeting_required: "This older booking has no verified Calendar receipt. Return it to Qualified and book it through the guided handoff.",
     meeting_no_longer_reschedulable: "This meeting is already completed or cancelled and cannot be rescheduled.",
+    founder_slot_overlap: "Another founder call is already booked in that time. Nothing was changed and no invite went out; pick a different time.",
     meeting_transition_pending: "A Calendar change is already waiting for its lifecycle update. Refresh and retry the same action.",
     meeting_host_deactivated: "This meeting's host has been deactivated, so it can't be rescheduled. Once its time has passed, mark it no-show; before then, cancel it. Then book a new audit with an active host.",
     meeting_host_check_failed: "We could not confirm this meeting's host just now. Nothing was changed. Retry in a moment.",

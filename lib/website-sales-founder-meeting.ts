@@ -1,6 +1,7 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
+import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
@@ -54,6 +55,7 @@ type AppointmentRow = {
   assigned_to: string | null;
   created_by: string;
   status: string;
+  meeting_kind?: string | null;
   duration_minutes: number | null;
   offer_label: string | null;
   client_name_snapshot: string | null;
@@ -1084,6 +1086,105 @@ async function markPendingError(
   }
 }
 
+/**
+ * Keep the founders' Schedule copies of a call in step with the call.
+ *
+ * A booking from the public calendar is mirrored into each founder's private
+ * Schedule (calendar_events, keyed by appointment_id). Reschedules and
+ * cancellations then updated Google and call_appointments but never those copies,
+ * so Schedule kept the original time after a reschedule and kept showing a
+ * cancelled call (Codex review of PR #611).
+ *
+ * Reads the AUTHORITATIVE call_appointments row and makes the copies match it:
+ * the times follow scheduled_for, and a cancelled call's copies are removed.
+ * Reading the row (rather than trusting the caller's argument) makes it correct
+ * from every saga path that calls it: a completed reschedule, a reschedule
+ * compensated back to its old time, a finalized cancellation. An appointment
+ * with no mirror rows (a rep-booked call) matches nothing. Best-effort by
+ * design: the call itself is already durable, so a failure here is logged for
+ * the next sync to repair and never fails or rolls back the meeting change.
+ */
+async function syncScheduleMirrors(db: Db, tenantId: string, appointmentId: string): Promise<void> {
+  try {
+    const row = await db
+      .from("call_appointments")
+      .select("scheduled_for,duration_minutes,status,workflow_status,calendar_status")
+      .eq("tenant_id", tenantId)
+      .eq("id", appointmentId)
+      .maybeSingle();
+    if (row.error || !row.data) return;
+    const call = row.data as {
+      scheduled_for: string;
+      duration_minutes: number | null;
+      status: string;
+      workflow_status: string;
+      calendar_status: string;
+    };
+    if (call.status === "cancelled" || call.workflow_status === "cancelled" || call.calendar_status === "cancelled") {
+      const removed = await db.from("calendar_events").delete().eq("tenant_id", tenantId).eq("appointment_id", appointmentId);
+      if (removed.error) console.error("[founder-meeting.schedule-mirror] remove failed", removed.error.message);
+      return;
+    }
+    const start = Date.parse(call.scheduled_for);
+    if (!Number.isFinite(start)) return;
+    const updated = await db
+      .from("calendar_events")
+      .update({
+        start_at: new Date(start).toISOString(),
+        end_at: new Date(start + (Number(call.duration_minutes) || 15) * 60_000).toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("tenant_id", tenantId)
+      .eq("appointment_id", appointmentId);
+    if (updated.error) console.error("[founder-meeting.schedule-mirror] update failed", updated.error.message);
+  } catch (error) {
+    console.error("[founder-meeting.schedule-mirror] sync failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * The OASIS workspace books two founders on one calendar, and bravo__223's
+ * triggers refuse to write a founder_audit appointment that overlaps another.
+ * That refusal happens at the FINAL database write, which a reschedule reaches
+ * only after Google has already moved the event: a reschedule into an occupied
+ * interval left the client's invite on the new time while the database kept the
+ * old one (Codex review of PR #611). So ask first, before anything is reserved
+ * or sent to Google. Same predicate as the trigger: the OASIS workspace only
+ * (other workspaces may run several founder-audit calendars), scheduled rows
+ * whose calendar is creating or verified, any overlap of the two intervals.
+ * Throws `founder_slot_overlap`; the trigger stays as the race-proof backstop.
+ */
+async function assertFounderSlotFree(
+  db: Db,
+  appointment: AppointmentRow,
+  meetingAtIso: string,
+  durationMinutes: number,
+): Promise<void> {
+  if (appointment.tenant_id !== AI_AUDIT_TENANT_ID || appointment.meeting_kind !== "founder_audit") return;
+  const start = Date.parse(meetingAtIso);
+  const end = start + durationMinutes * 60_000;
+  // A meeting can be up to 120 minutes (normalizedMeetingDuration), so one that
+  // starts up to two hours before ours can still overlap it.
+  const windowStart = new Date(start - 120 * 60_000).toISOString();
+  const windowEnd = new Date(end).toISOString();
+  const others = await db
+    .from("call_appointments")
+    .select("id,scheduled_for,duration_minutes")
+    .eq("tenant_id", appointment.tenant_id)
+    .eq("meeting_kind", "founder_audit")
+    .eq("status", "scheduled")
+    .in("calendar_status", ["creating", "verified"])
+    .gte("scheduled_for", windowStart)
+    .lte("scheduled_for", windowEnd);
+  if (others.error) throw new Error("founder_slot_check_failed", { cause: others.error });
+  for (const other of (others.data || []) as Array<{ id: string; scheduled_for: string; duration_minutes: number | null }>) {
+    if (other.id === appointment.id) continue;
+    const otherStart = Date.parse(other.scheduled_for);
+    const otherEnd = otherStart + (Number(other.duration_minutes) || 15) * 60_000;
+    if (otherStart < end && otherEnd > start) throw new Error("founder_slot_overlap");
+  }
+}
+
 export async function createVerifiedFounderMeeting(input: {
   tenantId: string;
   leadId: string;
@@ -1652,6 +1753,9 @@ export async function rescheduleVerifiedFounderMeeting(input: {
     throw new Error("meeting_host_check_failed", { cause: error });
   }
   if (hostStanding === "deactivated") throw new Error("meeting_host_deactivated");
+  // Before anything is reserved, patched or queued: a target that overlaps
+  // another founder call is refused here, not after Google has moved the invite.
+  await assertFounderSlotFree(db, appointment, meetingAt, normalizedMeetingDuration(appointment.duration_minutes));
   const reservation = await reserveOperation(
     db,
     appointment,
@@ -1740,6 +1844,8 @@ export async function rescheduleVerifiedFounderMeeting(input: {
     clientAgenda,
     deps.now(),
   );
+  // The Schedule copies follow the new time (best-effort; see syncScheduleMirrors).
+  await syncScheduleMirrors(db, input.tenantId, appointment.id);
   return meeting;
 }
 
@@ -1780,6 +1886,8 @@ async function finalizeCancellation(
     .select("*")
     .maybeSingle();
   if (cancelled.error || !cancelled.data) return null;
+  // A cancelled call must leave the founders' Schedule (best-effort; see syncScheduleMirrors).
+  await syncScheduleMirrors(db, appointment.tenant_id, appointment.id);
   return cancelled.data as AppointmentRow;
 }
 
@@ -2266,6 +2374,8 @@ async function compensateReschedule(
     .select("*")
     .maybeSingle();
   if (restored.error || !restored.data) return false;
+  // The call is back on its old time, so the Schedule copies go back with it.
+  await syncScheduleMirrors(deps.db, working.tenant_id, working.id);
   return true;
 }
 
