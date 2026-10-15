@@ -79,6 +79,8 @@ async function main(): Promise<void> {
   const { startAutomationTurn } = await import("../lib/os/runs/automation-turn");
   const { proposeAutomationEmail, ProposalRefused } = await import("../lib/os/desk/proposals");
   const { DESK_TOOLS } = await import("../lib/os/desk/catalog");
+  const { GuidedPreflightUnavailable, plainFailure } = await import("../lib/os/runs/guided-run");
+  const { foreignContactDetail } = await import("../lib/os/desk/proposals");
 
   const tenant = "aaaaaaaa-0000-4000-8000-000000000001";
   const owner = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -265,6 +267,184 @@ async function main(): Promise<void> {
     const source = readFileSync(join(ROOT, "lib", "os", "runs", "store.ts"), "utf8");
     assert.match(source, /WHERE tenant_id = \? AND user_id = \? AND automation_id = \? AND scheduled_for = \?[\s\S]*args: \[scope\.tenantId, scope\.userId/);
     assert.match(source, /c\.tenant_id = \? AND c\.user_id = \? AND c\.origin = 'automation'/);
+  });
+
+
+  // ── the review's fixes ────────────────────────────────────────────────────
+  const seatOf = (over: Record<string, unknown> = {}) => async () => ({ live: true as const, profile: { id: "profile", email: "owner@acme.test", teamRole: "owner", isOwner: true, adminAccess: true, ...over } });
+  const goodDeps = (over: Record<string, unknown> = {}) => ({
+    seat: seatOf(),
+    viewer: async () => viewer as never,
+    connector: async () => ({ kind: "connected", label: "Connected", detail: "Verified" }),
+    account: async () => ({ source: "workspace", provider: "openai", model: "gpt-test", encryptedApiKey: "cipher", enabled: true }),
+    decrypt: () => "plain",
+    ...over,
+  });
+  const runCount = async () => Number((await db.execute("SELECT COUNT(*) AS n FROM dept_chat_runs")).rows[0].n);
+  const okTurn = (text = "Done.") => async () => {
+    async function* stream() {
+      yield { type: "delta" as const, text };
+      yield { type: "done" as const, inputTokens: 1, outputTokens: 1 };
+    }
+    return { ok: true as const, agent: { display_name: "Sales" }, channelKey: "sales", agentSlug: "sdr", failureModel: () => null, stream: stream() };
+  };
+
+  await check("an owner who is no longer an owner or admin is refused before connectors, tools, account or model", async () => {
+    let touched = false;
+    const before = await runCount();
+    const denied = await runGuidedAutomation({
+      db, row, mode: "preview", scheduledFor: new Date("2026-10-15T14:00:00.000Z"), now: new Date("2026-10-15T14:00:00.000Z"),
+      deps: goodDeps({
+        seat: seatOf({ teamRole: "member", isOwner: false, adminAccess: false }),
+        viewer: async () => { touched = true; return viewer as never; },
+      }) as never,
+    });
+    assert.equal(denied.status, "failed");
+    assert.equal(denied.receipt?.errorCode, "owner_not_manager");
+    assert.equal(touched, false);
+    assert.equal(await runCount(), before + 1, "one terminal receipt, nothing queued");
+    assert.match(plainFailure("owner_not_manager"), /no longer manages the workspace/);
+    // An admin grant is enough, as it is to build one.
+    const granted = await runGuidedAutomation({
+      db, row, mode: "preview", scheduledFor: new Date("2026-10-15T14:01:00.000Z"), now: new Date("2026-10-15T14:01:00.000Z"),
+      deps: goodDeps({ seat: seatOf({ teamRole: "member", isOwner: false, adminAccess: true }), startTurn: okTurn() }) as never,
+    });
+    assert.equal(granted.status, "done");
+  });
+
+  await check("a failed READ (seat, connector, AI account) throws and records nothing: it is a retry, not a verdict on the automation", async () => {
+    const before = await runCount();
+    const at = (n: number) => new Date(`2026-10-15T15:0${n}:00.000Z`);
+    const attempt = (n: number, over: Record<string, unknown>) =>
+      runGuidedAutomation({ db, row, mode: "preview", scheduledFor: at(n), now: at(n), deps: goodDeps(over) as never });
+    await assert.rejects(() => attempt(0, { seat: async () => ({ live: false, reason: "unavailable" }) }), GuidedPreflightUnavailable);
+    await assert.rejects(() => attempt(1, { seat: async () => { throw new Error("db down"); } }), GuidedPreflightUnavailable);
+    await assert.rejects(() => attempt(2, { connector: async () => { throw new Error("timeout"); } }), GuidedPreflightUnavailable);
+    await assert.rejects(() => attempt(3, { account: async () => { throw new Error("timeout"); } }), GuidedPreflightUnavailable);
+    assert.equal(await runCount(), before, "no failed run was written, so no slot was burned");
+    // A decision, by contrast, is recorded: deactivated, or an account with no usable key.
+    const gone = await attempt(4, { seat: async () => ({ live: false, reason: "deactivated" }) });
+    assert.equal(gone.receipt?.errorCode, "owner_inactive");
+    const noKey = await attempt(5, { account: async () => null });
+    assert.equal(noKey.receipt?.errorCode, "ai_account_unavailable");
+  });
+
+  await check("a run that cannot be claimed because another is going fails as 'busy' at once; it does not stay queued, and the running one is not reaped", async () => {
+    const slotA = new Date("2026-10-15T16:00:00.000Z");
+    const slotB = new Date("2026-10-15T16:01:00.000Z");
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const first = runGuidedAutomation({
+      db, row, mode: "live", scheduledFor: slotA, now: slotA,
+      deps: goodDeps({
+        startTurn: async () => {
+          async function* stream() {
+            await gate;
+            yield { type: "delta" as const, text: "First finished." };
+            yield { type: "done" as const, inputTokens: 1, outputTokens: 1 };
+          }
+          return { ok: true as const, agent: { display_name: "Sales" }, channelKey: "sales", agentSlug: "sdr", failureModel: () => null, stream: stream() };
+        },
+      }) as never,
+    });
+    for (let i = 0; i < 100; i += 1) {
+      const live = await db.execute({ sql: "SELECT status FROM dept_chat_runs WHERE automation_id = ? AND scheduled_for = ?", args: [automation, slotA.toISOString()] });
+      if (live.rows[0]?.status === "running") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    let secondStarted = false;
+    const second = await runGuidedAutomation({
+      db, row, mode: "preview", scheduledFor: slotB, now: slotB,
+      deps: goodDeps({ startTurn: async () => { secondStarted = true; throw new Error("should not start"); } }) as never,
+    });
+    assert.equal(secondStarted, false);
+    assert.equal(second.status, "failed");
+    assert.equal(second.receipt?.errorCode, "automation_busy");
+    const queued = await db.execute({ sql: "SELECT COUNT(*) AS n FROM dept_chat_runs WHERE automation_id = ? AND status = 'queued'", args: [automation] });
+    assert.equal(Number(queued.rows[0].n), 0, "nothing is left queued");
+    const stillRunning = await db.execute({ sql: "SELECT status FROM dept_chat_runs WHERE automation_id = ? AND scheduled_for = ?", args: [automation, slotA.toISOString()] });
+    assert.equal(stillRunning.rows[0].status, "running", "the live run was not reaped as stale by the other's clock");
+    release();
+    const finished = await first;
+    assert.equal(finished.status, "done");
+    assert.match(plainFailure("automation_busy"), /earlier run/);
+  });
+
+  await check("a run's own clock is the wall clock, not the tick's start: its deadline and heartbeat are fresh", async () => {
+    const tickStart = new Date("2026-10-15T09:00:00.000Z");
+    const slot = new Date("2026-10-15T17:00:00.000Z");
+    const result = await runGuidedAutomation({
+      db, row, mode: "live", scheduledFor: slot, now: tickStart,
+      deps: goodDeps({ startTurn: okTurn("Fresh.") }) as never,
+    });
+    assert.equal(result.status, "done", "a deadline counted from a stale tick start would have timed out at once");
+    const stored = await db.execute({ sql: "SELECT created_at, deadline_at FROM dept_chat_runs WHERE id = ?", args: [result.runId] });
+    const created = Date.parse(String(stored.rows[0].created_at));
+    assert.ok(Math.abs(created - Date.now()) < 60_000, "queued at the real time");
+    assert.ok(Date.parse(String(stored.rows[0].deadline_at)) > Date.now(), "and its deadline is still ahead");
+  });
+
+  await check("a 'missed' note never sits beside a real run of the same slot", async () => {
+    const slot = new Date("2026-10-15T18:00:00.000Z");
+    const live = await runGuidedAutomation({ db, row, mode: "live", scheduledFor: slot, now: slot, deps: goodDeps({ startTurn: okTurn("Ran.") }) as never });
+    assert.equal(live.status, "done");
+    const noted = await recordMissedGuidedAutomation({ db, row, scheduledFor: slot, now: new Date("2026-10-15T18:40:00.000Z") });
+    assert.equal(noted.created, false);
+    assert.equal(noted.runId, live.runId, "the real run is the record");
+    const rows = await db.execute({ sql: "SELECT status FROM dept_chat_runs WHERE automation_id = ? AND scheduled_for = ?", args: [automation, slot.toISOString()] });
+    assert.deepEqual(rows.rows.map((r) => r.status), ["done"]);
+    // And the other way round: a missed note first still lets the slot be recorded once.
+    const later = new Date("2026-10-15T19:00:00.000Z");
+    assert.equal((await recordMissedGuidedAutomation({ db, row, scheduledFor: later, now: later })).created, true);
+  });
+
+  await check("the owner's words are scrubbed of deployment secrets at the last boundary before the model", async () => {
+    let sent: unknown[] = [];
+    const custom = {
+      v: 1, template: { id: "custom", version: 1 }, department: "sales",
+      inputs: { objective: `Look at leads and quote ${process.env.GUIDED_TEST_SECRET} in the note` },
+      tools: ["leads_search"], output: "digest", target: { kind: "cloud" }, approval: "proposal_only", runtime_cap_sec: 180,
+      schedule: { plan: { mode: "weekdays", time: "08:00", timezone: "America/Toronto" } },
+    };
+    const turn = await startAutomationTurn({
+      session: { scope: { tenantId: tenant, userId: owner }, email: "owner@acme.test", tenantSlug: "acme", dept: OS_DEPARTMENTS.find((d) => d.key === "sales")!, operatorName: "Owner", isOperator: false, canManageAi: true, fallback: null, viewer: viewer as never, bridge: null, computerDispatch: null, apiEngineChoice: { kind: "api", provider: "openai" }, apiAccountSnapshot: { provider: "openai", model: "gpt-test" }, fallbackFrom: null, fallbackReason: null },
+      payload: custom as never, mode: "preview", automationId: automation, automationName: row.name,
+      run: { department: "sales", agentSlug: "sdr", id: "ffffffff-0000-4000-8000-000000000006" } as never,
+      signal: new AbortController().signal, wouldDraft: [],
+      deps: {
+        prepare: async () => ({ ok: true, turn: { department: true, engine: { kind: "api" }, displayName: "Sales", agentSlug: "sdr", channelKey: "sales", provider: "openai", model: "gpt-test", revealModel: false } }) as never,
+        ground: async () => ({ tools: { on: true }, stream: (messages: unknown[]) => { sent = messages; return (async function* () { yield { type: "done", inputTokens: 0, outputTokens: 0 }; })(); } }) as never,
+      },
+    });
+    assert.equal(turn.ok, true);
+    if (turn.ok) for await (const _event of turn.stream) { /* consume */ }
+    const text = JSON.stringify(sent);
+    assert.ok(!text.includes(String(process.env.GUIDED_TEST_SECRET)), "the secret never reaches the provider");
+    assert.match(text, /REDACTED/);
+  });
+
+  await check("plainFailure: a refusal carries its own sentence, a run failure reads from the one copy table, nothing says 'can no longer be run safely' by default", () => {
+    assert.equal(plainFailure("input_invalid", "Tell us a little more."), "Tell us a little more.");
+    assert.match(plainFailure("run_timeout"), /time limit/);
+    assert.ok(!/no longer be run safely/.test(plainFailure("provider_429")));
+    assert.ok(!/no longer be run safely/.test(plainFailure("reply_empty")));
+    assert.match(plainFailure("missing_connection:google-workspace", "google-workspace"), /google-workspace connection is not connected/);
+  });
+
+  await check("a draft may not carry anyone else's email or phone to the lead; the lead's own details and the owner's are fine, dates are not phones", async () => {
+    assert.equal(foreignContactDetail("Call me at 514-555-0100", ["a@b.test"], null), "phone");
+    assert.equal(foreignContactDetail("Write to boss@elsewhere.test too", ["a@b.test"], null), "email");
+    assert.equal(foreignContactDetail("Reply to A@B.test any time", ["a@b.test"], null), null, "the lead's own address, any case");
+    assert.equal(foreignContactDetail("Or ring +1 (514) 555-0100", ["a@b.test"], "514 555 0100"), null, "the lead's own number in another format");
+    assert.equal(foreignContactDetail("Booked for 2026-10-15 at 10:30, invoice 12345678", ["a@b.test"], null), null, "a date or an amount is not a phone number");
+    assert.equal(foreignContactDetail("Write to me@owner.test", ["a@b.test", "me@owner.test"], null), null, "the owner's own address");
+    await db.execute({ sql: "INSERT INTO tenant_records (id,tenant_id,entity_type,data,created_at,updated_at) VALUES ('lead-2',?,'lead',?,?,?)", args: [tenant, JSON.stringify({ name: "Lead Two", email: "two@lead.test", phone: "+1 514 555 0199", stage: "follow_up" }), "2026-10-15T12:00:00.000Z", "2026-10-15T12:00:00.000Z"] });
+    const dept = OS_DEPARTMENTS.find((d) => d.key === "sales")!;
+    const policy = { mode: "preview" as const, automationId: automation, automationName: row.name };
+    const draft = (body: string) => proposeAutomationEmail(viewer as never, dept, "sdr", { to: "two@lead.test", subject: "Hello", body, lead_id: "lead-2" }, new Date("2026-10-15T12:00:00.000Z"), policy, { proposed: 0 });
+    await draft("Happy to talk. You can call 514 555 0199 or reply here.");
+    await assert.rejects(() => draft("Dana at dana@other-client.test said she liked it."), (e: unknown) => e instanceof ProposalRefused && e.message === "automation_draft_names_another_contact");
+    await assert.rejects(() => draft("Her number is 438-555-0123."), (e: unknown) => e instanceof ProposalRefused && e.message === "automation_draft_names_another_contact");
   });
 
   console.log(`guided-engine: ${passed} passed, ${failed} failed`);

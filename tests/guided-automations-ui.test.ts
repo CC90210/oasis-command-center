@@ -252,7 +252,7 @@ const CASES: Case[] = [
   { id: "job_custom_ready", kind: "section", props: base(at("job", setOutput(customDraft("sales", "Who needs a nudge this week?", ["pipeline_summary", "leads_search"]), "email_drafts"))) },
   { id: "job_custom_marketing", kind: "section", props: base(at("job", customDraft("marketing", "How are the numbers moving?", ["department_numbers"]))) },
   { id: "job_custom_cos", kind: "section", props: base(at("job", draftOf("custom", "chief_of_staff"))) },
-  { id: "job_manual", kind: "section", props: base(at("job", setSchedulePreset(FOLLOWUP, "manual"))) },
+  { id: "job_manual", kind: "section", props: base(at("job", setSchedulePreset(draftOf("daily_brief", "chief_of_staff"), "manual"))) },
   { id: "job_time_cleared", kind: "section", props: base(at("job", setScheduleTime(FOLLOWUP, ""), { touched: ["schedule"] })) },
   { id: "job_weekly", kind: "section", props: base(at("job", setScheduleTime(setScheduleDays(setSchedulePreset(draftOf("daily_brief", "chief_of_staff"), "monday_0800"), [1, 4]), "09:15"))) },
   { id: "job_dst", kind: "section", props: { ...base(at("job", draftOf("support_risk", "client_success", (d) => setSchedulePreset(d, "daily_0730")))), nowMs: Date.UTC(2026, 9, 30, 20, 0, 0) } },
@@ -1546,6 +1546,75 @@ async function main() {
     assert.match(f.words, /Cloud has no AI account yet\./);
     assert.ok(f.els.some((e) => e.type === "a" && e.props.href === "/settings/ai"));
     assert.deepEqual(changed, []);
+  });
+
+
+  await check("driven: Recent runs stays closed and reads nothing until opened; a run opens as a receipt; a failed read says so", async () => {
+    const runs = [
+      { id: "r2", at: "2026-10-15T13:00:00.000Z", origin: "test", status: "done", summary: "Two leads are quiet." },
+      { id: "r1", at: "2026-10-15T12:00:00.000Z", origin: "scheduled", status: "failed", summary: "It took longer than its time limit and was stopped." },
+    ];
+    const receipt = {
+      ...runs[0],
+      scheduledFor: null,
+      finishedAt: null,
+      text: "Call Dana first.",
+      steps: [{ label: "Looking up the pipeline", ok: true }, { label: "Reading lead history", ok: false }],
+      failure: null,
+    };
+    let fail = false;
+    const { api, calls } = fakeApi({
+      runs: () => (fail ? failure({ error: "server_error", message: "We could not load the runs." }) : { ok: true, runs }),
+      receipt: () => ({ ok: true, receipt }),
+    });
+    const view = mount(GuidedAutomationsList, () => ({
+      state: { kind: "ready" as const, data: [LIST_ITEMS[0]] },
+      api,
+      nowMs: NOW,
+      onEdit: () => undefined,
+      onItem: () => undefined,
+      onRemoved: () => undefined,
+      onTested: () => undefined,
+      onRetry: () => undefined,
+    }));
+    let f = frame(view);
+    assert.equal(calls.length, 0, "closed: nothing is read");
+    assert.match(f.words, /Recent runs/);
+    const toggle = (open: boolean) => (f.els.find((e) => e.type === "details")!.props.onToggle as (e: unknown) => void)({ currentTarget: { open } });
+    toggle(true);
+    await settle();
+    f = frame(view);
+    assert.deepEqual(calls.map((c) => [c.method, c.args[0]]), [["runs", LIST_ITEMS[0].id]]);
+    assert.match(f.words, /Finished/);
+    assert.match(f.words, /Failed/);
+    assert.match(f.words, /Preview/);
+    assert.match(f.words, /Scheduled/);
+    assert.match(f.words, /Two leads are quiet\./);
+    const runButtons = () => f.els.filter((e) => e.type === "button" && e.props["aria-expanded"] !== undefined);
+    assert.equal(runButtons().length, 2);
+    assert.equal(runButtons()[0].props["aria-expanded"], false);
+    await press(runButtons()[0]);
+    f = frame(view);
+    assert.deepEqual(calls.at(-1)?.args, [LIST_ITEMS[0].id, "r2"]);
+    assert.match(f.words, /What it looked up/);
+    assert.match(f.words, /Looking up the pipeline/);
+    assert.match(f.words, /Reading lead history \(could not be read\)/);
+    assert.match(f.words, /What it wrote/);
+    assert.match(f.words, /Call Dana first\./);
+    assert.match(f.words, /Preview only\. Nothing was sent or filed\./);
+    assert.equal(runButtons()[0].props["aria-expanded"], true);
+    await press(runButtons()[0]);
+    f = frame(view);
+    assert.equal(runButtons()[0].props["aria-expanded"], false, "pressing again closes it");
+    // A failed read is said, not shown as an empty list.
+    fail = true;
+    toggle(false);
+    f = frame(view);
+    toggle(true);
+    await settle();
+    f = frame(view);
+    assert.match(f.words, /We could not load the runs\./);
+    assertPlainCopy(f.words, "Recent runs");
   });
 
   console.log(failures ? `guided-automations-ui: ${failures} failure(s)` : "guided-automations-ui: all passed");

@@ -152,7 +152,13 @@ export function setTool(draft: Draft, tool: DeskToolName, on: boolean): Draft {
 }
 
 export function setOutput(draft: Draft, output: GuidedOutput): Draft {
-  return { ...draft, output };
+  const next = { ...draft, output };
+  if (output !== "email_drafts") return next;
+  // A run the person starts only previews, so drafts cannot be "only when I run it": move to the first real schedule.
+  const template = draftTemplate(draft);
+  if (!template || presetOf(template, draft.schedule)?.plan.mode !== "manual") return next;
+  const first = template.schedulePresets.find((p) => p.plan.mode !== "manual");
+  return { ...next, schedule: first ? { presetId: first.id } : null };
 }
 
 /** Whether a department's teammate can draft emails at all (the custom brief's second output). */
@@ -697,6 +703,7 @@ const RUN_STATUS_LABEL: Record<string, string> = {
   failed: "Failed",
   missed: "Missed",
   cancelled: "Cancelled",
+  interrupted: "Interrupted",
   running: "Running now",
   queued: "Waiting to start",
 };
@@ -726,11 +733,13 @@ export function instantText(iso: string): string | null {
 export function nextRunLine(item: GuidedAutomationView, nowMs: number | null): string {
   if (item.payload.schedule.plan.mode === "manual") return MANUAL_RUNS_TEXT;
   if (item.status === "paused") return "Not scheduled while it is paused. Turn it on to start the schedule.";
-  if (item.status === "needs_attention") return "Not scheduled until the problem below is fixed.";
+  // With a problem listed it cannot succeed; with none, only its last run failed and it will try again.
+  if (item.status === "needs_attention" && item.problems.length > 0) return "Not scheduled until the problem below is fixed.";
   const first = item.nextRuns[0];
   const text = first ? instantText(first) : null;
   if (!first || !text) return "The next run could not be worked out.";
-  return `Next run: ${text}${nowMs === null ? "" : ` (${relativeTime(Date.parse(first), nowMs)})`}`;
+  const when = `${text}${nowMs === null ? "" : ` (${relativeTime(Date.parse(first), nowMs)})`}`;
+  return item.status === "needs_attention" ? `Its last run failed. Next try: ${when}` : `Next run: ${when}`;
 }
 
 /** The "Last run" line of a list row, before its one-sentence summary. */

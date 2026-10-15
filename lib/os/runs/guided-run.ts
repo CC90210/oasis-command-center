@@ -14,6 +14,7 @@ import type { GuidedPayload } from "@/lib/automations/guided/types";
 import { decryptField } from "@/lib/field-encryption";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { deskToolAvailability } from "@/lib/os/desk/tools";
+import { failureCopy } from "@/lib/os/channel/outcome";
 import { liveSeat } from "@/lib/os/seat";
 import { redactAll } from "@/lib/secret-redaction";
 import { record_tenant_cron_run } from "@/lib/turso-rpc-shim";
@@ -22,6 +23,7 @@ import { startAutomationTurn, type WouldDraft } from "./automation-turn";
 import {
   enqueueRun,
   ensureAutomationConversation,
+  failQueuedAutomationRun,
   getAutomationRunForSlot,
   getRun,
   readEvents,
@@ -80,6 +82,8 @@ type GuidedRunDeps = {
   drive: typeof driveAutomationRun;
   startTurn: typeof startAutomationTurn;
   recordCron: typeof record_tenant_cron_run;
+  /** The wall clock for a run's own life (queued, heartbeats, deadline). Injected so tests can pin it. */
+  clock: () => Date;
 };
 
 const DEFAULT_DEPS: GuidedRunDeps = {
@@ -91,6 +95,7 @@ const DEFAULT_DEPS: GuidedRunDeps = {
   drive: driveAutomationRun,
   startTurn: startAutomationTurn,
   recordCron: record_tenant_cron_run,
+  clock: () => new Date(),
 };
 
 const OUTPUT_MAX = 8_000;
@@ -134,6 +139,19 @@ async function receiptFor(db: Client, scope: RunScope, run: Run): Promise<Guided
   };
 }
 
+/**
+ * A read the preflight needs failed for a reason that says nothing about the automation (the seat,
+ * a connection or the AI account could not be READ just now). Thrown, never recorded as a failed run:
+ * a recorded failure takes the slot for good and blames the owner for a hiccup, while a throw leaves
+ * the slot open so the dispatcher's next minute tries again inside the grace window.
+ */
+export class GuidedPreflightUnavailable extends Error {
+  constructor(readonly stage: string) {
+    super(`guided_preflight_unavailable:${stage}`);
+    this.name = "GuidedPreflightUnavailable";
+  }
+}
+
 /** The sentence a person reads for a refusal or failure code (preview result, last-run line, receipts). */
 export function plainFailure(code: string, detail?: string): string {
   switch (code) {
@@ -144,7 +162,9 @@ export function plainFailure(code: string, detail?: string): string {
     default:
       if (code.startsWith("missing_connection:")) return `The ${detail ?? "required"} connection is not connected.`;
       if (code.startsWith("tool_unavailable:")) return "One of this automation's lookups is not available to its owner.";
-      return detail || "This saved automation can no longer be run safely.";
+      // A validation refusal carries its own sentence; every other code reads from the one copy table
+      // (run failures, provider errors, the route's refusals).
+      return detail || failureCopy(code, { canManageAi: true }).sentence;
   }
 }
 
@@ -212,6 +232,11 @@ async function terminalFailure(input: {
 }
 
 type OwnerSeat = Extract<Awaited<ReturnType<typeof liveSeat>>, { live: true }>;
+
+/** Whether the owner still manages the workspace (an owner, an admin, or a member granted admin access). */
+function ownerManages(seat: OwnerSeat): boolean {
+  return seat.profile.isOwner || seat.profile.adminAccess || ["owner", "admin"].includes(seat.profile.teamRole);
+}
 type AgentBinding = Extract<ReturnType<typeof departmentChannelFor>, { kind: "agent" }>;
 type UsableAccount = UsableAiAccount & { provider: ApiEngineProvider };
 
@@ -256,10 +281,17 @@ export async function preflightGuidedAutomation(input: {
     checked = await deps.seat(row.tenant_id, row.owner_user_id);
   } catch {
     console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "owner_seat", code: "unavailable" });
+    throw new GuidedPreflightUnavailable("owner_seat");
+  }
+  if (!checked.live) {
+    // liveSeat says "unavailable" when its own read failed: that is not a deactivated owner.
+    if (checked.reason === "unavailable") throw new GuidedPreflightUnavailable("owner_seat");
     return no("owner_inactive");
   }
-  if (!checked.live) return no("owner_inactive");
   const seat: OwnerSeat = checked;
+  // Building needs an owner or admin (guided-service.guidedSession), so running does too: a demoted
+  // owner's automations stop rather than carry on with a member's rights.
+  if (!ownerManages(seat)) return no("owner_not_manager");
 
   const viewerResult = await deps.viewer(row.tenant_id, row.owner_user_id);
   if (!viewerResult.ok) return no("owner_inactive");
@@ -282,7 +314,7 @@ export async function preflightGuidedAutomation(input: {
       status = await deps.connector(row.tenant_id, connector, now.getTime());
     } catch {
       console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "connector", connector, code: "unavailable" });
-      status = null;
+      throw new GuidedPreflightUnavailable("connector");
     }
     if (status?.kind !== "connected") return no(`missing_connection:${connector}`, connector, payload.department, binding.agentSlug);
   }
@@ -293,10 +325,15 @@ export async function preflightGuidedAutomation(input: {
   let account;
   try {
     account = await deps.account(row.tenant_id);
+  } catch {
+    console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "ai_account", code: "unavailable" });
+    throw new GuidedPreflightUnavailable("ai_account");
+  }
+  try {
     if (!hasUsableKey(account) || !isApiEngineProvider(account.provider) || !account.model.trim()) account = null;
     else if (!deps.decrypt(account.encryptedApiKey)) account = null;
   } catch {
-    console.error("[guided.run.preflight]", { tenantId: row.tenant_id, automationId: row.id, stage: "ai_account", code: "unavailable" });
+    // The stored key could not be decrypted: the account is unusable, which is a state, not a hiccup.
     account = null;
   }
   if (!account || !hasUsableKey(account) || !isApiEngineProvider(account.provider)) {
@@ -323,19 +360,35 @@ export async function runGuidedAutomation(input: {
     db, deps, row, scope, scheduledFor, now, mode, code, message: plainFailure(code, detail), department, agentSlug,
   });
 
+  // A slot that already has a run is done with: answer from it before the preflight's dozen reads
+  // (overlapping dispatcher ticks and retries all land here).
+  const claimed = await getAutomationRunForSlot(db, scope, row.id, scheduledFor);
+  if (claimed && claimed.status !== "missed") {
+    return {
+      runId: claimed.id,
+      status: "already_claimed",
+      finalText: safeText(claimed.finalText),
+      wouldDraft: [],
+      receipt: await receiptFor(db, scope, claimed),
+    };
+  }
+
   const pre = await preflightGuidedAutomation({ row, now, deps: input.deps });
   if (!pre.ok) return fail(pre.code, pre.detail, pre.department, pre.agentSlug);
   const { seat, viewer, payload, department, binding, account, task, tenantSlug } = pre;
 
+  // `now` is when the dispatcher tick began. A run that starts minutes into a long tick must get its
+  // own clock: a deadline or heartbeat stamped from the tick's start would already be old.
+  const startedAt = deps.clock();
   const conversation = await ensureAutomationConversation(db, scope, {
     automationId: row.id,
     department: payload.department,
     agentSlug: binding.agentSlug,
     title: row.name,
-    now,
+    now: startedAt,
   });
   const runId = randomUUID();
-  const deadlineAt = new Date(now.getTime() + payload.runtime_cap_sec * 1_000);
+  const deadlineAt = new Date(startedAt.getTime() + payload.runtime_cap_sec * 1_000);
   const queued = await enqueueRun(db, scope, {
     id: runId,
     conversationId: conversation.id,
@@ -351,7 +404,7 @@ export async function runGuidedAutomation(input: {
     runtimeEngineName: account.provider,
     runtimeApiSnapshot: { provider: account.provider, model: account.model },
     showThinking: false,
-    now,
+    now: startedAt,
   });
   if (!queued.ok) {
     if (queued.reason === "already_claimed") {
@@ -374,7 +427,7 @@ export async function runGuidedAutomation(input: {
     dept: department,
     operatorName: seat.profile.email?.split("@")[0] || "Owner",
     isOperator: false,
-    canManageAi: seat.profile.isOwner || seat.profile.adminAccess || ["owner", "admin"].includes(seat.profile.teamRole),
+    canManageAi: ownerManages(seat),
     fallback: null,
     viewer,
     bridge: null,
@@ -386,17 +439,20 @@ export async function runGuidedAutomation(input: {
     fallbackReason: null,
   };
   const wouldDraft: WouldDraft[] = [];
-  await deps.drive({
+  const ended = await deps.drive({
     db,
     scope,
     departmentLabel: department.label,
     deadlineMs: payload.runtime_cap_sec * 1_000,
-    now: () => now,
+    now: deps.clock,
     startTurn: ({ run, signal }) => deps.startTurn({
       session, payload, mode, automationId: row.id, automationName: row.name, run, signal, wouldDraft,
     }),
     recordOutcome: async () => undefined,
   }, conversation.id, runId);
+  // The driver returns null when another run held the conversation, so this one was never claimed.
+  // Left queued it would read "Running now" for ever and use up the conversation's queue.
+  if (ended === null) await failQueuedAutomationRun(db, scope, runId, "automation_busy", deps.clock());
   const finished = await getRun(db, scope, runId);
   if (!finished) throw new Error("guided_run_receipt_missing");
   const finalText = safeText(finished.finalText);

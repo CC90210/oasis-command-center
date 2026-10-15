@@ -600,7 +600,12 @@ async function main() {
     assert.equal(nextRunLine(on, NOW), "Next run: Thu, Oct 15, 11:00 AM EDT (in 3 hours)");
     assert.equal(nextRunLine(on, null), "Next run: Thu, Oct 15, 11:00 AM EDT", "no clock yet: the time alone");
     assert.equal(nextRunLine({ ...on, status: "paused", nextRuns: [] }, NOW), "Not scheduled while it is paused. Turn it on to start the schedule.");
-    assert.equal(nextRunLine({ ...on, status: "needs_attention", nextRuns: [] }, NOW), "Not scheduled until the problem below is fixed.");
+    const problem = { code: "missing_connection:google-workspace", message: "Google is not connected.", repair: null };
+    assert.equal(nextRunLine({ ...on, status: "needs_attention", problems: [problem], nextRuns: [] }, NOW), "Not scheduled until the problem below is fixed.");
+    // No problem listed means only its last run failed: it is still scheduled, so the line must say when it tries again.
+    assert.equal(nextRunLine({ ...on, status: "needs_attention", problems: [] }, NOW), "Its last run failed. Next try: Thu, Oct 15, 11:00 AM EDT (in 3 hours)");
+    assert.equal(runStatusLabel("interrupted"), "Interrupted");
+    assert.equal(runStatusLabel("something_new"), "Unknown");
     assert.equal(nextRunLine({ ...on, nextRuns: [] }, NOW), "The next run could not be worked out.");
     const manual = itemFrom(draftOf("daily_brief", "chief_of_staff", (d) => setSchedulePreset(d, "manual")), "on");
     assert.equal(nextRunLine(manual, NOW), "Runs only when you press Test now.");

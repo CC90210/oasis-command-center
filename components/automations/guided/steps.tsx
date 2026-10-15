@@ -303,7 +303,9 @@ function SchedulePanel({ draft, validation, touched, touch, update, now }: Panel
           <ChipGroup
             name="gb-when"
             type="radio"
-            options={template.schedulePresets.map((p) => ({ value: p.id, label: chipLabel(p, draft.schedule) }))}
+            options={template.schedulePresets
+              .filter((p) => !(p.plan.mode === "manual" && draft.output === "email_drafts"))
+              .map((p) => ({ value: p.id, label: chipLabel(p, draft.schedule) }))}
             isChecked={(v) => draft.schedule?.presetId === v}
             onToggle={(v) => {
               touch("schedule");

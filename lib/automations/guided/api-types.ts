@@ -83,6 +83,30 @@ export type TestResult = {
   failure: string | null;
 };
 
+/** One line of an automation's run history: a scheduled run or a test. */
+export type RunHistoryItem = {
+  id: string;
+  /** ISO time the run started. */
+  at: string;
+  origin: "scheduled" | "test";
+  /** "done" | "failed" | "missed" | "cancelled" | "interrupted" | "running" | "queued" */
+  status: string;
+  /** One plain sentence: what it found, or why it did not finish. */
+  summary: string;
+};
+
+/** One run in full, for the person who owns or manages the automation. Everything in it is redacted. */
+export type RunReceipt = RunHistoryItem & {
+  scheduledFor: string | null;
+  finishedAt: string | null;
+  /** What it wrote (a digest, or its note on the drafts); empty unless it finished. */
+  text: string;
+  /** What it looked up, in order, in the department's own words; `ok` is null while a lookup is still going. */
+  steps: { label: string; ok: boolean | null }[];
+  /** A plain sentence when it did not finish. */
+  failure: string | null;
+};
+
 export type ApiFailure = {
   ok: false;
   error: GuidedErrorCode | "unauthorized" | "forbidden" | "not_found" | "cloud_unavailable" | "connection_missing" | "rate_limited" | "server_error" | string;
@@ -109,6 +133,10 @@ export interface GuidedApi {
   activate(id: string): Promise<ApiResult<{ item: GuidedAutomationView }>>;
   pause(id: string): Promise<ApiResult<{ item: GuidedAutomationView }>>;
   remove(id: string): Promise<ApiResult<Record<string, never>>>;
+  /** The last runs of one automation, scheduled and tests, newest first. */
+  runs(id: string): Promise<ApiResult<{ runs: RunHistoryItem[] }>>;
+  /** One run in full: what it looked up and what it wrote. */
+  receipt(id: string, runId: string): Promise<ApiResult<{ receipt: RunReceipt }>>;
 }
 
 // ── the browser's client ───────────────────────────────────────────────
@@ -142,4 +170,6 @@ export const guidedApi: GuidedApi = {
   activate: (id) => call(`/${encodeURIComponent(id)}/activate`, post("")),
   pause: (id) => call(`/${encodeURIComponent(id)}/pause`, post("")),
   remove: (id) => call(`/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  runs: (id) => call(`/${encodeURIComponent(id)}/runs`),
+  receipt: (id, runId) => call(`/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`),
 };

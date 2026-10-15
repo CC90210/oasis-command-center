@@ -30,9 +30,9 @@ import { loadWorkspaceConnectorStatus } from "@/components/os/connections/connec
 import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { isApiEngineProvider } from "@/lib/ai/agent-engine";
 import { toggleCronWithAudit } from "@/lib/automations/cron-toggle-transaction";
-import { GUIDED_ACTION_TYPE, type GuidedPayload } from "@/lib/automations/guided/types";
+import { GUIDED_ACTION_TYPE, GUIDED_PAYLOAD_VERSION, type GuidedPayload, type InputValues } from "@/lib/automations/guided/types";
 import { ALL_TEMPLATES, templateById } from "@/lib/automations/guided/templates";
-import { GUIDED_ZONE, requiredConnectors, validateGuidedPayload } from "@/lib/automations/guided/validate";
+import { GUIDED_ZONE, hasControlChars, requiredConnectors, validateGuidedPayload } from "@/lib/automations/guided/validate";
 import type {
   ApiFailure,
   CloudState,
@@ -44,12 +44,17 @@ import type {
   LastRunView,
   Problem,
   RepairLink,
+  RunHistoryItem,
+  RunReceipt,
   TestResult,
 } from "@/lib/automations/guided/api-types";
-import { describePlan, nextRuns, planToCron } from "@/lib/automations/schedule-plan";
+import { describePlan, nextRuns, planToCron, validatePlan } from "@/lib/automations/schedule-plan";
+import type { DeskToolName } from "@/lib/os/desk/catalog";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { connectorBySlug } from "@/lib/os/connectors";
-import { plainFailure, preflightGuidedAutomation, runGuidedAutomation, type GuidedAutomationRow } from "@/lib/os/runs/guided-run";
+import { GuidedPreflightUnavailable, plainFailure, preflightGuidedAutomation, runGuidedAutomation, type GuidedAutomationRow } from "@/lib/os/runs/guided-run";
+import { automationHasLiveRun } from "@/lib/os/runs/store";
+import { redactAll } from "@/lib/secret-redaction";
 import { setupHref } from "@/lib/setup-links";
 import { getSessionUser } from "@/lib/supabase-server";
 import { canManageTeam, getSessionContext } from "@/lib/team";
@@ -228,6 +233,7 @@ export function failureSentence(code: string | null): string {
     case "":
       return "It could not finish. Try again in a minute.";
     default:
+      // plainFailure reads the one copy table (provider errors, run failures, refusals) for every other code.
       return plainFailure(code);
   }
 }
@@ -237,7 +243,7 @@ function lastRunOf(r: Record<string, unknown>): LastRunView {
   const code = r.error_code ? String(r.error_code) : null;
   const summary =
     status === "done"
-      ? firstSentence(r.final_text ? String(r.final_text) : null)
+      ? firstSentence(r.final_text ? redactAll(String(r.final_text)) : null)
       : status === "missed"
         ? "It missed its scheduled time and was not run late."
         : status === "cancelled"
@@ -284,17 +290,69 @@ function problemsFor(payload: GuidedPayload, ctx: GuidedContextView): Problem[] 
   return out;
 }
 
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * A stored payload that no longer validates (an old template version, a lookup that left the
+ * catalogue) still has to be SHOWN, so a person can read what it was and rebuild it. It is rebuilt
+ * field by field into the exact shape the client reads, never cast from the stored JSON: a malformed
+ * row (a string where the screen reads an array) must not crash the page for everyone who opens it.
+ * Nothing it returns is ever run: only validateGuidedPayload's own output reaches the engine.
+ */
+export function salvagePayload(raw: Record<string, unknown>): GuidedPayload {
+  const department = OS_DEPARTMENTS.find((d) => d.key === raw.department)?.key ?? "chief_of_staff";
+  const tpl = isObject(raw.template) ? raw.template : {};
+  const inputs: InputValues = {};
+  if (isObject(raw.inputs)) {
+    for (const [name, value] of Object.entries(raw.inputs).slice(0, 20)) {
+      if (typeof value === "number" && Number.isFinite(value)) inputs[name.slice(0, 40)] = value;
+      else if (typeof value === "string") inputs[name.slice(0, 40)] = value.slice(0, 400);
+    }
+  }
+  const tools = Array.isArray(raw.tools) ? raw.tools.filter((t): t is string => typeof t === "string").slice(0, 12).map((t) => t.slice(0, 60) as DeskToolName) : [];
+  const planned = isObject(raw.schedule) ? validatePlan(raw.schedule.plan) : null;
+  const cap = typeof raw.runtime_cap_sec === "number" && raw.runtime_cap_sec > 0 && raw.runtime_cap_sec <= 600 ? raw.runtime_cap_sec : 120;
+  return {
+    v: GUIDED_PAYLOAD_VERSION,
+    template: { id: typeof tpl.id === "string" ? tpl.id.slice(0, 80) : "", version: typeof tpl.version === "number" && Number.isFinite(tpl.version) ? tpl.version : 0 },
+    department,
+    inputs,
+    tools,
+    output: raw.output === "email_drafts" ? "email_drafts" : "digest",
+    target: { kind: "cloud" },
+    approval: "proposal_only",
+    runtime_cap_sec: cap,
+    schedule: { plan: planned && planned.ok ? planned.plan : { mode: "manual", timezone: GUIDED_ZONE } },
+  };
+}
+
+/**
+ * Whether this person may see this automation. Its owner always can. Anyone else sees it only with
+ * the same access the department's own pages need (and the company-financials right for a Finance
+ * digest): the list carries the owner's objective and the first line of their last result, which is
+ * business data a manager without that department must not read through this screen.
+ */
+function visibleTo(s: GuidedSession, row: CronRow, raw: Record<string, unknown> | null): boolean {
+  if (row.owner_user_id === s.userId) return true;
+  const department = OS_DEPARTMENTS.find((d) => d.key === raw?.department);
+  if (!department || !departmentGate(department.slug, s.viewer.navInput)) return false;
+  const stored = raw && isObject(raw.template) ? raw.template : null;
+  const template = templateById(typeof stored?.id === "string" ? stored.id : "", department.key);
+  return !(template?.companyFinancialsOnly && !s.viewer.surface.capabilities.canSeeCompanyFinancials);
+}
+
 function viewOf(row: CronRow, ctx: GuidedContextView, last: LastRunView | null, now: Date): GuidedAutomationView | null {
   const raw = parsePayload(row.action_payload);
   if (!raw) return null;
   const validated = validateGuidedPayload(raw, { companyFinancials: ctx.companyFinancials });
   const enabled = isEnabled(row.enabled);
-  const template = templateById(String((raw.template as { id?: unknown } | undefined)?.id ?? ""), raw.department as never);
+  const shown = validated.ok ? validated.payload : salvagePayload(raw);
+  const template = templateById(shown.template.id, shown.department);
   const base = {
     id: row.id,
     name: row.name,
-    department: (raw.department as GuidedAutomationView["department"]) ?? "chief_of_staff",
-    templateId: template?.id ?? String((raw.template as { id?: unknown } | undefined)?.id ?? ""),
+    department: shown.department,
+    templateId: template?.id ?? shown.template.id,
     templateTitle: template?.title ?? "Saved automation",
     lastRun: last,
   };
@@ -302,7 +360,7 @@ function viewOf(row: CronRow, ctx: GuidedContextView, last: LastRunView | null, 
     return {
       ...base,
       status: "needs_attention",
-      payload: raw as unknown as GuidedPayload,
+      payload: shown,
       scheduleSentence: "Not scheduled",
       nextRuns: [],
       problems: [{ code: validated.error, message: `${validated.message} Edit it or rebuild it from a template.`, repair: null }],
@@ -319,9 +377,10 @@ function viewOf(row: CronRow, ctx: GuidedContextView, last: LastRunView | null, 
 
 export async function listAutomations(s: GuidedSession, now = new Date()): Promise<ServiceResult<{ items: GuidedAutomationView[] }>> {
   const [rows, ctx] = await Promise.all([loadRows(s.db, s.tenantId), contextOf(s, now)]);
-  const last = await lastRuns(s.db, s.tenantId, rows.map((r) => r.id));
+  const visible = rows.filter((r) => visibleTo(s, r, parsePayload(r.action_payload)));
+  const last = await lastRuns(s.db, s.tenantId, visible.map((r) => r.id));
   const items: GuidedAutomationView[] = [];
-  for (const row of rows) {
+  for (const row of visible) {
     const view = viewOf(row, ctx, last.get(row.id) ?? null, now);
     if (view) items.push(view);
     else console.error("[guided.list] unreadable payload", { tenantId: s.tenantId, id: row.id });
@@ -344,12 +403,9 @@ function cleanName(raw: unknown, fallback: string): { ok: true; name: string } |
   const name = raw.trim().replace(/\s+/g, " ");
   if (!name) return { ok: true, name: fallback };
   if (name.length > NAME_MAX) return { ok: false, message: `The name can be at most ${NAME_MAX} characters.` };
-  if (CONTROL_CHARS.test(name)) return { ok: false, message: "The name must be plain text on one line." };
+  if (hasControlChars(name)) return { ok: false, message: "The name must be plain text on one line." };
   return { ok: true, name };
 }
-
-/** Any control character (built from code points: this file never carries a backslash-u escape). */
-const CONTROL_CHARS = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`);
 
 type Prepared = { payload: GuidedPayload; agentSlug: string; name: string; description: string; schedule: string };
 
@@ -360,6 +416,13 @@ async function prepare(s: GuidedSession, body: { name?: unknown; payload?: unkno
     return { ok: false, status: 422, body: fail(validated.error, validated.message, validated.field ? { field: validated.field } : {}) };
   }
   const payload = validated.payload;
+  // The owner's words are stored and sent to a model provider on every run: text that is (or contains)
+  // one of this deployment's own secrets must never be saved.
+  for (const [name, value] of Object.entries(payload.inputs)) {
+    if (typeof value === "string" && redactAll(value) !== value) {
+      return { ok: false, status: 422, body: fail("input_invalid", "That looks like a password or key, and it would be sent to the AI on every run. Take it out and describe what you need instead.", { field: name }) };
+    }
+  }
   const department = OS_DEPARTMENTS.find((d) => d.key === payload.department);
   const binding = department && departmentGate(department.slug, s.viewer.navInput) ? departmentChannelFor(payload.department, { oasis: s.viewer.oasis, manifest: s.viewer.manifest }) : null;
   if (!department || !binding || binding.kind !== "agent") {
@@ -395,7 +458,7 @@ export async function createAutomation(s: GuidedSession, body: { name?: unknown;
             (id, tenant_id, agent_key, name, description, schedule, action_type, action_payload, enabled,
              created_by, owner_user_id, last_scheduled_for, tz, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
-    args: [id, s.tenantId, v.agentSlug, v.name, v.description, v.schedule, GUIDED_ACTION_TYPE, JSON.stringify(v.payload), s.userId, s.userId, stamp, GUIDED_ZONE, stamp, stamp],
+    args: [id, s.tenantId, v.agentSlug, v.name, v.description, v.schedule, GUIDED_ACTION_TYPE, JSON.stringify(v.payload), s.userId, s.userId, stamp, v.payload.schedule.plan.timezone, stamp, stamp],
   });
   const item = await viewFor(s, id, now);
   if (!item) return { status: 500, body: fail("server_error", "It was saved but could not be read back. Reload the page.") };
@@ -429,7 +492,7 @@ export async function updateAutomation(s: GuidedSession, id: string, body: { nam
              SET name = ?, description = ?, schedule = ?, action_payload = ?, agent_key = ?, tz = ?,
                  enabled = 0, last_scheduled_for = ?, updated_at = ?
            WHERE id = ? AND tenant_id = ? AND action_type = ? AND owner_user_id = ?`,
-    args: [v.name, v.description, v.schedule, JSON.stringify(v.payload), v.agentSlug, GUIDED_ZONE, stamp, stamp, id, s.tenantId, GUIDED_ACTION_TYPE, s.userId],
+    args: [v.name, v.description, v.schedule, JSON.stringify(v.payload), v.agentSlug, v.payload.schedule.plan.timezone, stamp, stamp, id, s.tenantId, GUIDED_ACTION_TYPE, s.userId],
   });
   if (r.rowsAffected !== 1) return notFound();
   const item = await viewFor(s, id, now);
@@ -448,14 +511,36 @@ export async function removeAutomation(s: GuidedSession, id: string): Promise<Se
 
 // ── test / activate / pause ──────────────────────────────────────────────
 
+/**
+ * Take one of this person's MAX_TESTS_PER_HOUR tests, in a single statement. A count read followed by
+ * the run lets a burst of presses all pass the check before any of them is recorded; here the count
+ * and the claim are one INSERT, so the 13th concurrent press inserts nothing and is refused. The
+ * claim rows live in the workspace audit log (one table, durable across Workers isolates).
+ */
+async function claimTestSlot(s: GuidedSession, id: string, now: Date): Promise<boolean> {
+  const stamp = now.toISOString();
+  const since = new Date(now.getTime() - 3_600_000).toISOString();
+  const claimed = await s.db.execute({
+    sql: `INSERT INTO tenant_audit_log
+            (id, tenant_id, actor_user_id, actor_email, action_type, target_table, target_id, metadata, created_at)
+          SELECT ?, ?, ?, ?, 'guided_test_claim', 'tenant_cron_jobs', ?, '{}', ?
+          WHERE (SELECT COUNT(*) FROM tenant_audit_log
+                  WHERE tenant_id = ? AND actor_user_id = ? AND action_type = 'guided_test_claim' AND created_at > ?) < ?`,
+    args: [randomUUID(), s.tenantId, s.userId, s.email, id, stamp, s.tenantId, s.userId, since, MAX_TESTS_PER_HOUR],
+  });
+  return claimed.rowsAffected === 1;
+}
+
 export async function testAutomation(s: GuidedSession, id: string, now = new Date()): Promise<ServiceResult<{ result: TestResult }>> {
   const owned = await ownedRow(s, id);
   if (!owned.ok) return owned.result;
-  const recent = await s.db.execute({
-    sql: `SELECT COUNT(*) AS n FROM dept_chat_runs WHERE tenant_id = ? AND user_id = ? AND origin = 'test' AND created_at > ?`,
-    args: [s.tenantId, s.userId, new Date(now.getTime() - 3_600_000).toISOString()],
-  });
-  if (Number((recent.rows[0] as unknown as { n?: unknown })?.n ?? 0) >= MAX_TESTS_PER_HOUR) {
+  // One run of an automation at a time: a test pressed during a scheduled run (or a second press) would
+  // be refused by the run engine anyway; saying so first costs nothing and uses none of the hourly allowance.
+  const scope = { tenantId: s.tenantId, userId: s.userId };
+  if (await automationHasLiveRun(s.db, scope, id, now)) {
+    return { status: 409, body: fail("run_in_progress", "This automation is running right now. Wait for it to finish, then test it again.") };
+  }
+  if (!(await claimTestSlot(s, id, now))) {
     return { status: 429, body: fail("rate_limited", `You have run ${MAX_TESTS_PER_HOUR} tests in the last hour. Each one uses your AI account, so wait a little before the next.`) };
   }
   // Each test is its own slot: the run engine keys a run by (automation, instant).
@@ -485,7 +570,7 @@ function repairFor(code: string): { error: string; repair: RepairLink | null; st
     return { error: "connection_missing", repair: CONNECTION_REPAIR(slug, label), status: 409 };
   }
   if (code === "ai_account_unavailable") return { error: "cloud_unavailable", repair: { label: "Open AI brain", href: setupHref("ai_account") }, status: 409 };
-  if (code === "owner_inactive" || code === "department_unavailable") return { error: "forbidden", repair: null, status: 403 };
+  if (code === "owner_inactive" || code === "owner_not_manager" || code === "department_unavailable") return { error: "forbidden", repair: null, status: 403 };
   if (code.startsWith("tool_unavailable:") || code === "tools_invalid") return { error: "tools_invalid", repair: null, status: 409 };
   return { error: code, repair: null, status: 422 };
 }
@@ -493,8 +578,19 @@ function repairFor(code: string): { error: string; repair: RepairLink | null; st
 export async function activateAutomation(s: GuidedSession, id: string, now = new Date()): Promise<ServiceResult<{ item: GuidedAutomationView }>> {
   const owned = await ownedRow(s, id);
   if (!owned.ok) return owned.result;
+  // Already on: nothing to switch. Re-stamping the schedule here could drop a slot that is due but not yet dispatched.
+  if (isEnabled(owned.row.enabled)) {
+    const current = await viewFor(s, id, now);
+    return current ? { status: 200, body: { ok: true, item: current } } : notFound();
+  }
   // The exact check every scheduled run makes. A person can switch on only what could run right now.
-  const pre = await preflightGuidedAutomation({ row: owned.row, now });
+  let pre;
+  try {
+    pre = await preflightGuidedAutomation({ row: owned.row, now });
+  } catch (error) {
+    if (!(error instanceof GuidedPreflightUnavailable)) throw error;
+    return { status: 503, body: fail("server_error", "We could not check your connections and AI account just now. Nothing was changed. Try again in a minute.") };
+  }
   if (!pre.ok) {
     const r = repairFor(pre.code);
     return { status: r.status, body: fail(r.error, plainFailure(pre.code, pre.detail), { repair: r.repair }) };
@@ -508,9 +604,86 @@ export async function activateAutomation(s: GuidedSession, id: string, now = new
 export async function pauseAutomation(s: GuidedSession, id: string, now = new Date()): Promise<ServiceResult<{ item: GuidedAutomationView }>> {
   // Anyone who manages the workspace may switch one off; the row must still be a guided automation of this workspace.
   const rows = await loadRows(s.db, s.tenantId, id);
-  if (rows.length === 0) return notFound();
+  if (rows.length === 0 || !visibleTo(s, rows[0], parsePayload(rows[0].action_payload))) return notFound();
   const toggled = await toggleCronWithAudit(s.db, { source: "tenant", id, tenantId: s.tenantId, enabled: false, actorEmail: s.email, actorUserId: s.userId });
   if (!toggled.ok) return { status: toggled.status, body: fail(String(toggled.body.error ?? "server_error"), String(toggled.body.message ?? "We could not pause it. Nothing was changed.")) };
   const item = await viewFor(s, id, now);
   return item ? { status: 200, body: { ok: true, item } } : notFound();
+}
+
+// ── run history and receipts ─────────────────────────────────────────────
+
+const HISTORY_LIMIT = 10;
+
+function historyItemOf(r: Record<string, unknown>): RunHistoryItem {
+  const view = lastRunOf(r);
+  return { id: String(r.id), at: view.at, origin: view.preview ? "test" : "scheduled", status: view.status, summary: view.summary };
+}
+
+/** The automation, only if this person may see it. */
+async function visibleRow(s: GuidedSession, id: string): Promise<{ ok: true; row: CronRow } | { ok: false; result: ServiceResult<never> }> {
+  const rows = await loadRows(s.db, s.tenantId, id);
+  if (rows.length === 0 || !visibleTo(s, rows[0], parsePayload(rows[0].action_payload))) return { ok: false, result: notFound() };
+  return { ok: true, row: rows[0] };
+}
+
+/** The last runs of one automation, newest first: a scheduled run and a test alike. */
+export async function listRunHistory(s: GuidedSession, id: string): Promise<ServiceResult<{ runs: RunHistoryItem[] }>> {
+  const seen = await visibleRow(s, id);
+  if (!seen.ok) return seen.result;
+  const rs = await s.db.execute({
+    sql: `SELECT id, status, error_code, final_text, origin, COALESCE(started_at, created_at) AS at
+          FROM dept_chat_runs
+          WHERE tenant_id = ? AND automation_id = ?
+          ORDER BY created_at DESC LIMIT ?`,
+    args: [s.tenantId, id, HISTORY_LIMIT],
+  });
+  return { status: 200, body: { ok: true, runs: rs.rows.map((r) => historyItemOf(r as unknown as Record<string, unknown>)) } };
+}
+
+/** One run in full: what it read, what it wrote, and why it failed if it did. Everything is redacted. */
+export async function getRunReceipt(s: GuidedSession, id: string, runId: string): Promise<ServiceResult<{ receipt: RunReceipt }>> {
+  const seen = await visibleRow(s, id);
+  if (!seen.ok) return seen.result;
+  const rs = await s.db.execute({
+    sql: `SELECT id, status, error_code, final_text, origin, scheduled_for, finished_at, COALESCE(started_at, created_at) AS at
+          FROM dept_chat_runs WHERE tenant_id = ? AND automation_id = ? AND id = ?`,
+    args: [s.tenantId, id, runId],
+  });
+  const raw = rs.rows[0] as unknown as Record<string, unknown> | undefined;
+  if (!raw) return notFound();
+  const events = await s.db.execute({
+    sql: `SELECT seq, data_json FROM dept_chat_run_events WHERE run_id = ? AND tenant_id = ? AND kind = 'tool' ORDER BY seq ASC LIMIT 200`,
+    args: [runId, s.tenantId],
+  });
+  const steps: RunReceipt["steps"] = [];
+  const byId = new Map<string, number>();
+  for (const e of events.rows) {
+    const data = safeJson(String((e as unknown as Record<string, unknown>).data_json ?? "")) as Record<string, unknown> | null;
+    if (!isObject(data)) continue;
+    const key = String(data.id ?? "");
+    if (data.phase === "start") {
+      byId.set(key, steps.length);
+      steps.push({ label: redactAll(String(data.label ?? "A lookup")).slice(0, 120), ok: null });
+    } else if (data.phase === "done" && byId.has(key)) {
+      steps[byId.get(key) as number].ok = data.ok === false ? false : true;
+    }
+  }
+  const item = historyItemOf(raw);
+  const status = String(raw.status ?? "");
+  const text = status === "done" ? redactAll(String(raw.final_text ?? "")).slice(0, 8_000) : "";
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      receipt: {
+        ...item,
+        scheduledFor: raw.scheduled_for ? String(raw.scheduled_for) : null,
+        finishedAt: raw.finished_at ? String(raw.finished_at) : null,
+        text,
+        steps,
+        failure: status === "done" || status === "running" || status === "queued" ? null : item.summary,
+      },
+    },
+  };
 }

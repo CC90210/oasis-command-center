@@ -175,7 +175,10 @@ await check("schedules: only offered kinds, in Toronto time, and not too often",
   const frequentDrafts = plan({ mode: "every_n_hours", time: "06:00", every_hours: 4 }, drafts);
   assert.ok(!frequentDrafts.ok && frequentDrafts.error === "schedule_too_frequent");
   assert.ok(plan({ mode: "every_n_hours", time: "06:00", every_hours: 12 }, drafts).ok, "drafts every 12 hours is the floor");
-  assert.ok(plan({ mode: "manual" }, drafts).ok, "run only when asked");
+  assert.ok(plan({ mode: "manual" }, digest).ok, "a digest may be run only when asked");
+  const manualDrafts = plan({ mode: "manual" }, drafts);
+  assert.ok(!manualDrafts.ok && manualDrafts.error === "schedule_invalid", "drafts need a schedule: a run you start yourself only previews");
+  assert.ok(!drafts.schedulePresets.some((p) => p.plan.mode === "manual"), "and the drafts template does not offer it");
   assert.equal(plan({ mode: "custom", cron: "* * * * *" }, digest).ok, false, "a raw cron is Advanced's");
   assert.equal(plan({ mode: "daily", time: "25:00" }, digest).ok, false);
   assert.equal(plan({ mode: "sometimes" }, digest).ok, false);

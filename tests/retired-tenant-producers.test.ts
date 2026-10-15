@@ -553,6 +553,9 @@ async function main() {
       // Device-bound AI runs may opt into a workspace API fallback. The
       // dispatcher is tenant-scoped at claim time and never targets SunBiz.
       "dispatch-engine-fallbacks",
+      // Guided automations (2026-10-15): the every-minute dispatcher of a workspace's own
+      // scheduled department tasks. Every query is scoped by the row's tenant_id.
+      "dispatch-automations",
     ].map((r) => `/api/cron/${r}`);
     assert.deepEqual([...new Set(CRON_TABLE.map((c) => base(c.path)))].sort(), [...KEPT].sort());
   });

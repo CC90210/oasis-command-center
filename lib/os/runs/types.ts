@@ -175,6 +175,8 @@ export const RUN_FAILURE_CODES = [
   "department_unavailable",
   "template_version_unknown",
   "tools_invalid",
+  "automation_busy",
+  "owner_not_manager",
 ] as const;
 export type RunFailureCode = (typeof RUN_FAILURE_CODES)[number];
 

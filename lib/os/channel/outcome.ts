@@ -283,6 +283,14 @@ const RUN_FAILURES = {
     sentence: "This run stopped because one of its saved lookups is no longer allowed.",
     short: "a saved lookup is no longer allowed",
   },
+  automation_busy: {
+    sentence: "This run did not start because an earlier run of the same automation was still going. It was not run late.",
+    short: "an earlier run was still going",
+  },
+  owner_not_manager: {
+    sentence: "This run stopped because its owner no longer manages the workspace. Ask an owner or admin to take it over.",
+    short: "its owner no longer manages the workspace",
+  },
 } as const;
 
 export const RUN_FAILURE_COPY_CODES: readonly string[] = Object.keys(RUN_FAILURES);

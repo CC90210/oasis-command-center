@@ -17,6 +17,8 @@ process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 process.env.TURSO_DB_PATH = dbFile;
 delete process.env.TURSO_DATABASE_URL;
 delete process.env.TURSO_DB_URL;
+// A deployment secret the redactor will know (its name ends in KEY and its value is long enough).
+process.env.GUIDED_SERVICE_TEST_KEY = "svc-secret-value-0123456789";
 
 function stub(request: string, exports: Record<string, unknown>): void {
   const path = require.resolve(request);
@@ -55,6 +57,9 @@ const world = {
   google: "connected" as string,
   cloud: "ready" as "ready" | "none" | "local",
   preflight: { ok: true } as { ok: boolean; code?: string; detail?: string },
+  preflightThrows: false,
+  financeAgent: false,
+  blockedSlugs: [] as string[],
   run: { status: "done", finalText: "Three leads are quiet. Call Dana first.", wouldDraft: [{ to: "dana@acme.test", subject: "Checking in", title: "t", body: "Hi Dana." }], errorCode: null as string | null },
   runCalls: [] as Array<{ mode: string }>,
 };
@@ -70,11 +75,17 @@ async function main(): Promise<void> {
     );
     CREATE TABLE dept_chat_runs (
       id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, automation_id TEXT, origin TEXT, status TEXT,
-      error_code TEXT, final_text TEXT, started_at TEXT, created_at TEXT
+      error_code TEXT, final_text TEXT, scheduled_for TEXT, started_at TEXT, heartbeat_at TEXT, finished_at TEXT, created_at TEXT
     );
+    CREATE TABLE dept_chat_run_events (
+      run_id TEXT NOT NULL, seq INTEGER NOT NULL, tenant_id TEXT NOT NULL, kind TEXT NOT NULL, data_json TEXT NOT NULL,
+      created_at TEXT NOT NULL, PRIMARY KEY (run_id, seq)
+    );
+    -- The production shape: id, metadata and created_at are NOT NULL (the toggle insert leaves them to defaults).
     CREATE TABLE tenant_audit_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT, actor_user_id TEXT, actor_email TEXT, action_type TEXT,
-      target_table TEXT, target_id TEXT, before TEXT, after TEXT
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT, actor_user_id TEXT, actor_email TEXT, action_type TEXT,
+      target_table TEXT, target_id TEXT, before TEXT, after TEXT, ip_hash TEXT, user_agent TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );
   `);
 
@@ -89,7 +100,7 @@ async function main(): Promise<void> {
       navInput: { persona: "founder" as const, capabilities: c, isOperator: false, tenantSlug: "acme", isOasisTenant: false, modules: resolveOsModules({ tenantSlug: "acme", provisioned: true }), provisioned: true, founders: null },
       oasis: false,
       provisioned: true,
-      manifest: { brand: { name: "Acme", subtitle: "", logo: "default", footer_label: "", footer_tagline: "" }, agents: [{ slug: "sdr", name: "Sales", departments: ["sales"], enabled: true }, { slug: "ops", name: "Ops", departments: ["operations"], enabled: true }] },
+      manifest: { brand: { name: "Acme", subtitle: "", logo: "default", footer_label: "", footer_tagline: "" }, agents: [{ slug: "sdr", name: "Sales", departments: ["sales"], enabled: true }, { slug: "ops", name: "Ops", departments: ["operations"], enabled: true }, ...(world.financeAgent ? [{ slug: "cfo", name: "Finance", departments: ["finance"], enabled: true }] : [])] },
       email: world.email,
       authUserId: OWNER,
     };
@@ -102,6 +113,17 @@ async function main(): Promise<void> {
   stub("../lib/supabase-server", { ...realSupabase, getSessionUser: async () => ({ id: String(world.session?.authUserId ?? OWNER), email: world.email }) });
   const realViewer = require("../components/os/department/viewer");
   stub("../components/os/department/viewer", { ...realViewer, resolveOsViewerFor: async () => (world.viewerOk ? viewer() : { ok: false, reason: "no_profile" }) });
+  // The department gate: the real rail rule, plus what a case needs to open Finance (OASIS-only in production) or shut a department.
+  const realGate = require("../components/os/department/gate");
+  const { departmentBySlug } = require("../lib/os/departments");
+  stub("../components/os/department/gate", {
+    ...realGate,
+    departmentGate: (slug: string, input: unknown) => {
+      if (world.blockedSlugs.includes(slug)) return null;
+      if (slug === "finance" && world.financeAgent) return departmentBySlug(slug);
+      return realGate.departmentGate(slug, input);
+    },
+  });
   const realFacts = require("../components/os/connections/connector-facts");
   stub("../components/os/connections/connector-facts", { ...realFacts, loadWorkspaceConnectorStatus: async () => ({ kind: world.google, label: "x" }) });
   const realAccount = require("../lib/ai/workspace-account");
@@ -113,7 +135,10 @@ async function main(): Promise<void> {
   const realRun = require("../lib/os/runs/guided-run");
   stub("../lib/os/runs/guided-run", {
     ...realRun,
-    preflightGuidedAutomation: async () => world.preflight,
+    preflightGuidedAutomation: async () => {
+      if (world.preflightThrows) throw new realRun.GuidedPreflightUnavailable("connector");
+      return world.preflight;
+    },
     runGuidedAutomation: async (input: { mode: string }) => {
       world.runCalls.push({ mode: input.mode });
       return {
@@ -133,6 +158,9 @@ async function main(): Promise<void> {
   const testRoute = await import("../app/api/automations/guided/[id]/test/route");
   const activateRoute = await import("../app/api/automations/guided/[id]/activate/route");
   const pauseRoute = await import("../app/api/automations/guided/[id]/pause/route");
+  const runsRoute = await import("../app/api/automations/guided/[id]/runs/route");
+  const receiptRoute = await import("../app/api/automations/guided/[id]/runs/[runId]/route");
+  const { validateGuidedPayload } = await import("../lib/automations/guided/validate");
   const { templateById, defaultInputs } = await import("../lib/automations/guided/templates");
 
   const ORIGIN = "https://oasisai.work";
@@ -143,6 +171,7 @@ async function main(): Promise<void> {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   const idCtx = (id: string) => ({ params: Promise.resolve({ id }) });
+  const runCtx = (id: string, runId: string) => ({ params: Promise.resolve({ id, runId }) });
   const json = async (res: Response) => (await res.json()) as Record<string, any>;
 
   const followup = templateById("followup_drafts", "sales")!;
@@ -162,10 +191,14 @@ async function main(): Promise<void> {
     world.google = "connected";
     world.cloud = "ready";
     world.preflight = { ok: true };
+    world.preflightThrows = false;
+    world.financeAgent = false;
+    world.blockedSlugs = [];
     world.run = { status: "done", finalText: "Three leads are quiet. Call Dana first.", wouldDraft: [{ to: "dana@acme.test", subject: "Checking in", title: "t", body: "Hi Dana." }], errorCode: null };
     world.runCalls = [];
     await db.execute("DELETE FROM tenant_cron_jobs");
     await db.execute("DELETE FROM dept_chat_runs");
+    await db.execute("DELETE FROM dept_chat_run_events");
     await db.execute("DELETE FROM tenant_audit_log");
   };
   const create = async (over: Record<string, unknown> = {}, name?: string) => {
@@ -421,20 +454,55 @@ async function main(): Promise<void> {
     assert.ok(stuck.result.failure);
   });
 
-  await check("Test now is capped per person per hour, in the database", async () => {
+  await check("Test now is capped per person per hour, by an atomic claim in the database", async () => {
     await reset();
     const { body } = await create({});
     const id = body.item.id as string;
-    for (let i = 0; i < service.MAX_TESTS_PER_HOUR; i += 1) {
-      await db.execute({ sql: "INSERT INTO dept_chat_runs (id, tenant_id, user_id, automation_id, origin, status, created_at) VALUES (?, ?, ?, ?, 'test', 'done', ?)", args: [`t${i}`, TENANT, OWNER, id, new Date().toISOString()] });
-    }
+    const claim = async (when: string) =>
+      db.execute({ sql: "INSERT INTO tenant_audit_log (tenant_id, actor_user_id, action_type, created_at) VALUES (?, ?, 'guided_test_claim', ?)", args: [TENANT, OWNER, when] });
+    for (let i = 0; i < service.MAX_TESTS_PER_HOUR; i += 1) await claim(new Date().toISOString());
     const limited = await testRoute.POST(req("POST", `/api/automations/guided/${id}/test`), idCtx(id));
     assert.equal(limited.status, 429);
     assert.equal((await json(limited)).error, "rate_limited");
     assert.equal(world.runCalls.length, 0);
-    // An old test does not count.
-    await db.execute({ sql: "UPDATE dept_chat_runs SET created_at = ?", args: [new Date(Date.now() - 2 * 3_600_000).toISOString()] });
+    // Another person's claims do not count against this one.
+    await db.execute({ sql: "UPDATE tenant_audit_log SET actor_user_id = ?", args: [OTHER] });
     assert.equal((await testRoute.POST(req("POST", `/api/automations/guided/${id}/test`), idCtx(id))).status, 200);
+    // An old claim does not count.
+    await db.execute({ sql: "UPDATE tenant_audit_log SET actor_user_id = ?, created_at = ?", args: [OWNER, new Date(Date.now() - 2 * 3_600_000).toISOString()] });
+    assert.equal((await testRoute.POST(req("POST", `/api/automations/guided/${id}/test`), idCtx(id))).status, 200);
+  });
+
+  await check("a burst of Test now presses cannot pass the cap together: exactly the allowance runs", async () => {
+    await reset();
+    const { body } = await create({});
+    const id = body.item.id as string;
+    const presses = await Promise.all(
+      Array.from({ length: service.MAX_TESTS_PER_HOUR + 5 }, () => testRoute.POST(req("POST", `/api/automations/guided/${id}/test`), idCtx(id))),
+    );
+    const statuses = presses.map((r) => r.status);
+    assert.equal(statuses.filter((x) => x === 200).length, service.MAX_TESTS_PER_HOUR, `statuses: ${statuses.join(",")}`);
+    assert.equal(statuses.filter((x) => x === 429).length, 5);
+    assert.equal(world.runCalls.length, service.MAX_TESTS_PER_HOUR, "the refused presses never reached the engine");
+    const claims = (await db.execute("SELECT COUNT(*) AS n FROM tenant_audit_log WHERE action_type = 'guided_test_claim'")).rows[0].n;
+    assert.equal(claims, service.MAX_TESTS_PER_HOUR);
+  });
+
+  await check("Test now while a run of the same automation is going is refused first, without using the allowance; a dead one does not block", async () => {
+    await reset();
+    const { body } = await create({});
+    const id = body.item.id as string;
+    const seed = (runId: string, status: string, beat: string) =>
+      db.execute({ sql: "INSERT INTO dept_chat_runs (id, tenant_id, user_id, automation_id, origin, status, created_at, started_at, heartbeat_at) VALUES (?, ?, ?, ?, 'automation', ?, ?, ?, ?)", args: [runId, TENANT, OWNER, id, status, beat, beat, beat] });
+    await seed("live-run", "running", new Date().toISOString());
+    const busy = await testRoute.POST(req("POST", `/api/automations/guided/${id}/test`), idCtx(id));
+    assert.equal(busy.status, 409);
+    assert.equal((await json(busy)).error, "run_in_progress");
+    assert.equal(world.runCalls.length, 0);
+    assert.equal((await db.execute("SELECT COUNT(*) AS n FROM tenant_audit_log WHERE action_type = 'guided_test_claim'")).rows[0].n, 0, "a refusal uses none of the hourly allowance");
+    await db.execute("DELETE FROM dept_chat_runs");
+    await seed("dead-run", "running", new Date(Date.now() - 10 * 60_000).toISOString());
+    assert.equal((await testRoute.POST(req("POST", `/api/automations/guided/${id}/test`), idCtx(id))).status, 200, "a run whose driver stopped reporting does not block for ever");
   });
 
   await check("the edges: a malformed id is a 404 before any read, a huge or non-object body is a 400, an unknown id is a 404", async () => {
@@ -453,6 +521,190 @@ async function main(): Promise<void> {
     const script = "eeeeeeee-0000-4000-8000-000000000005";
     assert.equal((await pauseRoute.POST(req("POST", `/api/automations/guided/${script}/pause`), idCtx(script))).status, 404);
     assert.equal((await db.execute({ sql: "SELECT enabled FROM tenant_cron_jobs WHERE id = ?", args: [script] })).rows[0].enabled, 1, "a script job is untouched");
+  });
+
+  const customPayload = (over: Record<string, unknown> = {}) => ({
+    v: 1,
+    template: { id: "custom", version: 1 },
+    department: "sales",
+    inputs: { objective: "Which leads from this week have not had a reply?" },
+    tools: ["leads_search"],
+    output: "digest",
+    schedule: { plan: { mode: "weekdays", time: "08:00" } },
+    ...over,
+  });
+
+  await check("a saved custom drafts automation reads back as valid: what the server stored passes the same validation again", async () => {
+    await reset();
+    const made = await listRoute.POST(req("POST", "/api/automations/guided", { payload: customPayload({ output: "email_drafts" }) }));
+    assert.equal(made.status, 201, JSON.stringify(await made.clone().json()));
+    const item = (await json(made)).item;
+    assert.equal(item.status, "paused", "valid and paused, not 'needs attention' the moment it is saved");
+    assert.deepEqual(item.problems.filter((p: { code: string }) => p.code === "tools_invalid"), []);
+    assert.ok(item.payload.tools.includes("propose_email"));
+    const stored = JSON.parse(String((await db.execute("SELECT action_payload FROM tenant_cron_jobs")).rows[0].action_payload));
+    const again = validateGuidedPayload(stored, { companyFinancials: true });
+    assert.equal(again.ok, true, "round trip: " + JSON.stringify(again));
+    if (again.ok) assert.deepEqual(again.payload, stored, "and it is stable");
+    // The draft tool is still not a read for a digest.
+    const digest = await json(await listRoute.POST(req("POST", "/api/automations/guided", { payload: customPayload({ tools: ["leads_search", "propose_email"] }) })));
+    assert.equal(digest.error, "tools_invalid");
+    // Only the draft tool ticked is not enough: it must read something.
+    const lone = await json(await listRoute.POST(req("POST", "/api/automations/guided", { payload: customPayload({ output: "email_drafts", tools: ["propose_email"] }) })));
+    assert.equal(lone.error, "tools_invalid");
+  });
+
+  await check("email drafts need a real schedule: 'only when I run it' only ever previews, so it is refused", async () => {
+    await reset();
+    const res = await json(await listRoute.POST(req("POST", "/api/automations/guided", { payload: customPayload({ output: "email_drafts", schedule: { plan: { mode: "manual" } } }) })));
+    assert.equal(res.error, "schedule_invalid");
+    assert.match(res.message, /Email drafts need a schedule/);
+    const digest = await listRoute.POST(req("POST", "/api/automations/guided", { payload: customPayload({ schedule: { plan: { mode: "manual" } } }) }));
+    assert.equal(digest.status, 201, "a digest may still be run by hand");
+  });
+
+  await check("the owner's words are refused when they contain a deployment secret; nothing is saved", async () => {
+    await reset();
+    const res = await listRoute.POST(req("POST", "/api/automations/guided", { payload: customPayload({ inputs: { objective: "Use the key svc-secret-value-0123456789 to look at leads" } }) }));
+    assert.equal(res.status, 422);
+    const body = await json(res);
+    assert.equal(body.error, "input_invalid");
+    assert.equal(body.field, "objective");
+    assert.ok(!JSON.stringify(body).includes("svc-secret-value"), "the refusal does not echo the secret");
+    assert.equal((await db.execute("SELECT COUNT(*) AS n FROM tenant_cron_jobs")).rows[0].n, 0);
+  });
+
+  await check("the stored zone follows the plan's zone, not a constant", async () => {
+    await reset();
+    const made = await listRoute.POST(req("POST", "/api/automations/guided", { payload: customPayload({ schedule: { plan: { mode: "weekdays", time: "08:00", timezone: "America/Vancouver" } } }) }));
+    assert.equal(made.status, 201);
+    const row = (await db.execute("SELECT tz, action_payload FROM tenant_cron_jobs")).rows[0] as Record<string, any>;
+    assert.equal(row.tz, JSON.parse(row.action_payload).schedule.plan.timezone);
+    assert.equal(row.tz, "America/Vancouver");
+  });
+
+  await check("a malformed stored payload is shown in a safe shape: no unchecked cast reaches the page", async () => {
+    await reset();
+    await db.execute({
+      sql: "INSERT INTO tenant_cron_jobs (id, tenant_id, action_type, name, owner_user_id, action_payload, enabled) VALUES ('mal', ?, 'department_task', 'Mangled', ?, ?, 0)",
+      args: [TENANT, OWNER, JSON.stringify({ v: 1, template: "nope", department: "bogus", inputs: "oops", tools: "x", output: 7, schedule: "daily", runtime_cap_sec: "soon" })],
+    });
+    const items = (await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items;
+    assert.equal(items.length, 1);
+    const view = items[0];
+    assert.equal(view.status, "needs_attention");
+    assert.ok(Array.isArray(view.payload.tools), "tools is always an array");
+    assert.equal(typeof view.payload.inputs, "object");
+    assert.ok(!Array.isArray(view.payload.inputs));
+    assert.equal(view.payload.target.kind, "cloud");
+    assert.ok(["digest", "email_drafts"].includes(view.payload.output));
+    assert.equal(typeof view.payload.schedule.plan.mode, "string");
+    assert.equal(view.department, "chief_of_staff", "an unknown department becomes the neutral one, not the raw string");
+    const sal = service.salvagePayload({ tools: ["a", 3, "b"], inputs: { n: 5, s: "x".repeat(900), z: { deep: 1 } }, department: "sales" });
+    assert.deepEqual(sal.tools, ["a", "b"]);
+    assert.deepEqual(sal.inputs.n, 5);
+    assert.equal(String(sal.inputs.s).length, 400);
+    assert.ok(!("z" in sal.inputs));
+  });
+
+  await check("another admin sees only what the department pages would show them; a Finance digest is hidden without the right", async () => {
+    await reset();
+    world.financeAgent = true;
+    const money = templateById("money_summary", "finance")!;
+    const madeFinance = await listRoute.POST(req("POST", "/api/automations/guided", { payload: { v: 1, template: { id: money.id, version: money.version }, department: "finance", inputs: {}, schedule: { plan: money.schedulePresets[0].plan } } }));
+    assert.equal(madeFinance.status, 201, JSON.stringify(await madeFinance.clone().json()));
+    const financeId = (await json(madeFinance)).item.id as string;
+    const salesId = (await create({})).body.item.id as string;
+    await db.execute({ sql: "INSERT INTO dept_chat_runs (id, tenant_id, user_id, automation_id, origin, status, final_text, created_at, started_at) VALUES ('fin-run', ?, ?, ?, 'automation', 'done', 'Collected 9000 dollars in 7 days.', '2026-10-15T12:00:00.000Z', '2026-10-15T12:00:01.000Z')", args: [TENANT, OWNER, financeId] });
+    // The owner sees both.
+    assert.equal((await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items.length, 2);
+    // A different admin without the company-financials right.
+    world.session = { ...world.session!, authUserId: OTHER, teamRole: "admin", isOwner: false };
+    world.financials = false;
+    world.blockedSlugs = [];
+    const theirs = (await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items;
+    assert.deepEqual(theirs.map((i: { id: string }) => i.id), [salesId], "the Finance digest and its last result are not listed");
+    assert.ok(!JSON.stringify(theirs).includes("9000"));
+    assert.equal((await pauseRoute.POST(req("POST", `/api/automations/guided/${financeId}/pause`), idCtx(financeId))).status, 404);
+    assert.equal((await runsRoute.GET(req("GET", `/api/automations/guided/${financeId}/runs`), idCtx(financeId))).status, 404);
+    assert.equal((await receiptRoute.GET(req("GET", `/api/automations/guided/${financeId}/runs/fin-run`), runCtx(financeId, "fin-run"))).status, 404);
+    // With the right they see it.
+    world.financials = true;
+    assert.equal((await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items.length, 2);
+    // A department they cannot open hides its automations from them too, with the same "not found".
+    world.blockedSlugs = ["sales"];
+    const noSales = (await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items;
+    assert.deepEqual(noSales.map((i: { id: string }) => i.id), [financeId]);
+    assert.equal((await pauseRoute.POST(req("POST", `/api/automations/guided/${salesId}/pause`), idCtx(salesId))).status, 404);
+    // The owner keeps seeing their own, so they can read what stopped working and fix it.
+    world.session = { ...world.session!, authUserId: OWNER, teamRole: "owner", isOwner: true };
+    assert.equal((await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items.length, 2);
+  });
+
+  await check("run history and receipts: newest first, redacted, tied to the automation, steps in order", async () => {
+    await reset();
+    const id = (await create({})).body.item.id as string;
+    const other = (await create({})).body.item.id as string;
+    const put = (runId: string, automation: string, status: string, origin: string, at: string, text: string | null, code: string | null = null) =>
+      db.execute({ sql: "INSERT INTO dept_chat_runs (id, tenant_id, user_id, automation_id, origin, status, final_text, error_code, scheduled_for, created_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", args: [runId, TENANT, OWNER, automation, origin, status, text, code, at, at, at, at] });
+    await put("11111111-0000-4000-8000-000000000001", id, "done", "automation", "2026-10-15T12:00:00.000Z", "Two leads are quiet. Key svc-secret-value-0123456789 leaked.");
+    await put("11111111-0000-4000-8000-000000000002", id, "failed", "test", "2026-10-15T13:00:00.000Z", null, "run_timeout");
+    await put("11111111-0000-4000-8000-000000000003", other, "done", "automation", "2026-10-15T14:00:00.000Z", "Not this one.");
+    const ev = (runId: string, seq: number, data: unknown) =>
+      db.execute({ sql: "INSERT INTO dept_chat_run_events (run_id, seq, tenant_id, kind, data_json, created_at) VALUES (?, ?, ?, 'tool', ?, '2026-10-15T12:00:00.000Z')", args: [runId, seq, TENANT, JSON.stringify(data)] });
+    const first = "11111111-0000-4000-8000-000000000001";
+    await ev(first, 1, { id: "a", phase: "start", label: "Looking up the pipeline", ok: null });
+    await ev(first, 2, { id: "a", phase: "done", ok: true });
+    await ev(first, 3, { id: "b", phase: "start", label: "Reading lead history", ok: null });
+    await ev(first, 4, { id: "b", phase: "done", ok: false });
+
+    const list = await json(await runsRoute.GET(req("GET", `/api/automations/guided/${id}/runs`), idCtx(id)));
+    assert.deepEqual(list.runs.map((r: { id: string }) => r.id), ["11111111-0000-4000-8000-000000000002", first], "newest first, only this automation's");
+    assert.equal(list.runs[0].origin, "test");
+    assert.match(list.runs[0].summary, /time limit/);
+    assert.equal(list.runs[1].origin, "scheduled");
+
+    const receipt = await json(await receiptRoute.GET(req("GET", `/api/automations/guided/${id}/runs/${first}`), runCtx(id, first)));
+    assert.equal(receipt.ok, true);
+    assert.deepEqual(receipt.receipt.steps, [{ label: "Looking up the pipeline", ok: true }, { label: "Reading lead history", ok: false }]);
+    assert.ok(!JSON.stringify(receipt).includes("svc-secret-value"), `the receipt is redacted: ${JSON.stringify(receipt).slice(0, 400)}`);
+    assert.match(receipt.receipt.text, /Two leads are quiet/);
+    const failed = await json(await receiptRoute.GET(req("GET", `/api/automations/guided/${id}/runs/11111111-0000-4000-8000-000000000002`), runCtx(id, "11111111-0000-4000-8000-000000000002")));
+    assert.match(failed.receipt.failure, /time limit/);
+    assert.equal(failed.receipt.text, "");
+    // Another automation's run, a run id that is not an id, and an unknown run are all "not found".
+    const foreign = "11111111-0000-4000-8000-000000000003";
+    assert.equal((await receiptRoute.GET(req("GET", `/api/automations/guided/${id}/runs/${foreign}`), runCtx(id, foreign))).status, 404);
+    assert.equal((await receiptRoute.GET(req("GET", `/api/automations/guided/${id}/runs/nope`), runCtx(id, "nope"))).status, 404);
+    assert.equal((await receiptRoute.GET(req("GET", `/api/automations/guided/${id}/runs/11111111-0000-4000-8000-0000000000ff`), runCtx(id, "11111111-0000-4000-8000-0000000000ff"))).status, 404);
+    // Signed out.
+    world.session = null;
+    assert.equal((await runsRoute.GET(req("GET", `/api/automations/guided/${id}/runs`), idCtx(id))).status, 401);
+  });
+
+  await check("Turn on: a failed READ is a try-again, not a verdict; an automation that is already on is not re-stamped; a demoted owner is refused", async () => {
+    await reset();
+    const id = (await create({})).body.item.id as string;
+    const turnOn = async () => {
+      const res = await activateRoute.POST(req("POST", `/api/automations/guided/${id}/activate`), idCtx(id));
+      return { status: res.status, body: await json(res) };
+    };
+    world.preflightThrows = true;
+    const hiccup = await turnOn();
+    assert.equal(hiccup.status, 503);
+    assert.match(hiccup.body.message, /Nothing was changed/);
+    assert.equal((await db.execute("SELECT enabled FROM tenant_cron_jobs")).rows[0].enabled, 0);
+    world.preflightThrows = false;
+    assert.equal((await turnOn()).status, 200);
+    await db.execute({ sql: "UPDATE tenant_cron_jobs SET last_scheduled_for = '2026-10-15T08:00:00.000Z'" });
+    assert.equal((await turnOn()).status, 200);
+    assert.equal((await db.execute("SELECT last_scheduled_for FROM tenant_cron_jobs")).rows[0].last_scheduled_for, "2026-10-15T08:00:00.000Z", "turning on what is already on changes nothing");
+    assert.equal((await db.execute("SELECT COUNT(*) AS n FROM tenant_audit_log WHERE action_type = 'cron_job_toggle'")).rows[0].n, 1, "and audits nothing");
+    await db.execute("UPDATE tenant_cron_jobs SET enabled = 0");
+    world.preflight = { ok: false, code: "owner_not_manager" };
+    const demoted = await turnOn();
+    assert.equal(demoted.status, 403);
+    assert.equal(demoted.body.error, "forbidden");
   });
 
   console.log(`guided-automations-service: ${passed} passed, ${failed} failed`);

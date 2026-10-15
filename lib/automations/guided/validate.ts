@@ -47,6 +47,11 @@ function isObject(v: unknown): v is Record<string, unknown> {
 
 const CONTROL = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`);
 
+/** Any control character. Built from code points: this file never carries a backslash-u escape. */
+export function hasControlChars(text: string): boolean {
+  return CONTROL.test(text);
+}
+
 /** One input value, checked against its declaration. Returns the clean value or an error sentence. */
 function checkInput(template: GuidedTemplate, name: string, raw: unknown): { ok: true; value: string | number } | { ok: false; message: string } {
   const field = template.inputs.find((f) => f.name === name);
@@ -77,9 +82,13 @@ function resolveTools(template: GuidedTemplate, department: DepartmentKey, outpu
   const allowed = new Set<DeskToolName>(readToolsFor(department));
   const picked: DeskToolName[] = [];
   for (const t of raw) {
+    // A stored drafts payload already ends in the draft tool this function appends below, so the
+    // payload it returned reads back as valid. For a digest that name is still not a read: refused.
+    if (output === "email_drafts" && t === "propose_email") continue;
     if (typeof t !== "string" || !allowed.has(t as DeskToolName)) return { ok: false, message: "One of the ticked reads is not available in this department." };
     if (!picked.includes(t as DeskToolName)) picked.push(t as DeskToolName);
   }
+  if (picked.length === 0) return { ok: false, message: "Tick at least one thing it may read." };
   if (output === "email_drafts") {
     if (!(DEPARTMENT_PALETTES[department] ?? []).includes("propose_email")) {
       return { ok: false, message: "This department cannot draft emails." };
@@ -154,6 +163,10 @@ export function validateGuidedPayload(raw: unknown, ctx: GuidedContext): GuidedV
   const plan = validatePlan(isObject(planInput) && planInput.timezone === undefined ? { ...planInput, timezone: GUIDED_ZONE } : planInput);
   if (!plan.ok) return refuse("schedule_invalid", plan.message, "schedule");
   if (plan.plan.mode === "custom") return refuse("schedule_invalid", "Pick one of the schedules offered. A custom schedule is in Advanced.", "schedule");
+  if (plan.plan.mode === "manual" && output === "email_drafts") {
+    // A run the person starts is always a preview that files nothing, so a drafts automation with no schedule could never file a draft.
+    return refuse("schedule_invalid", "Email drafts need a schedule. A run you start yourself only previews them and files nothing, so pick a time.", "schedule");
+  }
   const tooFrequent = checkFrequency(plan.plan, output);
   if (tooFrequent) return refuse("schedule_too_frequent", tooFrequent, "schedule");
 

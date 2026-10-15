@@ -14,6 +14,7 @@ import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 import { modelFactsForCopy } from "@/lib/ai/model-registry";
 import { DESK_TOOLS } from "@/lib/os/desk/catalog";
 import { taskMessageFor } from "@/lib/automations/guided/validate";
+import { redactAll } from "@/lib/secret-redaction";
 import type { GuidedPayload } from "@/lib/automations/guided/types";
 import type { RunSession } from "./session";
 import type { Run } from "./store";
@@ -75,8 +76,11 @@ function collectWouldDraft(target: WouldDraft[], name: string, content: string):
  * deliberately absent: the only user message is taskMessageFor(payload). */
 export async function startAutomationTurn(input: StartAutomationTurnInput): Promise<TurnStart> {
   const { session, payload, run, signal } = input;
-  const task = taskMessageFor(payload);
-  if (!task) return { ok: false, status: 409, error: "template_version_unknown" };
+  const built = taskMessageFor(payload);
+  if (!built) return { ok: false, status: 409, error: "template_version_unknown" };
+  // The owner's words are stored and later sent to a model provider. Create refuses text that looks
+  // like a secret; this scrub is the last boundary, for a value that became a secret after it was saved.
+  const task = redactAll(built);
   if (session.dept.key !== payload.department || run.department !== payload.department) {
     return { ok: false, status: 409, error: "department_unavailable" };
   }

@@ -475,7 +475,10 @@ export async function recordTerminalAutomationRun(
                      COALESCE((SELECT MAX(r.seq) FROM dept_chat_runs r WHERE r.conversation_id = c.id), 0) + 1,
                      ?, ?, 'build', 'automation', 0, ?, ?, ?, ?, 'worker', ?, ?, ?, ?
               FROM dept_chat_conversations c
-              WHERE c.id = ? AND c.tenant_id = ? AND c.user_id = ? AND c.origin = 'automation'`,
+              WHERE c.id = ? AND c.tenant_id = ? AND c.user_id = ? AND c.origin = 'automation'
+                AND NOT (? = 'missed' AND EXISTS (
+                  SELECT 1 FROM dept_chat_runs x
+                  WHERE x.tenant_id = c.tenant_id AND x.automation_id = ? AND x.scheduled_for = ? AND x.status <> 'missed'))`,
         args: [
           input.id,
           input.status,
@@ -491,9 +494,18 @@ export async function recordTerminalAutomationRun(
           input.conversationId,
           scope.tenantId,
           scope.userId,
+          input.status,
+          input.automationId,
+          iso(input.scheduledFor),
         ],
       });
-      if (inserted.rowsAffected === 0) throw new Error("os.runs.terminal_automation: conversation not found");
+      if (inserted.rowsAffected === 0) {
+        // A "missed" note never sits beside a real run of the same slot (a live run claimed it while
+        // this tick was deciding): the real run is the record.
+        const existing = input.status === "missed" ? await getAutomationRunForSlot(db, scope, input.automationId, input.scheduledFor) : null;
+        if (existing) return { run: existing, created: false };
+        throw new Error("os.runs.terminal_automation: conversation not found");
+      }
       const events: RunEvent[] = [];
       let seq = 1;
       if (input.errorCode && input.errorMessage) {
@@ -1112,6 +1124,41 @@ export async function failQueuedComputerRun(db: Client, scope: RunScope, runId: 
   const message = failureCopy(code, { canManageAi: false }).sentence;
   await closeRun(db, scope, runId, "failed", { code, message }, now);
   return true;
+}
+
+/**
+ * Fail ONE queued automation run that could not start (another run held its
+ * conversation, so the claim was refused). Without this the row would stay
+ * `queued` for ever, count against the conversation's queue and read "Running
+ * now". Guarded by status = 'queued' AND source = 'automation', so a run that
+ * a driver claimed a moment before is left alone.
+ */
+export async function failQueuedAutomationRun(db: Client, scope: RunScope, runId: string, code: string, now: Date): Promise<boolean> {
+  const rs = await exec(db, {
+    sql: `UPDATE dept_chat_runs SET status = 'failed', error_code = ?, finished_at = ?
+          WHERE id = ? AND tenant_id = ? AND user_id = ? AND source = 'automation' AND status = 'queued'`,
+    args: [code, iso(now), runId, scope.tenantId, scope.userId],
+  });
+  if (rs.rowsAffected === 0) return false;
+  const { failureCopy } = await import("@/lib/os/channel/outcome");
+  const message = failureCopy(code, { canManageAi: false }).sentence;
+  await closeRun(db, scope, runId, "failed", { code, message }, now);
+  return true;
+}
+
+/**
+ * True when this automation has a run that is queued or running right now (any
+ * origin). A row whose driver stopped reporting two minutes ago does not count:
+ * the executor's reaper closes it, and it must not block a person for ever.
+ */
+export async function automationHasLiveRun(db: Client, scope: RunScope, automationId: string, now: Date): Promise<boolean> {
+  const rs = await exec(db, {
+    sql: `SELECT 1 AS x FROM dept_chat_runs
+          WHERE tenant_id = ? AND user_id = ? AND automation_id = ? AND status IN ('queued', 'running')
+            AND COALESCE(heartbeat_at, started_at, created_at) > ? LIMIT 1`,
+    args: [scope.tenantId, scope.userId, automationId, iso(new Date(now.getTime() - 120_000))],
+  });
+  return rows(rs).length > 0;
 }
 
 /**

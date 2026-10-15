@@ -157,6 +157,24 @@ function automationLabel(name: string): string {
 
 const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
+const EMAIL_IN_TEXT = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const PHONE_IN_TEXT = /\+?\d[\d\s().-]{8,}\d/g;
+
+/**
+ * Whether free text carries an email address or phone number that is not one of the lead's or the
+ * owner's own. Returns what it found, or null. A date or an amount has fewer than ten digits.
+ */
+export function foreignContactDetail(text: string, ownEmails: ReadonlyArray<string | null | undefined>, ownPhone: string | null): "email" | "phone" | null {
+  const mine = new Set(ownEmails.map((e) => String(e ?? "").trim().toLowerCase()).filter(Boolean));
+  for (const found of text.match(EMAIL_IN_TEXT) ?? []) if (!mine.has(found.toLowerCase())) return "email";
+  const ownDigits = (ownPhone ?? "").replace(/\D/g, "").slice(-10);
+  for (const found of text.match(PHONE_IN_TEXT) ?? []) {
+    const digits = found.replace(/\D/g, "");
+    if (digits.length >= 10 && (ownDigits.length < 10 || digits.slice(-10) !== ownDigits)) return "phone";
+  }
+  return null;
+}
+
 export async function proposeAutomationEmail(
   viewer: OsViewer,
   dept: OsDepartment,
@@ -183,6 +201,13 @@ export async function proposeAutomationEmail(
   const leadEmail = (leadLine(lead).email ?? "").trim().toLowerCase();
   if (!leadEmail) throw new ProposalRefused("lead_has_no_email");
   if (payload.value.to !== leadEmail) throw new ProposalRefused("recipient_is_not_the_leads_email");
+  // The run reads other people's notes and messages, so a draft may not carry anyone else's contact
+  // details to this lead (a planted instruction in a lead's own text is the way that would happen).
+  const leadData = (lead.data ?? {}) as Record<string, unknown>;
+  const leadPhone = typeof leadData.phone === "string" ? leadData.phone : null;
+  if (foreignContactDetail(`${payload.value.subject}\n${payload.value.body}`, [leadEmail, viewer.email], leadPhone)) {
+    throw new ProposalRefused("automation_draft_names_another_contact");
+  }
   if (run.proposed >= AUTOMATION_DRAFTS_PER_RUN) throw new ProposalRefused("automation_draft_limit_per_run");
 
   const tenantId = viewer.surface.tenantId;

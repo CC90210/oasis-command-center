@@ -14,6 +14,7 @@ import { useRef, useState } from "react";
 import type { GuidedApi, GuidedAutomationView, TestResult } from "@/lib/automations/guided/api-types";
 import { activateAutomation, activatedLine, pauseAutomation, removeAutomation, runTest, type Failure } from "@/lib/automations/guided/flow";
 import { departmentLabel, lastRunHead, nextRunLine, type LoadState } from "@/lib/automations/guided/view";
+import { RunHistory } from "./RunHistory";
 import { FailureView, TestResultView } from "./TestResultView";
 import { Notice, RepairAnchor, StatusPill, TAP } from "./ui";
 
@@ -251,6 +252,7 @@ function Row({
           <TestResultView result={note.result} expectsDrafts={item.payload.output === "email_drafts"} />
         </div>
       )}
+      <RunHistory api={api} automationId={item.id} refreshKey={item.lastRun?.receiptId ?? ""} />
     </li>
   );
 }

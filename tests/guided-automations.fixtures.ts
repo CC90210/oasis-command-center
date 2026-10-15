@@ -111,6 +111,11 @@ export function fakeApi(overrides: Partial<Record<keyof GuidedApi, (...args: nev
     activate: answer("activate", (id) => ({ ok: true, item: { ...base, id: String(id), status: "on" as const } })),
     pause: answer("pause", (id) => ({ ok: true, item: { ...base, id: String(id), status: "paused" as const } })),
     remove: answer("remove", () => ({ ok: true })),
+    runs: answer("runs", () => ({ ok: true, runs: [] })),
+    receipt: answer("receipt", (_id, runId) => ({
+      ok: true,
+      receipt: { id: String(runId), at: "2026-10-15T12:00:00.000Z", origin: "test", status: "done", summary: "Finished.", scheduledFor: null, finishedAt: null, text: "", steps: [], failure: null },
+    })),
   } as unknown as GuidedApi;
   return { api, calls };
 }
