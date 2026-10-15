@@ -250,13 +250,19 @@ export function composeAiAuditWelcome(a: Record<string, unknown>, links: Welcome
     ? bookingUrl
       ? `You asked for a call, so pick the time that works here: ${bookingUrl}\nThe Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
       : `You asked for a call, so use the live calendar on the page to pick the time that works. The Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
+    // The two branches below used to promise "I'll come back to you with where
+    // I'd start and what it would take": a personal written answer nobody has
+    // committed to send (CC, 2026-10-08: there is no texted findings or custom
+    // report). The promises cleared for this funnel are "Free AI audit. No
+    // pitch." and "I read every one of these myself", so the copy says that and
+    // points at the call, which IS the answer. Copy by Maven (CMO), 2026-10-15.
     : urgent
       ? bookingUrl
-        ? `You said you want this moving soon, so I'll come back to you shortly with where I'd start and what it would take. If talking is faster, pick a time here: ${bookingUrl}`
-        : `You said you want this moving soon, so I'll come back to you shortly with where I'd start and what it would take. The live calendar on the page is there if talking is faster.`
+        ? `You said you want this moving soon. I read every one of these myself — the fastest way to a real answer is a call: ${bookingUrl}`
+        : `You said you want this moving soon. I read every one of these myself — the fastest way to a real answer is a call: reply with two times that work and I'll send the invite.`
       : bookingUrl
-        ? `I'll come back to you with where I'd start and roughly what it would take. If talking is easier, pick a time that works for both founders here: ${bookingUrl}`
-        : `I'll come back to you with where I'd start and roughly what it would take. If talking is easier, the live calendar on the page has the times that work for both founders.`;
+        ? `I read every one of these myself. If talking is easier, pick a time that works for both founders here: ${bookingUrl}`
+        : `I read every one of these myself. If talking is easier, reply with two times that work and I'll send the invite.`;
 
   // Quote their own bottleneck back at them. This is the single most
   // personal thing in the form — they typed it — and the email was
@@ -306,7 +312,8 @@ export function composeAiAuditWelcome(a: Record<string, unknown>, links: Welcome
     // scope instead of at the reader: I will tell you what NOT to build.
     `And I'll be straight about scope: if part of this is better solved by fixing a process than by automating it, I'll say so. You'll get the shortest path that actually works, not the biggest one.`,
     "",
-    `— CC`,
+    // "CC" is the internal name; public material signs as Conaugh.
+    `— Conaugh`,
     `Conaugh McKenna · OASIS AI Solutions`,
   ].join("\n");
 
