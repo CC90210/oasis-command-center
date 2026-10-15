@@ -130,7 +130,11 @@ export function inboundAttention(
   if (rest > 0 || truncated) {
     items.push({
       id: "inbound-more",
-      label: `${rest > 0 ? n(rest) : "More"} new inbound lead${rest === 1 ? "" : "s"} waiting in Warm inbound`,
+      // A known remainder says how many; a capped read that shows every row it read can only say "may".
+      label:
+        rest > 0
+          ? `${n(rest)} more new inbound lead${rest === 1 ? "" : "s"} waiting in Warm inbound`
+          : "There may be more new inbound leads waiting in Warm inbound",
       href: INBOUND_QUEUE_HREF,
       count: Math.max(rest, 0),
       ...(truncated ? { capped: true } : {}),

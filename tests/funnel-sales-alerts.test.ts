@@ -203,7 +203,13 @@ async function main(): Promise<void> {
   assert.ok(items.every((i) => !/[_]\d|10k_50k|sales_leadgen/.test(i.label)), "no raw option keys on screen");
   assert.equal(items.reduce((s, i) => s + i.count, 0), 7, "the header's Needs you counts each waiting lead once");
   assert.equal(items[5].capped, true, "a truncated window makes the sum a floor");
-  assert.match(items[5].label, /^2 new inbound leads waiting in Warm inbound$/);
+  assert.match(items[5].label, /^2 more new inbound leads waiting in Warm inbound$/);
+  // A capped read that shows every row it read cannot say how many are missing: it says "may".
+  const exactlyFive = inboundWaiting(rows.slice(0, 5), NOW, 9);
+  const cappedOnly = inboundAttention({ ok: true, value: { total: 9, untouched: 9, booked: 0, waiting: exactlyFive } });
+  assert.equal(cappedOnly.at(-1)?.label, "There may be more new inbound leads waiting in Warm inbound");
+  assert.equal(cappedOnly.at(-1)?.count, 0);
+  assert.equal(cappedOnly.at(-1)?.capped, true);
   assert.deepEqual(inboundAttention(null), []);
   assert.deepEqual(inboundAttention({ ok: false }), []);
   assert.deepEqual(inboundAttention({ ok: true, value: { total: 3, untouched: 0, booked: 0 } }), [], "no list where it was not read");
