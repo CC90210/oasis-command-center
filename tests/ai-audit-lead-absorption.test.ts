@@ -280,14 +280,26 @@ async function main() {
     assert.match(bulkAssign, /!isWarmInboundLead[\s\S]{0,700}advanceResearchedLeadOnAssign:\s*isWarmInboundLead/);
   });
 
-  await check("the public route uses strong identity and the short URL permanently redirects", () => {
+  await check("the public route uses strong identity; /ai-audit redirects permanently, /vsl temporarily", () => {
     const route = readFileSync(join(ROOT, "app", "api", "forms", "submit", "route.ts"), "utf8");
     assert.match(route, /findExistingLead\([\s\S]{0,220}matchOnBusinessName:\s*false/);
     assert.match(route, /r\.error === "already_ingested"[\s\S]{0,500}ensureAiAuditSubmissionDelivery/);
     assert.match(route, /repStartsWarmWork[\s\S]{0,300}stage:\s*repStartsWarmWork\s*\?\s*"assigned"/);
     const config = readFileSync(join(ROOT, "next.config.js"), "utf8");
     assert.match(config, /source:\s*["']\/ai-audit["'][\s\S]{0,180}destination:\s*["']\/f\/oasis-ai-cc\/ai-audit["'][\s\S]{0,80}permanent:\s*true/);
-    assert.match(config, /source:\s*["']\/vsl["'][\s\S]{0,180}destination:\s*["']\/f\/oasis-ai-cc\/vsl["'][\s\S]{0,80}permanent:\s*true/);
+    // /vsl must NOT be a static permanent redirect: a 308 is cached by browsers
+    // and crawlers for good, so the day the router form is published the cached
+    // visitors would still be sent to the audit. app/vsl/route.ts decides on
+    // every request and answers 302.
+    assert.doesNotMatch(config, /source:\s*["']\/vsl["']/);
+    const vsl = readFileSync(join(ROOT, "app", "vsl", "route.ts"), "utf8");
+    assert.match(vsl, /status:\s*302/);
+    assert.doesNotMatch(vsl, /permanent|status:\s*30[178]/);
+    assert.match(vsl, /resolvePublicForm\([\s\S]{0,120}VSL_ROUTER_SLUG/);
+    assert.match(vsl, /AI_AUDIT_SLUG/);
+    // A route handler runs after middleware, so the path has to be public.
+    const mw = readFileSync(join(ROOT, "middleware.ts"), "utf8");
+    assert.match(mw, /^\s*"\/vsl",/m);
   });
 
   await check("the Pipeline exposes a warm-inbound queue without the cold assignment-cycle filter", async () => {
@@ -361,7 +373,10 @@ async function main() {
 
   await check("started and completed leads use deterministic department:Sales event writes", () => {
     const notify = readFileSync(join(ROOT, "lib", "forms", "ai-audit-notify.ts"), "utf8");
-    assert.match(notify, /OASIS_AI_AUDIT_STARTED[\s\S]{0,100}OASIS_AI_AUDIT_COMPLETED/);
+    // STARTED, then (after the BOOKED branch the inline calendar added) COMPLETED:
+    // a window wide enough for the nested ternary, still tight enough to mean
+    // "one event_type expression".
+    assert.match(notify, /OASIS_AI_AUDIT_STARTED[\s\S]{0,220}OASIS_AI_AUDIT_COMPLETED/);
     assert.match(notify, /publisher_agent:\s*"dept:sales"[\s\S]{0,100}target_agent:\s*"dept:sales"/);
     assert.match(notify, /onConflict:\s*"id",\s*ignoreDuplicates:\s*true/);
     assert.doesNotMatch(notify, /publishAgentEvent/);
