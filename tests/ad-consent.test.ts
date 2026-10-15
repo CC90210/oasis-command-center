@@ -126,6 +126,17 @@ for (const junk of [null, undefined, "", "yes", "GRANTED", 1, true]) {
   }
   assert.ok(!doc.writes.some((w) => w.startsWith("oasis_session=")), "the session cookie is not touched");
 
+  // On www.oasisai.work gtag sets _gcl_* on the top domain (cookie_domain
+  // "auto"), so withdrawal must expire them on every parent domain too, and
+  // never aim at the bare TLD.
+  const sub = fakeDocument("_gcl_au=1.1.123");
+  withdrawGoogleAdsConsent({}, sub, "www.oasisai.work");
+  assert.ok(
+    sub.writes.some((w) => w.startsWith("_gcl_au=;") && w.includes("Domain=.oasisai.work") && w.includes("Max-Age=0")),
+    "_gcl_au set on .oasisai.work is expired when withdrawing from www",
+  );
+  assert.ok(!sub.writes.some((w) => /Domain=\.?work(;|$)/.test(w)), "never targets the bare TLD");
+
   // Withdrawal before the tag ever loaded must not create a gtag.
   const fresh: TagWindow = {};
   withdrawGoogleAdsConsent(fresh, fakeDocument(""), "oasisai.work");

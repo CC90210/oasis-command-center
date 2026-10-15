@@ -106,20 +106,35 @@ export function installGoogleAdsTag(win: TagWindow, doc: TagDocument): void {
 }
 
 /**
+ * The host and each parent domain down to two labels:
+ * "www.oasisai.work" -> ["www.oasisai.work", "oasisai.work"]. Never the bare TLD.
+ */
+function cookieDomains(host: string): string[] {
+  const labels = host.split(".").filter(Boolean);
+  const out: string[] = [];
+  for (let i = 0; i + 2 <= labels.length; i++) out.push(labels.slice(i).join("."));
+  return out;
+}
+
+/**
  * The visitor changed "Allow" to "No thanks" on this page. Tell an already
  * loaded tag to stop storing and sending ad data, and delete the first-party
- * _gcl_* cookies it set. DoubleClick's own cookie lives on Google's domain:
- * no site can delete it, which /privacy says.
+ * _gcl_* cookies it set. gtag writes them on the TOP domain (cookie_domain
+ * "auto"), so on www.oasisai.work they live on .oasisai.work: every parent
+ * domain is expired, not just the host. DoubleClick's own cookie lives on
+ * Google's domain: no site can delete it, which /privacy says.
  */
-export function withdrawGoogleAdsConsent(win: TagWindow, doc: TagDocument, cookieDomain: string): void {
+export function withdrawGoogleAdsConsent(win: TagWindow, doc: TagDocument, host: string): void {
   if (typeof win.gtag === "function") win.gtag("consent", "update", DENIED);
   const names = doc.cookie
     .split(";")
     .map((c) => c.split("=")[0]?.trim())
     .filter((n): n is string => !!n && n.startsWith("_gcl_"));
   for (const name of names) {
-    for (const domain of [cookieDomain, `.${cookieDomain}`]) {
-      doc.cookie = `${name}=; Max-Age=0; Path=/; Domain=${domain}`;
+    for (const base of cookieDomains(host)) {
+      for (const domain of [base, `.${base}`]) {
+        doc.cookie = `${name}=; Max-Age=0; Path=/; Domain=${domain}`;
+      }
     }
     doc.cookie = `${name}=; Max-Age=0; Path=/`;
   }
