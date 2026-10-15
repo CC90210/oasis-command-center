@@ -168,7 +168,7 @@ export async function AutomationsContent({
         <PageHeader
           title="Automations"
           subtitle={
-            guidedEnabled
+            guided
               ? GUIDED_SUBTITLE
               : "Scheduled jobs your agents run for you — daily briefs, follow-up reminders, lead scoring, anything you describe in plain English."
           }
