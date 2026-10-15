@@ -84,7 +84,7 @@ const LIBRARY_TABLES = `
   CREATE UNIQUE INDEX marketing_asset_media_tenant_id_storage_bucket_storage_path_key
     ON marketing_asset_media (tenant_id, storage_bucket, storage_path);
   CREATE TABLE marketing_corpus (
-    id TEXT NOT NULL DEFAULT ${UUID_SQL}, tenant_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'exemplar',
+    id TEXT NOT NULL DEFAULT ${UUID_SQL}, tenant_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'exemplar', trains TEXT,
     title TEXT, source_url TEXT, storage_bucket TEXT, storage_path TEXT, asset_id TEXT, transcript TEXT,
     extraction TEXT NOT NULL DEFAULT '{}', search_text TEXT, state TEXT NOT NULL DEFAULT 'queued',
     attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, contributed_by TEXT NOT NULL DEFAULT 'adon',

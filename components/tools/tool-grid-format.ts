@@ -60,13 +60,13 @@ export function withRun(jobs: readonly JobView[] | null, job: JobView): JobView[
  * default label, and a link already learned keeps the label it has.
  */
 export function runInput(
-  fields: ReadonlyArray<Pick<ToolField, "name" | "kind">>,
+  fields: ReadonlyArray<Pick<ToolField, "name" | "kind" | "alwaysSend">>,
   values: Readonly<Record<string, string>>,
   chosen: ReadonlySet<string>,
 ): Record<string, string> {
   const input: Record<string, string> = {};
   for (const f of fields) {
-    if (f.kind === "select" && !chosen.has(f.name)) continue;
+    if (f.kind === "select" && !chosen.has(f.name) && !f.alwaysSend) continue;
     input[f.name] = values[f.name] ?? "";
   }
   return input;

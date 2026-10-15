@@ -26,6 +26,7 @@ import {
   parseIngestUrl,
   type CorpusLabel,
 } from "@/lib/founders/ingest-core";
+import { TRAINS_LEGACY, isTrains, trainsOptions } from "@/lib/training/trains";
 
 export type ToolKey = "video_download" | "learn_from_link" | "repurpose_post";
 
@@ -39,6 +40,11 @@ export type ToolField = {
   options?: { value: string; label: string }[];
   /** The value a select starts on. */
   defaultValue?: string;
+  /**
+   * A select whose value is always sent, touched or not. For a choice that must always be explicit
+   * (which agent a note trains): the page can start it on the agent being looked at, and that IS the choice.
+   */
+  alwaysSend?: boolean;
 };
 
 export type ToolValidation =
@@ -181,6 +187,15 @@ const learnFromLink: ToolDef = {
       options: CORPUS_LABELS.map((l) => ({ value: l, label: CORPUS_LABEL_COPY[l].title })),
       defaultValue: LEARN_DEFAULT_LABEL,
     },
+    {
+      name: "trains",
+      label: "Which agent learns this?",
+      kind: "select",
+      required: true,
+      options: trainsOptions(),
+      defaultValue: TRAINS_LEGACY,
+      alwaysSend: true,
+    },
   ],
   validate(input) {
     const f = fieldsOf(input);
@@ -201,11 +216,15 @@ const learnFromLink: ToolDef = {
     // replaced by a default nobody picked.
     const rawLabel = text(f.label);
     if (rawLabel && !(CORPUS_LABELS as readonly string[]).includes(rawLabel)) return { ok: false, field: "label", code: "invalid_choice" };
+    // Which agent learns this. Absent (an older client): the note trains the agent notes always trained.
+    const rawTrains = text(f.trains);
+    if (rawTrains && !isTrains(rawTrains)) return { ok: false, field: "trains", code: "invalid_choice" };
     return {
       ok: true,
       value: {
         url: t.canonicalUrl,
         label: rawLabel ? (rawLabel as CorpusLabel) : null,
+        trains: rawTrains || null,
         source_kind: t.kind,
         extractor: t.extractor,
         external_id: t.externalId,

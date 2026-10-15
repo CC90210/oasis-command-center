@@ -1151,6 +1151,8 @@ export type CorpusRow = {
   contributed_by: string;
   created_at: string;
   indexed_at: string | null;
+  /** Which agent the note trains (lib/training/trains.ts); null for a note saved before an agent could be chosen. */
+  trains: string | null;
 };
 
 export type CorpusStats = {
@@ -1232,7 +1234,7 @@ export async function getCorpusItems(tenantId: string, limit = 40): Promise<Corp
     const db = getServiceSupabase();
     const r = await db
       .from("marketing_corpus")
-      .select("id, kind, label, title, source_url, state, last_error, contributed_by, created_at, indexed_at")
+      .select("id, kind, label, title, source_url, state, last_error, contributed_by, created_at, indexed_at, trains")
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(limit);

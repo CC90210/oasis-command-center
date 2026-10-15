@@ -15,6 +15,9 @@
  * lib/tools/session-handlers.ts. A catalog that could not be read says so; it
  * is never shown as "not set up" or as an empty grid.
  *
+ * `fieldDefaults` starts a field on a value the page knows (Admin > Agent training starts "Which agent
+ * learns this?" on the agent being looked at); a value a select does not offer is ignored.
+ *
  * `audience` picks which tools getToolCatalog hands the grid: "client"
  * (default) is every tool except an operatorOnly one, "operator" is only the
  * operatorOnly ones (Admin > Agent training). `showHeading=false` drops the
@@ -32,6 +35,7 @@ export async function ToolsSection({
   className = "mb-8",
   audience = "client",
   showHeading = true,
+  fieldDefaults,
 }: {
   tenantId: string;
   assetHrefPrefix?: string;
@@ -39,6 +43,8 @@ export async function ToolsSection({
   className?: string;
   audience?: CatalogOptions["audience"];
   showHeading?: boolean;
+  /** Tool key -> field name -> the value that field starts on. */
+  fieldDefaults?: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }) {
   let catalog: ToolCatalog | null = null;
   try {
@@ -58,5 +64,26 @@ export async function ToolsSection({
       </section>
     );
   }
-  return <ToolGrid catalog={catalog} assetHrefPrefix={assetHrefPrefix} showCodes={showCodes} className={className} showHeading={showHeading} />;
+  return <ToolGrid catalog={withFieldDefaults(catalog, fieldDefaults)} assetHrefPrefix={assetHrefPrefix} showCodes={showCodes} className={className} showHeading={showHeading} />;
+}
+
+/** The catalog with some fields starting on a value the page chose. A value a select does not offer is ignored. */
+export function withFieldDefaults(catalog: ToolCatalog, defaults: Readonly<Record<string, Readonly<Record<string, string>>>> | undefined): ToolCatalog {
+  if (!defaults || !catalog.installed) return catalog;
+  return {
+    ...catalog,
+    tools: catalog.tools.map((tool) => {
+      const own = defaults[tool.key];
+      if (!own) return tool;
+      return {
+        ...tool,
+        fields: tool.fields.map((f) => {
+          const value = own[f.name];
+          if (value === undefined) return f;
+          if (f.kind === "select" && !(f.options ?? []).some((o) => o.value === value)) return f;
+          return { ...f, defaultValue: value };
+        }),
+      };
+    }),
+  };
 }

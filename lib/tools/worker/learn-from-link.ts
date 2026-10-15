@@ -29,6 +29,7 @@ import { assertSafeUrl, fetchWithCap } from "@/lib/cloud-tool-runner";
 import { normalizeUrl } from "@/lib/founders/ingest-core";
 import { INJECTION_GUARD, safeJsonExtract, wrapUntrusted } from "@/lib/llm-input-boundary";
 import { LEARN_DEFAULT_LABEL } from "@/lib/tools/registry";
+import { TRAINS_LEGACY, isTrains } from "@/lib/training/trains";
 import { runToolModelCall, type ToolModelDeps } from "@/lib/tools/worker/ai";
 
 export type PageAnswer = { status: number; contentType: string; body: string; truncated: boolean; location: string | null };
@@ -298,13 +299,15 @@ export type LearnInput = {
   url: string;
   /** null: the person did not choose (lib/tools/registry.ts): a new note takes the default, a learned link keeps its own. */
   label: string | null;
+  /** Which agent the note trains (lib/training/trains.ts). null: a new note takes the default agent, a learned link keeps its own. */
+  trains?: string | null;
   source_kind: string;
   extractor: string;
   external_id: string | null;
   title: string;
 };
 
-export type LearnResult = { corpus_id: string; title: string; label: string; analysis: Analysis };
+export type LearnResult = { corpus_id: string; title: string; label: string; trains: string | null; analysis: Analysis };
 
 export type LearnContext = {
   db: Client;
@@ -335,10 +338,10 @@ export async function runLearnFromLink(
   // Another read of this link is in flight (the background reader, or a drop on
   // the Training page): do not read it twice.
   const existing = await ctx.db.execute({
-    sql: `SELECT id, state, label FROM marketing_corpus WHERE tenant_id = ? AND source_url = ? ORDER BY created_at DESC, id DESC LIMIT 20`,
+    sql: `SELECT id, state, label, trains FROM marketing_corpus WHERE tenant_id = ? AND source_url = ? ORDER BY created_at DESC, id DESC LIMIT 20`,
     args: [ctx.tenantId, input.url],
   });
-  const rows = existing.rows.map((r) => ({ id: String(r.id), state: String(r.state), label: String(r.label) }));
+  const rows = existing.rows.map((r) => ({ id: String(r.id), state: String(r.state), label: String(r.label), trains: r.trains == null ? null : String(r.trains) }));
   if (rows.some((r) => r.state === "queued" || r.state === "extracting")) return { ok: false, code: "already_being_read" };
 
   const page = await readLink(input, ctx.fetchPage ?? defaultPageFetch);
@@ -385,27 +388,28 @@ export async function runLearnFromLink(
   // the label is theirs, and so is the note).
   const corpusId = rows[0]?.id ?? randomUUID();
   const chosenBy = input.label ? ctx.contributedBy : null;
+  const trains = isTrains(input.trains) ? input.trains : null;
   const write: InStatement = rows[0]
     ? {
         sql: `UPDATE marketing_corpus
-                 SET label = COALESCE(?, label), title = ?, transcript = ?, extraction = ?, search_text = ?, state = 'indexed',
+                 SET label = COALESCE(?, label), trains = COALESCE(?, trains), title = ?, transcript = ?, extraction = ?, search_text = ?, state = 'indexed',
                      attempts = attempts + 1, last_error = NULL, contributed_by = COALESCE(?, contributed_by), updated_at = ?, indexed_at = ?
                WHERE id = ? AND tenant_id = ? AND state IN ('indexed','failed','skipped')
                  AND ${jobRunning} AND ${noReadInFlight}`,
-        args: [input.label, title, transcript, extraction, searchText, chosenBy, at, at,
+        args: [input.label, trains, title, transcript, extraction, searchText, chosenBy, at, at,
           corpusId, ctx.tenantId, ctx.jobId, ctx.tenantId, ctx.tenantId, input.url],
       }
     : {
-        sql: `INSERT INTO marketing_corpus (id, tenant_id, kind, label, title, source_url, transcript, extraction, search_text,
+        sql: `INSERT INTO marketing_corpus (id, tenant_id, kind, label, trains, title, source_url, transcript, extraction, search_text,
                                             state, attempts, last_error, contributed_by, created_at, updated_at, indexed_at)
-              SELECT ?, ?, 'link', ?, ?, ?, ?, ?, ?, 'indexed', 1, NULL, ?, ?, ?, ?
+              SELECT ?, ?, 'link', ?, ?, ?, ?, ?, ?, ?, 'indexed', 1, NULL, ?, ?, ?, ?
               WHERE ${jobRunning} AND ${noReadInFlight}`,
-        args: [corpusId, ctx.tenantId, input.label ?? LEARN_DEFAULT_LABEL, title, input.url, transcript, extraction, searchText, ctx.contributedBy, at, at, at,
+        args: [corpusId, ctx.tenantId, input.label ?? LEARN_DEFAULT_LABEL, trains ?? TRAINS_LEGACY, title, input.url, transcript, extraction, searchText, ctx.contributedBy, at, at, at,
           ctx.jobId, ctx.tenantId, ctx.tenantId, input.url],
       };
   return {
     ok: true,
-    result: { corpus_id: corpusId, title, label: input.label ?? rows[0]?.label ?? LEARN_DEFAULT_LABEL, analysis },
+    result: { corpus_id: corpusId, title, label: input.label ?? rows[0]?.label ?? LEARN_DEFAULT_LABEL, trains: trains ?? rows[0]?.trains ?? TRAINS_LEGACY, analysis },
     commit: {
       statements: [write],
       // The run is done only if the row it names now carries this run's id.
