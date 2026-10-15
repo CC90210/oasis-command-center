@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import {
   asBool,
   classifyLastResult,
+  explainSkippedResult,
   inferEmpireAgentKey,
   normalizeEmpireRow,
   normalizeTenantCronRow,
@@ -96,6 +97,31 @@ const recoveredMaven = normalizeEmpireRow(row({
 }));
 assert.equal(recoveredMaven.last_run_status, "success");
 assert.equal(recoveredMaven.unresolved_failures, 0);
+
+// ── A skipped slot is not a success and not a failure (2026-10-15) ─────────
+// scripts/scheduler.py writes `skipped-stale: …` into last_result when the PC was
+// off at the slot, and leaves last_run_at / run_count alone. The card used to
+// read that as a green "Ran 1d ago" with the raw machine string underneath.
+const skippedText =
+  "skipped-stale: next_run_at was 369 min behind threshold (30 min) — PC was likely off when this slot expired";
+const skippedVerdict = classifyLastResult(skippedText);
+assert.equal(skippedVerdict.status, "skipped", "a skipped slot is its own verdict");
+assert.equal(classifyLastResult("deferred: waiting on the mailbox").status, "skipped");
+assert.equal(classifyLastResult("skipped: outside publish window").status, "skipped");
+assert.equal(classifyLastResult("skipping nothing, all good").status, "success", "only a leading `skipped…:` / `deferred:` marker counts");
+const skippedRow = normalizeEmpireRow(row({ last_result: skippedText, fail_count: 0 }));
+assert.equal(skippedRow.last_run_status, "skipped");
+assert.equal(skippedRow.last_run_output, skippedText, "the raw scheduler text stays, as evidence");
+assert.match(String(skippedRow.last_run_note), /^Skipped: this was due about 6 h before the PC/, "the card gets a plain sentence");
+assert.ok(!/skipped-stale|next_run_at|threshold/.test(String(skippedRow.last_run_note)), "no machine words in the sentence");
+assert.equal(skippedRow.last_run_error, null, "a skip is not an error");
+assert.equal(normalizeEmpireRow(row({ last_result: "ok" })).last_run_note, null, "only a skip carries a note");
+assert.equal(explainSkippedResult("skipped-stale: PC was likely off"), "Skipped: the PC that runs this was off when it was due, so it waited for its next slot.");
+assert.match(explainSkippedResult("skipped-stale: next_run_at was 2000 min behind threshold (30 min)"), /about 33 h before/, "lateness is humanized, never shown as raw minutes");
+assert.match(explainSkippedResult("skipped-stale: next_run_at was 5000 min behind threshold (30 min)"), /about 3 days before/);
+assert.match(explainSkippedResult("skipped-stale: next_run_at was 45 min behind threshold (30 min)"), /about 45 min before/);
+assert.match(explainSkippedResult("deferred: x"), /^Deferred:/);
+assert.match(explainSkippedResult("skipped: x"), /^Skipped this slot/);
 
 // ── Booleans survived the transpiler as INTEGER ────────────────────────────
 // cron_jobs.is_active is INTEGER in SQLite and fromSql never restores it, so the

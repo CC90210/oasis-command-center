@@ -258,6 +258,7 @@ const TESTS = [
   "tests/marketing-car-launch.test.ts",
   "tests/cron-result-shape-parity.test.ts",
   "tests/automation-overdue-schedule.test.ts",
+  "tests/automations-honest-status.test.ts",
   "tests/cron-owner-migration.test.ts",
   "tests/atomic-cron-toggle.test.ts",
   "tests/legacy-cron-toggle.test.ts",

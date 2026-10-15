@@ -29,6 +29,7 @@ import {
   RUN_STOPPED,
   SAVED_TO_TRAINING,
   SEEN_REFRESH_MS,
+  TOOL_RUN_FINISHED_EVENT,
   isInFlight,
   nextPollIn,
   refusalLine,
@@ -161,6 +162,19 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
     const timer = window.setTimeout(() => void load(), wait);
     return () => window.clearTimeout(timer);
   }, [inFlight, jobs, reads, load]);
+
+  // The moment the last in-flight run settles, tell the page. A mount with no run in
+  // flight never fires it.
+  const wasInFlight = useRef(false);
+  useEffect(() => {
+    if (inFlight) {
+      wasInFlight.current = true;
+      return;
+    }
+    if (!wasInFlight.current) return;
+    wasInFlight.current = false;
+    window.dispatchEvent(new CustomEvent(TOOL_RUN_FINISHED_EVENT, { detail: { tool: tool.key } }));
+  }, [inFlight, tool.key]);
 
   const validation = def ? def.validate(values) : null;
   const canRun = ready && !busy && validation?.ok === true;
@@ -298,6 +312,13 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
           <button type="submit" className={`btn-primary disabled:cursor-not-allowed disabled:opacity-40 ${TAP}`} disabled={!canRun}>
             {tool.runLabel}
           </button>
+          {/* A dimmed button with no word on why reads as broken. While the one
+              thing it needs is still empty, say which thing. */}
+          {!busy && validation && !validation.ok && !(values[validation.field] ?? "").trim() && (
+            <p className="text-[11px] text-fg-dim" data-testid={`tool-${tool.key}-needs-input`}>
+              {`Add the ${(tool.fields.find((f) => f.name === validation.field)?.label ?? "details").toLowerCase()} above to turn ${tool.runLabel} on.`}
+            </p>
+          )}
           {refusal && (
             <p role="alert" className="text-xs text-status-hot">
               {refusal}

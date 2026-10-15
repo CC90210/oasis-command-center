@@ -28,6 +28,12 @@ export const POLL_EVERY_MS = 3_000;
 export const POLL_FOR_MS = 30 * 60_000;
 /** How often an open card counts "seen n min ago" again. */
 export const SEEN_REFRESH_MS = 30_000;
+/**
+ * Dispatched on window when a card's last in-flight run finishes. A page that lists
+ * what runs write (Agent training's "What it has learned") listens and re-reads, so
+ * a finished run shows up without a manual reload.
+ */
+export const TOOL_RUN_FINISHED_EVENT = "oasis:tool-run-finished";
 
 export function isInFlight(job: Pick<JobView, "status">): boolean {
   return job.status === "queued" || job.status === "claimed" || job.status === "running";
