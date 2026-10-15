@@ -2,9 +2,10 @@
 
 /**
  * InstallBridgeWizard — inline wizard for the dedicated /settings/devices/install
- * page. Same flow as InstallBridgeModal (mint pair code → render OS one-liner
- * → poll /api/devices for a new pairing → success), but rendered as a page
- * card instead of a fixed-position modal.
+ * page: mint pair code → render OS one-liner → poll /api/devices for a new
+ * pairing → success, rendered as a page card. (It was also a fixed-position
+ * modal inside Settings > Devices; that second copy of the flow was removed
+ * 2026-10-15, so this page is the one full-install path.)
  *
  * The state machine + polling logic lives in hooks/useBridgePairing.ts so
  * this file is a thin render-only wrapper. The Modal consumes the same hook.
