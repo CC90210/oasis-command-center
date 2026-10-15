@@ -24,6 +24,8 @@ import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
 import { SUPPORT_FORM_SLUG } from "@/lib/delivery/support-form";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
 import { AUDIT_FORM_HANDOFF } from "@/components/marketing/audit-form-body";
+import { isPublicFunnelReadyForBooking } from "@/lib/forms/public-booking";
+import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -92,6 +94,8 @@ type LoadResult =
       /** Cross-form pre-fill: the lead's existing contact/business data so the
        *  full application doesn't re-ask what the intake form already captured. */
       prefill: Record<string, unknown>;
+      /** The lead already finished the form (funnel stage), so the calendar may open straight away. */
+      bookingReady: boolean;
     }
   | { ok: false; reason: "token" | "tenant_mismatch" | "form_disabled" | "form_corrupt" | "not_found"; detail?: string };
 
@@ -226,6 +230,7 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
   // on intake. Best-effort — a lookup miss just yields an empty prefill (blank
   // form), never an error.
   const prefill: Record<string, unknown> = {};
+  let bookingReady = false;
   try {
     const leadRow = await db
       .from("tenant_records")
@@ -236,6 +241,10 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
       .maybeSingle();
     const ld = (leadRow.data as { data?: Record<string, unknown> } | null)?.data;
     if (ld) {
+      // Only a lead that finished the form and has NOT booked. One already at
+      // meeting_booked would get a calendar whose availability answers
+      // already_booked, so it showed "already has a meeting" over an empty grid.
+      bookingReady = ld.funnel_stage === "audit_requested" && isPublicFunnelReadyForBooking(ld);
       for (const k of PREFILL_LEAD_KEYS) {
         const v = ld[k];
         if (v !== undefined && v !== null && v !== "") prefill[k] = v;
@@ -248,6 +257,7 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
   return {
     ok: true,
     prefill,
+    bookingReady,
     form: {
       id: form.id,
       tenant_id: form.tenant_id,
@@ -305,6 +315,17 @@ export default async function PublicFormPage({
       ? AUDIT_FORM_HANDOFF.nextStep
       : undefined;
 
+  // The signed link in the confirmation email (?book=1) opens straight onto the
+  // calendar for someone who finished the form and closed the tab. Only for the
+  // forms whose next step is a founder call, only when the lead's stage says the
+  // form was completed; anything else renders the form as usual. The booking API
+  // re-checks both, so this never grants anything by itself.
+  const resumeBooking =
+    sp.book === "1" &&
+    result.bookingReady &&
+    result.tenant_slug === AI_AUDIT_TENANT_SLUG &&
+    isPublicBookingFormSlug(result.form.slug);
+
   return (
     <FormPublicClient
       formId={result.form.id}
@@ -312,6 +333,7 @@ export default async function PublicFormPage({
       branding={result.form.branding}
       steps={result.form.steps}
       initialStep={initialStep}
+      resumeBooking={resumeBooking}
       redirectUrl={result.form.redirect_url}
       token={result.token}
       prefill={result.prefill}

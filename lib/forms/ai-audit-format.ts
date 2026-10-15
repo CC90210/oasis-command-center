@@ -76,6 +76,34 @@ function label(table: Record<string, string>, v: unknown): string {
 }
 
 /**
+ * The bottleneck as a person reads it. A lead who leaves the optional detail box
+ * empty is stored with the required goal's option key ("sales_leadgen"); this turns
+ * exactly those keys into their words and leaves anything a person typed untouched
+ * (unlike auditAnswerLabel, it never rewrites underscores in free text).
+ */
+export function bottleneckLabel(value: unknown): string {
+  const text = str(value).trim();
+  return GOAL_LABELS[text] ?? text;
+}
+
+const ANSWER_TABLES = {
+  revenue: REVENUE_LABELS,
+  budget: BUDGET_LABELS,
+  timeframe: TIMELINE_LABELS,
+  team: TEAM_LABELS,
+} as const;
+
+/**
+ * A stored audit answer as the lead page should read it: "$10-50K/mo", not the
+ * option key "10k_50k". Unknown keys fall back to the key with underscores
+ * removed, so a renamed form option never renders as nothing. Null when empty.
+ */
+export function auditAnswerLabel(kind: keyof typeof ANSWER_TABLES, value: unknown): string | null {
+  const text = label(ANSWER_TABLES[kind], value);
+  return text || null;
+}
+
+/**
  * Label for CUSTOMER-FACING copy: known keys only, empty otherwise.
  *
  * `label()` falls back to the raw key with underscores swapped for spaces,
@@ -111,6 +139,8 @@ export type AlertLoop = {
   emailStatus?: string;
   /** Deep link that opens the thread with this lead in Gmail. */
   inboxUrl?: string;
+  /** Link that opens this lead in Command Center (lib/forms/lead-link.ts). */
+  leadUrl?: string;
 };
 
 export function buildAiAuditAlert(
@@ -162,6 +192,10 @@ export function buildAiAuditAlert(
     lines.push("", `✅ <b>ASKED TO BOOK A CALL</b>`);
   }
 
+  // Completion happens immediately before the inline calendar opens. The
+  // separate booked event carries the selected time once one exists.
+  lines.push("", "📅 <b>Meeting:</b> unbooked - needs follow-up");
+
   if (s.reasons.length) {
     lines.push("", `<b>Why this score:</b> ${e(s.reasons.join(" · "))}`);
   }
@@ -175,6 +209,9 @@ export function buildAiAuditAlert(
   }
   if (loop?.inboxUrl) {
     lines.push(`<a href="${loop.inboxUrl}">Open the thread in Gmail →</a>`);
+  }
+  if (loop?.leadUrl) {
+    lines.push(`<a href="${loop.leadUrl}">Open the lead in Command Center →</a>`);
   }
 
   return lines.join("\n");
@@ -191,11 +228,23 @@ export type Composed = { subject: string; body: string };
  * your journey". It references what they actually told us so it does not read
  * like an autoresponder, without needing a model to do it.
  */
-export function composeAiAuditWelcome(a: Record<string, unknown>): Composed {
+export type WelcomeLinks = {
+  /** Signed link that opens the founder calendar for THIS lead (the page is long gone from a closed tab). */
+  bookingUrl?: string;
+  /**
+   * Link to the free community. Present ONLY when marketingSendAllowed passed
+   * for this address: it is an invitation, so the confirmation of their own
+   * enquiry must never carry it for someone who declined marketing email.
+   */
+  communityUrl?: string;
+};
+
+export function composeAiAuditWelcome(a: Record<string, unknown>, links: WelcomeLinks = {}): Composed {
   const first = (str(a.name).trim().split(/\s+/)[0] || "there").slice(0, 40);
   const goal = label(GOAL_LABELS, a.automation_goal);
   const urgent = str(a.timeframe) === "immediate" || str(a.timeframe) === "30_days";
   const askedForCall = str(a.wants_call) === "yes";
+  const { bookingUrl, communityUrl } = links;
 
   const subject = askedForCall
     ? `${first} — booking your AI audit call`
@@ -205,11 +254,26 @@ export function composeAiAuditWelcome(a: Record<string, unknown>): Composed {
     ? `Thanks for filling that out — you're looking at ${goal}, and you gave me enough detail to actually be useful rather than guess.`
     : `Thanks for filling that out — you gave me enough detail to actually be useful rather than guess.`;
 
+  // With a signed link the email stands on its own: someone who closed the tab
+  // before picking a time still has a way to book. Without one (the signing key
+  // is unset) the copy keeps pointing at the page, as before.
   const next = askedForCall
-    ? `You asked for a call, so that's the next thing that happens. I'll come back to you with a couple of times that work — and I'll have read your answers before we talk, not during.`
+    ? bookingUrl
+      ? `You asked for a call, so pick the time that works here: ${bookingUrl}\nThe Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
+      : `You asked for a call, so use the live calendar on the page to pick the time that works. The Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
+    // The two branches below used to promise "I'll come back to you with where
+    // I'd start and what it would take": a personal written answer nobody has
+    // committed to send (CC, 2026-10-08: there is no texted findings or custom
+    // report). The promises cleared for this funnel are "Free AI audit. No
+    // pitch." and "I read every one of these myself", so the copy says that and
+    // points at the call, which IS the answer. Copy by Maven (CMO), 2026-10-15.
     : urgent
-      ? `You said you want this moving soon, so I'll come back to you shortly with where I'd start and what it would take. If it's faster to just talk, reply to this email and say so.`
-      : `I'll come back to you with where I'd start and roughly what it would take. No pitch deck, no discovery-call maze — just the honest read.`;
+      ? bookingUrl
+        ? `You said you want this moving soon. I read every one of these myself — the fastest way to a real answer is a call: ${bookingUrl}`
+        : `You said you want this moving soon. I read every one of these myself — the fastest way to a real answer is a call: reply with two times that work and I'll send the invite.`
+      : bookingUrl
+        ? `I read every one of these myself. If talking is easier, pick a time that works for both founders here: ${bookingUrl}`
+        : `I read every one of these myself. If talking is easier, reply with two times that work and I'll send the invite.`;
 
   // Quote their own bottleneck back at them. This is the single most
   // personal thing in the form — they typed it — and the email was
@@ -249,6 +313,7 @@ export function composeAiAuditWelcome(a: Record<string, unknown>): Composed {
     ...(context ? ["", context] : []),
     "",
     next,
+    ...(communityUrl ? ["", `If now is not the right time, the free OASIS community is open to you: ${communityUrl}`] : []),
     "",
     // Replaces "if I don't think automation is the right spend for you
     // right now, I'll tell you that." That line was conditional and meant
@@ -258,7 +323,8 @@ export function composeAiAuditWelcome(a: Record<string, unknown>): Composed {
     // scope instead of at the reader: I will tell you what NOT to build.
     `And I'll be straight about scope: if part of this is better solved by fixing a process than by automating it, I'll say so. You'll get the shortest path that actually works, not the biggest one.`,
     "",
-    `— CC`,
+    // "CC" is the internal name; public material signs as Conaugh.
+    `— Conaugh`,
     `Conaugh McKenna · OASIS AI Solutions`,
   ].join("\n");
 

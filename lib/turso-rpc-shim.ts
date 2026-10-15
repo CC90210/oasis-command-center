@@ -1763,6 +1763,27 @@ export async function patch_tenant_record_data(
     // jsonb || object-merge: shallow, top-level keys of p_patch win, explicit
     // JSON nulls in the patch are KEPT (json_patch would delete them — wrong).
     const merged: Record<string, unknown> = { ...oldObj, ...patch };
+    // Public funnel receipts are lifecycle checkpoints, not mutable labels.
+    // Keep this inside the same compare-and-swap as the JSON merge so a late
+    // final-step retry cannot race a booking transition and move the lead from
+    // meeting_booked back to audit_requested (or inbound_lead).
+    const funnelRank: Record<string, number> = {
+      inbound_lead: 1,
+      audit_requested: 2,
+      meeting_booked: 3,
+    };
+    const currentFunnelStage = typeof oldObj.funnel_stage === "string" ? oldObj.funnel_stage : "";
+    const requestedFunnelStage = typeof patch.funnel_stage === "string" ? patch.funnel_stage : "";
+    if (
+      funnelRank[currentFunnelStage] &&
+      funnelRank[requestedFunnelStage] &&
+      funnelRank[currentFunnelStage] > funnelRank[requestedFunnelStage]
+    ) {
+      merged.funnel_stage = currentFunnelStage;
+      for (const timestamp of ["inbound_lead_at", "audit_requested_at", "meeting_booked_at"]) {
+        if (oldObj[timestamp] !== undefined) merged[timestamp] = oldObj[timestamp];
+      }
+    }
     const newText = JSON.stringify(merged);
     const nowIso = new Date().toISOString();
 

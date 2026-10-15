@@ -9,7 +9,7 @@
  */
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 import { buildOasisFunnelAlert } from "@/lib/forms/oasis-funnel-format";
 import { sendOasisFunnelWelcome } from "@/lib/forms/oasis-funnel-email";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
@@ -31,10 +31,11 @@ export async function notifyOasisFunnelSubmission(
 ): Promise<void> {
   const { db, tenantId, leadId, answers } = input;
   await Promise.allSettled([
-    // operator: CC's OASIS funnel.
-    sendTelegram(buildOasisFunnelAlert(answers), { lane: "operator" }).then(async (r) => {
-      if (r.ok) return;
-      console.error("[oasis-funnel.notify] telegram:", r.reason);
+    // The sales desk (CC + Adon): a lead on oasisai.work. The audience is chosen
+    // from the workspace in lib/notify/alert-route.ts, never named here.
+    pushWorkspaceAlert(tenantId, buildOasisFunnelAlert(answers), { desk: "sales" }).then(async (r) => {
+      if (r.delivered) return;
+      console.error("[oasis-funnel.notify] telegram:", r.outcome);
       // Same defect the ai-audit funnel had: the only record of a failed
       // lead alert was a console line in a log nobody reads, so a lead
       // could arrive with no notification and no trace of why. Fixed in
@@ -44,7 +45,7 @@ export async function notifyOasisFunnelSubmission(
         db, tenantId, leadId,
         source: OASIS_FUNNEL_ALERT_SOURCE,
         label: "OASIS funnel",
-        reason: r.reason ?? "unknown",
+        reason: r.outcome,
         tag: "oasis-funnel.notify",
       });
     }),

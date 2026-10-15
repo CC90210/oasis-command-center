@@ -35,6 +35,8 @@ import {
 import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
+import { PublicBookingCalendar } from "./PublicBookingCalendar";
+import { isPublicBookingSurface } from "@/lib/forms/public-booking-config";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -75,6 +77,15 @@ type Props = {
    * stale value after a form definition changes.
    */
   initialStep?: number;
+  /**
+   * Open on the inline calendar instead of the first step: the visitor
+   * already finished the form and is returning through the signed link in
+   * their confirmation email. Set by the server page only after it verified
+   * the token and that the lead's funnel stage says the form was completed;
+   * the booking API checks the same thing again, so this is a convenience,
+   * never the gate.
+   */
+  resumeBooking?: boolean;
   redirectUrl: string | null;
   /**
    * Pre-signed HMAC token tied to a specific lead — used by Solara's
@@ -242,6 +253,11 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
   server_error: "Something went wrong on our end. Please try submitting again.",
   consent_record_unavailable:
     "We couldn't save your contact preferences just now. Please try submitting again.",
+  // The last step of an audit that opens the calendar. Your answers are already
+  // saved; only the step that marks you ready to book failed, and pressing
+  // submit again repairs it.
+  funnel_stage_write_unavailable:
+    "Your answers are saved, but we couldn't open the calendar just now. Please press submit again.",
   form_corrupt: "This form is temporarily unavailable. We have been notified, please try again shortly.",
   form_definition_corrupt:
     "This form is temporarily unavailable. We have been notified, please try again shortly.",
@@ -275,6 +291,7 @@ export function FormPublicClient({
   branding,
   steps,
   initialStep,
+  resumeBooking,
   redirectUrl,
   token: initialToken,
   anonymousInit,
@@ -349,7 +366,7 @@ export function FormPublicClient({
     if (resolving) addressResolvingRef.current.add(fieldName);
     else addressResolvingRef.current.delete(fieldName);
   }, []);
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState(Boolean(resumeBooking));
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
   // rendered as "continue now" buttons on the thank-you screen.
@@ -1004,6 +1021,10 @@ export function FormPublicClient({
   const thanksMessage =
     branding.thanks_message ||
     "Thanks, your details are in. A specialist will reach out within one business day.";
+  const publicBookingFormSlug = tenantSlug && formSlug &&
+    isPublicBookingSurface({ tenantSlug, formSlug })
+    ? formSlug
+    : null;
 
   /**
    * WHICH step is outstanding, not merely THAT one is.
@@ -1136,6 +1157,13 @@ export function FormPublicClient({
                     what this screen is for. */}
                 <p className="text-[11px] text-fg-dim">{handoff.footer}</p>
               </div>
+            ) : publicBookingFormSlug ? (
+              <PublicBookingCalendar
+                token={tokenRef.current || token}
+                primary={primary}
+                formSlug={publicBookingFormSlug}
+                completedStep={steps.length}
+              />
             ) : (
               <div className="text-center space-y-4 py-8">
                 <CheckCircle2 className="w-12 h-12 mx-auto" style={{ color: primary }} />

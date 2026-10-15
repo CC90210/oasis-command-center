@@ -108,6 +108,9 @@ assert.doesNotMatch(
 );
 assert.doesNotMatch(page, /<LeadActionToolbar/, "the call control appears only inside the single next-step panel");
 assert.match(page, /title="Activity and files"[\s\S]*defaultCollapsed/);
+for (const label of ["Revenue band", "Team size", "Primary bottleneck", "Current tools"]) {
+  assert.match(page, new RegExp(`label="${label}"`), `lead details exposes ${label}`);
+}
 assert.match(
   page,
   /\["founder_meeting_booked",[\s\S]*?<HandoffSummary/,
