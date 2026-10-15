@@ -22,6 +22,8 @@ import { BackgroundWorkersPanel } from "@/components/automations/BackgroundWorke
 import { BreezeDealsPanel } from "@/components/automations/BreezeDealsPanel";
 import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomationFlow";
 import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModulesStatusBoard";
+import { GuidedAutomations } from "@/components/automations/guided/GuidedAutomations";
+import type { GuidedApi } from "@/lib/automations/guided/api-types";
 import { getActiveProfile, getOnlineBridgeComputerLabels, getTenant } from "@/lib/queries";
 import { bridgeConnectionHeadline } from "@/lib/bridge-online-copy";
 import { safe } from "@/lib/api-helpers";
@@ -33,16 +35,41 @@ import { oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import type { ScriptAutomationAccess } from "@/lib/automations/script-access";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
+import type { ReactNode } from "react";
 
 /** What a viewer who cannot create script automations is told, in place of the
  *  box and the button, until the guided setup lands. No dead control. */
 const NEW_AUTOMATIONS_COMING = "New automations are coming to this page.";
+
+/** What the header says when the guided builder is on: only what a guided automation really does. */
+const GUIDED_SUBTITLE =
+  "Choose a job, set when it runs and test it before you turn it on. Automations read your workspace and write you a summary or draft emails that wait for your approval. Nothing goes out on its own.";
+
+/**
+ * The guided builder is the page; the script composer and the technical inventory fold away under one
+ * "Advanced" disclosure, closed, with their contents unchanged. With the builder off this renders its
+ * children exactly where they were, so the page is the one it always was.
+ */
+function AdvancedFold({ guided, children }: { guided: boolean; children: ReactNode }) {
+  if (!guided) return <>{children}</>;
+  return (
+    <details className="rounded-xl border border-bg-border bg-bg-elev/30 text-sm">
+      <summary className="cursor-pointer select-none px-4 py-3 font-bold text-fg">
+        Advanced: scripts and technical jobs
+        <span className="ml-2 text-xs font-normal text-fg-dim">Script automations, background workers and every scheduled job</span>
+      </summary>
+      <div className="space-y-6 border-t border-bg-border p-4">{children}</div>
+    </details>
+  );
+}
 
 export async function AutomationsContent({
   previewMode = false,
   tenantSlug: overrideSlug,
   hideHeader = false,
   scriptAccess = "not_allowed",
+  guidedEnabled = false,
+  guidedApi,
 }: {
   /** Operator is viewing a tenant they don't own. Renders the chrome
    *  + empty scaffold; NO sub-components mount, so no client-side
@@ -63,6 +90,12 @@ export async function AutomationsContent({
    *  (tests/client-surface-isolation.test.ts). Defaults closed: a mount that
    *  forgets it offers no create control, rather than one the API refuses. */
   scriptAccess?: ScriptAutomationAccess;
+  /** Show the guided builder and "Your automations" at the top, and fold the script composer and the
+   *  technical inventory under "Advanced". Off by default: with it off the page is unchanged. */
+  guidedEnabled?: boolean;
+  /** Tests only. A Server Component cannot pass a function to a Client Component, so a real mount
+   *  leaves this out and GuidedAutomations uses the browser client (lib/automations/guided/api-types). */
+  guidedApi?: GuidedApi;
 }) {
   if (previewMode) {
     return <PreviewAutomations tenantSlug={overrideSlug ?? "this tenant"} hideHeader={hideHeader} />;
@@ -126,15 +159,25 @@ export async function AutomationsContent({
   // client workspace is told OASIS pairs its machine, never sent to a dead end.
   const canInstallBridge = isOasisSurfaceTenant(tenantSlug);
 
+  // The builder needs a signed-in profile, like everything else below the sign-in box.
+  const guided = guidedEnabled && Boolean(profile);
+
   return (
     <div className="space-y-6 animate-fade-in">
       {!hideHeader && (
         <PageHeader
           title="Automations"
-          subtitle="Scheduled jobs your agents run for you — daily briefs, follow-up reminders, lead scoring, anything you describe in plain English."
+          subtitle={
+            guidedEnabled
+              ? GUIDED_SUBTITLE
+              : "Scheduled jobs your agents run for you — daily briefs, follow-up reminders, lead scoring, anything you describe in plain English."
+          }
         />
       )}
 
+      {guided && <GuidedAutomations api={guidedApi} />}
+
+      <AdvancedFold guided={guided}>
       <div className="rounded-xl border border-bg-border bg-bg-deep/40 p-4 flex items-start gap-3">
         {bridgeOnline ? (
           <Cpu className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" />
@@ -314,6 +357,7 @@ export async function AutomationsContent({
           Sign in to manage your automations.
         </div>
       )}
+      </AdvancedFold>
     </div>
   );
 }

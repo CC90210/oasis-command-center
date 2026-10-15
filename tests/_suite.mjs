@@ -281,6 +281,12 @@ const TESTS = [
   "tests/automation-owner-migration.test.ts",
   "tests/automation-schedule-plan.test.ts",
   "tests/guided-automations-contract.test.ts",
+  // Guided automations, the builder's screen (M5): step gating, the Review sentence, next runs in
+  // Toronto time and the Save / Test now / Turn on rules (view.ts and flow.ts, no browser); then every
+  // step and state drawn for real and the wizard driven with a fake API (the Automations page keeps
+  // the old composer under Advanced, byte for byte).
+  "tests/guided-automations-view.test.ts",
+  "tests/guided-automations-ui.test.ts",
   // A drafted schedule the runner cannot run (day names like MON-FRI) is
   // refused at the draft step in a sentence, save-draft's refusal is a
   // sentence, and Draft with AI works straight from the error.
