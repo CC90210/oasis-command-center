@@ -60,6 +60,8 @@ const world = {
   preflightThrows: false,
   /** Runs while the Turn on check is in progress (an edit saved in another tab, say). */
   duringPreflight: null as null | (() => Promise<void>),
+  /** The run engine throws a failed read (GuidedPreflightUnavailable) instead of running. */
+  runThrows: false,
   financeAgent: false,
   blockedSlugs: [] as string[],
   run: { status: "done", finalText: "Three leads are quiet. Call Dana first.", wouldDraft: [{ to: "dana@acme.test", subject: "Checking in", title: "t", body: "Hi Dana." }], errorCode: null as string | null },
@@ -143,6 +145,7 @@ async function main(): Promise<void> {
       return world.preflight;
     },
     runGuidedAutomation: async (input: { mode: string }) => {
+      if (world.runThrows) throw new realRun.GuidedPreflightUnavailable("ai_account");
       world.runCalls.push({ mode: input.mode });
       return {
         runId: `run-${world.runCalls.length}`,
@@ -205,6 +208,7 @@ async function main(): Promise<void> {
     world.preflight = { ok: true };
     world.preflightThrows = false;
     world.duringPreflight = null;
+    world.runThrows = false;
     world.financeAgent = false;
     world.blockedSlugs = [];
     world.run = { status: "done", finalText: "Three leads are quiet. Call Dana first.", wouldDraft: [{ to: "dana@acme.test", subject: "Checking in", title: "t", body: "Hi Dana." }], errorCode: null };
@@ -761,6 +765,19 @@ async function main(): Promise<void> {
     const theirs = (await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items;
     assert.equal(theirs[0].id, id);
     assert.equal(theirs[0].mine, false);
+  });
+
+  await check("Test now when a read fails before the run: a plain try-again, and the hourly test is given back", async () => {
+    await reset();
+    const id = (await create({})).body.item.id as string;
+    world.runThrows = true;
+    const res = await testRoute.POST(req("POST", `/api/automations/guided/${id}/test`), idCtx(id));
+    assert.equal(res.status, 503);
+    assert.match((await json(res)).message, /the test did not run\. Try again in a minute\./);
+    assert.equal((await db.execute("SELECT COUNT(*) AS n FROM tenant_audit_log WHERE action_type = 'guided_test_claim'")).rows[0].n, 0, "the claim was given back");
+    world.runThrows = false;
+    assert.equal((await testRoute.POST(req("POST", `/api/automations/guided/${id}/test`), idCtx(id))).status, 200);
+    assert.equal((await db.execute("SELECT COUNT(*) AS n FROM tenant_audit_log WHERE action_type = 'guided_test_claim'")).rows[0].n, 1);
   });
 
   await check("the one route module: an unknown path or method is a 404 and reaches no handler", async () => {

@@ -301,6 +301,8 @@ export async function dispatchGuidedAutomations(input: {
       const slots = dueSlots(fresh, plan, now);
       for (const slot of slots) {
         const tag = `${fresh.id}:${slot.toISOString()}`;
+        // Whether THIS slot took one of the tick's runs: only such a slot gives it back.
+        let counted = false;
         try {
           if (elapsed() >= budgetMs) {
             summary.deferred.push(tag);
@@ -321,9 +323,11 @@ export async function dispatchGuidedAutomations(input: {
               break;
             }
             runsBegun += 1;
+            counted = true;
             const run = await deps.run({ db: input.db, row: fresh, mode: "live", scheduledFor: slot, now });
             if (run.status === "already_claimed") {
               runsBegun -= 1;
+              counted = false;
               summary.alreadyClaimed.push(run.runId || tag);
             } else {
               summary.started.push(run.runId);
@@ -334,7 +338,7 @@ export async function dispatchGuidedAutomations(input: {
         } catch (error) {
           if (error instanceof GuidedPreflightUnavailable) {
             // Nothing was queued and the slot is not stamped: the next minute tries again until the grace ends.
-            runsBegun -= 1;
+            if (counted) runsBegun -= 1;
             summary.retrying.push(tag);
             console.error("[guided.dispatch.retrying]", { tenantId: fresh.tenant_id, automationId: fresh.id, scheduledFor: slot.toISOString(), stage: error.stage });
           } else {

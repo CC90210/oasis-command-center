@@ -235,6 +235,37 @@ async function main(): Promise<void> {
     assert.equal(await lastStamp("flaky"), "2026-10-14T13:00:00.000Z", "the slot is still open");
   });
 
+  await check("a failed read on one row gives its run back to the tick, and a failed missed note takes none", async () => {
+    await wipe();
+    // Two rows due with runsPerTick 1: the first fails its read, so the second must still run this tick.
+    await addRow("a-flaky", payload(DAILY), "2026-10-14T13:00:00.000Z");
+    await addRow("b-steady", payload(DAILY), "2026-10-14T13:01:00.000Z");
+    // A row whose missed note fails to write: it never took a run, so it must not give one back.
+    await addRow("c-old", payload(HOURLY), "2026-10-15T09:00:00.000Z");
+    // A third due row: with the run budget miscounted (a missed note giving back a run it never took) it would also run.
+    await addRow("d-extra", payload(DAILY), "2026-10-14T13:02:00.000Z");
+    const live: string[] = [];
+    const summary = await dispatchGuidedAutomations({
+      db,
+      now: new Date("2026-10-15T13:05:00.000Z"),
+      concurrency: 1,
+      runsPerTick: 1,
+      deps: {
+        run: async ({ row, scheduledFor }: RunInput) => {
+          if (row.id === "a-flaky") throw new GuidedPreflightUnavailable("connector");
+          live.push(row.id);
+          return done(row, scheduledFor);
+        },
+        recordMissed: async () => { throw new GuidedPreflightUnavailable("owner_seat"); },
+      } as never,
+    });
+    assert.deepEqual(live, ["b-steady"], "the retried row's run was given back, so the next row ran");
+    assert.ok(summary.retrying.some((t) => t.startsWith("a-flaky:")));
+    assert.ok(summary.retrying.some((t) => t.startsWith("c-old:")));
+    assert.equal(summary.started.length, 1, "never more runs than the tick allows");
+    assert.ok(summary.deferred.some((t) => t.startsWith("d-extra:")), "the next row waits for the next minute");
+  });
+
   await check("any other throw is a failure and also leaves the slot open", async () => {
     await wipe();
     await addRow("broken", payload(DAILY), "2026-10-14T13:00:00.000Z");

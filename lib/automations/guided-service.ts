@@ -524,18 +524,32 @@ export async function removeAutomation(s: GuidedSession, id: string): Promise<Se
  * and the claim are one INSERT, so the 13th concurrent press inserts nothing and is refused. The
  * claim rows live in the workspace audit log (one table, durable across Workers isolates).
  */
-async function claimTestSlot(s: GuidedSession, id: string, now: Date): Promise<boolean> {
+async function claimTestSlot(s: GuidedSession, id: string, now: Date): Promise<string | null> {
   const stamp = now.toISOString();
   const since = new Date(now.getTime() - 3_600_000).toISOString();
+  const claimId = randomUUID();
   const claimed = await s.db.execute({
     sql: `INSERT INTO tenant_audit_log
             (id, tenant_id, actor_user_id, actor_email, action_type, target_table, target_id, metadata, created_at)
           SELECT ?, ?, ?, ?, 'guided_test_claim', 'tenant_cron_jobs', ?, '{}', ?
           WHERE (SELECT COUNT(*) FROM tenant_audit_log
                   WHERE tenant_id = ? AND actor_user_id = ? AND action_type = 'guided_test_claim' AND created_at > ?) < ?`,
-    args: [randomUUID(), s.tenantId, s.userId, s.email, id, stamp, s.tenantId, s.userId, since, MAX_TESTS_PER_HOUR],
+    args: [claimId, s.tenantId, s.userId, s.email, id, stamp, s.tenantId, s.userId, since, MAX_TESTS_PER_HOUR],
   });
-  return claimed.rowsAffected === 1;
+  return claimed.rowsAffected === 1 ? claimId : null;
+}
+
+/** Give back a test that never reached the AI account (a read failed before it could start). */
+async function releaseTestSlot(s: GuidedSession, claimId: string): Promise<void> {
+  try {
+    await s.db.execute({
+      sql: "DELETE FROM tenant_audit_log WHERE id = ? AND tenant_id = ? AND actor_user_id = ? AND action_type = 'guided_test_claim'",
+      args: [claimId, s.tenantId, s.userId],
+    });
+  } catch (err) {
+    // The worst case is one test counted that did not run; it ages out within the hour.
+    console.error("[guided.test.release]", { tenantId: s.tenantId, error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 export async function testAutomation(s: GuidedSession, id: string, now = new Date()): Promise<ServiceResult<{ result: TestResult }>> {
@@ -547,11 +561,21 @@ export async function testAutomation(s: GuidedSession, id: string, now = new Dat
   if (await automationHasLiveRun(s.db, scope, id, now)) {
     return { status: 409, body: fail("run_in_progress", "This automation is running right now. Wait for it to finish, then test it again.") };
   }
-  if (!(await claimTestSlot(s, id, now))) {
+  const claimId = await claimTestSlot(s, id, now);
+  if (!claimId) {
     return { status: 429, body: fail("rate_limited", `You have run ${MAX_TESTS_PER_HOUR} tests in the last hour. Each one uses your AI account, so wait a little before the next.`) };
   }
   // Each test is its own slot: the run engine keys a run by (automation, instant).
-  const run = await runGuidedAutomation({ db: s.db, row: owned.row, mode: "preview", scheduledFor: now, now });
+  let run;
+  try {
+    run = await runGuidedAutomation({ db: s.db, row: owned.row, mode: "preview", scheduledFor: now, now });
+  } catch (error) {
+    if (!(error instanceof GuidedPreflightUnavailable)) throw error;
+    // A read the check needs failed (the seat, a connection, the AI account): nothing ran and nothing was
+    // recorded, so the test is given back and the person is asked to try again, not shown a crash.
+    await releaseTestSlot(s, claimId);
+    return { status: 503, body: fail("server_error", "We could not check your connections and AI account just now, so the test did not run. Try again in a minute.") };
+  }
   const finished = run.status === "done" || run.status === "failed" || run.status === "cancelled";
   const status: TestResult["status"] = run.status === "done" ? "done" : run.status === "cancelled" ? "cancelled" : "failed";
   const failureText = status === "done" ? null : failureSentence(run.receipt?.errorCode ?? (finished ? null : "run_incomplete"));
