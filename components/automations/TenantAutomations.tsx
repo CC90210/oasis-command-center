@@ -24,6 +24,7 @@
 import { AutomationsContent } from "./AutomationsContent";
 import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import { resolveScriptAutomationAccess } from "@/lib/automations/script-access";
+import { guidedBuilderAllowed } from "@/lib/automations/guided-access";
 
 export async function TenantAutomations({
   tenantSlug,
@@ -38,12 +39,15 @@ export async function TenantAutomations({
   // enforce — so a verified operator standing in as a plain member here is
   // never shown a control the API would then answer 403.
   const scriptAccess = tenantId ? await resolveScriptAutomationAccess(await resolvePlatformOperator()) : "not_allowed";
+  // The guided builder is any owner's or admin's (the routes enforce it too); preview mode mounts nothing.
+  const guidedEnabled = tenantId ? await guidedBuilderAllowed() : false;
   return (
     <AutomationsContent
       previewMode={!tenantId}
       tenantSlug={tenantSlug}
       hideHeader
       scriptAccess={scriptAccess}
+      guidedEnabled={guidedEnabled}
     />
   );
 }

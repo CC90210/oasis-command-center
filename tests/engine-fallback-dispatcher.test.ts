@@ -362,10 +362,10 @@ async function main() {
     assert.match(route, /export const GET = handle/);
     assert.match(registry, /\/api\/cron\/dispatch-engine-fallbacks/);
     assert.match(worker, /\/api\/cron\/dispatch-engine-fallbacks/);
-    assert.match(worker, /dispatch-engine-fallbacks" \? 840_000 : 120_000/);
+    assert.match(worker, /dispatch-engine-fallbacks[\s\S]*dispatch-automations[\s\S]*840_000 : 120_000/);
     assert.match(rollback, /\/api\/cron\/dispatch-engine-fallbacks/);
-    assert.match(rollback, /timeout-minutes:\s*55/);
-    assert.match(rollback, /if \[ "\$\{path\}" = "\/api\/cron\/dispatch-engine-fallbacks" \]; then\s+timeout_s=840/);
+    assert.match(rollback, /timeout-minutes:\s*70/);
+    assert.match(rollback, /if \[ "\$\{path\}" = "\/api\/cron\/dispatch-engine-fallbacks" \][\s\S]*\/api\/cron\/dispatch-automations[\s\S]*timeout_s=840/);
   });
 
   console.log(`engine-fallback-dispatcher: ${passed} passed, ${failed} failed`);

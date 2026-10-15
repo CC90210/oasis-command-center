@@ -6,6 +6,10 @@
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/cron/dispatch-automations",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/materialize-plans",
       "schedule": "0 3 * * *"
     },

@@ -280,6 +280,20 @@ const TESTS = [
   "tests/cron-poll-owner.test.ts",
   "tests/automation-owner-migration.test.ts",
   "tests/automation-schedule-plan.test.ts",
+  "tests/guided-automations-contract.test.ts",
+  // Guided automations, the builder's screen (M5): step gating, the Review sentence, next runs in
+  // Toronto time and the Save / Test now / Turn on rules (view.ts and flow.ts, no browser); then every
+  // step and state drawn for real and the wizard driven with a fake API (the Automations page keeps
+  // the old composer under Advanced, byte for byte).
+  "tests/guided-automations-view.test.ts",
+  "tests/guided-automations-ui.test.ts",
+  // Guided automations, the run engine and the minute dispatcher (M2 + M3): cloud only, allowlisted,
+  // preview files nothing, atomic slot claim, misses recorded and never replayed.
+  "tests/guided-engine.test.ts",
+  "tests/guided-automation-dispatcher.test.ts",
+  // The routes and their service: who may build, what a hostile body cannot change, Turn on refused
+  // with the fix, Test now capped, the owner rule, same-origin writes.
+  "tests/guided-automations-service.test.ts",
   // A drafted schedule the runner cannot run (day names like MON-FRI) is
   // refused at the draft step in a sentence, save-draft's refusal is a
   // sentence, and Draft with AI works straight from the error.

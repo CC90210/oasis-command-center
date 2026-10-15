@@ -36,6 +36,7 @@ import {
   streamOpenAICompatibleWithTools,
   type StreamYield,
   type ToolContext,
+  type ToolResultBlock,
 } from "@/lib/cloud-tool-runner";
 import type { InjectedToolset } from "@/lib/cloud-tool-runner";
 import { redactAll, redactTenantVaultSecrets, StreamingRedactor, type VaultSecret } from "@/lib/secret-redaction";
@@ -104,6 +105,9 @@ export type GroundArgs = {
   only?: readonly DeskToolName[];
   stateAllow?: readonly DeskToolName[];
   proposal?: AutomationProposalPolicy;
+  /** Automation receipts may collect a scrubbed preview result. The callback
+   * sees only the post-redaction tool block, never raw provider or vault data. */
+  onToolResult?: (name: string, result: ToolResultBlock) => void;
 };
 
 function sentence(reason: string): string {
@@ -280,7 +284,9 @@ export async function groundDepartmentTurn(args: GroundArgs): Promise<DeskGround
     tools: toolset.tools,
     execute: async (name, input) => {
       const r = await toolset.execute(name, input);
-      return { ...r, content: scrub(r.content), summary: scrub(r.summary) };
+      const safe = { ...r, content: scrub(r.content), summary: scrub(r.summary) };
+      args.onToolResult?.(name, safe);
+      return safe;
     },
   };
   const ctx: ToolContext = {
