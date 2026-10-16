@@ -198,8 +198,14 @@ const EXCERPT_MAX = 160;
 const MONEY_RE = /[$\u20AC\u00A3]|\b(?:CAD|USD|EUR|GBP|dollars?|bucks)\b/i;
 const PERCENT_RE = /%|\bper ?cent\b/i;
 const MULTIPLIER_RE = /\b[0-9]+(?:\.[0-9]+)?\s?x\b/i;
-/** A quantity on its own: "thousands of owners", "doubled", "half the time". */
-const QUANTITY_RE = /\b(?:hundreds?|thousands?|millions?|billions?|double[ds]?|doubling|triple[ds]?|tripling|half|halve[ds]?)\b/i;
+/**
+ * A quantity on its own: "thousands of owners", "dozens of clinics",
+ * "doubled", "twice as many", "tenfold", "half the time". A single "dozen"
+ * counts like "twelve" (SMALL_NUMBER): "a dozen agencies" is a claim, "a dozen
+ * open tabs" is not.
+ */
+const QUANTITY_RE =
+  /\b(?:hundreds?|thousands?|millions?|billions?|dozens|double[ds]?|doubling|twice|triple[ds]?|tripling|half|halve[ds]?|(?:two|three|four|five|six|seven|eight|nine|ten|twenty|hundred|thousand)-?fold)\b/i;
 /**
  * A spelled-out number counts as a claim only when it counts something a
  * client could hold us to: people, outcomes, time, payments ("twelve
@@ -210,7 +216,7 @@ const QUANTITY_RE = /\b(?:hundreds?|thousands?|millions?|billions?|double[ds]?|d
  * something else (CONNECTOR).
  */
 const SMALL_NUMBER =
-  "two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen" +
+  "two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen" +
   "|twenty|thirty|forty|fifty|sixty";
 const COUNTED =
   "clients?|customers?|businesses|companies|owners|members|users|students|patients|homeowners|founders|agencies|brands|people" +

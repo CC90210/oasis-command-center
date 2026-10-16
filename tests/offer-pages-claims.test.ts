@@ -84,6 +84,12 @@ async function main() {
       ["Forty five-star reviews.", /number/],
       ["Three times faster replies.", /number/],
       ["Thousands of owners use it.", /number/],
+      // Quantities in words (Codex on #647).
+      ["Dozens of clinics run on it.", /number/],
+      ["A dozen agencies signed on.", /number/],
+      ["Twice as many bookings.", /number/],
+      ["Tenfold growth in a year.", /number/],
+      ["A three-fold return.", /number/],
       // Time saved, and when.
       ["Save 20 hours a week.", /number/],
       ["Save twenty hours a week.", /number/],
@@ -190,6 +196,8 @@ async function main() {
       "Used to answering every lead by hand?",
       "One day at a time, one lead at a time.",
       "Within your team, nothing changes.",
+      // A single "dozen" that counts nothing a client could hold us to (the AI Audit page's own line).
+      "The answers live in your head, your inbox and a dozen open tabs.",
       // "right" and "seconds" that promise no speed.
       "The right way to answer a lead.",
       "Take a few seconds to read this first.",
