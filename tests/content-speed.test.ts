@@ -280,10 +280,11 @@ async function main() {
       pa("a4", OASIS, "instagram", 50_000, 9, true, 45), // outside the 30-day window
       pa("b1", OTHER, "instagram", 99_999, 99, true, 1), // another tenant
       {
-        sql: `INSERT INTO marketing_corpus (id, tenant_id, kind, label, title, source_url, state, contributed_by, created_at, indexed_at)
-              VALUES ('c1', ?, 'link', 'exemplar', 'A reel that works', 'https://www.instagram.com/reel/abc/', 'indexed', ?, ?, ?),
-                     ('c2', ?, 'link', 'counter_example', NULL, 'https://example.com/bad-ad', 'queued', ?, ?, NULL),
-                     ('c9', ?, 'link', 'exemplar', 'Not ours', 'https://example.com/x', 'indexed', 'x', ?, ?)`,
+        // c1 has no agent recorded (it trains Marketing); c2 was taught to Sales on Admin > Agent training.
+        sql: `INSERT INTO marketing_corpus (id, tenant_id, kind, label, title, source_url, state, contributed_by, created_at, indexed_at, trains)
+              VALUES ('c1', ?, 'link', 'exemplar', 'A reel that works', 'https://www.instagram.com/reel/abc/', 'indexed', ?, ?, ?, NULL),
+                     ('c2', ?, 'link', 'counter_example', NULL, 'https://example.com/bad-ad', 'queued', ?, ?, NULL, 'sales'),
+                     ('c9', ?, 'link', 'exemplar', 'Not ours', 'https://example.com/x', 'indexed', 'x', ?, ?, NULL)`,
         args: [OASIS, CC.email, daysAgo(2), daysAgo(2), OASIS, CC.email, daysAgo(0), OTHER, daysAgo(1), daysAgo(1)],
       },
       {
@@ -450,6 +451,23 @@ async function main() {
     assert.match(contents, /What is in it/);
     assert.match(contents, /A reel that works/);
     assert.doesNotMatch(contents, /Not ours/, "another tenant's material");
+  });
+
+  await check("Training: each link says which agent it trains, in Admin > Agent training's words (CC 2026-10-16)", async () => {
+    const frame = await resolve(await TrainPage(), true);
+    const boundary = hosts(frame).find((h) => h.type === "suspense")!;
+    const rows = hosts(await resolve(boundary.props.pending, false)).filter((h) => h.type === "li").map(textOf);
+    const { effectiveTrains, trainsLabel } = await import("../lib/training/trains");
+    const trainsOf = (title: string) => {
+      const row = rows.find((r) => r.includes(title));
+      assert.ok(row, `no row for ${title}: ${rows.join(" | ")}`);
+      return row!.match(/Trains: ([A-Za-z ]+?)(?=·|$)/)?.[1].trim();
+    };
+    assert.equal(trainsOf("A reel that works"), "Marketing", "a note with no agent recorded trains Marketing (the legacy rule)");
+    assert.equal(trainsOf("example.com/bad-ad"), "Sales", "a note taught to Sales says Sales");
+    // The same function Admin > Agent training's list uses for the same stored values.
+    assert.equal(trainsOf("A reel that works"), trainsLabel(effectiveTrains(null)));
+    assert.equal(trainsOf("example.com/bad-ad"), trainsLabel(effectiveTrains("sales")));
   });
 
   await check("Training says, in plain words, what it is, what is in it and how to add to it; no persona name; Tools has its place above it", async () => {

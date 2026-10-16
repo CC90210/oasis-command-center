@@ -33,6 +33,7 @@ import { EMPTY_CORPUS_STATS, getCorpusItems, getCorpusStats } from "@/lib/founde
 import { ingestStateCopy, type IngestState } from "@/lib/founders/ingest-core";
 import { TrainDropzone } from "@/components/founders/TrainDropzone";
 import { MarketingEmpty } from "@/components/founders/marketing-shared";
+import { effectiveTrains, trainsLabel } from "@/lib/training/trains";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Training · Content · OASIS" };
@@ -167,6 +168,9 @@ async function TrainingContents({ tenantId }: { tenantId: string }) {
                       <div className="truncate text-sm text-fg">{it.title || it.source_url}</div>
                       <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-fg-dim">
                         <span>{c.label}</span>
+                        {/* Which agent reads this note, in Admin > Agent training's words (CC 2026-10-16: this
+                            list did not say; a note with no choice recorded trains Marketing). */}
+                        <span>· Trains: {trainsLabel(effectiveTrains(it.trains))}</span>
                         {it.label === "exemplar" && <span style={{ color: "#7AE8F0" }}>· do more of this</span>}
                         {it.label === "counter_example" && <span style={{ color: "#F5D48A" }}>· never do this</span>}
                         {it.source_url && (

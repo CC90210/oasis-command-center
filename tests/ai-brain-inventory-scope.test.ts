@@ -22,7 +22,11 @@
  *      person to the runtime choices (drawn and pressed, tests/*.render.ts);
  *   3. the engine-scope rule itself, on real device records;
  *   4. ONE status vocabulary: for the same computers, Devices' app lines read
- *      exactly the words AI brain's inventory reads, from one shared mapping.
+ *      exactly the words AI brain's inventory reads, from one shared mapping;
+ *   5. ONE presence vocabulary: a computer's own state (Online, Idle, Busy,
+ *      Offline since ...) reads the same word on AI brain's computer cards, the
+ *      Your computers / Team computers rows and Devices (advanced), from
+ *      lib/devices/presence.ts presenceWords.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -146,6 +150,8 @@ async function main(): Promise<void> {
       ownInherited: boolean;
     };
     aiBrain: Record<string, Record<string, string>>;
+    aiBrainPresence: Record<string, string>;
+    advancedPresence: Record<string, string>;
     devices: Record<string, { row: string; apps: Record<string, string> }>;
     team: { present: boolean; open: boolean | null; rows: string[] };
     caption: string;
@@ -204,8 +210,43 @@ async function main(): Promise<void> {
   // E2 rides along: the same render shows Team computers open.
   assert.equal(out.team.present, true);
   assert.equal(out.team.open, true, "Team computers starts open (a closed list read as none)");
-  assert.deepEqual(out.team.rows, ["Riley's laptop · Ready for agents, checked 5 s ago · Riley's computer"]);
+  assert.deepEqual(out.team.rows, [
+    "Riley's laptop · Ready for agents, checked 5 s ago · Riley's computer",
+    "Riley's desktop · Online · Approval needed from Riley",
+    "Riley's old PC · Idle · Approval needed from Riley",
+  ]);
   console.log("  ok - Team computers is drawn open, in the shared words");
+
+  // 5. ONE presence vocabulary (CC 2026-10-16): a computer's own state reads the same word on AI brain's
+  // computer cards, the Your computers / Team computers rows and Devices (advanced). The audit found
+  // "Online" typed on two screens and machineState's raw "online" as a badge on the third.
+  const { presenceWords } = await import("../lib/devices/presence");
+  const brainSays = out.aiBrainPresence;
+  const advancedSays = out.advancedPresence;
+  const cardSays = (row: string, label: string) => row.slice(`${label} · `.length).split(" · ")[0];
+  const teamRow = (label: string) => out.team.rows.find((row) => row.startsWith(`${label} · `))!;
+  // Offline, the same computer on all three: Tower, last seen three days ago.
+  const offline = brainSays.Tower;
+  assert.match(offline, /^Offline since [A-Z][a-z]{2} \d{1,2}/, `an offline computer says since when: ${offline}`);
+  assert.equal(advancedSays.Tower, offline, "Devices (advanced) says what AI brain says for Tower");
+  assert.equal(cardSays(out.devices.Tower.row, "Tower"), offline, "and so does its Your computers row");
+  // Online: AI brain's cards, Devices (advanced) and a Team computers row whose heartbeat is fresh.
+  assert.deepEqual(
+    [brainSays["Studio PC"], advancedSays["Studio PC"], advancedSays["Riley's desktop"], cardSays(teamRow("Riley's desktop"), "Riley's desktop")],
+    ["Online", "Online", "Online", "Online"],
+  );
+  // Idle (AI brain has no idle: a computer there is online or not): Devices (advanced) and the Team row agree.
+  assert.equal(advancedSays["Riley's old PC"], "Idle");
+  assert.equal(cardSays(teamRow("Riley's old PC"), "Riley's old PC"), "Idle");
+  // Every word on every screen is presenceWords' own, never a raw state key.
+  const presenceShown = [...Object.values(brainSays), ...Object.values(advancedSays)];
+  assert.ok(presenceShown.length >= 10, `all three screens were drawn: ${JSON.stringify({ brainSays, advancedSays })}`);
+  for (const w of presenceShown) {
+    assert.ok([presenceWords("online"), presenceWords("idle"), presenceWords("busy"), presenceWords("offline")].some((p) => w.startsWith(p)), `"${w}" is not one of presenceWords' words`);
+    assert.doesNotMatch(w, /^(online|idle|offline)$/, "machineState's raw key on screen");
+  }
+  assert.equal(presenceWords("offline", null), "Offline", "never seen: plain Offline, not 'since never'");
+  console.log("  ok - one presence word per state on AI brain, Your computers and Devices (advanced)");
 
   console.log("ai-brain-inventory-scope: all passed");
 }
