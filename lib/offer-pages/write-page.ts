@@ -27,8 +27,13 @@
 import { INJECTION_GUARD, safeJsonExtract, wrapUntrusted } from "@/lib/llm-input-boundary";
 import { templateFor } from "./templates";
 import { COPY_CAPS, ITEM_CAPS, parseOfferPageDoc, type OfferPageDoc, type TemplateKey } from "./types";
+import { WRITE_PAGE_INPUT } from "./write-page-client";
 
-export const WRITE_PAGE_LIMITS = { description: 2000, audience: 300 } as const;
+export const WRITE_PAGE_LIMITS = {
+  description: WRITE_PAGE_INPUT.maxDescription,
+  audience: WRITE_PAGE_INPUT.maxAudience,
+  name: 120,
+} as const;
 
 type Item = { title: string; body: string };
 type Faq = { q: string; a: string };
@@ -75,11 +80,30 @@ export function writePageSystemPrompt(): string {
   ].join("\n\n");
 }
 
+/**
+ * The input with every value a person typed (the names, the description, the
+ * audience) passed through `scrub`: the route's secret redaction, configured
+ * keys plus this workspace's vault values, so no stored secret reaches the AI
+ * provider. Only the template key, a fixed value from code, is left as it is.
+ */
+export function scrubWriteInput(input: WritePageInput, scrub: (text: string) => string): WritePageInput {
+  return {
+    ...input,
+    businessName: scrub(input.businessName),
+    offerName: scrub(input.offerName),
+    description: scrub(input.description),
+    audience: input.audience ? scrub(input.audience) : input.audience,
+  };
+}
+
 export function writePageUserPrompt(input: WritePageInput): string {
   const template = templateFor(input.template);
+  // Every typed value is fenced as data, the names too: a name is stored
+  // text an owner chose, and could carry instructions like any other.
   return [
-    `Business: ${input.businessName.slice(0, 120)}`,
-    `Offer name: ${input.offerName.slice(0, 120)}`,
+    "The business and the offer, as the owner named them:",
+    wrapUntrusted(input.businessName, { label: "business name", maxLen: WRITE_PAGE_LIMITS.name }),
+    wrapUntrusted(input.offerName, { label: "offer name", maxLen: WRITE_PAGE_LIMITS.name }),
     `Page type: ${template.label} (${template.summary})`,
     "What the owner says the offer is and does:",
     wrapUntrusted(input.description, { label: "offer description", maxLen: WRITE_PAGE_LIMITS.description }),
@@ -270,4 +294,36 @@ export function applyWrittenCopy(
   if (audience && !(doc.brief?.audience || "").trim()) doc.brief = { ...(doc.brief ?? {}), audience };
 
   return { doc: parseOfferPageDoc(doc), filled: [...filled] };
+}
+
+/**
+ * The parts of a draft a write would still fill: what the prompt asks the
+ * model for (writePageSystemPrompt) that the draft has empty. The offer editor
+ * offers "Write the empty parts" only while this is non-empty, so a page that
+ * is fully written shows nothing extra. The FAQ has no lede in the prompt, so
+ * an FAQ without one is not counted as empty.
+ */
+export function emptyWritableParts(doc: OfferPageDoc): string[] {
+  const blank = (value: string | undefined) => !(value || "").trim();
+  const parts: string[] = [];
+  if (blank(doc.hero.eyebrow) || blank(doc.hero.headline) || blank(doc.hero.subheadline) || blank(doc.hero.cta_label)) {
+    parts.push("hero");
+  }
+  for (const section of doc.sections) {
+    switch (section.key) {
+      case "obstacles":
+      case "what_you_get":
+      case "work":
+        if (blank(section.title) || blank(section.lede) || section.items.length === 0) parts.push(section.key);
+        break;
+      case "faq":
+        if (blank(section.title) || section.items.length === 0) parts.push("faq");
+        break;
+      default:
+        break;
+    }
+  }
+  if (blank(doc.book.title) || blank(doc.book.lede)) parts.push("book");
+  if (blank(doc.seo.title) || blank(doc.seo.description)) parts.push("seo");
+  return parts;
 }

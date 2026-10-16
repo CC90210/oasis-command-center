@@ -16,16 +16,19 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { USAGE_SURFACES } from "../lib/ai/usage";
 import { lintDoc } from "../lib/offer-pages/claims";
-import { emptyDocForTemplate } from "../lib/offer-pages/templates";
+import { emptyDocForTemplate, OFFER_TEMPLATES } from "../lib/offer-pages/templates";
 import { COPY_CAPS, ITEM_CAPS, parseOfferPageDoc } from "../lib/offer-pages/types";
 import {
   applyWrittenCopy,
   cleanCopy,
+  emptyWritableParts,
   parseWrittenCopy,
+  scrubWriteInput,
   writePageSystemPrompt,
   writePageUserPrompt,
   type WrittenCopy,
 } from "../lib/offer-pages/write-page";
+import { redactAll, redactTenantVaultSecrets } from "../lib/secret-redaction";
 
 function check(name: string, fn: () => void): void {
   fn();
@@ -144,6 +147,70 @@ check("the route is an owner action on the workspace AI account that saves a dra
   assert.doesNotMatch(route, /publishOffer|offer\/publish|setLive|published_version/, "the route publishes");
   assert.doesNotMatch(route, /ANTHROPIC_API_KEY|inferForTenant/, "the route uses a key or path other than the workspace account");
   assert.ok((USAGE_SURFACES as readonly string[]).includes("offer_pages.write"), "the usage ledger does not know the surface");
+  // Codex review of #636: every typed value is scrubbed before the model call,
+  // and a vault that can't be read in full sends nothing.
+  assert.match(route, /fetchTenantVaultSecretsForRedaction\(tenantId, \{ requireComplete: true \}\)/);
+  assert.match(route, /scrubWriteInput\(/);
+  assert.match(route, /prompt: writePageUserPrompt\(input\)/, "the prompt is built from something other than the scrubbed input");
+  assert.match(route, /writePageInputProblem\(description\)/, "the route and the dialogs refuse different descriptions");
+});
+
+check("every typed value reaches the model inside an untrusted-data fence, the names too", () => {
+  const user = writePageUserPrompt({
+    offerName: "OFFERMARK",
+    businessName: "BUSINESSMARK",
+    description: "DESCRIPTIONMARK, and what the offer does for a client",
+    audience: "AUDIENCEMARK",
+    template: "book_call",
+  });
+  // What is left once every fenced block is removed must hold none of the typed values.
+  const outside = user.replace(/<<<UNTRUSTED_INPUT_BEGIN>>>[\s\S]*?<<<UNTRUSTED_INPUT_END>>>/g, "");
+  for (const mark of ["OFFERMARK", "BUSINESSMARK", "DESCRIPTIONMARK", "AUDIENCEMARK"]) {
+    assert.ok(user.includes(mark), `${mark} is missing from the prompt`);
+    assert.ok(!outside.includes(mark), `${mark} reaches the model outside an untrusted-data fence`);
+  }
+});
+
+check("a vault value typed into any field is redacted before the prompt is built", () => {
+  const value = "vault-value-0123456789abcdef";
+  const vault = [{ key: "CLIENT_PORTAL_PASSWORD", value }];
+  const input = {
+    offerName: `Offer ${value}`,
+    businessName: `Business ${value}`,
+    description: `It does this ${value} for a client`,
+    audience: `Owners ${value}`,
+    template: "book_call" as const,
+  };
+  const scrubbed = scrubWriteInput(input, (text) => redactTenantVaultSecrets(redactAll(text), vault));
+  for (const [field, text] of Object.entries(scrubbed)) {
+    assert.ok(!String(text).includes(value), `${field} still carries the vault value`);
+  }
+  const prompt = writePageUserPrompt(scrubbed);
+  assert.ok(!prompt.includes(value), "the prompt carries a vault value");
+  assert.equal((prompt.match(/\[REDACTED:CLIENT_PORTAL_PASSWORD\]/g) || []).length, 4);
+});
+
+check("the editor offers Write the empty parts exactly while a write would fill something", () => {
+  for (const t of OFFER_TEMPLATES) {
+    const fresh = emptyDocForTemplate(t.key);
+    const { doc, filled } = applyWrittenCopy(fresh, written);
+    assert.deepEqual(emptyWritableParts(fresh).sort(), [...filled].sort(), `${t.key}: what the editor calls empty is not what a write fills`);
+    assert.deepEqual(emptyWritableParts(doc), [], `${t.key}: a fully written page still offers the panel`);
+  }
+  const page = readFileSync("app/forms/[id]/edit/page.tsx", "utf8");
+  assert.match(page, /emptyWritableParts\(draft\)/);
+  assert.match(page, /emptyParts\.length > 0 \?/);
+  const panel = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
+  assert.match(panel, /requestWrittenPage\(formId/, "the editor's panel does not write");
+});
+
+check("a write that fails at creation can be retried: in the New offer dialog, and on the page's editor", () => {
+  const list = readFileSync("components/forms/FormsListClient.tsx", "utf8");
+  assert.match(list, /async function retryWrite\(\)[\s\S]*?requestWrittenPage\(createdId/, "New offer has no retry");
+  const turn = readFileSync("components/offer-pages/builder/TurnIntoOffer.tsx", "utf8");
+  assert.match(turn, /setMade\(true\)/, "Turn into an offer hides the failure by opening the editor at once");
+  const client = readFileSync("lib/offer-pages/write-page-client.ts", "utf8");
+  assert.doesNotMatch(client, /from the builder/, "a message promises a retry the builder does not have");
 });
 
 console.log("offer-write-page: all passed");

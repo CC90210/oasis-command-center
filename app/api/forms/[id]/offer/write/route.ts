@@ -13,12 +13,17 @@
  * MODEL: runToolModelCall (lib/tools/worker/ai.ts), the workspace AI account
  * path every workspace tool uses: its own key, budget cap and usage ledger
  * (surface "offer_pages.write"); never the platform key or the subscription.
+ * REDACTION: every typed value (names, description, audience) is scrubbed of
+ * configured keys and this workspace's vault values before the model sees it
+ * (CLAUDE.md "Redaction is load-bearing"). A vault that can't be read in full
+ * sends nothing, as a department turn does (lib/os/desk/turn.ts).
  * SAVE: the store's compare-and-swap draft save on the version just read, with
  * the same confirmation stamping and claim ticks as the builder's own save.
  */
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { sameOrigin } from "@/lib/calendar/http";
+import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { formsSession } from "@/lib/forms/access";
 import { applyClaimTicks, lintDoc, stampConfirmations } from "@/lib/offer-pages/claims";
 import { editableForm, fallbackHeadline } from "@/lib/offer-pages/operator";
@@ -27,11 +32,14 @@ import { OfferPageError } from "@/lib/offer-pages/types";
 import {
   applyWrittenCopy,
   parseWrittenCopy,
+  scrubWriteInput,
   WRITE_PAGE_LIMITS,
   writePageSystemPrompt,
   writePageUserPrompt,
 } from "@/lib/offer-pages/write-page";
+import { writePageInputProblem } from "@/lib/offer-pages/write-page-client";
 import { rateLimit } from "@/lib/rate-limit";
+import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/secret-redaction";
 import { toolErrorLine } from "@/lib/tools/errors";
 import { runToolModelCall } from "@/lib/tools/worker/ai";
 
@@ -77,12 +85,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!body || typeof body !== "object" || Array.isArray(body)) return json({ ok: false, error: "invalid_json" }, 400);
   const description = text(body.description, WRITE_PAGE_LIMITS.description);
   const audience = text(body.audience, WRITE_PAGE_LIMITS.audience);
-  if (description.length < 20) {
-    return json(
-      { ok: false, error: "description_required", message: "Say in a sentence or two what the offer is and does, so the page can be written from it." },
-      400,
-    );
-  }
+  const problem = writePageInputProblem(description);
+  if (problem) return json({ ok: false, error: "description_required", message: problem }, 400);
 
   const db = offerPagesDb();
   if (!db) return json({ ok: false, error: "offer_pages_unavailable", message: "Offer pages aren't switched on yet." }, 503);
@@ -101,13 +105,28 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const tenant = await db.execute({ sql: "SELECT name FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
   const businessName = String(tenant.rows[0]?.name ?? "").trim() || form.name;
 
+  let vault: VaultSecret[];
+  try {
+    vault = await fetchTenantVaultSecretsForRedaction(tenantId, { requireComplete: true });
+  } catch (err) {
+    console.error("[offer-pages.write] vault unreadable; nothing sent to the model", { formId: id, error: redactAll((err as Error).message) });
+    return json(
+      { ok: false, error: "redaction_unavailable", message: "The page couldn't be written safely just now: your workspace's saved keys couldn't be checked. Try again in a minute." },
+      503,
+    );
+  }
+  const input = scrubWriteInput(
+    { offerName: form.name, description, audience, businessName, template: row.template },
+    (value) => redactTenantVaultSecrets(redactAll(value), vault),
+  );
+
   const call = await runToolModelCall({
     tenantId,
     userId: actor,
     jobId: randomUUID(),
     surface: "offer_pages.write",
     system: writePageSystemPrompt(),
-    prompt: writePageUserPrompt({ offerName: form.name, description, audience, businessName, template: row.template }),
+    prompt: writePageUserPrompt(input),
     maxTokens: 3000,
     requestStartedAt,
   });
@@ -121,7 +140,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
   let applied: ReturnType<typeof applyWrittenCopy>;
   try {
-    applied = applyWrittenCopy(row.draft, written, { description, audience });
+    // The brief keeps the scrubbed words: it is read by the next writer, a model.
+    applied = applyWrittenCopy(row.draft, written, { description: input.description, audience: input.audience });
   } catch (err) {
     if (err instanceof OfferPageError) {
       console.error("[offer-pages.write] the written page did not parse", { formId: id, path: err.path, reason: err.reason });
