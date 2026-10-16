@@ -77,14 +77,15 @@ export function ConfirmPublish({ offers }: { offers: ConfirmOffer[] }) {
 
   // After a refresh, a page the server changed starts again from the server's
   // ticks; a page that did not change keeps what the owner has ticked so far.
+  // Which pages changed is decided here, once: the updater below stays pure, since
+  // React may call it twice (StrictMode, a rebased update) and a second call
+  // must not read a stamp the first one wrote.
   useEffect(() => {
+    const changed = new Set(offers.filter((o) => stamps.current[o.formId] !== stampOf(o)).map((o) => o.formId));
+    stamps.current = Object.fromEntries(offers.map((o) => [o.formId, stampOf(o)]));
     setChoices((prev) => {
       const next: Record<string, Choices> = {};
-      for (const o of offers) {
-        const s = stampOf(o);
-        next[o.formId] = stamps.current[o.formId] === s && prev[o.formId] ? prev[o.formId] : initialChoices(o);
-        stamps.current[o.formId] = s;
-      }
+      for (const o of offers) next[o.formId] = !changed.has(o.formId) && prev[o.formId] ? prev[o.formId] : initialChoices(o);
       return next;
     });
   }, [offers]);
