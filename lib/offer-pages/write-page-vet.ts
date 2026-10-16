@@ -19,10 +19,15 @@
  *   sentence names must be named in the owner's words ("Integrates with
  *   Salesforce", "HIPAA compliant").
  *
- * What it cannot catch: an ordinary sentence describing something the offer
- * does not do, in plain words with no figure, claim or name. Nothing keyword
- * based can; that is why the page stays a draft the owner reads through, and
- * the screens say so, before Publish.
+ * What it cannot catch, by design:
+ * - an ordinary sentence describing something the offer does not do, in plain
+ *   words with no figure, claim or name;
+ * - a brand spelled like an ordinary word at the very start of a sentence
+ *   with no integration verb ("Stripe handles every payment"): without a
+ *   dictionary, its capital looks like any first word's. Integration words
+ *   (integrates, syncs, works with...) are caught wherever the name stands.
+ * Nothing keyword based can close these; that is why the page stays a draft
+ * the owner reads through, and the screens say so, before Publish.
  *
  * Server only: claims.ts hashes sentences with node:crypto, so this file must
  * never be imported by a component (write-page.ts and write-page-client.ts
@@ -78,6 +83,13 @@ const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
   { re: /\bsync/gi, stem: true },
   { re: /\bplugs? (?:into|in)\b|\bworks with\b|\bpowered by\b|\bbuilt on\b/gi },
   { re: /\bcompliant\b|\bcompliance\b|\bcertified\b|\bcertification/gi },
+  // A zero price is a price ("Book a free consultation"). Narrow on purpose:
+  // "free up your time" and "hands-free" are not offers.
+  {
+    re: /\bfree\s+(?:consultations?|consults?|calls?|audits?|trials?|set-?ups?|demos?|assessments?|reviews?|sessions?|quotes?|estimates?|strategy|plans?|months?|weeks?|onboarding)\b|\bfor free\b|\bfree of charge\b|\bno[- ]cost\b|\bcomplimentary\b|\bat no (?:charge|cost)\b/gi,
+  },
+  // Delivery promised as instant is a time frame with no number in it.
+  { re: /\binstant(?:ly)?\b|\bimmediate(?:ly)?\b|\bright away\b|\b(?:in|within) seconds\b/gi },
   { re: /\brisk[- ]free\b|\bmoney[- ]back\b/gi },
   { re: /\btestimonial/gi, stem: true },
   // Money a client is promised (the linter's own claim words, phrase by phrase).

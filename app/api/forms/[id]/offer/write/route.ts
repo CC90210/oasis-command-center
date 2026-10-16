@@ -11,7 +11,7 @@
  * TWO MODES, ONE WRITER EACH.
  * - save (default; New offer, Turn into an offer): the page was just made and
  *   no editor holds it. The route keeps the owner's description in the brief
- *   (saved before the vault read and the model call, so a failed write keeps what they typed),
+ *   (scrubbed of vault values, then saved before the model call, so a failed write keeps what they typed),
  *   fills the empty fields and saves the draft. No call is made when nothing
  *   is empty, and an answer that fills nothing is an unusable answer.
  * - save: false (the offer editor's "Write the empty parts"): the route saves
@@ -161,20 +161,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return null;
   };
 
-  // A new offer keeps what the owner typed before anything that can fail (the
-  // vault read, the model call), so a failed write still leaves it in the
-  // brief for the retry. Configured keys are redacted now (no vault needed);
-  // the brief is the owner's own notes, like anything typed in the Copy brief,
-  // and every model call that reads it redacts it again. (The editor's
-  // description IS the brief it holds, saved by its own autosave.)
-  if (save) {
-    const briefed = withBrief(current.draft, { description: redactAll(description), audience: redactAll(audience) });
-    if (JSON.stringify(briefed.brief ?? null) !== JSON.stringify(current.draft.brief ?? null)) {
-      const refused = await saveRow(briefed);
-      if (refused) return refused;
-    }
-  }
-
   const tenant = await db.execute({ sql: "SELECT name FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
   const businessName = String(tenant.rows[0]?.name ?? "").trim() || form.name;
 
@@ -192,6 +178,20 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     { offerName: form.name, description, audience, businessName, template: current.template },
     (value) => redactTenantVaultSecrets(redactAll(value), vault),
   );
+
+  // A new offer keeps what the owner typed before the model call, so a failed
+  // write still leaves it in the brief for the retry. Fully scrubbed first
+  // (configured keys and this workspace's vault values): a vault value must
+  // never be written into the draft. So when the vault can't be read, nothing
+  // is saved (above); the dialog still holds the description for its retry.
+  // (The editor's description IS the brief it holds, saved by its autosave.)
+  if (save) {
+    const briefed = withBrief(current.draft, { description: input.description, audience: input.audience });
+    if (JSON.stringify(briefed.brief ?? null) !== JSON.stringify(current.draft.brief ?? null)) {
+      const refused = await saveRow(briefed);
+      if (refused) return refused;
+    }
+  }
 
   const call = await runToolModelCall({
     tenantId,

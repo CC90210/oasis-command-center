@@ -91,8 +91,10 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
             type="button"
             key={t.key}
             onClick={() => setTemplate(t.key)}
+            // The page exists once made: its template is saved, so it is locked.
+            disabled={made || busy}
             aria-pressed={template === t.key}
-            className={`rounded-xl border p-3 text-left ${template === t.key ? "border-accent bg-accent/10" : "border-bg-border hover:border-bg-border-strong"}`}
+            className={`rounded-xl border p-3 text-left disabled:opacity-60 ${template === t.key ? "border-accent bg-accent/10" : "border-bg-border hover:border-bg-border-strong"}`}
           >
             <div className="text-sm font-bold text-fg">{t.label}</div>
             <div className="mt-1 text-xs text-fg-muted">{t.summary}</div>

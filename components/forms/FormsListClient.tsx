@@ -846,8 +846,11 @@ function NewOfferPicker({
               type="button"
               key={t.key}
               onClick={() => setTemplate(t.key)}
+              // Once the offer exists (its words failed), its template, name and
+              // link are saved: a retry writes words only, so they are locked.
+              disabled={!!createdId}
               aria-pressed={template === t.key}
-              className={`rounded-xl border p-4 text-left transition-colors ${
+              className={`rounded-xl border p-4 text-left transition-colors disabled:opacity-60 ${
                 template === t.key ? "border-accent bg-accent/10" : "border-bg-border hover:border-bg-border-strong"
               }`}
             >
@@ -860,7 +863,7 @@ function NewOfferPicker({
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <label className="block text-xs text-fg-muted">
             {routerMode ? "Page name (only your team sees it)" : "Offer name (only your team sees it)"}
-            <input value={name} onChange={(e) => setName(e.target.value)} className="input mt-1 w-full" maxLength={120} />
+            <input value={name} onChange={(e) => setName(e.target.value)} disabled={!!createdId} className="input mt-1 w-full" maxLength={120} />
           </label>
           {routerMode ? (
             <div className="block text-xs text-fg-muted">
@@ -878,6 +881,7 @@ function NewOfferPicker({
                   setSlugTouched(true);
                   setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 63));
                 }}
+                disabled={!!createdId}
                 className="input mt-1 w-full font-mono"
                 maxLength={63}
               />

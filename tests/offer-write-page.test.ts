@@ -214,6 +214,12 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(inventsFacts("The quickest way to book", "The best scheduling app for clinics"), "the owner's best let quickest through");
   assert.ok(inventsFacts("Trusted by 14 happy clinics", "Includes 14 happy templates"), "14 happy templates let 14 happy clinics through");
   assert.ok(!inventsFacts("It syncs with your calendar", "It syncs bookings with your calendar."));
+  // Codex round eleven: a zero price and an instant delivery are claims too.
+  assert.ok(inventsFacts("Book a free consultation", "A scheduling app"), "an invented free offer got through");
+  assert.ok(inventsFacts("Setup is complimentary", "A scheduling app"), "an invented free setup got through");
+  assert.ok(inventsFacts("Setup is instant", "A scheduling app"), "an invented instant delivery got through");
+  assert.ok(!inventsFacts("Book a free consultation", "Book a free consultation with our team."));
+  assert.ok(!inventsFacts("Free up your week for the work you love", "A scheduling app"), "free up was read as a price");
   // Codex round nine: a number keeps what it counts, and a promised result keeps its phrase.
   assert.ok(inventsFacts("Trusted by 14 clinics", "Includes 14 templates"), "the owner's 14 templates let 14 clinics through");
   assert.ok(inventsFacts("Get more revenue from every call", "It helps you get more bookings."), "the owner's more bookings let more revenue through");
@@ -282,9 +288,11 @@ check("the route is an owner action on the workspace AI account that saves a dra
   };
   assert.ok(at("save && emptyWritableParts(current.draft).length === 0") < at("runToolModelCall("), "the empty check runs after the paid call");
   assert.ok(at("withBrief(current.draft") < at("runToolModelCall("), "the description is saved only after the model answers");
-  // Codex round eight: before the vault read too, so a vault outage cannot lose it.
-  assert.ok(at("withBrief(current.draft") < at("fetchTenantVaultSecretsForRedaction("), "a vault outage loses the description");
-  assert.match(route, /withBrief\(current\.draft, \{ description: redactAll\(description\), audience: redactAll\(audience\) \}\)/);
+  // Codex round eleven (over round eight): the brief is saved only once the
+  // vault has been read and it is fully scrubbed, so a vault value is never
+  // written into the draft. A vault outage saves nothing; the dialog keeps the text.
+  assert.ok(at("fetchTenantVaultSecretsForRedaction(") < at("withBrief(current.draft"), "the brief is saved before the vault can scrub it");
+  assert.match(route, /withBrief\(current\.draft, \{ description: input\.description, audience: input\.audience \}\)/);
   assert.ok(at("vetWrittenCopy(written, source)") < at("if (!save) return json({ ok: true, filled: [], copy"), "the editor gets copy nobody vetted");
   assert.ok(at("if (!save) return json(") < at("saveRow(applied.doc)"), "the editor's mode saves the words");
   assert.match(route, /if \(save\) \{\s*const briefed = withBrief/, "the editor's mode saves the brief over the one it holds");
@@ -453,6 +461,9 @@ check("the editor's write has one writer: the route saves nothing, and the edito
 check("a write that fails at creation can be retried: in the New offer dialog, and on the page's editor", () => {
   const list = readFileSync("components/forms/FormsListClient.tsx", "utf8");
   assert.match(list, /async function retryWrite\(\)[\s\S]*?requestWrittenPage\(createdId/, "New offer has no retry");
+  // Codex round eleven: once the offer exists, its template, name and link are
+  // saved, and a retry writes words only, so those fields are locked.
+  assert.ok((list.match(/disabled=\{!!createdId\}/g) || []).length >= 3, "a made offer's template, name or link still looks editable");
   const turn = readFileSync("components/offer-pages/builder/TurnIntoOffer.tsx", "utf8");
   assert.match(turn, /setMade\(true\)/, "Turn into an offer hides the failure by opening the editor at once");
   const client = readFileSync("lib/offer-pages/write-page-client.ts", "utf8");
