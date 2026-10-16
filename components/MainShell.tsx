@@ -27,9 +27,9 @@
  * component's children prop is fully supported in the App Router.
  */
 
+import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
-import { useRef } from "react";
-import ChatWidget from "@/components/ChatWidget";
+import { useEffect, useRef } from "react";
 import { RunnerStatusHeader } from "@/components/admin/RunnerStatusHeader";
 import { ContentHeader, type ContentHeaderProps } from "@/components/os/ContentHeader";
 import type { ChatShellProps } from "@/lib/chat-shell-props";
@@ -49,6 +49,18 @@ const CANVAS = "os-canvas-frame bg-bg";
 // All constrained pages share one width so the CRM routes match the Agents
 // tab, Dashboard, and every other surface (no edge-to-edge stretch).
 const CONTENT_WIDTH = "max-w-7xl";
+
+/**
+ * ChatWidget is loaded, not imported (2026-10-16). app/layout.tsx imports this
+ * file for every route, public pages included, and Next bundles a layout's
+ * static imports into every page under it. A static import here shipped the
+ * Command Center chat and the browser Supabase client to every anonymous
+ * visitor (~92 KB gzipped they never ran). tests/public-bundle-isolation.test.ts
+ * fails if it comes back. SSR stays on, so a hard load of /agent still renders
+ * the chat on the server and hydrates it as before.
+ */
+const loadChatWidget = () => import("@/components/ChatWidget");
+const ChatWidget = dynamic(loadChatWidget);
 
 /**
  * Chat-shell routes — these get the full-bleed, footer-less <main>. Exactly
@@ -133,6 +145,20 @@ export function MainShell({
   const activatedRef = useRef(onAgent);
   if (onAgent) activatedRef.current = true;
   const chatActivated = activatedRef.current;
+
+  // This shell renders only for signed-in pages, so fetch the chat chunk once
+  // the page is idle: the first soft-nav to /agent then mounts the chat in the
+  // same render (the latch above) instead of waiting on a download.
+  useEffect(() => {
+    if (!chat) return;
+    const warm = () => void loadChatWidget();
+    if (typeof window.requestIdleCallback === "function") {
+      const id = window.requestIdleCallback(warm, { timeout: 3000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const t = window.setTimeout(warm, 1500);
+    return () => window.clearTimeout(t);
+  }, [chat]);
 
   const mainEl = chatShell ? (
     // Full-screen chat shell: NO constrained wrapper, NO footer, NO content

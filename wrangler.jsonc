@@ -13,6 +13,9 @@
     "binding": "ASSETS",
     "directory": ".open-next/assets"
   },
+  "images": {
+    "binding": "IMAGES"
+  },
   "services": [
     { "binding": "WORKER_SELF_REFERENCE", "service": "oasis-command-center" },
     { "binding": "SEO_MEASURE", "service": "oasis-seo-measure" }

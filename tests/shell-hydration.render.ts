@@ -216,8 +216,9 @@ async function main() {
   delete g.document;
 
   // MainShell's element tree: the direct parent of the page element, on a
-  // normal page and on the chat shell. Called as a function (one render, its
-  // only hook is useRef), so the tree is what MainShell returns, unrendered.
+  // normal page and on the chat shell. Called as a function (one render; its
+  // hooks are useRef and the idle chat-chunk warm-up useEffect, which, as on
+  // the server, never runs), so the tree is what MainShell returns, unrendered.
   const { MainShell, PageSlot } = await import("../components/MainShell");
   const page = React.createElement("i", { "data-page": "1" });
   type Node = { type?: unknown; props?: { children?: unknown } };
@@ -249,7 +250,7 @@ async function main() {
   for (const path of ["/settings", "/agent"]) {
     pathname = path;
     const previous = internals.H;
-    internals.H = { useRef: (initial: unknown) => ({ current: initial }) };
+    internals.H = { useRef: (initial: unknown) => ({ current: initial }), useEffect: () => {} };
     try {
       const tree = MainShell({ children: page, footerLabel: "Footer", footerTagline: "Tagline", chat: null, header: null });
       pageParent[path] = parentOf(tree, page);
