@@ -129,7 +129,7 @@ for (const label of ["Revenue band", "Team size", "Primary bottleneck", "Current
   const detailsAt = page.indexOf('title="Lead details"');
   assert.ok(sourceAt > 0 && sourceAt < detailsAt, "the Source block renders above, not inside, the disclosure");
   assert.match(page, /const facts = leadFirstTouch\(data\);\s*if \(facts\.length === 0\) return null;/, "no first touch, no block");
-  assert.match(page, /const funnelStage = funnelStageLabel\(activeRecord\.data\.funnel_stage, activeRecord\.data\.funnel_form\);/);
+  assert.match(page, /const funnelStage = funnelStageLabel\(activeRecord\.data\.funnel_stage, leadFunnelForm\(activeRecord\.data\)\);/);
   assert.match(page, /subtitle=\{\s*funnelStage \? \(/, "the chip sits in the header, under the lead's name");
   // Not repeated inside the disclosure once they are shown above it.
   for (const moved of ["Funnel stage", "Campaign", "Keyword", "Offer"]) {

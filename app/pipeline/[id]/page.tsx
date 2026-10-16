@@ -39,7 +39,7 @@ import { mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { buildMemberNameMap } from "@/lib/assigned-names";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
-import { auditAnswerLabel, bottleneckLabel, funnelStageLabel } from "@/lib/forms/ai-audit-format";
+import { auditAnswerLabel, bottleneckLabel, funnelStageLabel, leadFunnelForm } from "@/lib/forms/ai-audit-format";
 import { leadFirstTouch } from "@/lib/offer-pages/utm";
 import { formatBookedTime } from "@/lib/forms/public-booking-alert";
 import { websiteBuildBriefIsReady } from "@/lib/website-sales-build-brief";
@@ -285,7 +285,7 @@ export default async function PipelineLeadDetailPage({
 
   // How far through the website funnel this lead got, as a chip under its name
   // (CC 2026-10-16). Only a funnel lead has one; anyone else gets no chip.
-  const funnelStage = funnelStageLabel(activeRecord.data.funnel_stage, activeRecord.data.funnel_form);
+  const funnelStage = funnelStageLabel(activeRecord.data.funnel_stage, leadFunnelForm(activeRecord.data));
 
   return (
     <div className="space-y-4 animate-fade-in">

@@ -147,6 +147,19 @@ export function funnelStageLabel(value: unknown, form?: unknown): string | null 
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/**
+ * The booking form a lead came through: its `funnel_form` stamp, else the AI
+ * audit when the lead carries the audit's own score stamp (only
+ * ai-audit-ingest.ts writes ai_audit_scored_at, and only for that form), else
+ * "" (unknown, never guessed). Leads finished before the stamp existed keep
+ * their "Audit requested" only when they can prove it.
+ */
+export function leadFunnelForm(data: Record<string, unknown>): string {
+  const stamped = str(data.funnel_form).trim().toLowerCase();
+  if (stamped) return stamped;
+  return str(data.ai_audit_scored_at).trim() ? AI_AUDIT_SLUG : "";
+}
+
 function finishedFormLabel(form: unknown): string {
   const slug = str(form).trim().toLowerCase();
   if (slug === AI_AUDIT_SLUG) return FUNNEL_STAGE_LABELS.audit_requested;

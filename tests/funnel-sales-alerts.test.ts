@@ -268,6 +268,16 @@ async function main(): Promise<void> {
     "Old Lead · finished the form, unbooked - needs follow-up",
     "a lead finished before the form was stamped is not guessed to be an audit",
   );
+  assert.equal(
+    inboundLeadLine({ name: "Old Audit", funnel_stage: "audit_requested", ai_audit_scored_at: "2026-10-15T12:00:00.000Z" }),
+    "Old Audit · audit done, unbooked - needs follow-up",
+    "an unstamped lead the AI audit scored proves it came through the audit",
+  );
+  assert.equal(
+    inboundLeadLine({ name: "Later Buyer", funnel_stage: "audit_requested", funnel_form: "protocol", ai_audit_scored_at: "2026-10-15T12:00:00.000Z" }),
+    "Later Buyer · finished the PROTOCOL form, unbooked - needs follow-up",
+    "the stamp of the form finished last wins over an older audit score",
+  );
   for (const form of ["protocol", "community", "command", "fleet", "book", undefined]) {
     assert.ok(!/audit/i.test(inboundLeadLine({ name: "X", funnel_stage: "audit_requested", funnel_form: form })), `${form} reads as an audit`);
   }
