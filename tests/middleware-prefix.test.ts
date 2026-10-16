@@ -25,6 +25,11 @@ assert.equal(isPublic("/api/checkout/session"), true, "public checkout creator b
 assert.equal(isPublic("/api/forms/booking"), true, "public audit booking bypasses session middleware and authenticates with the lead token");
 assert.equal(isPublic("/api/forms/booking/availability"), true, "public audit availability bypasses session middleware and authenticates with the lead token");
 assert.equal(isPublic("/api/forms/booking-admin"), false, "the public booking allowlist does not open adjacent operator routes");
+assert.equal(isPublic("/api/forms/booking/slots"), true, "the token-free open times behind /book are public");
+assert.equal(isPublic("/book"), true, "the booking link is reachable with no session");
+for (const gated of ["/booking", "/book-admin", "/bookings"]) {
+  assert.equal(isPublic(gated), false, `${gated} must not ride on the /book entry`);
+}
 assert.equal(isPublic("/api/forms"), false, "operator forms list remains session-gated");
 assert.equal(isPublic("/api/forms/abc/mint-link"), false, "operator link minting remains session-gated");
 assert.equal(isPublic("/oasis-loop/index.html"), true, "OASIS Loop diagram is public static HTML");

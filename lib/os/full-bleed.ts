@@ -49,6 +49,7 @@ export const FULL_BLEED_PREFIXES: readonly string[] = [
   // registry's /onboarding prefix. The exact page is public; middleware keeps
   // /onboarding/wizard and /onboarding/welcome authenticated.
   "/f/", // public form pages (anonymous + personalized)
+  "/book", // the public booking link: a prospect with no account books a call
   "/invite/", // pre-signup invite landing
   "/sign/", // public e-signature page: the signer may never have an account
   "/unsubscribe", // email opt-out landing: the recipient may be another company's customer

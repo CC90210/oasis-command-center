@@ -8,19 +8,31 @@ import { bottleneckLabel, leadRevenueAndBottleneck } from "@/lib/forms/ai-audit-
 import { normalizeFounderMeetingWebsite } from "@/lib/website-sales-meeting";
 import { AI_AUDIT_TENANT_ID, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
 import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
-import { listGoogleCalendarBusy, type GoogleBusyInterval } from "@/lib/integrations/google-calendar";
+import { listGoogleCalendarBusy } from "@/lib/integrations/google-calendar";
 import { getOasisPipelineAssignmentRoster, OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
-import { listCalendars } from "@/lib/calendar/store";
+import { listCalendars, listEvents, type Owner } from "@/lib/calendar/store";
+import type { EventRecord } from "@/lib/calendar/types";
 import { OASIS_PRE_HANDOFF_STAGE_KEYS } from "@/lib/oasis-stage-meta";
+import {
+  bookingReadWindow,
+  computeOpenSlots,
+  type BookingHostRole,
+  type BookingSettings,
+  type BusyInterval,
+  type HostBusy,
+} from "@/lib/booking/hours";
+import { scheduleBusyIntervals } from "@/lib/booking/schedule-busy";
+import {
+  bookingRoster,
+  hostIdentities,
+  loadBookingSettings,
+  type BookingHostIdentity,
+} from "@/lib/booking/settings-store";
+import type { MemberRow } from "@/lib/team";
 
 export const PUBLIC_BOOKING_TIME_ZONE = "America/Toronto";
 export const PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES = 15;
-export const PUBLIC_BOOKING_DAYS = 14;
-export const PUBLIC_BOOKING_MIN_LEAD_MINUTES = 120;
 export const PUBLIC_BOOKING_MAX_BODY_BYTES = 8_000;
-const PUBLIC_BOOKING_STEP_MINUTES = 30;
-const PUBLIC_BOOKING_START_HOUR = 9;
-const PUBLIC_BOOKING_END_HOUR = 17;
 
 export type PublicFunnelStage = "inbound_lead" | "audit_requested" | "meeting_booked";
 
@@ -217,79 +229,6 @@ export function buildPublicBookingContact(lead: Record<string, unknown>): Record
   };
 }
 
-const torontoParts = new Intl.DateTimeFormat("en-CA", {
-  timeZone: PUBLIC_BOOKING_TIME_ZONE,
-  weekday: "short",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-function localParts(instant: number): { weekday: string; hour: number; minute: number } {
-  const parts = Object.fromEntries(
-    torontoParts.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
-  );
-  return {
-    weekday: parts.weekday || "",
-    hour: Number(parts.hour),
-    minute: Number(parts.minute),
-  };
-}
-
-function slotBounds(options: { now: number; days: number }): { first: number; last: number } {
-  const step = PUBLIC_BOOKING_STEP_MINUTES * 60_000;
-  const firstPossible = options.now + PUBLIC_BOOKING_MIN_LEAD_MINUTES * 60_000;
-  return {
-    first: Math.ceil(firstPossible / step) * step,
-    last: options.now + options.days * 24 * 60 * 60_000,
-  };
-}
-
-export function isPublicBookingSlot(
-  value: string,
-  options: { now?: number; days?: number; durationMinutes?: number } = {},
-): boolean {
-  const instant = Date.parse(value);
-  if (!Number.isFinite(instant)) return false;
-  const bounds = slotBounds({ now: options.now ?? Date.now(), days: options.days ?? PUBLIC_BOOKING_DAYS });
-  if (instant < bounds.first || instant > bounds.last) return false;
-  const local = localParts(instant);
-  if (["Sat", "Sun"].includes(local.weekday)) return false;
-  if (local.minute !== 0 && local.minute !== 30) return false;
-  const durationMinutes = options.durationMinutes ?? PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES;
-  const localStartMinutes = local.hour * 60 + local.minute;
-  return localStartMinutes >= PUBLIC_BOOKING_START_HOUR * 60 &&
-    localStartMinutes + durationMinutes <= PUBLIC_BOOKING_END_HOUR * 60;
-}
-
-export function buildPublicBookingSlots(options: {
-  now?: number;
-  days?: number;
-  durationMinutes?: number;
-  busy: GoogleBusyInterval[];
-}): string[] {
-  const now = options.now ?? Date.now();
-  const days = options.days ?? PUBLIC_BOOKING_DAYS;
-  const { first, last } = slotBounds({ now, days });
-  const step = PUBLIC_BOOKING_STEP_MINUTES * 60_000;
-  const durationMinutes = options.durationMinutes ?? PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES;
-  const duration = durationMinutes * 60_000;
-  const busy = options.busy
-    .map((item) => ({ start: Date.parse(item.start), end: Date.parse(item.end) }))
-    .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start);
-  const slots: string[] = [];
-  for (let instant = first; instant <= last; instant += step) {
-    const iso = new Date(instant).toISOString();
-    if (!isPublicBookingSlot(iso, { now, days, durationMinutes })) continue;
-    if (busy.some((item) => item.start < instant + duration && item.end > instant)) continue;
-    slots.push(iso);
-  }
-  return slots;
-}
-
 type Founder = { auth_user_id: string; email: string; full_name?: string | null; display_name?: string | null };
 
 export async function publicBookingFounders(tenantId: string): Promise<{ host: Founder; opener: Founder }> {
@@ -420,47 +359,143 @@ export async function resolvePublicFunnelBooking(
   };
 }
 
-export async function loadPublicBookingSlots(input: {
-  tenantId: string;
-  founders: { host: Founder; opener: Founder };
-  durationMinutes?: number;
-  now?: number;
-}): Promise<string[]> {
-  const now = input.now ?? Date.now();
-  const durationMinutes = input.durationMinutes ?? PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES;
-  const timeMin = new Date(now + PUBLIC_BOOKING_MIN_LEAD_MINUTES * 60_000).toISOString();
-  // Google's events.list `timeMax` bounds an event's START. The last bookable
-  // slot starts at about now + PUBLIC_BOOKING_DAYS and runs `durationMinutes`
-  // past that, so a founder event starting inside that tail would not be
-  // returned and the slot would be offered, then accepted again by the booking
-  // route (it re-reads with this same window): a client booked over a founder's
-  // event. The window therefore reaches one meeting length past the last start.
-  const timeMax = new Date(
-    now + PUBLIC_BOOKING_DAYS * 24 * 60 * 60_000 + durationMinutes * 60_000,
-  ).toISOString();
-  const busy = await Promise.all([
-    listGoogleCalendarBusy({
-      tenantId: input.tenantId,
-      organizerUserId: input.founders.host.auth_user_id,
-      expectedOrganizerEmail: input.founders.host.email,
-      timeMin,
-      timeMax,
-    }),
-    listGoogleCalendarBusy({
-      tenantId: input.tenantId,
-      organizerUserId: input.founders.opener.auth_user_id,
-      expectedOrganizerEmail: input.founders.opener.email,
-      timeMin,
-      timeMax,
-    }),
-  ]);
-  return buildPublicBookingSlots({
-    now,
-    busy: busy.flat(),
-    durationMinutes,
+/** A host as a booking sees them: who, their role on the call, and where the call lands. */
+export type PublicBookingHost = BookingHostIdentity & {
+  role: BookingHostRole;
+  /** Schedule calendar for this host's copy of the call; null = their default calendar. */
+  targetCalendarId: string | null;
+};
+
+/** One bookable start, with the hosts on duty for it (organizer first). */
+export type PublicBookingSlot = { start: string; hosts: PublicBookingHost[] };
+
+export type PublicBookingAvailabilityDeps = {
+  loadSettings?: (tenantId: string) => Promise<{ settings: BookingSettings }>;
+  roster?: (tenantId: string) => Promise<MemberRow[]>;
+  listGoogleBusy?: typeof listGoogleCalendarBusy;
+  listScheduleEvents?: (owner: Owner) => Promise<EventRecord[]>;
+};
+
+async function scheduleEventsOf(owner: Owner): Promise<EventRecord[]> {
+  const { events, truncated } = await listEvents(owner);
+  // Same rule as the Google read: rows we could not see may be busy time, and
+  // offering a slot over unseen busy time double-books a founder.
+  if (truncated) throw new Error("schedule_events_truncated");
+  return events;
+}
+
+function hostsFromSettings(
+  settings: BookingSettings,
+  identities: Map<string, BookingHostIdentity>,
+): Array<PublicBookingHost | null> {
+  return settings.hosts.map((host) => {
+    const identity = identities.get(host.userId);
+    return identity ? { ...identity, role: host.role, targetCalendarId: host.targetCalendarId } : null;
   });
 }
 
+/**
+ * Every slot a visitor may book for a call of `durationMinutes`.
+ *
+ * Hours come from the workspace's booking settings (lib/booking/hours.ts):
+ * per host, so "CC and Adon Sunday to Thursday, CC alone on Friday and
+ * Saturday" is one rule. Busy time per host = their Google calendar plus their
+ * own Schedule (minus the weekly routine). The organizer's calendar must be
+ * readable or nothing is offered (the error says why). An attendee whose
+ * calendar cannot be read closes only the slots they are on duty for.
+ */
+export async function loadPublicBookingAvailability(
+  input: { tenantId: string; durationMinutes?: number; now?: number },
+  deps: PublicBookingAvailabilityDeps = {},
+): Promise<PublicBookingSlot[]> {
+  const now = input.now ?? Date.now();
+  const durationMinutes = input.durationMinutes ?? PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES;
+  const { settings } = await (deps.loadSettings ?? ((tenantId: string) => loadBookingSettings(tenantId)))(input.tenantId);
+  const roster = await (deps.roster ?? ((tenantId: string) => bookingRoster(tenantId)))(input.tenantId);
+  const hosts = hostsFromSettings(settings, hostIdentities(roster));
+  const organizerIndex = settings.hosts.findIndex((host) => host.role === "organizer");
+  if (organizerIndex < 0 || !hosts[organizerIndex]) throw new Error("public_booking_founders_unavailable");
+
+  const { timeMin, timeMax } = bookingReadWindow(settings, now, durationMinutes);
+  const listGoogleBusy = deps.listGoogleBusy ?? listGoogleCalendarBusy;
+  const listScheduleEvents = deps.listScheduleEvents ?? scheduleEventsOf;
+  const busyByHost = new Map<string, HostBusy>();
+  await Promise.all(settings.hosts.map(async (configured, index) => {
+    const host = hosts[index];
+    try {
+      if (!host) throw new Error("booking_host_not_on_roster");
+      const [google, schedule] = await Promise.all([
+        listGoogleBusy({
+          tenantId: input.tenantId,
+          organizerUserId: host.userId,
+          expectedOrganizerEmail: host.email,
+          timeMin: new Date(timeMin).toISOString(),
+          timeMax: new Date(timeMax).toISOString(),
+        }),
+        listScheduleEvents({ tenantId: input.tenantId, userId: host.userId }),
+      ]);
+      const busy: BusyInterval[] = google
+        .map((item) => ({ start: Date.parse(item.start), end: Date.parse(item.end) }))
+        .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start);
+      busy.push(...scheduleBusyIntervals(schedule, timeMin, timeMax, settings.timeZone));
+      busyByHost.set(configured.userId, busy);
+    } catch (error) {
+      if (configured.role === "organizer") throw error;
+      // Fail closed for this attendee's on-duty slots only; the organizer's
+      // solo hours (CC on Friday and Saturday) stay bookable.
+      console.error("[public-booking.attendee-busy-unavailable]", {
+        userId: configured.userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      busyByHost.set(configured.userId, "unavailable");
+    }
+  }));
+
+  const byId = new Map(hosts.flatMap((host) => (host ? [[host.userId, host] as const] : [])));
+  return computeOpenSlots({ settings, now, durationMinutes, busyByHost }).map((slot) => ({
+    start: slot.start,
+    hosts: slot.hostIds.flatMap((id) => {
+      const host = byId.get(id);
+      return host ? [host] : [];
+    }),
+  }));
+}
+
+/**
+ * The hosts a stored booking was made with, for repairing its Schedule copies
+ * on a replay. Unknown ids are dropped; with none left, the organizer.
+ */
+export async function publicBookingHostsById(
+  tenantId: string,
+  ids: string[],
+  deps: Pick<PublicBookingAvailabilityDeps, "loadSettings" | "roster"> = {},
+): Promise<PublicBookingHost[]> {
+  const { settings } = await (deps.loadSettings ?? ((t: string) => loadBookingSettings(t)))(tenantId);
+  const identities = hostIdentities(await (deps.roster ?? ((t: string) => bookingRoster(t)))(tenantId));
+  const configured = new Map(settings.hosts.map((host) => [host.userId, host]));
+  const resolve = (id: string): PublicBookingHost | null => {
+    const identity = identities.get(id);
+    if (!identity) return null;
+    const host = configured.get(id);
+    return { ...identity, role: host?.role ?? "attendee", targetCalendarId: host?.targetCalendarId ?? null };
+  };
+  const found = ids.flatMap((id) => {
+    const host = resolve(id);
+    return host ? [host] : [];
+  });
+  if (found.length) return found;
+  const organizer = settings.hosts.find((host) => host.role === "organizer");
+  const fallback = organizer ? resolve(organizer.userId) : null;
+  if (!fallback) throw new Error("public_booking_founders_unavailable");
+  return [fallback];
+}
+
+/**
+ * Copy a booked call onto each host's Schedule, on the calendar their booking
+ * settings name (CC's "Meetings"), else their default calendar. Before
+ * 2026-10-16 every copy went to the default calendar, which for CC is a hidden
+ * one, so booked calls never showed on his Schedule.
+ */
 export async function mirrorPublicBookingToSchedules(input: {
   db: SupabaseClient;
   tenantId: string;
@@ -474,21 +509,25 @@ export async function mirrorPublicBookingToSchedules(input: {
   company: string;
   formName: string;
   prospectEmail: string;
-  founders: { host: Founder; opener: Founder };
+  hosts: Array<Pick<PublicBookingHost, "userId" | "email" | "targetCalendarId">>;
 }): Promise<void> {
   const now = new Date().toISOString();
-  for (const founder of [input.founders.host, input.founders.opener]) {
-    const owner = { tenantId: input.tenantId, userId: founder.auth_user_id };
+  const guests = [input.prospectEmail, ...input.hosts.map((host) => host.email)].filter(Boolean);
+  for (const host of input.hosts) {
+    const owner = { tenantId: input.tenantId, userId: host.userId };
     const calendars = await listCalendars(owner);
-    const calendar = calendars.find((item) => item.isDefault) || calendars[0];
+    const calendar =
+      (host.targetCalendarId ? calendars.find((item) => item.id === host.targetCalendarId) : undefined) ||
+      calendars.find((item) => item.isDefault) ||
+      calendars[0];
     if (!calendar) throw new Error("public_booking_schedule_calendar_missing");
     const digest = createHash("sha256")
-      .update(`public-booking:${input.tenantId}:${input.appointmentId}:${founder.auth_user_id}`, "utf8")
+      .update(`public-booking:${input.tenantId}:${input.appointmentId}:${host.userId}`, "utf8")
       .digest("hex");
     const row = {
       id: `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`,
       tenant_id: input.tenantId,
-      user_id: founder.auth_user_id,
+      user_id: host.userId,
       calendar_id: calendar.id,
       title: `${input.formName} - ${input.company || input.prospectName || "Prospect"}`,
       description: `Lead ${input.leadId}\n${input.meetUrl}`,
@@ -503,7 +542,7 @@ export async function mirrorPublicBookingToSchedules(input: {
       original_start: null,
       color: "tide",
       reminders: "[10]",
-      guests: JSON.stringify([input.prospectEmail, input.founders.host.email, input.founders.opener.email]),
+      guests: JSON.stringify(guests),
       busy: 1,
       lead_id: input.leadId,
       appointment_id: input.appointmentId,

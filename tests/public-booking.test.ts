@@ -7,10 +7,8 @@ import {
   bookedLeadFacts,
   buildPublicBookingContact,
   buildPublicFunnelLeadPatch,
-  buildPublicBookingSlots,
   ensurePublicFunnelBookingEvent,
   isPublicFunnelReadyForBooking,
-  isPublicBookingSlot,
   publicBookingOwnershipPatch,
   publicBookingAvailabilitySchema,
   publicBookingCreateSchema,
@@ -178,7 +176,7 @@ await check("preserves an existing rep owner and collaborators when founders joi
 });
 
 await check("enables booking only for OASIS forms that promise a founder call", () => {
-  assert.deepEqual(PUBLIC_BOOKING_FORM_SLUGS, ["ai-audit", "command", "fleet"]);
+  assert.deepEqual(PUBLIC_BOOKING_FORM_SLUGS, ["ai-audit", "command", "fleet", "book"]);
   for (const slug of PUBLIC_BOOKING_FORM_SLUGS) assert.equal(isPublicBookingFormSlug(slug), true);
   for (const slug of ["protocol", "community", "vsl", "support", "start"]) {
     assert.equal(isPublicBookingFormSlug(slug), false, `${slug} must not force a sales call`);
@@ -186,12 +184,14 @@ await check("enables booking only for OASIS forms that promise a founder call", 
   assert.equal(publicBookingDurationMinutes("ai-audit"), 15);
   assert.equal(publicBookingDurationMinutes("command"), 45);
   assert.equal(publicBookingDurationMinutes("fleet"), 45);
+  assert.equal(publicBookingDurationMinutes("book"), 30, "the /book link is a 30-minute call (CC, 2026-10-16)");
 });
 
 await check("keeps public offer names explicit instead of inferring them from duration", () => {
   assert.equal(publicBookingOfferLabel("ai-audit"), "AI automation audit");
   assert.equal(publicBookingOfferLabel("command"), "COMMAND discovery call");
   assert.equal(publicBookingOfferLabel("fleet"), "FLEET discovery call");
+  assert.equal(publicBookingOfferLabel("book"), "discovery call");
   assert.match(bookingRoute, /offerLabel: publicBookingOfferLabel|const offerLabel = publicBookingOfferLabel/);
 });
 
@@ -234,42 +234,20 @@ await check("routes non-audit booking events to the Sales department with no dup
   assert.equal(writes[0].event_type, "OASIS_FUNNEL_BOOKED");
 });
 
-await check("offers 15-minute weekday Toronto slots and excludes either founder's busy time", () => {
-  const now = Date.parse("2026-10-12T12:00:00.000Z"); // Monday, 08:00 Toronto
-  const slots = buildPublicBookingSlots({
-    now,
-    days: 2,
-    busy: [
-      { start: "2026-10-12T14:00:00.000Z", end: "2026-10-12T14:30:00.000Z" },
-      { start: "2026-10-12T16:30:00.000Z", end: "2026-10-12T17:00:00.000Z" },
-    ],
-  });
+await check("books only a slot live availability returns, hosted by that slot's on-duty hosts", () => {
+  // Hours and who is on duty are lib/booking/hours.ts (tests/booking-hours.test.ts).
+  // Here: the route books exactly what availability offered, with the hosts on
+  // duty for THAT slot, and records them for a replay to repair the Schedule copies.
   assert.equal(PUBLIC_BOOKING_TIME_ZONE, "America/Toronto");
   assert.equal(PUBLIC_BOOKING_DEFAULT_DURATION_MINUTES, 15);
-  assert.ok(slots.length > 0);
-  assert.ok(!slots.includes("2026-10-12T14:00:00.000Z"));
-  assert.ok(!slots.includes("2026-10-12T16:30:00.000Z"));
-  assert.ok(slots.every((slot) => isPublicBookingSlot(slot, { now, days: 2 })));
-});
-
-await check("keeps 45-minute discovery calls inside business hours and clear of busy time", () => {
-  const now = Date.parse("2026-10-12T12:00:00.000Z");
-  const slots = buildPublicBookingSlots({
-    now,
-    days: 1,
-    durationMinutes: 45,
-    busy: [{ start: "2026-10-12T14:30:00.000Z", end: "2026-10-12T15:00:00.000Z" }],
-  });
-  assert.ok(!slots.includes("2026-10-12T14:00:00.000Z"), "a 45-minute call cannot overlap a later busy block");
-  assert.ok(!slots.includes("2026-10-12T20:30:00.000Z"), "a 45-minute call cannot run past 17:00 Toronto");
-  assert.ok(slots.every((slot) => isPublicBookingSlot(slot, { now, days: 1, durationMinutes: 45 })));
-});
-
-await check("refuses weekend, stale, and off-grid booking instants", () => {
-  const now = Date.parse("2026-10-12T12:00:00.000Z");
-  assert.equal(isPublicBookingSlot("2026-10-17T14:00:00.000Z", { now, days: 14 }), false);
-  assert.equal(isPublicBookingSlot("2026-10-12T12:30:00.000Z", { now, days: 14 }), false);
-  assert.equal(isPublicBookingSlot("2026-10-12T15:15:00.000Z", { now, days: 14 }), false);
+  assert.match(bookingRoute, /available\.find\(\(item\) => item\.start === startsAt\)/);
+  assert.match(bookingRoute, /hostUserId: organizer\.userId/);
+  assert.match(bookingRoute, /expectedOrganizerEmail: organizer\.email/);
+  assert.match(bookingRoute, /openerAttendee: attendee \? \{ email: attendee\.email/);
+  assert.match(bookingRoute, /hosts: slot\.hosts/);
+  assert.match(bookingRoute, /public_booking_host_ids: slot\.hosts\.map/);
+  assert.match(bookingRoute, /publicBookingHostsById\(/, "a replay rebuilds the same hosts");
+  assert.ok(!/founders\.host\.auth_user_id/.test(bookingRoute), "no booking is pinned to a fixed founder any more");
 });
 
 await check("strictly validates both anonymous booking request bodies", () => {
@@ -448,7 +426,7 @@ await check("only a prospect before the founder handoff may book; both public ro
   const booking = readFileSync("app/api/forms/booking/route.ts", "utf8");
   assert.match(availability, /isPublicBookingStageBookable\(context\.lead\.stage\)[\s\S]{0,160}lead_stage_not_bookable/);
   assert.ok(
-    availability.indexOf("isPublicBookingStageBookable(context.lead.stage)") < availability.indexOf("loadPublicBookingSlots({"),
+    availability.indexOf("isPublicBookingStageBookable(context.lead.stage)") < availability.indexOf("loadPublicBookingAvailability({"),
     "the stage is checked BEFORE two calendars are read",
   );
   assert.match(booking, /isPublicBookingStageBookable\(currentStage\)[\s\S]{0,160}lead_stage_not_bookable/);

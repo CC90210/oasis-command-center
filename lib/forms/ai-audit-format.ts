@@ -49,6 +49,8 @@ const GOAL_LABELS: Record<string, string> = {
   sales_leadgen: "sales / lead gen",
   workflow_automation: "workflow automation",
   customer_support: "customer support",
+  // The /book form's escape hatch (lib/forms/oasis-book-seed.ts).
+  not_sure: "not sure yet",
 };
 
 const TRIED_LABELS: Record<string, string> = {
