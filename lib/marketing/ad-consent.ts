@@ -23,6 +23,20 @@ export const AD_CONSENT_CHANGED_EVENT = "oasis:ad-consent-changed";
 /** Fired by the footer's "Ad cookie choices" button to reopen the banner. */
 export const AD_CONSENT_OPEN_EVENT = "oasis:ad-consent-open";
 
+/** Set on <html> before first paint when a choice is already stored. */
+export const AD_CHOICE_ATTRIBUTE = "data-ad-choice";
+
+/**
+ * Inline script for the marketing layout, run before first paint. The banner
+ * is server-rendered so it paints with the page: mounted after hydration, its
+ * paragraph was the Largest Contentful Paint on every marketing page (3.1 s of
+ * render delay on /, PageSpeed mobile 2026-10-16). This hides it for a visitor
+ * who already chose, so they never see it flash. Same rule as readAdConsent:
+ * storage that throws, or any value but granted/denied, means "not asked yet"
+ * and the banner shows.
+ */
+export const AD_CONSENT_PREPAINT = `try{var v=localStorage.getItem(${JSON.stringify(AD_CONSENT_STORAGE_KEY)});if(v==="granted"||v==="denied")document.documentElement.setAttribute(${JSON.stringify(AD_CHOICE_ATTRIBUTE)},"")}catch(e){}`;
+
 export const GOOGLE_TAG_SRC = `https://www.googletagmanager.com/gtag/js?id=${GOOGLE_ADS_TAG_ID}`;
 const TAG_SCRIPT_ID = "google-ads-tag";
 

@@ -5,6 +5,7 @@ import { Ambient } from "@/components/marketing/Ambient";
 import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
 import { AdConsent } from "@/components/marketing/AdConsent";
+import { AD_CONSENT_PREPAINT } from "@/lib/marketing/ad-consent";
 import { SITE_ORIGIN, marketingCanonicalPath } from "@/lib/marketing/routes";
 import { ORGANIZATION_JSONLD, WEBSITE_JSONLD } from "@/lib/marketing/entity";
 import "./marketing.css";
@@ -144,6 +145,9 @@ export default function MarketingLayout({
       className={`marketing ${display.variable} ${body.variable} ${data.variable} min-h-screen bg-ops-void font-body text-fg antialiased`}
     >
       <script dangerouslySetInnerHTML={{ __html: JS_FLAG }} />
+      {/* Before the banner in document order, so a stored choice hides the
+          server-rendered banner before it can paint. */}
+      <script dangerouslySetInnerHTML={{ __html: AD_CONSENT_PREPAINT }} />
       {/* JSON-LD is emitted from the layout so every marketing page carries the
           same entity identity. Rendering it per-page invites drift, and an
           assistant that sees two different @id values for one organisation

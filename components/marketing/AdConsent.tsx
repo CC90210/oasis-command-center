@@ -10,6 +10,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AD_CHOICE_ATTRIBUTE,
   AD_CONSENT_CHANGED_EVENT,
   AD_CONSENT_OPEN_EVENT,
   installGoogleAdsTag,
@@ -50,21 +51,26 @@ function announce(choice: Choice) {
 }
 
 export function AdConsent() {
-  const [open, setOpen] = useState(false);
+  // Open on the server too, so the banner is in the HTML and paints with the
+  // page; mounted after hydration it was every page's LCP element. The server
+  // cannot know the choice, so AD_CONSENT_PREPAINT (marketing layout) hides it
+  // before first paint for a visitor who chose, and this effect then removes it.
+  const [open, setOpen] = useState(true);
   const returnFocus = useRef<HTMLElement | null>(null);
   const firstButton = useRef<HTMLButtonElement | null>(null);
   const loaded = useRef(false);
 
-  // Decide after hydration, never on the server: the server cannot know the
-  // choice, and rendering the banner there would flash it for people who chose.
   useEffect(() => {
     if (readAdConsent(storage()) === "granted") {
       installGoogleAdsTag(window, document);
       loaded.current = true;
-    } else if (readAdConsent(storage()) === null) {
-      setOpen(true);
+      setOpen(false);
+    } else if (readAdConsent(storage()) === "denied") {
+      setOpen(false);
     }
     const reopen = () => {
+      // The pre-paint hide would keep a reopened banner invisible.
+      document.documentElement.removeAttribute(AD_CHOICE_ATTRIBUTE);
       returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       setOpen(true);
       requestAnimationFrame(() => firstButton.current?.focus());
@@ -112,8 +118,9 @@ export function AdConsent() {
   return (
     // Direct children of .marketing are forced to position:relative by
     // marketing.css; this zero-size wrapper takes that rule so the banner
-    // itself can stay fixed to the viewport.
-    <div>
+    // itself can stay fixed to the viewport. m-consent: hidden by marketing.css
+    // without JS (the buttons need it) and when a choice is stored.
+    <div className="m-consent">
       <section
         aria-labelledby="ad-consent-title"
         className="fixed inset-x-3 bottom-3 z-50 mx-auto max-w-3xl rounded-lg border border-ops-edge bg-ops-raised p-4 shadow-2xl shadow-black/60 sm:inset-x-6 sm:bottom-6 sm:p-5"

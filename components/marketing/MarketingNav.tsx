@@ -72,7 +72,7 @@ export function MarketingNav() {
           </span>
         </a>
 
-        <nav aria-label="Main" className="hidden items-center gap-1 md:flex">
+        <nav aria-label="Main" className="hidden items-center gap-1 lg:flex">
           {LINKS.map((l) => (
             <Link
               key={l.href}
@@ -97,7 +97,7 @@ export function MarketingNav() {
             href="/contact"
             className="ml-1 rounded-md bg-signal px-4 py-2 text-[15px] font-semibold tracking-[-0.01em] text-ops-void transition-all hover:brightness-110"
           >
-            Start
+            Start a project
           </Link>
         </nav>
 
@@ -107,7 +107,7 @@ export function MarketingNav() {
           aria-expanded={open}
           aria-controls="m-nav-sheet"
           aria-label={open ? "Close menu" : "Open menu"}
-          className="-mr-2 flex h-11 w-11 items-center justify-center text-fg-muted transition-colors hover:text-fg md:hidden"
+          className="-mr-2 flex h-11 w-11 items-center justify-center text-fg-muted transition-colors hover:text-fg lg:hidden"
         >
           {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
@@ -118,7 +118,7 @@ export function MarketingNav() {
       <div
         id="m-nav-sheet"
         hidden={!open}
-        className="border-t border-ops-line bg-ops-void md:hidden"
+        className="border-t border-ops-line bg-ops-void lg:hidden"
       >
         <nav aria-label="Main" className="flex flex-col px-5 py-3">
           {LINKS.map((l) => (
@@ -143,7 +143,7 @@ export function MarketingNav() {
             href="/contact"
             className="mt-5 rounded-md bg-signal px-4 py-3 text-center text-[16px] font-semibold text-ops-void"
           >
-            Start
+            Start a project
           </Link>
         </nav>
       </div>
