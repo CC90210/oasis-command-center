@@ -39,7 +39,8 @@ import { mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { buildMemberNameMap } from "@/lib/assigned-names";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
-import { auditAnswerLabel, bottleneckLabel } from "@/lib/forms/ai-audit-format";
+import { auditAnswerLabel, bottleneckLabel, funnelStageLabel } from "@/lib/forms/ai-audit-format";
+import { leadFirstTouch } from "@/lib/offer-pages/utm";
 import { formatBookedTime } from "@/lib/forms/public-booking-alert";
 import { websiteBuildBriefIsReady } from "@/lib/website-sales-build-brief";
 import {
@@ -282,15 +283,35 @@ export default async function PipelineLeadDetailPage({
     webLeadBusinessId && cardViewer && visibleToViewer(assignedTo ?? null, cardViewer),
   );
 
+  // How far through the website funnel this lead got, as a chip under its name
+  // (CC 2026-10-16). Only a funnel lead has one; anyone else gets no chip.
+  const funnelStage = funnelStageLabel(activeRecord.data.funnel_stage);
+
   return (
     <div className="space-y-4 animate-fade-in">
       <PageHeader
         title={title}
-        subtitle="Lead workspace · closed-loop lifecycle"
+        subtitle={
+          funnelStage ? (
+            <span className="inline-flex flex-wrap items-center gap-2">
+              <span
+                className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-xs font-semibold text-accent"
+                title="Funnel stage"
+              >
+                {funnelStage}
+              </span>
+              <span>Lead workspace · closed-loop lifecycle</span>
+            </span>
+          ) : (
+            "Lead workspace · closed-loop lifecycle"
+          )
+        }
         action={<BackToPipeline />}
       />
 
       <LeadMetricsBand metrics={metrics} canChangeStage={canWorkLifecycle} />
+
+      <LeadSourceBlock data={activeRecord.data} />
 
       {/* Won deals only: "Convert to client" / the client record it became.
           Draws nothing on any other stage, and changes nothing about the deal. */}
@@ -349,11 +370,22 @@ export default async function PipelineLeadDetailPage({
         </Card>
       ) : null}
 
+      {/*
+        OPEN BY DEFAULT (CC 2026-10-16). A new lead's own answers (revenue band,
+        team size, bottleneck, current tools, website, booked call) live here,
+        and collapsed they needed a click nobody made: the preview showed only
+        name, company and website. Opening the section is the smaller change
+        than moving those cells out; the section still collapses for anyone
+        who wants it shut.
+        The storage key is NEW on purpose: under the old key, any browser that
+        once toggled the section shut stored "1", which would keep hiding the
+        facts after this change. A choice made from here on is remembered.
+      */}
       <CollapsibleSection
         title="Lead details"
         subtitle="Contact, website context, and audit findings"
-        storageKey="oasis.pipeline.contactBand.collapsed"
-        defaultCollapsed
+        storageKey="oasis.pipeline.leadDetails.collapsed"
+        defaultCollapsed={false}
         collapsedPreview={renderContactPreview(activeRecord.data)}
       >
         <div className="space-y-3">
@@ -589,36 +621,47 @@ function LeadContactBand({ data }: { data: Record<string, unknown> }) {
   );
 }
 
-/** The four offers a lead can arrive for (lib/offer-pages: cat=p1..p4). */
-const PILLAR_LABELS: Record<string, string> = {
-  p1: "Protocol",
-  p2: "Command",
-  p3: "Community",
-  p4: "Fleet",
-};
+/**
+ * Where the lead came from, first touch (lib/offer-pages/utm.ts leadFirstTouch):
+ * campaign, keyword and offer, only the ones the lead has. Outside "Lead
+ * details" so it reads without a click (CC 2026-10-16); a lead with none of
+ * them gets no block at all, never a row of empty labels.
+ */
+function LeadSourceBlock({ data }: { data: Record<string, unknown> }) {
+  const facts = leadFirstTouch(data);
+  if (facts.length === 0) return null;
+  return (
+    <section
+      aria-label="Source"
+      className="flex flex-wrap items-baseline gap-x-6 gap-y-2 rounded-xl border border-bg-border bg-bg-elev/25 px-4 py-3"
+    >
+      <span className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">Source</span>
+      {facts.map((fact) => (
+        <span key={fact.label} className="min-w-0 break-words text-sm text-fg">
+          <span className="mr-1.5 text-[10px] font-bold uppercase tracking-wider text-fg-dim">{fact.label}</span>
+          {fact.value}
+        </span>
+      ))}
+    </section>
+  );
+}
 
 /**
- * What the lead told the funnel and where they came from: stage, budget,
- * timeline, campaign, keyword, offer and the call they booked. Rendered only
- * for a lead that has any of it, so a cold lead gets no row of empty cells.
+ * What the lead told the funnel: budget, timeline and the call they booked.
+ * Rendered only for a lead that has any of it, so a cold lead gets no row of
+ * empty cells. The funnel stage is the chip under the lead's name and the
+ * campaign, keyword and offer are the Source block (CC 2026-10-16), so they
+ * are not repeated here.
  */
 function LeadFunnelBand({ data }: { data: Record<string, unknown> }) {
   const stage = nonEmptyString(data.funnel_stage);
   const budget = auditAnswerLabel("budget", data.budget);
   const timeframe = auditAnswerLabel("timeframe", data.timeframe);
-  const campaign = [data.utm_source, data.utm_medium, data.utm_campaign]
-    .map(nonEmptyString)
-    .filter(Boolean)
-    .join(" / ");
-  const keyword = nonEmptyString(data.kw);
-  const cat = nonEmptyString(data.cat);
-  const pillar = cat ? PILLAR_LABELS[cat] ?? cat : null;
   const meetingAt = nonEmptyString(data.founder_meeting_at);
   const meetUrl = safeExternalUrl(nonEmptyString(data.google_meet_link));
-  if (!stage && !budget && !timeframe && !campaign && !keyword && !pillar && !meetingAt) return null;
+  if (!stage && !budget && !timeframe && !meetingAt) return null;
   return (
     <div className="grid gap-3 rounded-lg border border-bg-border bg-bg-elev/40 p-4 sm:grid-cols-2 xl:grid-cols-4">
-      <ContactCell label="Funnel stage" value={humanize(stage)} />
       <ContactCell
         label="Booked call"
         value={meetingAt ? formatBookedTime(meetingAt) : "Unbooked - needs follow-up"}
@@ -627,9 +670,6 @@ function LeadFunnelBand({ data }: { data: Record<string, unknown> }) {
       />
       <ContactCell label="Budget" value={budget} />
       <ContactCell label="Timeline" value={timeframe} />
-      <ContactCell label="Campaign" value={campaign || null} />
-      <ContactCell label="Keyword" value={keyword} />
-      <ContactCell label="Offer" value={pillar} />
     </div>
   );
 }

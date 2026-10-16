@@ -17,6 +17,8 @@ import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
 import { timeAgo } from "@/lib/fmt";
 import type { SuggestedAsk } from "./config";
 import type { AttentionItem } from "./numbers";
+import { tileCount } from "./count-rules";
+import { INBOUND_QUEUE_HREF, type InboundRecent } from "./inbound-rules";
 import { describeSchedule, lastRunLabel, routineTitle, type RoutineRow } from "./routine-rules";
 import type { Read } from "./routines";
 import { SuggestedAsks } from "./SuggestedAsks";
@@ -67,12 +69,68 @@ export function SlackLine({ slack, problem, canManage }: { slack: SlackHome; pro
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, count, children }: { title: string; count?: string | null; children: ReactNode }) {
   return (
     <section className="border-t border-hairline px-4 py-4 first:border-t-0">
-      <h2 className="mb-2.5 text-[13px] font-semibold leading-5 text-fg">{title}</h2>
+      <h2 className="mb-2.5 flex items-center gap-2 text-[13px] font-semibold leading-5 text-fg">
+        {title}
+        {count && (
+          <span className="rounded-full bg-accent/15 px-1.5 text-[11px] font-semibold leading-4 text-accent">{count}</span>
+        )}
+      </h2>
       {children}
     </section>
+  );
+}
+
+/**
+ * "New inbound leads (14 days)" (CC 2026-10-16): each lead that came in through
+ * the website in the last two weeks, at whatever stage, as name, company,
+ * revenue band, funnel chip and the booked call or "Unbooked", opening the
+ * lead. Needs you above names only the untouched ones; this is everyone, so a
+ * founder sees who booked as well as who is waiting. A failed read says so;
+ * it is never shown as an empty list.
+ */
+export function NewInboundLeads({ read }: { read: Read<InboundRecent> }) {
+  if (!read.ok) {
+    return <p className="text-[13px] leading-5 text-status-warm">Couldn’t load new inbound leads. Reload in a minute.</p>;
+  }
+  const { total, leads, truncated } = read.value;
+  if (leads.length === 0 && !truncated) {
+    return <p className="text-[13px] leading-5 text-fg-dim">No new inbound leads in the last 14 days.</p>;
+  }
+  const more = total - leads.length;
+  return (
+    <div>
+      <ul className="divide-y divide-hairline" aria-label="New inbound leads in the last 14 days">
+        {leads.map((lead) => (
+          <li key={lead.id} className="py-2 first:pt-0">
+            <Link href={lead.href} prefetch={false} className="group block min-w-0">
+              <div className="flex min-w-0 items-start justify-between gap-2">
+                <span className="truncate text-[13px] font-medium leading-5 text-fg group-hover:underline">
+                  {lead.name}
+                </span>
+                {lead.stage && (
+                  <span className="mt-0.5 shrink-0 rounded-md border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium leading-4 text-accent">
+                    {lead.stage}
+                  </span>
+                )}
+              </div>
+              <div className="truncate text-xs leading-4 text-fg-dim">
+                {[lead.company, lead.revenue].filter(Boolean).join(" · ")}
+                {lead.company || lead.revenue ? " · " : ""}
+                <span className={lead.booked === "Unbooked" ? "text-status-warm" : "text-fg-muted"}>{lead.booked}</span>
+              </div>
+            </Link>
+          </li>
+        ))}
+      </ul>
+      {(more > 0 || truncated) && (
+        <Link href={INBOUND_QUEUE_HREF} prefetch={false} className="mt-2 inline-block text-[13px] font-medium text-accent hover:underline">
+          {more > 0 ? `${more.toLocaleString("en-US")} more in Warm inbound` : "There may be more in Warm inbound"}
+        </Link>
+      )}
+    </div>
   );
 }
 
@@ -227,6 +285,8 @@ function Connections({
 
 export type OverviewPanelProps = {
   attention: readonly AttentionItem[];
+  /** Sales: "New inbound leads (14 days)". Null or absent draws no section. */
+  newInbound?: Read<InboundRecent> | null;
   /** This department's approvals waiting on the viewer (top few + total). */
   approvals: ApprovalsRead<ApprovalsBlock>;
   /** The Feed's Needs-you tab filtered to this department, when the viewer's rail has the Feed. */
@@ -244,6 +304,7 @@ export type OverviewPanelProps = {
 
 export function OverviewPanel({
   attention,
+  newInbound = null,
   approvals,
   feedHref,
   tiles,
@@ -259,6 +320,15 @@ export function OverviewPanel({
       <Section title="Needs you">
         <NeedsYou items={attention} approvals={approvals} feedHref={feedHref} />
       </Section>
+      {newInbound && (
+        <Section
+          title="New inbound leads (14 days)"
+          // The same count /pipeline's Warm inbound badge prints; "N+" when the read could not see every row.
+          count={newInbound.ok ? tileCount(newInbound.value.total, newInbound.value.truncated) : null}
+        >
+          <NewInboundLeads read={newInbound} />
+        </Section>
+      )}
       {tiles.length > 0 && (
         <Section title="Numbers">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-1">

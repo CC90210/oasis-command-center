@@ -16,6 +16,7 @@
  */
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
+import type { PublicFunnelStage } from "@/lib/forms/public-booking";
 
 /** Display text for the funnel's enum values. Keys read from
  *  oasis-ai-audit-seed.ts + the scoring tables in ai-audit-ingest.ts — an
@@ -103,6 +104,57 @@ export function auditAnswerLabel(kind: keyof typeof ANSWER_TABLES, value: unknow
   return text || null;
 }
 
+/** Where a funnel lead got to (lib/forms/public-booking.ts PublicFunnelStage), in plain words. */
+const FUNNEL_STAGE_LABELS: Record<PublicFunnelStage, string> = {
+  inbound_lead: "Inbound lead",
+  audit_requested: "Audit requested",
+  meeting_booked: "Meeting booked",
+};
+
+/**
+ * The funnel stage chip on the lead page and the Sales desk list. Null when the
+ * lead has no funnel stage (a cold lead gets no chip, not an empty one); a
+ * stage added later without a label here still shows, in words.
+ */
+export function funnelStageLabel(value: unknown): string | null {
+  const key = str(value).trim();
+  if (!key) return null;
+  const known = (FUNNEL_STAGE_LABELS as Record<string, string>)[key];
+  if (known) return known;
+  const words = key.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Revenue and bottleneck, the two facts a founder reads before calling, from a
+ * lead row or a form's answers. One reading for every sales alert: the booked
+ * call (public-booking.ts bookedLeadFacts), the audit started and the audit
+ * completed alerts, so the three cannot describe one lead differently.
+ * Empty strings when the lead never said.
+ */
+export function leadRevenueAndBottleneck(source: Record<string, unknown>): { revenue: string; bottleneck: string } {
+  const field = (key: string) => str(source[key]).trim();
+  return {
+    revenue: auditAnswerLabel("revenue", field("revenue_band") || field("monthly_revenue")) ?? "",
+    bottleneck: bottleneckLabel(field("primary_bottleneck") || field("bottleneck_detail") || field("automation_goal")),
+  };
+}
+
+/**
+ * The Revenue and Bottleneck lines of a sales alert. CC 2026-10-16: both
+ * alerts promised them and neither had them. A value the lead never gave drops
+ * its whole line, so an alert never reads "Revenue: undefined" or a bare label.
+ * Escaped and capped: a stranger typed the bottleneck.
+ */
+export function alertLeadFactLines(source: Record<string, unknown>): string[] {
+  const e = escapeTelegramHtml;
+  const { revenue, bottleneck } = leadRevenueAndBottleneck(source);
+  const lines: string[] = [];
+  if (revenue) lines.push(`📊 Revenue: ${e(revenue.slice(0, 120))}`);
+  if (bottleneck) lines.push(`🚧 Bottleneck: ${e(bottleneck.slice(0, 300))}`);
+  return lines;
+}
+
 /**
  * Label for CUSTOMER-FACING copy: known keys only, empty otherwise.
  *
@@ -169,7 +221,6 @@ export function buildAiAuditAlert(
   // The money facts, on one line each so they scan vertically.
   const budget = label(BUDGET_LABELS, a.budget);
   const timeline = label(TIMELINE_LABELS, a.timeframe);
-  const revenue = label(REVENUE_LABELS, a.monthly_revenue);
   const goal = label(GOAL_LABELS, a.automation_goal);
   const team = label(TEAM_LABELS, a.team_size);
   const tried = label(TRIED_LABELS, a.tried_before);
@@ -177,7 +228,10 @@ export function buildAiAuditAlert(
   lines.push("");
   if (budget) lines.push(`💰 Budget: ${e(budget)}`);
   if (timeline) lines.push(`⏱ Timeline: ${e(timeline)}`);
-  if (revenue) lines.push(`📊 Revenue: ${e(revenue)}`);
+  // Revenue, then the Bottleneck line the alert never had: the same reading the
+  // started and booked alerts use. "In their words" below still carries the
+  // full answer; this is the one line to read at a glance.
+  lines.push(...alertLeadFactLines(a));
   if (goal) lines.push(`🎯 Wants: ${e(goal)}`);
   if (team) lines.push(`👥 Team: ${e(team)}`);
   if (tried) lines.push(`🔁 Before: ${e(tried)}`);

@@ -174,6 +174,8 @@ export default async function DepartmentPage({
       prefill={prefill}
       overview={{
         attention: numbers.attention,
+        // Sales only, for a viewer who sees the whole warm-inbound queue.
+        newInbound: numbers.newInbound ?? null,
         approvals,
         feedHref: mayOpenOsHref(viewer.navInput, FEED_HREF) ? `${FEED_HREF}?tab=needs&dept=${dept.slug}` : null,
         tiles: numbers.tiles,

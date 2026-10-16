@@ -240,6 +240,37 @@ async function main() {
     const src = readFileSync("lib/forms/ai-audit-notify.ts", "utf8");
     assert.match(src, /isFirstSubmissionForLead\(/);
     assert.doesNotMatch(src, /from\("form_submissions"\)/, "ai-audit-notify.ts carries its own copy of the first-submission query again");
+    // This lead holds a name and nothing else: no Revenue or Bottleneck line.
+    assert.doesNotMatch(calls[0].text, /Revenue:|Bottleneck:|undefined/);
+  });
+
+  await step("the AI-audit started alert carries the lead's Revenue and Bottleneck, read from its own workspace only (CC 2026-10-16)", async () => {
+    reset();
+    // A returning visitor: the lead row already holds both facts from a booked-call form.
+    const L = "1ead0000-0000-4000-8000-0000000000f1";
+    await db.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+      args: [L, OASIS, JSON.stringify({ name: "Rita", revenue_band: "10k_50k", primary_bottleneck: "Quotes wait <days>" })],
+    });
+    const s = await submission("s-facts", AUDIT, OASIS, L, "2026-10-08T12:00:00.000Z");
+    await notifyAiAuditStarted({ db: supa, tenantId: OASIS, formId: AUDIT, leadId: L, submissionId: s, answers });
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].text, /Revenue: \$10-50K\/mo/, "revenue in words, from the lead row");
+    assert.match(calls[0].text, /Bottleneck: Quotes wait &lt;days&gt;/, "the bottleneck, escaped");
+    assert.match(calls[0].text, /audit started/i, "everything the alert already said is kept");
+    assert.match(calls[0].text, /unbooked - needs follow-up/);
+
+    // Another workspace's lead under the same id is never read into OASIS's alert.
+    reset();
+    const foreign = "1ead0000-0000-4000-8000-0000000000f2";
+    await db.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+      args: [foreign, CLIENT_A, JSON.stringify({ name: "Other", revenue_band: "250k_plus", primary_bottleneck: "CLIENT-A-SECRET" })],
+    });
+    const fs = await submission("s-foreign", AUDIT, OASIS, foreign, "2026-10-08T12:00:00.000Z");
+    await notifyAiAuditStarted({ db: supa, tenantId: OASIS, formId: AUDIT, leadId: foreign, submissionId: fs, answers });
+    assert.equal(calls.length, 1, "the alert itself still goes");
+    assert.doesNotMatch(calls[0].text, /CLIENT-A-SECRET|250K|Revenue:|Bottleneck:/, "a lead read crossed workspaces");
   });
 
   // -- through the real submit route ---------------------------------------

@@ -54,6 +54,8 @@ import {
 } from "@/lib/oasis-pipeline-query";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
+import { readOasisInboundQueue } from "@/components/os/department/inbound-load";
+import { tileCount } from "@/components/os/department/count-rules";
 
 export const dynamic = "force-dynamic";
 
@@ -232,6 +234,28 @@ export default async function PipelinePage({
   // Promise.all below. Rejections stay attached to the promise and surface
   // there, exactly as before.
   const ownedSlugPromise = resolveOwnedSlug(tenantId);
+  // The Warm inbound link's badge (CC 2026-10-16): new inbound leads in the
+  // last 14 days, the SAME count as the Sales desk's "New inbound leads (14
+  // days)", from the same read (components/os/department/inbound-load.ts).
+  // Pipeline admins only: they are the viewers whose Warm inbound board is the
+  // whole queue, so the badge never counts leads the board would not show.
+  // Started here so it overlaps the reads below; a failed read logs and draws
+  // no badge rather than a 0, and never takes the board down with it.
+  const inboundBadgePromise: Promise<string | null> =
+    session.ok && pipelineAdmin
+      ? readOasisInboundQueue({
+          tenantId,
+          tenantSlug,
+          teamRole: session.teamRole,
+          isOwner: session.isTrueAdmin,
+          adminAccess: session.adminAccess,
+        })
+          .then(({ recent }) => (recent.total > 0 || recent.truncated ? tileCount(recent.total, recent.truncated) : null))
+          .catch((error) => {
+            console.error("[pipeline.inbound-badge]", error);
+            return null;
+          })
+      : Promise.resolve(null);
   // A manager's board is a READ of their team's book. A deactivated rep's
   // closed and in-delivery leads keep assigned_to for history
   // (lib/team-activation-rules.ts "keep"), so the board scope and the names
@@ -409,6 +433,7 @@ export default async function PipelinePage({
   const stageHrefs = Object.fromEntries(
     stages.map((stage) => [stage.key, hrefWith({ stage: stage.key, page: null })]),
   );
+  const inboundBadge = await inboundBadgePromise;
 
   const repChip = (label: string, value: string | null) => {
     const active = (value ?? null) === repFilter;
@@ -449,13 +474,22 @@ export default async function PipelinePage({
         </Link>
         <Link
           href="/pipeline?motion=inbound"
-          className={`rounded-full border px-3 py-2 text-xs transition-colors ${
+          className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-2 text-xs transition-colors ${
             warmInbound
               ? "border-accent bg-accent/15 font-semibold text-accent"
               : "border-bg-border bg-bg-elev/40 text-fg-muted hover:border-fg-dim hover:text-fg"
           }`}
         >
-          Warm inbound
+          <span>Warm inbound</span>
+          {inboundBadge && (
+            <span
+              className="rounded-full bg-accent px-1.5 text-[10px] font-semibold leading-4 text-white"
+              title="New inbound leads in the last 14 days"
+            >
+              {inboundBadge}
+              <span className="sr-only"> new in the last 14 days</span>
+            </span>
+          )}
         </Link>
       </nav>
       {/* WHOSE BOARD. Admins and managers get one chip per rep plus the

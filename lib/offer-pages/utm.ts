@@ -48,6 +48,39 @@ export const UTM_AT_KEY = "utm_captured_at";
 /** The only values `cat` may carry (the four funnel pillars, HANDOVER section 4). */
 const CAT_VALUES = new Set(["p1", "p2", "p3", "p4"]);
 
+/** The four offers a lead can arrive for (cat=p1..p4), as the lead page names them. */
+export const PILLAR_LABELS: Record<string, string> = {
+  p1: "Protocol",
+  p2: "Command",
+  p3: "Community",
+  p4: "Fleet",
+};
+
+/**
+ * A lead's first touch as the lead page's Source block reads it: Campaign
+ * (utm source / medium / campaign), Keyword (kw) and Offer (cat), in that
+ * order, ONLY the ones the lead carries. CC 2026-10-16: the block is outside
+ * the collapsed "Lead details", and a lead with none of them gets no block,
+ * never a row of empty labels.
+ */
+export function leadFirstTouch(data: Record<string, unknown>): Array<{ label: string; value: string }> {
+  const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+  const cat = text(data[UTM_KEYS.cat]);
+  const facts = [
+    {
+      label: "Campaign",
+      value: [UTM_KEYS.utm_source, UTM_KEYS.utm_medium, UTM_KEYS.utm_campaign]
+        .map((key) => text(data[key]))
+        .filter(Boolean)
+        .join(" / "),
+    },
+    { label: "Keyword", value: text(data[UTM_KEYS.kw]) },
+    // A stored value outside p1..p4 still shows as typed rather than vanishing.
+    { label: "Offer", value: cat ? (PILLAR_LABELS[cat] ?? cat) : "" },
+  ];
+  return facts.filter((fact) => fact.value);
+}
+
 /** A raw query value this long or longer is a mangled link or an attack, not a campaign tag. */
 const MAX_RAW_LENGTH = 128;
 
