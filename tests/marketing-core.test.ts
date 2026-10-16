@@ -32,6 +32,7 @@ import {
   claimedBrandSlugs,
   isBrandGroupKey,
   stalePublishWarning,
+  summarizePublishIntent,
   buildMediaPath,
   channelBreadcrumb,
   channelsForTrack,
@@ -929,6 +930,48 @@ async function fallbackChecks() {
     page.indexOf("summary.degraded ?") < page.indexOf('headline="Nothing waiting on you"'),
     "the degraded branch must come first — otherwise needsYou === 0 wins and says 'nothing'",
   );
+}
+
+// summarizePublishIntent — CC, 2026-10-16: "I'm pretty sure the functionality of
+// this software posting is broken or not fully correct." The panel showed only the
+// word "failed": the drain's reason and per-network results were never read. These
+// pin what the panel now shows, using the two real rows the table holds.
+{
+  // 2026-09-14, verbatim shape: the drain's error with a traceback, result "{}".
+  const failed = summarizePublishIntent(
+    "{}",
+    "R2 download failed for marketing-media/x.mp4 in bucket oasis-storage: SSL validation failed\nTraceback (most recent call last):\n  File ...",
+  );
+  assert.deepEqual(failed.outcomes, [], "no network was reached, so no per-network rows");
+  assert.equal(
+    failed.reason,
+    "R2 download failed for marketing-media/x.mp4 in bucket oasis-storage: SSL validation failed",
+    "the reason is the first line; the traceback is not for the operator",
+  );
+
+  // 2026-08-17 shape, plus one refusal: what a mixed result looks like.
+  const done = summarizePublishIntent(
+    JSON.stringify({ instagram: { ok: true, post_id: "p1", reason: null }, twitter: { ok: false, post_id: null, reason: "x refused: too long\nmore" } }),
+    null,
+  );
+  assert.deepEqual(done.outcomes, [
+    { platform: "instagram", ok: true, detail: null },
+    { platform: "twitter", ok: false, detail: "x refused: too long" },
+  ]);
+  assert.equal(done.reason, null);
+
+  // Mid-publish the row holds the dispatch marker, which is not an outcome.
+  const dispatching = summarizePublishIntent(
+    JSON.stringify({ _dispatch_started_at: "2026-10-16T10:00:00Z", platforms: ["instagram"] }),
+    null,
+  );
+  assert.deepEqual(dispatching.outcomes, [], "the dispatch marker yields no outcome rows");
+
+  // Never throw on bad input: this renders on every asset page.
+  assert.deepEqual(summarizePublishIntent("not json", 42), { outcomes: [], reason: null });
+  assert.deepEqual(summarizePublishIntent(null, undefined), { outcomes: [], reason: null });
+  const long = summarizePublishIntent("{}", "x".repeat(400));
+  assert.ok(long.reason!.length <= 240 && long.reason!.endsWith("..."), "a runaway reason is clipped");
 }
 
 brandBoundaryChecks()

@@ -21,7 +21,9 @@
  */
 
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
+
+import type { PublishOutcome } from "@/lib/founders-marketing-core";
 
 /**
  * The channels reachable from here, and which of them can take a given asset,
@@ -65,7 +67,16 @@ export function AssetPublishPanel({
   mediaKind: PublishMediaKind;
   /** Slides in the deck — decides which channels can take it (see PUBLISH_CHANNELS). */
   slideCount?: number;
-  lastIntent?: { state: string; platforms: string[]; created_at: string } | null;
+  lastIntent?: {
+    state: string;
+    platforms: string[];
+    created_at: string;
+    finished_at?: string | null;
+    /** Per-network result the drain recorded (summarizePublishIntent). */
+    outcomes?: PublishOutcome[];
+    /** The drain's own reason, first line only. */
+    reason?: string | null;
+  } | null;
   /**
    * Computed by the SERVER via stalePublishWarning, not here.
    *
@@ -85,6 +96,23 @@ export function AssetPublishPanel({
 
   const toggle = (id: string) =>
     setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+
+  // WATCH A REQUEST THROUGH TO ITS RESULT. The drain runs on the operator's PC
+  // every minute and posting takes a minute or two more; before this, the page
+  // never changed after "Recorded", so a post that went out and one that failed
+  // looked the same until someone reloaded. While the request is queued or
+  // running, re-read the server every 8 s, for at most 20 minutes (the reaper's
+  // window), so the panel ends on "Posted" or the failure's reason by itself.
+  const inFlight = lastIntent?.state === "queued" || lastIntent?.state === "running";
+  useEffect(() => {
+    if (!inFlight) return;
+    const started = Date.now();
+    const t = setInterval(() => {
+      if (Date.now() - started > 20 * 60_000) return clearInterval(t);
+      router.refresh();
+    }, 8_000);
+    return () => clearInterval(t);
+  }, [inFlight, router]);
 
   async function submit() {
     // `busy` is set synchronously here rather than relying on the transition:
@@ -127,7 +155,9 @@ export function AssetPublishPanel({
     // collected.
     setMsg({
       ok: true,
-      text: `Recorded for ${(body.platforms || platforms).join(", ")}. It goes out on the next publisher run.`,
+      text:
+        `Queued for ${(body.platforms || platforms).map(channelLabel).join(", ")}. The publisher ` +
+        `picks it up within a minute while the publishing PC is on; this panel updates by itself.`,
     });
     start(() => router.refresh());
   }
@@ -166,15 +196,19 @@ export function AssetPublishPanel({
               aria-pressed={on}
               // The handle is what CC needs on a channel he CAN use; the reason
               // is what he needs on one he cannot.
-              title={refusal ?? c.handle}
+              title={refusal ?? `Posts as ${c.handle}`}
               className={
-                "rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors disabled:opacity-40 " +
+                "flex flex-col items-start rounded-md px-2.5 py-1 text-left text-[11px] font-semibold transition-colors disabled:opacity-40 " +
                 (on
                   ? "bg-accent/20 text-accent ring-1 ring-inset ring-accent/40"
                   : "bg-bg-deep text-fg-muted hover:text-fg")
               }
             >
               {c.label}
+              {/* The account it posts AS, on the button rather than a hover: five of
+                  the six are Conaugh's own accounts, not OASIS-branded ones, and
+                  that is worth seeing before pressing publish. */}
+              <span className="text-[10px] font-normal opacity-70">{c.handle}</span>
             </button>
           );
         })}
@@ -230,9 +264,13 @@ export function AssetPublishPanel({
       )}
 
       {lastIntent && (
-        <div className="border-t border-bg-border pt-3 text-[11px] text-fg-dim">
-          Last request: <span className="text-fg-muted">{lastIntent.state}</span>
-          {lastIntent.platforms.length > 0 && <> · {lastIntent.platforms.join(", ")}</>} ·{" "}
+        <div className="space-y-2 border-t border-bg-border pt-3 text-[11px] text-fg-dim">
+          <div>
+          Last request:{" "}
+          <span className={lastIntent.state === "failed" ? "font-semibold text-hot" : "font-semibold text-fg-muted"}>
+            {STATE_WORDS[lastIntent.state] ?? lastIntent.state}
+          </span>
+          {lastIntent.platforms.length > 0 && <> · {lastIntent.platforms.map(channelLabel).join(", ")}</>} ·{" "}
           {/* <time> with the raw ISO value, not toLocaleString(). This component is
               pre-rendered on the server, and locale/timezone differ there, so the
               formatted string would not match on hydration. The browser renders the
@@ -240,8 +278,46 @@ export function AssetPublishPanel({
           <time dateTime={lastIntent.created_at} title={lastIntent.created_at}>
             {lastIntent.created_at.replace("T", " ").slice(0, 16)} UTC
           </time>
+          </div>
+
+          {/* The drain's own reason. Before this the panel showed "failed" and
+              nothing else, which reads as "posting is broken" whatever the cause. */}
+          {lastIntent.reason && (
+            <p className={lastIntent.state === "failed" ? "leading-5 text-hot" : "leading-5 text-fg-dim"}>
+              {lastIntent.reason}
+            </p>
+          )}
+
+          {(lastIntent.outcomes?.length ?? 0) > 0 && (
+            <ul className="flex flex-wrap gap-1.5" aria-label="Result per network">
+              {lastIntent.outcomes!.map((o) => (
+                <li
+                  key={o.platform}
+                  title={o.detail ?? (o.ok ? "Accepted by the posting service" : "Refused")}
+                  className={
+                    "rounded-md px-2 py-0.5 font-semibold " +
+                    (o.ok ? "bg-accent/10 text-accent" : "bg-hot/10 text-hot")
+                  }
+                >
+                  {o.ok ? "✓" : "✕"} {channelLabel(o.platform)}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </div>
   );
+}
+
+/** The request's state in the operator's words, not the table's. */
+const STATE_WORDS: Record<string, string> = {
+  queued: "waiting for the publisher",
+  running: "posting now…",
+  done: "posted",
+  failed: "failed",
+};
+
+function channelLabel(id: string): string {
+  return PUBLISH_CHANNELS.find((c) => c.id === id)?.label ?? id;
 }

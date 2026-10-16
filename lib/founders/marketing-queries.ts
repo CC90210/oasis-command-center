@@ -24,7 +24,9 @@ import {
   claimedBrandSlugs,
   libraryPageCount,
   parseSlideUrls,
+  summarizePublishIntent,
   type AssetFormat,
+  type PublishOutcome,
   type AssetStatus,
   type BrandGroupKey,
   type Channel,
@@ -874,13 +876,15 @@ export async function getMarketingAsset(
 export async function getLatestPublishIntent(
   tenantId: string,
   assetId: string,
-): Promise<{ state: string; platforms: string[]; created_at: string } | null> {
+): Promise<LatestPublishIntent | null> {
   if (!tenantId || !assetId) return null;
   const db = getServiceSupabase();
   try {
     const r = await db
       .from("marketing_publish_intent")
-      .select("state, platforms, created_at")
+      // error + result: the drain's reason and its per-network outcome. The panel
+      // used to read only `state`, so a failure arrived with no reason at all.
+      .select("state, platforms, created_at, finished_at, error, result")
       .eq("tenant_id", tenantId)
       .eq("asset_id", assetId)
       .order("created_at", { ascending: false })
@@ -889,7 +893,14 @@ export async function getLatestPublishIntent(
     // pre-migration state and the panel simply shows no history.
     if (classify("publish_intent", r.error) !== "ok") return null;
     const row = (r.data || [])[0] as
-      | { state: string; platforms: unknown; created_at: string }
+      | {
+          state: string;
+          platforms: unknown;
+          created_at: string;
+          finished_at?: string | null;
+          error?: unknown;
+          result?: unknown;
+        }
       | undefined;
     if (!row) return null;
     // A malformed `platforms` string must not cost the operator the whole row.
@@ -908,11 +919,28 @@ export async function getLatestPublishIntent(
         console.warn("[marketing:publish_intent] unparseable platforms", row.platforms);
       }
     }
-    return { state: row.state, platforms, created_at: row.created_at };
+    const { outcomes, reason } = summarizePublishIntent(row.result, row.error);
+    return {
+      state: row.state,
+      platforms,
+      created_at: row.created_at,
+      finished_at: row.finished_at ?? null,
+      outcomes,
+      reason,
+    };
   } catch {
     return null;
   }
 }
+
+export type LatestPublishIntent = {
+  state: string;
+  platforms: string[];
+  created_at: string;
+  finished_at: string | null;
+  outcomes: PublishOutcome[];
+  reason: string | null;
+};
 
 export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;
 

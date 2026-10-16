@@ -813,6 +813,56 @@ export function stalePublishWarning(
   );
 }
 
+/** One network's answer to a publish request, as the drain recorded it. */
+export type PublishOutcome = { platform: string; ok: boolean; detail: string | null };
+
+/**
+ * What a finished publish request did, in the words the operator needs.
+ *
+ * CC, 2026-10-16, about the "Post to channels" panel: "I'm pretty sure the
+ * functionality of this software posting is broken or not fully correct." The
+ * drain did post (2026-08-17 reached all five short-form networks), but the panel
+ * only ever said "Last request: failed" or "done": the drain's reason and its
+ * per-network results sat in marketing_publish_intent unread. The one failure
+ * (2026-09-14, a storage download refused by an SSL check on the publishing PC)
+ * looked exactly like "posting is broken".
+ *
+ * `result` is the drain's JSON: { <platform>: { ok, post_id, reason | error } }.
+ * Mid-publish it is the dispatch marker { _dispatch_started_at, platforms }, which
+ * carries no outcome and yields none. `error` is the drain's text, which can end
+ * in a traceback; only its first line is the reason.
+ */
+export function summarizePublishIntent(
+  result: unknown,
+  error: unknown,
+): { outcomes: PublishOutcome[]; reason: string | null } {
+  let parsed: unknown = result;
+  if (typeof result === "string") {
+    try {
+      parsed = JSON.parse(result || "{}");
+    } catch {
+      parsed = {};
+    }
+  }
+  const outcomes: PublishOutcome[] = [];
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    for (const [platform, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (platform.startsWith("_") || !v || typeof v !== "object" || Array.isArray(v)) continue;
+      const row = v as { ok?: unknown; reason?: unknown; error?: unknown };
+      const ok = row.ok === true;
+      const why = ok ? null : String(row.reason ?? row.error ?? "").trim() || null;
+      outcomes.push({ platform, ok, detail: why ? firstLine(why) : null });
+    }
+  }
+  const reason = typeof error === "string" && error.trim() ? firstLine(error) : null;
+  return { outcomes, reason };
+}
+
+function firstLine(s: string): string {
+  const line = s.trim().split("\n")[0].trim();
+  return line.length > 240 ? `${line.slice(0, 237)}...` : line;
+}
+
 /**
  * Search Console data is not final for 2-4 days, so those days must render
  * greyed rather than being read as a real decline.
