@@ -47,6 +47,7 @@ import {
   type TurnFailureCode,
 } from "@/lib/os/channel/outcome";
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
+import { trainingBlockFor } from "@/lib/os/training-notes";
 import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount, type WorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import {
   billingForBridge,
@@ -348,8 +349,11 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       "agent.name": displayName,
     });
     const overlay = binding?.prompt_overlay?.trim();
+    // What the owner trained this department's agent on (Admin > Agent training), before the lock.
+    const training = dept ? await trainingBlockFor(tenantId, dept.key) : "";
     const baseSystem =
       (overlay ? `${interpolated}\n\nTENANT OVERLAY:\n${overlay}` : interpolated) +
+      training +
       (dept ? departmentIdentityLock(dept.label) : IDENTITY_LOCK_OVERLAY);
     const { composeSystemPrompt, normalizeMode } = await import("@/lib/chat-modes/plan-mode");
     const system = composeSystemPrompt(baseSystem, normalizeMode(req.chatMode));
@@ -649,10 +653,14 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
     "agent.name": displayName,
   });
   const overlay = binding?.prompt_overlay?.trim();
+  // What the owner trained this department's agent on (Admin > Agent training). Before the lock, so
+  // the lock still has the last word.
+  const training = dept ? await trainingBlockFor(tenantId, dept.key) : "";
   // The identity lock: the model never says which model or persona it is; a
   // department's own lock names only the department.
   const baseSystem =
     (overlay ? `${interpolated}\n\nTENANT OVERLAY:\n${overlay}` : interpolated) +
+    training +
     (dept ? departmentIdentityLock(dept.label) : IDENTITY_LOCK_OVERLAY);
   const { composeSystemPrompt, normalizeMode } = await import("@/lib/chat-modes/plan-mode");
   const system = composeSystemPrompt(baseSystem, normalizeMode(req.chatMode));

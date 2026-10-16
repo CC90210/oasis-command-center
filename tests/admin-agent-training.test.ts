@@ -46,19 +46,19 @@ async function main() {
 
   await check("a founder of another workspace (not a platform operator) gets a 404", async () => {
     await login(USERS.clientA);
-    assert.equal(await is404(Page), true);
+    assert.equal(await is404(() => Page({})), true);
   });
 
   await check("signed out: a 404", async () => {
     await login(null);
-    assert.equal(await is404(Page), true);
+    assert.equal(await is404(() => Page({})), true);
   });
 
   await check("the platform operator renders the page (and a login that is not a founder at all also 404s)", async () => {
     await login(USERS.rep); // an OASIS opener: not an alias, not an operator
-    assert.equal(await is404(Page), true);
+    assert.equal(await is404(() => Page({})), true);
     await login(USERS.cc);
-    const tree = await Page();
+    const tree = await Page({});
     assert.ok(tree, "the operator's call returns a tree instead of throwing");
   });
 
@@ -77,7 +77,7 @@ async function main() {
     "the subtitle says only what is true: the gate on THIS page, not a claim that the corpus itself is operator-only (Codex review round 3, MEDIUM + LOW)",
     async () => {
       await login(USERS.cc);
-      const tree = (await Page()) as { props: { subtitle: unknown } };
+      const tree = (await Page({})) as { props: { subtitle: unknown } };
       const subtitle = String(tree.props.subtitle);
       assert.doesNotMatch(subtitle, /never see this page or its results/i, "the old claim: Training and the ingest route already let other founders see and add to the same material");
       assert.match(subtitle, /operators only can run this here/i, "says what IS true: starting the tool is operator-only");

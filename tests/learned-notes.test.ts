@@ -8,9 +8,9 @@
  *
  *   1. the summary and intent wording the list reads in;
  *   2. a failed read is said plainly, never "nothing learned yet";
- *   3. the footer does NOT claim an agent learns from these notes: nothing reads
- *      them into a prompt yet (design doc 2026-10-14, section 5), and a list of
- *      saved links called "training" with no consumer is the overclaim it names;
+ *   3. the footer says what an agent does with its notes, which is now true: each note
+ *      trains one agent (or all), and that agent reads its newest ones before it answers
+ *      (tests/per-agent-training.test.ts pins the reader);
  *   4. the page does its reads behind a guard, so one failing read is "degraded",
  *      not a crashed page;
  *   5. the tool card says why Learn is off while its one field is empty.
@@ -43,19 +43,29 @@ async function main(): Promise<void> {
   assert.match(component, /stats\.degraded[\s\S]{0,260}Couldn&apos;t read the training material, so this is not an empty list/, "a failed count is said, not shown as zero");
   assert.match(component, /items\.degraded[\s\S]{0,260}the list did not load/, "a failed list is said, not shown as empty");
   assert.match(component, /Nothing learned yet\./, "a genuinely empty corpus says so");
-  assert.match(component, /No agent reads these notes into its writing yet/, "the footer is honest about the consumer");
-  assert.doesNotMatch(component, /(agents?|it) (will |can |now )?(learn|train)s? (on|from) (these|this)/i, "no claim that an agent learns from the list");
+  assert.match(component, /Before it answers, an agent reads its \{TRAINING_NOTES_MAX\} newest notes as examples of how to write/, "the footer says what the agent does with them");
+  assert.match(component, /They never change what it is allowed to do\./, "and what it does not");
+  assert.match(component, /Trains: \{trainsLabel\(row\.trains/, "each row says which agent it trains");
+  const { rowsFor } = await import("../components/tools/LearnedNotes");
+  const r = (id: string, trains: string | null) => ({ id, kind: "link", label: "exemplar", title: id, source_url: null, state: "indexed", last_error: null, contributed_by: "cc", created_at: "2026-10-15T12:00:00.000Z", indexed_at: null, trains });
+  const all = [r("a", "sales"), r("b", "all"), r("c", null), r("d", "finance")];
+  assert.deepEqual(rowsFor(all, "sales").map((x) => x.id), ["a", "b"], "an agent's tab lists what that agent reads");
+  assert.deepEqual(rowsFor(all, "marketing").map((x) => x.id), ["b", "c"], "Marketing also reads the older notes");
+  assert.deepEqual(rowsFor(all, null).map((x) => x.id), ["a", "b", "c", "d"], "All agents lists every note");
   assert.match(component, /ingestStateCopy/, "state wording comes from the one shared function (Training uses it too)");
   assert.match(component, /last_error\.slice\(0, 160\)/, "a failed row's reason is shown, bounded");
-  console.log("  ok - failed reads and an empty list are told apart, and the footer makes no training claim");
+  console.log("  ok - failed reads and an empty list are told apart, each row names its agent, and the footer says what happens");
 
   const page = read("app/admin/agent-training/page.tsx");
   assert.match(page, /await requireOperator\(\);/, "still gated first");
   assert.match(page, /getCorpusStats\(tenantId\)/);
-  assert.match(page, /getCorpusItems\(tenantId, 16\)/);
+  assert.match(page, /getCorpusItems\(tenantId, ITEMS_READ\)/);
+  assert.match(page, /<AgentTabs current=\{agent\} \/>/, "the page asks which agent is being trained");
+  assert.match(page, /fieldDefaults=\{\{ learn_from_link: \{ trains: agent \?\? TRAINS_ALL \} \}\}/, "and starts the Learn form on that agent");
+  assert.match(page, /key=\{agent \?\? TRAINS_ALL\}/, "a new tab starts the form again");
   assert.match(page, /async function safely/, "a rejected read becomes degraded instead of a crashed page");
   assert.match(page, /\{ \.\.\.EMPTY_CORPUS_STATS, degraded: true \}/);
-  assert.match(page, /<LearnedNotes stats=\{stats\} items=\{items\} \/>/);
+  assert.match(page, /<LearnedNotes stats=\{stats\} items=\{items\} agent=\{agent\} \/>/);
   assert.ok(page.indexOf("requireOperator()") < page.indexOf("getCorpusStats("), "the gate runs before any read");
   console.log("  ok - the page is gated first and degrades a failed read");
 
@@ -63,7 +73,7 @@ async function main(): Promise<void> {
   // finished run must make the list re-read.
   const body = page.slice(page.indexOf("export default async function AgentTrainingPage"));
   assert.doesNotMatch(body, /getCorpus(Stats|Items)\(/, "the page body awaits no corpus read: they live in the Suspense child");
-  assert.match(body, /<Suspense[\s\S]*<LearnedNotesLoader tenantId=\{founder\.tenantId\} \/>[\s\S]*<\/Suspense>/);
+  assert.match(body, /<Suspense[\s\S]*<LearnedNotesLoader tenantId=\{founder\.tenantId\} agent=\{agent\} \/>[\s\S]*<\/Suspense>/);
   assert.ok(body.indexOf("<ToolsSection") < body.indexOf("<Suspense"), "the Learn control is drawn before the streamed list");
   const refresher = read("components/tools/RefreshOnToolRun.tsx");
   assert.match(refresher, /addEventListener\(TOOL_RUN_FINISHED_EVENT/);

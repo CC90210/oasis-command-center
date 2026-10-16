@@ -253,7 +253,7 @@ async function main() {
     CREATE INDEX idx_post_analytics_published ON post_analytics (tenant_id, published_at DESC);
     CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, kind TEXT NOT NULL,
       label TEXT NOT NULL, title TEXT, source_url TEXT, state TEXT NOT NULL, last_error TEXT,
-      contributed_by TEXT NOT NULL, created_at TEXT NOT NULL, indexed_at TEXT);
+      contributed_by TEXT NOT NULL, created_at TEXT NOT NULL, indexed_at TEXT, trains TEXT);
     CREATE TABLE marketing_asset (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, track TEXT, status TEXT NOT NULL,
       brand_slug TEXT NOT NULL, brand_name TEXT, author_email TEXT, published_at TEXT);
     CREATE TABLE marketing_review (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL, acted_on_at TEXT);

@@ -6,18 +6,18 @@
  * the same rows Content > Training already lists; this puts them on the page
  * that writes them.
  *
- * HONEST ABOUT WHAT HAPPENS NEXT. Today the notes are stored and listed (here and
- * on Training). No agent reads them into its writing yet: per-agent training is
- * the next project (docs/superpowers/specs/2026-10-14-money-automations-agent-
- * training-design.md, section 5). Calling a list of saved links "training" with
- * no consumer would be the same overclaim the design doc names, so the footer
- * says exactly that instead.
+ * PER AGENT (2026-10-15). Each note trains one agent, or all of them (lib/training/trains.ts), and that
+ * agent reads its newest notes before it answers (lib/os/training-notes.ts, from
+ * lib/os/department-agent.ts). The page shows one agent at a time: the list is that agent's notes, each
+ * row says who it trains, and the footer says exactly what the agent does with them.
  *
  * Presentational and server-safe: the page does the reads and passes them in, so
  * a failed read arrives as `degraded` and says so, never as "nothing yet".
  */
 import type { CorpusItems, CorpusStats } from "@/lib/founders/marketing-queries";
 import { ingestStateCopy, type IngestState } from "@/lib/founders/ingest-core";
+import { TRAINING_NOTES_MAX, notesTrain, trainsLabel, type Trains } from "@/lib/training/trains";
+import type { DepartmentKey } from "@/lib/os/types";
 
 const SHOWN = 15;
 export const TRAINING_HREF = "/founders/marketing/train";
@@ -44,14 +44,23 @@ export function learnedSummary(stats: CorpusStats): string {
   return parts.join(" · ");
 }
 
-export function LearnedNotes({ stats, items }: { stats: CorpusStats; items: CorpusItems }) {
+/** The rows one agent reads (its own, the ones for every agent, and for Marketing the older ones); every row for "all agents". */
+export function rowsFor(rows: CorpusItems["rows"], agent: DepartmentKey | null): CorpusItems["rows"] {
+  return agent ? rows.filter((r) => notesTrain(r.trains, agent)) : rows;
+}
+
+export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStats; items: CorpusItems; agent?: DepartmentKey | null }) {
+  const rows = rowsFor(items.rows, agent);
+  const who = agent ? trainsLabel(agent) : null;
   return (
     <section aria-labelledby="learned-notes-title" className="space-y-3" data-testid="learned-notes">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 id="learned-notes-title" className="text-sm font-semibold text-fg">
-          What it has learned
+          {who ? `What the ${who} agent has learned` : "What your agents have learned"}
         </h2>
-        {!stats.degraded && stats.total > 0 && <span className="text-xs text-fg-muted">{learnedSummary(stats)}</span>}
+        {!stats.degraded && stats.total > 0 && (
+          <span className="text-xs text-fg-muted">{who && !items.degraded ? `${rows.length} for ${who} · ` : ""}{learnedSummary(stats)} in all</span>
+        )}
       </div>
 
       {stats.degraded ? (
@@ -62,13 +71,15 @@ export function LearnedNotes({ stats, items }: { stats: CorpusStats; items: Corp
         <p className="rounded-xl border border-bg-border bg-bg-panel p-4 text-sm text-fg-muted">
           The counts above are current, but the list did not load. Nothing has been lost; try again in a minute.
         </p>
-      ) : items.rows.length === 0 ? (
+      ) : rows.length === 0 ? (
         <p className="rounded-xl border border-bg-border bg-bg-panel p-4 text-sm text-fg-muted">
-          Nothing learned yet. Paste a link above and it appears here once it has been read.
+          {who
+            ? `Nothing has been taught to the ${who} agent yet. Paste a link above, with ${who} chosen, and it appears here once it has been read.`
+            : "Nothing learned yet. Paste a link above and it appears here once it has been read."}
         </p>
       ) : (
         <ul className="divide-y divide-bg-border rounded-xl border border-bg-border bg-bg-panel">
-          {items.rows.slice(0, SHOWN).map((row) => {
+          {rows.slice(0, SHOWN).map((row) => {
             const state = ingestStateCopy((row.state as IngestState) || "queued");
             const intent = intentLabel(row.label);
             const when = shortDate(row.created_at);
@@ -79,6 +90,7 @@ export function LearnedNotes({ stats, items }: { stats: CorpusStats; items: Corp
                 </div>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-dim">
                   <span className={state.tone === "bad" ? "text-status-warm" : "text-fg-muted"}>{state.label}</span>
+                  <span>· Trains: {trainsLabel(row.trains as Trains | null)}</span>
                   {intent && <span>· {intent}</span>}
                   {when && <span>· {when}</span>}
                   {row.source_url && (
@@ -101,9 +113,9 @@ export function LearnedNotes({ stats, items }: { stats: CorpusStats; items: Corp
         </ul>
       )}
 
-      {items.rows.length > SHOWN && (
+      {rows.length > SHOWN && (
         <p className="text-xs text-fg-dim">
-          Showing the newest {SHOWN} of {stats.total}.{" "}
+          Showing the newest {SHOWN} of {rows.length}.{" "}
           <a href={TRAINING_HREF} className="underline underline-offset-2 hover:text-fg-muted">
             See all on Training
           </a>
@@ -111,11 +123,11 @@ export function LearnedNotes({ stats, items }: { stats: CorpusStats; items: Corp
       )}
 
       <p className="text-xs leading-5 text-fg-dim">
-        Each link is read in the background and saved as a style note, listed here and on{" "}
+        Each link is read and saved as a style note for the agent you chose (also listed on{" "}
         <a href={TRAINING_HREF} className="underline underline-offset-2 hover:text-fg-muted">
           Content &gt; Training
         </a>
-        . No agent reads these notes into its writing yet; training a specific agent on them is the next step.
+        ). Before it answers, an agent reads its {TRAINING_NOTES_MAX} newest notes as examples of how to write: openings, techniques and tone. They never change what it is allowed to do.
       </p>
     </section>
   );
