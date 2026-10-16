@@ -318,18 +318,45 @@ const CLAIM_FAMILIES: ReadonlyArray<{ kind: ClaimKind; re: RegExp }> = (
   ] as const
 ).map(([kind, re]) => ({ kind, re: new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`) }));
 
+/** A family's place in the order the reasons are said (its first entry in CLAIM_FAMILIES). */
+const KIND_RANK: ReadonlyMap<ClaimKind, number> = new Map(
+  CLAIM_FAMILIES.map(({ kind }, i) => [kind, i] as const).reverse(),
+);
+
 /**
- * Every phrase in a sentence that makes it a claim, each with its family, in
- * family order and then as written. For grounding copy phrase by phrase
- * (#636's write-page vetting), so no second list of claim words has to follow
- * this one.
+ * Part of a word or a figure: letters, digits, an apostrophe or a hyphen
+ * ("best-rated", "money-back"), and a separator between two digits ("2,500").
+ */
+function inWord(s: string, i: number): boolean {
+  const c = s[i];
+  if (c === undefined) return false;
+  if (/[A-Za-z0-9'-]/.test(c)) return true;
+  return /[.,:]/.test(c) && /[0-9]/.test(s[i - 1] ?? "") && /[0-9]/.test(s[i + 1] ?? "");
+}
+
+/**
+ * Every phrase in a sentence that makes it a claim, each with its family:
+ * families in the order the reasons are said, and within one, as the sentence
+ * reads. Each phrase is widened to the whole words it sits in, so a shorter
+ * alternative never hides a stronger one ("Our best-rated", never "Our best";
+ * "$2,500", never "$"). For grounding copy phrase by phrase (#636's
+ * write-page vetting), so no second list of claim words has to follow this one.
  */
 export function claimPhrases(sentence: string): ClaimPhrase[] {
-  const out: ClaimPhrase[] = [];
+  const found = new Map<string, { kind: ClaimKind; start: number; phrase: string }>();
   for (const { kind, re } of CLAIM_FAMILIES) {
-    for (const m of sentence.matchAll(re)) if (m[0]) out.push({ kind, phrase: m[0] });
+    for (const m of sentence.matchAll(re)) {
+      if (!m[0] || m.index === undefined) continue;
+      let start = m.index;
+      let end = m.index + m[0].length;
+      while (start > 0 && inWord(sentence, start - 1)) start--;
+      while (end < sentence.length && inWord(sentence, end)) end++;
+      found.set(`${kind}:${start}:${end}`, { kind, start, phrase: sentence.slice(start, end) });
+    }
   }
-  return out;
+  return [...found.values()]
+    .sort((a, b) => KIND_RANK.get(a.kind)! - KIND_RANK.get(b.kind)! || a.start - b.start)
+    .map(({ kind, phrase }) => ({ kind, phrase }));
 }
 
 /** Each family, as the owner reads it on the tick line: a result and a claim word quote what was written. */

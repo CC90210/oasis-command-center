@@ -205,8 +205,17 @@ async function main() {
     has(s, "superlative", "The best");
     has(s, "who else uses it", "trusted by");
     has(s, "time frame", "in days");
-    has(s, "money", "$");
+    has(s, "money", "$2,500");
     has(s, "number", "2,500");
+    // A shorter alternative never hides a stronger one: the phrase is the whole compound (Codex on #645).
+    has("Our best-rated system.", "superlative", "Our best-rated");
+    has("Or CA$690 a month.", "money", "CA$690");
+    assert.ok(!claims.claimPhrases("Our best-rated system.").some((p) => p.phrase === "Our best"), "the compound was cut short");
+    // Within one family, as the sentence reads (Codex on #645).
+    assert.deepEqual(
+      claims.claimPhrases("Two clients, 3 leads, and doubled revenue.").filter((p) => p.kind === "number").map((p) => p.phrase),
+      ["Two clients", "3", "doubled"],
+    );
     // Two of one family: both named, in order.
     assert.deepEqual(
       claims.claimPhrases("The fastest setup at the cheapest price.").filter((p) => p.kind === "superlative").map((p) => p.phrase),
