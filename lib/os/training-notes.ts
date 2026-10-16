@@ -56,6 +56,8 @@ export function trainsWhere(department: DepartmentKey): { sql: string; args: str
 
 const NOTE_FIELD_CHARS = 280;
 const BLOCK_CHARS = 3_000;
+/** How far back the read looks for usable notes: newer rows with nothing usable must not hide older ones. */
+const SCAN_ROWS_MAX = 100;
 
 export type TrainingNote = {
   title: string;
@@ -63,6 +65,7 @@ export type TrainingNote = {
   hook: string | null;
   tone: string | null;
   pacing: string | null;
+  structure: string | null;
   steal: string | null;
   avoid: string | null;
 };
@@ -84,36 +87,50 @@ function parseExtraction(raw: unknown): Record<string, unknown> | null {
   }
 }
 
+/** One stored row as a note, or null when it holds nothing the agent can use. */
+function noteOf(r: Record<string, unknown>): TrainingNote | null {
+  const analysis = parseExtraction(r.extraction)?.analysis as Record<string, unknown> | undefined;
+  if (!analysis || typeof analysis !== "object") return null;
+  const note: TrainingNote = {
+    title: textOf(r.title, 120) ?? textOf(r.source_url, 120) ?? "A saved example",
+    label: String(r.label ?? "neutral"),
+    hook: textOf(analysis.hook),
+    tone: textOf(analysis.tone),
+    pacing: textOf(analysis.pacing),
+    structure: textOf(analysis.structure),
+    steal: textOf(analysis.steal),
+    avoid: textOf(analysis.avoid),
+  };
+  return note.hook || note.tone || note.pacing || note.structure || note.steal || note.avoid ? note : null;
+}
+
 /**
  * The newest learned notes that train this department's agent: its own, the ones for every agent, and
- * (for Marketing) the ones saved before an agent could be chosen. Only finished notes with an analysis.
+ * (for Marketing) the ones saved before an agent could be chosen. Only finished notes with something
+ * usable in their analysis. Read a page at a time (stable order, id breaks ties) until it has `limit`
+ * notes or has looked at SCAN_ROWS_MAX rows, so newer rows with nothing usable (an upload with no
+ * analysis, say) cannot hide the older notes the owner taught.
  */
 export async function readTrainingNotes(db: Client, tenantId: string, department: DepartmentKey, limit = TRAINING_NOTES_MAX): Promise<TrainingNote[]> {
+  const want = Math.max(1, Math.min(limit, 20));
+  const pageSize = want * 2;
   const where = trainsWhere(department);
-  const rs = await db.execute({
-    sql: `SELECT title, source_url, label, extraction
-          FROM marketing_corpus
-          WHERE tenant_id = ? AND state = 'indexed' AND ${where.sql}
-          ORDER BY COALESCE(indexed_at, updated_at, created_at) DESC
-          LIMIT ?`,
-    args: [tenantId, ...where.args, Math.max(1, Math.min(limit, 20)) * 2],
-  });
   const notes: TrainingNote[] = [];
-  for (const raw of rs.rows) {
-    const r = raw as unknown as Record<string, unknown>;
-    const analysis = parseExtraction(r.extraction)?.analysis as Record<string, unknown> | undefined;
-    if (!analysis || typeof analysis !== "object") continue;
-    const note: TrainingNote = {
-      title: textOf(r.title, 120) ?? textOf(r.source_url, 120) ?? "A saved example",
-      label: String(r.label ?? "neutral"),
-      hook: textOf(analysis.hook),
-      tone: textOf(analysis.tone),
-      pacing: textOf(analysis.pacing),
-      steal: textOf(analysis.steal),
-      avoid: textOf(analysis.avoid),
-    };
-    if (note.hook || note.tone || note.pacing || note.steal || note.avoid) notes.push(note);
-    if (notes.length >= limit) break;
+  for (let offset = 0; offset < SCAN_ROWS_MAX && notes.length < want; offset += pageSize) {
+    const rs = await db.execute({
+      sql: `SELECT title, source_url, label, extraction
+            FROM marketing_corpus
+            WHERE tenant_id = ? AND state = 'indexed' AND ${where.sql}
+            ORDER BY COALESCE(indexed_at, updated_at, created_at) DESC, id DESC
+            LIMIT ? OFFSET ?`,
+      args: [tenantId, ...where.args, pageSize, offset],
+    });
+    for (const raw of rs.rows) {
+      const note = noteOf(raw as unknown as Record<string, unknown>);
+      if (note) notes.push(note);
+      if (notes.length >= want) break;
+    }
+    if (rs.rows.length < pageSize) break;
   }
   return notes;
 }
@@ -132,6 +149,7 @@ export function trainingBlock(notes: readonly TrainingNote[]): string {
       n.steal && `technique to reuse: ${n.steal}`,
       n.tone && `tone: ${n.tone}`,
       n.pacing && `pacing: ${n.pacing}`,
+      n.structure && `structure: ${n.structure}`,
       n.avoid && `does not transfer: ${n.avoid}`,
     ].filter(Boolean);
     return `${i + 1}. [${LABEL_WORDS[n.label] ?? "For reference"}] ${n.title}. ${parts.join("; ")}.`;
