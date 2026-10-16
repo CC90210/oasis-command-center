@@ -280,6 +280,11 @@ const SOCIAL_PROOF_RE = new RegExp(
 const TIMEFRAME_RE =
   /\b(?:same|next)[- ](?:(?:business|working)[- ])?day\b|\bovernight\b|\b(?:in|within)\s+(?:a\s+few\s+)?(?:(?:business|working)\s+)?(?:minutes|hours|days|weeks)\b|\b(?:in|within)\s+(?:a|one|an)\s+(?:single\s+)?(?:(?:business|working)\s+)?(?:minute|hour|day|week|month)\b/i;
 /**
+ * A promise of no wait at all: "instant", "instantly", "immediate(ly)", "right
+ * away", "in/within seconds". A promised delivery time, like a time frame.
+ */
+const INSTANT_RE = /\binstant(?:ly)?\b|\bimmediate(?:ly)?\b|\bright\s+away\b|\b(?:in|within)\s+seconds\b/i;
+/**
  * Words that are a claim on their own. The bare words client(s), result(s)
  * and revenue are not: they name a section or a form question far more often
  * than they claim anything; COUNT_RE and RESULT_RE catch them in a claim.
@@ -288,7 +293,17 @@ const WORD_RE =
   /\b(guarantee[ds]?|proven|booked|refunds?|refunded|money[ -]back|risk[ -]free|roi|profits?|profitable|savings?)\b/i;
 
 /** The family a claim phrase belongs to (claimReasons says the same thing in a sentence). */
-export type ClaimKind = "money" | "percentage" | "multiplier" | "number" | "result" | "superlative" | "who else uses it" | "time frame" | "word";
+export type ClaimKind =
+  | "money"
+  | "percentage"
+  | "multiplier"
+  | "number"
+  | "result"
+  | "superlative"
+  | "who else uses it"
+  | "time frame"
+  | "instant"
+  | "word";
 
 /** One phrase that makes a sentence a claim, as it is written there. */
 export type ClaimPhrase = { kind: ClaimKind; phrase: string };
@@ -314,6 +329,7 @@ const CLAIM_FAMILIES: ReadonlyArray<{ kind: ClaimKind; re: RegExp }> = (
     ["superlative", SUPERLATIVE_RE],
     ["who else uses it", SOCIAL_PROOF_RE],
     ["time frame", TIMEFRAME_RE],
+    ["instant", INSTANT_RE],
     ["word", WORD_RE],
   ] as const
 ).map(([kind, re]) => ({ kind, re: new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`) }));
@@ -369,6 +385,7 @@ const REASON: Readonly<Record<ClaimKind, (phrase: string) => string>> = {
   superlative: () => "a superlative",
   "who else uses it": () => "who else uses it",
   "time frame": () => "a time frame",
+  instant: () => "an instant promise",
   word: (p) => `the word "${p.toLowerCase()}"`,
 };
 
