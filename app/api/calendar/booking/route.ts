@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { BOOK_FORM_SLUG } from "@/lib/forms/public-booking-config";
+import { publicBookingFormEnabled } from "@/lib/forms/public-booking";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { applyBookingSettingsEdit } from "@/lib/booking/settings-edit";
 import {
@@ -29,18 +30,6 @@ export const dynamic = "force-dynamic";
  * OASIS only for now: the public booking engine serves the OASIS workspace.
  * Any other workspace gets { available: false } and the card is not drawn.
  */
-
-async function bookFormLive(): Promise<boolean> {
-  const form = await getServiceSupabase()
-    .from("forms")
-    .select("id,enabled")
-    .eq("tenant_id", AI_AUDIT_TENANT_ID)
-    .eq("slug", BOOK_FORM_SLUG)
-    .maybeSingle();
-  if (form.error) throw new Error(`booking_form_read_failed:${form.error.message}`);
-  const row = form.data as { id?: string; enabled?: unknown } | null;
-  return Boolean(row?.id && (row.enabled === true || row.enabled === 1));
-}
 
 /**
  * Whether each host's own Google Calendar can be read. Availability refuses to
@@ -76,7 +65,7 @@ export async function GET(): Promise<NextResponse> {
       loadBookingSettings(owner.tenantId),
       bookingRoster(owner.tenantId),
       listCalendars(owner, { create: false }),
-      bookFormLive(),
+      publicBookingFormEnabled(getServiceSupabase(), BOOK_FORM_SLUG),
     ]);
     const identities = hostIdentities(roster);
     const statuses = await Promise.all(

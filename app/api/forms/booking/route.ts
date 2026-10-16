@@ -15,6 +15,7 @@ import {
   publicBookingFounders,
   publicBookingHostsById,
   publicBookingOwnershipPatch,
+  stringList,
   type PublicBookingSlot,
   readPublicBookingJson,
   removePublicBookingScheduleMirrors,
@@ -43,11 +44,6 @@ const RESOLUTION_ERRORS = new Set([
   "public_booking_founders_unavailable",
 ]);
 
-function stringIds(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.flatMap((item) => (typeof item === "string" && item.trim() ? [item.trim()] : []))
-    : [];
-}
 const PROVIDER_ERRORS = new Set([
   "google_calendar_not_connected",
   "calendar_scope_required",
@@ -179,10 +175,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     try {
       // The hosts this booking was made with (stored on the lead), so a replay
       // repairs the same Schedule copies the first request wrote.
-      const storedHostIds = stringIds(context.lead.public_booking_host_ids);
+      const storedHostIds = stringList(context.lead.public_booking_host_ids);
       const hosts = await publicBookingHostsById(
         context.tenantId,
-        storedHostIds.length ? storedHostIds : stringIds([context.lead.audit_host_user_id]),
+        storedHostIds.length ? storedHostIds : stringList([context.lead.audit_host_user_id]),
       );
       await mirrorPublicBookingToSchedules({
         db,

@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
-import { loadPublicBookingAvailability, PUBLIC_BOOKING_TIME_ZONE } from "@/lib/forms/public-booking";
+import {
+  loadPublicBookingAvailability,
+  publicBookingFormEnabled,
+  PUBLIC_BOOKING_TIME_ZONE,
+} from "@/lib/forms/public-booking";
 import { isPublicBookingFormSlug, publicBookingDurationMinutes } from "@/lib/forms/public-booking-config";
 import { rateLimit } from "@/lib/rate-limit";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -43,15 +47,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: "booking_form_not_found" }, { status: 404 });
   }
   try {
-    const form = await getServiceSupabase()
-      .from("forms")
-      .select("id,enabled")
-      .eq("tenant_id", AI_AUDIT_TENANT_ID)
-      .eq("slug", formSlug)
-      .maybeSingle();
-    if (form.error) throw new Error(`booking_form_read_failed:${form.error.message}`);
-    const row = form.data as { id?: string; enabled?: unknown } | null;
-    if (!row?.id || !(row.enabled === true || row.enabled === 1)) {
+    if (!(await publicBookingFormEnabled(getServiceSupabase(), formSlug))) {
       return NextResponse.json({ ok: false, error: "booking_form_not_found" }, { status: 404 });
     }
     const durationMinutes = publicBookingDurationMinutes(formSlug);

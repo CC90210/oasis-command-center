@@ -240,7 +240,8 @@ export async function publicBookingFounders(tenantId: string): Promise<{ host: F
   return { host: host as Founder, opener: opener as Founder };
 }
 
-function stringList(value: unknown): string[] {
+/** A JSON array of non-blank strings (trimmed); anything else is empty. */
+export function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
     const normalized = clean(item);
@@ -357,6 +358,23 @@ export async function resolvePublicFunnelBooking(
     lead,
     answers,
   };
+}
+
+/**
+ * Is this OASIS booking form present and switched on? Asked by the token-free
+ * open-times route (/book's calendar) and the Schedule's Booking link card, so
+ * both read "live" the same way. libSQL returns booleans as 0/1.
+ */
+export async function publicBookingFormEnabled(db: SupabaseClient, formSlug: string): Promise<boolean> {
+  const form = await db
+    .from("forms")
+    .select("id,enabled")
+    .eq("tenant_id", AI_AUDIT_TENANT_ID)
+    .eq("slug", formSlug)
+    .maybeSingle();
+  if (form.error) throw new Error(`booking_form_read_failed:${form.error.message}`);
+  const row = form.data as { id?: string; enabled?: unknown } | null;
+  return Boolean(row?.id && (row.enabled === true || row.enabled === 1));
 }
 
 /** A host as a booking sees them: who, their role on the call, and where the call lands. */
