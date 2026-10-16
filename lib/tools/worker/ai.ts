@@ -91,7 +91,7 @@ import { resolveCall } from "@/lib/ai/model-registry";
 import { classifyStreamError } from "@/lib/os/channel/outcome";
 import { redactAll } from "@/lib/secret-redaction";
 
-export type ToolSurface = "tools.learn_from_link" | "tools.repurpose_post" | "automations.draft";
+export type ToolSurface = "tools.learn_from_link" | "tools.repurpose_post" | "automations.draft" | "offer_pages.write";
 
 export type ToolModelDeps = {
   readAccount: (tenantId: string) => Promise<WorkspaceAiAccount | null>;

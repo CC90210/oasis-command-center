@@ -14,6 +14,7 @@ import { useRouter } from "next/navigation";
 import { Loader2, Sparkles } from "lucide-react";
 import { OFFER_TEMPLATES } from "@/lib/offer-pages/templates";
 import type { TemplateKey } from "@/lib/offer-pages/types";
+import { requestWrittenPage, WRITE_PAGE_MIN_DESCRIPTION } from "@/lib/offer-pages/write-page-client";
 
 export function TurnIntoOffer({ formId }: { formId: string }) {
   const router = useRouter();
@@ -21,8 +22,16 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
   const [template, setTemplate] = useState<TemplateKey>("free_audit");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Write my page" (lib/offer-pages/write-page.ts), on by default.
+  const [description, setDescription] = useState("");
+  const [writeIt, setWriteIt] = useState(true);
+  const [writing, setWriting] = useState(false);
 
   async function go() {
+    if (writeIt && description.trim().length < WRITE_PAGE_MIN_DESCRIPTION) {
+      setError("Say in a sentence or two what the offer is and does, or untick Write the page for me.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -35,6 +44,13 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
       if (!data.ok) {
         setError(data.message || "Couldn't make the page. Try again in a moment.");
         return;
+      }
+      if (writeIt) {
+        setWriting(true);
+        const written = await requestWrittenPage(formId, { description });
+        setWriting(false);
+        // The page exists either way; say why its words are missing, then show it.
+        if (!written.ok) setError(`The page is made. ${written.message}`);
       }
       router.refresh();
     } catch {
@@ -75,13 +91,28 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
           </button>
         ))}
       </div>
+      <label className="block text-[12px] text-fg-muted">
+        What does this offer do, and who is it for?
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={3}
+          maxLength={2000}
+          className="input mt-1 w-full"
+          placeholder="A sentence or two, in your own words. The page is written from this."
+        />
+      </label>
+      <label className="flex items-center gap-2 text-[12px] text-fg">
+        <input type="checkbox" checked={writeIt} onChange={(e) => setWriteIt(e.target.checked)} />
+        Write the page for me (a draft: you review it, and set prices yourself, before it goes live)
+      </label>
       <p className="text-[12px] text-fg-muted">
-        The page starts as a draft with only this form&apos;s own headline. Your link keeps showing the plain form until you publish.
+        The page starts as a draft. Your link keeps showing the plain form until you publish.
       </p>
       {error ? <p className="text-[13px] text-rose-400">{error}</p> : null}
       <div className="flex gap-2">
         <button type="button" className="btn-primary !px-3 !py-1.5 text-xs" onClick={go} disabled={busy}>
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Make the draft page"}
+          {writing ? "Writing your page..." : busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Make the draft page"}
         </button>
         <button type="button" className="btn-secondary !px-3 !py-1.5 text-xs" onClick={() => setOpen(false)}>
           Cancel

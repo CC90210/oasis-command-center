@@ -149,6 +149,7 @@ export const USAGE_SURFACES = [
   "tools.repurpose_post", //  lib/tools/worker/repurpose-post.ts, Content > Tools "Repurpose a post"
   "automations.run", //      a department task's run (lib/os/department-agent.ts AgentTurnRequest.surface; jobId = the run)
   "automations.draft", //    the department-task drafter on a workspace AI account (lib/tools/worker/ai.ts runToolModelCall)
+  "offer_pages.write", //    app/api/forms/[id]/offer/write, "Write my page" on a workspace AI account (runToolModelCall)
 ] as const;
 export type UsageSurface = (typeof USAGE_SURFACES)[number] | `infer:${string}`;
 const INFER_SURFACE_RE = /^infer:[A-Za-z0-9_.:-]{1,100}$/;

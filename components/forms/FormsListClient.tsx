@@ -52,6 +52,7 @@ import { OffersCardsGrid, type OfferCardEntry } from "./OffersCardsClient";
 import type { OfferCardViewModel } from "./OfferCard";
 import { offerCreateSlug, slugTakenMessage, ROUTER_SLUG } from "@/lib/offers/router-create";
 import { offerShareablePath } from "@/lib/offers/short-links";
+import { requestWrittenPage, WRITE_PAGE_MIN_DESCRIPTION } from "@/lib/offer-pages/write-page-client";
 import type { FunnelCounts } from "@/lib/offers/tracking-store";
 
 type FormRow = {
@@ -719,6 +720,14 @@ function NewOfferPicker({
   const [slugTouched, setSlugTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Write my page" (lib/offer-pages/write-page.ts): on by default, so a new
+  // offer opens on a page with words in it, not an empty template.
+  const [description, setDescription] = useState("");
+  const [writeIt, setWriteIt] = useState(true);
+  const [phase, setPhase] = useState<"form" | "writing">("form");
+  // Set when the offer exists but its words could not be written: the owner
+  // can still open it (the draft is saved) instead of being stuck here.
+  const [createdId, setCreatedId] = useState<string | null>(null);
   const typedSlug = slugTouched ? slug : slugify(name);
   const linkName = offerCreateSlug(routerMode, typedSlug);
 
@@ -726,6 +735,9 @@ function NewOfferPicker({
     setError(null);
     if (!name.trim()) return setError("Give the offer a name.");
     if (!SLUG_RE.test(linkName)) return setError("The link name needs at least two letters or numbers, with dashes between words.");
+    if (writeIt && description.trim().length < WRITE_PAGE_MIN_DESCRIPTION) {
+      return setError("Say in a sentence or two what the offer is and does, or untick Write the page for me.");
+    }
     setBusy(true);
     try {
       // The template's form steps, in the workspace's own look. No headline: the
@@ -760,6 +772,16 @@ function NewOfferPicker({
       if (!made.ok) {
         setError(made.message || "The form was made, but its page wasn't. Open the form from the list and choose Turn into an offer.");
         return;
+      }
+      if (writeIt) {
+        setPhase("writing");
+        const written = await requestWrittenPage(data.form.id, { description });
+        if (!written.ok) {
+          setPhase("form");
+          setCreatedId(data.form.id);
+          setError(`The offer is made. ${written.message}`);
+          return;
+        }
       }
       onCreated(data.form.id);
     } catch {
@@ -836,21 +858,51 @@ function NewOfferPicker({
           )}
         </div>
 
+        <label className="mt-4 block text-xs text-fg-muted">
+          What does this offer do, and who is it for?
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            maxLength={2000}
+            className="input mt-1 w-full"
+            placeholder="A sentence or two, in your own words. The page is written from this."
+          />
+        </label>
+        <label className="mt-2 flex items-center gap-2 text-xs text-fg">
+          <input type="checkbox" checked={writeIt} onChange={(e) => setWriteIt(e.target.checked)} />
+          Write the page for me (a draft: you review it, and set prices yourself, before it goes live)
+        </label>
+
         {error ? <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-400">{error}</div> : null}
 
         <div className="mt-6 flex items-center justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-fg-muted hover:text-fg">
             Cancel
           </button>
-          <button
-            type="button"
-            onClick={create}
-            disabled={busy}
-            className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-bold text-bg-deep hover:bg-accent-bright disabled:opacity-50"
-          >
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            {routerMode ? "Create the start-here page" : "Create the offer"}
-          </button>
+          {createdId ? (
+            <button
+              type="button"
+              onClick={() => onCreated(createdId)}
+              className="inline-flex items-center gap-2 rounded-lg border border-bg-border px-4 py-2 text-sm font-semibold text-fg hover:border-bg-border-strong"
+            >
+              Open the page anyway
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={create}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-bold text-bg-deep hover:bg-accent-bright disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {phase === "writing"
+                ? "Writing your page..."
+                : routerMode
+                  ? "Create the start-here page"
+                  : "Create the offer"}
+            </button>
+          )}
         </div>
         <p className="mt-3 text-[11px] text-fg-dim">
           The page goes public when you press Publish. Until then its link shows only a plain form, titled with your
