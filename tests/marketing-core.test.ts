@@ -33,6 +33,7 @@ import {
   isBrandGroupKey,
   stalePublishWarning,
   summarizePublishIntent,
+  awaitingConfirmation,
   buildMediaPath,
   channelBreadcrumb,
   channelsForTrack,
@@ -962,10 +963,35 @@ async function fallbackChecks() {
     null,
   );
   assert.deepEqual(done.outcomes, [
-    { platform: "instagram", ok: true, detail: null },
-    { platform: "twitter", ok: false, detail: "x refused: too long" },
+    { platform: "instagram", ok: true, detail: null, status: null, url: null },
+    { platform: "twitter", ok: false, detail: "x refused: too long", status: null, url: null },
   ]);
   assert.equal(done.reason, null);
+
+  // The drain's reconcile (BEA 096e25c8): status + live link per network, or a
+  // refusal after Zernio accepted it.
+  const reconciled = summarizePublishIntent(
+    JSON.stringify({
+      instagram: { ok: true, post_id: "p", status: "published", url: "https://www.instagram.com/reel/DcKGALDjk6k/" },
+      tiktok: { ok: true, post_id: "p", status: "pending" },
+      youtube: { ok: false, post_id: "p", status: "failed", error: "the network refused it (Zernio gave no reason)" },
+      threads: { ok: true, post_id: "p", status: "published", url: "javascript:alert(1)" },
+    }),
+    null,
+  );
+  const by = Object.fromEntries(reconciled.outcomes.map((o) => [o.platform, o]));
+  assert.equal(by.instagram.url, "https://www.instagram.com/reel/DcKGALDjk6k/");
+  assert.equal(by.instagram.status, "published");
+  assert.equal(by.youtube.detail, "the network refused it (Zernio gave no reason)");
+  assert.equal(by.threads.url, null, "a non-https link is never rendered as an href");
+  assert.equal(awaitingConfirmation(by.instagram), false, "live = confirmed");
+  assert.equal(awaitingConfirmation(by.tiktok), true, "still posting = keep watching");
+  assert.equal(awaitingConfirmation(by.youtube), false, "a refusal is final");
+  assert.equal(awaitingConfirmation(done.outcomes[0]), true, "accepted, not yet read = keep watching");
+  assert.equal(
+    summarizePublishIntent("{}", "refused after Zernio accepted it - threads: the network refused it (Zernio gave no reason)").reason,
+    "Sent, then turned down by the network: threads: the network refused it (the posting service gave no reason). Each network's result is below.",
+  );
 
   // Mid-publish the row holds the dispatch marker, which is not an outcome.
   const dispatching = summarizePublishIntent(

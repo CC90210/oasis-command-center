@@ -23,7 +23,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 
-import type { PublishOutcome } from "@/lib/founders-marketing-core";
+import { awaitingConfirmation, type PublishOutcome } from "@/lib/founders-marketing-core";
 
 /**
  * The channels reachable from here, and which of them can take a given asset,
@@ -105,16 +105,27 @@ export function AssetPublishPanel({
   // looked the same until someone reloaded. While the request is queued or
   // running, re-read the server every 8 s, for at most 20 minutes (the reaper's
   // window), so the panel ends on "Posted" or the failure's reason by itself.
+  //
+  // And after "posted": the drain's reconcile reads Zernio's per-network status
+  // (2 min after the post, then every minute) and writes the live link. Keep
+  // watching while a network is accepted-but-unconfirmed, for posts finished in
+  // the last 30 minutes only; an older unconfirmed row (2026-08-17 predates the
+  // reconcile) is not worth polling.
   const inFlight = lastIntent?.state === "queued" || lastIntent?.state === "running";
+  const confirming =
+    lastIntent?.state === "done" && (lastIntent.outcomes ?? []).some(awaitingConfirmation);
+  const finishedAt = lastIntent?.finished_at ?? null;
+  const watching = inFlight || confirming;
   useEffect(() => {
-    if (!inFlight) return;
+    if (!watching) return;
+    if (!inFlight && (!finishedAt || Date.now() - Date.parse(finishedAt) > 30 * 60_000)) return;
     const started = Date.now();
     const t = setInterval(() => {
       if (Date.now() - started > 20 * 60_000) return clearInterval(t);
       router.refresh();
     }, 8_000);
     return () => clearInterval(t);
-  }, [inFlight, router]);
+  }, [watching, inFlight, finishedAt, router]);
 
   async function submit() {
     // `busy` is set synchronously here rather than relying on the transition:
@@ -295,18 +306,45 @@ export function AssetPublishPanel({
 
           {(lastIntent.outcomes?.length ?? 0) > 0 && (
             <ul className="flex flex-wrap gap-1.5" aria-label="Result per network">
-              {lastIntent.outcomes!.map((o) => (
-                <li
-                  key={o.platform}
-                  title={o.detail ?? (o.ok ? "Accepted by the posting service" : "Refused")}
-                  className={
-                    "rounded-md px-2 py-0.5 font-semibold " +
-                    (o.ok ? "bg-accent/10 text-accent" : "bg-status-hot/10 text-status-hot")
-                  }
-                >
-                  {o.ok ? "✓" : "✕"} {channelLabel(o.platform)}
-                </li>
-              ))}
+              {lastIntent.outcomes!.map((o) => {
+                const live = o.ok && o.status === "published";
+                const working = o.ok && o.status !== null && !live;
+                const chip =
+                  "rounded-md px-2 py-0.5 font-semibold " +
+                  (!o.ok
+                    ? "bg-status-hot/10 text-status-hot"
+                    : working
+                      ? "bg-bg-deep text-fg-muted"
+                      : "bg-accent/10 text-accent");
+                const label = `${!o.ok ? "✕" : working ? "…" : "✓"} ${channelLabel(o.platform)}`;
+                const title = !o.ok
+                  ? (o.detail ?? "Refused")
+                  : live
+                    ? "Live on the network"
+                    : working
+                      ? `Still posting (${o.status})`
+                      : "Accepted by the posting service";
+                return (
+                  <li key={o.platform}>
+                    {/* The live post itself, once the drain has confirmed it. */}
+                    {live && o.url ? (
+                      <a
+                        href={o.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open the live post"
+                        className={chip + " inline-block underline-offset-2 hover:underline"}
+                      >
+                        {label} ↗
+                      </a>
+                    ) : (
+                      <span title={title} className={chip + " inline-block"}>
+                        {label}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
