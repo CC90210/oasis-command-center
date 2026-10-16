@@ -265,6 +265,7 @@ export async function loadConfirmList(
         name: form.name || form.slug,
         slug: form.slug,
         link: offerShareablePath(input.tenantSlug, form.slug),
+        previewPath: input.tenantSlug ? `/f/${input.tenantSlug}/${form.slug}?offer_preview=1` : null,
         formEnabled: form.enabled,
         status: statusOf(row),
         version: row.draftVersion,

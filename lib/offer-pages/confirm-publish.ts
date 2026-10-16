@@ -96,6 +96,13 @@ export type ConfirmOffer = {
   slug: string;
   /** The address to hand out (lib/offers/short-links.ts), or null when the workspace slug is unknown. */
   link: string | null;
+  /**
+   * The owner's preview of the draft, the whole page with its unconfirmed
+   * prices marked: the /f address with ?offer_preview=1 (a short address does
+   * not pass the preview through, as the builder's own preview knows). null
+   * when the workspace slug is unknown.
+   */
+  previewPath: string | null;
   formEnabled: boolean;
   status: OfferPageStatus;
   version: number;
