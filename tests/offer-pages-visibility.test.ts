@@ -195,11 +195,12 @@ t("pricing: only a tier with a name, a price and an owner's confirmation is draw
     >;
   const drawn = pricing(
     [
-      { name: "DIY", price: "$497", cadence: "a month", includes: ["The OS", " ", "Community"], confirmed: OK },
+      { name: "DIY", price: "$497", price_cad: "CA$690", cadence: "a month", includes: ["The OS", " ", "Community"], confirmed: OK },
       { name: "Turnkey", price: "From $2,500", highlighted: true },
       { name: "", price: "$1", confirmed: OK },
-      { name: "No price", price: "", confirmed: OK },
-      { name: "Managed", price: "$7,500", summary: "We run it.", highlighted: true, confirmed: OK },
+      // A Canadian price alone is not a price: the USD one is what draws a card.
+      { name: "No price", price: "", price_cad: "CA$5", confirmed: OK },
+      { name: "Managed", price: "$7,500", price_cad: " ", summary: "We run it.", highlighted: true, confirmed: OK },
       // Only a sign-off (who and when) draws a price: a bare true, or one with no one behind it, does not.
       { name: "Sneaky", price: "$9", confirmed: true },
       { name: "Nobody", price: "$9", confirmed: { by: " ", at: OK.at } },
@@ -208,8 +209,8 @@ t("pricing: only a tier with a name, a price and an owner's confirmation is draw
   );
   assert.equal(drawn.length, 1);
   assert.deepEqual(drawn[0].tiers, [
-    { index: 0, name: "DIY", price: "$497", cadence: "a month", summary: null, includes: ["The OS", "Community"], highlighted: false },
-    { index: 4, name: "Managed", price: "$7,500", cadence: null, summary: "We run it.", includes: [], highlighted: true },
+    { index: 0, name: "DIY", price: "$497", priceCad: "CA$690", cadence: "a month", summary: null, includes: ["The OS", "Community"], highlighted: false },
+    { index: 4, name: "Managed", price: "$7,500", priceCad: null, cadence: null, summary: "We run it.", includes: [], highlighted: true },
   ]);
   assert.equal(drawn[0].currencyNote, "Prices in CAD");
   assert.deepEqual(pricing([{ name: "Turnkey", price: "$2,500" }], "Prices in CAD"), [], "nothing confirmed: no section, no orphan note");

@@ -1,0 +1,157 @@
+{
+  "v": 1,
+  "template": "free_audit",
+  "theme": {
+    "canvas": "dark",
+    "accent": "#1FE3F0",
+    "logo": "workspace",
+    "layout": "split"
+  },
+  "nav": {
+    "pinned": [
+      "obstacles",
+      "what_you_get",
+      "work",
+      "faq"
+    ],
+    "cta_label": "Start my free audit"
+  },
+  "hero": {
+    "eyebrow": "Free AI Automation Audit",
+    "headline": "Find out what AI should take off your plate, before you buy anything",
+    "subheadline": "A few questions about how your business runs today: where the work piles up, what you have already tried, and how soon it needs fixing. Conaugh reads every one personally and follows up with you. Free AI audit. No pitch.",
+    "cta_label": "Start my free audit",
+    "video": null,
+    "show_transcript": false,
+    "vsl_script": {
+      "source": "maven",
+      "text": "AI AUTOMATION AUDIT VSL. Target 2 to 3 minutes. Conaugh on camera, eye level, quiet room, natural light from one side (the window-light look). Captions burned in. End on the OASIS end card.\nRule for the whole video: no number, result, client name or testimonial that is not confirmed. Where real proof belongs, the script says [CC: proof here]; leave it out if there is none yet.\n\n[BEAT 1. HOOK, 0:00 to 0:15]\nOn camera: If every question in your business comes back to you, this is for you.\n\n[BEAT 2. THE WEEK, 0:15 to 0:45]\nOn camera: The answers live in your head, your inbox and a dozen open tabs. Leads come in while you are doing the work. The same admin shows up every week: re-typing details, chasing invoices, sending the same reminders.\n\n[BEAT 3. WHY IT STAYS THAT WAY, 0:45 to 1:15]\nOn camera: Everyone says AI will fix it. So you buy a tool, and it does not know how your business actually runs. The problem was never the tool. Nobody looked at the work first.\n\n[BEAT 4. WHAT THE AUDIT IS, 1:15 to 1:50]\nOn camera: That is what this audit is for. You answer a few questions about how the business runs today: where the work piles up, what you have tried, and how soon you need it fixed. Revenue and budget are optional.\nOn camera: I read every one personally, and I follow up with you. You get a straight answer on where AI would take real work off your plate, where it would only add cost or risk, and where a simpler fix is enough.\n[CC: proof here, only if a client has given permission to be named]\n\n[BEAT 5. WHAT IT IS NOT, 1:50 to 2:10]\nOn camera: It is free, and it is not a sales call in disguise. Nothing is sold to you on the form. If OASIS is a fit, I will tell you what building it would involve. If it is not, I will tell you that too.\n\n[BEAT 6. CALL TO ACTION, 2:10 to 2:30]\nOn camera: Start your free audit below. If you are not ready, the free OASIS community is linked on this page. Come back when the timing is right."
+    }
+  },
+  "sections": [
+    {
+      "key": "obstacles",
+      "eyebrow": "Sound familiar?",
+      "title": "The whole week runs through you",
+      "items": [
+        {
+          "title": "Every question comes back to you",
+          "body": "The answers live in your head, your inbox and a dozen open tabs, so the team waits on you."
+        },
+        {
+          "title": "Leads wait while you are busy",
+          "body": "Enquiries arrive while you are doing the work, and follow-up happens whenever you remember."
+        },
+        {
+          "title": "The same admin, every week",
+          "body": "Re-typing details between systems, chasing invoices, sending the same reminders by hand."
+        },
+        {
+          "title": "Tools you bought and stopped using",
+          "body": "Each one promised to fix it. None of them knew how your business actually runs."
+        },
+        {
+          "title": "No idea where AI actually fits",
+          "body": "Everyone says AI will help. Nobody has told you which part of your week it should touch first."
+        }
+      ]
+    },
+    {
+      "key": "what_you_get",
+      "eyebrow": "The audit",
+      "title": "A real read on your operation, by a real person",
+      "items": [
+        {
+          "title": "Read by Conaugh, personally",
+          "body": "Your answers go to Conaugh McKenna, the founder of OASIS, not into an automated sequence. Conaugh reads every one personally."
+        },
+        {
+          "title": "A straight answer on where AI fits",
+          "body": "In the follow-up you hear where AI would take real work off your plate, where it would only add cost or risk, and where a simpler fix is enough."
+        },
+        {
+          "title": "The right next step, including the free ones",
+          "body": "If OASIS is a fit, you hear what building it would involve. If it is not, you hear that too, and where to go instead, like the free OASIS community."
+        },
+        {
+          "title": "No pitch, no obligation",
+          "body": "Nothing is sold to you on this form. You decide whether to talk."
+        }
+      ]
+    },
+    {
+      "key": "work",
+      "eyebrow": "How it works",
+      "title": "Three steps, and you stay in control",
+      "items": [
+        {
+          "title": "Answer a few questions",
+          "body": "Who you are, where the bottleneck is, the rough size of the business, and when you need it working. Revenue and budget are optional."
+        },
+        {
+          "title": "Conaugh reads your answers",
+          "body": "Every audit goes to Conaugh personally, with your answers in front of him."
+        },
+        {
+          "title": "He follows up, and you decide",
+          "body": "You get a straight answer on where AI fits. If you asked to talk, a call gets set up. If not, the answer is yours to keep."
+        }
+      ]
+    },
+    {
+      "key": "faq",
+      "title": "Questions",
+      "items": [
+        {
+          "q": "Is it really free?",
+          "a": "Yes. The audit costs nothing and nothing is sold to you on the form. If you later want OASIS to build something, that is a separate conversation, and only if you want it."
+        },
+        {
+          "q": "Who reads my answers?",
+          "a": "Conaugh McKenna, the founder of OASIS. He reads every one personally."
+        },
+        {
+          "q": "Do I need to know anything about AI?",
+          "a": "No. Describe how the work moves today in plain words. Working out where AI fits is the point of the audit."
+        },
+        {
+          "q": "Do I have to share revenue or budget?",
+          "a": "No. Those questions are optional ranges, and skipping them does not rule you out."
+        },
+        {
+          "q": "What happens after I submit?",
+          "a": "Conaugh reads your answers and follows up with you personally. If you asked to talk first, he will set up a time with you."
+        },
+        {
+          "q": "Is this for my size of business?",
+          "a": "It suits owner-led businesses and growing teams where the week runs through a few people. Larger and multi-location operations should look at FLEET, which starts with an enterprise AI and security audit."
+        },
+        {
+          "q": "What if I'm not ready?",
+          "a": "That is fine. Join the free OASIS community on Telegram, build alongside other owners, and come back when the timing is right. Join here: https://oasisai.work/go/community?form=ai-audit&t=oasis-ai-cc"
+        }
+      ]
+    }
+  ],
+  "book": {
+    "eyebrow": "Free AI audit. No pitch.",
+    "title": "Start your free audit",
+    "lede": "A few questions about how the business runs today. Conaugh reads every one personally.",
+    "mode": "form_then_link",
+    "qualify": "after"
+  },
+  "seo": {
+    "title": "Free AI Automation Audit | OASIS AI",
+    "description": "Find out what AI should take off your plate before you buy anything. A few questions; Conaugh reads every one personally. Free AI audit. No pitch.",
+    "indexable": false
+  },
+  "brief": {
+    "audience": "Owner-led service businesses and growing teams whose week runs through the owner. The money funnel: every B2B/AI-automation CTA points here (MAVEN_FUNNEL_AND_CTA_HANDOVER section 1).",
+    "promise": "Free AI audit. No pitch. Conaugh reads every one personally (the only two cleared promises, CC 2026-10-08).",
+    "included": "The live 4-step form (identity, bottleneck, size, timeline) and a personal follow-up from Conaugh. No written report, instant reply, texted findings or same-day call exists; none is promised.",
+    "proof_available": "None confirmed. Results section omitted.",
+    "price": "Free. No pricing section.",
+    "bonuses": "None.",
+    "guarantee": "None. 'No pitch' is the risk reversal; guarantee section omitted."
+  }
+}

@@ -256,6 +256,9 @@ function Pricing({ s, ctaLabel }: { s: Extract<DrawnSection, { key: "pricing" }>
                 <span className="break-words font-display text-4xl font-bold tracking-tight text-fg">{t.price}</span>
                 {t.cadence ? <span className="text-[15px] text-fg-muted">{t.cadence}</span> : null}
               </p>
+              {/* The Canadian price as the owner wrote it; one string, so the
+                  server markup carries no text separator inside it. */}
+              {t.priceCad ? <p className="mt-1 text-[13px] text-fg-muted" data-price-cad="">{`or ${t.priceCad}`}</p> : null}
               {t.summary ? <p className="mt-4 text-[15px] leading-relaxed text-fg-muted">{t.summary}</p> : null}
               {t.includes.length ? (
                 <ul className="mt-6 space-y-2.5 border-t border-ops-line pt-6">

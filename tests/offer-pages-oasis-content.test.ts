@@ -22,13 +22,26 @@
  *      alone; and the claims gate refuses to publish any of them.
  *   5. content/offers/oasis/PUBLISH_CHECKLIST.md lists every sentence the
  *      claims linter flags, so nothing that needs an owner's tick is missed.
+ *   6. --refresh-drafts, against an IN-MEMORY libSQL shaped like production
+ *      on 2026-10-16 (ai-audit's form live, its page an empty free_audit
+ *      draft; community saved by a person; nothing published): it writes a
+ *      draft only when the page is not live, never published and no person
+ *      saved it; a person's draft is left with what differs, unless
+ *      --include-edited names it; a published page never; a concurrent save
+ *      or publish between the read and the write is a "conflict", never an
+ *      overwrite; no form row ever changes; page-only files
+ *      (<slug>.page.json) are a bare page, absent is "no_content", and the
+ *      create path never reads or creates them. A copy file never carries an
+ *      owner's sign-off.
  *
  * Run: node --conditions=react-server --import tsx tests/offer-pages-oasis-content.test.ts
  */
-import { OASIS, done, formRow, setupOfferDatabase, step, ROOT } from "./_offer-pages-harness";
+import { OASIS, OFFER_MIGRATION_PATH, done, formRow, setupOfferDatabase, splitSql, step, ROOT } from "./_offer-pages-harness";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Client, InStatement } from "@libsql/client";
 
 const CONTENT_DIR = join(ROOT, "content", "offers", "oasis");
 const SLUGS = ["vsl", "protocol", "command", "community", "fleet"];
@@ -110,8 +123,43 @@ async function main() {
       ["--tenant-slug", "oasis-ai-cc", "--dry-run", "--publish"],
     ];
     for (const argv of refused) assert.equal(seed.parseArgs(argv).ok, false, `accepted: ${argv.join(" ")}`);
-    assert.deepEqual(seed.parseArgs(["--tenant-slug", "oasis-ai-cc", "--dry-run"]), { ok: true, args: { tenantSlug: "oasis-ai-cc", apply: false } });
-    assert.deepEqual(seed.parseArgs(["--apply", "--tenant-slug=oasis-ai-cc"]), { ok: true, args: { tenantSlug: "oasis-ai-cc", apply: true } });
+    assert.deepEqual(seed.parseArgs(["--tenant-slug", "oasis-ai-cc", "--dry-run"]), {
+      ok: true,
+      args: { tenantSlug: "oasis-ai-cc", apply: false, refresh: false, includeEdited: [] },
+    });
+    assert.deepEqual(seed.parseArgs(["--apply", "--tenant-slug=oasis-ai-cc"]), {
+      ok: true,
+      args: { tenantSlug: "oasis-ai-cc", apply: true, refresh: false, includeEdited: [] },
+    });
+  });
+
+  await step("--refresh-drafts needs the workspace and exactly one of --dry-run / --apply; --include-edited names a known page and only goes with it", () => {
+    const refused: Array<[string[], RegExp]> = [
+      [["--refresh-drafts"], /--tenant-slug/],
+      [["--refresh-drafts", "--dry-run"], /--tenant-slug/],
+      [["--tenant-slug", "client-a", "--refresh-drafts", "--apply"], /oasis-ai-cc workspace only/],
+      [["--tenant-slug", "oasis-ai-cc", "--refresh-drafts"], /exactly one/],
+      [["--tenant-slug", "oasis-ai-cc", "--refresh-drafts", "--dry-run", "--apply"], /exactly one/],
+      [["--tenant-slug", "oasis-ai-cc", "--apply", "--include-edited", "community"], /only goes with --refresh-drafts/],
+      [["--tenant-slug", "oasis-ai-cc", "--refresh-drafts", "--apply", "--include-edited"], /needs a page slug/],
+      [["--tenant-slug", "oasis-ai-cc", "--refresh-drafts", "--apply", "--include-edited", "--dry-run"], /needs a page slug/],
+      [["--tenant-slug", "oasis-ai-cc", "--refresh-drafts", "--apply", "--include-edited", "start"], /not one of the pages/],
+      [["--tenant-slug", "oasis-ai-cc", "--refresh-drafts", "--apply", "--include-edited=../vsl"], /not one of the pages/],
+      [["--tenant-slug", "oasis-ai-cc", "--refresh-drafts", "--apply", "--publish"], /unknown argument/],
+    ];
+    for (const [argv, why] of refused) {
+      const r = seed.parseArgs(argv);
+      assert.equal(r.ok, false, `accepted: ${argv.join(" ")}`);
+      if (!r.ok) assert.match(r.error, why, argv.join(" "));
+    }
+    assert.deepEqual(seed.parseArgs(["--tenant-slug", "oasis-ai-cc", "--refresh-drafts", "--dry-run"]), {
+      ok: true,
+      args: { tenantSlug: "oasis-ai-cc", apply: false, refresh: true, includeEdited: [] },
+    });
+    assert.deepEqual(
+      seed.parseArgs(["--refresh-drafts", "--apply", "--include-edited", "community", "--tenant-slug", "oasis-ai-cc", "--include-edited=ai-audit", "--include-edited", "community"]),
+      { ok: true, args: { tenantSlug: "oasis-ai-cc", apply: true, refresh: true, includeEdited: ["community", "ai-audit"] } },
+    );
   });
 
   await step("the seed function refuses another workspace, and the script holds no workspace id", async () => {
@@ -142,6 +190,13 @@ async function main() {
     const wrongLink = JSON.parse(JSON.stringify(json));
     wrongLink.community_link.href = "https://t.me/+somewhere";
     assert.throws(() => seed.parseOfferContent(wrongLink, "protocol.json"), /community_link/);
+    // A copy file never signs off a price on an owner's behalf: the server stamps that when an owner ticks it.
+    const signed = JSON.parse(JSON.stringify(json));
+    signed.offer_page.sections.push({ key: "pricing", tiers: [{ name: "Pack", price: "$97", price_cad: "CA$135", confirmed: { by: "copywriter", at: "2026-10-16T12:00:00.000Z" } }] });
+    assert.throws(() => seed.parseOfferContent(signed, "protocol.json"), /offer_page\.sections\[\d+\]\.tiers\[0\]\.confirmed: a content file never carries an owner's sign-off/);
+    const unsigned = JSON.parse(JSON.stringify(signed));
+    delete unsigned.offer_page.sections.at(-1).tiers[0].confirmed;
+    assert.equal(seed.parseOfferContent(unsigned, "protocol.json").slug, "protocol", "a price written with no sign-off is refused");
   });
 
   // -- 3. copy rules ------------------------------------------------------
@@ -345,7 +400,303 @@ async function main() {
         if (!checklist.includes(h.sentence)) missing.push(`${c.slug}: ${h.sentence}`);
       }
     }
+    // Page-only pages (ai-audit) need their ticks listed too.
+    for (const p of seed.loadOasisPageOnlyContent(CONTENT_DIR)) {
+      if (!p.doc) continue;
+      for (const h of claims.lintDoc(p.doc, { fallbackHeadline: "" })) {
+        if (!checklist.includes(h.sentence)) missing.push(`${p.slug}: ${h.sentence}`);
+      }
+    }
     assert.deepEqual(missing, [], "flagged sentences missing from the checklist");
+  });
+
+  // -- 6. --refresh-drafts, against an in-memory database --------------------
+  const { createClient } = await import("@libsql/client");
+  const { publishDraft, saveDraft } = await import("../lib/offer-pages/store");
+  const { emptyDocForTemplate } = await import("../lib/offer-pages/templates");
+  const bySlug = (slug: string) => content.find((c) => c.slug === slug)!;
+  const PERSON = "0d000000-0000-4000-8000-000000000002";
+  const EDITED_AT = "2026-10-14T18:30:00.000Z";
+  const T_REFRESH = "2026-10-16T20:00:00.000Z";
+  const TICK = { hash: "a".repeat(64), excerpt: "An older claim.", by: PERSON, at: EDITED_AT };
+  /** What the copy team would write for /ai-audit (a page-only file): a free_audit page, no sign-offs. */
+  const auditDoc = { ...JSON.parse(JSON.stringify(bySlug("fleet").doc)), template: "free_audit" };
+  auditDoc.hero.headline = "Find the hours AI can give back to your team";
+  const auditOnly = (doc: unknown = auditDoc) => [{ slug: "ai-audit", file: "ai-audit.page.json", doc: doc === null ? null : parseOfferPageDoc(doc) }];
+  /** The community draft a person saved on 2026-10-14: the content with one line edited and the FAQ removed. */
+  const personCommunity = JSON.parse(JSON.stringify(bySlug("community").doc));
+  personCommunity.hero.subheadline = "A subheadline someone edited in the builder.";
+  personCommunity.sections = personCommunity.sections.filter((s: Raw) => s.key !== "faq");
+  const olderVsl = JSON.parse(JSON.stringify(bySlug("vsl").doc));
+  olderVsl.hero.headline = "An older headline";
+  const IDS: Record<string, string> = {
+    "ai-audit": "f0c1a200-0000-4000-8000-0000000000a0",
+    vsl: "f0c1a200-0000-4000-8000-0000000000a1",
+    protocol: "f0c1a200-0000-4000-8000-0000000000a2",
+    command: "f0c1a200-0000-4000-8000-0000000000a3",
+    community: "f0c1a200-0000-4000-8000-0000000000a4",
+    fleet: "f0c1a200-0000-4000-8000-0000000000a5",
+    "no-page": "f0c1a200-0000-4000-8000-0000000000a6",
+  };
+
+  /** A fresh in-memory database shaped like production on 2026-10-16. Never the real one. */
+  const production = async (): Promise<Client> => {
+    const mem = createClient({ url: ":memory:" });
+    await mem.executeMultiple(`
+      CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT);
+      CREATE TABLE forms (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL,
+        description TEXT, branding TEXT NOT NULL DEFAULT '{}', steps TEXT NOT NULL DEFAULT '[]', on_complete_stage TEXT,
+        step_outcomes TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1, redirect_url TEXT, created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT '2026-09-01T00:00:00.000Z', updated_at TEXT NOT NULL DEFAULT '2026-09-01T00:00:00.000Z');
+    `);
+    for (const stmt of splitSql(readFileSync(OFFER_MIGRATION_PATH, "utf8"))) await mem.execute(stmt);
+    await mem.execute({ sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] });
+    const form = (slug: string, name: string, enabled: number, steps: unknown) =>
+      mem.execute({
+        sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+        args: [IDS[slug], OASIS, slug, name, JSON.stringify(steps), enabled],
+      });
+    await form("ai-audit", "AI Automation Audit", 1, [{ key: "live-step", title: "Tell us about your business", fields: [] }]);
+    for (const slug of ["vsl", "protocol", "command", "community", "fleet"]) {
+      await form(slug, bySlug(slug).form.name, slug === "fleet" ? 1 : 0, bySlug(slug).form.steps);
+    }
+    await form("no-page", "A form with no page", 0, []);
+    const page = (
+      slug: string,
+      draft: unknown,
+      o: { template?: string; version?: number; by?: string | null; published?: unknown; publishedVersion?: number; live?: number; claims?: unknown[] } = {},
+    ) =>
+      mem.execute({
+        sql: `INSERT INTO form_offer_pages (form_id, tenant_id, template_key, draft, draft_version, draft_updated_at, draft_updated_by,
+                published, published_version, published_at, published_by, live, claims_confirmed, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '2026-10-12T15:00:00.000Z', ?)`,
+        args: [
+          IDS[slug],
+          OASIS,
+          o.template ?? (draft as Raw).template,
+          JSON.stringify(draft),
+          o.version ?? 0,
+          o.by ? EDITED_AT : "2026-10-12T15:00:00.000Z",
+          o.by ?? null,
+          o.published === undefined ? null : JSON.stringify(o.published),
+          o.publishedVersion ?? 0,
+          o.published === undefined ? null : EDITED_AT,
+          o.published === undefined ? null : PERSON,
+          o.live ?? 0,
+          JSON.stringify(o.claims ?? []),
+          o.by ? EDITED_AT : "2026-10-12T15:00:00.000Z",
+        ],
+      });
+    await page("ai-audit", emptyDocForTemplate("free_audit"));
+    await page("vsl", olderVsl, { claims: [TICK] });
+    await page("protocol", bySlug("protocol").doc);
+    await page("command", olderVsl, { published: olderVsl, publishedVersion: 1, live: 1 });
+    await page("community", personCommunity, { version: 3, by: PERSON });
+    // Published once, then unpublished: still a page someone put in front of the public.
+    await page("fleet", bySlug("fleet").doc, { published: bySlug("fleet").doc, publishedVersion: 1, live: 0 });
+    return mem;
+  };
+  const snapshot = async (mem: Client) => ({
+    forms: (await mem.execute("SELECT * FROM forms ORDER BY id")).rows.map((r) => JSON.stringify(r)),
+    pages: (await mem.execute("SELECT * FROM form_offer_pages ORDER BY form_id")).rows.map((r) => JSON.stringify(r)),
+  });
+  const pageRow = async (mem: Client, slug: string) =>
+    (await mem.execute({ sql: "SELECT * FROM form_offer_pages WHERE form_id = ?", args: [IDS[slug]] })).rows[0] as unknown as Raw;
+  const outcomes = (r: { pages: Array<{ slug: string; outcome: string }> }) => Object.fromEntries(r.pages.map((p) => [p.slug, p.outcome]));
+  /** Runs `between` once, just before the refresh's own draft write reaches the table: a save or publish landing after the read. */
+  const interleaved = (mem: Client, between: () => Promise<unknown>): Client => {
+    let fired = false;
+    return new Proxy(mem, {
+      get(target, prop) {
+        if (prop === "execute") {
+          return async (stmt: InStatement) => {
+            const sql = typeof stmt === "string" ? stmt : stmt.sql;
+            if (!fired && /^\s*UPDATE form_offer_pages\s+SET draft = /.test(sql)) {
+              fired = true;
+              await between();
+            }
+            return target.execute(stmt);
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+  };
+
+  await step("page-only files: none yet is no_content, a file is the page alone (parsed first), a bad one or a sign-off refuses; the create path never takes one", async () => {
+    assert.deepEqual([...seed.OASIS_PAGE_ONLY_SLUGS], ["ai-audit"]);
+    assert.ok(!seed.OASIS_PAGE_ONLY_SLUGS.some((s) => (seed.OASIS_OFFER_SLUGS as readonly string[]).includes(s)), "a page-only slug is also a content slug");
+    // The real page (Maven's copy, 2026-10-16): the page alone, parsed by the strict parser, no form block.
+    const [real] = seed.loadOasisPageOnlyContent(CONTENT_DIR);
+    assert.equal(real.slug, "ai-audit");
+    assert.equal(real.file, join(CONTENT_DIR, "ai-audit.page.json"));
+    assert.ok(real.doc, "content/offers/oasis/ai-audit.page.json parses");
+    assert.equal(real.doc!.template, "free_audit");
+    assert.ok(!real.doc!.hero.video, "no video until one is attached with its rights tick");
+    const dir = mkdtempSync(join(tmpdir(), "page-only-"));
+    const file = join(dir, "ai-audit.page.json");
+    writeFileSync(file, JSON.stringify(auditDoc));
+    assert.deepEqual(seed.loadOasisPageOnlyContent(dir), [{ slug: "ai-audit", file, doc: parseOfferPageDoc(auditDoc) }]);
+    // A full content file (form and all) is not a page-only file: the form is never redefined.
+    writeFileSync(file, JSON.stringify(rawFile("fleet").json));
+    assert.throws(() => seed.loadOasisPageOnlyContent(dir), (e: unknown) => e instanceof seed.ContentError && /unknown key/.test(e.message));
+    writeFileSync(file, JSON.stringify({ ...auditDoc, sections: [{ key: "pricing", tiers: [{ name: "Audit", price: "$2,500", confirmed: { by: "x", at: T_REFRESH } }] }] }));
+    assert.throws(() => seed.loadOasisPageOnlyContent(dir), /\$\.sections\[0\]\.tiers\[0\]\.confirmed: a content file never carries an owner's sign-off/);
+    writeFileSync(file, "{ not json");
+    assert.throws(() => seed.loadOasisPageOnlyContent(dir), /unreadable/);
+    // The create path: never reads a page-only file, and refuses content under a page-only slug.
+    assert.ok(!seed.loadOasisOfferContent(CONTENT_DIR).some((c) => c.slug === "ai-audit"));
+    const mem = await production();
+    const before = await snapshot(mem);
+    const asAudit = { ...bySlug("fleet"), slug: "ai-audit", form: { ...bySlug("fleet").form, slug: "ai-audit" } };
+    await assert.rejects(() => seed.seedOasisOfferPages(mem, { tenantSlug: "oasis-ai-cc", apply: true, content: [asAudit] }), /page-only slug/);
+    assert.deepEqual(await snapshot(mem), before, "the create path touched the page-only form");
+  });
+
+  await step("refresh dry run: reports each page's outcome and what differs, writes nothing", async () => {
+    const mem = await production();
+    const before = await snapshot(mem);
+    const r = await seed.refreshOasisOfferDrafts(mem, { tenantSlug: "oasis-ai-cc", apply: false, content, pageOnly: auditOnly(), now: T_REFRESH });
+    assert.equal(r.tenantId, OASIS);
+    assert.deepEqual(outcomes(r), {
+      vsl: "would_refresh",
+      protocol: "unchanged",
+      command: "published_left",
+      community: "edited_left",
+      fleet: "published_left",
+      "ai-audit": "would_refresh",
+    });
+    const vsl = r.pages.find((p) => p.slug === "vsl")!;
+    assert.deepEqual([vsl.differences, vsl.version, vsl.ticks], [["hero.headline"], 0, 1]);
+    const community = r.pages.find((p) => p.slug === "community")!;
+    assert.deepEqual(
+      [community.differences, community.editedBy, community.editedAt, community.version],
+      [["hero.subheadline", "sections.faq (only in the content)"], PERSON, EDITED_AT, 3],
+    );
+    assert.deepEqual(await snapshot(mem), before, "a dry run wrote something");
+    // Absent page-only copy: reported, nothing read for it.
+    const none = await seed.refreshOasisOfferDrafts(mem, { tenantSlug: "oasis-ai-cc", apply: false, content: [], pageOnly: auditOnly(null) });
+    assert.deepEqual(outcomes(none), { "ai-audit": "no_content" });
+  });
+
+  await step("refresh --apply: only never-published, never-person-saved drafts are written, CAS on the version read; no form row changes; a re-run is unchanged", async () => {
+    const mem = await production();
+    const before = await snapshot(mem);
+    const r = await seed.refreshOasisOfferDrafts(mem, { tenantSlug: "oasis-ai-cc", apply: true, content, pageOnly: auditOnly(), now: T_REFRESH });
+    assert.deepEqual(outcomes(r), {
+      vsl: "refreshed",
+      protocol: "unchanged",
+      command: "published_left",
+      community: "edited_left",
+      fleet: "published_left",
+      "ai-audit": "refreshed",
+    });
+    const after = await snapshot(mem);
+    assert.deepEqual(after.forms, before.forms, "a refresh changed a form row (steps, name or switch)");
+    for (const [slug, doc] of [["vsl", bySlug("vsl").doc], ["ai-audit", parseOfferPageDoc(auditDoc)]] as const) {
+      const row = await pageRow(mem, slug);
+      assert.deepEqual(parseOfferPageDoc(String(row.draft)), doc, `${slug}: the draft is not the content`);
+      assert.deepEqual(
+        [Number(row.draft_version), row.draft_updated_by, row.draft_updated_at, Number(row.live), row.published, Number(row.published_version), row.claims_confirmed],
+        [1, null, T_REFRESH, 0, null, 0, "[]"],
+        `${slug}: not a plain draft write`,
+      );
+    }
+    assert.equal(String((await pageRow(mem, "ai-audit")).template_key), "free_audit");
+    // Everything else is exactly as it was.
+    const untouched = (s: { pages: string[] }) => s.pages.filter((p) => !p.includes(IDS.vsl) && !p.includes(IDS["ai-audit"]));
+    assert.deepEqual(untouched(after), untouched(before), "a refresh touched a page it must leave");
+    const again = await seed.refreshOasisOfferDrafts(mem, { tenantSlug: "oasis-ai-cc", apply: true, content, pageOnly: auditOnly(), now: "2026-10-17T00:00:00.000Z" });
+    assert.equal(outcomes(again).vsl, "unchanged");
+    assert.equal(outcomes(again)["ai-audit"], "unchanged");
+    assert.deepEqual(await snapshot(mem), after, "a second refresh changed something");
+  });
+
+  await step("--include-edited community: the person's draft is replaced (still CAS), its differences reported; a published page is never touched, named or not", async () => {
+    const mem = await production();
+    const before = await snapshot(mem);
+    const dry = await seed.refreshOasisOfferDrafts(mem, { tenantSlug: "oasis-ai-cc", apply: false, content, pageOnly: [], includeEdited: ["community", "command"] });
+    assert.deepEqual([outcomes(dry).community, outcomes(dry).command], ["would_refresh_edited", "published_left"]);
+    assert.deepEqual(await snapshot(mem), before);
+    const r = await seed.refreshOasisOfferDrafts(mem, { tenantSlug: "oasis-ai-cc", apply: true, content, pageOnly: [], includeEdited: ["community", "command"], now: T_REFRESH });
+    assert.deepEqual(outcomes(r), { vsl: "refreshed", protocol: "unchanged", command: "published_left", community: "refreshed_edited", fleet: "published_left" });
+    const community = r.pages.find((p) => p.slug === "community")!;
+    assert.deepEqual([community.differences, community.editedBy, community.version], [["hero.subheadline", "sections.faq (only in the content)"], PERSON, 3]);
+    const row = await pageRow(mem, "community");
+    assert.deepEqual(parseOfferPageDoc(String(row.draft)), bySlug("community").doc);
+    assert.deepEqual([Number(row.draft_version), row.draft_updated_by, Number(row.live), row.published], [4, null, 0, null]);
+    assert.deepEqual((await snapshot(mem)).forms, before.forms);
+    assert.equal(String((await pageRow(mem, "command")).draft), JSON.stringify(olderVsl), "a published page's draft was overwritten");
+    const lines = seed.formatRefreshReport(r);
+    assert.ok(lines.includes("  replaced: hero.subheadline, sections.faq (only in the content)"), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes(`saved by a person (${PERSON}, ${EDITED_AT}): replaced, as --include-edited community asks`)), lines.join("\n"));
+    assert.ok(lines.every((l) => /^[\x20-\x7E]*$/.test(l)), "the report is not plain ASCII");
+    // Without the flag the same page is left, and the report says how to merge.
+    const left = seed.formatRefreshReport(await seed.refreshOasisOfferDrafts(await production(), { tenantSlug: "oasis-ai-cc", apply: true, content, pageOnly: [] }));
+    assert.ok(left.includes("  merge by hand, or re-run with --include-edited community to replace it"), left.join("\n"));
+    assert.ok(left.includes("  differs from the content: hero.subheadline, sections.faq (only in the content)"), left.join("\n"));
+    await assert.rejects(
+      () => seed.refreshOasisOfferDrafts(mem, { tenantSlug: "oasis-ai-cc", apply: true, content, pageOnly: [], includeEdited: ["ai-audit"] }),
+      /not a page this run refreshes/,
+    );
+    await assert.rejects(() => seed.refreshOasisOfferDrafts(mem, { tenantSlug: "client-a", apply: true, content, pageOnly: [] }), /oasis-ai-cc only/);
+  });
+
+  await step("a save or a publish landing between the refresh's read and its write is a conflict, never an overwrite", async () => {
+    // A person saves the vsl draft in the builder (version 0 to 1).
+    let mem = await production();
+    const personDoc = { ...olderVsl, hero: { ...olderVsl.hero, headline: "The person's own headline" } };
+    let r = await seed.refreshOasisOfferDrafts(
+      interleaved(mem, () => saveDraft(mem, { tenantId: OASIS, formId: IDS.vsl, draft: parseOfferPageDoc(personDoc), expectedVersion: 0, claims: [], actor: PERSON, now: T_REFRESH })),
+      { tenantSlug: "oasis-ai-cc", apply: true, content: [bySlug("vsl")], pageOnly: [], now: T_REFRESH },
+    );
+    assert.equal(outcomes(r).vsl, "conflict");
+    let row = await pageRow(mem, "vsl");
+    assert.deepEqual([JSON.parse(String(row.draft)).hero.headline, Number(row.draft_version), row.draft_updated_by], ["The person's own headline", 1, PERSON]);
+    // An owner publishes it (Publish does not move the draft version).
+    mem = await production();
+    r = await seed.refreshOasisOfferDrafts(
+      interleaved(mem, () => publishDraft(mem, { tenantId: OASIS, formId: IDS.vsl, draft: parseOfferPageDoc(olderVsl), draftVersion: 0, actor: PERSON, now: T_REFRESH })),
+      { tenantSlug: "oasis-ai-cc", apply: true, content: [bySlug("vsl")], pageOnly: [], now: T_REFRESH },
+    );
+    assert.equal(outcomes(r).vsl, "conflict");
+    row = await pageRow(mem, "vsl");
+    assert.deepEqual([JSON.parse(String(row.draft)).hero.headline, Number(row.draft_version), Number(row.live)], ["An older headline", 0, 1], "the draft of a page that went live was overwritten");
+    // A person's name lands on the row without a version change: still not ours to replace.
+    mem = await production();
+    r = await seed.refreshOasisOfferDrafts(
+      interleaved(mem, () => mem.execute({ sql: "UPDATE form_offer_pages SET draft_updated_by = ? WHERE form_id = ?", args: [PERSON, IDS.vsl] })),
+      { tenantSlug: "oasis-ai-cc", apply: true, content: [bySlug("vsl")], pageOnly: [], now: T_REFRESH },
+    );
+    assert.equal(outcomes(r).vsl, "conflict");
+    assert.equal(JSON.parse(String((await pageRow(mem, "vsl")).draft)).hero.headline, "An older headline");
+    // --include-edited is still compare-and-swap: the person saving community again (version 3 to 4) wins.
+    mem = await production();
+    const again = { ...personCommunity, hero: { ...personCommunity.hero, subheadline: "Saved again while the refresh ran." } };
+    r = await seed.refreshOasisOfferDrafts(
+      interleaved(mem, () => saveDraft(mem, { tenantId: OASIS, formId: IDS.community, draft: parseOfferPageDoc(again), expectedVersion: 3, claims: [], actor: PERSON, now: T_REFRESH })),
+      { tenantSlug: "oasis-ai-cc", apply: true, content: [bySlug("community")], pageOnly: [], includeEdited: ["community"], now: T_REFRESH },
+    );
+    assert.equal(outcomes(r).community, "conflict");
+    row = await pageRow(mem, "community");
+    assert.deepEqual([JSON.parse(String(row.draft)).hero.subheadline, Number(row.draft_version)], ["Saved again while the refresh ran.", 4]);
+  });
+
+  await step("refresh: no form, no page, a template the page was not made with: nothing written", async () => {
+    const mem = await production();
+    const before = await snapshot(mem);
+    const as = (slug: string) => ({ ...bySlug("protocol"), slug, form: { ...bySlug("protocol").form, slug } });
+    const r = await seed.refreshOasisOfferDrafts(mem, {
+      tenantSlug: "oasis-ai-cc",
+      apply: true,
+      content: [as("not-a-form"), as("no-page")],
+      pageOnly: auditOnly({ ...auditDoc, template: "book_call" }),
+      now: T_REFRESH,
+    });
+    assert.deepEqual(outcomes(r), { "not-a-form": "no_form", "no-page": "no_page", "ai-audit": "template_differs" });
+    assert.match(r.pages[2].detail ?? "", /made as free_audit, the content is book_call/);
+    assert.deepEqual(await snapshot(mem), before);
   });
 
   done("offer-pages-oasis-content");

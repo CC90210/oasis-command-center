@@ -109,6 +109,11 @@ Book a call template, pinnable to the top menu, anchor `#pricing`):
   tier again keeps the first stamp, and a tier changed in any way is re-stamped
   with whoever saved the change. The builder also clears the tick when the
   price or how often it is paid is edited, so the owner confirms the new one.
+- `price_cad` (optional, cap 40): prices are set in USD (owner decision
+  2026-10-16) and this is the Canadian price as written ("CA$690"), drawn as a
+  smaller "or CA$690" line under the price, no currency math. It is part of the
+  confirmed tier (editing it re-stamps the sign-off and clears the builder's
+  tick) and, like the price, is not linted.
 - **The gate.** A tier is drawn only with a name, a price and an owner's
   confirmation. Publish is refused while any tier with a price is
   unconfirmed, and the checklist names it: `The price for "Turnkey" (From

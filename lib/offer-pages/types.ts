@@ -288,10 +288,16 @@ export type BonusesSection = {
  * The server stamps it with the saving owner and the time, bound to the whole
  * tier (claims.ts confirmables, kind "price"), so editing the tier moves the
  * sign-off to whoever saved the edit.
+ *
+ * Prices are set in USD (owner decision 2026-10-16). `price_cad` is the
+ * optional Canadian price, free text the same way ("CA$690"), drawn as a
+ * smaller "or CA$690" line under the price. It is part of the tier the
+ * confirmation vouches for, so editing it moves the sign-off too.
  */
 export type PricingTier = {
   name: Copy;
   price: Copy;
+  price_cad?: Copy;
   cadence?: Copy;
   summary?: Copy;
   includes?: Copy[];
@@ -766,7 +772,7 @@ function parseSection(v: unknown, path: string): BodySection {
       const tiers = o.tiers.map((raw, i) => {
         const p = `${path}.tiers[${i}]`;
         const it = obj(raw, p);
-        onlyKeys(it, ["name", "price", "cadence", "summary", "includes", "highlighted", "confirmed"], p);
+        onlyKeys(it, ["name", "price", "price_cad", "cadence", "summary", "includes", "highlighted", "confirmed"], p);
         // A sign-off is who and when (stamped by the server), never a bare
         // true/false a browser or a copy file could set on an owner's behalf.
         if (typeof it.confirmed === "boolean") {
@@ -777,6 +783,8 @@ function parseSection(v: unknown, path: string): BodySection {
           name: reqCopy(it, "name", p, COPY_CAPS.tier_name),
           price: reqCopy(it, "price", p, COPY_CAPS.price),
         };
+        const priceCad = optCopy(it, "price_cad", p, COPY_CAPS.price);
+        if (priceCad) tier.price_cad = priceCad;
         const cadence = optCopy(it, "cadence", p, COPY_CAPS.cadence);
         const summary = optCopy(it, "summary", p, COPY_CAPS.tier_summary);
         if (cadence) tier.cadence = cadence;
