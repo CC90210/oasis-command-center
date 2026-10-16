@@ -124,12 +124,12 @@ written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence
 
 | Where | Why | Sentence |
 |---|---|---|
-| `what_you_get.items[0].body` | money, a number | The SOPs, prompts and blueprints OASIS runs on, from $17 for a quick-win pack to $297 for the full suite. |
+| `hero.subheadline` | a number | Four ways in, from free to fully built. |
 | `what_you_get.items[1].body` | money, a number | For service businesses doing roughly $10K to $75K a month. |
-| `what_you_get.items[1].body` | money, a number | Follow-up, booking and back office running without you, from $497 a month. |
-| `what_you_get.items[3].body` | money, a number | It starts with an enterprise AI and security audit, from $2,500, credited in full to the build. |
-| `faq.items[0].a` | the word "revenue" | We also ask about revenue and budget so we can point you to the page that fits, and you can change your mind on any page. |
-| `faq.items[2].q` | the word "revenue" | Why do you ask about revenue and budget? |
+| `what_you_get.items[1].body` | the word "clients" | Team, Growth, Clients and Money in one operating view, set up for you or by you. |
+| `work.items[1].body` | the word "revenue" | Revenue and budget, so a solo builder is not sent to an enterprise audit. |
+| `faq.items[1].a` | a number | Yes, two. |
+| `faq.items[3].q` | the word "revenue" | Why do you ask about revenue and budget? |
 
 ### PROTOCOL (`protocol`): 1
 
