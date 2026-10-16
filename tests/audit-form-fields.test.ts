@@ -155,7 +155,14 @@ assert.match(source, /<noscript>/, "visitors without JavaScript receive an actio
 assert.match(source, /email: false,\s*sms: false,/, "both consent choices start unticked");
 assert.match(source, /\(\["email", "sms"\] as const\)\.map/, "email and SMS render as separate controls");
 assert.match(source, /name=\{AUDIT_CONSENT_FIELDS\[channel\]\}/, "each control is present in FormData");
-assert.match(source, /consentDisclosureText\(channel, consentIdentity\)/, "the UI renders canonical disclosure text");
+// Since 2026-10-16 the box shows a summary line with the canonical text under
+// "Full terms": ConsentChoice renders consentDisclosureText for this channel and
+// identity (tests/consent-summary.test.ts proves the text is in the markup).
+assert.match(
+  source,
+  /<ConsentChoice[\s\S]{0,300}channel=\{channel\}[\s\S]{0,60}identity=\{consentIdentity\}/,
+  "the UI renders canonical disclosure text through ConsentChoice",
+);
 
 const homeSource = readFileSync(join(root, "app/(marketing)/home/page.tsx"), "utf8");
 const contactSource = readFileSync(join(root, "app/(marketing)/contact/page.tsx"), "utf8");

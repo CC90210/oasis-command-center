@@ -25,7 +25,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { consentDisclosureText, type ConsentChannel, type ConsentIdentity } from "@/lib/consent/ledger-disclosure";
+import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-disclosure";
+import { ConsentChoice } from "@/components/forms/ConsentChoice";
 import { ZONE_CHOICES } from "@/lib/meeting-time";
 
 export type BookingField = {
@@ -668,22 +669,24 @@ export function BookingPage(props: Props) {
 
                 <div className="grid gap-3 border-t border-ops-line pt-4">
                   {(["email", "sms"] as ConsentChannel[]).map((channel) => (
-                    <label key={channel} className="flex items-start gap-3 text-[13px] leading-relaxed text-fg-muted">
-                      <input
-                        type="checkbox"
-                        checked={ticked[channel]}
-                        onChange={(e) => {
-                          setTicked((t) => ({ ...t, [channel]: e.target.checked }));
-                          // The consent ledger records a choice only on the form
-                          // step (POST /api/forms/submit). A change after a failed
-                          // booking, a withdrawal above all, must re-send that step,
-                          // not ride on the old token (Codex review of #628).
-                          tokenRef.current = null;
-                        }}
-                        className="mt-1 h-4 w-4 shrink-0 accent-[#00D4FF]"
-                      />
-                      <span>{consentDisclosureText(channel, consentIdentity)}</span>
-                    </label>
+                    // The same box as every other public form: one line, the
+                    // full terms under "Full terms" (components/forms/ConsentChoice.tsx).
+                    <ConsentChoice
+                      key={channel}
+                      id={`booking-consent-${channel}`}
+                      channel={channel}
+                      identity={consentIdentity}
+                      checked={ticked[channel]}
+                      variant="marketing"
+                      onChange={(value) => {
+                        setTicked((t) => ({ ...t, [channel]: value }));
+                        // The consent ledger records a choice only on the form
+                        // step (POST /api/forms/submit). A change after a failed
+                        // booking, a withdrawal above all, must re-send that step,
+                        // not ride on the old token (Codex review of #628).
+                        tokenRef.current = null;
+                      }}
+                    />
                   ))}
                   <p className="text-[12px] text-fg-dim">
                     Optional. Your booking and its calendar invite do not depend on these boxes.

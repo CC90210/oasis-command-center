@@ -206,18 +206,50 @@ const QUANTITY_RE = /\b(?:hundreds?|thousands?|millions?|billions?|double[ds]?|d
  * client could hold us to: people, outcomes, time, payments ("twelve
  * businesses", "twenty hours", "two payments", "three times faster"), up to
  * two words apart ("fifty new leads"). "Four dashboards", "three steps" and
- * "Yes, two." count nothing of the kind.
+ * "Yes, two." count nothing of the kind, and neither does "three steps for
+ * clients": a word in between may describe what is counted, never join it to
+ * something else (CONNECTOR).
  */
-const SMALL_NUMBER = "two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty";
+const SMALL_NUMBER =
+  "two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen" +
+  "|twenty|thirty|forty|fifty|sixty";
 const COUNTED =
   "clients?|customers?|businesses|companies|owners|members|users|students|patients|homeowners|founders|agencies|brands|people" +
   "|leads?|calls?|bookings?|appointments?|sales|deals?|jobs?|reviews?|referrals?|orders?|projects?|sign-?ups?" +
+  "|conversions?|results?|wins?|replies|responses|messages|inquiries|enquiries|subscribers|followers|views|visitors|visits" +
+  "|clicks|downloads|installs|meetings|demos|quotes|estimates|contracts|hires|tickets|conversations|partners|locations" +
+  "|stores|employees|transactions|deliveries" +
   "|hours?|minutes?|days?|weeks?|months?|years?|payments?|instal?lments?" +
   "|times\\s+(?:more|faster|better|higher|bigger|larger|as)";
-const COUNT_RE = new RegExp(`\\b(?:${SMALL_NUMBER})(?:[\\s-]+[a-z][a-z'-]*){0,2}?[\\s-]+(?:${COUNTED})\\b`, "i");
-/** A promised result: a gain in what the client earns or wins, or results described as good. */
-const RESULT_RE =
-  /\b(?:more|higher|bigger|extra|increased?|increases|increasing|boost(?:s|ed|ing)?|grow|grows|grew|growing|raise[ds]?)\s+(?:(?:your|our|their|the)\s+)?(?:revenue|sales|profits?|leads|bookings|customers|clients|conversions)\b|\b(?:real|proven|measurable|guaranteed|massive|incredible|amazing|predictable|consistent|better|faster|bigger)\s+results?\b/i;
+/**
+ * Words that join two things rather than describe one. A word between a
+ * number (or a gain) and what it counts may be "new" or "qualified", never one
+ * of these. A deny list, not an allow list: a describing word nobody listed
+ * still flags, so a real claim is never missed for its adjective.
+ */
+const CONNECTOR =
+  "a|an|and|as|at|but|by|for|from|if|in|into|is|are|it|its|nor|of|on|or|per|so|than|that|the|their|then|this|to|via|was|were|when|which|while|who|with|your|our|you|we|they";
+const DESCRIBING_WORD = `(?!(?:${CONNECTOR})\\b)[a-z][a-z'-]*`;
+const COUNT_RE = new RegExp(`\\b(?:${SMALL_NUMBER})(?:[\\s-]+${DESCRIBING_WORD}){0,2}?[\\s-]+(?:${COUNTED})\\b`, "i");
+/** What a client earns or wins, as a result names it after its rise ("revenue increased", "close rates went up"). */
+const METRIC =
+  "revenue|sales|profits?|income|earnings|margins?|leads|bookings|customers|clients|conversions|results|replies|referrals|reviews" +
+  "|sign-?ups|traffic|(?:close|conversion|response|reply|booking)\\s+rates?";
+const ROSE =
+  "increased|increases|grew|grows|rose|rises|jumped|jumps|climbed|climbs|improved|improves|soared|soars|skyrocketed|skyrockets" +
+  "|doubled|tripled|exploded|went\\s+up|goes\\s+up|took\\s+off|(?:is|are|was|were)\\s+(?:up|higher)";
+/**
+ * A promised result: a gain in what the client earns or wins, either way round
+ * ("more revenue", "more qualified leads"; "revenue increased", "results
+ * improved"), or results described as good.
+ */
+const RESULT_RE = new RegExp(
+  "\\b(?:more|higher|bigger|extra|increased?|increases|increasing|boost(?:s|ed|ing)?|grow|grows|grew|growing|raise[ds]?)\\s+" +
+    `(?:(?:your|our|their|the)\\s+)?(?:${DESCRIBING_WORD}\\s+){0,2}?(?:revenue|sales|profits?|leads|bookings|customers|clients|conversions)\\b` +
+    `|\\b(?:${METRIC})(?:\\s+${DESCRIBING_WORD}){0,2}?\\s+(?:${ROSE})\\b` +
+    "|\\b(?:real|proven|measurable|guaranteed|massive|incredible|amazing|predictable|consistent|better|faster|bigger)\\s+results?\\b",
+  "i",
+);
 /** "The best", "#1", "fastest", "the only" (not "by application only"). */
 const SUPERLATIVE_RE =
   /#\s?1\b|\bnumber[ -]one\b|\b(?:the|our)\s+(?:very\s+)?(?:best|only)\b|\bbest[- ](?:in[- ]class|rated|selling)\b|\b(?:fastest|quickest|cheapest|lowest|highest|biggest|largest|smartest|easiest|simplest|strongest|unbeatable|unmatched|world[- ]class|industry[- ]leading|market[- ]leading|top[- ]rated)\b|\bmost\s+(?:trusted|popular|advanced|powerful|affordable|reliable|complete|effective)\b/i;
