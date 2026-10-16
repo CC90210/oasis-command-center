@@ -823,6 +823,9 @@ async function testAvailabilityUsesTheWorkspaceCredentialOnlyWhenItIsTheFounders
     assert.deepEqual(busy, [{ start: START_AT, end: "2026-08-26T20:15:00.000Z" }]);
     assert.equal(eventReads, 1);
     assert.ok(tokenBodies.every((b) => b.includes("refresh_token=system-refresh-token")), "read with anything but the workspace credential");
+    // The host's own address (from the roster) in another case or with spaces still matches.
+    await listGoogleCalendarBusy({ ...args, expectedOrganizerEmail: "  FOUNDER@oasisai.work " }, baseDependencies(fetchImpl, { getBundle: async () => ({}) }));
+    assert.equal(eventReads, 2);
 
     // The founder's personal token is revoked: the same-account credential covers it, after the founder's own try.
     tokenBodies.length = 0;
