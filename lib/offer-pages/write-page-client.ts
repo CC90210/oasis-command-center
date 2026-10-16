@@ -21,6 +21,16 @@ export function writePageInputProblem(description: string): string | null {
 }
 
 /**
+ * True when a section's card or FAQ item holds any words. The editor's Add
+ * buttons save blank placeholders ({ title: "" }, { q: "", a: "" }) that the
+ * page never draws, so a section of only those is empty, and a write may
+ * replace them.
+ */
+export function itemHasWords(item: object): boolean {
+  return Object.values(item).some((value) => typeof value === "string" && value.trim() !== "");
+}
+
+/**
  * The parts of a draft a write would still fill: what the prompt asks the
  * model for (writePageSystemPrompt) that the draft has empty. The route skips
  * the paid model call for a new offer's draft with none, and the offer editor
@@ -38,10 +48,10 @@ export function emptyWritableParts(doc: OfferPageDoc): string[] {
       case "obstacles":
       case "what_you_get":
       case "work":
-        if (blank(section.title) || blank(section.lede) || section.items.length === 0) parts.push(section.key);
+        if (blank(section.title) || blank(section.lede) || !section.items.some(itemHasWords)) parts.push(section.key);
         break;
       case "faq":
-        if (blank(section.title) || section.items.length === 0) parts.push("faq");
+        if (blank(section.title) || !section.items.some(itemHasWords)) parts.push("faq");
         break;
       default:
         break;

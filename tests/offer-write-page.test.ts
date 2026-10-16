@@ -179,6 +179,10 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(!inventsFacts("Ready within one week", "Your front desk is ready within one week."), "a time frame the owner gave is refused");
   // The phrase must match, not just its kind: the owner's "two weeks" does not let "one week" through.
   assert.ok(inventsFacts("Ready in one week", "We set it up in two weeks."));
+  // A figure is compared with its unit (Codex, round four), and a bare one as a number.
+  assert.ok(inventsFacts("Live in 14 days", "Includes 14 templates"), "the owner's 14 templates let 14 days through");
+  assert.ok(!inventsFacts("Support 24/7 for every client", "We answer 24/7."));
+  assert.ok(!inventsFacts("Book 40% more", "Clinics book 40% more patients."));
 
   const claimy: WrittenCopy = {
     ...written,
@@ -274,6 +278,17 @@ check("a vault value typed into any field is redacted before the prompt is built
   const prompt = writePageUserPrompt(scrubbed);
   assert.ok(!prompt.includes(value), "the prompt carries a vault value");
   assert.equal((prompt.match(/\[REDACTED:CLIENT_PORTAL_PASSWORD\]/g) || []).length, 4);
+
+  // Codex round four: a secret straddling the prompt's 300-character audience
+  // cut is redacted whole first, so no fragment of it survives the cut.
+  const straddling = scrubWriteInput(
+    { ...input, audience: `${"a".repeat(290)}${value}` },
+    (text) => redactTenantVaultSecrets(redactAll(text), vault),
+  );
+  assert.ok(!writePageUserPrompt(straddling).includes(value.slice(0, 10)), "a fragment of a secret reaches the model");
+  const route = readFileSync("app/api/forms/[id]/offer/write/route.ts", "utf8");
+  assert.match(route, /const audience = text\(body\.audience, RAW_INPUT_CAP\)/, "the route cuts the audience before redacting it");
+  assert.match(route, /const description = text\(body\.description, RAW_INPUT_CAP\)/, "the route cuts the description before redacting it");
 });
 
 check("the editor offers Write the empty parts exactly while a write would fill something", () => {
@@ -286,6 +301,39 @@ check("the editor offers Write the empty parts exactly while a write would fill 
   const panel = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
   assert.match(panel, /emptyWritableParts\(doc\)/);
   assert.match(panel, /requestWrittenPage\(formId/, "the editor's panel does not write");
+
+  // Codex round four: the editor's Add buttons save blank placeholders the page
+  // never draws. A section of only those is empty, and a write replaces them.
+  const placeholders = emptyDocForTemplate("book_call");
+  for (const s of placeholders.sections) {
+    if (s.key === "what_you_get") {
+      s.title = "What you get";
+      s.lede = "All of it, set up for you.";
+      s.items = [{ title: "" }, { title: "  " }];
+    }
+    if (s.key === "faq") {
+      s.title = "Questions";
+      s.items = [{ q: "", a: "" }];
+    }
+  }
+  const empty = emptyWritableParts(placeholders);
+  assert.ok(empty.includes("what_you_get") && empty.includes("faq"), "a section of blank placeholders counts as written");
+  const filledIn = applyWrittenCopy(placeholders, written).doc;
+  const wyg = filledIn.sections.find((s) => s.key === "what_you_get") as { items: Array<{ title: string }> };
+  assert.equal(wyg.items[0].title, "Deliverable A", "blank placeholders blocked the written cards");
+  assert.ok(!emptyWritableParts(filledIn).includes("what_you_get"));
+});
+
+check("the editor's write is refused, not shown as written, while its saves are stopped", () => {
+  const panel = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
+  assert.match(panel, /disabled=\{busy \|\| saveFailed\}/, "the write can start while the editor's last save failed");
+  assert.match(panel, /if \(filled === null\) \{\s*return setError\(/, "a refused fill is reported as written");
+  const builder = readFileSync("components/offer-pages/builder/OfferBuilder.tsx", "utf8");
+  assert.match(builder, /saveFailed=\{saving === "error"\}/);
+  assert.match(builder, /if \(!latest \|\| conflict\.current\) return null;/, "a conflicted editor takes copy it cannot save");
+  // The latest page is recorded in update itself, not after render (Codex round four).
+  assert.match(builder, /docRef\.current = next;\s*setDoc\(next\);/);
+  assert.doesNotMatch(builder, /useEffect\(\(\) => \{\s*docRef\.current/, "the page reference lags a render behind");
 });
 
 check("the editor's write has one writer: the route saves nothing, and the editor fills its own page and autosaves", () => {

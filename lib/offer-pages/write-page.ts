@@ -29,7 +29,7 @@
 import { INJECTION_GUARD, safeJsonExtract, wrapUntrusted } from "@/lib/llm-input-boundary";
 import { templateFor } from "./templates";
 import { COPY_CAPS, ITEM_CAPS, parseOfferPageDoc, type OfferPageDoc, type TemplateKey } from "./types";
-import { WRITE_PAGE_INPUT } from "./write-page-client";
+import { itemHasWords, WRITE_PAGE_INPUT } from "./write-page-client";
 
 export const WRITE_PAGE_LIMITS = {
   description: WRITE_PAGE_INPUT.maxDescription,
@@ -196,7 +196,9 @@ export function cleanCopy(value: string | undefined, cap: number): string {
  * "one week" through.
  */
 const CLAIM_PATTERNS: readonly RegExp[] = [
-  /\d+/g,
+  // A figure, with its unit when it has one: the owner's "14 templates" does
+  // not let "live in 14 days" through, while a bare "24/7" matches as numbers.
+  /\d+(?:[.,]\d+)*(?:\s*(?:%|(?:percent|x|times|minutes?|hours?|days?|weeks?|months?|years?)(?![A-Za-z])))?/gi,
   /[$%]/g,
   /\bper ?cent\b/gi,
   /\bbest\b/gi,
@@ -331,7 +333,7 @@ export function applyWrittenCopy(base: OfferPageDoc, copy: WrittenCopy): { doc: 
       case "work": {
         const from = copy[section.key];
         let touched = fillHead(section, from);
-        if (section.items.length === 0) {
+        if (!section.items.some(itemHasWords)) {
           const items = cardsFrom(from.items, ITEM_CAPS[section.key]);
           if (items.length) {
             section.items = items;
@@ -343,7 +345,7 @@ export function applyWrittenCopy(base: OfferPageDoc, copy: WrittenCopy): { doc: 
       }
       case "faq": {
         let touched = fillHead(section, copy.faq);
-        if (section.items.length === 0) {
+        if (!section.items.some(itemHasWords)) {
           const items = copy.faq.items
             .map((it) => ({ q: cleanCopy(it.q, COPY_CAPS.faq_q), a: cleanCopy(it.a, COPY_CAPS.faq_a) }))
             .filter((it) => it.q && it.a)

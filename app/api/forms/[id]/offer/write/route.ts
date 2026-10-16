@@ -44,7 +44,6 @@ import {
   parseWrittenCopy,
   scrubWriteInput,
   vetWrittenCopy,
-  WRITE_PAGE_LIMITS,
   withBrief,
   writePageSystemPrompt,
   writePageUserPrompt,
@@ -62,6 +61,9 @@ export const maxDuration = 60;
 const json = (body: Record<string, unknown>, status = 200) => NextResponse.json(body, { status });
 
 const UNAVAILABLE = { ok: false, error: "offer_pages_unavailable", message: "Offer pages aren't switched on yet." } as const;
+
+/** A bound on what is read from the body, well above every prompt limit (write-page.ts WRITE_PAGE_LIMITS). */
+const RAW_INPUT_CAP = 10_000;
 
 /** HTTP status for a model-call refusal: the caller can fix some, wait out others. */
 function statusFor(code: string): number {
@@ -97,9 +99,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return json({ ok: false, error: "invalid_json" }, 400);
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) return json({ ok: false, error: "invalid_json" }, 400);
-  const description = text(body.description, WRITE_PAGE_LIMITS.description);
-  // Shortened for the prompt only: the saved brief keeps whatever the owner wrote (withBrief).
-  const audience = text(body.audience, WRITE_PAGE_LIMITS.audience);
+  // Read whole (bounded), redacted below, and only then shortened for the
+  // prompt (writePageUserPrompt): cutting first could split a secret, and
+  // redaction cannot recognise a fragment of one. The saved brief keeps the
+  // owner's longer audience (withBrief).
+  const description = text(body.description, RAW_INPUT_CAP);
+  const audience = text(body.audience, RAW_INPUT_CAP);
   const problem = writePageInputProblem(description);
   if (problem) return json({ ok: false, error: "description_required", message: problem }, 400);
   const save = body.save !== false;

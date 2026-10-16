@@ -104,6 +104,9 @@ export function OfferBuilder({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTicks = useRef<{ confirm: string[]; unconfirm: string[] }>({ confirm: [], unconfirm: [] });
   const conflict = useRef(false);
+  // The page as last edited, set in `update` itself (not after render), so
+  // "Write the empty parts" (takeCopy) always fills the latest one.
+  const docRef = useRef<OfferPageDoc | null>(initial.draft);
 
   /** One draft save; true only when the server took it. */
   const saveOnce = useCallback(async (next: OfferPageDoc): Promise<boolean> => {
@@ -147,6 +150,7 @@ export function OfferBuilder({
 
   const update = useCallback(
     (next: OfferPageDoc) => {
+      docRef.current = next;
       setDoc(next);
       setSaving("pending");
       if (timer.current) clearTimeout(timer.current);
@@ -162,15 +166,13 @@ export function OfferBuilder({
   // "Write the empty parts" (WriteEmptyParts): the route returns vetted copy
   // and saves nothing; it fills the fields still empty on the page as it is
   // when the answer arrives (an edit made meanwhile is kept), and the result
-  // saves like any other edit. One writer to this draft: this editor.
-  const docRef = useRef(doc);
-  useEffect(() => {
-    docRef.current = doc;
-  }, [doc]);
+  // saves like any other edit. One writer to this draft: this editor. Refused
+  // (null) while a conflict stops every save: words that could not be kept
+  // are not put on screen as written.
   const takeCopy = useCallback(
-    (copy: WrittenCopy): string[] => {
+    (copy: WrittenCopy): string[] | null => {
       const latest = docRef.current;
-      if (!latest) return [];
+      if (!latest || conflict.current) return null;
       const { doc: next, filled } = applyWrittenCopy(latest, copy);
       if (filled.length) update(next);
       return filled;
@@ -275,6 +277,7 @@ export function OfferBuilder({
         doc={doc}
         onBrief={(promise) => update({ ...doc, brief: { ...(doc.brief ?? {}), promise } })}
         onCopy={takeCopy}
+        saveFailed={saving === "error"}
       />
       <div className="flex flex-wrap items-center gap-3 text-xs text-fg-muted">
         <span>

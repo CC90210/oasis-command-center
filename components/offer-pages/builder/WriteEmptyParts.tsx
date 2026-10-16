@@ -37,13 +37,16 @@ export function WriteEmptyParts({
   doc,
   onBrief,
   onCopy,
+  saveFailed,
 }: {
   formId: string;
   doc: OfferPageDoc;
   /** The owner typed in the description box: the page's brief promise. */
   onBrief: (promise: string) => void;
-  /** Fill the page's empty fields from vetted copy; returns the parts filled. */
-  onCopy: (copy: WrittenCopy) => string[];
+  /** Fill the page's empty fields from vetted copy; the parts filled, or null when the editor can't keep them. */
+  onCopy: (copy: WrittenCopy) => string[] | null;
+  /** The editor's last save failed: words written now might not be kept, so none are asked for. */
+  saveFailed: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -54,6 +57,7 @@ export function WriteEmptyParts({
   const description = doc.brief?.promise ?? "";
 
   async function write() {
+    if (saveFailed) return;
     const problem = writePageInputProblem(description);
     if (problem) return setError(problem);
     setBusy(true);
@@ -62,11 +66,14 @@ export function WriteEmptyParts({
     const written = await requestWrittenPage(formId, { description, audience: doc.brief?.audience ?? "", save: false });
     setBusy(false);
     if (!written.ok) return setError(written.message);
-    let filled: string[] = [];
+    let filled: string[] | null = [];
     try {
       filled = written.copy ? onCopy(written.copy) : [];
     } catch {
       return setError("The words that came back couldn't be put on this page. Try again.");
+    }
+    if (filled === null) {
+      return setError("This page has a change that couldn't be saved, so the new words weren't added. Reload the page, then try again.");
     }
     if (filled.length === 0) {
       return setError("Nothing usable came back for the empty parts. Try again, or say a little more about the offer.");
@@ -96,9 +103,12 @@ export function WriteEmptyParts({
             Only the empty parts are written; anything already on the page stays as it is. It stays a draft: you
             review it, and set prices yourself, before it goes live.
           </p>
+          {saveFailed ? (
+            <p className="text-[13px] text-rose-400">Your last change isn&apos;t saved. Sort that out first, so nothing written here is lost.</p>
+          ) : null}
           {error ? <p className="text-[13px] text-rose-400">{error}</p> : null}
           <div className="flex gap-2">
-            <button type="button" className="btn-primary !px-3 !py-1.5 text-xs" onClick={write} disabled={busy}>
+            <button type="button" className="btn-primary !px-3 !py-1.5 text-xs" onClick={write} disabled={busy || saveFailed}>
               {busy ? (
                 <span className="inline-flex items-center gap-2">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
