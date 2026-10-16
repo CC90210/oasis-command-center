@@ -188,10 +188,16 @@ assert.match(String(elsewhere.result?.text), /^Skipped: this was due about 6 h b
 assert.equal(elsewhere.lastAttempt, "Last attempt: skipped");
 assert.equal(previousScheduledRun("30 5 * * *", "2026-10-16T09:47:00Z", TZ), null, "a next_run_at off the schedule names no slot");
 assert.equal(previousScheduledRun("not a cron", "2026-10-16T09:30:00Z", TZ), null);
-// The missed slot when the text names it wins, with or without a next_run_at.
+// A slot the text names WITH its zone wins, with or without a next_run_at.
+assert.equal(
+  sum({ last_result: "skipped-stale: missed 2026-10-15T09:30:00Z slot (PC off)", next_run_at: null }).result?.text,
+  "Skipped: the computer was off at 5:30 AM, so it waited for its next slot.",
+);
+// A bare wall clock carries no zone and no day: never shown as the viewer's time (Codex review 2026-10-16).
+assert.equal(slotNamedInText("skipped-stale: missed 05:30 slot (PC off)", at), null);
 assert.equal(
   sum({ last_result: "skipped-stale: missed 05:30 slot (PC off)", next_run_at: null }).result?.text,
-  "Skipped: the computer was off at 5:30 AM, so it waited for its next slot.",
+  "Skipped: the PC that runs this was off when it was due, so it waited for its next slot.",
 );
 assert.equal(slotNamedInText("skipped: waiting until 09:00", at), null, "only a time after 'missed' is the slot");
 
@@ -264,8 +270,13 @@ assert.equal(counterOnly.result?.text, "Ran at 8:00 AM, but 2 earlier failures h
 assert.equal(counterOnly.failed, true);
 
 assert.equal(
-  sum({ last_result: "caught-up: missed 05:30 slot (PC off)", last_run_at: "2026-10-15T15:39:00Z" }).result?.text,
+  sum({ last_result: "caught-up: missed 2026-10-15T09:30:00Z slot (PC off)", last_run_at: "2026-10-15T15:39:00Z" }).result?.text,
   "Ran fine at 11:39 AM, catching up on the 5:30 AM run the computer missed.",
+);
+assert.equal(
+  sum({ last_result: "caught-up: missed 05:30 slot (PC off)", last_run_at: "2026-10-15T15:39:00Z" }).result?.text,
+  "Ran fine at 11:39 AM, catching up on a run the computer missed.",
+  "a catch-up with only a bare clock still says it was a catch-up, without a time it cannot vouch for",
 );
 
 const neverRan = sum({ last_result: null, last_run_at: null });

@@ -277,6 +277,29 @@ async function main() {
     });
   }
 
+  /** The full Settings page (no section): where "Connect your computer" sits on the Profile section. */
+  async function fullSettingsTreeFor(who: Who): Promise<unknown> {
+    await login(who);
+    const page = await settingsDevicesPage();
+    const el = walk(page).elements.find((e) => e.type === SettingsContent);
+    assert.ok(el, "/settings/devices mounts SettingsContent");
+    const props = { ...(el!.props as Parameters<typeof SettingsContent>[0]), section: undefined };
+    const tree = await SettingsContent(props as Parameters<typeof SettingsContent>[0]);
+    // A member without workspace settings gets the personal view (a component in the tree, not
+    // expanded by walk): draw it too, since that is the page this member actually sees.
+    const personal = walk(tree).elements.find((e) => typeof e.type === "function" && (e.type as { name?: string }).name === "PersonalSettingsView");
+    return personal ? await (personal.type as (p: unknown) => unknown)(personal.props) : tree;
+  }
+
+  for (const who of ["member", "client", "operator"] as const) {
+    await check(`${who}: Connect your computer on the full Settings page links to the install page too (re-audit 2026-10-16)`, async () => {
+      const connect = section(await fullSettingsTreeFor(who), "connect-your-computer");
+      const links = connect.inside.elements.filter((e) => e.props.href === INSTALL);
+      assert.equal(links.length, 1, `Connect your computer carries ${links.length} links to ${INSTALL}`);
+      assert.equal(textOfEl(links[0]), "Don't have the connector? Install it");
+    });
+  }
+
   await check("operator + agents owner: Devices (advanced) is drawn, CLOSED on /settings/devices, with no second install path", async () => {
     const tree = await devicesTreeFor("operator");
     const advanced = section(tree, "devices");

@@ -54,7 +54,7 @@ import {
 } from "@/lib/oasis-pipeline-query";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
-import { readOasisInboundQueue } from "@/components/os/department/inbound-load";
+import { inboundQueueFromWindow, readOasisInboundQueue, type OasisInboundQueue } from "@/components/os/department/inbound-load";
 import { tileCount } from "@/components/os/department/count-rules";
 
 export const dynamic = "force-dynamic";
@@ -241,8 +241,16 @@ export default async function PipelinePage({
   // whole queue, so the badge never counts leads the board would not show.
   // Started here so it overlaps the reads below; a failed read logs and draws
   // no badge rather than a 0, and never takes the board down with it.
+  //
+  // On the plain Warm inbound view (no stage, rep, search or page) the board
+  // below makes THIS read itself: same stages, program, motion, unassigned rows
+  // and no cycle. The badge then takes its count from the board instead of
+  // reading the same up-to-2,000 rows twice (Codex review 2026-10-16).
+  const badgeOf = ({ recent }: OasisInboundQueue) =>
+    recent.total > 0 || recent.truncated ? tileCount(recent.total, recent.truncated) : null;
+  const badgeFromBoard = warmInbound && !stageFilter && !repFilter && !query && !requestedPage;
   const inboundBadgePromise: Promise<string | null> =
-    session.ok && pipelineAdmin
+    session.ok && pipelineAdmin && !badgeFromBoard
       ? readOasisInboundQueue({
           tenantId,
           tenantSlug,
@@ -250,7 +258,7 @@ export default async function PipelinePage({
           isOwner: session.isTrueAdmin,
           adminAccess: session.adminAccess,
         })
-          .then(({ recent }) => (recent.total > 0 || recent.truncated ? tileCount(recent.total, recent.truncated) : null))
+          .then(badgeOf)
           .catch((error) => {
             console.error("[pipeline.inbound-badge]", error);
             return null;
@@ -433,7 +441,8 @@ export default async function PipelinePage({
   const stageHrefs = Object.fromEntries(
     stages.map((stage) => [stage.key, hrefWith({ stage: stage.key, page: null })]),
   );
-  const inboundBadge = await inboundBadgePromise;
+  const inboundBadge =
+    session.ok && pipelineAdmin && badgeFromBoard ? badgeOf(inboundQueueFromWindow(pipelineWindow)) : await inboundBadgePromise;
 
   const repChip = (label: string, value: string | null) => {
     const active = (value ?? null) === repFilter;

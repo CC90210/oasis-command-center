@@ -390,6 +390,7 @@ export async function SettingsContent({
               <SafeBoundary label="Connect your computer">
                 <ConnectYourComputerCard />
               </SafeBoundary>
+              {INSTALL_CONNECTOR_LINK}
             </SettingsSection>
           )}
 
@@ -760,6 +761,7 @@ async function PersonalSettingsView({
           <SafeBoundary label="Connect your computer">
             <ConnectYourComputerCard />
           </SafeBoundary>
+          {INSTALL_CONNECTOR_LINK}
         </SettingsSection>
       )}
 

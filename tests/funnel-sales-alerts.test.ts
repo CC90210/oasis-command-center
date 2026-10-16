@@ -166,12 +166,23 @@ async function main(): Promise<void> {
     assert.match(completed, /Revenue: \$10-50K\/mo/, "revenue as words, not the option key");
     assert.match(completed, /Bottleneck: Quotes sit &lt;3 days&gt; unanswered/, "the typed bottleneck, escaped");
     assert.match(completed, /Wants: sales \/ lead gen/, "the goal line the alert already had is kept");
-    assert.match(completed, /In their words/, "the full answer block is kept");
     assert.ok(completed.indexOf("Revenue:") < completed.indexOf("Bottleneck:"), "Revenue, then Bottleneck");
+    // Never the same words twice (re-audit 2026-10-16): the short typed answer IS the Bottleneck line.
+    assert.doesNotMatch(completed, /In their words/, "a short answer already printed whole is not repeated");
+    assert.equal(completed.split("Quotes sit &lt;3 days&gt; unanswered").length - 1, 1, "the answer appears once");
+    const longAnswer = "Quotes sit unanswered. " + "x".repeat(400);
+    const longMsg = buildAiAuditAlert({ ...full, bottleneck_detail: longAnswer }, scoreAiAuditLead(full));
+    assert.match(longMsg, /In their words/, "a long answer keeps its full block (the Bottleneck line is capped)");
+    const picked = { ...full, primary_bottleneck: "Leads wait days" };
+    const pickedMsg = buildAiAuditAlert(picked, scoreAiAuditLead(picked));
+    assert.match(pickedMsg, /Bottleneck: Leads wait days/);
+    assert.match(pickedMsg, /In their words/, "a picked bottleneck leaves the typed answer its own block");
 
-    // Only the goal answered: the bottleneck reads as the goal's words, never its key.
+    // Only the goal answered: the bottleneck reads as the goal's words, never its key, and once.
     const goalOnly = { name: "Bo", automation_goal: "sales_leadgen" };
-    assert.match(buildAiAuditAlert(goalOnly, scoreAiAuditLead(goalOnly)), /Bottleneck: sales \/ lead gen/);
+    const goalMsg = buildAiAuditAlert(goalOnly, scoreAiAuditLead(goalOnly));
+    assert.match(goalMsg, /Bottleneck: sales \/ lead gen/);
+    assert.doesNotMatch(goalMsg, /Wants:/, "the goal is not printed a second time as Wants");
 
     // Neither given: neither line, and nothing reads "undefined" or a bare label.
     const bare = { name: "Cy", email: "cy@x.test" };
@@ -389,7 +400,12 @@ async function main(): Promise<void> {
     const deptPage = readFileSync(join(__dirname, "..", "app", "team", "[dept]", "page.tsx"), "utf8");
     assert.match(deptPage, /newInbound: numbers\.newInbound \?\? null/);
     const pipelinePage = readFileSync(join(__dirname, "..", "app", "pipeline", "page.tsx"), "utf8");
-    assert.match(pipelinePage, /session\.ok && pipelineAdmin\s*\?\s*readOasisInboundQueue\(/, "the badge is the same read, for pipeline admins only");
+    assert.match(pipelinePage, /session\.ok && pipelineAdmin && !badgeFromBoard\s*\?\s*readOasisInboundQueue\(/, "the badge is the same read, for pipeline admins only");
+    // On the plain Warm inbound view the board IS that read: the badge reuses it, never a second read.
+    assert.match(pipelinePage, /const badgeFromBoard = warmInbound && !stageFilter && !repFilter && !query && !requestedPage;/);
+    assert.match(pipelinePage, /session\.ok && pipelineAdmin && badgeFromBoard \? badgeOf\(inboundQueueFromWindow\(pipelineWindow\)\)/);
+    const inboundLoadSrc = readFileSync(join(__dirname, "..", "components", "os", "department", "inbound-load.ts"), "utf8");
+    assert.match(inboundLoadSrc, /return inboundQueueFromWindow\(window\);/, "one derivation for the badge and the Sales desk");
     assert.match(pipelinePage, /tileCount\(recent\.total, recent\.truncated\)/, "the badge prints the list's count, N+ when it is a floor");
     assert.match(pipelinePage, /<span>Warm inbound<\/span>\s*\{inboundBadge && \(/);
   }

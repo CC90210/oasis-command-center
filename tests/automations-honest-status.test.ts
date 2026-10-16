@@ -44,6 +44,13 @@ assert.doesNotMatch(manager, /<details[^>]*\bopen\b/, "Details starts closed");
 assert.doesNotMatch(manager, /Last result: |"Error: "/, "raw text is never the main line");
 assert.doesNotMatch(manager, /job\.last_run_(?:error|output|note)\b/, "the row never prints a raw stored column itself");
 assert.doesNotMatch(manager, /run\.details\.slice\(/, "the evidence is never cut short");
+// One result line for every row: the team's rows (admins only) say what their last run did too, in the
+// same component, so the two can never word a run differently (re-audit 2026-10-16).
+const teamRow = manager.slice(manager.indexOf("function TeamJobRow("), manager.indexOf("function JobRow("));
+const ownRow = manager.slice(manager.indexOf("function JobRow("), manager.indexOf("function RunResultLine("));
+assert.match(teamRow, /<RunResultLine run=\{summarizeRun\(job\)\} \/>/, "a team row has its result line");
+assert.match(ownRow, /<RunResultLine run=\{run\} daemon=\{Boolean\(daemon\)\} \/>/, "your own row uses the same line");
+assert.equal((manager.match(/data-testid="cron-result-line"/g) || []).length, 1, "the result line is written once");
 
 // The counts read as two counts of the same thing.
 assert.match(manager, /Yours \$\{tenantCount\} · OASIS platform \$\{empireCount\} \(operators only\)/);

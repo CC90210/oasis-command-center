@@ -46,7 +46,7 @@ import {
   type CronInventoryJob,
 } from "@/lib/automations/cron-inventory";
 import { describeNextRun } from "@/lib/automations/cron-schedule";
-import { relativeTimeShort, summarizeRun } from "@/lib/automations/run-summary";
+import { relativeTimeShort, summarizeRun, type RunSummary } from "@/lib/automations/run-summary";
 
 type ActionType = "script_run" | "snapshot_run" | "webhook_post";
 type CronJob = CronInventoryJob;
@@ -848,6 +848,9 @@ function TeamJobRow({
           <span className="text-fg-faint">·</span>
           <span>{job.action_type.replace(/_/g, " ")}</span>
         </div>
+        {/* What its last run did, in the same words as your own rows (re-audit 2026-10-16: the team's
+            rows said nothing about their runs). */}
+        <RunResultLine run={summarizeRun(job)} />
       </div>
       <button
         type="button"
@@ -1134,32 +1137,40 @@ function JobRow({
         )}
       </div>
 
-      {/* Every row: one plain sentence, the stored text kept as evidence under a
-          closed Details. Raw machine text is never the message (CC 2026-10-16),
-          and it is never dropped either. */}
-      {run.result && (
-        <div
-          className={`mt-3 rounded border px-2.5 py-1.5 text-xs ${
-            run.result.tone === "bad" && !daemon
-              ? "text-status-warm bg-status-warm/5 border-status-warm/30"
-              : "text-fg-muted bg-bg-deep/50 border-bg-border"
-          }`}
-          data-testid="cron-result-line"
-        >
-          <div>
-            {/* Not this process's result: it belongs to the parked scheduler
-                entry. Labelled and de-emphasised so a running daemon doesn't
-                wear an old red box. */}
-            {daemon && <span className="font-bold">Last scheduler run: </span>}
-            {run.result.text}
-          </div>
-          {run.details && (
-            <details className="mt-1 text-[11px] text-fg-dim">
-              <summary className="cursor-pointer select-none">Details</summary>
-              <div className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono">{run.details}</div>
-            </details>
-          )}
-        </div>
+      <RunResultLine run={run} daemon={Boolean(daemon)} />
+    </div>
+  );
+}
+
+/**
+ * Every row: one plain sentence, the stored text kept as evidence under a
+ * closed Details. Raw machine text is never the message (CC 2026-10-16), and it
+ * is never dropped either. One component for your rows and the team's, so the
+ * two cannot describe a run differently.
+ */
+function RunResultLine({ run, daemon = false }: { run: RunSummary; daemon?: boolean }) {
+  if (!run.result) return null;
+  return (
+    <div
+      className={`mt-3 rounded border px-2.5 py-1.5 text-xs ${
+        run.result.tone === "bad" && !daemon
+          ? "text-status-warm bg-status-warm/5 border-status-warm/30"
+          : "text-fg-muted bg-bg-deep/50 border-bg-border"
+      }`}
+      data-testid="cron-result-line"
+    >
+      <div>
+        {/* Not this process's result: it belongs to the parked scheduler
+            entry. Labelled and de-emphasised so a running daemon doesn't
+            wear an old red box. */}
+        {daemon && <span className="font-bold">Last scheduler run: </span>}
+        {run.result.text}
+      </div>
+      {run.details && (
+        <details className="mt-1 text-[11px] text-fg-dim">
+          <summary className="cursor-pointer select-none">Details</summary>
+          <div className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono">{run.details}</div>
+        </details>
       )}
     </div>
   );
