@@ -53,7 +53,8 @@ import { formsEditRefusal } from "@/lib/forms/access";
 import { countResponsesByForm } from "@/lib/forms/responses";
 import { countRecentLeads, listOfferSummaries, offerPagesDb, type OfferSummary } from "@/lib/offer-pages/store";
 import { countFunnelEventMetrics, type FunnelCounts } from "@/lib/offers/tracking-store";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, CheckCheck } from "lucide-react";
+import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
@@ -125,6 +126,17 @@ export default async function FormsPage() {
       <PageHeader
         title="Offers"
         subtitle="Full pages that make the case and take people's details, and the plain forms behind your other requests."
+        action={
+          // CC 2026-10-16: one screen, no manual video uploads. Every offer
+          // page's ticks, its proposed video and Publish, in one pass; for
+          // the same owners and admins the builder opens for.
+          canEdit && offers && Object.keys(offers.statuses).length ? (
+            <Link href="/forms/publish" className="btn-primary inline-flex min-h-11 items-center gap-2 !px-4 text-sm">
+              <CheckCheck className="h-4 w-4" aria-hidden="true" />
+              Confirm &amp; publish
+            </Link>
+          ) : undefined
+        }
       />
 
       {!result.ok && (
