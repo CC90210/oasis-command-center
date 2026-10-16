@@ -38,16 +38,25 @@ export type OfferCardViewModel = {
   /** The landing page's address (path), or null when the workspace could not be resolved. */
   publicPath?: string | null;
   /**
-   * What that address shows a visitor right now: the page ("public"), only the
-   * bare form because the page is unpublished ("draft"), or nothing because the
-   * form is switched off ("off"). Absent = not stated (older callers).
+   * What that address shows a visitor right now:
+   *   "public"        the page;
+   *   "draft"         only the bare form, because the page is unpublished;
+   *   "off"           nothing: the form is switched off and no page was published;
+   *   "off_published" nothing for now: switched off, but switching it on brings
+   *                   the published page straight back (no Publish needed);
+   *   "unresolved"    the address itself could not be built (the workspace
+   *                   lookup failed), which says nothing about the page.
+   * Absent = not stated (older callers).
    */
-  linkState?: "public" | "draft" | "off";
+  linkState?: "public" | "draft" | "off" | "off_published" | "unresolved";
 };
 
 /** The card's one link line: the landing page's address, or plainly why there is none yet. */
 function LinkLine({ path, state }: { path: string | null | undefined; state: OfferCardViewModel["linkState"] }) {
   if (!state) return null;
+  if (state === "unresolved" || (state === "public" && !path)) {
+    return <p className="text-xs text-status-warm">Couldn&apos;t build this offer&apos;s link. Refresh the page.</p>;
+  }
   if (state === "public" && path) {
     return (
       <a
@@ -63,9 +72,11 @@ function LinkLine({ path, state }: { path: string | null | undefined; state: Off
   }
   return (
     <p className="text-xs text-fg-dim">
-      {state === "off"
-        ? "Switched off: its link is closed. Switch it on, then publish the page."
-        : "Not public yet: until you publish, its link shows only the form, not this page."}
+      {state === "off_published"
+        ? "Switched off: its link is closed. Switch it on and its published page is back."
+        : state === "off"
+          ? "Switched off: its link is closed. Switch it on, then publish the page."
+          : "Not public yet: until you publish, its link shows only the form, not this page."}
     </p>
   );
 }

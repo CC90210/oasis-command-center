@@ -32,9 +32,10 @@ export const OASIS_OFFER_SHORT_PATHS: Readonly<Record<string, string>> = {
 /** The address to hand out for an offer: its short link when it has one, else /f/<workspace>/<offer>. */
 export function offerShareablePath(tenantSlug: string | null, formSlug: string): string | null {
   if (!tenantSlug) return null;
-  if (tenantSlug === AI_AUDIT_TENANT_SLUG) {
-    const short = OASIS_OFFER_SHORT_PATHS[formSlug];
-    if (short) return short;
+  // Own keys only: a valid slug such as "constructor" must not pick up an
+  // inherited Object member as its "path" (Codex review of #630).
+  if (tenantSlug === AI_AUDIT_TENANT_SLUG && Object.prototype.hasOwnProperty.call(OASIS_OFFER_SHORT_PATHS, formSlug)) {
+    return OASIS_OFFER_SHORT_PATHS[formSlug];
   }
   return `/f/${tenantSlug}/${formSlug}`;
 }

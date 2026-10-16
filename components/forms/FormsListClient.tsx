@@ -361,6 +361,10 @@ export function FormsListClient({
     // one; the draft preview stays on the canonical /f/ path (previewLink).
     const path = offerShareablePath(tenantSlug, r.slug);
     if (!path) return null;
+    // Switched off: the on/off switch is the action. A page that was published
+    // comes back the moment it is switched on, and Publish is refused while the
+    // form is off, so nothing here would help (Codex review of #630).
+    if (!r.enabled) return null;
     if (pageIsPublic(r)) {
       return (
         <>
@@ -440,7 +444,14 @@ export function FormsListClient({
       videoPlays: typeof recentFunnel[r.id]?.video_plays === "number" ? recentFunnel[r.id].video_plays : null,
       community: typeof recentFunnel[r.id]?.community === "number" ? recentFunnel[r.id].community : null,
       publicPath: offerShareablePath(tenantSlug, r.slug),
-      linkState: !r.enabled ? "off" : pageIsPublic(r) ? "public" : "draft",
+      // Each state says only what is true of it (Codex review of #630): an
+      // address that could not be built is not an unpublished page, and a
+      // switched-off page that was published is not a draft.
+      linkState: !tenantSlug
+        ? "unresolved"
+        : !r.enabled
+          ? o.status === "draft" ? "off" : "off_published"
+          : pageIsPublic(r) ? "public" : "draft",
     };
     return { view, toggle: onOff(r, ["On", "Off"]), actions: actions(r, true) };
   });

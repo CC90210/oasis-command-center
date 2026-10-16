@@ -66,6 +66,10 @@ async function main(): Promise<void> {
     assert.equal(offerShareablePath("oasis-ai-cc", "some-new-offer"), "/f/oasis-ai-cc/some-new-offer");
     assert.equal(offerShareablePath("acme", "protocol"), "/f/acme/protocol");
     assert.equal(offerShareablePath(null, "protocol"), null);
+    // Own keys only (Codex review of #630): never an inherited Object member.
+    for (const slug of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      assert.equal(offerShareablePath("oasis-ai-cc", slug), `/f/oasis-ai-cc/${slug}`, slug);
+    }
   });
 
   console.log("offer-short-links: all passed");

@@ -219,6 +219,34 @@ async function main() {
         recentLeads: { "offer-8": 0 },
       },
     },
+    offPublished: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-9", "theta", "Theta Offer", false)],
+        tenantLogoUrl: null,
+        tenantSlug: "acme",
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-9": 0 },
+        offers: { "offer-9": { status: "live", publishedVersion: 3 } },
+        recentLeads: { "offer-9": 0 },
+      },
+    },
+    unresolvedLive: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-10", "iota", "Iota Offer", true)],
+        tenantLogoUrl: null,
+        tenantSlug: null,
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-10": 0 },
+        offers: { "offer-10": { status: "live", publishedVersion: 1 } },
+        recentLeads: { "offer-10": 0 },
+      },
+    },
     liveWithChanges: {
       kind: "list",
       props: {
@@ -340,6 +368,19 @@ async function main() {
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
     assert.ok(h.includes(">/fleet-audit<"), "FLEET's card does not show its short link");
     assert.ok(h.includes('href="/fleet-audit"'), "Open page does not use the short link");
+  });
+  await step("a switched-off offer whose page was published never offers Publish (switching on brings it back)", () => {
+    const h = html.offPublished;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(!h.includes(">Publish<"), "Publish is offered for a page that is already published");
+    assert.ok(h.includes("its published page is back"), "the card does not say switching on restores the page");
+    assert.doesNotMatch(h, COPY_BUTTON, "a switched-off offer's card hands out a closed link");
+  });
+  await step("an address that could not be built is reported as such, never as an unpublished page", () => {
+    const h = html.unresolvedLive;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(h.includes("build this offer"), "the card does not say the link could not be built");
+    assert.ok(!h.includes("Not public yet"), "a live page is called unpublished because the address lookup failed");
   });
   await step("a live page with newer edits adds Preview changes, still one public link", () => {
     const h = html.liveWithChanges;
