@@ -18,8 +18,10 @@
  *     be in touch" (lib/booking-link.ts: absent is a real answer, never a dead
  *     link).
  *
- * In a preview (signed-in owner, draft page) the form is NOT mounted: a preview
- * must never create a lead. The steps are listed instead.
+ * In a preview (signed-in owner, draft page) the form is mounted in preview
+ * mode (FormPublicClient `preview`): every step and the live open times work,
+ * and nothing is sent, so a preview never creates a lead. With no form at all
+ * the steps are listed instead.
  */
 import { useState } from "react";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";

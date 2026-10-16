@@ -63,12 +63,12 @@ export function OfferPage({
   logoUrl: string | null;
   /** OASIS's own workspaces link OASIS's /privacy and /terms; nobody else's page does. */
   legalLinks: boolean;
-  /** The page's own form, or null in a preview (never a live form there). */
+  /** The page's own form; in the owner's preview, the same form in preview mode (it sends nothing). */
   form: EmbeddedFormProps | null;
   bookingUrl: string | null;
   /** The workspace's own contact address, for "two times that suit you" when there is no booking link. */
   contactEmail?: string | null;
-  /** Set for the owner's signed-in preview: a banner, and step titles instead of the form. */
+  /** Set for the owner's signed-in preview: a banner (and step titles, should the form be missing). */
   preview?: { steps: string[] } | null;
   /**
    * V5a funnel tracking (HANDOVER section 5): the public slugs every hero
@@ -166,6 +166,7 @@ export function OfferPage({
         {preview ? (
           <div className="border-b border-status-warm/40 bg-status-warm/10 px-5 py-2 text-center text-[13px] text-status-warm">
             Preview of your unpublished page. Only signed-in owners see this; the public link still shows what is live.
+            The form and the calendar below work, and nothing you enter is sent, saved or booked.
           </div>
         ) : null}
         <OfferNav nav={page.nav} name={workspaceName} logoUrl={logoUrl} ctaLabel={ctaLabel} />

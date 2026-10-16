@@ -136,6 +136,15 @@ type Props = {
    */
   tenantSlug?: string;
   formSlug?: string;
+  /**
+   * The owner's preview of an offer page (CC, 2026-10-16: the owner sees the
+   * real form and calendar, not a placeholder). Every step validates and
+   * advances, and the last one opens the calendar with live open times, but
+   * NOTHING leaves the page: no submit, no upload link, no consent capture, no
+   * tracking event and no booking. The page also passes no anonymousInit and
+   * no link token, so the submit route would refuse a request anyway.
+   */
+  preview?: boolean;
 };
 
 type SubmitResponse = {
@@ -315,6 +324,7 @@ export function FormPublicClient({
   onStepSubmitted,
   tenantSlug,
   formSlug,
+  preview = false,
 }: Props) {
   const consentIdemKey = useConsentIdempotencyKey();
   const consentDone = useRef(false);
@@ -389,6 +399,8 @@ export function FormPublicClient({
    * so crawlers still cannot create empty leads. Concurrent files share the
    * same promise and therefore the same lead. */
   const ensureUploadToken = useCallback(async (): Promise<string | null> => {
+    // A preview creates no lead, so it has nowhere to upload to.
+    if (preview) return null;
     if (tokenRef.current) return tokenRef.current;
     if (!anonymousInit) return null;
     if (tokenInitPromiseRef.current) return tokenInitPromiseRef.current;
@@ -417,7 +429,7 @@ export function FormPublicClient({
     })();
     tokenInitPromiseRef.current = pending;
     return pending;
-  }, [anonymousInit]);
+  }, [anonymousInit, preview]);
 
   // Fire view-ping exactly once on mount. Anonymous flows can't ping
   // /api/forms/view yet — there's no lead until the first submit — so
@@ -446,15 +458,16 @@ export function FormPublicClient({
   // were not supplied (see the Props doc comment) or sessionStorage is
   // unavailable (lib/offers/tracking-client.ts).
   const pageViewFired = useRef(false);
+  // A preview is the owner looking, never a visitor: it records nothing.
   useEffect(() => {
-    if (pageViewFired.current || !tenantSlug || !formSlug) return;
+    if (preview || pageViewFired.current || !tenantSlug || !formSlug) return;
     pageViewFired.current = true;
     trackEvent({ tenant: tenantSlug, form: formSlug, event: "page_view" });
-  }, [tenantSlug, formSlug]);
+  }, [preview, tenantSlug, formSlug]);
   useEffect(() => {
-    if (!tenantSlug || !formSlug) return;
+    if (preview || !tenantSlug || !formSlug) return;
     trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_viewed", stepIndex: currentStep });
-  }, [tenantSlug, formSlug, currentStep]);
+  }, [preview, tenantSlug, formSlug, currentStep]);
 
   // UTM/kw/cat read once from the page's own URL (never re-read mid-funnel —
   // the visitor is still on the same page). Forwarded on every step's submit
@@ -783,6 +796,16 @@ export function FormPublicClient({
     // would reject the very address the wait just finished resolving, leaving
     // the race exactly as open as before. (Codex P1.)
     if (!validateRef.current()) return;
+    // PREVIEW: the owner walks the real steps, validated like a visitor's, and
+    // nothing leaves the page. The route moves one step at a time
+    // (next_step = step + 1), so the preview does the same.
+    if (preview) {
+      const finished = currentStep >= steps.length - 1;
+      onStepSubmitted?.(currentStep, finished);
+      if (finished) setDone(true);
+      else setCurrentStep(currentStep + 1);
+      return;
+    }
     setSubmitting(true);
     setServerError(null);
     try {
@@ -1185,6 +1208,7 @@ export function FormPublicClient({
                 primary={primary}
                 formSlug={publicBookingFormSlug}
                 completedStep={steps.length}
+                preview={preview}
               />
             ) : (
               <>
@@ -1198,7 +1222,7 @@ export function FormPublicClient({
                 {/* COMMUNITY's next step IS the community: a link to click, not
                     only the address inside the thanks (review of #655). */}
                 {publicBookingFormSlug === "community" ? (
-                  <CommunityJoinLink formSlug={publicBookingFormSlug} completedStep={steps.length} primary={primary} />
+                  <CommunityJoinLink formSlug={publicBookingFormSlug} completedStep={steps.length} primary={primary} preview={preview} />
                 ) : null}
                 {publicBookingFormSlug ? (
                   <div className="border-t border-bg-border pt-5">
@@ -1209,6 +1233,7 @@ export function FormPublicClient({
                         formSlug={publicBookingFormSlug}
                         completedStep={steps.length}
                         optional
+                        preview={preview}
                       />
                     ) : (
                       <div className="space-y-2 text-center">
