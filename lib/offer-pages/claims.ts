@@ -288,6 +288,49 @@ const TIMEFRAME_RE =
 const WORD_RE =
   /\b(guarantee[ds]?|proven|booked|refunds?|refunded|money[ -]back|risk[ -]free|roi|profits?|profitable|savings?)\b/i;
 
+/** The family a claim phrase belongs to (claimReasons says the same thing in a sentence). */
+export type ClaimKind = "money" | "percentage" | "multiplier" | "number" | "result" | "superlative" | "who else uses it" | "time frame" | "word";
+
+/** One phrase that makes a sentence a claim, as it is written there. */
+export type ClaimPhrase = { kind: ClaimKind; phrase: string };
+
+/** A run of digits ("$2,500", "7", "3.5") as one phrase; any digit is a number, as DIGIT_RE says. */
+const DIGIT_RUN_RE = /[0-9](?:[0-9.,:]*[0-9])?/;
+
+/**
+ * Every claim family, in claimReasons' order. The one list the phrases are
+ * read from, so a pattern changed here changes both answers (the claims test
+ * holds them to the same verdict on every sentence it knows).
+ */
+const CLAIM_FAMILIES: ReadonlyArray<{ kind: ClaimKind; re: RegExp }> = [
+  { kind: "money", re: MONEY_RE },
+  { kind: "percentage", re: PERCENT_RE },
+  { kind: "multiplier", re: MULTIPLIER_RE },
+  { kind: "number", re: DIGIT_RUN_RE },
+  { kind: "number", re: QUANTITY_RE },
+  { kind: "number", re: COUNT_RE },
+  { kind: "result", re: RESULT_RE },
+  { kind: "superlative", re: SUPERLATIVE_RE },
+  { kind: "who else uses it", re: SOCIAL_PROOF_RE },
+  { kind: "time frame", re: TIMEFRAME_RE },
+  { kind: "word", re: WORD_RE },
+];
+
+/**
+ * Every phrase in a sentence that makes it a claim, each with its family, in
+ * family order and then as written. [] exactly when claimReasons is [] (the
+ * same patterns). For grounding copy phrase by phrase (#636's write-page
+ * vetting), so no second list of claim words has to follow this one.
+ */
+export function claimPhrases(sentence: string): ClaimPhrase[] {
+  const out: ClaimPhrase[] = [];
+  for (const { kind, re } of CLAIM_FAMILIES) {
+    const all = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+    for (const m of sentence.matchAll(all)) if (m[0]) out.push({ kind, phrase: m[0] });
+  }
+  return out;
+}
+
 /** Why a sentence is a claim, or [] when it is not one. */
 export function claimReasons(sentence: string): string[] {
   const why: string[] = [];
