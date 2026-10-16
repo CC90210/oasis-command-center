@@ -641,7 +641,9 @@ async function main(): Promise<void> {
     world.blockedSlugs = [];
     const theirs = (await json(await listRoute.GET(req("GET", "/api/automations/guided")))).items;
     assert.deepEqual(theirs.map((i: { id: string }) => i.id), [salesId], "the Finance digest and its last result are not listed");
-    assert.ok(!JSON.stringify(theirs).includes("9000"));
+    // The run's own words, not a bare "9000": an id, a time or a next-run stamp in the Sales item can
+    // contain those digits by chance, which failed main's CI on 2026-10-16 for no leak at all.
+    assert.ok(!JSON.stringify(theirs).includes("Collected 9000 dollars"), "the Finance digest's last result is listed");
     assert.equal((await pauseRoute.POST(req("POST", `/api/automations/guided/${financeId}/pause`), idCtx(financeId))).status, 404);
     assert.equal((await runsRoute.GET(req("GET", `/api/automations/guided/${financeId}/runs`), idCtx(financeId))).status, 404);
     assert.equal((await receiptRoute.GET(req("GET", `/api/automations/guided/${financeId}/runs/fin-run`), runCtx(financeId, "fin-run"))).status, 404);
