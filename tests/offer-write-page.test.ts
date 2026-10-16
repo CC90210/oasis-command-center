@@ -13,7 +13,7 @@
  * publishes.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { USAGE_SURFACES } from "../lib/ai/usage";
 import { lintDoc } from "../lib/offer-pages/claims";
 import { emptyDocForTemplate, OFFER_TEMPLATES } from "../lib/offer-pages/templates";
@@ -21,15 +21,14 @@ import { COPY_CAPS, ITEM_CAPS, parseOfferPageDoc } from "../lib/offer-pages/type
 import {
   applyWrittenCopy,
   cleanCopy,
-  inventsFacts,
   parseWrittenCopy,
   scrubWriteInput,
-  vetWrittenCopy,
   withBrief,
   writePageSystemPrompt,
   writePageUserPrompt,
   type WrittenCopy,
 } from "../lib/offer-pages/write-page";
+import { inventsFacts, vetWrittenCopy } from "../lib/offer-pages/write-page-vet";
 import { emptyWritableParts } from "../lib/offer-pages/write-page-client";
 import { redactAll, redactTenantVaultSecrets } from "../lib/secret-redaction";
 
@@ -184,6 +183,13 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(!inventsFacts("Three clinics already use it", "Three clinics already use our front desk."));
   assert.ok(inventsFacts("A leading platform", "Avoid misleading reports"), "the owner's misleading let leading through");
   assert.ok(!inventsFacts("Guaranteed setup", "We guarantee the setup."), "a stem the owner wrote was refused");
+  // Codex round seven: any kind of claim the publish linter knows (claimReasons)
+  // must be one the owner's words make too, so the two lists never drift.
+  const app = "A scheduling app for clinics";
+  assert.ok(inventsFacts("The only platform you need", app), "an invented superlative got through");
+  assert.ok(inventsFacts("The most effective way to get more bookings", app), "an invented promised result got through");
+  assert.ok(!inventsFacts("The only answering service in Ottawa", "We are the only answering service in Ottawa."));
+  assert.ok(!inventsFacts("Leads booked straight onto your calendar", "It books leads onto your calendar."), "booking talk was held back as a claim");
   // A money amount is one claim (Codex round six): a bare "99" and a "$" elsewhere do not make "$99".
   // ("Only $99", not "Only $99 a month": "a month" would be caught by the time-frame rule instead.)
   assert.ok(inventsFacts("Only $99", "We have 99 clients and charge $50 for setup."), "an invented price got through");
@@ -353,10 +359,18 @@ check("the editor offers Write the empty parts exactly while a write would fill 
 check("the editor's write is refused, not shown as written, while its saves are stopped", () => {
   const panel = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
   assert.match(panel, /disabled=\{busy \|\| saveFailed\}/, "the write can start while the editor's last save failed");
-  assert.match(panel, /if \(filled === null\) \{\s*return setError\(/, "a refused fill is reported as written");
+  assert.match(panel, /if \(filled === "conflict"\) \{\s*return setError\(/, "a refused fill is reported as written");
+  assert.match(panel, /if \(filled === "brief_changed"\) \{\s*return setError\(/, "words from an old description are reported as written");
   const builder = readFileSync("components/offer-pages/builder/OfferBuilder.tsx", "utf8");
   assert.match(builder, /saveFailed=\{saving === "error"\}/);
-  assert.match(builder, /if \(!latest \|\| conflict\.current\) return null;/, "a conflicted editor takes copy it cannot save");
+  assert.match(builder, /if \(!latest \|\| conflict\.current\) return "conflict";/, "a conflicted editor takes copy it cannot save");
+  // Codex round seven: the brief can change in the Copy brief too, so the
+  // editor compares the brief the words were written from with the latest one.
+  assert.match(
+    builder,
+    /if \(\(latest\.brief\?\.promise \?\? ""\) !== asked\.description \|\| \(latest\.brief\?\.audience \?\? ""\) !== asked\.audience\) \{\s*return "brief_changed";/,
+    "words written from an old brief are put on the page",
+  );
   // The latest page is recorded in update itself, not after render (Codex round four).
   assert.match(builder, /docRef\.current = next;\s*setDoc\(next\);/);
   assert.doesNotMatch(builder, /useEffect\(\(\) => \{\s*docRef\.current/, "the page reference lags a render behind");
@@ -364,7 +378,8 @@ check("the editor's write is refused, not shown as written, while its saves are 
 
 check("the editor's write has one writer: the route saves nothing, and the editor fills its own page and autosaves", () => {
   const panel = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
-  assert.match(panel, /requestWrittenPage\(formId, \{ description, audience: doc\.brief\?\.audience \?\? "", save: false \}\)/);
+  assert.match(panel, /const asked = \{ description, audience: doc\.brief\?\.audience \?\? "" \};/);
+  assert.match(panel, /requestWrittenPage\(formId, \{ \.\.\.asked, save: false \}\)/);
   assert.doesNotMatch(panel, /location\.reload|router\.refresh/, "the panel reloads over the editor's state");
   // The description box IS the page's brief, so it can never disagree with the Copy brief.
   assert.match(panel, /const description = doc\.brief\?\.promise \?\? ""/);
@@ -392,6 +407,19 @@ check("a write that fails at creation can be retried: in the New offer dialog, a
   assert.match(turn, /setMade\(true\)/, "Turn into an offer hides the failure by opening the editor at once");
   const client = readFileSync("lib/offer-pages/write-page-client.ts", "utf8");
   assert.doesNotMatch(client, /from the builder/, "a message promises a retry the builder does not have");
+});
+
+check("the never-invent check stays on the server, and the page fill stays browser-safe", () => {
+  // claims.ts hashes with node:crypto: the checker that uses it must never reach a component.
+  const vet = readFileSync("lib/offer-pages/write-page-vet.ts", "utf8");
+  assert.match(vet, /import \{ claimReasons \} from "\.\/claims";/);
+  for (const file of readdirSync("components", { recursive: true }) as string[]) {
+    if (!/\.tsx?$/.test(file)) continue;
+    assert.doesNotMatch(readFileSync(`components/${file}`, "utf8"), /write-page-vet/, `components/${file} imports the server-only checker`);
+  }
+  for (const file of ["lib/offer-pages/write-page.ts", "lib/offer-pages/write-page-client.ts"]) {
+    assert.doesNotMatch(readFileSync(file, "utf8"), /from "\.\/claims"|from "node:/, `${file} is no longer browser-safe`);
+  }
 });
 
 console.log("offer-write-page: all passed");

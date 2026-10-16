@@ -167,12 +167,16 @@ export function OfferBuilder({
   // and saves nothing; it fills the fields still empty on the page as it is
   // when the answer arrives (an edit made meanwhile is kept), and the result
   // saves like any other edit. One writer to this draft: this editor. Refused
-  // (null) while a conflict stops every save: words that could not be kept
-  // are not put on screen as written.
+  // while a conflict stops every save (words that could not be kept are not
+  // put on screen as written), and when the brief they were written from has
+  // changed since, in the panel or in the Copy brief (they would not match it).
   const takeCopy = useCallback(
-    (copy: WrittenCopy): string[] | null => {
+    (copy: WrittenCopy, asked: { description: string; audience: string }): string[] | "conflict" | "brief_changed" => {
       const latest = docRef.current;
-      if (!latest || conflict.current) return null;
+      if (!latest || conflict.current) return "conflict";
+      if ((latest.brief?.promise ?? "") !== asked.description || (latest.brief?.audience ?? "") !== asked.audience) {
+        return "brief_changed";
+      }
       const { doc: next, filled } = applyWrittenCopy(latest, copy);
       if (filled.length) update(next);
       return filled;

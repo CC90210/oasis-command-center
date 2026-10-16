@@ -43,8 +43,12 @@ export function WriteEmptyParts({
   doc: OfferPageDoc;
   /** The owner typed in the description box: the page's brief promise. */
   onBrief: (promise: string) => void;
-  /** Fill the page's empty fields from vetted copy; the parts filled, or null when the editor can't keep them. */
-  onCopy: (copy: WrittenCopy) => string[] | null;
+  /**
+   * Fill the page's empty fields from vetted copy written from `asked`: the
+   * parts filled, or why the editor refused it (its saves are stopped, or the
+   * brief changed while the words were being written).
+   */
+  onCopy: (copy: WrittenCopy, asked: { description: string; audience: string }) => string[] | "conflict" | "brief_changed";
   /** The editor's last save failed: words written now might not be kept, so none are asked for. */
   saveFailed: boolean;
 }) {
@@ -63,17 +67,21 @@ export function WriteEmptyParts({
     setBusy(true);
     setError(null);
     setNotice(null);
-    const written = await requestWrittenPage(formId, { description, audience: doc.brief?.audience ?? "", save: false });
+    const asked = { description, audience: doc.brief?.audience ?? "" };
+    const written = await requestWrittenPage(formId, { ...asked, save: false });
     setBusy(false);
     if (!written.ok) return setError(written.message);
-    let filled: string[] | null = [];
+    let filled: string[] | "conflict" | "brief_changed" = [];
     try {
-      filled = written.copy ? onCopy(written.copy) : [];
+      filled = written.copy ? onCopy(written.copy, asked) : [];
     } catch {
       return setError("The words that came back couldn't be put on this page. Try again.");
     }
-    if (filled === null) {
+    if (filled === "conflict") {
       return setError("This page has a change that couldn't be saved, so the new words weren't added. Reload the page, then try again.");
+    }
+    if (filled === "brief_changed") {
+      return setError("The description changed while the page was being written, so those words weren't added. Write again to use the new description.");
     }
     if (filled.length === 0) {
       return setError("Nothing usable came back for the empty parts. Try again, or say a little more about the offer.");

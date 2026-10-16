@@ -13,15 +13,16 @@
  * guarantees and any owner confirmation: those are facts an owner supplies and
  * confirms (lib/offer-pages/claims.ts publishGate), so the model is told not to
  * invent them and this file has nowhere to put them. The rule is also kept in
- * code: a sentence stating a figure or a claim word (best, leading, award, a
- * guarantee...) the owner's own words lack is left out (inventsFacts). The
- * claims gate still reads every generated sentence before Publish.
+ * code, on the server: write-page-vet.ts leaves out any sentence stating a
+ * figure or claim the owner's own words lack. The claims gate still reads
+ * every generated sentence before Publish.
  *
  * WHAT IT NEVER OVERWRITES. A field that already holds words keeps them; only
  * empty fields and empty sections are filled, so running it on a page an owner
  * or Maven has written changes nothing they wrote.
  *
- * Pure: no model call, no database. The result always passes
+ * Pure and browser-safe (the offer editor runs applyWrittenCopy): no model
+ * call, no database, no node: imports. The result always passes
  * parseOfferPageDoc (lib/offer-pages/types.ts) or this throws its
  * OfferPageError. ASCII only (tests/worker-source-one-byte.test.ts).
  */
@@ -180,112 +181,6 @@ export function cleanCopy(value: string | undefined, cap: number): string {
   return text;
 }
 
-// -- The never-invent rule, in code ----------------------------------------
-//
-// The prompt tells the model never to state a fact the owner did not give, but
-// a prompt is a request. The claims gate (claims.ts lintDoc) asks the owner to
-// confirm the claims it recognises, and it does not recognise every one
-// ("leading", "award-winning", "ready within one week"). So the server vets
-// the model's copy (vetWrittenCopy) before anything uses it: a sentence that
-// states a figure, a quantity, a time frame or a claim word the owner's own
-// words do not contain is left out.
-
-/**
- * Each match must appear, as written and as whole words, in the owner's words.
- * Matching the phrase, not the family, means "two weeks" in the description
- * does not let "one week" through. A `stem` match ("guarantee" in
- * "guaranteed") may run on into a longer word in the source, so the owner's
- * "guaranteed" covers the model's "guarantee".
- */
-const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
-  // A figure, with its unit when it has one: the owner's "14 templates" does
-  // not let "live in 14 days" through, while a bare "24/7" matches as numbers.
-  { re: /\d+(?:[.,]\d+)*(?:\s*(?:%|(?:percent|x|times|minutes?|hours?|days?|weeks?|months?|years?)(?![A-Za-z])))?/gi },
-  { re: /[$%]/g },
-  // A money amount is one claim: the owner's "99 clients" and "$50" do not let "$99" through.
-  { re: /\$\s?\d+(?:[.,]\d+)*/g },
-  { re: /\d+(?:[.,]\d+)*\s?(?:dollars?|bucks|cad|usd|eur|euros?|gbp|pounds?)\b/gi },
-  { re: /\bper ?cent\b/gi },
-  { re: /\bbest\b/gi },
-  { re: /\b(?:industry[- ])?leading\b/gi },
-  { re: /\baward/gi, stem: true },
-  { re: /\btop[- ]rated\b/gi },
-  { re: /\bworld[- ]class\b/gi },
-  { re: /\bnumber one\b|#\s?1\b|\bno\.\s?1\b/gi },
-  { re: /\bguarantee/gi, stem: true },
-  { re: /\bproven\b/gi },
-  { re: /\bunmatched\b|\bunbeatable\b|\bunrivall?ed\b/gi },
-  { re: /\b(?:fastest|cheapest|largest|biggest|most trusted)\b/gi },
-  { re: /\brisk[- ]free\b|\bmoney[- ]back\b/gi },
-  { re: /\btestimonial/gi, stem: true },
-  // Spelled-out quantities and multipliers.
-  { re: /\b(?:dozens?|hundreds?|thousands?|millions?|billions?)\b/gi },
-  { re: /\b(?:double|triple|twice|tenfold|halve)[sd]?\b/gi },
-  // A spelled-out count of something: "three clinics", "five steps". ("One"
-  // is left out: "one place", "one call" are prose, not counts.)
-  { re: /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s+[a-z]+/gi },
-  // Time frames: "one week", "a few days", "within days", "in minutes".
-  { re: /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|a|an|a few|a couple of|several)\s+(?:minute|hour|day|week|month|year)s?\b/gi },
-  { re: /\b(?:within|in under|in less than|under|less than|in just|in only|in)\s+(?:minutes|hours|days|weeks|months)\b/gi },
-  { re: /\b(?:overnight|same[- ]day|next[- ]day)\b/gi },
-];
-
-/** True when `source` holds `phrase` as whole words (a stem may run on into a longer word). */
-function sourceStates(source: string, phrase: string, stem: boolean): boolean {
-  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Word edges only where the phrase itself starts or ends with a letter or
-  // digit: "leading" is not found in "misleading", while "$" or "40%" are
-  // found where they stand.
-  const before = /^[a-z0-9]/i.test(phrase) ? "(?<![a-z0-9])" : "";
-  const after = !stem && /[a-z0-9]$/i.test(phrase) ? "(?![a-z0-9])" : "";
-  return new RegExp(before + escaped + after, "i").test(source);
-}
-
-/**
- * True when `text` states something `source` (everything the owner typed:
- * names, description, audience) does not: any match of CLAIM_PATTERNS that
- * the source does not state as whole words (sourceStates).
- */
-export function inventsFacts(text: string, source: string): boolean {
-  if (!text) return false;
-  return CLAIM_PATTERNS.some(({ re, stem }) => (text.match(re) ?? []).some((m) => !sourceStates(source, m, stem === true)));
-}
-
-/**
- * The model's copy with every sentence cleaned, and every one that invents a
- * fact (inventsFacts against `source`) emptied and counted in `withheld`. The
- * route runs this before the copy is saved or sent to the editor, so nothing
- * downstream sees an invented fact.
- */
-export function vetWrittenCopy(written: WrittenCopy, source: string): { copy: WrittenCopy; withheld: number } {
-  let withheld = 0;
-  const vet = (value: string | undefined): string => {
-    const text = cleanCopy(value, Number.MAX_SAFE_INTEGER);
-    if (text && inventsFacts(text, source)) {
-      withheld += 1;
-      return "";
-    }
-    return text;
-  };
-  const head = (h: WrittenHead): WrittenHead => ({ title: vet(h.title), lede: vet(h.lede) });
-  const cards = (items: Item[]): Item[] => items.map((it) => ({ title: vet(it.title), body: vet(it.body) }));
-  const copy: WrittenCopy = {
-    hero: {
-      eyebrow: vet(written.hero.eyebrow),
-      headline: vet(written.hero.headline),
-      subheadline: vet(written.hero.subheadline),
-      cta_label: vet(written.hero.cta_label),
-    },
-    obstacles: { ...head(written.obstacles), items: cards(written.obstacles.items) },
-    what_you_get: { ...head(written.what_you_get), items: cards(written.what_you_get.items) },
-    work: { ...head(written.work), items: cards(written.work.items) },
-    faq: { ...head(written.faq), items: written.faq.items.map((it) => ({ q: vet(it.q), a: vet(it.a) })) },
-    book: head(written.book),
-    seo: { title: vet(written.seo.title), description: vet(written.seo.description) },
-  };
-  return { copy, withheld };
-}
-
 // -- Filling the draft --------------------------------------------------------
 
 /** Fill an empty Head title and lede; true when either was filled. */
@@ -322,7 +217,7 @@ function cardsFrom(source: Item[], cap: number): Array<{ title: string; body?: s
 
 /**
  * `base` with every EMPTY field the template has filled from vetted copy
- * (vetWrittenCopy). Pure, so the offer editor runs it in the browser on the
+ * (vetWrittenCopy, write-page-vet.ts). Pure, so the offer editor runs it in the browser on the
  * page it holds at that moment (an edit made while the words were being
  * written is kept), and the route runs it for a new offer. Returns the parsed
  * document and the parts it filled; throws OfferPageError (from

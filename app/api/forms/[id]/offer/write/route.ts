@@ -43,11 +43,11 @@ import {
   applyWrittenCopy,
   parseWrittenCopy,
   scrubWriteInput,
-  vetWrittenCopy,
   withBrief,
   writePageSystemPrompt,
   writePageUserPrompt,
 } from "@/lib/offer-pages/write-page";
+import { vetWrittenCopy } from "@/lib/offer-pages/write-page-vet";
 import { emptyWritableParts, writePageInputProblem } from "@/lib/offer-pages/write-page-client";
 import { rateLimit } from "@/lib/rate-limit";
 import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/secret-redaction";
