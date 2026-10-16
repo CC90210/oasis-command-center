@@ -1084,7 +1084,8 @@ async function main() {
         { sql: "INSERT INTO client_roi_snapshots (tenant_id, snapshot_date, messages_handled, leads_processed, hours_saved_est, ai_actions_taken) VALUES (?, '2026-09-28', 40, 3, 1.5, 12)", args: [CLIENT_A] },
         { sql: "INSERT INTO client_roi_snapshots (tenant_id, snapshot_date, messages_handled, leads_processed, hours_saved_est, ai_actions_taken) VALUES (?, '2026-09-29', 10, 1, 0.5, 8)", args: [CLIENT_A] },
         { sql: "INSERT INTO client_roi_snapshots (tenant_id, snapshot_date, messages_handled, leads_processed, hours_saved_est, ai_actions_taken) VALUES (?, '2026-08-01', 999, 99, 9, 99)", args: [CLIENT_A] },
-        { sql: "INSERT INTO client_roi_snapshots (tenant_id, snapshot_date, messages_handled, leads_processed, hours_saved_est, ai_actions_taken) VALUES (?, '2026-09-29', 555, 55, 5, 55)", args: [CLIENT_B] },
+        // Another workspace's figures, distinctive on purpose: the leak check below looks for them.
+        { sql: "INSERT INTO client_roi_snapshots (tenant_id, snapshot_date, messages_handled, leads_processed, hours_saved_est, ai_actions_taken) VALUES (?, '2026-09-29', 987654, 8642, 75, 97531)", args: [CLIENT_B] },
         { sql: "INSERT INTO agent_turn_outcomes (tenant_id, channel_key, agent_slug, outcome, code, at) VALUES (?, 'dept:sales', 'sales', 'failed', 'billing', ?)", args: [CLIENT_A, ago(2)] },
         { sql: "INSERT INTO agent_turn_outcomes (tenant_id, channel_key, agent_slug, outcome, code, at) VALUES (?, 'dept:sales', 'sales', 'ok', NULL, ?)", args: [CLIENT_B, ago(2)] },
       ],
@@ -1101,7 +1102,9 @@ async function main() {
     await login(USERS.cc);
     const t = await page(record(X.id, "usage"));
     assert.match(t, /Client A Plumbing/);
-    assert.doesNotMatch(t, /555/);
+    // Client B's figures (as the page writes them, "987,654"), never a bare "555": the page's own ids,
+    // times and phone numbers can contain short digit runs by chance, which failed CI on 2026-10-16.
+    assert.doesNotMatch(t, /987,?654|97,?531|8,?642/, "another workspace's usage is on this client's page");
     const unlinked = await page(record(Y.id, "usage"));
     assert.match(unlinked, /Not linked to the client/);
   });
