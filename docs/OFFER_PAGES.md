@@ -27,6 +27,7 @@ entity, and `/offers` is its 404 route (`tests/os-redirects.test.ts`).
 | Public routes (a visitor's browser) | `app/api/offer-page/video`, `app/api/offer-page/captions` (both serve captions through `lib/offer-pages/captions.ts`) |
 | A refused field, in the builder's words | `lib/offer-pages/field-labels.ts` |
 | Seeding the two OASIS drafts | `scripts/seed-offer-pages.ts` (dry run unless `--apply`) |
+| Write my page: a new offer's words, drafted by the workspace's AI account (see below) | `lib/offer-pages/write-page.ts` (prompts and the page fill; browser-safe), `lib/offer-pages/write-page-vet.ts` (the never-invent check; server only), `lib/offer-pages/write-page-client.ts` (the one browser call, input limits, `emptyWritableParts`), `app/api/forms/[id]/offer/write/route.ts`, `components/offer-pages/builder/WriteEmptyParts.tsx` |
 | Confirm & publish: every page's ticks, its proposed top video, a link to its whole-page preview and Publish on one screen (owners and admins) | `/forms/publish`, `components/offer-pages/confirm/`, `lib/offer-pages/confirm-list.ts` (the list), `lib/offer-pages/confirm-publish.ts` (the requests, through the builder's and the Library's own routes; Publish sends `enable_form`, so a switched-off form goes on in the same transaction as the page, `store.ts` `publishDraft`), the proposed video: first the newest Library cut tagged for the page, `meta.offer_slug` = the form's slug, written by Maven's `publish_to_library.py --offer-slug`, in the hero layout's shape when there is one (`confirm-list.ts` `taggedHeroVideo`), so a new offer's video needs no code; else `lib/offer-pages/suggested-videos.ts` (by Library asset id) |
 
 ## Rules the code holds
@@ -141,6 +142,47 @@ a title to be drawn. A step with a video draws exactly as before, and a step
 whose video cannot play is still left out rather than shown as a card. In the
 builder: "Add a step", or "Or add a step with its video"; removing a step's
 video keeps the step.
+
+## Write my page
+
+New offer and Turn into an offer ask "What does this offer do, and who is it
+for?", with **Write the page for me** ticked. Once the page exists, the
+workspace's own AI account (`runToolModelCall`, usage surface
+`offer_pages.write`: its key, budget cap and ledger; never the platform key)
+drafts its words: the hero, the problems it solves, what you get, how it
+works, the FAQ, the booking section and the link preview. The offer editor
+shows **Write the empty parts** while any of those is still empty, which is
+also the retry when a first write failed.
+
+- **A draft, never published.** The words land in the draft; Publish and its
+  claims gate are unchanged.
+- **Only empty fields are filled.** Nothing an owner or Maven wrote is
+  replaced. Pricing, results, bonuses, the guarantee and every confirmation
+  are never written. A blank placeholder card counts as empty; a step that
+  holds only its video does not.
+- **Never invent.** The prompt forbids it, and `write-page-vet.ts` enforces
+  it before anything is saved or shown: a sentence is left out (counted, and
+  the editor says how many) when it states something the owner's words do
+  not. That covers every claim phrase the publish linter finds
+  (`claims.ts` `claimPhrases`), a figure with what it counts, spelled-out
+  counts, time frames, claim words, integrations and compliance, a zero
+  price, and names (brands, products, certifications). It cannot catch a
+  plain sentence describing something the offer does not do, or a brand
+  spelled like an ordinary word at the start of a sentence; that is why the
+  page stays a draft the owner reads.
+- **Secrets never reach the model or the draft.** Every typed value (names,
+  description, audience) is scrubbed of configured keys and the workspace's
+  vault values before the prompt is built and before the description is kept
+  in the page brief. A vault that cannot be read in full sends and saves
+  nothing.
+- **One writer.** For a new offer the route saves the draft (the brief first,
+  then the words). In the editor the route saves nothing: it returns the
+  vetted words, and the editor fills its own empty fields on the page as it
+  is when the answer arrives and saves them through its autosave. "Written"
+  is said only once that save has landed; a save conflict takes the words
+  back off.
+
+`tests/offer-write-page.test.ts` holds each of these.
 
 ## Known limits (the owner's call)
 

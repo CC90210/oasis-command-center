@@ -214,6 +214,12 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(inventsFacts("The quickest way to book", "The best scheduling app for clinics"), "the owner's best let quickest through");
   assert.ok(inventsFacts("Trusted by 14 happy clinics", "Includes 14 happy templates"), "14 happy templates let 14 happy clinics through");
   assert.ok(!inventsFacts("It syncs with your calendar", "It syncs bookings with your calendar."));
+  // The linter's claim phrases, every one (claimPhrases, #645): a second
+  // promised result in one sentence, and families only the linter knows.
+  assert.ok(inventsFacts("Get more revenue and more bookings.", "We help you get more revenue."), "a second promised result got through");
+  assert.ok(!inventsFacts("Get more revenue and more bookings.", "We help you get more revenue and more bookings."));
+  assert.ok(inventsFacts("Trusted by owners across Ontario.", "A scheduling app"), "an invented who-else-uses-it got through");
+  assert.ok(inventsFacts("Our best-rated plan.", "A scheduling app with a best plan"), "best let best-rated through");
   // Codex round twelve: hyphenated units and the teen count words.
   assert.ok(inventsFacts("A 14-day setup.", "Includes 14 templates."), "the owner's 14 templates let a 14-day setup through");
   assert.ok(!inventsFacts("A 14-day setup.", "We finish a 14-day setup with you."));
@@ -491,7 +497,8 @@ check("a write that fails at creation can be retried: in the New offer dialog, a
 check("the never-invent check stays on the server, and the page fill stays browser-safe", () => {
   // claims.ts hashes with node:crypto: the checker that uses it must never reach a component.
   const vet = readFileSync("lib/offer-pages/write-page-vet.ts", "utf8");
-  assert.match(vet, /import \{[^}]*\bclaimReasons\b[^}]*\} from "\.\/claims";/);
+  // One claim list: the checker grounds the linter's own phrases (claims.ts claimPhrases, #645).
+  assert.match(vet, /import \{[^}]*\bclaimPhrases\b[^}]*\} from "\.\/claims";/);
   for (const file of readdirSync("components", { recursive: true }) as string[]) {
     if (!/\.tsx?$/.test(file)) continue;
     assert.doesNotMatch(readFileSync(`components/${file}`, "utf8"), /write-page-vet/, `components/${file} imports the server-only checker`);
