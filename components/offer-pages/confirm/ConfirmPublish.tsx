@@ -236,6 +236,20 @@ function OfferConfirmCard({
         </p>
       )}
 
+      {o.warnings.length ? (
+        <div className="space-y-1.5" data-warnings="">
+          <p className="text-[12px] font-semibold text-fg">Worth a look before publishing</p>
+          <ul className="space-y-1">
+            {o.warnings.map((w) => (
+              <li key={w} className="flex items-start gap-2 text-[13px] text-fg-muted">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                {w}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {!o.formEnabled ? (
         <p className="text-[13px] text-fg-muted">Switch the form on: Publish does it for you. The page&apos;s Book section is the form.</p>
       ) : null}

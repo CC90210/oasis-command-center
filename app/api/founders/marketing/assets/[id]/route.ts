@@ -22,6 +22,13 @@
  * response as `orphan` so a sweep can find it. A row is reconstructible from a backup;
  * a deleted object is not. If we ever want true purge it belongs in a job that backs
  * up first, not in a click that cannot be undone.
+ *
+ * `from` (optional): change the status only while it is still `from`, else 409
+ * `status_changed` with the status it has now. Confirm & publish
+ * (lib/offer-pages/confirm-publish.ts) approves a video it showed as in review;
+ * a verdict someone reached in the Library since then (rejected, scheduled,
+ * published) must stand, not be rewritten to approved. Without `from` the
+ * change is unconditional, as the Library's own buttons send it.
  */
 
 import { NextResponse } from "next/server";
@@ -45,7 +52,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
   if (!founder) return notFound();
   const { id } = await ctx.params;
 
-  let body: { status?: string; note?: string };
+  let body: { status?: string; note?: string; from?: unknown };
   try {
     const parsed = await req.json();
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -63,6 +70,12 @@ export async function PATCH(req: Request, ctx: Ctx) {
       { status: 400 },
     );
   }
+  const from = body.from;
+  if (from !== undefined && (typeof from !== "string" || !isAssetStatus(from))) {
+    return NextResponse.json({ ok: false, error: "unsupported_from" }, { status: 400 });
+  }
+  const statusChanged = (now: string | null) =>
+    NextResponse.json({ ok: false, error: "status_changed", status: now }, { status: 409 });
 
   const db = getServiceSupabase();
 
@@ -78,15 +91,22 @@ export async function PATCH(req: Request, ctx: Ctx) {
     return NextResponse.json({ ok: false, error: "read_failed" }, { status: 500 });
   }
   if (!existing.data) return notFound();
+  if (from !== undefined && existing.data.status !== from) return statusChanged(String(existing.data.status));
 
-  const updated = await db
+  let update = db
     .from("marketing_asset")
     .update({ status: next, updated_at: new Date().toISOString() })
     .eq("tenant_id", founder.tenantId)
-    .eq("id", id)
-    .select("id, title, status")
-    .maybeSingle();
-  if (updated.error || !updated.data) {
+    .eq("id", id);
+  // The check above and this write are two statements: the write repeats it,
+  // so a verdict landing between them leaves no row matched, never overwritten.
+  if (from !== undefined) update = update.eq("status", from);
+  const updated = await update.select("id, title, status").maybeSingle();
+  if (updated.error) {
+    return NextResponse.json({ ok: false, error: "update_failed" }, { status: 500 });
+  }
+  if (!updated.data) {
+    if (from !== undefined) return statusChanged(null);
     return NextResponse.json({ ok: false, error: "update_failed" }, { status: 500 });
   }
 

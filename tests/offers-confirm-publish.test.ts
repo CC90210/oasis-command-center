@@ -13,13 +13,17 @@
  *   - ticks go up in the builder's own draft-save shape: claim hashes, and a
  *     price / guarantee / video carrying the builder's pending confirmation,
  *     never a name or time the screen made up; the SERVER stamps the owner;
- *   - Publish runs approve (only for a video still in review), form on, save,
+ *   - Publish runs approve (only for a video still in review), save, form on,
  *     publish, in that order, publishing the version the save returned; a
  *     page with anything left to tick is never sent to publish, nor one whose
  *     saved gate still lists a blocker; a conflict is reported, not retried;
+ *     a failed save or a blocked page leaves the form off, and a failed
+ *     publish switches off again the form it switched on (Codex on #637);
  *   - the proposed video: approved -> attached; in review -> approved through
- *     the Library's own route, then attached; approval refused -> nothing
- *     saved, nothing attached, the form left off;
+ *     the Library's own route, only while still in review, then attached;
+ *     approval refused, or a verdict reached in the Library since the screen
+ *     loaded -> nothing saved, nothing attached, the form left off;
+ *   - a gate warning shows before Publish, not only after it;
  *   - no proposal (suggested-videos.ts has none, or the map is empty) reads
  *     "No video proposed yet".
  *
@@ -65,6 +69,7 @@ const MEMBER = { id: "0e000000-0000-4000-8000-0000000000c9", email: "member@oasi
 const WIDE_PUNCT = [String.fromCharCode(0x2014), String.fromCharCode(0x2192)];
 
 const CLAIM_SUB = "Our clients see results in 30 days.";
+const CAPTION_WARNING = "The top video has no captions. People watching without sound will only have the transcript.";
 const PROTOCOL_DOC = minimalDoc({
   hero: { headline: "Systems that answer every lead", subheadline: CLAIM_SUB },
   sections: [
@@ -348,7 +353,15 @@ async function main() {
 
   const empty = await list({});
   await step("the screen draws every offer with its blockers, Ready for a page with nothing to confirm, and No video proposed yet", () => {
-    const html = render({ withProposals: { offers: first }, noProposals: { offers: empty } });
+    const html = render({
+      withProposals: { offers: first },
+      noProposals: { offers: empty },
+      withWarning: { offers: first.map((o) => (o.slug === "growth" ? { ...o, warnings: [CAPTION_WARNING] } : o)) },
+    });
+    const w = html.withWarning;
+    assert.doesNotMatch(w, /^RENDER FAILED/, w.slice(0, 400));
+    assert.ok(w.includes("Worth a look before publishing") && w.includes(CAPTION_WARNING), "a gate warning is not shown before Publish");
+    assert.ok(w.includes("Ready to publish."), "a warning blocks nothing");
     const h = html.withProposals;
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 400));
     for (const name of ["Growth", "Protocol", "Command", "Community", "Start here", "Fleet"]) assert.ok(h.includes(`>${name}</h2>`), `${name} is missing`);
@@ -363,6 +376,7 @@ async function main() {
     assert.ok(h.includes(">/protocol<"), "the short link");
     assert.ok(!/<input[^>]*checked/.test(h), "a box is ticked that no owner ticked");
     assert.ok(!/<video/.test(h), "the video loads before the tap");
+    assert.ok(!h.includes("Worth a look before publishing"), "a warnings heading with no warnings");
     assert.ok(/aria-label="Play video: Protocol cut"/.test(h), "no play button for the proposal");
     assert.ok(!WIDE_PUNCT.some((ch) => h.includes(ch)), "an em dash or an arrow on the screen");
     const n = html.noProposals;
@@ -418,15 +432,72 @@ async function main() {
     assert.equal((await rowOf(F.fleet)).live, false);
   });
 
-  await step("an approved proposal: form on, then save, then publish the version the save returned; the SERVER stamps the owner", async () => {
+  await step("a save that fails (someone saved first) leaves the form off and sends nothing else", async () => {
+    await login(USERS.cc);
+    const o = await offerOf("protocol");
+    await db.execute({ sql: "UPDATE form_offer_pages SET draft_version = draft_version + 1 WHERE form_id = ?", args: [F.protocol] });
+    calls.length = 0;
+    const r = await cp.publishOffer(o, everything(o), deps);
+    assert.equal(r.kind, "conflict", JSON.stringify(r));
+    assert.deepEqual(shape(), [`PUT /api/forms/${F.protocol}/offer`], "the form was switched on before the save went through");
+    assert.equal((await rowOf(F.protocol)).enabled, false);
+  });
+
+  await step("a saved gate that lists anything besides the switched-off form: saved, the form left off, never published", async () => {
+    await login(USERS.cc);
+    calls.length = 0;
+    const o = await offerOf("protocol");
+    // A screen that missed the flagged sentence thinks the page is ready.
+    const stale: ConfirmOffer = { ...o, claims: [] };
+    const r = await cp.publishOffer(stale, everything(stale, false), deps);
+    assert.equal(r.kind, "blocked", JSON.stringify(r));
+    const blockers = (r as { blockers: string[] }).blockers;
+    assert.ok(blockers.length > 0 && !blockers.some((b) => /Switch the form on/.test(b)), "Publish lists the form it would switch on itself");
+    assert.deepEqual(shape(), [`PUT /api/forms/${F.protocol}/offer`], "the form was switched on for a page that cannot go live");
+    const row = await rowOf(F.protocol);
+    assert.equal(row.enabled, false);
+    assert.equal(row.live, false);
+  });
+
+  await step("a publish that fails after the form was switched on switches it off again", async () => {
+    await login(USERS.cc);
+    const o = await offerOf("protocol");
+    calls.length = 0;
+    let bumped = false;
+    afterEach = async (url, method) => {
+      // An edit lands just after the form goes on, so the publish is a conflict.
+      if (!bumped && method === "PATCH" && url === `/api/forms/${F.protocol}`) {
+        bumped = true;
+        await db.execute({ sql: "UPDATE form_offer_pages SET draft_version = draft_version + 1 WHERE form_id = ?", args: [F.protocol] });
+      }
+    };
+    try {
+      const r = await cp.publishOffer(o, everything(o, false), deps);
+      assert.equal(r.kind, "conflict", JSON.stringify(r));
+      assert.deepEqual(shape(), [
+        `PUT /api/forms/${F.protocol}/offer`,
+        `PATCH /api/forms/${F.protocol}`,
+        `POST /api/forms/${F.protocol}/offer/publish`,
+        `PATCH /api/forms/${F.protocol}`,
+      ]);
+      assert.deepEqual([calls[1].body, calls[3].body], [{ enabled: true }, { enabled: false }]);
+      const row = await rowOf(F.protocol);
+      assert.equal(row.live, false);
+      assert.equal(row.enabled, false, "a page that did not go live left its form on");
+    } finally {
+      afterEach = null;
+    }
+  });
+
+  await step("an approved proposal: save, then form on, then publish the version the save returned; the SERVER stamps the owner", async () => {
     await login(USERS.cc);
     calls.length = 0;
     const o = await offerOf("protocol");
     const r = await cp.publishOffer(o, everything(o), deps);
     assert.equal(r.kind, "published", JSON.stringify(r));
-    assert.deepEqual(shape(), [`PATCH /api/forms/${F.protocol}`, `PUT /api/forms/${F.protocol}/offer`, `POST /api/forms/${F.protocol}/offer/publish`]);
-    assert.deepEqual(calls[0].body, { enabled: true }, "the Offers switch's own body");
-    assert.equal((calls[1].body!.draft as { hero: { video: { rights: { by: string } } } }).hero.video.rights.by, "pending");
+    assert.deepEqual(shape(), [`PUT /api/forms/${F.protocol}/offer`, `PATCH /api/forms/${F.protocol}`, `POST /api/forms/${F.protocol}/offer/publish`]);
+    assert.deepEqual(calls[1].body, { enabled: true }, "the Offers switch's own body");
+    assert.equal((calls[0].body!.draft as { hero: { video: { rights: { by: string } } } }).hero.video.rights.by, "pending");
     const row = await rowOf(F.protocol);
     assert.equal(calls[2].body!.version, row.version, "published a version other than the one just saved");
     assert.equal(row.version, o.version + 1);
@@ -453,7 +524,7 @@ async function main() {
         const r = await run(o, everything(o), deps);
         assert.equal(r.kind, "approve_failed", JSON.stringify(r));
         assert.deepEqual(shape(), [`PATCH /api/founders/marketing/assets/${A_REVIEW}`]);
-        assert.deepEqual(calls[0].body, { status: "approved" }, "the Library's own verdict body");
+        assert.deepEqual(calls[0].body, { status: "approved", from: "in_review" }, "the Library's own verdict body, only while in review");
       }
       const after = await rowOf(F.community);
       assert.deepEqual(after, before, "the page or its form changed after a refused approval");
@@ -463,7 +534,64 @@ async function main() {
     }
   });
 
-  await step("a proposal in review: approved through the Library's route first, then form on, save, publish", async () => {
+  await step("a verdict reached in the Library since the screen loaded stands: nothing approved, saved or switched on", async () => {
+    await login(USERS.cc);
+    const o = await offerOf("community");
+    const before = await rowOf(F.community);
+    await db.execute({ sql: "UPDATE marketing_asset SET status = 'rejected' WHERE id = ?", args: [A_REVIEW] });
+    try {
+      calls.length = 0;
+      const r = await cp.publishOffer(o, everything(o), deps);
+      assert.equal(r.kind, "approve_failed", JSON.stringify(r));
+      assert.match((r as { message: string }).message, /changed in the Library.*rejected now/);
+      assert.deepEqual(shape(), [`PATCH /api/founders/marketing/assets/${A_REVIEW}`]);
+      assert.equal(await assetStatus(A_REVIEW), "rejected", "the rejection was rewritten to approved");
+      assert.deepEqual(await rowOf(F.community), before, "the page or its form changed");
+      const n = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM marketing_review WHERE asset_id = ?", args: [A_REVIEW] })).rows[0].n;
+      assert.equal(Number(n), 0, "a review was recorded for an approval that did not happen");
+      // A `from` that is not a status is refused, and changes nothing.
+      const bad = await routes.asset.PATCH(
+        new NextRequest(`http://localhost/api/founders/marketing/assets/${A_REVIEW}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "approved", from: "nonsense" }),
+        }),
+        p(A_REVIEW),
+      );
+      assert.equal(bad.status, 400);
+      assert.equal(await assetStatus(A_REVIEW), "rejected");
+    } finally {
+      await db.execute({ sql: "UPDATE marketing_asset SET status = 'in_review' WHERE id = ?", args: [A_REVIEW] });
+    }
+  });
+
+  await step("approved, or further along, in the Library since the screen loaded: nothing to approve, the video is attached as it is", async () => {
+    const o = await offerOf("community");
+    const cases = [
+      ["approved", "saved"],
+      ["scheduled", "saved"],
+      ["published", "saved"],
+      ["draft", "approve_failed"],
+      ["archived", "approve_failed"],
+    ] as const;
+    for (const [now, want] of cases) {
+      const seen: string[] = [];
+      const stub = {
+        pending: pendingConfirmation,
+        fetch: async (url: string, init: { method: string }) => {
+          seen.push(`${init.method} ${url}`);
+          if (url.includes("/founders/")) return new Response(JSON.stringify({ ok: false, error: "status_changed", status: now }), { status: 409 });
+          return new Response(JSON.stringify({ ok: true, offer: { version: o.version + 1, gate: { blockers: [] } } }), { status: 200 });
+        },
+      };
+      const r = await cp.saveOffer(o, everything(o), stub);
+      assert.equal(r.kind, want, `${now}: ${JSON.stringify(r)}`);
+      const asset = `PATCH /api/founders/marketing/assets/${A_REVIEW}`;
+      assert.deepEqual(seen, want === "saved" ? [asset, `PUT /api/forms/${F.community}/offer`] : [asset], now);
+    }
+  });
+
+  await step("a proposal in review: approved through the Library's route first, then save, form on, publish", async () => {
     await login(USERS.cc);
     calls.length = 0;
     const o = await offerOf("community");
@@ -471,10 +599,11 @@ async function main() {
     assert.equal(r.kind, "published", JSON.stringify(r));
     assert.deepEqual(shape(), [
       `PATCH /api/founders/marketing/assets/${A_REVIEW}`,
-      `PATCH /api/forms/${F.community}`,
       `PUT /api/forms/${F.community}/offer`,
+      `PATCH /api/forms/${F.community}`,
       `POST /api/forms/${F.community}/offer/publish`,
     ]);
+    assert.deepEqual(calls[0].body, { status: "approved", from: "in_review" });
     assert.equal(await assetStatus(A_REVIEW), "approved");
     const review = (await db.execute({ sql: "SELECT decision, acted_on_at FROM marketing_review WHERE asset_id = ?", args: [A_REVIEW] })).rows;
     assert.equal(review.length, 1, "the Library's review record is missing");

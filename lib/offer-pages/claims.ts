@@ -44,6 +44,7 @@ import { createHash } from "node:crypto";
 import type { BodyKey, Confirmation, OfferPageDoc, VideoRef } from "./types";
 import { isConfirmed } from "./visibility";
 import { videoRefs } from "./providers";
+import { FORM_OFF_BLOCKER } from "./gate-words";
 
 // ---------------------------------------------------------------------------
 // Who confirmed it: stamped by the server, never by the browser
@@ -436,7 +437,7 @@ export function publishGate(
   const blockers: string[] = [];
   const warnings: string[] = [];
   if (!ctx.formEnabled) {
-    blockers.push("Switch the form on first. The page's Book section is the form, and a switched-off form takes no one's details.");
+    blockers.push(FORM_OFF_BLOCKER);
   }
   if (!(doc.hero.headline || "").trim() && !(ctx.fallbackHeadline || "").trim()) {
     blockers.push("Add a headline to the top of the page.");
