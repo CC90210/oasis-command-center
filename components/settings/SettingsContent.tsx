@@ -101,6 +101,26 @@ export type SettingsContentSection =
   | "devices";
 
 /**
+ * Under "Add a device", the ONE way to add a computer (CC 2026-10-16): a
+ * person without the connector app was handed a code and nowhere to get the
+ * app, while "Devices (advanced)" carried a second "Full install" path. The
+ * install page answers every viewer (the full install for the agents owner,
+ * an honest notice or pair-only with "Ask for access" for everyone else,
+ * app/settings/devices/install/page.tsx), so this is never a dead link.
+ */
+const INSTALL_CONNECTOR_LINK = (
+  <p className="mt-3 text-xs">
+    <Link
+      href="/settings/devices/install"
+      prefetch={false}
+      className="font-semibold text-accent underline underline-offset-2 hover:text-accent-bright"
+    >
+      Don&apos;t have the connector? Install it
+    </Link>
+  </p>
+);
+
+/**
  * `previewMode = true` is set by TenantSettings when the operator is
  * viewing a tenant they don't own (resolveDataTenant returned null).
  * In that case we render the same Card chrome the real Settings page
@@ -604,6 +624,7 @@ export async function SettingsContent({
               <SafeBoundary label="Add a device">
                 <ConnectYourComputerCard />
               </SafeBoundary>
+              {INSTALL_CONNECTOR_LINK}
             </SettingsSection>
           )}
 
@@ -626,24 +647,18 @@ export async function SettingsContent({
           {show("devices") && isOperator && (
             <SettingsSection
               id="devices"
-              defaultOpen={focused}
+              // Closed by default, on /settings/devices too, unlike every other
+              // section on its own page (`focused` above). CC 2026-10-16: these
+              // are diagnostics, and open they read as a second place to add
+              // or manage computers. #devices still opens it (OpenSectionOnHash).
+              defaultOpen={false}
               title="Devices (advanced)"
-              subtitle="For the OASIS operator's own computers only: the full install that gives your agents file-system, bash, and full MCP access. To connect a computer for department chats, use Add a device above. Optional: a connected AI provider account under AI brain is enough for chat without ever pairing a machine."
-              action={
-                // O1: pairing names this workspace's own private harness repo,
-                // which only its AGENTS OWNER (lib/agents-owner.ts) can read.
-                // Everyone else who reaches this operator-only section gets the
-                // honest in-section notice instead of a link that 404s.
-                agentsOwner ? (
-                  <Link
-                    href="/settings/devices/install"
-                    className="btn-primary inline-flex items-center gap-1 !px-3 !py-1.5 !text-xs"
-                  >
-                    Full install →
-                  </Link>
-                ) : undefined
-              }
+              subtitle="Technical details for every computer paired to this workspace: when each last checked in, and from which network address. To add a computer, use Add a device above. To disconnect one of your own, use Your computers above."
             >
+              {/* No "Full install" link here any more (CC 2026-10-16): Add a
+                  device above is the one way to add a computer, and its
+                  install link reaches the same page. installRepo still gates
+                  the owner-only notice and Revoke inside the list (O1). */}
               <SafeBoundary label="Devices">
                 <DevicesEditor installRepo={agentsOwner ? HARNESS_REPO : null} />
               </SafeBoundary>
@@ -757,6 +772,7 @@ async function PersonalSettingsView({
           <SafeBoundary label="Add a device">
             <ConnectYourComputerCard />
           </SafeBoundary>
+          {INSTALL_CONNECTOR_LINK}
         </SettingsSection>
       )}
 

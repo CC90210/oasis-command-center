@@ -14,7 +14,8 @@
  *     the connector to its own person, never whichever pairing is newest;
  *   - the fleet reporter and background workers (describeBackground) show
  *     only for the agents owner (CC), never for a non-owner viewer (Adon);
- *   - departmentInventoryLine's exact wording (lib/bridge-cli-status.ts).
+ *   - the Devices app lines' truthfulness rule (signed in is never "ready"),
+ *     in the shared words that replaced departmentInventoryLine (CC 2026-10-16).
  *
  * Run: node --conditions=react-server --import tsx tests/viewer-scoped-bridge-status.test.ts
  */
@@ -95,7 +96,8 @@ async function main() {
   const { getTenantBridgeStatus, getBridgeOnline, getOnlineBridgeComputerLabels } = await import("../lib/queries");
   const { loadMachines, describeBackground } = await import("../lib/admin/attention");
   const { loadSystemHealth } = await import("../lib/admin/system-health");
-  const { departmentInventoryLine } = await import("../lib/bridge-cli-status");
+  const cliStatus = await import("../lib/bridge-cli-status");
+  const { appStatusLines } = await import("../components/settings/YourComputersCard");
   const { getServiceSupabase } = await import("../lib/supabase-server");
 
   console.log("viewer-scoped-bridge-status:");
@@ -201,18 +203,28 @@ async function main() {
     assert.equal(adonHealth.attention.workersDown, 0);
   });
 
-  // ── Inventory wording (truthfulness rule, lib/bridge-cli-status.ts) ─────
-  await check("departmentInventoryLine: inventory says only installed or signed in; readiness belongs to a real probe", () => {
-    assert.equal(departmentInventoryLine("claude", { installed: true, authenticated: true, checked: true }), "Claude Code: signed in");
-    assert.equal(departmentInventoryLine("claude", { installed: true, authenticated: false, checked: true }), "Claude Code: installed, not signed in");
-    assert.equal(departmentInventoryLine("claude", { installed: false, authenticated: false, checked: false }), "Claude Code: not detected");
-    assert.equal(departmentInventoryLine("codex", { installed: true, authenticated: true, checked: true }), "Codex: signed in");
-    assert.equal(
-      departmentInventoryLine("gemini", { installed: true, authenticated: false, checked: false }),
-      "Gemini CLI: installed, did not answer the check",
-      "a timeout never reads as 'needs sign-in' — it may already be signed in",
+  // ── Inventory wording (truthfulness rule) ──────────────────────────────
+  // CC 2026-10-16: Devices' own inventory words (departmentInventoryLine) are
+  // retired; its app lines read AI brain's per-app label for the same device
+  // (YourComputersCard appStatusLines). The rule they kept still holds there:
+  // signed in is never "ready"; only a real probe on that computer is.
+  await check("Devices app lines: signed in reads Needs test, readiness belongs to a real probe", () => {
+    const runtime = (over: Record<string, unknown>) => ({
+      installed: false, signedIn: false, executionReady: false, unsupported: false, version: null, lastTestedAt: null, code: null, ...over,
+    });
+    const device = (runtimes: Record<string, unknown>) => ({
+      pairingId: "bp-cc", label: "CCPC (Windows)", ownerName: null, ownedByViewer: true, workspaceEligible: true, agentClaimEligible: true,
+      os: "windows", lastSeenAt: fresh, approved: true, online: true, busy: false,
+      protocols: ["runtime_action_v1", "department_task_v2", "coding_harness_task_v1"], localModels: [],
+      runtimes: { claude: runtime({}), codex: runtime({}), gemini: runtime({}), ...runtimes },
+    }) as unknown as Parameters<typeof appStatusLines>[0];
+    assert.deepEqual(
+      appStatusLines(device({ claude: runtime({ installed: true, signedIn: true }), codex: runtime({ installed: true }) }), true),
+      ["Claude Code: Needs test", "Codex: Sign-in needed"],
     );
-    assert.equal(departmentInventoryLine("gemini", { installed: true, authenticated: true, checked: true }), "Gemini CLI: signed in");
+    assert.deepEqual(appStatusLines(device({ claude: runtime({ installed: true, signedIn: true, executionReady: true }) }), true), ["Claude Code: Ready for agents"]);
+    assert.deepEqual(appStatusLines(device({}), true), [], "an app the computer does not have is not listed");
+    assert.equal("departmentInventoryLine" in cliStatus, false, "the second vocabulary is gone");
   });
 
   if (failures > 0) {

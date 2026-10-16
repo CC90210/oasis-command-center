@@ -8,8 +8,14 @@
  * Fix: a separate teamRowLine for Team computers only, which never says
  * "your"/"you" and always names the owner (falling back to "a teammate" /
  * "A teammate's computer" when the owner's name could not be resolved).
- * "Your computers" (the viewer's own list) is untouched -- "Waiting for
- * your approval" there is correct, it is literally the viewer's own device.
+ * "Your computers" (the viewer's own list) was untouched -- "Waiting for
+ * your approval" there was correct, it is literally the viewer's own device.
+ *
+ * CC 2026-10-16: ONE status vocabulary. Both row lines now say each state in
+ * Settings > AI brain's words (lib/bridge-cli-status.ts runtimeStatusWords):
+ * "Ready for agents" (was "Ready for department work"), "Busy", "Approval
+ * needed" (from the owner, on a team row), "Offline since". And the Team
+ * computers list starts open: closed, it read as no team computers at all.
  *
  * Run: node --conditions=react-server --import tsx tests/devices-team-row-copy.test.ts
  */
@@ -47,12 +53,12 @@ async function main() {
     assert.doesNotMatch(line, /your approval/i, `team row still says "your approval": ${line}`);
     assert.doesNotMatch(line, /\byou\b|\byour\b/i, `team row addresses the viewer directly: ${line}`);
     assert.match(line, /\bCC\b/, `team row does not name the owner: ${line}`);
-    assert.equal(line, "CC's computer · Online · not yet approved by CC for department work");
+    assert.equal(line, "CC's computer · Online · Approval needed from CC");
   });
 
   check("a not-approved team row for an IDLE teammate's computer (150-600s heartbeat) says 'Idle', never 'Online' (Codex review, P2)", () => {
     const line = teamRowLine("CC's computer", "CC", "not_approved", null, IDLE_AGO, NOW);
-    assert.equal(line, "CC's computer · Idle · not yet approved by CC for department work");
+    assert.equal(line, "CC's computer · Idle · Approval needed from CC");
     assert.doesNotMatch(line, /\bOnline\b/, `an idle heartbeat read as Online: ${line}`);
   });
 
@@ -60,20 +66,34 @@ async function main() {
     const line = teamRowLine("CCPC", "CC", "not_approved", null, OLD, NOW);
     assert.doesNotMatch(line, /your approval/i, `team row still says "your approval": ${line}`);
     assert.match(line, /Offline since/, `an offline teammate's row does not say so: ${line}`);
-    assert.match(line, /not yet approved by CC/);
+    assert.match(line, /Approval needed from CC$/);
   });
 
   check("an unresolved owner name falls back to 'a teammate', never blank, never 'your'", () => {
     const line = teamRowLine("A teammate's computer", "a teammate", "not_approved", null, RECENT, NOW);
     assert.doesNotMatch(line, /your approval/i);
-    assert.match(line, /not yet approved by a teammate for department work/);
+    assert.match(line, /Approval needed from a teammate$/);
   });
 
-  check("can_answer / busy / offline / blocked team rows are unaffected (same wording as the viewer's own list)", () => {
-    assert.equal(teamRowLine("CC's computer", "CC", "can_answer", RECENT, RECENT, NOW), "CC's computer · Ready for department work, checked 10 s ago");
-    assert.equal(teamRowLine("CC's computer", "CC", "busy", null, RECENT, NOW), "CC's computer · Finishing a reply");
+  check("can_answer / busy / offline / blocked team rows say each state in AI brain's words (CC 2026-10-16)", () => {
+    assert.equal(teamRowLine("CC's computer", "CC", "can_answer", RECENT, RECENT, NOW), "CC's computer · Ready for agents, checked 10 s ago");
+    assert.equal(teamRowLine("CC's computer", "CC", "busy", null, RECENT, NOW), "CC's computer · Busy, finishing a reply");
     assert.equal(teamRowLine("CC's computer", "CC", "offline", null, OLD, NOW), "CC's computer · Offline since 20 min ago");
     assert.match(teamRowLine("CC's computer", "CC", "blocked:subscription_auth_failure", null, RECENT, NOW), /Claude Code is signed out/);
+  });
+
+  const { RUNTIME_STATUS_WORDS: W } = await import("../lib/bridge-cli-status");
+  check("every state word on a team row is the shared one, never typed again in the card", () => {
+    const lines = [
+      teamRowLine("X", "CC", "can_answer", RECENT, RECENT, NOW),
+      teamRowLine("X", "CC", "busy", null, RECENT, NOW),
+      teamRowLine("X", "CC", "not_approved", null, RECENT, NOW),
+      teamRowLine("X", "CC", "offline", null, OLD, NOW),
+    ];
+    assert.deepEqual(
+      lines.map((l) => l.split(" · ").slice(1).join(" · ")),
+      [`${W.ready}, checked 10 s ago`, `${W.busy}, finishing a reply`, `Online · ${W.approval_needed} from CC`, `${W.offline} since 20 min ago`],
+    );
   });
 
   // ── The source itself: the "Team computers" render block must call
@@ -87,6 +107,12 @@ async function main() {
   check("the Team computers render block calls teamRowLine, not the bare rowLine it used to share with the viewer's own list", () => {
     assert.match(teamBlock, /teamRowLine\(/, "Team computers no longer calls teamRowLine");
     assert.doesNotMatch(teamBlock, /[^.]\browLine\(/, "Team computers still calls the plain rowLine (the original bug)");
+  });
+  // Drawn open by tests/ai-brain-inventory-scope.render.ts too; this pins the tag itself.
+  check("the Team computers list starts open (CC 2026-10-16: a closed list read as missing)", () => {
+    const details = src.match(/\{theirs\.length > 0 && \(\s*<details([^>]*)>/);
+    assert.ok(details, "the Team computers <details> was not found");
+    assert.match(details![1], /(^|\s)open(\s|$)/, `Team computers is closed by default: <details${details![1]}>`);
   });
 
   if (failures) {

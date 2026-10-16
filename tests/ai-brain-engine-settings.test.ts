@@ -65,7 +65,7 @@ async function main() {
     assert.match(route, /requestObject\(decoded, \["engine", "scope"\]\)/, "probe requests reject primitives and unknown fields");
     assert.match(route, /apiSwitchRateLimit\(req, ctx\.tenantId, ctx\.authUserId\)/, "paid provider tests are limited by authenticated user and client IP");
     assert.match(panel, /addEventListener\("oasis:agent-configs-changed"/, "connecting a key below refreshes the engine panel immediately");
-    assert.match(panel, /status\?\.label === "Unsupported"/, "an unsupported Gemini account disables reconnect and offers the API path");
+    assert.match(panel, /status\?\.label === runtimeStatusWords\("unsupported"\)/, "an unsupported Gemini account disables reconnect and offers the API path");
     assert.match(panel, /provider === "gemini" \?/, "Gemini never renders the unsupported CLI auth action");
     assert.match(panel, /Managed Gemini CLI account detected/, "a connector-detected managed Gemini account keeps Test without a fake reconnect");
     assert.match(panel, /subscriptionLimited[\s\S]*no reconnect is needed/, "a signed-in rate-limited runtime never starts a pointless reconnect loop");
@@ -75,8 +75,13 @@ async function main() {
     assert.match(connectFlow, /text:\s*started\.text/, "the exact vendor command stays visible while the selected computer authenticates");
     assert.match(connectFlow, /await testSelection\(\)/, "a completed sign-in automatically re-tests the same selected setup");
     assert.match(panel, /Installed apps and local models/, "the consolidated panel retains the per-computer inventory");
-    assert.match(panel, /inventoryRuntimeLabel/, "inventory distinguishes installed, signed-in and execution-tested runtimes");
-    assert.match(panel, /inventoryRuntimeLabel\(device, provider\)/, "inventory readiness is gated by the device's online, approval, busy and protocol state");
+    // runtimeStatusLabel is describeRuntime behind the rollout gate, shared with Devices (CC 2026-10-16).
+    assert.match(
+      readFileSync(join(ROOT, "components/settings/agent-engine-client.ts"), "utf8"),
+      /export function runtimeStatusLabel\([\s\S]*?describeRuntime\(target, provider\)\.label;\s*\}/,
+      "inventory distinguishes installed, signed-in and execution-tested runtimes",
+    );
+    assert.match(panel, /runtimeStatusLabel\(device, provider, state\.oasis\)/, "inventory readiness is gated by the device's online, approval, busy and protocol state");
     assert.match(panel, /describeLocalModel\(device, model\)\.label/, "local inventory cannot look ready while its computer is unavailable");
   });
 

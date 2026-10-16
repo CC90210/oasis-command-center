@@ -14,7 +14,8 @@ import {
   type CliEngine,
   type EngineSelection,
 } from "@/lib/ai/agent-engine";
-import { machinesOfBody, unsupportedProviders, type CliMachineSnapshot } from "@/lib/bridge-cli-status";
+import { machinesOfBody, runtimeStatusWords, unsupportedProviders, type CliMachineSnapshot } from "@/lib/bridge-cli-status";
+import { subscriptionRolloutError } from "@/lib/ai/engine-rollout";
 import { bridgeHostOSFromPlatform, bridgeRestartCommand } from "@/lib/bridge-install-guidance";
 import type { Provider } from "@/lib/providers";
 
@@ -628,54 +629,71 @@ export function describeRuntime(
   ]);
   if (!target.agentClaimEligible) {
     return {
-      label: "Approval needed",
+      label: runtimeStatusWords("approval_needed"),
       verified: false,
       repair: "This legacy full-access computer can run agents only for the workspace agents owner. Re-pair it as a Connector for My setup.",
     };
   }
-  if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
-  if (!target.online) return { label: "Offline", verified: false, repair: `On ${target.label}, run: ${connectorRestartCommand(target.os)}` };
+  if (!target.approved) return { label: runtimeStatusWords("approval_needed"), verified: false, repair: `Approve ${target.label} in Devices before using it.` };
+  if (!target.online) return { label: runtimeStatusWords("offline"), verified: false, repair: `On ${target.label}, run: ${connectorRestartCommand(target.os)}` };
   if (notInstalledCodes.has(code ?? "")) {
-    return { label: "Not installed", verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
+    return { label: runtimeStatusWords("not_installed"), verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
   }
   if (state.unsupported || unsupportedCodes.has(code ?? "") || (provider === "gemini" && state.installed && !state.signedIn)) {
-    return { label: "Unsupported", verified: false, repair: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead." };
+    return { label: runtimeStatusWords("unsupported"), verified: false, repair: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead." };
   }
   if (code === "rate_limited") {
     return {
-      label: "Subscription limit reached",
+      label: runtimeStatusWords("limit_reached"),
       verified: false,
       repair: `${name} is still signed in on ${target.label}. Wait for the provider's usage window to reset, then Test again; reconnecting will not help.`,
     };
   }
   if (code === "account_identity_unavailable" && provider === "claude") {
     return {
-      label: "Sign-in needed",
+      label: runtimeStatusWords("sign_in_needed"),
       verified: false,
       repair: `Open Claude Code once on ${target.label}, sign in so OASIS can identify the account, restart the OASIS connector, then Test again.`,
     };
   }
   if (signInCodes.has(code ?? "")) {
     return {
-      label: provider === "gemini" ? "Unsupported" : "Sign-in needed",
+      label: runtimeStatusWords(provider === "gemini" ? "unsupported" : "sign_in_needed"),
       verified: false,
       repair: provider === "gemini"
         ? "Gemini CLI personal sign-in is not supported. Choose a Google API key instead."
         : `On ${target.label}, run: ${CLI_LOGIN[provider]}`,
     };
   }
-  if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
+  if (target.busy) return { label: runtimeStatusWords("busy"), verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
   if (
     !target.protocols.includes("runtime_action_v1") ||
     !target.protocols.includes("department_task_v2") ||
     !target.protocols.includes("coding_harness_task_v1")
   ) {
-    return { label: "Needs test", verified: false, repair: `Update and restart the OASIS connector on ${target.label}, then Test again.` };
+    return { label: runtimeStatusWords("needs_test"), verified: false, repair: `Update and restart the OASIS connector on ${target.label}, then Test again.` };
   }
-  if (!state.installed) return { label: "Not installed", verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
-  if (!state.signedIn) return { label: "Sign-in needed", verified: false, repair: `On ${target.label}, run: ${CLI_LOGIN[provider]}` };
-  if (!state.executionReady) return { label: "Needs test", verified: false, repair: `Test ${name} on ${target.label} before using it for agents.` };
-  return { label: "Ready for agents", verified: true, repair: null };
+  if (!state.installed) return { label: runtimeStatusWords("not_installed"), verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
+  if (!state.signedIn) return { label: runtimeStatusWords("sign_in_needed"), verified: false, repair: `On ${target.label}, run: ${CLI_LOGIN[provider]}` };
+  if (!state.executionReady) return { label: runtimeStatusWords("needs_test"), verified: false, repair: `Test ${name} on ${target.label} before using it for agents.` };
+  return { label: runtimeStatusWords("ready"), verified: true, repair: null };
+}
+
+/**
+ * The words one app on one computer reads on BOTH Settings screens: AI brain's
+ * "Installed apps and local models" and the app lines under each of "Your
+ * computers" in Devices (CC 2026-10-16: the same computer and app must never
+ * read differently on the two). Codex outside OASIS is refused before any
+ * device state is read (lib/ai/engine-rollout.ts), exactly as the picker does.
+ */
+export function runtimeStatusLabel(
+  target: Parameters<typeof describeRuntime>[0],
+  provider: CliEngine,
+  oasisWorkspace: boolean,
+): string {
+  return subscriptionRolloutError(provider, oasisWorkspace) !== null
+    ? runtimeStatusWords("unsupported")
+    : describeRuntime(target, provider).label;
 }
 
 /** A detected model is usable only after the selected connector has run a real probe. */
@@ -685,27 +703,27 @@ export function describeLocalModel(
 ): { label: string; verified: boolean; repair: string | null } {
   if (!target.agentClaimEligible) {
     return {
-      label: "Approval needed",
+      label: runtimeStatusWords("approval_needed"),
       verified: false,
       repair: "This legacy full-access computer can run agents only for the workspace agents owner. Re-pair it as a Connector for My setup.",
     };
   }
-  if (!target.approved) return { label: "Approval needed", verified: false, repair: `Approve ${target.label} in Devices before using it.` };
-  if (!target.online) return { label: "Offline", verified: false, repair: `Start Ollama or LM Studio and restart the OASIS connector on ${target.label}.` };
-  if (target.busy) return { label: "Busy", verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
+  if (!target.approved) return { label: runtimeStatusWords("approval_needed"), verified: false, repair: `Approve ${target.label} in Devices before using it.` };
+  if (!target.online) return { label: runtimeStatusWords("offline"), verified: false, repair: `Start Ollama or LM Studio and restart the OASIS connector on ${target.label}.` };
+  if (target.busy) return { label: runtimeStatusWords("busy"), verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
   if (
     !target.protocols.includes("runtime_action_v1") ||
     !target.protocols.includes("department_task_v2") ||
     !target.protocols.includes("coding_harness_task_v1")
   ) {
-    return { label: "Needs test", verified: false, repair: `Update and restart the OASIS connector on ${target.label}, then Test again.` };
+    return { label: runtimeStatusWords("needs_test"), verified: false, repair: `Update and restart the OASIS connector on ${target.label}, then Test again.` };
   }
-  if (!model) return { label: "Not installed", verified: false, repair: `Start Ollama or LM Studio on ${target.label}, install a model, then Refresh.` };
+  if (!model) return { label: runtimeStatusWords("not_installed"), verified: false, repair: `Start Ollama or LM Studio on ${target.label}, install a model, then Refresh.` };
   if (model.state === "unavailable") {
-    return { label: "Offline", verified: false, repair: `Start ${model.adapter === "ollama" ? "Ollama" : "LM Studio"} on ${target.label}, then Test again.` };
+    return { label: runtimeStatusWords("offline"), verified: false, repair: `Start ${model.adapter === "ollama" ? "Ollama" : "LM Studio"} on ${target.label}, then Test again.` };
   }
-  if (model.state !== "ready") return { label: "Needs test", verified: false, repair: `Test ${model.label} on ${target.label} before using it for agents.` };
-  return { label: "Ready for agents", verified: true, repair: null };
+  if (model.state !== "ready") return { label: runtimeStatusWords("needs_test"), verified: false, repair: `Test ${model.label} on ${target.label} before using it for agents.` };
+  return { label: runtimeStatusWords("ready"), verified: true, repair: null };
 }
 
 export function selectionKey(selection: EngineSelection, scope: EngineScope): string {
