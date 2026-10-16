@@ -59,7 +59,20 @@ check("PROTOCOL and COMMUNITY keep their own next step, with the calendar offere
     assert.ok(page.indexOf(THANKS) < page.indexOf(OPTIONAL_HEADING), `${kind}: the calendar must sit under the thanks`);
     assert.ok(/Optional: pick a \d+-minute call/.test(page), `${kind}: the call must say it is optional`);
     assert.ok(!page.includes(REQUIRED_HEADING), `${kind}: an optional call must not read as the next step`);
-    assert.ok(!page.includes(COMMUNITY_FOOTER), `${kind}: the community link is already in the thanks`);
+    assert.ok(!page.includes("Not ready to book?"), `${kind}: the required calendar's footer on an optional call`);
+  }
+});
+
+check("COMMUNITY's last screen links to the community; PROTOCOL's does not (review of #655)", () => {
+  // The thanks names the community address only as text; COMMUNITY's next step is to click it.
+  const link = /href="\/go\/community\?form=community&amp;t=oasis-ai-cc&amp;step=4"/;
+  for (const kind of ["community", "communityNoAnswers"]) {
+    assert.match(html[kind], link, `${kind}: no community link to click`);
+    assert.equal(html[kind].split(COMMUNITY_FOOTER).length - 1, 1, `${kind}: the community link drawn twice`);
+    assert.ok(html[kind].indexOf(COMMUNITY_FOOTER) < html[kind].indexOf(OPTIONAL_HEADING), `${kind}: the community link must come before the optional call`);
+  }
+  for (const kind of ["protocol", "protocolNoPhone", "protocolBadPhone"]) {
+    assert.ok(!html[kind].includes("/go/community"), `${kind}: PROTOCOL's next step is the checkout, not the community`);
   }
 });
 
@@ -84,6 +97,7 @@ check("an optional form whose visitor left the phone blank links to /book instea
 check("COMMAND (a founder call) still opens straight on the calendar", () => {
   assert.ok(html.command.includes(REQUIRED_HEADING));
   assert.ok(html.command.includes(COMMUNITY_FOOTER));
+  assert.match(html.command, /Not ready to book\?[^<]*<\/p><a href="\/go\/community\?form=command&amp;t=oasis-ai-cc&amp;step=4"/, "the calendar's footer markup changed");
   assert.ok(!html.command.includes("All set."));
   assert.ok(!html.command.includes(OPTIONAL_HEADING));
 });
@@ -103,6 +117,9 @@ check("an offer page whose form ends on the calendar shows no second booking lin
   const linkBranch = src.indexOf(") : bookingUrl ? (");
   assert.ok(calendarBranch > 0 && linkBranch > calendarBranch, "the inline-calendar case must be decided before the booking link");
   const between = src.slice(calendarBranch, linkBranch);
+  // Review of #655: an optional call is offered, never announced as the next step.
+  assert.match(between, /callOptional\s*\?\s*"A few quick questions below\. At the end you can also book a call here, if you would like one\."/);
+  assert.match(src, /const callOptional = calendarOnPage && isOptionalPublicBookingFormSlug\(/);
   assert.ok(!between.includes("href="), "the inline-calendar banner must not link anywhere");
   assert.match(src, /isPublicBookingSurface\(\{ tenantSlug: form\.tenantSlug, formSlug: form\.formSlug \}\)/);
 });

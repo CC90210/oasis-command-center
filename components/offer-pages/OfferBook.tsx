@@ -24,7 +24,7 @@
 import { useState } from "react";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
-import { isPublicBookingSurface } from "@/lib/forms/public-booking-config";
+import { isOptionalPublicBookingFormSlug, isPublicBookingSurface } from "@/lib/forms/public-booking-config";
 import type { BookMode } from "@/lib/offer-pages/types";
 import { ACCENT_BORDER, ACCENT_WASH } from "./styles";
 
@@ -52,6 +52,8 @@ export function OfferBook({
   const calendarOnPage = Boolean(
     form?.tenantSlug && form.formSlug && isPublicBookingSurface({ tenantSlug: form.tenantSlug, formSlug: form.formSlug }),
   );
+  // PROTOCOL and COMMUNITY offer the call, never require it (review of #655).
+  const callOptional = calendarOnPage && isOptionalPublicBookingFormSlug(form?.formSlug ?? "");
 
   if (!form) {
     return (
@@ -82,7 +84,9 @@ export function OfferBook({
             <>
               <p className="font-display text-lg font-bold tracking-tight text-fg">Your details are in.</p>
               <p className="mt-2 text-[14px] leading-relaxed text-fg-muted">
-                A few quick questions below, then you pick a time for the call right here.
+                {callOptional
+                  ? "A few quick questions below. At the end you can also book a call here, if you would like one."
+                  : "A few quick questions below, then you pick a time for the call right here."}
               </p>
             </>
           ) : bookingUrl ? (

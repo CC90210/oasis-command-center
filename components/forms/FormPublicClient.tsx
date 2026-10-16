@@ -34,7 +34,7 @@ import {
 import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
-import { PublicBookingCalendar } from "./PublicBookingCalendar";
+import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
 import { isOptionalPublicBookingFormSlug, isPublicBookingSurface } from "@/lib/forms/public-booking-config";
 import { normalizeFounderMeetingPhone } from "@/lib/website-sales-meeting";
 import { ConsentChoice } from "./ConsentChoice";
@@ -1195,6 +1195,11 @@ export function FormPublicClient({
                     {thanksMessage}
                   </p>
                 </div>
+                {/* COMMUNITY's next step IS the community: a link to click, not
+                    only the address inside the thanks (review of #655). */}
+                {publicBookingFormSlug === "community" ? (
+                  <CommunityJoinLink formSlug={publicBookingFormSlug} completedStep={steps.length} primary={primary} />
+                ) : null}
                 {publicBookingFormSlug ? (
                   <div className="border-t border-bg-border pt-5">
                     {optionalBookingPhone ? (
