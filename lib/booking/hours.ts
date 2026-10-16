@@ -10,6 +10,8 @@
  * whole slot. A slot is offered when an organizer is on duty and EVERY host on
  * duty is free (with the buffer either side). Everyone on duty is invited. So
  * "both founders" and "CC alone on Friday" are one rule, not two code paths.
+ * An attendee who has not connected their calendar is not on duty at all
+ * (HostBusy "absent"), so their days book with the organizer alone.
  *
  * Pure: no database, no clock, no network. The server side that feeds it busy
  * time lives in lib/booking/settings-store.ts and lib/forms/public-booking.ts.
@@ -54,8 +56,15 @@ export type BookingSettings = {
 /** Epoch milliseconds; end > start. */
 export type BusyInterval = { start: number; end: number };
 
-/** A host whose calendar could not be read is never treated as free. */
-export type HostBusy = BusyInterval[] | "unavailable";
+/**
+ * A host whose calendar could not be read is never treated as free.
+ * "absent" is narrower: an ATTENDEE who has not connected the calendar we would
+ * read (CC, 2026-10-16: until Adon connects his work Google account, his days
+ * book with CC alone). That host leaves the slot entirely, neither required to
+ * be free nor invited, and is back on it as soon as the calendar reads. An
+ * organizer is never left off: an absent organizer closes every slot.
+ */
+export type HostBusy = BusyInterval[] | "unavailable" | "absent";
 
 export type OpenSlot = {
   /** ISO instant, UTC. */
@@ -242,14 +251,15 @@ export function bookingReadWindow(
 }
 
 function isFree(busy: HostBusy | undefined, start: number, end: number): boolean {
-  if (!busy || busy === "unavailable") return false;
+  if (!busy || busy === "unavailable" || busy === "absent") return false;
   return !busy.some((b) => b.start < end && b.end > start);
 }
 
 /**
  * Every slot a visitor may book, in time order. `busyByHost` must hold an
  * entry for every host; a missing or "unavailable" entry closes that host's
- * on-duty slots (fail closed: never invent availability).
+ * on-duty slots (fail closed: never invent availability). An "absent" attendee
+ * is left off their on-duty slots instead (see HostBusy).
  */
 export function computeOpenSlots(input: {
   settings: BookingSettings;
@@ -270,7 +280,9 @@ export function computeOpenSlots(input: {
   for (let start = first; start <= last; start += MINUTE_MS) {
     const { minute } = localSlot(start, settings.timeZone);
     if (minute % settings.stepMinutes !== 0) continue;
-    const onDuty = onDutyHosts(settings, start, durationMinutes);
+    const onDuty = onDutyHosts(settings, start, durationMinutes).filter(
+      (h) => h.role === "organizer" || input.busyByHost.get(h.userId) !== "absent",
+    );
     if (!onDuty.some((h) => h.role === "organizer")) {
       start += step - MINUTE_MS;
       continue;

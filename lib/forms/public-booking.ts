@@ -8,7 +8,7 @@ import { bottleneckLabel, leadRevenueAndBottleneck } from "@/lib/forms/ai-audit-
 import { normalizeFounderMeetingWebsite } from "@/lib/website-sales-meeting";
 import { AI_AUDIT_TENANT_ID, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
 import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
-import { listGoogleCalendarBusy } from "@/lib/integrations/google-calendar";
+import { GoogleCalendarIntegrationError, listGoogleCalendarBusy, type GoogleCalendarErrorCode } from "@/lib/integrations/google-calendar";
 import { getOasisPipelineAssignmentRoster, OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
 import { listCalendars, listEventsBetween, type Owner } from "@/lib/calendar/store";
 import type { EventRecord } from "@/lib/calendar/types";
@@ -416,6 +416,28 @@ async function scheduleEventsOf(owner: Owner, range: { timeMin: number; timeMax:
   return events;
 }
 
+/**
+ * The host has no working connection to their own work calendar, a state only
+ * they can fix by connecting it: nothing connected, a different Google
+ * account, a grant without calendar permission, or a revoked grant. Not a
+ * Google outage, a cut-off read or a bad workspace credential.
+ */
+const UNCONNECTED_CALENDAR_CODES: ReadonlySet<GoogleCalendarErrorCode> = new Set<GoogleCalendarErrorCode>([
+  "google_calendar_not_connected",
+  "calendar_organizer_mismatch",
+  "calendar_scope_required",
+]);
+
+function isUnconnectedCalendar(error: unknown): boolean {
+  if (!(error instanceof GoogleCalendarIntegrationError)) return false;
+  // token_refresh_failed also covers a network error or a Google 5xx on the
+  // refresh (google-calendar.ts refreshAccessToken). Only Google's own answer
+  // that the grant is dead (400 invalid_grant) means "not connected"; a
+  // connected host must never drop off their day because Google hiccuped.
+  if (error.code === "token_refresh_failed") return error.httpStatus === 400 && error.detail.includes("invalid_grant");
+  return UNCONNECTED_CALENDAR_CODES.has(error.code);
+}
+
 function hostsFromSettings(
   settings: BookingSettings,
   identities: Map<string, BookingHostIdentity>,
@@ -434,7 +456,8 @@ function hostsFromSettings(
  * Saturday" is one rule. Busy time per host = their Google calendar plus their
  * own Schedule (minus the weekly routine). The organizer's calendar must be
  * readable or nothing is offered (the error says why). An attendee whose
- * calendar cannot be read closes only the slots they are on duty for.
+ * calendar is not connected is left off their slots (the organizer takes them
+ * alone); one whose calendar fails to read closes only the slots they are on.
  */
 export async function loadPublicBookingAvailability(
   input: { tenantId: string; durationMinutes?: number; now?: number },
@@ -473,13 +496,18 @@ export async function loadPublicBookingAvailability(
       busyByHost.set(configured.userId, busy);
     } catch (error) {
       if (configured.role === "organizer") throw error;
-      // Fail closed for this attendee's on-duty slots only; the organizer's
-      // solo hours (CC on Friday and Saturday) stay bookable.
-      console.error("[public-booking.attendee-busy-unavailable]", {
+      // An attendee who has not connected their work calendar (none, revoked,
+      // another account, or no calendar permission) is left off the call: CC
+      // chose (2026-10-16) that Adon's days book with CC alone until Adon
+      // connects, and they include him again on the first read that works.
+      // Any other failure (Google down, a cut-off read) closes this attendee's
+      // on-duty slots only; the organizer's solo hours stay bookable.
+      const absent = isUnconnectedCalendar(error);
+      console.error(absent ? "[public-booking.attendee-calendar-not-connected]" : "[public-booking.attendee-busy-unavailable]", {
         userId: configured.userId,
         error: error instanceof Error ? error.message : String(error),
       });
-      busyByHost.set(configured.userId, "unavailable");
+      busyByHost.set(configured.userId, absent ? "absent" : "unavailable");
     }
   }));
 
