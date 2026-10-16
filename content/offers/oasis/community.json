@@ -110,7 +110,7 @@
   "offer_page": {
     "v": 1,
     "template": "book_call",
-    "theme": { "canvas": "dark", "accent": "#20D19D", "logo": "workspace", "layout": "split" },
+    "theme": { "canvas": "dark", "accent": "#20D19D", "logo": "workspace", "layout": "stacked" },
     "nav": { "pinned": ["obstacles", "what_you_get", "pricing", "faq"], "cta_label": "Join free" },
     "hero": {
       "eyebrow": "COMMUNITY, for builders and agencies",
