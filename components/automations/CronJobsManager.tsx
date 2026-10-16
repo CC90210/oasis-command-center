@@ -46,6 +46,7 @@ import {
   type CronInventoryJob,
 } from "@/lib/automations/cron-inventory";
 import { describeNextRun } from "@/lib/automations/cron-schedule";
+import { relativeTimeShort, summarizeRun } from "@/lib/automations/run-summary";
 
 type ActionType = "script_run" | "snapshot_run" | "webhook_post";
 type CronJob = CronInventoryJob;
@@ -224,15 +225,6 @@ function humanizeCron(expr: string): string {
 
   // Couldn't humanize — return raw so the operator at least sees the truth.
   return trimmed;
-}
-
-function relativeTimeShort(iso: string | null | undefined): string {
-  if (!iso) return "never";
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
-  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
-  return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
 export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) {
@@ -901,16 +893,22 @@ function JobRow({
   const daemon = job.daemon ?? null;
   const running = isRunning(job);
   const daemonUnknown = daemon !== null && daemon.state === "unknown";
-  const ranOk = job.last_run_status === "success";
-  const ranBad = job.last_run_status === "error";
+  // Every sentence this row says about its last run comes from one pure
+  // function (lib/automations/run-summary.ts), with times in the viewer's zone.
+  // CC 2026-10-16: the row still printed the scheduler's raw text as its
+  // message and gave a skipped slot no time.
+  const run = summarizeRun(job);
+  // Only a real failure is red. A skipped or held-back latest tick is not,
+  // even while the failure counter is still set (that keeps its own badge).
+  const ranBad = run.failed;
+  const ranOk = !ranBad && run.lastRan?.tone === "ok";
   // The stored result cannot say either way — a truncated `}` tail. Rendered
   // without a verdict rather than inheriting the success tick it used to get by
   // falling through the else.
-  const ranUnclear = job.last_run_status === "unknown";
-  // The scheduler did not run the latest slot (the PC was off). `last_run_at`
-  // is then the last time it REALLY ran, so the line says "Last ran", and the
-  // skip is a separate, neutral note below: not a tick, not a failure.
-  const ranSkipped = job.last_run_status === "skipped";
+  const ranUnclear = run.lastRan?.tone === "unclear";
+  // When the latest tick was not a real run (the PC was off, or the job held
+  // back), run.lastAttempt is set: the row then shows "Last ran" and "Last
+  // attempt" as two lines, and the skip is neutral: not a tick, not a failure.
   // What the promised next fire actually means now that the clock has passed it.
   // Daemon-backed rows are excluded by construction: their cron twin is parked,
   // so its next_run_at is not a promise anyone made.
@@ -1058,40 +1056,29 @@ function JobRow({
                 <span className="text-fg-faint font-mono text-[10px]">({job.schedule})</span>
               )}
             </span>
-            {job.last_run_at ? (
-              <span className="inline-flex items-center gap-1.5">
+            {run.lastRan ? (
+              <span className="inline-flex items-center gap-1.5" data-testid="cron-last-ran">
                 {ranOk ? (
                   <Check className="w-3.5 h-3.5 text-status-engaged" />
-                ) : ranBad ? (
+                ) : run.lastRan.tone === "bad" ? (
                   <XCircle className="w-3.5 h-3.5 text-status-warm" />
                 ) : ranUnclear ? (
                   <HelpCircle className="w-3.5 h-3.5 text-fg-dim" />
                 ) : (
                   <PlayCircle className="w-3.5 h-3.5 text-fg-dim" />
                 )}
-                <span className={ranBad && !daemon ? "text-status-warm font-medium" : "text-fg-muted"}>
+                <span className={run.lastRan.tone === "bad" && !daemon ? "text-status-warm font-medium" : "text-fg-muted"}>
                   {/* For a daemon-backed row this is history from when the
                       shared scheduler still ran it — say so, rather than
                       letting it read as the process's last tick. */}
-                  {daemon
-                    ? "Last scheduler run"
-                    : ranOk
-                      ? "Ran"
-                      : ranBad
-                        ? "Failed"
-                        : ranUnclear
-                          ? "Ran, result unclear"
-                          : ranSkipped
-                            ? "Last ran"
-                            : "Ran"}{" "}
-                  {relativeTimeShort(job.last_run_at)}
+                  {daemon ? `Last scheduler run ${relativeTimeShort(job.last_run_at)}` : run.lastRan.text}
                 </span>
                 <span className="text-fg-faint">·</span>
                 <span className="text-fg-faint">{job.run_count} total</span>
               </span>
-            ) : (
+            ) : !run.lastAttempt ? (
               <span className="text-fg-faint">Not run yet</span>
-            )}
+            ) : null}
             {nextRun && job.next_run_at && (
               <span
                 className={`inline-flex items-center gap-1.5 ${overdue ? "text-status-warm font-medium" : "text-fg-muted"}`}
@@ -1105,6 +1092,21 @@ function JobRow({
               </span>
             )}
           </div>
+          {/* The latest tick, on its own line, only when it was not the real
+              run above: "Last ran 1d ago" and "Last attempt: skipped at 5:30 AM"
+              are two different facts, and one line used to blur them. */}
+          {run.lastAttempt && (
+            <div className="mt-1 inline-flex items-center gap-1.5 text-xs text-fg-muted" data-testid="cron-last-attempt">
+              <PlayCircle className="w-3.5 h-3.5 text-fg-dim" />
+              <span>{run.lastAttempt}</span>
+              {!run.lastRan && (
+                <>
+                  <span className="text-fg-faint">·</span>
+                  <span className="text-fg-faint">{job.run_count} total</span>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Edit / delete — tenant only */}
@@ -1132,40 +1134,31 @@ function JobRow({
         )}
       </div>
 
-      {job.last_run_error && (
+      {/* Every row: one plain sentence, the stored text kept as evidence under a
+          closed Details. Raw machine text is never the message (CC 2026-10-16),
+          and it is never dropped either. */}
+      {run.result && (
         <div
-          className={`mt-3 text-[11px] rounded px-2.5 py-1.5 font-mono break-words ${
-            daemon
-              ? "text-fg-muted bg-bg-deep/50 border border-bg-border"
-              : "text-status-warm bg-status-warm/5 border border-status-warm/30"
+          className={`mt-3 rounded border px-2.5 py-1.5 text-xs ${
+            run.result.tone === "bad" && !daemon
+              ? "text-status-warm bg-status-warm/5 border-status-warm/30"
+              : "text-fg-muted bg-bg-deep/50 border-bg-border"
           }`}
+          data-testid="cron-result-line"
         >
-          {/* Not this process's error — it belongs to the parked scheduler
-              entry. Labelled and de-emphasised so a running daemon doesn't
-              wear an old red box. */}
-          <span className="font-bold not-italic">
-            {daemon ? "Last scheduler run error: " : "Error: "}
-          </span>
-          {job.last_run_error.slice(0, 240)}
-        </div>
-      )}
-      {/* A skipped slot: one plain sentence, the scheduler's own words kept as
-          evidence under Details. Raw machine text is never the message. */}
-      {!job.last_run_error && job.last_run_note && (
-        <div className="mt-3 rounded border border-bg-border bg-bg-deep/50 px-2.5 py-1.5 text-xs text-fg-muted" data-testid="cron-skipped-note">
-          <div>{job.last_run_note}</div>
-          {job.last_run_output && (
+          <div>
+            {/* Not this process's result: it belongs to the parked scheduler
+                entry. Labelled and de-emphasised so a running daemon doesn't
+                wear an old red box. */}
+            {daemon && <span className="font-bold">Last scheduler run: </span>}
+            {run.result.text}
+          </div>
+          {run.details && (
             <details className="mt-1 text-[11px] text-fg-dim">
               <summary className="cursor-pointer select-none">Details</summary>
-              <div className="mt-1 break-words font-mono">{job.last_run_output.slice(0, 240)}</div>
+              <div className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono">{run.details}</div>
             </details>
           )}
-        </div>
-      )}
-      {!job.last_run_error && !job.last_run_note && job.last_run_output && (
-        <div className="mt-3 text-[11px] rounded px-2.5 py-1.5 font-mono break-words text-fg-muted bg-bg-deep/50 border border-bg-border">
-          <span className="font-bold text-fg-muted">Last result: </span>
-          {job.last_run_output.slice(0, 240)}
         </div>
       )}
     </div>

@@ -24,6 +24,15 @@ export type CronInventoryJob = {
   last_run_error: string | null;
   /** Plain-English line for a `skipped` result (lib/cron-empire-row.ts explainSkippedResult). */
   last_run_note?: string | null;
+  /**
+   * Empire rows: what the latest tick was when it was NOT a real run
+   * (lib/cron-empire-row.ts attemptKindOf). Set even when unresolved failures
+   * keep last_run_status at "error", because the card's colour follows the
+   * latest tick and a skip never paints it red.
+   */
+  last_attempt_kind?: "missed" | "skipped" | "deferred" | null;
+  /** Empire rows: the stored last_result verbatim, whatever the verdict. Shown only under Details. */
+  last_result_text?: string | null;
   run_count: number;
   unresolved_failures?: number;
   created_at: string;
@@ -249,6 +258,10 @@ function isCronInventoryJob(value: unknown): value is CronInventoryJob {
     isNullableString(value.last_run_output) &&
     isNullableString(value.last_run_error) &&
     (value.last_run_note === undefined || isNullableString(value.last_run_note)) &&
+    (value.last_attempt_kind === undefined || value.last_attempt_kind === null ||
+      value.last_attempt_kind === "missed" || value.last_attempt_kind === "skipped" ||
+      value.last_attempt_kind === "deferred") &&
+    (value.last_result_text === undefined || isNullableString(value.last_result_text)) &&
     typeof value.run_count === "number" && Number.isFinite(value.run_count) &&
     (value.unresolved_failures === undefined ||
       (typeof value.unresolved_failures === "number" &&
