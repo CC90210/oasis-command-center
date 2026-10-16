@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CalendarClock, Copy, ExternalLink, Settings2, X } from "lucide-react";
 import type { BookingSettings, WeeklyHours } from "@/lib/booking/hours";
+import { setupHref } from "@/lib/setup-links";
 
 type BookingInfo = {
   ok: true;
@@ -187,7 +188,7 @@ export function BookingLinkCard() {
                     ? "No times can be offered until it is connected."
                     : "Times that need them are closed until it is connected."}{" "}
                   {you ? (
-                    <a className="underline underline-offset-2 hover:text-fg" href="/settings/connections?app=google-workspace">
+                    <a className="underline underline-offset-2 hover:text-fg" href={setupHref("connector:google-workspace")}>
                       Connect it
                     </a>
                   ) : (
