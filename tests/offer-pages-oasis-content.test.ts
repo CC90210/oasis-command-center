@@ -54,7 +54,9 @@ const HOUSE_AGENTS = /\b(bravo|maven|atlas|aura|apex|knut)\b/i;
  */
 const FUNNEL_FIGURES = new Set([
   "0", "17", "27", "47", "59", "97", "147", "197", "297", "395", "497", "500", "997",
-  "1400", "2000", "2500", "3500", "5000", "7500", "15000",
+  // 3000: BEA docs/funnel/OASIS_MASTER_HANDOVER_AND_SALES_ENGINE.md section 4.2 ("2C Managed Partner:
+  // $5,000 setup + $3,000 / mo"; 4B "$3,000-$8,000"). Missing here until COMMAND quoted it (2026-10-16).
+  "1400", "2000", "2500", "3000", "3500", "5000", "7500", "15000",
   "2K", "5K", "10K", "15K", "50K", "75K", "250K",
 ]);
 
@@ -192,6 +194,8 @@ async function main() {
     assert.throws(() => seed.parseOfferContent(wrongLink, "protocol.json"), /community_link/);
     // A copy file never signs off a price on an owner's behalf: the server stamps that when an owner ticks it.
     const signed = JSON.parse(JSON.stringify(json));
+    // The page may already have its own pricing section (PROTOCOL does since 2026-10-16): replace it.
+    signed.offer_page.sections = signed.offer_page.sections.filter((s: Raw) => s.key !== "pricing");
     signed.offer_page.sections.push({ key: "pricing", tiers: [{ name: "Pack", price: "$97", price_cad: "CA$135", confirmed: { by: "copywriter", at: "2026-10-16T12:00:00.000Z" } }] });
     assert.throws(() => seed.parseOfferContent(signed, "protocol.json"), /offer_page\.sections\[\d+\]\.tiers\[0\]\.confirmed: a content file never carries an owner's sign-off/);
     const unsigned = JSON.parse(JSON.stringify(signed));
@@ -205,7 +209,17 @@ async function main() {
       const { text } = rawFile(slug);
       assert.ok(!text.includes("—"), `${slug}: em dash`);
       assert.ok(!text.includes("–"), `${slug}: en dash`);
-      assert.doesNotMatch(text, HOUSE_AGENTS, `${slug}: house agent name`);
+      // What the page shows. Left out: the script's `source` (who wrote it, a record), the `brief` (stripped
+      // before publish), and the word-for-word narration of an approved film (source "maven"): the film is
+      // what CC approved on 2026-10-16, and FLEET's names OASIS's own agents on purpose. All copy is checked.
+      const shown = structuredClone(rawFile(slug).json);
+      const script = shown.offer_page?.hero?.vsl_script;
+      if (script) {
+        if (script.source === "maven") delete script.text;
+        delete script.source;
+      }
+      if (shown.offer_page) delete shown.offer_page.brief;
+      assert.doesNotMatch(JSON.stringify(shown), HOUSE_AGENTS, `${slug}: house agent name`);
     }
     const checklist = readFileSync(join(CONTENT_DIR, "PUBLISH_CHECKLIST.md"), "utf8");
     assert.ok(!checklist.includes("—"), "checklist: em dash");
@@ -237,12 +251,21 @@ async function main() {
 
   await step("every monthly plan says plainly how to cancel, with no cancellation fee", () => {
     let monthly = 0;
+    const CANCEL = /cancel[^.]*any time from your account[.;] (there is )?no cancellation fee/i;
     for (const slug of ["command", "community"]) {
-      const wyg = rawFile(slug).json.offer_page.sections.find((s: Raw) => s.key === "what_you_get");
+      const sections = rawFile(slug).json.offer_page.sections;
+      const wyg = sections.find((s: Raw) => s.key === "what_you_get");
       for (const it of wyg.items) {
         if (!/a month/.test(it.title)) continue;
         monthly += 1;
-        assert.match(it.body, /cancel[^.]*any time from your account; no cancellation fee/i, `${slug}: "${it.title}"`);
+        assert.match(it.body, CANCEL, `${slug}: "${it.title}"`);
+      }
+      // A monthly plan in the pricing section (2026-10-16): the section that lists it says how to cancel.
+      const pricing = sections.find((s: Raw) => s.key === "pricing");
+      for (const t of pricing?.tiers ?? []) {
+        if (!/a month/.test(t.cadence ?? "")) continue;
+        monthly += 1;
+        assert.match(`${pricing.lede ?? ""} ${t.summary ?? ""}`, CANCEL, `${slug}: pricing tier "${t.name}"`);
       }
     }
     assert.equal(monthly, 5, "five monthly plans: OS DIY, Turnkey, managed partner, VIP, mentorship");
@@ -262,15 +285,20 @@ async function main() {
     }
   });
 
-  await step("every hero: an empty video slot, a script by the founders, no transcript drawn yet, kept out of search", () => {
+  await step("every hero: an empty video slot, a script by the founders or the narration of its approved film, no transcript drawn yet, kept out of search", () => {
     for (const slug of SLUGS) {
       const doc = rawFile(slug).json.offer_page;
       assert.equal(doc.hero.video, null, slug);
-      assert.equal(doc.hero.vsl_script.source, "cc", slug);
-      assert.ok(doc.hero.vsl_script.text.length > 800, `${slug}: script too short`);
-      assert.match(doc.hero.vsl_script.text, /BEAT 1\. HOOK/, slug);
-      if (slug === "community") assert.match(doc.hero.vsl_script.text, /Join free below/, slug);
-      else assert.match(doc.hero.vsl_script.text, /free community is linked/, slug);
+      // "cc": the founders' recording script. "maven": the narration, word for word, of the approved pillar
+      // film the page plays (CC approved those films 2026-10-16); a 20-second narration has no beats.
+      assert.ok(["cc", "maven"].includes(doc.hero.vsl_script.source), `${slug}: script source ${doc.hero.vsl_script.source}`);
+      assert.ok(doc.hero.vsl_script.text.trim().length > 0, `${slug}: empty script`);
+      if (doc.hero.vsl_script.source === "cc") {
+        assert.ok(doc.hero.vsl_script.text.length > 800, `${slug}: script too short`);
+        assert.match(doc.hero.vsl_script.text, /BEAT 1\. HOOK/, slug);
+        if (slug === "community") assert.match(doc.hero.vsl_script.text, /Join free below/, slug);
+        else assert.match(doc.hero.vsl_script.text, /free community is linked/, slug);
+      }
       assert.equal(doc.hero.show_transcript, false, slug);
       assert.equal(doc.seo.indexable, false, slug);
     }

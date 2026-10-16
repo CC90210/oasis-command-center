@@ -6,9 +6,18 @@
     "href": "/go/community?form=fleet&t=oasis-ai-cc"
   },
   "work_steps": [
-    { "title": "Request the audit", "body": "Tell us how the operation runs today and where you think AI fits." },
-    { "title": "We run the audit and hand you the plan", "body": "A written statement of work and a roadmap: where AI pays back, where it is a liability, and what to do first." },
-    { "title": "If you go ahead, we build the fleet", "body": "The audit fee is credited in full to the build." }
+    {
+      "title": "Request the audit",
+      "body": "Tell us how the operation runs today and where you think AI fits."
+    },
+    {
+      "title": "We run the audit and hand you the plan",
+      "body": "A written statement of work and a roadmap: where AI pays back, where it is a liability, and what to do first."
+    },
+    {
+      "title": "If you go ahead, we build the fleet",
+      "body": "The audit fee is credited in full to the build."
+    }
   ],
   "form": {
     "name": "FLEET: enterprise AI audit and agent fleets",
@@ -30,12 +39,45 @@
         "description": "Takes about twenty seconds.",
         "cta_label": "Next",
         "fields": [
-          { "name": "name", "label": "Your name", "type": "text", "required": true, "placeholder": "First and last" },
-          { "name": "email", "label": "Work email", "type": "email", "required": true, "placeholder": "you@company.com" },
-          { "name": "phone", "label": "Mobile number", "type": "phone", "required": true, "help": "So we can follow up with you directly." },
-          { "name": "company", "label": "Company name", "type": "text", "required": true },
-          { "name": "website", "label": "Website or social handle", "type": "text", "help": "Optional, but it lets us look at your setup before we speak." },
-          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "fleet" }
+          {
+            "name": "name",
+            "label": "Your name",
+            "type": "text",
+            "required": true,
+            "placeholder": "First and last"
+          },
+          {
+            "name": "email",
+            "label": "Work email",
+            "type": "email",
+            "required": true,
+            "placeholder": "you@company.com"
+          },
+          {
+            "name": "phone",
+            "label": "Mobile number",
+            "type": "phone",
+            "required": true,
+            "help": "So we can follow up with you directly."
+          },
+          {
+            "name": "company",
+            "label": "Company name",
+            "type": "text",
+            "required": true
+          },
+          {
+            "name": "website",
+            "label": "Website or social handle",
+            "type": "text",
+            "help": "Optional, but it lets us look at your setup before we speak."
+          },
+          {
+            "name": "pillar",
+            "label": "Pillar",
+            "type": "hidden",
+            "value": "fleet"
+          }
         ]
       },
       {
@@ -50,11 +92,26 @@
             "type": "select",
             "required": true,
             "options": [
-              { "value": "audit", "label": "The enterprise AI and security audit" },
-              { "value": "fleet", "label": "A bespoke multi-agent fleet" },
-              { "value": "website", "label": "A website rebuild" },
-              { "value": "website_audit", "label": "A website audit first" },
-              { "value": "not_sure", "label": "Not sure yet" }
+              {
+                "value": "audit",
+                "label": "The enterprise AI and security audit"
+              },
+              {
+                "value": "fleet",
+                "label": "A bespoke multi-agent fleet"
+              },
+              {
+                "value": "website",
+                "label": "A website rebuild"
+              },
+              {
+                "value": "website_audit",
+                "label": "A website audit first"
+              },
+              {
+                "value": "not_sure",
+                "label": "Not sure yet"
+              }
             ]
           },
           {
@@ -63,10 +120,22 @@
             "type": "select",
             "required": true,
             "options": [
-              { "value": "sales_leadgen", "label": "Sales and lead gen: finding and following up with prospects" },
-              { "value": "customer_support", "label": "Customer support: answering the same questions all day" },
-              { "value": "workflow_automation", "label": "Workflow automation: the manual admin between systems" },
-              { "value": "agent_fleet", "label": "A custom AI agent fleet: the whole operation running itself" }
+              {
+                "value": "sales_leadgen",
+                "label": "Sales and lead gen: finding and following up with prospects"
+              },
+              {
+                "value": "customer_support",
+                "label": "Customer support: answering the same questions all day"
+              },
+              {
+                "value": "workflow_automation",
+                "label": "Workflow automation: the manual admin between systems"
+              },
+              {
+                "value": "agent_fleet",
+                "label": "A custom AI agent fleet: the whole operation running itself"
+              }
             ]
           },
           {
@@ -81,10 +150,22 @@
             "label": "Tried to fix it before?",
             "type": "select",
             "options": [
-              { "value": "never", "label": "No, first time looking at this" },
-              { "value": "diy", "label": "Yes, built something in-house and it half-works" },
-              { "value": "hired", "label": "Yes, hired someone and it did not stick" },
-              { "value": "tools", "label": "Yes, bought tools nobody uses" }
+              {
+                "value": "never",
+                "label": "No, first time looking at this"
+              },
+              {
+                "value": "diy",
+                "label": "Yes, built something in-house and it half-works"
+              },
+              {
+                "value": "hired",
+                "label": "Yes, hired someone and it did not stick"
+              },
+              {
+                "value": "tools",
+                "label": "Yes, bought tools nobody uses"
+              }
             ],
             "help": "No wrong answer. It tells us what not to repeat."
           }
@@ -101,11 +182,26 @@
             "label": "Monthly revenue",
             "type": "select",
             "options": [
-              { "value": "pre_revenue", "label": "Pre-revenue / just starting" },
-              { "value": "under_10k", "label": "Under $10K/mo" },
-              { "value": "10k_50k", "label": "$10K to $50K/mo" },
-              { "value": "50k_250k", "label": "$50K to $250K/mo" },
-              { "value": "250k_plus", "label": "$250K+/mo" }
+              {
+                "value": "pre_revenue",
+                "label": "Pre-revenue / just starting"
+              },
+              {
+                "value": "under_10k",
+                "label": "Under $10K/mo"
+              },
+              {
+                "value": "10k_50k",
+                "label": "$10K to $50K/mo"
+              },
+              {
+                "value": "50k_250k",
+                "label": "$50K to $250K/mo"
+              },
+              {
+                "value": "250k_plus",
+                "label": "$250K+/mo"
+              }
             ]
           },
           {
@@ -113,11 +209,26 @@
             "label": "Team size",
             "type": "select",
             "options": [
-              { "value": "solo", "label": "Just me" },
-              { "value": "2_5", "label": "2 to 5" },
-              { "value": "6_20", "label": "6 to 20" },
-              { "value": "21_100", "label": "21 to 100" },
-              { "value": "100_plus", "label": "100+" }
+              {
+                "value": "solo",
+                "label": "Just me"
+              },
+              {
+                "value": "2_5",
+                "label": "2 to 5"
+              },
+              {
+                "value": "6_20",
+                "label": "6 to 20"
+              },
+              {
+                "value": "21_100",
+                "label": "21 to 100"
+              },
+              {
+                "value": "100_plus",
+                "label": "100+"
+              }
             ]
           },
           {
@@ -125,11 +236,26 @@
             "label": "Budget set aside for this?",
             "type": "select",
             "options": [
-              { "value": "none_yet", "label": "Nothing yet, exploring what it costs" },
-              { "value": "under_2k", "label": "Under $2K/mo" },
-              { "value": "2k_5k", "label": "$2K to $5K/mo" },
-              { "value": "5k_15k", "label": "$5K to $15K/mo" },
-              { "value": "15k_plus", "label": "$15K+/mo" }
+              {
+                "value": "none_yet",
+                "label": "Nothing yet, exploring what it costs"
+              },
+              {
+                "value": "under_2k",
+                "label": "Under $2K/mo"
+              },
+              {
+                "value": "2k_5k",
+                "label": "$2K to $5K/mo"
+              },
+              {
+                "value": "5k_15k",
+                "label": "$5K to $15K/mo"
+              },
+              {
+                "value": "15k_plus",
+                "label": "$15K+/mo"
+              }
             ],
             "help": "Optional. Skipping it does not rule you out."
           }
@@ -146,10 +272,22 @@
             "type": "select",
             "required": true,
             "options": [
-              { "value": "immediate", "label": "Immediately, it is costing us right now" },
-              { "value": "30_days", "label": "Next 30 days" },
-              { "value": "quarter", "label": "This quarter" },
-              { "value": "exploring", "label": "Just exploring, no timeline yet" }
+              {
+                "value": "immediate",
+                "label": "Immediately, it is costing us right now"
+              },
+              {
+                "value": "30_days",
+                "label": "Next 30 days"
+              },
+              {
+                "value": "quarter",
+                "label": "This quarter"
+              },
+              {
+                "value": "exploring",
+                "label": "Just exploring, no timeline yet"
+              }
             ]
           },
           {
@@ -157,8 +295,14 @@
             "label": "Want to skip the back-and-forth and talk first?",
             "type": "select",
             "options": [
-              { "value": "yes", "label": "Yes, send me times" },
-              { "value": "audit_first", "label": "Send the audit scope first, then we will talk" }
+              {
+                "value": "yes",
+                "label": "Yes, send me times"
+              },
+              {
+                "value": "audit_first",
+                "label": "Send the audit scope first, then we will talk"
+              }
             ]
           }
         ]
@@ -168,18 +312,31 @@
   "offer_page": {
     "v": 1,
     "template": "book_call",
-    "theme": { "canvas": "dark", "logo": "workspace" },
-    "nav": { "pinned": ["obstacles", "what_you_get", "faq"], "cta_label": "Request the audit" },
+    "theme": {
+      "canvas": "dark",
+      "accent": "#E8C547",
+      "logo": "workspace",
+      "layout": "stacked"
+    },
+    "nav": {
+      "pinned": [
+        "obstacles",
+        "what_you_get",
+        "pricing",
+        "faq"
+      ],
+      "cta_label": "Request the audit"
+    },
     "hero": {
-      "eyebrow": "FLEET, for mid-market and multi-location teams",
-      "headline": "Before anyone builds anything, find out where AI pays back",
-      "subheadline": "An enterprise AI and security audit maps where AI will earn its keep in your operation and where it is a liability. Then, if it makes sense, we build the fleet of AI agents to run it. The audit fee is credited in full to the build.",
+      "eyebrow": "FLEET, for mid-market and multi-location operations",
+      "headline": "Before anyone builds anything, find out where AI pays back, and where it is a liability",
+      "subheadline": "An AI and security audit maps how work actually moves through your operation. If it makes sense, OASIS builds the fleet: AI agents that hold a seat in your business, with an owner, an approval step and a report for everything they do. The audit fee is credited in full to the build.",
       "cta_label": "Request your audit",
       "video": null,
       "show_transcript": false,
       "vsl_script": {
-        "source": "cc",
-        "text": "FLEET VSL. Target length 3 to 6 minutes. Adon or CC on camera, landscape, eye level, quiet room. Oasis Studio adds captions, b-roll, the screen recordings named below and the OASIS end card.\nRule for the whole video: say no number, result or client story that is not on the page. Prices are said exactly as the page shows them. The audit report shown on screen is synthetic: headings and structure only, never a real company's findings.\n\n[BEAT 1. HOOK, 0:00 to 0:20]\nOn camera: Every vendor in your inbox says AI will fix it. Nobody has looked at how your operation actually runs, location by location.\n\n[BEAT 2. WHO THIS IS FOR, AND WHO IT IS NOT FOR]\nOn camera: This is for mid-market and multi-location operations. It is not for a one-person business. PROTOCOL or COMMAND fit that better. And if you are not ready for any of it, the free community is linked below this video.\n\n[BEAT 3. WHY IT KEEPS HAPPENING]\nOn camera: AI projects stall because they start with a tool, not an audit. A pilot works for one team, adds data risk nobody owns, and never becomes how the business runs.\n\n[BEAT 4. WHAT WE DO ABOUT IT]\nOn camera: Before anyone builds anything, we audit where AI pays back and where it is a liability.\nScreen recording: the shape of the audit report, headings only.\nVoice over: Three steps. You request the audit. We run it and hand you a statement of work and a roadmap. If you go ahead, we build the fleet, and the audit fee is credited in full.\n\n[BEAT 5. WHAT YOU GET, PRICES SAID OUT LOUD]\nOn camera, matching the page word for word:\nThe enterprise AI and security audit, $2,500 to $7,500, credited in full to the build.\nBespoke multi-agent fleets, $5,000 to $15,000 and up.\nA website rebuild, $2,000 to $5,000, or start with a $500 website audit.\nNote for the recording: once Adon picks one number for each range, say that number, and update this script and the page together.\n\n[BEAT 6. PROOF]\nNo permissioned examples are confirmed yet, so show the audit report's structure instead and walk through what each part answers.\n\n[BEAT 7. CALL TO ACTION]\nOn camera: Request your audit below. Not ready? The free community is linked right below this video."
+        "source": "maven",
+        "text": "A tool waits for another prompt. A fully staffed system owns the handoff. In OASIS, Bravo runs operations, Maven runs demand, and Atlas keeps the numbers honest. One request moves to the right seat, stops for approval, and reports back in plain English. Staff the company, keep the control."
       }
     },
     "sections": [
@@ -188,10 +345,26 @@
         "eyebrow": "Sound familiar?",
         "title": "Everyone is selling AI. Nobody has looked at your operation.",
         "items": [
-          { "title": "Every vendor says AI will fix it", "body": "You have heard the pitch from every direction. Nobody has looked at how your operation actually runs." },
-          { "title": "Data and security questions with no owner", "body": "Customer data, access and approvals across locations. Adding AI without a plan adds risk nobody can see." },
-          { "title": "Pilots that never leave the pilot", "body": "A tool gets trialled in one team, works for one person, and never becomes how the business runs." },
-          { "title": "A website that drops the enquiries", "body": "Forms that go nowhere and pages nobody updates, at every location." }
+          {
+            "title": "Every vendor says AI will fix it",
+            "body": "You have heard the pitch from every direction. Nobody has looked at how your operation actually runs, location by location."
+          },
+          {
+            "title": "Data and access with no owner",
+            "body": "Customer data, permissions and approvals across sites. Adding AI without a plan adds risk nobody can see."
+          },
+          {
+            "title": "Pilots that never leave the pilot",
+            "body": "A tool works for one team, for one person, and never becomes how the business runs."
+          },
+          {
+            "title": "Demos instead of systems",
+            "body": "Impressive in a meeting, unaccountable in production: no owner, no approval step, no record of what it did."
+          },
+          {
+            "title": "Systems that do not talk to each other",
+            "body": "Every location re-keys the same details into a different tool, and the mistakes travel with them."
+          }
         ]
       },
       {
@@ -199,41 +372,149 @@
         "eyebrow": "The services",
         "title": "Audit first. Build only what pays back.",
         "items": [
-          { "title": "Enterprise AI and security audit: $2,500 to $7,500", "body": "A written statement of work and a roadmap: where AI pays back, where it is a liability, and what to do first. The full audit fee is credited to the build if you go ahead." },
-          { "title": "Bespoke multi-agent fleets: $5,000 to $15,000+", "body": "A custom fleet of AI agents for multi-location operations, run on Cloudflare or Docker infrastructure, with an infrastructure retainer after launch." },
-          { "title": "Website rebuild: $2,000 to $5,000", "body": "A rebuilt website whose forms feed straight into your OASIS CRM. Want a look first? Start with a $500 website audit." }
+          {
+            "title": "AI and security audit",
+            "body": "How work moves through your operation today, where AI pays back, where it adds risk, and the security of the data it would touch. You get a written statement of work and a roadmap, and the fee is credited in full to the build."
+          },
+          {
+            "title": "Custom integrations",
+            "body": "The connections between the software you already run. APIs, webhooks and the manual re-keying in between, replaced by automations that each have an owner."
+          },
+          {
+            "title": "A governed agent fleet",
+            "body": "A coordinated team of AI agents with a command center beneath it: approvals before anything important happens, memory, reporting and observability."
+          },
+          {
+            "title": "Website rebuild",
+            "body": "A rebuilt website whose forms feed straight into your OASIS CRM. Want a look first? Start with a website audit."
+          }
+        ]
+      },
+      {
+        "key": "work",
+        "eyebrow": "How it works",
+        "title": "Audit, plan, then build",
+        "items": [
+          {
+            "title": "Request the audit",
+            "body": "Tell OASIS how the operation runs today and where you think AI fits."
+          },
+          {
+            "title": "Get the plan",
+            "body": "A written statement of work and a roadmap: where AI pays back, where it is a liability, and what to do first."
+          },
+          {
+            "title": "Build the fleet, if you go ahead",
+            "body": "OASIS builds what the plan says is worth building, and the audit fee is credited in full to the build."
+          }
+        ]
+      },
+      {
+        "key": "pricing",
+        "eyebrow": "Pricing",
+        "title": "One audit, then only what pays back",
+        "lede": "One-time prices. Larger fleets are scoped by proposal, and taxes, if applicable, are documented at kickoff.",
+        "currency_note": "Prices in US dollars.",
+        "tiers": [
+          {
+            "name": "AI and security audit",
+            "price": "$2,500",
+            "cadence": "one-time",
+            "summary": "The statement of work and roadmap. Credited in full to the build.",
+            "includes": [
+              "How work moves through each location today",
+              "Where AI pays back, and where it adds risk",
+              "A security review of the data AI would touch",
+              "A written statement of work and roadmap",
+              "The fee credited in full to the build"
+            ]
+          },
+          {
+            "name": "Custom integration",
+            "price": "$5,000",
+            "cadence": "one-time build",
+            "summary": "Connect the software you already run and retire the manual re-keying between it.",
+            "includes": [
+              "Scoped from your audit",
+              "APIs, webhooks and automations between your systems",
+              "An owner and an approval step for each automation"
+            ]
+          },
+          {
+            "name": "Agent fleet",
+            "price": "$7,500",
+            "cadence": "one-time build",
+            "summary": "A command center plus the first production agent seat.",
+            "includes": [
+              "A custom command center",
+              "The first production agent seat",
+              "Approvals before anything important happens",
+              "Reporting and observability"
+            ],
+            "highlighted": true
+          },
+          {
+            "name": "Enterprise fleet",
+            "price": "$15,000",
+            "cadence": "one-time build",
+            "summary": "A coordinated roster of agents across teams or locations. Larger fleets are scoped by proposal.",
+            "includes": [
+              "A coordinated agent roster",
+              "Governance, approvals and observability",
+              "Memory and reporting across the fleet"
+            ]
+          }
         ]
       },
       {
         "key": "faq",
         "title": "Questions",
         "items": [
-          { "q": "What does the audit cover?", "a": "How work moves through your operation today, where AI would pay back, where it would add risk, and the security of the data it would touch. You get a written statement of work and a roadmap." },
-          { "q": "Why is the audit price a range?", "a": "We confirm the exact fee with you before any work starts. Whatever it is, the full audit fee is credited to the build if you go ahead." },
-          { "q": "How does it work?", "a": "First, request the audit and tell us about the operation. Then we run it and hand you the statement of work and roadmap. If you go ahead, we build the fleet and the audit fee is credited to it." },
-          { "q": "Can we start with something smaller?", "a": "Yes. The master protocol suite on the PROTOCOL page includes a self-audit protocol your team can run in-house for $297. For the website alone, start with the $500 website audit." },
-          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside us, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=fleet&t=oasis-ai-cc" }
+          {
+            "q": "What does the audit cover?",
+            "a": "How work moves through your operation today, where AI would pay back, where it would add risk, and the security of the data it would touch. You get a written statement of work and a roadmap."
+          },
+          {
+            "q": "Why start with an audit?",
+            "a": "Because AI projects stall when they start with a tool. The audit decides what is worth building, and what is not, before money goes into a build. If you go ahead, the full audit fee is credited to the build."
+          },
+          {
+            "q": "Who controls what the agents do?",
+            "a": "You do. Each agent has an owner on your side, anything important waits for an approval, and every agent reports what it did in plain English."
+          },
+          {
+            "q": "Is there an ongoing cost after launch?",
+            "a": "A fleet runs on infrastructure that needs looking after, so a monthly infrastructure retainer follows launch. The amount is confirmed in your statement of work before any build starts."
+          },
+          {
+            "q": "Can we start with something smaller?",
+            "a": "Yes. The free AI Automation Audit suits owner-led businesses, and PROTOCOL has playbooks your team can run in-house. For the website alone, start with a website audit."
+          },
+          {
+            "q": "What if I'm not ready?",
+            "a": "That is fine. Join the free OASIS community on Telegram, build alongside other operators, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=fleet&t=oasis-ai-cc"
+          }
         ]
       }
     ],
     "book": {
       "eyebrow": "Next step",
       "title": "Request your audit",
-      "lede": "A few questions about your operation, then pick a time to talk.",
+      "lede": "A few questions about your operation, then a time to talk.",
       "mode": "form_then_link",
       "qualify": "after"
     },
     "seo": {
-      "title": "FLEET: enterprise AI audit and agent fleets",
-      "description": "An enterprise AI and security audit that maps where AI pays back and where it is a liability, credited in full to the build.",
+      "title": "FLEET: AI and security audit, then governed agent fleets",
+      "description": "An AI and security audit that maps where AI pays back and where it is a liability, credited in full to the build. Then AI agents with an owner, an approval step and a report.",
       "indexable": false
     },
     "brief": {
-      "audience": "Mid-market, corporate and multi-location operations (funnel doc FLEET, cat=p4).",
-      "promise": "Before anyone builds anything, we audit where AI pays back and where it is a liability (HANDOVER section 7 angle).",
-      "included": "4A Enterprise AI + security audit (SOW report + roadmap, 100% credited to the build). 4B Bespoke multi-agent fleets (Cloudflare/Docker fleets, infrastructure retainer). 4C High-converting website rebuild (Next.js on Cloudflare, forms wire into OCC CRM); shown on the page as Website rebuild, because high-converting is a performance claim with no evidence yet.",
-      "proof_available": "None confirmed.",
-      "price": "As the funnel doc states: 4A $2,500-7,500, 100% credited to the build. 4B $5,000-15,000+. 4C $2,000-5,000, or a $500 website audit first. Downsell: self-audit protocol ($297, PROTOCOL 1C). Currency unconfirmed.",
+      "audience": "Mid-market, corporate and multi-location operations that need governed integration rather than a demo (oasis-ai.md pillar 4, cat=p4).",
+      "promise": "Audit first, then build only what pays back. Staff the company, keep the control (pack v2 fleet film).",
+      "included": "Audit (SOW + roadmap, credited in full to the build), custom integrations (handover 4B, to confirm), governed agent fleets (live /pricing Foundation and Enterprise scopes), website rebuild (4C, to confirm).",
+      "proof_available": "None confirmed. Results section omitted.",
+      "price": "Recommended USD: audit $2,500; integration $5,000; agent fleet $7,500; enterprise fleet $15,000. See pricing_recommendation in Maven's file. CC confirms each tier in the builder.",
       "bonuses": "None named for FLEET.",
       "guarantee": "None confirmed. Section omitted."
     }
