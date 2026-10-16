@@ -9,13 +9,13 @@
  * version marks the new presentation; and every public form renders consent
  * through the one component, so no form can show different terms.
  *
- * Run: node --import tsx tests/consent-summary.test.ts (react-dom/server does
- * not resolve under --conditions=react-server).
+ * The component's element tree is walked directly, with no renderer: CI runs
+ * every test with NODE_OPTIONS=--conditions=react-server, where
+ * react-dom/server refuses to load.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import {
   CONSENT_DISCLOSURE_VERSION,
   consentDisclosureText,
@@ -34,10 +34,29 @@ const identity: ConsentIdentity = {
   privacyUrl: "https://oasisai.work/privacy",
 };
 
+type El = { type: unknown; props: Record<string, unknown> };
+
+function elements(node: unknown, out: El[] = []): El[] {
+  if (Array.isArray(node)) {
+    for (const child of node) elements(child, out);
+  } else if (node && typeof node === "object" && "props" in node) {
+    const el = node as El;
+    out.push(el);
+    elements(el.props.children, out);
+  }
+  return out;
+}
+
+function textOf(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (node && typeof node === "object" && "props" in node) return textOf((node as El).props.children);
+  return "";
+}
+
 async function main(): Promise<void> {
   // tsconfig.json sets jsx:"preserve", so tsx compiles components with the
-  // classic runtime: React must be global before the component module loads
-  // (same as tests/offer-pages-public.render.ts).
+  // classic runtime: React must be global before the component module loads.
   (globalThis as unknown as { React: typeof React }).React = React;
   const { ConsentChoice } = await import("../components/forms/ConsentChoice");
 
@@ -63,21 +82,30 @@ async function main(): Promise<void> {
 
   check("each box shows the summary and keeps the full terms in the page, collapsed and tied to the box", () => {
     for (const channel of ["email", "sms"] as const) {
-      const html = renderToStaticMarkup(
-        React.createElement(ConsentChoice, { id: `c-${channel}`, channel, identity, checked: false, onChange: () => undefined }),
-      );
-      assert.ok(html.includes(consentSummaryText(channel, identity).replace(/&/g, "&amp;")), `${channel}: summary missing`);
-      assert.match(html, /<details[^>]*>/, `${channel}: no drop-down`);
-      assert.doesNotMatch(html, /<details[^>]*\bopen\b/, `${channel}: the full terms are open by default`);
-      assert.ok(html.includes(">Full terms<"), `${channel}: the Full terms link is missing`);
-      const full = consentDisclosureText(channel, identity).replace(/&/g, "&amp;");
-      assert.ok(html.includes(full), `${channel}: the full disclosure left the page`);
-      assert.match(html, new RegExp(`aria-describedby="c-${channel}-terms"`), `${channel}: the box is not tied to its terms`);
-      assert.match(html, new RegExp(`<p id="c-${channel}-terms"`), `${channel}: the terms carry no id`);
-      assert.match(html, new RegExp(`<label for="c-${channel}"`), `${channel}: the summary is not the box's label`);
-      // Legal text and its control keep AA contrast on light forms (Codex on #633):
-      // fg-muted, never fg-dim.
-      assert.doesNotMatch(html, /text-fg-dim/, `${channel}: a consent element uses the low-contrast fg-dim`);
+      const id = `c-${channel}`;
+      const els = elements(ConsentChoice({ id, channel, identity, checked: false, onChange: () => undefined }));
+      const one = (type: string) => {
+        const found = els.filter((el) => el.type === type);
+        assert.equal(found.length, 1, `${channel}: expected one <${type}>`);
+        return found[0];
+      };
+      const input = one("input");
+      const label = one("label");
+      const details = one("details");
+      const summary = one("summary");
+      const terms = one("p");
+      assert.equal(input.props.type, "checkbox");
+      assert.equal(input.props["aria-describedby"], `${id}-terms`, `${channel}: the box is not tied to its terms`);
+      assert.equal(label.props.htmlFor, id, `${channel}: the summary is not the box's label`);
+      assert.equal(textOf(label), consentSummaryText(channel, identity), `${channel}: summary missing`);
+      assert.ok(!details.props.open, `${channel}: the full terms are open by default`);
+      assert.equal(textOf(summary).trim(), "Full terms", `${channel}: the Full terms link is missing`);
+      assert.equal(terms.props.id, `${id}-terms`, `${channel}: the terms carry no id`);
+      assert.equal(textOf(terms), consentDisclosureText(channel, identity), `${channel}: the full disclosure left the page`);
+      // Legal text and its control keep AA contrast on light forms (Codex on #633).
+      for (const el of els) {
+        assert.doesNotMatch(String(el.props.className ?? ""), /text-fg-dim/, `${channel}: a consent element uses fg-dim`);
+      }
     }
   });
 
