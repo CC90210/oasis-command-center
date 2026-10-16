@@ -229,16 +229,20 @@ export function buildAiAuditAlert(
   if (budget) lines.push(`💰 Budget: ${e(budget)}`);
   if (timeline) lines.push(`⏱ Timeline: ${e(timeline)}`);
   // Revenue, then the Bottleneck line the alert never had: the same reading the
-  // started and booked alerts use. "In their words" below still carries the
-  // full answer; this is the one line to read at a glance.
+  // started and booked alerts use. The bottleneck can BE the goal or the typed
+  // answer (leadRevenueAndBottleneck falls back to them), so neither is printed
+  // a second time below (re-audit 2026-10-16: the alert said it twice).
+  const { bottleneck } = leadRevenueAndBottleneck(a);
   lines.push(...alertLeadFactLines(a));
-  if (goal) lines.push(`🎯 Wants: ${e(goal)}`);
+  if (goal && goal !== bottleneck) lines.push(`🎯 Wants: ${e(goal)}`);
   if (team) lines.push(`👥 Team: ${e(team)}`);
   if (tried) lines.push(`🔁 Before: ${e(tried)}`);
 
-  // Their own words are the highest-signal thing in the whole submission.
+  // Their own words are the highest-signal thing in the whole submission. Left
+  // out only when the Bottleneck line above already printed all of them.
   const detail = str(a.bottleneck_detail).trim();
-  if (detail) {
+  const printedWhole = detail.length <= 300 && bottleneck === bottleneckLabel(detail);
+  if (detail && !printedWhole) {
     lines.push("", `<b>In their words:</b>`, `<i>${e(detail.slice(0, 600))}</i>`);
   }
 

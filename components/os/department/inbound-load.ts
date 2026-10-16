@@ -27,6 +27,24 @@ import { inboundRecent, inboundWaiting, type InboundFigures, type InboundRecent 
 /** The queue's figures, with both lists always read. */
 export type OasisInboundQueue = InboundFigures & { recent: InboundRecent };
 
+type InboundWindow = Awaited<ReturnType<typeof listOasisPipelineWindow>>;
+
+/**
+ * The figures from a window already read with exactly this queue's arguments.
+ * /pipeline's plain Warm inbound view for a pipeline admin IS that read, so the
+ * badge takes its count from the board instead of reading the same up-to-2,000
+ * rows twice (Codex review 2026-10-16). One derivation for both callers.
+ */
+export function inboundQueueFromWindow(window: InboundWindow, now: number = Date.now()): OasisInboundQueue {
+  return {
+    total: window.total,
+    untouched: window.stageCounts.researched ?? 0,
+    booked: window.stageCounts.founder_meeting_booked ?? 0,
+    waiting: inboundWaiting(window.rows, now, window.stageCounts.researched ?? 0),
+    recent: inboundRecent(window.rows, now, window.truncatedStages, formatBookedTime),
+  };
+}
+
 export async function readOasisInboundQueue(scope: {
   tenantId: string;
   tenantSlug: string | null;
@@ -44,12 +62,5 @@ export async function readOasisInboundQueue(scope: {
     // Warm form leads carry no assignment-cycle stamp (app/pipeline/page.tsx).
     cycle: undefined,
   });
-  const now = Date.now();
-  return {
-    total: window.total,
-    untouched: window.stageCounts.researched ?? 0,
-    booked: window.stageCounts.founder_meeting_booked ?? 0,
-    waiting: inboundWaiting(window.rows, now, window.stageCounts.researched ?? 0),
-    recent: inboundRecent(window.rows, now, window.truncatedStages, formatBookedTime),
-  };
+  return inboundQueueFromWindow(window);
 }

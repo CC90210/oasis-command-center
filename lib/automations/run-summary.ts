@@ -28,7 +28,7 @@ import {
 } from "@/lib/cron-empire-row";
 import type { CronInventoryJob } from "@/lib/automations/cron-inventory";
 import { scheduleIntervalSeconds } from "@/lib/automations/cron-schedule";
-import { formatClock, nextRuns } from "@/lib/automations/schedule-plan";
+import { nextRuns } from "@/lib/automations/schedule-plan";
 import { isTimeZone, wallDateKey } from "@/lib/calendar/zone";
 
 const MINUTE_MS = 60_000;
@@ -146,21 +146,18 @@ export function previousScheduledRun(
 }
 
 /**
- * The missed slot when the stored text names one after the word "missed": a
- * full timestamp with its zone, or a wall-clock "05:30" (a catch-up line such as
- * "caught-up: missed 05:30 slot (PC off)"). Anything else is not trusted as the
- * slot: "skipped: waiting until 09:00" names a different moment.
+ * The missed slot when the stored text names one after the word "missed", as a
+ * full timestamp WITH its zone. A bare wall clock ("caught-up: missed 05:30
+ * slot") is the scheduler computer's clock with no zone: shown as-is it is the
+ * wrong time for a viewer elsewhere and says nothing about which day, so it is
+ * not trusted (Codex review 2026-10-16); the slot read off the schedule, which
+ * checks the zone, is used instead. "skipped: waiting until 09:00" names a
+ * different moment and is never the slot either.
  */
 export function slotNamedInText(text: string | null | undefined, opts: RunSummaryOptions = {}): string | null {
   if (!text) return null;
-  const match =
-    /\bmissed\b\D{0,24}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})|\d{1,2}:\d{2})/i.exec(text);
-  if (!match) return null;
-  const found = match[1];
-  if (found.includes("T")) return formatRunMoment(found, opts);
-  const [h, m] = found.split(":").map(Number);
-  if (h > 23 || m > 59) return null;
-  return formatClock(found);
+  const match = /\bmissed\b\D{0,24}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))/i.exec(text);
+  return match ? formatRunMoment(match[1], opts) : null;
 }
 
 /**
@@ -262,9 +259,11 @@ export function summarizeRun(job: RunSummaryJob, opts: RunSummaryOptions = {}): 
 
   let result: RunSummary["result"] = null;
   if (status === "success") {
-    const caughtUp = /^caught-up\b/i.test((evidence ?? "").trim()) ? slotNamedInText(evidence, at) : null;
+    const isCatchUp = /^caught-up\b/i.test((evidence ?? "").trim());
+    const caughtUp = isCatchUp ? slotNamedInText(evidence, at) : null;
+    const catchUpNote = !isCatchUp ? "" : caughtUp ? `, catching up on the ${caughtUp} run the computer missed` : ", catching up on a run the computer missed";
     result = {
-      text: `Ran fine${atWhen}${caughtUp ? `, catching up on the ${caughtUp} run the computer missed` : ""}.`,
+      text: `Ran fine${atWhen}${catchUpNote}.`,
       tone: "ok",
     };
   } else if (status === "error") {
