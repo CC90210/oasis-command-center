@@ -23,6 +23,7 @@ import { BookEditor, BriefEditor, HeroEditor, SectionCard, newSection, type Chip
 import { PublishChecklist } from "./PublishChecklist";
 import { VideoPicker } from "./VideoPicker";
 import { TextField, Tick } from "./fields";
+import { offerShareablePath } from "@/lib/offers/short-links";
 
 type OfferView = {
   template: string;
@@ -180,7 +181,11 @@ export function OfferBuilder({
 
   const setSection = (i: number, s: BodySection) => update({ ...doc, sections: doc.sections.map((x, j) => (j === i ? s : x)) });
   const missing = BODY_KEYS.filter((k) => !doc.sections.some((s) => s.key === k));
+  // The /f address feeds the owner's preview below (?offer_preview=1): a short path such as /vsl is a route
+  // handler that does not pass the preview through. The link a person opens or copies is the page's own short
+  // address, the same one the Offers card shows (#630), so the two screens never name two addresses.
   const publicPath = tenantSlug ? `/f/${tenantSlug}/${form.slug}` : null;
+  const shareablePath = offerShareablePath(tenantSlug, form.slug);
 
   async function tick(hash: string, confirmed: boolean) {
     if (!doc) return;
@@ -260,8 +265,8 @@ export function OfferBuilder({
             "Draft"
           )}
         </span>
-        {publicPath ? (
-          <a href={publicPath} target="_blank" rel="noopener noreferrer" className="ml-auto inline-flex items-center gap-1 text-accent hover:text-accent-bright">
+        {shareablePath ? (
+          <a href={shareablePath} target="_blank" rel="noopener noreferrer" className="ml-auto inline-flex items-center gap-1 text-accent hover:text-accent-bright">
             Open the public link <ExternalLink className="h-3 w-3" />
           </a>
         ) : null}

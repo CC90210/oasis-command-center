@@ -224,6 +224,16 @@ async function main() {
   const { OfferPageError, parseOfferPageDoc } = await import("../lib/offer-pages/types");
   const { publishGate, lintDoc, stampConfirmations } = await import("../lib/offer-pages/claims");
 
+  // -- 0. the builder names the same address the Offers card does (#630) ---
+  await t("the builder's public link is the page's short address; the preview still uses /f", () => {
+    const src = readFileSync(join(ROOT, "components", "offer-pages", "builder", "OfferBuilder.tsx"), "utf8");
+    assert.match(src, /import \{ offerShareablePath \} from "@\/lib\/offers\/short-links";/);
+    assert.match(src, /const shareablePath = offerShareablePath\(tenantSlug, form\.slug\);/);
+    assert.match(src, /<a href=\{shareablePath\}[^>]*>\s*Open the public link/, "the link a person opens is the short address");
+    assert.doesNotMatch(src, /<a href=\{publicPath\}/, "never the /f address as the visible link");
+    assert.match(src, /src=\{`\$\{publicPath\}\?offer_preview=1`\}/, "the owner's preview keeps the /f address");
+  });
+
   // -- 1. backward compatibility ------------------------------------------
   await t("every content/offers/oasis page parses unchanged and gains no layout", () => {
     const dir = join(ROOT, "content", "offers", "oasis");
