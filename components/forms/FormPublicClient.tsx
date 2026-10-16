@@ -1028,6 +1028,13 @@ export function FormPublicClient({
   // PROTOCOL and COMMUNITY: their own next step (the checkout email, the
   // community link) is the thanks, and the calendar is offered under it.
   const publicBookingOptional = publicBookingFormSlug !== null && isOptionalPublicBookingFormSlug(publicBookingFormSlug);
+  // The founder-meeting engine books only with a phone (client_phone_required),
+  // and these two forms ask for one as optional. A visitor who left it blank is
+  // pointed to /book, which asks for it, instead of a calendar that would let
+  // them pick a time and then refuse it (Codex review of #655).
+  const optionalBookingPhone = steps
+    .flatMap((s) => s.fields)
+    .some((f) => f.type === "phone" && String(mergedValues[f.name] ?? prefill?.[f.name] ?? "").trim() !== "");
 
   /**
    * WHICH step is outstanding, not merely THAT one is.
@@ -1178,13 +1185,29 @@ export function FormPublicClient({
                 </div>
                 {publicBookingFormSlug ? (
                   <div className="border-t border-bg-border pt-5">
-                    <PublicBookingCalendar
-                      token={tokenRef.current || token}
-                      primary={primary}
-                      formSlug={publicBookingFormSlug}
-                      completedStep={steps.length}
-                      optional
-                    />
+                    {optionalBookingPhone ? (
+                      <PublicBookingCalendar
+                        token={tokenRef.current || token}
+                        primary={primary}
+                        formSlug={publicBookingFormSlug}
+                        completedStep={steps.length}
+                        optional
+                      />
+                    ) : (
+                      <div className="space-y-2 text-center">
+                        <h3 className="text-lg font-bold text-fg">Want to talk it through first?</h3>
+                        <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
+                          Optional: book a call with our team. The booking page asks for a phone number so we can reach you.
+                        </p>
+                        <a
+                          href="/book"
+                          className="inline-block text-sm font-semibold underline underline-offset-4"
+                          style={{ color: primary }}
+                        >
+                          Book a call
+                        </a>
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </>

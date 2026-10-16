@@ -18,7 +18,10 @@ const base = JSON.parse(
 ) as Props;
 
 const THANKS = "Thanks, we have your pick. A member of the OASIS team will email you a secure checkout link.";
-const lastScreen = (tenantSlug: string, formSlug: string) =>
+// The visitor's answers reach the last screen as `prefill` here (a static
+// render cannot type into the form); the fixture's phone field is "phone".
+const PHONE = { phone: "+1 514 555 0101" };
+const lastScreen = (tenantSlug: string, formSlug: string, answers: Record<string, unknown> | null = PHONE) =>
   renderToStaticMarkup(
     React.createElement(FormPublicClient, {
       ...base,
@@ -26,6 +29,7 @@ const lastScreen = (tenantSlug: string, formSlug: string) =>
       tenantSlug,
       formSlug,
       resumeBooking: true,
+      prefill: answers,
     }),
   );
 
@@ -33,6 +37,8 @@ console.log(
   JSON.stringify({
     protocol: lastScreen("oasis-ai-cc", "protocol"),
     community: lastScreen("oasis-ai-cc", "community"),
+    protocolNoPhone: lastScreen("oasis-ai-cc", "protocol", { phone: "  " }),
+    communityNoAnswers: lastScreen("oasis-ai-cc", "community", null),
     command: lastScreen("oasis-ai-cc", "command"),
     vsl: lastScreen("oasis-ai-cc", "vsl"),
     otherWorkspace: lastScreen("other-co", "protocol"),

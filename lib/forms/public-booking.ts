@@ -145,8 +145,16 @@ export function buildPublicFunnelLeadPatch(
   answers: Record<string, unknown>,
   stage: PublicFunnelStage,
   occurredAt = new Date().toISOString(),
+  /**
+   * The form this step belongs to, stamped as `funnel_form` so the Sales desk
+   * and the lead page can say WHICH form was finished: the stage is shared by
+   * every booking form, and a PROTOCOL buyer must not read as an audit.
+   */
+  formSlug?: string,
 ): Record<string, unknown> {
   const patch: Record<string, unknown> = { funnel_stage: stage };
+  const form = clean(formSlug).toLowerCase();
+  if (form) patch.funnel_form = form;
   const name = clean(answers.name);
   const email = clean(answers.email).toLowerCase();
   const phone = clean(answers.phone);

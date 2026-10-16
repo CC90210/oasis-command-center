@@ -45,6 +45,21 @@ const PUBLIC_BOOKING_OFFER_LABEL_BY_FORM: Readonly<Record<(typeof PUBLIC_BOOKING
   community: "community intro call",
 };
 
+/**
+ * The form a lead finished, as a founder reads it on the Sales desk and the
+ * lead page ("finished the PROTOCOL form"). The finished-form stage is shared
+ * by every form here, so without the form's name a PROTOCOL buyer read as an
+ * audit (review of #655).
+ */
+const PUBLIC_BOOKING_FORM_NAME_BY_FORM: Readonly<Record<(typeof PUBLIC_BOOKING_FORM_SLUGS)[number], string>> = {
+  [AI_AUDIT_SLUG]: "AI audit",
+  command: "COMMAND",
+  fleet: "FLEET",
+  [BOOK_FORM_SLUG]: "Book a call",
+  protocol: "PROTOCOL",
+  community: "community",
+};
+
 const publicBookingForms = new Set<string>(PUBLIC_BOOKING_FORM_SLUGS);
 const optionalBookingForms = new Set<string>(PUBLIC_BOOKING_OPTIONAL_FORM_SLUGS);
 
@@ -65,6 +80,14 @@ export function publicBookingDurationMinutes(formSlug: string): number {
   return ownKey(PUBLIC_BOOKING_DURATION_BY_FORM, normalized)
     ? PUBLIC_BOOKING_DURATION_BY_FORM[normalized]
     : PUBLIC_BOOKING_DURATION_BY_FORM[AI_AUDIT_SLUG];
+}
+
+/** The finished form's name ("PROTOCOL"), or null for a slug that is not a booking form. */
+export function publicBookingFormName(formSlug: unknown): string | null {
+  const normalized = (typeof formSlug === "string" ? formSlug : "").trim().toLowerCase();
+  return ownKey(PUBLIC_BOOKING_FORM_NAME_BY_FORM, normalized)
+    ? PUBLIC_BOOKING_FORM_NAME_BY_FORM[normalized as (typeof PUBLIC_BOOKING_FORM_SLUGS)[number]]
+    : null;
 }
 
 export function publicBookingOfferLabel(formSlug: string): string {

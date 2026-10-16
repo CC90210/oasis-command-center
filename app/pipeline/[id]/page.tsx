@@ -285,7 +285,7 @@ export default async function PipelineLeadDetailPage({
 
   // How far through the website funnel this lead got, as a chip under its name
   // (CC 2026-10-16). Only a funnel lead has one; anyone else gets no chip.
-  const funnelStage = funnelStageLabel(activeRecord.data.funnel_stage);
+  const funnelStage = funnelStageLabel(activeRecord.data.funnel_stage, activeRecord.data.funnel_form);
 
   return (
     <div className="space-y-4 animate-fade-in">

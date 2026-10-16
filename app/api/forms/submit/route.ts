@@ -1754,6 +1754,8 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     const completedPatch = buildPublicFunnelLeadPatch(
       { ...mergedAnswers },
       "audit_requested",
+      new Date().toISOString(),
+      form.slug,
     );
     const completed = await db.rpc("patch_tenant_record_data", {
       p_id: link.lead_id,
@@ -2164,7 +2166,7 @@ async function initAnonymousLead(input: {
   );
   const isBookableOasisIntake = isPublicBookingForm({ tenantId: form.tenant_id, formSlug: form.slug });
   const inboundFunnelPatch = isBookableOasisIntake
-    ? buildPublicFunnelLeadPatch(input.payload, "inbound_lead")
+    ? buildPublicFunnelLeadPatch(input.payload, "inbound_lead", new Date().toISOString(), form.slug)
     : {};
 
   let lead: { id: string; data: Record<string, unknown> };

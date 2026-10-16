@@ -200,6 +200,23 @@ await check("every OASIS offer form ends on the calendar; PROTOCOL and COMMUNITY
   assert.equal(publicBookingDurationMinutes("community"), 15);
 });
 
+await check("the lead records which form it started and finished (review of #655)", () => {
+  // The finished stage is shared by every booking form; funnel_form is what lets
+  // the Sales desk say "finished the PROTOCOL form" instead of "audit done".
+  assert.equal(buildPublicFunnelLeadPatch({}, "audit_requested", "2026-10-16T12:00:00.000Z", " Protocol ").funnel_form, "protocol");
+  assert.equal("funnel_form" in buildPublicFunnelLeadPatch({}, "audit_requested", "2026-10-16T12:00:00.000Z"), false, "no form, no stamp");
+  assert.match(
+    submitRoute,
+    /buildPublicFunnelLeadPatch\(\s*\{ \.\.\.mergedAnswers \},\s*"audit_requested",\s*new Date\(\)\.toISOString\(\),\s*form\.slug,\s*\)/,
+    "the finished form is stamped",
+  );
+  assert.match(
+    submitRoute,
+    /buildPublicFunnelLeadPatch\(input\.payload, "inbound_lead", new Date\(\)\.toISOString\(\), form\.slug\)/,
+    "the started form is stamped",
+  );
+});
+
 await check("keeps public offer names explicit instead of inferring them from duration", () => {
   assert.equal(publicBookingOfferLabel("ai-audit"), "AI automation audit");
   assert.equal(publicBookingOfferLabel("command"), "COMMAND discovery call");

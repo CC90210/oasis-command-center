@@ -63,6 +63,23 @@ check("PROTOCOL and COMMUNITY keep their own next step, with the calendar offere
   }
 });
 
+check("an optional form whose visitor left the phone blank links to /book instead of a calendar it would refuse", () => {
+  // Codex review of #655: the founder-meeting engine books only with a phone
+  // (client_phone_required), and PROTOCOL and COMMUNITY ask for one as optional.
+  for (const kind of ["protocolNoPhone", "communityNoAnswers"]) {
+    const page = html[kind];
+    assert.ok(page.includes("All set.") && page.includes(THANKS), `${kind}: the thanks is gone`);
+    assert.ok(page.includes(OPTIONAL_HEADING), `${kind}: no call offered at all`);
+    assert.ok(page.includes('href="/book"'), `${kind}: no way to book`);
+    assert.ok(page.includes("asks for a phone number"), `${kind}: the booking page's reason is not said`);
+    assert.ok(!/Optional: pick a \d+-minute call/.test(page), `${kind}: a calendar that cannot book was offered`);
+    assert.ok(!page.includes("Checking the calendar"), `${kind}: a calendar that cannot book was mounted`);
+  }
+  for (const kind of ["protocol", "community"]) {
+    assert.ok(!html[kind].includes('href="/book"'), `${kind}: a visitor with a phone books here, not on another page`);
+  }
+});
+
 check("COMMAND (a founder call) still opens straight on the calendar", () => {
   assert.ok(html.command.includes(REQUIRED_HEADING));
   assert.ok(html.command.includes(COMMUNITY_FOOTER));
