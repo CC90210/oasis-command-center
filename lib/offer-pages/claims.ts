@@ -257,22 +257,28 @@ const SUPERLATIVE_RE =
   /#\s?1\b|\bnumber[ -]one\b|\b(?:the|our)\s+(?:very\s+)?(?:best|only)\b|\b(?:a|an|the|our)\s+(?:very\s+)?leading\b|\baward[- ]winning\b|\bbest[- ](?:in[- ]class|rated|selling)\b|\b(?:fastest|quickest|cheapest|lowest|highest|biggest|largest|smartest|easiest|simplest|strongest|unbeatable|unmatched|world[- ]class|industry[- ]leading|market[- ]leading|top[- ]rated)\b|\bmost\s+(?:trusted|popular|advanced|powerful|affordable|reliable|complete|effective)\b/i;
 /**
  * Who else uses it: "trusted by", "used by", "relied on by", and a spelled-out
- * count after "over", "more than" or "serving" ("serving twenty clinics"),
- * whatever it counts. A count of a noun COUNTED does not list is a claim here
- * because the words around it make it one.
+ * count after "over", "more than", "serving" or "across" ("serving twenty
+ * clinics", "over eighty agencies"), whatever it counts. A count of a noun
+ * COUNTED does not list is a claim here because the words around it make it
+ * one. "Serving one clinic" counts too ("one" only after "serving": "across
+ * one view" claims nothing).
  */
+const PROOF_NUMBER = `${SMALL_NUMBER}|seventy|eighty|ninety|a\\s+dozen|dozens`;
 const SOCIAL_PROOF_RE = new RegExp(
   "\\b(?:trusted|used|chosen|loved|relied\\s+on|recommended)\\s+by\\b" +
-    `|\\b(?:over|more\\s+than|serving|across)\\s+(?:${SMALL_NUMBER})\\b`,
+    `|\\b(?:over|more\\s+than|serving|across)\\s+(?:${PROOF_NUMBER})\\b` +
+    "|\\bserving\\s+(?:one|a\\s+single)\\b",
   "i",
 );
 /**
  * A promised time frame: "same-day", "overnight", "in days", "within hours",
- * "in one week", "within a month". Digits ("in 7 days") already flag as a
- * number. "One day" alone is not one ("one day at a time").
+ * "in one week", "within a month", each also as business or working days
+ * ("within one business day", "same business-day setup"). Digits ("in 7
+ * days") already flag as a number. "One day" alone is not one ("one day at a
+ * time").
  */
 const TIMEFRAME_RE =
-  /\b(?:same|next)[- ]day\b|\bovernight\b|\b(?:in|within)\s+(?:a\s+few\s+)?(?:minutes|hours|days|weeks)\b|\b(?:in|within)\s+(?:a|one|an)\s+(?:single\s+)?(?:minute|hour|day|week|month)\b/i;
+  /\b(?:same|next)[- ](?:(?:business|working)[- ])?day\b|\bovernight\b|\b(?:in|within)\s+(?:a\s+few\s+)?(?:(?:business|working)\s+)?(?:minutes|hours|days|weeks)\b|\b(?:in|within)\s+(?:a|one|an)\s+(?:single\s+)?(?:(?:business|working)\s+)?(?:minute|hour|day|week|month)\b/i;
 /**
  * Words that are a claim on their own. The bare words client(s), result(s)
  * and revenue are not: they name a section or a form question far more often

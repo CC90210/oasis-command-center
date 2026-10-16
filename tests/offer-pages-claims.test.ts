@@ -128,6 +128,14 @@ async function main() {
       ["Relied on by owners across Quebec.", /who else uses it/],
       ["Serving twenty clinics.", /who else uses it/],
       ["Over forty agencies run on it.", /who else uses it/],
+      // Counts outside two to sixty, and business days (Codex on #640).
+      ["Serving one clinic in Laval.", /who else uses it/],
+      ["Serving seventy clinics.", /who else uses it/],
+      ["Over eighty agencies.", /who else uses it/],
+      ["Across dozens of trades.", /who else uses it/],
+      ["Ready within one business day.", /time frame/],
+      ["Same business-day setup.", /time frame/],
+      ["Live in a few working days.", /time frame/],
       ["Ready within one week.", /time frame/],
       ["Same-day setup.", /time frame/],
       ["Live in days, not months.", /time frame/],
@@ -174,6 +182,7 @@ async function main() {
       "Used to answering every lead by hand?",
       "One day at a time, one lead at a time.",
       "Within your team, nothing changes.",
+      "Everything across one view.",
       // "only" that is not "the only".
       "By application only.",
       "Build only what pays back.",
