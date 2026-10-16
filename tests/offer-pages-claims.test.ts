@@ -67,6 +67,17 @@ async function main() {
       ["Twelve businesses run on it.", /number/],
       ["Twenty clients signed on.", /number/],
       ["Fifty new leads a month.", /number/],
+      // Every number word from two to sixty (CodeRabbit on #635: thirteen, fourteen, sixteen to nineteen were missing).
+      ["Thirteen clients use it.", /number/],
+      ["Fourteen businesses signed on.", /number/],
+      ["Sixteen hours back every week.", /number/],
+      ["Seventeen reviews in a month.", /number/],
+      ["Eighteen new leads.", /number/],
+      ["Nineteen bookings last week.", /number/],
+      // Counted outcomes.
+      ["Get three conversions a day.", /number/],
+      ["Three results you can measure.", /number/],
+      ["Ten wins this quarter.", /number/],
       ["Three times faster replies.", /number/],
       ["Thousands of owners use it.", /number/],
       // Time saved, and when.
@@ -78,6 +89,10 @@ async function main() {
       ["Cut response time to 2 minutes.", /number/],
       ["More revenue, less admin.", /result \("more revenue"\)/],
       ["Real results for real businesses.", /result \("real results"\)/],
+      // A gain with words describing what is gained.
+      ["Get more qualified leads.", /result \("more qualified leads"\)/],
+      ["Boost your monthly revenue.", /result \("boost your monthly revenue"\)/],
+      ["More high-quality, booked calls.", /booked/],
       // Payment terms are a commercial promise.
       ["Setup can be split into two payments.", /number/],
       // Guarantees and the other claim words.
@@ -124,6 +139,10 @@ async function main() {
       "Team, Growth, Clients and Money in one view",
       "Each client's work, conversations and next steps in one place, so nobody has to ask you.",
       "Three steps, and you stay in control",
+      // A number joined to clients by "for", not counting them (CodeRabbit on #635).
+      "Three steps for clients",
+      "Two tabs for your clients and their bookings.",
+      "More time for leads that matter.",
       "Four ways in, from free to fully built.",
       "New leads, where they came from and the next follow-up, in one pipeline instead of four inboxes.",
       "See what needs attention, open the source, assign the next move and see the result.",
