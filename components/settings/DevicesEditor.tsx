@@ -25,7 +25,7 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Info } from "lucide-react";
-import { machineState } from "@/lib/devices/presence";
+import { machineState, presenceWords } from "@/lib/devices/presence";
 import { timeAgo } from "@/components/settings/YourComputersCard";
 
 type Device = {
@@ -202,8 +202,10 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm text-fg truncate" title={d.label}>{d.label}</span>
-                    <span className={`text-[10px] uppercase tracking-wider font-bold ${fresh ? "text-accent" : "text-fg-dim"}`}>
-                      {state}
+                    {/* The words AI brain and Your computers print for the same state (presenceWords), not
+                        machineState's raw lowercase key shouted in capitals (CC 2026-10-16). */}
+                    <span data-testid="device-presence" className={`text-[11px] font-semibold ${fresh ? "text-accent" : "text-fg-dim"}`}>
+                      {presenceWords(state, d.last_seen_at)}
                     </span>
                   </div>
                   <div className="text-[10px] text-fg-dim font-mono mt-0.5 truncate" title={d.machine_fingerprint || undefined}>

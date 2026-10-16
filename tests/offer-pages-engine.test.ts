@@ -24,6 +24,9 @@
  *      "Confirm ", which the checklist reserves for claim ticks); the price
  *      itself is not linted twice, the rest of the tier's words are; each card
  *      ends with the Book button and the section does not add a second one.
+ *      The optional Canadian price (price_cad) is part of the confirmed tier
+ *      (editing it re-stamps), is not linted, draws as "or <text>" under the
+ *      price, and the builder's input for it clears the tick.
  *   4. A "how it works" step needs no video: it draws as a numbered card; a
  *      step's video still plays exactly as before.
  *
@@ -207,9 +210,9 @@ const PRICING = {
   currency_note: "Prices in CAD",
   tiers: [
     { name: "DIY", price: "$497", cadence: "a month", summary: "You run it.", includes: ["The OS", "", "Community access"], confirmed: OK },
-    { name: "Turnkey", price: "From $2,500", summary: "We build it with you.", includes: ["Everything in DIY", "Setup calls"], highlighted: true, confirmed: OK },
+    { name: "Turnkey", price: "From $2,500", price_cad: "CA$3,450", summary: "We build it with you.", includes: ["Everything in DIY", "Setup calls"], highlighted: true, confirmed: OK },
     // Written by the copy team, not yet signed off by an owner.
-    { name: "Managed", price: "$7,500", cadence: "one time" },
+    { name: "Managed", price: "$7,500", price_cad: "CA$10,350", cadence: "one time" },
   ],
 };
 
@@ -225,7 +228,9 @@ async function main() {
   await t("every content/offers/oasis page parses unchanged and gains no layout", () => {
     const dir = join(ROOT, "content", "offers", "oasis");
     const files = readdirSync(dir).filter((f) => f.endsWith(".json")).sort();
-    const pages = files.filter((f) => "offer_page" in (JSON.parse(readFileSync(join(dir, f), "utf8")) as Raw));
+    // <slug>.page.json is a page with no form (scripts/seed-oasis-offer-pages.ts, page-only): the file IS the page.
+    const pageOnly = (f: string) => f.endsWith(".page.json");
+    const pages = files.filter((f) => pageOnly(f) || "offer_page" in (JSON.parse(readFileSync(join(dir, f), "utf8")) as Raw));
     assert.deepEqual(
       files.filter((f) => !pages.includes(f)),
       ["vsl-routing.json"],
@@ -233,14 +238,16 @@ async function main() {
     );
     assert.ok(pages.length >= 5, `expected the five OASIS pages, found ${pages.join(", ")}`);
     for (const f of pages) {
-      const page = (JSON.parse(readFileSync(join(dir, f), "utf8")) as Raw).offer_page as Raw;
+      const json = JSON.parse(readFileSync(join(dir, f), "utf8")) as Raw;
+      const page = (pageOnly(f) ? json : json.offer_page) as Raw;
       // The empty slots the parser rightly drops (as offer-pages-oasis-content does).
       const expected = structuredClone(page);
       if (expected.hero.video === null) delete expected.hero.video;
       for (const s of expected.sections) if (s.key === "bonuses") for (const it of s.items) if (it.value === null) delete it.value;
       const parsed = parseOfferPageDoc(page);
       assert.deepEqual(JSON.parse(JSON.stringify(parsed)), expected, `${f}: the parser dropped or changed something`);
-      assert.equal("layout" in parsed.theme, false, `${f}: a layout appeared that nobody chose`);
+      // A page that chose no layout gains none; one that chose it (content since 2026-10-16) keeps exactly that.
+      assert.equal("layout" in parsed.theme, "layout" in page.theme, `${f}: a layout appeared that nobody chose, or a chosen one was dropped`);
       assert.deepEqual(parseOfferPageDoc(JSON.stringify(parsed)), parsed, `${f}: not stable through the stored string`);
     }
   });
@@ -398,6 +405,8 @@ async function main() {
     // The tier changes while the browser still sends the old stamp: whoever saved the change now vouches for it.
     const edits: Array<[string, unknown]> = [
       ["price", "$8,000"],
+      // The Canadian price is part of the confirmed card: changing it (or adding one) moves the sign-off.
+      ["price_cad", "CA$11,000"],
       ["cadence", "a year"],
       ["name", "Managed plus"],
       ["summary", "More of it."],
@@ -411,6 +420,13 @@ async function main() {
       assert.deepEqual(tierOf(stamped, 2).confirmed, { by: "owner-adon", at: T2 }, `a changed ${field} kept the old sign-off`);
       assert.deepEqual(tierOf(stamped, 0).confirmed, OK, `editing one tier's ${field} moved another tier's sign-off`);
     }
+    // Adding a Canadian price to a confirmed tier that had none, or removing one, is a change too.
+    const addedCad = structuredClone(first);
+    tierOf(addedCad, 0).price_cad = "CA$690";
+    assert.deepEqual(tierOf(stampConfirmations(parseOfferPageDoc(addedCad), [first, null], "owner-adon", T2), 0).confirmed, { by: "owner-adon", at: T2 }, "adding a Canadian price kept the old sign-off");
+    const droppedCad = structuredClone(first);
+    delete tierOf(droppedCad, 1).price_cad;
+    assert.deepEqual(tierOf(stampConfirmations(parseOfferPageDoc(droppedCad), [first, null], "owner-adon", T2), 1).confirmed, { by: "owner-adon", at: T2 }, "removing the Canadian price kept the old sign-off");
     // A save never signs off a price nobody confirmed.
     const untouched = stampConfirmations(parseOfferPageDoc(priced), [null, null], "owner-adon", T2);
     assert.equal("confirmed" in tierOf(untouched, 2), false, "a save signed off a price nobody confirmed");
@@ -430,6 +446,9 @@ async function main() {
     const hits = lintDoc(parseOfferPageDoc(priced));
     const where = hits.filter((h) => h.section === "pricing").map((h) => h.where);
     assert.ok(!where.some((w) => /\.price$/.test(w)), `the price was linted: ${where.join(", ")}`);
+    // The Canadian price is vouched for by the same tick: money in it, yet never a claim to tick again.
+    assert.ok(!where.some((w) => /\.price_cad$/.test(w)), `the Canadian price was linted: ${where.join(", ")}`);
+    assert.ok(!hits.some((h) => /CA\$/.test(h.sentence)), "a Canadian price reached the linter");
     assert.ok(where.includes("pricing.currency_note"), "the currency note (money) is not linted");
     const words = structuredClone(priced);
     words.sections[5].tiers[0].summary = "Clients see results in 30 days.";
@@ -447,6 +466,18 @@ async function main() {
     assert.ok(s.includes(">DIY<") && s.includes(">Turnkey<"), "a confirmed tier is missing");
     assert.ok(!s.includes("Managed") && !s.includes("$7,500"), "an unconfirmed price reached the page");
     assert.ok(s.includes("From $2,500") && s.includes("$497") && s.includes("a month"), "a price or its cadence is missing");
+    // The Canadian price: one smaller line straight under the USD price, the owner's text after a fixed "or ".
+    const turnkeyCard = s.slice(s.lastIndexOf("<article", s.indexOf(">Turnkey<")), s.indexOf("</article>", s.indexOf(">Turnkey<")));
+    assert.match(turnkeyCard, /From \$2,500<\/span><\/p><p class="mt-1 text-\[13px\] text-fg-muted" data-price-cad="">or CA\$3,450<\/p>/, "the Canadian price is not the line under the price");
+    assert.equal(count(s, /data-price-cad=""/), 1, "a Canadian price was drawn for a tier without one, or for an unconfirmed tier");
+    assert.ok(!s.includes("CA$10,350"), "an unconfirmed tier's Canadian price reached the page");
+    // The builder: an optional "Price in CAD" input that clears the tick when edited, as the price does.
+    const editors = readFileSync(join(ROOT, "components", "offer-pages", "builder", "SectionEditors.tsx"), "utf8");
+    assert.match(
+      editors,
+      /label="Price in CAD \(optional\)"[\s\S]{0,400}?onChange=\{\(v\) => edit\(i, \{ price_cad: v, confirmed: undefined \}\)\}/,
+      "the builder's Canadian price input is missing or no longer clears the confirmation",
+    );
     assert.equal(count(s, /<article\b/), 2, "one card per drawn tier");
     assert.equal(count(s, /data-highlighted=""/), 1, "exactly one highlighted card");
     const turnkey = s.slice(s.lastIndexOf("<article", s.indexOf(">Turnkey<")));

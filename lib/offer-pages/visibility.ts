@@ -75,6 +75,8 @@ export type DrawnTier = {
   index: number;
   name: string;
   price: string;
+  /** The optional Canadian price, drawn as "or <this>" under the price. */
+  priceCad: string | null;
   cadence: string | null;
   summary: string | null;
   includes: string[];
@@ -233,6 +235,7 @@ export function drawnSections(doc: OfferPageDoc, media: MediaCheck): DrawnSectio
             index,
             name: it.name,
             price: it.price,
+            priceCad: filled(it.price_cad) ? it.price_cad : null,
             cadence: filled(it.cadence) ? it.cadence : null,
             summary: filled(it.summary) ? it.summary : null,
             includes: (it.includes ?? []).filter(filled),

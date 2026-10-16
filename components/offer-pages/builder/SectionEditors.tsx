@@ -534,11 +534,12 @@ function BonusValue({
   );
 }
 
-/** "From $497 a month": the price and how often, as the card will read them ("" with no price yet). */
+/** "From $497 a month, or CA$690": the price, how often and the Canadian price, as the card will read them ("" with no price yet). */
 function priceAsShown(t: PricingTier): string {
   const price = t.price.trim();
   const cadence = (t.cadence ?? "").trim();
-  return price ? `${price}${cadence ? ` ${cadence}` : ""}` : "";
+  const cad = (t.price_cad ?? "").trim();
+  return price ? `${price}${cadence ? ` ${cadence}` : ""}${cad ? `, or ${cad}` : ""}` : "";
 }
 
 /** A tier without the highlight key at all (not `false`), so a saved page carries only what was chosen. */
@@ -551,7 +552,8 @@ function unhighlighted(t: PricingTier): PricingTier {
 /**
  * Pricing: one to four prices. A price is written exactly as it should read
  * ("$2,500", "From $497") and reaches the page only once an owner ticks it;
- * editing the price or how often it is paid clears that tick, the way editing
+ * editing the price, its Canadian price or how often it is paid clears that
+ * tick, the way editing
  * the guarantee clears its confirmation.
  */
 function PricingTiers({ s, onChange }: { s: PricingSection; onChange: (s: BodySection) => void }) {
@@ -571,6 +573,18 @@ function PricingTiers({ s, onChange }: { s: PricingSection; onChange: (s: BodySe
               hint="Editing it clears the confirmation."
               onChange={(v) => edit(i, { price: v, confirmed: undefined })}
             />
+            {/* Under the price on every width: row 2 of the price's column on
+                desktop, straight after it when the fields stack on a phone. */}
+            <div className="sm:col-start-2 sm:row-start-2">
+              <TextField
+                label="Price in CAD (optional)"
+                value={it.price_cad}
+                cap={COPY_CAPS.price}
+                placeholder="CA$690"
+                hint="Shown under the price. Editing it clears the confirmation."
+                onChange={(v) => edit(i, { price_cad: v, confirmed: undefined })}
+              />
+            </div>
             <TextField
               label="How often (optional)"
               value={it.cadence}

@@ -45,6 +45,7 @@ import {
 } from "@/components/settings/ProviderAccountsCard";
 import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
 import { runtimeStatusWords } from "@/lib/bridge-cli-status";
+import { presenceWords } from "@/lib/devices/presence";
 import { AgentEngineScopeProvider } from "@/components/settings/agent-engine-scope-context";
 
 const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "gemini"];
@@ -884,8 +885,10 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                     <div className="truncate text-sm font-semibold text-fg" title={device.label}>{device.label}</div>
                     {device.ownerName && <div className="text-[11px] text-fg-dim">{device.ownerName}</div>}
                   </div>
-                  <span className={`text-[11px] font-semibold ${device.online ? "text-status-engaged" : "text-status-warm"}`}>
-                    {device.online ? "Online" : runtimeStatusWords("offline")}
+                  {/* The computer's own state in the words Devices prints for it (presenceWords, CC 2026-10-16).
+                      Online and busy by the same order describeRuntime reads them in. */}
+                  <span data-testid="engine-device-presence" className={`text-[11px] font-semibold ${device.online ? "text-status-engaged" : "text-status-warm"}`}>
+                    {presenceWords(device.online ? (device.busy ? "busy" : "online") : "offline", device.lastSeenAt)}
                   </span>
                 </div>
                 <div className="mt-3 grid gap-2 sm:grid-cols-3">
