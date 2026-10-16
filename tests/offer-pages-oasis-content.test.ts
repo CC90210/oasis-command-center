@@ -400,6 +400,13 @@ async function main() {
         if (!checklist.includes(h.sentence)) missing.push(`${c.slug}: ${h.sentence}`);
       }
     }
+    // Page-only pages (ai-audit) need their ticks listed too.
+    for (const p of seed.loadOasisPageOnlyContent(CONTENT_DIR)) {
+      if (!p.doc) continue;
+      for (const h of claims.lintDoc(p.doc, { fallbackHeadline: "" })) {
+        if (!checklist.includes(h.sentence)) missing.push(`${p.slug}: ${h.sentence}`);
+      }
+    }
     assert.deepEqual(missing, [], "flagged sentences missing from the checklist");
   });
 

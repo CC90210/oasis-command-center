@@ -175,5 +175,29 @@ written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence
 | `faq.items[3].a` | money, a number | The master protocol suite on the PROTOCOL page includes a self-audit protocol your team can run in-house for $297. |
 | `faq.items[3].a` | money, a number | For the website alone, start with the $500 website audit. |
 
+### AI Automation Audit (`ai-audit`): 3
+
+| Where | Why | Sentence |
+|---|---|---|
+| `work.title` | a number | Three steps, and you stay in control |
+| `work.items[0].body` | the word "revenue" | Revenue and budget are optional. |
+| `faq.items[3].q` | the word "revenue" | Do I have to share revenue or budget? |
+
 Not flagged, but still a commitment to confirm (sections 1 and 3 to 6 above): the cancellation sentence, "Nothing
 renews", the bonus line, every thank-you message, and every promise to email someone.
+
+## 8. AI Automation Audit (`ai-audit`, page only)
+
+Copy from Maven (CMO-Agent `output/offer-pages/ai-audit.json`, 2026-10-16), loaded as `ai-audit.page.json` by
+`--refresh-drafts`; the live form keeps its own steps. Checked against the live form: revenue, team size and budget
+are optional, as the page says.
+
+- [ ] **"Conaugh reads every one personally"** (hero, book, what you get). Confirmed wording 2026-10-08.
+- [ ] **"Follows up with you personally"** on every completed audit (hero, how it works, FAQ).
+- [ ] **The follow-up gives "a straight answer on where AI fits".** No written report, instant reply or same-day call
+      is promised anywhere on the page.
+- [ ] **Routing:** larger operations to FLEET, unready ones to the free community (what you get, FAQ).
+- [ ] **How a call gets booked today** (FAQ "he will set up a time with you"). When the public booking calendar ships,
+      the FAQ can say "pick a time right after you submit".
+- [ ] **Hero video:** none yet. Maven's window-light audit film (9:16 and 16:9) waits on the narrator voice; attach it
+      with its rights tick in the builder.
