@@ -32,6 +32,7 @@ const TESTS = [
   "tests/robots-tiers.test.ts",
   "tests/sunbiz-form-templates.test.ts",
   "tests/public-form-resolver.test.ts",
+  "tests/resume-email-funding-only.test.ts",
   "tests/form-lead-identity.test.ts",
   "tests/extraction-doc-url-guard.test.ts",
   "tests/appdrop-dedupe.test.ts",
