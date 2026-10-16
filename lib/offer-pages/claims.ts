@@ -249,9 +249,30 @@ const RESULT_RE = new RegExp(
     "|\\b(?:real|proven|measurable|guaranteed|massive|incredible|amazing|predictable|consistent|better|faster|bigger)\\s+results?\\b",
   "i",
 );
-/** "The best", "#1", "fastest", "the only" (not "by application only"). */
+/**
+ * "The best", "#1", "fastest", "the only" (not "by application only"), "a
+ * leading", "award-winning" (not "leading your team").
+ */
 const SUPERLATIVE_RE =
-  /#\s?1\b|\bnumber[ -]one\b|\b(?:the|our)\s+(?:very\s+)?(?:best|only)\b|\bbest[- ](?:in[- ]class|rated|selling)\b|\b(?:fastest|quickest|cheapest|lowest|highest|biggest|largest|smartest|easiest|simplest|strongest|unbeatable|unmatched|world[- ]class|industry[- ]leading|market[- ]leading|top[- ]rated)\b|\bmost\s+(?:trusted|popular|advanced|powerful|affordable|reliable|complete|effective)\b/i;
+  /#\s?1\b|\bnumber[ -]one\b|\b(?:the|our)\s+(?:very\s+)?(?:best|only)\b|\b(?:a|an|the|our)\s+(?:very\s+)?leading\b|\baward[- ]winning\b|\bbest[- ](?:in[- ]class|rated|selling)\b|\b(?:fastest|quickest|cheapest|lowest|highest|biggest|largest|smartest|easiest|simplest|strongest|unbeatable|unmatched|world[- ]class|industry[- ]leading|market[- ]leading|top[- ]rated)\b|\bmost\s+(?:trusted|popular|advanced|powerful|affordable|reliable|complete|effective)\b/i;
+/**
+ * Who else uses it: "trusted by", "used by", "relied on by", and a spelled-out
+ * count after "over", "more than" or "serving" ("serving twenty clinics"),
+ * whatever it counts. A count of a noun COUNTED does not list is a claim here
+ * because the words around it make it one.
+ */
+const SOCIAL_PROOF_RE = new RegExp(
+  "\\b(?:trusted|used|chosen|loved|relied\\s+on|recommended)\\s+by\\b" +
+    `|\\b(?:over|more\\s+than|serving|across)\\s+(?:${SMALL_NUMBER})\\b`,
+  "i",
+);
+/**
+ * A promised time frame: "same-day", "overnight", "in days", "within hours",
+ * "in one week", "within a month". Digits ("in 7 days") already flag as a
+ * number. "One day" alone is not one ("one day at a time").
+ */
+const TIMEFRAME_RE =
+  /\b(?:same|next)[- ]day\b|\bovernight\b|\b(?:in|within)\s+(?:a\s+few\s+)?(?:minutes|hours|days|weeks)\b|\b(?:in|within)\s+(?:a|one|an)\s+(?:single\s+)?(?:minute|hour|day|week|month)\b/i;
 /**
  * Words that are a claim on their own. The bare words client(s), result(s)
  * and revenue are not: they name a section or a form question far more often
@@ -270,6 +291,8 @@ export function claimReasons(sentence: string): string[] {
   const result = RESULT_RE.exec(sentence);
   if (result) why.push(`a promised result ("${result[0].toLowerCase().replace(/\s+/g, " ")}")`);
   if (SUPERLATIVE_RE.test(sentence)) why.push("a superlative");
+  if (SOCIAL_PROOF_RE.test(sentence)) why.push("who else uses it");
+  if (TIMEFRAME_RE.test(sentence)) why.push("a time frame");
   const word = WORD_RE.exec(sentence);
   if (word) why.push(`the word "${word[1].toLowerCase()}"`);
   return why;
