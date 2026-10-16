@@ -35,9 +35,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { sameOrigin } from "@/lib/calendar/http";
 import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { formsSession } from "@/lib/forms/access";
-import { applyClaimTicks, lintDoc, stampConfirmations } from "@/lib/offer-pages/claims";
-import { editableForm, fallbackHeadline } from "@/lib/offer-pages/operator";
-import { offerPagesDb, readOfferRow, saveDraft, type OfferRow } from "@/lib/offer-pages/store";
+import { editableForm, saveDraftLikeBuilder } from "@/lib/offer-pages/operator";
+import { offerPagesDb, readOfferRow, type OfferRow } from "@/lib/offer-pages/store";
 import { OfferPageError, type OfferPageDoc } from "@/lib/offer-pages/types";
 import {
   applyWrittenCopy,
@@ -130,21 +129,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return json({ ok: true, filled: [], message: "Every part of this page already has words, so nothing was changed." });
   }
 
-  /** One draft save, the builder's own way (stamping, claim ticks, compare-and-swap). */
+  /**
+   * One draft save, the builder's own way (operator.ts saveDraftLikeBuilder:
+   * stamping, claim ticks, compare-and-swap). `current` becomes the row read
+   * back after it, so the words saved after the brief are judged against it.
+   */
   const saveRow = async (next: OfferPageDoc): Promise<NextResponse | null> => {
-    const now = new Date().toISOString();
-    const headline = fallbackHeadline(form);
-    const draft = stampConfirmations(next, [current.draft, current.published], actor, now);
-    const claims = applyClaimTicks({
-      existing: current.claims,
-      confirm: [],
-      unconfirm: [],
-      draftHits: lintDoc(draft, { fallbackHeadline: headline }),
-      publishedHits: current.published ? lintDoc(current.published, { fallbackHeadline: headline }) : [],
-      actor,
-      now,
-    });
-    const saved = await saveDraft(db, { tenantId, formId: id, draft, expectedVersion: current.draftVersion, claims, actor, now });
+    const saved = await saveDraftLikeBuilder(db, { form, row: current, next, expectedVersion: current.draftVersion, actor });
     if (!saved.ok) {
       if (saved.error === "conflict") {
         return json(
@@ -155,9 +146,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       if (saved.error === "not_found") return json({ ok: false, error: "not_found" }, 404);
       return json(UNAVAILABLE, 503);
     }
-    const after = await readOfferRow(db, tenantId, id);
-    if (after.state !== "row") return json({ ok: false, error: "not_found" }, 404);
-    current = after.row;
+    current = saved.row;
     return null;
   };
 

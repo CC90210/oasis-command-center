@@ -10,8 +10,9 @@
 import "server-only";
 import type { Client } from "@libsql/client";
 import { parseFormBranding, type FormBranding } from "@/lib/forms/types";
-import { publishGate, type GateResult } from "./claims";
-import { statusOf, type OfferRow } from "./store";
+import { applyClaimTicks, lintDoc, publishGate, stampConfirmations, type GateResult } from "./claims";
+import { readOfferRow, saveDraft, statusOf, type OfferRow } from "./store";
+import type { OfferPageDoc } from "./types";
 
 export type EditableForm = { id: string; tenantId: string; slug: string; name: string; enabled: boolean; branding: FormBranding };
 
@@ -50,6 +51,61 @@ export function fallbackHeadline(form: Pick<EditableForm, "branding">): string {
 export function gateFor(row: OfferRow, form: EditableForm): GateResult | null {
   if (!row.draft) return null;
   return publishGate(row.draft, row.claims, { formEnabled: form.enabled, fallbackHeadline: fallbackHeadline(form) });
+}
+
+export type DraftSaved =
+  | { ok: true; version: number; row: OfferRow }
+  | { ok: false; error: "conflict"; currentVersion: number | null }
+  | { ok: false; error: "not_found" | "unavailable" };
+
+/**
+ * Save a draft the builder's way, for every route that saves one (the
+ * builder's PUT, Write my page): every owner confirmation in it is stamped by
+ * the server with the saving owner and the time unless it is already on record
+ * for the same content (stampConfirmations, against the stored draft and the
+ * live page); the claim ticks follow the draft (applyClaimTicks: a tick is kept
+ * only for a sentence the draft or the live page flags, `confirm` / `unconfirm`
+ * the owner's own); and the write is a compare-and-swap on `expectedVersion`
+ * (conflict, never an overwrite). Answers with the new version and the row as
+ * read back after the write, so a caller saving twice in one request saves the
+ * second time against the first.
+ */
+export async function saveDraftLikeBuilder(
+  db: Client,
+  input: {
+    form: EditableForm;
+    /** The row as read before this save: its draft, live page and ticks are what the save is judged against. */
+    row: OfferRow;
+    next: OfferPageDoc;
+    expectedVersion: number;
+    actor: string;
+    confirm?: string[];
+    unconfirm?: string[];
+    now?: string;
+  },
+): Promise<DraftSaved> {
+  const { form, row, actor } = input;
+  const now = input.now ?? new Date().toISOString();
+  const headline = fallbackHeadline(form);
+  const draft = stampConfirmations(input.next, [row.draft, row.published], actor, now);
+  const claims = applyClaimTicks({
+    existing: row.claims,
+    confirm: input.confirm ?? [],
+    unconfirm: input.unconfirm ?? [],
+    draftHits: lintDoc(draft, { fallbackHeadline: headline }),
+    publishedHits: row.published ? lintDoc(row.published, { fallbackHeadline: headline }) : [],
+    actor,
+    now,
+  });
+  const saved = await saveDraft(db, { tenantId: form.tenantId, formId: form.id, draft, expectedVersion: input.expectedVersion, claims, actor, now });
+  if (!saved.ok) {
+    if (saved.error === "conflict") return { ok: false, error: "conflict", currentVersion: saved.currentVersion ?? null };
+    return { ok: false, error: saved.error };
+  }
+  const after = await readOfferRow(db, form.tenantId, form.id);
+  if (after.state === "unavailable") return { ok: false, error: "unavailable" };
+  if (after.state !== "row") return { ok: false, error: "not_found" };
+  return { ok: true, version: saved.version, row: after.row };
 }
 
 /** The builder's view of an offer page row. */

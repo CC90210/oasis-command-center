@@ -277,7 +277,10 @@ check("the route is an owner action on the workspace AI account that saves a dra
   assert.match(route, /sameOrigin\(req\)/);
   assert.match(route, /runToolModelCall\(/);
   assert.match(route, /surface: "offer_pages\.write"/);
-  assert.match(route, /saveDraft\(db, \{[^}]*expectedVersion: current\.draftVersion/);
+  // The builder's own save (operator.ts saveDraftLikeBuilder), compare-and-swap on the row just read,
+  // and `current` becomes the row read back after it (save mode saves the brief, then the words).
+  assert.match(route, /saveDraftLikeBuilder\(db, \{[^}]*row: current,[^}]*expectedVersion: current\.draftVersion/);
+  assert.match(route, /current = saved\.row;/, "a second save in one request is judged against a stale row");
   assert.doesNotMatch(route, /publishOffer|offer\/publish|setLive|published_version/, "the route publishes");
   assert.doesNotMatch(route, /ANTHROPIC_API_KEY|inferForTenant/, "the route uses a key or path other than the workspace account");
   assert.ok((USAGE_SURFACES as readonly string[]).includes("offer_pages.write"), "the usage ledger does not know the surface");
