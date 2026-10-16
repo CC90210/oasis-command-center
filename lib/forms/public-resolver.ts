@@ -30,6 +30,8 @@ export type PublicFormLookup =
         on_complete_stage: string | null;
         step_outcomes: unknown;
         redirect_url: string | null;
+        /** Always true unless the caller asked for includeDisabled. */
+        enabled: boolean;
       };
     }
   | { ok: false; reason: "not_found" };
@@ -38,6 +40,13 @@ export async function resolvePublicForm(
   db: SupabaseClient,
   tenantSlugRaw: string,
   formSlugRaw: string,
+  /**
+   * includeDisabled: also return a form that is off (enabled false), for the
+   * one caller that may draw it: the owner's preview of its offer page
+   * (app/f/[tenant_slug]/[form_slug]/page.tsx), which checks the owner
+   * itself. Every other caller, the submit route included, keeps the default.
+   */
+  opts: { includeDisabled?: boolean } = {},
 ): Promise<PublicFormLookup> {
   const tenantSlug = tenantSlugRaw.trim().toLowerCase();
   const formSlug = formSlugRaw.trim().toLowerCase();
@@ -87,7 +96,9 @@ export async function resolvePublicForm(
         redirect_url: string | null;
       }
     | null;
-  if (!form || !form.enabled) return { ok: false, reason: "not_found" };
+  // The same truthiness the check always used, so no enabled form changes.
+  const enabled = Boolean(form?.enabled);
+  if (!form || (!enabled && !opts.includeDisabled)) return { ok: false, reason: "not_found" };
 
   return {
     ok: true,
@@ -104,6 +115,7 @@ export async function resolvePublicForm(
       on_complete_stage: form.on_complete_stage,
       step_outcomes: form.step_outcomes,
       redirect_url: form.redirect_url,
+      enabled,
     },
   };
 }

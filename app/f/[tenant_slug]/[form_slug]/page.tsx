@@ -24,7 +24,12 @@
  *
  * ?offer_preview=1 shows the DRAFT, but only to a signed-in owner or admin of
  * the form's own workspace (the builder's Preview tab). Everyone else gets the
- * public page, and a preview never mounts a live form.
+ * public page. The preview mounts the real form in preview mode (CC,
+ * 2026-10-16: the owner sees the actual form and calendar): every step and the
+ * live open times work, and nothing is ever sent (FormPublicClient `preview`,
+ * no anonymousInit and no link, so the submit route could not take it either).
+ * It also works for a form that is OFF, which no visitor can reach: the owner
+ * checks the page before switching it on.
  *
  * AN OFFER'S NAME IS INTERNAL (the New offer dialog says so). A form with an
  * offer page and no headline of its own is titled with the workspace's name on
@@ -61,9 +66,7 @@ import { signMediaUrls } from "@/lib/founders/marketing-queries";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import { resolveBookingUrl } from "@/lib/booking-link";
 import { CONTACT_EMAIL } from "@/lib/marketing/routes";
-import { resolveSessionContext } from "@/lib/api-auth";
-import { resolvePersona } from "@/lib/role-surfaces";
-import { formsEditRefusal } from "@/lib/forms/access";
+import { canPreviewOfferPage } from "@/lib/offer-pages/preview-access";
 import { communityUrlForTenant } from "@/lib/offers/community-link";
 import { routerPrefillForCat } from "@/lib/forms/router-cat-preselect";
 
@@ -79,14 +82,29 @@ export const revalidate = 0;
  */
 export async function generateMetadata({
   params,
+  searchParams,
 }: {
   params: Promise<RouteParams>;
+  searchParams?: Promise<{ offer_preview?: string }>;
 }): Promise<Metadata> {
   const resolved = await params;
   const db = getServiceSupabase();
-  const lookup = await resolvePublicForm(db, resolved.tenant_slug, resolved.form_slug);
+  let lookup = await resolvePublicForm(db, resolved.tenant_slug, resolved.form_slug);
+  // The owner's preview of a form that is off renders the page (below), so it
+  // gets the page's own tab and icon too, never the 404's (Codex review of
+  // #659). Anyone else still gets the 404's title.
+  if (!lookup.ok && (await searchParams)?.offer_preview === "1") {
+    const off = await resolvePublicForm(db, resolved.tenant_slug, resolved.form_slug, { includeDisabled: true });
+    // Only when the page will render it: an owner, and a draft to show (with
+    // none, the page is the 404, so the tab is too; Codex review of #659).
+    if (off.ok && (await canPreviewOfferPage(off.form.tenant_id)) && (await hasPreviewDraft(off.form.tenant_id, off.form.id))) {
+      lookup = off;
+    }
+  }
   if (!lookup.ok) {
-    return { title: "Form", robots: { index: false, follow: false } };
+    // The same words as the public 404 this request draws (app/f/not-found.tsx),
+    // so the tab does not switch to "Form" once the page loads.
+    return { title: "Page not available", robots: { index: false, follow: false } };
   }
   const offer = await offerState(lookup.form.tenant_id, lookup.form.id);
   let title = lookup.form.name || "Application";
@@ -120,6 +138,18 @@ export async function generateMetadata({
     robots: { index: false, follow: false },
     ...(icon ? { icons: { icon } } : {}),
   };
+}
+
+/** Does this form have an offer draft the owner's preview can draw? Any doubt is "no". */
+async function hasPreviewDraft(tenantId: string, formId: string): Promise<boolean> {
+  const db = offerPagesDb();
+  if (!db) return false;
+  try {
+    const row = await readOfferRow(db, tenantId, formId);
+    return row.state === "row" && Boolean(row.row.draft);
+  } catch {
+    return false;
+  }
 }
 
 /** A form's offer page state, read once per request (metadata and page share it). */
@@ -162,6 +192,8 @@ type LoadResult =
         branding: FormBranding;
         steps: FormStep[];
         redirect_url: string | null;
+        /** Off: only the owner's preview of its offer page may render it. */
+        enabled: boolean;
       };
       tenant_slug: string;
     }
@@ -171,10 +203,16 @@ type LoadResult =
       detail?: string;
     };
 
-async function loadForm(params: RouteParams): Promise<LoadResult> {
+async function loadForm(params: RouteParams, opts: { includeDisabled?: boolean } = {}): Promise<LoadResult> {
   const db = getServiceSupabase();
-  const resolved = await resolvePublicForm(db, params.tenant_slug, params.form_slug);
+  const resolved = await resolvePublicForm(db, params.tenant_slug, params.form_slug, opts);
   if (!resolved.ok) {
+    return { ok: false, reason: "not_found" };
+  }
+  // A form that is off exists only for its owner's preview. Decided BEFORE the
+  // form is parsed, so a visitor never learns it exists, not even from the
+  // configuration-error page a malformed one would draw (Codex review of #659).
+  if (!resolved.form.enabled && !(await canPreviewOfferPage(resolved.form.tenant_id))) {
     return { ok: false, reason: "not_found" };
   }
 
@@ -235,6 +273,7 @@ async function loadForm(params: RouteParams): Promise<LoadResult> {
       branding,
       steps,
       redirect_url: resolved.form.redirect_url,
+      enabled: resolved.form.enabled,
     },
     tenant_slug: resolved.tenant_slug,
   };
@@ -264,7 +303,10 @@ export default async function AnonymousFormPage({
   const sp = (await searchParams) || {};
   const rep = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : undefined;
   const source = typeof sp.source === "string" && sp.source.trim() ? sp.source.trim() : undefined;
-  const result = await loadForm(resolved);
+  const previewRequested = sp.offer_preview === "1";
+  // A form that is off is read only when a preview was asked for, and then
+  // drawn only as its owner's preview (below): everyone else still gets 404.
+  const result = await loadForm(resolved, { includeDisabled: previewRequested });
 
   if (!result.ok) {
     if (result.reason === "form_corrupt") {
@@ -291,7 +333,8 @@ export default async function AnonymousFormPage({
   // value is unrecognized, or this form has no "path" field offering it.
   const catPrefill = routerPrefillForCat(result.form.steps, sp.cat);
 
-  const offer = await loadOfferView(result, sp.offer_preview === "1");
+  const offer = await loadOfferView(result, previewRequested);
+  if (!result.form.enabled && !offer?.preview) notFound();
   if (offer) {
     const tenantId = result.form.tenant_id;
     const oasis = isOasisInternalTenant(tenantId);
@@ -318,7 +361,25 @@ export default async function AnonymousFormPage({
         communityConfigured={offer.preview ? false : communityConfigured}
         form={
           offer.preview
-            ? null
+            ? {
+                // The real form, in preview mode: it walks every step and shows
+                // the live open times, and sends nothing. No anonymousInit and
+                // no link, so even a submit that reached the route would be
+                // refused (no_auth_provided).
+                formId: result.form.id,
+                formName: offer.prepared.page.hero.headline,
+                branding: { ...result.form.branding, primary_color: offer.prepared.accent },
+                steps: result.form.steps,
+                redirectUrl: null,
+                token: null,
+                brand: consentBrandForTenant(result.tenant_slug, result.form.slug),
+                consentIdentity,
+                consentLedgerEnabled,
+                tenantSlug: result.tenant_slug,
+                formSlug: result.form.slug,
+                ...(catPrefill ? { prefill: catPrefill } : {}),
+                preview: true,
+              }
             : {
                 formId: result.form.id,
                 // Not drawn inside the Book section, but a client component's
@@ -421,21 +482,6 @@ async function plainFormName(result: Extract<LoadResult, { ok: true }>): Promise
 }
 
 /**
- * May this session see this form's DRAFT? A signed-in owner or admin of the
- * form's own workspace, by the rule every forms write uses. Anyone else,
- * including a signed-in member of another workspace, is an ordinary visitor.
- */
-async function canPreview(tenantId: string): Promise<boolean> {
-  try {
-    const session = await resolveSessionContext();
-    if (!session.ok || session.tenantId !== tenantId) return false;
-    return formsEditRefusal({ persona: resolvePersona(session), tenantId }) === null;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * The offer page to draw instead of the plain form, or null for the plain form.
  * Never throws: whatever goes wrong in the page layer, the visitor gets the
  * form they came for, never a 500.
@@ -450,7 +496,7 @@ async function loadOfferView(
   try {
     let doc: OfferPageDoc | null = null;
     let preview = false;
-    if (previewRequested && (await canPreview(tenantId))) {
+    if (previewRequested && (await canPreviewOfferPage(tenantId))) {
       const row = await readOfferRow(db, tenantId, formId);
       if (row.state === "row" && row.row.draft) {
         doc = row.row.draft;

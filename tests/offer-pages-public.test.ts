@@ -319,9 +319,85 @@ async function main() {
     const owner = await run("vsl", { offer_preview: "1" });
     assert.equal((owner.props.prepared as { page: { hero: { headline: string } } }).page.hero.headline, "Draft headline, not live yet");
     assert.deepEqual(owner.props.preview, { steps: ["Your details", "About you"] });
-    assert.equal(owner.props.form, null, "a preview mounted a live form");
+    // CC, 2026-10-16: the owner's preview mounts the REAL form, in preview mode.
+    // It sends nothing: the form is flagged, and it carries neither the
+    // anonymous start nor a link, so the submit route could not take it either.
+    const previewForm = owner.props.form as Record<string, unknown>;
+    assert.equal(previewForm.preview, true, "the preview's form is not in preview mode");
+    assert.equal("anonymousInit" in previewForm, false, "a preview's form could start a lead");
+    assert.equal(previewForm.token, null, "a preview's form carries a link");
+    assert.equal(previewForm.redirectUrl, null);
+    assert.equal("submissionSource" in previewForm || "submissionPath" in previewForm, false);
+    assert.deepEqual(
+      (previewForm.steps as Array<{ title: string }>).map((s) => s.title),
+      ["Your details", "About you"],
+      "the preview's form is not the page's own form",
+    );
+    assert.equal(previewForm.formSlug, "vsl", "the preview's calendar needs the form it belongs to");
+    // A visitor's form is never in preview mode.
+    assert.equal("preview" in (anon.props.form as Record<string, unknown>), false, "a visitor's form is in preview mode");
     scenarios.preview = { kind: "offer", props: plain(owner.props) };
     await login(null);
+  });
+
+  await step("a form that is OFF: its owner's preview renders, and everyone else still gets 404", async () => {
+    // The Confirm & publish screen links every offer's preview, and three
+    // OASIS offers sat with their forms off, so those links answered 404.
+    const FORM_OFF = "f0a1d170-0000-4000-8000-00000000f0ff";
+    const FORM_OFF_BROKEN = "f0a1d170-0000-4000-8000-00000000f0fe";
+    await db.batch(
+      [
+        formRow(FORM_OFF, OASIS, "offform", "Off form", CONTACT_STEPS, { headline: "Off" }, 0),
+        offerRow({ formId: FORM_OFF, tenantId: OASIS, draft: liveDoc("A page whose form is off") }),
+      ],
+      "write",
+    );
+    const isNotFound = (e: unknown) =>
+      /NEXT_(HTTP_ERROR_FALLBACK;404|NOT_FOUND)/.test(String((e as { digest?: unknown })?.digest ?? (e as Error)?.message ?? e));
+    try {
+      for (const who of [null, USERS.clientA, USERS.rep]) {
+        await login(who);
+        await assert.rejects(run("offform", { offer_preview: "1" }), isNotFound, "someone but its owner reached a form that is off");
+        await assert.rejects(run("offform"), isNotFound, "a form that is off reached a visitor");
+      }
+      await login(USERS.cc);
+      await assert.rejects(run("offform"), isNotFound, "without ?offer_preview even the owner gets the closed form");
+      const owner = await run("offform", { offer_preview: "1" });
+      assert.equal(owner.type, OfferPage, "the owner's preview of a form that is off did not render");
+      assert.equal((owner.props.prepared as { page: { hero: { headline: string } } }).page.hero.headline, "A page whose form is off");
+      assert.equal((owner.props.form as Record<string, unknown>).preview, true);
+      assert.equal("anonymousInit" in (owner.props.form as Record<string, unknown>), false);
+
+      // The tab: the owner's preview is the page, everyone else the 404 (Codex review of #659).
+      const meta = (sp: Record<string, string>) =>
+        page.generateMetadata({ params: Promise.resolve({ tenant_slug: "oasis-ai-cc", form_slug: "offform" }), searchParams: Promise.resolve(sp) });
+      assert.equal((await meta({ offer_preview: "1" })).title, "Off", "the owner's preview has the 404's tab");
+      assert.equal((await meta({})).title, "Page not available");
+      await login(null);
+      assert.equal((await meta({ offer_preview: "1" })).title, "Page not available", "a visitor's tab names a closed form");
+      await login(USERS.cc);
+      // A closed form with no offer page to draw is the 404 even for its owner, so its tab is too.
+      await db.execute({ sql: "DELETE FROM form_offer_pages WHERE form_id = ?", args: [FORM_OFF] });
+      assert.equal((await meta({ offer_preview: "1" })).title, "Page not available", "the tab named a preview the page will not draw");
+      await assert.rejects(run("offform", { offer_preview: "1" }), isNotFound, "a closed form with no draft rendered");
+
+      // Codex review of #659: a form that is off AND malformed must not show a
+      // visitor its configuration-error page (which would prove it exists).
+      await db.batch([formRow(FORM_OFF_BROKEN, OASIS, "offbroken", "Off and broken", { not: "steps" }, { headline: "Off" }, 0)], "write");
+      for (const who of [null, USERS.clientA, USERS.rep]) {
+        await login(who);
+        await assert.rejects(run("offbroken", { offer_preview: "1" }), isNotFound, "a visitor learned a closed form exists");
+      }
+    } finally {
+      await login(null);
+      await db.batch(
+        [
+          { sql: "DELETE FROM form_offer_pages WHERE form_id = ?", args: [FORM_OFF] },
+          { sql: "DELETE FROM forms WHERE id IN (?, ?)", args: [FORM_OFF, FORM_OFF_BROKEN] },
+        ],
+        "write",
+      );
+    }
   });
 
   await step("the owner's preview marks its Library videos for the builder's preview route; the public page never does", async () => {
@@ -505,12 +581,15 @@ async function main() {
     assert.doesNotMatch(html.live, /i\.ytimg\.com|vimeocdn/, "a third-party thumbnail is requested before a tap");
   });
 
-  await step("the owner's preview shows the draft and never a live form", () => {
+  await step("the owner's preview shows the draft with the real form, and says nothing is sent", () => {
     const h = html.preview;
     assert.ok(h.includes("Draft headline, not live yet"));
     assert.ok(h.includes("Preview of your unpublished page"));
-    assert.ok(h.includes("A preview never sends anything"));
-    assert.doesNotMatch(h, /<input\b/i, "a preview drew form inputs");
+    // The VSL router has no calendar, so the banner promises only the form (Codex review of #659).
+    assert.ok(h.includes("The form below works, and nothing you enter is sent or saved."), "the preview does not say it sends nothing");
+    assert.ok(!h.includes("calendar below"), "a preview with no calendar promises one");
+    assert.match(h, /<input\b/i, "the preview drew no form: the owner cannot try it");
+    assert.ok(!h.includes("The form appears here"), "the placeholder is back");
   });
 
   await step("the owner's preview reads whole, each unconfirmed piece with its note; the public page has neither", () => {

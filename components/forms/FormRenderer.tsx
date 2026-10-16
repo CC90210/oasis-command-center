@@ -59,6 +59,13 @@ type Props = {
    *  SunBiz/Bluerise Opt-in Vault disclosure, which renders its own text
    *  separately). */
   belowFields?: React.ReactNode;
+  /**
+   * The owner's offer-page preview (FormPublicClient `preview`): nothing typed
+   * may leave the browser. An address field is a plain text box (no lookup
+   * service sees it) and a multi-file upload is not offered (no signed upload).
+   * Distinct from `previewMode`, which disables submission altogether.
+   */
+  sandbox?: boolean;
 };
 
 export function FormRenderer({
@@ -77,6 +84,7 @@ export function FormRenderer({
   ensureUploadToken,
   onAddressResolvingChange,
   belowFields,
+  sandbox = false,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
 
@@ -153,6 +161,7 @@ export function FormRenderer({
                   ? (resolving) => onAddressResolvingChange?.(field.name, resolving)
                   : undefined
               }
+              sandbox={sandbox}
             />
           ))}
       </div>
@@ -214,6 +223,7 @@ function FieldRow({
   fallbackState,
   hasExternalStateField,
   onResolvingChange,
+  sandbox,
 }: {
   field: FormField;
   value: unknown;
@@ -224,6 +234,7 @@ function FieldRow({
   fallbackState?: string;
   hasExternalStateField?: boolean;
   onResolvingChange?: (resolving: boolean) => void;
+  sandbox?: boolean;
 }) {
   const inputId = useId();
 
@@ -251,6 +262,7 @@ function FieldRow({
         fallbackState,
         onResolvingChange,
         hasExternalStateField,
+        sandbox,
       )}
 
       {field.help && <p className="text-[11px] text-fg-dim">{field.help}</p>}
@@ -272,6 +284,7 @@ function renderInput(
   fallbackState?: string,
   onResolvingChange?: (resolving: boolean) => void,
   hasExternalStateField?: boolean,
+  sandbox?: boolean,
 ): React.ReactNode {
   const base =
     "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
@@ -294,6 +307,20 @@ function renderInput(
       );
 
     case "address":
+      // The owner's preview: a plain text box, so no lookup service sees what
+      // is typed (Codex review of #659). Same value shape, same validation.
+      if (sandbox) {
+        return (
+          <input
+            id={inputId}
+            type="text"
+            value={typeof value === "string" ? value : ""}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={field.placeholder}
+            className={base}
+          />
+        );
+      }
       // Predictive address autocomplete (US only). Stores the selected
       // formatted address as a plain string, so downstream (PDF, lead record)
       // is unaffected — identical to a text field's value.
@@ -395,6 +422,15 @@ function renderInput(
       );
 
     case "file_upload_multi":
+      // The owner's preview uploads nothing (an upload needs a lead); the step
+      // does not wait on it either (FormPublicClient validate).
+      if (sandbox) {
+        return (
+          <p id={inputId} className="rounded-md border border-dashed border-bg-border px-3 py-2 text-[12px] text-fg-dim">
+            Preview: file uploads are skipped here, so nothing leaves your browser. Visitors upload their files on the live page.
+          </p>
+        );
+      }
       // Multi-file drag-and-drop, direct-to-Supabase-Storage (bank statements).
       // Value = array of uploaded descriptors; submit route registers them.
       return (

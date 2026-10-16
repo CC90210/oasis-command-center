@@ -56,6 +56,7 @@ export function PublicBookingCalendar({
   formSlug,
   completedStep,
   optional = false,
+  preview = false,
 }: {
   token: string | null;
   primary: string;
@@ -68,6 +69,13 @@ export function PublicBookingCalendar({
    * thanks) is not repeated.
    */
   optional?: boolean;
+  /**
+   * The owner's preview (FormPublicClient `preview`): the live open times,
+   * read from the open-times route because a preview has no lead, and a
+   * picked time books nothing. The community link is drawn but goes nowhere,
+   * so a preview never counts as a visitor's click.
+   */
+  preview?: boolean;
 }) {
   const [availability, setAvailability] = useState<Availability | null>(null);
   const [loading, setLoading] = useState(true);
@@ -76,8 +84,27 @@ export function PublicBookingCalendar({
   const [error, setError] = useState("");
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const bookingRequest = useRef<{ slot: string; id: string } | null>(null);
+  const [previewPicked, setPreviewPicked] = useState<string | null>(null);
+
+  /** The preview's times: the same live open times, from the route that needs no lead. */
+  async function loadPreview() {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/forms/booking/slots?form=${encodeURIComponent(formSlug)}&preview=1`);
+      const data = await response.json() as Availability;
+      setAvailability(data);
+      if (!response.ok || !data.ok) setError(friendlyError(data.error));
+    } catch {
+      setAvailability({ ok: false, error: "network" });
+      setError(friendlyError("network"));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function load() {
+    if (preview) return loadPreview();
     if (!token) {
       setAvailability({ ok: false, error: "token_missing" });
       setLoading(false);
@@ -118,6 +145,11 @@ export function PublicBookingCalendar({
   }, [availability]);
 
   async function book() {
+    // A preview books nothing: it says what the live page would do instead.
+    if (preview) {
+      if (selected) setPreviewPicked(selected);
+      return;
+    }
     if (!token || !selected || booking) return;
     if (bookingRequest.current?.slot !== selected) {
       bookingRequest.current = { slot: selected, id: crypto.randomUUID() };
@@ -244,6 +276,12 @@ export function PublicBookingCalendar({
       )}
 
       {error && <p className="text-center text-sm text-rose-400" role="alert">{error}</p>}
+      {preview && previewPicked && (
+        <p className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-center text-sm text-status-warm" role="status">
+          Preview: on the live page this books {dayFormat.format(new Date(previewPicked))} at {timeFormat.format(new Date(previewPicked))},
+          sends the visitor the Google Meet invite and puts the call on your Schedule. Nothing was booked.
+        </p>
+      )}
       {selected && !loading && (
         <button
           type="button"
@@ -263,6 +301,7 @@ export function PublicBookingCalendar({
           completedStep={completedStep}
           primary={primary}
           lead="Not ready to book? Stay close without starting a sales process."
+          preview={preview}
         />
       )}
     </div>
@@ -281,12 +320,15 @@ export function CommunityJoinLink({
   completedStep,
   primary,
   lead = null,
+  preview = false,
 }: {
   formSlug: string;
   completedStep: number;
   primary: string;
   /** The line above the link; null draws the link alone, with no rule above it. */
   lead?: string | null;
+  /** The owner's preview: drawn the same, going nowhere, so no click is counted. */
+  preview?: boolean;
 }) {
   const base = `/go/community?form=${encodeURIComponent(formSlug)}&t=oasis-ai-cc&step=${completedStep}`;
   const [href, setHref] = useState(base);
@@ -294,8 +336,13 @@ export function CommunityJoinLink({
     const visit = getOrCreateVisitId();
     setHref(visit ? `${base}&v=${encodeURIComponent(visit)}` : base);
   }, [base]);
-  const link = (
-    <a href={href} className="mt-2 inline-block text-sm font-semibold underline underline-offset-4" style={{ color: primary }}>
+  const className = "mt-2 inline-block text-sm font-semibold underline underline-offset-4";
+  const link = preview ? (
+    <span className={className} style={{ color: primary }}>
+      Join the free OASIS Telegram community →
+    </span>
+  ) : (
+    <a href={href} className={className} style={{ color: primary }}>
       Join the free OASIS Telegram community →
     </a>
   );

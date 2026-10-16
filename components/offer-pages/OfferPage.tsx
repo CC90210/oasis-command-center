@@ -25,6 +25,7 @@ import { ArrowRight } from "lucide-react";
 import { offerFontVariables } from "@/app/fonts/offer-fonts";
 import { Section, Eyebrow } from "@/components/marketing/Section";
 import { CTA_PRIMARY, CTA_INLINE } from "@/components/marketing/Cta";
+import { isPublicBookingSurface } from "@/lib/forms/public-booking-config";
 import type { PreparedOffer } from "@/lib/offer-pages/render";
 import type { BodyKey } from "@/lib/offer-pages/types";
 import { OfferNav } from "./OfferNav";
@@ -63,12 +64,12 @@ export function OfferPage({
   logoUrl: string | null;
   /** OASIS's own workspaces link OASIS's /privacy and /terms; nobody else's page does. */
   legalLinks: boolean;
-  /** The page's own form, or null in a preview (never a live form there). */
+  /** The page's own form; in the owner's preview, the same form in preview mode (it sends nothing). */
   form: EmbeddedFormProps | null;
   bookingUrl: string | null;
   /** The workspace's own contact address, for "two times that suit you" when there is no booking link. */
   contactEmail?: string | null;
-  /** Set for the owner's signed-in preview: a banner, and step titles instead of the form. */
+  /** Set for the owner's signed-in preview: a banner (and step titles, should the form be missing). */
   preview?: { steps: string[] } | null;
   /**
    * V5a funnel tracking (HANDOVER section 5): the public slugs every hero
@@ -88,6 +89,11 @@ export function OfferPage({
   communityConfigured?: boolean;
 }) {
   const { page, ctaLabel } = prepared;
+  // The preview banner promises a working calendar only where the form ends on
+  // one (Codex review of #659: the VSL router and other workspaces' forms do not).
+  const calendarOnPage = Boolean(
+    form?.tenantSlug && form.formSlug && isPublicBookingSurface({ tenantSlug: form.tenantSlug, formSlug: form.formSlug }),
+  );
   const tracking: VideoTracking = tenantSlug && formSlug ? { tenant: tenantSlug, form: formSlug } : null;
   const communityLink = (
     <CommunityLink tenantSlug={tenantSlug} formSlug={formSlug} configured={communityConfigured} />
@@ -165,7 +171,10 @@ export function OfferPage({
       <div>
         {preview ? (
           <div className="border-b border-status-warm/40 bg-status-warm/10 px-5 py-2 text-center text-[13px] text-status-warm">
-            Preview of your unpublished page. Only signed-in owners see this; the public link still shows what is live.
+            Preview of your unpublished page. Only signed-in owners see this; the public link still shows what is live.{" "}
+            {calendarOnPage
+              ? "The form and the calendar below work, and nothing you enter is sent, saved or booked."
+              : "The form below works, and nothing you enter is sent or saved."}
           </div>
         ) : null}
         <OfferNav nav={page.nav} name={workspaceName} logoUrl={logoUrl} ctaLabel={ctaLabel} />

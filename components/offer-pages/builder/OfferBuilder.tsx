@@ -577,9 +577,10 @@ export function OfferBuilder({
               Reload the preview
             </button>
           </div>
-          {!form.enabled ? (
-            <p className="text-[13px] text-status-warm">Switch the form on to preview its page.</p>
-          ) : publicPath ? (
+          {/* The preview works with the form off too (the owner checks the
+              page before switching it on): app/f/.../page.tsx draws a form
+              that is off for its owner's preview, and nobody else. */}
+          {publicPath ? (
             <div className="flex justify-center rounded-xl border border-bg-border bg-bg-deep p-3">
               <iframe
                 key={previewKey}
@@ -590,7 +591,9 @@ export function OfferBuilder({
               />
             </div>
           ) : null}
-          <p className="text-[12px] text-fg-dim">The preview shows your saved draft. Only you and other owners can see it; it never sends anything.</p>
+          <p className="text-[12px] text-fg-dim">
+            The preview shows your saved draft with the real form (and live open times, when the form ends on a call). Only you and other owners can see it; it never sends or books anything.
+          </p>
         </div>
       ) : null}
     </div>

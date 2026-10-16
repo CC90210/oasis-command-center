@@ -8,6 +8,7 @@ import {
 } from "@/lib/forms/public-booking";
 import { isPublicBookingFormSlug, publicBookingDurationMinutes } from "@/lib/forms/public-booking-config";
 import { rateLimit } from "@/lib/rate-limit";
+import { canPreviewOfferPage } from "@/lib/offer-pages/preview-access";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
@@ -22,6 +23,10 @@ export const dynamic = "force-dynamic";
  * are returned, never who is on the call or why a time is closed. Booking
  * itself still needs the signed token the form's first step mints
  * (POST /api/forms/booking re-reads availability fresh before it books).
+ *
+ * ?preview=1 is the owner's offer-page preview (components/forms/
+ * PublicBookingCalendar.tsx `preview`): the same times, for a form that is not
+ * on yet, to a signed-in owner of OASIS only (lib/offer-pages/preview-access.ts).
  */
 const SAFE_ERRORS = new Set([
   "public_booking_founders_unavailable",
@@ -47,7 +52,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: "booking_form_not_found" }, { status: 404 });
   }
   try {
-    if (!(await publicBookingFormEnabled(getServiceSupabase(), formSlug))) {
+    // A form that is off has no public times. Its owner's preview of the offer
+    // page (?preview=1, a signed-in owner or admin of OASIS) still shows them,
+    // so the page can be checked before it is switched on; everyone else gets
+    // the same 404 as before.
+    const enabled = await publicBookingFormEnabled(getServiceSupabase(), formSlug);
+    const ownerPreview =
+      !enabled && req.nextUrl.searchParams.get("preview") === "1" && (await canPreviewOfferPage(AI_AUDIT_TENANT_ID));
+    if (!enabled && !ownerPreview) {
       return NextResponse.json({ ok: false, error: "booking_form_not_found" }, { status: 404 });
     }
     const durationMinutes = publicBookingDurationMinutes(formSlug);
