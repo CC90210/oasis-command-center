@@ -100,7 +100,7 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
         ))}
       </div>
       <WritePageDescription value={description} onChange={setDescription} disabled={busy} />
-      <WritePageToggle checked={writeIt} onChange={setWriteIt} />
+      <WritePageToggle checked={writeIt} onChange={setWriteIt} disabled={busy} />
       <p className="text-[12px] text-fg-muted">
         The page starts as a draft. Your link keeps showing the plain form until you publish.
       </p>

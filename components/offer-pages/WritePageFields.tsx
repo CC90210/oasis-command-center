@@ -39,15 +39,18 @@ export function WritePageDescription({
 export function WritePageToggle({
   checked,
   onChange,
+  disabled = false,
   className = "",
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
+  /** Locked once creation starts: the choice it started with is the one it carries out. */
+  disabled?: boolean;
   className?: string;
 }) {
   return (
     <label className={`flex items-center gap-2 text-xs text-fg ${className}`}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       Write the page for me (a draft: you review it, and set prices yourself, before it goes live)
     </label>
   );

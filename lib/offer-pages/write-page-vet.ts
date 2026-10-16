@@ -42,10 +42,13 @@ type Card = WrittenCopy["obstacles"]["items"][number];
  * "guaranteed" covers the model's "guarantee".
  */
 const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
-  // A figure, with what it counts: the owner's "14 templates" lets neither
-  // "live in 14 days" nor "trusted by 14 clinics" through. "24/7" and the
-  // like are one token, matched as written.
-  { re: /\d+\/\d+|\d+(?:[.,]\d+)*(?:\s*(?:%|[A-Za-z]+))?/gi },
+  // A figure, with what it counts (and a describing word before that: "14
+  // happy clinics"): the owner's "14 templates" lets neither "live in 14
+  // days" nor "trusted by 14 clinics" through. "24/7" and the like are one
+  // token, matched as written.
+  {
+    re: /\d+\/\d+|\d+(?:[.,]\d+)*(?:\s*(?:%|(?:(?:happy|new|more|active|loyal|satisfied|paying|real|qualified|local|small|extra|repeat|returning|verified|five-star)\s+)?[A-Za-z]+))?/gi,
+  },
   { re: /[$%]/g },
   // A money amount is one claim: the owner's "99 clients" and "$50" do not let "$99" through.
   { re: /\$\s?\d+(?:[.,]\d+)*/g },
@@ -61,6 +64,20 @@ const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
   { re: /\bproven\b/gi },
   { re: /\bunmatched\b|\bunbeatable\b|\bunrivall?ed\b/gi },
   { re: /\b(?:fastest|cheapest|largest|biggest|most trusted)\b/gi },
+  // The rest of the publish linter's superlatives (claims.ts SUPERLATIVE_RE),
+  // phrase by phrase: the owner's "best" does not let "the only" or
+  // "quickest" through.
+  { re: /\b(?:the|our)\s+(?:very\s+)?only\b/gi },
+  { re: /\b(?:quickest|lowest|highest|smartest|easiest|simplest|strongest|market[- ]leading)\b/gi },
+  { re: /\bmost\s+(?:popular|advanced|powerful|affordable|reliable|complete|effective)\b/gi },
+  // What the offer connects to, and what it is certified for: an integration
+  // or a compliance the owner did not state is a capability a buyer holds
+  // them to, whether or not a product is named ("Salesforce syncs every
+  // booking" starts with its name, where a capital proves nothing).
+  { re: /\bintegrat/gi, stem: true },
+  { re: /\bsync/gi, stem: true },
+  { re: /\bplugs? (?:into|in)\b|\bworks with\b|\bpowered by\b|\bbuilt on\b/gi },
+  { re: /\bcompliant\b|\bcompliance\b|\bcertified\b|\bcertification/gi },
   { re: /\brisk[- ]free\b|\bmoney[- ]back\b/gi },
   { re: /\btestimonial/gi, stem: true },
   // Money a client is promised (the linter's own claim words, phrase by phrase).
@@ -128,6 +145,10 @@ function namesIn(text: string): string[] {
     if (/^[A-Z0-9&]{2,}s?$/.test(word)) {
       // Plural acronyms ("APIs", "SOPs", "DMs") name the same kind of thing.
       if (!GENERIC_ACRONYMS.has(word.replace(/s$/, ""))) names.push(word);
+    } else if (/[a-z][A-Z]|[A-Za-z][0-9]/.test(word)) {
+      // A product's own spelling ("HubSpot", "QuickBooks", "Office365") is a
+      // name wherever it stands, at a sentence's start or in a heading too.
+      names.push(word);
     } else if (!startsSentence && !titleCase && word.length > 1) {
       // (A single letter is "I" or a label like "Plan A", never a name.)
       names.push(word);

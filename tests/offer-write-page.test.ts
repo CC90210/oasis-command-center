@@ -204,6 +204,16 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   // The owner is told how many sentences were left out, and how to get them back.
   const panelText = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
   assert.match(panelText, /left out for stating something your description doesn't/);
+  // Codex round ten: integration and compliance claims, product spellings at
+  // a sentence's start, the linter's other superlatives one by one, and a
+  // describing word between a number and what it counts.
+  assert.ok(inventsFacts("Salesforce syncs every booking", "A scheduling app"), "an invented integration at a sentence start got through");
+  assert.ok(inventsFacts("HubSpot gets every lead", "A scheduling app"), "an invented product at a sentence start got through");
+  assert.ok(inventsFacts("Fully compliant with privacy rules", "A scheduling app"), "an invented compliance claim got through");
+  assert.ok(inventsFacts("The only scheduling app you need", "The best scheduling app for clinics"), "the owner's best let the only through");
+  assert.ok(inventsFacts("The quickest way to book", "The best scheduling app for clinics"), "the owner's best let quickest through");
+  assert.ok(inventsFacts("Trusted by 14 happy clinics", "Includes 14 happy templates"), "14 happy templates let 14 happy clinics through");
+  assert.ok(!inventsFacts("It syncs with your calendar", "It syncs bookings with your calendar."));
   // Codex round nine: a number keeps what it counts, and a promised result keeps its phrase.
   assert.ok(inventsFacts("Trusted by 14 clinics", "Includes 14 templates"), "the owner's 14 templates let 14 clinics through");
   assert.ok(inventsFacts("Get more revenue from every call", "It helps you get more bookings."), "the owner's more bookings let more revenue through");
@@ -280,6 +290,8 @@ check("the route is an owner action on the workspace AI account that saves a dra
   assert.match(route, /if \(save\) \{\s*const briefed = withBrief/, "the editor's mode saves the brief over the one it holds");
   assert.match(route, /applied\.filled\.length === 0\) return unusable\(\)/);
   assert.doesNotMatch(route, /offerView\(/, "an answer carries a page the editor could rewind to");
+  // Codex round ten: a usage-ledger outage is a 503 to wait out, not a 402 budget refusal.
+  assert.match(route, /if \(code === "ai_usage_unavailable"\) return 503;/);
 });
 
 check("every typed value reaches the model inside an untrusted-data fence, the names too", () => {
@@ -416,10 +428,15 @@ check("the editor's write has one writer: the route saves nothing, and the edito
   // save to land (Codex round nine).
   assert.match(
     builder,
-    /const latest = docRef\.current;[\s\S]*?applyWrittenCopy\(latest, copy\)[\s\S]*?await saver\.save\(next\);\s*return \(await saver\.idle\(\)\) \? filled : "not_saved";/,
+    /const latest = docRef\.current;[\s\S]*?applyWrittenCopy\(latest, copy\)[\s\S]*?await saver\.save\(next\);\s*if \(await saver\.idle\(\)\) return filled;[\s\S]*?return "not_saved";/,
   );
   assert.match(panel, /filled = written\.copy \? await onCopy\(written\.copy, asked\) : \[\];/);
   assert.match(panel, /if \(filled === "not_saved"\) \{\s*return setError\(/, "unsaved words are reported as written");
+  // Codex round ten: a conflict that lands while the words are saving takes them back off the page.
+  assert.match(builder, /if \(await saver\.idle\(\)\) return filled;\s*if \(conflict\.current\) \{[\s\S]*?setDoc\(latest\);[\s\S]*?return "conflict";/);
+  // ...and the Write the page for me box is locked once creation starts, in both dialogs.
+  assert.match(readFileSync("components/forms/FormsListClient.tsx", "utf8"), /<WritePageToggle checked=\{writeIt\} onChange=\{setWriteIt\} disabled=\{busy\}/);
+  assert.match(readFileSync("components/offer-pages/builder/TurnIntoOffer.tsx", "utf8"), /<WritePageToggle checked=\{writeIt\} onChange=\{setWriteIt\} disabled=\{busy\}/);
   // The New offer list takes up a refresh's rows, so an offer made before its words failed shows (Codex round nine).
   const list = readFileSync("components/forms/FormsListClient.tsx", "utf8");
   assert.match(list, /if \(rowsFrom !== initialRows\) \{\s*setRowsFrom\(initialRows\);\s*setRows\(initialRows\);/);

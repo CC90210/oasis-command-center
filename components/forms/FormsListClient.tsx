@@ -886,7 +886,7 @@ function NewOfferPicker({
         </div>
 
         <WritePageDescription value={description} onChange={setDescription} disabled={busy} className="mt-4" />
-        {createdId ? null : <WritePageToggle checked={writeIt} onChange={setWriteIt} className="mt-2" />}
+        {createdId ? null : <WritePageToggle checked={writeIt} onChange={setWriteIt} disabled={busy} className="mt-2" />}
 
         {error ? <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-400">{error}</div> : null}
 

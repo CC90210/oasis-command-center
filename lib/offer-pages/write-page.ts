@@ -67,6 +67,7 @@ export function writePageSystemPrompt(): string {
     "You write the words of a landing page for a business's own offer.",
     "Write plainly and specifically, in the second person, in short sentences. Describe what the offer does, who it is for, the problems it solves and what the buyer gets, using only what the description says.",
     "NEVER invent facts. Do not write any number, percentage, price, money amount, time frame, count of clients or results, testimonial, guarantee, award, ranking or superlative (best, #1, leading) unless the description states it word for word. If it states none, write without them.",
+    "Do not name any product, platform, integration, brand or certification the description does not name, and do not say the offer integrates, syncs or connects with anything the description does not say.",
     "No markup, no HTML, no emoji, no em dashes. Plain sentences only.",
     "Answer with ONE JSON object and nothing else, exactly this shape (every field a string; arrays as described):",
     JSON.stringify({

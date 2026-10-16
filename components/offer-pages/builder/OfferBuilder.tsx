@@ -194,7 +194,18 @@ export function OfferBuilder({
       setDoc(next);
       if (timer.current) clearTimeout(timer.current);
       await saver.save(next);
-      return (await saver.idle()) ? filled : "not_saved";
+      if (await saver.idle()) return filled;
+      if (conflict.current) {
+        // A conflict (perhaps from a save already in flight) stops every save,
+        // so these words can never be kept: take them back off the page, unless
+        // it has been edited since, and say why.
+        if (docRef.current === next) {
+          docRef.current = latest;
+          setDoc(latest);
+        }
+        return "conflict";
+      }
+      return "not_saved";
     },
     [saver],
   );

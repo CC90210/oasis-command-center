@@ -68,7 +68,9 @@ const RAW_INPUT_CAP = 10_000;
 /** HTTP status for a model-call refusal: the caller can fix some, wait out others. */
 function statusFor(code: string): number {
   if (code === "ai_account_missing") return 412;
-  if (code.startsWith("ai_budget") || code === "ai_usage_unavailable") return 402;
+  // The usage ledger could not be read: an outage to wait out, not a budget refusal.
+  if (code === "ai_usage_unavailable") return 503;
+  if (code.startsWith("ai_budget")) return 402;
   if (code === "ai_rate_limited") return 429;
   if (code === "ai_timeout" || code === "request_timeout") return 504;
   return 502;
