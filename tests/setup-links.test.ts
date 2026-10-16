@@ -49,7 +49,7 @@ function split(href: string): { path: string; query: string; hash: string } {
 }
 
 function routeFile(path: string): string {
-  const direct = path === "/" ? "app/page.tsx" : `app${path}/page.tsx`;
+  const direct = path === "/" ? "app/(today)/page.tsx" : `app${path}/page.tsx`;
   if (existsSync(join(ROOT, direct))) return direct;
 
   // Route groups such as app/(marketing)/onboarding do not contribute a URL

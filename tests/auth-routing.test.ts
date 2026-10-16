@@ -77,7 +77,7 @@ assert.equal(homePathForTenant({ commandCenterProfileSlug: "oasis-ai-cc" }), "/"
 
 // Fresh-session landing (CC 2026-06-17): a SunBiz member who logs in with no
 // explicit ?next= (so next="/") must land DETERMINISTICALLY on their tenant
-// dashboard, not on "/" (which double-hops through app/page.tsx and was
+// dashboard, not on "/" (which double-hops through app/(today)/page.tsx and was
 // surfacing the chat-first /reasoning view). Operators + other tenants still
 // resolve to "/".
 assert.equal(

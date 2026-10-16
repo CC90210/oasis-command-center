@@ -103,7 +103,7 @@ export function LegalSection({
   return (
     <section className="mb-9">
       <h2 className="mb-3 font-display text-lg font-bold tracking-tight text-fg">
-        <span className="mr-2 tabular-nums text-fg-faint">{n}.</span>
+        <span className="mr-2 tabular-nums text-fg-dim">{n}.</span>
         {title}
       </h2>
       <div className="space-y-3 text-[15px] leading-relaxed text-fg-muted">

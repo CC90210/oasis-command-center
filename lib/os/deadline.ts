@@ -2,8 +2,8 @@
  * lib/os/deadline.ts - a read either answers inside its budget or becomes an
  * error. Nothing in the OS may wait on a promise forever.
  *
- * WHY. The root loading boundary (app/loading.tsx) draws a skeleton for every
- * route while its server component renders. A read that never settles (a
+ * WHY. Each signed-in section's loading boundary (app/<section>/loading.tsx)
+ * draws a skeleton while its server component renders. A read that never settles (a
  * database connection that hangs, a provider that never answers) keeps that
  * skeleton on screen with no error, no log line and no way out: the founder's
  * "the dashboard is loading" complaint. With a deadline, a hung read rejects

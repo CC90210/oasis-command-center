@@ -244,7 +244,7 @@ async function main() {
     assert.match(src, new RegExp(`${flag.replace(".", "\\.")}\\s*\\?\\s*${lead}${loader}\\(`), `${file}: ${loader} runs only behind ${flag}`);
     assert.equal((src.match(new RegExp(`${loader}\\(`, "g")) || []).length, 1, `${file}: ${loader} is called once`);
   }
-  const dispatcher = code("app/page.tsx");
+  const dispatcher = code("app/(today)/page.tsx");
   assert.match(dispatcher, /showFinancials=\{surface\.capabilities\.canSeeCompanyFinancials\}/);
 
   const MONEY_READERS = [
@@ -258,7 +258,7 @@ async function main() {
     "TodayBrief",
   ];
   for (const file of [
-    "app/page.tsx",
+    "app/(today)/page.tsx",
     "components/today/RepToday.tsx",
     "components/today/ManagerToday.tsx",
     "components/today/MarketingToday.tsx",
