@@ -198,7 +198,6 @@ const EXCERPT_MAX = 160;
 const MONEY_RE = /[$\u20AC\u00A3]|\b(?:CAD|USD|EUR|GBP|dollars?|bucks)\b/i;
 const PERCENT_RE = /%|\bper ?cent\b/i;
 const MULTIPLIER_RE = /\b[0-9]+(?:\.[0-9]+)?\s?x\b/i;
-const DIGIT_RE = /[0-9]/;
 /** A quantity on its own: "thousands of owners", "doubled", "half the time". */
 const QUANTITY_RE = /\b(?:hundreds?|thousands?|millions?|billions?|double[ds]?|doubling|triple[ds]?|tripling|half|halve[ds]?)\b/i;
 /**
@@ -294,57 +293,67 @@ export type ClaimKind = "money" | "percentage" | "multiplier" | "number" | "resu
 /** One phrase that makes a sentence a claim, as it is written there. */
 export type ClaimPhrase = { kind: ClaimKind; phrase: string };
 
-/** A run of digits ("$2,500", "7", "3.5") as one phrase; any digit is a number, as DIGIT_RE says. */
-const DIGIT_RUN_RE = /[0-9](?:[0-9.,:]*[0-9])?/;
+/** A run of digits ("$2,500", "7", "3.5") as one phrase: any digit makes a number. */
+const DIGIT_RE = /[0-9](?:[0-9.,:]*[0-9])?/;
 
 /**
- * Every claim family, in claimReasons' order. The one list the phrases are
- * read from, so a pattern changed here changes both answers (the claims test
- * holds them to the same verdict on every sentence it knows).
+ * Every claim family, in the order the reasons are said. THE one list: both
+ * claimPhrases and claimReasons read it, so a pattern changed here changes
+ * both answers. Global copies, made once (matchAll never moves their
+ * lastIndex: it matches on a copy).
  */
-const CLAIM_FAMILIES: ReadonlyArray<{ kind: ClaimKind; re: RegExp }> = [
-  { kind: "money", re: MONEY_RE },
-  { kind: "percentage", re: PERCENT_RE },
-  { kind: "multiplier", re: MULTIPLIER_RE },
-  { kind: "number", re: DIGIT_RUN_RE },
-  { kind: "number", re: QUANTITY_RE },
-  { kind: "number", re: COUNT_RE },
-  { kind: "result", re: RESULT_RE },
-  { kind: "superlative", re: SUPERLATIVE_RE },
-  { kind: "who else uses it", re: SOCIAL_PROOF_RE },
-  { kind: "time frame", re: TIMEFRAME_RE },
-  { kind: "word", re: WORD_RE },
-];
+const CLAIM_FAMILIES: ReadonlyArray<{ kind: ClaimKind; re: RegExp }> = (
+  [
+    ["money", MONEY_RE],
+    ["percentage", PERCENT_RE],
+    ["multiplier", MULTIPLIER_RE],
+    ["number", DIGIT_RE],
+    ["number", QUANTITY_RE],
+    ["number", COUNT_RE],
+    ["result", RESULT_RE],
+    ["superlative", SUPERLATIVE_RE],
+    ["who else uses it", SOCIAL_PROOF_RE],
+    ["time frame", TIMEFRAME_RE],
+    ["word", WORD_RE],
+  ] as const
+).map(([kind, re]) => ({ kind, re: new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`) }));
 
 /**
  * Every phrase in a sentence that makes it a claim, each with its family, in
- * family order and then as written. [] exactly when claimReasons is [] (the
- * same patterns). For grounding copy phrase by phrase (#636's write-page
- * vetting), so no second list of claim words has to follow this one.
+ * family order and then as written. For grounding copy phrase by phrase
+ * (#636's write-page vetting), so no second list of claim words has to follow
+ * this one.
  */
 export function claimPhrases(sentence: string): ClaimPhrase[] {
   const out: ClaimPhrase[] = [];
   for (const { kind, re } of CLAIM_FAMILIES) {
-    const all = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
-    for (const m of sentence.matchAll(all)) if (m[0]) out.push({ kind, phrase: m[0] });
+    for (const m of sentence.matchAll(re)) if (m[0]) out.push({ kind, phrase: m[0] });
   }
   return out;
 }
 
-/** Why a sentence is a claim, or [] when it is not one. */
+/** Each family, as the owner reads it on the tick line: a result and a claim word quote what was written. */
+const REASON: Readonly<Record<ClaimKind, (phrase: string) => string>> = {
+  money: () => "money",
+  percentage: () => "a percentage",
+  multiplier: () => "a multiplier",
+  number: () => "a number",
+  result: (p) => `a promised result ("${p.toLowerCase().replace(/\s+/g, " ")}")`,
+  superlative: () => "a superlative",
+  "who else uses it": () => "who else uses it",
+  "time frame": () => "a time frame",
+  word: (p) => `the word "${p.toLowerCase()}"`,
+};
+
+/** Why a sentence is a claim, or [] when it is not one: one reason per family, from its first phrase. */
 export function claimReasons(sentence: string): string[] {
+  const seen = new Set<ClaimKind>();
   const why: string[] = [];
-  if (MONEY_RE.test(sentence)) why.push("money");
-  if (PERCENT_RE.test(sentence)) why.push("a percentage");
-  if (MULTIPLIER_RE.test(sentence)) why.push("a multiplier");
-  if (DIGIT_RE.test(sentence) || QUANTITY_RE.test(sentence) || COUNT_RE.test(sentence)) why.push("a number");
-  const result = RESULT_RE.exec(sentence);
-  if (result) why.push(`a promised result ("${result[0].toLowerCase().replace(/\s+/g, " ")}")`);
-  if (SUPERLATIVE_RE.test(sentence)) why.push("a superlative");
-  if (SOCIAL_PROOF_RE.test(sentence)) why.push("who else uses it");
-  if (TIMEFRAME_RE.test(sentence)) why.push("a time frame");
-  const word = WORD_RE.exec(sentence);
-  if (word) why.push(`the word "${word[1].toLowerCase()}"`);
+  for (const { kind, phrase } of claimPhrases(sentence)) {
+    if (seen.has(kind)) continue;
+    seen.add(kind);
+    why.push(REASON[kind](phrase));
+  }
   return why;
 }
 

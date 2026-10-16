@@ -220,6 +220,8 @@ async function main() {
     has("A money-back guarantee.", "word", "money-back");
     has("Twelve businesses run on it.", "number", "Twelve businesses");
     assert.deepEqual(claims.claimPhrases("Book a walkthrough."), []);
+    // Several phrases of one family make ONE reason, said once, from the first of them.
+    assert.deepEqual(claims.claimReasons("From $497 to $997 a month, more revenue and more leads."), ["money", "a number", 'a promised result ("more revenue")']);
   });
 
   await step("lint walks every drawn piece of copy, once per sentence, and skips the brief", () => {
