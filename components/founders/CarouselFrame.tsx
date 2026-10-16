@@ -15,10 +15,23 @@
  * Keyboard reachable because a review pass is a rhythm: arrow keys move between
  * slides once the strip has focus, which is faster than aiming at a chevron
  * thirty-nine times.
+ *
+ * MOTION SLIDES. A motion carousel's slides are MP4s (CC, 2026-10-16: ten
+ * decks showed a broken-image icon and "slide 1 of 4" because every slide was
+ * drawn as an <img>). A video slide is drawn by TileVideo, so it keeps the
+ * Library's one rule for video: a cover until someone presses play, then a
+ * <video preload="none">. Slide 1's cover is the asset's poster. Inside a tile
+ * the slide plays IN PLACE - the tile's enlarge slot is hidden from it, because
+ * the big phone opens on slide 1 and would play the wrong slide; Enlarge still
+ * opens the big phone, where each slide waits for its own play press.
  */
 
-import { useState } from "react";
+import { useContext, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+
+import { enlargeSlotContext } from "@/components/founders/PhoneEnlarge";
+import { TileVideo } from "@/components/founders/TileVideo";
+import { slideKind } from "@/lib/founders-marketing-core";
 
 export function CarouselFrame({
   slides,
@@ -27,6 +40,8 @@ export function CarouselFrame({
   style,
   width,
   height,
+  posterUrl,
+  variant = "native",
 }: {
   slides: string[];
   title: string;
@@ -35,10 +50,18 @@ export function CarouselFrame({
   /** The slides' measured pixels, so the browser can size the image before it loads. */
   width?: number | null;
   height?: number | null;
+  /** The asset's cover: slide 1's poster when slide 1 is a video. */
+  posterUrl?: string | null;
+  /** How a video slide plays: as a Reel inside a PhoneFrame, or with browser controls. */
+  variant?: "native" | "phone";
 }) {
   const [i, setI] = useState(0);
+  const Slot = enlargeSlotContext();
+  const slot = useContext(Slot);
   const count = slides.length;
   const at = Math.min(i, Math.max(count - 1, 0));
+  const isVideo = count > 0 && slideKind(slides[at]) === "video";
+  const slideTitle = `${title}, slide ${at + 1} of ${count}`;
 
   // Wrap deliberately: a carousel is a loop on every network that renders one,
   // and stopping at the end makes a reviewer think it broke.
@@ -59,20 +82,34 @@ export function CarouselFrame({
         if (e.key === "ArrowRight") { e.preventDefault(); go(1); }
       }}
     >
-      {/* ONE <img>, for the slide on screen. The first slide loads lazily, when
-          the tile nears the viewport; every other slide loads only when the
-          viewer moves to it. A Library page of carousels used to pull every
-          cover at full size on arrival. */}
-      {/* eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, deliberately short-lived; see the note in marketing-shared */}
-      <img
-        src={slides[at]}
-        alt={`${title}, slide ${at + 1} of ${count}`}
-        loading="lazy"
-        decoding="async"
-        width={width ?? undefined}
-        height={height ?? undefined}
-        className="h-full w-full object-contain"
-      />
+      {/* ONE slide on screen. An image slide is one lazy <img>: the first loads
+          when the tile nears the viewport, every other only when the viewer
+          moves to it. A video slide is a cover until play (see MOTION SLIDES);
+          `key` gives each slide its own player, so moving on stops the last. */}
+      {isVideo ? (
+        <Slot.Provider value={slot?.place === "tile" ? null : slot}>
+          <TileVideo
+            key={at}
+            src={slides[at]}
+            posterUrl={at === 0 ? posterUrl : null}
+            width={width}
+            height={height}
+            title={slideTitle}
+            variant={variant}
+          />
+        </Slot.Provider>
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, deliberately short-lived; see the note in marketing-shared
+        <img
+          src={slides[at]}
+          alt={slideTitle}
+          loading="lazy"
+          decoding="async"
+          width={width ?? undefined}
+          height={height ?? undefined}
+          className="h-full w-full object-contain"
+        />
+      )}
 
       <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tabular-nums tracking-wider text-fg-muted">
         {at + 1}/{count}

@@ -35,7 +35,51 @@ export type OfferCardViewModel = {
   videoPlays: number | null;
   /** Distinct visits sent to the free community over the last 7 days. null = could not be read. */
   community: number | null;
+  /** The landing page's address (path), or null when the workspace could not be resolved. */
+  publicPath?: string | null;
+  /**
+   * What that address shows a visitor right now:
+   *   "public"        the page;
+   *   "draft"         only the bare form, because the page is unpublished;
+   *   "off"           nothing: the form is switched off and no page was published;
+   *   "off_published" nothing for now: switched off, but switching it on brings
+   *                   the published page straight back (no Publish needed);
+   *   "unresolved"    the address itself could not be built (the workspace
+   *                   lookup failed), which says nothing about the page.
+   * Absent = not stated (older callers).
+   */
+  linkState?: "public" | "draft" | "off" | "off_published" | "unresolved";
 };
+
+/** The card's one link line: the landing page's address, or plainly why there is none yet. */
+function LinkLine({ path, state }: { path: string | null | undefined; state: OfferCardViewModel["linkState"] }) {
+  if (!state) return null;
+  if (state === "unresolved" || (state === "public" && !path)) {
+    return <p className="text-xs text-status-warm">Couldn&apos;t build this offer&apos;s link. Refresh the page.</p>;
+  }
+  if (state === "public" && path) {
+    return (
+      <a
+        href={path}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="block truncate font-mono text-[11px] text-accent hover:text-accent-bright"
+        title="The live landing page"
+      >
+        {path}
+      </a>
+    );
+  }
+  return (
+    <p className="text-xs text-fg-dim">
+      {state === "off_published"
+        ? "Switched off: its link is closed. Switch it on and its published page is back."
+        : state === "off"
+          ? "Switched off: its link is closed. Switch it on, then publish the page."
+          : "Not public yet: until you publish, its link shows only the form, not this page."}
+    </p>
+  );
+}
 
 /** "Live, version N" / "Live + unpublished changes" / "Draft page (not live)". */
 export function offerPageLabel(status: OfferPageStatus, publishedVersion: number): string {
@@ -139,6 +183,7 @@ export function OfferCard({
         <Tag tone={statusTone(offer.status)}>{offerPageLabel(offer.status, offer.publishedVersion)}</Tag>
         <Tag tone={offer.hasVideo ? "accent" : "neutral"}>{offer.hasVideo ? "Video attached" : "No video attached"}</Tag>
       </div>
+      <LinkLine path={offer.publicPath} state={offer.linkState} />
       <FunnelStrip views={offer.views} videoPlays={offer.videoPlays} leads={offer.leads} community={offer.community} />
       <div className="flex flex-wrap items-center gap-3 border-t border-hairline pt-3 text-xs">{actions}</div>
     </article>

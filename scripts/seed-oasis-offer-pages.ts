@@ -215,17 +215,30 @@ export function parseOfferContent(raw: unknown, file: string): OfferContent {
   };
 }
 
+/**
+ * One content file as JSON. A file that cannot be read or is not JSON is a ContentError ("unreadable"); with
+ * `missingIsNull` an absent file is null instead (a page-only file that has not been written yet).
+ */
+function readContentJson(file: string, opts: { missingIsNull?: boolean } = {}): unknown {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (err) {
+    if (opts.missingIsNull && (err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new ContentError(file, `unreadable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new ContentError(file, `unreadable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Every content file, all parsed before any is used. Throws on the first bad one. */
 export function loadOasisOfferContent(dir: string = resolve(process.cwd(), "content", "offers", "oasis")): OfferContent[] {
   return OASIS_OFFER_SLUGS.map((slug) => {
     const file = join(dir, `${slug}.json`);
-    let raw: unknown;
-    try {
-      raw = JSON.parse(readFileSync(file, "utf8"));
-    } catch (err) {
-      throw new ContentError(file, `unreadable: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    const content = parseOfferContent(raw, file);
+    const content = parseOfferContent(readContentJson(file), file);
     if (content.slug !== slug) throw new ContentError(file, `slug must be "${slug}" (the file name)`);
     return content;
   });
@@ -238,19 +251,8 @@ export type PageOnlyContent = { slug: string; file: string; doc: OfferPageDoc | 
 export function loadOasisPageOnlyContent(dir: string = resolve(process.cwd(), "content", "offers", "oasis")): PageOnlyContent[] {
   return OASIS_PAGE_ONLY_SLUGS.map((slug) => {
     const file = join(dir, `${slug}.page.json`);
-    let text: string;
-    try {
-      text = readFileSync(file, "utf8");
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return { slug, file, doc: null };
-      throw new ContentError(file, `unreadable: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(text);
-    } catch (err) {
-      throw new ContentError(file, `unreadable: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    const raw = readContentJson(file, { missingIsNull: true });
+    if (raw === null) return { slug, file, doc: null };
     let doc: OfferPageDoc;
     try {
       // The page alone: a form block, a slug or any other key is refused by the parser.

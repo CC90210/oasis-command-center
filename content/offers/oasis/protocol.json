@@ -100,18 +100,18 @@
   "offer_page": {
     "v": 1,
     "template": "book_call",
-    "theme": { "canvas": "dark", "logo": "workspace" },
-    "nav": { "pinned": ["obstacles", "what_you_get", "faq"], "cta_label": "Pick your pack" },
+    "theme": { "canvas": "dark", "accent": "#1FE3F0", "logo": "workspace", "layout": "split" },
+    "nav": { "pinned": ["obstacles", "what_you_get", "pricing", "faq"], "cta_label": "Pick your pack" },
     "hero": {
       "eyebrow": "PROTOCOL, for solo operators and DIY builders",
-      "headline": "Run your business on the same SOPs and prompts OASIS runs on",
-      "subheadline": "The exact procedures, prompt packs and system blueprints we use, packaged so you can set them up yourself this week. Pick the pack that fits where you are, from a quick win to the full suite.",
+      "headline": "Stop rebuilding the same workflow from zero",
+      "subheadline": "OASIS Protocol turns a business outcome into a sequence you can actually run: the procedure, the prompts and the blueprint, in order. Pick the pack that fits where you are, from one quick win to the full suite.",
       "cta_label": "Pick your pack",
       "video": null,
       "show_transcript": false,
       "vsl_script": {
-        "source": "cc",
-        "text": "PROTOCOL VSL. Target length 3 to 6 minutes. Adon or CC on camera, landscape, eye level, quiet room. Oasis Studio adds captions, b-roll, the screen recordings named below and the OASIS end card.\nRule for the whole video: say no number, result or client story that is not on the page. Prices are said exactly as the page shows them.\n\n[BEAT 1. HOOK, 0:00 to 0:20]\nOn camera: It is Sunday night. You saved another AI thread this week, and on Monday you will still be doing everything by hand. Here is exactly what we use. Copy it this week.\n\n[BEAT 2. WHO THIS IS FOR, AND WHO IT IS NOT FOR]\nOn camera: This is for you if you run the business on your own, or you like building your own systems. You want the steps, not a retainer.\nIt is not for you if you want someone to set it all up for you. If that is you, look at COMMAND. And if you are not ready to spend anything yet, the free community is linked below this video.\n\n[BEAT 3. WHY IT KEEPS HAPPENING]\nOn camera: The problem is not that you need more AI. It is that every tutorial starts from zero. You collect ideas, not a process. Without a written procedure, a prompt that worked last week drifts, and you are back to doing it yourself.\n\n[BEAT 4. WHAT WE DO ABOUT IT]\nScreen recording: the PROTOCOL library inside the OASIS Command Center.\nVoice over: It works in three steps. First, pick the pack that matches where you are. Second, follow the SOP or blueprint step by step, using the prompts exactly as written. Third, when you want it running without you, move up to OS DIY.\n\n[BEAT 5. WHAT YOU GET, PRICES SAID OUT LOUD]\nOn camera, matching the page word for word:\nQuick-win SOPs and prompt packs, $17 to $47. Add an extra prompt pack for $27 if you want it.\nSystem blueprints and workflows, $97 to $197, or two payments of $59. Add the video vault for $47.\nThe master protocol suite, $297.\nThe mystery digital vault for advanced builders, $97 to $395.\nNote for the recording: once Adon picks one number for each range, say that number, and update this script and the page together.\n\n[BEAT 6. PROOF]\nNo permissioned examples are confirmed yet, so show the product instead: screen-record one SOP being followed from start to finish. Use synthetic data only, never a real customer's details.\n\n[BEAT 7. CALL TO ACTION]\nOn camera: Pick your pack below and we will send you a secure checkout link. Not ready? The free community is linked right below this video."
+        "source": "maven",
+        "text": "Still rebuilding the same workflow from zero? OASIS Protocol turns a business outcome into a sequence your team can actually run. Type the goal, open the steps, test the handoffs, save the version that works. The next time the problem appears, you are not starting over, you are running the protocol."
       }
     },
     "sections": [
@@ -120,6 +120,7 @@
         "eyebrow": "Sound familiar?",
         "title": "You are building it yourself, without a map",
         "items": [
+          { "title": "The process lives in your head", "body": "You have built this workflow before. The first version just never made it onto paper, so you build it again." },
           { "title": "You are the whole team", "body": "Sales, delivery, admin and follow-up all wait on you, so the work that grows the business is the work that slips." },
           { "title": "Every AI tutorial starts from zero", "body": "You have watched the videos and saved the threads. What you do not have is a tested process you can follow on a Monday morning." },
           { "title": "Prompts that work once, then drift", "body": "A prompt that worked last week gives you something different today, and you cannot tell why." },
@@ -130,25 +131,77 @@
         "key": "what_you_get",
         "eyebrow": "The packs",
         "title": "Pick the pack that fits where you are",
-        "lede": "Each pack is the written procedure, the prompts and the blueprints, ready to follow.",
+        "lede": "Every protocol is written to be run in order: the goal, the steps, the handoffs to test, and the version to save.",
         "items": [
-          { "title": "Quick-win SOPs and prompt packs: $17 to $47", "body": "Short, copy-ready procedures and prompts for one job at a time. Built for people just starting. Optional add-on: an extra prompt pack for $27." },
-          { "title": "System blueprints and workflows: $97 to $197", "body": "The blueprints and workflows behind a full system, for DIY builders, with private template access. Prefer to split it? Two payments of $59. Optional add-on: the video vault for $47." },
-          { "title": "Master protocol suite: $297", "body": "Every protocol in one suite, for agency owners who want the whole library." },
-          { "title": "Mystery digital vault: $97 to $395", "body": "Advanced builds for experienced builders. You find out what is inside when you open it." }
+          { "title": "Quick-win SOPs and prompt packs", "body": "Short, copy-ready procedures and prompts for one job at a time. Built for people just starting." },
+          { "title": "System blueprints and workflows", "body": "The blueprints and workflows behind a full system, for builders who set up their own tools, with private template access." },
+          { "title": "Master protocol suite", "body": "Every protocol in one suite, for agency owners who want the whole library." },
+          { "title": "Written to be run, not read", "body": "No document dump. Each protocol is a sequence with the prompts in place, so the next time the problem appears you run it instead of starting over." }
+        ]
+      },
+      {
+        "key": "work",
+        "eyebrow": "How it works",
+        "title": "Pick it, run it, keep it",
+        "items": [
+          { "title": "Pick the pack that matches where you are", "body": "Quick wins if you are starting out, blueprints if you build your own systems, the full suite if you run an agency." },
+          { "title": "Run it step by step", "body": "Each SOP and blueprint is written to be followed in order, with the prompts used exactly as written." },
+          { "title": "Keep the version that works", "body": "Save it, and the next time the problem comes back you run the protocol. Want it set up for you instead? Look at COMMAND." }
+        ]
+      },
+      {
+        "key": "pricing",
+        "eyebrow": "Packs",
+        "title": "One-time packs. Nothing renews.",
+        "currency_note": "Prices in US dollars.",
+        "tiers": [
+          {
+            "name": "Quick-win pack",
+            "price": "$47",
+            "cadence": "one-time",
+            "summary": "One job off your plate: a copy-ready procedure and its prompts.",
+            "includes": [
+              "A copy-ready SOP for one job",
+              "The prompts, written to be used as-is",
+              "Built for people just starting",
+              "Optional extra prompt pack at checkout"
+            ]
+          },
+          {
+            "name": "System blueprint",
+            "price": "$147",
+            "cadence": "one-time",
+            "summary": "The blueprint and workflows behind a full system, for builders who set up their own tools.",
+            "includes": [
+              "The blueprint and its workflows",
+              "Private template access",
+              "Optional video vault at checkout"
+            ]
+          },
+          {
+            "name": "Master protocol suite",
+            "price": "$297",
+            "cadence": "one-time",
+            "summary": "Every protocol in one suite, for agency owners who want the whole library.",
+            "includes": [
+              "Every OASIS protocol in one suite",
+              "The quick wins and the blueprints together",
+              "For agency owners and serious builders"
+            ],
+            "highlighted": true
+          }
         ]
       },
       {
         "key": "faq",
         "title": "Questions",
         "items": [
-          { "q": "Which pack should I start with?", "a": "If you are new to this, start with the quick-win packs and get one job off your plate. If you already build your own systems, the blueprints are for you. If you run an agency and want everything, take the master suite. The mystery vault is for experienced builders who want the advanced material." },
-          { "q": "How does it work?", "a": "First, pick the pack that matches where you are. Then follow the SOP or blueprint step by step, using the prompts exactly as written. When you want the system running without you, apply for OS DIY on the COMMAND page." },
+          { "q": "Which pack should I start with?", "a": "If you are new to this, start with a quick-win pack and get one job off your plate. If you already build your own systems, the blueprints are for you. If you run an agency and want everything, take the master suite." },
           { "q": "Do I need to be technical?", "a": "The quick-win packs are written for people just starting. The blueprints and the suite assume you are comfortable setting up tools yourself." },
           { "q": "How do I pay?", "a": "Leave your details below and pick your pack. A member of the OASIS team will email you a secure checkout link." },
           { "q": "Is this a subscription?", "a": "No. Each pack is a one-time purchase. Nothing renews." },
-          { "q": "What if I want it done for me?", "a": "Then PROTOCOL is not the right fit. Look at COMMAND, where we set up the OASIS Command Center for your business." },
-          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside us, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=protocol&t=oasis-ai-cc" }
+          { "q": "What if I want it done for me?", "a": "Then PROTOCOL is not the right fit. Look at COMMAND, where OASIS sets up the Command Center around your business." },
+          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside other builders, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=protocol&t=oasis-ai-cc" }
         ]
       }
     ],
@@ -160,17 +213,17 @@
       "qualify": "after"
     },
     "seo": {
-      "title": "PROTOCOL: the SOPs and prompts OASIS runs on",
-      "description": "Copy-ready SOPs, prompt packs and system blueprints from OASIS, for solo operators and DIY builders who want to set it up themselves.",
+      "title": "PROTOCOL: SOPs, prompts and blueprints you can run",
+      "description": "Stop rebuilding the same workflow from zero. Copy-ready SOPs, prompt packs and system blueprints from OASIS, written to be run in order.",
       "indexable": false
     },
     "brief": {
-      "audience": "Solopreneurs and DIY builders (funnel doc PROTOCOL, cat=p1, keyword PROTOCOL).",
-      "promise": "The exact SOPs, prompts and blueprints OASIS runs on, so you can set it up yourself this week (HANDOVER section 4).",
-      "included": "1A Quick-win SOPs + prompt packs (beginners). 1B System blueprints + workflows (DIY builders, private template access). 1C Master protocol suite (agency owners, lifetime library key per funnel doc, not stated on the page until delivery is confirmed). 1D Mystery digital vault (advanced builders, instant vault key in OCC per funnel doc, not stated on the page: delivery is not built).",
-      "proof_available": "None confirmed. No results, testimonials or numbers on the page until there are permissioned ones.",
-      "price": "As the funnel doc states: 1A $17-47 (bump +$27 prompt pack), 1B $97-197 (2-pay $59 x 2, bump +$47 video vault), 1C $297 (downsell 1B at $147), 1D $97-395 (downsell 1A at $47). Currency unconfirmed. Ranges need one number each before publish.",
-      "bonuses": "None named for PROTOCOL.",
+      "audience": "Beginners, solopreneurs, builders and agency owners who keep rebuilding the same workflow (oasis-ai.md pillar 1, cat=p1).",
+      "promise": "Executable operating paths, not a document dump (oasis-ai.md creative lane 1); the pack v2 protocol film.",
+      "included": "1A quick-win SOPs and prompt packs, 1B system blueprints and workflows (private template access), 1C master protocol suite. 1D mystery vault held back until its delivery is built.",
+      "proof_available": "None confirmed. Results section omitted.",
+      "price": "Recommended USD: 1A $47, 1B $147, 1C $297, all one-time. The 1B 2-pay ($59 x 2) needs resetting at $147. CC confirms each tier in the builder.",
+      "bonuses": "None named for PROTOCOL. Order bumps (prompt pack, video vault) live in the form, not as page bonuses.",
       "guarantee": "None confirmed. Section omitted."
     }
   }

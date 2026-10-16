@@ -11,6 +11,12 @@ need a confirmation. The rest only a person can check.
 **Order matters.** A tick is stored against the exact sentence, so editing a sentence clears its tick. Settle the
 currency and the price ranges first, edit the copy, and tick the flagged sentences last.
 
+**Copy of 2026-10-16 (Maven).** All six pages, the AI Automation Audit included, carry Maven's copy: one USD price
+per tier inside the gated pricing section (each needs the owner's confirmation in the builder), the accent of each
+page's pillar film, and the narration of the approved film as the script. Each page's own list of claims to confirm
+and the pricing conflicts Maven resolved are in `CMO-Agent/output/offer-pages/<slug>.json` (`claims_to_confirm`,
+`pricing_recommendation`); the per-page sections below predate that copy where they still talk about ranges.
+
 ---
 
 ## 1. Every page
@@ -124,56 +130,60 @@ written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence
 
 | Where | Why | Sentence |
 |---|---|---|
-| `what_you_get.items[0].body` | money, a number | The SOPs, prompts and blueprints OASIS runs on, from $17 for a quick-win pack to $297 for the full suite. |
+| `hero.subheadline` | a number | Four ways in, from free to fully built. |
 | `what_you_get.items[1].body` | money, a number | For service businesses doing roughly $10K to $75K a month. |
-| `what_you_get.items[1].body` | money, a number | Follow-up, booking and back office running without you, from $497 a month. |
-| `what_you_get.items[3].body` | money, a number | It starts with an enterprise AI and security audit, from $2,500, credited in full to the build. |
-| `faq.items[0].a` | the word "revenue" | We also ask about revenue and budget so we can point you to the page that fits, and you can change your mind on any page. |
-| `faq.items[2].q` | the word "revenue" | Why do you ask about revenue and budget? |
+| `what_you_get.items[1].body` | the word "clients" | Team, Growth, Clients and Money in one operating view, set up for you or by you. |
+| `work.items[1].body` | the word "revenue" | Revenue and budget, so a solo builder is not sent to an enterprise audit. |
+| `faq.items[1].a` | a number | Yes, two. |
+| `faq.items[3].q` | the word "revenue" | Why do you ask about revenue and budget? |
 
-### PROTOCOL (`protocol`): 7
-
-| Where | Why | Sentence |
-|---|---|---|
-| `what_you_get.items[0].title` | money, a number | Quick-win SOPs and prompt packs: $17 to $47 |
-| `what_you_get.items[0].body` | money, a number | Optional add-on: an extra prompt pack for $27. |
-| `what_you_get.items[1].title` | money, a number | System blueprints and workflows: $97 to $197 |
-| `what_you_get.items[1].body` | money, a number | Two payments of $59. |
-| `what_you_get.items[1].body` | money, a number | Optional add-on: the video vault for $47. |
-| `what_you_get.items[2].title` | money, a number | Master protocol suite: $297 |
-| `what_you_get.items[3].title` | money, a number | Mystery digital vault: $97 to $395 |
-
-### COMMAND (`command`): 8
+### PROTOCOL (`protocol`): 1
 
 | Where | Why | Sentence |
 |---|---|---|
-| `what_you_get.items[0].title` | money, a number | OS DIY: $497 a month, no setup fee |
-| `what_you_get.items[1].title` | money, a number | OS Turnkey, done for you: $2,500 setup + $997 a month |
-| `what_you_get.items[1].body` | a percentage, a number | You fill in the onboarding vault (your logins, documents and channels), and the 7-day setup clock starts when it is 100% submitted. |
-| `what_you_get.items[1].body` | money, a number | Two payments of $1,400. |
-| `what_you_get.items[2].title` | money, a number | Managed operating partner: $5,000 setup + $2,500 to $3,500 a month |
-| `faq.items[0].a` | a number | It is a 45-minute video call. |
-| `faq.items[4].a` | money, a number | Turnkey's setup can be split into two payments of $1,400. |
-| `faq.items[4].a` | money, a number | You can also start on OS DIY at $497 a month with no setup fee, or join the VIP mastermind at $97 a month and build alongside us first. |
+| `pricing.currency_note` | money | Prices in US dollars. |
 
-### COMMUNITY (`community`): 3
+### COMMAND (`command`): 16
 
 | Where | Why | Sentence |
 |---|---|---|
-| `what_you_get.items[0].title` | money, a number | Free Telegram lounge: $0 |
-| `what_you_get.items[1].title` | money, a number | VIP mastermind: $47 to $97 a month |
-| `what_you_get.items[2].title` | money, a number | One-on-one founder mentorship: $2,500 to $5,000 a month |
+| `hero.headline` | a number | Your business should not need four dashboards to answer one question |
+| `hero.subheadline` | the word "clients" | The OASIS Command Center brings Team, Growth, Clients and Money into one operating view. |
+| `hero.subheadline` | the word "result" | See what needs attention, open the source, assign the next move and see the result. |
+| `obstacles.items[1].title` | a number | Four dashboards, no answer |
+| `what_you_get.title` | a number | One operating view, four sections |
+| `what_you_get.items[1].body` | a number | New leads, where they came from and the next follow-up, in one pipeline instead of four inboxes. |
+| `what_you_get.items[2].title` | the word "clients" | Clients |
+| `what_you_get.items[2].body` | the word "client" | Each client's work, conversations and next steps in one place, so nobody has to ask you. |
+| `work.items[2].body` | the word "result" | Ask what needs attention, open the source, assign the next move and see the result. |
+| `pricing.tiers[0].includes[0]` | the word "clients" | Team, Growth, Clients and Money in one view |
+| `pricing.tiers[1].cadence` | money, a number | a month + $2,500 setup |
+| `pricing.tiers[1].summary` | money, a number | Setup is $2,500 paid at once, or two payments of $1,400. |
+| `pricing.tiers[2].cadence` | money, a number | a month + $5,000 setup |
+| `pricing.currency_note` | money | Prices in US dollars. |
+| `faq.items[3].a` | a number | Turnkey's setup can be split into two payments. |
+| `seo.description` | the word "clients" | Team, Growth, Clients and Money in one operating view. |
 
-### FLEET (`fleet`): 6
+### COMMUNITY (`community`): 2
 
 | Where | Why | Sentence |
 |---|---|---|
-| `what_you_get.items[0].title` | money, a number | Enterprise AI and security audit: $2,500 to $7,500 |
-| `what_you_get.items[1].title` | money, a number | Bespoke multi-agent fleets: $5,000 to $15,000+ |
-| `what_you_get.items[2].title` | money, a number | Website rebuild: $2,000 to $5,000 |
-| `what_you_get.items[2].body` | money, a number | Start with a $500 website audit. |
-| `faq.items[3].a` | money, a number | The master protocol suite on the PROTOCOL page includes a self-audit protocol your team can run in-house for $297. |
-| `faq.items[3].a` | money, a number | For the website alone, start with the $500 website audit. |
+| `work.items[0].title` | a number | Answer two quick questions |
+| `pricing.currency_note` | money | Prices in US dollars. |
+
+### FLEET (`fleet`): 1
+
+| Where | Why | Sentence |
+|---|---|---|
+| `pricing.currency_note` | money | Prices in US dollars. |
+
+### AI Automation Audit (`ai-audit`): 3
+
+| Where | Why | Sentence |
+|---|---|---|
+| `work.title` | a number | Three steps, and you stay in control |
+| `work.items[0].body` | the word "revenue" | Revenue and budget are optional. |
+| `faq.items[3].q` | the word "revenue" | Do I have to share revenue or budget? |
 
 ### AI Automation Audit (`ai-audit`): 3
 

@@ -18,7 +18,9 @@
 
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
-import { ArrowLeft, ArrowRight, RotateCcw } from "lucide-react";
+import { ArrowLeft, ArrowRight, Play, RotateCcw } from "lucide-react";
+
+import { slideKind } from "@/lib/founders-marketing-core";
 
 export function SlideReorder({
   assetId,
@@ -87,15 +89,29 @@ export function SlideReorder({
             className="group/slide relative w-[74px] shrink-0 overflow-hidden rounded-md border border-bg-border bg-bg-deep"
           >
             {/* Lazy and async like every Library image: each thumbnail is a
-                full-size slide, so a long deck must not fetch them all up front. */}
-            {/* eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, short-lived by design */}
-            <img
-              src={slideUrls[slideIdx]}
-              alt={`Slide ${pos + 1}`}
-              loading="lazy"
-              decoding="async"
-              className="h-[92px] w-full object-cover"
-            />
+                full-size slide, so a long deck must not fetch them all up front.
+                A motion slide (an MP4) is a labelled panel, never an <img> of a
+                video: that drew a broken-image icon. It loads nothing; the
+                carousel above plays it. */}
+            {slideKind(slideUrls[slideIdx] ?? "") === "video" ? (
+              <div
+                role="img"
+                aria-label={`Slide ${pos + 1}, video`}
+                className="flex h-[92px] w-full flex-col items-center justify-center gap-1 bg-black text-fg-muted"
+              >
+                <Play aria-hidden className="h-4 w-4 fill-current" />
+                <span className="text-[9px] font-bold uppercase tracking-wider">Video</span>
+              </div>
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, short-lived by design
+              <img
+                src={slideUrls[slideIdx]}
+                alt={`Slide ${pos + 1}`}
+                loading="lazy"
+                decoding="async"
+                className="h-[92px] w-full object-cover"
+              />
+            )}
             <span className="absolute left-1 top-1 rounded bg-bg-deep/85 px-1 text-[9px] font-bold tabular-nums text-fg-muted">
               {pos + 1}
             </span>
