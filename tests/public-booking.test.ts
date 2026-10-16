@@ -267,7 +267,7 @@ await check("books only a slot live availability returns, hosted by that slot's 
   const bookPage = readFileSync("components/booking/BookingPage.tsx", "utf8");
   assert.match(
     bookPage,
-    /setTicked\(\(t\) => \(\{ \.\.\.t, \[channel\]: e\.target\.checked \}\)\);[\s\S]{0,400}tokenRef\.current = null;/,
+    /setTicked\(\(t\) => \(\{ \.\.\.t, \[channel\]: value \}\)\);[\s\S]{0,400}tokenRef\.current = null;/,
     "a consent change after a failed booking re-sends the form step so the ledger records it",
   );
   assert.ok(!/hostUserId: founders\./.test(bookingRoute), "no booking is pinned to a fixed founder any more");

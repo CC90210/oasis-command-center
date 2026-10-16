@@ -27,7 +27,6 @@ import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 import { captureConsent, disclosureFor, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
 import {
-  consentDisclosureText,
   renderedChannelsForStep,
   type ConsentChannel,
   type ConsentIdentity,
@@ -37,6 +36,7 @@ import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { PublicBookingCalendar } from "./PublicBookingCalendar";
 import { isPublicBookingSurface } from "@/lib/forms/public-booking-config";
+import { ConsentChoice } from "./ConsentChoice";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -1206,30 +1206,20 @@ export function FormPublicClient({
                     // <label>/<input> pair, not a styled div: a screen reader
                     // announces it as a checkbox with this exact text, and Tab
                     // + Space operate it with no mouse. Recorded whether ticked
-                    // or not — see lib/consent/ledger.ts.
+                    // or not — see lib/consent/ledger.ts. Since 2026-10-16 each
+                    // box shows one summary line with the full disclosure under
+                    // "Full terms" (components/forms/ConsentChoice.tsx).
                     <div className="space-y-3 rounded-lg border border-bg-border bg-bg-elev/30 p-3">
-                      {ledgerChannels.map((channel) => {
-                        const inputId = `${ledgerIdBase}-consent-${channel}`;
-                        return (
-                          <div key={channel} className="flex items-start gap-3 py-1">
-                            <input
-                              id={inputId}
-                              type="checkbox"
-                              checked={ledgerTicked[channel]}
-                              onChange={(e) =>
-                                setLedgerTicked((prev) => ({ ...prev, [channel]: e.target.checked }))
-                              }
-                              className="mt-0.5 h-4 w-4 shrink-0 rounded border-bg-border"
-                            />
-                            <label
-                              htmlFor={inputId}
-                              className="text-[12px] leading-relaxed text-fg-muted"
-                            >
-                              {consentDisclosureText(channel, consentIdentity)}
-                            </label>
-                          </div>
-                        );
-                      })}
+                      {ledgerChannels.map((channel) => (
+                        <ConsentChoice
+                          key={channel}
+                          id={`${ledgerIdBase}-consent-${channel}`}
+                          channel={channel}
+                          identity={consentIdentity}
+                          checked={ledgerTicked[channel]}
+                          onChange={(value) => setLedgerTicked((prev) => ({ ...prev, [channel]: value }))}
+                        />
+                      ))}
                     </div>
                   ) : null
                 }
