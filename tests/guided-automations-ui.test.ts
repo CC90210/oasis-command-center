@@ -296,6 +296,8 @@ const CASES: Case[] = [
   // the list
   { id: "list_items", kind: "section", props: base({}, CTX, LIST_ITEMS) },
   { id: "list_empty", kind: "section", props: base({}, CTX, []) },
+  { id: "list_empty_with_others", kind: "section", props: { ...base({}, CTX, []), othersText: "Daily Automation Register" } },
+  { id: "list_items_with_others", kind: "section", props: { ...base({}, CTX, LIST_ITEMS), othersText: "Daily Automation Register" } },
   { id: "list_confirm", kind: "section", props: base({ initialRows: { i2: { confirmDelete: true } } }, CTX, LIST_ITEMS) },
   { id: "list_row_failure", kind: "section", props: base({ initialRows: { i1: { note: { kind: "failure", failure: toFailure(failure({ error: "connection_missing", message: "Google Workspace is not connected.", repair: REPAIR_GOOGLE })) } } } }, CTX, LIST_ITEMS) },
   { id: "list_row_test", kind: "section", props: base({ initialRows: { i2: { note: { kind: "test", result: RESULT_DRAFTS } } } }, CTX, LIST_ITEMS) },
@@ -420,10 +422,16 @@ async function main() {
   const dom: Record<string, HNode> = {};
   for (const [id, html] of Object.entries(markup)) dom[id] = parse(html);
   const guided = (id: string) => {
-    // The page cases keep only what comes before the Advanced fold.
+    // The page cases keep only the builder's own words: the header, then the builder and its rows, without
+    // the older parts of the page (the connection banner, the scheduled-jobs list inside Your automations,
+    // the explainer), which keep their own copy.
     const html = markup[id];
-    const cut = html.indexOf('<details class="rounded-xl border border-bg-border bg-bg-elev/30 text-sm">');
-    return id.startsWith("page_") && cut > 0 ? html.slice(0, cut) : html;
+    if (!id.startsWith("page_")) return html;
+    const banner = html.indexOf('<div class="rounded-xl border border-bg-border bg-bg-deep/40 p-4 flex items-start gap-3">');
+    const builder = html.indexOf('<div class="space-y-8">');
+    const older = html.indexOf('<div data-testid="automations-made-before">');
+    if (banner < 0 || builder < 0 || older < 0) return html;
+    return html.slice(0, banner) + html.slice(builder, older);
   };
   const sectionIds = CASES.filter((c) => c.kind === "section").map((c) => c.id);
   const textOnly = (html: string) => decode(html.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ");
@@ -1030,6 +1038,22 @@ async function main() {
     assert.equal(flat(tags(r, "h2").find((h) => h.attrs.id === "guided-list-h")!), "Your automations", "no count when there is nothing");
   });
 
+  await check("automations made before the builder are listed INSIDE Your automations, after its rows, and never hidden by a 'nothing yet'", () => {
+    // CC, 2026-10-16: "my automations aren't being displayed - the ones I previously built aren't showing up".
+    const empty = dom.list_empty_with_others;
+    const section = all(empty, (x) => x.tag === "section" && x.attrs["aria-labelledby"] === "guided-list-h")[0];
+    assert.ok(section, "one Your automations section");
+    assert.ok(flat(section).includes("Daily Automation Register"), "the older automations are inside it");
+    assert.ok(!flat(empty).includes("build your first one above"), "no 'nothing yet' above real automations");
+    assert.equal(flat(tags(empty, "h2").find((h) => h.attrs.id === "guided-list-h")!), "Your automations", "no count that leaves the older ones out");
+    const withRows = dom.list_items_with_others;
+    const rowsSection = all(withRows, (x) => x.tag === "section" && x.attrs["aria-labelledby"] === "guided-list-h")[0];
+    const text = flat(rowsSection);
+    assert.ok(text.indexOf("Daily Automation Register") > text.indexOf(flat(tags(rowsSection, "li")[0])), "the builder's rows first, then the older ones");
+    assert.equal(flat(tags(withRows, "h2").find((h) => h.attrs.id === "guided-list-h")!), "Your automations");
+    assert.ok(!markup.list_empty.includes("automations-made-before"), "no empty wrapper when there is nothing older");
+  });
+
   await check("loading and could-not-load states are real: words, a way to try again, never an empty box", () => {
     const loading = dom.loading;
     assert.ok(flat(loading).includes("Loading the builder..."));
@@ -1058,25 +1082,35 @@ async function main() {
     assert.ok(off.includes("How automations work, in plain English"));
   });
 
-  await check("integration: with the builder on, it is the ONE way to make an automation: no AI box, no script form, older jobs folded away", () => {
+  await check("integration: with the builder on, it is the ONE way to make an automation, and every automation already made is in plain sight", () => {
     const on = dom.page_on;
     const top = on.kids[0];
     const children = top.kids;
     const idxGuided = children.findIndex((k) => k.tag === "div" && tags(k, "section").some((s) => s.attrs["aria-labelledby"] === "guided-list-h"));
-    const idxFold = children.findIndex((k) => k.tag === "details");
-    assert.ok(idxGuided > 0 && idxFold > idxGuided, "the builder and the list come before the fold");
-    const fold = children[idxFold];
-    assert.ok(!("open" in fold.attrs), "closed by default");
-    assert.equal(tags(fold, "summary")[0].kids[0].text, "Other scheduled jobs");
-    assert.equal(all(on, (x) => x.tag === "summary" && /^Other scheduled jobs/.test(flat(x))).length, 1, "one fold");
+    assert.ok(idxGuided > 0, "the builder and Your automations near the top");
+    // Nothing the person built is closed away: the only disclosure left is the plain-English explainer.
+    assert.ok(!markup.page_on.includes("Other scheduled jobs"), "no 'Other scheduled jobs' box");
+    const disclosures = all(on, (x) => x.tag === "details");
+    assert.equal(disclosures.length, 1, "one disclosure");
+    assert.match(flat(tags(disclosures[0], "summary")[0]), /How automations work, in plain English/);
+    // The scheduled-jobs list (CronJobsManager: its count line reads "Loading..." before it fetches) is
+    // INSIDE the Your automations section, not after it and not inside any disclosure.
+    const yours = all(on, (x) => x.tag === "section" && x.attrs["aria-labelledby"] === "guided-list-h")[0];
+    const before = all(yours, (x) => x.attrs["data-testid"] === "automations-made-before");
+    assert.equal(before.length, 1, "the older automations are listed inside Your automations");
+    assert.match(flat(before[0]), /Loading/, "and it is the scheduled-jobs list");
+    assert.ok(!all(disclosures[0], (x) => x.attrs["data-testid"] === "automations-made-before").length);
+    // The connection status, the modules board and the explainer keep their places on the page.
+    // The render stubs no paired computer, so the banner's own headline for that case must be on the page,
+    // before the builder (it says whether scheduled jobs can run at all).
+    const bannerAt = markup.page_on.indexOf("Computer not connected yet.");
+    assert.ok(bannerAt > 0 && bannerAt < markup.page_on.indexOf("guided-list-h"), "the connection status is on the page, above the list");
     for (const html of [markup.page_on, markup.page_on_not_allowed]) {
       assert.ok(!html.includes("Draft with AI"), "the AI box is gone");
       assert.ok(!html.includes("Describe what you want"), "and its heading");
       assert.ok(!html.includes("New automations are coming to this page."), "no placeholder for a path that is not offered");
       assert.ok(!html.includes("Run a Python script"), "no script form");
     }
-    const inside = flat(fold);
-    assert.ok(inside.includes("How automations work, in plain English"));
     assert.ok(markup.page_on.includes("Use New automation at the top of this page."));
     assert.ok(markup.page_on.includes("Pick a job, say when it should run and try it once before you turn it on."));
     assert.ok(!markup.page_on.includes("lead scoring"), "the header no longer promises what no tenant job does");

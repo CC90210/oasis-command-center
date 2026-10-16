@@ -79,7 +79,11 @@ async function main() {
   const markup: Record<string, string> = {};
   for (const c of input.cases) {
     if (c.kind === "section") {
-      markup[c.id] = renderToStaticMarkup(React.createElement(GuidedAutomations, { api, ...c.props }));
+      // `othersText` stands in for the page's list of automations made before the builder (children cannot
+      // cross the JSON boundary): a paragraph carrying that text.
+      const { othersText, ...props } = c.props as { othersText?: string };
+      const others = othersText ? React.createElement("p", { id: "others-probe" }, othersText) : undefined;
+      markup[c.id] = renderToStaticMarkup(React.createElement(GuidedAutomations, { api, ...props }, others));
     } else {
       profile = c.profile === undefined ? { tenant_id: "t-1", auth_user_id: "u-1", agents_enabled: ["bravo"] } : c.profile;
       markup[c.id] = renderToStaticMarkup((await AutomationsContent(c.props)) as never);
