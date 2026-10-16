@@ -472,7 +472,8 @@ async function main() {
 
   await check("Training says, in plain words, what it is, what is in it and how to add to it; no persona name; Tools has its place above it", async () => {
     const text = textOf(await resolve(await TrainPage(), false));
-    assert.match(text, /what the marketing agent learns from/i, "what it is");
+    assert.match(text, /what your agents learn from/i, "what it is (each row names the agent it trains)");
+    assert.match(text, /The links you add here are what the marketing agent learns from/, "links added here still train Marketing, and the page says so");
     assert.match(text, /reels, TikToks, YouTube\s+videos, GitHub repos and articles/, "what goes in it");
     assert.match(text, /Every five minutes a background job reads each new link/, "what happens to it (the Training Corpus Ingest job's schedule)");
     assert.match(text, /Add examples/);
@@ -607,7 +608,7 @@ async function main() {
   await check("no Requests card; the Training card says what it is; nothing on the Overview names a persona or a vendor", async () => {
     const text = textOf(await resolve(await MarketingPage(), false));
     assert.doesNotMatch(text, /Requests|Jobs for the marketing agent|None open\./, "the Requests card is gone");
-    assert.match(text, /Training material.*What the marketing agent learns from/s);
+    assert.match(text, /Training material.*What your agents learn from/s);
     assert.doesNotMatch(text, PERSONA, `a persona name or pronoun on the Overview: ${text.match(PERSONA)?.[0]}`);
     assert.doesNotMatch(text, /Zernio|provenance/, "the posting account, not its vendor; no jargon");
   });

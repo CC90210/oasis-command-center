@@ -1,5 +1,7 @@
 /**
- * /founders/marketing/train - Training: what the marketing agent learns from.
+ * /founders/marketing/train - Training: what your agents learn from. Links added here train the
+ * Marketing agent; the list also shows notes taught to other agents on Admin > Agent training, each
+ * row naming the agent it trains (CC 2026-10-16).
  *
  * Adon, 2026-08-02: "The dashboard is really just going to be putting your full
  * power in a dashboard and really making it seem as if I'm able to train you in
@@ -53,7 +55,7 @@ export default async function TrainPage() {
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Training"
-        subtitle="What the marketing agent learns from, what is in it, and how to add to it."
+        subtitle="What your agents learn from, what is in it, and how to add to it."
       />
 
       {/* TOOLS: the Train tools track's own <section> goes here, above the
