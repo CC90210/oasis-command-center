@@ -730,7 +730,8 @@ async function main() {
         storage_bucket TEXT, storage_path TEXT, mime TEXT, bytes INTEGER, width INTEGER, height INTEGER, label TEXT);
       CREATE TABLE marketing_review (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL, acted_on_at TEXT);
       CREATE TABLE marketing_publish_intent (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL,
-        state TEXT NOT NULL, platforms TEXT, created_at TEXT NOT NULL);
+        state TEXT NOT NULL, platforms TEXT, created_at TEXT NOT NULL,
+        result TEXT NOT NULL DEFAULT '{}', error TEXT, finished_at TEXT);
     `);
     await raw.batch(
       [
@@ -846,7 +847,11 @@ async function main() {
         { w: 1080, h: 1920, caption: "Watch it land" },
         "at the video's own shape, with its caption",
       );
-      assert.deepEqual(previewOptions(page.tree), ["Instagram", "TikTok", "Safe zones"], "no Phone / Original choice for a video");
+      assert.deepEqual(
+        previewOptions(page.tree),
+        ["Instagram", "TikTok", "Safe zones", "Download"],
+        "no Phone / Original choice for a video; Download saves the original (CC, 2026-10-16)",
+      );
       assert.ok(hosts(page.tree).some((h) => h.type === "enlarge-button"), "Enlarge");
 
       const original = await renderAsset("v1", { frame: "original" });
