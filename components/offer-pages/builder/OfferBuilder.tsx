@@ -13,9 +13,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, Loader2 } from "lucide-react";
 import { FormBuilderClient } from "@/components/forms/FormBuilderClient";
 import type { FormBranding, FormStep } from "@/lib/forms/types";
-import type { BodyKey, BodySection, OfferPageDoc } from "@/lib/offer-pages/types";
+import type { BodyKey, BodySection, HeroLayout, OfferPageDoc } from "@/lib/offer-pages/types";
 import { BODY_KEYS, COPY_CAPS, accentPassesAA, isHexColor } from "@/lib/offer-pages/types";
-import { NAV_LABELS, drawnSections } from "@/lib/offer-pages/visibility";
+import { NAV_LABELS, drawnSections, isConfirmed } from "@/lib/offer-pages/visibility";
 import type { GateResult } from "@/lib/offer-pages/claims";
 import { serialSaver } from "@/lib/offer-pages/save-queue";
 import { fieldLabel } from "@/lib/offer-pages/field-labels";
@@ -53,6 +53,13 @@ type Tab = (typeof TABS)[number];
 
 /** For the status chips only: the builder cannot check a Library asset, so it assumes one resolves. */
 const LENIENT_MEDIA = { video: () => true, image: () => true };
+
+/** The three hero layouts, in the owner's words (lib/offer-pages/types.ts HERO_LAYOUTS). */
+const HERO_LAYOUT_CHOICES: ReadonlyArray<{ value: HeroLayout; label: string; description: string }> = [
+  { value: "split", label: "Side by side", description: "Your words on the left and the video on the right. Phones show the video under the words." },
+  { value: "stacked", label: "Video under the headline", description: "Headline and button centred at the top, with a wide video underneath." },
+  { value: "centered", label: "Centred", description: "Everything in one centred column, with a smaller video under the words." },
+];
 
 function wordCount(s: string): number {
   return s.trim() ? s.trim().split(/\s+/).length : 0;
@@ -155,6 +162,10 @@ export function OfferBuilder({
     const drawn = new Set(drawnSections(doc, LENIENT_MEDIA).map((s) => s.key));
     const needsOk = new Set((view.gate?.claims ?? []).filter((c) => !c.confirmed).map((c) => c.section));
     for (const s of doc.sections) out[s.key] = !drawn.has(s.key) ? "hidden" : needsOk.has(s.key) ? "needs_ok" : "ready";
+    // A written price nobody confirmed is not drawn, so the section would read
+    // "Hidden - empty" while it is really waiting on the owner's tick.
+    const pricing = doc.sections.find((s) => s.key === "pricing");
+    if (pricing && pricing.key === "pricing" && pricing.tiers.some((t) => t.price.trim() && !isConfirmed(t.confirmed))) out.pricing = "needs_ok";
     return out;
   }, [doc, view.gate]);
 
@@ -433,6 +444,26 @@ export function OfferBuilder({
               </span>
             </div>
           </label>
+          <fieldset className="space-y-2">
+            <legend className="label">Hero layout (the top of the page)</legend>
+            {HERO_LAYOUT_CHOICES.map((c) => (
+              <label key={c.value} className="flex cursor-pointer items-start gap-2 text-[13px] text-fg">
+                <input
+                  type="radio"
+                  name="offer-hero-layout"
+                  className="mt-0.5 h-4 w-4"
+                  value={c.value}
+                  // No choice saved yet is today's side-by-side hero, so that is what shows as picked.
+                  checked={(doc.theme.layout ?? "split") === c.value}
+                  onChange={() => update({ ...doc, theme: { ...doc.theme, layout: c.value } })}
+                />
+                <span>
+                  <span className="font-semibold">{c.label}</span>
+                  <span className="block text-[12px] text-fg-muted">{c.description}</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
           <Tick
             checked={doc.theme.logo !== "none"}
             onChange={(v) => update({ ...doc, theme: { ...doc.theme, logo: v ? "workspace" : "none" } })}

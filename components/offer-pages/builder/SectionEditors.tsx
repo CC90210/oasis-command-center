@@ -8,7 +8,9 @@
  * Claims are entered with their owner's word at the moment they go in: a result
  * is added only with the client's permission and a confirmation; a bonus value
  * only with "Confirm this value"; the guarantee shows only once its terms are
- * confirmed. The server records who confirmed each one and when.
+ * confirmed. The server records who confirmed each one and when. A price may
+ * be written first and confirmed later (the copy team drafts it), but it
+ * reaches the page and Publish only once an owner ticks it.
  *
  * Placeholders are input hints, never saved, never drawn.
  */
@@ -24,14 +26,16 @@ import type {
   ObstaclesSection,
   OfferBrief,
   OfferPageDoc,
+  PricingSection,
+  PricingTier,
   ResultItem,
   ResultsSection,
   VideoRef,
   WhatYouGetSection,
   WorkSection,
 } from "@/lib/offer-pages/types";
-import { COPY_CAPS, ITEM_CAPS } from "@/lib/offer-pages/types";
-import { NAV_LABELS, formatMoney } from "@/lib/offer-pages/visibility";
+import { COPY_CAPS, ITEM_CAPS, TIER_INCLUDES_CAP } from "@/lib/offer-pages/types";
+import { NAV_LABELS, formatMoney, isConfirmed } from "@/lib/offer-pages/visibility";
 import { TextField, Tick, SmallButton, pendingConfirmation } from "./fields";
 import { VideoPicker } from "./VideoPicker";
 
@@ -182,6 +186,8 @@ export function SectionCard({
             <ResultItems s={section} onChange={onChange} formId={formId} libraryAvailable={libraryAvailable} />
           ) : section.key === "bonuses" ? (
             <BonusItems s={section} onChange={onChange} />
+          ) : section.key === "pricing" ? (
+            <PricingTiers s={section} onChange={onChange} />
           ) : section.key === "guarantee" ? (
             <GuaranteeFields s={section} onChange={onChange} />
           ) : (
@@ -266,29 +272,62 @@ function WorkItems({
   const set = (items: WorkSection["items"]) => onChange({ ...s, items });
   return (
     <div className="space-y-3">
+      <p className="text-[12px] text-fg-muted">
+        Each item is a step. Add a video to show it; a step without one shows as a numbered card with its title and text.
+      </p>
       {s.items.map((it, i) => (
         <ItemFrame key={i} index={i} count={s.items.length} onMove={(by) => set(move(s.items, i, by))} onRemove={() => set(s.items.filter((_, j) => j !== i))}>
+          <TextField
+            label={it.video ? "Caption" : "Step title"}
+            value={it.title}
+            cap={COPY_CAPS.title}
+            onChange={(v) => set(s.items.map((x, j) => (j === i ? { ...x, title: v } : x)))}
+          />
+          <TextField
+            label={it.video ? "A line about it" : "What happens in this step"}
+            value={it.body}
+            cap={COPY_CAPS.body}
+            multiline
+            rows={2}
+            onChange={(v) => set(s.items.map((x, j) => (j === i ? { ...x, body: v } : x)))}
+          />
+          {/* Removing a step's video keeps the step (it becomes a numbered card); the bin above removes the step. */}
           <VideoPicker
             formId={formId}
-            label="The video"
-            value={it.video}
+            label="Video for this step (optional)"
+            value={it.video ?? null}
             libraryAvailable={libraryAvailable}
-            onChange={(v) => (v ? set(s.items.map((x, j) => (j === i ? { ...x, video: v } : x))) : set(s.items.filter((_, j) => j !== i)))}
+            onChange={(v) =>
+              set(
+                s.items.map((x, j) => {
+                  if (j !== i) return x;
+                  if (v) return { ...x, video: v };
+                  const rest = { ...x };
+                  delete rest.video;
+                  return rest;
+                }),
+              )
+            }
           />
-          <TextField label="Caption" value={it.title} cap={COPY_CAPS.title} onChange={(v) => set(s.items.map((x, j) => (j === i ? { ...x, title: v } : x)))} />
-          <TextField label="A line about it" value={it.body} cap={COPY_CAPS.body} multiline rows={2} onChange={(v) => set(s.items.map((x, j) => (j === i ? { ...x, body: v } : x)))} />
         </ItemFrame>
       ))}
       {s.items.length < ITEM_CAPS.work ? (
-        <VideoPicker
-          formId={formId}
-          label="Add a work video"
-          value={null}
-          libraryAvailable={libraryAvailable}
-          onChange={(v) => {
-            if (v) set([...s.items, { title: "", video: v }]);
-          }}
-        />
+        <div className="space-y-3 rounded-lg border border-dashed border-bg-border p-3">
+          <SmallButton tone="primary" onClick={() => set([...s.items, { title: "" }])}>
+            <span className="inline-flex items-center gap-1">
+              <Plus className="h-3 w-3" /> Add a step
+            </span>
+          </SmallButton>
+          <VideoPicker
+            formId={formId}
+            label="Or add a step with its video"
+            value={null}
+            libraryAvailable={libraryAvailable}
+            onChange={(v) => {
+              if (v) set([...s.items, { title: "", video: v }]);
+            }}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -495,6 +534,117 @@ function BonusValue({
   );
 }
 
+/** "From $497 a month": the price and how often, as the card will read them ("" with no price yet). */
+function priceAsShown(t: PricingTier): string {
+  const price = t.price.trim();
+  const cadence = (t.cadence ?? "").trim();
+  return price ? `${price}${cadence ? ` ${cadence}` : ""}` : "";
+}
+
+/** A tier without the highlight key at all (not `false`), so a saved page carries only what was chosen. */
+function unhighlighted(t: PricingTier): PricingTier {
+  const copy = { ...t };
+  delete copy.highlighted;
+  return copy;
+}
+
+/**
+ * Pricing: one to four prices. A price is written exactly as it should read
+ * ("$2,500", "From $497") and reaches the page only once an owner ticks it;
+ * editing the price or how often it is paid clears that tick, the way editing
+ * the guarantee clears its confirmation.
+ */
+function PricingTiers({ s, onChange }: { s: PricingSection; onChange: (s: BodySection) => void }) {
+  const set = (tiers: PricingTier[]) => onChange({ ...s, tiers });
+  const edit = (i: number, patch: Partial<PricingTier>) => set(s.tiers.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  return (
+    <div className="space-y-3">
+      {s.tiers.map((it, i) => (
+        <ItemFrame key={i} index={i} count={s.tiers.length} onMove={(by) => set(move(s.tiers, i, by))} onRemove={() => set(s.tiers.filter((_, j) => j !== i))}>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <TextField label="Plan name" value={it.name} cap={COPY_CAPS.tier_name} onChange={(v) => edit(i, { name: v })} />
+            <TextField
+              label="Price, as it should read"
+              value={it.price}
+              cap={COPY_CAPS.price}
+              placeholder="From $497"
+              hint="Editing it clears the confirmation."
+              onChange={(v) => edit(i, { price: v, confirmed: undefined })}
+            />
+            <TextField
+              label="How often (optional)"
+              value={it.cadence}
+              cap={COPY_CAPS.cadence}
+              placeholder="a month"
+              onChange={(v) => edit(i, { cadence: v, confirmed: undefined })}
+            />
+          </div>
+          <TextField label="One line about this plan (optional)" value={it.summary} cap={COPY_CAPS.tier_summary} multiline rows={2} onChange={(v) => edit(i, { summary: v })} />
+          <IncludesEditor lines={it.includes ?? []} onChange={(includes) => edit(i, { includes })} />
+          <Tick
+            checked={it.highlighted === true}
+            onChange={(v) => set(s.tiers.map((x, j) => (j === i && v ? { ...unhighlighted(x), highlighted: true } : unhighlighted(x))))}
+          >
+            Highlight this plan in the accent colour. Only one plan can be highlighted.
+          </Tick>
+          {/* As the guarantee's tick and a bonus value: the browser sends a
+              pending confirmation, and the server stamps it with the saving
+              owner and the time (claims.ts stampConfirmations). */}
+          <Tick checked={isConfirmed(it.confirmed)} onChange={(v) => edit(i, { confirmed: v ? pendingConfirmation() : undefined })}>
+            I confirm this price is right. It is shown on the page exactly as written
+            {priceAsShown(it) ? `: ${priceAsShown(it)}` : ""}.
+          </Tick>
+          {it.price.trim() && !isConfirmed(it.confirmed) ? (
+            <p className="text-[11px] text-status-warm">Not on the page until you confirm the price.</p>
+          ) : it.confirmed && it.confirmed.by !== "pending" ? (
+            <p className="text-[11px] text-fg-dim">Price confirmed {it.confirmed.at.slice(0, 10)}.</p>
+          ) : null}
+        </ItemFrame>
+      ))}
+      {s.tiers.length < ITEM_CAPS.pricing ? (
+        <SmallButton tone="primary" onClick={() => set([...s.tiers, { name: "", price: "" }])}>
+          <span className="inline-flex items-center gap-1">
+            <Plus className="h-3 w-3" /> Add a price
+          </span>
+        </SmallButton>
+      ) : null}
+      <TextField
+        label="Note under the prices (optional)"
+        value={s.currency_note}
+        cap={COPY_CAPS.currency_note}
+        placeholder="Prices in CAD"
+        onChange={(v) => onChange({ ...s, currency_note: v })}
+      />
+      <p className="text-[11px] text-fg-dim">Each price card ends with your Book button.</p>
+    </div>
+  );
+}
+
+function IncludesEditor({ lines, onChange }: { lines: string[]; onChange: (lines: string[]) => void }) {
+  return (
+    <div className="space-y-2">
+      <div className="label">What&apos;s included (optional, one thing per line)</div>
+      {lines.map((line, j) => (
+        <div key={j} className="flex items-start gap-2">
+          <div className="flex-1">
+            <TextField label={`Line ${j + 1}`} value={line} cap={COPY_CAPS.tier_include} onChange={(v) => onChange(lines.map((x, k) => (k === j ? v : x)))} />
+          </div>
+          <SmallButton tone="danger" onClick={() => onChange(lines.filter((_, k) => k !== j))} title="Remove this line">
+            <Trash2 className="h-3.5 w-3.5" />
+          </SmallButton>
+        </div>
+      ))}
+      {lines.length < TIER_INCLUDES_CAP ? (
+        <SmallButton tone="primary" onClick={() => onChange([...lines, ""])}>
+          <span className="inline-flex items-center gap-1">
+            <Plus className="h-3 w-3" /> Add a line
+          </span>
+        </SmallButton>
+      ) : null}
+    </div>
+  );
+}
+
 function GuaranteeFields({ s, onChange }: { s: GuaranteeSection; onChange: (s: BodySection) => void }) {
   return (
     <div className="space-y-3">
@@ -546,6 +696,7 @@ function FaqItems({ s, onChange }: { s: FaqSection; onChange: (s: BodySection) =
 /** A new, empty section of this kind. */
 export function newSection(key: BodyKey): BodySection {
   if (key === "guarantee") return { key: "guarantee" };
+  if (key === "pricing") return { key: "pricing", tiers: [] };
   return { key, items: [] } as BodySection;
 }
 

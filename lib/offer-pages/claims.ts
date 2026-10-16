@@ -7,7 +7,9 @@
  *
  *   1. every result has evidence, the client's permission and an owner's
  *      confirmation (the parser refuses one without; checked again here);
- *   2. every bonus value or price was confirmed by an owner;
+ *   2. every bonus value or price was confirmed by an owner (a pricing tier's
+ *      price is free text shown exactly as written, so its stamped `confirmed`
+ *      is what vouches for it, and the linter below does not ask about it again);
  *   3. the guarantee, if it has words, was confirmed by an owner;
  *   4. every sentence the linter flags carries an owner's tick, "true, and we
  *      can back it". Ticks are stored by the sentence's sha256, so editing the
@@ -93,6 +95,23 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
         });
       }
     }
+    if (s.key === "pricing") {
+      for (const it of s.tiers) {
+        // Only a tier that carries a confirmation: registering an unconfirmed
+        // one would have stampConfirmations sign it off on the owner's behalf.
+        if (!it.confirmed) continue;
+        const tier = it;
+        out.push({
+          kind: "price",
+          // The whole tier, not just the figure: a confirmation vouches for the
+          // card as written (name, price, cadence, summary, what's included),
+          // so changing any of it moves the sign-off to whoever saved the edit.
+          thing: withoutKey(tier, "confirmed"),
+          get: () => tier.confirmed,
+          set: (c) => (tier.confirmed = c),
+        });
+      }
+    }
     if (s.key === "guarantee" && s.confirmed) {
       const g = s;
       out.push({
@@ -116,8 +135,8 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
  *   - anything else (new content, or confirmed content that was edited) is
  *     stamped with the saving owner and the time.
  * A browser can therefore never put another person's name on a claim, and
- * editing what was confirmed (the quote, the amount, the video, the terms)
- * makes the person who saved the edit the one vouching for it.
+ * editing what was confirmed (the quote, the amount, the video, the terms, a
+ * price tier) makes the person who saved the edit the one vouching for it.
  */
 export function stampConfirmations(
   next: OfferPageDoc,
@@ -260,6 +279,19 @@ function drawnCopy(doc: OfferPageDoc, fallbackHeadline: string): Copy[] {
         });
         add(k, "bonuses.value_note", s.value_note);
         break;
+      case "pricing":
+        // Every word on a tier except the price itself: the price has its own
+        // owner's tick (publishGate), and a second "is $2,500 true?" tick for
+        // the same figure would only teach owners to click through.
+        s.tiers.forEach((it, i) => {
+          const p = `pricing.tiers[${i}]`;
+          add(k, `${p}.name`, it.name);
+          add(k, `${p}.cadence`, it.cadence);
+          add(k, `${p}.summary`, it.summary);
+          (it.includes ?? []).forEach((line, j) => add(k, `${p}.includes[${j}]`, line));
+        });
+        add(k, "pricing.currency_note", s.currency_note);
+        break;
       case "guarantee":
         add(k, "guarantee.body", s.body);
         break;
@@ -381,6 +413,21 @@ export function publishGate(
     if (s.key === "bonuses") {
       s.items.forEach((it, i) => {
         if (it.value && !isConfirmed(it.value.confirmed)) blockers.push(`Bonus ${i + 1}'s value needs an owner's confirmation.`);
+      });
+    }
+    // A hidden section draws nothing, so it vouches for nothing (as drawnCopy skips it).
+    if (s.key === "pricing" && !s.hidden) {
+      s.tiers.forEach((it, i) => {
+        const price = (it.price || "").trim();
+        const name = (it.name || "").trim();
+        // Never starts with "Confirm ": PublishChecklist keeps those lines for
+        // the claim ticks, and this one must show as a plain blocker.
+        const which = name ? `"${name}"` : `plan ${i + 1}`;
+        if (price && !isConfirmed(it.confirmed)) {
+          blockers.push(`The price for ${which} (${price}) needs an owner's confirmation. It is shown exactly as written.`);
+        } else if (!price && name) {
+          warnings.push(`${which} has no price yet, so it is not shown.`);
+        }
       });
     }
     if (s.key === "guarantee" && (s.body || "").trim() && !isConfirmed(s.confirmed)) {

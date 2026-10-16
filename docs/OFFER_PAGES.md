@@ -39,7 +39,8 @@ entity, and `/offers` is its 404 route (`tests/os-redirects.test.ts`).
   tab, under the workspace's name. A live page with no headline falls back to the
   form's own headline, then the workspace's name. Never the form's name.
 - **Claims need an owner.** A result needs evidence, the client's permission and
-  an owner's confirmation; a bonus value or price needs an owner's confirmation;
+  an owner's confirmation; a bonus value or price needs an owner's confirmation
+  (a pricing tier's `confirmed`, see below);
   the guarantee shows only once its terms are confirmed; every sentence the linter
   flags needs an owner's tick, stored under the sentence's sha256 (editing the
   sentence clears it). The server stamps every confirmation with the saving
@@ -58,6 +59,78 @@ entity, and `/offers` is its 404 route (`tests/os-redirects.test.ts`).
   `lib/notify/alert-route.ts`: OASIS's own workspaces reach OASIS's chat, a
   client workspace only the bot it connected, a retired workspace nobody.
 - **noindex**, always (offer pages stay out of search results).
+
+## One engine, a distinct page per offer
+
+Each offer page is the same document type; what makes the six OASIS offers look
+like six different pages is the content plus these three choices. Every one is
+optional, so every page stored before them parses and draws exactly as it did
+(`tests/offer-pages-engine.test.ts` compares a page without them, byte for byte,
+with markup rendered before they existed).
+
+### Hero layout (`theme.layout`)
+
+| Value | Desktop | Builder name |
+|---|---|---|
+| absent | today's hero: words left, video right (words only, left-aligned, with no video) | shows as "Side by side" |
+| `split` | the same as absent, chosen explicitly | Side by side |
+| `stacked` | headline, subheadline and button centred on top; the video wide (`max-w-4xl`) below | Video under the headline |
+| `centered` | one centred column; the video narrower (`max-w-3xl`) under the words | Centred |
+
+Every layout keeps the hero rules: no Reveal (the hero is the first paint),
+the `#offer-hero-end` marker the phone Book bar watches, and on phones the
+words, then the video, then the button. Builder: Settings tab, "Hero layout".
+
+### Pricing (`key: "pricing"`)
+
+A body section like the others (after bonuses in the builder's order, in the
+Book a call template, pinnable to the top menu, anchor `#pricing`):
+
+```json
+{ "key": "pricing", "eyebrow": "...", "title": "...", "lede": "...",
+  "currency_note": "Prices in CAD",
+  "tiers": [
+    { "name": "Turnkey", "price": "From $2,500", "cadence": "a month",
+      "summary": "...", "includes": ["...", "..."], "highlighted": true,
+      "confirmed": { "by": "<owner's user id>", "at": "2026-10-16T12:00:00.000Z" } }
+  ] }
+```
+
+- At most 4 tiers (0 is a section being started, and is not drawn), 8
+  `includes` lines each, at most one `highlighted`. Caps: name 60, price 40,
+  cadence 40, summary 300, an included line 160, the currency note 120.
+- `price` is free text, shown exactly as written; it is never turned into a
+  number. `confirmed` is the owner's sign-off, the same stamped confirmation
+  (who and when) a bonus value carries. Whoever drafts the copy leaves it out;
+  the owner ticks it in the builder ("I confirm this price is right. It is
+  shown on the page exactly as written"). A bare `true`/`false` is refused by
+  the parser. The server stamps it with the saving owner and the time, bound
+  to the whole tier (kind "price" in `claims.ts` confirmables): saving the same
+  tier again keeps the first stamp, and a tier changed in any way is re-stamped
+  with whoever saved the change. The builder also clears the tick when the
+  price or how often it is paid is edited, so the owner confirms the new one.
+- **The gate.** A tier is drawn only with a name, a price and an owner's
+  confirmation. Publish is refused while any tier with a price is
+  unconfirmed, and the checklist names it: `The price for "Turnkey" (From
+  $2,500) needs an owner's confirmation.` (A tier with a name and no price is a
+  warning, not a blocker; a hidden pricing section blocks nothing.) The price
+  is not also put through the claims linter, since its own tick vouches for
+  it; the tier's name, cadence, summary, included lines and the currency note
+  are linted like any copy.
+- **On the page.** One card per drawn tier, one column on phones and up to
+  three or four on desktop; the highlighted card carries the accent (border,
+  wash, top rule) and the filled button. Every card ends with the Book button
+  (`#book`), so pricing is deliberately NOT one of the sections that add a
+  Book button after themselves (no two buttons in a row).
+
+### "Our work" steps without a video
+
+A `work` item's `video` is optional. A step with no video draws as a numbered
+card (01, 02... among the video-less steps) with its title and text, and needs
+a title to be drawn. A step with a video draws exactly as before, and a step
+whose video cannot play is still left out rather than shown as a card. In the
+builder: "Add a step", or "Or add a step with its video"; removing a step's
+video keeps the step.
 
 ## Known limits (the owner's call)
 

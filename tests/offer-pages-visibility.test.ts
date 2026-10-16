@@ -12,8 +12,11 @@
  *     EVERY bonus has a confirmed value in one currency; the value footnote only
  *     next to a confirmed value;
  *   - the guarantee needs words AND an owner's confirmation;
- *   - "our work" draws only playable videos; the hero headline falls back to the
- *     form's own; the transcript appears only under a drawn video.
+ *   - "our work" draws only playable videos, and a step with no video at all
+ *     when it has a title; the hero headline falls back to the form's own; the
+ *     transcript appears only under a drawn video;
+ *   - pricing draws only tiers with a name, a price and an owner's confirmation
+ *     (who and when, as a bonus value), and is in the menu when pinned.
  *
  * Pure. Run: node --conditions=react-server --import tsx tests/offer-pages-visibility.test.ts
  */
@@ -151,9 +154,67 @@ t("our work draws only playable videos; a what-you-get video only when it can pl
   ]);
   const drawn = drawnSections(d, media);
   const work = drawn.find((s) => s.key === "work") as Extract<(typeof drawn)[number], { key: "work" }>;
-  assert.deepEqual(work.items.map((i) => i.video.ref), ["work:1"]);
+  assert.deepEqual(work.items.map((i) => i.video?.ref), ["work:1"]);
   const wyg = drawn.find((s) => s.key === "what_you_get") as Extract<(typeof drawn)[number], { key: "what_you_get" }>;
   assert.equal(wyg.items[0].video, null, "the item stays, its broken video does not");
+});
+
+t("a work step with no video is drawn as a step when it has a title; a broken video never becomes a step", () => {
+  const media = { video: (ref: string) => ref !== "work:1", image: () => true };
+  const d = doc([
+    {
+      key: "work",
+      items: [
+        { title: "We map it", body: "One call." },
+        { title: "Broken video", video: LIB },
+        { title: "", body: "No title, not drawn." },
+        { title: "Portal", video: YT },
+        { title: "You go live" },
+      ],
+    },
+  ]);
+  const work = drawnSections(d, media)[0] as Extract<ReturnType<typeof drawnSections>[number], { key: "work" }>;
+  assert.deepEqual(
+    work.items.map((i) => [i.index, i.title, i.video?.ref ?? null]),
+    [
+      [0, "We map it", null],
+      [3, "Portal", "work:3"],
+      [4, "You go live", null],
+    ],
+  );
+  assert.equal(work.items[0].body, "One call.");
+  // Steps only, no video anywhere: still a section.
+  assert.equal(drawnSections(doc([{ key: "work", items: [{ title: "Step one" }] }]), everything).length, 1);
+  assert.deepEqual(drawnSections(doc([{ key: "work", items: [{ title: " " }] }]), everything), []);
+});
+
+t("pricing: only a tier with a name, a price and an owner's confirmation is drawn; empty lines and an orphan note are not", () => {
+  const pricing = (tiers: Array<Record<string, unknown>>, note?: string) =>
+    drawnSections(doc([{ key: "pricing", tiers, ...(note ? { currency_note: note } : {}) } as unknown as OfferPageDoc["sections"][number]]), everything) as Array<
+      Extract<ReturnType<typeof drawnSections>[number], { key: "pricing" }>
+    >;
+  const drawn = pricing(
+    [
+      { name: "DIY", price: "$497", cadence: "a month", includes: ["The OS", " ", "Community"], confirmed: OK },
+      { name: "Turnkey", price: "From $2,500", highlighted: true },
+      { name: "", price: "$1", confirmed: OK },
+      { name: "No price", price: "", confirmed: OK },
+      { name: "Managed", price: "$7,500", summary: "We run it.", highlighted: true, confirmed: OK },
+      // Only a sign-off (who and when) draws a price: a bare true, or one with no one behind it, does not.
+      { name: "Sneaky", price: "$9", confirmed: true },
+      { name: "Nobody", price: "$9", confirmed: { by: " ", at: OK.at } },
+    ],
+    "Prices in CAD",
+  );
+  assert.equal(drawn.length, 1);
+  assert.deepEqual(drawn[0].tiers, [
+    { index: 0, name: "DIY", price: "$497", cadence: "a month", summary: null, includes: ["The OS", "Community"], highlighted: false },
+    { index: 4, name: "Managed", price: "$7,500", cadence: null, summary: "We run it.", includes: [], highlighted: true },
+  ]);
+  assert.equal(drawn[0].currencyNote, "Prices in CAD");
+  assert.deepEqual(pricing([{ name: "Turnkey", price: "$2,500" }], "Prices in CAD"), [], "nothing confirmed: no section, no orphan note");
+  const d = doc([{ key: "pricing", tiers: [{ name: "DIY", price: "$497", confirmed: OK }] }], { nav: { pinned: ["pricing"] } });
+  assert.deepEqual(navFor(d, drawnSections(d, everything)), [{ key: "pricing", anchor: "pricing", label: "Pricing" }]);
 });
 
 t("the transcript appears only under a drawn video", () => {

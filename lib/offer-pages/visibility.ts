@@ -8,12 +8,17 @@
  *   hero          always; its headline falls back to the form's own headline
  *   what you get  items with a title (an item's video only when it can play)
  *   obstacles     items with a title
- *   our work      items whose video can play
+ *   our work      items whose video can play; an item with no video at all is
+ *                 a numbered step, drawn when it has a title (an item whose
+ *                 video cannot play is still dropped, never turned into a step)
  *   results       items with evidence, the client's permission and an owner's
  *                 confirmation, and their content complete
  *   bonuses       items with a title; a value only when an owner confirmed it;
  *                 the total only when EVERY bonus has a confirmed value in one
  *                 currency; the value footnote only next to a confirmed value
+ *   pricing       tiers with a name and a price that an owner confirmed; the
+ *                 empty lines of "what's included" dropped; the currency note
+ *                 only beside a drawn price
  *   guarantee     a body an owner confirmed
  *   faq           questions with an answer
  *   book          always, last (the form lives there)
@@ -51,7 +56,8 @@ export type MediaCheck = {
 export type DrawnSection =
   | { key: "what_you_get"; head: Head; items: { index: number; title: string; body?: string; video: VideoAt | null }[] }
   | { key: "obstacles"; head: Head; items: { index: number; title: string; body?: string }[] }
-  | { key: "work"; head: Head; items: { index: number; title: string; body?: string; video: VideoAt }[] }
+  /** `video` null: a step with no video, drawn as a numbered card. */
+  | { key: "work"; head: Head; items: { index: number; title: string; body?: string; video: VideoAt | null }[] }
   | { key: "results"; head: Head; items: { index: number; item: ResultItem }[] }
   | {
       key: "bonuses";
@@ -60,8 +66,20 @@ export type DrawnSection =
       valueNote: string | null;
       total: { cents: number; currency: Money["currency"] } | null;
     }
+  | { key: "pricing"; head: Head; tiers: DrawnTier[]; currencyNote: string | null }
   | { key: "guarantee"; head: Head; body: string; termsUrl: string | null }
   | { key: "faq"; head: Head; items: { q: string; a: string }[] };
+
+/** A pricing tier as the page draws it: only ever one an owner confirmed. */
+export type DrawnTier = {
+  index: number;
+  name: string;
+  price: string;
+  cadence: string | null;
+  summary: string | null;
+  includes: string[];
+  highlighted: boolean;
+};
 
 export type DrawnPage = {
   hero: {
@@ -84,6 +102,7 @@ export const NAV_LABELS: Readonly<Record<BodyKey, string>> = {
   work: "Our work",
   results: "Results",
   bonuses: "Bonuses",
+  pricing: "Pricing",
   guarantee: "Guarantee",
   faq: "FAQ",
 };
@@ -159,12 +178,14 @@ export function drawnSections(doc: OfferPageDoc, media: MediaCheck): DrawnSectio
       case "work": {
         const items = s.items
           .map((it, index) => ({ it, index, ref: `work:${index}` }))
-          .filter(({ it, ref }) => !!it.video && media.video(ref, it.video))
+          // A step with a video: drawn only when that video can play (as
+          // always). A step with none: drawn when it has a title to show.
+          .filter(({ it, ref }) => (it.video ? media.video(ref, it.video) : filled(it.title)))
           .map(({ it, index, ref }) => ({
             index,
             title: it.title,
             ...(filled(it.body) ? { body: it.body } : {}),
-            video: { ref, video: it.video },
+            video: it.video ? { ref, video: it.video } : null,
           }));
         if (items.length) out.push({ key: "work", head, items });
         break;
@@ -201,6 +222,23 @@ export function drawnSections(doc: OfferPageDoc, media: MediaCheck): DrawnSectio
           valueNote: anyValue && filled(s.value_note) ? s.value_note : null,
           total,
         });
+        break;
+      }
+      case "pricing": {
+        const tiers: DrawnTier[] = s.tiers
+          .map((it, index) => ({ it, index }))
+          // Only an owner's sign-off (who and when) draws a price, as with a bonus value.
+          .filter(({ it }) => filled(it.name) && filled(it.price) && isConfirmed(it.confirmed))
+          .map(({ it, index }) => ({
+            index,
+            name: it.name,
+            price: it.price,
+            cadence: filled(it.cadence) ? it.cadence : null,
+            summary: filled(it.summary) ? it.summary : null,
+            includes: (it.includes ?? []).filter(filled),
+            highlighted: it.highlighted === true,
+          }));
+        if (tiers.length) out.push({ key: "pricing", head, tiers, currencyNote: filled(s.currency_note) ? s.currency_note : null });
         break;
       }
       case "guarantee": {

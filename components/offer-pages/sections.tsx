@@ -8,10 +8,10 @@
  * section never reaches here, and nothing here fills a gap with a default.
  */
 import type { ReactNode } from "react";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, Check } from "lucide-react";
 import { Section, Eyebrow } from "@/components/marketing/Section";
 import { Reveal } from "@/components/marketing/Reveal";
-import { CTA_INLINE, CTA_PRIMARY } from "@/components/marketing/Cta";
+import { CTA_INLINE, CTA_PRIMARY, CTA_SECONDARY } from "@/components/marketing/Cta";
 import type { DrawnSection } from "@/lib/offer-pages/visibility";
 import { formatMoney } from "@/lib/offer-pages/visibility";
 import { BODY_ANCHORS } from "@/lib/offer-pages/types";
@@ -127,21 +127,35 @@ function Work({
   media: PreparedOffer["media"];
   tracking: VideoTracking;
 }) {
+  // Steps without a video are numbered among themselves (01, 02...), so a
+  // "how it works" list reads in order even with a video step between two.
+  const stepNumber = new Map<number, number>();
+  for (const it of s.items) if (!it.video) stepNumber.set(it.index, stepNumber.size);
   return (
     <>
       <OfferHead head={s.head} />
       <div className="mt-12 grid gap-10 md:grid-cols-2">
         {s.items.map((it, i) => (
-          <Reveal key={it.index} delay={(i % 2) * 80}>
-            <figure className="space-y-4">
-              <Facade media={media[it.video.ref]} label={it.title || "Our work"} tracking={tracking} />
-              {it.title || it.body ? (
-                <figcaption>
-                  {it.title ? <p className="font-display text-lg font-bold tracking-tight text-fg">{it.title}</p> : null}
-                  {it.body ? <p className="mt-1.5 text-[15px] leading-relaxed text-fg-muted">{it.body}</p> : null}
-                </figcaption>
-              ) : null}
-            </figure>
+          // A step card fills its grid row (h-full) beside a video; a video
+          // step's Reveal is exactly what it always was.
+          <Reveal key={it.index} delay={(i % 2) * 80} className={it.video ? undefined : "h-full"}>
+            {it.video ? (
+              <figure className="space-y-4">
+                <Facade media={media[it.video.ref]} label={it.title || "Our work"} tracking={tracking} />
+                {it.title || it.body ? (
+                  <figcaption>
+                    {it.title ? <p className="font-display text-lg font-bold tracking-tight text-fg">{it.title}</p> : null}
+                    {it.body ? <p className="mt-1.5 text-[15px] leading-relaxed text-fg-muted">{it.body}</p> : null}
+                  </figcaption>
+                ) : null}
+              </figure>
+            ) : (
+              <article className="flex h-full flex-col gap-4 border border-ops-line bg-ops-panel/40 p-7 sm:p-9">
+                <span className={`${DATA_LABEL} ${ACCENT_TEXT}`}>{num(stepNumber.get(it.index) ?? 0)}</span>
+                <h3 className="font-display text-xl font-bold leading-snug tracking-tight text-fg">{it.title}</h3>
+                {it.body ? <p className="text-[15px] leading-relaxed text-fg-muted">{it.body}</p> : null}
+              </article>
+            )}
           </Reveal>
         ))}
       </div>
@@ -203,6 +217,67 @@ function Bonuses({ s }: { s: Extract<DrawnSection, { key: "bonuses" }> }) {
         </Reveal>
       ) : null}
       {s.valueNote ? <p className="mt-3 max-w-2xl font-data text-[11px] leading-relaxed tracking-[0.04em] text-fg-dim">{s.valueNote}</p> : null}
+    </>
+  );
+}
+
+/** The grid per number of cards: literal strings, because Tailwind only generates classes it can read. */
+const PRICING_GRID: Readonly<Record<number, string>> = {
+  1: "grid max-w-md gap-6",
+  2: "grid gap-6 md:grid-cols-2 lg:max-w-4xl",
+  3: "grid gap-6 md:grid-cols-2 lg:grid-cols-3",
+  4: "grid gap-6 md:grid-cols-2 xl:grid-cols-4",
+};
+
+/**
+ * Pricing: one card per confirmed price, each ending with the Book button
+ * (the section adds no second one: OfferPage ASK_AGAIN_AFTER). The prices are
+ * the owner's words exactly as written. The highlighted card is marked with
+ * the accent (its border, wash and top rule) and its button is the filled one;
+ * with none highlighted, every card's button is.
+ */
+function Pricing({ s, ctaLabel }: { s: Extract<DrawnSection, { key: "pricing" }>; ctaLabel: string }) {
+  const anyHighlighted = s.tiers.some((t) => t.highlighted);
+  return (
+    <>
+      <OfferHead head={s.head} />
+      <div className={`mt-12 ${PRICING_GRID[Math.min(s.tiers.length, 4)]}`}>
+        {s.tiers.map((t, i) => (
+          <Reveal key={t.index} delay={(i % 4) * 80} className="h-full">
+            <article
+              className={`relative flex h-full flex-col overflow-hidden border p-7 sm:p-8 ${
+                t.highlighted ? `${ACCENT_BORDER} ${ACCENT_WASH} shadow-raised` : "border-ops-line bg-ops-panel/40"
+              }`}
+              {...(t.highlighted ? { "data-highlighted": "" } : {})}
+            >
+              {t.highlighted ? <span aria-hidden="true" className={`absolute inset-x-0 top-0 h-[3px] ${ACCENT_RULE}`} /> : null}
+              <h3 className={`${DATA_LABEL} ${t.highlighted ? ACCENT_TEXT : "text-fg-dim"}`}>{t.name}</h3>
+              <p className="mt-5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="break-words font-display text-4xl font-bold tracking-tight text-fg">{t.price}</span>
+                {t.cadence ? <span className="text-[15px] text-fg-muted">{t.cadence}</span> : null}
+              </p>
+              {t.summary ? <p className="mt-4 text-[15px] leading-relaxed text-fg-muted">{t.summary}</p> : null}
+              {t.includes.length ? (
+                <ul className="mt-6 space-y-2.5 border-t border-ops-line pt-6">
+                  {t.includes.map((line, j) => (
+                    <li key={j} className="flex gap-3 text-[15px] leading-relaxed text-fg">
+                      <Check className={`mt-1 h-4 w-4 shrink-0 ${ACCENT_TEXT}`} aria-hidden="true" />
+                      <span>{line}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <div className="mt-auto pt-8">
+                <a href="#book" className={`${t.highlighted || !anyHighlighted ? CTA_PRIMARY : CTA_SECONDARY} w-full`} data-section="pricing">
+                  {ctaLabel}
+                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </a>
+              </div>
+            </article>
+          </Reveal>
+        ))}
+      </div>
+      {s.currencyNote ? <p className="mt-6 max-w-2xl font-data text-[11px] leading-relaxed tracking-[0.04em] text-fg-dim">{s.currencyNote}</p> : null}
     </>
   );
 }
@@ -282,6 +357,9 @@ export function OfferSection({
       break;
     case "bonuses":
       inner = <Bonuses s={s} />;
+      break;
+    case "pricing":
+      inner = <Pricing s={s} ctaLabel={prepared.ctaLabel} />;
       break;
     case "guarantee":
       inner = <Guarantee s={s} />;
