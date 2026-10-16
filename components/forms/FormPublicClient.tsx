@@ -35,7 +35,7 @@ import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { PublicBookingCalendar } from "./PublicBookingCalendar";
-import { isPublicBookingSurface } from "@/lib/forms/public-booking-config";
+import { isOptionalPublicBookingFormSlug, isPublicBookingSurface } from "@/lib/forms/public-booking-config";
 import { ConsentChoice } from "./ConsentChoice";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
@@ -1025,6 +1025,9 @@ export function FormPublicClient({
     isPublicBookingSurface({ tenantSlug, formSlug })
     ? formSlug
     : null;
+  // PROTOCOL and COMMUNITY: their own next step (the checkout email, the
+  // community link) is the thanks, and the calendar is offered under it.
+  const publicBookingOptional = publicBookingFormSlug !== null && isOptionalPublicBookingFormSlug(publicBookingFormSlug);
 
   /**
    * WHICH step is outstanding, not merely THAT one is.
@@ -1157,7 +1160,7 @@ export function FormPublicClient({
                     what this screen is for. */}
                 <p className="text-[11px] text-fg-dim">{handoff.footer}</p>
               </div>
-            ) : publicBookingFormSlug ? (
+            ) : publicBookingFormSlug && !publicBookingOptional ? (
               <PublicBookingCalendar
                 token={tokenRef.current || token}
                 primary={primary}
@@ -1165,13 +1168,26 @@ export function FormPublicClient({
                 completedStep={steps.length}
               />
             ) : (
-              <div className="text-center space-y-4 py-8">
-                <CheckCircle2 className="w-12 h-12 mx-auto" style={{ color: primary }} />
-                <h2 className="text-xl font-bold text-fg">All set.</h2>
-                <p className="text-sm text-fg-muted max-w-md mx-auto">
-                  {thanksMessage}
-                </p>
-              </div>
+              <>
+                <div className="text-center space-y-4 py-8">
+                  <CheckCircle2 className="w-12 h-12 mx-auto" style={{ color: primary }} />
+                  <h2 className="text-xl font-bold text-fg">All set.</h2>
+                  <p className="text-sm text-fg-muted max-w-md mx-auto">
+                    {thanksMessage}
+                  </p>
+                </div>
+                {publicBookingFormSlug ? (
+                  <div className="border-t border-bg-border pt-5">
+                    <PublicBookingCalendar
+                      token={tokenRef.current || token}
+                      primary={primary}
+                      formSlug={publicBookingFormSlug}
+                      completedStep={steps.length}
+                      optional
+                    />
+                  </div>
+                ) : null}
+              </>
             )
           ) : (
             <>
