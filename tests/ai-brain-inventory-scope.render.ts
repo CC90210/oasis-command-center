@@ -5,14 +5,16 @@
  * `node --import tsx` and asserts against the one JSON line it prints. It
  * asserts nothing itself.
  *
- * Two client components, drawn by their real hooks (useState, useRef,
- * useEffect) frame after frame against a stubbed fetch that answers BOTH
- * screens from the same GET /api/ai/engine body:
+ * Three client components, drawn by their real hooks (useState, useRef,
+ * useEffect) frame after frame against a stubbed fetch that answers every
+ * screen from the same GET /api/ai/engine and GET /api/devices bodies:
  *   - Settings > AI brain (AgentEnginePanel): the "Choose your own" button for
  *     a person who inherits the workspace default, pressed, and what it moves
- *     to; and the words each app reads under "Installed apps and local models".
+ *     to; the words each app reads under "Installed apps and local models";
+ *     and each computer card's presence word.
  *   - Settings > Devices (YourComputersCard): the app lines under each of the
  *     same computers, the row lines, and whether Team computers starts open.
+ *   - Devices (advanced) (DevicesEditor): each pairing's presence badge.
  */
 import { dirname } from "node:path";
 import type { ReactElement } from "react";
@@ -225,6 +227,10 @@ async function main() {
             deviceRow("p-laptop", "Laptop", true, { claim_enabled_at: null, paired_via: "connector" }),
             deviceRow("p-tower", "Tower", true, { last_seen_at: new Date(NOW - 3 * 24 * 60 * 60_000).toISOString(), claim_state_at: null }),
             deviceRow("p-riley", "Riley's laptop", false),
+            // Two of a teammate's computers not approved yet: their Team computers rows print the heartbeat's
+            // word, one online and one idle (5 minutes), for the three-screen presence check.
+            deviceRow("p-riley-desk", "Riley's desktop", false, { claim_enabled_at: null, claim_state_at: null }),
+            deviceRow("p-riley-old", "Riley's old PC", false, { claim_enabled_at: null, claim_state_at: null, last_seen_at: new Date(Date.now() - 5 * 60_000).toISOString() }),
           ],
         }),
         { status: 200 },
@@ -235,6 +241,7 @@ async function main() {
 
   const { AgentEnginePanel } = await import("../components/settings/AgentEnginePanel");
   const { YourComputersCard } = await import("../components/settings/YourComputersCard");
+  const { DevicesEditor } = await import("../components/settings/DevicesEditor");
 
   // ── Settings > AI brain ──────────────────────────────────────────────────
   async function drawPanel() {
@@ -284,6 +291,9 @@ async function main() {
   DEVICES.forEach((d, i) => {
     aiBrain[String(d.label)] = Object.fromEntries(apps.map((app, j) => [app, statuses[i * apps.length + j]]));
   });
+  // Each computer card's own presence word, in the same order.
+  const presences = panelEls.filter((e) => e.props["data-testid"] === "engine-device-presence").map((e) => squash(textOf(e)));
+  const aiBrainPresence: Record<string, string> = Object.fromEntries(DEVICES.map((d, i) => [String(d.label), presences[i]]));
   inherited.frames.unmount();
 
   // The same panel for a person who chose their own setup: no button.
@@ -321,6 +331,22 @@ async function main() {
   const caption = squash(textOf(cardEls.find((e) => e.props["data-testid"] === "signed-in-caption")));
   card.unmount();
 
+  // ── Settings > Devices (advanced): the same pairings, each row's presence badge ──
+  const advanced = framesOf(DevicesEditor as (p: { installRepo: string | null }) => unknown);
+  let advancedTree = advanced({ installRepo: null });
+  for (let i = 0; i < 20 && !all(advancedTree).some((e) => e.type === "li"); i++) {
+    await tick();
+    advancedTree = advanced({ installRepo: null });
+  }
+  const advancedPresence: Record<string, string> = {};
+  for (const li of all(advancedTree).filter((e) => e.type === "li")) {
+    const els = all(li.props.children);
+    const label = els.find((e) => e.type === "span" && typeof e.props.title === "string");
+    const badge = els.find((e) => e.props["data-testid"] === "device-presence");
+    if (label && badge) advancedPresence[String(label.props.title)] = squash(textOf(badge));
+  }
+  advanced.unmount();
+
   console.log(
     JSON.stringify({
       panel: {
@@ -335,6 +361,8 @@ async function main() {
         ownInherited,
       },
       aiBrain,
+      aiBrainPresence,
+      advancedPresence,
       devices,
       team: { present: Boolean(team), open: team ? team.props.open === true : null, rows: teamRows },
       caption,

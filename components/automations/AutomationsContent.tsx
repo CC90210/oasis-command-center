@@ -44,6 +44,11 @@ const NEW_AUTOMATIONS_COMING = "New automations are coming to this page.";
 const GUIDED_SUBTITLE =
   "Pick a job, say when it should run and try it once before you turn it on. Automations write you a summary or draft emails that wait for your approval. Nothing goes out on its own.";
 
+/** With the builder on, what an empty workspace's list says after "You have no automations yet.": the
+ *  builder's own empty sentence never shows on this page (the older list is always passed under it), so
+ *  this line is the one a brand-new workspace reads (CC 2026-10-16). */
+const GUIDED_EMPTY_HINT = "Build your first one with New automation above.";
+
 /**
  * With the guided builder on it is the ONE way to MAKE an automation: the "describe it and AI writes a
  * script" box and the script form are not offered (CC, 2026-10-15: one onboarding path, built from the
@@ -340,7 +345,7 @@ export async function AutomationsContent({
           {connectionBanner}
           {/* The builder, then "Your automations": its own rows first, then every automation made before it. */}
           <GuidedAutomations api={guidedApi}>
-            <CronJobsManager agentKeys={automationAgentKeys} canCreateScripts={false} />
+            <CronJobsManager agentKeys={automationAgentKeys} canCreateScripts={false} emptyHint={GUIDED_EMPTY_HINT} />
           </GuidedAutomations>
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
           {workersAndUnderwriting}

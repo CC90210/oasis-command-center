@@ -280,10 +280,11 @@ async function main() {
       pa("a4", OASIS, "instagram", 50_000, 9, true, 45), // outside the 30-day window
       pa("b1", OTHER, "instagram", 99_999, 99, true, 1), // another tenant
       {
-        sql: `INSERT INTO marketing_corpus (id, tenant_id, kind, label, title, source_url, state, contributed_by, created_at, indexed_at)
-              VALUES ('c1', ?, 'link', 'exemplar', 'A reel that works', 'https://www.instagram.com/reel/abc/', 'indexed', ?, ?, ?),
-                     ('c2', ?, 'link', 'counter_example', NULL, 'https://example.com/bad-ad', 'queued', ?, ?, NULL),
-                     ('c9', ?, 'link', 'exemplar', 'Not ours', 'https://example.com/x', 'indexed', 'x', ?, ?)`,
+        // c1 has no agent recorded (it trains Marketing); c2 was taught to Sales on Admin > Agent training.
+        sql: `INSERT INTO marketing_corpus (id, tenant_id, kind, label, title, source_url, state, contributed_by, created_at, indexed_at, trains)
+              VALUES ('c1', ?, 'link', 'exemplar', 'A reel that works', 'https://www.instagram.com/reel/abc/', 'indexed', ?, ?, ?, NULL),
+                     ('c2', ?, 'link', 'counter_example', NULL, 'https://example.com/bad-ad', 'queued', ?, ?, NULL, 'sales'),
+                     ('c9', ?, 'link', 'exemplar', 'Not ours', 'https://example.com/x', 'indexed', 'x', ?, ?, NULL)`,
         args: [OASIS, CC.email, daysAgo(2), daysAgo(2), OASIS, CC.email, daysAgo(0), OTHER, daysAgo(1), daysAgo(1)],
       },
       {
@@ -452,9 +453,27 @@ async function main() {
     assert.doesNotMatch(contents, /Not ours/, "another tenant's material");
   });
 
+  await check("Training: each link says which agent it trains, in Admin > Agent training's words (CC 2026-10-16)", async () => {
+    const frame = await resolve(await TrainPage(), true);
+    const boundary = hosts(frame).find((h) => h.type === "suspense")!;
+    const rows = hosts(await resolve(boundary.props.pending, false)).filter((h) => h.type === "li").map(textOf);
+    const { effectiveTrains, trainsLabel } = await import("../lib/training/trains");
+    const trainsOf = (title: string) => {
+      const row = rows.find((r) => r.includes(title));
+      assert.ok(row, `no row for ${title}: ${rows.join(" | ")}`);
+      return row!.match(/Trains: ([A-Za-z ]+?)(?=·|$)/)?.[1].trim();
+    };
+    assert.equal(trainsOf("A reel that works"), "Marketing", "a note with no agent recorded trains Marketing (the legacy rule)");
+    assert.equal(trainsOf("example.com/bad-ad"), "Sales", "a note taught to Sales says Sales");
+    // The same function Admin > Agent training's list uses for the same stored values.
+    assert.equal(trainsOf("A reel that works"), trainsLabel(effectiveTrains(null)));
+    assert.equal(trainsOf("example.com/bad-ad"), trainsLabel(effectiveTrains("sales")));
+  });
+
   await check("Training says, in plain words, what it is, what is in it and how to add to it; no persona name; Tools has its place above it", async () => {
     const text = textOf(await resolve(await TrainPage(), false));
-    assert.match(text, /what the marketing agent learns from/i, "what it is");
+    assert.match(text, /what your agents learn from/i, "what it is (each row names the agent it trains)");
+    assert.match(text, /The links you add here are what the marketing agent learns from/, "links added here still train Marketing, and the page says so");
     assert.match(text, /reels, TikToks, YouTube\s+videos, GitHub repos and articles/, "what goes in it");
     assert.match(text, /Every five minutes a background job reads each new link/, "what happens to it (the Training Corpus Ingest job's schedule)");
     assert.match(text, /Add examples/);
@@ -589,7 +608,7 @@ async function main() {
   await check("no Requests card; the Training card says what it is; nothing on the Overview names a persona or a vendor", async () => {
     const text = textOf(await resolve(await MarketingPage(), false));
     assert.doesNotMatch(text, /Requests|Jobs for the marketing agent|None open\./, "the Requests card is gone");
-    assert.match(text, /Training material.*What the marketing agent learns from/s);
+    assert.match(text, /Training material.*What your agents learn from/s);
     assert.doesNotMatch(text, PERSONA, `a persona name or pronoun on the Overview: ${text.match(PERSONA)?.[0]}`);
     assert.doesNotMatch(text, /Zernio|provenance/, "the posting account, not its vendor; no jargon");
   });

@@ -27,6 +27,8 @@ import {
   bestComputerAnswerState,
   computerAnswerState,
   machineState,
+  presenceWords,
+  timeAgo,
   type ComputerAnswerState,
 } from "@/lib/devices/presence";
 import { runtimeStatusWords } from "@/lib/bridge-cli-status";
@@ -83,34 +85,23 @@ function blockedWords(reason: string): string {
   return BLOCKED_REASON_WORDS[reason] || reason.replace(/_/g, " ");
 }
 
-/** Exported so Devices (advanced) dates its rows the same way "Offline since" does here (CC 2026-10-16). */
-export function timeAgo(iso: string | null): string {
-  if (!iso) return "never";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (ms < 0) return "just now";
-  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} s ago`;
-  if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)} min ago`;
-  // Older than an hour: a bare "5:20 AM" could be yesterday's, last week's or
-  // last month's. Say which day when it is not today.
-  const at = new Date(iso);
-  if (at.toDateString() === new Date().toDateString()) {
-    return at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  }
-  return at.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
+/** Exported so Devices (advanced) dates its rows the same way "Offline since" does here (CC 2026-10-16).
+ *  It lives in lib/devices/presence.ts now, beside presenceWords, which writes that "Offline since". */
+export { timeAgo };
 
 /**
  * The exact row line (ui_changes section 1), from the one state. The state's
  * word is the one Settings > AI brain uses for it (lib/bridge-cli-status.ts
  * runtimeStatusWords; CC 2026-10-16: this line said "Ready for department
  * work" where AI brain said "Ready for agents"). A blocked computer keeps its
- * own reason: AI brain has no word for a refused claim.
+ * own reason: AI brain has no word for a refused claim. Busy and Offline are
+ * presenceWords', the computer's words on every screen.
  */
 function rowLine(label: string, state: ComputerAnswerState, claimStateAt: string | null, lastSeenAt: string | null): string {
   if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt)}`;
-  if (state === "busy") return `${label} · ${runtimeStatusWords("busy")}, finishing a reply`;
+  if (state === "busy") return `${label} · ${presenceWords("busy")}, finishing a reply`;
   if (state === "not_approved") return `${label} · ${runtimeStatusWords("approval_needed")}`;
-  if (state === "offline") return `${label} · ${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt)}`;
+  if (state === "offline") return `${label} · ${presenceWords("offline", lastSeenAt)}`;
   return `${label} · Connected, can't answer: ${blockedWords(state.slice("blocked:".length))}`;
 }
 
@@ -131,6 +122,8 @@ function rowLine(label: string, state: ComputerAnswerState, claimStateAt: string
  *
  * The state words are AI brain's (runtimeStatusWords, CC 2026-10-16), the
  * same as rowLine's; "Approval needed from <owner>" still names who approves.
+ * The heartbeat's word is presenceWords' (lib/devices/presence.ts), the one
+ * AI brain's computer cards and Devices (advanced) print for the same state.
  */
 function teamRowLine(
   label: string,
@@ -141,14 +134,12 @@ function teamRowLine(
   nowMs: number,
 ): string {
   if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt)}`;
-  if (state === "busy") return `${label} · ${runtimeStatusWords("busy")}, finishing a reply`;
+  if (state === "busy") return `${label} · ${presenceWords("busy")}, finishing a reply`;
   if (state === "not_approved") {
-    const heartbeat = machineState(lastSeenAt, nowMs);
-    const presence =
-      heartbeat === "offline" ? `${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt)}` : heartbeat === "idle" ? "Idle" : "Online";
+    const presence = presenceWords(machineState(lastSeenAt, nowMs), lastSeenAt);
     return `${label} · ${presence} · ${runtimeStatusWords("approval_needed")} from ${ownerName}`;
   }
-  if (state === "offline") return `${label} · ${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt)}`;
+  if (state === "offline") return `${label} · ${presenceWords("offline", lastSeenAt)}`;
   return `${label} · Connected, can't answer: ${blockedWords(state.slice("blocked:".length))}`;
 }
 

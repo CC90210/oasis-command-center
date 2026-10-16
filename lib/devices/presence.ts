@@ -17,6 +17,7 @@
  *
  * PURE AND CLIENT-SAFE: Settings > Devices draws its rows in the browser.
  */
+import { runtimeStatusWords } from "@/lib/bridge-cli-status";
 
 export const HEARTBEAT_S = 60;
 export const ONLINE_MS = 150_000;
@@ -37,6 +38,45 @@ export function machineState(lastSeenAt: string | null | undefined, nowMs: numbe
 /** Online by the one rule (an idle computer is not online). */
 export function isOnline(lastSeenAt: string | null | undefined, nowMs: number): boolean {
   return machineState(lastSeenAt, nowMs) === "online";
+}
+
+/**
+ * When a computer was last seen, as the device screens say it: "12 s ago", "4 min ago", a time today, or a
+ * day and time before today. It lived in components/settings/YourComputersCard.tsx (which still exports
+ * it); it is here so presenceWords owns the date in "Offline since".
+ */
+export function timeAgo(iso: string | null): string {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return "just now";
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} s ago`;
+  if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)} min ago`;
+  // Older than an hour: a bare "5:20 AM" could be yesterday's, last week's or
+  // last month's. Say which day when it is not today.
+  const at = new Date(iso);
+  if (at.toDateString() === new Date().toDateString()) {
+    return at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  return at.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/** Every presence a screen shows for a computer: machineState's three, and busy (every slot has a run in it). */
+export type PresenceState = MachineState | "busy";
+
+/**
+ * ONE set of words for a computer's presence, for every screen that shows it: Settings > AI brain's
+ * computer cards (AgentEnginePanel), Team computers rows (YourComputersCard teamRowLine) and Devices
+ * (advanced) (DevicesEditor). An audit (CC 2026-10-16) found one state written three ways: "Online" typed
+ * on two screens, machineState's raw lowercase word as a badge on the third. Each screen still decides
+ * which state its computer is in by its own rule; this only names the state. Busy and Offline are AI
+ * brain's words (lib/bridge-cli-status.ts), so a computer and its apps say the same thing.
+ */
+export function presenceWords(state: PresenceState, lastSeenAt?: string | null): string {
+  if (state === "online") return "Online";
+  if (state === "idle") return "Idle";
+  if (state === "busy") return runtimeStatusWords("busy");
+  // "since never" said nothing true: a computer never seen is just Offline.
+  return lastSeenAt ? `${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt)}` : runtimeStatusWords("offline");
 }
 
 /**

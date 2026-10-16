@@ -13,9 +13,11 @@
  * `others` (the page's scheduled-jobs list: automations made before this builder) is listed in the same
  * section, after these rows. With it present the section never says "nothing yet" and shows no count of
  * its own: the older list carries its own counts, and claiming an empty list above real automations is
- * exactly what hid CC's on 2026-10-16.
+ * exactly what hid CC's on 2026-10-16. The older list cannot see these rows, so unless this list has
+ * loaded with none it is handed `emptyHint: null` (see quietWhenEmpty): its "You have no automations
+ * yet" under the builder's rows, or beside a list still loading or that failed, would be false.
  */
-import { useRef, useState, type ReactNode } from "react";
+import { cloneElement, isValidElement, useRef, useState, type ReactElement, type ReactNode } from "react";
 import type { GuidedApi, GuidedAutomationView, TestResult } from "@/lib/automations/guided/api-types";
 import { activateAutomation, activatedLine, pauseAutomation, removeAutomation, runTest, type Failure } from "@/lib/automations/guided/flow";
 import { departmentLabel, lastRunHead, nextRunLine, type LoadState } from "@/lib/automations/guided/view";
@@ -48,9 +50,21 @@ export type GuidedAutomationsListProps = {
 
 const BUTTON = `btn-secondary ${TAP} disabled:cursor-not-allowed disabled:opacity-50`;
 
+/**
+ * `others` told to say nothing when it is empty itself (CronJobsManager's `emptyHint: null`). Only a
+ * component gets the prop: a plain tag would print it as an attribute.
+ */
+function quietWhenEmpty(others: ReactNode): ReactNode {
+  return isValidElement(others) && typeof others.type !== "string"
+    ? cloneElement(others as ReactElement<{ emptyHint?: string | null }>, { emptyHint: null })
+    : others;
+}
+
 export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRemoved, onTested, onRetry, initialRows, others }: GuidedAutomationsListProps) {
   const hasOthers = others !== undefined && others !== null && others !== false;
   const count = state.kind === "ready" && !hasOthers ? state.data.length : null;
+  // Only a list that loaded with nothing lets the older one say "none yet" and point at the builder.
+  const builderEmpty = state.kind === "ready" && state.data.length === 0;
   return (
     <section aria-labelledby="guided-list-h" aria-busy={state.kind === "loading"} className="space-y-3">
       <h2 id="guided-list-h" className="text-base font-semibold text-fg">
@@ -89,7 +103,7 @@ export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRem
         </ul>
       )}
 
-      {hasOthers && <div data-testid="automations-made-before">{others}</div>}
+      {hasOthers && <div data-testid="automations-made-before">{builderEmpty ? others : quietWhenEmpty(others)}</div>}
     </section>
   );
 }
