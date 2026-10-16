@@ -483,7 +483,7 @@ async function TrainingCard({ tenantId }: { tenantId: string }) {
   return (
     <Card
       title="Training material"
-      subtitle="What the marketing agent learns from"
+      subtitle="What your agents learn from"
       action={
         <Link
           href="/founders/marketing/train"

@@ -46,7 +46,12 @@ import type { DepartmentKey } from "@/lib/os/types";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Agent training · Admin" };
 
-/** How many of the newest notes the page reads, so each agent's tab can list its own. */
+/**
+ * How many of the newest notes the general read takes. An agent's tab reads its own notes, filtered in the
+ * database (trainingRowsFor, lib/os/training-notes.ts), so this read serves only the "All agents" tab, and
+ * an agent's tab when Turso is not the active backend (trainingRowsFor answers null; LearnedNotes then
+ * filters these rows by the same rule).
+ */
 const ITEMS_READ = 200;
 
 /**

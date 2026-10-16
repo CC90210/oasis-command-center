@@ -323,7 +323,10 @@ function headImports(source: string, fileName: string): { names: string[]; fromC
   // anti-vacuity: the scan found the one <head> and the boot script inside it.
   assert.equal(head.heads, 1, "app/layout.tsx should draw exactly one <head>; the scan found " + head.heads);
   assert.ok(head.names.includes("SIDEBAR_BOOT_SCRIPT"), `the scan did not see SIDEBAR_BOOT_SCRIPT inside <head> (saw: ${head.names.join(", ") || "nothing"})`);
-  assert.ok(head.names.includes("Script"), "the scan did not see next/script inside <head>");
+  // The Google Ads tag used to sit here as a next/script (PR #610). It now loads
+  // only after the visitor allows ad cookies (lib/marketing/ad-consent.ts), so
+  // a Script back in the root <head> would load it for everyone, unconsented.
+  assert.ok(!head.names.includes("Script"), "app/layout.tsx <head> carries a next/script again; the Google tag must wait for consent");
   assert.deepEqual(
     head.fromClient,
     [],

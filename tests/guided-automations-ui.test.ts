@@ -305,6 +305,9 @@ const CASES: Case[] = [
   { id: "list_no_clock", kind: "section", props: { initialContext: ready(CTX), initialList: ready(LIST_ITEMS) } },
 ];
 
+/** Per page case, the props the page handed its scheduled-jobs list (CronJobsManager), as the render saw them. */
+const olderListProps: Record<string, Record<string, unknown> | null> = {};
+
 function renderMarkup(cases: Case[]): Record<string, string> {
   const r = spawnSync(process.execPath, ["--import", "tsx", "tests/guided-automations-ui.render.ts"], {
     cwd: root,
@@ -316,7 +319,9 @@ function renderMarkup(cases: Case[]): Record<string, string> {
     maxBuffer: 64 * 1024 * 1024,
   });
   assert.equal(r.status, 0, `render failed: ${r.stderr}`);
-  return (JSON.parse(r.stdout) as { markup: Record<string, string> }).markup;
+  const out = JSON.parse(r.stdout) as { markup: Record<string, string>; olderList?: Record<string, Record<string, unknown> | null> };
+  Object.assign(olderListProps, out.olderList ?? {});
+  return out.markup;
 }
 
 // ═══ the driven half: React's state hooks stood in for ═══════════════════
@@ -1116,6 +1121,20 @@ async function main() {
     assert.ok(!markup.page_on.includes("lead scoring"), "the header no longer promises what no tenant job does");
   });
 
+  await check("integration: with the builder on, an empty workspace's list points at New automation; with it off, the old words alone (CC 2026-10-16)", async () => {
+    // The builder's own "build your first one above" never shows on the page (the older list is always
+    // passed under it), so the scheduled-jobs list's empty line is the one a brand-new workspace reads.
+    // That line is drawn only after a fetch, so here: the prop the real page passes, and the words it makes.
+    const { emptyListLine } = await import("../components/automations/CronJobsManager");
+    const hint = olderListProps.page_on?.emptyHint;
+    assert.equal(hint, "Build your first one with New automation above.", "the page passes the builder's hint");
+    assert.equal(olderListProps.page_on_not_allowed?.emptyHint, hint, "for every viewer the builder is on for");
+    assert.equal(emptyListLine(hint as string), "You have no automations yet. Build your first one with New automation above.");
+    assert.ok(olderListProps.page_off && !("emptyHint" in olderListProps.page_off), "with the builder off the page passes no hint");
+    assert.equal(emptyListLine(undefined), "You have no automations yet.", "and the empty line keeps O2's exact words");
+    assert.equal(emptyListLine(null), "", "told to stay quiet, it says nothing");
+  });
+
   await check("integration: signed out, the builder is not offered and the page is the old one", () => {
     const html = markup.page_on_signed_out;
     assert.ok(!html.includes("guided-builder-h") && !html.includes("Pick a job, say when it should run"));
@@ -1593,6 +1612,58 @@ async function main() {
     assert.equal(calls.at(-1)?.method, "remove");
     assert.equal(calls.at(-1)?.args[0], "i4");
     assert.deepEqual(removed, ["i4"]);
+  });
+
+  await check("driven: the older list says 'none yet' and points at the builder only when the builder's list loaded empty (CC 2026-10-16)", async () => {
+    const { CronJobsManager } = await import("../components/automations/CronJobsManager");
+    const HINT = "Build your first one with New automation above.";
+    const { api } = fakeApi();
+    const listWith = (state: Parameters<typeof GuidedAutomationsList>[0]["state"]) =>
+      GuidedAutomationsList({
+        state,
+        api,
+        nowMs: NOW,
+        onEdit: () => undefined,
+        onItem: () => undefined,
+        onRemoved: () => undefined,
+        onTested: () => undefined,
+        onRetry: () => undefined,
+        others: ReactNS.createElement(CronJobsManager, { agentKeys: [], emptyHint: HINT }),
+      });
+    /** The CronJobsManager element the list renders, as it hands it on (not drawn). */
+    const handed = (node: unknown): El | null => {
+      if (Array.isArray(node)) return node.map(handed).find(Boolean) ?? null;
+      if (!isValidElement(node)) return null;
+      const el = node as unknown as El;
+      return el.type === CronJobsManager ? el : handed(el.props.children);
+    };
+    /** The words a person reads once the older list has loaded with no jobs: its first state slot is `jobs`. */
+    const loadedEmpty = (tree: unknown) => {
+      slots = [[]];
+      cursor = 0;
+      return squash(text(tree));
+    };
+
+    const empty = listWith(ready([]));
+    assert.equal(handed(empty)?.props.emptyHint, HINT, "a brand-new workspace: the hint reaches the older list");
+    assert.match(loadedEmpty(empty), /You have no automations yet\. Build your first one with New automation above\./);
+
+    for (const [why, state] of [
+      ["the builder's rows are on screen", ready(LIST_ITEMS)],
+      ["the builder's list is still loading", { kind: "loading" as const }],
+      ["the builder's list could not load", { kind: "error" as const, message: "We could not reach the server.", repair: null }],
+    ] as const) {
+      const tree = listWith(state as Parameters<typeof GuidedAutomationsList>[0]["state"]);
+      assert.equal(handed(tree)?.props.emptyHint, null, `${why}: the older list is told to stay quiet when empty`);
+      if (state.kind !== "ready") assert.doesNotMatch(loadedEmpty(tree), /no automations yet|Build your first one/, `${why}: no "none yet"`);
+    }
+
+    // Drawn alone (the builder off): the exact old words.
+    slots = [[]];
+    cursor = 0;
+    const alone = squash(text(CronJobsManager({ agentKeys: [] })));
+    assert.match(alone, /You have no automations yet\./);
+    assert.doesNotMatch(alone, /Build your first one/);
   });
 
   await check("driven: a teammate's automation offers only Pause, and says why", async () => {

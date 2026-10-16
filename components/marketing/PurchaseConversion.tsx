@@ -2,8 +2,17 @@
 
 import { useEffect, useRef } from "react";
 import { purchaseConversionPayload } from "@/lib/marketing/google-ads";
+import { AD_CONSENT_CHANGED_EVENT, readAdConsent } from "@/lib/marketing/ad-consent";
 
 const STORAGE_PREFIX = "oasis:google-ads:purchase:";
+
+function localStore(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 declare global {
   interface Window {
@@ -36,8 +45,12 @@ export function PurchaseConversion({
     }
 
     let attempts = 0;
+    let sent = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const send = () => {
+      if (sent) return;
+      // A gtag left on the page after No thanks is not permission to send.
+      if (readAdConsent(localStore()) === "denied") return;
       if (typeof window.gtag !== "function") {
         attempts += 1;
         if (attempts < 40) timer = setTimeout(send, 100);
@@ -46,6 +59,7 @@ export function PurchaseConversion({
       const payload = purchaseConversionPayload({ valueCad, transactionId, sendTo });
       if (!payload) return;
       window.gtag("event", "conversion", payload);
+      sent = true;
       try {
         window.sessionStorage.setItem(storageKey, "sent");
       } catch {
@@ -54,8 +68,18 @@ export function PurchaseConversion({
       }
     };
     send();
+    // The tag loads only after the visitor allows ad cookies (AdConsent). A
+    // buyer who allows them after the 4 s poll above gave up still counts;
+    // one who declines never gets a gtag, so nothing is sent.
+    const onConsent = (e: Event) => {
+      if ((e as CustomEvent<string>).detail !== "granted") return;
+      attempts = 0;
+      send();
+    };
+    window.addEventListener(AD_CONSENT_CHANGED_EVENT, onConsent);
     return () => {
       if (timer) clearTimeout(timer);
+      window.removeEventListener(AD_CONSENT_CHANGED_EVENT, onConsent);
     };
   }, [sendTo, transactionId, valueCad]);
 

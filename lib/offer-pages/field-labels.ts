@@ -62,6 +62,7 @@ const FIELD: Readonly<Record<string, string>> = {
   items: "items",
   name: "name",
   price: "price",
+  price_cad: "price in CAD",
   cadence: "billing period",
   summary: "summary",
   includes: "what's included",
