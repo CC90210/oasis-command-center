@@ -277,20 +277,56 @@ function humanizeMinutes(minutes: number): string {
 }
 
 /**
+ * Which kind of non-run a skip-shaped result is. Each one leaves the row's
+ * timestamps in a different state (scripts/scheduler.py), and the card can only
+ * say WHEN if it knows which:
+ *   - "missed": `skipped-stale: …`, written by the scheduler's own boot-blast
+ *     guard. It never starts the job and leaves last_run_at alone, so last_run_at
+ *     is still the last REAL run and the skip's own moment is stored nowhere.
+ *   - "deferred": `DEFERRED: …` from a handler, or a script's exit 75. The job
+ *     was started, so the scheduler stamped last_run_at at this attempt.
+ *   - "skipped": any other `skipped…:` a job wrote about itself. Same stamping.
+ * Null for a real run, or for a row that has never run.
+ */
+export type AttemptKind = "missed" | "skipped" | "deferred";
+
+export function attemptKindOf(raw: unknown): AttemptKind | null {
+  const text = asText(raw).trim();
+  if (!SKIPPED_RESULT_RE.test(text)) return null;
+  if (/^skipped-stale\s*:/i.test(text)) return "missed";
+  if (/^deferred\s*:/i.test(text)) return "deferred";
+  return "skipped";
+}
+
+/**
  * The sentence the card shows for a skipped result, in the words of the person
  * reading it. The raw scheduler text stays available under "Details": it is the
  * evidence, not the message.
+ *
+ * `when` is the moment already written for the reader ("5:30 AM", "8:00 AM
+ * yesterday"), built in the browser because only the browser knows the viewer's
+ * zone. Without it the sentence carried no time at all, and CC could not tell a
+ * skip from this morning apart from one last week (CC 2026-10-16).
  */
-export function explainSkippedResult(text: string): string {
+export function explainSkippedResult(text: string, when?: string | null): string {
   const lateMatch = /was\s+(\d+)\s*min\s+behind/i.exec(text);
   const late = lateMatch ? humanizeMinutes(Number(lateMatch[1])) : null;
   if (/skipped-stale/i.test(text)) {
+    if (when) return `Skipped: the computer was off at ${when}, so it waited for its next slot.`;
     return late
       ? `Skipped: this was due about ${late} before the PC that runs it was back on, so it waited for its next slot.`
       : "Skipped: the PC that runs this was off when it was due, so it waited for its next slot.";
   }
-  if (/^deferred/i.test(text.trim())) return "Deferred: held back until something it waits on is ready.";
-  return "Skipped this slot; it runs again at its next scheduled time.";
+  if (/^deferred/i.test(text.trim())) {
+    // The one deferral reason live rows carry today (scripts/bravo_sleep.py).
+    const why = /claude_quota/i.test(text)
+      ? "the AI usage limit was reached, so it tries again on its own."
+      : "held back until something it waits on is ready.";
+    return when ? `Deferred at ${when}: ${why}` : `Deferred: ${why}`;
+  }
+  return when
+    ? `Skipped at ${when}; it runs again at its next scheduled time.`
+    : "Skipped this slot; it runs again at its next scheduled time.";
 }
 
 export function classifyLastResult(raw: unknown): LastResultVerdict {
@@ -348,7 +384,14 @@ export function normalizeEmpireRow(row: EmpireCronRow) {
     reason: failureReason,
   } = classifyLastResult(row.last_result);
   const unresolvedFailures = Math.max(0, asCount(row.fail_count));
+  // The job's health verdict: unresolved failures outrank a clean-looking
+  // result, because the counter only grows on a real failure and only a real
+  // success clears it. /health's attention list reads this. It is NOT the card's
+  // colour: when the latest tick was a skip or a deferral, the card stays
+  // neutral and shows the count on its own (last_attempt_kind, below; CC
+  // 2026-10-16: a PC that was off is not a failure).
   const status = unresolvedFailures > 0 ? "error" as const : classifiedStatus;
+  const attemptKind = classifiedStatus === "skipped" ? attemptKindOf(lastResult) : null;
   const unresolvedError = unresolvedFailures > 0
     ? `${unresolvedFailures} unresolved failure${unresolvedFailures === 1 ? "" : "s"}.` +
       (lastResult ? ` Latest scheduler result: ${lastResult}` : " No later successful run has cleared the counter.")
@@ -379,6 +422,12 @@ export function normalizeEmpireRow(row: EmpireCronRow) {
     last_run_output: status === "success" || status === "unknown" || status === "skipped" ? lastResult : null,
     last_run_note: status === "skipped" ? explainSkippedResult(lastResult) : null,
     last_run_error: unresolvedError ?? (status === "error" ? shapeError : null),
+    // What the latest tick was when it was not a real run, and the stored text
+    // verbatim whatever the verdict. The card builds its plain sentence and its
+    // "Last ran" / "Last attempt" lines from these, and shows the text itself
+    // only inside a closed Details (lib/automations/run-summary.ts).
+    last_attempt_kind: attemptKind,
+    last_result_text: lastResult.trim() ? lastResult : null,
     run_count: asCount(row.run_count),
     unresolved_failures: unresolvedFailures,
     created_at: row.created_at,

@@ -26,26 +26,29 @@ const read = (rel: string) => readFileSync(join(__dirname, "..", rel), "utf8");
 
 const manager = read("components/automations/CronJobsManager.tsx");
 
-// A skipped slot is its own state: neutral icon, "Last ran", a plain note, the raw text under Details.
-assert.match(manager, /const ranSkipped = job\.last_run_status === "skipped";/);
-assert.match(manager, /ranSkipped\s*\?\s*"Last ran"/, "last_run_at is the last REAL run, so the line says so");
-assert.doesNotMatch(
-  manager,
-  /ranOk\s*\?\s*\(\s*<Check[\s\S]{0,40}ranSkipped/,
-  "a skipped slot never gets the success tick",
-);
-assert.match(manager, /data-testid="cron-skipped-note"/);
-assert.match(manager, /job\.last_run_note[\s\S]{0,400}<summary[^>]*>Details<\/summary>[\s\S]{0,200}job\.last_run_output/, "raw text sits under Details, not in the message");
+// Every line about the last run comes from lib/automations/run-summary.ts, whose
+// sentences, times and colours are pinned in cron-empire-row.test.ts. This pins
+// that the row renders THAT, and nothing raw (CC 2026-10-16).
+assert.match(manager, /const run = summarizeRun\(job\);/);
+assert.match(manager, /const ranBad = run\.failed;/, "only a real failure is red; a skip or deferral is not");
+assert.match(manager, /: ranBad \|\| overdue/, "the card border reads that same verdict");
+assert.match(manager, /const ranOk = !ranBad && run\.lastRan\?\.tone === "ok";/, "a skipped slot never gets the success tick");
+assert.match(manager, /run\.lastRan\.text/, "the Last ran line is the summary's");
+assert.match(manager, /\{run\.lastAttempt && \([\s\S]{0,200}data-testid="cron-last-attempt"[\s\S]{0,200}\{run\.lastAttempt\}/, "Last attempt is its own line, only when it differs");
 assert.match(
   manager,
-  /!job\.last_run_error && !job\.last_run_note && job\.last_run_output/,
-  "the raw 'Last result:' box is only for a result with no plain note",
+  /data-testid="cron-result-line"[\s\S]{0,600}\{run\.result\.text\}[\s\S]{0,200}<details className=[^>]*>\s*<summary[^>]*>Details<\/summary>[\s\S]{0,200}\{run\.details\}/,
+  "one plain sentence per row, the stored text under a closed Details",
 );
+assert.doesNotMatch(manager, /<details[^>]*\bopen\b/, "Details starts closed");
+assert.doesNotMatch(manager, /Last result: |"Error: "/, "raw text is never the main line");
+assert.doesNotMatch(manager, /job\.last_run_(?:error|output|note)\b/, "the row never prints a raw stored column itself");
+assert.doesNotMatch(manager, /run\.details\.slice\(/, "the evidence is never cut short");
 
 // The counts read as two counts of the same thing.
 assert.match(manager, /Yours \$\{tenantCount\} · OASIS platform \$\{empireCount\} \(operators only\)/);
 assert.doesNotMatch(manager, /for this workspace · \$\{empireCount\}/, "the two-sentence wording is gone");
-console.log("  ok - a skipped slot is neutral, plainly worded, with the raw text under Details; counts read as counts");
+console.log("  ok - every row has one plain result line with the raw text under Details; a skip is neutral; counts read as counts");
 
 const flow = read("components/automations/DescribeAutomationFlow.tsx");
 
@@ -67,6 +70,9 @@ const inventory = read("lib/automations/cron-inventory.ts");
 assert.match(inventory, /last_run_status: "success" \| "error" \| "unknown" \| "skipped" \| null;/);
 assert.match(inventory, /value\.last_run_status === "skipped"/, "the response validator accepts it");
 assert.match(inventory, /last_run_note\?: string \| null;/);
+assert.match(inventory, /last_attempt_kind\?: "missed" \| "skipped" \| "deferred" \| null;/);
+assert.match(inventory, /value\.last_attempt_kind === "missed"/, "the response validator accepts the attempt kind");
+assert.match(inventory, /last_result_text\?: string \| null;/);
 console.log("  ok - the wire type and validator carry the skipped status and its note");
 
 console.log("automations-honest-status: all passed");

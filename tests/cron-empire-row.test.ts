@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import {
   asBool,
+  attemptKindOf,
   classifyLastResult,
   explainSkippedResult,
   inferEmpireAgentKey,
@@ -19,6 +20,13 @@ import {
   normalizeTenantCronRow,
   type EmpireCronRow,
 } from "../lib/cron-empire-row";
+import {
+  formatRunMoment,
+  plainFailureReason,
+  previousScheduledRun,
+  slotNamedInText,
+  summarizeRun,
+} from "../lib/automations/run-summary";
 
 function row(over: Partial<Record<string, unknown>> = {}): EmpireCronRow {
   return {
@@ -122,6 +130,173 @@ assert.match(explainSkippedResult("skipped-stale: next_run_at was 5000 min behin
 assert.match(explainSkippedResult("skipped-stale: next_run_at was 45 min behind threshold (30 min)"), /about 45 min before/);
 assert.match(explainSkippedResult("deferred: x"), /^Deferred:/);
 assert.match(explainSkippedResult("skipped: x"), /^Skipped this slot/);
+
+// ── Every row says what happened, and when, in plain English (CC 2026-10-16) ──
+// A frozen clock and a fixed zone: 15:00Z on Oct 15 is 11:00 AM in Toronto (EDT).
+// Formats are the ones scripts/scheduler.py actually writes into last_result.
+const NOW = Date.parse("2026-10-15T15:00:00Z");
+const TZ = "America/Toronto";
+const at = { now: NOW, timeZone: TZ };
+const sum = (over: Partial<Record<string, unknown>>) => summarizeRun(normalizeEmpireRow(row(over)), at);
+const RAW_WORDS = /skipped-stale|next_run_at|threshold|FAILED|DEFERRED|claude_quota|retry_after|\{|\}/;
+
+// Which kind of non-run: each leaves the timestamps in a different state.
+assert.equal(attemptKindOf(skippedText), "missed", "the scheduler's own boot-blast skip");
+assert.equal(attemptKindOf("DEFERRED: claude_quota retry_after=420 no memory files changed"), "deferred");
+assert.equal(attemptKindOf("deferred:1/3"), "deferred");
+assert.equal(attemptKindOf("SKIPPED: bridge offline"), "skipped", "a skip the job wrote about itself");
+assert.equal(attemptKindOf("ok"), null);
+assert.equal(attemptKindOf("caught-up: missed 05:30 slot (PC off)"), null, "a catch-up is a real run");
+assert.equal(attemptKindOf({ drained: 0 }), null);
+assert.equal(normalizeEmpireRow(row({ last_result: skippedText })).last_attempt_kind, "missed");
+assert.equal(normalizeEmpireRow(row({ last_result: "ok" })).last_attempt_kind, null);
+assert.equal(normalizeEmpireRow(row({ last_result: "skipped-stale: x", fail_count: 2 })).last_attempt_kind, "missed", "set even when the counter keeps the verdict at error");
+assert.equal(normalizeEmpireRow(row({ last_result: { errors: 3 } })).last_result_text, '{"errors":3}', "the stored text, verbatim, whatever the verdict");
+assert.equal(normalizeEmpireRow(row({ last_result: null })).last_result_text, null);
+
+// 1. A scheduler skip says WHEN: the slot the computer was off at, read off the
+//    row's own schedule (next_run_at was advanced past it), in the viewer's zone.
+const dailySkip = {
+  schedule: "30 5 * * *",
+  last_result: skippedText,
+  last_run_at: "2026-10-14T09:31:00Z", // its last REAL run, 5:31 AM yesterday
+  next_run_at: "2026-10-16T09:30:00Z", // tomorrow 5:30 AM: the skip moved it here
+  fail_count: 0,
+};
+const missed = sum(dailySkip);
+assert.equal(missed.result?.text, "Skipped: the computer was off at 5:30 AM, so it waited for its next slot.");
+assert.equal(missed.result?.tone, "neutral");
+// 2. "Last ran" and "Last attempt" are two lines when they differ.
+assert.equal(missed.lastRan?.text, "Last ran 1d ago");
+assert.equal(missed.lastRan?.tone, "neutral", "no success tick: the stored result is the skip, not that run's verdict");
+assert.equal(missed.lastAttempt, "Last attempt: skipped at 5:30 AM");
+// 3. Not red.
+assert.equal(missed.failed, false);
+// 4. The raw text is under Details, never the message.
+assert.equal(missed.details, skippedText);
+assert.equal(previousScheduledRun("30 5 * * *", "2026-10-16T09:30:00Z", TZ)?.toISOString(), "2026-10-15T09:30:00.000Z");
+assert.equal(previousScheduledRun("0 * * * *", "2026-10-15T16:00:00Z", TZ)?.toISOString(), "2026-10-15T15:00:00.000Z");
+assert.equal(
+  sum({ ...dailySkip, schedule: "0 * * * *", next_run_at: "2026-10-15T16:00:00Z" }).result?.text,
+  "Skipped: the computer was off at 11:00 AM, so it waited for its next slot.",
+);
+// No time rather than a wrong one: the scheduler reads cron in its own computer's
+// zone, so in Paris next_run_at is not a 5:30 run and nothing is derived.
+assert.equal(previousScheduledRun("30 5 * * *", "2026-10-16T09:30:00Z", "Europe/Paris"), null);
+const elsewhere = summarizeRun(normalizeEmpireRow(row(dailySkip)), { now: NOW, timeZone: "Europe/Paris" });
+assert.match(String(elsewhere.result?.text), /^Skipped: this was due about 6 h before/);
+assert.equal(elsewhere.lastAttempt, "Last attempt: skipped");
+assert.equal(previousScheduledRun("30 5 * * *", "2026-10-16T09:47:00Z", TZ), null, "a next_run_at off the schedule names no slot");
+assert.equal(previousScheduledRun("not a cron", "2026-10-16T09:30:00Z", TZ), null);
+// The missed slot when the text names it wins, with or without a next_run_at.
+assert.equal(
+  sum({ last_result: "skipped-stale: missed 05:30 slot (PC off)", next_run_at: null }).result?.text,
+  "Skipped: the computer was off at 5:30 AM, so it waited for its next slot.",
+);
+assert.equal(slotNamedInText("skipped: waiting until 09:00", at), null, "only a time after 'missed' is the slot");
+
+// 3. A skip after real failures: the health verdict stays "error" for /health
+//    (pinned above and in system-health-loader), but the card is not red. The
+//    failure is told where it belongs, on the real run, plus the count badge.
+const missedAfterFailures = sum({ ...dailySkip, fail_count: 2 });
+assert.equal(normalizeEmpireRow(row({ ...dailySkip, fail_count: 2 })).last_run_status, "error");
+assert.equal(missedAfterFailures.failed, false, "a skip never paints the card red");
+assert.equal(missedAfterFailures.lastRan?.text, "Last ran 1d ago and failed");
+assert.equal(missedAfterFailures.lastRan?.tone, "bad");
+assert.equal(missedAfterFailures.result?.tone, "neutral");
+// The Morning Brief shape from /health: a skip the job wrote, counter at 2.
+const heldBriefing = sum({
+  last_result: "SKIPPED: bridge offline",
+  fail_count: 2,
+  last_run_at: "2026-10-15T12:00:00Z",
+});
+assert.equal(heldBriefing.failed, false);
+assert.equal(heldBriefing.result?.text, "Skipped at 8:00 AM; it runs again at its next scheduled time.");
+assert.equal(heldBriefing.lastAttempt, "Last attempt 3h ago: skipped");
+assert.equal(heldBriefing.lastRan, null, "the job stamped last_run_at at the skip, so the real run before it is unknown");
+
+// Deferred: the attempt's own time (the scheduler stamps last_run_at for it).
+const deferred = sum({
+  last_result: "DEFERRED: claude_quota retry_after=420 no memory files changed",
+  last_run_at: "2026-10-15T12:00:00Z",
+});
+assert.equal(deferred.result?.text, "Deferred at 8:00 AM: the AI usage limit was reached, so it tries again on its own.");
+assert.equal(deferred.lastAttempt, "Last attempt 3h ago: held back");
+assert.equal(deferred.lastRan, null);
+assert.equal(deferred.failed, false);
+assert.equal(
+  sum({ last_result: "deferred:1/3", last_run_at: "2026-10-14T12:00:00Z" }).result?.text,
+  "Deferred at 8:00 AM yesterday: held back until something it waits on is ready.",
+);
+
+// 4. Real runs: one plain line each, the stored text kept under Details.
+const fine = sum({ last_result: { drained: 0 }, last_run_at: "2026-10-15T12:00:00Z" });
+assert.equal(fine.result?.text, "Ran fine at 8:00 AM.");
+assert.equal(fine.result?.tone, "ok");
+assert.equal(fine.details, '{"drained":0}');
+assert.equal(fine.lastRan?.text, "Last ran 3h ago", "one line when the last attempt WAS the last run");
+assert.equal(fine.lastAttempt, null);
+assert.equal(fine.failed, false);
+
+const timedOut = "FAILED (timeout after 120s): [full: daily_brief_20261015.txt] partial output";
+const failed = sum({ last_result: timedOut, fail_count: 1, last_run_at: "2026-10-15T12:00:00Z" });
+assert.equal(failed.result?.text, "Failed at 8:00 AM: it took too long and was stopped.");
+assert.equal(failed.result?.tone, "bad");
+assert.equal(failed.failed, true, "a real failure is still red");
+assert.equal(failed.details, timedOut, "Details holds the stored text itself, not the counter wrapper");
+
+const shapeFail = sum({ last_result: { errors: 3, sent: 0 }, last_run_at: "2026-10-15T12:00:00Z" });
+assert.equal(shapeFail.result?.text, "Failed at 8:00 AM: it reported 3 problems.");
+assert.equal(shapeFail.details, '{"errors":3,"sent":0}');
+assert.equal(
+  sum({ last_result: "FAILED (exit 1): [full: x.txt] Traceback (most recent call last)", last_run_at: "2026-10-15T12:00:00Z" }).result?.text,
+  "Failed at 8:00 AM: the script stopped with an error.",
+);
+assert.equal(plainFailureReason("boom"), null, "no reason the text does not state");
+
+const unclear = sum({ last_result: "}", last_run_at: "2026-10-15T12:00:00Z" });
+assert.equal(unclear.result?.text, "Result unclear: it ran at 8:00 AM, but what it saved does not say whether it worked.");
+assert.equal(unclear.result?.tone, "unclear");
+assert.equal(unclear.details, "}");
+
+const counterOnly = sum({ last_result: { drained: 0 }, fail_count: 2, last_run_at: "2026-10-15T12:00:00Z" });
+assert.equal(counterOnly.result?.text, "Ran at 8:00 AM, but 2 earlier failures have not been cleared by a good run.");
+assert.equal(counterOnly.failed, true);
+
+assert.equal(
+  sum({ last_result: "caught-up: missed 05:30 slot (PC off)", last_run_at: "2026-10-15T15:39:00Z" }).result?.text,
+  "Ran fine at 11:39 AM, catching up on the 5:30 AM run the computer missed.",
+);
+
+const neverRan = sum({ last_result: null, last_run_at: null });
+assert.equal(neverRan.result, null);
+assert.equal(neverRan.lastRan, null);
+assert.equal(neverRan.lastAttempt, null);
+
+// Tenant rows (the bridge's own columns, no verbatim field) get the same lines.
+const tenantJob = (over: Record<string, unknown>) => summarizeRun({
+  schedule: "0 8 * * *",
+  last_run_at: "2026-10-15T12:00:00Z",
+  last_run_status: "success",
+  last_run_output: null,
+  last_run_error: null,
+  ...over,
+} as never, at);
+assert.equal(tenantJob({ last_run_output: "published 2" }).result?.text, "Ran fine at 8:00 AM.");
+assert.equal(tenantJob({ last_run_output: "published 2" }).details, "published 2");
+assert.equal(tenantJob({ last_run_status: "error", last_run_error: "boom" }).result?.text, "Failed at 8:00 AM.");
+assert.equal(tenantJob({ last_run_status: "error", last_run_error: "boom" }).details, "boom");
+
+// None of the sentences is the stored text.
+for (const s of [missed, missedAfterFailures, heldBriefing, deferred, fine, failed, shapeFail, unclear, counterOnly]) {
+  assert.doesNotMatch(String(s.result?.text), RAW_WORDS, `raw words in: ${s.result?.text}`);
+}
+
+// Times read the way a sentence carries them, in the viewer's zone.
+assert.equal(formatRunMoment("2026-10-15T12:00:00Z", at), "8:00 AM");
+assert.equal(formatRunMoment("2026-10-14T12:00:00Z", at), "8:00 AM yesterday");
+assert.equal(formatRunMoment("2026-10-12T12:00:00Z", at), "8:00 AM on Oct 12");
+assert.equal(formatRunMoment("2026-10-15T12:00:00Z", { now: NOW, timeZone: "Europe/Paris" }), "2:00 PM");
 
 // ── Booleans survived the transpiler as INTEGER ────────────────────────────
 // cron_jobs.is_active is INTEGER in SQLite and fromSql never restores it, so the
