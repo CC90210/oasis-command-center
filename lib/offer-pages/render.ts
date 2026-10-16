@@ -109,7 +109,9 @@ export async function prepareOfferRender(input: {
     video: (ref, video) => (video.source === "library" ? resolved.videos.has(ref) : video.source === "upload" ? verifiedUploads.has(ref) : embedUrl(video) !== null),
     image: (image) => signed.images.has(imageKey(image)),
   };
-  const page = drawnPage(doc, { fallbackHeadline: input.fallbackHeadline, media });
+  // The owner's preview also draws a price or guarantee nobody confirmed yet,
+  // marked (visibility.ts); the public page never does.
+  const page = drawnPage(doc, { fallbackHeadline: input.fallbackHeadline, media, unconfirmed: input.preview === true });
 
   const out: PreparedOffer["media"] = {};
   const addVideo = (ref: string) => {

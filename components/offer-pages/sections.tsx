@@ -236,6 +236,19 @@ const PRICING_GRID: Readonly<Record<number, string>> = {
  * the accent (its border, wash and top rule) and its button is the filled one;
  * with none highlighted, every card's button is.
  */
+/**
+ * The owner's preview only: a price or guarantee no owner has confirmed yet is
+ * drawn so the page reads whole, and says so in its own corner. The public page
+ * never receives one (visibility.ts drawnSections), so this never reaches a visitor.
+ */
+function NotConfirmedYet({ what }: { what: string }) {
+  return (
+    <p className="mt-4 border border-dashed border-ops-line px-3 py-2 font-data text-[11px] leading-relaxed tracking-[0.04em] text-fg-dim" data-unconfirmed="">
+      {`Not confirmed yet. Visitors see ${what} only after an owner confirms it on Confirm & publish.`}
+    </p>
+  );
+}
+
 function Pricing({ s, ctaLabel }: { s: Extract<DrawnSection, { key: "pricing" }>; ctaLabel: string }) {
   const anyHighlighted = s.tiers.some((t) => t.highlighted);
   return (
@@ -260,6 +273,7 @@ function Pricing({ s, ctaLabel }: { s: Extract<DrawnSection, { key: "pricing" }>
                   server markup carries no text separator inside it. */}
               {t.priceCad ? <p className="mt-1 text-[13px] text-fg-muted" data-price-cad="">{`or ${t.priceCad}`}</p> : null}
               {t.summary ? <p className="mt-4 text-[15px] leading-relaxed text-fg-muted">{t.summary}</p> : null}
+              {t.unconfirmed ? <NotConfirmedYet what="this price" /> : null}
               {t.includes.length ? (
                 <ul className="mt-6 space-y-2.5 border-t border-ops-line pt-6">
                   {t.includes.map((line, j) => (
@@ -293,6 +307,7 @@ function Guarantee({ s }: { s: Extract<DrawnSection, { key: "guarantee" }> }) {
         {s.head.eyebrow ? <Eyebrow>{s.head.eyebrow}</Eyebrow> : null}
         {s.head.title ? <h2 className={`${s.head.eyebrow ? "mt-5" : ""} ${H2}`}>{s.head.title}</h2> : null}
         <p className="mt-5 max-w-3xl whitespace-pre-line text-[17px] leading-relaxed text-fg">{s.body}</p>
+        {s.unconfirmed ? <NotConfirmedYet what="the guarantee" /> : null}
         {s.termsUrl ? (
           <a href={s.termsUrl} target="_blank" rel="noopener noreferrer" className={`mt-6 ${CTA_INLINE}`}>
             Read the full terms

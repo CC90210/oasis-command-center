@@ -10,7 +10,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import {
+  AD_CHOICE_ATTRIBUTE,
+  AD_CONSENT_PREPAINT,
   AD_CONSENT_STORAGE_KEY,
   GOOGLE_TAG_SRC,
   installGoogleAdsTag,
@@ -228,6 +231,40 @@ for (const junk of [null, undefined, "", "yes", "GRANTED", 1, true]) {
 
   const footer = read("components/marketing/MarketingFooter.tsx");
   assert.match(footer, /<AdConsentSettingsButton \/>/, "the choice can be changed from every marketing page's footer");
+}
+
+// 6. First paint. The banner used to mount only after hydration, which made
+//    its paragraph the Largest Contentful Paint on every marketing page (3.1 s
+//    of render delay on /, PSI mobile 2026-10-16). It is now server-rendered,
+//    and a pre-paint script hides it for a visitor whose choice is stored.
+{
+  const runPrepaint = (storage: unknown) => {
+    const attrs = new Map<string, string>();
+    const documentElement = { setAttribute: (k: string, v: string) => void attrs.set(k, v) };
+    runInNewContext(AD_CONSENT_PREPAINT, { localStorage: storage, document: { documentElement } });
+    return attrs.has(AD_CHOICE_ATTRIBUTE);
+  };
+  assert.equal(runPrepaint(fakeStorage({ [AD_CONSENT_STORAGE_KEY]: "granted" })), true, "a stored Allow hides the banner before paint");
+  assert.equal(runPrepaint(fakeStorage({ [AD_CONSENT_STORAGE_KEY]: "denied" })), true, "a stored No thanks hides the banner before paint");
+  assert.equal(runPrepaint(fakeStorage()), false, "no stored choice: the banner shows");
+  assert.equal(runPrepaint(fakeStorage({ [AD_CONSENT_STORAGE_KEY]: "yes" })), false, "a value readAdConsent rejects shows the banner");
+  assert.equal(runPrepaint(throwingStorage), false, "storage that throws shows the banner, same as readAdConsent");
+  assert.doesNotThrow(() => runInNewContext(AD_CONSENT_PREPAINT, { document: {} }), "no localStorage at all must not throw");
+
+  const marketingLayout = read("app/(marketing)/layout.tsx");
+  assert.match(
+    marketingLayout,
+    /__html: JS_FLAG[\s\S]{0,300}__html: AD_CONSENT_PREPAINT[\s\S]*<AdConsent \/>/,
+    "the pre-paint check runs inline, after the js flag and before the banner in document order",
+  );
+
+  const component = read("components/marketing/AdConsent.tsx");
+  assert.match(component, /useState\(true\)/, "the banner renders on the server, so it paints with the page");
+  assert.match(component, /const reopen = \(\) => \{[\s\S]{0,200}removeAttribute\(AD_CHOICE_ATTRIBUTE\)/, "reopening from the footer clears the pre-paint hide");
+  assert.match(component, /className="m-consent"/, "the wrapper carries the class the pre-paint CSS hides");
+
+  const css = read("app/(marketing)/marketing.css");
+  assert.match(css, /html:not\(\.js\) \.m-consent,\s*html\[data-ad-choice\] \.m-consent \{\s*display: none;/, "hidden without JS (its buttons need it) and when a choice is stored");
 }
 
 console.log("ad-consent: all assertions passed");

@@ -27,6 +27,7 @@ entity, and `/offers` is its 404 route (`tests/os-redirects.test.ts`).
 | Public routes (a visitor's browser) | `app/api/offer-page/video`, `app/api/offer-page/captions` (both serve captions through `lib/offer-pages/captions.ts`) |
 | A refused field, in the builder's words | `lib/offer-pages/field-labels.ts` |
 | Seeding the two OASIS drafts | `scripts/seed-offer-pages.ts` (dry run unless `--apply`) |
+| Confirm & publish: every page's ticks, its proposed top video and Publish on one screen (owners and admins) | `/forms/publish`, `components/offer-pages/confirm/`, `lib/offer-pages/confirm-list.ts` (the list), `lib/offer-pages/confirm-publish.ts` (the requests, through the builder's and the Library's own routes; Publish sends `enable_form`, so a switched-off form goes on in the same transaction as the page, `store.ts` `publishDraft`), `lib/offer-pages/suggested-videos.ts` (the proposed videos, by Library asset id) |
 
 ## Rules the code holds
 
@@ -45,6 +46,10 @@ entity, and `/offers` is its 404 route (`tests/os-redirects.test.ts`).
   flags needs an owner's tick, stored under the sentence's sha256 (editing the
   sentence clears it). The server stamps every confirmation with the saving
   owner and the time, and saving the same content again keeps the first stamp.
+  The owner's preview (`?offer_preview=1`, the builder's Preview tab) also draws
+  a price or guarantee nobody confirmed yet, each with a "Not confirmed yet"
+  note, so the whole page reads before the ticks; a visitor never gets either
+  (`visibility.ts` `unconfirmed`, set only by `render.ts` for the preview).
 - **Templates carry structure only.** No invented copy; an empty section is not
   drawn.
 - **Video loads on tap.** The server HTML holds a poster and a button: no

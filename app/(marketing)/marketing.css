@@ -50,6 +50,15 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* ── Ad-cookie banner ──────────────────────────────────────────────────
+   Server-rendered so it paints with the page. Hidden without JS (its
+   buttons need it, and without JS no tag loads anyway) and when
+   AD_CONSENT_PREPAINT found a stored choice before first paint. */
+html:not(.js) .m-consent,
+html[data-ad-choice] .m-consent {
+  display: none;
+}
+
 /* ── Scroll reveal ─────────────────────────────────────────────────────
    Without JS, or with reduced motion, elements are simply visible. The
    hidden start state only exists once JS has confirmed it can undo it. */
