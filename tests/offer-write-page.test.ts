@@ -46,7 +46,7 @@ const written: WrittenCopy = {
   hero: { eyebrow: "For service businesses", headline: "Your follow-up, booking and back office, running without you", subheadline: "One place for leads, clients and money.", cta_label: "Book a walkthrough" },
   obstacles: { title: "Sound familiar?", lede: "Where the week goes.", items: items(4, "Problem") },
   what_you_get: { title: "What you get", lede: "Everything set up for you.", items: items(5, "Deliverable") },
-  work: { title: "How it works", lede: "Three steps.", items: items(3, "Step") },
+  work: { title: "How it works", lede: "From first call to running.", items: items(3, "Step") },
   faq: { title: "Questions", items: [{ q: "Do I need to be technical?", a: "No. It is set up for you." }, { q: "Can I cancel?", a: "Yes, talk to us." }] },
   book: { title: "Book your walkthrough", lede: "Pick a time that suits you." },
   seo: { title: "OASIS Command Center", description: "One operating view for a service business." },
@@ -179,6 +179,11 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(!inventsFacts("Ready within one week", "Your front desk is ready within one week."), "a time frame the owner gave is refused");
   // The phrase must match, not just its kind: the owner's "two weeks" does not let "one week" through.
   assert.ok(inventsFacts("Ready in one week", "We set it up in two weeks."));
+  // Codex round five: a spelled-out count is a figure too, and words match only as whole words.
+  assert.ok(inventsFacts("Trusted by three clinics", "We serve dental clinics"), "an invented count got through");
+  assert.ok(!inventsFacts("Three clinics already use it", "Three clinics already use our front desk."));
+  assert.ok(inventsFacts("A leading platform", "Avoid misleading reports"), "the owner's misleading let leading through");
+  assert.ok(!inventsFacts("Guaranteed setup", "We guarantee the setup."), "a stem the owner wrote was refused");
   // A figure is compared with its unit (Codex, round four), and a bare one as a number.
   assert.ok(inventsFacts("Live in 14 days", "Includes 14 templates"), "the owner's 14 templates let 14 days through");
   assert.ok(!inventsFacts("Support 24/7 for every client", "We answer 24/7."));
@@ -322,6 +327,22 @@ check("the editor offers Write the empty parts exactly while a write would fill 
   const wyg = filledIn.sections.find((s) => s.key === "what_you_get") as { items: Array<{ title: string }> };
   assert.equal(wyg.items[0].title, "Deliverable A", "blank placeholders blocked the written cards");
   assert.ok(!emptyWritableParts(filledIn).includes("what_you_get"));
+
+  // Codex round five: a step that holds only its video ("Or add a step with
+  // its video") is content, never a placeholder: a write keeps it.
+  const withVideo = emptyDocForTemplate("book_call");
+  const video = { source: "library" as const, asset_id: "a-1", video_media_id: "m-1", rights: { by: "u-1", at: "2026-10-08T12:00:00.000Z" }, aspect: "16:9" as const };
+  for (const s of withVideo.sections) {
+    if (s.key === "work") {
+      s.title = "How it works";
+      s.lede = "Watch it run.";
+      s.items = [{ title: "", video }];
+    }
+  }
+  assert.ok(!emptyWritableParts(withVideo).includes("work"), "a step holding a video counts as empty");
+  const kept = applyWrittenCopy(withVideo, written).doc.sections.find((s) => s.key === "work") as { items: Array<{ title: string; video?: unknown }> };
+  assert.equal(kept.items.length, 1, "a write replaced a step holding a video");
+  assert.deepEqual(kept.items[0].video, video, "the step's video was lost");
 });
 
 check("the editor's write is refused, not shown as written, while its saves are stopped", () => {

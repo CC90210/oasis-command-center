@@ -21,13 +21,16 @@ export function writePageInputProblem(description: string): string | null {
 }
 
 /**
- * True when a section's card or FAQ item holds any words. The editor's Add
- * buttons save blank placeholders ({ title: "" }, { q: "", a: "" }) that the
- * page never draws, so a section of only those is empty, and a write may
- * replace them.
+ * True when a section's card or FAQ item holds anything: words, or media such
+ * as a step's video ({ title: "", video }, "Or add a step with its video").
+ * The editor's Add buttons save blank placeholders ({ title: "" },
+ * { q: "", a: "" }) that the page never draws, so a section of only those is
+ * empty, and a write may replace them; never one holding a video.
  */
-export function itemHasWords(item: object): boolean {
-  return Object.values(item).some((value) => typeof value === "string" && value.trim() !== "");
+export function itemHasContent(item: object): boolean {
+  return Object.values(item).some((value) =>
+    typeof value === "string" ? value.trim() !== "" : value !== null && typeof value === "object",
+  );
 }
 
 /**
@@ -48,10 +51,10 @@ export function emptyWritableParts(doc: OfferPageDoc): string[] {
       case "obstacles":
       case "what_you_get":
       case "work":
-        if (blank(section.title) || blank(section.lede) || !section.items.some(itemHasWords)) parts.push(section.key);
+        if (blank(section.title) || blank(section.lede) || !section.items.some(itemHasContent)) parts.push(section.key);
         break;
       case "faq":
-        if (blank(section.title) || !section.items.some(itemHasWords)) parts.push("faq");
+        if (blank(section.title) || !section.items.some(itemHasContent)) parts.push("faq");
         break;
       default:
         break;

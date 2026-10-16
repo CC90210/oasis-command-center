@@ -29,7 +29,7 @@
 import { INJECTION_GUARD, safeJsonExtract, wrapUntrusted } from "@/lib/llm-input-boundary";
 import { templateFor } from "./templates";
 import { COPY_CAPS, ITEM_CAPS, parseOfferPageDoc, type OfferPageDoc, type TemplateKey } from "./types";
-import { itemHasWords, WRITE_PAGE_INPUT } from "./write-page-client";
+import { itemHasContent, WRITE_PAGE_INPUT } from "./write-page-client";
 
 export const WRITE_PAGE_LIMITS = {
   description: WRITE_PAGE_INPUT.maxDescription,
@@ -77,7 +77,7 @@ export function writePageSystemPrompt(): string {
       book: { title: "the booking section's title", lede: "one sentence" },
       seo: { title: "under 70 characters", description: "under 200 characters" },
     }),
-    "Write 3 to 5 obstacles, 3 to 6 deliverables, exactly 3 steps and 3 to 5 FAQ items. Do not number the steps or any item: the page numbers them itself, and any figure the description does not state is removed.",
+    "Write 3 to 5 obstacles, 3 to 6 deliverables, exactly 3 steps and 3 to 5 FAQ items. Do not number the steps or any item, and state no counts in words either (three, five): the page numbers them itself, and any figure or count the description does not state is removed.",
     INJECTION_GUARD,
   ].join("\n\n");
 }
@@ -191,46 +191,61 @@ export function cleanCopy(value: string | undefined, cap: number): string {
 // words do not contain is left out.
 
 /**
- * Each match must appear, as written, in the owner's words. Matching the
- * phrase, not the family, means "two weeks" in the description does not let
- * "one week" through.
+ * Each match must appear, as written and as whole words, in the owner's words.
+ * Matching the phrase, not the family, means "two weeks" in the description
+ * does not let "one week" through. A `stem` match ("guarantee" in
+ * "guaranteed") may run on into a longer word in the source, so the owner's
+ * "guaranteed" covers the model's "guarantee".
  */
-const CLAIM_PATTERNS: readonly RegExp[] = [
+const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
   // A figure, with its unit when it has one: the owner's "14 templates" does
   // not let "live in 14 days" through, while a bare "24/7" matches as numbers.
-  /\d+(?:[.,]\d+)*(?:\s*(?:%|(?:percent|x|times|minutes?|hours?|days?|weeks?|months?|years?)(?![A-Za-z])))?/gi,
-  /[$%]/g,
-  /\bper ?cent\b/gi,
-  /\bbest\b/gi,
-  /\b(?:industry[- ])?leading\b/gi,
-  /\baward/gi,
-  /\btop[- ]rated\b/gi,
-  /\bworld[- ]class\b/gi,
-  /\bnumber one\b|#\s?1\b|\bno\.\s?1\b/gi,
-  /\bguarantee/gi,
-  /\bproven\b/gi,
-  /\bunmatched\b|\bunbeatable\b|\bunrivall?ed\b/gi,
-  /\b(?:fastest|cheapest|largest|biggest|most trusted)\b/gi,
-  /\brisk[- ]free\b|\bmoney[- ]back\b/gi,
-  /\btestimonial/gi,
+  { re: /\d+(?:[.,]\d+)*(?:\s*(?:%|(?:percent|x|times|minutes?|hours?|days?|weeks?|months?|years?)(?![A-Za-z])))?/gi },
+  { re: /[$%]/g },
+  { re: /\bper ?cent\b/gi },
+  { re: /\bbest\b/gi },
+  { re: /\b(?:industry[- ])?leading\b/gi },
+  { re: /\baward/gi, stem: true },
+  { re: /\btop[- ]rated\b/gi },
+  { re: /\bworld[- ]class\b/gi },
+  { re: /\bnumber one\b|#\s?1\b|\bno\.\s?1\b/gi },
+  { re: /\bguarantee/gi, stem: true },
+  { re: /\bproven\b/gi },
+  { re: /\bunmatched\b|\bunbeatable\b|\bunrivall?ed\b/gi },
+  { re: /\b(?:fastest|cheapest|largest|biggest|most trusted)\b/gi },
+  { re: /\brisk[- ]free\b|\bmoney[- ]back\b/gi },
+  { re: /\btestimonial/gi, stem: true },
   // Spelled-out quantities and multipliers.
-  /\b(?:dozens?|hundreds?|thousands?|millions?|billions?)\b/gi,
-  /\b(?:double|triple|twice|tenfold|halve)[sd]?\b/gi,
+  { re: /\b(?:dozens?|hundreds?|thousands?|millions?|billions?)\b/gi },
+  { re: /\b(?:double|triple|twice|tenfold|halve)[sd]?\b/gi },
+  // A spelled-out count of something: "three clinics", "five steps". ("One"
+  // is left out: "one place", "one call" are prose, not counts.)
+  { re: /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s+[a-z]+/gi },
   // Time frames: "one week", "a few days", "within days", "in minutes".
-  /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|a|an|a few|a couple of|several)\s+(?:minute|hour|day|week|month|year)s?\b/gi,
-  /\b(?:within|in under|in less than|under|less than|in just|in only|in)\s+(?:minutes|hours|days|weeks|months)\b/gi,
-  /\b(?:overnight|same[- ]day|next[- ]day)\b/gi,
+  { re: /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|a|an|a few|a couple of|several)\s+(?:minute|hour|day|week|month|year)s?\b/gi },
+  { re: /\b(?:within|in under|in less than|under|less than|in just|in only|in)\s+(?:minutes|hours|days|weeks|months)\b/gi },
+  { re: /\b(?:overnight|same[- ]day|next[- ]day)\b/gi },
 ];
+
+/** True when `source` holds `phrase` as whole words (a stem may run on into a longer word). */
+function sourceStates(source: string, phrase: string, stem: boolean): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Word edges only where the phrase itself starts or ends with a letter or
+  // digit: "leading" is not found in "misleading", while "$" or "40%" are
+  // found where they stand.
+  const before = /^[a-z0-9]/i.test(phrase) ? "(?<![a-z0-9])" : "";
+  const after = !stem && /[a-z0-9]$/i.test(phrase) ? "(?![a-z0-9])" : "";
+  return new RegExp(before + escaped + after, "i").test(source);
+}
 
 /**
  * True when `text` states something `source` (everything the owner typed:
  * names, description, audience) does not: any match of CLAIM_PATTERNS that
- * the source does not contain, compared case-insensitively.
+ * the source does not state as whole words (sourceStates).
  */
 export function inventsFacts(text: string, source: string): boolean {
   if (!text) return false;
-  const src = source.toLowerCase();
-  return CLAIM_PATTERNS.some((pattern) => (text.match(pattern) ?? []).some((m) => !src.includes(m.toLowerCase())));
+  return CLAIM_PATTERNS.some(({ re, stem }) => (text.match(re) ?? []).some((m) => !sourceStates(source, m, stem === true)));
 }
 
 /**
@@ -333,7 +348,7 @@ export function applyWrittenCopy(base: OfferPageDoc, copy: WrittenCopy): { doc: 
       case "work": {
         const from = copy[section.key];
         let touched = fillHead(section, from);
-        if (!section.items.some(itemHasWords)) {
+        if (!section.items.some(itemHasContent)) {
           const items = cardsFrom(from.items, ITEM_CAPS[section.key]);
           if (items.length) {
             section.items = items;
@@ -345,7 +360,7 @@ export function applyWrittenCopy(base: OfferPageDoc, copy: WrittenCopy): { doc: 
       }
       case "faq": {
         let touched = fillHead(section, copy.faq);
-        if (!section.items.some(itemHasWords)) {
+        if (!section.items.some(itemHasContent)) {
           const items = copy.faq.items
             .map((it) => ({ q: cleanCopy(it.q, COPY_CAPS.faq_q), a: cleanCopy(it.a, COPY_CAPS.faq_a) }))
             .filter((it) => it.q && it.a)
