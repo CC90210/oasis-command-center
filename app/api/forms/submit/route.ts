@@ -1537,7 +1537,10 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         }),
       );
     }
-  } else {
+  } else if (!isLastStep) {
+    // "Pick up where you left off" only makes sense while steps remain. On a
+    // one-step form (the /book "Book a call" form) step 0 IS the finish, and a
+    // resume email minutes after someone booked would read as if they had not.
     await maybeQueueResumeEmail({
       db,
       step_index: stepIndex,

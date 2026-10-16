@@ -5,6 +5,7 @@ import { Check, MoreHorizontal, Plus, Sunrise, Sunset } from "lucide-react";
 import { formatTime, startOfDay, weekdayShort } from "@/lib/calendar/dates";
 import { shabbatForWeekOf, sunTimes } from "@/lib/calendar/sun";
 import { CALENDAR_COLORS, CALENDAR_COLOR_LABELS, type CalendarColor, type CalendarPrefs, type CalendarRecord } from "@/lib/calendar/types";
+import { BookingLinkCard } from "./BookingLinkCard";
 import { MiniMonth } from "./MiniMonth";
 
 type Props = {
@@ -147,6 +148,8 @@ export function Sidebar(p: Props) {
           />
         )}
       </section>
+
+      <BookingLinkCard />
 
       {p.legacy && (
         <section className="rounded-lg border border-dashed border-hairline p-3 text-[12px] text-fg-muted">

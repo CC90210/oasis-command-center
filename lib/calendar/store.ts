@@ -261,6 +261,39 @@ export async function listEvents(owner: Owner): Promise<{ events: EventRecord[];
   return { events: rows.slice(0, MAX_EVENTS).map(toEvent), truncated: rows.length > MAX_EVENTS };
 }
 
+/**
+ * The owner's events that can matter between `from` and `to`: every repeating
+ * series and every edited occurrence (either can reach into the range from
+ * outside it), plus the one-off events that overlap it.
+ *
+ * For readers that need a window rather than the whole history (public
+ * booking availability). `listEvents` returns the first MAX_EVENTS rows in
+ * start order, so on a long-lived or imported calendar old history fills that
+ * cap and hides the window; a reader that fails closed on truncation would
+ * then refuse forever (Codex review of #628).
+ *
+ * Bounds compare as text: timed rows store UTC ISO instants and all-day rows
+ * `YYYY-MM-DD`, so a caller passing ISO bounds should widen them by a day.
+ */
+export async function listEventsBetween(
+  owner: Owner,
+  from: string,
+  to: string,
+): Promise<{ events: EventRecord[]; truncated: boolean }> {
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from("calendar_events")
+    .select("*")
+    .eq("tenant_id", owner.tenantId)
+    .eq("user_id", owner.userId)
+    .or(`recurrence.not.is.null,recurring_event_id.not.is.null,and(end_at.gte."${from}",start_at.lt."${to}")`)
+    .order("start_at", { ascending: true })
+    .limit(MAX_EVENTS + 1);
+  if (error) storageError(error, "event_read_failed");
+  const rows = (data ?? []) as EventRow[];
+  return { events: rows.slice(0, MAX_EVENTS).map(toEvent), truncated: rows.length > MAX_EVENTS };
+}
+
 async function getEvent(owner: Owner, id: string): Promise<EventRecord | null> {
   const db = getServiceSupabase();
   const { data, error } = await db

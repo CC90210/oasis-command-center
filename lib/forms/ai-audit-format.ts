@@ -49,6 +49,8 @@ const GOAL_LABELS: Record<string, string> = {
   sales_leadgen: "sales / lead gen",
   workflow_automation: "workflow automation",
   customer_support: "customer support",
+  // The /book form's escape hatch (lib/forms/oasis-book-seed.ts).
+  not_sure: "not sure yet",
 };
 
 const TRIED_LABELS: Record<string, string> = {
@@ -70,10 +72,21 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
+/**
+ * A table's OWN entry for a key. A visitor's free text ("Anything we should
+ * know?" on /book feeds bottleneckLabel) can be exactly "constructor" or
+ * "toString", and a plain lookup would return Object's inherited member, a
+ * function, where the lead and the sales alert expect words (Codex review of
+ * #630 found the same shape in lib/offers/short-links.ts).
+ */
+function ownEntry(table: Readonly<Record<string, string>>, key: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
 function label(table: Record<string, string>, v: unknown): string {
   const k = str(v);
   if (!k) return "";
-  return table[k] || k.replace(/_/g, " ");
+  return ownEntry(table, k) || k.replace(/_/g, " ");
 }
 
 /**
@@ -84,7 +97,7 @@ function label(table: Record<string, string>, v: unknown): string {
  */
 export function bottleneckLabel(value: unknown): string {
   const text = str(value).trim();
-  return GOAL_LABELS[text] ?? text;
+  return ownEntry(GOAL_LABELS, text) ?? text;
 }
 
 const ANSWER_TABLES = {
@@ -167,7 +180,7 @@ export function alertLeadFactLines(source: Record<string, unknown>): string[] {
 function safeLabel(table: Record<string, string>, v: unknown): string {
   const k = str(v);
   if (!k) return "";
-  return table[k] ?? "";
+  return ownEntry(table, k) ?? "";
 }
 
 /** Status → the emoji that survives a glance at a phone screen. */
