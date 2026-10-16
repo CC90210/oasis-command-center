@@ -520,7 +520,13 @@ async function main() {
   await step("page-only files: none yet is no_content, a file is the page alone (parsed first), a bad one or a sign-off refuses; the create path never takes one", async () => {
     assert.deepEqual([...seed.OASIS_PAGE_ONLY_SLUGS], ["ai-audit"]);
     assert.ok(!seed.OASIS_PAGE_ONLY_SLUGS.some((s) => (seed.OASIS_OFFER_SLUGS as readonly string[]).includes(s)), "a page-only slug is also a content slug");
-    assert.deepEqual(seed.loadOasisPageOnlyContent(CONTENT_DIR), [{ slug: "ai-audit", file: join(CONTENT_DIR, "ai-audit.page.json"), doc: null }]);
+    // The real page (Maven's copy, 2026-10-16): the page alone, parsed by the strict parser, no form block.
+    const [real] = seed.loadOasisPageOnlyContent(CONTENT_DIR);
+    assert.equal(real.slug, "ai-audit");
+    assert.equal(real.file, join(CONTENT_DIR, "ai-audit.page.json"));
+    assert.ok(real.doc, "content/offers/oasis/ai-audit.page.json parses");
+    assert.equal(real.doc!.template, "free_audit");
+    assert.ok(!real.doc!.hero.video, "no video until one is attached with its rights tick");
     const dir = mkdtempSync(join(tmpdir(), "page-only-"));
     const file = join(dir, "ai-audit.page.json");
     writeFileSync(file, JSON.stringify(auditDoc));
