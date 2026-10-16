@@ -75,6 +75,9 @@ async function main(): Promise<void> {
       assert.match(html, new RegExp(`aria-describedby="c-${channel}-terms"`), `${channel}: the box is not tied to its terms`);
       assert.match(html, new RegExp(`<p id="c-${channel}-terms"`), `${channel}: the terms carry no id`);
       assert.match(html, new RegExp(`<label for="c-${channel}"`), `${channel}: the summary is not the box's label`);
+      // Legal text and its control keep AA contrast on light forms (Codex on #633):
+      // fg-muted, never fg-dim.
+      assert.doesNotMatch(html, /text-fg-dim/, `${channel}: a consent element uses the low-contrast fg-dim`);
     }
   });
 

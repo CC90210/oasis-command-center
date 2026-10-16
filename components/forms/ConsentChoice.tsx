@@ -59,10 +59,13 @@ export function ConsentChoice({
           {consentSummaryText(channel, identity)}
         </label>
         <details className="mt-1">
-          <summary className="w-fit cursor-pointer list-none text-[11px] text-fg-dim underline underline-offset-2 hover:text-fg [&::-webkit-details-marker]:hidden">
+          {/* text-fg-muted, not fg-dim: fg-dim on a light-theme form's panel is about
+              2.3:1, below the 4.5:1 a legal text and its control need (Codex on #633).
+              fg-muted is the colour the full disclosure always used. */}
+          <summary className="w-fit cursor-pointer list-none text-[12px] text-fg-muted underline underline-offset-2 hover:text-fg [&::-webkit-details-marker]:hidden">
             Full terms
           </summary>
-          <p id={termsId} className="mt-1 text-[11px] leading-relaxed text-fg-dim">
+          <p id={termsId} className="mt-1 text-[12px] leading-relaxed text-fg-muted">
             {consentDisclosureText(channel, identity)}
           </p>
         </details>
