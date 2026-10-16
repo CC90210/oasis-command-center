@@ -220,6 +220,10 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(!inventsFacts("Get more revenue and more bookings.", "We help you get more revenue and more bookings."));
   assert.ok(inventsFacts("Trusted by owners across Ontario.", "A scheduling app"), "an invented who-else-uses-it got through");
   assert.ok(inventsFacts("Our best-rated plan.", "A scheduling app with a best plan"), "best let best-rated through");
+  // Codex on #647: quantities the linter's list lacks are still grounded here.
+  for (const quantity of ["Twice as many bookings", "Tenfold growth in calls", "Dozens of templates", "Hundreds of clinics", "Double your calls"]) {
+    assert.ok(inventsFacts(quantity, "A scheduling app"), `"${quantity}" got through`);
+  }
   // Codex round twelve: hyphenated units and the teen count words.
   assert.ok(inventsFacts("A 14-day setup.", "Includes 14 templates."), "the owner's 14 templates let a 14-day setup through");
   assert.ok(!inventsFacts("A 14-day setup.", "We finish a 14-day setup with you."));

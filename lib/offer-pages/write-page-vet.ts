@@ -60,6 +60,10 @@ const EXTRA_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
   // linter counts only what a client could hold us to. ("One" is left out:
   // "one place", "one call" are prose, not counts.)
   { re: /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s+[a-z]+/gi },
+  // Spelled-out quantities the linter's QUANTITY_RE does not list (it has
+  // hundreds, thousands, double, triple, half...): "twice as many bookings",
+  // "tenfold growth", "dozens of templates".
+  { re: /\b(?:dozens?|twice|tenfold)\b/gi },
   // Time frames in more shapes than the linter's ("one week", "a few days", "in minutes").
   { re: /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|ninety|a|an|a few|a couple of|several)\s+(?:minute|hour|day|week|month|year)s?\b/gi },
   { re: /\b(?:within|in under|in less than|under|less than|in just|in only|in)\s+(?:minutes|hours|days|weeks|months)\b/gi },
