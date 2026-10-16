@@ -10,14 +10,16 @@ const read = (path: string) => readFileSync(join(root, path), "utf8");
 
 async function main() {
 
-// 1-3: tag id, loader, and init are one corrected value in the root <head>.
+// 1-3: one tag id, loaded only by the consent module after "Allow" (2026-10-15:
+// the root <head> used to load it on every marketing page with no choice,
+// which Law 25 does not allow). Behaviour is pinned in tests/ad-consent.test.ts.
 const layout = read("app/layout.tsx");
+const consentModule = read("lib/marketing/ad-consent.ts");
 assert.equal(GOOGLE_ADS_TAG_ID, "AW-18509362419");
-assert.match(layout, /googletagmanager\.com\/gtag\/js\?id=AW-18509362419/);
-assert.match(layout, /gtag\('config', 'AW-18509362419'\)/);
-assert.match(layout, /shouldLoadGoogleAdsTag = ALL_MARKETING_PATHS\.includes/);
-assert.match(layout, /\{shouldLoadGoogleAdsTag \? \(/);
-assert.doesNotMatch(layout, /AW-(?!18509362419)\d{8,}/, "no stale Google Ads id remains in the root layout");
+assert.match(consentModule, /googletagmanager\.com\/gtag\/js\?id=\$\{GOOGLE_ADS_TAG_ID\}/);
+assert.match(consentModule, /win\.gtag\("config", GOOGLE_ADS_TAG_ID\)/);
+assert.doesNotMatch(layout, /googletagmanager|AW-\d{8,}/, "the root layout no longer loads the tag unconditionally");
+assert.doesNotMatch(consentModule, /AW-\d{8,}/, "the consent module takes the id from GOOGLE_ADS_TAG_ID, never a literal");
 
 // 4: three server-owned tiers cover every advertised CAD band.
 assert.equal(CHECKOUT_OFFERS.length, 3);
@@ -124,6 +126,9 @@ const conversion = read("components/marketing/PurchaseConversion.tsx");
 assert.match(conversion, /sessionStorage\.getItem\(storageKey\)/);
 assert.match(conversion, /window\.gtag\("event", "conversion"/);
 assert.ok(conversion.indexOf("window.gtag") < conversion.indexOf("sessionStorage.setItem"));
+// A buyer who allows ad cookies after the poll gave up still counts, once.
+assert.match(conversion, /addEventListener\(AD_CONSENT_CHANGED_EVENT/);
+assert.match(conversion, /if \(sent\) return;/);
 
 // 9-10: all six ad sitelinks resolve to real App Router pages. Four share one
 // allow-listed dynamic entry to avoid duplicating route manifests in the

@@ -66,7 +66,22 @@ type Props = {
    *  create routes refuse everyone else, so nobody else gets the button. Rows
    *  keep their toggle and edit controls either way. Defaults closed. */
   canCreateScripts?: boolean;
+  /** Said after "You have no automations yet." when this list is empty: where to make one. The
+   *  Automations page passes the guided builder's button when the builder is on (CC 2026-10-16: a new
+   *  workspace read "You have no automations yet." and nothing about how to build one). null says
+   *  nothing at all when empty: GuidedAutomationsList sends it while its own rows are on screen, or not
+   *  yet known, because "no automations yet" under real ones is false. Left out, the old words alone. */
+  emptyHint?: string | null;
 };
+
+/** O2 requirement G's exact empty-state words. */
+const NO_AUTOMATIONS_YET = "You have no automations yet.";
+
+/** The count line's words for an empty list (see `emptyHint`). Exported for tests. */
+export function emptyListLine(emptyHint?: string | null): string {
+  if (emptyHint === null) return "";
+  return emptyHint ? `${NO_AUTOMATIONS_YET} ${emptyHint}` : NO_AUTOMATIONS_YET;
+}
 
 const DAEMON_CONFIRM_TIMEOUT_MS = 75_000;
 const DAEMON_CONFIRM_POLL_MS = 4_000;
@@ -227,7 +242,7 @@ function humanizeCron(expr: string): string {
   return trimmed;
 }
 
-export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) {
+export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint }: Props) {
   const [jobs, setJobs] = useState<CronJob[] | null>(null);
   // O2: everyone else's automations, present only for an owner/admin
   // (inventory.team_included says so). Switch-off only — see TeamJobRow.
@@ -654,8 +669,7 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) 
         <div className="text-xs text-fg-muted space-y-0.5">
           {(() => {
             if (jobs === null) return "Loading…";
-            // O2 requirement G's exact empty-state words.
-            if (jobs.length === 0) return "You have no automations yet.";
+            if (jobs.length === 0) return emptyListLine(emptyHint);
             const tenantCount = jobs.filter((j) => j.source === "tenant").length;
             const empireCount = jobs.filter((j) => j.source === "empire").length;
             // Counts the daemon-backed rows by what their process is doing,

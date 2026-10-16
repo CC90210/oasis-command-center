@@ -64,6 +64,23 @@ async function main() {
 
   const { GuidedAutomations } = await import("../components/automations/guided/GuidedAutomations");
   const { AutomationsContent } = await import("../components/automations/AutomationsContent");
+  const { CronJobsManager } = await import("../components/automations/CronJobsManager");
+
+  /** The props the page hands its scheduled-jobs list (its empty line is drawn only after a fetch, so not here). */
+  const olderListProps = (node: unknown): Record<string, unknown> | null => {
+    if (Array.isArray(node)) {
+      for (const n of node) {
+        const hit = olderListProps(n);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (!React.isValidElement(node)) return null;
+    const el = node as { type: unknown; props: Record<string, unknown> };
+    if (el.type === CronJobsManager) return el.props;
+    return olderListProps(el.props.children);
+  };
+  const olderList: Record<string, Record<string, unknown> | null> = {};
 
   // The page never calls the API in a static render; a call here is a bug in the test.
   const api = new Proxy(
@@ -86,10 +103,12 @@ async function main() {
       markup[c.id] = renderToStaticMarkup(React.createElement(GuidedAutomations, { api, ...props }, others));
     } else {
       profile = c.profile === undefined ? { tenant_id: "t-1", auth_user_id: "u-1", agents_enabled: ["bravo"] } : c.profile;
-      markup[c.id] = renderToStaticMarkup((await AutomationsContent(c.props)) as never);
+      const tree = await AutomationsContent(c.props);
+      olderList[c.id] = olderListProps(tree);
+      markup[c.id] = renderToStaticMarkup(tree as never);
     }
   }
-  process.stdout.write(JSON.stringify({ markup }));
+  process.stdout.write(JSON.stringify({ markup, olderList }));
 }
 
 main().catch((err) => {

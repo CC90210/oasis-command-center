@@ -4,6 +4,7 @@ import localFont from "next/font/local";
 import { Ambient } from "@/components/marketing/Ambient";
 import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
+import { AdConsent } from "@/components/marketing/AdConsent";
 import { SITE_ORIGIN, marketingCanonicalPath } from "@/lib/marketing/routes";
 import { ORGANIZATION_JSONLD, WEBSITE_JSONLD } from "@/lib/marketing/entity";
 import "./marketing.css";
@@ -169,6 +170,10 @@ export default function MarketingLayout({
       <MarketingNav />
       <main id="main">{children}</main>
       <MarketingFooter />
+      {/* Last child so the fixed banner paints above the page. Every page in
+          this shell is a page the Google Ads tag measures, so every page asks
+          first; nothing from Google loads until "Allow". */}
+      <AdConsent />
     </div>
   );
 }

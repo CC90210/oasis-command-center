@@ -185,6 +185,14 @@ written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence
 | `work.items[0].body` | the word "revenue" | Revenue and budget are optional. |
 | `faq.items[3].q` | the word "revenue" | Do I have to share revenue or budget? |
 
+### AI Automation Audit (`ai-audit`): 3
+
+| Where | Why | Sentence |
+|---|---|---|
+| `work.title` | a number | Three steps, and you stay in control |
+| `work.items[0].body` | the word "revenue" | Revenue and budget are optional. |
+| `faq.items[3].q` | the word "revenue" | Do I have to share revenue or budget? |
+
 Not flagged, but still a commitment to confirm (sections 1 and 3 to 6 above): the cancellation sentence, "Nothing
 renews", the bonus line, every thank-you message, and every promise to email someone.
 
