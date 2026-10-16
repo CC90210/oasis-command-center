@@ -1537,10 +1537,17 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         }),
       );
     }
-  } else if (!isLastStep) {
+  } else if (!isLastStep && isFundingTenant(link.tenant)) {
     // "Pick up where you left off" only makes sense while steps remain. On a
     // one-step form (the /book "Book a call" form) step 0 IS the finish, and a
     // resume email minutes after someone booked would read as if they had not.
+    //
+    // Funding workspaces only: the email is a funding application's ("bank
+    // statements, ID, voided check"; lib/forms/resume-link.ts). An OASIS lead
+    // got it queued on step 1 of the AI audit, even one who went on to book
+    // within the minute; 13 sat unsent from 2026-08-01 to 2026-10-16 (Bravo's
+    // end-to-end test). An OASIS follow-up for a form left half-done needs its
+    // own words, not these.
     await maybeQueueResumeEmail({
       db,
       step_index: stepIndex,
