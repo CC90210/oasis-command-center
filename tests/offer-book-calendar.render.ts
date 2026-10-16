@@ -38,6 +38,7 @@ console.log(
     protocol: lastScreen("oasis-ai-cc", "protocol"),
     community: lastScreen("oasis-ai-cc", "community"),
     protocolNoPhone: lastScreen("oasis-ai-cc", "protocol", { phone: "  " }),
+    protocolBadPhone: lastScreen("oasis-ai-cc", "protocol", { phone: "123" }),
     communityNoAnswers: lastScreen("oasis-ai-cc", "community", null),
     command: lastScreen("oasis-ai-cc", "command"),
     vsl: lastScreen("oasis-ai-cc", "vsl"),

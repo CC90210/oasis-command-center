@@ -66,7 +66,8 @@ check("PROTOCOL and COMMUNITY keep their own next step, with the calendar offere
 check("an optional form whose visitor left the phone blank links to /book instead of a calendar it would refuse", () => {
   // Codex review of #655: the founder-meeting engine books only with a phone
   // (client_phone_required), and PROTOCOL and COMMUNITY ask for one as optional.
-  for (const kind of ["protocolNoPhone", "communityNoAnswers"]) {
+  // A phone the engine would refuse ("123": invalid_client_phone) is no phone (Codex re-review of #655).
+  for (const kind of ["protocolNoPhone", "communityNoAnswers", "protocolBadPhone"]) {
     const page = html[kind];
     assert.ok(page.includes("All set.") && page.includes(THANKS), `${kind}: the thanks is gone`);
     assert.ok(page.includes(OPTIONAL_HEADING), `${kind}: no call offered at all`);

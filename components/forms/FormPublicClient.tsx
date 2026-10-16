@@ -36,6 +36,7 @@ import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { PublicBookingCalendar } from "./PublicBookingCalendar";
 import { isOptionalPublicBookingFormSlug, isPublicBookingSurface } from "@/lib/forms/public-booking-config";
+import { normalizeFounderMeetingPhone } from "@/lib/website-sales-meeting";
 import { ConsentChoice } from "./ConsentChoice";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
@@ -268,6 +269,15 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
   invalid_step_index: "Something went wrong moving between steps. Please refresh and try again.",
   step_index_out_of_range: "Something went wrong moving between steps. Please refresh and try again.",
 };
+
+/** A phone the founder-meeting engine would book with (lib/website-sales-meeting.ts). */
+function bookablePhone(value: unknown): boolean {
+  try {
+    return normalizeFounderMeetingPhone(value) !== null;
+  } catch {
+    return false;
+  }
+}
 
 /** Shown when the route returns a code this build has never heard of. */
 export const SUBMIT_ERROR_FALLBACK =
@@ -1028,13 +1038,15 @@ export function FormPublicClient({
   // PROTOCOL and COMMUNITY: their own next step (the checkout email, the
   // community link) is the thanks, and the calendar is offered under it.
   const publicBookingOptional = publicBookingFormSlug !== null && isOptionalPublicBookingFormSlug(publicBookingFormSlug);
-  // The founder-meeting engine books only with a phone (client_phone_required),
-  // and these two forms ask for one as optional. A visitor who left it blank is
-  // pointed to /book, which asks for it, instead of a calendar that would let
-  // them pick a time and then refuse it (Codex review of #655).
+  // The founder-meeting engine books only with a phone it can use
+  // (client_phone_required, invalid_client_phone), and these two forms ask for
+  // one as optional. A visitor who left it blank or typed one the engine would
+  // refuse is pointed to /book, which asks for it, instead of a calendar that
+  // would let them pick a time and then refuse it (Codex review of #655). The
+  // same rule the engine applies: normalizeFounderMeetingPhone.
   const optionalBookingPhone = steps
     .flatMap((s) => s.fields)
-    .some((f) => f.type === "phone" && String(mergedValues[f.name] ?? prefill?.[f.name] ?? "").trim() !== "");
+    .some((f) => f.type === "phone" && bookablePhone(mergedValues[f.name] ?? prefill?.[f.name]));
 
   /**
    * WHICH step is outstanding, not merely THAT one is.

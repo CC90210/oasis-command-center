@@ -63,7 +63,7 @@ import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { buildPublicFunnelLeadPatch } from "@/lib/forms/public-booking";
-import { isPublicBookingForm } from "@/lib/forms/public-booking-config";
+import { isOptionalPublicBookingFormSlug, isPublicBookingForm } from "@/lib/forms/public-booking-config";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
 import {
   ensureAiAuditSubmissionDelivery,
@@ -1950,7 +1950,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     }
   }
 
-  if (funnelStageWriteFailed) {
+  // A required booking form's next step IS the calendar, which must not open
+  // over a lead that still says inbound_lead. On PROTOCOL and COMMUNITY the call
+  // is optional and their own next step (the thanks: checkout email, community
+  // link) is already durable, so only their calendar fails (its availability
+  // read refuses a lead not ready to book), never their completion (Codex
+  // review of #655).
+  if (funnelStageWriteFailed && !isOptionalPublicBookingFormSlug(form.slug)) {
     return NextResponse.json(
       { ok: false, error: "funnel_stage_write_unavailable" },
       { status: 503 },

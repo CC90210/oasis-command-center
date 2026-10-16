@@ -77,7 +77,7 @@ await check("normalizes every CRM field named in the funnel brief", () => {
 await check("does not reveal booking when the audit_requested write failed", () => {
   // The calendar stays hidden (503 at the end of the handler) ...
   assert.match(submitRoute, /funnelStageWriteFailed = true;/);
-  assert.match(submitRoute, /if \(funnelStageWriteFailed\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \},\s*\{ status: 503 \},/);
+  assert.match(submitRoute, /if \(funnelStageWriteFailed && !isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \},\s*\{ status: 503 \},/);
   // ... but a failed stage write must NOT drop the speed-to-lead pipeline: the failure path
   // does not return, and the 503 comes after the scoring/alert/email after() blocks (#611 review).
   const failedBlock = submitRoute
@@ -88,7 +88,7 @@ await check("does not reveal booking when the audit_requested write failed", () 
     .replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(failedBlock, /\breturn\b/, "the failure path returns early again");
   assert.ok(
-    submitRoute.indexOf("ingestAiAuditSubmission({") < submitRoute.indexOf("if (funnelStageWriteFailed) {"),
+    submitRoute.indexOf("ingestAiAuditSubmission({") < submitRoute.indexOf("if (funnelStageWriteFailed && !isOptionalPublicBookingFormSlug(form.slug)) {"),
     "the 503 must come after the completion pipeline is scheduled",
   );
   assert.equal(isPublicFunnelReadyForBooking({ funnel_stage: "inbound_lead" }), false);
@@ -215,6 +215,13 @@ await check("the lead records which form it started and finished (review of #655
     /buildPublicFunnelLeadPatch\(input\.payload, "inbound_lead", new Date\(\)\.toISOString\(\), form\.slug\)/,
     "the started form is stamped",
   );
+});
+
+await check("a failed stage write blocks only a required booking form's completion, never an optional one's", () => {
+  // Codex re-review of #655: PROTOCOL's and COMMUNITY's own next step (the
+  // thanks) is durable and their call optional, so only their calendar fails.
+  assert.match(submitRoute, /if \(funnelStageWriteFailed && !isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \}/);
+  assert.equal(submitRoute.match(/funnel_stage_write_unavailable/g)?.length, 1, "one place answers the stage-write failure");
 });
 
 await check("keeps public offer names explicit instead of inferring them from duration", () => {
