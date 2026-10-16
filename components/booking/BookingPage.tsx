@@ -121,7 +121,10 @@ function icsHref(booked: Booked, title: string): string {
     "VERSION:2.0",
     "PRODID:-//OASIS AI//Booking//EN",
     "BEGIN:VEVENT",
-    `UID:${icsStamp(booked.startsAt)}-oasis-booking@oasisai.work`,
+    // Stable per booking (the Meet code + start). No "@domain": it would read as
+    // an unverified mailbox (tests/verified-mailboxes.test.ts), and RFC 5545
+    // only asks that a UID be globally unique.
+    `UID:oasis-booking-${booked.meetUrl.replace(/[^a-z0-9-]/gi, "").slice(-24)}-${icsStamp(booked.startsAt)}`,
     `DTSTAMP:${icsStamp(new Date().toISOString())}`,
     `DTSTART:${icsStamp(booked.startsAt)}`,
     `DTEND:${icsStamp(booked.endsAt)}`,
