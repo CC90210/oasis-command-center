@@ -14,7 +14,10 @@
  *     Loom 32 hex;
  *   - nothing that would be a claim exists without an owner: a result without
  *     evidence or permission, a value without confirmation, a video without
- *     its rights tick are all refused;
+ *     its rights tick are all refused; a price carries an explicit true/false
+ *     owner's confirmation (false is allowed in a draft, never drawn);
+ *   - a work step needs no video, and one with a video parses to the same JSON;
+ *   - pricing: at most 4 tiers, 8 included lines each, one highlight, the caps;
  *   - the whole document is capped at 200 KB;
  *   - booking on the page (native) is refused until PR3, the canvas is dark
  *     only, the page is never indexable;
@@ -203,7 +206,87 @@ t("a value needs an owner's confirmation; a video needs its rights tick", () => 
   refused((d) => ((items(d, "bonuses")[0].value as Record<string, unknown>).cents = 12.5), "$.sections[4].items[0].value.cents");
   refused((d) => ((items(d, "bonuses")[0].value as Record<string, unknown>).currency = "EUR"), "$.sections[4].items[0].value.currency");
   refused((d) => delete ((d.hero as Record<string, unknown>).video as Record<string, unknown>).rights, "$.hero.video.rights");
-  refused((d) => delete items(d, "work")[0].video, "$.sections[2].items[0].video", /video/);
+  // A step's video, when it has one, still needs its rights tick.
+  refused((d) => delete (items(d, "work")[0].video as Record<string, unknown>).rights, "$.sections[2].items[0].video.rights");
+});
+
+t("a work step needs no video (2026-10-16); one that has a video keeps it exactly", () => {
+  const d = fullDoc();
+  delete items(d, "work")[0].video;
+  items(d, "work").push({ title: "We map it", body: "One call.", video: null });
+  const work = parseOfferPageDoc(d).sections.find((s) => s.key === "work");
+  assert.deepEqual(work, { key: "work", items: [{ title: "Client portal" }, { title: "We map it", body: "One call." }] }, "a step without a video gained or lost something");
+  const withVideo = parseOfferPageDoc(fullDoc()).sections.find((s) => s.key === "work");
+  assert.deepEqual(JSON.parse(JSON.stringify(withVideo)), sec(fullDoc(), "work"), "a stored step with its video no longer parses to itself");
+});
+
+/** fullDoc plus a pricing section, appended (index 7) so every path above keeps its index. */
+function pricedDoc(): Record<string, unknown> {
+  const d = fullDoc();
+  (d.sections as unknown[]).push({
+    key: "pricing",
+    title: "Pricing",
+    currency_note: "Prices in CAD",
+    tiers: [
+      { name: "DIY", price: "$497", cadence: "a month", summary: "You run it.", includes: ["The OS", ""], confirmed: true },
+      { name: "Turnkey", price: "From $2,500", highlighted: true, confirmed: false },
+      { name: "Managed", price: "$7,500", highlighted: false, confirmed: true },
+    ],
+  });
+  return d;
+}
+const tiers = (d: Record<string, unknown>) => sec(d, "pricing").tiers as Array<Record<string, unknown>>;
+
+t("a pricing section parses, keeps every tier as written, and round-trips", () => {
+  const doc = parseOfferPageDoc(pricedDoc());
+  assert.deepEqual(doc.sections.map((s) => s.key).slice(-1), ["pricing"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(doc.sections[7])), sec(pricedDoc(), "pricing"), "the parser changed a tier (an empty included line and highlighted:false are kept)");
+  assert.deepEqual(parseOfferPageDoc(JSON.stringify(doc)), doc);
+  // Zero tiers is a section being started: it parses (and is not drawn).
+  const empty = fullDoc();
+  (empty.sections as unknown[]).push({ key: "pricing", tiers: [] });
+  parseOfferPageDoc(empty);
+  // Pricing can be pinned to the top menu like any section.
+  const pinned = pricedDoc();
+  (pinned.nav as Record<string, unknown>).pinned = ["pricing"];
+  assert.deepEqual(parseOfferPageDoc(pinned).nav.pinned, ["pricing"]);
+});
+
+t("pricing: 1 to 4 tiers, 8 lines each, one highlight, an owner's yes or no on every price, plain text, the caps", () => {
+  const withSection = (mutate: (d: Record<string, unknown>) => void) => (d: Record<string, unknown>) => {
+    const p = pricedDoc();
+    Object.assign(d, p);
+    mutate(d);
+  };
+  const P = "$.sections[7]";
+  refused(withSection((d) => tiers(d).push({ name: "A", price: "$1", confirmed: true }, { name: "B", price: "$2", confirmed: true })), `${P}.tiers`, /at most 4/);
+  refused(withSection((d) => (tiers(d)[0].includes = Array.from({ length: 9 }, () => "x"))), `${P}.tiers[0].includes`, /at most 8/);
+  refused(withSection((d) => (tiers(d)[2].highlighted = true)), `${P}.tiers[2].highlighted`, /only one/);
+  refused(withSection((d) => delete tiers(d)[0].confirmed), `${P}.tiers[0].confirmed`, /true or false/);
+  refused(withSection((d) => (tiers(d)[0].confirmed = "yes")), `${P}.tiers[0].confirmed`, /true or false/);
+  refused(withSection((d) => (tiers(d)[0].confirmed = { by: "u-1", at: OK.at })), `${P}.tiers[0].confirmed`, /true or false/);
+  refused(withSection((d) => delete tiers(d)[0].price), `${P}.tiers[0].price`, /required/);
+  refused(withSection((d) => delete tiers(d)[0].name), `${P}.tiers[0].name`, /required/);
+  refused(withSection((d) => (tiers(d)[0].price = "x".repeat(41))), `${P}.tiers[0].price`, /40/);
+  refused(withSection((d) => (tiers(d)[0].name = "x".repeat(61))), `${P}.tiers[0].name`, /60/);
+  refused(withSection((d) => (tiers(d)[0].includes = ["<b>bold</b>"])), `${P}.tiers[0].includes[0]`, /plain text/);
+  refused(withSection((d) => (tiers(d)[0].discount = "10%")), `${P}.tiers[0].discount`, /unknown key/);
+  refused(withSection((d) => (sec(d, "pricing").items = [])), `${P}.items`, /unknown key/);
+  refused(withSection((d) => (sec(d, "pricing").tiers = "DIY")), `${P}.tiers`, /list/);
+  refused(withSection((d) => (tiers(d)[1].highlighted = "yes")), `${P}.tiers[1].highlighted`);
+});
+
+t("a refused price is named in the builder's words; so is the hero layout", () => {
+  const doc = parseOfferPageDoc(pricedDoc());
+  const cases: Array<[string, string]> = [
+    ["$.sections[7].tiers[1].price", "Plan 2 price"],
+    ["$.sections[7].tiers[0].includes[3]", "Plan 1 what's included"],
+    ["$.sections[7].tiers[2].confirmed", "Plan 3 owner's confirmation"],
+    ["$.sections[7].tiers[2]", "Plan 3"],
+    ["$.sections[7].currency_note", "Pricing section currency note"],
+    ["$.theme.layout", "Hero layout"],
+  ];
+  for (const [path, words] of cases) assert.equal(fieldLabel(path, doc), words, path);
 });
 
 t("uploaded images are refused until uploads exist", () => {
@@ -213,7 +296,7 @@ t("uploaded images are refused until uploads exist", () => {
 // -- the shape of the page ---------------------------------------------------
 t("one of each section, known keys in the menu, dark canvas, never indexable, no native booking yet", () => {
   refused((d) => (d.sections as unknown[]).push({ key: "faq", items: [] }), /^\$\.sections/);
-  refused((d) => ((d.nav as Record<string, unknown>).pinned = ["pricing"]), "$.nav.pinned[0]");
+  refused((d) => ((d.nav as Record<string, unknown>).pinned = ["testimonials"]), "$.nav.pinned[0]");
   refused((d) => ((d.theme as Record<string, unknown>).canvas = "light"), "$.theme.canvas");
   refused((d) => ((d.seo as Record<string, unknown>).indexable = true), "$.seo.indexable", /search/);
   refused((d) => ((d.book as Record<string, unknown>).mode = "native"), "$.book.mode", /not available/);

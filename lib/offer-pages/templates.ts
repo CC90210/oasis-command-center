@@ -31,7 +31,9 @@ export const OFFER_TEMPLATES: readonly OfferTemplate[] = [
     key: "book_call",
     label: "Book a call (VSL)",
     summary: "A video up top, the case for it below, and the booking step at the end.",
-    sections: ["what_you_get", "obstacles", "work", "results", "bonuses", "guarantee", "faq"],
+    // Pricing starts empty (hidden) like every section: a long VSL page is
+    // where a visitor decides, so the slot is there for the owner's prices.
+    sections: ["what_you_get", "obstacles", "work", "results", "bonuses", "pricing", "guarantee", "faq"],
     pinned: ["what_you_get", "results", "bonuses"],
     book: { mode: "form_then_link", qualify: "after" },
   },
@@ -62,6 +64,7 @@ export function templateFor(key: TemplateKey): OfferTemplate {
 function emptySection(key: BodyKey): BodySection {
   if (key === "guarantee") return { key: "guarantee" };
   if (key === "bonuses") return { key: "bonuses", items: [] };
+  if (key === "pricing") return { key: "pricing", tiers: [] };
   return { key, items: [] } as BodySection;
 }
 

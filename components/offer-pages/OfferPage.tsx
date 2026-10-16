@@ -5,9 +5,11 @@
  * the CSS variable --accent (signal cyan unless the offer sets one).
  *
  *   sticky header   mark, pinned sections, Book
- *   hero            eyebrow, headline, subheadline, the VSL (a facade), Book
+ *   hero            eyebrow, headline, subheadline, the VSL (a facade), Book;
+ *                   laid out split (today's), stacked or centered (theme.layout)
  *   body sections   only those holding real content, in the owner's order;
- *                   results, bonuses and the guarantee end with the Book button
+ *                   results, bonuses and the guarantee end with the Book button,
+ *                   and every pricing card carries its own
  *   #book           the form, always last, on ONE card (the form draws no card
  *                   of its own inside it: FormPublicClient chrome="embedded")
  *   footer          the workspace's name (and OASIS's legal links on OASIS's own)
@@ -35,7 +37,12 @@ import type { VideoTracking } from "./VideoFacade";
 /** Same switch as app/(marketing)/layout.tsx: reveals animate only once JS can undo them. */
 const JS_FLAG = `document.documentElement.classList.add('js')`;
 
-/** The sections a visitor decides on (proof, value, risk): each ends with the booking button. */
+/**
+ * The sections a visitor decides on (proof, value, risk): each ends with the
+ * booking button. Pricing is a decide section too, but it is NOT here: every
+ * price card already ends with its own Book button (sections.tsx), and a
+ * section button straight after them would be two buttons in a row.
+ */
 const ASK_AGAIN_AFTER: ReadonlySet<BodyKey> = new Set<BodyKey>(["results", "bonuses", "guarantee"]);
 
 export function OfferPage({
@@ -97,6 +104,57 @@ export function OfferPage({
     </a>
   );
 
+  // The hero's layout (theme.layout). Absent and "split" draw today's hero,
+  // byte for byte (tests/offer-pages-engine.test.ts holds the fixtures);
+  // "stacked" and "centered" put the words in one centred column with the
+  // video below them. Every layout keeps the same DOM order (words, video,
+  // phone button), so phones and screen readers read it the same way.
+  const centred = prepared.layout === "stacked" || prepared.layout === "centered";
+
+  const heroWords = (
+    <>
+      {hero.eyebrow ? (
+        <Eyebrow>{hero.eyebrow}</Eyebrow>
+      ) : (
+        <span
+          aria-hidden="true"
+          className={`${centred ? "mx-auto " : ""}block h-px w-8 bg-[linear-gradient(to_right,var(--accent,#00D4FF),transparent)]`}
+        />
+      )}
+      <h1
+        className="mt-6 font-display text-[clamp(2.3rem,5.4vw,4rem)] font-bold leading-[1.03] tracking-[-0.025em] text-fg"
+      >
+        {hero.headline}
+      </h1>
+      {hero.subheadline ? (
+        <p className={`${centred ? "mx-auto " : ""}mt-6 max-w-xl text-[17px] leading-relaxed text-fg-muted sm:text-[18px]`}>{hero.subheadline}</p>
+      ) : null}
+    </>
+  );
+
+  // The video, its transcript and the PHONE button: phones draw the button
+  // after the video in every layout (the words' own button is desktop-only
+  // whenever there is a video).
+  const heroVideo = heroMedia ? (
+    <>
+      <OfferFacade media={heroMedia} label={hero.headline} priority tracking={tracking} />
+      {hero.transcript ? (
+        <details className="mt-4">
+          <summary className={`${CTA_INLINE} cursor-pointer list-none [&::-webkit-details-marker]:hidden`}>
+            Read the script
+          </summary>
+          <div className="mt-4 max-h-[50vh] overflow-y-auto whitespace-pre-line rounded-lg border border-ops-line bg-ops-panel p-5 text-[15px] leading-relaxed text-fg-muted">
+            {hero.transcript}
+          </div>
+        </details>
+      ) : null}
+      <div className="mt-8 flex flex-col gap-3 lg:hidden">
+        {heroCta}
+        {communityLink}
+      </div>
+    </>
+  ) : null;
+
   return (
     <div
       className={`marketing ${offerFontVariables} min-h-screen bg-ops-void font-body text-fg antialiased`}
@@ -122,49 +180,37 @@ export function OfferPage({
               bare, so every hero opens on the same mark and never on two. */}
           <section className="m-edge relative overflow-hidden">
             <div className="mx-auto w-full max-w-6xl px-5 pb-16 pt-14 sm:px-8 sm:pb-24 sm:pt-20">
-              <div className={heroMedia ? "grid items-center gap-10 lg:grid-cols-[1.02fr_1fr] lg:gap-14" : "max-w-3xl"}>
-                {/* No Reveal in the hero: it is the first paint (LCP), so it never
-                    waits for JavaScript to fade it in. Sections below the fold do. */}
+              {/* No Reveal in the hero, in any layout: it is the first paint
+                  (LCP), so it never waits for JavaScript to fade it in.
+                  Sections below the fold do. */}
+              {centred ? (
                 <div>
-                  {hero.eyebrow ? (
-                    <Eyebrow>{hero.eyebrow}</Eyebrow>
-                  ) : (
-                    <span aria-hidden="true" className="block h-px w-8 bg-[linear-gradient(to_right,var(--accent,#00D4FF),transparent)]" />
-                  )}
-                  <h1
-                    className="mt-6 font-display text-[clamp(2.3rem,5.4vw,4rem)] font-bold leading-[1.03] tracking-[-0.025em] text-fg"
-                  >
-                    {hero.headline}
-                  </h1>
-                  {hero.subheadline ? (
-                    <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-fg-muted sm:text-[18px]">{hero.subheadline}</p>
-                  ) : null}
-                  {/* Desktop: the button under the words. Phones draw it after the video. */}
-                  <div className={`mt-9 flex flex-col gap-3 ${heroMedia ? "hidden lg:flex" : ""}`}>
-                    {heroCta}
-                    {communityLink}
-                  </div>
-                </div>
-                {heroMedia ? (
-                  <div>
-                    <OfferFacade media={heroMedia} label={hero.headline} priority tracking={tracking} />
-                    {hero.transcript ? (
-                      <details className="mt-4">
-                        <summary className={`${CTA_INLINE} cursor-pointer list-none [&::-webkit-details-marker]:hidden`}>
-                          Read the script
-                        </summary>
-                        <div className="mt-4 max-h-[50vh] overflow-y-auto whitespace-pre-line rounded-lg border border-ops-line bg-ops-panel p-5 text-[15px] leading-relaxed text-fg-muted">
-                          {hero.transcript}
-                        </div>
-                      </details>
-                    ) : null}
-                    <div className="mt-8 flex flex-col gap-3 lg:hidden">
+                  <div className="mx-auto max-w-3xl text-center">
+                    {heroWords}
+                    {/* Desktop: the button under the words, centred. Phones draw it after the video. */}
+                    <div className={`mt-9 flex flex-col items-center gap-3 ${heroMedia ? "hidden lg:flex" : ""}`}>
                       {heroCta}
                       {communityLink}
                     </div>
                   </div>
-                ) : null}
-              </div>
+                  {heroMedia ? (
+                    // stacked: the video wide under the words; centered: narrower, the column's own width.
+                    <div className={`mx-auto mt-12 w-full ${prepared.layout === "stacked" ? "max-w-4xl" : "max-w-3xl"}`}>{heroVideo}</div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className={heroMedia ? "grid items-center gap-10 lg:grid-cols-[1.02fr_1fr] lg:gap-14" : "max-w-3xl"}>
+                  <div>
+                    {heroWords}
+                    {/* Desktop: the button under the words. Phones draw it after the video. */}
+                    <div className={`mt-9 flex flex-col gap-3 ${heroMedia ? "hidden lg:flex" : ""}`}>
+                      {heroCta}
+                      {communityLink}
+                    </div>
+                  </div>
+                  {heroMedia ? <div>{heroVideo}</div> : null}
+                </div>
+              )}
             </div>
             <span id="offer-hero-end" aria-hidden="true" className="block h-px" />
           </section>

@@ -7,7 +7,9 @@
  *
  *   1. every result has evidence, the client's permission and an owner's
  *      confirmation (the parser refuses one without; checked again here);
- *   2. every bonus value or price was confirmed by an owner;
+ *   2. every bonus value or price was confirmed by an owner (a pricing tier's
+ *      price is free text shown exactly as written, so its `confirmed` tick is
+ *      what vouches for it, and the linter below does not ask about it again);
  *   3. the guarantee, if it has words, was confirmed by an owner;
  *   4. every sentence the linter flags carries an owner's tick, "true, and we
  *      can back it". Ticks are stored by the sentence's sha256, so editing the
@@ -260,6 +262,19 @@ function drawnCopy(doc: OfferPageDoc, fallbackHeadline: string): Copy[] {
         });
         add(k, "bonuses.value_note", s.value_note);
         break;
+      case "pricing":
+        // Every word on a tier except the price itself: the price has its own
+        // owner's tick (publishGate), and a second "is $2,500 true?" tick for
+        // the same figure would only teach owners to click through.
+        s.tiers.forEach((it, i) => {
+          const p = `pricing.tiers[${i}]`;
+          add(k, `${p}.name`, it.name);
+          add(k, `${p}.cadence`, it.cadence);
+          add(k, `${p}.summary`, it.summary);
+          (it.includes ?? []).forEach((line, j) => add(k, `${p}.includes[${j}]`, line));
+        });
+        add(k, "pricing.currency_note", s.currency_note);
+        break;
       case "guarantee":
         add(k, "guarantee.body", s.body);
         break;
@@ -381,6 +396,21 @@ export function publishGate(
     if (s.key === "bonuses") {
       s.items.forEach((it, i) => {
         if (it.value && !isConfirmed(it.value.confirmed)) blockers.push(`Bonus ${i + 1}'s value needs an owner's confirmation.`);
+      });
+    }
+    // A hidden section draws nothing, so it vouches for nothing (as drawnCopy skips it).
+    if (s.key === "pricing" && !s.hidden) {
+      s.tiers.forEach((it, i) => {
+        const price = (it.price || "").trim();
+        const name = (it.name || "").trim();
+        // Never starts with "Confirm ": PublishChecklist keeps those lines for
+        // the claim ticks, and this one must show as a plain blocker.
+        const which = name ? `"${name}"` : `plan ${i + 1}`;
+        if (price && it.confirmed !== true) {
+          blockers.push(`The price for ${which} (${price}) needs an owner's confirmation. It is shown exactly as written.`);
+        } else if (!price && name) {
+          warnings.push(`${which} has no price yet, so it is not shown.`);
+        }
       });
     }
     if (s.key === "guarantee" && (s.body || "").trim() && !isConfirmed(s.confirmed)) {

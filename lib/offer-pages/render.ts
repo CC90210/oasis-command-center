@@ -15,7 +15,7 @@
  *     headline and the booking still are.
  */
 import type { Client } from "@libsql/client";
-import type { Aspect, OfferPageDoc, TemplateKey } from "./types";
+import type { Aspect, HeroLayout, OfferPageDoc, TemplateKey } from "./types";
 import { DEFAULT_ACCENT } from "./types";
 import { drawnPage, type DrawnPage, type MediaCheck } from "./visibility";
 import { embedUrl, formatDuration, videoRefs } from "./providers";
@@ -40,6 +40,12 @@ export type FacadeMedia = {
 export type PreparedOffer = {
   page: DrawnPage;
   accent: string;
+  /**
+   * The hero's layout, only when the owner chose one. Absent is today's hero
+   * (OfferPage draws it byte for byte), so a page saved before layouts
+   * existed prepares to exactly the object it always did.
+   */
+  layout?: HeroLayout;
   ctaLabel: string;
   /** Per drawn video ref. */
   media: Record<string, FacadeMedia>;
@@ -167,7 +173,8 @@ export async function prepareOfferRender(input: {
     if (s.key === "what_you_get") {
       for (const it of s.items) if (it.video) addVideo(it.video.ref);
     } else if (s.key === "work") {
-      for (const it of s.items) addVideo(it.video.ref);
+      // A step with no video is a numbered card: nothing to resolve or sign.
+      for (const it of s.items) if (it.video) addVideo(it.video.ref);
     } else if (s.key === "results") {
       for (const { item, index } of s.items) if (item.kind === "video") addVideo(`results:${index}`);
     }
@@ -182,6 +189,7 @@ export async function prepareOfferRender(input: {
   return {
     page,
     accent: doc.theme.accent || DEFAULT_ACCENT,
+    ...(doc.theme.layout ? { layout: doc.theme.layout } : {}),
     ctaLabel: doc.nav.cta_label || doc.hero.cta_label || DEFAULT_CTA[doc.template],
     media: out,
     images,

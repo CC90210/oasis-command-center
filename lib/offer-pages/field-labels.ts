@@ -18,6 +18,7 @@ const ITEM_NOUN: Readonly<Record<BodyKey, string>> = {
   work: "Our work item",
   results: "Result",
   bonuses: "Bonus",
+  pricing: "Plan",
   guarantee: "Guarantee",
   faq: "Question",
 };
@@ -59,6 +60,15 @@ const FIELD: Readonly<Record<string, string>> = {
   hidden: "show or hide switch",
   key: "section",
   items: "items",
+  name: "name",
+  price: "price",
+  cadence: "billing period",
+  summary: "summary",
+  includes: "what's included",
+  highlighted: "highlight",
+  currency_note: "currency note",
+  tiers: "prices",
+  layout: "hero layout",
 };
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
@@ -101,6 +111,7 @@ export function fieldLabel(path: string | undefined | null, doc?: OfferPageDoc |
     case "theme":
       if (last === "accent") return "Accent colour";
       if (last === "logo") return "Logo setting";
+      if (last === "layout") return "Hero layout";
       return "Page look";
     case "brief":
       return "Copy brief";
@@ -109,10 +120,11 @@ export function fieldLabel(path: string | undefined | null, doc?: OfferPageDoc |
     case "sections": {
       if (area.index === null) return "Sections";
       const key = doc?.sections?.[area.index]?.key as BodyKey | undefined;
-      const items = rest.find((r) => r.name === "items");
+      // Pricing keeps its tiers under "tiers", every other section under "items".
+      const items = rest.find((r) => r.name === "items" || r.name === "tiers");
       if (items && items.index !== null) {
         const name = itemName(key, items.index);
-        return last === "items" ? name : `${name} ${field}`.trim();
+        return last === items.name ? name : `${name} ${field}`.trim();
       }
       const section = key ? `${NAV_LABELS[key]} section` : `Section ${area.index + 1}`;
       return last === "sections" ? section : `${section} ${field}`.trim();

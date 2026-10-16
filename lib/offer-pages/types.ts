@@ -22,7 +22,10 @@
  *     money value needs a confirmation; every attached video needs the rights
  *     confirmation. Confirmations are re-stamped by the server with the saving
  *     owner's id and the time (claims.ts stampConfirmations), so a browser can
- *     never claim someone else said it.
+ *     never claim someone else said it. A pricing tier's price carries a plain
+ *     `confirmed` true/false instead (it may be written, unconfirmed, by
+ *     whoever drafts the copy); it is never drawn and never published until an
+ *     owner sets it true (visibility.ts, claims.ts publishGate).
  *   - Templates and this parser carry structure only. Nothing here invents copy.
  *
  * No `server-only`: the builder, the tests and the seed script parse with it.
@@ -37,7 +40,12 @@ export const OFFER_DOC_MAX_BYTES = 200 * 1024;
 export const TEMPLATE_KEYS = ["book_call", "free_audit", "application"] as const;
 export type TemplateKey = (typeof TEMPLATE_KEYS)[number];
 
-export const BODY_KEYS = ["what_you_get", "obstacles", "work", "results", "bonuses", "guarantee", "faq"] as const;
+/**
+ * Every body section, in the order the builder offers them. "pricing" sits
+ * after the bonuses (the value) and before the guarantee (the risk): the
+ * order a visitor decides in.
+ */
+export const BODY_KEYS = ["what_you_get", "obstacles", "work", "results", "bonuses", "pricing", "guarantee", "faq"] as const;
 export type BodyKey = (typeof BODY_KEYS)[number];
 
 /** Section anchors on the public page. */
@@ -47,9 +55,23 @@ export const BODY_ANCHORS: Readonly<Record<BodyKey, string>> = {
   work: "work",
   results: "results",
   bonuses: "bonuses",
+  pricing: "pricing",
   guarantee: "guarantee",
   faq: "faq",
 };
+
+/**
+ * How the top of the page is laid out, so each offer can look like its own
+ * page. Absent is today's hero, byte for byte, and "split" is the same thing
+ * said out loud:
+ *   split     words on the left, the video on the right on desktop (words
+ *             only, left-aligned, when there is no video);
+ *   stacked   the words centred on top, the video wide (max-w-4xl) below;
+ *   centered  one centred column, the video narrower (max-w-3xl) below.
+ * Phones read top to bottom in every layout, with the button under the video.
+ */
+export const HERO_LAYOUTS = ["split", "stacked", "centered"] as const;
+export type HeroLayout = (typeof HERO_LAYOUTS)[number];
 
 /** Character caps per kind of copy (design section 3.3, plus the unnamed ones). */
 export const COPY_CAPS = {
@@ -76,17 +98,28 @@ export const COPY_CAPS = {
   seo_title: 70,
   seo_description: 200,
   brief: 2000,
+  /** A pricing tier's name ("Turnkey"), its price as written ("From $497/mo"), and the rest of its card. */
+  tier_name: 60,
+  price: 40,
+  cadence: 40,
+  tier_summary: 300,
+  tier_include: 160,
+  currency_note: 120,
 } as const;
 
-/** Items per section (design section 3.3). */
+/** Items per section (design section 3.3); for pricing, its tiers. */
 export const ITEM_CAPS: Readonly<Record<Exclude<BodyKey, "guarantee">, number>> = {
   what_you_get: 8,
   obstacles: 10,
   work: 6,
   results: 30,
   bonuses: 8,
+  pricing: 4,
   faq: 20,
 };
+
+/** Lines in one pricing tier's "what's included" list. */
+export const TIER_INCLUDES_CAP = 8;
 
 /** The page canvas (ops-void). Accents are checked against it. */
 export const OFFER_CANVAS = "#050608";
@@ -232,13 +265,37 @@ export type Head = { eyebrow?: Copy; title?: Copy; lede?: Copy; hidden?: boolean
 
 export type WhatYouGetSection = { key: "what_you_get"; items: { title: Copy; body?: Copy; video?: VideoRef }[] } & Head;
 export type ObstaclesSection = { key: "obstacles"; items: { title: Copy; body?: Copy }[] } & Head;
-export type WorkSection = { key: "work"; items: { title: Copy; body?: Copy; video: VideoRef }[] } & Head;
+/**
+ * "Our work" / "How it works". The video is optional (it was required until
+ * 2026-10-16): a step with no video draws as a numbered step card, so an offer
+ * can explain its process before any footage exists. A step that HAS a video
+ * draws exactly as it always did.
+ */
+export type WorkSection = { key: "work"; items: { title: Copy; body?: Copy; video?: VideoRef }[] } & Head;
 export type ResultsSection = { key: "results"; items: ResultItem[] } & Head;
 export type BonusesSection = {
   key: "bonuses";
   items: { title: Copy; body?: Copy; value?: Money | null }[];
   value_note?: Copy;
 } & Head;
+
+/**
+ * One price on the page. The price is free text ("$2,500", "From $497/mo"),
+ * shown exactly as written, so it is never parsed into money: it is a claim an
+ * owner vouches for with `confirmed`, the way a bonus value is. A tier whose
+ * price is not confirmed is never drawn, and Publish names it (claims.ts).
+ */
+export type PricingTier = {
+  name: Copy;
+  price: Copy;
+  cadence?: Copy;
+  summary?: Copy;
+  includes?: Copy[];
+  /** The one tier the page draws with the accent. At most one per section. */
+  highlighted?: boolean;
+  confirmed: boolean;
+};
+export type PricingSection = { key: "pricing"; tiers: PricingTier[]; currency_note?: Copy } & Head;
 export type GuaranteeSection = { key: "guarantee"; body?: Copy; terms_url?: string; confirmed?: Confirmation } & Head;
 export type FaqSection = { key: "faq"; items: { q: Copy; a: Copy }[] } & Head;
 
@@ -248,6 +305,7 @@ export type BodySection =
   | WorkSection
   | ResultsSection
   | BonusesSection
+  | PricingSection
   | GuaranteeSection
   | FaqSection;
 
@@ -285,7 +343,8 @@ export type OfferBrief = {
 export type OfferPageDoc = {
   v: 1;
   template: TemplateKey;
-  theme: { canvas: "dark"; accent?: string; logo?: "workspace" | "none" };
+  /** `layout` absent is today's hero (see HERO_LAYOUTS). */
+  theme: { canvas: "dark"; accent?: string; logo?: "workspace" | "none"; layout?: HeroLayout };
   nav: { pinned: BodyKey[]; cta_label?: Copy };
   hero: Hero;
   sections: BodySection[];
@@ -660,11 +719,11 @@ function parseSection(v: unknown, path: string): BodySection {
         const p = `${path}.items[${i}]`;
         const it = obj(raw, p);
         onlyKeys(it, ["title", "body", "video"], p);
-        if (it.video === undefined || it.video === null) throw new OfferPageError(`${p}.video`, "a work item needs its video");
-        const out: WorkSection["items"][number] = {
-          title: reqCopy(it, "title", p, COPY_CAPS.title),
-          video: parseVideoRef(it.video, `${p}.video`),
-        };
+        // Keys in the order they were always written (title, video, body), so a
+        // stored step with a video parses back to the very same JSON.
+        const title = reqCopy(it, "title", p, COPY_CAPS.title);
+        const out: WorkSection["items"][number] =
+          it.video === undefined || it.video === null ? { title } : { title, video: parseVideoRef(it.video, `${p}.video`) };
         const body = optCopy(it, "body", p, COPY_CAPS.body);
         if (body) out.body = body;
         return out;
@@ -691,6 +750,52 @@ function parseSection(v: unknown, path: string): BodySection {
       const section: BonusesSection = { key: "bonuses", items, ...head };
       const note = optCopy(o, "value_note", path, COPY_CAPS.value_note);
       if (note) section.value_note = note;
+      return section;
+    }
+    case "pricing": {
+      onlyKeys(o, ["key", "tiers", "currency_note", ...HEAD_KEYS], path);
+      // Zero tiers is a section being started (the builder's "Add a section",
+      // a template); it is simply not drawn. The page draws one to four.
+      if (!Array.isArray(o.tiers)) throw new OfferPageError(`${path}.tiers`, "expected a list");
+      if (o.tiers.length > ITEM_CAPS.pricing) throw new OfferPageError(`${path}.tiers`, `at most ${ITEM_CAPS.pricing} prices`);
+      let highlightedAt = -1;
+      const tiers = o.tiers.map((raw, i) => {
+        const p = `${path}.tiers[${i}]`;
+        const it = obj(raw, p);
+        onlyKeys(it, ["name", "price", "cadence", "summary", "includes", "highlighted", "confirmed"], p);
+        // Required and a real boolean, never inferred: false is a price written
+        // by someone (the copy team, an agent) that no owner has vouched for yet.
+        if (typeof it.confirmed !== "boolean") {
+          throw new OfferPageError(`${p}.confirmed`, "expected true or false: has an owner confirmed this price?");
+        }
+        const confirmed = it.confirmed;
+        const tier = {
+          name: reqCopy(it, "name", p, COPY_CAPS.tier_name),
+          price: reqCopy(it, "price", p, COPY_CAPS.price),
+        } as PricingTier;
+        const cadence = optCopy(it, "cadence", p, COPY_CAPS.cadence);
+        const summary = optCopy(it, "summary", p, COPY_CAPS.tier_summary);
+        if (cadence) tier.cadence = cadence;
+        if (summary) tier.summary = summary;
+        if (it.includes !== undefined && it.includes !== null) {
+          if (!Array.isArray(it.includes)) throw new OfferPageError(`${p}.includes`, "expected a list");
+          if (it.includes.length > TIER_INCLUDES_CAP) throw new OfferPageError(`${p}.includes`, `at most ${TIER_INCLUDES_CAP} lines`);
+          // A line being typed (empty) is kept, as an item's empty title is; visibility.ts drops it.
+          tier.includes = it.includes.map((line, j) => copyOf(line, `${p}.includes[${j}]`, COPY_CAPS.tier_include));
+        }
+        const highlighted = optBool(it, "highlighted", p);
+        if (highlighted) {
+          if (highlightedAt >= 0) throw new OfferPageError(`${p}.highlighted`, `only one plan can be highlighted (plan ${highlightedAt + 1} already is)`);
+          highlightedAt = i;
+        }
+        // Kept as written, false included (as `hidden` is), so a stored page parses back to itself.
+        if (highlighted !== undefined) tier.highlighted = highlighted;
+        tier.confirmed = confirmed;
+        return tier;
+      });
+      const section: PricingSection = { key: "pricing", tiers, ...head };
+      const note = optCopy(o, "currency_note", path, COPY_CAPS.currency_note);
+      if (note) section.currency_note = note;
       return section;
     }
     case "guarantee": {
@@ -770,7 +875,7 @@ export function parseOfferPageDoc(value: unknown): OfferPageDoc {
   }
 
   const themeIn = obj(o.theme, "$.theme");
-  onlyKeys(themeIn, ["canvas", "accent", "logo"], "$.theme");
+  onlyKeys(themeIn, ["canvas", "accent", "logo", "layout"], "$.theme");
   if (themeIn.canvas !== "dark") throw new OfferPageError("$.theme.canvas", "only the dark canvas is available");
   const theme: OfferPageDoc["theme"] = { canvas: "dark" };
   if (themeIn.accent !== undefined && themeIn.accent !== null && themeIn.accent !== "") {
@@ -783,6 +888,14 @@ export function parseOfferPageDoc(value: unknown): OfferPageDoc {
   if (themeIn.logo !== undefined) {
     if (themeIn.logo !== "workspace" && themeIn.logo !== "none") throw new OfferPageError("$.theme.logo", "expected workspace or none");
     theme.logo = themeIn.logo;
+  }
+  // Absent (or null) stays absent: every page stored before layouts existed
+  // keeps today's hero, and parses back to exactly what was stored.
+  if (themeIn.layout !== undefined && themeIn.layout !== null) {
+    if (typeof themeIn.layout !== "string" || !HERO_LAYOUTS.includes(themeIn.layout as HeroLayout)) {
+      throw new OfferPageError("$.theme.layout", "expected split, stacked or centered");
+    }
+    theme.layout = themeIn.layout as HeroLayout;
   }
 
   const sectionsIn = o.sections;

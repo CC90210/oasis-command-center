@@ -147,8 +147,10 @@ export function videoRefs(doc: OfferPageDoc): VideoAt[] {
         if (item.video) out.push({ ref: `what_you_get:${i}`, video: item.video });
       });
     } else if (s.key === "work") {
+      // The ref keeps the item's index in the document, so a step without a
+      // video leaves a gap ("work:0" absent) rather than renumbering the rest.
       s.items.forEach((item, i) => {
-        out.push({ ref: `work:${i}`, video: item.video });
+        if (item.video) out.push({ ref: `work:${i}`, video: item.video });
       });
     } else if (s.key === "results") {
       s.items.forEach((item, i) => {
