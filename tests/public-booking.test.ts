@@ -222,6 +222,18 @@ await check("a failed stage write blocks only a required booking form's completi
   // thanks) is durable and their call optional, so only their calendar fails.
   assert.match(submitRoute, /if \(funnelStageWriteFailed && !isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \}/);
   assert.equal(submitRoute.match(/funnel_stage_write_unavailable/g)?.length, 1, "one place answers the stage-write failure");
+  // CodeRabbit on #655: nothing retries an optional form's step (it answered
+  // 200), so the route retries the same merge once after the response.
+  const failure = submitRoute.slice(
+    submitRoute.indexOf("funnelStageWriteFailed = true;"),
+    submitRoute.indexOf("// AI-audit funnel, FIRST step."),
+  );
+  assert.match(
+    failure,
+    /if \(isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*after\(async \(\) => \{\s*const retried = await db\.rpc\("patch_tenant_record_data", \{\s*p_id: link\.lead_id,\s*p_tenant_id: form\.tenant_id,\s*p_patch: completedPatch,/,
+    "an optional form's failed stage write is never retried",
+  );
+  assert.match(failure, /\[forms\.submit\.public_booking_completion\.retry_failed\]/, "a failed retry is silent");
 });
 
 await check("keeps public offer names explicit instead of inferring them from duration", () => {

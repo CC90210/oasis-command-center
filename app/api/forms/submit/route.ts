@@ -1777,6 +1777,27 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       // of #611). The form row is already durable and every step is idempotent,
       // so the browser can retry this same final step.
       funnelStageWriteFailed = true;
+      // PROTOCOL and COMMUNITY answer 200 even so (their call is optional; see
+      // the 503 at the end), so no browser retries this step. Retry the same
+      // idempotent merge once after the response instead, so the lead still
+      // reaches audit_requested and its optional calendar can open; a second
+      // failure is logged as loudly as the first (CodeRabbit on #655).
+      if (isOptionalPublicBookingFormSlug(form.slug)) {
+        after(async () => {
+          const retried = await db.rpc("patch_tenant_record_data", {
+            p_id: link.lead_id,
+            p_tenant_id: form.tenant_id,
+            p_patch: completedPatch,
+          });
+          if (retried.error) {
+            console.error("[forms.submit.public_booking_completion.retry_failed]", {
+              lead_id: link.lead_id,
+              form_slug: form.slug,
+              error: retried.error.message,
+            });
+          }
+        });
+      }
     }
   }
 
