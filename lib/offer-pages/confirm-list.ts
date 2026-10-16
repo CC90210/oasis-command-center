@@ -107,20 +107,24 @@ type Row = Record<string, unknown>;
 const rowsOf = (rs: { columns: string[]; rows: unknown[] }): Row[] =>
   rs.rows.map((r) => Object.fromEntries(rs.columns.map((c, i) => [c, (r as unknown as unknown[])[i]])));
 
-const ASPECTS: ReadonlySet<string> = new Set<Aspect>(["9:16", "16:9", "1:1", "4:5"]);
-
-/** The shape a hero layout draws best: beside the words (split) is tall, under them (stacked) is wide. */
+/**
+ * The shape a hero layout draws best: beside the words (split) is tall, under
+ * them (stacked) is wide; centered takes any. No layout at all draws as split
+ * (OfferPage, and the builder's layout picker), so it prefers tall too.
+ */
 export function aspectForLayout(layout: HeroLayout | undefined): Aspect | null {
-  return layout === "split" ? "9:16" : layout === "stacked" ? "16:9" : null;
+  return layout === "stacked" ? "16:9" : layout === "centered" ? null : "9:16";
 }
 
 /**
  * The Library cut tagged for this page (meta.offer_slug = the form's slug):
  * this workspace's own video of OASIS's own brand, in review, approved or
- * published, with a video file. The newest by created_at (a tag write or a
- * byte swap moves updated_at, so updated_at would let an old cut jump ahead),
- * preferring the shape the page's hero layout draws; the newest of any shape
- * otherwise. null when no cut is tagged for it.
+ * published, with a video file, in a shape a page can draw. The newest by
+ * created_at (a tag write or a byte swap moves updated_at, so updated_at would
+ * let an old cut jump ahead), preferring the shape the page's hero layout
+ * draws; the newest of any shape otherwise. The choice is the query's own
+ * ORDER BY, so no number of newer cuts in another shape can push the matching
+ * one out. null when no cut is tagged for it.
  */
 export async function taggedHeroVideo(
   db: Client,
@@ -134,21 +138,20 @@ export async function taggedHeroVideo(
         sql: `SELECT a.id, a.aspect FROM marketing_asset a
               WHERE a.tenant_id = ? AND a.brand_slug = ? AND a.format = 'video'
                 AND a.status IN ('in_review', 'approved', 'published')
+                AND a.aspect IN ('9:16', '16:9', '1:1', '4:5')
                 AND (CASE WHEN json_valid(a.meta) THEN json_extract(a.meta, '$.offer_slug') END) = ?
                 AND EXISTS (SELECT 1 FROM marketing_asset_media m
                             WHERE m.tenant_id = a.tenant_id AND m.asset_id = a.id AND m.kind = 'video' AND m.storage_path <> '')
-              ORDER BY a.created_at DESC, a.id DESC
-              LIMIT 25`,
-        args: [input.tenantId, FOUNDERS_OWN_BRAND, input.formSlug],
+              ORDER BY CASE WHEN a.aspect = ? THEN 0 ELSE 1 END, a.created_at DESC, a.id DESC
+              LIMIT 1`,
+        args: [input.tenantId, FOUNDERS_OWN_BRAND, input.formSlug, aspectForLayout(input.layout) ?? ""],
       }),
     );
   } catch (err) {
     if (/no such table:\s*"?marketing_asset/i.test(err instanceof Error ? err.message : String(err))) return null;
     throw err;
   }
-  const usable = rows.filter((r) => ASPECTS.has(String(r.aspect)));
-  const want = aspectForLayout(input.layout);
-  const hit = (want ? usable.find((r) => r.aspect === want) : undefined) ?? usable[0];
+  const hit = rows[0];
   return hit ? { assetId: String(hit.id), aspect: String(hit.aspect) as Aspect } : null;
 }
 

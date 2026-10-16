@@ -813,6 +813,23 @@ async function main() {
       [T(7), OASIS, "arthrisil", '{"offer_slug":"growth"}', "9:16", "approved", "2026-10-15T03:00:00Z", "2026-10-15T03:00:00Z", true],
       [T(8), OASIS, "oasis-ai", "not json at all", "9:16", "approved", "2026-10-15T04:00:00Z", "2026-10-15T04:00:00Z", true],
       [T(9), OASIS, "oasis-ai", '{"offer_slug":"protocol"}', "9:16", "approved", "2026-10-15T05:00:00Z", "2026-10-15T05:00:00Z", true],
+      // The newest growth cut is wide: a page with no layout (drawn split) still gets the tall T3.
+      ["ta000000-0000-4000-8000-000000000010", OASIS, "oasis-ai", '{"offer_slug":"growth"}', "16:9", "approved", "2026-10-15T06:00:00Z", "2026-10-15T06:00:00Z", true],
+      // A shape no page draws is never proposed.
+      ["ta000000-0000-4000-8000-000000000011", OASIS, "oasis-ai", '{"offer_slug":"growth"}', "21:9", "approved", "2026-10-15T07:00:00Z", "2026-10-15T07:00:00Z", true],
+      // Thirty newer tall cuts and one older wide one: a stacked page still gets the wide one.
+      ...Array.from({ length: 30 }, (_, i): [string, string, string, string, string, string, string, string, boolean] => [
+        `tb000000-0000-4000-8000-0000000000${String(i).padStart(2, "0")}`,
+        OASIS,
+        "oasis-ai",
+        '{"offer_slug":"many"}',
+        "9:16",
+        "approved",
+        `2026-10-15T10:${String(i).padStart(2, "0")}:00Z`,
+        `2026-10-15T10:${String(i).padStart(2, "0")}:00Z`,
+        true,
+      ]),
+      ["tc000000-0000-4000-8000-000000000001", OASIS, "oasis-ai", '{"offer_slug":"many"}', "16:9", "approved", "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z", true],
     ];
     await db.batch(
       cuts.flatMap(([id, tenant, brand, meta, aspect, status, created, updated, file]) => [
@@ -827,11 +844,16 @@ async function main() {
     );
     const listed = await import("../lib/offer-pages/confirm-list");
     const tagged = (formSlug: string, layout?: "split" | "stacked" | "centered") => listed.taggedHeroVideo(db, { tenantId: OASIS, formSlug, layout });
-    // No layout: the newest usable cut (T4 rejected, T5 has no file; T1's newer updated_at counts for nothing).
-    assert.deepEqual(await tagged("growth"), { assetId: T(3), aspect: "9:16" });
+    // Split, and no layout at all (drawn split): the newest usable TALL cut (T4 rejected, T5 has no
+    // file, the newer wide T10 is the wrong shape; T1's newer updated_at counts for nothing).
+    assert.deepEqual(await tagged("growth"), { assetId: T(3), aspect: "9:16" }, "a page with no layout is not treated as split");
     assert.deepEqual(await tagged("growth", "split"), { assetId: T(3), aspect: "9:16" });
-    assert.deepEqual(await tagged("growth", "stacked"), { assetId: T(1), aspect: "16:9" }, "a stacked page is not offered its wide cut first");
-    assert.deepEqual(await tagged("growth", "centered"), { assetId: T(3), aspect: "9:16" });
+    // Stacked: the newest wide cut. Centered: the newest of any shape the page can draw (never the 21:9).
+    assert.deepEqual(await tagged("growth", "stacked"), { assetId: "ta000000-0000-4000-8000-000000000010", aspect: "16:9" });
+    assert.deepEqual(await tagged("growth", "centered"), { assetId: "ta000000-0000-4000-8000-000000000010", aspect: "16:9" });
+    // However many newer cuts of the other shape there are.
+    assert.deepEqual(await tagged("many", "stacked"), { assetId: "tc000000-0000-4000-8000-000000000001", aspect: "16:9" }, "newer tall cuts pushed the wide one out");
+    assert.deepEqual(await tagged("many", "split"), { assetId: "tb000000-0000-4000-8000-000000000029", aspect: "9:16" });
     assert.equal(await tagged("nothing-tagged"), null);
     // Through the list: growth has no hand-map entry and gets its tagged cut; a tag beats protocol's map entry.
     const by = Object.fromEntries((await list({})).map((o) => [o.slug, o]));
