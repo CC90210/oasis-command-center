@@ -558,10 +558,11 @@ export function FormsListClient({
             <ExternalLink className="w-3 h-3 text-accent" />
             Share link (anonymous)
           </div>
-          The <span className="font-mono text-fg">Copy link</span> button on
-          each row gives you a public URL anyone can open without an account.
-          An offer&apos;s link shows its page once you publish it, and the plain
-          form until then. A fresh lead is created the moment someone submits;
+          The <span className="font-mono text-fg">Copy link</span> button gives
+          you a public URL anyone can open without an account: on each intake
+          form, and on each offer once its page is published (until then an
+          offer&apos;s card offers Open draft and Publish instead, so its link
+          never hands out the bare form). A fresh lead is created the moment someone submits;
           their name, email, phone and company (if the form asks) seed the lead
           automatically.
         </div>
