@@ -15,7 +15,12 @@
  * builder can fix (a missing headline, a result without evidence), and the
  * screen says so instead of offering a Publish that would be refused.
  *
- * THE PROPOSED VIDEO (suggested-videos.ts) is resolved from its Library asset
+ * WHICH VIDEO IS PROPOSED. First the cut tagged for this page in the Library
+ * (taggedHeroVideo: meta.offer_slug = the form's slug, written by Maven's
+ * publish_to_library.py --offer-slug), so a new offer's video is proposed with
+ * no code change; else the hand map (suggested-videos.ts).
+ *
+ * THE PROPOSED VIDEO is resolved from its Library asset
  * the way the builder's "Choose from Library" resolves one
  * (app/api/forms/[id]/offer/library-videos): this workspace's own asset, OASIS's
  * own brand, a video, with its video file; the poster and captions when it has
@@ -30,7 +35,7 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import type { OfferPageDoc, PricingTier } from "./types";
+import type { Aspect, HeroLayout, OfferPageDoc, PricingTier } from "./types";
 import { lintDoc, publishGate, type ClaimTick } from "./claims";
 import { formatMoney, isConfirmed } from "./visibility";
 import { listOfferStatuses, readOfferRow, statusOf } from "./store";
@@ -101,6 +106,51 @@ function guaranteeOf(doc: OfferPageDoc): GuaranteeItem | null {
 type Row = Record<string, unknown>;
 const rowsOf = (rs: { columns: string[]; rows: unknown[] }): Row[] =>
   rs.rows.map((r) => Object.fromEntries(rs.columns.map((c, i) => [c, (r as unknown as unknown[])[i]])));
+
+const ASPECTS: ReadonlySet<string> = new Set<Aspect>(["9:16", "16:9", "1:1", "4:5"]);
+
+/** The shape a hero layout draws best: beside the words (split) is tall, under them (stacked) is wide. */
+export function aspectForLayout(layout: HeroLayout | undefined): Aspect | null {
+  return layout === "split" ? "9:16" : layout === "stacked" ? "16:9" : null;
+}
+
+/**
+ * The Library cut tagged for this page (meta.offer_slug = the form's slug):
+ * this workspace's own video of OASIS's own brand, in review, approved or
+ * published, with a video file. The newest by created_at (a tag write or a
+ * byte swap moves updated_at, so updated_at would let an old cut jump ahead),
+ * preferring the shape the page's hero layout draws; the newest of any shape
+ * otherwise. null when no cut is tagged for it.
+ */
+export async function taggedHeroVideo(
+  db: Client,
+  input: { tenantId: string; formSlug: string; layout: HeroLayout | undefined },
+): Promise<SuggestedVideo | null> {
+  let rows: Row[];
+  try {
+    rows = rowsOf(
+      await db.execute({
+        // CASE first: json_extract on a meta that is not JSON would fail the whole read.
+        sql: `SELECT a.id, a.aspect FROM marketing_asset a
+              WHERE a.tenant_id = ? AND a.brand_slug = ? AND a.format = 'video'
+                AND a.status IN ('in_review', 'approved', 'published')
+                AND (CASE WHEN json_valid(a.meta) THEN json_extract(a.meta, '$.offer_slug') END) = ?
+                AND EXISTS (SELECT 1 FROM marketing_asset_media m
+                            WHERE m.tenant_id = a.tenant_id AND m.asset_id = a.id AND m.kind = 'video' AND m.storage_path <> '')
+              ORDER BY a.created_at DESC, a.id DESC
+              LIMIT 25`,
+        args: [input.tenantId, FOUNDERS_OWN_BRAND, input.formSlug],
+      }),
+    );
+  } catch (err) {
+    if (/no such table:\s*"?marketing_asset/i.test(err instanceof Error ? err.message : String(err))) return null;
+    throw err;
+  }
+  const usable = rows.filter((r) => ASPECTS.has(String(r.aspect)));
+  const want = aspectForLayout(input.layout);
+  const hit = (want ? usable.find((r) => r.aspect === want) : undefined) ?? usable[0];
+  return hit ? { assetId: String(hit.id), aspect: String(hit.aspect) as Aspect } : null;
+}
 
 /** The proposal for one page, resolved from its Library asset in this workspace. */
 export async function resolveProposal(
@@ -242,7 +292,9 @@ export async function loadConfirmList(
         guarantee: guaranteeOf(row.draft),
         proposal: await resolveProposal(db, {
           tenantId: input.tenantId,
-          suggestion: suggestedHeroVideo(input.tenantSlug, form.slug, suggestions),
+          suggestion:
+            (await taggedHeroVideo(db, { tenantId: input.tenantId, formSlug: form.slug, layout: row.draft.theme.layout })) ??
+            suggestedHeroVideo(input.tenantSlug, form.slug, suggestions),
           doc: row.draft,
           sign: input.sign,
         }),

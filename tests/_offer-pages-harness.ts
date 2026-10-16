@@ -194,7 +194,8 @@ export async function createLibraryTables(db: Client): Promise<void> {
   await db.executeMultiple(`
     CREATE TABLE marketing_asset (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, brand_slug TEXT NOT NULL DEFAULT 'oasis-ai',
       title TEXT NOT NULL DEFAULT '', format TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', aspect TEXT,
-      duration_s REAL, updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+      duration_s REAL, updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), meta TEXT NOT NULL DEFAULT '{}');
     CREATE TABLE marketing_asset_media (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL, kind TEXT NOT NULL,
       storage_bucket TEXT NOT NULL DEFAULT 'marketing-media', storage_path TEXT NOT NULL, mime TEXT, bytes INTEGER,
       width INTEGER, height INTEGER, label TEXT);
