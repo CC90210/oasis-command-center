@@ -214,6 +214,10 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(inventsFacts("The quickest way to book", "The best scheduling app for clinics"), "the owner's best let quickest through");
   assert.ok(inventsFacts("Trusted by 14 happy clinics", "Includes 14 happy templates"), "14 happy templates let 14 happy clinics through");
   assert.ok(!inventsFacts("It syncs with your calendar", "It syncs bookings with your calendar."));
+  // Codex round twelve: hyphenated units and the teen count words.
+  assert.ok(inventsFacts("A 14-day setup.", "Includes 14 templates."), "the owner's 14 templates let a 14-day setup through");
+  assert.ok(!inventsFacts("A 14-day setup.", "We finish a 14-day setup with you."));
+  assert.ok(inventsFacts("Works for thirteen clients.", "Works for two clients."), "the owner's two clients let thirteen through");
   // Codex round eleven: a zero price and an instant delivery are claims too.
   assert.ok(inventsFacts("Book a free consultation", "A scheduling app"), "an invented free offer got through");
   assert.ok(inventsFacts("Setup is complimentary", "A scheduling app"), "an invented free setup got through");
@@ -246,6 +250,12 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   const wyg = doc.sections.find((s) => s.key === "what_you_get") as { items: Array<{ title: string; body?: string }> };
   assert.deepEqual(wyg.items[0], { title: "A front desk" }, "the invented sentence stayed in the card");
   assert.equal(withheld, 3);
+
+  // Codex round twelve: vetted sentence by sentence, so a grounded sentence
+  // survives an invented one beside it in the same field.
+  const mixed: WrittenCopy = { ...written, hero: { ...written.hero, subheadline: "We answer your calls. Guaranteed results." } };
+  const vetted = vetWrittenCopy(mixed, "OASIS Command Center: we answer your calls.");
+  assert.equal(vetted.copy.hero.subheadline, "We answer your calls.", "a grounded sentence was dropped with its invented neighbour");
 });
 
 check("a new offer's description is kept in the brief, and a longer saved audience is never shortened", () => {
@@ -444,7 +454,7 @@ check("the editor's write has one writer: the route saves nothing, and the edito
   assert.match(builder, /if \(await saver\.idle\(\)\) return filled;\s*if \(conflict\.current\) \{[\s\S]*?setDoc\(latest\);[\s\S]*?return "conflict";/);
   // ...and the Write the page for me box is locked once creation starts, in both dialogs.
   assert.match(readFileSync("components/forms/FormsListClient.tsx", "utf8"), /<WritePageToggle checked=\{writeIt\} onChange=\{setWriteIt\} disabled=\{busy\}/);
-  assert.match(readFileSync("components/offer-pages/builder/TurnIntoOffer.tsx", "utf8"), /<WritePageToggle checked=\{writeIt\} onChange=\{setWriteIt\} disabled=\{busy\}/);
+  assert.match(readFileSync("components/offer-pages/builder/TurnIntoOffer.tsx", "utf8"), /<WritePageToggle checked=\{writeIt\} onChange=\{setWriteIt\} disabled=\{busy(?: \|\| made)?\}/);
   // The New offer list takes up a refresh's rows, so an offer made before its words failed shows (Codex round nine).
   const list = readFileSync("components/forms/FormsListClient.tsx", "utf8");
   assert.match(list, /if \(rowsFrom !== initialRows\) \{\s*setRowsFrom\(initialRows\);\s*setRows\(initialRows\);/);
@@ -466,6 +476,9 @@ check("a write that fails at creation can be retried: in the New offer dialog, a
   assert.ok((list.match(/disabled=\{!!createdId\}/g) || []).length >= 3, "a made offer's template, name or link still looks editable");
   const turn = readFileSync("components/offer-pages/builder/TurnIntoOffer.tsx", "utf8");
   assert.match(turn, /setMade\(true\)/, "Turn into an offer hides the failure by opening the editor at once");
+  // Codex round twelve: once the page is made, its inputs are locked (the retry lives on the editor).
+  assert.match(turn, /<WritePageDescription value=\{description\} onChange=\{setDescription\} disabled=\{busy \|\| made\} \/>/);
+  assert.match(turn, /<WritePageToggle checked=\{writeIt\} onChange=\{setWriteIt\} disabled=\{busy \|\| made\} \/>/);
   const client = readFileSync("lib/offer-pages/write-page-client.ts", "utf8");
   assert.doesNotMatch(client, /from the builder/, "a message promises a retry the builder does not have");
 });

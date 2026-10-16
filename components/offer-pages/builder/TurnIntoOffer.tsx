@@ -101,8 +101,9 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
           </button>
         ))}
       </div>
-      <WritePageDescription value={description} onChange={setDescription} disabled={busy} />
-      <WritePageToggle checked={writeIt} onChange={setWriteIt} disabled={busy} />
+      {/* Locked once the page is made: from here the only paths are Open or Close, and the retry lives on the page's editor. */}
+      <WritePageDescription value={description} onChange={setDescription} disabled={busy || made} />
+      <WritePageToggle checked={writeIt} onChange={setWriteIt} disabled={busy || made} />
       <p className="text-[12px] text-fg-muted">
         The page starts as a draft. Your link keeps showing the plain form until you publish.
       </p>

@@ -52,7 +52,8 @@ const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
   // days" nor "trusted by 14 clinics" through. "24/7" and the like are one
   // token, matched as written.
   {
-    re: /\d+\/\d+|\d+(?:[.,]\d+)*(?:\s*(?:%|(?:(?:happy|new|more|active|loyal|satisfied|paying|real|qualified|local|small|extra|repeat|returning|verified|five-star)\s+)?[A-Za-z]+))?/gi,
+    // (Hyphens join too: "a 14-day setup" is compared as "14-day".)
+    re: /\d+\/\d+|\d+(?:[.,]\d+)*(?:[\s-]*(?:%|(?:(?:happy|new|more|active|loyal|satisfied|paying|real|qualified|local|small|extra|repeat|returning|verified|five-star)[\s-]+)?[A-Za-z]+))?/gi,
   },
   { re: /[$%]/g },
   // A money amount is one claim: the owner's "99 clients" and "$50" do not let "$99" through.
@@ -99,9 +100,9 @@ const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
   { re: /\b(?:double|triple|twice|tenfold|halve)[sd]?\b/gi },
   // A spelled-out count of something: "three clinics", "five steps". ("One"
   // is left out: "one place", "one call" are prose, not counts.)
-  { re: /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s+[a-z]+/gi },
+  { re: /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s+[a-z]+/gi },
   // Time frames: "one week", "a few days", "within days", "in minutes".
-  { re: /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|a|an|a few|a couple of|several)\s+(?:minute|hour|day|week|month|year)s?\b/gi },
+  { re: /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|ninety|a|an|a few|a couple of|several)\s+(?:minute|hour|day|week|month|year)s?\b/gi },
   { re: /\b(?:within|in under|in less than|under|less than|in just|in only|in)\s+(?:minutes|hours|days|weeks|months)\b/gi },
   { re: /\b(?:overnight|same[- ]day|next[- ]day)\b/gi },
 ];
@@ -198,13 +199,17 @@ export function inventsFacts(text: string, source: string): boolean {
  */
 export function vetWrittenCopy(written: WrittenCopy, source: string): { copy: WrittenCopy; withheld: number } {
   let withheld = 0;
+  // Sentence by sentence: a card body or subheadline keeps its grounded
+  // sentences when one beside them invents something.
   const vet = (value: string | undefined): string => {
     const text = cleanCopy(value, Number.MAX_SAFE_INTEGER);
-    if (text && inventsFacts(text, source)) {
+    if (!text) return text;
+    const kept = sentencesOf(text).filter((sentence) => {
+      if (!inventsFacts(sentence, source)) return true;
       withheld += 1;
-      return "";
-    }
-    return text;
+      return false;
+    });
+    return kept.join(" ");
   };
   const head = (h: Head): Head => ({ title: vet(h.title), lede: vet(h.lede) });
   const cards = (items: Card[]): Card[] => items.map((it) => ({ title: vet(it.title), body: vet(it.body) }));
