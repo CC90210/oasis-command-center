@@ -35,6 +35,15 @@ async function main() {
     );
   });
 
+  await check("a manager opens AI brain on Workspace default until they pick a tab (CC 2026-10-16)", () => {
+    const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
+    // Opening managers on "My setup" saved CC's Anthropic key as personal, so
+    // the workspace tools (Write my page) kept the old Gemini account.
+    assert.match(panel, /const wanted: EngineScope = scopeChosen\.current \? scopeRef\.current : "workspace";/, "a manager's first view is the workspace account");
+    assert.match(panel, /wanted === "workspace" && result\.state\.canManage \? "workspace" : "person"/, "a member who cannot manage still opens on My setup");
+    assert.match(panel, /function changeScope\([^)]*\) \{[^}]*scopeChosen\.current = true;/, "a tab the viewer picks is kept when the panel reloads");
+  });
+
   await check("the consolidated panel exposes exactly the three runtime choices and the two manager scopes", () => {
     const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
     for (const label of ["Subscription app", "Pure local", "API key", "My setup", "Workspace default"]) {

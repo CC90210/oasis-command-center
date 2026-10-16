@@ -141,6 +141,12 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const stop = useRef<AbortController | null>(null);
   const noticeRef = useRef<HTMLDivElement | null>(null);
   const scopeRef = useRef<EngineScope>("person");
+  // Has the viewer picked a tab? Until they do, a manager opens on "Workspace
+  // default": the account every workspace tool runs on (lib/ai/
+  // workspace-account.ts). Opening managers on "My setup" saved CC's
+  // Anthropic key as personal on 2026-10-14, so Write my page kept running on
+  // the workspace's old Gemini key until its quota ran out (2026-10-16).
+  const scopeChosen = useRef(false);
   const draftRef = useRef<EngineSelection | null>(null);
   // The runtime choices ("Subscription app", "Pure local", "API key"): where
   // "Choose your own" takes a person who inherits the workspace default.
@@ -158,7 +164,8 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     setState(result.state);
     setStagedKeyReceipts(result.state.savedKeyReceipts);
     if (!options.keepDraft || !draftRef.current) {
-      const nextScope: EngineScope = scopeRef.current === "workspace" && result.state.canManage ? "workspace" : "person";
+      const wanted: EngineScope = scopeChosen.current ? scopeRef.current : "workspace";
+      const nextScope: EngineScope = wanted === "workspace" && result.state.canManage ? "workspace" : "person";
       const next =
         nextScope === "workspace"
           ? result.state.engine
@@ -285,6 +292,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
 
   function changeScope(next: EngineScope) {
     if (next === "workspace" && !loadedState.canManage) return;
+    scopeChosen.current = true;
     scopeRef.current = next;
     setScopeState(next);
     setDraft(
