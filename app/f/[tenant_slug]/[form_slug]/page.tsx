@@ -89,7 +89,9 @@ export async function generateMetadata({
   const db = getServiceSupabase();
   const lookup = await resolvePublicForm(db, resolved.tenant_slug, resolved.form_slug);
   if (!lookup.ok) {
-    return { title: "Form", robots: { index: false, follow: false } };
+    // The same words as the public 404 this request draws (app/f/not-found.tsx),
+    // so the tab does not switch to "Form" once the page loads.
+    return { title: "Page not available", robots: { index: false, follow: false } };
   }
   const offer = await offerState(lookup.form.tenant_id, lookup.form.id);
   let title = lookup.form.name || "Application";
