@@ -127,7 +127,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   /** One draft save, the builder's own way; the row as saved, or the answer to send. */
-  async function save(next: OfferPageDoc): Promise<{ ok: true } | { ok: false; response: NextResponse }> {
+  const save = async (next: OfferPageDoc): Promise<{ ok: true } | { ok: false; response: NextResponse }> => {
     const now = new Date().toISOString();
     const headline = fallbackHeadline(form);
     const draft = stampConfirmations(next, [current.draft, current.published], actor, now);
@@ -158,7 +158,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (after.state !== "row") return { ok: false, response: json({ ok: false, error: "not_found" }, 404) };
     current = after.row;
     return { ok: true };
-  }
+  };
 
   const tenant = await db.execute({ sql: "SELECT name FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
   const businessName = String(tenant.rows[0]?.name ?? "").trim() || form.name;
