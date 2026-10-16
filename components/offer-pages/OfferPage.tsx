@@ -25,6 +25,7 @@ import { ArrowRight } from "lucide-react";
 import { offerFontVariables } from "@/app/fonts/offer-fonts";
 import { Section, Eyebrow } from "@/components/marketing/Section";
 import { CTA_PRIMARY, CTA_INLINE } from "@/components/marketing/Cta";
+import { isPublicBookingSurface } from "@/lib/forms/public-booking-config";
 import type { PreparedOffer } from "@/lib/offer-pages/render";
 import type { BodyKey } from "@/lib/offer-pages/types";
 import { OfferNav } from "./OfferNav";
@@ -88,6 +89,11 @@ export function OfferPage({
   communityConfigured?: boolean;
 }) {
   const { page, ctaLabel } = prepared;
+  // The preview banner promises a working calendar only where the form ends on
+  // one (Codex review of #659: the VSL router and other workspaces' forms do not).
+  const calendarOnPage = Boolean(
+    form?.tenantSlug && form.formSlug && isPublicBookingSurface({ tenantSlug: form.tenantSlug, formSlug: form.formSlug }),
+  );
   const tracking: VideoTracking = tenantSlug && formSlug ? { tenant: tenantSlug, form: formSlug } : null;
   const communityLink = (
     <CommunityLink tenantSlug={tenantSlug} formSlug={formSlug} configured={communityConfigured} />
@@ -165,8 +171,10 @@ export function OfferPage({
       <div>
         {preview ? (
           <div className="border-b border-status-warm/40 bg-status-warm/10 px-5 py-2 text-center text-[13px] text-status-warm">
-            Preview of your unpublished page. Only signed-in owners see this; the public link still shows what is live.
-            The form and the calendar below work, and nothing you enter is sent, saved or booked.
+            Preview of your unpublished page. Only signed-in owners see this; the public link still shows what is live.{" "}
+            {calendarOnPage
+              ? "The form and the calendar below work, and nothing you enter is sent, saved or booked."
+              : "The form below works, and nothing you enter is sent or saved."}
           </div>
         ) : null}
         <OfferNav nav={page.nav} name={workspaceName} logoUrl={logoUrl} ctaLabel={ctaLabel} />

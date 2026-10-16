@@ -82,12 +82,21 @@ export const revalidate = 0;
  */
 export async function generateMetadata({
   params,
+  searchParams,
 }: {
   params: Promise<RouteParams>;
+  searchParams?: Promise<{ offer_preview?: string }>;
 }): Promise<Metadata> {
   const resolved = await params;
   const db = getServiceSupabase();
-  const lookup = await resolvePublicForm(db, resolved.tenant_slug, resolved.form_slug);
+  let lookup = await resolvePublicForm(db, resolved.tenant_slug, resolved.form_slug);
+  // The owner's preview of a form that is off renders the page (below), so it
+  // gets the page's own tab and icon too, never the 404's (Codex review of
+  // #659). Anyone else still gets the 404's title.
+  if (!lookup.ok && (await searchParams)?.offer_preview === "1") {
+    const off = await resolvePublicForm(db, resolved.tenant_slug, resolved.form_slug, { includeDisabled: true });
+    if (off.ok && (await canPreviewOfferPage(off.form.tenant_id))) lookup = off;
+  }
   if (!lookup.ok) {
     // The same words as the public 404 this request draws (app/f/not-found.tsx),
     // so the tab does not switch to "Form" once the page loads.

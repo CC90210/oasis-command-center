@@ -368,6 +368,15 @@ async function main() {
       assert.equal((owner.props.form as Record<string, unknown>).preview, true);
       assert.equal("anonymousInit" in (owner.props.form as Record<string, unknown>), false);
 
+      // The tab: the owner's preview is the page, everyone else the 404 (Codex review of #659).
+      const meta = (sp: Record<string, string>) =>
+        page.generateMetadata({ params: Promise.resolve({ tenant_slug: "oasis-ai-cc", form_slug: "offform" }), searchParams: Promise.resolve(sp) });
+      assert.equal((await meta({ offer_preview: "1" })).title, "Off", "the owner's preview has the 404's tab");
+      assert.equal((await meta({})).title, "Page not available");
+      await login(null);
+      assert.equal((await meta({ offer_preview: "1" })).title, "Page not available", "a visitor's tab names a closed form");
+      await login(USERS.cc);
+
       // Codex review of #659: a form that is off AND malformed must not show a
       // visitor its configuration-error page (which would prove it exists).
       await db.batch([formRow(FORM_OFF_BROKEN, OASIS, "offbroken", "Off and broken", { not: "steps" }, { headline: "Off" }, 0)], "write");
@@ -572,7 +581,9 @@ async function main() {
     const h = html.preview;
     assert.ok(h.includes("Draft headline, not live yet"));
     assert.ok(h.includes("Preview of your unpublished page"));
-    assert.ok(h.includes("nothing you enter is sent, saved or booked"), "the preview does not say it sends nothing");
+    // The VSL router has no calendar, so the banner promises only the form (Codex review of #659).
+    assert.ok(h.includes("The form below works, and nothing you enter is sent or saved."), "the preview does not say it sends nothing");
+    assert.ok(!h.includes("calendar below"), "a preview with no calendar promises one");
     assert.match(h, /<input\b/i, "the preview drew no form: the owner cannot try it");
     assert.ok(!h.includes("The form appears here"), "the placeholder is back");
   });

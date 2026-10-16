@@ -592,7 +592,7 @@ export function OfferBuilder({
             </div>
           ) : null}
           <p className="text-[12px] text-fg-dim">
-            The preview shows your saved draft with the real form and live open times. Only you and other owners can see it; it never sends or books anything.
+            The preview shows your saved draft with the real form (and live open times, when the form ends on a call). Only you and other owners can see it; it never sends or books anything.
           </p>
         </div>
       ) : null}
