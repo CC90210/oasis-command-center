@@ -482,7 +482,7 @@ export function BookingPage(props: Props) {
             ) : days.length === 0 ? (
               <div className="mt-5">
                 <p className="text-[15px] text-fg-muted">
-                  Every time in the next two weeks is taken. Leave your details and we will make room.
+                  Every open time is taken right now. Leave your details and we will make room.
                 </p>
                 <button
                   type="button"

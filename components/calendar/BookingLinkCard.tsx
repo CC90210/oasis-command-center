@@ -83,6 +83,10 @@ function summarize(week: WeeklyHours): string {
 export function BookingLinkCard() {
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const [editing, setEditing] = useState(false);
+  // Shown after a save lost a version race: the card has re-read the settings,
+  // so the next Settings opens on the latest version (CodeRabbit on #628:
+  // "close and open again" alone reopened the same stale copy forever).
+  const [conflictNote, setConflictNote] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -160,7 +164,14 @@ export function BookingLinkCard() {
           <ExternalLink className="h-3.5 w-3.5" aria-hidden /> Open
         </a>
         {info.canEdit ? (
-          <button type="button" className="btn h-7 px-2 text-[12px]" onClick={() => setEditing(true)}>
+          <button
+            type="button"
+            className="btn h-7 px-2 text-[12px]"
+            onClick={() => {
+              setConflictNote(null);
+              setEditing(true);
+            }}
+          >
             <Settings2 className="h-3.5 w-3.5" aria-hidden /> Settings
           </button>
         ) : null}
@@ -200,6 +211,11 @@ export function BookingLinkCard() {
           );
         })}
       </ul>
+      {conflictNote ? (
+        <p role="status" className="mt-2 text-status-warm">
+          {conflictNote}
+        </p>
+      ) : null}
       {editing ? (
         <BookingSettingsDialog
           info={info}
@@ -207,6 +223,13 @@ export function BookingLinkCard() {
           onSaved={async () => {
             setEditing(false);
             await refresh();
+          }}
+          onConflict={async () => {
+            setEditing(false);
+            await refresh();
+            setConflictNote(
+              "Someone else saved the booking settings a moment ago. These are the latest; open Settings to make your change again.",
+            );
           }}
         />
       ) : null}
@@ -226,10 +249,13 @@ function BookingSettingsDialog({
   info,
   onClose,
   onSaved,
+  onConflict,
 }: {
   info: BookingInfo;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  /** The save lost a version race: the caller re-reads the settings and closes this. */
+  onConflict: () => Promise<void>;
 }) {
   const s = info.settings;
   const [weeks, setWeeks] = useState<Record<string, DayDraft[]>>(() =>
@@ -290,12 +316,14 @@ function BookingSettingsDialog({
         await onSaved();
         return;
       }
+      if (data?.error === "version_conflict") {
+        await onConflict();
+        return;
+      }
       setError(
-        data?.error === "version_conflict"
-          ? "Someone else saved these settings a moment ago. Close this and open it again to see their changes."
-          : data?.error === "invalid_settings"
-            ? "Some of these values are out of range. Check the hours and try again."
-            : "Could not save. Try again.",
+        data?.error === "invalid_settings"
+          ? "Some of these values are out of range. Check the hours and try again."
+          : "Could not save. Try again.",
       );
     } catch {
       setError("Could not save. Try again.");

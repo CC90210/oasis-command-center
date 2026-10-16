@@ -137,6 +137,15 @@ async function main(): Promise<void> {
     }
   });
 
+  await check("a save that loses the version race re-reads the settings, so the next Settings is the latest (CodeRabbit on #628)", () => {
+    const card = readFileSync("components/calendar/BookingLinkCard.tsx", "utf8");
+    assert.match(card, /if \(data\?\.error === "version_conflict"\) \{\s*await onConflict\(\);/, "a conflict does not hand back to the card");
+    assert.match(card, /onConflict=\{async \(\) => \{\s*setEditing\(false\);\s*await refresh\(\);/, "the card does not re-read the settings on a conflict");
+    assert.doesNotMatch(card, /Close this and open it again/, "the old advice reopened the same stale copy");
+    const page = readFileSync("components/booking/BookingPage.tsx", "utf8");
+    assert.doesNotMatch(page, /next two weeks/, "the horizon is a setting (7 to 30 days), never a fixed two weeks");
+  });
+
   console.log("booking-settings: all passed");
 }
 
