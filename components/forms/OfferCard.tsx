@@ -35,7 +35,40 @@ export type OfferCardViewModel = {
   videoPlays: number | null;
   /** Distinct visits sent to the free community over the last 7 days. null = could not be read. */
   community: number | null;
+  /** The landing page's address (path), or null when the workspace could not be resolved. */
+  publicPath?: string | null;
+  /**
+   * What that address shows a visitor right now: the page ("public"), only the
+   * bare form because the page is unpublished ("draft"), or nothing because the
+   * form is switched off ("off"). Absent = not stated (older callers).
+   */
+  linkState?: "public" | "draft" | "off";
 };
+
+/** The card's one link line: the landing page's address, or plainly why there is none yet. */
+function LinkLine({ path, state }: { path: string | null | undefined; state: OfferCardViewModel["linkState"] }) {
+  if (!state) return null;
+  if (state === "public" && path) {
+    return (
+      <a
+        href={path}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="block truncate font-mono text-[11px] text-accent hover:text-accent-bright"
+        title="The live landing page"
+      >
+        {path}
+      </a>
+    );
+  }
+  return (
+    <p className="text-xs text-fg-dim">
+      {state === "off"
+        ? "Switched off: its link is closed. Switch it on, then publish the page."
+        : "Not public yet: until you publish, its link shows only the form, not this page."}
+    </p>
+  );
+}
 
 /** "Live, version N" / "Live + unpublished changes" / "Draft page (not live)". */
 export function offerPageLabel(status: OfferPageStatus, publishedVersion: number): string {
@@ -139,6 +172,7 @@ export function OfferCard({
         <Tag tone={statusTone(offer.status)}>{offerPageLabel(offer.status, offer.publishedVersion)}</Tag>
         <Tag tone={offer.hasVideo ? "accent" : "neutral"}>{offer.hasVideo ? "Video attached" : "No video attached"}</Tag>
       </div>
+      <LinkLine path={offer.publicPath} state={offer.linkState} />
       <FunnelStrip views={offer.views} videoPlays={offer.videoPlays} leads={offer.leads} community={offer.community} />
       <div className="flex flex-wrap items-center gap-3 border-t border-hairline pt-3 text-xs">{actions}</div>
     </article>

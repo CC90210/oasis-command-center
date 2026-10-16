@@ -11,8 +11,14 @@
  *                 exact same" as the table below). Each card: the one-line
  *                 promise from the page's own hero, the page's status (Live,
  *                 version N / Live + unpublished changes / Draft page), its
- *                 VSL status, new leads in the last 7 days, responses, the
- *                 link with a Share menu, Edit. The form at slug "vsl" (if any)
+ *                 VSL status, new leads in the last 7 days, responses, Edit,
+ *                 and ONE link: the landing page's own address. While the page
+ *                 is public, Copy link / Open page / Share all hand out that
+ *                 page. While it is a draft (or switched off) the card says so
+ *                 and offers Open draft + Publish, never a link that would
+ *                 show only the bare form (CC, 2026-10-16: "the copy link
+ *                 sends us to the intake form... redundancy and overlap").
+ *                 The form at slug "vsl" (if any)
  *                 is pinned above the grid as the "Start here" router card;
  *                 with none, a quiet empty-state card offers Create.
  *   Intake forms  forms without a page, exactly as before, in a plain table
@@ -45,6 +51,7 @@ import type { TemplateKey } from "@/lib/offer-pages/types";
 import { OffersCardsGrid, type OfferCardEntry } from "./OffersCardsClient";
 import type { OfferCardViewModel } from "./OfferCard";
 import { offerCreateSlug, slugTakenMessage, ROUTER_SLUG } from "@/lib/offers/router-create";
+import { offerShareablePath } from "@/lib/offers/short-links";
 import type { FunnelCounts } from "@/lib/offers/tracking-store";
 
 type FormRow = {
@@ -230,8 +237,8 @@ export function FormsListClient({
       window.prompt("Copy this URL:", text);
     }
   }
-  async function copyPublicUrl(formId: string, formSlug: string) {
-    const path = publicFormPath(formSlug);
+  async function copyPublicUrl(formId: string, formSlug: string, what: "form" | "page" = "form") {
+    const path = what === "page" ? offerShareablePath(tenantSlug, formSlug) : publicFormPath(formSlug);
     if (!path) {
       setError("Couldn't build the link: refresh the page and try again.");
       return;
@@ -279,10 +286,10 @@ export function FormsListClient({
       <span className={`text-xs ${r.enabled ? "text-status-engaged" : "text-fg-dim"}`}>{r.enabled ? labels[0] : labels[1]}</span>
     );
 
-  const copyButton = (r: FormRow) => (
+  const copyButton = (r: FormRow, what: "form" | "page" = "form") => (
     <button
       type="button"
-      onClick={() => copyPublicUrl(r.id, r.slug)}
+      onClick={() => copyPublicUrl(r.id, r.slug, what)}
       disabled={!tenantSlug || !r.enabled}
       className="inline-flex items-center gap-1 text-fg-muted hover:text-fg text-xs disabled:opacity-40 disabled:cursor-not-allowed"
       title={
@@ -290,7 +297,9 @@ export function FormsListClient({
           ? "Couldn't resolve your workspace - refresh and try again."
           : !r.enabled
             ? "Switch it on first - a switched-off form refuses public submissions."
-            : "Copy the public link. Anyone with it can open it; a fresh lead is created on submit."
+            : what === "page"
+              ? "Copy the landing page's link. Anyone with it sees this offer's page; a fresh lead is created on submit."
+              : "Copy the public link. Anyone with it can open it; a fresh lead is created on submit."
       }
     >
       {copiedId === r.id ? (
@@ -315,7 +324,7 @@ export function FormsListClient({
    * canEdit - a read-only viewer who followed it would see the real public
    * page (live submission controls), never a draft preview.
    */
-  const previewLink = (r: FormRow) => {
+  const previewLink = (r: FormRow, label: "Open draft" | "Preview changes") => {
     if (!canEdit || !r.enabled) return null;
     const path = publicFormPath(r.slug);
     if (!path) return null;
@@ -328,13 +337,67 @@ export function FormsListClient({
         title="See the page as it is right now, draft changes included. Only you can open this."
       >
         <ExternalLink className="w-3 h-3" />
-        Preview
+        {label}
       </a>
     );
   };
 
+  /** Does this offer's public link show its landing page right now? */
+  const pageIsPublic = (r: FormRow): boolean => {
+    const status = offers?.[r.id]?.status;
+    return r.enabled && (status === "live" || status === "live_with_changes");
+  };
+
+  /**
+   * An offer card's link actions. ONE address, the landing page's:
+   *   public -> Copy link, Open page, Share (tagged copies of that same page),
+   *             plus Preview changes when a newer draft is waiting;
+   *   draft  -> Open draft (the owner's preview) and Publish (the builder,
+   *             whose checklist sits at the top). No Copy link: until Publish
+   *             the address shows only the bare form, which is not the offer.
+   */
+  const offerLinkActions = (r: FormRow) => {
+    // The offer's own short address (lib/offers/short-links.ts) when it has
+    // one; the draft preview stays on the canonical /f/ path (previewLink).
+    const path = offerShareablePath(tenantSlug, r.slug);
+    if (!path) return null;
+    if (pageIsPublic(r)) {
+      return (
+        <>
+          {copyButton(r, "page")}
+          <a
+            href={path}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-fg-muted hover:text-fg text-xs"
+            title="Open the live landing page, exactly as visitors see it."
+          >
+            <ExternalLink className="w-3 h-3" />
+            Open page
+          </a>
+          {offers?.[r.id]?.status === "live_with_changes" ? previewLink(r, "Preview changes") : null}
+          <ShareMenu path={path} onCopy={(key, text) => copyText(key, text)} copiedKey={copiedId} formId={r.id} />
+        </>
+      );
+    }
+    return (
+      <>
+        {previewLink(r, "Open draft")}
+        {canEdit ? (
+          <Link
+            href={`/forms/${r.id}/edit`}
+            className="inline-flex items-center gap-1 font-semibold text-accent hover:text-accent-bright text-xs"
+            title="Open the builder: its checklist says what is left, then Publish makes this link show the page."
+          >
+            Publish
+          </Link>
+        ) : null}
+      </>
+    );
+  };
+
   const actions = (r: FormRow, offer: boolean) => (
-    <div className="inline-flex items-center gap-3">
+    <div className="inline-flex flex-wrap items-center gap-3">
       {canEdit && (
         <Link
           href={`/forms/${r.id}/edit`}
@@ -344,16 +407,7 @@ export function FormsListClient({
           Edit
         </Link>
       )}
-      {offer ? previewLink(r) : null}
-      {copyButton(r)}
-      {offer && tenantSlug && r.enabled ? (
-        <ShareMenu
-          path={publicFormPath(r.slug)}
-          onCopy={(key, text) => copyText(key, text)}
-          copiedKey={copiedId}
-          formId={r.id}
-        />
-      ) : null}
+      {offer ? offerLinkActions(r) : copyButton(r)}
       {offer ? responsesLink(r) : null}
       {canEdit && (
         <button
@@ -385,6 +439,8 @@ export function FormsListClient({
       views: typeof recentFunnel[r.id]?.views === "number" ? recentFunnel[r.id].views : null,
       videoPlays: typeof recentFunnel[r.id]?.video_plays === "number" ? recentFunnel[r.id].video_plays : null,
       community: typeof recentFunnel[r.id]?.community === "number" ? recentFunnel[r.id].community : null,
+      publicPath: offerShareablePath(tenantSlug, r.slug),
+      linkState: !r.enabled ? "off" : pageIsPublic(r) ? "public" : "draft",
     };
     return { view, toggle: onOff(r, ["On", "Off"]), actions: actions(r, true) };
   });
