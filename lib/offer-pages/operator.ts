@@ -50,7 +50,11 @@ export function fallbackHeadline(form: Pick<EditableForm, "branding">): string {
 
 export function gateFor(row: OfferRow, form: EditableForm): GateResult | null {
   if (!row.draft) return null;
-  return publishGate(row.draft, row.claims, { formEnabled: form.enabled, fallbackHeadline: fallbackHeadline(form) });
+  return publishGate(row.draft, row.claims, {
+    formEnabled: form.enabled,
+    fallbackHeadline: fallbackHeadline(form),
+    heroBurnedCaptions: row.draftHeroBurnedCaptions,
+  });
 }
 
 export type DraftSaved =

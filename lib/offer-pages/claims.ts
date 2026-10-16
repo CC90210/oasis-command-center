@@ -595,7 +595,12 @@ const quote = (s: string) => `"${s.length > 90 ? `${s.slice(0, 87)}...` : s}"`;
 export function publishGate(
   doc: OfferPageDoc,
   ticks: ClaimTick[],
-  ctx: { formEnabled: boolean; fallbackHeadline: string },
+  ctx: {
+    formEnabled: boolean;
+    fallbackHeadline: string;
+    /** The top video's captions are burned into the picture (OfferRow draftHeroBurnedCaptions): no caption-file warning. */
+    heroBurnedCaptions?: boolean;
+  },
 ): GateResult {
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -648,7 +653,11 @@ export function publishGate(
     if (!c.confirmed) blockers.push(`Confirm ${quote(c.sentence)} is true and you can back it.`);
   }
   const hero = doc.hero.video;
-  if (hero && ((hero.source === "library" && !hero.caption_media_id) || (hero.source === "upload" && !hero.caption_path))) {
+  if (
+    hero &&
+    !ctx.heroBurnedCaptions &&
+    ((hero.source === "library" && !hero.caption_media_id) || (hero.source === "upload" && !hero.caption_path))
+  ) {
     warnings.push("The top video has no captions. People watching without sound will only have the transcript.");
   }
   return { blockers, warnings, claims };
