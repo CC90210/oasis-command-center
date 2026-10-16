@@ -782,6 +782,77 @@ async function testAvailabilityReadsTheFoundersOwnCalendarAndNeverFallsBack() {
   }
 }
 
+async function testAvailabilityUsesTheWorkspaceCredentialOnlyWhenItIsTheFoundersOwnAccount() {
+  // 2026-10-16: no founder had a personal Google connection in production, so
+  // every booking form answered google_calendar_not_connected, while the
+  // workspace credential configured there IS CC's own account. Reading it for
+  // CC's free time reads exactly CC's calendar; reading it for anyone else would not.
+  const saved = {
+    token: process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN,
+    address: process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS,
+    id: process.env.GOOGLE_CLIENT_ID,
+    secret: process.env.GOOGLE_CLIENT_SECRET,
+  };
+  process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN = "system-refresh-token";
+  process.env.GOOGLE_CLIENT_ID = "google-client-id";
+  process.env.GOOGLE_CLIENT_SECRET = "google-client-secret";
+  const args = {
+    tenantId: TENANT_ID,
+    organizerUserId: ORGANIZER_USER_ID,
+    expectedOrganizerEmail: "founder@oasisai.work",
+    timeMin: "2026-08-26T12:00:00.000Z",
+    timeMax: "2026-08-27T12:00:00.000Z",
+  };
+  const tokenBodies: string[] = [];
+  let eventReads = 0;
+  const fetchImpl: GoogleCalendarDependencies["fetchImpl"] = async (url, init) => {
+    const href = String(url);
+    if (href.includes("oauth2.googleapis.com/token")) {
+      const body = String((init as RequestInit)?.body || "");
+      tokenBodies.push(body);
+      if (body.includes("refresh_token=refresh-token")) return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      return new Response(JSON.stringify({ access_token: "system-access-token", expires_in: 3600 }), { status: 200 });
+    }
+    eventReads += 1;
+    return jsonResponse({ items: [{ start: { dateTime: START_AT }, end: { dateTime: "2026-08-26T20:15:00.000Z" } }] });
+  };
+  try {
+    // The workspace credential is the founder's own account, the founder has no personal connection: it is read.
+    process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS = "Founder@OASISai.work";
+    const busy = await listGoogleCalendarBusy(args, baseDependencies(fetchImpl, { getBundle: async () => ({}) }));
+    assert.deepEqual(busy, [{ start: START_AT, end: "2026-08-26T20:15:00.000Z" }]);
+    assert.equal(eventReads, 1);
+    assert.ok(tokenBodies.every((b) => b.includes("refresh_token=system-refresh-token")), "read with anything but the workspace credential");
+
+    // The founder's personal token is revoked: the same-account credential covers it, after the founder's own try.
+    tokenBodies.length = 0;
+    eventReads = 0;
+    const staleBundle = { ...freshBundle(), access_token: "", expires_at: "2026-08-25T13:00:00.000Z" };
+    await listGoogleCalendarBusy(args, baseDependencies(fetchImpl, { getBundle: async () => staleBundle }));
+    assert.ok(tokenBodies[0].includes("refresh_token=refresh-token"), "the founder's own token is tried first");
+    assert.ok(tokenBodies.some((b) => b.includes("refresh_token=system-refresh-token")));
+    assert.equal(eventReads, 1);
+
+    // The workspace credential is someone else's account: never read for this founder, either way.
+    process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS = "meetings@oasisai.work";
+    eventReads = 0;
+    await assert.rejects(
+      listGoogleCalendarBusy(args, baseDependencies(fetchImpl, { getBundle: async () => ({}) })),
+      (error: unknown) => error instanceof GoogleCalendarIntegrationError && error.code === "google_calendar_not_connected",
+    );
+    await assert.rejects(
+      listGoogleCalendarBusy(args, baseDependencies(fetchImpl, { getBundle: async () => staleBundle })),
+      (error: unknown) => error instanceof GoogleCalendarIntegrationError && error.code === "token_refresh_failed",
+    );
+    assert.equal(eventReads, 0, "another account's calendar was read for this founder's free time");
+  } finally {
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN", saved.token);
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_ADDRESS", saved.address);
+    restoreEnv("GOOGLE_CLIENT_ID", saved.id);
+    restoreEnv("GOOGLE_CLIENT_SECRET", saved.secret);
+  }
+}
+
 async function testAvailabilityRefusesATruncatedPage() {
   // A first page that says there is more (nextPageToken) hides busy time; offering slots
   // from it would double-book a founder. It must fail, not return a short list.
@@ -856,6 +927,7 @@ async function main() {
   await testCancelSendsUpdatesAndTreatsMissingEventAsSuccess();
   await testCancelRefreshesTokenAndFailsClosedWithoutCalendarScope();
   await testAvailabilityReadsTheFoundersOwnCalendarAndNeverFallsBack();
+await testAvailabilityUsesTheWorkspaceCredentialOnlyWhenItIsTheFoundersOwnAccount();
   await testAvailabilityRefusesATruncatedPage();
   console.log("founder-meeting-calendar: OK");
 }

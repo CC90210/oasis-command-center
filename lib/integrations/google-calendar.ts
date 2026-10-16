@@ -814,8 +814,14 @@ async function openAuthorizedCalendarSession(args: {
   tenantId: string;
   organizerUserId: string;
   expectedOrganizerEmail?: string;
-  /** Availability must never substitute a different account for the founder whose free time is being checked. */
-  allowSystemFallback?: boolean;
+  /**
+   * Whether the workspace identity may stand in for the host. Availability
+   * passes "same_account": it must never substitute a DIFFERENT account for
+   * the founder whose free time is being checked, but when the workspace
+   * credential IS that founder's own Google account (GOOGLE_SYSTEM_CALENDAR_ADDRESS
+   * equals their work address), it reads exactly their calendar, so it may.
+   */
+  allowSystemFallback?: boolean | "same_account";
   dependencyOverrides?: Partial<GoogleCalendarDependencies>;
 }): Promise<{
   dependencies: GoogleCalendarDependencies;
@@ -831,6 +837,12 @@ async function openAuthorizedCalendarSession(args: {
     args.organizerUserId,
     WORK_OAUTH_SERVICE,
   );
+  const expectedOrganizerEmail = String(args.expectedOrganizerEmail || "").trim().toLowerCase();
+  /** May this workspace credential stand in for this host (see allowSystemFallback)? */
+  const fallbackAllowed = (system: SystemCalendarConfig): boolean =>
+    args.allowSystemFallback === "same_account"
+      ? Boolean(expectedOrganizerEmail) && system.organizerEmail === expectedOrganizerEmail
+      : args.allowSystemFallback !== false;
 
   // Workspace fallback (2026-08-25): a host without a usable personal work
   // connection no longer blocks the booking when workspace credentials are
@@ -846,7 +858,7 @@ async function openAuthorizedCalendarSession(args: {
   let sessionClientSecret: string | undefined;
   if (!bundle.refresh_token || !hasRequiredScope(bundle.scope)) {
     const system = systemCalendarConfig();
-    if (system && args.allowSystemFallback !== false) {
+    if (system && fallbackAllowed(system)) {
       systemFallback = true;
       calendarId = system.calendarId;
       sessionClientId = system.clientId;
@@ -870,7 +882,6 @@ async function openAuthorizedCalendarSession(args: {
     }
   }
 
-  const expectedOrganizerEmail = String(args.expectedOrganizerEmail || "").trim().toLowerCase();
   const connectedOrganizerEmail = String(sessionBundle.gmail_address || "").trim().toLowerCase();
   if (
     !systemFallback &&
@@ -937,9 +948,8 @@ async function openAuthorizedCalendarSession(args: {
     } catch (error) {
       const revoked =
         error instanceof GoogleCalendarIntegrationError && error.code === "token_refresh_failed";
-      const system = revoked && !systemFallback && args.allowSystemFallback !== false
-        ? systemCalendarConfig()
-        : null;
+      const candidate = revoked && !systemFallback ? systemCalendarConfig() : null;
+      const system = candidate && fallbackAllowed(candidate) ? candidate : null;
       if (!system) throw error;
       systemFallback = true;
       calendarId = system.calendarId;
@@ -1257,7 +1267,9 @@ export async function listGoogleCalendarBusy(
     tenantId: args.tenantId,
     organizerUserId: args.organizerUserId,
     expectedOrganizerEmail: args.expectedOrganizerEmail,
-    allowSystemFallback: false,
+    // Only the founder's own account: the workspace credential when it IS this
+    // founder's Google account (production's is CC's), never anyone else's free time.
+    allowSystemFallback: "same_account",
     dependencyOverrides,
   });
   const url = new URL(`${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`);
