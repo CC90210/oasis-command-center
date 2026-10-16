@@ -147,6 +147,8 @@ async function main() {
       const reasons = claims.claimReasons(s);
       assert.ok(reasons.length > 0, `not flagged: ${s}`);
       assert.match(reasons.join(", "), why, s);
+      // The phrases come from the same patterns: a flagged sentence always names at least one.
+      assert.ok(claims.claimPhrases(s).length > 0, `flagged, but no phrase named: ${s}`);
     }
     assert.deepEqual(claims.sentencesOf("First line. Second line!\nThird line"), ["First line.", "Second line!", "Third line"]);
   });
@@ -187,7 +189,48 @@ async function main() {
       "By application only.",
       "Build only what pays back.",
     ];
-    for (const s of plain) assert.deepEqual(claims.claimReasons(s), [], `flagged noise: ${s}`);
+    for (const s of plain) {
+      assert.deepEqual(claims.claimReasons(s), [], `flagged noise: ${s}`);
+      assert.deepEqual(claims.claimPhrases(s), [], `a phrase named in noise: ${s}`);
+    }
+  });
+
+  await step("claimPhrases names every claim phrase as written, with its family, several per sentence", () => {
+    const has = (s: string, kind: string, phrase: string) =>
+      assert.ok(
+        claims.claimPhrases(s).some((p) => p.kind === kind && p.phrase === phrase),
+        `${kind} "${phrase}" not named in: ${s}\n${JSON.stringify(claims.claimPhrases(s))}`,
+      );
+    const s = "The best CRM, trusted by owners, live in days, from $2,500.";
+    has(s, "superlative", "The best");
+    has(s, "who else uses it", "trusted by");
+    has(s, "time frame", "in days");
+    has(s, "money", "$2,500");
+    has(s, "number", "2,500");
+    // A shorter alternative never hides a stronger one: the phrase is the whole compound (Codex on #645).
+    has("Our best-rated system.", "superlative", "Our best-rated");
+    has("Or CA$690 a month.", "money", "CA$690");
+    assert.ok(!claims.claimPhrases("Our best-rated system.").some((p) => p.phrase === "Our best"), "the compound was cut short");
+    // Within one family, as the sentence reads (Codex on #645).
+    assert.deepEqual(
+      claims.claimPhrases("Two clients, 3 leads, and doubled revenue.").filter((p) => p.kind === "number").map((p) => p.phrase),
+      ["Two clients", "3", "doubled"],
+    );
+    // Two of one family: both named, in order.
+    assert.deepEqual(
+      claims.claimPhrases("The fastest setup at the cheapest price.").filter((p) => p.kind === "superlative").map((p) => p.phrase),
+      ["fastest", "cheapest"],
+    );
+    has("Award-winning, and a leading provider.", "superlative", "Award-winning");
+    has("Award-winning, and a leading provider.", "superlative", "a leading");
+    has("Serving twenty clinics.", "who else uses it", "Serving twenty");
+    has("Ready within one business day.", "time frame", "within one business day");
+    has("Get more qualified leads.", "result", "more qualified leads");
+    has("A money-back guarantee.", "word", "money-back");
+    has("Twelve businesses run on it.", "number", "Twelve businesses");
+    assert.deepEqual(claims.claimPhrases("Book a walkthrough."), []);
+    // Several phrases of one family make ONE reason, said once, from the first of them.
+    assert.deepEqual(claims.claimReasons("From $497 to $997 a month, more revenue and more leads."), ["money", "a number", 'a promised result ("more revenue")']);
   });
 
   await step("lint walks every drawn piece of copy, once per sentence, and skips the brief", () => {
