@@ -381,7 +381,9 @@ export async function publishOffer(o: ConfirmOffer, c: Choices, deps: ActionDeps
   if (rest.length) return afterApproval({ kind: "blocked", blockers: rest }, approval);
   const r = await call(deps, `/api/forms/${encodeURIComponent(o.formId)}/offer/publish`, "POST", {
     version: saved.version,
-    enable_form: saved.blockers.includes(FORM_OFF_BLOCKER),
+    // Always: a page this screen publishes goes live with its form on, even
+    // if someone switched the form off after the save (Codex on #637).
+    enable_form: true,
   });
   if (r.ok) {
     const warnings = Array.isArray(r.data.warnings) ? r.data.warnings.filter((w): w is string => typeof w === "string") : [];

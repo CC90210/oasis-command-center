@@ -13,7 +13,9 @@
  * `enable_form: true` (Confirm & publish): a switched-off form is not a
  * blocker, because the publish switches it on in the same transaction
  * (store.ts publishDraft enableForm). Both happen, or neither: the form never
- * goes on for a page that did not go live.
+ * goes on for a page that did not go live. It is applied whatever this
+ * route's read of the form said: someone switching the form off after that
+ * read must not leave the page live with its form off (Codex on #637).
  *
  * WHAT GOES LIVE is exactly draft `version`: the publish is a compare-and-swap
  * on it, so an edit that lands between the owner's check and the click is not
@@ -79,7 +81,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     draftVersion: version,
     actor: auth.session.userId,
     now,
-    enableForm: enableForm && !form.enabled,
+    enableForm,
   });
   if (!published.ok) {
     if (published.error === "conflict") {

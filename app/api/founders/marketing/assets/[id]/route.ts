@@ -106,7 +106,13 @@ export async function PATCH(req: Request, ctx: Ctx) {
     return NextResponse.json({ ok: false, error: "update_failed" }, { status: 500 });
   }
   if (!updated.data) {
-    if (from !== undefined) return statusChanged(null);
+    if (from !== undefined) {
+      // A verdict landed between the check and the write: answer with the
+      // status it has now, so the caller can tell "approved by someone else"
+      // from "rejected" (Codex on #637).
+      const now = await db.from("marketing_asset").select("status").eq("tenant_id", founder.tenantId).eq("id", id).maybeSingle();
+      return statusChanged(now.data ? String(now.data.status) : null);
+    }
     return NextResponse.json({ ok: false, error: "update_failed" }, { status: 500 });
   }
 

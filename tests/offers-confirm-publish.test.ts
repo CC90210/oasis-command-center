@@ -57,6 +57,9 @@ stubPath(join(ROOT, "components", "forms", "FormBuilderClient.tsx"), { FormBuild
 stubPath(join(ROOT, "components", "forms", "FormsListClient.tsx"), { FormsListClient: FormsListMarker });
 stubPath(join(ROOT, "components", "forms", "SunBizFormsClient.tsx"), { SunBizFormsClient: marker("SunBizFormsClient") });
 
+/** Runs right after a route reads a form (operator.ts editableForm), when a step sets it. */
+let afterFormRead: ((formId: string) => Promise<void>) | null = null;
+
 const F = {
   growth: "c0f10000-0000-4000-8000-000000000001",
   protocol: "c0f10000-0000-4000-8000-000000000002",
@@ -190,6 +193,20 @@ async function main() {
     ],
     "write",
   );
+
+  // The routes' read of a form, with a hook after it: a step holds the publish
+  // route right there to switch the form off between its read and its write.
+  {
+    const realOp = await import("../lib/offer-pages/operator");
+    stubPath(join(ROOT, "lib", "offer-pages", "operator.ts"), {
+      ...realOp,
+      editableForm: async (...args: Parameters<typeof realOp.editableForm>) => {
+        const form = await realOp.editableForm(...args);
+        if (afterFormRead) await afterFormRead(args[2]);
+        return form;
+      },
+    });
+  }
 
   const { NextRequest } = await import("next/server");
   const access = await import("../lib/forms/access");
@@ -717,6 +734,51 @@ async function main() {
       assert.equal((await rowOf(F.growth)).live, false);
     } finally {
       afterEach = null;
+    }
+  });
+
+  await step("a form switched off between the save and the publish: the page still goes live with its form on", async () => {
+    await login(USERS.cc);
+    const o = await offerOf("growth");
+    assert.equal(o.formEnabled, true, "precondition: growth's form is on");
+    calls.length = 0;
+    afterEach = async (_url, method) => {
+      if (method === "PUT") await db.execute({ sql: "UPDATE forms SET enabled = 0 WHERE id = ?", args: [F.growth] });
+    };
+    try {
+      const r = await cp.publishOffer(o, cp.initialChoices(o), deps);
+      assert.equal(r.kind, "published", JSON.stringify(r));
+      assert.equal(calls[1].body!.enable_form, true, "Publish trusted a stale read of the form");
+      const row = await rowOf(F.growth);
+      assert.equal(row.live, true);
+      assert.equal(row.enabled, true, "the page went live with its form off");
+    } finally {
+      afterEach = null;
+    }
+  });
+
+  await step("a form switched off AFTER the publish route read it as on: the page still goes live with its form on", async () => {
+    await login(USERS.cc);
+    const o = await offerOf("growth");
+    assert.equal(o.formEnabled, true, "precondition: growth's form is on");
+    // Hold the publish route right after its read of the form (operator.ts
+    // editableForm) and switch the form off there, before the publish writes.
+    let held = false;
+    afterFormRead = async (formId) => {
+      if (held || formId !== F.growth || !calls.some((c) => c.url.endsWith("/offer/publish"))) return;
+      held = true;
+      await db.execute({ sql: "UPDATE forms SET enabled = 0 WHERE id = ?", args: [F.growth] });
+    };
+    try {
+      calls.length = 0;
+      const r = await cp.publishOffer(o, cp.initialChoices(o), deps);
+      assert.equal(r.kind, "published", JSON.stringify(r));
+      assert.equal(held, true, "precondition: the form was switched off inside the publish route");
+      const row = await rowOf(F.growth);
+      assert.equal(row.live, true);
+      assert.equal(row.enabled, true, "the publish trusted the route's own stale read of the form");
+    } finally {
+      afterFormRead = null;
     }
   });
 
