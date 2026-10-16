@@ -32,6 +32,8 @@ import {
   claimedBrandSlugs,
   isBrandGroupKey,
   stalePublishWarning,
+  summarizePublishIntent,
+  awaitingConfirmation,
   buildMediaPath,
   channelBreadcrumb,
   channelsForTrack,
@@ -929,6 +931,80 @@ async function fallbackChecks() {
     page.indexOf("summary.degraded ?") < page.indexOf('headline="Nothing waiting on you"'),
     "the degraded branch must come first — otherwise needsYou === 0 wins and says 'nothing'",
   );
+}
+
+// summarizePublishIntent — CC, 2026-10-16: "I'm pretty sure the functionality of
+// this software posting is broken or not fully correct." The panel showed only the
+// word "failed": the drain's reason and per-network results were never read. These
+// pin what the panel now shows, using the two real rows the table holds.
+{
+  // 2026-09-14, verbatim shape: the drain's error with a traceback, result "{}".
+  const failed = summarizePublishIntent(
+    "{}",
+    "R2 download failed for marketing-media/x.mp4 in bucket oasis-storage: SSL validation failed\nTraceback (most recent call last):\n  File ...",
+  );
+  assert.deepEqual(failed.outcomes, [], "no network was reached, so no per-network rows");
+  assert.equal(
+    failed.rawReason,
+    "R2 download failed for marketing-media/x.mp4 in bucket oasis-storage: SSL validation failed",
+    "the raw reason is the first line; the traceback is not for the operator",
+  );
+  assert.match(failed.reason!, /could not fetch the file from storage \(a security check/,
+    "the operator reads plain words, not the drain's jargon");
+  assert.match(failed.reason!, /nothing was posted/);
+  assert.match(summarizePublishIntent("{}", "send_gateway forced a dry run (MAVEN_FORCE_DRY_RUN engaged) — nothing was posted").reason!,
+    /kill switch is on/);
+  assert.equal(summarizePublishIntent("{}", "Late returned no post id: {}").reason, "Late returned no post id: {}",
+    "an unrecognised reason passes through as written");
+
+  // 2026-08-17 shape, plus one refusal: what a mixed result looks like.
+  const done = summarizePublishIntent(
+    JSON.stringify({ instagram: { ok: true, post_id: "p1", reason: null }, twitter: { ok: false, post_id: null, reason: "x refused: too long\nmore" } }),
+    null,
+  );
+  assert.deepEqual(done.outcomes, [
+    { platform: "instagram", ok: true, detail: null, status: null, url: null },
+    { platform: "twitter", ok: false, detail: "x refused: too long", status: null, url: null },
+  ]);
+  assert.equal(done.reason, null);
+
+  // The drain's reconcile (BEA 096e25c8): status + live link per network, or a
+  // refusal after Zernio accepted it.
+  const reconciled = summarizePublishIntent(
+    JSON.stringify({
+      instagram: { ok: true, post_id: "p", status: "published", url: "https://www.instagram.com/reel/DcKGALDjk6k/" },
+      tiktok: { ok: true, post_id: "p", status: "pending" },
+      youtube: { ok: false, post_id: "p", status: "failed", error: "the network refused it (Zernio gave no reason)" },
+      threads: { ok: true, post_id: "p", status: "published", url: "javascript:alert(1)" },
+    }),
+    null,
+  );
+  const by = Object.fromEntries(reconciled.outcomes.map((o) => [o.platform, o]));
+  assert.equal(by.instagram.url, "https://www.instagram.com/reel/DcKGALDjk6k/");
+  assert.equal(by.instagram.status, "published");
+  assert.equal(by.youtube.detail, "the network refused it (Zernio gave no reason)");
+  assert.equal(by.threads.url, null, "a non-https link is never rendered as an href");
+  assert.equal(awaitingConfirmation(by.instagram), false, "live = confirmed");
+  assert.equal(awaitingConfirmation(by.tiktok), true, "still posting = keep watching");
+  assert.equal(awaitingConfirmation(by.youtube), false, "a refusal is final");
+  assert.equal(awaitingConfirmation(done.outcomes[0]), true, "accepted, not yet read = keep watching");
+  assert.equal(
+    summarizePublishIntent("{}", "refused after Zernio accepted it - threads: the network refused it (Zernio gave no reason)").reason,
+    "Sent, then turned down by the network: threads: the network refused it (the posting service gave no reason). Each network's result is below.",
+  );
+
+  // Mid-publish the row holds the dispatch marker, which is not an outcome.
+  const dispatching = summarizePublishIntent(
+    JSON.stringify({ _dispatch_started_at: "2026-10-16T10:00:00Z", platforms: ["instagram"] }),
+    null,
+  );
+  assert.deepEqual(dispatching.outcomes, [], "the dispatch marker yields no outcome rows");
+
+  // Never throw on bad input: this renders on every asset page.
+  assert.deepEqual(summarizePublishIntent("not json", 42), { outcomes: [], reason: null, rawReason: null });
+  assert.deepEqual(summarizePublishIntent(null, undefined), { outcomes: [], reason: null, rawReason: null });
+  const long = summarizePublishIntent("{}", "x".repeat(400));
+  assert.ok(long.rawReason!.length <= 240 && long.rawReason!.endsWith("..."), "a runaway reason is clipped");
 }
 
 brandBoundaryChecks()

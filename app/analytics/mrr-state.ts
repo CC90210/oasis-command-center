@@ -12,7 +12,7 @@
  *                  money ("the degraded path loses money"), so the OASIS
  *                  founder would read "Not connected, none feeding it" about
  *                  a Stripe account that is connected. It is "Couldn't
- *                  check", the same answer Today gives (app/page.tsx).
+ *                  check", the same answer Today gives (app/(today)/page.tsx).
  *   owner_only     an OASIS workspace, and a viewer whose persona does not see
  *                  company money: the source exists, it is not theirs to see.
  *   not_connected  a confirmed workspace that is not OASIS: nothing feeds MRR

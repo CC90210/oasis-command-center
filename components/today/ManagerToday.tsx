@@ -4,7 +4,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * WHY THIS COMPONENT HAD TO EXIST BEFORE THE MANAGER ROLE COULD SHIP
  * ─────────────────────────────────────────────────────────────────────────────
- * app/page.tsx dispatches Today by persona, and every persona without a branch
+ * app/(today)/page.tsx dispatches Today by persona, and every persona without a branch
  * falls through to FounderToday. When the `manager` persona was added, it fell
  * through — and although the MONEY was safe (FounderToday takes
  * `showFinancials`, which is false for a manager), FounderToday consults no

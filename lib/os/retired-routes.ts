@@ -6,7 +6,8 @@
  * /embed, /offers, /lenders, /funded-deals, /applications, /sms, /email-blast,
  * /metrics, /templates, /renewals) first became pages that call notFound(). That
  * draws the not-found screen, but the response status was 200: the root
- * app/loading.tsx is a Suspense boundary around every page, so the shell (and
+ * app/loading.tsx was a Suspense boundary around every page (each signed-in
+ * section now carries its own, app/t/ included), so the shell (and
  * its 200) has streamed before the page runs. A browser, a crawler and a
  * monitor all read 200 as "this page exists". A route handler answers before
  * any rendering starts, so its status is the one the client gets.

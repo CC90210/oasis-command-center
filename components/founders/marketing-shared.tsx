@@ -11,6 +11,7 @@ import Link from "next/link";
 import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { CarouselFrame } from "@/components/founders/CarouselFrame";
+import { DownloadLink } from "@/components/founders/DownloadLink";
 import { EnlargeButton, PhoneEnlarge } from "@/components/founders/PhoneEnlarge";
 import { PhoneFrame, PhoneTextCard, type PhoneFrameShape } from "@/components/founders/PhoneFrame";
 import { TileVideo } from "@/components/founders/TileVideo";
@@ -384,7 +385,10 @@ export function AssetTile({
           <span className="text-[10px] tabular-nums text-fg-dim">
             {[aspect, duration].filter(Boolean).join(" · ")}
           </span>
-          <EnlargeButton title={title} />
+          <span className="flex items-center gap-1.5">
+            {hasVisual && <DownloadLink assetId={id} title={title} />}
+            <EnlargeButton title={title} />
+          </span>
         </div>
       )}
       {/* The verdict lives on the tile. Sending the operator somewhere else to approve
@@ -433,6 +437,7 @@ export function AssetTile({
             />
           )}
           <EnlargeButton title={title} corner />
+          {hasVisual && <DownloadLink assetId={id} title={title} corner />}
         </div>
         {details}
       </PhoneEnlarge>

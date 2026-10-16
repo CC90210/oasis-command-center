@@ -60,7 +60,7 @@ function routeExists(urlPath: string): boolean {
 }
 
 // ── the resolver itself, against routes that certainly exist / do not ─────
-assert.equal(routeExists("/"), true, "app/page.tsx");
+assert.equal(routeExists("/"), true, "app/(today)/page.tsx");
 assert.equal(routeExists("/pipeline"), true);
 assert.equal(routeExists("/settings/audit-log"), true);
 assert.equal(routeExists("/projects/abc-123"), true, "[id] segment");
@@ -340,9 +340,9 @@ function linksIn(src: string, file: string): Found[] {
  */
 const KNOWN_DEAD: ReadonlyArray<{ file: string; path: string; why: string }> = [
   {
-    file: "app/page.tsx",
+    file: "app/(today)/page.tsx",
     path: "/t/sun",
-    why: "the Today dispatcher's SunBiz branch still redirects a session on the retired profile to its shell; app/page.tsx belongs to the OS shell track (W1a), not W0.",
+    why: "the Today dispatcher's SunBiz branch still redirects a session on the retired profile to its shell; app/(today)/page.tsx belongs to the OS shell track (W1a), not W0.",
   },
 ];
 const EXEMPT_FILES = new Set(["lib/manifest/templates.ts"]);

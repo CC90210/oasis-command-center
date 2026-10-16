@@ -466,7 +466,7 @@ function stripComments(src: string): string {
 
 const repToday = read("components/today/RepToday.tsx");
 const deliveryToday = read("components/today/DeliveryToday.tsx");
-const dispatcher = read("app/page.tsx");
+const dispatcher = read("app/(today)/page.tsx");
 const founderToday = read("components/today/FounderToday.tsx");
 
 const repCode = stripComments(repToday);
@@ -475,7 +475,7 @@ const dispatcherCode = stripComments(dispatcher);
 const founderCode = stripComments(founderToday);
 
 /* ───── the MANAGER surface ──────────────────────────────────────────────────
- * A persona without its own branch in app/page.tsx falls through to
+ * A persona without its own branch in app/(today)/page.tsx falls through to
  * FounderToday. `manager` shipped without one, and although the money was safe
  * (showFinancials is false for that persona), FounderToday consults no other
  * capability — so it would have rendered the whole tenant's pipeline and the
@@ -515,7 +515,7 @@ assert.equal(
 );
 assert.ok(
   /surface\.persona === "marketing"/.test(dispatcherCode),
-  "app/page.tsx MUST branch on marketing — without it they fall through to FounderToday",
+  "app/(today)/page.tsx MUST branch on marketing — without it they fall through to FounderToday",
 );
 assert.ok(
   dispatcherCode.indexOf('surface.persona === "marketing"') < dispatcherCode.indexOf("<FounderToday"),
@@ -790,7 +790,7 @@ assert.ok(
 
 assert.ok(
   /surface\.persona === "manager"/.test(dispatcherCode),
-  "app/page.tsx MUST branch on the manager persona — without it a manager falls through to FounderToday",
+  "app/(today)/page.tsx MUST branch on the manager persona — without it a manager falls through to FounderToday",
 );
 assert.ok(
   dispatcherCode.indexOf('surface.persona === "manager"') < dispatcherCode.indexOf("<FounderToday"),
@@ -858,7 +858,7 @@ for (const reader of FINANCIAL_READERS) {
   assert.equal(
     dispatcherCode.includes(reader),
     false,
-    `app/page.tsx names ${reader} in CODE — the dispatcher runs before the persona branch, so anything it fetches is fetched for EVERY persona`,
+    `app/(today)/page.tsx names ${reader} in CODE — the dispatcher runs before the persona branch, so anything it fetches is fetched for EVERY persona`,
   );
 }
 
@@ -884,8 +884,8 @@ assert.ok(
 // The dispatcher must branch to the rep component BEFORE it can reach the
 // founder one. Order is the enforcement.
 const salesBranch = dispatcherCode.indexOf('persona === "sales"');
-assert.ok(salesBranch > -1, "app/page.tsx has no sales branch");
-assert.ok(dispatcherCode.includes("<FounderToday"), "app/page.tsx never renders FounderToday");
+assert.ok(salesBranch > -1, "app/(today)/page.tsx has no sales branch");
+assert.ok(dispatcherCode.includes("<FounderToday"), "app/(today)/page.tsx never renders FounderToday");
 assert.ok(
   salesBranch < dispatcherCode.lastIndexOf("<FounderToday"),
   "the sales branch must return before the founder dashboard is reachable",
@@ -906,7 +906,7 @@ assert.ok(
  */
 {
   const guard = dispatcherCode.indexOf("if (!surface.ok)");
-  assert.ok(guard > -1, "app/page.tsx must handle an unresolvable session explicitly");
+  assert.ok(guard > -1, "app/(today)/page.tsx must handle an unresolvable session explicitly");
   const nextReturn = dispatcherCode.indexOf("if (surface.persona", guard);
   assert.ok(nextReturn > guard, "could not delimit the unauthorised branch — this assertion is not proving anything");
   const branch = dispatcherCode.slice(guard, nextReturn);
