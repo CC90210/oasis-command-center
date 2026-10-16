@@ -432,13 +432,27 @@ export async function saveDraft(
  * Publish the draft the owner checked: its copy (brief stripped) becomes the
  * live page in one statement, and only while the draft is still the version
  * they checked.
+ *
+ * `enableForm`: switch the page's form on in the same transaction, and only
+ * when the publish itself went through (Confirm & publish, Codex on #637). The
+ * page and its form then change together or not at all, so a response lost on
+ * the way back can never leave a draft's plain form public, nor a live page
+ * with its form off.
  */
 export async function publishDraft(
   db: Client,
-  input: { tenantId: string; formId: string; draft: OfferPageDoc; draftVersion: number; actor: string | null; now: string },
+  input: {
+    tenantId: string;
+    formId: string;
+    draft: OfferPageDoc;
+    draftVersion: number;
+    actor: string | null;
+    now: string;
+    enableForm?: boolean;
+  },
 ): Promise<WriteResult<{ publishedVersion: number }>> {
   try {
-    const rs = await db.execute({
+    const publish = {
       sql: `UPDATE form_offer_pages
             SET published = ?, published_version = published_version + 1, published_at = ?, published_by = ?,
                 live = 1, updated_at = ?
@@ -453,7 +467,17 @@ export async function publishDraft(
         input.formId,
         input.draftVersion,
       ],
-    });
+    };
+    // The form goes on only if the row above was just published: same version,
+    // live, and stamped with this publish's own time.
+    const enable = {
+      sql: `UPDATE forms SET enabled = 1
+            WHERE id = ? AND tenant_id = ?
+              AND EXISTS (SELECT 1 FROM form_offer_pages
+                          WHERE tenant_id = ? AND form_id = ? AND draft_version = ? AND live = 1 AND published_at = ?)`,
+      args: [input.formId, input.tenantId, input.tenantId, input.formId, input.draftVersion, input.now],
+    };
+    const rs = input.enableForm ? (await db.batch([publish, enable], "write"))[0] : await db.execute(publish);
     const r = rowsOf(rs)[0];
     if (r) return { ok: true, publishedVersion: Number(r.published_version) };
     const v = await currentVersion(db, input.tenantId, input.formId);

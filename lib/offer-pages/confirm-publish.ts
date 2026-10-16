@@ -22,13 +22,13 @@
  *                                { draft, version, confirm_claims, unconfirm_claims }
  *                                (OfferBuilder's draft save, compare-and-swap
  *                                on `version`)
- *   switch the form on           PATCH /api/forms/[id] { enabled: true }
- *                                (the Offers list's on/off switch), only after
- *                                the save, and switched off again if Publish
- *                                then fails: a page that did not go live never
- *                                leaves its form on
- *   publish                      POST /api/forms/[id]/offer/publish { version }
- *                                with the version that save just returned
+ *   publish                      POST /api/forms/[id]/offer/publish
+ *                                { version, enable_form } with the version that
+ *                                save just returned. enable_form switches a
+ *                                switched-off form on in the SAME transaction
+ *                                as the publish (store.ts publishDraft), so the
+ *                                page and its form change together or not at
+ *                                all, even when the response is lost.
  *
  * WHO CONFIRMED IT. A ticked price, guarantee or video goes up as the builder
  * sends it: pendingConfirmation() (components/offer-pages/builder/fields.tsx,
@@ -232,13 +232,20 @@ export function buildSaveBody(o: ConfirmOffer, c: Choices, pending: () => Confir
 export type Fetcher = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => Promise<Response>;
 export type ActionDeps = { fetch: Fetcher; pending: () => Confirmation };
 
-export type ActionOutcome =
+export type ActionOutcome = (
   | { kind: "saved"; version: number; blockers: string[] }
   | { kind: "published"; publishedVersion: number; warnings: string[] }
   | { kind: "blocked"; blockers: string[] }
   | { kind: "conflict"; message: string }
   | { kind: "approve_failed"; message: string }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+) & {
+  /** What did happen on the way, when the action stopped later (the video's Library approval). */
+  notes?: string[];
+};
+
+/** Said when the video's approval went through and a later step did not. */
+export const APPROVED_NOTE = "The video itself was approved in the Library. After you reload, tick it again to attach it.";
 
 export const CONFLICT_MESSAGE = "Someone edited this page since this screen loaded, so nothing was changed. Reload the page, then tick again.";
 
@@ -261,39 +268,60 @@ async function call(deps: ActionDeps, url: string, method: string, body?: unknow
 const blockersOf = (data: Record<string, unknown>): string[] =>
   Array.isArray(data.blockers) ? data.blockers.filter((b): b is string => typeof b === "string") : [];
 
-/** Library statuses a page's top video may have (the offer save accepts these). */
-const ATTACHABLE = new Set(["approved", "scheduled", "published"]);
+/**
+ * Library statuses a page's top video may newly carry: exactly what the offer
+ * save accepts for a newly attached Library video (app/api/forms/[id]/offer,
+ * "approved or published"). Not "scheduled": the save would refuse it.
+ */
+const ATTACHABLE = new Set(["approved", "published"]);
+
+type Approval = { refused: ActionOutcome | null; approved: boolean };
 
 /**
  * The approval the video tick needs first, when the proposal is still in
- * review. null when there is nothing to approve or it went through.
+ * review. `refused` is set when the action must stop here; `approved` says
+ * this call approved it, so a later step that fails can say so.
  */
-async function approveIfNeeded(o: ConfirmOffer, c: Choices, deps: ActionDeps): Promise<ActionOutcome | null> {
+async function approveIfNeeded(o: ConfirmOffer, c: Choices, deps: ActionDeps): Promise<Approval> {
   const p = o.proposal;
-  if (!c.video || p.state !== "ready" || p.onPage || !p.needsApproval) return null;
+  if (!c.video || p.state !== "ready" || p.onPage || !p.needsApproval) return { refused: null, approved: false };
   const r = await call(deps, `/api/founders/marketing/assets/${encodeURIComponent(p.assetId)}`, "PATCH", {
     status: "approved",
     from: "in_review",
   });
-  if (r.ok) return null;
+  if (r.ok) return { refused: null, approved: true };
   if (r.data.error === "status_changed") {
     const now = typeof r.data.status === "string" ? r.data.status : "";
-    // Approved, or further along, since this screen loaded: nothing to approve, attach it as it is.
-    if (ATTACHABLE.has(now)) return null;
+    // Approved or published since this screen loaded: nothing to approve, attach it as it is.
+    if (ATTACHABLE.has(now)) return { refused: null, approved: false };
     return {
-      kind: "approve_failed",
-      message:
-        `This video's status changed in the Library since this screen loaded${now ? ` (it is ${now.replace(/_/g, " ")} now)` : ""}, ` +
-        "so it was not approved, nothing was saved and no video was attached. Reload the page.",
+      refused: {
+        kind: "approve_failed",
+        message:
+          `This video's status changed in the Library since this screen loaded${now ? ` (it is ${now.replace(/_/g, " ")} now)` : ""}, ` +
+          "so it was not approved, nothing was saved and no video was attached. Reload the page.",
+      },
+      approved: false,
     };
   }
+  // No answer at all (status 0): the approval may or may not have gone through.
+  const unknown = r.status === 0;
   return {
-    kind: "approve_failed",
-    message:
-      "The video could not be approved in the Library, so nothing was saved and no video was attached. " +
-      "Try again, or approve it in the Library and come back.",
+    refused: {
+      kind: "approve_failed",
+      message: unknown
+        ? "No answer came back from the Library, so nothing was saved and no video was attached. Reload the page: it shows whether the video was approved."
+        : "The video could not be approved in the Library, so nothing was saved and no video was attached. Try again, or approve it in the Library and come back.",
+    },
+    approved: false,
   };
 }
+
+/** A later step's outcome, with the approval this action already made said out loud. */
+const afterApproval = (outcome: ActionOutcome, a: Approval): ActionOutcome =>
+  a.approved && outcome.kind !== "published" && outcome.kind !== "saved"
+    ? { ...outcome, notes: [...(outcome.notes ?? []), APPROVED_NOTE] }
+    : outcome;
 
 type Saved = { ok: true; version: number; blockers: string[] } | { ok: false; outcome: ActionOutcome };
 
@@ -324,37 +352,37 @@ const besidesFormOff = (blockers: string[]) => blockers.filter((b) => b !== FORM
 /** Save: approve the proposed video if it needs it, then the builder's draft save. */
 export async function saveOffer(o: ConfirmOffer, c: Choices, deps: ActionDeps): Promise<ActionOutcome> {
   if (!o.draft) return { kind: "error", message: "This page's saved draft can't be read. Open it in the builder." };
-  const refused = await approveIfNeeded(o, c, deps);
-  if (refused) return refused;
+  const approval = await approveIfNeeded(o, c, deps);
+  if (approval.refused) return approval.refused;
   const saved = await putDraft(o, c, deps);
-  return saved.ok ? { kind: "saved", version: saved.version, blockers: besidesFormOff(saved.blockers) } : saved.outcome;
+  return saved.ok
+    ? { kind: "saved", version: saved.version, blockers: besidesFormOff(saved.blockers) }
+    : afterApproval(saved.outcome, approval);
 }
 
 /**
  * Publish, in this order: approve the proposed video (when it is ticked and
- * still in review), save every tick, switch the form on (when the save's gate
- * says it is off), then publish the version that save returned. Each step runs
- * only when the one before it went through: a refused approval saves nothing,
- * a failed save or a saved gate that lists anything else leaves the form as it
- * was, and a publish that fails after the form was switched on switches it off
- * again, so a page that did not go live never leaves its plain form public.
+ * still in review), save every tick, then publish the version that save
+ * returned, switching a switched-off form on in the same transaction. Each
+ * step runs only when the one before it went through: a refused approval saves
+ * nothing, and a failed save or a saved gate that lists anything besides the
+ * switched-off form never reaches the publish. The form and the page change
+ * together or not at all, so no answer lost on the way back can leave a
+ * draft's plain form public.
  */
 export async function publishOffer(o: ConfirmOffer, c: Choices, deps: ActionDeps): Promise<ActionOutcome> {
   if (!o.draft) return { kind: "error", message: "This page's saved draft can't be read. Open it in the builder." };
   if (!isReady(o, c)) return { kind: "blocked", blockers: whatBlocks(o, c) };
-  const refused = await approveIfNeeded(o, c, deps);
-  if (refused) return refused;
+  const approval = await approveIfNeeded(o, c, deps);
+  if (approval.refused) return approval.refused;
   const saved = await putDraft(o, c, deps);
-  if (!saved.ok) return saved.outcome;
+  if (!saved.ok) return afterApproval(saved.outcome, approval);
   const rest = besidesFormOff(saved.blockers);
-  if (rest.length) return { kind: "blocked", blockers: rest };
-  const formUrl = `/api/forms/${encodeURIComponent(o.formId)}`;
-  const switchedOn = saved.blockers.includes(FORM_OFF_BLOCKER);
-  if (switchedOn) {
-    const on = await call(deps, formUrl, "PATCH", { enabled: true });
-    if (!on.ok) return { kind: "error", message: "Saved, but the form could not be switched on, so nothing was published. Try Publish again." };
-  }
-  const r = await call(deps, `${formUrl}/offer/publish`, "POST", { version: saved.version });
+  if (rest.length) return afterApproval({ kind: "blocked", blockers: rest }, approval);
+  const r = await call(deps, `/api/forms/${encodeURIComponent(o.formId)}/offer/publish`, "POST", {
+    version: saved.version,
+    enable_form: saved.blockers.includes(FORM_OFF_BLOCKER),
+  });
   if (r.ok) {
     const warnings = Array.isArray(r.data.warnings) ? r.data.warnings.filter((w): w is string => typeof w === "string") : [];
     return { kind: "published", publishedVersion: Number(r.data.published_version), warnings };
@@ -364,15 +392,15 @@ export async function publishOffer(o: ConfirmOffer, c: Choices, deps: ActionDeps
       ? { kind: "conflict", message: CONFLICT_MESSAGE }
       : r.data.error === "publish_blocked"
         ? { kind: "blocked", blockers: blockersOf(r.data) }
-        : { kind: "error", message: "Saved, but not published. Try Publish again in a moment." };
-  if (!switchedOn) return failed;
-  const off = await call(deps, formUrl, "PATCH", { enabled: false });
-  if (off.ok) return failed;
-  return {
-    kind: "error",
-    message: "Not published, and the form this screen switched on could not be switched off again. Switch it off on the Offers screen, then reload this page.",
-  };
+        : r.status === 0
+          ? { kind: "error", message: NO_ANSWER_MESSAGE }
+          : { kind: "error", message: "Saved, but not published. Try Publish again in a moment." };
+  return afterApproval(failed, approval);
 }
+
+/** Publish sent, no answer back: it went live with its form on, or nothing changed. */
+export const NO_ANSWER_MESSAGE =
+  "Saved, but no answer came back from Publish. Reload this page: it shows Live with the form on if it went through, and Draft with the form as it was if not.";
 
 // ---------------------------------------------------------------------------
 // Words
@@ -416,8 +444,13 @@ export function whatBlocks(o: ConfirmOffer, c: Choices): string[] {
   return [...out, ...o.unfixable];
 }
 
-/** One outcome, as the card says it. */
+/** One outcome, as the card says it, with what did happen on the way (`notes`) last. */
 export function outcomeWords(outcome: ActionOutcome): { tone: "ok" | "warn" | "error"; lines: string[] } {
+  const words = baseWords(outcome);
+  return outcome.notes?.length ? { ...words, lines: [...words.lines, ...outcome.notes] } : words;
+}
+
+function baseWords(outcome: ActionOutcome): { tone: "ok" | "warn" | "error"; lines: string[] } {
   switch (outcome.kind) {
     case "published":
       return { tone: "ok", lines: [`Published. The page is live (version ${outcome.publishedVersion}).`, ...outcome.warnings] };

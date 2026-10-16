@@ -1,5 +1,5 @@
 /**
- * POST /api/forms/[id]/offer/publish  { version }
+ * POST /api/forms/[id]/offer/publish  { version, enable_form? }
  *
  * Makes the draft the owner checked the public page at /f/<workspace>/<slug>.
  *
@@ -9,6 +9,11 @@
  * guarantee were confirmed by an owner; every flagged sentence carries an
  * owner's tick; every video carries its rights confirmation; the page has a
  * headline; and the form is switched on.
+ *
+ * `enable_form: true` (Confirm & publish): a switched-off form is not a
+ * blocker, because the publish switches it on in the same transaction
+ * (store.ts publishDraft enableForm). Both happen, or neither: the form never
+ * goes on for a page that did not go live.
  *
  * WHAT GOES LIVE is exactly draft `version`: the publish is a compare-and-swap
  * on it, so an edit that lands between the owner's check and the click is not
@@ -31,7 +36,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!auth.ok) return auth.response;
   const tenantId = auth.session.tenantId;
   const { id } = await ctx.params;
-  const body = (await req.json().catch(() => ({}))) as { version?: unknown };
+  const body = (await req.json().catch(() => ({}))) as { version?: unknown; enable_form?: unknown };
+  const enableForm = body.enable_form === true;
 
   const db = offerPagesDb();
   if (!db) return NextResponse.json({ ok: false, error: "offer_pages_unavailable" }, { status: 503 });
@@ -60,13 +66,21 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     );
   }
 
-  const gate = publishGate(row.draft, row.claims, { formEnabled: form.enabled, fallbackHeadline: fallbackHeadline(form) });
+  const gate = publishGate(row.draft, row.claims, { formEnabled: form.enabled || enableForm, fallbackHeadline: fallbackHeadline(form) });
   if (gate.blockers.length) {
     return NextResponse.json({ ok: false, error: "publish_blocked", blockers: gate.blockers, warnings: gate.warnings }, { status: 409 });
   }
 
   const now = new Date().toISOString();
-  const published = await publishDraft(db, { tenantId, formId: id, draft: row.draft, draftVersion: version, actor: auth.session.userId, now });
+  const published = await publishDraft(db, {
+    tenantId,
+    formId: id,
+    draft: row.draft,
+    draftVersion: version,
+    actor: auth.session.userId,
+    now,
+    enableForm: enableForm && !form.enabled,
+  });
   if (!published.ok) {
     if (published.error === "conflict") {
       return NextResponse.json(
@@ -82,6 +96,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     ok: true,
     published_version: published.publishedVersion,
     warnings: gate.warnings,
-    offer: after.state === "row" ? offerView(after.row, form) : null,
+    offer: after.state === "row" ? offerView(after.row, enableForm ? { ...form, enabled: true } : form) : null,
   });
 }
