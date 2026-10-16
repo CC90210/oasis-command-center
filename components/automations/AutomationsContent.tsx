@@ -35,7 +35,6 @@ import { oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import type { ScriptAutomationAccess } from "@/lib/automations/script-access";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
-import type { ReactNode } from "react";
 
 /** What a viewer who cannot create script automations is told, in place of the
  *  box and the button, until the guided setup lands. No dead control. */
@@ -46,25 +45,14 @@ const GUIDED_SUBTITLE =
   "Pick a job, say when it should run and try it once before you turn it on. Automations write you a summary or draft emails that wait for your approval. Nothing goes out on its own.";
 
 /**
- * With the guided builder on it is the ONE way to make an automation: the "describe it and AI writes a
+ * With the guided builder on it is the ONE way to MAKE an automation: the "describe it and AI writes a
  * script" box and the script form are not offered (CC, 2026-10-15: one onboarding path, built from the
- * templates). Jobs that already exist (and, for operators, OASIS's own system jobs) stay listed under one
- * closed disclosure, so they can still be switched on or off. With the builder off this renders its
- * children exactly where they were, so the page is the one it always was.
+ * templates). Everything that already exists stays in plain sight: the automations made before the
+ * builder (and, for operators, OASIS's own system jobs) are listed inside "Your automations", under the
+ * builder's rows, and the connection status, modules and background workers keep their places. They sat
+ * in a closed "Other scheduled jobs" box until 2026-10-16, which read as "you have no automations" (CC:
+ * "my automations aren't being displayed - the ones I previously built aren't showing up").
  */
-function AdvancedFold({ guided, children }: { guided: boolean; children: ReactNode }) {
-  if (!guided) return <>{children}</>;
-  return (
-    <details className="rounded-xl border border-bg-border bg-bg-elev/30 text-sm">
-      <summary className="cursor-pointer select-none px-4 py-3 font-bold text-fg">
-        Other scheduled jobs
-        <span className="ml-2 text-xs font-normal text-fg-dim">Jobs made before this builder, and system jobs. Switch them on or off here.</span>
-      </summary>
-      <div className="space-y-6 border-t border-bg-border p-4">{children}</div>
-    </details>
-  );
-}
-
 export async function AutomationsContent({
   previewMode = false,
   tenantSlug: overrideSlug,
@@ -164,6 +152,176 @@ export async function AutomationsContent({
   // The builder needs a signed-in profile, like everything else below the sign-in box.
   const guided = guidedEnabled && Boolean(profile);
 
+  const connectionBanner = (
+    <div className="rounded-xl border border-bg-border bg-bg-deep/40 p-4 flex items-start gap-3">
+      {bridgeOnline ? (
+        <Cpu className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" />
+      ) : (
+        <Cloud className="w-5 h-5 text-fg-dim shrink-0 mt-0.5" />
+      )}
+      <div className="flex-1 text-xs leading-relaxed">
+        {bridgeOnline === null ? (
+          <>
+            <span className="text-fg-muted font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
+            The connection could not be read just now, so this is not saying it is disconnected.
+            Reload in a minute.
+          </>
+        ) : bridgeOnline ? (
+          <>
+            <span className="text-status-engaged font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
+            Jobs run on the schedule below. Edits take effect within a minute. Switch any job off
+            and it stops firing — the spec stays saved so you can flip it back on later.
+          </>
+        ) : (
+          <>
+            <span className="text-fg-muted font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
+            Local agent jobs are paused until a machine is paired. Cloud sales workers, including
+            founder-meeting invitations and reminders, continue independently.{" "}
+            {canInstallBridge ? (
+              <>
+                Click <span className="text-fg font-medium">Install bridge</span> to restore local jobs.
+              </>
+            ) : (
+              "OASIS pairs a machine with your workspace directly."
+            )}
+          </>
+        )}
+      </div>
+      {bridgeOnline === false && canInstallBridge && (
+        <Link
+          href="/settings/devices/install"
+          className="btn-primary inline-flex items-center gap-1.5 text-xs shrink-0"
+        >
+          <Download className="w-3 h-3" />
+          Install bridge
+        </Link>
+      )}
+      <Clock className="w-4 h-4 text-fg-dim shrink-0 mt-0.5 hidden sm:block" />
+    </div>
+  );
+
+  const howItWorks = (
+    <details className="rounded-xl border border-bg-border bg-bg-elev/30 p-4 text-sm">
+      <summary className="cursor-pointer select-none flex items-center gap-2 text-fg font-bold">
+        <span className="inline-block">▸</span>
+        How automations work, in plain English
+      </summary>
+      <div className="mt-3 space-y-3 text-fg-muted leading-relaxed">
+        <p>
+          <span className="text-fg font-bold">Where they run.</span> Calendar invitations and
+          meeting reminders run in the cloud, so they do not depend on anyone&apos;s laptop. Agent
+          scripts that need local files or CLIs run through the connected machine.
+        </p>
+        <p>
+          <span className="text-fg font-bold">What it costs.</span> Most jobs are free
+          (pulling data, taking snapshots, syncing Stripe). AI-powered ones cost roughly
+          25¢ per daily summary; scoring a single lead is ~a penny. Email/SMS sends use your
+          own Gmail / Twilio with no markup.
+        </p>
+        <p>
+          <span className="text-fg font-bold">Where output ends up.</span>{" "}
+          {isClientAutomationSurface
+            ? "Back in the dashboard — the Daily Plan, the deal records, the Breeze BD deal queue below, and alerts. Calls and texts to merchants go out through Kixie and TextTorrent. Scored Breeze deals go to Ezra's Telegram for approve/decline — approving there creates the lead."
+            : "Telegram (alerts + briefs), local files (snapshots), or back into the dashboard (scoring + sync jobs)."}
+        </p>
+        <p>
+          <span className="text-fg font-bold">Switching jobs on/off.</span> Each row has a
+          toggle. Flip it off and the job stops within a minute — spec stays saved.
+        </p>
+        {isClientAutomationSurface && (
+          <p>
+            <span className="text-fg font-bold">The four sections below.</span>{" "}
+            <span className="text-fg">Modules</span> is what the system can do — your live
+            capabilities, for reference (nothing to switch).{" "}
+            <span className="text-fg">Scheduled jobs</span> are the timed automations; flip one
+            off to pause it (takes effect within ~60s on the VPS).{" "}
+            <span className="text-fg">Breeze BD deals</span> is the live intake queue — every UW
+            sheet the scrubber verified and scored, with its Telegram approval status.{" "}
+            <span className="text-fg">Background workers</span> are the always-on processes that
+            power all of it — Start, Stop, or Restart each one and the signal goes straight to
+            the VPS.
+          </p>
+        )}
+        <p>
+          <span className="text-fg font-bold">Making your own.</span>{" "}
+          {guided
+            ? "Use New automation at the top of this page."
+            : scriptAccess === "allowed"
+              ? "Describe what you want in the box below and your agent writes the script, shows you what it does, and saves it switched-off so nothing fires until you read it."
+              : NEW_AUTOMATIONS_COMING}
+        </p>
+      </div>
+    </details>
+  );
+
+  // Always-on processes and, on the SunBiz surface only, its underwriting desk (see the notes inside).
+  const workersAndUnderwriting = (
+    <>
+      {isOasisSurfaceTenant(tenantSlug) && (
+        // The panel existed and rendered for exactly one tenant: "sun".
+        // OASIS's own workspace — where the empire daemons actually run —
+        // never saw it, so the page that lists scheduled jobs had no way to
+        // show the always-on processes doing the work beside them. The
+        // Instagram setter was the cost: a live daemon answering real
+        // prospects, invisible on the operations page, with only its parked
+        // cron twin visible and reading OFF.
+        //
+        // Gated on the SURFACE, not the role — same rule as the Breeze
+        // section below. isOasisSurfaceTenant covers OASIS's own workspaces
+        // only, and /automations is already 404 for the personas whose
+        // canSeeSystemSurfaces is false (reps, managers), so no client
+        // tenant and no rep gets CC's machine's daemon list.
+        <BackgroundWorkersPanel />
+      )}
+      {isClientAutomationSurface && (
+        // SURFACE, NOT ROLE. This read `(isOperator || tenantSlug === "sun")`
+        // until 2026-08-17, and the first half of that leaked a client's book
+        // onto OASIS's own operations page.
+        //
+        // `isOperatorEmail` is true for CC. `/automations` at the top level of
+        // oasisai.work is the OASIS surface, tenantSlug is not "sun" — and the
+        // panel rendered anyway. Worse, it worked: GET /api/automations/breeze-deals
+        // deliberately resolves an empire operator to the SunBiz tenant
+        // (`tenants.slug = 'submissions'`), so the request returned REAL deals.
+        // CC opened OASIS's automations and read Kinesioworks' revenue,
+        // Diamond Ridge's leverage, 146 pending submissions.
+        //
+        // Being allowed to see a client's data somewhere is not permission to
+        // render it everywhere. Role answers "may this person"; the surface
+        // answers "is this the place", and only the second one belongs in this
+        // condition. The Breeze queue is Adon's underwriting desk and lives on
+        // the SunBiz surface, where its own heading already says so.
+        //
+        // The route keeps its operator path on purpose — Adon's tooling calls it
+        // directly and /t/sun/automations still renders this section. Nothing
+        // lost, just no longer painted onto the wrong portal.
+        //
+        // B3 (2026-07-23), retained: the heading below separates "your SunBiz
+        // automations" from "the Breeze/MCA underwriting surface Adon operates",
+        // which previously ran together under a plain border-top.
+        <section
+          aria-labelledby="underwriting-breeze-heading"
+          className="border-t-2 border-bg-border pt-6 space-y-6"
+        >
+          <div>
+            <h2
+              id="underwriting-breeze-heading"
+              className="text-xs font-bold uppercase tracking-wider text-fg-muted"
+            >
+              Underwriting / Breeze
+            </h2>
+            <p className="text-[11px] text-fg-dim mt-0.5">
+              The MCA/underwriting surface — deal intake queue + the background daemons that
+              power it. Separate from the SunBiz automations above.
+            </p>
+          </div>
+          <BreezeDealsPanel />
+          <BackgroundWorkersPanel />
+        </section>
+      )}
+    </>
+  );
+
   return (
     <div className="space-y-6 animate-fade-in">
       {!hideHeader && (
@@ -177,192 +335,45 @@ export async function AutomationsContent({
         />
       )}
 
-      {guided && <GuidedAutomations api={guidedApi} />}
-
-      <AdvancedFold guided={guided}>
-      <div className="rounded-xl border border-bg-border bg-bg-deep/40 p-4 flex items-start gap-3">
-        {bridgeOnline ? (
-          <Cpu className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" />
-        ) : (
-          <Cloud className="w-5 h-5 text-fg-dim shrink-0 mt-0.5" />
-        )}
-        <div className="flex-1 text-xs leading-relaxed">
-          {bridgeOnline === null ? (
-            <>
-              <span className="text-fg-muted font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
-              The connection could not be read just now, so this is not saying it is disconnected.
-              Reload in a minute.
-            </>
-          ) : bridgeOnline ? (
-            <>
-              <span className="text-status-engaged font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
-              Jobs run on the schedule below. Edits take effect within a minute. Switch any job off
-              and it stops firing — the spec stays saved so you can flip it back on later.
-            </>
-          ) : (
-            <>
-              <span className="text-fg-muted font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
-              Local agent jobs are paused until a machine is paired. Cloud sales workers, including
-              founder-meeting invitations and reminders, continue independently.{" "}
-              {canInstallBridge ? (
-                <>
-                  Click <span className="text-fg font-medium">Install bridge</span> to restore local jobs.
-                </>
-              ) : (
-                "OASIS pairs a machine with your workspace directly."
-              )}
-            </>
-          )}
-        </div>
-        {bridgeOnline === false && canInstallBridge && (
-          <Link
-            href="/settings/devices/install"
-            className="btn-primary inline-flex items-center gap-1.5 text-xs shrink-0"
-          >
-            <Download className="w-3 h-3" />
-            Install bridge
-          </Link>
-        )}
-        <Clock className="w-4 h-4 text-fg-dim shrink-0 mt-0.5 hidden sm:block" />
-      </div>
-
-      <details className="rounded-xl border border-bg-border bg-bg-elev/30 p-4 text-sm">
-        <summary className="cursor-pointer select-none flex items-center gap-2 text-fg font-bold">
-          <span className="inline-block">▸</span>
-          How automations work, in plain English
-        </summary>
-        <div className="mt-3 space-y-3 text-fg-muted leading-relaxed">
-          <p>
-            <span className="text-fg font-bold">Where they run.</span> Calendar invitations and
-            meeting reminders run in the cloud, so they do not depend on anyone&apos;s laptop. Agent
-            scripts that need local files or CLIs run through the connected machine.
-          </p>
-          <p>
-            <span className="text-fg font-bold">What it costs.</span> Most jobs are free
-            (pulling data, taking snapshots, syncing Stripe). AI-powered ones cost roughly
-            25¢ per daily summary; scoring a single lead is ~a penny. Email/SMS sends use your
-            own Gmail / Twilio with no markup.
-          </p>
-          <p>
-            <span className="text-fg font-bold">Where output ends up.</span>{" "}
-            {isClientAutomationSurface
-              ? "Back in the dashboard — the Daily Plan, the deal records, the Breeze BD deal queue below, and alerts. Calls and texts to merchants go out through Kixie and TextTorrent. Scored Breeze deals go to Ezra's Telegram for approve/decline — approving there creates the lead."
-              : "Telegram (alerts + briefs), local files (snapshots), or back into the dashboard (scoring + sync jobs)."}
-          </p>
-          <p>
-            <span className="text-fg font-bold">Switching jobs on/off.</span> Each row has a
-            toggle. Flip it off and the job stops within a minute — spec stays saved.
-          </p>
-          {isClientAutomationSurface && (
-            <p>
-              <span className="text-fg font-bold">The four sections below.</span>{" "}
-              <span className="text-fg">Modules</span> is what the system can do — your live
-              capabilities, for reference (nothing to switch).{" "}
-              <span className="text-fg">Scheduled jobs</span> are the timed automations; flip one
-              off to pause it (takes effect within ~60s on the VPS).{" "}
-              <span className="text-fg">Breeze BD deals</span> is the live intake queue — every UW
-              sheet the scrubber verified and scored, with its Telegram approval status.{" "}
-              <span className="text-fg">Background workers</span> are the always-on processes that
-              power all of it — Start, Stop, or Restart each one and the signal goes straight to
-              the VPS.
-            </p>
-          )}
-          <p>
-            <span className="text-fg font-bold">Making your own.</span>{" "}
-            {guided
-              ? "Use New automation at the top of this page."
-              : scriptAccess === "allowed"
-                ? "Describe what you want in the box below and your agent writes the script, shows you what it does, and saves it switched-off so nothing fires until you read it."
-                : NEW_AUTOMATIONS_COMING}
-          </p>
-        </div>
-      </details>
-
-      {profile ? (
+      {guided ? (
         <>
-          {guided ? null : scriptAccess === "allowed" ? (
-            // Drafting and saving a script is for verified platform operators
-            // only; the routes refuse everyone else, so nobody else is offered it.
-            // With the guided builder on, the builder is the only way to make one.
-            <DescribeAutomationFlow />
-          ) : (
-            <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-4 text-sm text-fg-muted">
-              {scriptAccess === "unknown"
-                ? "We couldn't confirm your access to create automations just now, so that option is hidden. Reload the page to try again."
-                : NEW_AUTOMATIONS_COMING}
-            </div>
-          )}
+          {connectionBanner}
+          {/* The builder, then "Your automations": its own rows first, then every automation made before it. */}
+          <GuidedAutomations api={guidedApi}>
+            <CronJobsManager agentKeys={automationAgentKeys} canCreateScripts={false} />
+          </GuidedAutomations>
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
-          <CronJobsManager agentKeys={automationAgentKeys} canCreateScripts={!guided && scriptAccess === "allowed"} />
-          {isOasisSurfaceTenant(tenantSlug) && (
-            // The panel existed and rendered for exactly one tenant: "sun".
-            // OASIS's own workspace — where the empire daemons actually run —
-            // never saw it, so the page that lists scheduled jobs had no way to
-            // show the always-on processes doing the work beside them. The
-            // Instagram setter was the cost: a live daemon answering real
-            // prospects, invisible on the operations page, with only its parked
-            // cron twin visible and reading OFF.
-            //
-            // Gated on the SURFACE, not the role — same rule as the Breeze
-            // section below. isOasisSurfaceTenant covers OASIS's own workspaces
-            // only, and /automations is already 404 for the personas whose
-            // canSeeSystemSurfaces is false (reps, managers), so no client
-            // tenant and no rep gets CC's machine's daemon list.
-            <BackgroundWorkersPanel />
-          )}
-          {isClientAutomationSurface && (
-            // SURFACE, NOT ROLE. This read `(isOperator || tenantSlug === "sun")`
-            // until 2026-08-17, and the first half of that leaked a client's book
-            // onto OASIS's own operations page.
-            //
-            // `isOperatorEmail` is true for CC. `/automations` at the top level of
-            // oasisai.work is the OASIS surface, tenantSlug is not "sun" — and the
-            // panel rendered anyway. Worse, it worked: GET /api/automations/breeze-deals
-            // deliberately resolves an empire operator to the SunBiz tenant
-            // (`tenants.slug = 'submissions'`), so the request returned REAL deals.
-            // CC opened OASIS's automations and read Kinesioworks' revenue,
-            // Diamond Ridge's leverage, 146 pending submissions.
-            //
-            // Being allowed to see a client's data somewhere is not permission to
-            // render it everywhere. Role answers "may this person"; the surface
-            // answers "is this the place", and only the second one belongs in this
-            // condition. The Breeze queue is Adon's underwriting desk and lives on
-            // the SunBiz surface, where its own heading already says so.
-            //
-            // The route keeps its operator path on purpose — Adon's tooling calls it
-            // directly and /t/sun/automations still renders this section. Nothing
-            // lost, just no longer painted onto the wrong portal.
-            //
-            // B3 (2026-07-23), retained: the heading below separates "your SunBiz
-            // automations" from "the Breeze/MCA underwriting surface Adon operates",
-            // which previously ran together under a plain border-top.
-            <section
-              aria-labelledby="underwriting-breeze-heading"
-              className="border-t-2 border-bg-border pt-6 space-y-6"
-            >
-              <div>
-                <h2
-                  id="underwriting-breeze-heading"
-                  className="text-xs font-bold uppercase tracking-wider text-fg-muted"
-                >
-                  Underwriting / Breeze
-                </h2>
-                <p className="text-[11px] text-fg-dim mt-0.5">
-                  The MCA/underwriting surface — deal intake queue + the background daemons that
-                  power it. Separate from the SunBiz automations above.
-                </p>
-              </div>
-              <BreezeDealsPanel />
-              <BackgroundWorkersPanel />
-            </section>
-          )}
+          {workersAndUnderwriting}
+          {howItWorks}
         </>
       ) : (
-        <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-8 text-center text-fg-muted">
-          Sign in to manage your automations.
-        </div>
+        <>
+          {connectionBanner}
+          {howItWorks}
+          {profile ? (
+            <>
+              {scriptAccess === "allowed" ? (
+                // Drafting and saving a script is for verified platform operators
+                // only; the routes refuse everyone else, so nobody else is offered it.
+                <DescribeAutomationFlow />
+              ) : (
+                <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-4 text-sm text-fg-muted">
+                  {scriptAccess === "unknown"
+                    ? "We couldn't confirm your access to create automations just now, so that option is hidden. Reload the page to try again."
+                    : NEW_AUTOMATIONS_COMING}
+                </div>
+              )}
+              <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
+              <CronJobsManager agentKeys={automationAgentKeys} canCreateScripts={scriptAccess === "allowed"} />
+              {workersAndUnderwriting}
+            </>
+          ) : (
+            <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-8 text-center text-fg-muted">
+              Sign in to manage your automations.
+            </div>
+          )}
+        </>
       )}
-      </AdvancedFold>
     </div>
   );
 }

@@ -9,8 +9,13 @@
  * inline (this viewer blocks confirm()). Loading, "could not load" and "nothing yet" each say so.
  *
  * Every line about a run or a status is the server's: this component states nothing it was not told.
+ *
+ * `others` (the page's scheduled-jobs list: automations made before this builder) is listed in the same
+ * section, after these rows. With it present the section never says "nothing yet" and shows no count of
+ * its own: the older list carries its own counts, and claiming an empty list above real automations is
+ * exactly what hid CC's on 2026-10-16.
  */
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import type { GuidedApi, GuidedAutomationView, TestResult } from "@/lib/automations/guided/api-types";
 import { activateAutomation, activatedLine, pauseAutomation, removeAutomation, runTest, type Failure } from "@/lib/automations/guided/flow";
 import { departmentLabel, lastRunHead, nextRunLine, type LoadState } from "@/lib/automations/guided/view";
@@ -37,12 +42,15 @@ export type GuidedAutomationsListProps = {
   onTested: () => void;
   onRetry: () => void;
   initialRows?: Readonly<Record<string, RowInitial>>;
+  /** Automations made another way, listed in this section after the builder's rows. */
+  others?: ReactNode;
 };
 
 const BUTTON = `btn-secondary ${TAP} disabled:cursor-not-allowed disabled:opacity-50`;
 
-export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRemoved, onTested, onRetry, initialRows }: GuidedAutomationsListProps) {
-  const count = state.kind === "ready" ? state.data.length : null;
+export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRemoved, onTested, onRetry, initialRows, others }: GuidedAutomationsListProps) {
+  const hasOthers = others !== undefined && others !== null && others !== false;
+  const count = state.kind === "ready" && !hasOthers ? state.data.length : null;
   return (
     <section aria-labelledby="guided-list-h" aria-busy={state.kind === "loading"} className="space-y-3">
       <h2 id="guided-list-h" className="text-base font-semibold text-fg">
@@ -67,7 +75,7 @@ export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRem
         </div>
       )}
 
-      {state.kind === "ready" && state.data.length === 0 && (
+      {state.kind === "ready" && state.data.length === 0 && !hasOthers && (
         <div className="rounded-xl border border-dashed border-bg-border-strong p-5">
           <p className="max-w-prose text-sm leading-relaxed text-fg-muted">Automations you save show up here with their next run and last result, so build your first one above.</p>
         </div>
@@ -80,6 +88,8 @@ export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRem
           ))}
         </ul>
       )}
+
+      {hasOthers && <div data-testid="automations-made-before">{others}</div>}
     </section>
   );
 }

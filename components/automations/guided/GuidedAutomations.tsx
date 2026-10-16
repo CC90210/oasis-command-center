@@ -12,8 +12,12 @@
  *
  * `api` is optional because a Server Component cannot hand a function to a Client Component: the page
  * leaves it out and this component uses the browser client. Only the tests pass one.
+ *
+ * `children` are the automations made before this builder (the page passes its scheduled-jobs list). They
+ * are listed inside "Your automations", under the builder's own rows, never folded away: CC, 2026-10-16,
+ * "my automations aren't being displayed - the ones I previously built aren't showing up".
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { guidedApi, type GuidedApi, type GuidedAutomationView, type GuidedContextView } from "@/lib/automations/guided/api-types";
 import { loadContext, loadList } from "@/lib/automations/guided/flow";
 import { editSession, upsertItem, type LoadState } from "@/lib/automations/guided/view";
@@ -30,11 +34,13 @@ export type GuidedAutomationsProps = {
   initialList?: LoadState<GuidedAutomationView[]>;
   initialBuilder?: BuilderInitial;
   initialRows?: Readonly<Record<string, RowInitial>>;
+  /** The automations made another way, listed under "Your automations" after the builder's own rows. */
+  children?: ReactNode;
 };
 
 type Session = { key: number; edit: GuidedAutomationView | null };
 
-export function GuidedAutomations({ api = guidedApi, nowMs, initialContext, initialList, initialBuilder, initialRows }: GuidedAutomationsProps) {
+export function GuidedAutomations({ api = guidedApi, nowMs, initialContext, initialList, initialBuilder, initialRows, children }: GuidedAutomationsProps) {
   const [context, setContext] = useState<LoadState<GuidedContextView>>(initialContext ?? { kind: "loading" });
   const [list, setList] = useState<LoadState<GuidedAutomationView[]>>(initialList ?? { kind: "loading" });
   const [session, setSession] = useState<Session>({ key: 0, edit: null });
@@ -138,6 +144,7 @@ export function GuidedAutomations({ api = guidedApi, nowMs, initialContext, init
         onTested={() => void loadItems(true)}
         onRetry={() => void loadItems(false)}
         initialRows={initialRows}
+        others={children}
       />
     </div>
   );
