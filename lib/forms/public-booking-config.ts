@@ -42,14 +42,21 @@ export function isPublicBookingFormSlug(formSlug: string): boolean {
   return publicBookingForms.has(formSlug.trim().toLowerCase());
 }
 
+// Own keys only: never an inherited Object member for a slug like "constructor".
+const ownKey = (table: object, key: string): boolean => Object.prototype.hasOwnProperty.call(table, key);
+
 export function publicBookingDurationMinutes(formSlug: string): number {
   const normalized = formSlug.trim().toLowerCase() as (typeof PUBLIC_BOOKING_FORM_SLUGS)[number];
-  return PUBLIC_BOOKING_DURATION_BY_FORM[normalized] || PUBLIC_BOOKING_DURATION_BY_FORM[AI_AUDIT_SLUG];
+  return ownKey(PUBLIC_BOOKING_DURATION_BY_FORM, normalized)
+    ? PUBLIC_BOOKING_DURATION_BY_FORM[normalized]
+    : PUBLIC_BOOKING_DURATION_BY_FORM[AI_AUDIT_SLUG];
 }
 
 export function publicBookingOfferLabel(formSlug: string): string {
   const normalized = formSlug.trim().toLowerCase() as (typeof PUBLIC_BOOKING_FORM_SLUGS)[number];
-  return PUBLIC_BOOKING_OFFER_LABEL_BY_FORM[normalized] || PUBLIC_BOOKING_OFFER_LABEL_BY_FORM[AI_AUDIT_SLUG];
+  return ownKey(PUBLIC_BOOKING_OFFER_LABEL_BY_FORM, normalized)
+    ? PUBLIC_BOOKING_OFFER_LABEL_BY_FORM[normalized]
+    : PUBLIC_BOOKING_OFFER_LABEL_BY_FORM[AI_AUDIT_SLUG];
 }
 
 export function isPublicBookingForm(input: { tenantId: string; formSlug: string }): boolean {

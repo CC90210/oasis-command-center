@@ -197,6 +197,13 @@ await check("keeps public offer names explicit instead of inferring them from du
   assert.equal(publicBookingOfferLabel("command"), "COMMAND discovery call");
   assert.equal(publicBookingOfferLabel("fleet"), "FLEET discovery call");
   assert.equal(publicBookingOfferLabel("book"), "discovery call");
+  // Own keys only: a slug or typed answer like "constructor" never reads an
+  // inherited Object member (Codex review of #630 found the shape elsewhere).
+  for (const word of ["constructor", "toString", "__proto__"]) {
+    assert.equal(publicBookingDurationMinutes(word), 15, word);
+    assert.equal(publicBookingOfferLabel(word), "AI automation audit", word);
+    assert.equal(buildPublicFunnelLeadPatch({ bottleneck_detail: word }, "inbound_lead").primary_bottleneck, word, word);
+  }
   assert.match(bookingRoute, /offerLabel: publicBookingOfferLabel|const offerLabel = publicBookingOfferLabel/);
 });
 
