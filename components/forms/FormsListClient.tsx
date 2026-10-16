@@ -52,6 +52,8 @@ import { OffersCardsGrid, type OfferCardEntry } from "./OffersCardsClient";
 import type { OfferCardViewModel } from "./OfferCard";
 import { offerCreateSlug, slugTakenMessage, ROUTER_SLUG } from "@/lib/offers/router-create";
 import { offerShareablePath } from "@/lib/offers/short-links";
+import { WritePageDescription, WritePageToggle } from "@/components/offer-pages/WritePageFields";
+import { requestWrittenPage, writePageInputProblem } from "@/lib/offer-pages/write-page-client";
 import type { FunnelCounts } from "@/lib/offers/tracking-store";
 
 type FormRow = {
@@ -137,6 +139,14 @@ export function FormsListClient({
   const router = useRouter();
   const searchParams = useSearchParams();
   const [rows, setRows] = useState(initialRows);
+  // A refresh (router.refresh) brings new rows from the server, such as an
+  // offer New offer made before its words failed: take them up, so it shows.
+  // React's "adjust state when a prop changes", during render, not an effect.
+  const [rowsFrom, setRowsFrom] = useState(initialRows);
+  if (rowsFrom !== initialRows) {
+    setRowsFrom(initialRows);
+    setRows(initialRows);
+  }
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // false = closed; "offer" = the ordinary New offer picker; "router" = the
@@ -585,7 +595,11 @@ export function FormsListClient({
           profileSlug={profileSlug}
           tenantName={tenantName}
           tenantLogoUrl={tenantLogoUrl}
-          onClose={() => setPicker(false)}
+          onClose={() => {
+            setPicker(false);
+            // The dialog can close on an offer it already made (its words failed): show it in the list.
+            router.refresh();
+          }}
           onCreated={(id) => router.push(`/forms/${id}/edit`)}
         />
       ) : null}
@@ -719,6 +733,14 @@ function NewOfferPicker({
   const [slugTouched, setSlugTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Write my page" (lib/offer-pages/write-page.ts): on by default, so a new
+  // offer opens on a page with words in it, not an empty template.
+  const [description, setDescription] = useState("");
+  const [writeIt, setWriteIt] = useState(true);
+  const [phase, setPhase] = useState<"form" | "writing">("form");
+  // Set when the offer exists but its words could not be written: the owner
+  // can still open it (the draft is saved) instead of being stuck here.
+  const [createdId, setCreatedId] = useState<string | null>(null);
   const typedSlug = slugTouched ? slug : slugify(name);
   const linkName = offerCreateSlug(routerMode, typedSlug);
 
@@ -726,6 +748,8 @@ function NewOfferPicker({
     setError(null);
     if (!name.trim()) return setError("Give the offer a name.");
     if (!SLUG_RE.test(linkName)) return setError("The link name needs at least two letters or numbers, with dashes between words.");
+    const problem = writeIt ? writePageInputProblem(description) : null;
+    if (problem) return setError(`${problem} Or untick Write the page for me.`);
     setBusy(true);
     try {
       // The template's form steps, in the workspace's own look. No headline: the
@@ -761,12 +785,37 @@ function NewOfferPicker({
         setError(made.message || "The form was made, but its page wasn't. Open the form from the list and choose Turn into an offer.");
         return;
       }
+      if (writeIt) {
+        setPhase("writing");
+        const written = await requestWrittenPage(data.form.id, { description });
+        if (!written.ok) {
+          setPhase("form");
+          setCreatedId(data.form.id);
+          setError(`The offer is made, but its words weren't written. ${written.message}`);
+          return;
+        }
+      }
       onCreated(data.form.id);
     } catch {
       setError("Couldn't create the offer: the connection dropped. Check it and try again.");
     } finally {
       setBusy(false);
     }
+  }
+
+  /** The offer exists but its words weren't written: write them again, here. */
+  async function retryWrite() {
+    if (!createdId) return;
+    const problem = writePageInputProblem(description);
+    if (problem) return setError(problem);
+    setError(null);
+    setBusy(true);
+    setPhase("writing");
+    const written = await requestWrittenPage(createdId, { description });
+    setPhase("form");
+    setBusy(false);
+    if (!written.ok) return setError(`The offer is made, but its words weren't written. ${written.message}`);
+    onCreated(createdId);
   }
 
   return (
@@ -786,7 +835,8 @@ function NewOfferPicker({
                 : "A full page with your form inside. Templates set the sections only; every word is yours to write."}
             </p>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="text-fg-dim hover:text-fg">
+          {/* Not while making or writing: a request that lands after closing would still open the offer. */}
+          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" className="text-fg-dim hover:text-fg disabled:opacity-40">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -797,8 +847,11 @@ function NewOfferPicker({
               type="button"
               key={t.key}
               onClick={() => setTemplate(t.key)}
+              // Once the offer exists (its words failed), its template, name and
+              // link are saved: a retry writes words only, so they are locked.
+              disabled={!!createdId}
               aria-pressed={template === t.key}
-              className={`rounded-xl border p-4 text-left transition-colors ${
+              className={`rounded-xl border p-4 text-left transition-colors disabled:opacity-60 ${
                 template === t.key ? "border-accent bg-accent/10" : "border-bg-border hover:border-bg-border-strong"
               }`}
             >
@@ -811,7 +864,7 @@ function NewOfferPicker({
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <label className="block text-xs text-fg-muted">
             {routerMode ? "Page name (only your team sees it)" : "Offer name (only your team sees it)"}
-            <input value={name} onChange={(e) => setName(e.target.value)} className="input mt-1 w-full" maxLength={120} />
+            <input value={name} onChange={(e) => setName(e.target.value)} disabled={!!createdId} className="input mt-1 w-full" maxLength={120} />
           </label>
           {routerMode ? (
             <div className="block text-xs text-fg-muted">
@@ -829,6 +882,7 @@ function NewOfferPicker({
                   setSlugTouched(true);
                   setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 63));
                 }}
+                disabled={!!createdId}
                 className="input mt-1 w-full font-mono"
                 maxLength={63}
               />
@@ -836,21 +890,50 @@ function NewOfferPicker({
           )}
         </div>
 
+        <WritePageDescription value={description} onChange={setDescription} disabled={busy} className="mt-4" />
+        {createdId ? null : <WritePageToggle checked={writeIt} onChange={setWriteIt} disabled={busy} className="mt-2" />}
+
         {error ? <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-400">{error}</div> : null}
 
         <div className="mt-6 flex items-center justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-fg-muted hover:text-fg">
+          <button type="button" onClick={onClose} disabled={busy} className="rounded-lg px-4 py-2 text-sm text-fg-muted hover:text-fg disabled:opacity-40">
             Cancel
           </button>
-          <button
-            type="button"
-            onClick={create}
-            disabled={busy}
-            className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-bold text-bg-deep hover:bg-accent-bright disabled:opacity-50"
-          >
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            {routerMode ? "Create the start-here page" : "Create the offer"}
-          </button>
+          {createdId ? (
+            <>
+              <button
+                type="button"
+                onClick={() => onCreated(createdId)}
+                disabled={busy}
+                className="inline-flex items-center gap-2 rounded-lg border border-bg-border px-4 py-2 text-sm font-semibold text-fg hover:border-bg-border-strong disabled:opacity-50"
+              >
+                Open the page anyway
+              </button>
+              <button
+                type="button"
+                onClick={retryWrite}
+                disabled={busy}
+                className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-bold text-bg-deep hover:bg-accent-bright disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {phase === "writing" ? "Writing your page..." : "Try writing again"}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={create}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-bold text-bg-deep hover:bg-accent-bright disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {phase === "writing"
+                ? "Writing your page..."
+                : routerMode
+                  ? "Create the start-here page"
+                  : "Create the offer"}
+            </button>
+          )}
         </div>
         <p className="mt-3 text-[11px] text-fg-dim">
           The page goes public when you press Publish. Until then its link shows only a plain form, titled with your

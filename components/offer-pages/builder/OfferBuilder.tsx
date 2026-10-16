@@ -22,6 +22,8 @@ import { fieldLabel } from "@/lib/offer-pages/field-labels";
 import { BookEditor, BriefEditor, HeroEditor, SectionCard, newSection, type ChipState } from "./SectionEditors";
 import { PublishChecklist } from "./PublishChecklist";
 import { VideoPicker } from "./VideoPicker";
+import { WriteEmptyParts } from "./WriteEmptyParts";
+import { applyWrittenCopy, type WrittenCopy } from "@/lib/offer-pages/write-page";
 import { TextField, Tick } from "./fields";
 import { offerShareablePath } from "@/lib/offers/short-links";
 
@@ -102,6 +104,12 @@ export function OfferBuilder({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTicks = useRef<{ confirm: string[]; unconfirm: string[] }>({ confirm: [], unconfirm: [] });
   const conflict = useRef(false);
+  // The same conflict as state, for the screen: it stays set until reload,
+  // unlike `saving`, which an edit moves on to "pending".
+  const [conflicted, setConflicted] = useState(false);
+  // The page as last edited, set in `update` itself (not after render), so
+  // "Write the empty parts" (takeCopy) always fills the latest one.
+  const docRef = useRef<OfferPageDoc | null>(initial.draft);
 
   /** One draft save; true only when the server took it. */
   const saveOnce = useCallback(async (next: OfferPageDoc): Promise<boolean> => {
@@ -117,7 +125,10 @@ export function OfferBuilder({
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; offer?: OfferView; error?: string; message?: string; path?: string; reason?: string };
       if (!data.ok || !data.offer) {
-        if (data.error === "draft_conflict") conflict.current = true;
+        if (data.error === "draft_conflict") {
+          conflict.current = true;
+          setConflicted(true);
+        }
         setSaving("error");
         setSaveError(
           data.message ||
@@ -145,6 +156,7 @@ export function OfferBuilder({
 
   const update = useCallback(
     (next: OfferPageDoc) => {
+      docRef.current = next;
       setDoc(next);
       setSaving("pending");
       if (timer.current) clearTimeout(timer.current);
@@ -156,6 +168,47 @@ export function OfferBuilder({
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
   }, []);
+
+  // "Write the empty parts" (WriteEmptyParts): the route returns vetted copy
+  // and saves nothing; it fills the fields still empty on the page as it is
+  // when the answer arrives (an edit made meanwhile is kept), and the result
+  // saves like any other edit. One writer to this draft: this editor. Refused
+  // while a conflict stops every save (words that could not be kept are not
+  // put on screen as written), and when the brief they were written from has
+  // changed since, in the panel or in the Copy brief (they would not match it).
+  const takeCopy = useCallback(
+    async (
+      copy: WrittenCopy,
+      asked: { description: string; audience: string },
+    ): Promise<string[] | "conflict" | "brief_changed" | "not_saved"> => {
+      const latest = docRef.current;
+      if (!latest || conflict.current) return "conflict";
+      if ((latest.brief?.promise ?? "") !== asked.description || (latest.brief?.audience ?? "") !== asked.audience) {
+        return "brief_changed";
+      }
+      const { doc: next, filled } = applyWrittenCopy(latest, copy);
+      if (!filled.length) return filled;
+      // Saved now, not after the edit debounce, and "Written" is said only once
+      // the save has landed: leaving the page a moment later cannot drop it.
+      docRef.current = next;
+      setDoc(next);
+      if (timer.current) clearTimeout(timer.current);
+      await saver.save(next);
+      if (await saver.idle()) return filled;
+      if (conflict.current) {
+        // A conflict (perhaps from a save already in flight) stops every save,
+        // so these words can never be kept: take them back off the page, unless
+        // it has been edited since, and say why.
+        if (docRef.current === next) {
+          docRef.current = latest;
+          setDoc(latest);
+        }
+        return "conflict";
+      }
+      return "not_saved";
+    },
+    [saver],
+  );
 
   const chips = useMemo(() => {
     const out: Partial<Record<BodyKey, ChipState>> = {};
@@ -249,6 +302,13 @@ export function OfferBuilder({
 
   return (
     <div className="space-y-5">
+      <WriteEmptyParts
+        formId={form.id}
+        doc={doc}
+        onBrief={(promise) => update({ ...doc, brief: { ...(doc.brief ?? {}), promise } })}
+        onCopy={takeCopy}
+        saveFailed={saving === "error" || conflicted}
+      />
       <div className="flex flex-wrap items-center gap-3 text-xs text-fg-muted">
         <span>
           {saving === "saving" ? (

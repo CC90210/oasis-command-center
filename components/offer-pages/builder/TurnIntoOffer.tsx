@@ -14,6 +14,8 @@ import { useRouter } from "next/navigation";
 import { Loader2, Sparkles } from "lucide-react";
 import { OFFER_TEMPLATES } from "@/lib/offer-pages/templates";
 import type { TemplateKey } from "@/lib/offer-pages/types";
+import { WritePageDescription, WritePageToggle } from "@/components/offer-pages/WritePageFields";
+import { requestWrittenPage, writePageInputProblem } from "@/lib/offer-pages/write-page-client";
 
 export function TurnIntoOffer({ formId }: { formId: string }) {
   const router = useRouter();
@@ -21,8 +23,20 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
   const [template, setTemplate] = useState<TemplateKey>("free_audit");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Write my page" (lib/offer-pages/write-page.ts), on by default.
+  const [description, setDescription] = useState("");
+  const [writeIt, setWriteIt] = useState(true);
+  const [writing, setWriting] = useState(false);
+  // The page exists but its words could not be written: say why here, and
+  // open it on request. Its editor offers "Write the empty parts" to retry.
+  const [made, setMade] = useState(false);
 
   async function go() {
+    const problem = writeIt ? writePageInputProblem(description) : null;
+    if (problem) {
+      setError(`${problem} Or untick Write the page for me.`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -35,6 +49,16 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
       if (!data.ok) {
         setError(data.message || "Couldn't make the page. Try again in a moment.");
         return;
+      }
+      if (writeIt) {
+        setWriting(true);
+        const written = await requestWrittenPage(formId, { description });
+        setWriting(false);
+        if (!written.ok) {
+          setMade(true);
+          setError(`The page is made, but its words weren't written. ${written.message} Open it to try again with Write the empty parts.`);
+          return;
+        }
       }
       router.refresh();
     } catch {
@@ -67,24 +91,41 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
             type="button"
             key={t.key}
             onClick={() => setTemplate(t.key)}
+            // The page exists once made: its template is saved, so it is locked.
+            disabled={made || busy}
             aria-pressed={template === t.key}
-            className={`rounded-xl border p-3 text-left ${template === t.key ? "border-accent bg-accent/10" : "border-bg-border hover:border-bg-border-strong"}`}
+            className={`rounded-xl border p-3 text-left disabled:opacity-60 ${template === t.key ? "border-accent bg-accent/10" : "border-bg-border hover:border-bg-border-strong"}`}
           >
             <div className="text-sm font-bold text-fg">{t.label}</div>
             <div className="mt-1 text-xs text-fg-muted">{t.summary}</div>
           </button>
         ))}
       </div>
+      {/* Locked once the page is made: from here the only paths are Open or Close, and the retry lives on the page's editor. */}
+      <WritePageDescription value={description} onChange={setDescription} disabled={busy || made} />
+      <WritePageToggle checked={writeIt} onChange={setWriteIt} disabled={busy || made} />
       <p className="text-[12px] text-fg-muted">
-        The page starts as a draft with only this form&apos;s own headline. Your link keeps showing the plain form until you publish.
+        The page starts as a draft. Your link keeps showing the plain form until you publish.
       </p>
       {error ? <p className="text-[13px] text-rose-400">{error}</p> : null}
       <div className="flex gap-2">
-        <button type="button" className="btn-primary !px-3 !py-1.5 text-xs" onClick={go} disabled={busy}>
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Make the draft page"}
-        </button>
-        <button type="button" className="btn-secondary !px-3 !py-1.5 text-xs" onClick={() => setOpen(false)}>
-          Cancel
+        {made ? (
+          <button type="button" className="btn-primary !px-3 !py-1.5 text-xs" onClick={() => router.refresh()}>
+            Open the page
+          </button>
+        ) : (
+          <button type="button" className="btn-primary !px-3 !py-1.5 text-xs" onClick={go} disabled={busy}>
+            {writing ? "Writing your page..." : busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Make the draft page"}
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn-secondary !px-3 !py-1.5 text-xs"
+          onClick={() => (made ? router.refresh() : setOpen(false))}
+          // Not while making or writing: a request that lands after cancelling would still refresh into the editor.
+          disabled={busy}
+        >
+          {made ? "Close" : "Cancel"}
         </button>
       </div>
     </div>
