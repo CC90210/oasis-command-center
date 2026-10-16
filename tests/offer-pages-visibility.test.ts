@@ -16,7 +16,10 @@
  *     when it has a title; the hero headline falls back to the form's own; the
  *     transcript appears only under a drawn video;
  *   - pricing draws only tiers with a name, a price and an owner's confirmation
- *     (who and when, as a bonus value), and is in the menu when pinned.
+ *     (who and when, as a bonus value), and is in the menu when pinned;
+ *   - the owner's preview (`unconfirmed`) also draws an unconfirmed price and
+ *     guarantee, each marked, and a confirmed one unmarked; without the option
+ *     (the public page) nothing changes.
  *
  * Pure. Run: node --conditions=react-server --import tsx tests/offer-pages-visibility.test.ts
  */
@@ -216,6 +219,38 @@ t("pricing: only a tier with a name, a price and an owner's confirmation is draw
   assert.deepEqual(pricing([{ name: "Turnkey", price: "$2,500" }], "Prices in CAD"), [], "nothing confirmed: no section, no orphan note");
   const d = doc([{ key: "pricing", tiers: [{ name: "DIY", price: "$497", confirmed: OK }] }], { nav: { pinned: ["pricing"] } });
   assert.deepEqual(navFor(d, drawnSections(d, everything)), [{ key: "pricing", anchor: "pricing", label: "Pricing" }]);
+});
+
+t("the owner's preview draws an unconfirmed price and guarantee, marked; the public rules are unchanged", () => {
+  const d = doc(
+    [
+      { key: "pricing", tiers: [{ name: "DIY", price: "$497", confirmed: OK }, { name: "Turnkey", price: "$2,500" }, { name: "", price: "$1" }], currency_note: "Prices in US dollars." },
+      { key: "guarantee", body: "Your money back in 30 days." },
+    ] as unknown as OfferPageDoc["sections"],
+  );
+  const pub = drawnPage(d, { fallbackHeadline: "H", media: everything });
+  const pubPricing = pub.sections.find((s) => s.key === "pricing") as Extract<ReturnType<typeof drawnSections>[number], { key: "pricing" }>;
+  assert.deepEqual(pubPricing.tiers.map((x) => x.name), ["DIY"], "the public page drew an unconfirmed price");
+  assert.ok(pubPricing.tiers.every((x) => !("unconfirmed" in x)), "a confirmed price is marked");
+  assert.equal(pub.sections.some((s) => s.key === "guarantee"), false, "the public page drew an unconfirmed guarantee");
+
+  const pre = drawnPage(d, { fallbackHeadline: "H", media: everything, unconfirmed: true });
+  const prePricing = pre.sections.find((s) => s.key === "pricing") as typeof pubPricing;
+  assert.deepEqual(
+    prePricing.tiers.map((x) => [x.name, x.unconfirmed ?? false]),
+    [
+      ["DIY", false],
+      ["Turnkey", true],
+    ],
+    "the preview drew the unconfirmed price unmarked, or the nameless one",
+  );
+  assert.equal(prePricing.currencyNote, "Prices in US dollars.");
+  const g = pre.sections.find((s) => s.key === "guarantee") as Extract<ReturnType<typeof drawnSections>[number], { key: "guarantee" }>;
+  assert.equal(g.unconfirmed, true);
+  // Nothing confirmed anywhere: the public page has no pricing section at all, the preview has one.
+  const none = doc([{ key: "pricing", tiers: [{ name: "Turnkey", price: "$2,500" }] }] as unknown as OfferPageDoc["sections"]);
+  assert.deepEqual(drawnSections(none, everything), []);
+  assert.equal(drawnSections(none, everything, { unconfirmed: true }).length, 1);
 });
 
 t("the transcript appears only under a drawn video", () => {

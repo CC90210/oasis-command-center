@@ -35,6 +35,9 @@
  *  10. The Offers list (FormsListClient) renders on the server with an enabled
  *      offer row and a workspace link: a client component is server-rendered
  *      first, where there is no window.
+ *  11. The owner's preview draws a price and a guarantee nobody confirmed yet,
+ *      each with its "Not confirmed yet" note, so the whole page reads; the
+ *      public page of the same document draws neither, and no note.
  *
  * The markup comes from tests/offer-pages-public.render.ts, run as a child
  * process without the react-server condition (react-dom/server does not load
@@ -61,6 +64,7 @@ const FORM_VSL = "f0f1c000-0000-4000-8000-000000000001";
 const FORM_LIB = "f0f1c000-0000-4000-8000-000000000002";
 const FORM_NEW = "f0f1c000-0000-4000-8000-000000000003";
 const FORM_FOREIGN_THUMB = "f0f1c000-0000-4000-8000-000000000004";
+const FORM_PRICED = "f0f1c000-0000-4000-8000-000000000005";
 const YT = "dQw4w9WgXcQ";
 /** What New offer stores as the form's name: internal, by the dialog's own words. */
 const INTERNAL_NAME = "Q4 Meta test - cold list, do not share";
@@ -101,6 +105,24 @@ function liveDoc(headline: string) {
     ],
     book: { title: "Book a walkthrough", mode: "form_then_link", qualify: "after" },
     seo: { title: "Lead system walkthrough", description: "A short page.", indexable: false },
+  };
+}
+
+/** A page with one confirmed price, one unconfirmed price and an unconfirmed guarantee. */
+function pricedDoc() {
+  return {
+    ...liveDoc("Priced page"),
+    sections: [
+      {
+        key: "pricing",
+        tiers: [
+          { name: "DIY", price: "$497", cadence: "a month", confirmed: OK },
+          { name: "Turnkey", price: "$2,500", cadence: "setup" },
+        ],
+        currency_note: "Prices in US dollars.",
+      },
+      { key: "guarantee", body: "Money back in 30 days." },
+    ],
   };
 }
 
@@ -164,6 +186,15 @@ async function main() {
             video: { source: "youtube", id: YT, rights: OK, aspect: "16:9", thumb_path: `${CLIENT_A}/offer-pages/youtube-${YT}.jpg` },
           },
         },
+        live: 1,
+      }),
+      // A live page whose price and guarantee nobody confirmed yet (published by hand, as a page from before the gate).
+      formRow(FORM_PRICED, OASIS, "priced", "Priced offer", CONTACT_STEPS, { headline: "Plain" }),
+      offerRow({
+        formId: FORM_PRICED,
+        tenantId: OASIS,
+        draft: pricedDoc(),
+        published: pricedDoc(),
         live: 1,
       }),
     ],
@@ -344,6 +375,33 @@ async function main() {
     scenarios.foreignThumb = { kind: "offer", props: plain(el.props) };
   });
 
+  await step("the owner's preview draws an unconfirmed price and guarantee, marked; a visitor gets neither", async () => {
+    type Sections = Array<{ key: string; tiers?: Array<{ name: string; unconfirmed?: boolean }>; unconfirmed?: boolean }>;
+    await login(USERS.cc);
+    const owner = await run("priced", { offer_preview: "1" });
+    assert.deepEqual(owner.props.preview, { steps: ["Your details", "About you"] }, "precondition: the owner's preview");
+    const ownerSections = (owner.props.prepared as { page: { sections: Sections } }).page.sections;
+    assert.deepEqual(
+      ownerSections.find((s) => s.key === "pricing")?.tiers?.map((x) => [x.name, x.unconfirmed === true]),
+      [
+        ["DIY", false],
+        ["Turnkey", true],
+      ],
+    );
+    assert.equal(ownerSections.find((s) => s.key === "guarantee")?.unconfirmed, true);
+    scenarios.previewUnconfirmed = { kind: "offer", props: plain(owner.props) };
+    await login(null);
+    for (const sp of [{}, { offer_preview: "1" }]) {
+      const visitor = await run("priced", sp);
+      assert.equal(visitor.props.preview, null);
+      const sections = (visitor.props.prepared as { page: { sections: Sections } }).page.sections;
+      assert.deepEqual(sections.find((s) => s.key === "pricing")?.tiers?.map((x) => x.name), ["DIY"], "a visitor got the unconfirmed price");
+      assert.equal(sections.some((s) => s.key === "guarantee"), false, "a visitor got the unconfirmed guarantee");
+      assert.doesNotMatch(JSON.stringify(visitor.props), /unconfirmed/, "a visitor's props carry an unconfirmed mark");
+    }
+    scenarios.publicUnconfirmed = { kind: "offer", props: plain((await run("priced")).props) };
+  });
+
   // The Offers list: rendered on the server first, like any client component.
   scenarios.offersList = {
     kind: "list",
@@ -453,6 +511,18 @@ async function main() {
     assert.ok(h.includes("Preview of your unpublished page"));
     assert.ok(h.includes("A preview never sends anything"));
     assert.doesNotMatch(h, /<input\b/i, "a preview drew form inputs");
+  });
+
+  await step("the owner's preview reads whole, each unconfirmed piece with its note; the public page has neither", () => {
+    const pre = html.previewUnconfirmed;
+    assert.ok(pre.includes("$2,500") && pre.includes("Money back in 30 days."), "the preview left out the unconfirmed price or guarantee");
+    assert.equal((pre.match(/data-unconfirmed=""/g) || []).length, 2, "one note per unconfirmed piece: the Turnkey price and the guarantee");
+    assert.ok(pre.includes("Not confirmed yet. Visitors see this price only after an owner confirms it on Confirm &amp; publish."));
+    assert.ok(pre.includes("Not confirmed yet. Visitors see the guarantee only after an owner confirms it on Confirm &amp; publish."));
+    const pub = html.publicUnconfirmed;
+    assert.ok(pub.includes("$497"), "the confirmed price is missing");
+    assert.ok(!pub.includes("$2,500") && !pub.includes("Money back in 30 days."), "the public page drew an unconfirmed piece");
+    assert.doesNotMatch(pub, /data-unconfirmed|Not confirmed yet/, "the public page carries a preview note");
   });
 
   await step("another workspace's thumbnail is nowhere in the page a visitor gets", () => {

@@ -25,6 +25,13 @@
  *
  * The top menu lists only sections that are drawn AND pinned.
  *
+ * THE OWNER'S PREVIEW (`unconfirmed`, drawnPage's ctx). A price or a guarantee
+ * no owner has confirmed yet is drawn too, marked `unconfirmed`, so the owner
+ * sees the whole page before ticking it (CC 2026-10-16: "each offer has its own
+ * landing page"; a preview without its prices read as a broken page). Only
+ * app/f/.../page.tsx's signed-in owner preview sets it (render.ts `preview`);
+ * the public page never does, so nothing unconfirmed ever reaches a visitor.
+ *
  * Pure: the public page, the builder's status chips and the tests share it.
  * Whether a video can play or an image can be shown is the caller's answer
  * (`media`), because only the server can check a Library asset.
@@ -67,10 +74,14 @@ export type DrawnSection =
       total: { cents: number; currency: Money["currency"] } | null;
     }
   | { key: "pricing"; head: Head; tiers: DrawnTier[]; currencyNote: string | null }
-  | { key: "guarantee"; head: Head; body: string; termsUrl: string | null }
+  /** `unconfirmed`: the owner's preview only (see the header), never the public page. */
+  | { key: "guarantee"; head: Head; body: string; termsUrl: string | null; unconfirmed?: true }
   | { key: "faq"; head: Head; items: { q: string; a: string }[] };
 
-/** A pricing tier as the page draws it: only ever one an owner confirmed. */
+/**
+ * A pricing tier as the page draws it: only ever one an owner confirmed, but
+ * in the owner's preview, where an unconfirmed one is drawn marked `unconfirmed`.
+ */
 export type DrawnTier = {
   index: number;
   name: string;
@@ -81,7 +92,12 @@ export type DrawnTier = {
   summary: string | null;
   includes: string[];
   highlighted: boolean;
+  /** The owner's preview only: no owner has confirmed this price yet. */
+  unconfirmed?: true;
 };
+
+/** What to draw beyond the public rules: the owner's preview of the draft only. */
+export type DrawOptions = { unconfirmed?: boolean };
 
 export type DrawnPage = {
   hero: {
@@ -147,7 +163,8 @@ function headOf(s: Head): Head {
 }
 
 /** Every section this document draws, in its order, each holding only complete items. */
-export function drawnSections(doc: OfferPageDoc, media: MediaCheck): DrawnSection[] {
+export function drawnSections(doc: OfferPageDoc, media: MediaCheck, opts: DrawOptions = {}): DrawnSection[] {
+  const preview = opts.unconfirmed === true;
   const out: DrawnSection[] = [];
   for (const s of doc.sections) {
     if (s.hidden) continue;
@@ -229,8 +246,9 @@ export function drawnSections(doc: OfferPageDoc, media: MediaCheck): DrawnSectio
       case "pricing": {
         const tiers: DrawnTier[] = s.tiers
           .map((it, index) => ({ it, index }))
-          // Only an owner's sign-off (who and when) draws a price, as with a bonus value.
-          .filter(({ it }) => filled(it.name) && filled(it.price) && isConfirmed(it.confirmed))
+          // Only an owner's sign-off (who and when) draws a price, as with a
+          // bonus value. The owner's preview draws the rest too, marked.
+          .filter(({ it }) => filled(it.name) && filled(it.price) && (preview || isConfirmed(it.confirmed)))
           .map(({ it, index }) => ({
             index,
             name: it.name,
@@ -240,13 +258,20 @@ export function drawnSections(doc: OfferPageDoc, media: MediaCheck): DrawnSectio
             summary: filled(it.summary) ? it.summary : null,
             includes: (it.includes ?? []).filter(filled),
             highlighted: it.highlighted === true,
+            ...(isConfirmed(it.confirmed) ? {} : { unconfirmed: true as const }),
           }));
         if (tiers.length) out.push({ key: "pricing", head, tiers, currencyNote: filled(s.currency_note) ? s.currency_note : null });
         break;
       }
       case "guarantee": {
-        if (filled(s.body) && isConfirmed(s.confirmed)) {
-          out.push({ key: "guarantee", head, body: s.body, termsUrl: s.terms_url ?? null });
+        if (filled(s.body) && (preview || isConfirmed(s.confirmed))) {
+          out.push({
+            key: "guarantee",
+            head,
+            body: s.body,
+            termsUrl: s.terms_url ?? null,
+            ...(isConfirmed(s.confirmed) ? {} : { unconfirmed: true as const }),
+          });
         }
         break;
       }
@@ -269,8 +294,8 @@ export function navFor(doc: OfferPageDoc, drawn: DrawnSection[]): DrawnPage["nav
 }
 
 /** The whole page as it will be drawn. */
-export function drawnPage(doc: OfferPageDoc, ctx: { fallbackHeadline: string; media: MediaCheck }): DrawnPage {
-  const sections = drawnSections(doc, ctx.media);
+export function drawnPage(doc: OfferPageDoc, ctx: { fallbackHeadline: string; media: MediaCheck } & DrawOptions): DrawnPage {
+  const sections = drawnSections(doc, ctx.media, { unconfirmed: ctx.unconfirmed });
   const heroVideo = doc.hero.video && ctx.media.video("hero", doc.hero.video) ? { ref: "hero", video: doc.hero.video } : null;
   const script = doc.hero.vsl_script?.text;
   return {
