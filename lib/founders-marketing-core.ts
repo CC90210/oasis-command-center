@@ -1063,6 +1063,24 @@ export function assetHref(id: string, from?: string | null): string {
     : `/founders/marketing/asset/${id}?from=${encodeURIComponent(back)}`;
 }
 
+/**
+ * What one carousel slide is, from its URL's path: a motion carousel's slides
+ * are MP4s (scripts/stockpile_to_library.py, 2026-10-15), and an MP4 drawn as
+ * an <img> is a broken-image icon with its alt text - the Library showed ten
+ * decks that way. The signed URL keeps the object key as its path (R2 presigns
+ * the key itself), so the extension is the truth; the query string never is.
+ */
+const VIDEO_EXT = /\.(mp4|m4v|mov|webm)$/i;
+export function slideKind(url: string): "video" | "image" {
+  let path = url;
+  try {
+    path = new URL(url, "https://slide.invalid").pathname;
+  } catch {
+    path = url.split(/[?#]/)[0] ?? url;
+  }
+  return VIDEO_EXT.test(path) ? "video" : "image";
+}
+
 /** Which app the phone preview imitates. */
 export type PhoneChrome = "instagram" | "tiktok";
 

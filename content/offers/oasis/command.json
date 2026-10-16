@@ -126,42 +126,54 @@
   "offer_page": {
     "v": 1,
     "template": "book_call",
-    "theme": { "canvas": "dark", "logo": "workspace" },
-    "nav": { "pinned": ["obstacles", "what_you_get", "faq"], "cta_label": "Book the call" },
+    "theme": { "canvas": "dark", "accent": "#3A86FF", "logo": "workspace", "layout": "split" },
+    "nav": { "pinned": ["obstacles", "what_you_get", "pricing", "faq"], "cta_label": "Book the call" },
     "hero": {
       "eyebrow": "COMMAND, for service businesses",
-      "headline": "Your follow-up, booking and back office, running without you",
-      "subheadline": "The OASIS Command Center answers new leads, books the call and keeps the back office moving while you do the work you are paid for. We set it up for you, or you set it up yourself.",
+      "headline": "Your business should not need four dashboards to answer one question",
+      "subheadline": "The OASIS Command Center brings Team, Growth, Clients and Money into one operating view. See what needs attention, open the source, assign the next move and see the result. OASIS sets it up around how you already work, or you set it up yourself.",
       "cta_label": "Book your discovery call",
       "video": null,
       "show_transcript": false,
       "vsl_script": {
-        "source": "cc",
-        "text": "COMMAND VSL. Target length 3 to 6 minutes. Adon or CC on camera, landscape, eye level, quiet room. Oasis Studio adds captions, b-roll, the screen recordings named below and the OASIS end card.\nRule for the whole video: say no number, result or client story that is not on the page. Prices are said exactly as the page shows them. Every screen recording uses a synthetic test lead, never a real customer's details.\n\n[BEAT 1. HOOK, 0:00 to 0:20]\nOn camera: You are on a job. Your phone buzzes with a new enquiry. By the time you call back that evening, they have hired whoever answered first. Leads go cold while you work.\n\n[BEAT 2. WHO THIS IS FOR, AND WHO IT IS NOT FOR]\nOn camera: This is for service businesses doing roughly $10K to $75K a month, where the owner is still the one chasing every lead.\nIt is not for you if you are just starting out or want to build it all yourself. PROTOCOL is a better start. And if you are not ready for any of it, the free community is linked below this video.\n\n[BEAT 3. WHY IT KEEPS HAPPENING]\nOn camera: It keeps happening because follow-up has no owner. It lives in your inbox, your texts and your head, and nothing chases it unless you do. Another app does not fix that. A system that does the chasing does.\n\n[BEAT 4. WHAT WE DO ABOUT IT, SHOWN IN THE COMMAND CENTER]\nScreen recording: a test lead fills in a form.\nVoice over: Here is your follow-up and booking running without you. Watch a lead arrive.\nScreen recording: the automatic reply going out.\nVoice over: It gets an answer.\nScreen recording: the call appearing in Schedule.\nVoice over: And the call lands on the calendar. Three steps: book the call and show us where work slips. We set it up around your business, or you set it up yourself. Then the follow-up keeps going without you.\n\n[BEAT 5. WHAT YOU GET, PRICES SAID OUT LOUD]\nOn camera, matching the page word for word:\nOS DIY, $497 a month, no setup fee. You configure it yourself.\nOS Turnkey, done for you, $2,500 setup plus $997 a month, or the setup in two payments of $1,400. The 7-day setup clock starts when your onboarding vault is 100% submitted.\nManaged operating partner, $5,000 setup plus $2,500 to $3,500 a month.\nEvery monthly plan: cancel any time from your account, no cancellation fee.\nNote for the recording: once Adon picks one number for each range, say that number, and update this script and the page together.\n\n[BEAT 6. PROOF]\nNo permissioned examples are confirmed yet, so the proof is the product working: the beat 4 recording, start to finish, no cuts in the middle.\n\n[BEAT 7. CALL TO ACTION]\nOn camera: Book your discovery call below. It is 45 minutes. You talk first, then we show you the Command Center set up around what you told us. Not ready? The free community is linked right below this video."
+        "source": "maven",
+        "text": "Your business should not need four dashboards to answer one question. OASIS Command Center brings team, growth, clients, and money into one operating view. Ask what needs attention. Open the source. Assign the next move, see the result. One place to run the company and the agents inside it."
       }
     },
     "sections": [
       {
         "key": "obstacles",
         "eyebrow": "Sound familiar?",
-        "title": "The work is good. The follow-up is where it leaks.",
+        "title": "The work is good. Keeping track of it is the problem.",
         "items": [
-          { "title": "Leads go cold while you are on the job", "body": "A new enquiry comes in while you are with a customer. By the time you call back, they have hired someone who answered first." },
+          { "title": "Every question comes back to you", "body": "Where is that quote? Did anyone call them back? The answer lives in your head, so the team waits on you." },
+          { "title": "Four dashboards, no answer", "body": "The CRM, the calendar, the inbox and the invoices each hold part of the story, and none of them agree." },
+          { "title": "Leads go cold while you are on the job", "body": "A new enquiry arrives while you are with a customer. By the time you call back, they have hired someone else." },
           { "title": "Follow-up lives in your head", "body": "Quotes, callbacks and reminders sit in your inbox, your texts and a notebook. Nothing chases them unless you do." },
-          { "title": "Booking takes a string of messages", "body": "Back and forth about times before anyone is on the calendar, and some people give up halfway." },
-          { "title": "You bought tools nobody uses", "body": "Another app with another login. It was supposed to save time and became one more thing to manage." },
-          { "title": "The back office eats your evenings", "body": "Admin happens after hours, because the day belongs to the customers." }
+          { "title": "Tools nobody uses", "body": "Another app with another login. It was supposed to save time and became one more thing to manage." }
         ]
       },
       {
         "key": "what_you_get",
-        "eyebrow": "The plans",
-        "title": "Set up for you, or by you",
-        "lede": "Every plan runs on the OASIS Command Center. The difference is who sets it up and who runs it with you.",
+        "eyebrow": "The Command Center",
+        "title": "One operating view, four sections",
+        "lede": "Every plan runs on the same Command Center. The difference is who sets it up and who runs it with you.",
         "items": [
-          { "title": "OS DIY: $497 a month, no setup fee", "body": "The OASIS Command Center platform, provisioned for your business, and you configure it yourself. For owners comfortable with software. Cancel any time from your account; no cancellation fee." },
-          { "title": "OS Turnkey, done for you: $2,500 setup + $997 a month", "body": "We configure the Command Center around how your business already runs. You fill in the onboarding vault (your logins, documents and channels), and the 7-day setup clock starts when it is 100% submitted. Prefer to split the setup? Two payments of $1,400. Cancel the monthly plan any time from your account; no cancellation fee." },
-          { "title": "Managed operating partner: $5,000 setup + $2,500 to $3,500 a month", "body": "For established businesses that want a dedicated team running the system with them, with a weekly audit. Cancel any time from your account; no cancellation fee." }
+          { "title": "Team", "body": "Who owns what, and what is waiting on whom, across your people and the AI agents working beside them." },
+          { "title": "Growth", "body": "New leads, where they came from and the next follow-up, in one pipeline instead of four inboxes." },
+          { "title": "Clients", "body": "Each client's work, conversations and next steps in one place, so nobody has to ask you." },
+          { "title": "Money", "body": "Overview and analytics, transactions, invoices, bills and expenses, accounts, reports and taxes, next to the work that earned it." },
+          { "title": "Set up for you, or by you", "body": "OASIS configures it around how your business already runs, or you configure it yourself on DIY." }
+        ]
+      },
+      {
+        "key": "work",
+        "eyebrow": "How it works",
+        "title": "From the call to one view of the work",
+        "items": [
+          { "title": "Show where the work slips", "body": "Book the call and talk first: how leads come in, where they stall, and what a good week looks like." },
+          { "title": "Set it up around your business", "body": "On Turnkey and Managed, OASIS sets it up from your onboarding vault. On DIY, you configure it yourself." },
+          { "title": "Run the company from one view", "body": "Ask what needs attention, open the source, assign the next move and see the result." }
         ]
       },
       {
@@ -169,43 +181,86 @@
         "eyebrow": "On the call",
         "title": "A bonus for starting on the call",
         "items": [
-          { "title": "Expedited VIP vault bonus", "body": "Offered to owners who decide to start at the end of the discovery call. We walk you through what it includes on the call.", "value": null }
+          { "title": "Expedited VIP vault bonus", "body": "Offered to owners who decide to start at the end of the discovery call. You will hear exactly what it includes on the call.", "value": null }
+        ]
+      },
+      {
+        "key": "pricing",
+        "eyebrow": "Plans",
+        "title": "Set up for you, or by you",
+        "lede": "Same Command Center on every plan. Cancel any time from your account; no cancellation fee.",
+        "currency_note": "Prices in US dollars.",
+        "tiers": [
+          {
+            "name": "OS DIY",
+            "price": "$497",
+            "cadence": "a month, no setup fee",
+            "summary": "The Command Center, provisioned for your business. You configure it yourself.",
+            "includes": [
+              "Team, Growth, Clients and Money in one view",
+              "Provisioned for your business",
+              "For owners comfortable with software"
+            ]
+          },
+          {
+            "name": "OS Turnkey",
+            "price": "$997",
+            "cadence": "a month + $2,500 setup",
+            "summary": "OASIS configures the Command Center around how your business already runs. Setup is $2,500 paid at once, or two payments of $1,400.",
+            "includes": [
+              "Configured around your current process",
+              "One onboarding vault for logins, documents and channels",
+              "Setup starts when the vault is complete",
+              "Everything in OS DIY"
+            ],
+            "highlighted": true
+          },
+          {
+            "name": "Managed operating partner",
+            "price": "$3,000",
+            "cadence": "a month + $5,000 setup",
+            "summary": "For established businesses: a dedicated team runs the system with you.",
+            "includes": [
+              "Everything in OS Turnkey",
+              "Dedicated fleet operations",
+              "A weekly audit of what ran and what stalled"
+            ]
+          }
         ]
       },
       {
         "key": "faq",
         "title": "Questions",
         "items": [
-          { "q": "What happens on the discovery call?", "a": "It is a 45-minute video call. For the first part you talk and we listen: how leads come in, where they stall, and what a good week looks like for you. Then we share a screen and walk through the Command Center set up around what you told us. If it is a fit, you can start on the call. If it is not, we will tell you." },
-          { "q": "How does it work?", "a": "First, book the call and show us where work slips. Then we set up the Command Center around your business, or you set it up yourself on OS DIY. After that, new leads get an answer, calls land on your calendar and the follow-up keeps going without you chasing it." },
-          { "q": "Which plan is right for me?", "a": "If you are comfortable configuring software, OS DIY. If you would rather hand it over, Turnkey. If you want a team running it alongside you every week, the managed partner. We will recommend one on the call." },
-          { "q": "What do you need from me to get started?", "a": "For Turnkey, your onboarding vault: you add the logins, sign the documents and choose your channels in one place. Setup starts when it is complete." },
-          { "q": "What if the setup fee is too much right now?", "a": "Turnkey's setup can be split into two payments of $1,400. You can also start on OS DIY at $497 a month with no setup fee, or join the VIP mastermind at $97 a month and build alongside us first." },
+          { "q": "What happens on the discovery call?", "a": "It is a video call. You talk first: how leads come in, where they stall and what a good week looks like. Then you see the Command Center and how it would fit your business. If it is not a fit, you will hear that too." },
+          { "q": "Which plan is right for me?", "a": "If you are comfortable configuring software, OS DIY. If you would rather hand it over, OS Turnkey. If you want a team running it alongside you every week, the managed operating partner. You get a recommendation on the call." },
+          { "q": "What do you need from me to get started?", "a": "For Turnkey and Managed, the onboarding vault: you add the logins, sign the documents and choose your channels in one place. Setup starts when it is complete." },
+          { "q": "What if the setup fee is too much right now?", "a": "Turnkey's setup can be split into two payments. You can also start on OS DIY with no setup fee, or join the free OASIS community and build alongside other owners first." },
           { "q": "How do I cancel?", "a": "Cancel any time from your account. There is no cancellation fee." },
-          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside us, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=command&t=oasis-ai-cc" }
+          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside other owners, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=command&t=oasis-ai-cc" }
         ]
       }
     ],
     "book": {
       "eyebrow": "Next step",
       "title": "Book your discovery call",
-      "lede": "Answer a few questions about your business, then pick a time.",
+      "lede": "A few questions about your business, then a time to talk.",
       "mode": "form_then_link",
       "qualify": "after"
     },
     "seo": {
-      "title": "COMMAND: the OASIS Command Center for service businesses",
-      "description": "Follow-up, booking and back office running without you. Set up by OASIS or by you. Book a discovery call.",
+      "title": "COMMAND: the OASIS Command Center",
+      "description": "Team, Growth, Clients and Money in one operating view. Set up by OASIS around how you already work, or by you. Book a discovery call.",
       "indexable": false
     },
     "brief": {
-      "audience": "Service businesses doing about $10K-75K a month (funnel doc COMMAND, cat=p2). 2A targets tech-fluent SMBs ($10K-30K/mo), 2B service SMBs ($20K-75K/mo), 2C established businesses.",
-      "promise": "The OASIS Command Center runs your follow-up, booking and back office, set up for you or by you (HANDOVER section 4).",
-      "included": "2A OS DIY core platform (Cloudflare Worker + Turso provisioning). 2B OS Turnkey (OCC onboarding vault, then agent configuration; 7-day SLA starts only when the vault is 100% submitted). 2C Managed operating partner (dedicated fleet ops + weekly audit).",
-      "proof_available": "None confirmed. The VSL shows the product working on a synthetic lead instead.",
-      "price": "As the funnel doc states: 2A $497/mo, no setup. 2B $2,500 setup + $997/mo, or 2-pay $1,400 x 2. 2C $5,000 setup + $2,500-3,500/mo. Downsell ladder: 2-pay, then DIY $497/mo, then VIP $97/mo, then the free community. Currency unconfirmed.",
-      "bonuses": "Expedited VIP vault bonus, offered at the close of the discovery call. The funnel doc gives a $500 value; not shown until Adon or CC confirm it.",
-      "guarantee": "None confirmed. Section omitted."
+      "audience": "Service businesses doing about $10K-75K a month (oasis-ai.md pillar 2, cat=p2): DIY for tech-fluent SMBs, Turnkey for service SMBs, Managed for established businesses.",
+      "promise": "One place to run the company and the agents inside it (pack v2 command film, CC-approved).",
+      "included": "2A OS DIY, 2B OS Turnkey (onboarding vault, setup starts when it is complete), 2C Managed operating partner (dedicated fleet ops + weekly audit). Product truth: Team, Growth, Clients and Money are first-class sections; Money holds overview, analytics, transactions, invoices, bills and expenses, accounts, reports, taxes and settings.",
+      "proof_available": "None confirmed. Results section omitted.",
+      "price": "Recommended USD: DIY $497/mo no setup; Turnkey $997/mo + $2,500 setup (or 2 x $1,400); Managed $3,000/mo + $5,000 setup. CC confirms each tier in the builder.",
+      "bonuses": "Expedited VIP vault bonus at the close of the discovery call. The funnel doc's $500 value stays hidden until CC confirms it.",
+      "guarantee": "None on the page. The handover's 7-day turnkey SLA is described as a setup clock, not a guarantee, until CC confirms terms."
     }
   }
 }

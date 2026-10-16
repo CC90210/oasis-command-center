@@ -181,7 +181,15 @@ export default async function AssetDetailPage({
   // poster on file) was a black "No cover image".
   const carousel = isRenderableCarousel(asset.asset_type, slideUrls);
   const phoneMediaEl = carousel ? (
-    <CarouselFrame slides={slideUrls} title={asset.title} width={w} height={h} className="h-full w-full" />
+    <CarouselFrame
+      slides={slideUrls}
+      title={asset.title}
+      width={w}
+      height={h}
+      posterUrl={posterUrl}
+      variant="phone"
+      className="h-full w-full"
+    />
   ) : videoUrl ? (
     <TileVideo src={videoUrl} posterUrl={posterUrl} width={w} height={h} title={asset.title} variant="phone" initialOpen />
   ) : imageUrl ? (

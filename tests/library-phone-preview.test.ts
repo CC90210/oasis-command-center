@@ -35,7 +35,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { PHONE_REEL_RATIO, PHONE_SCREEN_RATIO, phoneMediaFit } from "../lib/founders-marketing-core";
+import { PHONE_REEL_RATIO, PHONE_SCREEN_RATIO, phoneMediaFit, slideKind } from "../lib/founders-marketing-core";
 
 const ROOT = join(__dirname, "..");
 
@@ -138,11 +138,13 @@ check("PhoneFrame fills 9:16 and letterboxes 1:1 and 4:5 (and 16:9) without crop
   assert.match(drawn.frames.reel, /data-fit="fill"/);
   assert.equal(mediaBox(drawn.frames.reel), "left:0%;top:0%;width:100%;height:100%");
 
+  // Instagram letterboxes are FEED posts: the media starts under the app bar and
+  // the account row (0.105W + 0.12W of a 16W/9 reel area = 12.65625%), whole.
   assert.match(drawn.frames.square, /data-fit="letterbox"/);
-  assert.equal(mediaBox(drawn.frames.square), "left:0%;top:21.875%;width:100%;height:56.25%");
+  assert.equal(mediaBox(drawn.frames.square), "left:0%;top:12.65625%;width:100%;height:56.25%");
 
   assert.match(drawn.frames.card45, /data-fit="letterbox"/);
-  assert.equal(mediaBox(drawn.frames.card45), "left:0%;top:14.84375%;width:100%;height:70.3125%");
+  assert.equal(mediaBox(drawn.frames.card45), "left:0%;top:12.65625%;width:100%;height:70.3125%");
 
   assert.match(drawn.frames.wide, /data-fit="letterbox"/);
   assert.match(mediaBox(drawn.frames.wide), /width:100%;height:31\.6406%/);
@@ -150,7 +152,51 @@ check("PhoneFrame fills 9:16 and letterboxes 1:1 and 4:5 (and 16:9) without crop
   assert.match(drawn.frames.tall, /data-fit="pillarbox"/);
   assert.match(mediaBox(drawn.frames.tall), /width:82\.0513%;height:100%/);
 
-  assert.equal(mediaBox(drawn.frames.labelOnly), "left:0%;top:14.84375%;width:100%;height:70.3125%");
+  assert.equal(mediaBox(drawn.frames.labelOnly), "left:0%;top:12.65625%;width:100%;height:70.3125%");
+});
+
+check("an Instagram 4:5 / 1:1 / 16:9 post is a feed post: no app chrome over the media (CC 2026-10-16, cut off)", () => {
+  for (const name of ["square", "card45", "wide", "labelOnly"]) {
+    const html = drawn.frames[name];
+    assert.match(html, /data-layout="feed"/, `${name}: drawn as a feed post`);
+    assert.ok(html.includes("Posts"), `${name}: the feed's app bar`);
+    assert.ok(!html.includes(">Reels<"), `${name}: not the Reels chrome`);
+    assert.ok(!/bg-gradient-to-t/.test(html), `${name}: no gradient laid over the picture`);
+    // Every chrome row sits above the media box or below it, never inside it.
+    const box = /top:([\d.]+)%;width:100%;height:([\d.]+)%/.exec(mediaBox(html));
+    assert.ok(box, `${name}: media box geometry`);
+    const [top, bottom] = [Number(box![1]), Number(box![1]) + Number(box![2])];
+    const rows = [...html.matchAll(/style="top:([\d.]+)%(?:;height:([\d.]+)%)?"/g)].map((m) => Number(m[1]));
+    assert.ok(rows.length >= 2, `${name}: the action row and caption are positioned`);
+    for (const y of rows) assert.ok(y <= top + 1e-9 || y >= bottom - 1e-9, `${name}: a chrome row at ${y}% is inside the media (${top}-${bottom}%)`);
+  }
+  for (const name of ["reel", "tall", "tiktok"]) {
+    assert.match(drawn.frames[name], /data-layout="reel"/, `${name}: vertical media and TikTok keep the Reel chrome`);
+  }
+});
+
+check("slideKind: an MP4 slide is a video, judged by the URL's path and never its query", () => {
+  assert.equal(slideKind("https://r2.test/marketing-media/deck/slide_2.mp4?X-Amz-Signature=x"), "video");
+  assert.equal(slideKind("https://r2.test/a/b.MOV"), "video");
+  assert.equal(slideKind("https://r2.test/a/b.webm#t=1"), "video");
+  assert.equal(slideKind("https://r2.test/a/slide_1.png?X-Amz-Expires=3600"), "image");
+  assert.equal(slideKind("https://r2.test/a/slide_1.png?name=clip.mp4"), "image", "a query that mentions .mp4 is not a video");
+  assert.equal(slideKind("deck/slide_3.mp4"), "video", "a bare storage path works too");
+});
+
+check("a motion carousel's slides are players, never <img> of an MP4, and load nothing on arrival", () => {
+  for (const p of ["grid", "phone"]) {
+    const html = drawn.tiles[`videoCarousel:${p}`];
+    assert.equal(tags(html, "video").length, 0, `videoCarousel:${p}: a <video> mounted before anyone pressed play`);
+    const mp4Imgs = tags(html, "img").filter((t) => /\.mp4/i.test(attr(t, "src") ?? ""));
+    assert.equal(mp4Imgs.length, 0, `videoCarousel:${p}: an MP4 drawn as an <img> is a broken-image icon`);
+    assert.match(html, /aria-label="Play Asset title, slide 1 of 3"/, `videoCarousel:${p}: slide 1 waits behind a named play button`);
+    assert.match(html, /slide_1\.png/, `videoCarousel:${p}: slide 1's cover is the asset's poster`);
+    assert.match(html, /aria-roledescription="carousel"/, `videoCarousel:${p}: still one carousel card`);
+  }
+  // The thumbnails on the re-order strip: a video slide is a labelled panel, not an <img>.
+  const strip = code("components/founders/SlideReorder.tsx");
+  assert.match(strip, /slideKind\(/, "SlideReorder decides per slide whether it is a video");
 });
 
 check("PhoneFrame is CSS only: no image in the frame, the overlay states only what the asset says", () => {
