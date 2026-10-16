@@ -199,8 +199,9 @@ also the retry when a first write failed.
   - any digit ("200 clients", "save 20 hours a week", "2 minutes");
   - a spelled-out count, two to sixty, of people, outcomes, time or payments
     ("twelve businesses", "fifty new leads", "three conversions", "twenty
-    replies", "twenty hours", "two payments", "three times faster"), or a quantity word
-    (hundreds, thousands, doubled, tripled, half);
+    replies", "twenty hours", "two payments", "three times faster", "a dozen
+    agencies"), or a quantity word (hundreds, thousands, dozens, doubled,
+    twice, tripled, tenfold, half);
   - a promised result, either way round ("more revenue", "more qualified
     leads", "grow your leads"; "revenue increased", "results improved", "sales
     are up"), or results described as good ("real results");

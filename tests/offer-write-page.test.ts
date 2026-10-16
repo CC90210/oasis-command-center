@@ -220,7 +220,8 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(!inventsFacts("Get more revenue and more bookings.", "We help you get more revenue and more bookings."));
   assert.ok(inventsFacts("Trusted by owners across Ontario.", "A scheduling app"), "an invented who-else-uses-it got through");
   assert.ok(inventsFacts("Our best-rated plan.", "A scheduling app with a best plan"), "best let best-rated through");
-  // Codex on #647: quantities the linter's list lacks are still grounded here.
+  // Codex on #647: quantity words. Since #649 the linter's own QUANTITY_RE
+  // has dozens, twice and -fold, so claimPhrases grounds all of these.
   for (const quantity of ["Twice as many bookings", "Tenfold growth in calls", "Dozens of templates", "Hundreds of clinics", "Double your calls"]) {
     assert.ok(inventsFacts(quantity, "A scheduling app"), `"${quantity}" got through`);
   }
