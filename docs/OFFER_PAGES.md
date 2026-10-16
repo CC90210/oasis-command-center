@@ -92,7 +92,7 @@ Book a call template, pinnable to the top menu, anchor `#pricing`):
   "tiers": [
     { "name": "Turnkey", "price": "From $2,500", "cadence": "a month",
       "summary": "...", "includes": ["...", "..."], "highlighted": true,
-      "confirmed": false }
+      "confirmed": { "by": "<owner's user id>", "at": "2026-10-16T12:00:00.000Z" } }
   ] }
 ```
 
@@ -100,12 +100,17 @@ Book a call template, pinnable to the top menu, anchor `#pricing`):
   `includes` lines each, at most one `highlighted`. Caps: name 60, price 40,
   cadence 40, summary 300, an included line 160, the currency note 120.
 - `price` is free text, shown exactly as written; it is never turned into a
-  number. `confirmed` is required and is the owner's yes or no on that price:
-  whoever drafts the copy writes `false`, and the owner ticks it in the
-  builder ("I confirm this price is right. It is shown on the page exactly as
-  written"). Editing the price or how often it is paid clears the tick.
-- **The gate.** A tier is drawn only with a name, a price and
-  `confirmed: true`. Publish is refused while any tier with a price is
+  number. `confirmed` is the owner's sign-off, the same stamped confirmation
+  (who and when) a bonus value carries. Whoever drafts the copy leaves it out;
+  the owner ticks it in the builder ("I confirm this price is right. It is
+  shown on the page exactly as written"). A bare `true`/`false` is refused by
+  the parser. The server stamps it with the saving owner and the time, bound
+  to the whole tier (kind "price" in `claims.ts` confirmables): saving the same
+  tier again keeps the first stamp, and a tier changed in any way is re-stamped
+  with whoever saved the change. The builder also clears the tick when the
+  price or how often it is paid is edited, so the owner confirms the new one.
+- **The gate.** A tier is drawn only with a name, a price and an owner's
+  confirmation. Publish is refused while any tier with a price is
   unconfirmed, and the checklist names it: `The price for "Turnkey" (From
   $2,500) needs an owner's confirmation.` (A tier with a name and no price is a
   warning, not a blocker; a hidden pricing section blocks nothing.) The price
@@ -137,11 +142,6 @@ video keeps the step.
 - The claim words are: clients, results, guarantee(d), proven, revenue, booked,
   refund, money back, risk-free, ROI, profit, savings; plus money, numbers,
   percentages and multipliers.
-- **A price's tick is a plain true/false.** Unlike the other confirmations, the
-  server does not stamp who ticked a pricing tier or when (the document shape
-  is `confirmed: boolean`). Only owners and admins can save a draft, but if the
-  record of who vouched for each price matters, it needs a change to a stamped
-  confirmation like a bonus value's.
 
 ## Not in this version
 

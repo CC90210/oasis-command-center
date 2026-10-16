@@ -22,10 +22,10 @@
  *     money value needs a confirmation; every attached video needs the rights
  *     confirmation. Confirmations are re-stamped by the server with the saving
  *     owner's id and the time (claims.ts stampConfirmations), so a browser can
- *     never claim someone else said it. A pricing tier's price carries a plain
- *     `confirmed` true/false instead (it may be written, unconfirmed, by
- *     whoever drafts the copy); it is never drawn and never published until an
- *     owner sets it true (visibility.ts, claims.ts publishGate).
+ *     never claim someone else said it. A pricing tier's price may be written
+ *     with no confirmation yet (whoever drafts the copy); it is never drawn
+ *     and never published until an owner confirms it (visibility.ts,
+ *     claims.ts publishGate).
  *   - Templates and this parser carry structure only. Nothing here invents copy.
  *
  * No `server-only`: the builder, the tests and the seed script parse with it.
@@ -282,8 +282,12 @@ export type BonusesSection = {
 /**
  * One price on the page. The price is free text ("$2,500", "From $497/mo"),
  * shown exactly as written, so it is never parsed into money: it is a claim an
- * owner vouches for with `confirmed`, the way a bonus value is. A tier whose
- * price is not confirmed is never drawn, and Publish names it (claims.ts).
+ * owner vouches for with `confirmed`, the same stamped Confirmation a bonus
+ * value carries. Absent is a price written (by the copy team, an agent) that
+ * no owner has signed off yet: never drawn, and Publish names it (claims.ts).
+ * The server stamps it with the saving owner and the time, bound to the whole
+ * tier (claims.ts confirmables, kind "price"), so editing the tier moves the
+ * sign-off to whoever saved the edit.
  */
 export type PricingTier = {
   name: Copy;
@@ -293,7 +297,7 @@ export type PricingTier = {
   includes?: Copy[];
   /** The one tier the page draws with the accent. At most one per section. */
   highlighted?: boolean;
-  confirmed: boolean;
+  confirmed?: Confirmation;
 };
 export type PricingSection = { key: "pricing"; tiers: PricingTier[]; currency_note?: Copy } & Head;
 export type GuaranteeSection = { key: "guarantee"; body?: Copy; terms_url?: string; confirmed?: Confirmation } & Head;
@@ -763,16 +767,16 @@ function parseSection(v: unknown, path: string): BodySection {
         const p = `${path}.tiers[${i}]`;
         const it = obj(raw, p);
         onlyKeys(it, ["name", "price", "cadence", "summary", "includes", "highlighted", "confirmed"], p);
-        // Required and a real boolean, never inferred: false is a price written
-        // by someone (the copy team, an agent) that no owner has vouched for yet.
-        if (typeof it.confirmed !== "boolean") {
-          throw new OfferPageError(`${p}.confirmed`, "expected true or false: has an owner confirmed this price?");
+        // A sign-off is who and when (stamped by the server), never a bare
+        // true/false a browser or a copy file could set on an owner's behalf.
+        if (typeof it.confirmed === "boolean") {
+          throw new OfferPageError(`${p}.confirmed`, "a price's confirmation records who confirmed it and when, not true or false");
         }
-        const confirmed = it.confirmed;
-        const tier = {
+        const confirmed = it.confirmed === undefined || it.confirmed === null ? undefined : parseConfirmation(it.confirmed, `${p}.confirmed`);
+        const tier: PricingTier = {
           name: reqCopy(it, "name", p, COPY_CAPS.tier_name),
           price: reqCopy(it, "price", p, COPY_CAPS.price),
-        } as PricingTier;
+        };
         const cadence = optCopy(it, "cadence", p, COPY_CAPS.cadence);
         const summary = optCopy(it, "summary", p, COPY_CAPS.tier_summary);
         if (cadence) tier.cadence = cadence;
@@ -790,7 +794,7 @@ function parseSection(v: unknown, path: string): BodySection {
         }
         // Kept as written, false included (as `hidden` is), so a stored page parses back to itself.
         if (highlighted !== undefined) tier.highlighted = highlighted;
-        tier.confirmed = confirmed;
+        if (confirmed) tier.confirmed = confirmed;
         return tier;
       });
       const section: PricingSection = { key: "pricing", tiers, ...head };

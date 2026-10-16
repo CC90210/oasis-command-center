@@ -8,8 +8,8 @@
  *   1. every result has evidence, the client's permission and an owner's
  *      confirmation (the parser refuses one without; checked again here);
  *   2. every bonus value or price was confirmed by an owner (a pricing tier's
- *      price is free text shown exactly as written, so its `confirmed` tick is
- *      what vouches for it, and the linter below does not ask about it again);
+ *      price is free text shown exactly as written, so its stamped `confirmed`
+ *      is what vouches for it, and the linter below does not ask about it again);
  *   3. the guarantee, if it has words, was confirmed by an owner;
  *   4. every sentence the linter flags carries an owner's tick, "true, and we
  *      can back it". Ticks are stored by the sentence's sha256, so editing the
@@ -95,6 +95,23 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
         });
       }
     }
+    if (s.key === "pricing") {
+      for (const it of s.tiers) {
+        // Only a tier that carries a confirmation: registering an unconfirmed
+        // one would have stampConfirmations sign it off on the owner's behalf.
+        if (!it.confirmed) continue;
+        const tier = it;
+        out.push({
+          kind: "price",
+          // The whole tier, not just the figure: a confirmation vouches for the
+          // card as written (name, price, cadence, summary, what's included),
+          // so changing any of it moves the sign-off to whoever saved the edit.
+          thing: withoutKey(tier, "confirmed"),
+          get: () => tier.confirmed,
+          set: (c) => (tier.confirmed = c),
+        });
+      }
+    }
     if (s.key === "guarantee" && s.confirmed) {
       const g = s;
       out.push({
@@ -118,8 +135,8 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
  *   - anything else (new content, or confirmed content that was edited) is
  *     stamped with the saving owner and the time.
  * A browser can therefore never put another person's name on a claim, and
- * editing what was confirmed (the quote, the amount, the video, the terms)
- * makes the person who saved the edit the one vouching for it.
+ * editing what was confirmed (the quote, the amount, the video, the terms, a
+ * price tier) makes the person who saved the edit the one vouching for it.
  */
 export function stampConfirmations(
   next: OfferPageDoc,
@@ -406,7 +423,7 @@ export function publishGate(
         // Never starts with "Confirm ": PublishChecklist keeps those lines for
         // the claim ticks, and this one must show as a plain blocker.
         const which = name ? `"${name}"` : `plan ${i + 1}`;
-        if (price && it.confirmed !== true) {
+        if (price && !isConfirmed(it.confirmed)) {
           blockers.push(`The price for ${which} (${price}) needs an owner's confirmation. It is shown exactly as written.`);
         } else if (!price && name) {
           warnings.push(`${which} has no price yet, so it is not shown.`);

@@ -9,8 +9,8 @@
  * is added only with the client's permission and a confirmation; a bonus value
  * only with "Confirm this value"; the guarantee shows only once its terms are
  * confirmed. The server records who confirmed each one and when. A price may
- * be written first and ticked later (the copy team drafts it), but it reaches
- * the page and Publish only once an owner ticks it.
+ * be written first and confirmed later (the copy team drafts it), but it
+ * reaches the page and Publish only once an owner ticks it.
  *
  * Placeholders are input hints, never saved, never drawn.
  */
@@ -35,7 +35,7 @@ import type {
   WorkSection,
 } from "@/lib/offer-pages/types";
 import { COPY_CAPS, ITEM_CAPS, TIER_INCLUDES_CAP } from "@/lib/offer-pages/types";
-import { NAV_LABELS, formatMoney } from "@/lib/offer-pages/visibility";
+import { NAV_LABELS, formatMoney, isConfirmed } from "@/lib/offer-pages/visibility";
 import { TextField, Tick, SmallButton, pendingConfirmation } from "./fields";
 import { VideoPicker } from "./VideoPicker";
 
@@ -569,14 +569,14 @@ function PricingTiers({ s, onChange }: { s: PricingSection; onChange: (s: BodySe
               cap={COPY_CAPS.price}
               placeholder="From $497"
               hint="Editing it clears the confirmation."
-              onChange={(v) => edit(i, { price: v, confirmed: false })}
+              onChange={(v) => edit(i, { price: v, confirmed: undefined })}
             />
             <TextField
               label="How often (optional)"
               value={it.cadence}
               cap={COPY_CAPS.cadence}
               placeholder="a month"
-              onChange={(v) => edit(i, { cadence: v, confirmed: false })}
+              onChange={(v) => edit(i, { cadence: v, confirmed: undefined })}
             />
           </div>
           <TextField label="One line about this plan (optional)" value={it.summary} cap={COPY_CAPS.tier_summary} multiline rows={2} onChange={(v) => edit(i, { summary: v })} />
@@ -587,17 +587,22 @@ function PricingTiers({ s, onChange }: { s: PricingSection; onChange: (s: BodySe
           >
             Highlight this plan in the accent colour. Only one plan can be highlighted.
           </Tick>
-          <Tick checked={it.confirmed === true} onChange={(v) => edit(i, { confirmed: v })}>
+          {/* As the guarantee's tick and a bonus value: the browser sends a
+              pending confirmation, and the server stamps it with the saving
+              owner and the time (claims.ts stampConfirmations). */}
+          <Tick checked={isConfirmed(it.confirmed)} onChange={(v) => edit(i, { confirmed: v ? pendingConfirmation() : undefined })}>
             I confirm this price is right. It is shown on the page exactly as written
             {priceAsShown(it) ? `: ${priceAsShown(it)}` : ""}.
           </Tick>
-          {it.price.trim() && it.confirmed !== true ? (
+          {it.price.trim() && !isConfirmed(it.confirmed) ? (
             <p className="text-[11px] text-status-warm">Not on the page until you confirm the price.</p>
+          ) : it.confirmed && it.confirmed.by !== "pending" ? (
+            <p className="text-[11px] text-fg-dim">Price confirmed {it.confirmed.at.slice(0, 10)}.</p>
           ) : null}
         </ItemFrame>
       ))}
       {s.tiers.length < ITEM_CAPS.pricing ? (
-        <SmallButton tone="primary" onClick={() => set([...s.tiers, { name: "", price: "", confirmed: false }])}>
+        <SmallButton tone="primary" onClick={() => set([...s.tiers, { name: "", price: "" }])}>
           <span className="inline-flex items-center gap-1">
             <Plus className="h-3 w-3" /> Add a price
           </span>

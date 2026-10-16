@@ -15,8 +15,8 @@
  *   - "our work" draws only playable videos, and a step with no video at all
  *     when it has a title; the hero headline falls back to the form's own; the
  *     transcript appears only under a drawn video;
- *   - pricing draws only tiers with a name, a price and an owner's explicit
- *     yes (confirmed === true), and is in the menu when pinned.
+ *   - pricing draws only tiers with a name, a price and an owner's confirmation
+ *     (who and when, as a bonus value), and is in the menu when pinned.
  *
  * Pure. Run: node --conditions=react-server --import tsx tests/offer-pages-visibility.test.ts
  */
@@ -188,20 +188,21 @@ t("a work step with no video is drawn as a step when it has a title; a broken vi
   assert.deepEqual(drawnSections(doc([{ key: "work", items: [{ title: " " }] }]), everything), []);
 });
 
-t("pricing: only a tier with a name, a price and an owner's yes is drawn; empty lines and an orphan note are not", () => {
+t("pricing: only a tier with a name, a price and an owner's confirmation is drawn; empty lines and an orphan note are not", () => {
   const pricing = (tiers: Array<Record<string, unknown>>, note?: string) =>
     drawnSections(doc([{ key: "pricing", tiers, ...(note ? { currency_note: note } : {}) } as unknown as OfferPageDoc["sections"][number]]), everything) as Array<
       Extract<ReturnType<typeof drawnSections>[number], { key: "pricing" }>
     >;
   const drawn = pricing(
     [
-      { name: "DIY", price: "$497", cadence: "a month", includes: ["The OS", " ", "Community"], confirmed: true },
-      { name: "Turnkey", price: "From $2,500", highlighted: true, confirmed: false },
-      { name: "", price: "$1", confirmed: true },
-      { name: "No price", price: "", confirmed: true },
-      { name: "Managed", price: "$7,500", summary: "We run it.", highlighted: true, confirmed: true },
-      // Truthy is not yes: only the boolean true an owner set draws a price.
-      { name: "Sneaky", price: "$9", confirmed: "true" },
+      { name: "DIY", price: "$497", cadence: "a month", includes: ["The OS", " ", "Community"], confirmed: OK },
+      { name: "Turnkey", price: "From $2,500", highlighted: true },
+      { name: "", price: "$1", confirmed: OK },
+      { name: "No price", price: "", confirmed: OK },
+      { name: "Managed", price: "$7,500", summary: "We run it.", highlighted: true, confirmed: OK },
+      // Only a sign-off (who and when) draws a price: a bare true, or one with no one behind it, does not.
+      { name: "Sneaky", price: "$9", confirmed: true },
+      { name: "Nobody", price: "$9", confirmed: { by: " ", at: OK.at } },
     ],
     "Prices in CAD",
   );
@@ -211,8 +212,8 @@ t("pricing: only a tier with a name, a price and an owner's yes is drawn; empty 
     { index: 4, name: "Managed", price: "$7,500", cadence: null, summary: "We run it.", includes: [], highlighted: true },
   ]);
   assert.equal(drawn[0].currencyNote, "Prices in CAD");
-  assert.deepEqual(pricing([{ name: "Turnkey", price: "$2,500", confirmed: false }], "Prices in CAD"), [], "nothing confirmed: no section, no orphan note");
-  const d = doc([{ key: "pricing", tiers: [{ name: "DIY", price: "$497", confirmed: true }] }], { nav: { pinned: ["pricing"] } });
+  assert.deepEqual(pricing([{ name: "Turnkey", price: "$2,500" }], "Prices in CAD"), [], "nothing confirmed: no section, no orphan note");
+  const d = doc([{ key: "pricing", tiers: [{ name: "DIY", price: "$497", confirmed: OK }] }], { nav: { pinned: ["pricing"] } });
   assert.deepEqual(navFor(d, drawnSections(d, everything)), [{ key: "pricing", anchor: "pricing", label: "Pricing" }]);
 });
 

@@ -15,7 +15,7 @@ import { FormBuilderClient } from "@/components/forms/FormBuilderClient";
 import type { FormBranding, FormStep } from "@/lib/forms/types";
 import type { BodyKey, BodySection, HeroLayout, OfferPageDoc } from "@/lib/offer-pages/types";
 import { BODY_KEYS, COPY_CAPS, accentPassesAA, isHexColor } from "@/lib/offer-pages/types";
-import { NAV_LABELS, drawnSections } from "@/lib/offer-pages/visibility";
+import { NAV_LABELS, drawnSections, isConfirmed } from "@/lib/offer-pages/visibility";
 import type { GateResult } from "@/lib/offer-pages/claims";
 import { serialSaver } from "@/lib/offer-pages/save-queue";
 import { fieldLabel } from "@/lib/offer-pages/field-labels";
@@ -165,7 +165,7 @@ export function OfferBuilder({
     // A written price nobody confirmed is not drawn, so the section would read
     // "Hidden - empty" while it is really waiting on the owner's tick.
     const pricing = doc.sections.find((s) => s.key === "pricing");
-    if (pricing && pricing.key === "pricing" && pricing.tiers.some((t) => t.price.trim() && t.confirmed !== true)) out.pricing = "needs_ok";
+    if (pricing && pricing.key === "pricing" && pricing.tiers.some((t) => t.price.trim() && !isConfirmed(t.confirmed))) out.pricing = "needs_ok";
     return out;
   }, [doc, view.gate]);
 

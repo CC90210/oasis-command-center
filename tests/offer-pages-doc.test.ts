@@ -14,8 +14,9 @@
  *     Loom 32 hex;
  *   - nothing that would be a claim exists without an owner: a result without
  *     evidence or permission, a value without confirmation, a video without
- *     its rights tick are all refused; a price carries an explicit true/false
- *     owner's confirmation (false is allowed in a draft, never drawn);
+ *     its rights tick are all refused; a price's confirmation is a stamped
+ *     who-and-when (absent in a draft, never drawn) and a bare true/false is
+ *     refused;
  *   - a work step needs no video, and one with a video parses to the same JSON;
  *   - pricing: at most 4 tiers, 8 included lines each, one highlight, the caps;
  *   - the whole document is capped at 200 KB;
@@ -228,9 +229,10 @@ function pricedDoc(): Record<string, unknown> {
     title: "Pricing",
     currency_note: "Prices in CAD",
     tiers: [
-      { name: "DIY", price: "$497", cadence: "a month", summary: "You run it.", includes: ["The OS", ""], confirmed: true },
-      { name: "Turnkey", price: "From $2,500", highlighted: true, confirmed: false },
-      { name: "Managed", price: "$7,500", highlighted: false, confirmed: true },
+      { name: "DIY", price: "$497", cadence: "a month", summary: "You run it.", includes: ["The OS", ""], confirmed: OK },
+      // No confirmation yet: a price the copy team wrote, waiting on an owner.
+      { name: "Turnkey", price: "From $2,500", highlighted: true },
+      { name: "Managed", price: "$7,500", highlighted: false, confirmed: OK },
     ],
   });
   return d;
@@ -242,6 +244,10 @@ t("a pricing section parses, keeps every tier as written, and round-trips", () =
   assert.deepEqual(doc.sections.map((s) => s.key).slice(-1), ["pricing"]);
   assert.deepEqual(JSON.parse(JSON.stringify(doc.sections[7])), sec(pricedDoc(), "pricing"), "the parser changed a tier (an empty included line and highlighted:false are kept)");
   assert.deepEqual(parseOfferPageDoc(JSON.stringify(doc)), doc);
+  assert.equal("confirmed" in (doc.sections[7] as { tiers: object[] }).tiers[1], false, "an unconfirmed tier gained a confirmation");
+  const nulled = pricedDoc();
+  tiers(nulled)[1].confirmed = null;
+  assert.equal("confirmed" in (parseOfferPageDoc(nulled).sections[7] as { tiers: object[] }).tiers[1], false, "a null confirmation is not one");
   // Zero tiers is a section being started: it parses (and is not drawn).
   const empty = fullDoc();
   (empty.sections as unknown[]).push({ key: "pricing", tiers: [] });
@@ -252,19 +258,23 @@ t("a pricing section parses, keeps every tier as written, and round-trips", () =
   assert.deepEqual(parseOfferPageDoc(pinned).nav.pinned, ["pricing"]);
 });
 
-t("pricing: 1 to 4 tiers, 8 lines each, one highlight, an owner's yes or no on every price, plain text, the caps", () => {
+t("pricing: 0 to 4 tiers, 8 lines each, one highlight, a price's sign-off is who and when (never true/false), plain text, the caps", () => {
   const withSection = (mutate: (d: Record<string, unknown>) => void) => (d: Record<string, unknown>) => {
     const p = pricedDoc();
     Object.assign(d, p);
     mutate(d);
   };
   const P = "$.sections[7]";
-  refused(withSection((d) => tiers(d).push({ name: "A", price: "$1", confirmed: true }, { name: "B", price: "$2", confirmed: true })), `${P}.tiers`, /at most 4/);
+  refused(withSection((d) => tiers(d).push({ name: "A", price: "$1", confirmed: OK }, { name: "B", price: "$2", confirmed: OK })), `${P}.tiers`, /at most 4/);
   refused(withSection((d) => (tiers(d)[0].includes = Array.from({ length: 9 }, () => "x"))), `${P}.tiers[0].includes`, /at most 8/);
   refused(withSection((d) => (tiers(d)[2].highlighted = true)), `${P}.tiers[2].highlighted`, /only one/);
-  refused(withSection((d) => delete tiers(d)[0].confirmed), `${P}.tiers[0].confirmed`, /true or false/);
-  refused(withSection((d) => (tiers(d)[0].confirmed = "yes")), `${P}.tiers[0].confirmed`, /true or false/);
-  refused(withSection((d) => (tiers(d)[0].confirmed = { by: "u-1", at: OK.at })), `${P}.tiers[0].confirmed`, /true or false/);
+  // A client-sent boolean is refused, true or false: a sign-off is the server's stamp.
+  refused(withSection((d) => (tiers(d)[0].confirmed = true)), `${P}.tiers[0].confirmed`, /who confirmed it and when/);
+  refused(withSection((d) => (tiers(d)[1].confirmed = false)), `${P}.tiers[1].confirmed`, /who confirmed it and when/);
+  refused(withSection((d) => (tiers(d)[0].confirmed = "yes")), `${P}.tiers[0].confirmed`, /object/);
+  refused(withSection((d) => (tiers(d)[0].confirmed = { by: "", at: OK.at })), `${P}.tiers[0].confirmed.by`);
+  refused(withSection((d) => (tiers(d)[0].confirmed = { by: "u-1", at: "yesterday" })), `${P}.tiers[0].confirmed.at`);
+  refused(withSection((d) => (tiers(d)[0].confirmed = { by: "u-1", at: OK.at, note: "trust me" })), `${P}.tiers[0].confirmed.note`, /unknown key/);
   refused(withSection((d) => delete tiers(d)[0].price), `${P}.tiers[0].price`, /required/);
   refused(withSection((d) => delete tiers(d)[0].name), `${P}.tiers[0].name`, /required/);
   refused(withSection((d) => (tiers(d)[0].price = "x".repeat(41))), `${P}.tiers[0].price`, /40/);

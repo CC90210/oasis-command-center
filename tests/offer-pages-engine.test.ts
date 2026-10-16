@@ -16,7 +16,10 @@
  *   2. "stacked" and "centered": centred copy, no side column, the video under
  *      the words (max-w-4xl and max-w-3xl), the phone button still under the
  *      video, nothing in the hero waits for JavaScript (no Reveal).
- *   3. PRICING: only a tier an owner confirmed is drawn; Publish names every
+ *   3. PRICING: a tier's sign-off is a server-stamped who-and-when, like a
+ *      bonus value's (kept on an unchanged save, re-stamped with the saver
+ *      when the tier changes, never invented; a bare true/false is refused);
+ *      only a tier an owner confirmed is drawn; Publish names every
  *      unconfirmed price and the checklist shows it (it does not start with
  *      "Confirm ", which the checklist reserves for claim ticks); the price
  *      itself is not linted twice, the rest of the tier's words are; each card
@@ -203,9 +206,10 @@ const PRICING = {
   title: "Pick how you start",
   currency_note: "Prices in CAD",
   tiers: [
-    { name: "DIY", price: "$497", cadence: "a month", summary: "You run it.", includes: ["The OS", "", "Community access"], confirmed: true },
-    { name: "Turnkey", price: "From $2,500", summary: "We build it with you.", includes: ["Everything in DIY", "Setup calls"], highlighted: true, confirmed: true },
-    { name: "Managed", price: "$7,500", cadence: "one time", confirmed: false },
+    { name: "DIY", price: "$497", cadence: "a month", summary: "You run it.", includes: ["The OS", "", "Community access"], confirmed: OK },
+    { name: "Turnkey", price: "From $2,500", summary: "We build it with you.", includes: ["Everything in DIY", "Setup calls"], highlighted: true, confirmed: OK },
+    // Written by the copy team, not yet signed off by an owner.
+    { name: "Managed", price: "$7,500", cadence: "one time" },
   ],
 };
 
@@ -215,7 +219,7 @@ async function main() {
     return;
   }
   const { OfferPageError, parseOfferPageDoc } = await import("../lib/offer-pages/types");
-  const { publishGate, lintDoc } = await import("../lib/offer-pages/claims");
+  const { publishGate, lintDoc, stampConfirmations } = await import("../lib/offer-pages/claims");
 
   // -- 1. backward compatibility ------------------------------------------
   await t("every content/offers/oasis page parses unchanged and gains no layout", () => {
@@ -345,9 +349,13 @@ async function main() {
     const price = gate.blockers.filter((b) => /price/i.test(b) && !b.startsWith("Confirm "));
     assert.deepEqual(price, ['The price for "Managed" ($7,500) needs an owner\'s confirmation. It is shown exactly as written.']);
     const allOk = structuredClone(priced);
-    allOk.sections[5].tiers[2].confirmed = true;
+    allOk.sections[5].tiers[2].confirmed = OK;
     const passed = publishGate(parseOfferPageDoc(allOk), [], { formEnabled: true, fallbackHeadline: "" });
     assert.equal(passed.blockers.filter((b) => /price for/.test(b)).length, 0, "a confirmed price still blocks");
+    // A confirmation with no one behind it (built by hand, past the parser) is no sign-off.
+    const nobody = parseOfferPageDoc(allOk);
+    ((nobody.sections[5] as Raw).tiers[2] as Raw).confirmed = { by: " ", at: OK.at };
+    assert.equal(publishGate(nobody, [], { formEnabled: true, fallbackHeadline: "" }).blockers.filter((b) => /price for "Managed"/.test(b)).length, 1);
     // A tier with no name is named by its place.
     const unnamed = structuredClone(priced);
     unnamed.sections[5].tiers[2].name = "";
@@ -358,7 +366,7 @@ async function main() {
     );
     // A tier with a name and no price is not drawn: said, not blocked.
     const noPrice = structuredClone(priced);
-    noPrice.sections[5].tiers[2] = { name: "Managed", price: "", confirmed: false };
+    noPrice.sections[5].tiers[2] = { name: "Managed", price: "" };
     const g = publishGate(parseOfferPageDoc(noPrice), [], { formEnabled: true, fallbackHeadline: "" });
     assert.equal(g.blockers.filter((b) => /price for/.test(b)).length, 0);
     assert.ok(g.warnings.includes('"Managed" has no price yet, so it is not shown.'), g.warnings.join(" | "));
@@ -366,6 +374,56 @@ async function main() {
     const hidden = structuredClone(priced);
     hidden.sections[5].hidden = true;
     assert.equal(publishGate(parseOfferPageDoc(hidden), [], { formEnabled: true, fallbackHeadline: "" }).blockers.filter((b) => /price for/.test(b)).length, 0);
+  });
+
+  await t("a price's sign-off is the server's stamp: kept on an unchanged save, re-stamped with the saver when the tier changes, never invented", () => {
+    // As app/api/forms/[id]/offer/route.ts calls it: the parsed body, then [stored draft, published copy].
+    const T0 = "2026-10-16T08:59:59.000Z";
+    const T1 = "2026-10-16T09:00:00.000Z";
+    const T2 = "2026-10-16T15:00:00.000Z";
+    const tierOf = (d: unknown, i: number) => (d as Raw).sections[5].tiers[i] as Raw;
+    // The owner ticks "Managed": the builder sends a pending confirmation, the server stamps it.
+    const ticked = structuredClone(priced);
+    ticked.sections[5].tiers[2].confirmed = { by: "pending", at: T0 };
+    const first = stampConfirmations(parseOfferPageDoc(ticked), [parseOfferPageDoc(priced), null], "owner-cc", T1);
+    assert.deepEqual(tierOf(first, 2).confirmed, { by: "owner-cc", at: T1 }, "the tick was not stamped with the saving owner and the time");
+    assert.deepEqual(tierOf(first, 0).confirmed, OK, "a sign-off on record was moved by a save that did not touch its tier");
+    // The same page saved again, by anyone, echoing the stamp or a pending tick or a forged name: the record stands.
+    for (const sent of [{ by: "owner-cc", at: T1 }, { by: "pending", at: T2 }, { by: "someone-else", at: T2 }]) {
+      const resent = structuredClone(first);
+      tierOf(resent, 2).confirmed = sent;
+      const stamped = stampConfirmations(parseOfferPageDoc(resent), [first, null], "owner-adon", T2);
+      assert.deepEqual(tierOf(stamped, 2).confirmed, { by: "owner-cc", at: T1 }, `an unchanged tier sent with ${JSON.stringify(sent)} lost its sign-off`);
+    }
+    // The tier changes while the browser still sends the old stamp: whoever saved the change now vouches for it.
+    const edits: Array<[string, unknown]> = [
+      ["price", "$8,000"],
+      ["cadence", "a year"],
+      ["name", "Managed plus"],
+      ["summary", "More of it."],
+      ["includes", ["Everything"]],
+      ["highlighted", false],
+    ];
+    for (const [field, value] of edits) {
+      const edited = structuredClone(first);
+      tierOf(edited, 2)[field] = value;
+      const stamped = stampConfirmations(parseOfferPageDoc(edited), [first, null], "owner-adon", T2);
+      assert.deepEqual(tierOf(stamped, 2).confirmed, { by: "owner-adon", at: T2 }, `a changed ${field} kept the old sign-off`);
+      assert.deepEqual(tierOf(stamped, 0).confirmed, OK, `editing one tier's ${field} moved another tier's sign-off`);
+    }
+    // A save never signs off a price nobody confirmed.
+    const untouched = stampConfirmations(parseOfferPageDoc(priced), [null, null], "owner-adon", T2);
+    assert.equal("confirmed" in tierOf(untouched, 2), false, "a save signed off a price nobody confirmed");
+    // A client-sent boolean never reaches the stamp: the parser refuses it, true or false.
+    for (const sent of [true, false]) {
+      const bool = structuredClone(priced);
+      bool.sections[5].tiers[2].confirmed = sent;
+      assert.throws(
+        () => parseOfferPageDoc(bool),
+        (e: unknown) => e instanceof OfferPageError && e.path === "$.sections[5].tiers[2].confirmed" && /who confirmed it and when/.test(e.reason),
+        `a client-sent confirmed: ${sent} was accepted`,
+      );
+    }
   });
 
   await t("the price is vouched for by its own tick, so the linter reads the rest of the tier, not the price", () => {

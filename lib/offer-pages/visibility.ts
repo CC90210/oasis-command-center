@@ -227,8 +227,8 @@ export function drawnSections(doc: OfferPageDoc, media: MediaCheck): DrawnSectio
       case "pricing": {
         const tiers: DrawnTier[] = s.tiers
           .map((it, index) => ({ it, index }))
-          // `=== true`, never truthy: only an owner's explicit yes draws a price.
-          .filter(({ it }) => filled(it.name) && filled(it.price) && it.confirmed === true)
+          // Only an owner's sign-off (who and when) draws a price, as with a bonus value.
+          .filter(({ it }) => filled(it.name) && filled(it.price) && isConfirmed(it.confirmed))
           .map(({ it, index }) => ({
             index,
             name: it.name,
