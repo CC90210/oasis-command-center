@@ -152,10 +152,11 @@ video keeps the step.
   - any digit ("200 clients", "save 20 hours a week", "2 minutes");
   - a spelled-out count, two to sixty, of people, outcomes, time or payments
     ("twelve businesses", "fifty new leads", "three conversions", "twenty
-    hours", "two payments", "three times faster"), or a quantity word
+    replies", "twenty hours", "two payments", "three times faster"), or a quantity word
     (hundreds, thousands, doubled, tripled, half);
-  - a promised result ("more revenue", "more qualified leads", "grow your
-    leads", "real results");
+  - a promised result, either way round ("more revenue", "more qualified
+    leads", "grow your leads"; "revenue increased", "results improved", "sales
+    are up"), or results described as good ("real results");
   - a superlative ("the best", "#1", "number one", "fastest", "the only",
     "best-in-class", "most trusted");
   - the words guarantee(d), proven, booked, refund, money back, risk-free,

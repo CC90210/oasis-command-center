@@ -78,6 +78,10 @@ async function main() {
       ["Get three conversions a day.", /number/],
       ["Three results you can measure.", /number/],
       ["Ten wins this quarter.", /number/],
+      // Spelled-out outcome counts the narrowing must keep (Codex on #637).
+      ["We delivered two conversions.", /number/],
+      ["Twenty replies arrived.", /number/],
+      ["Forty five-star reviews.", /number/],
       ["Three times faster replies.", /number/],
       ["Thousands of owners use it.", /number/],
       // Time saved, and when.
@@ -93,6 +97,11 @@ async function main() {
       ["Get more qualified leads.", /result \("more qualified leads"\)/],
       ["Boost your monthly revenue.", /result \("boost your monthly revenue"\)/],
       ["More high-quality, booked calls.", /booked/],
+      // The metric first, then its rise (Codex on #637).
+      ["Revenue increased last quarter.", /result \("revenue increased"\)/],
+      ["Results improved.", /result \("results improved"\)/],
+      ["Sales are up this month.", /result \("sales are up"\)/],
+      ["Close rates went up.", /result \("close rates went up"\)/],
       // Payment terms are a commercial promise.
       ["Setup can be split into two payments.", /number/],
       // Guarantees and the other claim words.
