@@ -44,6 +44,10 @@ async function main(): Promise<void> {
     publicBookingFormEnabled: async () => formOn,
     loadPublicBookingAvailability: async () => [{ start: "2026-10-20T14:00:00.000Z", hosts: [] }],
   });
+  // The route opens its database client before the (stubbed) enabled check; CI
+  // has no database configured, so the client is stood in too.
+  const realSupabase = await import("../lib/supabase-server");
+  stub(join(ROOT, "lib", "supabase-server.ts"), { ...realSupabase, getServiceSupabase: () => ({}) });
   stub(join(ROOT, "lib", "offer-pages", "preview-access.ts"), {
     canPreviewOfferPage: async () => {
       ownerAsked += 1;

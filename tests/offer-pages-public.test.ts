@@ -376,6 +376,10 @@ async function main() {
       await login(null);
       assert.equal((await meta({ offer_preview: "1" })).title, "Page not available", "a visitor's tab names a closed form");
       await login(USERS.cc);
+      // A closed form with no offer page to draw is the 404 even for its owner, so its tab is too.
+      await db.execute({ sql: "DELETE FROM form_offer_pages WHERE form_id = ?", args: [FORM_OFF] });
+      assert.equal((await meta({ offer_preview: "1" })).title, "Page not available", "the tab named a preview the page will not draw");
+      await assert.rejects(run("offform", { offer_preview: "1" }), isNotFound, "a closed form with no draft rendered");
 
       // Codex review of #659: a form that is off AND malformed must not show a
       // visitor its configuration-error page (which would prove it exists).

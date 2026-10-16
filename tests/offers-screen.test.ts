@@ -9,9 +9,9 @@
  *      NEVER a 0 - only leads has real tracking today.
  *   3. The "Start here" router card appears only when a form at slug "vsl"
  *      exists; otherwise a quiet empty state with Create.
- *   4. Preview is drawn only for canEdit && enabled (Codex review, PR #596):
- *      the public route 404s a disabled form before preview authorization
- *      runs, and only honours ?offer_preview=1 for an editor. Since
+ *   4. Preview is drawn only for canEdit (Codex review, PR #596): the public
+ *      route only honours ?offer_preview=1 for an editor, and since #659 it
+ *      draws a switched-off form's draft for its owner too. Since
  *      2026-10-16 it reads "Open draft" on a draft and "Preview changes" on a
  *      live page with newer edits.
  *   6. ONE link per offer (CC, 2026-10-16): a public page's card copies,
@@ -339,11 +339,14 @@ async function main() {
     assert.ok(!h.includes(">Share<"), "a draft card shares a link that shows only the form");
     assert.ok(h.includes("Not public yet"), "the card does not say why there is no link yet");
   });
-  await step("Open draft is withheld for a switched-off offer, even for an editor", () => {
+  await step("a switched-off offer's editor can open its draft, and nothing public is handed out", () => {
     const h = html.previewEditorDisabled;
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
-    assert.ok(!h.includes(">Open draft<"), "Open draft is drawn for a disabled offer, which 404s the preview route");
+    // Since #659 the route draws a switched-off form's draft for its owner, so
+    // the owner can check the page before switching it on (Codex review of #659).
+    assert.ok(h.includes(">Open draft<"), "a switched-off offer's owner cannot open its draft");
     assert.doesNotMatch(h, COPY_BUTTON, "a switched-off offer's card hands out a closed link");
+    assert.ok(!h.includes(">Share<") && !h.includes(">Publish<"), "a switched-off offer's card offers more than its draft");
     assert.ok(h.includes("Switched off"), "the card does not say the link is closed");
   });
   await step("Open draft and Publish are withheld for a read-only viewer, even on an enabled offer", () => {

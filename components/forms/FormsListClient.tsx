@@ -328,14 +328,15 @@ export function FormsListClient({
 
   /**
    * An offer card's Preview: the public path with ?offer_preview=1. Rendered
-   * ONLY for an editor on an enabled form (Codex review, PR #596):
-   * resolvePublicForm 404s a switched-off form before preview authorization
-   * ever runs, and the public route only honours offer_preview=1 for someone
-   * canEdit - a read-only viewer who followed it would see the real public
-   * page (live submission controls), never a draft preview.
+   * ONLY for an editor (Codex review, PR #596): the public route honours
+   * offer_preview=1 only for someone canEdit, and a read-only viewer who
+   * followed it would see the real public page (live submission controls),
+   * never a draft preview. Since #659 it is drawn for a switched-off form too:
+   * the route reads a form that is off for its owner's preview (and 404s it
+   * for anyone else), so the owner checks the page before switching it on.
    */
   const previewLink = (r: FormRow, label: "Open draft" | "Preview changes") => {
-    if (!canEdit || !r.enabled) return null;
+    if (!canEdit) return null;
     const path = publicFormPath(r.slug);
     if (!path) return null;
     return (
@@ -373,8 +374,10 @@ export function FormsListClient({
     if (!path) return null;
     // Switched off: the on/off switch is the action. A page that was published
     // comes back the moment it is switched on, and Publish is refused while the
-    // form is off, so nothing here would help (Codex review of #630).
-    if (!r.enabled) return null;
+    // form is off, so nothing here would help (Codex review of #630), except
+    // the owner's look at the draft, which the route draws for a form that is
+    // off since #659 (Codex review of #659).
+    if (!r.enabled) return previewLink(r, "Open draft");
     if (pageIsPublic(r)) {
       return (
         <>

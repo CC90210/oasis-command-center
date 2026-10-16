@@ -95,7 +95,11 @@ export async function generateMetadata({
   // #659). Anyone else still gets the 404's title.
   if (!lookup.ok && (await searchParams)?.offer_preview === "1") {
     const off = await resolvePublicForm(db, resolved.tenant_slug, resolved.form_slug, { includeDisabled: true });
-    if (off.ok && (await canPreviewOfferPage(off.form.tenant_id))) lookup = off;
+    // Only when the page will render it: an owner, and a draft to show (with
+    // none, the page is the 404, so the tab is too; Codex review of #659).
+    if (off.ok && (await canPreviewOfferPage(off.form.tenant_id)) && (await hasPreviewDraft(off.form.tenant_id, off.form.id))) {
+      lookup = off;
+    }
   }
   if (!lookup.ok) {
     // The same words as the public 404 this request draws (app/f/not-found.tsx),
@@ -134,6 +138,18 @@ export async function generateMetadata({
     robots: { index: false, follow: false },
     ...(icon ? { icons: { icon } } : {}),
   };
+}
+
+/** Does this form have an offer draft the owner's preview can draw? Any doubt is "no". */
+async function hasPreviewDraft(tenantId: string, formId: string): Promise<boolean> {
+  const db = offerPagesDb();
+  if (!db) return false;
+  try {
+    const row = await readOfferRow(db, tenantId, formId);
+    return row.state === "row" && Boolean(row.row.draft);
+  } catch {
+    return false;
+  }
 }
 
 /** A form's offer page state, read once per request (metadata and page share it). */
