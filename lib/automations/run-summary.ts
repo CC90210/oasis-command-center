@@ -104,7 +104,7 @@ export function formatRunMoment(instant: string | number | Date, opts: RunSummar
   // ICU puts a narrow no-break space before AM/PM; keep plain spaces.
   const clock = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", timeZone })
     .format(date)
-    .replace(/[  ]/g, " ");
+    .replace(/[\u202f\u00a0]/g, " ");
   const day = wallDateKey(date, timeZone);
   if (day === wallDateKey(new Date(now), timeZone)) return clock;
   if (day === wallDateKey(new Date(now - DAY_MS), timeZone)) return `${clock} yesterday`;
