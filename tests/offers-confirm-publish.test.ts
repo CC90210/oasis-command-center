@@ -29,7 +29,11 @@
  *     loaded -> nothing saved, nothing attached, the form left off;
  *   - a gate warning shows before Publish, not only after it;
  *   - no proposal (suggested-videos.ts has none, or the map is empty) reads
- *     "No video proposed yet".
+ *     "No video proposed yet";
+ *   - a Library cut tagged for a page (meta.offer_slug) is proposed ahead of
+ *     the hand map, so a new offer needs no code: the newest by created_at,
+ *     the hero layout's shape first; never another workspace's, another
+ *     brand's, a rejected one or one with no video file.
  *
  * Real routes, real sessions, a local libSQL file (tests/_offer-pages-harness.ts).
  * The screen's request code (lib/offer-pages/confirm-publish.ts) runs with a
@@ -325,6 +329,7 @@ async function main() {
   await step("every offer: its short link, form On/Off, Draft/Live and what blocks it, per publishGate", () => {
     const by = Object.fromEntries(first.map((o) => [o.slug, o]));
     assert.equal(by.protocol.link, "/protocol", "the short public link (lib/offers/short-links.ts)");
+    assert.equal(by.protocol.previewPath, "/f/oasis-ai-cc/protocol?offer_preview=1", "the owner's preview of the whole page (the /f address: a short one drops the preview)");
     assert.equal(by.growth.link, "/f/oasis-ai-cc/growth");
     assert.equal(by.protocol.formEnabled, false);
     assert.equal(by.vsl.status, "live");
@@ -369,7 +374,8 @@ async function main() {
     assert.equal(sv.suggestedHeroVideo("oasis-ai-cc", "vsl"), null);
     assert.equal(sv.suggestedHeroVideo("oasis-ai-cc", "constructor"), null);
     assert.equal(sv.suggestedHeroVideo("client-a", "protocol"), null, "another workspace's form of the same slug gets nothing");
-    assert.deepEqual(sv.suggestedHeroVideo("oasis-ai-cc", "protocol"), { assetId: "3560d5e0-f4ce-40e4-a3d1-bb779e5a6536", aspect: "9:16" });
+    assert.deepEqual(sv.suggestedHeroVideo("oasis-ai-cc", "protocol"), { assetId: "d216493c-002b-4ce4-9a0e-846f5895e749", aspect: "9:16" });
+    assert.deepEqual(sv.suggestedHeroVideo("oasis-ai-cc", "fleet"), { assetId: "20a179c9-b263-45c9-b2c3-e83656d09319", aspect: "9:16" }, "FLEET's old pack film is proposed again");
     assert.deepEqual(Object.keys(sv.SUGGESTED_HERO_VIDEOS).sort(), ["ai-audit", "command", "community", "fleet", "protocol"]);
   });
 
@@ -396,6 +402,7 @@ async function main() {
     assert.ok(h.includes("Approve this video and confirm we own it."), "the in-review video's tick");
     assert.ok(h.includes("Switch the form on"), "the form-off line");
     assert.ok(h.includes(">/protocol<"), "the short link");
+    assert.ok(/href="\/f\/oasis-ai-cc\/protocol\?offer_preview=1"[^>]*>Preview the whole page/.test(h), "no link to the page's own preview");
     assert.ok(!/<input[^>]*checked/.test(h), "a box is ticked that no owner ticked");
     assert.ok(!/<video/.test(h), "the video loads before the tap");
     assert.ok(!h.includes("Worth a look before publishing"), "a warnings heading with no warnings");
@@ -793,6 +800,76 @@ async function main() {
     const words = cp.outcomeWords({ kind: "published", publishedVersion: 1, warnings: [] });
     assert.equal(words.tone, "ok");
     assert.ok(!WIDE_PUNCT.some((ch) => JSON.stringify(cp.outcomeWords({ kind: "blocked", blockers: ["x"] })).includes(ch)), "an em dash or arrow in the words");
+  });
+
+  await step("a Library cut tagged for a page is proposed with no code: newest by created_at, the layout's shape first, ahead of the hand map", async () => {
+    const T = (n: number) => `ta000000-0000-4000-8000-00000000000${n}`;
+    // [id, tenant, brand, slug tag (or raw meta), aspect, status, created_at, updated_at, has a video file]
+    const cuts: Array<[string, string, string, string, string, string, string, string, boolean]> = [
+      [T(1), OASIS, "oasis-ai", '{"offer_slug":"growth"}', "16:9", "approved", "2026-10-10T00:00:00Z", "2026-10-16T09:00:00Z", true],
+      [T(2), OASIS, "oasis-ai", '{"offer_slug":"growth"}', "9:16", "in_review", "2026-10-12T00:00:00Z", "2026-10-12T00:00:00Z", true],
+      [T(3), OASIS, "oasis-ai", '{"offer_slug":"growth","other":1}', "9:16", "approved", "2026-10-14T00:00:00Z", "2026-10-14T00:00:00Z", true],
+      [T(4), OASIS, "oasis-ai", '{"offer_slug":"growth"}', "9:16", "rejected", "2026-10-15T00:00:00Z", "2026-10-15T00:00:00Z", true],
+      [T(5), OASIS, "oasis-ai", '{"offer_slug":"growth"}', "9:16", "approved", "2026-10-15T01:00:00Z", "2026-10-15T01:00:00Z", false],
+      [T(6), "aaaaaaaa-0000-4000-8000-00000000000a", "oasis-ai", '{"offer_slug":"growth"}', "9:16", "approved", "2026-10-15T02:00:00Z", "2026-10-15T02:00:00Z", true],
+      [T(7), OASIS, "arthrisil", '{"offer_slug":"growth"}', "9:16", "approved", "2026-10-15T03:00:00Z", "2026-10-15T03:00:00Z", true],
+      [T(8), OASIS, "oasis-ai", "not json at all", "9:16", "approved", "2026-10-15T04:00:00Z", "2026-10-15T04:00:00Z", true],
+      [T(9), OASIS, "oasis-ai", '{"offer_slug":"protocol"}', "9:16", "approved", "2026-10-15T05:00:00Z", "2026-10-15T05:00:00Z", true],
+      // The newest growth cut is wide: a page with no layout (drawn split) still gets the tall T3.
+      ["ta000000-0000-4000-8000-000000000010", OASIS, "oasis-ai", '{"offer_slug":"growth"}', "16:9", "approved", "2026-10-15T06:00:00Z", "2026-10-15T06:00:00Z", true],
+      // A shape no page draws is never proposed.
+      ["ta000000-0000-4000-8000-000000000011", OASIS, "oasis-ai", '{"offer_slug":"growth"}', "21:9", "approved", "2026-10-15T07:00:00Z", "2026-10-15T07:00:00Z", true],
+      // Thirty newer tall cuts and one older wide one: a stacked page still gets the wide one.
+      ...Array.from({ length: 30 }, (_, i): [string, string, string, string, string, string, string, string, boolean] => [
+        `tb000000-0000-4000-8000-0000000000${String(i).padStart(2, "0")}`,
+        OASIS,
+        "oasis-ai",
+        '{"offer_slug":"many"}',
+        "9:16",
+        "approved",
+        `2026-10-15T10:${String(i).padStart(2, "0")}:00Z`,
+        `2026-10-15T10:${String(i).padStart(2, "0")}:00Z`,
+        true,
+      ]),
+      ["tc000000-0000-4000-8000-000000000001", OASIS, "oasis-ai", '{"offer_slug":"many"}', "16:9", "approved", "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z", true],
+    ];
+    await db.batch(
+      cuts.flatMap(([id, tenant, brand, meta, aspect, status, created, updated, file]) => [
+        {
+          sql: `INSERT INTO marketing_asset (id, tenant_id, brand_slug, title, format, status, aspect, duration_s, created_at, updated_at, meta)
+                VALUES (?, ?, ?, ?, 'video', ?, ?, 30, ?, ?, ?)`,
+          args: [id, tenant, brand, `Cut ${id.slice(-1)}`, status, aspect, created, updated, meta],
+        },
+        ...(file ? [{ sql: "INSERT INTO marketing_asset_media (id, tenant_id, asset_id, kind, storage_path) VALUES (?, ?, ?, 'video', ?)", args: [`${id}-v`, tenant, id, `oasis/${id}.mp4`] }] : []),
+      ]),
+      "write",
+    );
+    const listed = await import("../lib/offer-pages/confirm-list");
+    const tagged = (formSlug: string, layout?: "split" | "stacked" | "centered") => listed.taggedHeroVideo(db, { tenantId: OASIS, formSlug, layout });
+    // Split, and no layout at all (drawn split): the newest usable TALL cut (T4 rejected, T5 has no
+    // file, the newer wide T10 is the wrong shape; T1's newer updated_at counts for nothing).
+    assert.deepEqual(await tagged("growth"), { assetId: T(3), aspect: "9:16" }, "a page with no layout is not treated as split");
+    assert.deepEqual(await tagged("growth", "split"), { assetId: T(3), aspect: "9:16" });
+    // Stacked: the newest wide cut. Centered: the newest of any shape the page can draw (never the 21:9).
+    assert.deepEqual(await tagged("growth", "stacked"), { assetId: "ta000000-0000-4000-8000-000000000010", aspect: "16:9" });
+    assert.deepEqual(await tagged("growth", "centered"), { assetId: "ta000000-0000-4000-8000-000000000010", aspect: "16:9" });
+    // However many newer cuts of the other shape there are.
+    assert.deepEqual(await tagged("many", "stacked"), { assetId: "tc000000-0000-4000-8000-000000000001", aspect: "16:9" }, "newer tall cuts pushed the wide one out");
+    assert.deepEqual(await tagged("many", "split"), { assetId: "tb000000-0000-4000-8000-000000000029", aspect: "9:16" });
+    assert.equal(await tagged("nothing-tagged"), null);
+    // A client workspace never gets a Library proposal, even with a cut of its own tagged (T6): the
+    // Library is OASIS's only, and its approval route is founders-only (Codex on #641).
+    assert.equal(await listed.taggedHeroVideo(db, { tenantId: "aaaaaaaa-0000-4000-8000-00000000000a", formSlug: "growth", layout: undefined }), null);
+    // Through the list: growth has no hand-map entry and gets its tagged cut; a tag beats protocol's map entry.
+    const by = Object.fromEntries((await list({})).map((o) => [o.slug, o]));
+    const g = by.growth.proposal;
+    assert.equal(g.state, "ready", JSON.stringify(g));
+    assert.equal(g.state === "ready" && g.assetId, T(3));
+    const pr = (await list()).find((o) => o.slug === "protocol")!.proposal;
+    assert.equal(pr.state === "ready" ? pr.assetId : pr.state, T(9), "the hand map beat a tagged cut");
+    // Command: tagged nowhere, so the hand map still answers (its asset is not in this Library: missing).
+    assert.equal(by.command.proposal.state, "none", "with an empty map and no tag, nothing is proposed");
+    assert.equal((await list()).find((o) => o.slug === "command")!.proposal.state, "missing");
   });
 
   done("offers-confirm-publish");

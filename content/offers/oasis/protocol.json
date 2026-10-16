@@ -100,7 +100,7 @@
   "offer_page": {
     "v": 1,
     "template": "book_call",
-    "theme": { "canvas": "dark", "accent": "#1FE3F0", "logo": "workspace", "layout": "split" },
+    "theme": { "canvas": "dark", "accent": "#1FE3F0", "logo": "workspace", "layout": "stacked" },
     "nav": { "pinned": ["obstacles", "what_you_get", "pricing", "faq"], "cta_label": "Pick your pack" },
     "hero": {
       "eyebrow": "PROTOCOL, for solo operators and DIY builders",

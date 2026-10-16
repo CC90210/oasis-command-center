@@ -2,7 +2,8 @@
 
 The five pages in this folder (the "Start here" router plus PROTOCOL, COMMAND, COMMUNITY and FLEET) are seeded
 by `scripts/seed-oasis-offer-pages.ts` as **drafts behind switched-off forms**. Nothing here is public. A page goes
-live only when Adon or CC has confirmed every item below, switched its form On, and pressed Publish in the builder.
+live only when Adon or CC has confirmed every item below and pressed Publish, on Confirm & publish (`/forms/publish`,
+which also switches the form On) or in the builder (form On first).
 
 The builder's claims gate (`lib/offer-pages/claims.ts`, `publishGate`) enforces part of this list on its own:
 the form must be On, every flagged sentence needs an owner's tick, every bonus value and every video's rights
@@ -34,23 +35,26 @@ and the pricing conflicts Maven resolved are in `CMO-Agent/output/offer-pages/<s
       fee." Confirm a client can actually cancel from their account (for example a Stripe customer portal). If not,
       replace it with the real cancel path before publish. Quebec auto-renewal rules apply.
 - [ ] **VSL recorded** (Adon and CC on camera, HANDOVER section 7), ingested into Library as an OASIS asset and
-      picked in the builder's VideoPicker.
+      picked in the builder's VideoPicker. Until then each page's hero is Maven's narrated cut: a Library video
+      tagged with the page's slug (`meta.offer_slug`) is proposed on Confirm & publish (`/forms/publish`), where one
+      tick approves it and attaches it.
 - [ ] **Video rights ticked honestly:** founders' own footage, licensed music and b-roll only.
 - [ ] **Transcript:** each hero carries the recording SCRIPT (`vsl_script`), with `show_transcript` off. After
       recording, replace the script with the real transcript, then switch `show_transcript` on. Turning it on also
       sends the transcript through the claims linter, which will flag the prices it says out loud.
-- [ ] **"How it works" section:** the page schema requires a video for each step, so the `work` section is left
-      out. The three steps are in each file's `work_steps` and in the FAQ answer "How does it work?". Add the
-      section once each step has its screen recording.
+- [x] **"How it works" section** (done: a step no longer needs a video, #626, and every page carries its three
+      steps in its `work` section, #631). Add a screen recording to a step when there is one.
 - [ ] **No results, testimonials, statistics or guarantee** are on any page; those sections are omitted. Add one
       only with evidence, the client's permission and an owner's tick (the gate enforces this).
-- [ ] **Every flagged sentence in section 7 ticked** in the builder, after the edits above.
-- [ ] **Form switched On, then Publish.** The gate refuses while the form is off.
-- [ ] **Public paths:** until slice V6 ships short paths, the pages live at `/f/oasis-ai-cc/<slug>`
-      (`vsl`, `protocol`, `command`, `community`, `fleet`).
-- [ ] **Slugs free in production.** The seed has not been run against production. Its dry run reports any form
-      already using one of these slugs (`--tenant-slug oasis-ai-cc --dry-run`), and it never touches a form it did
-      not create.
+- [ ] **Every flagged sentence in section 7 ticked**, after the edits above: on Confirm & publish
+      (`/forms/publish`, every page on one screen) or in each page's builder.
+- [ ] **Form on, then Publish.** Confirm & publish switches the form on in the same write as the publish, so
+      there is no separate step and the form never goes on for a page that did not go live. The builder's own
+      Publish still refuses while the form is off.
+- [x] **Public paths** (done: #630). Each page has its own short link: `/vsl`, `/protocol`, `/command`,
+      `/community`, `/fleet-audit` and `/ai-audit`; `/f/oasis-ai-cc/<slug>` still works.
+- [x] **Slugs free in production** (done 2026-10-16: the seed ran against production; all six forms and drafts
+      exist, and it never touches a form it did not create).
 
 ## 2. Router (`vsl`, "Start here")
 

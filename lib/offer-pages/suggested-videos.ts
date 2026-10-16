@@ -16,6 +16,11 @@
  * the asset, the way the builder's "Choose from Library" does
  * (app/api/forms/[id]/offer/library-videos). The aspect is the cut's shape.
  *
+ * THE FALLBACK. A cut tagged for a page in the Library (meta.offer_slug, which
+ * Maven's publish_to_library.py writes with --offer-slug) is proposed first,
+ * with no entry here (confirm-list.ts taggedHeroVideo): that is how a NEW
+ * offer gets its video. This map answers only for a page no tagged cut serves.
+ *
  * WHO FILLS IT. Bravo, from the asset ids Maven hands over for each offer.
  * An asset still "in review" in the Library is offered with the tick "Approve
  * this video and confirm we own it": approving is the owner's call, made
@@ -35,13 +40,17 @@ export type SuggestedVideo = { assetId: string; aspect: Aspect };
 /** The only workspace these proposals belong to. */
 export const SUGGESTED_VIDEOS_TENANT_SLUG = "oasis-ai-cc";
 
-/** Form slug -> the proposed top video (Maven's cuts, 2026-10-16, all 9:16). */
+/**
+ * Form slug -> the proposed top video (Maven's picks, 2026-10-16, all 9:16).
+ * FLEET and PROTOCOL moved to Maven's newer motion cuts; FLEET's older pack
+ * film (35f0bd3b) named the house agents and is no longer proposed.
+ */
 export const SUGGESTED_HERO_VIDEOS: Readonly<Record<string, SuggestedVideo>> = {
   "ai-audit": { assetId: "234693f1-d82a-4b72-a5a8-13c1c66dca32", aspect: "9:16" },
-  protocol: { assetId: "3560d5e0-f4ce-40e4-a3d1-bb779e5a6536", aspect: "9:16" },
+  protocol: { assetId: "d216493c-002b-4ce4-9a0e-846f5895e749", aspect: "9:16" },
   command: { assetId: "4afa20aa-9558-4803-8aa1-dcf63686a1ce", aspect: "9:16" },
   community: { assetId: "b99f760e-ddad-471c-b418-af70f1b10b43", aspect: "9:16" },
-  fleet: { assetId: "35f0bd3b-2600-4cf0-925e-c0e6c75354f3", aspect: "9:16" },
+  fleet: { assetId: "20a179c9-b263-45c9-b2c3-e83656d09319", aspect: "9:16" },
 };
 
 /**

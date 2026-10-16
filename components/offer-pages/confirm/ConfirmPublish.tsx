@@ -212,6 +212,17 @@ function OfferConfirmCard({
           <span className={`rounded-md border px-2 py-1 ${o.status === "draft" ? "border-bg-border text-fg-muted" : "border-status-engaged/40 text-status-engaged"}`}>
             {STATUS_WORDS[o.status]}
           </span>
+          {o.previewPath ? (
+            // The whole page as it will look, its unconfirmed prices marked: read it before ticking.
+            <a
+              href={o.previewPath}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-h-11 items-center gap-1 px-2 text-accent hover:text-accent-bright"
+            >
+              Preview the whole page <ExternalLink className="h-3 w-3" aria-hidden="true" />
+            </a>
+          ) : null}
           <Link href={`/forms/${encodeURIComponent(o.formId)}/edit`} className="inline-flex min-h-11 items-center gap-1 px-2 text-accent hover:text-accent-bright">
             Open the builder <ExternalLink className="h-3 w-3" aria-hidden="true" />
           </Link>
