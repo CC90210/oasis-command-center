@@ -104,7 +104,8 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
         out.push({
           kind: "price",
           // The whole tier, not just the figure: a confirmation vouches for the
-          // card as written (name, price, cadence, summary, what's included),
+          // card as written (name, price, the Canadian price, cadence,
+          // summary, what's included),
           // so changing any of it moves the sign-off to whoever saved the edit.
           thing: withoutKey(tier, "confirmed"),
           get: () => tier.confirmed,
@@ -280,9 +281,10 @@ function drawnCopy(doc: OfferPageDoc, fallbackHeadline: string): Copy[] {
         add(k, "bonuses.value_note", s.value_note);
         break;
       case "pricing":
-        // Every word on a tier except the price itself: the price has its own
-        // owner's tick (publishGate), and a second "is $2,500 true?" tick for
-        // the same figure would only teach owners to click through.
+        // Every word on a tier except the price itself and its Canadian price
+        // (price_cad): both are vouched for by the tier's own owner's tick
+        // (publishGate), and a second "is $2,500 true?" tick for the same
+        // figure would only teach owners to click through.
         s.tiers.forEach((it, i) => {
           const p = `pricing.tiers[${i}]`;
           add(k, `${p}.name`, it.name);

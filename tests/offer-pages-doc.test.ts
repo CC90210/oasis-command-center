@@ -229,7 +229,7 @@ function pricedDoc(): Record<string, unknown> {
     title: "Pricing",
     currency_note: "Prices in CAD",
     tiers: [
-      { name: "DIY", price: "$497", cadence: "a month", summary: "You run it.", includes: ["The OS", ""], confirmed: OK },
+      { name: "DIY", price: "$497", price_cad: "CA$690", cadence: "a month", summary: "You run it.", includes: ["The OS", ""], confirmed: OK },
       // No confirmation yet: a price the copy team wrote, waiting on an owner.
       { name: "Turnkey", price: "From $2,500", highlighted: true },
       { name: "Managed", price: "$7,500", highlighted: false, confirmed: OK },
@@ -278,6 +278,10 @@ t("pricing: 0 to 4 tiers, 8 lines each, one highlight, a price's sign-off is who
   refused(withSection((d) => delete tiers(d)[0].price), `${P}.tiers[0].price`, /required/);
   refused(withSection((d) => delete tiers(d)[0].name), `${P}.tiers[0].name`, /required/);
   refused(withSection((d) => (tiers(d)[0].price = "x".repeat(41))), `${P}.tiers[0].price`, /40/);
+  // The Canadian price: optional, free text under the same cap and plain-text rule as the price.
+  refused(withSection((d) => (tiers(d)[0].price_cad = "x".repeat(41))), `${P}.tiers[0].price_cad`, /40/);
+  refused(withSection((d) => (tiers(d)[0].price_cad = "<i>CA$690</i>")), `${P}.tiers[0].price_cad`, /plain text/);
+  refused(withSection((d) => (tiers(d)[0].price_cad = 690)), `${P}.tiers[0].price_cad`, /text/);
   refused(withSection((d) => (tiers(d)[0].name = "x".repeat(61))), `${P}.tiers[0].name`, /60/);
   refused(withSection((d) => (tiers(d)[0].includes = ["<b>bold</b>"])), `${P}.tiers[0].includes[0]`, /plain text/);
   refused(withSection((d) => (tiers(d)[0].discount = "10%")), `${P}.tiers[0].discount`, /unknown key/);
@@ -290,6 +294,7 @@ t("a refused price is named in the builder's words; so is the hero layout", () =
   const doc = parseOfferPageDoc(pricedDoc());
   const cases: Array<[string, string]> = [
     ["$.sections[7].tiers[1].price", "Plan 2 price"],
+    ["$.sections[7].tiers[0].price_cad", "Plan 1 price in CAD"],
     ["$.sections[7].tiers[0].includes[3]", "Plan 1 what's included"],
     ["$.sections[7].tiers[2].confirmed", "Plan 3 owner's confirmation"],
     ["$.sections[7].tiers[2]", "Plan 3"],

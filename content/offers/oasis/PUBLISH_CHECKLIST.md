@@ -15,18 +15,15 @@ currency and the price ranges first, edit the copy, and tick the flagged sentenc
 
 ## 1. Every page
 
-- [ ] **Currency: CAD or USD.** The funnel doc writes every price as `$` and never says which. The pages do the
-      same. Once confirmed, add it to the copy (for example "$497 CAD a month") on every page, in every VSL script
-      and in the form option labels.
+- [x] **Currency: USD** (owner decision 2026-10-16). Prices are set in USD. A pricing tier may also carry an
+      optional Canadian price (`price_cad`, for example "CA$690"), drawn as a smaller "or CA$690" line under the
+      USD price and confirmed with the rest of the tier.
 - [ ] **Telegram link is the right group:** `https://t.me/+w_8rgh8YBWg4YmM5` (HANDOVER decision 3). It belongs in
       server config for `/go/community`, never in a page.
-- [ ] **The "Not ready? Join the free community" link is not drawn yet.** The page schema has no link field (all
-      copy is plain text), so each file carries it as `community_link`
-      (`/go/community?form=<slug>&t=oasis-ai-cc`) for slice V2 to draw in the hero area and the FAQ. Until V2 ships,
-      the only community link a visitor sees is the plain-text URL in the "What if I'm not ready?" answer and in the
-      form's thank-you message.
-- [ ] **`/go/community` does not exist yet** (slice V5, HANDOVER section 5.4). Every community URL on these pages
-      404s until it ships. Do not publish any page before it exists.
+- [x] **The "Not ready? Join the free community" link is drawn** (done: `components/offer-pages/CommunityLink.tsx`
+      on main draws it on every offer page once the workspace's community URL is set, `lib/offers/community-link.ts`).
+      Each file still carries it as `community_link` (`/go/community?form=<slug>&t=oasis-ai-cc`).
+- [x] **`/go/community` exists** (done: `app/go/community/route.ts` on main, slice V5, HANDOVER section 5.4).
 - [ ] **Cancellation wording is true.** Every monthly plan says "Cancel any time from your account; no cancellation
       fee." Confirm a client can actually cancel from their account (for example a Stripe customer portal). If not,
       replace it with the real cancel path before publish. Quebec auto-renewal rules apply.
@@ -113,10 +110,10 @@ currency and the price ranges first, edit the copy, and tick the flagged sentenc
       (self-audit protocol, $297) to PROTOCOL 1C. Confirm the suite contains it.
 - [ ] **4C is titled "Website rebuild"**, not "High-converting website rebuild": "high-converting" is a performance
       claim with no evidence yet. Restore it only with evidence.
-- [ ] **`/ai-audit` decision.** HANDOVER section 3 recommends `/ai-audit` become FLEET's qualification form and
-      render the FLEET page once it is live. The seed instead creates a separate `fleet` form with the same field
-      names and option values, and never touches `/ai-audit` (it holds 21 responses and live links point at it).
-      Decide which form FLEET keeps.
+- [x] **`/ai-audit` decision: FLEET keeps its own form** (owner decision 2026-10-16). The AI Automation Audit keeps
+      its own page and its own live form: its page copy comes as a page-only file (`ai-audit.page.json`, loaded by
+      `--refresh-drafts`), which never changes the form's steps, name or switch. The seed's separate `fleet` form
+      keeps the same field names and option values.
 
 ## 7. Sentences the claims linter flags
 

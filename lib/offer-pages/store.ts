@@ -373,7 +373,16 @@ async function currentVersion(db: Client, tenantId: string, formId: string): Pro
   return r ? Number(r.draft_version ?? 0) : null;
 }
 
-/** Save the draft, compare-and-swap on the version the editor read. */
+/**
+ * Save the draft, compare-and-swap on the version the editor read.
+ *
+ * `onlyIfUnpublished` / `onlyIfNoPersonSaved` are for the content seed's
+ * refresh (scripts/seed-oasis-offer-pages.ts), never the builder: Publish does
+ * not move draft_version, so the version alone cannot tell that a page went
+ * live after it was read. With them, the same one statement also requires the
+ * page never to have been published (and not live), or no person ever to have
+ * saved it; a row that no longer qualifies answers `conflict`, like a lost swap.
+ */
 export async function saveDraft(
   db: Client,
   input: {
@@ -384,14 +393,19 @@ export async function saveDraft(
     claims: ClaimTick[];
     actor: string | null;
     now: string;
+    onlyIfUnpublished?: boolean;
+    onlyIfNoPersonSaved?: boolean;
   },
 ): Promise<WriteResult<{ version: number }>> {
+  const guards =
+    (input.onlyIfUnpublished ? " AND live = 0 AND published IS NULL AND published_version = 0" : "") +
+    (input.onlyIfNoPersonSaved ? " AND draft_updated_by IS NULL" : "");
   try {
     const rs = await db.execute({
       sql: `UPDATE form_offer_pages
             SET draft = ?, draft_version = draft_version + 1, draft_updated_at = ?, draft_updated_by = ?,
                 claims_confirmed = ?, updated_at = ?
-            WHERE tenant_id = ? AND form_id = ? AND draft_version = ?`,
+            WHERE tenant_id = ? AND form_id = ? AND draft_version = ?${guards}`,
       args: [
         JSON.stringify(input.draft),
         input.now,
