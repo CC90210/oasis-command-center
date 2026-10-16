@@ -246,7 +246,8 @@ async function main() {
       for (const s of expected.sections) if (s.key === "bonuses") for (const it of s.items) if (it.value === null) delete it.value;
       const parsed = parseOfferPageDoc(page);
       assert.deepEqual(JSON.parse(JSON.stringify(parsed)), expected, `${f}: the parser dropped or changed something`);
-      assert.equal("layout" in parsed.theme, false, `${f}: a layout appeared that nobody chose`);
+      // A page that chose no layout gains none; one that chose it (content since 2026-10-16) keeps exactly that.
+      assert.equal("layout" in parsed.theme, "layout" in page.theme, `${f}: a layout appeared that nobody chose, or a chosen one was dropped`);
       assert.deepEqual(parseOfferPageDoc(JSON.stringify(parsed)), parsed, `${f}: not stable through the stored string`);
     }
   });
