@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * DevicesEditor — the advanced, read-mostly list of paired machines for this
- * tenant + the revoke action.
+ * DevicesEditor — the advanced diagnostics list of paired machines for this
+ * tenant, closed by default under "Devices (advanced)".
  *
  * Each row in bridge_pairings is a local install (`oasis bridge start`
  * pinging /api/bridge/ping every 60s). Revoking sets revoked_at; the daemon
@@ -10,16 +10,23 @@
  * to bring it back online.
  *
  * It does NOT pair anything. A computer is added one way: "Add a device" at
- * the top of Settings > Devices (the connector code), plus the section's
- * "Full install" page for the operator's own harness. This list used to carry
- * its own "Connect this computer" / "Connect another computer" buttons, a
- * second and third way to do the same job, which left people unsure which one
- * to press (2026-10-15).
+ * the top of Settings > Devices (the connector code, with a link to install
+ * the connector). This list used to carry its own "Connect this computer" /
+ * "Connect another computer" buttons, and the section a "Full install" link,
+ * more ways to do the same job, which left people unsure which one to press
+ * (2026-10-15, CC 2026-10-16).
+ *
+ * REVOKE STAYS ONLY WHERE IT HAS NO OTHER HOME (CC 2026-10-16: this list is
+ * diagnostics, not a second place to manage computers). The viewer's own
+ * computers are disconnected from "Your computers" above, so their rows here
+ * carry no Revoke. A teammate's computer has no Disconnect anywhere else, so
+ * its Revoke stays: removing it would leave a pairing nobody can undo.
  */
 
 import { useEffect, useState } from "react";
 import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Info } from "lucide-react";
 import { machineState } from "@/lib/devices/presence";
+import { timeAgo } from "@/components/settings/YourComputersCard";
 
 type Device = {
   id: string;
@@ -29,16 +36,9 @@ type Device = {
   last_seen_ip: string | null;
   created_at: string;
   revoked_at: string | null;
+  /** GET /api/devices: true for the viewer's own pairing (O3a). */
+  mine?: boolean;
 };
-
-function timeAgo(iso: string | null): string {
-  if (!iso) return "never";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (ms < 60_000) return "just now";
-  if (ms < 60 * 60_000) return `${Math.floor(ms / 60_000)}m ago`;
-  if (ms < 24 * 60 * 60_000) return `${Math.floor(ms / (60 * 60_000))}h ago`;
-  return `${Math.floor(ms / (24 * 60 * 60_000))}d ago`;
-}
 
 /**
  * Plain words for what this workspace's computer owner has, for everyone else
@@ -215,7 +215,10 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
                   </div>
                 </div>
               </div>
-              {installRepo && (
+              {installRepo && d.mine === true && (
+                <span className="text-[11px] text-fg-dim shrink-0">Disconnect it in Your computers above</span>
+              )}
+              {installRepo && d.mine !== true && (
                 <button
                   onClick={() => revoke(d.id)}
                   disabled={busy === d.id}

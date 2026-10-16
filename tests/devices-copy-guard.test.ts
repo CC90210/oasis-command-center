@@ -37,6 +37,7 @@
  * Run: node --conditions=react-server --import tsx tests/devices-copy-guard.test.ts
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
@@ -574,6 +575,49 @@ check("the recovery hint without a known OS points at Settings > Devices on the 
   assert.ok(shows("lib/bridge-install-guidance.ts", "Open Settings > Devices"));
   assert.ok(!shows("lib/bridge-install-guidance.ts", "paired machine"));
 });
+
+// -- Devices (advanced), drawn (CC 2026-10-16) ------------------------------
+// A child process: this suite runs under react-server, where client hooks cannot run.
+{
+  const nodeOptions = (process.env.NODE_OPTIONS || "")
+    .split(/\s+/)
+    .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+    .join(" ");
+  const env: NodeJS.ProcessEnv = { ...process.env, NODE_OPTIONS: nodeOptions };
+  if (!nodeOptions) delete env.NODE_OPTIONS;
+  const r = spawnSync(process.execPath, ["--import", "tsx", "tests/devices-copy-guard.render.ts"], { cwd: ROOT, encoding: "utf8", env, timeout: 120_000 });
+  type Row = { text: string; revoke: boolean };
+  const drawn =
+    r.status === 0
+      ? (JSON.parse(r.stdout.trim().split("\n").pop() || "{}") as { owner: Row[]; notOwner: Row[]; expected: Record<string, string> })
+      : null;
+  check("the DevicesEditor render process ran", () => {
+    assert.ok(drawn, r.stderr || r.stdout);
+  });
+  if (drawn) {
+    const row = (rows: Row[], label: string) => {
+      const found = rows.find((x) => x.text.startsWith(label));
+      assert.ok(found, `no row for ${label}: ${JSON.stringify(rows)}`);
+      return found!;
+    };
+    check("Settings > Devices (advanced): Revoke only where Your computers has no Disconnect for that computer", () => {
+      const mine = row(drawn.owner, "CCPC");
+      assert.equal(mine.revoke, false, "the viewer's own computer still has Revoke here (Disconnect lives in Your computers)");
+      assert.match(mine.text, /Disconnect it in Your computers above/);
+      // A teammate's computer has no Disconnect anywhere else: removing this would be a trapdoor.
+      assert.equal(row(drawn.owner, "Riley's laptop").revoke, true, "a teammate's computer lost its only remove action");
+      assert.ok(drawn.notOwner.every((x) => !x.revoke), "a viewer who is not the agents owner sees a Revoke");
+    });
+    check("Settings > Devices (advanced): an old ping, a pairing and a revocation show their date, like Offline since", () => {
+      const mine = row(drawn.owner, "CCPC");
+      assert.ok(!drawn.owner.some((x) => /\b\d+d ago\b/.test(x.text)), `a row still says "Nd ago": ${JSON.stringify(drawn.owner)}`);
+      assert.ok(/[A-Z][a-z]{2} \d{1,2}/.test(drawn.expected.mineSeen), `the shared helper gives no date for 5 days ago: ${drawn.expected.mineSeen}`);
+      assert.match(mine.text, new RegExp(`last ping ${drawn.expected.mineSeen.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · paired ${drawn.expected.minePaired.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.match(row(drawn.owner, "Riley's laptop").text, / s ago · paired /, "a recent ping still reads in seconds");
+      assert.ok(drawn.owner.some((x) => x.text.includes(`revoked ${drawn.expected.revoked}`)), "the revoked row has no date");
+    });
+  }
+}
 
 if (failures > 0) {
   console.log(`devices-copy-guard: ${failures} failure(s)`);

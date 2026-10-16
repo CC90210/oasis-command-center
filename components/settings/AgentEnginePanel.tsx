@@ -27,6 +27,7 @@ import {
   queueEngineProbe,
   readEngine,
   repairForCode,
+  runtimeStatusLabel,
   saveEngine,
   selectionKey,
   type EngineDevice,
@@ -43,6 +44,7 @@ import {
   type ProviderKeyStagedDetail,
 } from "@/components/settings/ProviderAccountsCard";
 import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
+import { runtimeStatusWords } from "@/lib/bridge-cli-status";
 import { AgentEngineScopeProvider } from "@/components/settings/agent-engine-scope-context";
 
 const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "gemini"];
@@ -88,10 +90,6 @@ function commandFor(device: EngineDevice, provider: CliEngine): string | null {
   if (!runtime.installed) return INSTALL_COMMAND[provider];
   if (!runtime.signedIn) return LOGIN_COMMAND[provider];
   return null;
-}
-
-function inventoryRuntimeLabel(device: EngineDevice, provider: CliEngine): string {
-  return describeRuntime(device, provider).label;
 }
 
 function jobSentence(job: RuntimeJob): string {
@@ -143,6 +141,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const noticeRef = useRef<HTMLDivElement | null>(null);
   const scopeRef = useRef<EngineScope>("person");
   const draftRef = useRef<EngineSelection | null>(null);
+  // The runtime choices ("Subscription app", "Pure local", "API key"): where
+  // "Choose your own" takes a person who inherits the workspace default.
+  const choicesRef = useRef<HTMLDivElement | null>(null);
 
   async function load(options: { keepDraft?: boolean } = {}) {
     if (!options.keepDraft) setActivity("reading");
@@ -292,6 +293,23 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
           ? loadedState.personEngine.selection
           : loadedState.engine,
     );
+  }
+
+  /**
+   * "Choose your own" (CC 2026-10-16): a person who inherits the workspace
+   * default was told to "choose one below" with nothing to press. The choice
+   * IS the runtime radios below (the draft already starts from the setup in
+   * use), so this brings them into view and puts the keyboard on the selected
+   * one, ready to move between the three with the arrow keys.
+   */
+  function chooseOwnEngine() {
+    const group = choicesRef.current;
+    if (!group) return;
+    group.scrollIntoView({ behavior: "smooth", block: "center" });
+    const radio =
+      group.querySelector<HTMLInputElement>('input[type="radio"]:checked') ??
+      group.querySelector<HTMLInputElement>('input[type="radio"]');
+    radio?.focus({ preventScroll: true });
   }
 
   async function copyCommand(command: string) {
@@ -490,9 +508,19 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
           </p>
           <p className="mt-1 text-xs text-fg-muted">
             {inheritsWorkspaceDefault
-              ? "You have not chosen your own, so you use the workspace default. Choose one below to change only your setup."
+              ? "You have not chosen your own, so you use the workspace default. Choosing your own changes only your setup."
               : "Choose where the model runs, verify that exact connection, then put it in use."}
           </p>
+          {inheritsWorkspaceDefault && (
+            <button
+              type="button"
+              data-testid="engine-choose-own"
+              onClick={chooseOwnEngine}
+              className="mt-2 rounded-md border border-hairline px-3 py-1.5 text-xs font-semibold text-fg hover:border-bg-border-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              Choose your own
+            </button>
+          )}
         </div>
         <button
           type="button"
@@ -562,7 +590,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
         </div>
       )}
 
-      <div className="grid gap-2 md:grid-cols-3" role="radiogroup" aria-label="AI runtime type">
+      <div ref={choicesRef} className="grid gap-2 md:grid-cols-3" role="radiogroup" aria-label="AI runtime type">
         {modeOption("subscription", <Cpu className="h-4 w-4" aria-hidden="true" />, "Subscription app", "Use an AI app signed in on a paired computer. No API credits.")}
         {modeOption("local", <HardDrive className="h-4 w-4" aria-hidden="true" />, "Pure local", "Use an Ollama or LM Studio model detected on a paired computer.")}
         {modeOption("api", <Cloud className="h-4 w-4" aria-hidden="true" />, "API key", "Use Anthropic, OpenAI, Google or OpenRouter with usage-based billing.")}
@@ -576,11 +604,11 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
               const runtime = selectedDevice?.runtimes[provider];
               const rolloutRestricted = subscriptionRolloutError(provider, state.oasis) !== null;
               const status = rolloutRestricted
-                ? { label: "Unsupported", verified: false, repair: CODEX_OASIS_ROLLOUT_MESSAGE }
+                ? { label: runtimeStatusWords("unsupported"), verified: false, repair: CODEX_OASIS_ROLLOUT_MESSAGE }
                 : selectedDevice
                   ? describeRuntime(selectedDevice, provider)
                   : null;
-              const unsupported = status?.label === "Unsupported";
+              const unsupported = status?.label === runtimeStatusWords("unsupported");
               const subscriptionLimited = runtime?.code === "rate_limited";
               const selected = draft.provider === provider;
               return (
@@ -857,18 +885,18 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                     {device.ownerName && <div className="text-[11px] text-fg-dim">{device.ownerName}</div>}
                   </div>
                   <span className={`text-[11px] font-semibold ${device.online ? "text-status-engaged" : "text-status-warm"}`}>
-                    {device.online ? "Online" : "Offline"}
+                    {device.online ? "Online" : runtimeStatusWords("offline")}
                   </span>
                 </div>
                 <div className="mt-3 grid gap-2 sm:grid-cols-3">
                   {CLI_PROVIDERS.map((provider) => {
                     const runtime = device.runtimes[provider];
-                    const rolloutRestricted = subscriptionRolloutError(provider, state.oasis) !== null;
                     return (
                       <div key={provider} className="rounded-md border border-hairline bg-bg-deep/40 px-2.5 py-2">
                         <div className="text-xs font-semibold text-fg">{CLI_ENGINE_LABEL[provider]}</div>
-                        <div className="mt-0.5 text-[11px] text-fg-muted">
-                          {rolloutRestricted ? "Unsupported" : inventoryRuntimeLabel(device, provider)}
+                        <div className="mt-0.5 text-[11px] text-fg-muted" data-testid="engine-inventory-status">
+                          {/* The same words Devices shows for this app on this computer (CC 2026-10-16). */}
+                          {runtimeStatusLabel(device, provider, state.oasis)}
                         </div>
                         {runtime.version && <div className="mt-0.5 truncate font-mono text-[10px] text-fg-dim">{runtime.version}</div>}
                       </div>

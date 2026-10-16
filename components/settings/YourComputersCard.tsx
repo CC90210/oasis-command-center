@@ -5,9 +5,10 @@
  * in plain words, with an Approve button for one they have not approved yet.
  *
  * Reads GET /api/devices (O3a: returns the viewer's own pairings always, plus
- * every pairing for an owner/admin with `mine` set) and GET /api/bridge/
- * cli-status (the same CLI inventory the coding harness card reads, matched
- * here by pairing id for the department inventory lines). Approves with
+ * every pairing for an owner/admin with `mine` set) and GET /api/ai/engine
+ * (the same device runtimes Settings > AI brain reads, matched here by pairing
+ * id for each computer's app lines, so one computer and app reads the same
+ * words on both screens, CC 2026-10-16). Approves with
  * POST /api/devices/[id]/approve (O3a, owner-of-that-computer only).
  *
  * computerAnswerState (lib/devices/presence.ts) is the ONE rule: a heartbeat
@@ -28,7 +29,9 @@ import {
   machineState,
   type ComputerAnswerState,
 } from "@/lib/devices/presence";
-import { departmentInventoryLine, type CliProvider, type CliStatusInfo } from "@/lib/bridge-cli-status";
+import { runtimeStatusWords } from "@/lib/bridge-cli-status";
+import { CLI_ENGINE_LABEL, type CliEngine } from "@/lib/ai/agent-engine";
+import { readEngine, runtimeStatusLabel, type EngineDevice } from "@/components/settings/agent-engine-client";
 import { DEVICE_LABEL_MAX, deviceLabelProblem, deviceLabelProblemWords } from "@/lib/devices/label";
 
 type DeviceRow = {
@@ -49,7 +52,22 @@ type DeviceRow = {
   owner_name: string | null;
 };
 
-type MachineInventory = { id: string | null; label: string | null; data: Record<CliProvider, CliStatusInfo> };
+/** What GET /api/ai/engine says about the viewer's computers: the inputs AI brain's app labels read. */
+type EngineInventory = { devices: EngineDevice[]; oasis: boolean };
+
+const CLI_APPS: CliEngine[] = ["claude", "codex", "gemini"];
+
+/**
+ * One line per AI app installed on a computer, in the words Settings > AI
+ * brain shows for that app on that computer (runtimeStatusLabel, the one
+ * function both screens call; CC 2026-10-16). Only installed apps are listed,
+ * as before: an app the computer does not have is not news on this card.
+ */
+export function appStatusLines(device: EngineDevice, oasisWorkspace: boolean): string[] {
+  return CLI_APPS.filter((p) => device.runtimes[p].installed).map(
+    (p) => `${CLI_ENGINE_LABEL[p]}: ${runtimeStatusLabel(device, p, oasisWorkspace)}`,
+  );
+}
 
 const BLOCKED_REASON_WORDS: Record<string, string> = {
   subscription_auth_failure: "Claude Code is signed out",
@@ -65,7 +83,8 @@ function blockedWords(reason: string): string {
   return BLOCKED_REASON_WORDS[reason] || reason.replace(/_/g, " ");
 }
 
-function timeAgo(iso: string | null): string {
+/** Exported so Devices (advanced) dates its rows the same way "Offline since" does here (CC 2026-10-16). */
+export function timeAgo(iso: string | null): string {
   if (!iso) return "never";
   const ms = Date.now() - new Date(iso).getTime();
   if (ms < 0) return "just now";
@@ -80,12 +99,18 @@ function timeAgo(iso: string | null): string {
   return at.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-/** The exact row line (ui_changes section 1), from the one state. */
+/**
+ * The exact row line (ui_changes section 1), from the one state. The state's
+ * word is the one Settings > AI brain uses for it (lib/bridge-cli-status.ts
+ * runtimeStatusWords; CC 2026-10-16: this line said "Ready for department
+ * work" where AI brain said "Ready for agents"). A blocked computer keeps its
+ * own reason: AI brain has no word for a refused claim.
+ */
 function rowLine(label: string, state: ComputerAnswerState, claimStateAt: string | null, lastSeenAt: string | null): string {
-  if (state === "can_answer") return `${label} · Ready for department work, checked ${timeAgo(claimStateAt)}`;
-  if (state === "busy") return `${label} · Finishing a reply`;
-  if (state === "not_approved") return `${label} · Waiting for your approval`;
-  if (state === "offline") return `${label} · Offline since ${timeAgo(lastSeenAt)}`;
+  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt)}`;
+  if (state === "busy") return `${label} · ${runtimeStatusWords("busy")}, finishing a reply`;
+  if (state === "not_approved") return `${label} · ${runtimeStatusWords("approval_needed")}`;
+  if (state === "offline") return `${label} · ${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt)}`;
   return `${label} · Connected, can't answer: ${blockedWords(state.slice("blocked:".length))}`;
 }
 
@@ -103,6 +128,9 @@ function rowLine(label: string, state: ComputerAnswerState, claimStateAt: string
  * dropped network, a restart in progress. Collapsing 'idle' into "Online"
  * read as a live, working computer when it was anything but; it now gets
  * its own word, matching lib/devices/presence.ts's own rule exactly.
+ *
+ * The state words are AI brain's (runtimeStatusWords, CC 2026-10-16), the
+ * same as rowLine's; "Approval needed from <owner>" still names who approves.
  */
 function teamRowLine(
   label: string,
@@ -112,20 +140,21 @@ function teamRowLine(
   lastSeenAt: string | null,
   nowMs: number,
 ): string {
-  if (state === "can_answer") return `${label} · Ready for department work, checked ${timeAgo(claimStateAt)}`;
-  if (state === "busy") return `${label} · Finishing a reply`;
+  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt)}`;
+  if (state === "busy") return `${label} · ${runtimeStatusWords("busy")}, finishing a reply`;
   if (state === "not_approved") {
     const heartbeat = machineState(lastSeenAt, nowMs);
-    const presence = heartbeat === "offline" ? `Offline since ${timeAgo(lastSeenAt)}` : heartbeat === "idle" ? "Idle" : "Online";
-    return `${label} · ${presence} · not yet approved by ${ownerName} for department work`;
+    const presence =
+      heartbeat === "offline" ? `${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt)}` : heartbeat === "idle" ? "Idle" : "Online";
+    return `${label} · ${presence} · ${runtimeStatusWords("approval_needed")} from ${ownerName}`;
   }
-  if (state === "offline") return `${label} · Offline since ${timeAgo(lastSeenAt)}`;
+  if (state === "offline") return `${label} · ${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt)}`;
   return `${label} · Connected, can't answer: ${blockedWords(state.slice("blocked:".length))}`;
 }
 
 export function YourComputersCard() {
   const [devices, setDevices] = useState<DeviceRow[] | null>(null);
-  const [machines, setMachines] = useState<MachineInventory[]>([]);
+  const [engine, setEngine] = useState<EngineInventory | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -167,13 +196,12 @@ export function YourComputersCard() {
   async function load() {
     setError(null);
     try {
-      const [dr, cr] = await Promise.all([
-        fetch("/api/devices").then((r) => r.json()),
-        fetch("/api/bridge/cli-status").then((r) => r.json()).catch(() => ({ ok: false })),
-      ]);
+      // readEngine never throws: an unread AI setup leaves the app lines off
+      // (as an unread inventory did), it never invents a status.
+      const [dr, er] = await Promise.all([fetch("/api/devices").then((r) => r.json()), readEngine()]);
       if (dr.ok) setDevices(dr.devices as DeviceRow[]);
       else setError(dr.error || "load_failed");
-      setMachines(cr.ok && Array.isArray(cr.machines) ? (cr.machines as MachineInventory[]) : []);
+      setEngine(er.ok ? { devices: er.state.devices, oasis: er.state.oasis } : null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "load_failed");
     }
@@ -249,9 +277,8 @@ export function YourComputersCard() {
   const now = Date.now();
 
   const inventoryFor = (id: string): string[] => {
-    const m = machines.find((x) => x.id === id);
-    if (!m) return [];
-    return (["claude", "codex", "gemini"] as CliProvider[]).filter((p) => m.data[p]?.installed).map((p) => departmentInventoryLine(p, m.data[p]));
+    const device = engine?.devices.find((x) => x.pairingId === id);
+    return device && engine ? appStatusLines(device, engine.oasis) : [];
   };
 
   return (
@@ -368,12 +395,14 @@ export function YourComputersCard() {
       )}
       {mine.some((d) => inventoryFor(d.id).length > 0) && (
         <p className="text-[11px] leading-relaxed text-fg-dim" data-testid="signed-in-caption">
-          &ldquo;Signed in&rdquo; is what the app reports on that computer. Whether it can take department work is
-          confirmed by a Test in Settings &gt; AI brain.
+          Each app reads the same here as in Settings &gt; AI brain. &ldquo;Needs test&rdquo; means it is installed and
+          signed in; whether it can take department work is confirmed by a Test in Settings &gt; AI brain.
         </p>
       )}
+      {/* Open by default (CC 2026-10-16): a closed list of the team's
+          computers read as no team computers at all. It still folds away. */}
       {theirs.length > 0 && (
-        <details className="text-xs text-fg-dim">
+        <details open className="text-xs text-fg-dim">
           <summary className="cursor-pointer hover:text-fg-muted">
             Team computers ({theirs.length}) · {Array.from(new Set(theirs.map((d) => d.owner_name || "a teammate"))).join(", ")}
           </summary>

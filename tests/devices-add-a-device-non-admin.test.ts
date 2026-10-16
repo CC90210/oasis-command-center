@@ -12,9 +12,16 @@
  *
  * Both personas are real rows read through the real Turso adapter and the
  * real session cookie: a workspace owner and a plain member. Neither is a
- * verified platform operator (ADMIN_EMAILS is empty, OPERATOR_EMAIL is
- * unset), but both can manage their own computers. Only the raw team-wide
- * "Devices (advanced)" inventory stays operator-only.
+ * verified platform operator (ADMIN_EMAILS names only the third persona,
+ * OPERATOR_EMAIL is unset), but both can manage their own computers. Only the
+ * raw team-wide "Devices (advanced)" inventory stays operator-only.
+ *
+ * CC 2026-10-16, one way to add a device: "Add a device" links to the
+ * connector install page ("Don't have the connector? Install it") for every
+ * viewer, and "Devices (advanced)" lost its "Full install" link and starts
+ * CLOSED on /settings/devices. That section is drawn here for a real verified
+ * operator who is also the workspace's agents owner, the one viewer who used
+ * to get the second path.
  *
  * Run: node --conditions=react-server --import tsx tests/devices-add-a-device-non-admin.test.ts
  */
@@ -34,7 +41,8 @@ process.env.EMPIRE_AUTH_BACKEND = "turso";
 process.env.AUTH_SESSION_SECRET = "devices-add-a-device-test-secret-long-enough-01";
 delete process.env.OPERATOR_EMAIL;
 delete process.env.OPERATOR_EMAIL_FALLBACK_ENABLED;
-process.env.ADMIN_EMAILS = "";
+// Only the operator persona's alias; the owner and member are not on it.
+process.env.ADMIN_EMAILS = "ops@devices-test.oasis";
 
 globalThis.fetch = (async (input: unknown) => {
   throw new Error(`network disabled in test: ${String(input).slice(0, 80)}`);
@@ -88,12 +96,15 @@ stubFile("components/SafeBoundary.tsx", {
 });
 
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006c";
+// lib/platform-operator.ts OASIS_OPERATOR_TENANT_ID: a verified operator holds an owner seat here.
+const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
 const USERS = {
   client: u(1, "owner@devices-test.client"), // owner of the client workspace -- canManageTenant true
   member: u(2, "riley@devices-test.client"), // plain member -- canManageTenant false
+  operator: u(3, "ops@devices-test.oasis"), // verified operator AND agents owner of OASIS
 } as const;
 type Who = keyof typeof USERS;
 
@@ -167,11 +178,11 @@ async function main() {
   const clientManifest = parseManifest(finalizeManifestFromWizard({ template: "custom", slug: "oasis-ai-cc", answers: {} }));
 
   const stamp = "2026-10-12T00:00:00Z";
-  const profile = (who: Who, role: string, owner: 0 | 1, name: string) => ({
+  const profile = (who: Who, role: string, owner: 0 | 1, name: string, tenant = CLIENT) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, admin_access,
             onboarding_completed_at, full_name, display_name, agents_enabled, updated_at, joined_at)
           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, '["bravo"]', ?, ?)`,
-    args: [`p-${who}`, USERS[who].id, USERS[who].email, CLIENT, role, owner, stamp, name, name, stamp, stamp],
+    args: [`p-${who}`, USERS[who].id, USERS[who].email, tenant, role, owner, stamp, name, name, stamp, stamp],
   });
   await raw.batch(
     [
@@ -183,12 +194,19 @@ async function main() {
       },
       profile("client", "owner", 1, "Alex Owner"),
       profile("member", "member", 0, "Riley"),
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis', 'OASIS')", args: [OASIS] },
+      profile("operator", "owner", 1, "Ops", OASIS),
+      {
+        sql: "INSERT INTO workspace_agents_owner (id, tenant_id, auth_user_id, created_at, revoked_at) VALUES ('wao-1', ?, ?, ?, NULL)",
+        args: [OASIS, USERS.operator.id, stamp],
+      },
     ],
     "write",
   );
 
   const { SettingsContent } = await import("../components/settings/SettingsContent");
   const { ConnectYourComputerCard } = await import("../components/settings/YourComputersCard");
+  const { DevicesEditor } = await import("../components/settings/DevicesEditor");
   const settingsDevicesPage = (await import("../app/settings/devices/page")).default;
 
   /**
@@ -238,6 +256,45 @@ async function main() {
       .filter((id): id is string => typeof id === "string");
     assert.ok(ids.includes("your-computers"));
     assert.ok(!ids.includes("devices"));
+  });
+
+  /** The element with this id, and every element and string inside it. */
+  const section = (tree: unknown, id: string) => {
+    const el = walk(tree).elements.find((e) => e.props.id === id);
+    assert.ok(el, `section #${id} is not in the tree`);
+    return { el: el!, inside: walk(el!.props) };
+  };
+  const INSTALL = "/settings/devices/install";
+  const textOfEl = (el: { props: Record<string, unknown> }) => walk(el.props.children).strings.join("");
+
+  for (const who of ["member", "client", "operator"] as const) {
+    await check(`${who}: Add a device links to the connector install page (CC 2026-10-16)`, async () => {
+      const add = section(await devicesTreeFor(who), "add-a-device");
+      const links = add.inside.elements.filter((e) => e.props.href === INSTALL);
+      assert.equal(links.length, 1, `Add a device carries ${links.length} links to ${INSTALL}`);
+      assert.equal(textOfEl(links[0]), "Don't have the connector? Install it");
+      assert.ok(add.inside.elements.some((e) => e.type === ConnectYourComputerCard), "the link sits beside the connector code card");
+    });
+  }
+
+  await check("operator + agents owner: Devices (advanced) is drawn, CLOSED on /settings/devices, with no second install path", async () => {
+    const tree = await devicesTreeFor("operator");
+    const advanced = section(tree, "devices");
+    assert.equal(advanced.el.props.title, "Devices (advanced)");
+    // The agents-owner path: the viewer who used to get the "Full install" link.
+    const editor = advanced.inside.elements.find((e) => e.type === DevicesEditor);
+    assert.ok(editor && typeof editor.props.installRepo === "string" && editor.props.installRepo, "this operator is not the agents owner, so the old link would not have shown");
+    assert.equal(advanced.el.props.defaultOpen, false, "Devices (advanced) opens by itself on its own page");
+    assert.equal(advanced.el.props.action, undefined, "Devices (advanced) still carries a header action (the old Full install link)");
+    assert.ok(!advanced.inside.elements.some((e) => e.props.href === INSTALL), "Devices (advanced) still links to the install page");
+    assert.ok(!advanced.inside.strings.some((s) => /Full install/.test(s)), "the words Full install are still in the section");
+    // Every other section on its own page still opens (only the diagnostics changed).
+    for (const id of ["add-a-device", "your-computers"]) {
+      assert.equal(section(tree, id).el.props.defaultOpen, true, `#${id} no longer opens on its own page`);
+    }
+    // In the whole Devices page, the install page is reached from one place: Add a device.
+    const everyInstallLink = walk(tree).elements.filter((e) => e.props.href === INSTALL);
+    assert.equal(everyInstallLink.length, 1, `${everyInstallLink.length} links to ${INSTALL} on /settings/devices`);
   });
 
   if (failures) {

@@ -111,14 +111,45 @@ export function cliUnsupportedDetail(provider: CliProvider): string {
     : "The app's maker does not allow this sign-in on this computer. Pick another app, or use an AI account.";
 }
 
-/** Inventory is deliberately weaker than readiness. It may say Installed or
- * Signed in; only the exact-device inference probe may say Ready for agents. */
-export function departmentInventoryLine(provider: CliProvider, info: Pick<CliStatusInfo, "installed" | "authenticated" | "checked">): string {
-  const label = CLI_SIGN_IN[provider].label;
-  if (!info.installed) return `${label}: not detected`;
-  if (info.authenticated) return `${label}: signed in`;
-  if (!info.checked) return `${label}: installed, did not answer the check`;
-  return `${label}: installed, not signed in`;
+/**
+ * ONE set of words for an AI app's state on a computer (CC 2026-10-16: the
+ * same computer and app read "Ready for agents" in Settings > AI brain,
+ * "signed in" in Settings > Devices, and "Ready for department work" on the
+ * Devices row line). Every place either screen names one of these states reads
+ * the words from here: describeRuntime and describeLocalModel
+ * (components/settings/agent-engine-client.ts), which both screens' app lines
+ * go through, and the Devices row line (components/settings/YourComputersCard.tsx).
+ *
+ * AI brain's words are the canonical set. Devices used to describe the
+ * heartbeat inventory instead ("not detected", "installed, not signed in"),
+ * which cannot see a Test result; it now reads the same device runtimes AI
+ * brain reads, so no state on either screen needs a word this set lacks.
+ */
+export type RuntimeStatus =
+  | "ready"
+  | "needs_test"
+  | "sign_in_needed"
+  | "not_installed"
+  | "unsupported"
+  | "limit_reached"
+  | "busy"
+  | "offline"
+  | "approval_needed";
+
+export const RUNTIME_STATUS_WORDS: Readonly<Record<RuntimeStatus, string>> = {
+  ready: "Ready for agents",
+  needs_test: "Needs test",
+  sign_in_needed: "Sign-in needed",
+  not_installed: "Not installed",
+  unsupported: "Unsupported",
+  limit_reached: "Subscription limit reached",
+  busy: "Busy",
+  offline: "Offline",
+  approval_needed: "Approval needed",
+};
+
+export function runtimeStatusWords(status: RuntimeStatus): string {
+  return RUNTIME_STATUS_WORDS[status];
 }
 
 export type CliStatusSnapshot = Record<CliProvider, CliStatusInfo>;
