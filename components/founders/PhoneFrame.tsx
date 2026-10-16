@@ -32,6 +32,7 @@ import type { ReactNode } from "react";
 import {
   Bookmark,
   Camera,
+  ChevronLeft,
   Clapperboard,
   Heart,
   Home,
@@ -57,6 +58,25 @@ const REEL_PCT = (16 / 19.5) * 100;
 const TABS_PCT = 100 - STATUS_PCT - REEL_PCT;
 
 const ICON = "h-[6.4cqw] w-[6.4cqw] text-white [filter:drop-shadow(0_1px_1px_rgba(0,0,0,0.6))]";
+
+/*
+ * THE FEED POST (CC, 2026-10-16: "some of the images or videos are cut off").
+ * A 4:5 carousel, a 1:1 card or a 16:9 film is a FEED post on Instagram, not a
+ * Reel: the account row sits above the picture and the actions and caption sit
+ * below it. Drawn as a Reel, the caption, the action column and the bottom
+ * gradient lay on top of the lower third of the picture - the tweet card's last
+ * line and every deck's foot were hidden behind the app's own chrome. So an
+ * Instagram letterbox draws the feed layout and nothing covers the media.
+ *
+ * Shares of the 9:16 reel area's HEIGHT (its width W is the screen's; its
+ * height is 16W/9): app bar 0.105W, account row 0.12W, action row 0.11W.
+ */
+const W_TO_REEL_PCT = (w: number) => Math.round(w * (9 / 16) * 100 * 1e6) / 1e6;
+const FEED_BAR_PCT = W_TO_REEL_PCT(0.105);
+const FEED_HEAD_PCT = W_TO_REEL_PCT(0.12);
+const FEED_TOP_PCT = FEED_BAR_PCT + FEED_HEAD_PCT;
+const FEED_ACTIONS_PCT = W_TO_REEL_PCT(0.11);
+const FEED_ICON = "h-[6.4cqw] w-[6.4cqw] text-white";
 
 /**
  * What the phone draws around an asset. Exported so the big phone
@@ -97,12 +117,17 @@ export function PhoneFrame({
   const name = handle.trim() || "Account";
   const initial = name[0]!.toUpperCase();
   const tiktok = chrome === "tiktok";
+  // An Instagram post that is not vertical: the feed layout (see THE FEED POST).
+  const feed = !tiktok && fit.mode === "letterbox";
+  const mediaTop = feed ? FEED_TOP_PCT : (100 - fit.heightPct) / 2;
+  const actionsTop = FEED_TOP_PCT + fit.heightPct;
 
   return (
     <figure
       data-phone-frame=""
       data-fit={fit.mode}
       data-chrome={chrome}
+      data-layout={feed ? "feed" : "reel"}
       aria-label={`${label}, as it shows on a phone`}
       className={`m-0 w-full [container-type:inline-size] ${className}`}
     >
@@ -146,7 +171,7 @@ export function PhoneFrame({
               className="absolute"
               style={{
                 left: `${(100 - fit.widthPct) / 2}%`,
-                top: `${(100 - fit.heightPct) / 2}%`,
+                top: `${mediaTop}%`,
                 width: `${fit.widthPct}%`,
                 height: `${fit.heightPct}%`,
               }}
@@ -154,8 +179,51 @@ export function PhoneFrame({
               {children}
             </div>
 
-            {/* The app's chrome. pointer-events-none so the media's own
-                controls (play, carousel arrows) stay reachable underneath. */}
+            {feed ? (
+              // The feed post's chrome: above and below the media, never on it.
+              <div aria-hidden className="pointer-events-none absolute inset-0">
+                <div
+                  className="absolute inset-x-0 top-0 flex items-center gap-[2cqw] px-[3.6cqw] text-[4cqw] font-semibold"
+                  style={{ height: `${FEED_BAR_PCT}%` }}
+                >
+                  <ChevronLeft className="h-[5.6cqw] w-[5.6cqw]" />
+                  <span>Posts</span>
+                </div>
+                <div
+                  className="absolute inset-x-0 flex items-center gap-[2cqw] px-[3.6cqw] text-[3.6cqw] font-semibold"
+                  style={{ top: `${FEED_BAR_PCT}%`, height: `${FEED_HEAD_PCT}%` }}
+                >
+                  <span className="flex h-[7cqw] w-[7cqw] shrink-0 items-center justify-center rounded-full bg-neutral-700 text-[3.2cqw] font-bold">
+                    {initial}
+                  </span>
+                  {/* The brand name, never an "@handle" (see the reel's account line). */}
+                  <span className="min-w-0 truncate">{name}</span>
+                  <span className="shrink-0 rounded-[1.4cqw] border-[0.3cqw] border-white/80 px-[1.8cqw] py-[0.4cqw] text-[3cqw]">
+                    Follow
+                  </span>
+                  <MoreHorizontal className="ml-auto h-[5.6cqw] w-[5.6cqw]" />
+                </div>
+                <div
+                  className="absolute inset-x-0 flex items-center gap-[4cqw] px-[3.6cqw]"
+                  style={{ top: `${actionsTop}%`, height: `${FEED_ACTIONS_PCT}%` }}
+                >
+                  <Heart className={FEED_ICON} />
+                  <MessageCircle className={FEED_ICON} />
+                  <Send className={FEED_ICON} />
+                  <Bookmark className={`${FEED_ICON} ml-auto`} />
+                </div>
+                {caption ? (
+                  <p
+                    className="absolute left-[3.6cqw] right-[3.6cqw] m-0 line-clamp-2 text-[3.3cqw] leading-[1.35] text-white/95"
+                    style={{ top: `${actionsTop + FEED_ACTIONS_PCT}%` }}
+                  >
+                    <span className="font-semibold">{name}</span> {caption}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+            /* The app's chrome. pointer-events-none so the media's own
+                controls (play, carousel arrows) stay reachable underneath. */
             <div aria-hidden className="pointer-events-none absolute inset-0">
               <div className="absolute inset-x-0 top-0 flex items-center justify-between px-[4cqw] pt-[3cqw] text-[4.2cqw] font-semibold [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">
                 {tiktok ? (
@@ -225,6 +293,7 @@ export function PhoneFrame({
                 </>
               )}
             </div>
+            )}
           </div>
 
           {/* Tab bar + home indicator: the bottom safe area. */}
