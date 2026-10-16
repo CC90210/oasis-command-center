@@ -28,7 +28,7 @@ import { INJECTION_GUARD, wrapUntrusted } from "@/lib/llm-input-boundary";
 import { redactAll } from "@/lib/secret-redaction";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { TRAINING_NOTES_MAX, TRAINS_ALL, TRAINS_LEGACY, TRAINS_VALUES } from "@/lib/training/trains";
-import type { CorpusItems, CorpusRow } from "@/lib/founders/marketing-queries";
+import { CORPUS_ROW_COLUMNS, type CorpusItems, type CorpusRow } from "@/lib/founders/marketing-queries";
 import type { DepartmentKey } from "@/lib/os/types";
 
 /** A failed read's message for the log: a driver error can carry the connection URL with its token. */
@@ -192,8 +192,6 @@ export async function trainingBlockFor(
   }
 }
 
-const ROW_COLUMNS = "id, kind, label, title, source_url, state, last_error, contributed_by, created_at, indexed_at, trains";
-
 /**
  * One agent's notes for its tab on Admin > Agent training: every state (being read, learned, failed), newest
  * first, filtered by the SAME rule its read uses, in the database, before the limit, so an agent's older
@@ -210,7 +208,7 @@ export async function trainingRowsFor(
   const where = trainsWhere(department);
   try {
     const rs = await (deps.db ?? getTursoClient()).execute({
-      sql: `SELECT ${ROW_COLUMNS} FROM marketing_corpus WHERE tenant_id = ? AND ${where.sql} ORDER BY created_at DESC, id DESC LIMIT ?`,
+      sql: `SELECT ${CORPUS_ROW_COLUMNS} FROM marketing_corpus WHERE tenant_id = ? AND ${where.sql} ORDER BY created_at DESC, id DESC LIMIT ?`,
       args: [tenantId, ...where.args, Math.max(1, Math.min(limit, 200))],
     });
     const str = (v: unknown) => (v === null || v === undefined ? null : String(v));

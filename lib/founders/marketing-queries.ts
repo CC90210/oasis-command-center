@@ -1222,6 +1222,9 @@ export async function getCorpusStats(
 /** The newest corpus links, and whether the read failed (a failed read is not an empty list). */
 export type CorpusItems = { rows: CorpusRow[]; degraded: boolean };
 
+/** The columns a CorpusRow is read from, shared by every list of training material (lib/os/training-notes.ts too). */
+export const CORPUS_ROW_COLUMNS = "id, kind, label, title, source_url, state, last_error, contributed_by, created_at, indexed_at, trains";
+
 /**
  * Most recent corpus items, newest first. Unlike the other list readers this
  * one says when it failed: the Training tab prints "Nothing in it yet" for an
@@ -1234,7 +1237,7 @@ export async function getCorpusItems(tenantId: string, limit = 40): Promise<Corp
     const db = getServiceSupabase();
     const r = await db
       .from("marketing_corpus")
-      .select("id, kind, label, title, source_url, state, last_error, contributed_by, created_at, indexed_at, trains")
+      .select(CORPUS_ROW_COLUMNS)
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(limit);
