@@ -16,10 +16,12 @@ import {
   PUBLIC_BOOKING_TIME_ZONE,
 } from "../lib/forms/public-booking";
 import {
+  isOptionalPublicBookingFormSlug,
   isPublicBookingFormSlug,
   publicBookingDurationMinutes,
   publicBookingOfferLabel,
   PUBLIC_BOOKING_FORM_SLUGS,
+  PUBLIC_BOOKING_OPTIONAL_FORM_SLUGS,
 } from "../lib/forms/public-booking-config";
 import { patch_tenant_record_data } from "../lib/turso-rpc-shim";
 
@@ -75,7 +77,7 @@ await check("normalizes every CRM field named in the funnel brief", () => {
 await check("does not reveal booking when the audit_requested write failed", () => {
   // The calendar stays hidden (503 at the end of the handler) ...
   assert.match(submitRoute, /funnelStageWriteFailed = true;/);
-  assert.match(submitRoute, /if \(funnelStageWriteFailed\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \},\s*\{ status: 503 \},/);
+  assert.match(submitRoute, /if \(funnelStageWriteFailed && !isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \},\s*\{ status: 503 \},/);
   // ... but a failed stage write must NOT drop the speed-to-lead pipeline: the failure path
   // does not return, and the 503 comes after the scoring/alert/email after() blocks (#611 review).
   const failedBlock = submitRoute
@@ -86,7 +88,7 @@ await check("does not reveal booking when the audit_requested write failed", () 
     .replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(failedBlock, /\breturn\b/, "the failure path returns early again");
   assert.ok(
-    submitRoute.indexOf("ingestAiAuditSubmission({") < submitRoute.indexOf("if (funnelStageWriteFailed) {"),
+    submitRoute.indexOf("ingestAiAuditSubmission({") < submitRoute.indexOf("if (funnelStageWriteFailed && !isOptionalPublicBookingFormSlug(form.slug)) {"),
     "the 503 must come after the completion pipeline is scheduled",
   );
   assert.equal(isPublicFunnelReadyForBooking({ funnel_stage: "inbound_lead" }), false);
@@ -180,16 +182,58 @@ await check("a host the booking settings appoint owns and sees the lead (Codex r
   assert.match(bookingRoute, /publicBookingOwnershipPatch\(context\.lead, \{\s*organizer: organizer\.userId,\s*collaborators: \[\s*\.\.\.slot\.hosts\.map/);
 });
 
-await check("enables booking only for OASIS forms that promise a founder call", () => {
-  assert.deepEqual(PUBLIC_BOOKING_FORM_SLUGS, ["ai-audit", "command", "fleet", "book"]);
+await check("every OASIS offer form ends on the calendar; PROTOCOL and COMMUNITY offer it, never force it", () => {
+  // CC, 2026-10-16: every offer page has a place to submit and to book a call.
+  assert.deepEqual(PUBLIC_BOOKING_FORM_SLUGS, ["ai-audit", "command", "fleet", "book", "protocol", "community"]);
   for (const slug of PUBLIC_BOOKING_FORM_SLUGS) assert.equal(isPublicBookingFormSlug(slug), true);
-  for (const slug of ["protocol", "community", "vsl", "support", "start"]) {
-    assert.equal(isPublicBookingFormSlug(slug), false, `${slug} must not force a sales call`);
+  assert.deepEqual(PUBLIC_BOOKING_OPTIONAL_FORM_SLUGS, ["protocol", "community"]);
+  for (const slug of ["protocol", "community", " Protocol "]) {
+    assert.equal(isOptionalPublicBookingFormSlug(slug), true, `${slug} must not force a sales call`);
   }
+  for (const slug of ["ai-audit", "command", "fleet", "book", "vsl"]) assert.equal(isOptionalPublicBookingFormSlug(slug), false);
+  for (const slug of ["vsl", "support", "start"]) assert.equal(isPublicBookingFormSlug(slug), false, `${slug} has no calendar`);
   assert.equal(publicBookingDurationMinutes("ai-audit"), 15);
   assert.equal(publicBookingDurationMinutes("command"), 45);
   assert.equal(publicBookingDurationMinutes("fleet"), 45);
   assert.equal(publicBookingDurationMinutes("book"), 30, "the /book link is a 30-minute call (CC, 2026-10-16)");
+  assert.equal(publicBookingDurationMinutes("protocol"), 15);
+  assert.equal(publicBookingDurationMinutes("community"), 15);
+});
+
+await check("the lead records which form it started and finished (review of #655)", () => {
+  // The finished stage is shared by every booking form; funnel_form is what lets
+  // the Sales desk say "finished the PROTOCOL form" instead of "audit done".
+  assert.equal(buildPublicFunnelLeadPatch({}, "audit_requested", "2026-10-16T12:00:00.000Z", " Protocol ").funnel_form, "protocol");
+  assert.equal("funnel_form" in buildPublicFunnelLeadPatch({}, "audit_requested", "2026-10-16T12:00:00.000Z"), false, "no form, no stamp");
+  assert.match(
+    submitRoute,
+    /buildPublicFunnelLeadPatch\(\s*\{ \.\.\.mergedAnswers \},\s*"audit_requested",\s*new Date\(\)\.toISOString\(\),\s*form\.slug,\s*\)/,
+    "the finished form is stamped",
+  );
+  assert.match(
+    submitRoute,
+    /buildPublicFunnelLeadPatch\(input\.payload, "inbound_lead", new Date\(\)\.toISOString\(\), form\.slug\)/,
+    "the started form is stamped",
+  );
+});
+
+await check("a failed stage write blocks only a required booking form's completion, never an optional one's", () => {
+  // Codex re-review of #655: PROTOCOL's and COMMUNITY's own next step (the
+  // thanks) is durable and their call optional, so only their calendar fails.
+  assert.match(submitRoute, /if \(funnelStageWriteFailed && !isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \}/);
+  assert.equal(submitRoute.match(/funnel_stage_write_unavailable/g)?.length, 1, "one place answers the stage-write failure");
+  // CodeRabbit on #655: nothing retries an optional form's step (it answered
+  // 200), so the route retries the same merge once after the response.
+  const failure = submitRoute.slice(
+    submitRoute.indexOf("funnelStageWriteFailed = true;"),
+    submitRoute.indexOf("// AI-audit funnel, FIRST step."),
+  );
+  assert.match(
+    failure,
+    /if \(isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*after\(async \(\) => \{\s*const retried = await db\.rpc\("patch_tenant_record_data", \{\s*p_id: link\.lead_id,\s*p_tenant_id: form\.tenant_id,\s*p_patch: completedPatch,/,
+    "an optional form's failed stage write is never retried",
+  );
+  assert.match(failure, /\[forms\.submit\.public_booking_completion\.retry_failed\]/, "a failed retry is silent");
 });
 
 await check("keeps public offer names explicit instead of inferring them from duration", () => {
@@ -197,6 +241,8 @@ await check("keeps public offer names explicit instead of inferring them from du
   assert.equal(publicBookingOfferLabel("command"), "COMMAND discovery call");
   assert.equal(publicBookingOfferLabel("fleet"), "FLEET discovery call");
   assert.equal(publicBookingOfferLabel("book"), "discovery call");
+  assert.equal(publicBookingOfferLabel("protocol"), "PROTOCOL questions call");
+  assert.equal(publicBookingOfferLabel("community"), "community intro call");
   // Own keys only: a slug or typed answer like "constructor" never reads an
   // inherited Object member (Codex review of #630 found the shape elsewhere).
   for (const word of ["constructor", "toString", "__proto__"]) {

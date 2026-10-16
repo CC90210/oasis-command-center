@@ -234,7 +234,7 @@ async function main(): Promise<void> {
   const day = (n: number) => new Date(NOW - n * 86_400_000).toISOString();
   const inboundRow = (id: string, ageDays: number, data: Record<string, unknown>) => ({ id, created_at: day(ageDays), data: { stage: "researched", ...data } });
   const rows = [
-    inboundRow("a", 1, { name: "Ada Lovelace", company_name: "Acme", monthly_revenue: "10k_50k", funnel_stage: "audit_requested", primary_bottleneck: "Leads wait days" }),
+    inboundRow("a", 1, { name: "Ada Lovelace", company_name: "Acme", monthly_revenue: "10k_50k", funnel_stage: "audit_requested", funnel_form: "ai-audit", primary_bottleneck: "Leads wait days" }),
     inboundRow("b", 0.2, { name: "Bo Chen", company: "Bo Co", funnel_stage: "inbound_lead" }),
     inboundRow("booked", 2, { name: "Already Booked", funnel_stage: "meeting_booked" }),
     inboundRow("old", 15, { name: "Too Old", funnel_stage: "audit_requested" }),
@@ -253,6 +253,34 @@ async function main(): Promise<void> {
     "words, not option keys, and what the lead did",
   );
   assert.equal(inboundLeadLine(rows[1].data), "Bo Chen · Bo Co · started the form, did not finish");
+  // Review of #655: the finished stage is shared by every booking form, so the
+  // line names the form; a PROTOCOL buyer or a community joiner is never an "audit".
+  assert.equal(
+    inboundLeadLine({ name: "Pat Buyer", funnel_stage: "audit_requested", funnel_form: "protocol" }),
+    "Pat Buyer · finished the PROTOCOL form, unbooked - needs follow-up",
+  );
+  assert.equal(
+    inboundLeadLine({ name: "Cam Joiner", funnel_stage: "audit_requested", funnel_form: "community" }),
+    "Cam Joiner · finished the community form, unbooked - needs follow-up",
+  );
+  assert.equal(
+    inboundLeadLine({ name: "Old Lead", funnel_stage: "audit_requested" }),
+    "Old Lead · finished the form, unbooked - needs follow-up",
+    "a lead finished before the form was stamped is not guessed to be an audit",
+  );
+  assert.equal(
+    inboundLeadLine({ name: "Old Audit", funnel_stage: "audit_requested", ai_audit_scored_at: "2026-10-15T12:00:00.000Z" }),
+    "Old Audit · audit done, unbooked - needs follow-up",
+    "an unstamped lead the AI audit scored proves it came through the audit",
+  );
+  assert.equal(
+    inboundLeadLine({ name: "Later Buyer", funnel_stage: "audit_requested", funnel_form: "protocol", ai_audit_scored_at: "2026-10-15T12:00:00.000Z" }),
+    "Later Buyer · finished the PROTOCOL form, unbooked - needs follow-up",
+    "the stamp of the form finished last wins over an older audit score",
+  );
+  for (const form of ["protocol", "community", "command", "fleet", "book", undefined]) {
+    assert.ok(!/audit/i.test(inboundLeadLine({ name: "X", funnel_stage: "audit_requested", funnel_form: form })), `${form} reads as an audit`);
+  }
   const items = inboundAttention({ ok: true, value: { total: 9, untouched: 9, booked: 1, waiting } });
   assert.equal(items.length, 6, "five leads and one 'more' line");
   assert.equal(items[0].href, "/pipeline/b");
@@ -277,7 +305,14 @@ async function main(): Promise<void> {
     const { inboundRecent, INBOUND_RECENT_SHOWN } = await import("../components/os/department/inbound-rules");
     const { funnelStageLabel } = await import("../lib/forms/ai-audit-format");
     assert.equal(funnelStageLabel("inbound_lead"), "Inbound lead");
-    assert.equal(funnelStageLabel("audit_requested"), "Audit requested");
+    assert.equal(funnelStageLabel("audit_requested", "ai-audit"), "Audit requested");
+    assert.equal(funnelStageLabel("audit_requested", " AI-Audit "), "Audit requested");
+    assert.equal(funnelStageLabel("audit_requested", "protocol"), "PROTOCOL form finished");
+    assert.equal(funnelStageLabel("audit_requested", "community"), "community form finished");
+    assert.equal(funnelStageLabel("audit_requested", "command"), "COMMAND form finished");
+    assert.equal(funnelStageLabel("audit_requested", "book"), "Book a call form finished");
+    assert.equal(funnelStageLabel("audit_requested"), "Form finished", "no stamp: never guessed to be an audit");
+    assert.equal(funnelStageLabel("audit_requested", "constructor"), "Form finished", "own keys only");
     assert.equal(funnelStageLabel("meeting_booked"), "Meeting booked");
     assert.equal(funnelStageLabel("call_no_show"), "Call no show", "a stage added later still reads as words");
     assert.equal(funnelStageLabel(""), null, "no funnel stage, no chip");
@@ -290,7 +325,7 @@ async function main(): Promise<void> {
     const stamp = (iso: string) => `T(${iso})`;
     const recentRows = [
       row("booked", 2, { stage: "founder_meeting_booked", name: "Dana Booked", company: "Dana Co", revenue_band: "50k_250k", funnel_stage: "meeting_booked", founder_meeting_at: "2026-10-22T18:30:00.000Z" }),
-      row("fresh", 0.1, { stage: "researched", name: "Eve Fresh", company_name: "Eve Inc", monthly_revenue: "10k_50k", funnel_stage: "audit_requested" }),
+      row("fresh", 0.1, { stage: "researched", name: "Eve Fresh", company_name: "Eve Inc", monthly_revenue: "10k_50k", funnel_stage: "audit_requested", funnel_form: "ai-audit" }),
       row("bare", 1, { stage: "assigned" }),
       row("stale", 20, { stage: "lost", name: "Too Old", funnel_stage: "inbound_lead" }),
     ];

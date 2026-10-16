@@ -34,8 +34,9 @@ import {
 import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
-import { PublicBookingCalendar } from "./PublicBookingCalendar";
-import { isPublicBookingSurface } from "@/lib/forms/public-booking-config";
+import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
+import { isOptionalPublicBookingFormSlug, isPublicBookingSurface } from "@/lib/forms/public-booking-config";
+import { normalizeFounderMeetingPhone } from "@/lib/website-sales-meeting";
 import { ConsentChoice } from "./ConsentChoice";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
@@ -268,6 +269,15 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
   invalid_step_index: "Something went wrong moving between steps. Please refresh and try again.",
   step_index_out_of_range: "Something went wrong moving between steps. Please refresh and try again.",
 };
+
+/** A phone the founder-meeting engine would book with (lib/website-sales-meeting.ts). */
+function bookablePhone(value: unknown): boolean {
+  try {
+    return normalizeFounderMeetingPhone(value) !== null;
+  } catch {
+    return false;
+  }
+}
 
 /** Shown when the route returns a code this build has never heard of. */
 export const SUBMIT_ERROR_FALLBACK =
@@ -1025,6 +1035,18 @@ export function FormPublicClient({
     isPublicBookingSurface({ tenantSlug, formSlug })
     ? formSlug
     : null;
+  // PROTOCOL and COMMUNITY: their own next step (the checkout email, the
+  // community link) is the thanks, and the calendar is offered under it.
+  const publicBookingOptional = publicBookingFormSlug !== null && isOptionalPublicBookingFormSlug(publicBookingFormSlug);
+  // The founder-meeting engine books only with a phone it can use
+  // (client_phone_required, invalid_client_phone), and these two forms ask for
+  // one as optional. A visitor who left it blank or typed one the engine would
+  // refuse is pointed to /book, which asks for it, instead of a calendar that
+  // would let them pick a time and then refuse it (Codex review of #655). The
+  // same rule the engine applies: normalizeFounderMeetingPhone.
+  const optionalBookingPhone = steps
+    .flatMap((s) => s.fields)
+    .some((f) => f.type === "phone" && bookablePhone(mergedValues[f.name] ?? prefill?.[f.name]));
 
   /**
    * WHICH step is outstanding, not merely THAT one is.
@@ -1157,7 +1179,7 @@ export function FormPublicClient({
                     what this screen is for. */}
                 <p className="text-[11px] text-fg-dim">{handoff.footer}</p>
               </div>
-            ) : publicBookingFormSlug ? (
+            ) : publicBookingFormSlug && !publicBookingOptional ? (
               <PublicBookingCalendar
                 token={tokenRef.current || token}
                 primary={primary}
@@ -1165,13 +1187,47 @@ export function FormPublicClient({
                 completedStep={steps.length}
               />
             ) : (
-              <div className="text-center space-y-4 py-8">
-                <CheckCircle2 className="w-12 h-12 mx-auto" style={{ color: primary }} />
-                <h2 className="text-xl font-bold text-fg">All set.</h2>
-                <p className="text-sm text-fg-muted max-w-md mx-auto">
-                  {thanksMessage}
-                </p>
-              </div>
+              <>
+                <div className="text-center space-y-4 py-8">
+                  <CheckCircle2 className="w-12 h-12 mx-auto" style={{ color: primary }} />
+                  <h2 className="text-xl font-bold text-fg">All set.</h2>
+                  <p className="text-sm text-fg-muted max-w-md mx-auto">
+                    {thanksMessage}
+                  </p>
+                </div>
+                {/* COMMUNITY's next step IS the community: a link to click, not
+                    only the address inside the thanks (review of #655). */}
+                {publicBookingFormSlug === "community" ? (
+                  <CommunityJoinLink formSlug={publicBookingFormSlug} completedStep={steps.length} primary={primary} />
+                ) : null}
+                {publicBookingFormSlug ? (
+                  <div className="border-t border-bg-border pt-5">
+                    {optionalBookingPhone ? (
+                      <PublicBookingCalendar
+                        token={tokenRef.current || token}
+                        primary={primary}
+                        formSlug={publicBookingFormSlug}
+                        completedStep={steps.length}
+                        optional
+                      />
+                    ) : (
+                      <div className="space-y-2 text-center">
+                        <h3 className="text-lg font-bold text-fg">Want to talk it through first?</h3>
+                        <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
+                          Optional: book a call with our team. The booking page asks for a phone number so we can reach you.
+                        </p>
+                        <a
+                          href="/book"
+                          className="inline-block text-sm font-semibold underline underline-offset-4"
+                          style={{ color: primary }}
+                        >
+                          Book a call
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </>
             )
           ) : (
             <>

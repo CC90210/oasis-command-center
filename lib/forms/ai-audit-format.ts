@@ -17,6 +17,8 @@
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
 import type { PublicFunnelStage } from "@/lib/forms/public-booking";
+import { AI_AUDIT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
+import { publicBookingFormName } from "@/lib/forms/public-booking-config";
 
 /** Display text for the funnel's enum values. Keys read from
  *  oasis-ai-audit-seed.ts + the scoring tables in ai-audit-ingest.ts — an
@@ -128,14 +130,53 @@ const FUNNEL_STAGE_LABELS: Record<PublicFunnelStage, string> = {
  * The funnel stage chip on the lead page and the Sales desk list. Null when the
  * lead has no funnel stage (a cold lead gets no chip, not an empty one); a
  * stage added later without a label here still shows, in words.
+ *
+ * `audit_requested` means "finished the form" for EVERY booking form, so its
+ * chip names the form the lead stamped (`funnel_form`): "Audit requested" only
+ * for the AI audit, "PROTOCOL form finished" for PROTOCOL, and "Form finished"
+ * for a lead stamped before the form was recorded (review of #655: a PROTOCOL
+ * buyer must never read as an audit).
  */
-export function funnelStageLabel(value: unknown): string | null {
+export function funnelStageLabel(value: unknown, form?: unknown): string | null {
   const key = str(value).trim();
   if (!key) return null;
+  if (key === "audit_requested") return finishedFormLabel(form);
   const known = (FUNNEL_STAGE_LABELS as Record<string, string>)[key];
   if (known) return known;
   const words = key.replace(/_/g, " ");
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * The booking form a lead came through: its `funnel_form` stamp, else the AI
+ * audit when the lead carries the audit's own score stamp (only
+ * ai-audit-ingest.ts writes ai_audit_scored_at, and only for that form), else
+ * "" (unknown, never guessed). Leads finished before the stamp existed keep
+ * their "Audit requested" only when they can prove it.
+ */
+export function leadFunnelForm(data: Record<string, unknown>): string {
+  const stamped = str(data.funnel_form).trim().toLowerCase();
+  if (stamped) return stamped;
+  return str(data.ai_audit_scored_at).trim() ? AI_AUDIT_SLUG : "";
+}
+
+function finishedFormLabel(form: unknown): string {
+  const slug = str(form).trim().toLowerCase();
+  if (slug === AI_AUDIT_SLUG) return FUNNEL_STAGE_LABELS.audit_requested;
+  const name = publicBookingFormName(slug);
+  return name ? `${name} form finished` : "Form finished";
+}
+
+/**
+ * What a lead that finished its form and has not booked did, for the Sales
+ * desk's one-line summary: "audit done" for the AI audit, "finished the
+ * PROTOCOL form" for PROTOCOL, "finished the form" when the form is unknown.
+ */
+export function finishedFormPhrase(form: unknown): string {
+  const slug = str(form).trim().toLowerCase();
+  if (slug === AI_AUDIT_SLUG) return "audit done";
+  const name = publicBookingFormName(slug);
+  return name ? `finished the ${name} form` : "finished the form";
 }
 
 /**

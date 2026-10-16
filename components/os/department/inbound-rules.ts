@@ -8,7 +8,7 @@
  * counts, so this is where a founder opening Sales sees them.
  */
 import type { KpiTileProps } from "@/components/os/KpiTile";
-import { auditAnswerLabel, bottleneckLabel, funnelStageLabel } from "@/lib/forms/ai-audit-format";
+import { auditAnswerLabel, bottleneckLabel, finishedFormPhrase, funnelStageLabel, leadFunnelForm } from "@/lib/forms/ai-audit-format";
 
 /** The leads the list looks back over. */
 export const INBOUND_WINDOW_DAYS = 14;
@@ -74,7 +74,8 @@ export function inboundLeadLine(data: Record<string, unknown>): string {
     company,
     revenue ?? "",
     bottleneckLabel(text(data.primary_bottleneck)).slice(0, 60),
-    done ? "audit done, unbooked - needs follow-up" : "started the form, did not finish",
+    // Which form: the finished stage is shared by every booking form (#655).
+    done ? `${finishedFormPhrase(leadFunnelForm(data))}, unbooked - needs follow-up` : "started the form, did not finish",
   ];
   return parts.filter(Boolean).join(" · ");
 }
@@ -152,7 +153,7 @@ export function inboundRecent(
         name: text(r.data.name) || "New lead",
         company: text(r.data.company_name) || text(r.data.company) || null,
         revenue: auditAnswerLabel("revenue", text(r.data.revenue_band) || text(r.data.monthly_revenue)),
-        stage: funnelStageLabel(r.data.funnel_stage),
+        stage: funnelStageLabel(r.data.funnel_stage, leadFunnelForm(r.data)),
         booked: meetingAt ? formatTime(meetingAt) : "Unbooked",
         href: `/pipeline/${r.id}`,
       };

@@ -55,11 +55,19 @@ export function PublicBookingCalendar({
   primary,
   formSlug,
   completedStep,
+  optional = false,
 }: {
   token: string | null;
   primary: string;
   formSlug: string;
   completedStep: number;
+  /**
+   * The call is an extra, not the next step (PROTOCOL, COMMUNITY): the form's
+   * own thanks sits above this, so the heading offers the call instead of
+   * announcing the details are in, and the community link (already in that
+   * thanks) is not repeated.
+   */
+  optional?: boolean;
 }) {
   const [availability, setAvailability] = useState<Availability | null>(null);
   const [loading, setLoading] = useState(true);
@@ -67,8 +75,6 @@ export function PublicBookingCalendar({
   const [booking, setBooking] = useState(false);
   const [error, setError] = useState("");
   const [receipt, setReceipt] = useState<Receipt | null>(null);
-  const communityBase = `/go/community?form=${encodeURIComponent(formSlug)}&t=oasis-ai-cc&step=${completedStep}`;
-  const [communityHref, setCommunityHref] = useState(communityBase);
   const bookingRequest = useRef<{ slot: string; id: string } | null>(null);
 
   async function load() {
@@ -98,11 +104,9 @@ export function PublicBookingCalendar({
 
   useEffect(() => {
     void load();
-    const visit = getOrCreateVisitId();
-    setCommunityHref(visit ? `${communityBase}&v=${encodeURIComponent(visit)}` : communityBase);
     // The token is the lead-bound credential; a fresh one means a fresh audit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [communityBase, token]);
+  }, [token]);
 
   const groups = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -182,13 +186,22 @@ export function PublicBookingCalendar({
 
   return (
     <div className="space-y-5 py-3">
-      <div className="space-y-2 text-center">
-        <CheckCircle2 className="mx-auto h-10 w-10" style={{ color: primary }} />
-        <h2 className="text-xl font-bold text-fg">Your details are in. Pick a time while you’re here.</h2>
-        <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
-          These are the live times our team has open. The call is {availability?.duration_minutes || 15} minutes and the Google Meet invite arrives instantly.
-        </p>
-      </div>
+      {optional ? (
+        <div className="space-y-2 text-center">
+          <h3 className="text-lg font-bold text-fg">Want to talk it through first?</h3>
+          <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
+            Optional: pick a {availability?.duration_minutes || 15}-minute call with our team. These are the live times we have open, and the Google Meet invite arrives instantly.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2 text-center">
+          <CheckCircle2 className="mx-auto h-10 w-10" style={{ color: primary }} />
+          <h2 className="text-xl font-bold text-fg">Your details are in. Pick a time while you’re here.</h2>
+          <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
+            These are the live times our team has open. The call is {availability?.duration_minutes || 15} minutes and the Google Meet invite arrives instantly.
+          </p>
+        </div>
+      )}
 
       {loading ? (
         <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-fg-muted">
@@ -244,12 +257,54 @@ export function PublicBookingCalendar({
         </button>
       )}
 
-      <div className="border-t border-bg-border pt-4 text-center">
-        <p className="text-xs text-fg-dim">Not ready to book? Stay close without starting a sales process.</p>
-        <a href={communityHref} className="mt-2 inline-block text-sm font-semibold underline underline-offset-4" style={{ color: primary }}>
-          Join the free OASIS Telegram community →
-        </a>
-      </div>
+      {optional ? null : (
+        <CommunityJoinLink
+          formSlug={formSlug}
+          completedStep={completedStep}
+          primary={primary}
+          lead="Not ready to book? Stay close without starting a sales process."
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * "Join the free OASIS Telegram community", through /go/community so the
+ * click counts against this form and visit (the visit id is added once the
+ * page runs, so the server's first render matches). One markup for the
+ * calendar's footer and the COMMUNITY form's own last screen, where it is the
+ * form's next step (review of #655: the thanks names the link only as text).
+ */
+export function CommunityJoinLink({
+  formSlug,
+  completedStep,
+  primary,
+  lead = null,
+}: {
+  formSlug: string;
+  completedStep: number;
+  primary: string;
+  /** The line above the link; null draws the link alone, with no rule above it. */
+  lead?: string | null;
+}) {
+  const base = `/go/community?form=${encodeURIComponent(formSlug)}&t=oasis-ai-cc&step=${completedStep}`;
+  const [href, setHref] = useState(base);
+  useEffect(() => {
+    const visit = getOrCreateVisitId();
+    setHref(visit ? `${base}&v=${encodeURIComponent(visit)}` : base);
+  }, [base]);
+  const link = (
+    <a href={href} className="mt-2 inline-block text-sm font-semibold underline underline-offset-4" style={{ color: primary }}>
+      Join the free OASIS Telegram community →
+    </a>
+  );
+  return lead ? (
+    <div className="border-t border-bg-border pt-4 text-center">
+      <p className="text-xs text-fg-dim">{lead}</p>
+      {link}
+    </div>
+  ) : (
+    <div className="text-center">{link}</div>
   );
 }

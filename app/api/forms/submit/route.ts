@@ -63,7 +63,7 @@ import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { buildPublicFunnelLeadPatch } from "@/lib/forms/public-booking";
-import { isPublicBookingForm } from "@/lib/forms/public-booking-config";
+import { isOptionalPublicBookingFormSlug, isPublicBookingForm } from "@/lib/forms/public-booking-config";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
 import {
   ensureAiAuditSubmissionDelivery,
@@ -1754,6 +1754,8 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     const completedPatch = buildPublicFunnelLeadPatch(
       { ...mergedAnswers },
       "audit_requested",
+      new Date().toISOString(),
+      form.slug,
     );
     const completed = await db.rpc("patch_tenant_record_data", {
       p_id: link.lead_id,
@@ -1775,6 +1777,27 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       // of #611). The form row is already durable and every step is idempotent,
       // so the browser can retry this same final step.
       funnelStageWriteFailed = true;
+      // PROTOCOL and COMMUNITY answer 200 even so (their call is optional; see
+      // the 503 at the end), so no browser retries this step. Retry the same
+      // idempotent merge once after the response instead, so the lead still
+      // reaches audit_requested and its optional calendar can open; a second
+      // failure is logged as loudly as the first (CodeRabbit on #655).
+      if (isOptionalPublicBookingFormSlug(form.slug)) {
+        after(async () => {
+          const retried = await db.rpc("patch_tenant_record_data", {
+            p_id: link.lead_id,
+            p_tenant_id: form.tenant_id,
+            p_patch: completedPatch,
+          });
+          if (retried.error) {
+            console.error("[forms.submit.public_booking_completion.retry_failed]", {
+              lead_id: link.lead_id,
+              form_slug: form.slug,
+              error: retried.error.message,
+            });
+          }
+        });
+      }
     }
   }
 
@@ -1948,7 +1971,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     }
   }
 
-  if (funnelStageWriteFailed) {
+  // A required booking form's next step IS the calendar, which must not open
+  // over a lead that still says inbound_lead. On PROTOCOL and COMMUNITY the call
+  // is optional and their own next step (the thanks: checkout email, community
+  // link) is already durable, so only their calendar fails (its availability
+  // read refuses a lead not ready to book), never their completion (Codex
+  // review of #655).
+  if (funnelStageWriteFailed && !isOptionalPublicBookingFormSlug(form.slug)) {
     return NextResponse.json(
       { ok: false, error: "funnel_stage_write_unavailable" },
       { status: 503 },
@@ -2164,7 +2193,7 @@ async function initAnonymousLead(input: {
   );
   const isBookableOasisIntake = isPublicBookingForm({ tenantId: form.tenant_id, formSlug: form.slug });
   const inboundFunnelPatch = isBookableOasisIntake
-    ? buildPublicFunnelLeadPatch(input.payload, "inbound_lead")
+    ? buildPublicFunnelLeadPatch(input.payload, "inbound_lead", new Date().toISOString(), form.slug)
     : {};
 
   let lead: { id: string; data: Record<string, unknown> };

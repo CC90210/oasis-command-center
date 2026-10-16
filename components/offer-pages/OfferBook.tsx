@@ -6,8 +6,11 @@
  * The form is the page's own form, unchanged (FormPublicClient, chrome
  * "embedded"): the same submit route, the same one-lead rule, the same
  * validation before any lead is written. What this adds is the step after the
- * contact details, until booking on the page arrives (PR3):
+ * contact details:
  *
+ *   - the form ends on the founder calendar on this page (every OASIS offer
+ *     form, lib/forms/public-booking-config.ts): "Your details are in", and
+ *     the time is picked inline at the end, never through a second link;
  *   - a booking link is configured: a "Pick a time" button (a link in a new
  *     tab, never an embedded calendar), with the remaining questions below it;
  *   - none is configured: "Tell us two times that suit you", by email to the
@@ -21,6 +24,7 @@
 import { useState } from "react";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
+import { isOptionalPublicBookingFormSlug, isPublicBookingSurface } from "@/lib/forms/public-booking-config";
 import type { BookMode } from "@/lib/offer-pages/types";
 import { ACCENT_BORDER, ACCENT_WASH } from "./styles";
 
@@ -42,6 +46,14 @@ export function OfferBook({
   previewSteps?: string[];
 }) {
   const [contactDone, setContactDone] = useState(false);
+  // The form ends on the founder calendar on this same page (FormPublicClient
+  // -> PublicBookingCalendar). A "Pick a time" link to the booking page as
+  // well would be a second way to book, through a second form and a second lead.
+  const calendarOnPage = Boolean(
+    form?.tenantSlug && form.formSlug && isPublicBookingSurface({ tenantSlug: form.tenantSlug, formSlug: form.formSlug }),
+  );
+  // PROTOCOL and COMMUNITY offer the call, never require it (review of #655).
+  const callOptional = calendarOnPage && isOptionalPublicBookingFormSlug(form?.formSlug ?? "");
 
   if (!form) {
     return (
@@ -68,7 +80,16 @@ export function OfferBook({
     <div className="space-y-5">
       {mode === "form_then_link" && contactDone ? (
         <div className={`rounded-xl border ${ACCENT_BORDER} ${ACCENT_WASH} p-5 sm:p-6`} role="status">
-          {bookingUrl ? (
+          {calendarOnPage ? (
+            <>
+              <p className="font-display text-lg font-bold tracking-tight text-fg">Your details are in.</p>
+              <p className="mt-2 text-[14px] leading-relaxed text-fg-muted">
+                {callOptional
+                  ? "A few quick questions below. At the end you can also book a call here, if you would like one."
+                  : "A few quick questions below, then you pick a time for the call right here."}
+              </p>
+            </>
+          ) : bookingUrl ? (
             <>
               <p className="font-display text-lg font-bold tracking-tight text-fg">Your details are in. Pick a time that suits you.</p>
               <p className="mt-2 text-[14px] leading-relaxed text-fg-muted">
