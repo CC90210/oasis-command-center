@@ -116,6 +116,46 @@ check("an organizer whose calendar cannot be read closes everything (fail closed
   assert.equal(slotsWith(new Map<string, HostBusy>([[ADON, []]])).length, 0);
 });
 
+// CC, 2026-10-16: until Adon connects his work Google account, his days book
+// with CC alone. Booking engine's rules for it: only an UNCONNECTED attendee
+// leaves the slot; a readable busy one still closes it; the organizer rule is
+// unchanged; and it reverts by itself on the first read that works.
+check("an attendee with no connected calendar is left off: every day books with the organizer alone", () => {
+  const absent = slotsWith(new Map<string, HostBusy>([[CC, []], [ADON, "absent"]]));
+  const ccOnly = slotsWith(new Map<string, HostBusy>([[CC, []]]), { ...settings, hosts: [settings.hosts[0]] });
+  assert.deepEqual(absent, ccOnly, "the same slots as a workspace where CC is the only host");
+  const thursday = absent.find((s) => s.start === "2026-10-15T16:00:00.000Z");
+  assert.deepEqual(thursday?.hostIds, [CC], "Thu 12:00 is offered with CC alone, so only CC is invited");
+  assert.ok(absent.some((s) => ["Sun", "Mon", "Tue", "Wed", "Thu"].includes(weekdayIn(s.start))), "Adon's days open");
+  for (const s of absent) assert.deepEqual(s.hostIds, [CC], `${s.start} still lists Adon`);
+});
+
+check("the organizer's busy time still closes a slot the attendee is left off", () => {
+  const busy = new Map<string, HostBusy>([
+    [CC, [{ start: Date.parse("2026-10-15T16:00:00.000Z"), end: Date.parse("2026-10-15T17:00:00.000Z") }]],
+    [ADON, "absent"],
+  ]);
+  const open = starts(slotsWith(busy));
+  assert.ok(!open.includes("2026-10-15T16:00:00.000Z"));
+  assert.ok(!open.includes("2026-10-15T16:30:00.000Z"));
+  assert.ok(open.includes("2026-10-15T17:00:00.000Z"));
+});
+
+check("an organizer is never left off: an absent organizer closes everything", () => {
+  assert.equal(slotsWith(new Map<string, HostBusy>([[CC, "absent"], [ADON, []]])).length, 0);
+  assert.equal(slotsWith(new Map<string, HostBusy>([[CC, "absent"], [ADON, "absent"]])).length, 0);
+});
+
+check("once the attendee's calendar reads, they are back on their days, and their busy time counts", () => {
+  const connected = slotsWith(free());
+  assert.deepEqual(connected.find((s) => s.start === "2026-10-15T16:00:00.000Z")?.hostIds, [CC, ADON]);
+  const busy = free();
+  busy.set(ADON, [{ start: Date.parse("2026-10-15T16:00:00.000Z"), end: Date.parse("2026-10-15T17:00:00.000Z") }]);
+  const open = starts(slotsWith(busy));
+  assert.ok(!open.includes("2026-10-15T16:00:00.000Z"), "a connected, busy attendee closes the slot");
+  assert.ok(open.includes("2026-10-15T17:00:00.000Z"));
+});
+
 check("the buffer keeps free time either side of a busy block", () => {
   const buffered = { ...settings, bufferMinutes: 10 };
   const busy = free();
