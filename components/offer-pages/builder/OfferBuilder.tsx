@@ -104,6 +104,9 @@ export function OfferBuilder({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTicks = useRef<{ confirm: string[]; unconfirm: string[] }>({ confirm: [], unconfirm: [] });
   const conflict = useRef(false);
+  // The same conflict as state, for the screen: it stays set until reload,
+  // unlike `saving`, which an edit moves on to "pending".
+  const [conflicted, setConflicted] = useState(false);
   // The page as last edited, set in `update` itself (not after render), so
   // "Write the empty parts" (takeCopy) always fills the latest one.
   const docRef = useRef<OfferPageDoc | null>(initial.draft);
@@ -122,7 +125,10 @@ export function OfferBuilder({
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; offer?: OfferView; error?: string; message?: string; path?: string; reason?: string };
       if (!data.ok || !data.offer) {
-        if (data.error === "draft_conflict") conflict.current = true;
+        if (data.error === "draft_conflict") {
+          conflict.current = true;
+          setConflicted(true);
+        }
         setSaving("error");
         setSaveError(
           data.message ||
@@ -281,7 +287,7 @@ export function OfferBuilder({
         doc={doc}
         onBrief={(promise) => update({ ...doc, brief: { ...(doc.brief ?? {}), promise } })}
         onCopy={takeCopy}
-        saveFailed={saving === "error"}
+        saveFailed={saving === "error" || conflicted}
       />
       <div className="flex flex-wrap items-center gap-3 text-xs text-fg-muted">
         <span>

@@ -77,7 +77,8 @@ check("the model's answer is read safely: fenced JSON works, junk or a hero-less
 });
 
 check("a fresh book_call page gets every writable part, and still parses as a page", () => {
-  const { copy, withheld } = vetWrittenCopy(written, "One operating view for a service business.");
+  // (The route's source always carries the business and offer names, as here.)
+  const { copy, withheld } = vetWrittenCopy(written, "OASIS Command Center: one operating view for a service business.");
   assert.equal(withheld, 0, "plain copy was held back");
   const { doc, filled } = applyWrittenCopy(emptyDocForTemplate("book_call"), copy);
   assert.deepEqual(filled.sort(), ["book", "faq", "hero", "obstacles", "seo", "what_you_get", "work"]);
@@ -149,7 +150,7 @@ check("generated sentences still meet the claims gate before Publish", () => {
 });
 
 check("a figure or claim word the owner never gave is left out, not saved (the never-invent rule, in code)", () => {
-  const owner = "We answer the phone for dental clinics and book patients.";
+  const owner = "OASIS Command Center: we answer the phone for dental clinics and book patients.";
   for (const invented of [
     "The leading answering service",
     "Award-winning front desk",
@@ -190,6 +191,19 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(inventsFacts("The most effective way to get more bookings", app), "an invented promised result got through");
   assert.ok(!inventsFacts("The only answering service in Ottawa", "We are the only answering service in Ottawa."));
   assert.ok(!inventsFacts("Leads booked straight onto your calendar", "It books leads onto your calendar."), "booking talk was held back as a claim");
+  // Codex round eight: a name the owner never gave (an integration, a brand, a
+  // certification) is an invention too.
+  assert.ok(inventsFacts("Integrates with Salesforce in a click", "A scheduling app"), "an invented integration got through");
+  assert.ok(inventsFacts("Fully HIPAA compliant booking", "A scheduling app"), "an invented certification got through");
+  assert.ok(inventsFacts("Your calendar syncs with Google Calendar", "A scheduling app for clinics"), "an invented integration got through");
+  assert.ok(!inventsFacts("Your calendar syncs with Google Calendar", "It syncs with Google Calendar."));
+  assert.ok(!inventsFacts("AI-powered booking that answers your DMs", "An AI app that answers DMs"), "a generic acronym was held as a name");
+  assert.ok(!inventsFacts("Never Miss Another Call", "A scheduling app"), "a Title Case heading was read as names");
+  assert.ok(!inventsFacts("Meet your AI Front Desk today", "AI Front Desk: it answers calls"));
+  assert.ok(!inventsFacts("Ready-to-use SOPs that connect your APIs", "A scheduling app"), "a plural generic acronym was held as a name");
+  // The owner is told how many sentences were left out, and how to get them back.
+  const panelText = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
+  assert.match(panelText, /left out for stating something your description doesn't/);
   // A money amount is one claim (Codex round six): a bare "99" and a "$" elsewhere do not make "$99".
   // ("Only $99", not "Only $99 a month": "a month" would be caught by the time-frame rule instead.)
   assert.ok(inventsFacts("Only $99", "We have 99 clients and charge $50 for setup."), "an invented price got through");
@@ -254,6 +268,9 @@ check("the route is an owner action on the workspace AI account that saves a dra
   };
   assert.ok(at("save && emptyWritableParts(current.draft).length === 0") < at("runToolModelCall("), "the empty check runs after the paid call");
   assert.ok(at("withBrief(current.draft") < at("runToolModelCall("), "the description is saved only after the model answers");
+  // Codex round eight: before the vault read too, so a vault outage cannot lose it.
+  assert.ok(at("withBrief(current.draft") < at("fetchTenantVaultSecretsForRedaction("), "a vault outage loses the description");
+  assert.match(route, /withBrief\(current\.draft, \{ description: redactAll\(description\), audience: redactAll\(audience\) \}\)/);
   assert.ok(at("vetWrittenCopy(written, source)") < at("if (!save) return json({ ok: true, filled: [], copy"), "the editor gets copy nobody vetted");
   assert.ok(at("if (!save) return json(") < at("saveRow(applied.doc)"), "the editor's mode saves the words");
   assert.match(route, /if \(save\) \{\s*const briefed = withBrief/, "the editor's mode saves the brief over the one it holds");
@@ -362,7 +379,9 @@ check("the editor's write is refused, not shown as written, while its saves are 
   assert.match(panel, /if \(filled === "conflict"\) \{\s*return setError\(/, "a refused fill is reported as written");
   assert.match(panel, /if \(filled === "brief_changed"\) \{\s*return setError\(/, "words from an old description are reported as written");
   const builder = readFileSync("components/offer-pages/builder/OfferBuilder.tsx", "utf8");
-  assert.match(builder, /saveFailed=\{saving === "error"\}/);
+  // Codex round eight: a conflict blocks the write until reload, not just until the next edit moves `saving` on.
+  assert.match(builder, /saveFailed=\{saving === "error" \|\| conflicted\}/);
+  assert.match(builder, /conflict\.current = true;\s*setConflicted\(true\);/);
   assert.match(builder, /if \(!latest \|\| conflict\.current\) return "conflict";/, "a conflicted editor takes copy it cannot save");
   // Codex round seven: the brief can change in the Copy brief too, so the
   // editor compares the brief the words were written from with the latest one.

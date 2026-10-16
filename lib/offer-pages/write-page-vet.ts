@@ -15,6 +15,14 @@
  *   kind: a sentence making a kind of claim the owner's words never make (a
  *   superlative, a promised result, money...) is left out. So every claim
  *   kind the linter learns is grounded here too, with no second list to keep.
+ * - Names (namesIn): a brand, product, integration or certification the
+ *   sentence names must be named in the owner's words ("Integrates with
+ *   Salesforce", "HIPAA compliant").
+ *
+ * What it cannot catch: an ordinary sentence describing something the offer
+ * does not do, in plain words with no figure, claim or name. Nothing keyword
+ * based can; that is why the page stays a draft the owner reads through, and
+ * the screens say so, before Publish.
  *
  * Server only: claims.ts hashes sentences with node:crypto, so this file must
  * never be imported by a component (write-page.ts and write-page-client.ts
@@ -94,11 +102,46 @@ function claimKinds(text: string): Set<string> {
   );
 }
 
+/** Acronyms that name a kind of thing, not a product, standard or certification. */
+const GENERIC_ACRONYMS = new Set(["AI", "CRM", "SMS", "FAQ", "DM", "SEO", "API", "URL", "PDF", "CEO", "B2B", "B2C", "IT", "HR", "VIP", "OK", "TV", "PM", "AM", "UI", "UX", "SOP", "KPI", "CTA", "DIY"]);
+
+/**
+ * The names a sentence states (brands, products, integrations, standards):
+ * a capitalised word that does not start the sentence ("Integrates with
+ * Salesforce"), or an acronym that is not a generic one ("HIPAA"). A heading
+ * in Title Case capitalises every word, so only its acronyms are names.
+ */
+function namesIn(text: string): string[] {
+  const words = text.match(/[A-Za-z][A-Za-z0-9'&.-]*/g) ?? [];
+  const long = words.filter((w) => w.length > 3);
+  const titleCase = long.length > 1 && long.filter((w) => /^[A-Z]/.test(w)).length / long.length >= 0.6;
+  const names: string[] = [];
+  // No "." inside a word: "No. It is" must leave the full stop for "It" to start a sentence.
+  for (const m of text.matchAll(/(^|[.!?:]\s+|\s)([A-Z][A-Za-z0-9'&-]*)/g)) {
+    // "AI-powered" names "AI"; "Salesforce-ready" names "Salesforce".
+    const word = m[2].split("-")[0].replace(/'+$/, "");
+    const startsSentence = m.index === 0 || /[.!?:]\s+$/.test(m[1]);
+    if (/^[A-Z0-9&]{2,}s?$/.test(word)) {
+      // Plural acronyms ("APIs", "SOPs", "DMs") name the same kind of thing.
+      if (!GENERIC_ACRONYMS.has(word.replace(/s$/, ""))) names.push(word);
+    } else if (!startsSentence && !titleCase && word.length > 1) {
+      // (A single letter is "I" or a label like "Plan A", never a name.)
+      names.push(word);
+    }
+  }
+  return names;
+}
+
 /**
  * True when `text` states something `source` (everything the owner typed:
- * names, description, audience) does not: a CLAIM_PATTERNS match the source
- * does not state as whole words (sourceStates), or a kind of claim the
- * publish linter sees in it that it never sees in the source.
+ * names, description, audience) does not:
+ * - a CLAIM_PATTERNS match the source does not state as whole words
+ *   (sourceStates);
+ * - a kind of claim the publish linter sees in it that it never sees in the
+ *   source;
+ * - or a name (namesIn) the source never mentions. An integration, brand or
+ *   certification the owner did not name is exactly the invention a buyer
+ *   would hold them to.
  */
 export function inventsFacts(text: string, source: string): boolean {
   if (!text) return false;
@@ -106,7 +149,8 @@ export function inventsFacts(text: string, source: string): boolean {
     return true;
   }
   const owned = claimKinds(source);
-  return [...claimKinds(text)].some((kind) => !owned.has(kind));
+  if ([...claimKinds(text)].some((kind) => !owned.has(kind))) return true;
+  return namesIn(text).some((name) => !sourceStates(source, name, false));
 }
 
 /**

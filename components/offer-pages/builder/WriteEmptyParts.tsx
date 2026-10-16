@@ -83,11 +83,17 @@ export function WriteEmptyParts({
     if (filled === "brief_changed") {
       return setError("The description changed while the page was being written, so those words weren't added. Write again to use the new description.");
     }
+    // Sentences that stated a figure, claim or name the description does not
+    // give were left out; the owner gets them back by giving that detail.
+    const left =
+      written.withheld > 0
+        ? ` ${written.withheld} ${written.withheld === 1 ? "sentence was" : "sentences were"} left out for stating something your description doesn't (a number, a claim or a name). Add it to the description to use it.`
+        : "";
     if (filled.length === 0) {
-      return setError("Nothing usable came back for the empty parts. Try again, or say a little more about the offer.");
+      return setError(`Nothing usable came back for the empty parts.${left || " Try again, or say a little more about the offer."}`);
     }
     setOpen(false);
-    setNotice(`Written: ${named(filled)}. Read it through, and set prices yourself, before you publish.`);
+    setNotice(`Written: ${named(filled)}. Read it through, and set prices yourself, before you publish.${left}`);
   }
 
   return (

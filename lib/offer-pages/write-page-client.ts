@@ -74,7 +74,8 @@ export function emptyWritableParts(doc: OfferPageDoc): string[] {
  * holds.
  */
 export type WritePageOutcome =
-  | { ok: true; filled: string[]; copy: WrittenCopy | null }
+  /** `withheld`: sentences the server left out for stating something the description does not (write-page-vet.ts). */
+  | { ok: true; filled: string[]; copy: WrittenCopy | null; withheld: number }
   | { ok: false; message: string };
 
 export async function requestWrittenPage(
@@ -91,8 +92,15 @@ export async function requestWrittenPage(
         save: input.save !== false,
       }),
     });
-    const data = (await res.json().catch(() => null)) as { ok?: boolean; filled?: string[]; message?: string; copy?: WrittenCopy } | null;
-    if (data?.ok) return { ok: true, filled: Array.isArray(data.filled) ? data.filled : [], copy: data.copy ?? null };
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; filled?: string[]; message?: string; copy?: WrittenCopy; withheld?: number } | null;
+    if (data?.ok) {
+      return {
+        ok: true,
+        filled: Array.isArray(data.filled) ? data.filled : [],
+        copy: data.copy ?? null,
+        withheld: typeof data.withheld === "number" ? data.withheld : 0,
+      };
+    }
     return { ok: false, message: data?.message || "The page couldn't be written just now. Your draft is saved; try again in a minute." };
   } catch {
     return { ok: false, message: "The connection dropped while the page was being written. Your draft is saved; try again." };
