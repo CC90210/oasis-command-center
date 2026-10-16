@@ -110,7 +110,11 @@ async function main(): Promise<void> {
   });
 
   check("every public form renders consent through ConsentChoice, never its own copy of the terms", () => {
-    for (const file of ["components/forms/FormPublicClient.tsx", "components/marketing/AuditForm.tsx"]) {
+    for (const file of [
+      "components/forms/FormPublicClient.tsx",
+      "components/marketing/AuditForm.tsx",
+      "components/booking/BookingPage.tsx",
+    ]) {
       const src = readFileSync(file, "utf8");
       assert.match(src, /<ConsentChoice\b/, `${file} does not use ConsentChoice`);
       assert.doesNotMatch(src, /consentDisclosureText\(/, `${file} renders the disclosure itself`);

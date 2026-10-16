@@ -9,11 +9,14 @@ import {
   buildPublicFunnelLeadPatch,
   ensurePublicFunnelBookingEvent,
   isPublicBookingStageBookable,
-  loadPublicBookingSlots,
+  loadPublicBookingAvailability,
   mirrorPublicBookingToSchedules,
   publicBookingCreateSchema,
   publicBookingFounders,
+  publicBookingHostsById,
   publicBookingOwnershipPatch,
+  stringList,
+  type PublicBookingSlot,
   readPublicBookingJson,
   removePublicBookingScheduleMirrors,
   resolvePublicFunnelBooking,
@@ -40,6 +43,7 @@ const RESOLUTION_ERRORS = new Set([
   "booking_lead_not_found",
   "public_booking_founders_unavailable",
 ]);
+
 const PROVIDER_ERRORS = new Set([
   "google_calendar_not_connected",
   "calendar_scope_required",
@@ -169,6 +173,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ? storedDuration
       : durationMinutes;
     try {
+      // The hosts this booking was made with (stored on the lead), so a replay
+      // repairs the same Schedule copies the first request wrote. A booking
+      // made before hosts were stored was always both founders, so it
+      // replays with both (Codex review of #628), never the organizer alone.
+      const storedHostIds = stringList(context.lead.public_booking_host_ids);
+      const hosts = await publicBookingHostsById(
+        context.tenantId,
+        storedHostIds.length ? storedHostIds : [founders.host.auth_user_id, founders.opener.auth_user_id],
+      );
       await mirrorPublicBookingToSchedules({
         db,
         tenantId: context.tenantId,
@@ -182,7 +195,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         company,
         formName: context.formName,
         prospectEmail,
-        founders,
+        hosts,
       });
       await activateVerifiedFounderMeeting(context.tenantId, priorAppointment);
     } catch (error) {
@@ -204,20 +217,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: "lead_stage_not_bookable" }, { status: 409 });
   }
 
-  let available: string[];
+  let available: PublicBookingSlot[];
   try {
-    available = await loadPublicBookingSlots({
+    available = await loadPublicBookingAvailability({
       tenantId: context.tenantId,
-      founders,
       durationMinutes,
     });
   } catch (error) {
     console.error("[public-booking.live-availability]", error);
     return NextResponse.json({ ok: false, error: "availability_unavailable" }, { status: 503 });
   }
-  if (!available.includes(startsAt)) {
+  const slot = available.find((item) => item.start === startsAt);
+  // The hosts on duty for THIS slot (lib/booking/hours.ts): the organizer owns
+  // the Google event; an on-duty attendee (Adon, Sunday to Thursday) is invited.
+  // On Friday and Saturday the organizer is on duty alone and nobody else is.
+  const organizer = slot?.hosts.find((host) => host.role === "organizer");
+  if (!slot || !organizer) {
     return NextResponse.json({ ok: false, error: "slot_unavailable" }, { status: 409 });
   }
+  const attendee = slot.hosts.find((host) => host.role === "attendee") ?? null;
 
   const endAt = new Date(Date.parse(startsAt) + durationMinutes * 60_000).toISOString();
   let meeting: Awaited<ReturnType<typeof createVerifiedFounderMeeting>> | null = null;
@@ -225,8 +243,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     meeting = await createVerifiedFounderMeeting({
       tenantId: context.tenantId,
       leadId: context.leadId,
-      actorUserId: founders.host.auth_user_id,
-      hostUserId: founders.host.auth_user_id,
+      actorUserId: organizer.userId,
+      hostUserId: organizer.userId,
       requestId,
       meetingAt: startsAt,
       durationMinutes,
@@ -235,11 +253,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       clientAgenda: `A ${durationMinutes}-minute ${context.formName} call with OASIS AI Solutions.`,
       handoffNote: bottleneck || `Public ${context.formSlug} booking.`,
       smsConsent: false,
-      expectedOrganizerEmail: founders.host.email,
-      openerAttendee: {
-        email: founders.opener.email,
-        displayName: founders.opener.full_name || founders.opener.display_name || "Adon",
-      },
+      expectedOrganizerEmail: organizer.email,
+      openerAttendee: attendee ? { email: attendee.email, displayName: attendee.displayName } : null,
       confirmations: {
         contactConfirmed: true,
         clientAgreedToTime: true,
@@ -259,7 +274,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       company,
       formName: context.formName,
       prospectEmail,
-      founders,
+      hosts: slot.hosts,
     });
   } catch (error) {
     const errorCode = error instanceof Error ? error.message.split(":", 1)[0] : "";
@@ -291,20 +306,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const occurredAt = new Date().toISOString();
-  const ownership = publicBookingOwnershipPatch(context.lead, founders);
+  const ownership = publicBookingOwnershipPatch(context.lead, {
+    organizer: organizer.userId,
+    collaborators: [
+      ...slot.hosts.map((host) => host.userId),
+      founders.host.auth_user_id,
+      founders.opener.auth_user_id,
+    ],
+  });
   const leadPatch = {
     ...buildPublicFunnelLeadPatch(combined, "meeting_booked", occurredAt),
     stage: "founder_meeting_booked",
     ...ownership,
-    booked_founder: founders.host.auth_user_id,
-    audit_host_user_id: founders.host.auth_user_id,
-    audit_host_email: founders.host.email,
+    booked_founder: organizer.userId,
+    audit_host_user_id: organizer.userId,
+    audit_host_email: organizer.email,
+    public_booking_host_ids: slot.hosts.map((host) => host.userId),
     audit_host_role: "owner",
     audit_duration_minutes: durationMinutes,
     calendar_event_status: "verified",
     calendar_confirmation_method: "server_google_calendar_api",
     calendar_confirmed_at: occurredAt,
-    calendar_confirmed_by: founders.host.auth_user_id,
+    calendar_confirmed_by: organizer.userId,
     calendar_appointment_id: meeting.appointmentId,
     google_calendar_id: meeting.receipt.calendarId,
     google_calendar_event_id: meeting.receipt.eventId,
@@ -324,7 +347,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     p_patch: leadPatch,
     p_request_id: requestId,
     p_occurred_at: occurredAt,
-    p_actor_user_id: founders.host.auth_user_id,
+    p_actor_user_id: organizer.userId,
     p_action: "public_funnel_booking",
     p_interaction_type: "calendar_booking",
     p_subject: `${context.formName} booked`,

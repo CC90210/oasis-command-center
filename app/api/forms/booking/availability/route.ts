@@ -3,9 +3,8 @@ import { getClientIp } from "@/lib/api-helpers";
 import { sameOrigin } from "@/lib/calendar/http";
 import {
   isPublicBookingStageBookable,
-  loadPublicBookingSlots,
+  loadPublicBookingAvailability,
   publicBookingAvailabilitySchema,
-  publicBookingFounders,
   PUBLIC_BOOKING_TIME_ZONE,
   readPublicBookingJson,
   resolvePublicFunnelBooking,
@@ -59,17 +58,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!isPublicBookingStageBookable(context.lead.stage)) {
       return NextResponse.json({ ok: false, error: "lead_stage_not_bookable" }, { status: 409 });
     }
-    const founders = await publicBookingFounders(context.tenantId);
     const durationMinutes = publicBookingDurationMinutes(context.formSlug);
-    const slots = await loadPublicBookingSlots({
+    const available = await loadPublicBookingAvailability({
       tenantId: context.tenantId,
-      founders,
       durationMinutes,
     });
     return NextResponse.json(
       {
         ok: true,
-        slots,
+        slots: available.map((slot) => slot.start),
         duration_minutes: durationMinutes,
         time_zone: PUBLIC_BOOKING_TIME_ZONE,
       },

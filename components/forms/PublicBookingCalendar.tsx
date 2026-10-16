@@ -158,7 +158,7 @@ export function PublicBookingCalendar({
             {dayFormat.format(new Date(receipt.starts_at))} at {timeFormat.format(new Date(receipt.starts_at))}
           </p>
           <p className="text-xs leading-relaxed text-fg-dim">
-            Google sent the invitation and calendar file to your email. It includes CC, Adon, and your private Meet link.
+            Google sent the invitation and calendar file to your email. It includes your private Meet link.
           </p>
         </div>
         <div className="mx-auto flex max-w-sm flex-col gap-2 sm:flex-row">
@@ -186,13 +186,13 @@ export function PublicBookingCalendar({
         <CheckCircle2 className="mx-auto h-10 w-10" style={{ color: primary }} />
         <h2 className="text-xl font-bold text-fg">Your details are in. Pick a time while you’re here.</h2>
         <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
-          These are the live times that work for both CC and Adon. The call is {availability?.duration_minutes || 15} minutes and the Google Meet invite arrives instantly.
+          These are the live times our team has open. The call is {availability?.duration_minutes || 15} minutes and the Google Meet invite arrives instantly.
         </p>
       </div>
 
       {loading ? (
         <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-fg-muted">
-          <Loader2 className="h-4 w-4 animate-spin" /> Checking both calendars…
+          <Loader2 className="h-4 w-4 animate-spin" /> Checking the calendar...
         </div>
       ) : groups.length > 0 ? (
         <div className="max-h-[24rem] space-y-4 overflow-y-auto pr-1 text-left">
