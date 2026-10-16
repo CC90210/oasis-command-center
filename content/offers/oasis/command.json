@@ -6,18 +6,9 @@
     "href": "/go/community?form=command&t=oasis-ai-cc"
   },
   "work_steps": [
-    {
-      "title": "Book the call and show us where work leaks",
-      "body": "You talk first: how leads come in, where they stall, what a good week looks like."
-    },
-    {
-      "title": "We set it up around your business, or you do",
-      "body": "Turnkey and the managed partner are set up by us. OS DIY is yours to configure."
-    },
-    {
-      "title": "The follow-up keeps going without you",
-      "body": "New leads get an answer, calls land on your calendar, and the back office keeps moving."
-    }
+    { "title": "Book the call and show us where work leaks", "body": "You talk first: how leads come in, where they stall, what a good week looks like." },
+    { "title": "We set it up around your business, or you do", "body": "Turnkey and the managed partner are set up by us. OS DIY is yours to configure." },
+    { "title": "The follow-up keeps going without you", "body": "New leads get an answer, calls land on your calendar, and the back office keeps moving." }
   ],
   "form": {
     "name": "COMMAND: the OASIS Command Center",
@@ -39,45 +30,12 @@
         "description": "Takes about twenty seconds.",
         "cta_label": "Next",
         "fields": [
-          {
-            "name": "name",
-            "label": "Your name",
-            "type": "text",
-            "required": true,
-            "placeholder": "First and last"
-          },
-          {
-            "name": "email",
-            "label": "Work email",
-            "type": "email",
-            "required": true,
-            "placeholder": "you@company.com"
-          },
-          {
-            "name": "phone",
-            "label": "Mobile number",
-            "type": "phone",
-            "required": true,
-            "help": "So we can confirm the call with you."
-          },
-          {
-            "name": "company",
-            "label": "Company name",
-            "type": "text",
-            "required": true
-          },
-          {
-            "name": "website",
-            "label": "Website or social handle",
-            "type": "text",
-            "help": "Optional, but it lets us look at your setup before the call."
-          },
-          {
-            "name": "pillar",
-            "label": "Pillar",
-            "type": "hidden",
-            "value": "command"
-          }
+          { "name": "name", "label": "Your name", "type": "text", "required": true, "placeholder": "First and last" },
+          { "name": "email", "label": "Work email", "type": "email", "required": true, "placeholder": "you@company.com" },
+          { "name": "phone", "label": "Mobile number", "type": "phone", "required": true, "help": "So we can confirm the call with you." },
+          { "name": "company", "label": "Company name", "type": "text", "required": true },
+          { "name": "website", "label": "Website or social handle", "type": "text", "help": "Optional, but it lets us look at your setup before the call." },
+          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "command" }
         ]
       },
       {
@@ -91,26 +49,11 @@
             "label": "Monthly revenue",
             "type": "select",
             "options": [
-              {
-                "value": "pre_revenue",
-                "label": "Pre-revenue / just starting"
-              },
-              {
-                "value": "under_10k",
-                "label": "Under $10K/mo"
-              },
-              {
-                "value": "10k_50k",
-                "label": "$10K to $50K/mo"
-              },
-              {
-                "value": "50k_250k",
-                "label": "$50K to $250K/mo"
-              },
-              {
-                "value": "250k_plus",
-                "label": "$250K+/mo"
-              }
+              { "value": "pre_revenue", "label": "Pre-revenue / just starting" },
+              { "value": "under_10k", "label": "Under $10K/mo" },
+              { "value": "10k_50k", "label": "$10K to $50K/mo" },
+              { "value": "50k_250k", "label": "$50K to $250K/mo" },
+              { "value": "250k_plus", "label": "$250K+/mo" }
             ]
           },
           {
@@ -118,26 +61,11 @@
             "label": "Team size",
             "type": "select",
             "options": [
-              {
-                "value": "solo",
-                "label": "Just me"
-              },
-              {
-                "value": "2_5",
-                "label": "2 to 5"
-              },
-              {
-                "value": "6_20",
-                "label": "6 to 20"
-              },
-              {
-                "value": "21_100",
-                "label": "21 to 100"
-              },
-              {
-                "value": "100_plus",
-                "label": "100+"
-              }
+              { "value": "solo", "label": "Just me" },
+              { "value": "2_5", "label": "2 to 5" },
+              { "value": "6_20", "label": "6 to 20" },
+              { "value": "21_100", "label": "21 to 100" },
+              { "value": "100_plus", "label": "100+" }
             ]
           },
           {
@@ -146,22 +74,10 @@
             "type": "select",
             "required": true,
             "options": [
-              {
-                "value": "lead_followup",
-                "label": "New leads waiting for a reply"
-              },
-              {
-                "value": "booking",
-                "label": "Getting people booked"
-              },
-              {
-                "value": "back_office",
-                "label": "Admin and the back office"
-              },
-              {
-                "value": "all",
-                "label": "All of it"
-              }
+              { "value": "lead_followup", "label": "New leads waiting for a reply" },
+              { "value": "booking", "label": "Getting people booked" },
+              { "value": "back_office", "label": "Admin and the back office" },
+              { "value": "all", "label": "All of it" }
             ]
           },
           {
@@ -184,22 +100,10 @@
             "label": "Setup",
             "type": "select",
             "options": [
-              {
-                "value": "diy",
-                "label": "I will configure it myself (OS DIY)"
-              },
-              {
-                "value": "turnkey",
-                "label": "Set it up for me (Turnkey)"
-              },
-              {
-                "value": "managed",
-                "label": "Run it with me every week (managed partner)"
-              },
-              {
-                "value": "not_sure",
-                "label": "Not sure yet"
-              }
+              { "value": "diy", "label": "I will configure it myself (OS DIY)" },
+              { "value": "turnkey", "label": "Set it up for me (Turnkey)" },
+              { "value": "managed", "label": "Run it with me every week (managed partner)" },
+              { "value": "not_sure", "label": "Not sure yet" }
             ]
           },
           {
@@ -207,26 +111,11 @@
             "label": "Budget set aside for this?",
             "type": "select",
             "options": [
-              {
-                "value": "none_yet",
-                "label": "Nothing yet, exploring what it costs"
-              },
-              {
-                "value": "under_2k",
-                "label": "Under $2K/mo"
-              },
-              {
-                "value": "2k_5k",
-                "label": "$2K to $5K/mo"
-              },
-              {
-                "value": "5k_15k",
-                "label": "$5K to $15K/mo"
-              },
-              {
-                "value": "15k_plus",
-                "label": "$15K+/mo"
-              }
+              { "value": "none_yet", "label": "Nothing yet, exploring what it costs" },
+              { "value": "under_2k", "label": "Under $2K/mo" },
+              { "value": "2k_5k", "label": "$2K to $5K/mo" },
+              { "value": "5k_15k", "label": "$5K to $15K/mo" },
+              { "value": "15k_plus", "label": "$15K+/mo" }
             ],
             "help": "Optional. Skipping it does not rule you out."
           }
@@ -237,21 +126,8 @@
   "offer_page": {
     "v": 1,
     "template": "book_call",
-    "theme": {
-      "canvas": "dark",
-      "accent": "#3A86FF",
-      "logo": "workspace",
-      "layout": "split"
-    },
-    "nav": {
-      "pinned": [
-        "obstacles",
-        "what_you_get",
-        "pricing",
-        "faq"
-      ],
-      "cta_label": "Book the call"
-    },
+    "theme": { "canvas": "dark", "accent": "#3A86FF", "logo": "workspace", "layout": "split" },
+    "nav": { "pinned": ["obstacles", "what_you_get", "pricing", "faq"], "cta_label": "Book the call" },
     "hero": {
       "eyebrow": "COMMAND, for service businesses",
       "headline": "Your business should not need four dashboards to answer one question",
@@ -270,26 +146,11 @@
         "eyebrow": "Sound familiar?",
         "title": "The work is good. Keeping track of it is the problem.",
         "items": [
-          {
-            "title": "Every question comes back to you",
-            "body": "Where is that quote? Did anyone call them back? The answer lives in your head, so the team waits on you."
-          },
-          {
-            "title": "Four dashboards, no answer",
-            "body": "The CRM, the calendar, the inbox and the invoices each hold part of the story, and none of them agree."
-          },
-          {
-            "title": "Leads go cold while you are on the job",
-            "body": "A new enquiry arrives while you are with a customer. By the time you call back, they have hired someone else."
-          },
-          {
-            "title": "Follow-up lives in your head",
-            "body": "Quotes, callbacks and reminders sit in your inbox, your texts and a notebook. Nothing chases them unless you do."
-          },
-          {
-            "title": "Tools nobody uses",
-            "body": "Another app with another login. It was supposed to save time and became one more thing to manage."
-          }
+          { "title": "Every question comes back to you", "body": "Where is that quote? Did anyone call them back? The answer lives in your head, so the team waits on you." },
+          { "title": "Four dashboards, no answer", "body": "The CRM, the calendar, the inbox and the invoices each hold part of the story, and none of them agree." },
+          { "title": "Leads go cold while you are on the job", "body": "A new enquiry arrives while you are with a customer. By the time you call back, they have hired someone else." },
+          { "title": "Follow-up lives in your head", "body": "Quotes, callbacks and reminders sit in your inbox, your texts and a notebook. Nothing chases them unless you do." },
+          { "title": "Tools nobody uses", "body": "Another app with another login. It was supposed to save time and became one more thing to manage." }
         ]
       },
       {
@@ -298,26 +159,11 @@
         "title": "One operating view, four sections",
         "lede": "Every plan runs on the same Command Center. The difference is who sets it up and who runs it with you.",
         "items": [
-          {
-            "title": "Team",
-            "body": "Who owns what, and what is waiting on whom, across your people and the AI agents working beside them."
-          },
-          {
-            "title": "Growth",
-            "body": "New leads, where they came from and the next follow-up, in one pipeline instead of four inboxes."
-          },
-          {
-            "title": "Clients",
-            "body": "Each client's work, conversations and next steps in one place, so nobody has to ask you."
-          },
-          {
-            "title": "Money",
-            "body": "Overview and analytics, transactions, invoices, bills and expenses, accounts, reports and taxes, next to the work that earned it."
-          },
-          {
-            "title": "Set up for you, or by you",
-            "body": "OASIS configures it around how your business already runs, or you configure it yourself on DIY."
-          }
+          { "title": "Team", "body": "Who owns what, and what is waiting on whom, across your people and the AI agents working beside them." },
+          { "title": "Growth", "body": "New leads, where they came from and the next follow-up, in one pipeline instead of four inboxes." },
+          { "title": "Clients", "body": "Each client's work, conversations and next steps in one place, so nobody has to ask you." },
+          { "title": "Money", "body": "Overview and analytics, transactions, invoices, bills and expenses, accounts, reports and taxes, next to the work that earned it." },
+          { "title": "Set up for you, or by you", "body": "OASIS configures it around how your business already runs, or you configure it yourself on DIY." }
         ]
       },
       {
@@ -325,18 +171,9 @@
         "eyebrow": "How it works",
         "title": "From the call to one view of the work",
         "items": [
-          {
-            "title": "Show where the work slips",
-            "body": "Book the call and talk first: how leads come in, where they stall, and what a good week looks like."
-          },
-          {
-            "title": "Set it up around your business",
-            "body": "On Turnkey and Managed, OASIS sets it up from your onboarding vault. On DIY, you configure it yourself."
-          },
-          {
-            "title": "Run the company from one view",
-            "body": "Ask what needs attention, open the source, assign the next move and see the result."
-          }
+          { "title": "Show where the work slips", "body": "Book the call and talk first: how leads come in, where they stall, and what a good week looks like." },
+          { "title": "Set it up around your business", "body": "On Turnkey and Managed, OASIS sets it up from your onboarding vault. On DIY, you configure it yourself." },
+          { "title": "Run the company from one view", "body": "Ask what needs attention, open the source, assign the next move and see the result." }
         ]
       },
       {
@@ -344,11 +181,7 @@
         "eyebrow": "On the call",
         "title": "A bonus for starting on the call",
         "items": [
-          {
-            "title": "Expedited VIP vault bonus",
-            "body": "Offered to owners who decide to start at the end of the discovery call. You will hear exactly what it includes on the call.",
-            "value": null
-          }
+          { "title": "Expedited VIP vault bonus", "body": "Offered to owners who decide to start at the end of the discovery call. You will hear exactly what it includes on the call.", "value": null }
         ]
       },
       {
@@ -399,30 +232,12 @@
         "key": "faq",
         "title": "Questions",
         "items": [
-          {
-            "q": "What happens on the discovery call?",
-            "a": "It is a video call. You talk first: how leads come in, where they stall and what a good week looks like. Then you see the Command Center and how it would fit your business. If it is not a fit, you will hear that too."
-          },
-          {
-            "q": "Which plan is right for me?",
-            "a": "If you are comfortable configuring software, OS DIY. If you would rather hand it over, OS Turnkey. If you want a team running it alongside you every week, the managed operating partner. You get a recommendation on the call."
-          },
-          {
-            "q": "What do you need from me to get started?",
-            "a": "For Turnkey and Managed, the onboarding vault: you add the logins, sign the documents and choose your channels in one place. Setup starts when it is complete."
-          },
-          {
-            "q": "What if the setup fee is too much right now?",
-            "a": "Turnkey's setup can be split into two payments. You can also start on OS DIY with no setup fee, or join the free OASIS community and build alongside other owners first."
-          },
-          {
-            "q": "How do I cancel?",
-            "a": "Cancel any time from your account. There is no cancellation fee."
-          },
-          {
-            "q": "What if I'm not ready?",
-            "a": "That is fine. Join the free OASIS community on Telegram, build alongside other owners, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=command&t=oasis-ai-cc"
-          }
+          { "q": "What happens on the discovery call?", "a": "It is a video call. You talk first: how leads come in, where they stall and what a good week looks like. Then you see the Command Center and how it would fit your business. If it is not a fit, you will hear that too." },
+          { "q": "Which plan is right for me?", "a": "If you are comfortable configuring software, OS DIY. If you would rather hand it over, OS Turnkey. If you want a team running it alongside you every week, the managed operating partner. You get a recommendation on the call." },
+          { "q": "What do you need from me to get started?", "a": "For Turnkey and Managed, the onboarding vault: you add the logins, sign the documents and choose your channels in one place. Setup starts when it is complete." },
+          { "q": "What if the setup fee is too much right now?", "a": "Turnkey's setup can be split into two payments. You can also start on OS DIY with no setup fee, or join the free OASIS community and build alongside other owners first." },
+          { "q": "How do I cancel?", "a": "Cancel any time from your account. There is no cancellation fee." },
+          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside other owners, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=command&t=oasis-ai-cc" }
         ]
       }
     ],

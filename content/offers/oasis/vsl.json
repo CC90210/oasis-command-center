@@ -9,98 +9,38 @@
     "status": "First cut from HANDOVER section 4 (the funnel doc's triage: self-selection + revenue + intent). Data, not code: slice V2/V5 stores these per workspace so CC and Adon can tune them. Nothing reads this yet.",
     "precedence": "First match wins, top to bottom, in the HANDOVER table's order. The table overlaps (for example a COMMAND pick with no budget also matches the COMMUNITY row); CC and Adon confirm the order before V2 ships.",
     "fields": {
-      "path": [
-        "protocol",
-        "command",
-        "community",
-        "fleet"
-      ],
-      "monthly_revenue": [
-        "pre_revenue",
-        "under_10k",
-        "10k_50k",
-        "50k_250k",
-        "250k_plus"
-      ],
-      "budget": [
-        "none_yet",
-        "under_2k",
-        "2k_5k",
-        "5k_15k",
-        "15k_plus"
-      ]
+      "path": ["protocol", "command", "community", "fleet"],
+      "monthly_revenue": ["pre_revenue", "under_10k", "10k_50k", "50k_250k", "250k_plus"],
+      "budget": ["none_yet", "under_2k", "2k_5k", "5k_15k", "15k_plus"]
     },
     "rules": [
       {
         "go": "protocol",
         "community_link_first": true,
         "when_any": [
-          {
-            "path": [
-              "protocol"
-            ]
-          },
-          {
-            "monthly_revenue": [
-              "pre_revenue",
-              "under_10k"
-            ],
-            "budget": [
-              "none_yet"
-            ]
-          }
+          { "path": ["protocol"] },
+          { "monthly_revenue": ["pre_revenue", "under_10k"], "budget": ["none_yet"] }
         ]
       },
       {
         "go": "command",
         "when_any": [
-          {
-            "path": [
-              "command"
-            ],
-            "monthly_revenue": [
-              "10k_50k",
-              "50k_250k",
-              "250k_plus"
-            ]
-          },
-          {
-            "budget": [
-              "2k_5k",
-              "5k_15k",
-              "15k_plus"
-            ]
-          }
+          { "path": ["command"], "monthly_revenue": ["10k_50k", "50k_250k", "250k_plus"] },
+          { "budget": ["2k_5k", "5k_15k", "15k_plus"] }
         ]
       },
       {
         "go": "community",
         "when_any": [
-          {
-            "path": [
-              "community"
-            ]
-          },
-          {
-            "budget": [
-              "none_yet"
-            ]
-          }
+          { "path": ["community"] },
+          { "budget": ["none_yet"] }
         ]
       },
       {
         "go": "fleet",
         "when_any": [
-          {
-            "path": [
-              "fleet"
-            ]
-          },
-          {
-            "monthly_revenue": [
-              "250k_plus"
-            ]
-          }
+          { "path": ["fleet"] },
+          { "monthly_revenue": ["250k_plus"] }
         ],
         "not_asked_here": "The HANDOVER table also routes team size 21+ to FLEET. The router does not ask team size; FLEET's own form does."
       },
@@ -137,22 +77,10 @@
             "type": "select",
             "required": true,
             "options": [
-              {
-                "value": "protocol",
-                "label": "PROTOCOL: I want to set it up myself"
-              },
-              {
-                "value": "command",
-                "label": "COMMAND: I run a service business and leads slip through"
-              },
-              {
-                "value": "community",
-                "label": "COMMUNITY: I am early and want to build alongside others"
-              },
-              {
-                "value": "fleet",
-                "label": "FLEET: we are a larger or multi-location operation"
-              }
+              { "value": "protocol", "label": "PROTOCOL: I want to set it up myself" },
+              { "value": "command", "label": "COMMAND: I run a service business and leads slip through" },
+              { "value": "community", "label": "COMMUNITY: I am early and want to build alongside others" },
+              { "value": "fleet", "label": "FLEET: we are a larger or multi-location operation" }
             ]
           }
         ]
@@ -168,26 +96,11 @@
             "label": "Monthly revenue",
             "type": "select",
             "options": [
-              {
-                "value": "pre_revenue",
-                "label": "Pre-revenue / just starting"
-              },
-              {
-                "value": "under_10k",
-                "label": "Under $10K/mo"
-              },
-              {
-                "value": "10k_50k",
-                "label": "$10K to $50K/mo"
-              },
-              {
-                "value": "50k_250k",
-                "label": "$50K to $250K/mo"
-              },
-              {
-                "value": "250k_plus",
-                "label": "$250K+/mo"
-              }
+              { "value": "pre_revenue", "label": "Pre-revenue / just starting" },
+              { "value": "under_10k", "label": "Under $10K/mo" },
+              { "value": "10k_50k", "label": "$10K to $50K/mo" },
+              { "value": "50k_250k", "label": "$50K to $250K/mo" },
+              { "value": "250k_plus", "label": "$250K+/mo" }
             ]
           },
           {
@@ -195,26 +108,11 @@
             "label": "Budget set aside for this?",
             "type": "select",
             "options": [
-              {
-                "value": "none_yet",
-                "label": "Nothing yet, exploring what it costs"
-              },
-              {
-                "value": "under_2k",
-                "label": "Under $2K/mo"
-              },
-              {
-                "value": "2k_5k",
-                "label": "$2K to $5K/mo"
-              },
-              {
-                "value": "5k_15k",
-                "label": "$5K to $15K/mo"
-              },
-              {
-                "value": "15k_plus",
-                "label": "$15K+/mo"
-              }
+              { "value": "none_yet", "label": "Nothing yet, exploring what it costs" },
+              { "value": "under_2k", "label": "Under $2K/mo" },
+              { "value": "2k_5k", "label": "$2K to $5K/mo" },
+              { "value": "5k_15k", "label": "$5K to $15K/mo" },
+              { "value": "15k_plus", "label": "$15K+/mo" }
             ],
             "help": "Optional. Skipping it does not rule you out."
           }

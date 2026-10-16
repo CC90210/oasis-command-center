@@ -6,18 +6,9 @@
     "href": "/go/community?form=protocol&t=oasis-ai-cc"
   },
   "work_steps": [
-    {
-      "title": "Pick the pack that matches where you are",
-      "body": "Quick wins if you are starting out, blueprints if you build your own systems, the full suite if you run an agency."
-    },
-    {
-      "title": "Follow it step by step",
-      "body": "Each SOP and blueprint is written to be followed in order, with the prompts used exactly as written."
-    },
-    {
-      "title": "Move up when you want it running without you",
-      "body": "When you are ready for software that runs the system for you, apply for OS DIY on the COMMAND page."
-    }
+    { "title": "Pick the pack that matches where you are", "body": "Quick wins if you are starting out, blueprints if you build your own systems, the full suite if you run an agency." },
+    { "title": "Follow it step by step", "body": "Each SOP and blueprint is written to be followed in order, with the prompts used exactly as written." },
+    { "title": "Move up when you want it running without you", "body": "When you are ready for software that runs the system for you, apply for OS DIY on the COMMAND page." }
   ],
   "form": {
     "name": "PROTOCOL: SOPs, prompts and blueprints",
@@ -39,33 +30,10 @@
         "description": "Takes about twenty seconds.",
         "cta_label": "Next",
         "fields": [
-          {
-            "name": "name",
-            "label": "Your name",
-            "type": "text",
-            "required": true,
-            "placeholder": "First and last"
-          },
-          {
-            "name": "email",
-            "label": "Email",
-            "type": "email",
-            "required": true,
-            "placeholder": "you@company.com",
-            "help": "Your checkout link goes here."
-          },
-          {
-            "name": "phone",
-            "label": "Mobile number",
-            "type": "phone",
-            "help": "Optional."
-          },
-          {
-            "name": "pillar",
-            "label": "Pillar",
-            "type": "hidden",
-            "value": "protocol"
-          }
+          { "name": "name", "label": "Your name", "type": "text", "required": true, "placeholder": "First and last" },
+          { "name": "email", "label": "Email", "type": "email", "required": true, "placeholder": "you@company.com", "help": "Your checkout link goes here." },
+          { "name": "phone", "label": "Mobile number", "type": "phone", "help": "Optional." },
+          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "protocol" }
         ]
       },
       {
@@ -80,26 +48,11 @@
             "type": "select",
             "required": true,
             "options": [
-              {
-                "value": "1a",
-                "label": "Quick-win SOPs and prompt packs ($17 to $47)"
-              },
-              {
-                "value": "1b",
-                "label": "System blueprints and workflows ($97 to $197)"
-              },
-              {
-                "value": "1c",
-                "label": "Master protocol suite ($297)"
-              },
-              {
-                "value": "1d",
-                "label": "Mystery digital vault ($97 to $395)"
-              },
-              {
-                "value": "not_sure",
-                "label": "Not sure yet, help me pick"
-              }
+              { "value": "1a", "label": "Quick-win SOPs and prompt packs ($17 to $47)" },
+              { "value": "1b", "label": "System blueprints and workflows ($97 to $197)" },
+              { "value": "1c", "label": "Master protocol suite ($297)" },
+              { "value": "1d", "label": "Mystery digital vault ($97 to $395)" },
+              { "value": "not_sure", "label": "Not sure yet, help me pick" }
             ]
           },
           {
@@ -107,57 +60,30 @@
             "label": "Add the extra prompt pack for $27?",
             "type": "select",
             "options": [
-              {
-                "value": "yes",
-                "label": "Yes, add it"
-              },
-              {
-                "value": "no",
-                "label": "No, thanks"
-              }
+              { "value": "yes", "label": "Yes, add it" },
+              { "value": "no", "label": "No, thanks" }
             ],
-            "show_if": {
-              "field": "pack",
-              "equals": "1a"
-            }
+            "show_if": { "field": "pack", "equals": "1a" }
           },
           {
             "name": "add_video_vault",
             "label": "Add the video vault for $47?",
             "type": "select",
             "options": [
-              {
-                "value": "yes",
-                "label": "Yes, add it"
-              },
-              {
-                "value": "no",
-                "label": "No, thanks"
-              }
+              { "value": "yes", "label": "Yes, add it" },
+              { "value": "no", "label": "No, thanks" }
             ],
-            "show_if": {
-              "field": "pack",
-              "equals": "1b"
-            }
+            "show_if": { "field": "pack", "equals": "1b" }
           },
           {
             "name": "payment_plan",
             "label": "How would you like to pay?",
             "type": "select",
             "options": [
-              {
-                "value": "full",
-                "label": "In one payment"
-              },
-              {
-                "value": "two_pay",
-                "label": "Two payments of $59"
-              }
+              { "value": "full", "label": "In one payment" },
+              { "value": "two_pay", "label": "Two payments of $59" }
             ],
-            "show_if": {
-              "field": "pack",
-              "equals": "1b"
-            }
+            "show_if": { "field": "pack", "equals": "1b" }
           },
           {
             "name": "first_build",
@@ -174,21 +100,8 @@
   "offer_page": {
     "v": 1,
     "template": "book_call",
-    "theme": {
-      "canvas": "dark",
-      "accent": "#1FE3F0",
-      "logo": "workspace",
-      "layout": "split"
-    },
-    "nav": {
-      "pinned": [
-        "obstacles",
-        "what_you_get",
-        "pricing",
-        "faq"
-      ],
-      "cta_label": "Pick your pack"
-    },
+    "theme": { "canvas": "dark", "accent": "#1FE3F0", "logo": "workspace", "layout": "split" },
+    "nav": { "pinned": ["obstacles", "what_you_get", "pricing", "faq"], "cta_label": "Pick your pack" },
     "hero": {
       "eyebrow": "PROTOCOL, for solo operators and DIY builders",
       "headline": "Stop rebuilding the same workflow from zero",
@@ -207,26 +120,11 @@
         "eyebrow": "Sound familiar?",
         "title": "You are building it yourself, without a map",
         "items": [
-          {
-            "title": "The process lives in your head",
-            "body": "You have built this workflow before. The first version just never made it onto paper, so you build it again."
-          },
-          {
-            "title": "You are the whole team",
-            "body": "Sales, delivery, admin and follow-up all wait on you, so the work that grows the business is the work that slips."
-          },
-          {
-            "title": "Every AI tutorial starts from zero",
-            "body": "You have watched the videos and saved the threads. What you do not have is a tested process you can follow on a Monday morning."
-          },
-          {
-            "title": "Prompts that work once, then drift",
-            "body": "A prompt that worked last week gives you something different today, and you cannot tell why."
-          },
-          {
-            "title": "You do not want an agency yet",
-            "body": "You want to build it yourself, with a map from people who already run it, not a retainer."
-          }
+          { "title": "The process lives in your head", "body": "You have built this workflow before. The first version just never made it onto paper, so you build it again." },
+          { "title": "You are the whole team", "body": "Sales, delivery, admin and follow-up all wait on you, so the work that grows the business is the work that slips." },
+          { "title": "Every AI tutorial starts from zero", "body": "You have watched the videos and saved the threads. What you do not have is a tested process you can follow on a Monday morning." },
+          { "title": "Prompts that work once, then drift", "body": "A prompt that worked last week gives you something different today, and you cannot tell why." },
+          { "title": "You do not want an agency yet", "body": "You want to build it yourself, with a map from people who already run it, not a retainer." }
         ]
       },
       {
@@ -235,22 +133,10 @@
         "title": "Pick the pack that fits where you are",
         "lede": "Every protocol is written to be run in order: the goal, the steps, the handoffs to test, and the version to save.",
         "items": [
-          {
-            "title": "Quick-win SOPs and prompt packs",
-            "body": "Short, copy-ready procedures and prompts for one job at a time. Built for people just starting."
-          },
-          {
-            "title": "System blueprints and workflows",
-            "body": "The blueprints and workflows behind a full system, for builders who set up their own tools, with private template access."
-          },
-          {
-            "title": "Master protocol suite",
-            "body": "Every protocol in one suite, for agency owners who want the whole library."
-          },
-          {
-            "title": "Written to be run, not read",
-            "body": "No document dump. Each protocol is a sequence with the prompts in place, so the next time the problem appears you run it instead of starting over."
-          }
+          { "title": "Quick-win SOPs and prompt packs", "body": "Short, copy-ready procedures and prompts for one job at a time. Built for people just starting." },
+          { "title": "System blueprints and workflows", "body": "The blueprints and workflows behind a full system, for builders who set up their own tools, with private template access." },
+          { "title": "Master protocol suite", "body": "Every protocol in one suite, for agency owners who want the whole library." },
+          { "title": "Written to be run, not read", "body": "No document dump. Each protocol is a sequence with the prompts in place, so the next time the problem appears you run it instead of starting over." }
         ]
       },
       {
@@ -258,18 +144,9 @@
         "eyebrow": "How it works",
         "title": "Pick it, run it, keep it",
         "items": [
-          {
-            "title": "Pick the pack that matches where you are",
-            "body": "Quick wins if you are starting out, blueprints if you build your own systems, the full suite if you run an agency."
-          },
-          {
-            "title": "Run it step by step",
-            "body": "Each SOP and blueprint is written to be followed in order, with the prompts used exactly as written."
-          },
-          {
-            "title": "Keep the version that works",
-            "body": "Save it, and the next time the problem comes back you run the protocol. Want it set up for you instead? Look at COMMAND."
-          }
+          { "title": "Pick the pack that matches where you are", "body": "Quick wins if you are starting out, blueprints if you build your own systems, the full suite if you run an agency." },
+          { "title": "Run it step by step", "body": "Each SOP and blueprint is written to be followed in order, with the prompts used exactly as written." },
+          { "title": "Keep the version that works", "body": "Save it, and the next time the problem comes back you run the protocol. Want it set up for you instead? Look at COMMAND." }
         ]
       },
       {
@@ -319,30 +196,12 @@
         "key": "faq",
         "title": "Questions",
         "items": [
-          {
-            "q": "Which pack should I start with?",
-            "a": "If you are new to this, start with a quick-win pack and get one job off your plate. If you already build your own systems, the blueprints are for you. If you run an agency and want everything, take the master suite."
-          },
-          {
-            "q": "Do I need to be technical?",
-            "a": "The quick-win packs are written for people just starting. The blueprints and the suite assume you are comfortable setting up tools yourself."
-          },
-          {
-            "q": "How do I pay?",
-            "a": "Leave your details below and pick your pack. A member of the OASIS team will email you a secure checkout link."
-          },
-          {
-            "q": "Is this a subscription?",
-            "a": "No. Each pack is a one-time purchase. Nothing renews."
-          },
-          {
-            "q": "What if I want it done for me?",
-            "a": "Then PROTOCOL is not the right fit. Look at COMMAND, where OASIS sets up the Command Center around your business."
-          },
-          {
-            "q": "What if I'm not ready?",
-            "a": "That is fine. Join the free OASIS community on Telegram, build alongside other builders, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=protocol&t=oasis-ai-cc"
-          }
+          { "q": "Which pack should I start with?", "a": "If you are new to this, start with a quick-win pack and get one job off your plate. If you already build your own systems, the blueprints are for you. If you run an agency and want everything, take the master suite." },
+          { "q": "Do I need to be technical?", "a": "The quick-win packs are written for people just starting. The blueprints and the suite assume you are comfortable setting up tools yourself." },
+          { "q": "How do I pay?", "a": "Leave your details below and pick your pack. A member of the OASIS team will email you a secure checkout link." },
+          { "q": "Is this a subscription?", "a": "No. Each pack is a one-time purchase. Nothing renews." },
+          { "q": "What if I want it done for me?", "a": "Then PROTOCOL is not the right fit. Look at COMMAND, where OASIS sets up the Command Center around your business." },
+          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside other builders, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=protocol&t=oasis-ai-cc" }
         ]
       }
     ],
