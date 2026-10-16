@@ -126,16 +126,16 @@ and the pricing conflicts Maven resolved are in `CMO-Agent/output/offer-pages/<s
 Each needs an owner's tick in the builder: "true, and we can back it". Generated from `lintDoc` on the drafts as
 written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence is missing from this list.
 
-### Router (`vsl`): 6
+**Narrowed 2026-10-16** (29 sentences before, 9 now). The linter now flags real claims only: money, percentages,
+multipliers, digits, a spelled-out count of people, outcomes, time or payments, promised results, superlatives and
+guarantee words. It no longer asks about a number that counts nothing ("Four dashboards, no answer", "Yes, two.",
+"Three steps, and you stay in control"), questions about revenue and budget, or the bare word Clients.
+
+### Router (`vsl`): 1
 
 | Where | Why | Sentence |
 |---|---|---|
-| `hero.subheadline` | a number | Four ways in, from free to fully built. |
 | `what_you_get.items[1].body` | money, a number | For service businesses doing roughly $10K to $75K a month. |
-| `what_you_get.items[1].body` | the word "clients" | Team, Growth, Clients and Money in one operating view, set up for you or by you. |
-| `work.items[1].body` | the word "revenue" | Revenue and budget, so a solo builder is not sent to an enterprise audit. |
-| `faq.items[1].a` | a number | Yes, two. |
-| `faq.items[3].q` | the word "revenue" | Why do you ask about revenue and budget? |
 
 ### PROTOCOL (`protocol`): 1
 
@@ -143,32 +143,20 @@ written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence
 |---|---|---|
 | `pricing.currency_note` | money | Prices in US dollars. |
 
-### COMMAND (`command`): 16
+### COMMAND (`command`): 5
 
 | Where | Why | Sentence |
 |---|---|---|
-| `hero.headline` | a number | Your business should not need four dashboards to answer one question |
-| `hero.subheadline` | the word "clients" | The OASIS Command Center brings Team, Growth, Clients and Money into one operating view. |
-| `hero.subheadline` | the word "result" | See what needs attention, open the source, assign the next move and see the result. |
-| `obstacles.items[1].title` | a number | Four dashboards, no answer |
-| `what_you_get.title` | a number | One operating view, four sections |
-| `what_you_get.items[1].body` | a number | New leads, where they came from and the next follow-up, in one pipeline instead of four inboxes. |
-| `what_you_get.items[2].title` | the word "clients" | Clients |
-| `what_you_get.items[2].body` | the word "client" | Each client's work, conversations and next steps in one place, so nobody has to ask you. |
-| `work.items[2].body` | the word "result" | Ask what needs attention, open the source, assign the next move and see the result. |
-| `pricing.tiers[0].includes[0]` | the word "clients" | Team, Growth, Clients and Money in one view |
 | `pricing.tiers[1].cadence` | money, a number | a month + $2,500 setup |
 | `pricing.tiers[1].summary` | money, a number | Setup is $2,500 paid at once, or two payments of $1,400. |
 | `pricing.tiers[2].cadence` | money, a number | a month + $5,000 setup |
 | `pricing.currency_note` | money | Prices in US dollars. |
 | `faq.items[3].a` | a number | Turnkey's setup can be split into two payments. |
-| `seo.description` | the word "clients" | Team, Growth, Clients and Money in one operating view. |
 
-### COMMUNITY (`community`): 2
+### COMMUNITY (`community`): 1
 
 | Where | Why | Sentence |
 |---|---|---|
-| `work.items[0].title` | a number | Answer two quick questions |
 | `pricing.currency_note` | money | Prices in US dollars. |
 
 ### FLEET (`fleet`): 1
@@ -177,21 +165,9 @@ written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence
 |---|---|---|
 | `pricing.currency_note` | money | Prices in US dollars. |
 
-### AI Automation Audit (`ai-audit`): 3
+### AI Automation Audit (`ai-audit`): 0
 
-| Where | Why | Sentence |
-|---|---|---|
-| `work.title` | a number | Three steps, and you stay in control |
-| `work.items[0].body` | the word "revenue" | Revenue and budget are optional. |
-| `faq.items[3].q` | the word "revenue" | Do I have to share revenue or budget? |
-
-### AI Automation Audit (`ai-audit`): 3
-
-| Where | Why | Sentence |
-|---|---|---|
-| `work.title` | a number | Three steps, and you stay in control |
-| `work.items[0].body` | the word "revenue" | Revenue and budget are optional. |
-| `faq.items[3].q` | the word "revenue" | Do I have to share revenue or budget? |
+Nothing flagged.
 
 Not flagged, but still a commitment to confirm (sections 1 and 3 to 6 above): the cancellation sentence, "Nothing
 renews", the bonus line, every thank-you message, and every promise to email someone.

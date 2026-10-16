@@ -17,10 +17,19 @@
  *   5. every video carries its rights confirmation;
  *   6. the page has a headline, and the form (the Book section) is switched on.
  *
- * THE LINTER flags a sentence that carries money, a number (digits or a number
- * word), a percentage, a multiplier ("3x"), or the words clients, results,
- * guarantee(d), proven, revenue, booked, refund, money back, risk-free, ROI,
- * profit or savings. It over-flags on purpose: an extra tick costs a click, a
+ * THE LINTER flags a sentence that makes a claim someone could hold the
+ * business to: money ("$497", "1200 CAD"), a percentage, a multiplier ("3x"),
+ * any digit ("200 clients", "save 20 hours"), a spelled-out count of people,
+ * outcomes, time or payments ("twelve businesses", "twenty hours", "two
+ * payments"), a quantity word ("thousands", "doubled", "half"), a promised
+ * result ("more revenue", "real results"), a superlative ("the best", "#1",
+ * "fastest", "the only"), or the words guarantee(d), proven, booked, refund,
+ * money back, risk-free, ROI, profit or savings.
+ * It does NOT flag a spelled-out number that counts nothing a client could
+ * hold us to ("four dashboards", "three steps", "Yes, two."), or the bare
+ * words client(s), result(s) and revenue ("Clients" as a section name, "Do I
+ * have to share revenue?"): those were most of the ticks, and none was a claim.
+ * Where it is unsure it still over-flags: an extra tick costs a click, a
  * missed claim costs the business.
  *
  * WHAT IT DOES NOT READ: the form's own copy that the Book section draws (step
@@ -189,10 +198,35 @@ const MONEY_RE = /[$\u20AC\u00A3]|\b(?:CAD|USD|EUR|GBP|dollars?|bucks)\b/i;
 const PERCENT_RE = /%|\bper ?cent\b/i;
 const MULTIPLIER_RE = /\b[0-9]+(?:\.[0-9]+)?\s?x\b/i;
 const DIGIT_RE = /[0-9]/;
-const NUMBER_WORD_RE =
-  /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|hundreds?|thousands?|millions?|billions?|double[ds]?|triple[ds]?|half)\b/i;
+/** A quantity on its own: "thousands of owners", "doubled", "half the time". */
+const QUANTITY_RE = /\b(?:hundreds?|thousands?|millions?|billions?|double[ds]?|doubling|triple[ds]?|tripling|half|halve[ds]?)\b/i;
+/**
+ * A spelled-out number counts as a claim only when it counts something a
+ * client could hold us to: people, outcomes, time, payments ("twelve
+ * businesses", "twenty hours", "two payments", "three times faster"), up to
+ * two words apart ("fifty new leads"). "Four dashboards", "three steps" and
+ * "Yes, two." count nothing of the kind.
+ */
+const SMALL_NUMBER = "two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty";
+const COUNTED =
+  "clients?|customers?|businesses|companies|owners|members|users|students|patients|homeowners|founders|agencies|brands|people" +
+  "|leads?|calls?|bookings?|appointments?|sales|deals?|jobs?|reviews?|referrals?|orders?|projects?|sign-?ups?" +
+  "|hours?|minutes?|days?|weeks?|months?|years?|payments?|instal?lments?" +
+  "|times\\s+(?:more|faster|better|higher|bigger|larger|as)";
+const COUNT_RE = new RegExp(`\\b(?:${SMALL_NUMBER})(?:[\\s-]+[a-z][a-z'-]*){0,2}?[\\s-]+(?:${COUNTED})\\b`, "i");
+/** A promised result: a gain in what the client earns or wins, or results described as good. */
+const RESULT_RE =
+  /\b(?:more|higher|bigger|extra|increased?|increases|increasing|boost(?:s|ed|ing)?|grow|grows|grew|growing|raise[ds]?)\s+(?:(?:your|our|their|the)\s+)?(?:revenue|sales|profits?|leads|bookings|customers|clients|conversions)\b|\b(?:real|proven|measurable|guaranteed|massive|incredible|amazing|predictable|consistent|better|faster|bigger)\s+results?\b/i;
+/** "The best", "#1", "fastest", "the only" (not "by application only"). */
+const SUPERLATIVE_RE =
+  /#\s?1\b|\bnumber[ -]one\b|\b(?:the|our)\s+(?:very\s+)?(?:best|only)\b|\bbest[- ](?:in[- ]class|rated|selling)\b|\b(?:fastest|quickest|cheapest|lowest|highest|biggest|largest|smartest|easiest|simplest|strongest|unbeatable|unmatched|world[- ]class|industry[- ]leading|market[- ]leading|top[- ]rated)\b|\bmost\s+(?:trusted|popular|advanced|powerful|affordable|reliable|complete|effective)\b/i;
+/**
+ * Words that are a claim on their own. The bare words client(s), result(s)
+ * and revenue are not: they name a section or a form question far more often
+ * than they claim anything; COUNT_RE and RESULT_RE catch them in a claim.
+ */
 const WORD_RE =
-  /\b(clients?|results?|guarantee[ds]?|proven|revenue|booked|refunds?|refunded|money[ -]back|risk[ -]free|roi|profits?|profitable|savings?)\b/i;
+  /\b(guarantee[ds]?|proven|booked|refunds?|refunded|money[ -]back|risk[ -]free|roi|profits?|profitable|savings?)\b/i;
 
 /** Why a sentence is a claim, or [] when it is not one. */
 export function claimReasons(sentence: string): string[] {
@@ -200,7 +234,10 @@ export function claimReasons(sentence: string): string[] {
   if (MONEY_RE.test(sentence)) why.push("money");
   if (PERCENT_RE.test(sentence)) why.push("a percentage");
   if (MULTIPLIER_RE.test(sentence)) why.push("a multiplier");
-  if (DIGIT_RE.test(sentence) || NUMBER_WORD_RE.test(sentence)) why.push("a number");
+  if (DIGIT_RE.test(sentence) || QUANTITY_RE.test(sentence) || COUNT_RE.test(sentence)) why.push("a number");
+  const result = RESULT_RE.exec(sentence);
+  if (result) why.push(`a promised result ("${result[0].toLowerCase().replace(/\s+/g, " ")}")`);
+  if (SUPERLATIVE_RE.test(sentence)) why.push("a superlative");
   const word = WORD_RE.exec(sentence);
   if (word) why.push(`the word "${word[1].toLowerCase()}"`);
   return why;

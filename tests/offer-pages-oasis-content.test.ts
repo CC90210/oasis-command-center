@@ -21,7 +21,9 @@
  *      nothing; a half-finished run resumes; a form someone else owns is left
  *      alone; and the claims gate refuses to publish any of them.
  *   5. content/offers/oasis/PUBLISH_CHECKLIST.md lists every sentence the
- *      claims linter flags, so nothing that needs an owner's tick is missed.
+ *      claims linter flags, so nothing that needs an owner's tick is missed,
+ *      under one "### <Title> (`slug`): N" heading per page whose N is what
+ *      the linter flags today.
  *   6. --refresh-drafts, against an IN-MEMORY libSQL shaped like production
  *      on 2026-10-16 (ai-audit's form live, its page an empty free_audit
  *      draft; community saved by a person; nothing published): it writes a
@@ -423,19 +425,30 @@ async function main() {
   await step("PUBLISH_CHECKLIST.md lists every sentence the claims linter flags, per page", () => {
     const checklist = readFileSync(join(CONTENT_DIR, "PUBLISH_CHECKLIST.md"), "utf8");
     const missing: string[] = [];
+    const wrongCount: string[] = [];
+    // Each page's table is headed "### <Title> (`slug`): N", once, with N what the linter flags today.
+    const counted = (slug: string, n: number) => {
+      const heads = [...checklist.matchAll(new RegExp(`^### .+ \\(\`${slug}\`\\): (\\d+)$`, "gm"))].map((m) => Number(m[1]));
+      if (heads.length !== 1 || heads[0] !== n) wrongCount.push(`${slug}: headings ${JSON.stringify(heads)}, lintDoc flags ${n}`);
+    };
     for (const c of content) {
-      for (const h of claims.lintDoc(c.doc, { fallbackHeadline: c.form.branding.headline ?? "" })) {
+      const hits = claims.lintDoc(c.doc, { fallbackHeadline: c.form.branding.headline ?? "" });
+      counted(c.slug, hits.length);
+      for (const h of hits) {
         if (!checklist.includes(h.sentence)) missing.push(`${c.slug}: ${h.sentence}`);
       }
     }
     // Page-only pages (ai-audit) need their ticks listed too.
     for (const p of seed.loadOasisPageOnlyContent(CONTENT_DIR)) {
       if (!p.doc) continue;
-      for (const h of claims.lintDoc(p.doc, { fallbackHeadline: "" })) {
+      const hits = claims.lintDoc(p.doc, { fallbackHeadline: "" });
+      counted(p.slug, hits.length);
+      for (const h of hits) {
         if (!checklist.includes(h.sentence)) missing.push(`${p.slug}: ${h.sentence}`);
       }
     }
     assert.deepEqual(missing, [], "flagged sentences missing from the checklist");
+    assert.deepEqual(wrongCount, [], "a checklist table's count is stale or the table is listed twice");
   });
 
   // -- 6. --refresh-drafts, against an in-memory database --------------------
