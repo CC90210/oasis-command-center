@@ -187,7 +187,8 @@ are optional, as the page says.
 - [ ] **The follow-up gives "a straight answer on where AI fits".** No written report, instant reply or same-day call
       is promised anywhere on the page.
 - [ ] **Routing:** larger operations to FLEET, unready ones to the free community (what you get, FAQ).
-- [ ] **How a call gets booked today** (FAQ "he will set up a time with you"). When the public booking calendar ships,
-      the FAQ can say "pick a time right after you submit".
+- [x] **How a call gets booked** (FAQ "What happens after I submit?"). The calendar shipped (#655): the form opens it on
+      the page. Maven's answer, applied to this file and the production draft 2026-10-16 (no number, so no new tick):
+      "Right after you submit, a calendar opens on this page so you can book a short call".
 - [ ] **Hero video:** none yet. Maven's window-light audit film (9:16 and 16:9) waits on the narrator voice; attach it
       with its rights tick in the builder.
