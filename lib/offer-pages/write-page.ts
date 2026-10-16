@@ -180,61 +180,106 @@ export function cleanCopy(value: string | undefined, cap: number): string {
   return text;
 }
 
-// -- Filling the draft ------------------------------------------------------
-
 // -- The never-invent rule, in code ----------------------------------------
 //
 // The prompt tells the model never to state a fact the owner did not give, but
 // a prompt is a request. The claims gate (claims.ts lintDoc) asks the owner to
-// confirm the claims it recognises, and it does not recognise every superlative
-// ("leading", "award-winning", "number one"). So a sentence the model wrote
-// with a figure or one of these words that the owner's own words do not
-// contain is left out here, before anything is saved.
+// confirm the claims it recognises, and it does not recognise every one
+// ("leading", "award-winning", "ready within one week"). So the server vets
+// the model's copy (vetWrittenCopy) before anything uses it: a sentence that
+// states a figure, a quantity, a time frame or a claim word the owner's own
+// words do not contain is left out.
 
-/** Each family counts as invented when the text has it and the owner's words do not. */
-const CLAIM_FAMILIES: readonly RegExp[] = [
-  /\bbest\b/i,
-  /\b(?:industry[- ])?leading\b/i,
-  /\baward/i,
-  /\btop[- ]rated\b/i,
-  /\bworld[- ]class\b/i,
-  /\bnumber one\b|#\s?1\b|\bno\.\s?1\b/i,
-  /\bguarantee/i,
-  /\bproven\b/i,
-  /\bunmatched\b|\bunbeatable\b|\bunrivall?ed\b/i,
-  /\b(?:fastest|cheapest|largest|biggest|most trusted)\b/i,
-  /\brisk[- ]free\b|\bmoney[- ]back\b/i,
-  /\btestimonial/i,
-  /[$%]/,
+/**
+ * Each match must appear, as written, in the owner's words. Matching the
+ * phrase, not the family, means "two weeks" in the description does not let
+ * "one week" through.
+ */
+const CLAIM_PATTERNS: readonly RegExp[] = [
+  /\d+/g,
+  /[$%]/g,
+  /\bper ?cent\b/gi,
+  /\bbest\b/gi,
+  /\b(?:industry[- ])?leading\b/gi,
+  /\baward/gi,
+  /\btop[- ]rated\b/gi,
+  /\bworld[- ]class\b/gi,
+  /\bnumber one\b|#\s?1\b|\bno\.\s?1\b/gi,
+  /\bguarantee/gi,
+  /\bproven\b/gi,
+  /\bunmatched\b|\bunbeatable\b|\bunrivall?ed\b/gi,
+  /\b(?:fastest|cheapest|largest|biggest|most trusted)\b/gi,
+  /\brisk[- ]free\b|\bmoney[- ]back\b/gi,
+  /\btestimonial/gi,
+  // Spelled-out quantities and multipliers.
+  /\b(?:dozens?|hundreds?|thousands?|millions?|billions?)\b/gi,
+  /\b(?:double|triple|twice|tenfold|halve)[sd]?\b/gi,
+  // Time frames: "one week", "a few days", "within days", "in minutes".
+  /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|a|an|a few|a couple of|several)\s+(?:minute|hour|day|week|month|year)s?\b/gi,
+  /\b(?:within|in under|in less than|under|less than|in just|in only|in)\s+(?:minutes|hours|days|weeks|months)\b/gi,
+  /\b(?:overnight|same[- ]day|next[- ]day)\b/gi,
 ];
 
 /**
- * True when `text` states a figure or a claim word that `source` (everything
- * the owner typed: names, description, audience) does not contain. Every digit
- * run must appear in the source as written, so "3x" or "24/7" survive only when
- * the owner said them.
+ * True when `text` states something `source` (everything the owner typed:
+ * names, description, audience) does not: any match of CLAIM_PATTERNS that
+ * the source does not contain, compared case-insensitively.
  */
 export function inventsFacts(text: string, source: string): boolean {
   if (!text) return false;
-  const digitsInSource = new Set(source.match(/\d+/g) ?? []);
-  if ((text.match(/\d+/g) ?? []).some((run) => !digitsInSource.has(run))) return true;
-  return CLAIM_FAMILIES.some((family) => family.test(text) && !family.test(source));
+  const src = source.toLowerCase();
+  return CLAIM_PATTERNS.some((pattern) => (text.match(pattern) ?? []).some((m) => !src.includes(m.toLowerCase())));
 }
 
-type Cleaner = (value: string | undefined, cap: number) => string;
+/**
+ * The model's copy with every sentence cleaned, and every one that invents a
+ * fact (inventsFacts against `source`) emptied and counted in `withheld`. The
+ * route runs this before the copy is saved or sent to the editor, so nothing
+ * downstream sees an invented fact.
+ */
+export function vetWrittenCopy(written: WrittenCopy, source: string): { copy: WrittenCopy; withheld: number } {
+  let withheld = 0;
+  const vet = (value: string | undefined): string => {
+    const text = cleanCopy(value, Number.MAX_SAFE_INTEGER);
+    if (text && inventsFacts(text, source)) {
+      withheld += 1;
+      return "";
+    }
+    return text;
+  };
+  const head = (h: WrittenHead): WrittenHead => ({ title: vet(h.title), lede: vet(h.lede) });
+  const cards = (items: Item[]): Item[] => items.map((it) => ({ title: vet(it.title), body: vet(it.body) }));
+  const copy: WrittenCopy = {
+    hero: {
+      eyebrow: vet(written.hero.eyebrow),
+      headline: vet(written.hero.headline),
+      subheadline: vet(written.hero.subheadline),
+      cta_label: vet(written.hero.cta_label),
+    },
+    obstacles: { ...head(written.obstacles), items: cards(written.obstacles.items) },
+    what_you_get: { ...head(written.what_you_get), items: cards(written.what_you_get.items) },
+    work: { ...head(written.work), items: cards(written.work.items) },
+    faq: { ...head(written.faq), items: written.faq.items.map((it) => ({ q: vet(it.q), a: vet(it.a) })) },
+    book: head(written.book),
+    seo: { title: vet(written.seo.title), description: vet(written.seo.description) },
+  };
+  return { copy, withheld };
+}
+
+// -- Filling the draft --------------------------------------------------------
 
 /** Fill an empty Head title and lede; true when either was filled. */
-function fillHead(target: { title?: string; lede?: string }, source: WrittenHead, clean: Cleaner): boolean {
+function fillHead(target: { title?: string; lede?: string }, source: WrittenHead): boolean {
   let touched = false;
   if (!(target.title || "").trim()) {
-    const title = clean(source.title, COPY_CAPS.title);
+    const title = cleanCopy(source.title, COPY_CAPS.title);
     if (title) {
       target.title = title;
       touched = true;
     }
   }
   if (!(target.lede || "").trim()) {
-    const lede = clean(source.lede, COPY_CAPS.lede);
+    const lede = cleanCopy(source.lede, COPY_CAPS.lede);
     if (lede) {
       target.lede = lede;
       touched = true;
@@ -243,12 +288,12 @@ function fillHead(target: { title?: string; lede?: string }, source: WrittenHead
   return touched;
 }
 
-/** A section's cards from the model, cleaned and capped; titles required, bodies optional. */
-function cardsFrom(source: Item[], cap: number, clean: Cleaner): Array<{ title: string; body?: string }> {
+/** A section's cards from the copy, cleaned and capped; titles required, bodies optional. */
+function cardsFrom(source: Item[], cap: number): Array<{ title: string; body?: string }> {
   return source
     .map((it) => {
-      const title = clean(it.title, COPY_CAPS.title);
-      const body = clean(it.body, COPY_CAPS.body);
+      const title = cleanCopy(it.title, COPY_CAPS.title);
+      const body = cleanCopy(it.body, COPY_CAPS.body);
       return body ? { title, body } : { title };
     })
     .filter((it) => it.title)
@@ -256,34 +301,21 @@ function cardsFrom(source: Item[], cap: number, clean: Cleaner): Array<{ title: 
 }
 
 /**
- * The draft with every EMPTY field the template has filled from the model's
- * copy. `source` is everything the owner typed (names, description, audience):
- * a sentence stating a figure or claim it lacks is left out (inventsFacts) and
- * counted in `withheld`. Returns the parsed document and the parts it filled;
- * throws OfferPageError (from parseOfferPageDoc) if the result could not be
- * stored. The owner's brief is set by withBrief, not here.
+ * `base` with every EMPTY field the template has filled from vetted copy
+ * (vetWrittenCopy). Pure, so the offer editor runs it in the browser on the
+ * page it holds at that moment (an edit made while the words were being
+ * written is kept), and the route runs it for a new offer. Returns the parsed
+ * document and the parts it filled; throws OfferPageError (from
+ * parseOfferPageDoc) if the result could not be stored.
  */
-export function applyWrittenCopy(
-  base: OfferPageDoc,
-  written: WrittenCopy,
-  source: string,
-): { doc: OfferPageDoc; filled: string[]; withheld: number } {
+export function applyWrittenCopy(base: OfferPageDoc, copy: WrittenCopy): { doc: OfferPageDoc; filled: string[] } {
   const doc = structuredClone(base) as OfferPageDoc;
   const filled = new Set<string>();
-  let withheld = 0;
-  const clean: Cleaner = (value, cap) => {
-    const text = cleanCopy(value, cap);
-    if (text && inventsFacts(text, source)) {
-      withheld += 1;
-      return "";
-    }
-    return text;
-  };
 
   const heroCaps = { eyebrow: COPY_CAPS.eyebrow, headline: COPY_CAPS.headline, subheadline: COPY_CAPS.subheadline, cta_label: COPY_CAPS.cta_label } as const;
   for (const field of Object.keys(heroCaps) as Array<keyof typeof heroCaps>) {
     if ((doc.hero[field] || "").trim()) continue;
-    const text = clean(written.hero[field], heroCaps[field]);
+    const text = cleanCopy(copy.hero[field], heroCaps[field]);
     if (text) {
       doc.hero[field] = text;
       filled.add("hero");
@@ -297,10 +329,10 @@ export function applyWrittenCopy(
       case "obstacles":
       case "what_you_get":
       case "work": {
-        const from = written[section.key];
-        let touched = fillHead(section, from, clean);
+        const from = copy[section.key];
+        let touched = fillHead(section, from);
         if (section.items.length === 0) {
-          const items = cardsFrom(from.items, ITEM_CAPS[section.key], clean);
+          const items = cardsFrom(from.items, ITEM_CAPS[section.key]);
           if (items.length) {
             section.items = items;
             touched = true;
@@ -310,10 +342,10 @@ export function applyWrittenCopy(
         break;
       }
       case "faq": {
-        let touched = fillHead(section, written.faq, clean);
+        let touched = fillHead(section, copy.faq);
         if (section.items.length === 0) {
-          const items = written.faq.items
-            .map((it) => ({ q: clean(it.q, COPY_CAPS.faq_q), a: clean(it.a, COPY_CAPS.faq_a) }))
+          const items = copy.faq.items
+            .map((it) => ({ q: cleanCopy(it.q, COPY_CAPS.faq_q), a: cleanCopy(it.a, COPY_CAPS.faq_a) }))
             .filter((it) => it.q && it.a)
             .slice(0, ITEM_CAPS.faq);
           if (items.length) {
@@ -329,34 +361,35 @@ export function applyWrittenCopy(
     }
   }
 
-  if (fillHead(doc.book, written.book, clean)) filled.add("book");
+  if (fillHead(doc.book, copy.book)) filled.add("book");
 
-  const seoTitle = clean(written.seo.title, COPY_CAPS.seo_title);
+  const seoTitle = cleanCopy(copy.seo.title, COPY_CAPS.seo_title);
   if (!(doc.seo.title || "").trim() && seoTitle) {
     doc.seo.title = seoTitle;
     filled.add("seo");
   }
-  const seoDescription = clean(written.seo.description, COPY_CAPS.seo_description);
+  const seoDescription = cleanCopy(copy.seo.description, COPY_CAPS.seo_description);
   if (!(doc.seo.description || "").trim() && seoDescription) {
     doc.seo.description = seoDescription;
     filled.add("seo");
   }
 
-  return { doc: parseOfferPageDoc(doc), filled: [...filled], withheld };
+  return { doc: parseOfferPageDoc(doc), filled: [...filled] };
 }
 
 /**
- * The draft with the owner's own words about the offer kept in its brief, for
- * the next writer (a re-run, or Maven's copy request). The brief is the
- * owner's notes and is never published (lib/offer-pages/types.ts), so the
- * words they typed last replace what was there. Saved BEFORE the model call
- * (the route), so a write that fails still keeps what they typed.
+ * A new offer's draft with the owner's description kept in its brief (the
+ * route saves this BEFORE the model call, so a write that fails still keeps
+ * what they typed). The promise is the description just typed; the audience
+ * is set only when the brief has none, so a longer one written in the Copy
+ * brief is never replaced by the shortened prompt copy. The brief is the
+ * owner's notes and is never published (lib/offer-pages/types.ts).
  */
 export function withBrief(base: OfferPageDoc, brief: { description?: string; audience?: string }): OfferPageDoc {
   const promise = cleanCopy(brief.description, COPY_CAPS.brief);
   const audience = cleanCopy(brief.audience, COPY_CAPS.brief);
   const next = { ...(base.brief ?? {}) };
   if (promise) next.promise = promise;
-  if (audience) next.audience = audience;
+  if (audience && !(next.audience || "").trim()) next.audience = audience;
   return parseOfferPageDoc({ ...base, brief: next });
 }

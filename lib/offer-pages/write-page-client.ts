@@ -9,6 +9,7 @@
  * route read them from here, so the screens and the route agree.
  */
 import type { OfferPageDoc } from "./types";
+import type { WrittenCopy } from "./write-page";
 
 export const WRITE_PAGE_INPUT = { minDescription: 20, maxDescription: 2000, maxAudience: 300 } as const;
 
@@ -22,9 +23,9 @@ export function writePageInputProblem(description: string): string | null {
 /**
  * The parts of a draft a write would still fill: what the prompt asks the
  * model for (writePageSystemPrompt) that the draft has empty. The route skips
- * the paid model call when this is empty, and the offer editor offers "Write
- * the empty parts" only while it is not. The FAQ has no lede in the prompt, so
- * an FAQ without one is not counted as empty.
+ * the paid model call for a new offer's draft with none, and the offer editor
+ * offers "Write the empty parts" only while its page has some. The FAQ has no
+ * lede in the prompt, so an FAQ without one is not counted as empty.
  */
 export function emptyWritableParts(doc: OfferPageDoc): string[] {
   const blank = (value: string | undefined) => !(value || "").trim();
@@ -52,17 +53,20 @@ export function emptyWritableParts(doc: OfferPageDoc): string[] {
 }
 
 /**
- * `offer` is the page as the route left it (the same shape the builder's own
- * save returns), on failures too: the route saves the owner's description
- * before the model call, so a failed write can still have moved the draft on.
+ * Two ways to ask. The New offer and Turn into an offer dialogs leave `save`
+ * on: the route writes the words into the new page's draft and saves it. The
+ * offer editor sends `save: false`: the route saves nothing and returns the
+ * vetted `copy`, and the editor fills its own empty fields with it and saves
+ * through its own autosave, so there is only ever one writer to the draft it
+ * holds.
  */
 export type WritePageOutcome =
-  | { ok: true; filled: string[]; offer: unknown }
-  | { ok: false; message: string; offer: unknown };
+  | { ok: true; filled: string[]; copy: WrittenCopy | null }
+  | { ok: false; message: string };
 
 export async function requestWrittenPage(
   formId: string,
-  input: { description: string; audience?: string; expectedVersion?: number },
+  input: { description: string; audience?: string; save?: boolean },
 ): Promise<WritePageOutcome> {
   try {
     const res = await fetch(`/api/forms/${formId}/offer/write`, {
@@ -71,14 +75,13 @@ export async function requestWrittenPage(
       body: JSON.stringify({
         description: input.description.trim(),
         audience: (input.audience || "").trim(),
-        ...(typeof input.expectedVersion === "number" ? { expected_version: input.expectedVersion } : {}),
+        save: input.save !== false,
       }),
     });
-    const data = (await res.json().catch(() => null)) as { ok?: boolean; filled?: string[]; message?: string; offer?: unknown } | null;
-    const offer = data?.offer ?? null;
-    if (data?.ok) return { ok: true, filled: Array.isArray(data.filled) ? data.filled : [], offer };
-    return { ok: false, message: data?.message || "The page couldn't be written just now. Your draft is saved; try again in a minute.", offer };
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; filled?: string[]; message?: string; copy?: WrittenCopy } | null;
+    if (data?.ok) return { ok: true, filled: Array.isArray(data.filled) ? data.filled : [], copy: data.copy ?? null };
+    return { ok: false, message: data?.message || "The page couldn't be written just now. Your draft is saved; try again in a minute." };
   } catch {
-    return { ok: false, message: "The connection dropped while the page was being written. Your draft is saved; try again.", offer: null };
+    return { ok: false, message: "The connection dropped while the page was being written. Your draft is saved; try again." };
   }
 }

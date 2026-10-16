@@ -23,6 +23,7 @@ import { BookEditor, BriefEditor, HeroEditor, SectionCard, newSection, type Chip
 import { PublishChecklist } from "./PublishChecklist";
 import { VideoPicker } from "./VideoPicker";
 import { WriteEmptyParts } from "./WriteEmptyParts";
+import { applyWrittenCopy, type WrittenCopy } from "@/lib/offer-pages/write-page";
 import { TextField, Tick } from "./fields";
 import { offerShareablePath } from "@/lib/offers/short-links";
 
@@ -158,28 +159,24 @@ export function OfferBuilder({
     if (timer.current) clearTimeout(timer.current);
   }, []);
 
-  // "Write the empty parts" (WriteEmptyParts) saves on the server and returns
-  // the page; take it up here, so the editor keeps the server's version. An
-  // edit made while the words were being written is never written over: the
-  // save stops on it with a plain way out, as on any other conflict.
-  const savingRef = useRef(saving);
+  // "Write the empty parts" (WriteEmptyParts): the route returns vetted copy
+  // and saves nothing; it fills the fields still empty on the page as it is
+  // when the answer arrives (an edit made meanwhile is kept), and the result
+  // saves like any other edit. One writer to this draft: this editor.
+  const docRef = useRef(doc);
   useEffect(() => {
-    savingRef.current = saving;
-  }, [saving]);
-  const takeWritten = useCallback((offer: unknown) => {
-    const next = offer as OfferView | null;
-    if (!next || typeof next.version !== "number" || next.version === versionRef.current) return;
-    const s = savingRef.current;
-    if (s === "pending" || s === "saving" || s === "error") {
-      conflict.current = true;
-      setSaving("error");
-      setSaveError("The empty parts were written while you were editing, so your latest change was not saved over them. Copy that change, then reload the page.");
-      return;
-    }
-    versionRef.current = next.version;
-    setView(next);
-    setDoc(next.draft);
-  }, []);
+    docRef.current = doc;
+  }, [doc]);
+  const takeCopy = useCallback(
+    (copy: WrittenCopy): string[] => {
+      const latest = docRef.current;
+      if (!latest) return [];
+      const { doc: next, filled } = applyWrittenCopy(latest, copy);
+      if (filled.length) update(next);
+      return filled;
+    },
+    [update],
+  );
 
   const chips = useMemo(() => {
     const out: Partial<Record<BodyKey, ChipState>> = {};
@@ -273,7 +270,12 @@ export function OfferBuilder({
 
   return (
     <div className="space-y-5">
-      <WriteEmptyParts formId={form.id} doc={doc} version={() => versionRef.current} saveState={saving} onOffer={takeWritten} />
+      <WriteEmptyParts
+        formId={form.id}
+        doc={doc}
+        onBrief={(promise) => update({ ...doc, brief: { ...(doc.brief ?? {}), promise } })}
+        onCopy={takeCopy}
+      />
       <div className="flex flex-wrap items-center gap-3 text-xs text-fg-muted">
         <span>
           {saving === "saving" ? (
