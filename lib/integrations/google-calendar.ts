@@ -843,6 +843,15 @@ async function openAuthorizedCalendarSession(args: {
     args.allowSystemFallback === "same_account"
       ? Boolean(expectedOrganizerEmail) && system.organizerEmail === expectedOrganizerEmail
       : args.allowSystemFallback !== false;
+  /**
+   * The calendar a fallback session reads. Standing in for the host's own
+   * account ("same_account", availability), it is that account's PRIMARY
+   * calendar, where their meetings are: GOOGLE_CALENDAR_ID may name a
+   * secondary booking calendar for event placement, and reading only that
+   * would hide the host's real busy time and double-book them.
+   */
+  const fallbackCalendarId = (system: SystemCalendarConfig): string =>
+    args.allowSystemFallback === "same_account" ? PRIMARY_CALENDAR_ID : system.calendarId;
 
   // Workspace fallback (2026-08-25): a host without a usable personal work
   // connection no longer blocks the booking when workspace credentials are
@@ -860,11 +869,15 @@ async function openAuthorizedCalendarSession(args: {
     const system = systemCalendarConfig();
     if (system && fallbackAllowed(system)) {
       systemFallback = true;
-      calendarId = system.calendarId;
+      calendarId = fallbackCalendarId(system);
       sessionClientId = system.clientId;
       sessionClientSecret = system.clientSecret;
       sessionBundle = {
         ...bundle,
+        // The host's cached access token is theirs (a Gmail-only grant, or
+        // another account's): never spent on the workspace session.
+        access_token: "",
+        expires_at: "",
         refresh_token: system.refreshToken,
         scope: CALENDAR_EVENTS_SCOPE,
         ...(system.organizerEmail ? { gmail_address: system.organizerEmail } : {}),
@@ -952,7 +965,7 @@ async function openAuthorizedCalendarSession(args: {
       const system = candidate && fallbackAllowed(candidate) ? candidate : null;
       if (!system) throw error;
       systemFallback = true;
-      calendarId = system.calendarId;
+      calendarId = fallbackCalendarId(system);
       sessionClientId = system.clientId;
       sessionClientSecret = system.clientSecret;
       sessionBundle = {

@@ -823,6 +823,38 @@ async function testAvailabilityUsesTheWorkspaceCredentialOnlyWhenItIsTheFounders
     assert.deepEqual(busy, [{ start: START_AT, end: "2026-08-26T20:15:00.000Z" }]);
     assert.equal(eventReads, 1);
     assert.ok(tokenBodies.every((b) => b.includes("refresh_token=system-refresh-token")), "read with anything but the workspace credential");
+    // Codex on #651: a cached PERSONAL access token is never spent on the workspace session.
+    const seen: string[] = [];
+    const recording: GoogleCalendarDependencies["fetchImpl"] = async (url, init) => {
+      if (!String(url).includes("oauth2.googleapis.com/token")) {
+        seen.push(String(((init as RequestInit)?.headers as Record<string, string>)?.authorization ?? ""));
+      }
+      return fetchImpl(url, init);
+    };
+    const personalOnly = { access_token: "personal-access-token", expires_at: "2099-01-01T00:00:00.000Z", gmail_address: "founder@oasisai.work" };
+    await listGoogleCalendarBusy(args, baseDependencies(recording, { getBundle: async () => personalOnly }));
+    assert.deepEqual(seen, ["Bearer system-access-token"], "the workspace session read with the host's cached personal token");
+    eventReads = 0;
+
+    // Codex and the booking engine's author on #651: GOOGLE_CALENDAR_ID may name a secondary booking
+    // calendar; same-account availability still reads the founder's PRIMARY calendar.
+    const savedCalendarId = process.env.GOOGLE_CALENDAR_ID;
+    process.env.GOOGLE_CALENDAR_ID = "bookings@group.calendar.google.com";
+    const paths: string[] = [];
+    try {
+      await listGoogleCalendarBusy(
+        args,
+        baseDependencies(async (url, init) => {
+          if (!String(url).includes("oauth2.googleapis.com/token")) paths.push(new URL(String(url)).pathname);
+          return fetchImpl(url, init);
+        }, { getBundle: async () => ({}) }),
+      );
+    } finally {
+      restoreEnv("GOOGLE_CALENDAR_ID", savedCalendarId);
+    }
+    assert.deepEqual(paths, ["/calendar/v3/calendars/primary/events"], "availability read a secondary calendar instead of the founder's primary");
+    eventReads = 1;
+
     // The host's own address (from the roster) in another case or with spaces still matches.
     await listGoogleCalendarBusy({ ...args, expectedOrganizerEmail: "  FOUNDER@oasisai.work " }, baseDependencies(fetchImpl, { getBundle: async () => ({}) }));
     assert.equal(eventReads, 2);
