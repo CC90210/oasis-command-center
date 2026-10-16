@@ -11,6 +11,8 @@ import {
 } from "@/lib/booking/settings-store";
 import { badRequest, errorResponse, forbidden, readJson, requireOwner, sameOrigin } from "@/lib/calendar/http";
 import { listCalendars } from "@/lib/calendar/store";
+import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
+import { personalGoogleStatus } from "@/lib/os/connectors";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
@@ -40,6 +42,22 @@ async function bookFormLive(): Promise<boolean> {
   return Boolean(row?.id && (row.enabled === true || row.enabled === 1));
 }
 
+/**
+ * Whether each host's own Google Calendar can be read. Availability refuses to
+ * substitute any other account for a host's free time, so a host who is not
+ * connected closes their on-duty slots (the organizer: every slot). The card
+ * says so in the same words Settings uses, never silence.
+ */
+async function hostCalendarStatus(tenantId: string, userId: string): Promise<{ ready: boolean; label: string }> {
+  try {
+    const status = personalGoogleStatus(await readPersonalGoogleFact(tenantId, userId));
+    return { ready: status.state === "ready", label: status.label };
+  } catch (err) {
+    console.error("[calendar.booking.host-status]", err instanceof Error ? err.message : err);
+    return { ready: false, label: "Status unavailable" };
+  }
+}
+
 function settingsError(err: unknown, where: string): NextResponse {
   if (err instanceof BookingSettingsError) {
     console.error(`[calendar.booking.${where}]`, err.message);
@@ -61,6 +79,9 @@ export async function GET(): Promise<NextResponse> {
       bookFormLive(),
     ]);
     const identities = hostIdentities(roster);
+    const statuses = await Promise.all(
+      loaded.settings.hosts.map((host) => hostCalendarStatus(owner.tenantId, host.userId)),
+    );
     return NextResponse.json(
       {
         ok: true,
@@ -72,10 +93,11 @@ export async function GET(): Promise<NextResponse> {
         settings: loaded.settings,
         canEdit: loaded.settings.hosts.some((host) => host.userId === owner.userId),
         you: owner.userId,
-        hosts: loaded.settings.hosts.map((host) => ({
+        hosts: loaded.settings.hosts.map((host, index) => ({
           userId: host.userId,
           name: identities.get(host.userId)?.displayName ?? "Unknown teammate",
           role: host.role,
+          calendar: statuses[index],
         })),
         roster: [...identities.values()].map((person) => ({ userId: person.userId, name: person.displayName })),
         calendars: calendars.map((calendar) => ({ id: calendar.id, name: calendar.name, isDefault: calendar.isDefault })),

@@ -24,7 +24,12 @@ type BookingInfo = {
   settings: BookingSettings;
   canEdit: boolean;
   you: string;
-  hosts: { userId: string; name: string; role: "organizer" | "attendee" }[];
+  hosts: {
+    userId: string;
+    name: string;
+    role: "organizer" | "attendee";
+    calendar: { ready: boolean; label: string };
+  }[];
   calendars: { id: string; name: string; isDefault: boolean }[];
 };
 
@@ -167,13 +172,29 @@ export function BookingLinkCard() {
           Your booked calls land on <span className="text-fg">{landsOn}</span>.
         </p>
       ) : null}
-      <ul className="mt-2 space-y-1 text-fg-muted">
+      <ul className="mt-2 space-y-1.5 text-fg-muted">
         {info.hosts.map((host) => {
           const hours = info.settings.hosts.find((h) => h.userId === host.userId)?.weeklyHours;
+          const you = host.userId === info.you;
           return (
             <li key={host.userId}>
-              <span className="text-fg">{host.userId === info.you ? "You" : host.name}</span>
+              <span className="text-fg">{you ? "You" : host.name}</span>
               {host.role === "organizer" ? " (hosts)" : " (joins)"}: {hours ? summarize(hours) : "No hours"}
+              {host.calendar.ready ? null : (
+                <span className="block text-status-warm">
+                  Google Calendar: {host.calendar.label}.{" "}
+                  {host.role === "organizer"
+                    ? "No times can be offered until it is connected."
+                    : "Times that need them are closed until it is connected."}{" "}
+                  {you ? (
+                    <a className="underline underline-offset-2 hover:text-fg" href="/settings/connections?app=google-workspace">
+                      Connect it
+                    </a>
+                  ) : (
+                    "They connect it in Settings, Connections."
+                  )}
+                </span>
+              )}
             </li>
           );
         })}

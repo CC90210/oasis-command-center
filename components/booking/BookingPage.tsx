@@ -16,6 +16,10 @@
  *      meeting booked", the call lands on the hosts' Schedule.
  * A failed step 2 never loses the visitor: the lead already exists, the chosen
  * details stay filled in, and a taken slot sends them back to fresh times.
+ * When no time can be shown at all (the calendar cannot be read, or every
+ * time is taken), the visitor can still leave their details: step 1 alone
+ * puts them in Sales as a warm inbound lead, so a broken calendar never
+ * turns a ready buyer away with nothing recorded.
  *
  * ASCII only (tests/worker-source-one-byte.test.ts).
  */
@@ -163,6 +167,9 @@ export function BookingPage(props: Props) {
   const [error, setError] = useState<string | null>(null);
   const [booked, setBooked] = useState<Booked | null>(null);
   const [showNote, setShowNote] = useState(false);
+  // No time could be shown: take the details alone (see the header comment).
+  const [detailsOnly, setDetailsOnly] = useState(false);
+  const [leftDetails, setLeftDetails] = useState(false);
   const tokenRef = useRef<string | null>(null);
   const requestIdRef = useRef<{ slot: string; id: string } | null>(null);
   const detailsRef = useRef<HTMLDivElement | null>(null);
@@ -250,7 +257,7 @@ export function BookingPage(props: Props) {
   };
 
   const submit = async () => {
-    if (!slot || busy) return;
+    if ((!slot && !detailsOnly) || busy) return;
     if (!validate()) return;
     setBusy(true);
     setError(null);
@@ -284,6 +291,10 @@ export function BookingPage(props: Props) {
         }
         token = data.minted_token;
         tokenRef.current = token;
+      }
+      if (detailsOnly || !slot) {
+        setLeftDetails(true);
+        return;
       }
 
       // One request id per chosen time: a retry of the same time is idempotent.
@@ -331,6 +342,20 @@ export function BookingPage(props: Props) {
   };
 
   const callTitle = `${durationMinutes}-minute call with OASIS AI`;
+
+  if (leftDetails) {
+    return (
+      <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col justify-center px-5 py-16">
+        <p className="m-eyebrow font-data text-[10px] uppercase tracking-[0.26em] text-signal">Received</p>
+        <h1 className="mt-5 font-display text-[2rem] font-semibold leading-tight tracking-[-0.02em] text-fg">
+          Thanks. We&apos;ll reach out to set a time.
+        </h1>
+        <p className="mt-4 text-[15px] leading-relaxed text-fg-muted">
+          Your details are with the OASIS team. Expect an email or a text from us with times that work.
+        </p>
+      </main>
+    );
+  }
 
   if (booked) {
     return (
@@ -443,11 +468,27 @@ export function BookingPage(props: Props) {
                 >
                   Try again
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setDetailsOnly(true)}
+                  className="mt-4 ml-2 rounded-md border border-ops-edge px-4 py-2 text-[14px] text-fg hover:border-fg-dim"
+                >
+                  Leave your details instead
+                </button>
               </div>
             ) : days.length === 0 ? (
-              <p className="mt-5 text-[15px] text-fg-muted">
-                Every time in the next two weeks is taken. Email us and we will make room.
-              </p>
+              <div className="mt-5">
+                <p className="text-[15px] text-fg-muted">
+                  Every time in the next two weeks is taken. Leave your details and we will make room.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setDetailsOnly(true)}
+                  className="mt-4 rounded-md border border-ops-edge px-4 py-2 text-[14px] text-fg hover:border-fg-dim"
+                >
+                  Leave your details instead
+                </button>
+              </div>
             ) : (
               <>
                 <div className="-mx-1 mt-5 flex gap-2 overflow-x-auto px-1 pb-2" role="tablist" aria-label="Days">
@@ -501,22 +542,28 @@ export function BookingPage(props: Props) {
             )}
           </div>
 
-          {slot ? (
+          {slot || detailsOnly ? (
             <div ref={detailsRef} className="mt-6 scroll-mt-6 rounded-xl border border-ops-line bg-ops-panel p-4 sm:p-6">
               <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-ops-line pb-4">
                 <div>
-                  <p className="font-data text-[10px] uppercase tracking-[0.18em] text-signal">Your time</p>
+                  <p className="font-data text-[10px] uppercase tracking-[0.18em] text-signal">
+                    {slot ? "Your time" : "No time picked"}
+                  </p>
                   <p className="mt-1 font-display text-[17px] font-semibold text-fg">
-                    {fmt(slot, zone, { weekday: "long", month: "long", day: "numeric" })} at{" "}
-                    {fmt(slot, zone, { hour: "numeric", minute: "2-digit" })}
+                    {slot
+                      ? `${fmt(slot, zone, { weekday: "long", month: "long", day: "numeric" })} at ${fmt(slot, zone, { hour: "numeric", minute: "2-digit" })}`
+                      : "We will reach out with times"}
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setSlot(null)}
+                  onClick={() => {
+                    setSlot(null);
+                    setDetailsOnly(false);
+                  }}
                   className="text-[14px] text-fg-muted underline-offset-4 hover:text-fg hover:underline"
                 >
-                  Change
+                  {slot ? "Change" : "Back to the calendar"}
                 </button>
               </div>
 
@@ -644,7 +691,7 @@ export function BookingPage(props: Props) {
                   disabled={busy}
                   className="inline-flex w-full items-center justify-center rounded-md bg-signal px-6 py-3 text-[15px] font-semibold tracking-[-0.01em] text-ops-void transition-all hover:brightness-110 disabled:opacity-60 sm:w-auto"
                 >
-                  {busy ? "Booking..." : "Book this time"}
+                  {busy ? (slot ? "Booking..." : "Sending...") : slot ? "Book this time" : "Send my details"}
                 </button>
               </form>
             </div>
