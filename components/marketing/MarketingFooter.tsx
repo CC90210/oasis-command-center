@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { OasisLogo } from "@/components/brand/OasisLogo";
+import { AdConsentSettingsButton } from "@/components/marketing/AdConsent";
 import {
   AI_DISCLOSURE_NOTICE,
   LEGAL_ENTITY,
@@ -78,7 +79,12 @@ export function MarketingFooter() {
 
           <FooterColumn title="Company" links={SITE_LINKS} />
           <FooterColumn title="Platform" links={PLATFORM_LINKS} />
-          <FooterColumn title="Legal" links={LEGAL_LINKS} />
+          <FooterColumn title="Legal" links={LEGAL_LINKS}>
+            {/* Withdrawing consent must be as easy as giving it (Law 25). */}
+            <li>
+              <AdConsentSettingsButton />
+            </li>
+          </FooterColumn>
         </div>
 
         <div className="mt-12 border-t border-ops-line pt-8">
@@ -105,9 +111,12 @@ export function MarketingFooter() {
 function FooterColumn({
   title,
   links,
+  children,
 }: {
   title: string;
   links: { href: string; label: string }[];
+  /** Extra list items after the links (the Legal column's consent control). */
+  children?: React.ReactNode;
 }) {
   return (
     <div>
@@ -125,6 +134,7 @@ function FooterColumn({
             </Link>
           </li>
         ))}
+        {children}
       </ul>
     </div>
   );
