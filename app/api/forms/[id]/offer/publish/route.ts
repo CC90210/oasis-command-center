@@ -68,7 +68,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     );
   }
 
-  const gate = publishGate(row.draft, row.claims, { formEnabled: form.enabled || enableForm, fallbackHeadline: fallbackHeadline(form) });
+  const gate = publishGate(row.draft, row.claims, {
+    formEnabled: form.enabled || enableForm,
+    fallbackHeadline: fallbackHeadline(form),
+    heroBurnedCaptions: row.draftHeroBurnedCaptions,
+  });
   if (gate.blockers.length) {
     return NextResponse.json({ ok: false, error: "publish_blocked", blockers: gate.blockers, warnings: gate.warnings }, { status: 409 });
   }

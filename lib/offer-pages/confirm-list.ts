@@ -286,7 +286,11 @@ export async function loadConfirmList(
         };
       }
       const headline = fallbackHeadline(form);
-      const gate = publishGate(row.draft, row.claims, { formEnabled: form.enabled, fallbackHeadline: headline });
+      const gate = publishGate(row.draft, row.claims, {
+        formEnabled: form.enabled,
+        fallbackHeadline: headline,
+        heroBurnedCaptions: row.draftHeroBurnedCaptions,
+      });
       return {
         ...base,
         draft: row.draft,

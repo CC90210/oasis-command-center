@@ -60,6 +60,14 @@ export type OfferRow = {
   publishedBy: string | null;
   live: boolean;
   claims: ClaimTick[];
+  /**
+   * The draft's top video is a Library video whose asset says its captions are
+   * burned into the picture (marketing_asset.meta.burned_captions). publishGate
+   * then does not warn that it has no caption file: it does not need one, and a
+   * caption track would draw a second set over the first (2026-10-16, all six
+   * OASIS VSLs). Set by readOfferRow; absent means no.
+   */
+  draftHeroBurnedCaptions?: boolean;
 };
 
 /** What the Offers list shows in its Page column. */
@@ -137,11 +145,38 @@ export async function readOfferRow(db: Client, tenantId: string, formId: string)
       args: [tenantId, formId],
     });
     const r = rowsOf(rs)[0];
-    return r ? { state: "row", row: toRow(r) } : { state: "none" };
+    if (!r) return { state: "none" };
+    const row = toRow(r);
+    if (await heroHasBurnedCaptions(db, tenantId, row.draft)) row.draftHeroBurnedCaptions = true;
+    return { state: "row", row };
   } catch (err) {
     if (!isMissingOfferTable(err)) throw err;
     noteOfferTableMissing("read");
     return { state: "unavailable" };
+  }
+}
+
+/**
+ * Does this page's top video carry its captions in the picture? Only a Library
+ * video can say so (its asset's meta.burned_captions, stamped by the Library's
+ * publish tool). Any doubt (no asset, unreadable meta, no Library tables) is
+ * "no": the result only decides whether Publish shows a caption warning.
+ */
+async function heroHasBurnedCaptions(db: Client, tenantId: string, doc: OfferPageDoc | null): Promise<boolean> {
+  const video = doc?.hero.video;
+  if (!video || video.source !== "library") return false;
+  try {
+    const rs = await db.execute({
+      sql: "SELECT meta FROM marketing_asset WHERE tenant_id = ? AND id = ? LIMIT 1",
+      args: [tenantId, video.asset_id],
+    });
+    const raw = rowsOf(rs)[0]?.meta;
+    const meta = typeof raw === "string" ? (JSON.parse(raw) as unknown) : raw;
+    if (!meta || typeof meta !== "object") return false;
+    const flag = (meta as Record<string, unknown>).burned_captions;
+    return flag === true || flag === 1;
+  } catch {
+    return false;
   }
 }
 
