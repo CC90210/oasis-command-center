@@ -202,6 +202,9 @@ const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
   // not let "live in 14 days" through, while a bare "24/7" matches as numbers.
   { re: /\d+(?:[.,]\d+)*(?:\s*(?:%|(?:percent|x|times|minutes?|hours?|days?|weeks?|months?|years?)(?![A-Za-z])))?/gi },
   { re: /[$%]/g },
+  // A money amount is one claim: the owner's "99 clients" and "$50" do not let "$99" through.
+  { re: /\$\s?\d+(?:[.,]\d+)*/g },
+  { re: /\d+(?:[.,]\d+)*\s?(?:dollars?|bucks|cad|usd|eur|euros?|gbp|pounds?)\b/gi },
   { re: /\bper ?cent\b/gi },
   { re: /\bbest\b/gi },
   { re: /\b(?:industry[- ])?leading\b/gi },

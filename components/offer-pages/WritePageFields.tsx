@@ -11,10 +11,13 @@ import { WRITE_PAGE_INPUT } from "@/lib/offer-pages/write-page-client";
 export function WritePageDescription({
   value,
   onChange,
+  disabled = false,
   className = "",
 }: {
   value: string;
   onChange: (value: string) => void;
+  /** Locked while the page is being written from it, so the words match what was asked. */
+  disabled?: boolean;
   className?: string;
 }) {
   return (
@@ -23,6 +26,7 @@ export function WritePageDescription({
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
         rows={3}
         maxLength={WRITE_PAGE_INPUT.maxDescription}
         className="input mt-1 w-full"

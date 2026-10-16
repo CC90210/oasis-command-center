@@ -184,6 +184,11 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   assert.ok(!inventsFacts("Three clinics already use it", "Three clinics already use our front desk."));
   assert.ok(inventsFacts("A leading platform", "Avoid misleading reports"), "the owner's misleading let leading through");
   assert.ok(!inventsFacts("Guaranteed setup", "We guarantee the setup."), "a stem the owner wrote was refused");
+  // A money amount is one claim (Codex round six): a bare "99" and a "$" elsewhere do not make "$99".
+  // ("Only $99", not "Only $99 a month": "a month" would be caught by the time-frame rule instead.)
+  assert.ok(inventsFacts("Only $99", "We have 99 clients and charge $50 for setup."), "an invented price got through");
+  assert.ok(inventsFacts("Just 99 dollars", "We have 99 clients."), "an invented price in words got through");
+  assert.ok(!inventsFacts("Only $99", "It costs $99 a month."));
   // A figure is compared with its unit (Codex, round four), and a bare one as a number.
   assert.ok(inventsFacts("Live in 14 days", "Includes 14 templates"), "the owner's 14 templates let 14 days through");
   assert.ok(!inventsFacts("Support 24/7 for every client", "We answer 24/7."));
@@ -363,7 +368,8 @@ check("the editor's write has one writer: the route saves nothing, and the edito
   assert.doesNotMatch(panel, /location\.reload|router\.refresh/, "the panel reloads over the editor's state");
   // The description box IS the page's brief, so it can never disagree with the Copy brief.
   assert.match(panel, /const description = doc\.brief\?\.promise \?\? ""/);
-  assert.match(panel, /<WritePageDescription value=\{description\} onChange=\{onBrief\} \/>/);
+  // Locked while writing, so the words always match the description they were asked from (Codex round six).
+  assert.match(panel, /<WritePageDescription value=\{description\} onChange=\{onBrief\} disabled=\{busy\} \/>/);
   assert.doesNotMatch(panel, /useState\(doc\.brief/, "the panel keeps its own copy of the brief");
   const builder = readFileSync("components/offer-pages/builder/OfferBuilder.tsx", "utf8");
   assert.match(builder, /onBrief=\{\(promise\) => update\(\{ \.\.\.doc, brief: \{ \.\.\.\(doc\.brief \?\? \{\}\), promise \} \}\)\}/);

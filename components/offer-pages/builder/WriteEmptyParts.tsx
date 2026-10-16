@@ -98,7 +98,7 @@ export function WriteEmptyParts({
       {parts.length && notice ? <p className="text-[13px] text-fg-muted">{notice}</p> : null}
       {open ? (
         <>
-          <WritePageDescription value={description} onChange={onBrief} />
+          <WritePageDescription value={description} onChange={onBrief} disabled={busy} />
           <p className="text-xs text-fg-muted">
             Only the empty parts are written; anything already on the page stays as it is. It stays a draft: you
             review it, and set prices yourself, before it goes live.
