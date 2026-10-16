@@ -2,7 +2,7 @@
  * A Today read either answers inside its budget or becomes an error the error
  * boundary renders - never an endless skeleton.
  *
- * WHY. app/loading.tsx is a Suspense fallback around every route. A read that
+ * WHY. Each signed-in section's loading.tsx is a Suspense fallback. A read that
  * never settles (a hung database connection, a provider that never answers)
  * kept that skeleton up with no error and no log line: the founder's "the
  * dashboard is loading" complaint (audit stage-3a critic, "loading boundary").

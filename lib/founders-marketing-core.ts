@@ -814,6 +814,115 @@ export function stalePublishWarning(
 }
 
 /**
+ * One network's answer to a publish request, as the drain recorded it.
+ *
+ * `ok` is "Zernio accepted it". `status` and `url` arrive later, from the drain's
+ * reconcile (Business-Empire-Agent 096e25c8, 2026-10-16), which reads Zernio's
+ * per-network status for intents finished 2 min - 48 h ago: "published" plus the
+ * live link, "failed" with ok flipped to false, or a still-working value.
+ */
+export type PublishOutcome = {
+  platform: string;
+  ok: boolean;
+  detail: string | null;
+  /** Zernio's per-network status once reconciled; null = not read yet. */
+  status: string | null;
+  /** The live post, https only (it is rendered as a link). */
+  url: string | null;
+};
+
+/**
+ * What a finished publish request did, in the words the operator needs.
+ *
+ * CC, 2026-10-16, about the "Post to channels" panel: "I'm pretty sure the
+ * functionality of this software posting is broken or not fully correct." The
+ * drain did post (2026-08-17 reached all five short-form networks), but the panel
+ * only ever said "Last request: failed" or "done": the drain's reason and its
+ * per-network results sat in marketing_publish_intent unread. The one failure
+ * (2026-09-14, a storage download refused by an SSL check on the publishing PC)
+ * looked exactly like "posting is broken".
+ *
+ * `result` is the drain's JSON: { <platform>: { ok, post_id, reason | error } }.
+ * Mid-publish it is the dispatch marker { _dispatch_started_at, platforms }, which
+ * carries no outcome and yields none. `error` is the drain's text, which can end
+ * in a traceback; only its first line is the reason.
+ */
+export function summarizePublishIntent(
+  result: unknown,
+  error: unknown,
+): { outcomes: PublishOutcome[]; reason: string | null; rawReason: string | null } {
+  let parsed: unknown = result;
+  if (typeof result === "string") {
+    try {
+      parsed = JSON.parse(result || "{}");
+    } catch {
+      parsed = {};
+    }
+  }
+  const outcomes: PublishOutcome[] = [];
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    for (const [platform, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (platform.startsWith("_") || !v || typeof v !== "object" || Array.isArray(v)) continue;
+      const row = v as { ok?: unknown; reason?: unknown; error?: unknown; status?: unknown; url?: unknown };
+      const ok = row.ok === true;
+      const why = ok ? null : String(row.error ?? row.reason ?? "").trim() || null;
+      const status = typeof row.status === "string" && row.status.trim() ? row.status.trim() : null;
+      // Rendered as an <a href>: anything but a plain https URL (javascript:, data:)
+      // is dropped rather than trusted because it came from our own table.
+      const url = typeof row.url === "string" && /^https:\/\/[^\s"'<>]+$/.test(row.url) ? row.url : null;
+      outcomes.push({ platform, ok, detail: why ? firstLine(why) : null, status, url });
+    }
+  }
+  const rawReason = typeof error === "string" && error.trim() ? firstLine(error) : null;
+  return { outcomes, reason: rawReason ? plainPublishReason(rawReason) : null, rawReason };
+}
+
+/**
+ * The drain's failures that have actually happened, in plain words. Anything
+ * unrecognised passes through as the drain wrote it: an honest raw reason beats
+ * a friendly guess.
+ */
+export function plainPublishReason(raw: string): string {
+  if (/R2 download failed|download failed for marketing-media/i.test(raw)) {
+    return (
+      "The publishing PC could not fetch the file from storage" +
+      (/SSL|certificate/i.test(raw) ? " (a security check on its connection failed)" : "") +
+      ", so nothing was posted. Try again; if it repeats, the PC's network needs a look."
+    );
+  }
+  if (/forced a dry run|killswitch|FORCE_DRY_RUN/i.test(raw)) {
+    return "The posting kill switch is on, so nothing was posted.";
+  }
+  if (/no media attached/i.test(raw)) return "No file is attached to this asset, so there was nothing to post.";
+  if (/asset no longer exists/i.test(raw)) return "The asset was deleted before it could be posted.";
+  if (/refused after Zernio accepted it/i.test(raw)) {
+    // The drain's reconcile (BEA 096e25c8): "refused after Zernio accepted it - <net>: <reason>".
+    const parts = raw
+      .split(/;\s*/)
+      .map((p) => p.replace(/^.*?refused after Zernio accepted it\s*-\s*/i, "").replace(/Zernio/g, "the posting service"));
+    return `Sent, then turned down by the network: ${parts.join("; ")}. Each network's result is below.`;
+  }
+  if (/identical asset already|repeat window/i.test(raw)) {
+    return "This exact file was already posted in the last 7 days, so it was not posted again.";
+  }
+  return raw;
+}
+
+/**
+ * Accepted by Zernio but not yet confirmed live: the drain's reconcile is still
+ * expected to report back. Drives the panel's auto-refresh after "posted", so the
+ * live links appear without a reload.
+ */
+export function awaitingConfirmation(o: PublishOutcome): boolean {
+  return o.ok && o.status !== "published";
+}
+
+function firstLine(s: string): string {
+  const line = s.trim().split("\n")[0].trim();
+  return line.length > 240 ? `${line.slice(0, 237)}...` : line;
+}
+
+/**
  * Search Console data is not final for 2-4 days, so those days must render
  * greyed rather than being read as a real decline.
  */

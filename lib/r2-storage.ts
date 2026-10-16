@@ -180,6 +180,24 @@ function objectKey(bucket: string, path: string): string {
  * real body's byte length a browser cannot override — so this is how a cap
  * survives a client that ignores it (offer-page video uploads).
  */
+/**
+ * RFC 3986 encoding, which SigV4's canonical query requires. encodeURIComponent
+ * leaves !'()* bare; R2 encodes them, so a value containing one would sign to a
+ * different string than R2 checks. The X-Amz-* values never contain them, so
+ * every URL signed before this existed is byte-for-byte unchanged.
+ */
+function rfc3986(s: string): string {
+  return encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
+/**
+ * `extraQuery` is additive and defaults to {}, the same contract as
+ * `extraSignedHeaders`: absent, the URL is the exact bytes it always was. Present,
+ * the parameters join the canonical query and so the signature. That is how a
+ * GET carries `response-content-disposition`, which makes R2 answer with
+ * `Content-Disposition: attachment` and the browser save the file (the Library's
+ * Download button) instead of playing it.
+ */
 function presign(
   method: "GET" | "PUT",
   bucket: string,
@@ -187,6 +205,7 @@ function presign(
   expiresInSec: number,
   windowSec = 0,
   extraSignedHeaders: Readonly<Record<string, string>> = {},
+  extraQuery: Readonly<Record<string, string>> = {},
 ): string {
   const { key, secret, bucket: r2Bucket } = cfg();
   // Signed at the start of the window, alive for the window on top of the
@@ -203,10 +222,11 @@ function presign(
     "X-Amz-Date": amz,
     "X-Amz-Expires": String(expiresInSec + windowSec),
     "X-Amz-SignedHeaders": signedHeaders,
+    ...extraQuery,
   });
   const canonicalQuery = [...q.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .map(([k, v]) => `${rfc3986(k)}=${rfc3986(v)}`)
     .join("&");
   const headerValues: Record<string, string> = { host: host(), ...extraSignedHeaders };
   const canonicalHeaders = headerNames.map((h) => `${h}:${headerValues[h]}\n`).join("");
@@ -222,8 +242,28 @@ function presign(
   return `https://${host()}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${sig}`;
 }
 
-function presignGet(bucket: string, path: string, expiresInSec: number): string {
-  return presign("GET", bucket, path, expiresInSec, readWindowSec(expiresInSec));
+function presignGet(
+  bucket: string,
+  path: string,
+  expiresInSec: number,
+  extraQuery: Readonly<Record<string, string>> = {},
+): string {
+  return presign("GET", bucket, path, expiresInSec, readWindowSec(expiresInSec), {}, extraQuery);
+}
+
+/**
+ * supabase-js's `createSignedUrl(path, expiresIn, { download })`: `true` saves under
+ * the object's own name, a string saves under that name. The name is reduced to
+ * plain ASCII here, because it travels inside a quoted header value and a stray
+ * quote or semicolon would end it early.
+ */
+export function downloadDisposition(download: string | boolean | undefined): Record<string, string> {
+  if (!download) return {};
+  if (download === true) return { "response-content-disposition": "attachment" };
+  const safe = download.replace(/[^A-Za-z0-9._ -]+/g, "").replace(/\s+/g, " ").trim().slice(0, 120);
+  return {
+    "response-content-disposition": safe ? `attachment; filename="${safe}"` : "attachment",
+  };
 }
 
 /**
@@ -379,9 +419,9 @@ function bucketApi(bucket: string) {
       }
     },
 
-    async createSignedUrl(path: string, expiresIn: number) {
+    async createSignedUrl(path: string, expiresIn: number, opts?: { download?: string | boolean }) {
       try {
-        return ok({ signedUrl: presignGet(bucket, path, expiresIn) });
+        return ok({ signedUrl: presignGet(bucket, path, expiresIn, downloadDisposition(opts?.download)) });
       } catch (e) {
         return fail(e instanceof Error ? e.message : "presign failed");
       }

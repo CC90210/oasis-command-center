@@ -7,7 +7,7 @@
  * overdue invoices, connections that need attention), one card per
  * department, and a right column with today's schedule, goal pace and cash.
  * The layout and the pieces live in components/os/today; this file does the
- * reading. It keeps its name and its place in app/page.tsx because
+ * reading. It keeps its name and its place in app/(today)/page.tsx because
  * tests/role-surfaces.test.ts and tests/oasis-money-readers.test.ts pin the
  * dispatcher's persona order and the money gate HERE.
  *

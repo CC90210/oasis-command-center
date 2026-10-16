@@ -66,7 +66,7 @@ export function normalizePostLoginRedirect(
   // and what safeInternalPath collapses login-loop / auth-callback values to)
   // means "no specific destination". Route the user to their resolved home so
   // a SunBiz/suga MEMBER lands on their tenant DASHBOARD (/t/sun) deterministically
-  // rather than bouncing through "/" → app/page.tsx. Empire operators + every
+  // rather than bouncing through "/" → app/(today)/page.tsx. Empire operators + every
   // other tenant still resolve to "/" via homePathForTenant. (CC 2026-06-17:
   // fresh SunBiz sessions were surfacing the chat-first /reasoning view; the
   // dashboard must be the landing.)

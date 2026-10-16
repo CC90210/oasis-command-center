@@ -58,7 +58,7 @@ const CLIENT_FACING: Record<string, RegExp | null> = {
   "app/(marketing)/terms/page.tsx": /LEGAL_CONTACTS\.legal/,
   "app/(marketing)/dmca/page.tsx": /LEGAL_CONTACTS\.dmca/,
   "app/(marketing)/contact/page.tsx": /CONTACT_EMAIL/,
-  "app/page.tsx": /CONTACT_EMAIL/,
+  "app/(today)/page.tsx": /CONTACT_EMAIL/,
   "app/unsubscribe/page.tsx": /CONTACT_EMAIL/,
   "app/unsubscribe/ManualOptOut.tsx": /CONTACT_EMAIL/,
   "app/settings/privacy/page.tsx": /PRIVACY_OFFICER\.email/,

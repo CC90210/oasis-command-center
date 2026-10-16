@@ -424,7 +424,7 @@ const READONLY: SurfaceCapabilities = { ...WORKER, canAct: false };
  * They keep the surface they have today. Not because it is the design we would
  * choose now, but because changing it is a regression to a working product for
  * people who never asked: `/` redirects a SunBiz session to /t/sun long before
- * any persona branch runs (app/page.tsx), so this row describes a path that is
+ * any persona branch runs (app/(today)/page.tsx), so this row describes a path that is
  * unreachable in practice and exists so the matrix is total rather than having
  * a hole where two roles fall through.
  *

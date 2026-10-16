@@ -53,6 +53,7 @@ import { PhoneFrame, PhoneTextCard, type PhoneFrameShape } from "@/components/fo
 import { TileVideo } from "@/components/founders/TileVideo";
 import { SlideReorder } from "@/components/founders/SlideReorder";
 import { AssetActions } from "@/components/founders/AssetActions";
+import { DownloadLink } from "@/components/founders/DownloadLink";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
 
 export const dynamic = "force-dynamic";
@@ -319,6 +320,9 @@ export default async function AssetDetailPage({
             )}
             <span className="mx-1 h-4 w-px bg-bg-border" aria-hidden />
             <EnlargeButton title={asset.title} />
+            {(videoUrl || imageUrl || slideUrls.length > 0) && (
+              <DownloadLink assetId={asset.id} title={asset.title} />
+            )}
           </div>
         </PhoneEnlarge>
 
@@ -354,6 +358,13 @@ export default async function AssetDetailPage({
                   in a minute; the cause is logged for the OASIS team.
                 </p>
               )}
+              {/* Each slide as its own file, in the order above. */}
+              <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-bg-border pt-3">
+                <span className="text-[11px] text-fg-dim">Download</span>
+                {slideUrls.map((_, i) => (
+                  <DownloadLink key={i} assetId={asset.id} title={asset.title} slide={i + 1} label={`Slide ${i + 1}`} />
+                ))}
+              </div>
             </Card>
           )}
 

@@ -261,7 +261,7 @@ const pages = sourceTree("app").filter((f) => f.endsWith(`${sep}page.tsx`));
 check("anti-vacuity: the walk reached every page", () => {
   // 130 on 2026-10-01; W1b deletes some legacy pages, so the floor sits well below.
   assert.ok(pages.length >= 80, `only ${pages.length} pages walked`);
-  for (const must of ["app/page.tsx", "app/agents/page.tsx", "app/pipeline/page.tsx", "app/t/[slug]/marketplace/page.tsx"]) {
+  for (const must of ["app/(today)/page.tsx", "app/agents/page.tsx", "app/pipeline/page.tsx", "app/t/[slug]/marketplace/page.tsx"]) {
     assert.ok(pages.some((p) => rel(p) === must), `the walk never reached ${must}`);
   }
 });

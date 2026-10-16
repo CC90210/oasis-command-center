@@ -27,7 +27,7 @@
  *      Performance carry no second "Back to Content" under the tabs; no hub
  *      file calls it "Studio" or "Marketing" in code (comments may say how it
  *      used to be).
- *   6. app/page.tsx renders MarketingToday only behind canSeeMarketing, the
+ *   6. app/(today)/page.tsx renders MarketingToday only behind canSeeMarketing, the
  *      tenant-narrowed capability; the behavioural case is in
  *      tests/client-route-gating.test.ts.
  *
@@ -384,8 +384,8 @@ async function main() {
   });
 
   // ── 6. the Today dispatch ────────────────────────────────────────────────
-  await check("app/page.tsx renders MarketingToday only behind the tenant-narrowed capability", () => {
-    const dispatcher = code("app/page.tsx");
+  await check("app/(today)/page.tsx renders MarketingToday only behind the tenant-narrowed capability", () => {
+    const dispatcher = code("app/(today)/page.tsx");
     assert.match(
       dispatcher,
       /if \(surface\.persona === "marketing"\) \{\s*if \(surface\.capabilities\.canSeeMarketing\) \{\s*return <MarketingToday viewerName=\{viewerName\} \/>;/,

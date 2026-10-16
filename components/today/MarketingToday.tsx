@@ -1,7 +1,7 @@
 /**
  * MarketingToday — the marketing employee's dashboard.
  *
- * WHY IT EXISTS AT ALL: app/page.tsx dispatches Today by persona, and any
+ * WHY IT EXISTS AT ALL: app/(today)/page.tsx dispatches Today by persona, and any
  * persona without a branch falls through to FounderToday. FounderToday takes
  * `showFinancials` and consults no other capability, so a marketing hire would
  * have seen the tenant's whole pipeline and the company inbound tape — both
@@ -18,7 +18,7 @@
  * a fabricated metric on a dashboard is worse than an empty one, because a
  * plausible number gets believed and acted on.
  *
- * OASIS'S OWN MARKETING HIRE ONLY. app/page.tsx renders this when the viewer's
+ * OASIS'S OWN MARKETING HIRE ONLY. app/(today)/page.tsx renders this when the viewer's
  * tenant-narrowed capability record says canSeeMarketing, not on the persona
  * alone (2026-10-01): every link here is OASIS's own Content hub, which 404s
  * outside OASIS's workspaces, so a client's marketing hire gets the neutral
