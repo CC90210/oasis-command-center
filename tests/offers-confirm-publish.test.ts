@@ -329,6 +329,7 @@ async function main() {
   await step("every offer: its short link, form On/Off, Draft/Live and what blocks it, per publishGate", () => {
     const by = Object.fromEntries(first.map((o) => [o.slug, o]));
     assert.equal(by.protocol.link, "/protocol", "the short public link (lib/offers/short-links.ts)");
+    assert.equal(by.protocol.previewPath, "/f/oasis-ai-cc/protocol?offer_preview=1", "the owner's preview of the whole page (the /f address: a short one drops the preview)");
     assert.equal(by.growth.link, "/f/oasis-ai-cc/growth");
     assert.equal(by.protocol.formEnabled, false);
     assert.equal(by.vsl.status, "live");
@@ -401,6 +402,7 @@ async function main() {
     assert.ok(h.includes("Approve this video and confirm we own it."), "the in-review video's tick");
     assert.ok(h.includes("Switch the form on"), "the form-off line");
     assert.ok(h.includes(">/protocol<"), "the short link");
+    assert.ok(/href="\/f\/oasis-ai-cc\/protocol\?offer_preview=1"[^>]*>Preview the whole page/.test(h), "no link to the page's own preview");
     assert.ok(!/<input[^>]*checked/.test(h), "a box is ticked that no owner ticked");
     assert.ok(!/<video/.test(h), "the video loads before the tap");
     assert.ok(!h.includes("Worth a look before publishing"), "a warnings heading with no warnings");
