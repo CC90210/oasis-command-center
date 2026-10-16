@@ -160,11 +160,37 @@ async function main(): Promise<void> {
     await put(A, "chief_of_staff", "cos-old");
     // 25 newer finished rows the agent cannot use (an upload with no analysis, an empty one): past two pages.
     for (let i = 0; i < 25; i += 1) await put(A, "chief_of_staff", `cos-empty-${i}`, { extraction: i % 2 ? "{}" : JSON.stringify({ analysis: { hook: "  ", tone: null } }) });
-    await put(A, "chief_of_staff", "cos-structure", { extraction: JSON.stringify({ analysis: { structure: "Problem, proof, ask" } }) });
+    // The shape the learn step stores: a list of steps.
+    await put(A, "chief_of_staff", "cos-structure", { extraction: JSON.stringify({ analysis: { hook: null, structure: ["Problem", "Proof", " ", "Ask"] } }) });
     const got = await notes.readTrainingNotes(db, A, "chief_of_staff");
     assert.deepEqual(got.map((x) => x.title), ["Note cos-structure", "Note cos-old", "Note everyone-1"], "the older notes are found past the unusable rows");
-    assert.equal(got[0].structure, "Problem, proof, ask");
-    assert.match(notes.trainingBlock(got), /structure: Problem, proof, ask/);
+    assert.equal(got[0].structure, "Problem, then Proof, then Ask");
+    assert.match(notes.trainingBlock(got), /structure: Problem, then Proof, then Ask/);
+  });
+
+  await check("whatever the learn step keeps, the agent reads: the writer's own parser, stored as it stores it", async () => {
+    const { parseAnalysis } = await import("../lib/tools/worker/learn-from-link");
+    const answers = [
+      { structure: ["Cold open", "Proof", "Ask"] },
+      { structure: "One line" },
+      { hook: "A question", tone: "Dry", pacing: "Fast", structure: ["Setup", "Turn"], steal: "Open on the result", avoid: "Their slang" },
+    ];
+    for (const [i, answer] of answers.entries()) {
+      const analysis = parseAnalysis(JSON.stringify(answer));
+      assert.ok(analysis && analysis !== "empty", `the learn step keeps answer ${i}`);
+      const one = createClient({ url: ":memory:" });
+      await one.execute("CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, tenant_id TEXT, label TEXT, trains TEXT, title TEXT, source_url TEXT, extraction TEXT, state TEXT, created_at TEXT, updated_at TEXT, indexed_at TEXT)");
+      await one.execute({
+        sql: "INSERT INTO marketing_corpus VALUES ('r1', ?, 'exemplar', 'sales', 'T', 'https://e.test', ?, 'indexed', 'x', 'x', 'x')",
+        args: [A, JSON.stringify({ via: "toolkit:learn_from_link", analysis })],
+      });
+      const [note] = await notes.readTrainingNotes(one, A, "sales");
+      assert.ok(note, `the agent reads answer ${i}`);
+      for (const key of ["hook", "tone", "pacing", "structure", "steal", "avoid"] as const) {
+        const kept = (analysis as Record<string, unknown>)[key];
+        assert.equal(note[key] !== null, kept !== null, `answer ${i}: ${key} kept by the writer is read by the agent`);
+      }
+    }
   });
 
   await check("at most the newest five", async () => {

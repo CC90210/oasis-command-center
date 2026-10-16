@@ -87,6 +87,11 @@ function parseExtraction(raw: unknown): Record<string, unknown> | null {
   }
 }
 
+/** The learn step stores a structure as its list of steps (learn-from-link.ts parseAnalysis); older rows may hold text. */
+function structureOf(v: unknown): string | null {
+  return textOf(Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s.trim() !== "").join(", then ") : v);
+}
+
 /** One stored row as a note, or null when it holds nothing the agent can use. */
 function noteOf(r: Record<string, unknown>): TrainingNote | null {
   const analysis = parseExtraction(r.extraction)?.analysis as Record<string, unknown> | undefined;
@@ -97,7 +102,7 @@ function noteOf(r: Record<string, unknown>): TrainingNote | null {
     hook: textOf(analysis.hook),
     tone: textOf(analysis.tone),
     pacing: textOf(analysis.pacing),
-    structure: textOf(analysis.structure),
+    structure: structureOf(analysis.structure),
     steal: textOf(analysis.steal),
     avoid: textOf(analysis.avoid),
   };
