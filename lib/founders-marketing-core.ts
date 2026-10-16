@@ -835,7 +835,7 @@ export type PublishOutcome = { platform: string; ok: boolean; detail: string | n
 export function summarizePublishIntent(
   result: unknown,
   error: unknown,
-): { outcomes: PublishOutcome[]; reason: string | null } {
+): { outcomes: PublishOutcome[]; reason: string | null; rawReason: string | null } {
   let parsed: unknown = result;
   if (typeof result === "string") {
     try {
@@ -854,8 +854,32 @@ export function summarizePublishIntent(
       outcomes.push({ platform, ok, detail: why ? firstLine(why) : null });
     }
   }
-  const reason = typeof error === "string" && error.trim() ? firstLine(error) : null;
-  return { outcomes, reason };
+  const rawReason = typeof error === "string" && error.trim() ? firstLine(error) : null;
+  return { outcomes, reason: rawReason ? plainPublishReason(rawReason) : null, rawReason };
+}
+
+/**
+ * The drain's failures that have actually happened, in plain words. Anything
+ * unrecognised passes through as the drain wrote it: an honest raw reason beats
+ * a friendly guess.
+ */
+export function plainPublishReason(raw: string): string {
+  if (/R2 download failed|download failed for marketing-media/i.test(raw)) {
+    return (
+      "The publishing PC could not fetch the file from storage" +
+      (/SSL|certificate/i.test(raw) ? " (a security check on its connection failed)" : "") +
+      ", so nothing was posted. Try again; if it repeats, the PC's network needs a look."
+    );
+  }
+  if (/forced a dry run|killswitch|FORCE_DRY_RUN/i.test(raw)) {
+    return "The posting kill switch is on, so nothing was posted.";
+  }
+  if (/no media attached/i.test(raw)) return "No file is attached to this asset, so there was nothing to post.";
+  if (/asset no longer exists/i.test(raw)) return "The asset was deleted before it could be posted.";
+  if (/identical asset already|repeat window/i.test(raw)) {
+    return "This exact file was already posted in the last 7 days, so it was not posted again.";
+  }
+  return raw;
 }
 
 function firstLine(s: string): string {

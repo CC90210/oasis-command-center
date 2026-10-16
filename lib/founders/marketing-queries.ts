@@ -919,7 +919,7 @@ export async function getLatestPublishIntent(
         console.warn("[marketing:publish_intent] unparseable platforms", row.platforms);
       }
     }
-    const { outcomes, reason } = summarizePublishIntent(row.result, row.error);
+    const { outcomes, reason, rawReason } = summarizePublishIntent(row.result, row.error);
     return {
       state: row.state,
       platforms,
@@ -927,6 +927,7 @@ export async function getLatestPublishIntent(
       finished_at: row.finished_at ?? null,
       outcomes,
       reason,
+      rawReason,
     };
   } catch {
     return null;
@@ -940,6 +941,7 @@ export type LatestPublishIntent = {
   finished_at: string | null;
   outcomes: PublishOutcome[];
   reason: string | null;
+  rawReason: string | null;
 };
 
 export const mediaKey = (bucket: string, path: string) => `${bucket}\n${path}`;

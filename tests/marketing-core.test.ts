@@ -944,10 +944,17 @@ async function fallbackChecks() {
   );
   assert.deepEqual(failed.outcomes, [], "no network was reached, so no per-network rows");
   assert.equal(
-    failed.reason,
+    failed.rawReason,
     "R2 download failed for marketing-media/x.mp4 in bucket oasis-storage: SSL validation failed",
-    "the reason is the first line; the traceback is not for the operator",
+    "the raw reason is the first line; the traceback is not for the operator",
   );
+  assert.match(failed.reason!, /could not fetch the file from storage \(a security check/,
+    "the operator reads plain words, not the drain's jargon");
+  assert.match(failed.reason!, /nothing was posted/);
+  assert.match(summarizePublishIntent("{}", "send_gateway forced a dry run (MAVEN_FORCE_DRY_RUN engaged) — nothing was posted").reason!,
+    /kill switch is on/);
+  assert.equal(summarizePublishIntent("{}", "Late returned no post id: {}").reason, "Late returned no post id: {}",
+    "an unrecognised reason passes through as written");
 
   // 2026-08-17 shape, plus one refusal: what a mixed result looks like.
   const done = summarizePublishIntent(
@@ -968,10 +975,10 @@ async function fallbackChecks() {
   assert.deepEqual(dispatching.outcomes, [], "the dispatch marker yields no outcome rows");
 
   // Never throw on bad input: this renders on every asset page.
-  assert.deepEqual(summarizePublishIntent("not json", 42), { outcomes: [], reason: null });
-  assert.deepEqual(summarizePublishIntent(null, undefined), { outcomes: [], reason: null });
+  assert.deepEqual(summarizePublishIntent("not json", 42), { outcomes: [], reason: null, rawReason: null });
+  assert.deepEqual(summarizePublishIntent(null, undefined), { outcomes: [], reason: null, rawReason: null });
   const long = summarizePublishIntent("{}", "x".repeat(400));
-  assert.ok(long.reason!.length <= 240 && long.reason!.endsWith("..."), "a runaway reason is clipped");
+  assert.ok(long.rawReason!.length <= 240 && long.rawReason!.endsWith("..."), "a runaway reason is clipped");
 }
 
 brandBoundaryChecks()

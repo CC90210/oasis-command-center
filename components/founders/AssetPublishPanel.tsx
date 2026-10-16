@@ -74,8 +74,10 @@ export function AssetPublishPanel({
     finished_at?: string | null;
     /** Per-network result the drain recorded (summarizePublishIntent). */
     outcomes?: PublishOutcome[];
-    /** The drain's own reason, first line only. */
+    /** The drain's reason in plain words (plainPublishReason). */
     reason?: string | null;
+    /** The drain's own first line, on hover, for whoever has to fix it. */
+    rawReason?: string | null;
   } | null;
   /**
    * Computed by the SERVER via stalePublishWarning, not here.
@@ -242,7 +244,7 @@ export function AssetPublishPanel({
             "rounded-lg px-3 py-1.5 text-[11px] " +
             (msg.ok
               ? "border border-accent/30 bg-accent/10 text-accent"
-              : "border border-hot/40 bg-hot/10 text-hot")
+              : "border border-status-hot/40 bg-status-hot/10 text-status-hot")
           }
         >
           {msg.text}
@@ -257,7 +259,7 @@ export function AssetPublishPanel({
       {staleWarning && (
         <div
           role="status"
-          className="rounded-lg border border-hot/40 bg-hot/10 px-3 py-2 text-[11px] leading-5 text-hot"
+          className="rounded-lg border border-status-hot/40 bg-status-hot/10 px-3 py-2 text-[11px] leading-5 text-status-hot"
         >
           {staleWarning}
         </div>
@@ -267,7 +269,7 @@ export function AssetPublishPanel({
         <div className="space-y-2 border-t border-bg-border pt-3 text-[11px] text-fg-dim">
           <div>
           Last request:{" "}
-          <span className={lastIntent.state === "failed" ? "font-semibold text-hot" : "font-semibold text-fg-muted"}>
+          <span className={lastIntent.state === "failed" ? "font-semibold text-status-hot" : "font-semibold text-fg-muted"}>
             {STATE_WORDS[lastIntent.state] ?? lastIntent.state}
           </span>
           {lastIntent.platforms.length > 0 && <> · {lastIntent.platforms.map(channelLabel).join(", ")}</>} ·{" "}
@@ -283,7 +285,10 @@ export function AssetPublishPanel({
           {/* The drain's own reason. Before this the panel showed "failed" and
               nothing else, which reads as "posting is broken" whatever the cause. */}
           {lastIntent.reason && (
-            <p className={lastIntent.state === "failed" ? "leading-5 text-hot" : "leading-5 text-fg-dim"}>
+            <p
+              title={lastIntent.rawReason ?? undefined}
+              className={lastIntent.state === "failed" ? "leading-5 text-status-hot" : "leading-5 text-fg-dim"}
+            >
               {lastIntent.reason}
             </p>
           )}
@@ -296,7 +301,7 @@ export function AssetPublishPanel({
                   title={o.detail ?? (o.ok ? "Accepted by the posting service" : "Refused")}
                   className={
                     "rounded-md px-2 py-0.5 font-semibold " +
-                    (o.ok ? "bg-accent/10 text-accent" : "bg-hot/10 text-hot")
+                    (o.ok ? "bg-accent/10 text-accent" : "bg-status-hot/10 text-status-hot")
                   }
                 >
                   {o.ok ? "✓" : "✕"} {channelLabel(o.platform)}
