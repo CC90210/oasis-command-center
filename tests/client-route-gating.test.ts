@@ -54,7 +54,7 @@
  *      Revenue goal section carries the id the link's fragment opens.
  *  12. Today for a client workspace's marketing hire (team_role marketing) is
  *      the neutral Today: no link into OASIS's Content hub (/founders/marketing,
- *      a 404 for them), no "OASIS", no persona name. app/page.tsx dispatched
+ *      a 404 for them), no "OASIS", no persona name. app/(today)/page.tsx dispatched
  *      MarketingToday on the persona alone, which is tenant-blind. OASIS's own
  *      marketing hire keeps MarketingToday.
  *
@@ -903,7 +903,7 @@ async function main() {
   });
 
   // ── 7. Today, unlinked account ─────────────────────────────────────────
-  const today = (await import("../app/page")).default;
+  const today = (await import("../app/(today)/page")).default;
   const { PageFrame } = await import("../components/os/PageFrame");
   await check("Today, account not linked: the support form and the verified inbox, not 'send CC'", async () => {
     await login("unlinked");
@@ -916,7 +916,7 @@ async function main() {
   });
 
   // ── 12. Today, a client workspace's marketing hire ───────────────────────
-  // app/page.tsx dispatched MarketingToday on the persona alone. The persona is
+  // app/(today)/page.tsx dispatched MarketingToday on the persona alone. The persona is
   // tenant-blind, so a client's marketing hire got OASIS's own card whose three
   // links (/founders/marketing, its Library and Performance) all 404 outside
   // OASIS's workspaces. The branch now asks the tenant-narrowed capability
