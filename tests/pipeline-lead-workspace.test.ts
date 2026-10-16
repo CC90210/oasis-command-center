@@ -5,6 +5,7 @@ import {
   coachingNextStep,
   pipelineMilestoneIndex,
 } from "../app/pipeline/[id]/workflow-model";
+import { leadFirstTouch } from "../lib/offer-pages/utm";
 
 assert.equal(PIPELINE_MILESTONES.length, 6, "the lead file uses one six-milestone progress model");
 assert.deepEqual(
@@ -110,6 +111,50 @@ assert.doesNotMatch(page, /<LeadActionToolbar/, "the call control appears only i
 assert.match(page, /title="Activity and files"[\s\S]*defaultCollapsed/);
 for (const label of ["Revenue band", "Team size", "Primary bottleneck", "Current tools"]) {
   assert.match(page, new RegExp(`label="${label}"`), `lead details exposes ${label}`);
+}
+
+// A NEW LEAD'S OWN FACTS READ WITHOUT A CLICK (CC 2026-10-16).
+//
+// They sat in "Lead details", collapsed by default, whose preview was only
+// name, company and website. Now: the funnel stage is a chip under the name,
+// first touch is a Source block outside the disclosure, and the disclosure
+// opens by default under a NEW storage key (an old stored "collapsed" must not
+// keep hiding them).
+{
+  const leadDetails = page.match(/<CollapsibleSection\s+title="Lead details"[\s\S]*?>/)?.[0] || "";
+  assert.match(leadDetails, /defaultCollapsed=\{false\}/, "Lead details opens by default");
+  assert.match(leadDetails, /storageKey="oasis\.pipeline\.leadDetails\.collapsed"/);
+  assert.doesNotMatch(page, /oasis\.pipeline\.contactBand\.collapsed/, "the old key's stored 'collapsed' would still hide the facts");
+  const sourceAt = page.indexOf("<LeadSourceBlock data={activeRecord.data} />");
+  const detailsAt = page.indexOf('title="Lead details"');
+  assert.ok(sourceAt > 0 && sourceAt < detailsAt, "the Source block renders above, not inside, the disclosure");
+  assert.match(page, /const facts = leadFirstTouch\(data\);\s*if \(facts\.length === 0\) return null;/, "no first touch, no block");
+  assert.match(page, /const funnelStage = funnelStageLabel\(activeRecord\.data\.funnel_stage\);/);
+  assert.match(page, /subtitle=\{\s*funnelStage \? \(/, "the chip sits in the header, under the lead's name");
+  // Not repeated inside the disclosure once they are shown above it.
+  for (const moved of ["Funnel stage", "Campaign", "Keyword", "Offer"]) {
+    assert.doesNotMatch(page, new RegExp(`<ContactCell label="${moved}"`), `${moved} is shown above, not again in Lead details`);
+  }
+  assert.match(page, /<ContactCell label="Website"/, "the website stays in Lead details, now open");
+}
+
+{
+  // The Source block's facts: only what the lead has, campaign joined, offer named.
+  assert.deepEqual(leadFirstTouch({}), [], "a lead with no first touch gets no labels at all");
+  assert.deepEqual(leadFirstTouch({ utm_source: " ", kw: "", cat: "" }), [], "blank values are missing values");
+  assert.deepEqual(
+    leadFirstTouch({ utm_source: "facebook", utm_medium: "paid", utm_campaign: "fall-audit", kw: "ai receptionist", cat: "p2" }),
+    [
+      { label: "Campaign", value: "facebook / paid / fall-audit" },
+      { label: "Keyword", value: "ai receptionist" },
+      { label: "Offer", value: "Command" },
+    ],
+  );
+  assert.deepEqual(leadFirstTouch({ utm_campaign: "fall-audit" }), [{ label: "Campaign", value: "fall-audit" }], "whichever exist");
+  assert.deepEqual(leadFirstTouch({ kw: "crm", cat: "p9" }), [
+    { label: "Keyword", value: "crm" },
+    { label: "Offer", value: "p9" },
+  ], "an offer outside p1..p4 still shows as stored");
 }
 assert.match(
   page,

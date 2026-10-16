@@ -18,7 +18,12 @@ import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { AI_AUDIT_SLUG, AI_AUDIT_STEP_COUNT, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
-import { buildAiAuditAlert, composeAiAuditWelcome, type WelcomeLinks } from "@/lib/forms/ai-audit-format";
+import {
+  alertLeadFactLines,
+  buildAiAuditAlert,
+  composeAiAuditWelcome,
+  type WelcomeLinks,
+} from "@/lib/forms/ai-audit-format";
 import { signFormLink } from "@/lib/form-links";
 import { buildResumeUrl } from "@/lib/forms/resume-link";
 import { marketingSendAllowed } from "@/lib/consent/marketing-send-gate";
@@ -127,6 +132,38 @@ export async function ensureAiAuditSalesEvent(input: {
 }
 
 /**
+ * The lead row's `data`, scoped to this workspace, for the started alert's
+ * Revenue and Bottleneck lines. Best effort: a failed read is logged and costs
+ * those two lines, never the alert itself.
+ */
+async function readLeadData(
+  db: SupabaseClient,
+  tenantId: string,
+  leadId: string,
+): Promise<Record<string, unknown>> {
+  try {
+    const res = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "lead")
+      .eq("id", leadId)
+      .maybeSingle();
+    if (res.error) {
+      console.error("[ai-audit.started] lead read:", res.error.message);
+      return {};
+    }
+    let data: unknown = (res.data as { data?: unknown } | null)?.data;
+    // The Turso adapter can hand back the JSON column as text.
+    if (typeof data === "string") data = JSON.parse(data);
+    return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+  } catch (err) {
+    console.error("[ai-audit.started] lead read threw:", err);
+    return {};
+  }
+}
+
+/**
  * First-touch alert for the ai-audit funnel.
  *
  * The completion alert above only fires on the LAST step. That was fine
@@ -204,6 +241,11 @@ export async function notifyAiAuditStarted(input: {
   const company = s("company");
   const email = s("email");
   const website = s("website");
+  // Revenue and Bottleneck (CC 2026-10-16). Step 1 asks neither, so they come
+  // from the lead's own row: a returning visitor matched onto an existing lead
+  // (a booked-call form, an earlier audit) already carries both. What they just
+  // typed wins over what the row held. A lead with neither gets neither line.
+  const facts = alertLeadFactLines({ ...(await readLeadData(db, tenantId, leadId)), ...answers });
 
   const lines = [
     "🟢 New inbound — OASIS AI audit started",
@@ -211,6 +253,7 @@ export async function notifyAiAuditStarted(input: {
     `${name}${company ? ` · ${company}` : ""}`,
     email ? `✉️ ${email}` : "",
     website ? `🔗 ${website}` : "",
+    ...facts,
     "",
     // Derived from the seed, so the alert cannot drift out of step with
     // the funnel the way the hardcoded version did.

@@ -8,15 +8,37 @@
  * counts, so this is where a founder opening Sales sees them.
  */
 import type { KpiTileProps } from "@/components/os/KpiTile";
-import { auditAnswerLabel, bottleneckLabel } from "@/lib/forms/ai-audit-format";
+import { auditAnswerLabel, bottleneckLabel, funnelStageLabel } from "@/lib/forms/ai-audit-format";
 
 /** The leads the list looks back over. */
 export const INBOUND_WINDOW_DAYS = 14;
 /** How many leads the Needs-you list names; the rest are one "more" line. */
 export const INBOUND_LIST_SHOWN = 5;
+/** How many rows "New inbound leads (14 days)" shows; the rest are one link to Warm inbound. */
+export const INBOUND_RECENT_SHOWN = 10;
 
 /** A new inbound lead nobody has picked up, as one readable line. */
 export type InboundWaitingLead = { id: string; line: string };
+
+/** One row of "New inbound leads (14 days)": who, how big, how far, and when the call is. */
+export type InboundRecentLead = {
+  id: string;
+  name: string;
+  company: string | null;
+  /** "$10-50K/mo", never the option key. */
+  revenue: string | null;
+  /** The funnel chip ("Audit requested"); null for a lead with no funnel stage. */
+  stage: string | null;
+  /** The booked call in Toronto time, or "Unbooked". */
+  booked: string;
+  href: string;
+};
+
+/**
+ * Every warm-inbound lead created in the last INBOUND_WINDOW_DAYS, newest
+ * first, at any stage. `truncated` makes `total` a floor (see inboundRecent).
+ */
+export type InboundRecent = { total: number; leads: InboundRecentLead[]; truncated: boolean };
 
 /** The warm-inbound queue's figures: how many, and how far along. */
 export type InboundFigures = {
@@ -25,6 +47,8 @@ export type InboundFigures = {
   booked: number;
   /** New inbound leads still waiting for a first touch (absent where not read). */
   waiting?: { total: number; leads: InboundWaitingLead[]; truncated: boolean };
+  /** "New inbound leads (14 days)" on the Sales desk, and the Warm inbound badge (absent where not read). */
+  recent?: InboundRecent;
 };
 
 /** Where the tile's action goes: the queue itself. */
@@ -79,6 +103,61 @@ export function inboundWaiting(
     total: waiting.length,
     leads: waiting.slice(0, INBOUND_LIST_SHOWN).map((r) => ({ id: r.id, line: inboundLeadLine(r.data) })),
     truncated: stageResearchedCount > untouched.length,
+  };
+}
+
+/**
+ * "New inbound leads (14 days)", the list the Sales desk promised (CC
+ * 2026-10-16): every warm-inbound lead created in the window, whatever stage it
+ * reached, so a founder sees who came in, how big they are, how far through the
+ * funnel they got and whether a call is booked. Read from the same window as
+ * the tile and Needs you (listOasisPipelineWindow, sales_motion inbound_warm,
+ * this workspace only).
+ *
+ * The window keeps the most recently UPDATED rows of each stage and lists a
+ * stage in `truncatedStages` when it held more. A row it left out was updated
+ * no later than the oldest row it kept, and created no later than it was
+ * updated, so a truncated stage can only hide a lead from this window when its
+ * oldest kept row was itself updated inside the window. Only then is `total` a
+ * floor; an old, long stage (lost) does not make every count "N+".
+ *
+ * `formatTime` is the booked-call alert's Toronto-time formatter, passed in so
+ * this file stays free of server-only imports.
+ */
+export function inboundRecent(
+  rows: ReadonlyArray<{ id: string; created_at: string; updated_at?: string | null; data: Record<string, unknown> }>,
+  nowMs: number,
+  truncatedStages: readonly string[],
+  formatTime: (iso: string) => string,
+): InboundRecent {
+  const since = nowMs - INBOUND_WINDOW_DAYS * 86_400_000;
+  const recent = rows
+    .filter((r) => {
+      const created = Date.parse(r.created_at);
+      return Number.isFinite(created) && created >= since;
+    })
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const truncated = truncatedStages.some((stage) => {
+    const kept = rows.filter((r) => r.data.stage === stage).map((r) => Date.parse(r.updated_at ?? ""));
+    // No readable timestamp means no proof: say "may be more" rather than guess.
+    if (kept.length === 0 || kept.some((t) => !Number.isFinite(t))) return true;
+    return Math.min(...kept) >= since;
+  });
+  return {
+    total: recent.length,
+    leads: recent.slice(0, INBOUND_RECENT_SHOWN).map((r) => {
+      const meetingAt = text(r.data.founder_meeting_at);
+      return {
+        id: r.id,
+        name: text(r.data.name) || "New lead",
+        company: text(r.data.company_name) || text(r.data.company) || null,
+        revenue: auditAnswerLabel("revenue", text(r.data.revenue_band) || text(r.data.monthly_revenue)),
+        stage: funnelStageLabel(r.data.funnel_stage),
+        booked: meetingAt ? formatTime(meetingAt) : "Unbooked",
+        href: `/pipeline/${r.id}`,
+      };
+    }),
+    truncated,
   };
 }
 

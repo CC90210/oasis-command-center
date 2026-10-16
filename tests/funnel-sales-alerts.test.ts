@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const GROUP = "-100777000";
@@ -157,6 +157,51 @@ async function main(): Promise<void> {
   assert.match(msg, /pipeline\/L3/);
   console.log("  ok - the completed-lead alert says unbooked and links the lead");
 
+  // 8b. Revenue and Bottleneck lines on the sales alerts (CC 2026-10-16): the
+  //     completed alert had "Wants:" and "In their words" but no Bottleneck line.
+  const { alertLeadFactLines, leadRevenueAndBottleneck } = await import("../lib/forms/ai-audit-format");
+  {
+    const full = { name: "Ada", company: "Acme", monthly_revenue: "10k_50k", automation_goal: "sales_leadgen", bottleneck_detail: "Quotes sit <3 days> unanswered" };
+    const completed = buildAiAuditAlert(full, scoreAiAuditLead(full));
+    assert.match(completed, /Revenue: \$10-50K\/mo/, "revenue as words, not the option key");
+    assert.match(completed, /Bottleneck: Quotes sit &lt;3 days&gt; unanswered/, "the typed bottleneck, escaped");
+    assert.match(completed, /Wants: sales \/ lead gen/, "the goal line the alert already had is kept");
+    assert.match(completed, /In their words/, "the full answer block is kept");
+    assert.ok(completed.indexOf("Revenue:") < completed.indexOf("Bottleneck:"), "Revenue, then Bottleneck");
+
+    // Only the goal answered: the bottleneck reads as the goal's words, never its key.
+    const goalOnly = { name: "Bo", automation_goal: "sales_leadgen" };
+    assert.match(buildAiAuditAlert(goalOnly, scoreAiAuditLead(goalOnly)), /Bottleneck: sales \/ lead gen/);
+
+    // Neither given: neither line, and nothing reads "undefined" or a bare label.
+    const bare = { name: "Cy", email: "cy@x.test" };
+    const bareMsg = buildAiAuditAlert(bare, scoreAiAuditLead(bare));
+    assert.doesNotMatch(bareMsg, /Revenue:|Bottleneck:/, "a missing value drops its whole line");
+    assert.doesNotMatch(bareMsg, /undefined|null/);
+
+    // A lead row's own keys are read as well as the form's (the started alert passes the lead).
+    assert.deepEqual(alertLeadFactLines({ revenue_band: "50k_250k", primary_bottleneck: "Leads wait days" }), [
+      "📊 Revenue: $50-250K/mo",
+      "🚧 Bottleneck: Leads wait days",
+    ]);
+    assert.deepEqual(alertLeadFactLines({ revenue_band: "  ", primary_bottleneck: "" }), [], "blank is missing");
+    assert.deepEqual(alertLeadFactLines({ monthly_revenue: "under_10k" }), ["📊 Revenue: &lt;$10K/mo"], "one without the other");
+    const long = alertLeadFactLines({ primary_bottleneck: "y".repeat(900) })[0];
+    assert.ok(long.length < 330 && !/y{301}/.test(long), "a long bottleneck is capped at 300");
+    // The booked-call alert reads the same two facts the same way.
+    assert.deepEqual(leadRevenueAndBottleneck({ monthly_revenue: "10k_50k", automation_goal: "sales_leadgen" }), {
+      revenue: "$10-50K/mo",
+      bottleneck: "sales / lead gen",
+    });
+    const publicBooking = readFileSync(join(__dirname, "..", "lib", "forms", "public-booking.ts"), "utf8");
+    assert.match(publicBooking, /return leadRevenueAndBottleneck\(lead\);/, "bookedLeadFacts must not grow its own copy again");
+    // The started alert prints the same lines, from the lead row as well as the answers.
+    const notifySrc = readFileSync(join(__dirname, "..", "lib", "forms", "ai-audit-notify.ts"), "utf8");
+    assert.match(notifySrc, /alertLeadFactLines\(\{ \.\.\.\(await readLeadData\(db, tenantId, leadId\)\), \.\.\.answers \}\)/);
+    assert.match(notifySrc, /\.from\("tenant_records"\)\s*\.select\("data"\)\s*\.eq\("tenant_id", tenantId\)/, "the lead read is scoped to the workspace");
+  }
+  console.log("  ok - the sales alerts carry Revenue and Bottleneck lines only when the lead has them");
+
   // 9. The Sales tab's inbound tile: honest in every state.
   const { inboundTiles, INBOUND_QUEUE_HREF } = await import("../components/os/department/inbound-rules");
   assert.deepEqual(inboundTiles(null), [], "a viewer with no warm-inbound scope gets no tile");
@@ -215,6 +260,140 @@ async function main(): Promise<void> {
   assert.deepEqual(inboundAttention({ ok: true, value: { total: 3, untouched: 0, booked: 0 } }), [], "no list where it was not read");
   assert.deepEqual(inboundAttention({ ok: true, value: { total: 0, untouched: 0, booked: 0, waiting: inboundWaiting([], NOW, 0) } }), []);
   console.log("  ok - the Sales tab names the new inbound leads waiting for a person");
+
+  // 9c. "New inbound leads (14 days)" on the Sales desk, and the badge count (CC 2026-10-16).
+  {
+    const { inboundRecent, INBOUND_RECENT_SHOWN } = await import("../components/os/department/inbound-rules");
+    const { funnelStageLabel } = await import("../lib/forms/ai-audit-format");
+    assert.equal(funnelStageLabel("inbound_lead"), "Inbound lead");
+    assert.equal(funnelStageLabel("audit_requested"), "Audit requested");
+    assert.equal(funnelStageLabel("meeting_booked"), "Meeting booked");
+    assert.equal(funnelStageLabel("call_no_show"), "Call no show", "a stage added later still reads as words");
+    assert.equal(funnelStageLabel(""), null, "no funnel stage, no chip");
+    assert.equal(funnelStageLabel(undefined), null);
+
+    const at = (ageDays: number) => new Date(NOW - ageDays * 86_400_000).toISOString();
+    const row = (id: string, ageDays: number, data: Record<string, unknown>, updatedAgeDays = ageDays) => ({
+      id, created_at: at(ageDays), updated_at: at(updatedAgeDays), data,
+    });
+    const stamp = (iso: string) => `T(${iso})`;
+    const recentRows = [
+      row("booked", 2, { stage: "founder_meeting_booked", name: "Dana Booked", company: "Dana Co", revenue_band: "50k_250k", funnel_stage: "meeting_booked", founder_meeting_at: "2026-10-22T18:30:00.000Z" }),
+      row("fresh", 0.1, { stage: "researched", name: "Eve Fresh", company_name: "Eve Inc", monthly_revenue: "10k_50k", funnel_stage: "audit_requested" }),
+      row("bare", 1, { stage: "assigned" }),
+      row("stale", 20, { stage: "lost", name: "Too Old", funnel_stage: "inbound_lead" }),
+    ];
+    const list = inboundRecent(recentRows, NOW, [], stamp);
+    assert.equal(list.total, 3, "any stage, created inside 14 days; the 20-day-old lead is out");
+    assert.deepEqual(list.leads.map((l) => l.id), ["fresh", "bare", "booked"], "newest first");
+    assert.deepEqual(list.leads[0], {
+      id: "fresh", name: "Eve Fresh", company: "Eve Inc", revenue: "$10-50K/mo",
+      stage: "Audit requested", booked: "Unbooked", href: "/pipeline/fresh",
+    });
+    assert.equal(list.leads[2].booked, "T(2026-10-22T18:30:00.000Z)", "a booked call shows its time, through the alert's formatter");
+    assert.equal(list.leads[2].stage, "Meeting booked");
+    assert.deepEqual(
+      { name: list.leads[1].name, company: list.leads[1].company, revenue: list.leads[1].revenue, stage: list.leads[1].stage },
+      { name: "New lead", company: null, revenue: null, stage: null },
+      "a lead with nothing on file has no empty facts, only a name",
+    );
+    assert.equal(list.truncated, false);
+
+    const many = Array.from({ length: 13 }, (_, i) => row(`m${i}`, 1 + i * 0.1, { stage: "researched", name: `Lead ${i}` }));
+    const capped = inboundRecent(many, NOW, [], stamp);
+    assert.equal(capped.total, 13, "the count is every new lead");
+    assert.equal(capped.leads.length, INBOUND_RECENT_SHOWN, "the list stops at its cap");
+
+    // Truncation: a capped stage whose oldest kept row is older than the window
+    // cannot hide a new lead, so the count is exact; one updated inside it can.
+    const lostKept = [row("n1", 1, { stage: "researched", name: "New" }), row("old-lost", 40, { stage: "lost" }, 30)];
+    assert.equal(inboundRecent(lostKept, NOW, ["lost"], stamp).truncated, false, "an old, long stage does not make the count a floor");
+    const busyKept = [row("n2", 1, { stage: "researched", name: "New" }, 0.5)];
+    assert.equal(inboundRecent(busyKept, NOW, ["researched"], stamp).truncated, true, "a capped stage still busy inside the window may hide a new lead");
+    assert.equal(inboundRecent([row("x", 1, { stage: "lost" }, 1)].map((r) => ({ ...r, updated_at: null })), NOW, ["lost"], stamp).truncated, true, "no timestamp is no proof");
+
+    // Rendered: the titled list with its count, rows linking to the lead.
+    // next/link and the composer context call createContext at import time,
+    // which react-server does not have: stand-ins, as tests/os-approvals.test.ts.
+    const ReactNS = await import("react");
+    const { createElement } = ReactNS;
+    // tsx compiles the panel's JSX to React.createElement.
+    (globalThis as unknown as { React: typeof ReactNS }).React = ReactNS;
+    const stub =(request: string, exports: Record<string, unknown>) => {
+      const p = require.resolve(request);
+      require.cache[p] = { id: p, filename: p, path: dirname(p), loaded: true, children: [], paths: [], exports } as unknown as NodeModule;
+    };
+    stub("next/link", {
+      __esModule: true,
+      default: ({ href, children, prefetch: _p, ...rest }: { href: string; prefetch?: boolean; children?: unknown }) =>
+        createElement("a", { href, ...rest }, children as never),
+    });
+    stub("../components/os/department/ComposerContext", {
+      __esModule: true,
+      ComposerProvider: ({ children }: { children?: unknown }) => children,
+      useComposer: () => {
+        throw new Error("client hook called under react-server");
+      },
+    });
+    const { OverviewPanel, NewInboundLeads } = await import("../components/os/department/OverviewPanel");
+    // The text a viewer reads: server components are called, and only children
+    // are followed (a className is not on screen). A client component (hooks)
+    // throws when called bare; its children are what it would render.
+    const strings = (node: unknown, out: string[] = []): string[] => {
+      if (node === null || node === undefined || typeof node === "boolean") return out;
+      if (typeof node === "string" || typeof node === "number") { out.push(String(node)); return out; }
+      if (Array.isArray(node)) { for (const n of node) strings(n, out); return out; }
+      const el = node as { type?: unknown; props?: Record<string, unknown> };
+      if (!el.props) return out;
+      if (typeof el.type === "function") {
+        try { return strings((el.type as (p: unknown) => unknown)(el.props), out); } catch { /* client component */ }
+      }
+      return strings(el.props.children, out);
+    };
+    const hrefs = (node: unknown, out: string[] = []): string[] => {
+      if (!node || typeof node !== "object") return out;
+      if (Array.isArray(node)) { for (const n of node) hrefs(n, out); return out; }
+      const el = node as { props?: Record<string, unknown> };
+      if (!el.props) return out;
+      if (typeof el.props.href === "string") out.push(el.props.href);
+      return hrefs(el.props.children, out);
+    };
+    const rendered = NewInboundLeads({ read: { ok: true, value: list } });
+    const text = strings(rendered).join("");
+    assert.match(text, /Eve Fresh/);
+    assert.match(text, /Audit requested/);
+    assert.match(text, /Eve Inc · \$10-50K\/mo · Unbooked/);
+    assert.match(text, /Dana Co · \$50-250K\/mo · T\(2026-10-22/);
+    assert.ok(!/undefined|null/.test(text), "no empty fact prints as a word");
+    assert.deepEqual(hrefs(rendered), ["/pipeline/fresh", "/pipeline/bare", "/pipeline/booked"]);
+    const more = strings(NewInboundLeads({ read: { ok: true, value: capped } })).join("");
+    assert.match(more, /3 more in Warm inbound/);
+    assert.match(strings(NewInboundLeads({ read: { ok: false } })).join(""), /Couldn’t load new inbound leads/, "a failed read is not an empty list");
+    assert.match(strings(NewInboundLeads({ read: { ok: true, value: inboundRecent([], NOW, [], stamp) } })).join(""), /No new inbound leads in the last 14 days/);
+
+    const base = { attention: [], approvals: { ok: true as const, value: { items: [], total: 0 } }, feedHref: null, tiles: [], routines: { ok: true as const, value: [] }, connections: [], canManageConnections: true, asks: [] };
+    const panel = strings(OverviewPanel({ ...base, newInbound: { ok: true, value: capped } })).join("|");
+    assert.match(panel, /New inbound leads \(14 days\)\|13\|/, "the titled list carries the same count the badge prints");
+    assert.match(strings(OverviewPanel({ ...base, newInbound: { ok: true, value: { ...capped, truncated: true } } })).join("|"), /\|13\+\|/, "a floor prints as N+");
+    assert.doesNotMatch(strings(OverviewPanel(base)).join("|"), /New inbound leads/, "no scope, no section");
+
+    // One read behind the list, the tile, Needs you and the /pipeline badge.
+    const numbersSrc = readFileSync(join(__dirname, "..", "components", "os", "department", "numbers.ts"), "utf8");
+    assert.match(numbersSrc, /readOasisInboundQueue\(\{/);
+    assert.doesNotMatch(numbersSrc, /listOasisPipelineWindow\(\{[\s\S]{0,300}OASIS_INBOUND_WARM_MOTION/, "numbers.ts grew a second inbound reader");
+    assert.match(numbersSrc, /newInbound: inbound === null \? null : inbound\.ok \? \{ ok: true, value: inbound\.value\.recent \}/);
+    const loadSrc = readFileSync(join(__dirname, "..", "components", "os", "department", "inbound-load.ts"), "utf8");
+    assert.match(loadSrc, /salesMotion: OASIS_INBOUND_WARM_MOTION/);
+    assert.match(loadSrc, /tenantId: scope\.tenantId/);
+    assert.match(loadSrc, /recent: inboundRecent\(window\.rows, now, window\.truncatedStages, formatBookedTime\)/);
+    const deptPage = readFileSync(join(__dirname, "..", "app", "team", "[dept]", "page.tsx"), "utf8");
+    assert.match(deptPage, /newInbound: numbers\.newInbound \?\? null/);
+    const pipelinePage = readFileSync(join(__dirname, "..", "app", "pipeline", "page.tsx"), "utf8");
+    assert.match(pipelinePage, /session\.ok && pipelineAdmin\s*\?\s*readOasisInboundQueue\(/, "the badge is the same read, for pipeline admins only");
+    assert.match(pipelinePage, /tileCount\(recent\.total, recent\.truncated\)/, "the badge prints the list's count, N+ when it is a floor");
+    assert.match(pipelinePage, /<span>Warm inbound<\/span>\s*\{inboundBadge && \(/);
+  }
+  console.log("  ok - the Sales desk lists new inbound leads (14 days) and /pipeline badges the same count");
 
   // 10. The lead page reads stored answers as labels, never raw option keys.
   const { auditAnswerLabel } = await import("../lib/forms/ai-audit-format");

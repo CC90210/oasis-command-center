@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { verifyFormLink } from "@/lib/form-links";
 import { normalizePhoneE164 } from "@/lib/conversation-threading";
-import { auditAnswerLabel, bottleneckLabel } from "@/lib/forms/ai-audit-format";
+import { bottleneckLabel, leadRevenueAndBottleneck } from "@/lib/forms/ai-audit-format";
 import { normalizeFounderMeetingWebsite } from "@/lib/website-sales-meeting";
 import { AI_AUDIT_TENANT_ID, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
 import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
@@ -184,12 +184,9 @@ export function buildPublicFunnelLeadPatch(
  * "10k_50k" / "sales_leadgen" (review of #611).
  */
 export function bookedLeadFacts(lead: Record<string, unknown>): { revenue: string; bottleneck: string } {
-  return {
-    revenue: auditAnswerLabel("revenue", clean(lead.revenue_band) || clean(lead.monthly_revenue)) ?? "",
-    bottleneck: bottleneckLabel(
-      clean(lead.primary_bottleneck) || clean(lead.bottleneck_detail) || clean(lead.automation_goal),
-    ),
-  };
+  // The one reading every sales alert shares (CC 2026-10-16: the started and
+  // completed alerts now print the same two lines).
+  return leadRevenueAndBottleneck(lead);
 }
 
 /**

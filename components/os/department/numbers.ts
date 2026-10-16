@@ -41,8 +41,7 @@ import { founderBoardSummary } from "@/lib/oasis-board-summary";
 import { summarizeBoardCounts, type BoardSummary } from "@/lib/oasis-board-summary-rules";
 import { listOasisPipelineWindow } from "@/lib/oasis-pipeline-query";
 import { oasisBoardProgramFilter, oasisBoardStages } from "@/lib/oasis-lead-create";
-import { isOasisPipelineAdmin, stagesForOasisWarmInboundRole } from "@/lib/oasis-sales-pipeline-policy";
-import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
+import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
 import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
@@ -61,7 +60,8 @@ import {
 } from "@/components/os/today/brief-load";
 import { isReviewItem, needsYouTotal } from "@/components/os/today/model";
 import { tileCount } from "./count-rules";
-import { inboundAttention, inboundTiles, inboundWaiting, type InboundFigures } from "./inbound-rules";
+import { inboundAttention, inboundTiles, type InboundRecent } from "./inbound-rules";
+import { readOasisInboundQueue, type OasisInboundQueue } from "./inbound-load";
 import { mrrTile } from "./money-rules";
 import {
   empireReadFor,
@@ -104,6 +104,11 @@ export type DepartmentNumbers = {
    * approvals itself.
    */
   needsYou?: { total: number; capped: boolean };
+  /**
+   * Sales only: "New inbound leads (14 days)". Null or absent: this viewer does
+   * not see the whole warm-inbound queue, so no list is drawn.
+   */
+  newInbound?: Read<InboundRecent> | null;
 };
 
 const CONNECTIONS_HREF = setupHref("connections");
@@ -388,29 +393,20 @@ function failureAttention(h: RoutineHealth): AttentionItem[] {
  * viewers (founders and pipeline admins, who already see every stage); anyone
  * else gets no tile rather than a number from a narrower scope.
  */
-async function loadInboundQueue(viewer: OsViewer): Promise<Read<InboundFigures> | null> {
+async function loadInboundQueue(viewer: OsViewer): Promise<Read<OasisInboundQueue> | null> {
   if (!viewer.oasis) return null;
   const { surface } = viewer;
   const founder = surface.persona === "founder";
   if (!founder && !isOasisPipelineAdmin(surface.teamRole)) return null;
-  return read("pipeline.inbound", async () => {
-    const filter = oasisBoardProgramFilter(surface.tenantSlug);
-    const window = await listOasisPipelineWindow({
+  // The read itself is shared with /pipeline's Warm inbound badge (inbound-load.ts).
+  return read("pipeline.inbound", () =>
+    readOasisInboundQueue({
       tenantId: surface.tenantId,
-      stageKeys: stagesForOasisWarmInboundRole(surface.teamRole, founder).map((s) => s.key),
-      salesProgram: filter.salesProgram,
-      salesMotion: OASIS_INBOUND_WARM_MOTION,
-      includeUnassigned: true,
-      // Warm form leads carry no assignment-cycle stamp (app/pipeline/page.tsx).
-      cycle: undefined,
-    });
-    return {
-      total: window.total,
-      untouched: window.stageCounts.researched ?? 0,
-      booked: window.stageCounts.founder_meeting_booked ?? 0,
-      waiting: inboundWaiting(window.rows, Date.now(), window.stageCounts.researched ?? 0),
-    };
-  });
+      tenantSlug: surface.tenantSlug,
+      teamRole: surface.teamRole,
+      isOwner: founder,
+    }),
+  );
 }
 
 async function salesNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
@@ -420,6 +416,9 @@ async function salesNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
     // The new inbound leads nobody has picked up, by name: "Needs you" is where a
     // founder opening Sales looks, and each line opens the lead.
     attention: inboundAttention(inbound),
+    // "New inbound leads (14 days)" (CC 2026-10-16): every new inbound lead, not
+    // only the untouched ones Needs you names, from the same read.
+    newInbound: inbound === null ? null : inbound.ok ? { ok: true, value: inbound.value.recent } : { ok: false },
   };
 }
 
