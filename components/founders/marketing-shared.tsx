@@ -194,7 +194,17 @@ function TileMedia({
   if (isRenderableCarousel(assetType, slides)) {
     // One card, N slides. Before the slides were registered this row
     // rendered as an isolated image whose artwork said "01/05 · swipe →".
-    return <CarouselFrame slides={slides} title={title} width={mediaW} height={mediaH} className="h-full w-full" />;
+    return (
+      <CarouselFrame
+        slides={slides}
+        title={title}
+        width={mediaW}
+        height={mediaH}
+        posterUrl={posterUrl}
+        variant={phone ? "phone" : "native"}
+        className="h-full w-full"
+      />
+    );
   }
   if (playbackUrl && format === "video") {
     return (

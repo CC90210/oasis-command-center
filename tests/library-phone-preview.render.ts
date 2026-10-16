@@ -180,6 +180,18 @@ async function main() {
       posterUrl: "https://media.test/slide_1.png",
       slideUrls: ["https://media.test/slide_1.png", "https://media.test/slide_2.png", "https://media.test/slide_3.png", "https://media.test/slide_4.png"],
     },
+    // A motion carousel: every slide is an MP4 (the ten decks of 2026-10-15),
+    // signed the way R2 signs them, with the key as the path.
+    videoCarousel: {
+      format: "video", assetType: "carousel", aspect: "4:5", mediaW: 1080, mediaH: 1350,
+      playbackUrl: "https://r2.test/marketing-media/deck/slide_1.mp4?X-Amz-Signature=a",
+      posterUrl: "https://r2.test/marketing-media/deck/slide_1.png?X-Amz-Signature=b",
+      slideUrls: [
+        "https://r2.test/marketing-media/deck/slide_1.mp4?X-Amz-Signature=a",
+        "https://r2.test/marketing-media/deck/slide_2.mp4?X-Amz-Signature=c",
+        "https://r2.test/marketing-media/deck/slide_3.mp4?X-Amz-Signature=d",
+      ],
+    },
     image: { format: "image", assetType: "single_image", aspect: "1:1", posterUrl: "https://media.test/card.png", mediaW: 1080, mediaH: 1080 },
     copy: { format: "copy", assetType: "single_image", aspect: null, hook: "A caption drafted in chat" },
     html: { format: "html", assetType: "single_image", aspect: null, hook: "A landing page drafted in chat" },
