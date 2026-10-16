@@ -204,6 +204,10 @@ check("a figure or claim word the owner never gave is left out, not saved (the n
   // The owner is told how many sentences were left out, and how to get them back.
   const panelText = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
   assert.match(panelText, /left out for stating something your description doesn't/);
+  // Codex round nine: a number keeps what it counts, and a promised result keeps its phrase.
+  assert.ok(inventsFacts("Trusted by 14 clinics", "Includes 14 templates"), "the owner's 14 templates let 14 clinics through");
+  assert.ok(inventsFacts("Get more revenue from every call", "It helps you get more bookings."), "the owner's more bookings let more revenue through");
+  assert.ok(!inventsFacts("Get more bookings from your calls", "It helps you get more bookings."));
   // A money amount is one claim (Codex round six): a bare "99" and a "$" elsewhere do not make "$99".
   // ("Only $99", not "Only $99 a month": "a month" would be caught by the time-frame rule instead.)
   assert.ok(inventsFacts("Only $99", "We have 99 clients and charge $50 for setup."), "an invented price got through");
@@ -407,8 +411,18 @@ check("the editor's write has one writer: the route saves nothing, and the edito
   assert.doesNotMatch(panel, /useState\(doc\.brief/, "the panel keeps its own copy of the brief");
   const builder = readFileSync("components/offer-pages/builder/OfferBuilder.tsx", "utf8");
   assert.match(builder, /onBrief=\{\(promise\) => update\(\{ \.\.\.doc, brief: \{ \.\.\.\(doc\.brief \?\? \{\}\), promise \} \}\)\}/);
-  // The copy fills the page as it is when the answer arrives (docRef), and saves like any edit (update).
-  assert.match(builder, /const latest = docRef\.current;[\s\S]*?applyWrittenCopy\(latest, copy\)[\s\S]*?if \(filled\.length\) update\(next\);/);
+  // The copy fills the page as it is when the answer arrives (docRef), and is
+  // saved at once through the editor's own save queue; "Written" waits for the
+  // save to land (Codex round nine).
+  assert.match(
+    builder,
+    /const latest = docRef\.current;[\s\S]*?applyWrittenCopy\(latest, copy\)[\s\S]*?await saver\.save\(next\);\s*return \(await saver\.idle\(\)\) \? filled : "not_saved";/,
+  );
+  assert.match(panel, /filled = written\.copy \? await onCopy\(written\.copy, asked\) : \[\];/);
+  assert.match(panel, /if \(filled === "not_saved"\) \{\s*return setError\(/, "unsaved words are reported as written");
+  // The New offer list takes up a refresh's rows, so an offer made before its words failed shows (Codex round nine).
+  const list = readFileSync("components/forms/FormsListClient.tsx", "utf8");
+  assert.match(list, /if \(rowsFrom !== initialRows\) \{\s*setRowsFrom\(initialRows\);\s*setRows\(initialRows\);/);
 
   // And the fill itself keeps an edit made while the words were being written.
   const atStart = emptyDocForTemplate("book_call");
@@ -431,7 +445,7 @@ check("a write that fails at creation can be retried: in the New offer dialog, a
 check("the never-invent check stays on the server, and the page fill stays browser-safe", () => {
   // claims.ts hashes with node:crypto: the checker that uses it must never reach a component.
   const vet = readFileSync("lib/offer-pages/write-page-vet.ts", "utf8");
-  assert.match(vet, /import \{ claimReasons \} from "\.\/claims";/);
+  assert.match(vet, /import \{[^}]*\bclaimReasons\b[^}]*\} from "\.\/claims";/);
   for (const file of readdirSync("components", { recursive: true }) as string[]) {
     if (!/\.tsx?$/.test(file)) continue;
     assert.doesNotMatch(readFileSync(`components/${file}`, "utf8"), /write-page-vet/, `components/${file} imports the server-only checker`);

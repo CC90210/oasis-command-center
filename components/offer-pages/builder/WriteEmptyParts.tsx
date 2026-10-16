@@ -48,7 +48,10 @@ export function WriteEmptyParts({
    * parts filled, or why the editor refused it (its saves are stopped, or the
    * brief changed while the words were being written).
    */
-  onCopy: (copy: WrittenCopy, asked: { description: string; audience: string }) => string[] | "conflict" | "brief_changed";
+  onCopy: (
+    copy: WrittenCopy,
+    asked: { description: string; audience: string },
+  ) => Promise<string[] | "conflict" | "brief_changed" | "not_saved">;
   /** The editor's last save failed: words written now might not be kept, so none are asked for. */
   saveFailed: boolean;
 }) {
@@ -57,7 +60,8 @@ export function WriteEmptyParts({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const parts = emptyWritableParts(doc);
-  if (parts.length === 0 && !notice) return null;
+  // Stays up while it has something to say: the words can fill the page and still fail to save.
+  if (parts.length === 0 && !notice && !error) return null;
   const description = doc.brief?.promise ?? "";
 
   async function write() {
@@ -69,13 +73,21 @@ export function WriteEmptyParts({
     setNotice(null);
     const asked = { description, audience: doc.brief?.audience ?? "" };
     const written = await requestWrittenPage(formId, { ...asked, save: false });
-    setBusy(false);
-    if (!written.ok) return setError(written.message);
-    let filled: string[] | "conflict" | "brief_changed" = [];
+    if (!written.ok) {
+      setBusy(false);
+      return setError(written.message);
+    }
+    let filled: string[] | "conflict" | "brief_changed" | "not_saved" = [];
     try {
-      filled = written.copy ? onCopy(written.copy, asked) : [];
+      // Busy until the words are saved, not just on screen.
+      filled = written.copy ? await onCopy(written.copy, asked) : [];
     } catch {
+      setBusy(false);
       return setError("The words that came back couldn't be put on this page. Try again.");
+    }
+    setBusy(false);
+    if (filled === "not_saved") {
+      return setError("The words are on the page but weren't saved yet (see the note above the editor). They save with your next change.");
     }
     if (filled === "conflict") {
       return setError("This page has a change that couldn't be saved, so the new words weren't added. Reload the page, then try again.");

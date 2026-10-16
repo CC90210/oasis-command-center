@@ -177,17 +177,26 @@ export function OfferBuilder({
   // put on screen as written), and when the brief they were written from has
   // changed since, in the panel or in the Copy brief (they would not match it).
   const takeCopy = useCallback(
-    (copy: WrittenCopy, asked: { description: string; audience: string }): string[] | "conflict" | "brief_changed" => {
+    async (
+      copy: WrittenCopy,
+      asked: { description: string; audience: string },
+    ): Promise<string[] | "conflict" | "brief_changed" | "not_saved"> => {
       const latest = docRef.current;
       if (!latest || conflict.current) return "conflict";
       if ((latest.brief?.promise ?? "") !== asked.description || (latest.brief?.audience ?? "") !== asked.audience) {
         return "brief_changed";
       }
       const { doc: next, filled } = applyWrittenCopy(latest, copy);
-      if (filled.length) update(next);
-      return filled;
+      if (!filled.length) return filled;
+      // Saved now, not after the edit debounce, and "Written" is said only once
+      // the save has landed: leaving the page a moment later cannot drop it.
+      docRef.current = next;
+      setDoc(next);
+      if (timer.current) clearTimeout(timer.current);
+      await saver.save(next);
+      return (await saver.idle()) ? filled : "not_saved";
     },
-    [update],
+    [saver],
   );
 
   const chips = useMemo(() => {

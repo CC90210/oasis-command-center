@@ -139,6 +139,14 @@ export function FormsListClient({
   const router = useRouter();
   const searchParams = useSearchParams();
   const [rows, setRows] = useState(initialRows);
+  // A refresh (router.refresh) brings new rows from the server, such as an
+  // offer New offer made before its words failed: take them up, so it shows.
+  // React's "adjust state when a prop changes", during render, not an effect.
+  const [rowsFrom, setRowsFrom] = useState(initialRows);
+  if (rowsFrom !== initialRows) {
+    setRowsFrom(initialRows);
+    setRows(initialRows);
+  }
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // false = closed; "offer" = the ordinary New offer picker; "router" = the

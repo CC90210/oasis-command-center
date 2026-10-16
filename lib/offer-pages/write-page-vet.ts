@@ -28,7 +28,7 @@
  * never be imported by a component (write-page.ts and write-page-client.ts
  * are the browser-safe halves). ASCII only (tests/worker-source-one-byte).
  */
-import { claimReasons } from "./claims";
+import { claimReasons, sentencesOf } from "./claims";
 import { cleanCopy, type WrittenCopy } from "./write-page";
 
 type Head = Pick<WrittenCopy["book"], "title" | "lede">;
@@ -42,9 +42,10 @@ type Card = WrittenCopy["obstacles"]["items"][number];
  * "guaranteed" covers the model's "guarantee".
  */
 const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; stem?: true }> = [
-  // A figure, with its unit when it has one: the owner's "14 templates" does
-  // not let "live in 14 days" through, while a bare "24/7" matches as numbers.
-  { re: /\d+(?:[.,]\d+)*(?:\s*(?:%|(?:percent|x|times|minutes?|hours?|days?|weeks?|months?|years?)(?![A-Za-z])))?/gi },
+  // A figure, with what it counts: the owner's "14 templates" lets neither
+  // "live in 14 days" nor "trusted by 14 clinics" through. "24/7" and the
+  // like are one token, matched as written.
+  { re: /\d+\/\d+|\d+(?:[.,]\d+)*(?:\s*(?:%|[A-Za-z]+))?/gi },
   { re: /[$%]/g },
   // A money amount is one claim: the owner's "99 clients" and "$50" do not let "$99" through.
   { re: /\$\s?\d+(?:[.,]\d+)*/g },
@@ -88,17 +89,20 @@ function sourceStates(source: string, phrase: string, stem: boolean): boolean {
 }
 
 /**
- * The kinds of claim a sentence makes, as the publish linter names them, with
- * the matched words dropped ("a promised result", not 'a promised result
- * ("more leads")'). The linter's single claim words (`the word "booked"`) are
- * left to CLAIM_PATTERNS, which checks the ones that promise something phrase
- * by phrase: "booked" alone is how a booking page talks, not a claim to vet.
+ * The claims the publish linter sees, sentence by sentence (claimReasons reads
+ * one sentence: its first match). A promised result keeps its phrase
+ * ('a promised result ("more revenue")'), so the owner's "more bookings" does
+ * not let "more revenue" through; every other claim is compared by kind. The
+ * linter's single claim words (`the word "booked"`) are left to
+ * CLAIM_PATTERNS, which checks the ones that promise something phrase by
+ * phrase: "booked" alone is how a booking page talks, not a claim to vet.
  */
 function claimKinds(text: string): Set<string> {
   return new Set(
-    claimReasons(text)
-      .map((reason) => reason.replace(/\s*\(.*$/, ""))
-      .filter((kind) => !kind.startsWith("the word")),
+    sentencesOf(text)
+      .flatMap((sentence) => claimReasons(sentence))
+      .filter((reason) => !reason.startsWith("the word"))
+      .map((reason) => (reason.startsWith("a promised result") ? reason : reason.replace(/\s*\(.*$/, ""))),
   );
 }
 
