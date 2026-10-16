@@ -855,6 +855,9 @@ async function main() {
     assert.deepEqual(await tagged("many", "stacked"), { assetId: "tc000000-0000-4000-8000-000000000001", aspect: "16:9" }, "newer tall cuts pushed the wide one out");
     assert.deepEqual(await tagged("many", "split"), { assetId: "tb000000-0000-4000-8000-000000000029", aspect: "9:16" });
     assert.equal(await tagged("nothing-tagged"), null);
+    // A client workspace never gets a Library proposal, even with a cut of its own tagged (T6): the
+    // Library is OASIS's only, and its approval route is founders-only (Codex on #641).
+    assert.equal(await listed.taggedHeroVideo(db, { tenantId: "aaaaaaaa-0000-4000-8000-00000000000a", formSlug: "growth", layout: undefined }), null);
     // Through the list: growth has no hand-map entry and gets its tagged cut; a tag beats protocol's map entry.
     const by = Object.fromEntries((await list({})).map((o) => [o.slug, o]));
     const g = by.growth.proposal;

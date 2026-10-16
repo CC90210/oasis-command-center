@@ -45,6 +45,7 @@ import { SUGGESTED_HERO_VIDEOS, suggestedHeroVideo, type SuggestedVideo } from "
 import type { BonusValueItem, ConfirmOffer, GuaranteeItem, PriceItem, ProposalRef, ProposalView } from "./confirm-publish";
 import { offerShareablePath } from "@/lib/offers/short-links";
 import { FOUNDERS_OWN_BRAND } from "@/lib/founders-marketing-core";
+import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 
 /** The proposed video is watched now, on this screen: half an hour, as the builder's preview signs one. */
 export const PROPOSAL_PLAY_TTL_SEC = 30 * 60;
@@ -124,12 +125,15 @@ export function aspectForLayout(layout: HeroLayout | undefined): Aspect | null {
  * let an old cut jump ahead), preferring the shape the page's hero layout
  * draws; the newest of any shape otherwise. The choice is the query's own
  * ORDER BY, so no number of newer cuts in another shape can push the matching
- * one out. null when no cut is tagged for it.
+ * one out. null when no cut is tagged for it, and always null outside OASIS's
+ * own workspaces: the Library is OASIS's only (the builder's picker answers
+ * available: false there, and approving an asset is founders-only).
  */
 export async function taggedHeroVideo(
   db: Client,
   input: { tenantId: string; formSlug: string; layout: HeroLayout | undefined },
 ): Promise<SuggestedVideo | null> {
+  if (!isOasisInternalTenant(input.tenantId)) return null;
   let rows: Row[];
   try {
     rows = rowsOf(
