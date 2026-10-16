@@ -669,7 +669,14 @@ export function BookingPage(props: Props) {
                       <input
                         type="checkbox"
                         checked={ticked[channel]}
-                        onChange={(e) => setTicked((t) => ({ ...t, [channel]: e.target.checked }))}
+                        onChange={(e) => {
+                          setTicked((t) => ({ ...t, [channel]: e.target.checked }));
+                          // The consent ledger records a choice only on the form
+                          // step (POST /api/forms/submit). A change after a failed
+                          // booking, a withdrawal above all, must re-send that step,
+                          // not ride on the old token (Codex review of #628).
+                          tokenRef.current = null;
+                        }}
                         className="mt-1 h-4 w-4 shrink-0 accent-[#00D4FF]"
                       />
                       <span>{consentDisclosureText(channel, consentIdentity)}</span>

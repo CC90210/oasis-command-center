@@ -174,11 +174,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       : durationMinutes;
     try {
       // The hosts this booking was made with (stored on the lead), so a replay
-      // repairs the same Schedule copies the first request wrote.
+      // repairs the same Schedule copies the first request wrote. A booking
+      // made before hosts were stored was always both founders, so it
+      // replays with both (Codex review of #628), never the organizer alone.
       const storedHostIds = stringList(context.lead.public_booking_host_ids);
       const hosts = await publicBookingHostsById(
         context.tenantId,
-        storedHostIds.length ? storedHostIds : stringList([context.lead.audit_host_user_id]),
+        storedHostIds.length ? storedHostIds : [founders.host.auth_user_id, founders.opener.auth_user_id],
       );
       await mirrorPublicBookingToSchedules({
         db,

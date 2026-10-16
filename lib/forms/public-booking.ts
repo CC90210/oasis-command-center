@@ -10,7 +10,7 @@ import { AI_AUDIT_TENANT_ID, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-a
 import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
 import { listGoogleCalendarBusy } from "@/lib/integrations/google-calendar";
 import { getOasisPipelineAssignmentRoster, OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
-import { listCalendars, listEvents, type Owner } from "@/lib/calendar/store";
+import { listCalendars, listEventsBetween, type Owner } from "@/lib/calendar/store";
 import type { EventRecord } from "@/lib/calendar/types";
 import { OASIS_PRE_HANDOFF_STAGE_KEYS } from "@/lib/oasis-stage-meta";
 import {
@@ -396,11 +396,20 @@ export type PublicBookingAvailabilityDeps = {
   loadSettings?: (tenantId: string) => Promise<{ settings: BookingSettings }>;
   roster?: (tenantId: string) => Promise<MemberRow[]>;
   listGoogleBusy?: typeof listGoogleCalendarBusy;
-  listScheduleEvents?: (owner: Owner) => Promise<EventRecord[]>;
+  listScheduleEvents?: (owner: Owner, range: { timeMin: number; timeMax: number }) => Promise<EventRecord[]>;
 };
 
-async function scheduleEventsOf(owner: Owner): Promise<EventRecord[]> {
-  const { events, truncated } = await listEvents(owner);
+const DAY_MS = 24 * 60 * 60_000;
+
+async function scheduleEventsOf(owner: Owner, range: { timeMin: number; timeMax: number }): Promise<EventRecord[]> {
+  // Only the rows that can touch the booking window (series, edited
+  // occurrences, overlapping one-offs), widened by a day because all-day rows
+  // store dates, so old history can never fill the cap (lib/calendar/store.ts).
+  const { events, truncated } = await listEventsBetween(
+    owner,
+    new Date(range.timeMin - DAY_MS).toISOString(),
+    new Date(range.timeMax + DAY_MS).toISOString(),
+  );
   // Same rule as the Google read: rows we could not see may be busy time, and
   // offering a slot over unseen busy time double-books a founder.
   if (truncated) throw new Error("schedule_events_truncated");
@@ -455,7 +464,7 @@ export async function loadPublicBookingAvailability(
           timeMin: new Date(timeMin).toISOString(),
           timeMax: new Date(timeMax).toISOString(),
         }),
-        listScheduleEvents({ tenantId: input.tenantId, userId: host.userId }),
+        listScheduleEvents({ tenantId: input.tenantId, userId: host.userId }, { timeMin, timeMax }),
       ]);
       const busy: BusyInterval[] = google
         .map((item) => ({ start: Date.parse(item.start), end: Date.parse(item.end) }))

@@ -259,6 +259,17 @@ await check("books only a slot live availability returns, hosted by that slot's 
   assert.match(bookingRoute, /hosts: slot\.hosts/);
   assert.match(bookingRoute, /public_booking_host_ids: slot\.hosts\.map/);
   assert.match(bookingRoute, /publicBookingHostsById\(/, "a replay rebuilds the same hosts");
+  assert.match(
+    bookingRoute,
+    /storedHostIds\.length \? storedHostIds : \[founders\.host\.auth_user_id, founders\.opener\.auth_user_id\]/,
+    "a booking made before hosts were stored replays with both founders (Codex review of #628)",
+  );
+  const bookPage = readFileSync("components/booking/BookingPage.tsx", "utf8");
+  assert.match(
+    bookPage,
+    /setTicked\(\(t\) => \(\{ \.\.\.t, \[channel\]: e\.target\.checked \}\)\);[\s\S]{0,400}tokenRef\.current = null;/,
+    "a consent change after a failed booking re-sends the form step so the ledger records it",
+  );
   assert.ok(!/hostUserId: founders\./.test(bookingRoute), "no booking is pinned to a fixed founder any more");
 });
 
