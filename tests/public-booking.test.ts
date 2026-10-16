@@ -155,14 +155,11 @@ await check("falls back to the selected automation goal for the bottleneck", () 
 });
 
 await check("preserves an existing rep owner and collaborators when founders join the booking", () => {
-  const founders = {
-    host: { auth_user_id: "founder-cc", email: "cc@example.com" },
-    opener: { auth_user_id: "founder-adon", email: "adon@example.com" },
-  };
+  const people = { organizer: "founder-cc", collaborators: ["founder-cc", "founder-adon"] };
   assert.deepEqual(
     publicBookingOwnershipPatch(
       { assigned_to: "rep-owner", collaborators: ["rep-collaborator", "founder-adon"] },
-      founders,
+      people,
     ),
     {
       assigned_to: "rep-owner",
@@ -170,9 +167,17 @@ await check("preserves an existing rep owner and collaborators when founders joi
     },
   );
   assert.deepEqual(
-    publicBookingOwnershipPatch({}, founders),
+    publicBookingOwnershipPatch({}, people),
     { assigned_to: "founder-cc", collaborators: ["founder-adon"] },
   );
+});
+
+await check("a host the booking settings appoint owns and sees the lead (Codex review of #628)", () => {
+  assert.deepEqual(
+    publicBookingOwnershipPatch({}, { organizer: "rep-host", collaborators: ["rep-host", "founder-cc", "founder-adon"] }),
+    { assigned_to: "rep-host", collaborators: ["founder-cc", "founder-adon"] },
+  );
+  assert.match(bookingRoute, /publicBookingOwnershipPatch\(context\.lead, \{\s*organizer: organizer\.userId,\s*collaborators: \[\s*\.\.\.slot\.hosts\.map/);
 });
 
 await check("enables booking only for OASIS forms that promise a founder call", () => {
@@ -247,7 +252,7 @@ await check("books only a slot live availability returns, hosted by that slot's 
   assert.match(bookingRoute, /hosts: slot\.hosts/);
   assert.match(bookingRoute, /public_booking_host_ids: slot\.hosts\.map/);
   assert.match(bookingRoute, /publicBookingHostsById\(/, "a replay rebuilds the same hosts");
-  assert.ok(!/founders\.host\.auth_user_id/.test(bookingRoute), "no booking is pinned to a fixed founder any more");
+  assert.ok(!/hostUserId: founders\./.test(bookingRoute), "no booking is pinned to a fixed founder any more");
 });
 
 await check("strictly validates both anonymous booking request bodies", () => {

@@ -249,16 +249,21 @@ export function stringList(value: unknown): string[] {
   });
 }
 
-/** Keep a claimed rep's ownership/credit while ensuring both founders can work the booked call. */
+/**
+ * Keep a claimed rep's ownership/credit while ensuring everyone who works the
+ * booked call can see the lead: the call's organizer owns an unowned lead, and
+ * the call's hosts plus both founders are collaborators. Built from the slot's
+ * hosts, not two fixed founders, so a host the booking settings appoint is never
+ * left off the lead they are about to run the call for (Codex review of #628).
+ */
 export function publicBookingOwnershipPatch(
   lead: Record<string, unknown>,
-  founders: { host: Founder; opener: Founder },
+  people: { organizer: string; collaborators: string[] },
 ): { assigned_to: string; collaborators: string[] } {
-  const assignedTo = clean(lead.assigned_to) || founders.host.auth_user_id;
+  const assignedTo = clean(lead.assigned_to) || people.organizer;
   const collaborators = new Set([
     ...stringList(lead.collaborators),
-    founders.host.auth_user_id,
-    founders.opener.auth_user_id,
+    ...people.collaborators,
   ]);
   collaborators.delete(assignedTo);
   return { assigned_to: assignedTo, collaborators: [...collaborators] };

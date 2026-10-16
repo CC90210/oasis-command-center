@@ -75,7 +75,10 @@ export const BOOKING_LIMITS = {
   // one extra person (createVerifiedFounderMeeting openerAttendee), so a third
   // host would be told they are on the call and never receive the invite.
   maxHosts: 2,
-  maxWindowsPerDay: 6,
+  // One window per day: the Schedule's settings dialog edits exactly one, and a
+  // second window it could not show would be dropped by the next unrelated
+  // save (Codex review of #628). Split hours need an editor that shows them.
+  maxWindowsPerDay: 1,
 } as const;
 
 // -- Parsing ---------------------------------------------------------------
@@ -105,9 +108,6 @@ function parseWeeklyHours(value: unknown): WeeklyHours | null {
       if (!window) return null;
       windows.push(window);
     }
-    windows.sort((a, b) => a.start - b.start);
-    // Overlapping windows on one day are a typing mistake, not a wider window.
-    if (windows.some((w, i) => i > 0 && w.start < windows[i - 1].end)) return null;
     week.push(windows);
   }
   return week;

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { BOOK_FORM_SLUG } from "@/lib/forms/public-booking-config";
 import { publicBookingFormEnabled } from "@/lib/forms/public-booking";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import type { BookingSettings } from "@/lib/booking/hours";
 import { applyBookingSettingsEdit } from "@/lib/booking/settings-edit";
 import {
   BookingSettingsError,
@@ -47,6 +48,18 @@ async function hostCalendarStatus(tenantId: string, userId: string): Promise<{ r
   }
 }
 
+/**
+ * The settings as the signed-in person may see them: everyone's hours, but only
+ * THEIR OWN target calendar id. Calendars are private to their owner; another
+ * host's id is never sent (a save carries it over server-side, settings-edit.ts).
+ */
+function visibleSettings(settings: BookingSettings, viewerUserId: string): BookingSettings {
+  return {
+    ...settings,
+    hosts: settings.hosts.map((host) => (host.userId === viewerUserId ? host : { ...host, targetCalendarId: null })),
+  };
+}
+
 function settingsError(err: unknown, where: string): NextResponse {
   if (err instanceof BookingSettingsError) {
     console.error(`[calendar.booking.${where}]`, err.message);
@@ -79,7 +92,7 @@ export async function GET(): Promise<NextResponse> {
         live,
         version: loaded.version,
         saved: loaded.saved,
-        settings: loaded.settings,
+        settings: visibleSettings(loaded.settings, owner.userId),
         canEdit: loaded.settings.hosts.some((host) => host.userId === owner.userId),
         you: owner.userId,
         hosts: loaded.settings.hosts.map((host, index) => ({
@@ -135,7 +148,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     if (!saved.ok) {
       return NextResponse.json({ ok: false, error: saved.error, version: saved.version }, { status: 409 });
     }
-    return NextResponse.json({ ok: true, version: saved.version, settings: edit.settings });
+    return NextResponse.json({ ok: true, version: saved.version, settings: visibleSettings(edit.settings, owner.userId) });
   } catch (err) {
     return settingsError(err, "put");
   }

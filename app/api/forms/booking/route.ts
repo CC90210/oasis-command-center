@@ -304,7 +304,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const occurredAt = new Date().toISOString();
-  const ownership = publicBookingOwnershipPatch(context.lead, founders);
+  const ownership = publicBookingOwnershipPatch(context.lead, {
+    organizer: organizer.userId,
+    collaborators: [
+      ...slot.hosts.map((host) => host.userId),
+      founders.host.auth_user_id,
+      founders.opener.auth_user_id,
+    ],
+  });
   const leadPatch = {
     ...buildPublicFunnelLeadPatch(combined, "meeting_booked", occurredAt),
     stage: "founder_meeting_booked",

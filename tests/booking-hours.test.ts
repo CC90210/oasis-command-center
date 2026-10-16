@@ -172,11 +172,11 @@ check("settings parse strictly: anything off is refused, never repaired", () => 
   assert.equal(mutate((s) => { (hosts(s)[0].weeklyHours as unknown[][])[1] = [{ start: 600, end: 600 }]; }), null);
   assert.equal(mutate((s) => { (hosts(s)[0].weeklyHours as unknown[][])[1] = [{ start: 600, end: 1500 }]; }), null);
   assert.equal(
-    mutate((s) => { (hosts(s)[0].weeklyHours as unknown[][])[1] = [{ start: 600, end: 800 }, { start: 700, end: 900 }]; }),
+    mutate((s) => { (hosts(s)[0].weeklyHours as unknown[][])[1] = [{ start: 600, end: 700 }, { start: 840, end: 1000 }]; }),
     null,
-    "overlapping windows",
+    "one window per day: the settings dialog round-trips exactly one, so a second would be lost on save",
   );
-  assert.ok(mutate((s) => { (hosts(s)[0].weeklyHours as unknown[][])[1] = [{ start: 840, end: 1000 }, { start: 600, end: 700 }]; }));
+  assert.ok(mutate((s) => { (hosts(s)[0].weeklyHours as unknown[][])[1] = []; }), "a day off is an empty day");
 });
 
 // -- The Schedule as busy time ---------------------------------------------

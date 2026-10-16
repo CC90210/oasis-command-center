@@ -28,7 +28,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Book a call | OASIS AI",
-  description: "Pick a time for a 30-minute Google Meet with the OASIS AI founders.",
+  description: "Pick a time for a 30-minute Google Meet with OASIS AI.",
   alternates: { canonical: "/book" },
   // Like every public form page: reached by link, not by search.
   robots: { index: false, follow: false },

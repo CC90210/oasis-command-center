@@ -35,7 +35,7 @@ export const BOOK_FORM_BRANDING: FormBranding = {
   primary_color: "#00D4FF",
   accent_color: "#faf9f5",
   headline: "Book a call with OASIS AI",
-  subheadline: "30 minutes on Google Meet with the founders. Pick a time that suits you.",
+  subheadline: "30 minutes on Google Meet with OASIS AI. Pick a time that suits you.",
   thanks_message: "You're booked. The Google Calendar invite with the Meet link is on its way to your inbox.",
 };
 
