@@ -168,6 +168,8 @@ video keeps the step.
     clinics", "over eighty agencies", "serving one clinic");
   - a time frame ("same-day", "overnight", "in days", "within hours", "within
     one week", "within one business day");
+  - an instant promise ("instant", "instantly", "immediately", "right away",
+    "within seconds");
   - the words guarantee(d), proven, booked, refund, money back, risk-free,
     ROI, profit or savings.
 

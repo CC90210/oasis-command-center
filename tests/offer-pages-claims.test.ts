@@ -142,6 +142,12 @@ async function main() {
       ["Replies within hours.", /time frame/],
       ["Live in a single day.", /time frame/],
       ["Your answers overnight.", /time frame/],
+      // A promise of no wait at all (Codex on #636, for copy people write).
+      ["Replies go out instantly.", /instant promise/],
+      ["Instant answers for every lead.", /instant promise/],
+      ["We start immediately.", /instant promise/],
+      ["Your report arrives right away.", /instant promise/],
+      ["Booked in seconds.", /instant promise/],
     ];
     for (const [s, why] of flagged) {
       const reasons = claims.claimReasons(s);
@@ -184,6 +190,9 @@ async function main() {
       "Used to answering every lead by hand?",
       "One day at a time, one lead at a time.",
       "Within your team, nothing changes.",
+      // "right" and "seconds" that promise no speed.
+      "The right way to answer a lead.",
+      "Take a few seconds to read this first.",
       "Everything across one view.",
       // "only" that is not "the only".
       "By application only.",
