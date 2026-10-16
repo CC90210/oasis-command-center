@@ -17,6 +17,7 @@
  * Run: node --conditions=react-server --import tsx tests/offer-preview-form.test.ts
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -120,6 +121,28 @@ async function main(): Promise<void> {
       3,
       "both calendars and COMMUNITY's own community link must know they are a preview",
     );
+  });
+
+  // Codex review of #659: nothing typed leaves the browser (no address lookup
+  // service), and a required upload cannot strand the preview before the calendar.
+  await check("the preview's address field calls no lookup service, and its upload is skipped, never required", () => {
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, TSX_TSCONFIG_PATH: "tests/tsconfig.render.json" };
+    const kept = (process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((t) => t && !/^(--conditions=|-C=)/.test(t) && t !== "--conditions" && t !== "-C");
+    if (kept.length) childEnv.NODE_OPTIONS = kept.join(" ");
+    else delete childEnv.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/offer-preview-form.render.ts"], { encoding: "utf8", env: childEnv });
+    assert.equal(r.status, 0, `renderer failed:\n${r.stderr}`);
+    const html = JSON.parse(r.stdout) as { preview: string; live: string };
+    assert.match(html.live, /role="combobox"/, "control: the live address field is the lookup field");
+    assert.doesNotMatch(html.preview, /role="combobox"|aria-autocomplete/, "the preview's address field calls the lookup service");
+    assert.match(html.preview, /<label for="([^"]+)"[^>]*>Business address[\s\S]*?<input id="\1" type="text"/, "the preview's address is not a plain box");
+    assert.ok(html.preview.includes("file uploads are skipped here"), "the preview offers an upload it cannot make");
+    assert.ok(!html.live.includes("file uploads are skipped here"), "a visitor is told uploads are skipped");
+    const validate = form.slice(form.indexOf("  const validate = useCallback("), form.indexOf("  const validateRef = useRef(validate);"));
+    const skip = validate.indexOf('if (preview && field.type === "file_upload_multi") continue;');
+    assert.ok(skip > validate.indexOf("if (!field.required) continue;"), "the preview skips more than a required upload");
+    assert.ok(skip > 0 && skip < validate.indexOf('next[field.name] = "Required";'), "a required upload holds the preview back");
+    assert.match(form, /onAddressResolvingChange=\{setAddressResolving\}\s*sandbox=\{preview\}/, "the form does not tell its fields it is a preview");
   });
 
   // -- 3. The calendar in preview mode -------------------------------------

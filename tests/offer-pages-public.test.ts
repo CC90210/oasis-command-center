@@ -344,6 +344,7 @@ async function main() {
     // The Confirm & publish screen links every offer's preview, and three
     // OASIS offers sat with their forms off, so those links answered 404.
     const FORM_OFF = "f0a1d170-0000-4000-8000-00000000f0ff";
+    const FORM_OFF_BROKEN = "f0a1d170-0000-4000-8000-00000000f0fe";
     await db.batch(
       [
         formRow(FORM_OFF, OASIS, "offform", "Off form", CONTACT_STEPS, { headline: "Off" }, 0),
@@ -366,12 +367,20 @@ async function main() {
       assert.equal((owner.props.prepared as { page: { hero: { headline: string } } }).page.hero.headline, "A page whose form is off");
       assert.equal((owner.props.form as Record<string, unknown>).preview, true);
       assert.equal("anonymousInit" in (owner.props.form as Record<string, unknown>), false);
+
+      // Codex review of #659: a form that is off AND malformed must not show a
+      // visitor its configuration-error page (which would prove it exists).
+      await db.batch([formRow(FORM_OFF_BROKEN, OASIS, "offbroken", "Off and broken", { not: "steps" }, { headline: "Off" }, 0)], "write");
+      for (const who of [null, USERS.clientA, USERS.rep]) {
+        await login(who);
+        await assert.rejects(run("offbroken", { offer_preview: "1" }), isNotFound, "a visitor learned a closed form exists");
+      }
     } finally {
       await login(null);
       await db.batch(
         [
           { sql: "DELETE FROM form_offer_pages WHERE form_id = ?", args: [FORM_OFF] },
-          { sql: "DELETE FROM forms WHERE id = ?", args: [FORM_OFF] },
+          { sql: "DELETE FROM forms WHERE id IN (?, ?)", args: [FORM_OFF, FORM_OFF_BROKEN] },
         ],
         "write",
       );

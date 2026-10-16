@@ -609,13 +609,16 @@ export function FormPublicClient({
       }
 
       if (!field.required) continue;
+      // The owner's preview offers no upload (FormRenderer `sandbox`), so a
+      // required upload cannot hold the preview back from the later steps.
+      if (preview && field.type === "file_upload_multi") continue;
       if (v === undefined || v === null || v === "" || (Array.isArray(v) && v.length === 0)) {
         next[field.name] = "Required";
       }
     }
     setErrors(next);
     return Object.keys(next).length === 0;
-  }, [step.fields, values, mergedValues]);
+  }, [step.fields, values, mergedValues, preview]);
 
   /**
    * `submit()` can await an in-flight address resolution before it validates.
@@ -1278,6 +1281,7 @@ export function FormPublicClient({
                 uploadToken={token}
                 ensureUploadToken={ensureUploadToken}
                 onAddressResolvingChange={setAddressResolving}
+                sandbox={preview}
                 belowFields={
                   ledgerChannels.length > 0 ? (
                     // THE CONSENT LEDGER'S OWN BOXES. Separate, unticked, one per

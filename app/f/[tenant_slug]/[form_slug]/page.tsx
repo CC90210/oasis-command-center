@@ -182,6 +182,12 @@ async function loadForm(params: RouteParams, opts: { includeDisabled?: boolean }
   if (!resolved.ok) {
     return { ok: false, reason: "not_found" };
   }
+  // A form that is off exists only for its owner's preview. Decided BEFORE the
+  // form is parsed, so a visitor never learns it exists, not even from the
+  // configuration-error page a malformed one would draw (Codex review of #659).
+  if (!resolved.form.enabled && !(await canPreviewOfferPage(resolved.form.tenant_id))) {
+    return { ok: false, reason: "not_found" };
+  }
 
   let steps: FormStep[];
   let branding: FormBranding;
