@@ -239,7 +239,7 @@
     "template": "book_call",
     "theme": {
       "canvas": "dark",
-      "accent": "#5EEAD4",
+      "accent": "#3A86FF",
       "logo": "workspace",
       "layout": "split"
     },

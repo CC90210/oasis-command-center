@@ -314,9 +314,9 @@
     "template": "book_call",
     "theme": {
       "canvas": "dark",
-      "accent": "#E8C547",
+      "accent": "#F7A834",
       "logo": "workspace",
-      "layout": "stacked"
+      "layout": "split"
     },
     "nav": {
       "pinned": [

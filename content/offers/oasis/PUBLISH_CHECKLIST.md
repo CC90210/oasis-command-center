@@ -11,6 +11,12 @@ need a confirmation. The rest only a person can check.
 **Order matters.** A tick is stored against the exact sentence, so editing a sentence clears its tick. Settle the
 currency and the price ranges first, edit the copy, and tick the flagged sentences last.
 
+**Copy of 2026-10-16 (Maven).** All six pages, the AI Automation Audit included, carry Maven's copy: one USD price
+per tier inside the gated pricing section (each needs the owner's confirmation in the builder), the accent of each
+page's pillar film, and the narration of the approved film as the script. Each page's own list of claims to confirm
+and the pricing conflicts Maven resolved are in `CMO-Agent/output/offer-pages/<slug>.json` (`claims_to_confirm`,
+`pricing_recommendation`); the per-page sections below predate that copy where they still talk about ranges.
+
 ---
 
 ## 1. Every page

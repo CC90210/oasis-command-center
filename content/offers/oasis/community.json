@@ -194,9 +194,9 @@
     "template": "book_call",
     "theme": {
       "canvas": "dark",
-      "accent": "#B9A4FF",
+      "accent": "#20D19D",
       "logo": "workspace",
-      "layout": "centered"
+      "layout": "split"
     },
     "nav": {
       "pinned": [
@@ -289,6 +289,7 @@
         "key": "pricing",
         "eyebrow": "The rooms",
         "title": "Free to start",
+        "lede": "The community is free. Cancel any paid room any time from your account; no cancellation fee.",
         "currency_note": "Prices in US dollars.",
         "tiers": [
           {
@@ -349,6 +350,10 @@
           {
             "q": "How do I cancel a paid plan?",
             "a": "Cancel any time from your account. There is no cancellation fee."
+          },
+          {
+            "q": "What if I'm not ready?",
+            "a": "Then the free community is exactly where to start. It costs nothing, and you can stay as long as you like. Start free on the next screen, or join here: https://oasisai.work/go/community?form=community&t=oasis-ai-cc"
           }
         ]
       }

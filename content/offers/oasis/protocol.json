@@ -176,9 +176,9 @@
     "template": "book_call",
     "theme": {
       "canvas": "dark",
-      "accent": "#F5B971",
+      "accent": "#1FE3F0",
       "logo": "workspace",
-      "layout": "stacked"
+      "layout": "split"
     },
     "nav": {
       "pinned": [
