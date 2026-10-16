@@ -17,7 +17,7 @@
  * a canonical of "/home" would point Google at a URL nobody links to.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   MARKETING_LEGAL_PATHS,
@@ -114,6 +114,26 @@ assert.equal(WEBSITE_JSONLD.publisher["@id"], ORGANIZATION_JSONLD["@id"], "one e
   }
   // Proves the check can fail: Next's default list streams to Googlebot.
   assert.equal(shouldServeStreamingMetadata(agents.googlebot, undefined), true, "without the setting, Googlebot gets streamed metadata");
+
+  // The setting is app-wide: every route's first byte now waits for its
+  // generateMetadata (Codex review 2026-10-16). Each one is listed with what it
+  // awaits. Adding one fails here on purpose: keep it to a header read or a
+  // lookup the page body awaits anyway, then list it.
+  const KNOWN_GENERATE_METADATA: Record<string, string> = {
+    "app/(marketing)/layout.tsx": "headers() for the canonical path",
+    "app/(marketing)/funnel/[funnel]/page.tsx": "a constant lookup",
+    "app/f/[tenant_slug]/[form_slug]/page.tsx": "the form lookup the page body awaits",
+    "app/f/[tenant_slug]/[form_slug]/[lead_token]/page.tsx": "params and a slug-to-icon map, no DB",
+  };
+  const found = (readdirSync(join(root, "app"), { recursive: true }) as string[])
+    .map((f) => `app/${f.split("\\").join("/")}`)
+    .filter((f) => /\.(t|j)sx?$/.test(f) && /export (async )?function generateMetadata\b/.test(readFileSync(join(root, f), "utf8")))
+    .sort();
+  assert.deepEqual(
+    found,
+    Object.keys(KNOWN_GENERATE_METADATA).sort(),
+    "generateMetadata set changed: with htmlLimitedBots /.*/ the page shell waits for it. Keep it fast, then list it in KNOWN_GENERATE_METADATA",
+  );
 }
 
 console.log("marketing-canonical: all assertions passed");
