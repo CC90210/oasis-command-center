@@ -84,17 +84,26 @@ try {
   // wrangler.jsonc stays comment-free: this parse is plain JSON.
   const wrangler = JSON.parse(readFileSync("wrangler.jsonc", "utf8")) as {
     vars?: Record<string, string>;
-    placement?: { mode?: string };
+    placement?: { mode?: string; region?: string };
   };
   assert.equal(wrangler.vars?.DEPLOY_ENV, "production");
   assert.equal(wrangler.vars?.DEPLOY_PLATFORM, "cloudflare");
   assert.equal(wrangler.vars?.DEPLOY_SURFACE, "oasis");
-  // Smart Placement runs the Worker near Turso, not near the viewer. A page
-  // makes 3-4 SEQUENTIAL Turso reads (session, profile, workspace, data) and a
-  // round trip from the edge measured ~145 ms (2026-09-29, from Montreal), so
-  // the database distance, paid 3-4 times, was most of a tab switch (PR #475).
-  // Removing it is a deliberate performance decision, not a tidy-up.
-  assert.equal(wrangler.placement?.mode, "smart", "Smart Placement was removed from wrangler.jsonc");
+  // The Worker runs near Turso, not near the viewer. A page makes several
+  // SEQUENTIAL Turso reads (session, profile, workspace, data) and a round trip
+  // from the edge measured ~145 ms (2026-09-29, from Montreal), so the database
+  // distance, paid each time, was most of a tab switch (PR #475).
+  // "mode": "smart" was meant to do this, but on 2026-10-16 it had placed the
+  // Worker in Amsterdam (cf-placement: remote-AMS) while Turso is in AWS
+  // us-west-2: the shell alone measured 0.7-4 s. So the placement is now the
+  // explicit hint for Turso's own region. If the database moves, move this
+  // with it; removing it is a deliberate performance decision, not a tidy-up.
+  assert.equal(
+    wrangler.placement?.region,
+    "aws:us-west-2",
+    "the Worker is no longer pinned to Turso's region (aws:us-west-2) in wrangler.jsonc",
+  );
+  assert.equal(wrangler.placement?.mode, undefined, "placement mode and region are mutually exclusive");
 
   const health = readFileSync("app/api/health/route.ts", "utf8");
   assert.match(health, /deploymentGitSha\(\)/);
