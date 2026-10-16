@@ -334,7 +334,9 @@ async function main() {
     const h = html.previewEditorEnabled;
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
     assert.ok(h.includes(">Open draft<"), "Open draft is missing for an editor on an enabled draft");
-    assert.ok(h.includes(">Publish<"), "Publish is missing on a draft offer");
+    assert.ok(h.includes(">Confirm &amp; publish<"), "Publish is missing on a draft offer");
+    // CC 2026-10-16: a draft card goes to the one screen that publishes every offer (claims, prices, video).
+    assert.match(h, /<a[^>]*href="\/forms\/publish"[^>]*>Confirm &amp; publish<\/a>/, "the draft card does not lead to Confirm & publish");
     assert.doesNotMatch(h, COPY_BUTTON, "a draft card hands out a link that shows only the form");
     assert.ok(!h.includes(">Share<"), "a draft card shares a link that shows only the form");
     assert.ok(h.includes("Not public yet"), "the card does not say why there is no link yet");
@@ -346,14 +348,14 @@ async function main() {
     // the owner can check the page before switching it on (Codex review of #659).
     assert.ok(h.includes(">Open draft<"), "a switched-off offer's owner cannot open its draft");
     assert.doesNotMatch(h, COPY_BUTTON, "a switched-off offer's card hands out a closed link");
-    assert.ok(!h.includes(">Share<") && !h.includes(">Publish<"), "a switched-off offer's card offers more than its draft");
+    assert.ok(!h.includes(">Share<") && !h.includes(">Confirm &amp; publish<"), "a switched-off offer's card offers more than its draft");
     assert.ok(h.includes("Switched off"), "the card does not say the link is closed");
   });
   await step("Open draft and Publish are withheld for a read-only viewer, even on an enabled offer", () => {
     const h = html.previewReadOnlyViewer;
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
     assert.ok(!h.includes(">Open draft<"), "Open draft is drawn for a viewer the route does not authorize to see a draft");
-    assert.ok(!h.includes(">Publish<"), "Publish is drawn for a viewer who may not edit");
+    assert.ok(!h.includes(">Confirm &amp; publish<"), "Publish is drawn for a viewer who may not edit");
   });
   await step("a live offer's card copies, opens and shares the landing page, and shows its address", () => {
     const h = html.livePage;
@@ -364,7 +366,7 @@ async function main() {
     assert.ok(h.includes(">/f/acme/zeta<"), "the landing page's address is missing");
     assert.ok(h.includes("Copy the landing page"), "Copy link does not say it copies the landing page");
     assert.ok(!h.includes(">Open draft<") && !h.includes(">Preview changes<"), "a live page with no pending edits has one link, not two");
-    assert.ok(!h.includes(">Publish<"), "Publish is offered on a page that is already live with nothing new");
+    assert.ok(!h.includes(">Confirm &amp; publish<"), "Publish is offered on a page that is already live with nothing new");
   });
   await step("an OASIS offer's card hands out its own short link (lib/offers/short-links.ts)", () => {
     const h = html.oasisLiveFleet;
@@ -375,7 +377,7 @@ async function main() {
   await step("a switched-off offer whose page was published never offers Publish (switching on brings it back)", () => {
     const h = html.offPublished;
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
-    assert.ok(!h.includes(">Publish<"), "Publish is offered for a page that is already published");
+    assert.ok(!h.includes(">Confirm &amp; publish<"), "Publish is offered for a page that is already published");
     assert.ok(h.includes("its published page is back"), "the card does not say switching on restores the page");
     assert.doesNotMatch(h, COPY_BUTTON, "a switched-off offer's card hands out a closed link");
   });

@@ -400,13 +400,18 @@ export function FormsListClient({
     return (
       <>
         {previewLink(r, "Open draft")}
+        {/* CC 2026-10-16: every card read DRAFT with no clear way to make it
+            real. The one screen that does it for every offer at once (its
+            claims, prices and proposed video, each watched and ticked, then
+            Publish) is /forms/publish, so the draft card goes there. The
+            builder stays one click away under Edit. */}
         {canEdit ? (
           <Link
-            href={`/forms/${r.id}/edit`}
+            href="/forms/publish"
             className="inline-flex items-center gap-1 font-semibold text-accent hover:text-accent-bright text-xs"
-            title="Open the builder: its checklist says what is left, then Publish makes this link show the page."
+            title="Tick what needs your OK (claims, prices, the proposed video) and publish, on one screen for every offer."
           >
-            Publish
+            Confirm &amp; publish
           </Link>
         ) : null}
       </>
