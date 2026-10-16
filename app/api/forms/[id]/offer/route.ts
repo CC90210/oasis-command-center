@@ -37,9 +37,8 @@ import { videoRefs } from "@/lib/offer-pages/providers";
 import { imageKey, imageRefs, resolveLibrary, verifyUploadObject } from "@/lib/offer-pages/video";
 import { offerUploadStorage } from "@/lib/offer-pages/upload";
 import { emptyDocForTemplate } from "@/lib/offer-pages/templates";
-import { applyClaimTicks, lintDoc, stampConfirmations } from "@/lib/offer-pages/claims";
-import { createOfferRow, isSupportDeskForm, offerPagesDb, readOfferRow, saveDraft } from "@/lib/offer-pages/store";
-import { editableForm, fallbackHeadline, offerView } from "@/lib/offer-pages/operator";
+import { createOfferRow, isSupportDeskForm, offerPagesDb, readOfferRow } from "@/lib/offer-pages/store";
+import { editableForm, offerView, saveDraftLikeBuilder } from "@/lib/offer-pages/operator";
 import { offerAlertStatus } from "@/lib/offer-pages/alert-status";
 
 export const runtime = "nodejs";
@@ -222,19 +221,17 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       }
     }
   }
-  const draft = stampConfirmations(parsed, [row.draft, row.published], actor, now);
   const hashes = (v: unknown) => (Array.isArray(v) ? v.filter((h): h is string => typeof h === "string" && /^[0-9a-f]{64}$/.test(h)) : []);
-  const headline = fallbackHeadline(form);
-  const claims = applyClaimTicks({
-    existing: row.claims,
+  const saved = await saveDraftLikeBuilder(db, {
+    form,
+    row,
+    next: parsed,
+    expectedVersion: version,
+    actor,
     confirm: hashes(body.confirm_claims),
     unconfirm: hashes(body.unconfirm_claims),
-    draftHits: lintDoc(draft, { fallbackHeadline: headline }),
-    publishedHits: row.published ? lintDoc(row.published, { fallbackHeadline: headline }) : [],
-    actor,
     now,
   });
-  const saved = await saveDraft(db, { tenantId, formId: id, draft, expectedVersion: version, claims, actor, now });
   if (!saved.ok) {
     if (saved.error === "unavailable") return UNAVAILABLE();
     if (saved.error === "conflict") {
@@ -250,7 +247,5 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     }
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
-  const after = await readOfferRow(db, tenantId, id);
-  if (after.state !== "row") return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-  return NextResponse.json({ ok: true, offer: offerView(after.row, form) });
+  return NextResponse.json({ ok: true, offer: offerView(saved.row, form) });
 }
