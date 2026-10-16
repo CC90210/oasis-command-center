@@ -16,12 +16,14 @@
  */
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { matchesPathPrefix } from "@/lib/path-prefix";
 
-const OASIS_FORMS_PREFIX = "/f/oasis-ai-cc/";
+// Exactly /f/oasis-ai-cc or anything under it (/f/oasis-ai-cc/<form>/...).
+const OASIS_FORMS_ROOT = "/f/oasis-ai-cc";
 
 export function PublicFormNotFound() {
   const pathname = usePathname() || "";
-  const isOasis = pathname.startsWith(OASIS_FORMS_PREFIX);
+  const isOasis = matchesPathPrefix(pathname, OASIS_FORMS_ROOT);
 
   return (
     <main className="flex min-h-[70vh] items-center justify-center bg-bg px-6 py-16">
