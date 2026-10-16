@@ -48,7 +48,8 @@ export const FULL_BLEED_PREFIXES: readonly string[] = [
   // /onboarding and its signed-in wizard children are covered by the marketing
   // registry's /onboarding prefix. The exact page is public; middleware keeps
   // /onboarding/wizard and /onboarding/welcome authenticated.
-  "/f", // public form pages (anonymous + personalized), and /f itself: its not-found page
+  "/f", // exactly /f: its public not-found page ("/f/" below does not match it)
+  "/f/", // public form pages (anonymous + personalized)
   "/book", // the public booking link: a prospect with no account books a call
   "/invite/", // pre-signup invite landing
   "/sign/", // public e-signature page: the signer may never have an account
