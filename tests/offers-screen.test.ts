@@ -11,7 +11,12 @@
  *      exists; otherwise a quiet empty state with Create.
  *   4. Preview is drawn only for canEdit && enabled (Codex review, PR #596):
  *      the public route 404s a disabled form before preview authorization
- *      runs, and only honours ?offer_preview=1 for an editor.
+ *      runs, and only honours ?offer_preview=1 for an editor. Since
+ *      2026-10-16 it reads "Open draft" on a draft and "Preview changes" on a
+ *      live page with newer edits.
+ *   6. ONE link per offer (CC, 2026-10-16): a public page's card copies,
+ *      opens and shares the landing page; a draft's card never offers Copy
+ *      link (that address would show only the bare form) and offers Publish.
  *   5. The router's Create action always submits slug "vsl", never one
  *      derived from the typed name (Codex review, PR #596) - proved as a
  *      pure function (offerCreateSlug) rather than by simulating a click and
@@ -69,6 +74,9 @@ function render(scenarios: Record<string, Scenario>): Record<string, string> {
   assert.equal(child.status, 0, `render child failed:\n${child.stderr}`);
   return JSON.parse(child.stdout) as Record<string, string>;
 }
+
+/** A Copy link BUTTON was drawn (its tooltip), not merely the words in the help text. */
+const COPY_BUTTON = /title="(Copy the landing page|Copy the public link\. Anyone)/;
 
 async function main() {
   console.log("offers-screen:");
@@ -183,6 +191,76 @@ async function main() {
         recentLeads: { "offer-4": 0 },
       },
     },
+    livePage: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-6", "zeta", "Zeta Offer", true)],
+        tenantLogoUrl: null,
+        tenantSlug: "acme",
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-6": 0 },
+        offers: { "offer-6": { status: "live", publishedVersion: 2 } },
+        recentLeads: { "offer-6": 0 },
+      },
+    },
+    oasisLiveFleet: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-8", "fleet", "FLEET", true)],
+        tenantLogoUrl: null,
+        tenantSlug: "oasis-ai-cc",
+        tenantName: "OASIS AI",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-8": 0 },
+        offers: { "offer-8": { status: "live", publishedVersion: 1 } },
+        recentLeads: { "offer-8": 0 },
+      },
+    },
+    offPublished: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-9", "theta", "Theta Offer", false)],
+        tenantLogoUrl: null,
+        tenantSlug: "acme",
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-9": 0 },
+        offers: { "offer-9": { status: "live", publishedVersion: 3 } },
+        recentLeads: { "offer-9": 0 },
+      },
+    },
+    unresolvedLive: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-10", "iota", "Iota Offer", true)],
+        tenantLogoUrl: null,
+        tenantSlug: null,
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-10": 0 },
+        offers: { "offer-10": { status: "live", publishedVersion: 1 } },
+        recentLeads: { "offer-10": 0 },
+      },
+    },
+    liveWithChanges: {
+      kind: "list",
+      props: {
+        initialRows: [row("offer-7", "eta", "Eta Offer", true)],
+        tenantLogoUrl: null,
+        tenantSlug: "acme",
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "offer-7": 0 },
+        offers: { "offer-7": { status: "live_with_changes", publishedVersion: 2 } },
+        recentLeads: { "offer-7": 0 },
+      },
+    },
     previewReadOnlyViewer: {
       kind: "list",
       props: {
@@ -252,20 +330,63 @@ async function main() {
     assert.ok(!h.includes("Which one is you"), "a router card appeared with no vsl form");
   });
 
-  await step("Preview is drawn for an editor on an enabled offer", () => {
+  await step("a draft offer shows its editor Open draft and Publish, and never a Copy link to the bare form", () => {
     const h = html.previewEditorEnabled;
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
-    assert.ok(h.includes(">Preview<"), "Preview is missing for an editor on an enabled offer");
+    assert.ok(h.includes(">Open draft<"), "Open draft is missing for an editor on an enabled draft");
+    assert.ok(h.includes(">Publish<"), "Publish is missing on a draft offer");
+    assert.doesNotMatch(h, COPY_BUTTON, "a draft card hands out a link that shows only the form");
+    assert.ok(!h.includes(">Share<"), "a draft card shares a link that shows only the form");
+    assert.ok(h.includes("Not public yet"), "the card does not say why there is no link yet");
   });
-  await step("Preview is withheld for a switched-off offer, even for an editor", () => {
+  await step("Open draft is withheld for a switched-off offer, even for an editor", () => {
     const h = html.previewEditorDisabled;
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
-    assert.ok(!h.includes(">Preview<"), "Preview is drawn for a disabled offer, which 404s the preview route");
+    assert.ok(!h.includes(">Open draft<"), "Open draft is drawn for a disabled offer, which 404s the preview route");
+    assert.doesNotMatch(h, COPY_BUTTON, "a switched-off offer's card hands out a closed link");
+    assert.ok(h.includes("Switched off"), "the card does not say the link is closed");
   });
-  await step("Preview is withheld for a read-only viewer, even on an enabled offer", () => {
+  await step("Open draft and Publish are withheld for a read-only viewer, even on an enabled offer", () => {
     const h = html.previewReadOnlyViewer;
     assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
-    assert.ok(!h.includes(">Preview<"), "Preview is drawn for a viewer who may not edit, who the route does not authorize to see a draft");
+    assert.ok(!h.includes(">Open draft<"), "Open draft is drawn for a viewer the route does not authorize to see a draft");
+    assert.ok(!h.includes(">Publish<"), "Publish is drawn for a viewer who may not edit");
+  });
+  await step("a live offer's card copies, opens and shares the landing page, and shows its address", () => {
+    const h = html.livePage;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.match(h, COPY_BUTTON, "Copy link is missing on a live offer");
+    assert.ok(h.includes(">Open page<"), "Open page is missing on a live offer");
+    assert.ok(h.includes(">Share<"), "Share is missing on a live offer");
+    assert.ok(h.includes(">/f/acme/zeta<"), "the landing page's address is missing");
+    assert.ok(h.includes("Copy the landing page"), "Copy link does not say it copies the landing page");
+    assert.ok(!h.includes(">Open draft<") && !h.includes(">Preview changes<"), "a live page with no pending edits has one link, not two");
+    assert.ok(!h.includes(">Publish<"), "Publish is offered on a page that is already live with nothing new");
+  });
+  await step("an OASIS offer's card hands out its own short link (lib/offers/short-links.ts)", () => {
+    const h = html.oasisLiveFleet;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(h.includes(">/fleet-audit<"), "FLEET's card does not show its short link");
+    assert.ok(h.includes('href="/fleet-audit"'), "Open page does not use the short link");
+  });
+  await step("a switched-off offer whose page was published never offers Publish (switching on brings it back)", () => {
+    const h = html.offPublished;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(!h.includes(">Publish<"), "Publish is offered for a page that is already published");
+    assert.ok(h.includes("its published page is back"), "the card does not say switching on restores the page");
+    assert.doesNotMatch(h, COPY_BUTTON, "a switched-off offer's card hands out a closed link");
+  });
+  await step("an address that could not be built is reported as such, never as an unpublished page", () => {
+    const h = html.unresolvedLive;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(h.includes("build this offer"), "the card does not say the link could not be built");
+    assert.ok(!h.includes("Not public yet"), "a live page is called unpublished because the address lookup failed");
+  });
+  await step("a live page with newer edits adds Preview changes, still one public link", () => {
+    const h = html.liveWithChanges;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(h.includes(">Preview changes<"), "Preview changes is missing when a newer draft waits");
+    assert.ok(h.includes(">Open page<") && COPY_BUTTON.test(h), "the live page's own link is missing");
   });
 
   // -- 5. offerCreateSlug / slugTakenMessage: the router Create fix ---------

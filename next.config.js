@@ -303,6 +303,17 @@ const nextConfig = {
   // update the canonical URL.
   async redirects() {
     return [
+      // The OASIS offer pages' short links (CC, 2026-10-16): one address per
+      // offer, the one the Offers card copies. Temporary (307) on purpose, so a
+      // later change of slug is not stuck in browsers' caches. Same list as
+      // lib/offers/short-links.ts OASIS_OFFER_SHORT_PATHS (a JS config cannot
+      // import TypeScript); tests/offer-short-links.test.ts fails on drift.
+      // /fleet is the marketing page, so FLEET's offer is /fleet-audit;
+      // /ai-audit and /vsl already have their own rules below and in app/vsl.
+      { source: "/protocol", destination: "/f/oasis-ai-cc/protocol", permanent: false },
+      { source: "/command", destination: "/f/oasis-ai-cc/command", permanent: false },
+      { source: "/community", destination: "/f/oasis-ai-cc/community", permanent: false },
+      { source: "/fleet-audit", destination: "/f/oasis-ai-cc/fleet", permanent: false },
       {
         // The short campaign URL is public and permanent. Next preserves the
         // query string, so UTM/source attribution reaches the canonical form.
