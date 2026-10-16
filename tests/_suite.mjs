@@ -309,6 +309,8 @@ const TESTS = [
   "tests/scheduled-send-delivery-safety.test.ts",
   "tests/oasis-call-isolation.test.ts",
   "tests/cloudflare-runtime-parity.test.ts",
+  "tests/cloudflare-image-binding.test.ts",
+  "tests/public-bundle-isolation.test.ts",
   "tests/oasis-worker-secret-boundary.test.ts",
   "tests/oasis-deployment-boundary.test.ts",
   "tests/client-surface-isolation.test.ts",
