@@ -37,8 +37,6 @@ import { safe } from "@/lib/api-helpers";
 import { FormBuilderClient } from "@/components/forms/FormBuilderClient";
 import { OfferBuilder } from "@/components/offer-pages/builder/OfferBuilder";
 import { TurnIntoOffer } from "@/components/offer-pages/builder/TurnIntoOffer";
-import { WriteEmptyParts } from "@/components/offer-pages/builder/WriteEmptyParts";
-import { emptyWritableParts } from "@/lib/offer-pages/write-page";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { formsEditRefusal } from "@/lib/forms/access";
 import { isSupportDeskForm, offerPagesDb, readOfferRow } from "@/lib/offer-pages/store";
@@ -176,10 +174,6 @@ export default async function EditFormPage({
   const offer = await loadOfferForEditor(row.tenant_id, initialForm);
 
   if (offer.kind === "offer") {
-    // "Write the empty parts": the retry for Write my page, shown only while
-    // the draft has parts a write would fill.
-    const draft = offer.view.draft;
-    const emptyParts = draft ? emptyWritableParts(draft) : [];
     return (
       <div className="space-y-6 animate-fade-in">
         <PageHeader
@@ -195,14 +189,6 @@ export default async function EditFormPage({
             </Link>
           }
         />
-        {draft && emptyParts.length > 0 ? (
-          <WriteEmptyParts
-            formId={row.id}
-            emptyParts={emptyParts}
-            initialDescription={draft.brief?.promise ?? ""}
-            audience={draft.brief?.audience ?? ""}
-          />
-        ) : null}
         <OfferBuilder
           form={initialForm}
           profileSlug={profileSlug}

@@ -21,13 +21,15 @@ import { COPY_CAPS, ITEM_CAPS, parseOfferPageDoc } from "../lib/offer-pages/type
 import {
   applyWrittenCopy,
   cleanCopy,
-  emptyWritableParts,
+  inventsFacts,
   parseWrittenCopy,
   scrubWriteInput,
+  withBrief,
   writePageSystemPrompt,
   writePageUserPrompt,
   type WrittenCopy,
 } from "../lib/offer-pages/write-page";
+import { emptyWritableParts } from "../lib/offer-pages/write-page-client";
 import { redactAll, redactTenantVaultSecrets } from "../lib/secret-redaction";
 
 function check(name: string, fn: () => void): void {
@@ -35,7 +37,9 @@ function check(name: string, fn: () => void): void {
   console.log(`  ok - ${name}`);
 }
 
-const items = (n: number, prefix: string) => Array.from({ length: n }, (_, i) => ({ title: `${prefix} ${i + 1}`, body: `About ${prefix} ${i + 1}.` }));
+// Letters, not numbers: a figure the owner never gave is left out (inventsFacts).
+const items = (n: number, prefix: string) =>
+  Array.from({ length: n }, (_, i) => ({ title: `${prefix} ${String.fromCharCode(65 + i)}`, body: `About ${prefix} ${String.fromCharCode(65 + i)}.` }));
 
 const written: WrittenCopy = {
   hero: { eyebrow: "For service businesses", headline: "Your follow-up, booking and back office, running without you", subheadline: "One place for leads, clients and money.", cta_label: "Book a walkthrough" },
@@ -73,12 +77,12 @@ check("the model's answer is read safely: fenced JSON works, junk or a hero-less
 });
 
 check("a fresh book_call page gets every writable part, and still parses as a page", () => {
-  const { doc, filled } = applyWrittenCopy(emptyDocForTemplate("book_call"), written, { description: "One operating view for a service business." });
+  const { doc, filled, withheld } = applyWrittenCopy(emptyDocForTemplate("book_call"), written, "One operating view for a service business.");
   assert.deepEqual(filled.sort(), ["book", "faq", "hero", "obstacles", "seo", "what_you_get", "work"]);
+  assert.equal(withheld, 0);
   assert.equal(doc.hero.headline, written.hero.headline);
   assert.equal(doc.book.title, "Book your walkthrough");
   assert.equal(doc.seo.title, "OASIS Command Center");
-  assert.equal(doc.brief?.promise, "One operating view for a service business.");
   assert.deepEqual(parseOfferPageDoc(JSON.stringify(doc)), doc, "the result does not round-trip through the page parser");
   const section = (key: string) => doc.sections.find((s) => s.key === key) as Record<string, unknown>;
   assert.equal((section("obstacles").items as unknown[]).length, 4);
@@ -86,7 +90,7 @@ check("a fresh book_call page gets every writable part, and still parses as a pa
 });
 
 check("owner facts are never written: pricing, results, bonuses and guarantee stay empty, with no confirmation anywhere", () => {
-  const { doc } = applyWrittenCopy(emptyDocForTemplate("book_call"), written);
+  const { doc } = applyWrittenCopy(emptyDocForTemplate("book_call"), written, "");
   const section = (key: string) => doc.sections.find((s) => s.key === key) as Record<string, unknown>;
   assert.deepEqual(section("pricing").tiers, []);
   assert.deepEqual(section("results").items, []);
@@ -99,13 +103,13 @@ check("nothing an owner or Maven wrote is overwritten: only empty fields and emp
   const base = emptyDocForTemplate("book_call", { headline: "The owner's own headline" });
   const wyg = base.sections.find((s) => s.key === "what_you_get");
   if (wyg && wyg.key === "what_you_get") wyg.items = [{ title: "Maven's deliverable" }];
-  const { doc, filled } = applyWrittenCopy(base, written);
+  const { doc, filled } = applyWrittenCopy(base, written, "");
   assert.equal(doc.hero.headline, "The owner's own headline");
   const after = doc.sections.find((s) => s.key === "what_you_get");
   assert.ok(after && after.key === "what_you_get");
   assert.deepEqual(after.items, [{ title: "Maven's deliverable" }]);
   assert.ok(filled.includes("what_you_get"), "the empty title and lede of that section are still filled");
-  const again = applyWrittenCopy(doc, written);
+  const again = applyWrittenCopy(doc, written, "");
   assert.deepEqual(again.filled, [], "a second run on a written page changes nothing");
 });
 
@@ -116,8 +120,11 @@ check("generated copy is cleaned to what the page accepts: caps, item counts, no
     hero: { headline: `Grow <b>faster</b>\u2014today ${long}`, subheadline: "a\u0007b", eyebrow: "", cta_label: "" },
     obstacles: { title: "", lede: "", items: items(15, "Problem") },
   };
-  const { doc } = applyWrittenCopy(emptyDocForTemplate("book_call"), noisy);
+  const { doc } = applyWrittenCopy(emptyDocForTemplate("book_call"), noisy, "");
   assert.ok((doc.hero.headline || "").length <= COPY_CAPS.headline);
+  // Whole tags go, not just their "<" (Codex, #636 round two).
+  assert.match(doc.hero.headline || "", /^Grow faster, today/);
+  assert.doesNotMatch(doc.hero.headline || "", /b>/);
   assert.doesNotMatch(doc.hero.headline || "", /<b>|\u2014/);
   assert.equal(doc.hero.subheadline, "a b");
   const obstacles = doc.sections.find((s) => s.key === "obstacles") as { items: unknown[] };
@@ -126,15 +133,60 @@ check("generated copy is cleaned to what the page accepts: caps, item counts, no
 });
 
 check("a section the template does not have is never added", () => {
-  const { doc } = applyWrittenCopy(emptyDocForTemplate("free_audit"), written);
+  const { doc } = applyWrittenCopy(emptyDocForTemplate("free_audit"), written, "");
   assert.ok(!doc.sections.some((s) => s.key === "obstacles" || s.key === "work"), "free_audit gained sections it does not have");
   assert.ok(doc.sections.some((s) => s.key === "what_you_get"));
 });
 
 check("generated sentences still meet the claims gate before Publish", () => {
+  // The owner's own words carry the claim, so it is written; the gate still asks them to confirm it.
   const claimy: WrittenCopy = { ...written, hero: { ...written.hero, headline: "Guaranteed to double your revenue" } };
-  const { doc } = applyWrittenCopy(emptyDocForTemplate("book_call"), claimy);
+  const { doc } = applyWrittenCopy(emptyDocForTemplate("book_call"), claimy, "We guarantee it will double your revenue.");
+  assert.equal(doc.hero.headline, "Guaranteed to double your revenue");
   assert.ok(lintDoc(doc, {}).length > 0, "a claim the model wrote anyway would skip the owner's confirmation");
+});
+
+check("a figure or claim word the owner never gave is left out, not saved (the never-invent rule, in code)", () => {
+  const owner = "We answer the phone for dental clinics and book patients.";
+  for (const invented of [
+    "The leading answering service",
+    "Award-winning front desk",
+    "The best way to book",
+    "Number one for clinics",
+    "#1 for clinics",
+    "Book 40% more patients",
+    "From $99 a month",
+    "Live in 14 days",
+    "Step 1: call us",
+    "Guaranteed bookings",
+    "Proven by clinics",
+  ]) {
+    assert.ok(inventsFacts(invented, owner), `"${invented}" was not caught`);
+  }
+  assert.ok(!inventsFacts("We answer the phone and book your patients", owner));
+  assert.ok(!inventsFacts("Live in 14 days", "We go live in 14 days."), "a figure the owner gave is refused");
+  assert.ok(!inventsFacts("The leading clinic service", "the leading clinic service in town"));
+
+  const claimy: WrittenCopy = {
+    ...written,
+    hero: { ...written.hero, headline: "The award-winning way to book", subheadline: "Clinics book 40% more." },
+    what_you_get: { ...written.what_you_get, items: [{ title: "A front desk", body: "Rated best in class." }, { title: "Booked calls", body: "Calls answered for you." }] },
+  };
+  const { doc, withheld } = applyWrittenCopy(emptyDocForTemplate("book_call"), claimy, owner);
+  assert.ok(!doc.hero.headline, "an invented claim was saved");
+  assert.ok(!doc.hero.subheadline, "an invented figure was saved");
+  const wyg = doc.sections.find((s) => s.key === "what_you_get") as { items: Array<{ title: string; body?: string }> };
+  assert.deepEqual(wyg.items[0], { title: "A front desk" }, "the invented sentence stayed in the card");
+  assert.equal(withheld, 3);
+});
+
+check("the owner's description is kept in the brief, their latest words winning", () => {
+  const fresh = emptyDocForTemplate("book_call");
+  const once = withBrief(fresh, { description: "One operating view for a service business.", audience: "Owners" });
+  assert.equal(once.brief?.promise, "One operating view for a service business.");
+  assert.equal(once.brief?.audience, "Owners");
+  assert.equal(withBrief(once, { description: "Newer words from the owner." }).brief?.promise, "Newer words from the owner.");
+  assert.deepEqual(withBrief(once, {}).brief, once.brief, "an empty call changed the brief");
 });
 
 check("the route is an owner action on the workspace AI account that saves a draft and never publishes", () => {
@@ -143,7 +195,7 @@ check("the route is an owner action on the workspace AI account that saves a dra
   assert.match(route, /sameOrigin\(req\)/);
   assert.match(route, /runToolModelCall\(/);
   assert.match(route, /surface: "offer_pages\.write"/);
-  assert.match(route, /saveDraft\(db, \{[^}]*expectedVersion: row\.draftVersion/);
+  assert.match(route, /saveDraft\(db, \{[^}]*expectedVersion: current\.draftVersion/);
   assert.doesNotMatch(route, /publishOffer|offer\/publish|setLive|published_version/, "the route publishes");
   assert.doesNotMatch(route, /ANTHROPIC_API_KEY|inferForTenant/, "the route uses a key or path other than the workspace account");
   assert.ok((USAGE_SURFACES as readonly string[]).includes("offer_pages.write"), "the usage ledger does not know the surface");
@@ -153,6 +205,19 @@ check("the route is an owner action on the workspace AI account that saves a dra
   assert.match(route, /scrubWriteInput\(/);
   assert.match(route, /prompt: writePageUserPrompt\(input\)/, "the prompt is built from something other than the scrubbed input");
   assert.match(route, /writePageInputProblem\(description\)/, "the route and the dialogs refuse different descriptions");
+  // Codex round two: no paid call when nothing is empty; the owner's words are
+  // saved before the call; an answer that fills nothing is not a success; a
+  // write onto a version the editor does not hold is refused.
+  const at = (pattern: string) => {
+    const i = route.indexOf(pattern);
+    assert.ok(i >= 0, `the route lost: ${pattern}`);
+    return i;
+  };
+  assert.ok(at("emptyWritableParts(current.draft).length === 0") < at("runToolModelCall("), "the empty check runs after the paid call");
+  assert.ok(at("withBrief(current.draft") < at("runToolModelCall("), "the description is saved only after the model answers");
+  assert.match(route, /applied\.filled\.length === 0\) return unusable\(\)/);
+  assert.match(route, /expectedVersion !== null && expectedVersion !== current\.draftVersion/);
+  assert.match(route, /offer: offerView\(current, form\)/, "an answer does not carry the page as it now stands");
 });
 
 check("every typed value reaches the model inside an untrusted-data fence, the names too", () => {
@@ -193,15 +258,24 @@ check("a vault value typed into any field is redacted before the prompt is built
 check("the editor offers Write the empty parts exactly while a write would fill something", () => {
   for (const t of OFFER_TEMPLATES) {
     const fresh = emptyDocForTemplate(t.key);
-    const { doc, filled } = applyWrittenCopy(fresh, written);
+    const { doc, filled } = applyWrittenCopy(fresh, written, "");
     assert.deepEqual(emptyWritableParts(fresh).sort(), [...filled].sort(), `${t.key}: what the editor calls empty is not what a write fills`);
     assert.deepEqual(emptyWritableParts(doc), [], `${t.key}: a fully written page still offers the panel`);
   }
-  const page = readFileSync("app/forms/[id]/edit/page.tsx", "utf8");
-  assert.match(page, /emptyWritableParts\(draft\)/);
-  assert.match(page, /emptyParts\.length > 0 \?/);
   const panel = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
+  assert.match(panel, /emptyWritableParts\(doc\)/);
   assert.match(panel, /requestWrittenPage\(formId/, "the editor's panel does not write");
+});
+
+check("the editor's write never loses an unsaved change: it waits for the save, sends its version, and takes up the page without reloading", () => {
+  const panel = readFileSync("components/offer-pages/builder/WriteEmptyParts.tsx", "utf8");
+  assert.match(panel, /disabled=\{busy \|\| unsaved \|\| blocked\}/, "the write can start while a change is unsaved");
+  assert.match(panel, /expectedVersion: version\(\)/);
+  assert.doesNotMatch(panel, /location\.reload|router\.refresh/, "the panel reloads over the editor's state");
+  const builder = readFileSync("components/offer-pages/builder/OfferBuilder.tsx", "utf8");
+  assert.match(builder, /<WriteEmptyParts formId=\{form\.id\} doc=\{doc\} version=\{\(\) => versionRef\.current\} saveState=\{saving\} onOffer=\{takeWritten\} \/>/);
+  // A change made while the words were being written stops the save instead of being overwritten.
+  assert.match(builder, /if \(s === "pending" \|\| s === "saving" \|\| s === "error"\) \{\s*conflict\.current = true;/);
 });
 
 check("a write that fails at creation can be retried: in the New offer dialog, and on the page's editor", () => {

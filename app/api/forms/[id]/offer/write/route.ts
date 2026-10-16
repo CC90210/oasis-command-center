@@ -1,11 +1,12 @@
 /**
- * POST /api/forms/[id]/offer/write  { description, audience? }
+ * POST /api/forms/[id]/offer/write  { description, audience?, expected_version? }
  *
  * "Write my page" (lib/offer-pages/write-page.ts): the workspace's own AI
  * account drafts the words of this offer's page from the owner's description,
  * and the result is saved as the DRAFT. It fills only empty fields, writes no
- * price, result, guarantee or confirmation, and never publishes: the page
- * still goes public only through Publish and its claims gate.
+ * price, result, guarantee or confirmation, leaves out any sentence stating a
+ * figure or claim the owner did not give, and never publishes: the page still
+ * goes public only through Publish and its claims gate.
  *
  * WHO: formsSession({ edit: true }), the rule every forms write uses (an owner
  * or admin of the session's own workspace). Same-origin and rate-capped per
@@ -13,12 +14,19 @@
  * MODEL: runToolModelCall (lib/tools/worker/ai.ts), the workspace AI account
  * path every workspace tool uses: its own key, budget cap and usage ledger
  * (surface "offer_pages.write"); never the platform key or the subscription.
+ * No call is made when the draft has nothing empty to fill.
  * REDACTION: every typed value (names, description, audience) is scrubbed of
  * configured keys and this workspace's vault values before the model sees it
  * (CLAUDE.md "Redaction is load-bearing"). A vault that can't be read in full
  * sends nothing, as a department turn does (lib/os/desk/turn.ts).
- * SAVE: the store's compare-and-swap draft save on the version just read, with
- * the same confirmation stamping and claim ticks as the builder's own save.
+ * SAVES: the owner's (scrubbed) description goes into the page brief BEFORE
+ * the model call, so a write that fails keeps what they typed; then the words.
+ * Each save is the builder's own: compare-and-swap on the version just read,
+ * with its confirmation stamping and claim ticks. expected_version (the offer
+ * editor sends it) refuses a write onto a version the editor does not have.
+ * Every answer after the read carries `offer`, the page as it now stands, the
+ * same shape the builder's save returns, so the editor stays on the version
+ * the server has.
  */
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
@@ -26,18 +34,19 @@ import { sameOrigin } from "@/lib/calendar/http";
 import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { formsSession } from "@/lib/forms/access";
 import { applyClaimTicks, lintDoc, stampConfirmations } from "@/lib/offer-pages/claims";
-import { editableForm, fallbackHeadline } from "@/lib/offer-pages/operator";
-import { offerPagesDb, readOfferRow, saveDraft } from "@/lib/offer-pages/store";
-import { OfferPageError } from "@/lib/offer-pages/types";
+import { editableForm, fallbackHeadline, offerView } from "@/lib/offer-pages/operator";
+import { offerPagesDb, readOfferRow, saveDraft, type OfferRow } from "@/lib/offer-pages/store";
+import { OfferPageError, type OfferPageDoc } from "@/lib/offer-pages/types";
 import {
   applyWrittenCopy,
   parseWrittenCopy,
   scrubWriteInput,
   WRITE_PAGE_LIMITS,
+  withBrief,
   writePageSystemPrompt,
   writePageUserPrompt,
 } from "@/lib/offer-pages/write-page";
-import { writePageInputProblem } from "@/lib/offer-pages/write-page-client";
+import { emptyWritableParts, writePageInputProblem } from "@/lib/offer-pages/write-page-client";
 import { rateLimit } from "@/lib/rate-limit";
 import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/secret-redaction";
 import { toolErrorLine } from "@/lib/tools/errors";
@@ -48,6 +57,8 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const json = (body: Record<string, unknown>, status = 200) => NextResponse.json(body, { status });
+
+const UNAVAILABLE = { ok: false, error: "offer_pages_unavailable", message: "Offer pages aren't switched on yet." } as const;
 
 /** HTTP status for a model-call refusal: the caller can fix some, wait out others. */
 function statusFor(code: string): number {
@@ -87,19 +98,66 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const audience = text(body.audience, WRITE_PAGE_LIMITS.audience);
   const problem = writePageInputProblem(description);
   if (problem) return json({ ok: false, error: "description_required", message: problem }, 400);
+  const expectedVersion = typeof body.expected_version === "number" ? body.expected_version : null;
 
   const db = offerPagesDb();
-  if (!db) return json({ ok: false, error: "offer_pages_unavailable", message: "Offer pages aren't switched on yet." }, 503);
+  if (!db) return json(UNAVAILABLE, 503);
   const form = await editableForm(db, tenantId, id);
   if (!form) return json({ ok: false, error: "not_found" }, 404);
   const read = await readOfferRow(db, tenantId, id);
-  if (read.state === "unavailable") return json({ ok: false, error: "offer_pages_unavailable", message: "Offer pages aren't switched on yet." }, 503);
+  if (read.state === "unavailable") return json(UNAVAILABLE, 503);
   if (read.state === "none") {
     return json({ ok: false, error: "offer_page_missing", message: "Make the page first (New offer, or Turn into an offer)." }, 409);
   }
-  const row = read.row;
-  if (!row.draft) {
-    return json({ ok: false, error: "draft_unreadable", message: "This page's draft can't be read, so nothing was written over it." }, 409);
+  // The page as it stands; every answer from here carries it (header).
+  let current: OfferRow = read.row;
+  const reply = (body: Record<string, unknown>, status = 200) => json({ ...body, offer: offerView(current, form) }, status);
+  if (!current.draft) {
+    return reply({ ok: false, error: "draft_unreadable", message: "This page's draft can't be read, so nothing was written over it." }, 409);
+  }
+  if (expectedVersion !== null && expectedVersion !== current.draftVersion) {
+    return reply(
+      { ok: false, error: "draft_conflict", current_version: current.draftVersion, message: "This page was saved somewhere else since you opened it. Reload, then try again." },
+      409,
+    );
+  }
+  // Nothing empty: no paid call.
+  if (emptyWritableParts(current.draft).length === 0) {
+    return reply({ ok: true, filled: [], message: "Every part of this page already has words, so nothing was changed." });
+  }
+
+  /** One draft save, the builder's own way; the row as saved, or the answer to send. */
+  async function save(next: OfferPageDoc): Promise<{ ok: true } | { ok: false; response: NextResponse }> {
+    const now = new Date().toISOString();
+    const headline = fallbackHeadline(form);
+    const draft = stampConfirmations(next, [current.draft, current.published], actor, now);
+    const claims = applyClaimTicks({
+      existing: current.claims,
+      confirm: [],
+      unconfirm: [],
+      draftHits: lintDoc(draft, { fallbackHeadline: headline }),
+      publishedHits: current.published ? lintDoc(current.published, { fallbackHeadline: headline }) : [],
+      actor,
+      now,
+    });
+    const saved = await saveDraft(db, { tenantId, formId: id, draft, expectedVersion: current.draftVersion, claims, actor, now });
+    if (!saved.ok) {
+      if (saved.error === "conflict") {
+        return {
+          ok: false,
+          response: reply(
+            { ok: false, error: "draft_conflict", current_version: saved.currentVersion, message: "Someone saved this page while it was being written. Reload, then try again." },
+            409,
+          ),
+        };
+      }
+      if (saved.error === "not_found") return { ok: false, response: json({ ok: false, error: "not_found" }, 404) };
+      return { ok: false, response: json(UNAVAILABLE, 503) };
+    }
+    const after = await readOfferRow(db, tenantId, id);
+    if (after.state !== "row") return { ok: false, response: json({ ok: false, error: "not_found" }, 404) };
+    current = after.row;
+    return { ok: true };
   }
 
   const tenant = await db.execute({ sql: "SELECT name FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
@@ -110,15 +168,23 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     vault = await fetchTenantVaultSecretsForRedaction(tenantId, { requireComplete: true });
   } catch (err) {
     console.error("[offer-pages.write] vault unreadable; nothing sent to the model", { formId: id, error: redactAll((err as Error).message) });
-    return json(
+    return reply(
       { ok: false, error: "redaction_unavailable", message: "The page couldn't be written safely just now: your workspace's saved keys couldn't be checked. Try again in a minute." },
       503,
     );
   }
   const input = scrubWriteInput(
-    { offerName: form.name, description, audience, businessName, template: row.template },
+    { offerName: form.name, description, audience, businessName, template: current.template },
     (value) => redactTenantVaultSecrets(redactAll(value), vault),
   );
+
+  // Keep what the owner typed before the model call: a write that fails
+  // still leaves it in the brief, where the editor's retry starts from.
+  const briefed = withBrief(current.draft, { description: input.description, audience: input.audience });
+  if (JSON.stringify(briefed.brief ?? null) !== JSON.stringify(current.draft.brief ?? null)) {
+    const kept = await save(briefed);
+    if (!kept.ok) return kept.response;
+  }
 
   const call = await runToolModelCall({
     tenantId,
@@ -131,55 +197,28 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     requestStartedAt,
   });
   if (!call.ok) {
-    return json({ ok: false, error: call.code, message: toolErrorLine(call.code, "worker") }, statusFor(call.code));
+    return reply({ ok: false, error: call.code, message: toolErrorLine(call.code, "worker") }, statusFor(call.code));
   }
+  const unusable = () => reply({ ok: false, error: "ai_unusable_answer", message: toolErrorLine("ai_unusable_answer", "worker") }, 502);
   const written = parseWrittenCopy(call.text);
-  if (!written) {
-    return json({ ok: false, error: "ai_unusable_answer", message: toolErrorLine("ai_unusable_answer", "worker") }, 502);
-  }
+  if (!written || !current.draft) return unusable();
 
   let applied: ReturnType<typeof applyWrittenCopy>;
   try {
-    // The brief keeps the scrubbed words: it is read by the next writer, a model.
-    applied = applyWrittenCopy(row.draft, written, { description: input.description, audience: input.audience });
+    const source = [input.businessName, input.offerName, input.description, input.audience ?? ""].join("\n");
+    applied = applyWrittenCopy(current.draft, written, source);
   } catch (err) {
     if (err instanceof OfferPageError) {
       console.error("[offer-pages.write] the written page did not parse", { formId: id, path: err.path, reason: err.reason });
-      return json({ ok: false, error: "ai_unusable_answer", message: toolErrorLine("ai_unusable_answer", "worker") }, 502);
+      return unusable();
     }
     throw err;
   }
-  if (applied.filled.length === 0) {
-    return json({
-      ok: true,
-      version: row.draftVersion,
-      filled: [],
-      message: "Every part of this page already has words, so nothing was changed.",
-    });
-  }
+  // Parts were empty (checked above), so an answer that fills none is unusable,
+  // not a success: the caller would show an untouched page as written.
+  if (applied.filled.length === 0) return unusable();
 
-  const now = new Date().toISOString();
-  const headline = fallbackHeadline(form);
-  const draft = stampConfirmations(applied.doc, [row.draft, row.published], actor, now);
-  const claims = applyClaimTicks({
-    existing: row.claims,
-    confirm: [],
-    unconfirm: [],
-    draftHits: lintDoc(draft, { fallbackHeadline: headline }),
-    publishedHits: row.published ? lintDoc(row.published, { fallbackHeadline: headline }) : [],
-    actor,
-    now,
-  });
-  const saved = await saveDraft(db, { tenantId, formId: id, draft, expectedVersion: row.draftVersion, claims, actor, now });
-  if (!saved.ok) {
-    if (saved.error === "conflict") {
-      return json(
-        { ok: false, error: "draft_conflict", current_version: saved.currentVersion, message: "Someone saved this page while it was being written. Reload, then try again." },
-        409,
-      );
-    }
-    if (saved.error === "not_found") return json({ ok: false, error: "not_found" }, 404);
-    return json({ ok: false, error: "offer_pages_unavailable", message: "Offer pages aren't switched on yet." }, 503);
-  }
-  return json({ ok: true, version: saved.version, filled: applied.filled, model: call.model });
+  const wrote = await save(applied.doc);
+  if (!wrote.ok) return wrote.response;
+  return reply({ ok: true, filled: applied.filled, withheld: applied.withheld, model: call.model });
 }

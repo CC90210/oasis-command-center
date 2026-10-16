@@ -12,8 +12,10 @@
  * WHAT IT NEVER WRITES. Prices, results, testimonials, bonus values,
  * guarantees and any owner confirmation: those are facts an owner supplies and
  * confirms (lib/offer-pages/claims.ts publishGate), so the model is told not to
- * invent them and this file has nowhere to put them. The claims gate still
- * reads every generated sentence before Publish.
+ * invent them and this file has nowhere to put them. The rule is also kept in
+ * code: a sentence stating a figure or a claim word (best, leading, award, a
+ * guarantee...) the owner's own words lack is left out (inventsFacts). The
+ * claims gate still reads every generated sentence before Publish.
  *
  * WHAT IT NEVER OVERWRITES. A field that already holds words keeps them; only
  * empty fields and empty sections are filled, so running it on a page an owner
@@ -75,7 +77,7 @@ export function writePageSystemPrompt(): string {
       book: { title: "the booking section's title", lede: "one sentence" },
       seo: { title: "under 70 characters", description: "under 200 characters" },
     }),
-    "Write 3 to 5 obstacles, 3 to 6 deliverables, exactly 3 steps and 3 to 5 FAQ items.",
+    "Write 3 to 5 obstacles, 3 to 6 deliverables, exactly 3 steps and 3 to 5 FAQ items. Do not number the steps or any item: the page numbers them itself, and any figure the description does not state is removed.",
     INJECTION_GUARD,
   ].join("\n\n");
 }
@@ -164,7 +166,9 @@ export function cleanCopy(value: string | undefined, cap: number): string {
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     // Em and en dashes become a plain comma pause.
     .replace(/\s*[\u2013\u2014]\s*/g, ", ")
-    // Anything the parser reads as markup.
+    // Markup: whole tags first (<b>faster</b> reads "faster", not "b>faster/b>"),
+    // then any "<" left that the parser would still read as the start of one.
+    .replace(/<\/?[A-Za-z][^<>]*>/g, "")
     .replace(/<(?=\s*[A-Za-z!/?])/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -178,18 +182,59 @@ export function cleanCopy(value: string | undefined, cap: number): string {
 
 // -- Filling the draft ------------------------------------------------------
 
+// -- The never-invent rule, in code ----------------------------------------
+//
+// The prompt tells the model never to state a fact the owner did not give, but
+// a prompt is a request. The claims gate (claims.ts lintDoc) asks the owner to
+// confirm the claims it recognises, and it does not recognise every superlative
+// ("leading", "award-winning", "number one"). So a sentence the model wrote
+// with a figure or one of these words that the owner's own words do not
+// contain is left out here, before anything is saved.
+
+/** Each family counts as invented when the text has it and the owner's words do not. */
+const CLAIM_FAMILIES: readonly RegExp[] = [
+  /\bbest\b/i,
+  /\b(?:industry[- ])?leading\b/i,
+  /\baward/i,
+  /\btop[- ]rated\b/i,
+  /\bworld[- ]class\b/i,
+  /\bnumber one\b|#\s?1\b|\bno\.\s?1\b/i,
+  /\bguarantee/i,
+  /\bproven\b/i,
+  /\bunmatched\b|\bunbeatable\b|\bunrivall?ed\b/i,
+  /\b(?:fastest|cheapest|largest|biggest|most trusted)\b/i,
+  /\brisk[- ]free\b|\bmoney[- ]back\b/i,
+  /\btestimonial/i,
+  /[$%]/,
+];
+
+/**
+ * True when `text` states a figure or a claim word that `source` (everything
+ * the owner typed: names, description, audience) does not contain. Every digit
+ * run must appear in the source as written, so "3x" or "24/7" survive only when
+ * the owner said them.
+ */
+export function inventsFacts(text: string, source: string): boolean {
+  if (!text) return false;
+  const digitsInSource = new Set(source.match(/\d+/g) ?? []);
+  if ((text.match(/\d+/g) ?? []).some((run) => !digitsInSource.has(run))) return true;
+  return CLAIM_FAMILIES.some((family) => family.test(text) && !family.test(source));
+}
+
+type Cleaner = (value: string | undefined, cap: number) => string;
+
 /** Fill an empty Head title and lede; true when either was filled. */
-function fillHead(target: { title?: string; lede?: string }, source: WrittenHead): boolean {
+function fillHead(target: { title?: string; lede?: string }, source: WrittenHead, clean: Cleaner): boolean {
   let touched = false;
   if (!(target.title || "").trim()) {
-    const title = cleanCopy(source.title, COPY_CAPS.title);
+    const title = clean(source.title, COPY_CAPS.title);
     if (title) {
       target.title = title;
       touched = true;
     }
   }
   if (!(target.lede || "").trim()) {
-    const lede = cleanCopy(source.lede, COPY_CAPS.lede);
+    const lede = clean(source.lede, COPY_CAPS.lede);
     if (lede) {
       target.lede = lede;
       touched = true;
@@ -199,11 +244,11 @@ function fillHead(target: { title?: string; lede?: string }, source: WrittenHead
 }
 
 /** A section's cards from the model, cleaned and capped; titles required, bodies optional. */
-function cardsFrom(source: Item[], cap: number): Array<{ title: string; body?: string }> {
+function cardsFrom(source: Item[], cap: number, clean: Cleaner): Array<{ title: string; body?: string }> {
   return source
     .map((it) => {
-      const title = cleanCopy(it.title, COPY_CAPS.title);
-      const body = cleanCopy(it.body, COPY_CAPS.body);
+      const title = clean(it.title, COPY_CAPS.title);
+      const body = clean(it.body, COPY_CAPS.body);
       return body ? { title, body } : { title };
     })
     .filter((it) => it.title)
@@ -212,22 +257,33 @@ function cardsFrom(source: Item[], cap: number): Array<{ title: string; body?: s
 
 /**
  * The draft with every EMPTY field the template has filled from the model's
- * copy, plus the owner's description kept in the page brief (never published).
- * Returns the parsed document and the list of parts it filled; throws
- * OfferPageError (from parseOfferPageDoc) if the result could not be stored.
+ * copy. `source` is everything the owner typed (names, description, audience):
+ * a sentence stating a figure or claim it lacks is left out (inventsFacts) and
+ * counted in `withheld`. Returns the parsed document and the parts it filled;
+ * throws OfferPageError (from parseOfferPageDoc) if the result could not be
+ * stored. The owner's brief is set by withBrief, not here.
  */
 export function applyWrittenCopy(
   base: OfferPageDoc,
   written: WrittenCopy,
-  brief: { description?: string; audience?: string } = {},
-): { doc: OfferPageDoc; filled: string[] } {
+  source: string,
+): { doc: OfferPageDoc; filled: string[]; withheld: number } {
   const doc = structuredClone(base) as OfferPageDoc;
   const filled = new Set<string>();
+  let withheld = 0;
+  const clean: Cleaner = (value, cap) => {
+    const text = cleanCopy(value, cap);
+    if (text && inventsFacts(text, source)) {
+      withheld += 1;
+      return "";
+    }
+    return text;
+  };
 
   const heroCaps = { eyebrow: COPY_CAPS.eyebrow, headline: COPY_CAPS.headline, subheadline: COPY_CAPS.subheadline, cta_label: COPY_CAPS.cta_label } as const;
   for (const field of Object.keys(heroCaps) as Array<keyof typeof heroCaps>) {
     if ((doc.hero[field] || "").trim()) continue;
-    const text = cleanCopy(written.hero[field], heroCaps[field]);
+    const text = clean(written.hero[field], heroCaps[field]);
     if (text) {
       doc.hero[field] = text;
       filled.add("hero");
@@ -241,10 +297,10 @@ export function applyWrittenCopy(
       case "obstacles":
       case "what_you_get":
       case "work": {
-        const source = written[section.key];
-        let touched = fillHead(section, source);
+        const from = written[section.key];
+        let touched = fillHead(section, from, clean);
         if (section.items.length === 0) {
-          const items = cardsFrom(source.items, ITEM_CAPS[section.key]);
+          const items = cardsFrom(from.items, ITEM_CAPS[section.key], clean);
           if (items.length) {
             section.items = items;
             touched = true;
@@ -254,10 +310,10 @@ export function applyWrittenCopy(
         break;
       }
       case "faq": {
-        let touched = fillHead(section, written.faq);
+        let touched = fillHead(section, written.faq, clean);
         if (section.items.length === 0) {
           const items = written.faq.items
-            .map((it) => ({ q: cleanCopy(it.q, COPY_CAPS.faq_q), a: cleanCopy(it.a, COPY_CAPS.faq_a) }))
+            .map((it) => ({ q: clean(it.q, COPY_CAPS.faq_q), a: clean(it.a, COPY_CAPS.faq_a) }))
             .filter((it) => it.q && it.a)
             .slice(0, ITEM_CAPS.faq);
           if (items.length) {
@@ -273,57 +329,34 @@ export function applyWrittenCopy(
     }
   }
 
-  if (fillHead(doc.book, written.book)) filled.add("book");
+  if (fillHead(doc.book, written.book, clean)) filled.add("book");
 
-  const seoTitle = cleanCopy(written.seo.title, COPY_CAPS.seo_title);
+  const seoTitle = clean(written.seo.title, COPY_CAPS.seo_title);
   if (!(doc.seo.title || "").trim() && seoTitle) {
     doc.seo.title = seoTitle;
     filled.add("seo");
   }
-  const seoDescription = cleanCopy(written.seo.description, COPY_CAPS.seo_description);
+  const seoDescription = clean(written.seo.description, COPY_CAPS.seo_description);
   if (!(doc.seo.description || "").trim() && seoDescription) {
     doc.seo.description = seoDescription;
     filled.add("seo");
   }
 
-  // The owner's own words about the offer, kept for the next writer (Maven or
-  // a re-run). The brief is never published (lib/offer-pages/types.ts).
-  const promise = cleanCopy(brief.description, COPY_CAPS.brief);
-  const audience = cleanCopy(brief.audience, COPY_CAPS.brief);
-  if (promise && !(doc.brief?.promise || "").trim()) doc.brief = { ...(doc.brief ?? {}), promise };
-  if (audience && !(doc.brief?.audience || "").trim()) doc.brief = { ...(doc.brief ?? {}), audience };
-
-  return { doc: parseOfferPageDoc(doc), filled: [...filled] };
+  return { doc: parseOfferPageDoc(doc), filled: [...filled], withheld };
 }
 
 /**
- * The parts of a draft a write would still fill: what the prompt asks the
- * model for (writePageSystemPrompt) that the draft has empty. The offer editor
- * offers "Write the empty parts" only while this is non-empty, so a page that
- * is fully written shows nothing extra. The FAQ has no lede in the prompt, so
- * an FAQ without one is not counted as empty.
+ * The draft with the owner's own words about the offer kept in its brief, for
+ * the next writer (a re-run, or Maven's copy request). The brief is the
+ * owner's notes and is never published (lib/offer-pages/types.ts), so the
+ * words they typed last replace what was there. Saved BEFORE the model call
+ * (the route), so a write that fails still keeps what they typed.
  */
-export function emptyWritableParts(doc: OfferPageDoc): string[] {
-  const blank = (value: string | undefined) => !(value || "").trim();
-  const parts: string[] = [];
-  if (blank(doc.hero.eyebrow) || blank(doc.hero.headline) || blank(doc.hero.subheadline) || blank(doc.hero.cta_label)) {
-    parts.push("hero");
-  }
-  for (const section of doc.sections) {
-    switch (section.key) {
-      case "obstacles":
-      case "what_you_get":
-      case "work":
-        if (blank(section.title) || blank(section.lede) || section.items.length === 0) parts.push(section.key);
-        break;
-      case "faq":
-        if (blank(section.title) || section.items.length === 0) parts.push("faq");
-        break;
-      default:
-        break;
-    }
-  }
-  if (blank(doc.book.title) || blank(doc.book.lede)) parts.push("book");
-  if (blank(doc.seo.title) || blank(doc.seo.description)) parts.push("seo");
-  return parts;
+export function withBrief(base: OfferPageDoc, brief: { description?: string; audience?: string }): OfferPageDoc {
+  const promise = cleanCopy(brief.description, COPY_CAPS.brief);
+  const audience = cleanCopy(brief.audience, COPY_CAPS.brief);
+  const next = { ...(base.brief ?? {}) };
+  if (promise) next.promise = promise;
+  if (audience) next.audience = audience;
+  return parseOfferPageDoc({ ...base, brief: next });
 }
