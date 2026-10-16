@@ -835,7 +835,8 @@ function NewOfferPicker({
                 : "A full page with your form inside. Templates set the sections only; every word is yours to write."}
             </p>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="text-fg-dim hover:text-fg">
+          {/* Not while making or writing: a request that lands after closing would still open the offer. */}
+          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" className="text-fg-dim hover:text-fg disabled:opacity-40">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -895,7 +896,7 @@ function NewOfferPicker({
         {error ? <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-400">{error}</div> : null}
 
         <div className="mt-6 flex items-center justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-fg-muted hover:text-fg">
+          <button type="button" onClick={onClose} disabled={busy} className="rounded-lg px-4 py-2 text-sm text-fg-muted hover:text-fg disabled:opacity-40">
             Cancel
           </button>
           {createdId ? (

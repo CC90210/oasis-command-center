@@ -122,6 +122,8 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
           type="button"
           className="btn-secondary !px-3 !py-1.5 text-xs"
           onClick={() => (made ? router.refresh() : setOpen(false))}
+          // Not while making or writing: a request that lands after cancelling would still refresh into the editor.
+          disabled={busy}
         >
           {made ? "Close" : "Cancel"}
         </button>

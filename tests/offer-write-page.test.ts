@@ -471,11 +471,16 @@ check("the editor's write has one writer: the route saves nothing, and the edito
 check("a write that fails at creation can be retried: in the New offer dialog, and on the page's editor", () => {
   const list = readFileSync("components/forms/FormsListClient.tsx", "utf8");
   assert.match(list, /async function retryWrite\(\)[\s\S]*?requestWrittenPage\(createdId/, "New offer has no retry");
+  // CodeRabbit on #636: the dialogs cannot be dismissed while making or writing,
+  // so a request that lands after closing cannot open or refresh anything.
+  assert.match(list, /<button type="button" onClick=\{onClose\} disabled=\{busy\} aria-label="Close"/);
+  assert.match(list, /<button type="button" onClick=\{onClose\} disabled=\{busy\} className="rounded-lg px-4 py-2/);
   // Codex round eleven: once the offer exists, its template, name and link are
   // saved, and a retry writes words only, so those fields are locked.
   assert.ok((list.match(/disabled=\{!!createdId\}/g) || []).length >= 3, "a made offer's template, name or link still looks editable");
   const turn = readFileSync("components/offer-pages/builder/TurnIntoOffer.tsx", "utf8");
   assert.match(turn, /setMade\(true\)/, "Turn into an offer hides the failure by opening the editor at once");
+  assert.match(turn, /onClick=\{\(\) => \(made \? router\.refresh\(\) : setOpen\(false\)\)\}[\s\S]{0,200}?disabled=\{busy\}/, "Cancel works while writing");
   // Codex round twelve: once the page is made, its inputs are locked (the retry lives on the editor).
   assert.match(turn, /<WritePageDescription value=\{description\} onChange=\{setDescription\} disabled=\{busy \|\| made\} \/>/);
   assert.match(turn, /<WritePageToggle checked=\{writeIt\} onChange=\{setWriteIt\} disabled=\{busy \|\| made\} \/>/);
