@@ -202,6 +202,6 @@ assert.match(
 // 6. Mobile controls meet the platform accessibility floor.
 assert.match(source, /text-\[16px\][^"\n]*sm:text-\[15px\]/, "mobile text inputs stay at 16px to prevent iOS focus zoom");
 const navSource = readFileSync(join(root, "components/marketing/MarketingNav.tsx"), "utf8");
-assert.match(navSource, /className="-mr-2 flex h-11 w-11 items-center justify-center[^\"]*md:hidden"/, "the mobile menu has a 44 by 44 CSS-pixel target");
+assert.match(navSource, /className="-mr-2 flex h-11 w-11 items-center justify-center[^\"]*lg:hidden"/, "the mobile menu has a 44 by 44 CSS-pixel target");
 
 console.log("audit form fields: passed");

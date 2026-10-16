@@ -46,6 +46,10 @@ entity, and `/offers` is its 404 route (`tests/os-redirects.test.ts`).
   flags needs an owner's tick, stored under the sentence's sha256 (editing the
   sentence clears it). The server stamps every confirmation with the saving
   owner and the time, and saving the same content again keeps the first stamp.
+  The owner's preview (`?offer_preview=1`, the builder's Preview tab) also draws
+  a price or guarantee nobody confirmed yet, each with a "Not confirmed yet"
+  note, so the whole page reads before the ticks; a visitor never gets either
+  (`visibility.ts` `unconfirmed`, set only by `render.ts` for the preview).
 - **Templates carry structure only.** No invented copy; an empty section is not
   drawn.
 - **Video loads on tap.** The server HTML holds a poster and a button: no
