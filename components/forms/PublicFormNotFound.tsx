@@ -33,9 +33,11 @@ export function PublicFormNotFound() {
             <Link href="/book" className="btn-primary text-sm">
               Book a call
             </Link>
-            <Link href="/" className="btn-secondary text-sm">
+            {/* "/" is the dashboard for a signed-in visitor: a full load, see SHELL_BOUNDARY_NOTE in lib/marketing/routes.ts. */}
+            {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- a full load is the POINT here; see the note above. */}
+            <a href="/" className="btn-secondary text-sm">
               Visit OASIS AI
-            </Link>
+            </a>
           </div>
         ) : (
           <p className="text-sm text-fg-muted">If someone sent you this link, ask them for a new one.</p>

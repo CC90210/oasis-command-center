@@ -46,4 +46,23 @@ check("only OASIS's own links offer Book a call", () => {
   assert.equal((src.match(/href="\/book"/g) || []).length, 1, "a second Book a call link exists outside the OASIS branch");
 });
 
+check("every /f link shape the form routes do not match reaches the same public page (Codex on #656)", () => {
+  // /f, /f/<workspace>, and a lead link with extra segments. A catch-all cannot
+  // sit beside [tenant_slug], so each shape has its own page calling notFound().
+  for (const page of [
+    "app/f/page.tsx",
+    "app/f/[tenant_slug]/page.tsx",
+    "app/f/[tenant_slug]/[form_slug]/[lead_token]/[...rest]/page.tsx",
+  ]) {
+    assert.ok(existsSync(page), `${page} is missing: that link shape falls through to the app's not-found`);
+    assert.match(readFileSync(page, "utf8"), /notFound\(\)/, `${page} does not call notFound()`);
+  }
+});
+
+check("the link to the site root is a full page load, not a soft navigation (Codex on #656)", () => {
+  const src = readFileSync(component, "utf8");
+  assert.match(src, /<a href="\/" /, "Visit OASIS AI is not a plain anchor");
+  assert.doesNotMatch(src, /<Link href="\/"/, "a soft navigation to / draws the dashboard without its shell for a signed-in visitor");
+});
+
 console.log("public-form-not-found: all passed");
