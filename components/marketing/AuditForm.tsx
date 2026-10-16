@@ -11,11 +11,8 @@ import {
   auditFormContinuationPath,
   auditFormProblem,
 } from "@/components/marketing/audit-form-body";
-import {
-  consentDisclosureText,
-  type ConsentChannel,
-  type ConsentIdentity,
-} from "@/lib/consent/ledger-disclosure";
+import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-disclosure";
+import { ConsentChoice } from "@/components/forms/ConsentChoice";
 import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
 /**
@@ -181,28 +178,20 @@ export function AuditForm({
       </div>
 
       <div className="mt-5 space-y-3 rounded-md border border-ops-line bg-ops-void/35 p-3.5">
-        {(["email", "sms"] as const).map((channel) => {
-          const inputId = `${consentIdBase}-consent-${channel}`;
-          return (
-            <label key={channel} htmlFor={inputId} className="flex cursor-pointer items-start gap-3 py-1">
-              <input
-                id={inputId}
-                name={AUDIT_CONSENT_FIELDS[channel]}
-                value="true"
-                type="checkbox"
-                autoComplete="off"
-                checked={consentTicked[channel]}
-                onChange={(event) =>
-                  setConsentTicked((current) => ({ ...current, [channel]: event.target.checked }))
-                }
-                className="mt-0.5 h-4 w-4 shrink-0 rounded border-ops-edge"
-              />
-              <span className="text-[12px] leading-relaxed text-fg-muted">
-                {consentDisclosureText(channel, consentIdentity)}
-              </span>
-            </label>
-          );
-        })}
+        {(["email", "sms"] as const).map((channel) => (
+          // One summary line per box, the full disclosure under "Full terms"
+          // (components/forms/ConsentChoice.tsx, CC 2026-10-16).
+          <ConsentChoice
+            key={channel}
+            id={`${consentIdBase}-consent-${channel}`}
+            name={AUDIT_CONSENT_FIELDS[channel]}
+            channel={channel}
+            identity={consentIdentity}
+            checked={consentTicked[channel]}
+            onChange={(value) => setConsentTicked((current) => ({ ...current, [channel]: value }))}
+            variant="marketing"
+          />
+        ))}
       </div>
 
       <noscript>

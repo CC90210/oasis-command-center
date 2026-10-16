@@ -39,7 +39,13 @@ export type ConsentIdentity = {
  * documents for the SunBiz/Bluerise vault, and the same reason it matters
  * here: the ledger asserts a person read exactly this text.
  */
-export const CONSENT_DISCLOSURE_VERSION = "occ-ledger-v1-2026-10";
+export const CONSENT_DISCLOSURE_VERSION = "occ-ledger-v2-2026-10-16";
+// v2 (2026-10-16, CC: "remove the text ... just make it a clickable link ... or
+// drops it down"): the WORDING below is unchanged; the PRESENTATION changed.
+// Each box now shows consentSummaryText (who, what, how to stop) and the full
+// disclosure sits one click away under "Full terms", still in the page and
+// tied to the box (aria-describedby). Rows stamped v2 were recorded under that
+// presentation; v1 rows were shown the full text inline.
 
 /**
  * The exact disclosure text for one channel. Deterministic: same channel +
@@ -60,6 +66,25 @@ export function consentDisclosureText(channel: ConsentChannel, identity: Consent
     `enquiry and related offers, including by automated text message. Consent is not a condition of ` +
     `receiving a response. Message and data rates may apply. Reply STOP at any time to opt out. ` +
     `Privacy policy: ${privacyUrl}`
+  );
+}
+
+/**
+ * The line shown beside each consent box (v2 presentation): who is asking,
+ * what for, and how to stop, in one sentence. The full disclosure
+ * (consentDisclosureText: the address, the privacy policy, "not a condition")
+ * is one click away under "Full terms". The SMS line keeps "Msg & data rates
+ * may apply" and "reply STOP" in plain view, as carrier rules expect at the
+ * opt-in itself.
+ */
+export function consentSummaryText(channel: ConsentChannel, identity: ConsentIdentity): string {
+  const { businessName } = identity;
+  if (channel === "email") {
+    return `Yes, ${businessName} may email me about my enquiry and related offers. I can unsubscribe at any time.`;
+  }
+  return (
+    `Yes, ${businessName} may text my mobile about my enquiry and related offers, including automated texts. ` +
+    `Msg & data rates may apply; reply STOP to opt out.`
   );
 }
 
