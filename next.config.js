@@ -17,6 +17,15 @@ const WORKER_BUILD = process.env.CF_MIGRATION_BUILD === "1";
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Metadata always goes in <head>, for every user agent. Next 15.2+ otherwise
+  // streams it into the body for any UA outside a short bot list whenever
+  // generateMetadata is dynamic, as the marketing layout's is (it reads
+  // headers() for the canonical). Measured 2026-10-16: Googlebot, GPTBot and
+  // Chrome got title, description and canonical after </head> on 7 pages.
+  // Google honours rel=canonical only in <head>; AI crawlers run no script to
+  // hoist it. Cost: the shell waits for metadata, which here is a header read.
+  // Pinned by tests/marketing-canonical.test.ts.
+  htmlLimitedBots: /.*/,
   // @napi-rs/canvas ships a platform-native .node binary (used by
   // lib/forms/signature-crop.ts on the autofill-application route).
   // Webpack can't parse a native binary, so it must stay an external

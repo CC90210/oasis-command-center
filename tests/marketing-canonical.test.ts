@@ -86,4 +86,34 @@ for (const key of ["sameAs", "logo", "offers", "streetAddress"]) {
 }
 assert.equal(WEBSITE_JSONLD.publisher["@id"], ORGANIZATION_JSONLD["@id"], "one entity id");
 
+// The tags above must reach the crawler INSIDE <head>. The layout's
+// generateMetadata reads headers(), and Next 15.2+ then streams metadata into
+// the body for every user agent outside its short "HTML-limited bot" list.
+// Measured on oasisai.work 2026-10-16: on /about /audit /contact /dmca
+// /onboarding /pricing /privacy, Googlebot, GPTBot and plain Chrome all got
+// the title, description and canonical after </head>; only Chrome-Lighthouse
+// got them in the head, which is why PageSpeed reported no problem. Google
+// honours rel=canonical only in <head>, and AI crawlers do not run the script
+// that hoists it. Driven through Next's own decision function, not a regex.
+{
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nextConfig = require("../next.config.js");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { shouldServeStreamingMetadata } = require("next/dist/server/lib/streaming-metadata");
+  assert.ok(nextConfig.htmlLimitedBots instanceof RegExp, "next.config.js sets htmlLimitedBots");
+  const configured = nextConfig.htmlLimitedBots.source; // what Next stores after loading the config
+  const agents = {
+    googlebot: "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    gptbot: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)",
+    perplexity: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)",
+    claudebot: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)",
+    chrome: "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+  };
+  for (const [name, ua] of Object.entries(agents)) {
+    assert.equal(shouldServeStreamingMetadata(ua, configured), false, `${name} gets metadata in <head>, not streamed`);
+  }
+  // Proves the check can fail: Next's default list streams to Googlebot.
+  assert.equal(shouldServeStreamingMetadata(agents.googlebot, undefined), true, "without the setting, Googlebot gets streamed metadata");
+}
+
 console.log("marketing-canonical: all assertions passed");
