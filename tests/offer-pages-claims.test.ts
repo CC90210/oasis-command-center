@@ -3,10 +3,16 @@
  * POST /api/forms/[id]/offer/publish), design section 3.5.
  *
  * WHAT IS PINNED:
- *   1. The linter flags money, numbers (digits and number words), percentages,
- *      multipliers ("3x") and the words clients, results, guarantee(d),
- *      proven, revenue, booked, refund, money back, risk-free, ROI, profit,
- *      savings; a plain sentence passes.
+ *   1. The linter flags real claims: money, percentages, multipliers ("3x"),
+ *      digits, spelled-out counts of people, outcomes, time or payments,
+ *      quantity words (thousands, doubled), promised results ("more revenue"),
+ *      superlatives ("the best", "#1", "fastest", "the only") and the words
+ *      guarantee(d), proven, booked, refund, money back, risk-free, ROI, profit,
+ *      savings. It does not flag the noise the owner was ticking on OASIS's
+ *      drafts (2026-10-16): a number that counts nothing ("Four dashboards, no
+ *      answer", "Yes, two.", "Three steps"), the bare words client(s),
+ *      result(s) and revenue ("Clients", "Do I have to share revenue or
+ *      budget?"); a plain sentence passes.
  *   2. A tick is stored under the sentence's sha256: editing the sentence
  *      clears it. A tick can only be added for a sentence the draft flags.
  *   3. Confirmations are stamped by the server: a new one gets the saving
@@ -41,36 +47,120 @@ async function main() {
   console.log("offer-pages-claims:");
 
   // -- 1. the linter -------------------------------------------------------
-  await step("the linter flags money, numbers, percentages, multipliers and the claim words; a plain sentence passes", () => {
+  await step("the linter flags every real claim: money, percentages, multipliers, counts, time saved, results, guarantees, superlatives", () => {
     const flagged: Array<[string, RegExp]> = [
+      // Money amounts and revenue bands.
       ["Starts at $2,500.", /money/],
+      ["$497 a month.", /money/],
+      ["Packs from $17.", /money/],
       ["Priced at 1200 CAD.", /money/],
+      ["For businesses doing $10K to $75K a month.", /money/],
+      // Percentages and multipliers.
       ["Cut admin by 40%.", /percentage/],
+      ["30% more replies.", /percentage/],
       ["Replies get 3x faster.", /multiplier/],
+      ["10x faster follow-up.", /multiplier/],
+      // Counts tied to people or outcomes, in digits or words.
+      ["Trusted by 200 clients.", /number/],
+      ["12 businesses run on it.", /number/],
+      ["500 leads in the first month.", /number/],
+      ["Twelve businesses run on it.", /number/],
+      ["Twenty clients signed on.", /number/],
+      ["Fifty new leads a month.", /number/],
+      // Every number word from two to sixty (CodeRabbit on #635: thirteen, fourteen, sixteen to nineteen were missing).
+      ["Thirteen clients use it.", /number/],
+      ["Fourteen businesses signed on.", /number/],
+      ["Sixteen hours back every week.", /number/],
+      ["Seventeen reviews in a month.", /number/],
+      ["Eighteen new leads.", /number/],
+      ["Nineteen bookings last week.", /number/],
+      // Counted outcomes.
+      ["Get three conversions a day.", /number/],
+      ["Three results you can measure.", /number/],
+      ["Ten wins this quarter.", /number/],
+      // Spelled-out outcome counts the narrowing must keep (Codex on #637).
+      ["We delivered two conversions.", /number/],
+      ["Twenty replies arrived.", /number/],
+      ["Forty five-star reviews.", /number/],
+      ["Three times faster replies.", /number/],
+      ["Thousands of owners use it.", /number/],
+      // Time saved, and when.
+      ["Save 20 hours a week.", /number/],
       ["Save twenty hours a week.", /number/],
       ["It takes 14 days.", /number/],
-      ["Our clients stay.", /clients/],
-      ["See the results.", /results/],
+      // Results with numbers, and promised results.
+      ["Doubled revenue in a quarter.", /number/],
+      ["Cut response time to 2 minutes.", /number/],
+      ["More revenue, less admin.", /result \("more revenue"\)/],
+      ["Real results for real businesses.", /result \("real results"\)/],
+      // A gain with words describing what is gained.
+      ["Get more qualified leads.", /result \("more qualified leads"\)/],
+      ["Boost your monthly revenue.", /result \("boost your monthly revenue"\)/],
+      ["More high-quality, booked calls.", /booked/],
+      // The metric first, then its rise (Codex on #637).
+      ["Revenue increased last quarter.", /result \("revenue increased"\)/],
+      ["Results improved.", /result \("results improved"\)/],
+      ["Sales are up this month.", /result \("sales are up"\)/],
+      ["Close rates went up.", /result \("close rates went up"\)/],
+      // Payment terms are a commercial promise.
+      ["Setup can be split into two payments.", /number/],
+      // Guarantees and the other claim words.
       ["Guaranteed delivery.", /guaranteed/],
-      ["A proven system.", /proven/],
-      ["More revenue, less admin.", /revenue/],
-      ["Calls booked while you sleep.", /booked/],
+      ["A money-back guarantee.", /money-back/],
       ["Money back, no questions asked.", /money back/],
       ["A full refund if it does not fit.", /refund/],
       ["Start risk-free.", /risk-free/],
+      ["A proven system.", /proven/],
+      ["Calls booked while you sleep.", /booked/],
       ["Strong ROI from week one.", /roi/],
       ["Pure profit.", /profit/],
       ["Real savings on admin.", /savings/],
+      // Superlatives.
+      ["The best CRM for trades.", /superlative/],
+      ["The #1 choice for plumbers.", /superlative/],
+      ["The fastest way to answer a lead.", /superlative/],
+      ["The only system built for trades.", /superlative/],
+      ["Best-in-class support.", /superlative/],
     ];
     for (const [s, why] of flagged) {
       const reasons = claims.claimReasons(s);
       assert.ok(reasons.length > 0, `not flagged: ${s}`);
       assert.match(reasons.join(", "), why, s);
     }
-    for (const s of ["We build systems that fit how you work.", "Book a walkthrough.", "One call, then a plan."]) {
-      assert.deepEqual(claims.claimReasons(s), [], `flagged a plain sentence: ${s}`);
-    }
     assert.deepEqual(claims.sentencesOf("First line. Second line!\nThird line"), ["First line.", "Second line!", "Third line"]);
+  });
+
+  await step("the linter does not flag noise: numbers that count nothing, questions, section names, the bare words client, result and revenue", () => {
+    const plain = [
+      "We build systems that fit how you work.",
+      "Book a walkthrough.",
+      "One call, then a plan.",
+      // What the owner was asked to tick on OASIS's drafts on 2026-10-16, none of it a claim.
+      "Four dashboards, no answer",
+      "One operating view, four sections",
+      "Your business should not need four dashboards to answer one question",
+      "Yes, two.",
+      "Answer two quick questions",
+      "Why do you ask about revenue and budget?",
+      "Do I have to share revenue or budget?",
+      "Revenue and budget are optional.",
+      "Clients",
+      "Team, Growth, Clients and Money in one view",
+      "Each client's work, conversations and next steps in one place, so nobody has to ask you.",
+      "Three steps, and you stay in control",
+      // A number joined to clients by "for", not counting them (CodeRabbit on #635).
+      "Three steps for clients",
+      "Two tabs for your clients and their bookings.",
+      "More time for leads that matter.",
+      "Four ways in, from free to fully built.",
+      "New leads, where they came from and the next follow-up, in one pipeline instead of four inboxes.",
+      "See what needs attention, open the source, assign the next move and see the result.",
+      "See the results.",
+      // "only" that is not "the only".
+      "By application only.",
+      "Build only what pays back.",
+    ];
+    for (const s of plain) assert.deepEqual(claims.claimReasons(s), [], `flagged noise: ${s}`);
   });
 
   await step("lint walks every drawn piece of copy, once per sentence, and skips the brief", () => {

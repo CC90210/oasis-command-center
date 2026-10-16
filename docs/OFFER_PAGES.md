@@ -144,9 +144,37 @@ video keeps the step.
   that is linted, including the default thank-you, "A specialist will reach out
   within one business day." Edit the form's words in the Form & booking tab, or
   ask for the linter to cover them.
-- The claim words are: clients, results, guarantee(d), proven, revenue, booked,
-  refund, money back, risk-free, ROI, profit, savings; plus money, numbers,
-  percentages and multipliers.
+- **What the linter flags** (narrowed 2026-10-16: the owner was ticking 29
+  sentences on OASIS's drafts, most of them noise; 9 now). A sentence is a
+  claim when it carries:
+  - money ("$497", "from $17", "1200 CAD", "$10K to $75K a month"), a
+    percentage ("30% more") or a multiplier ("3x", "10x faster");
+  - any digit ("200 clients", "save 20 hours a week", "2 minutes");
+  - a spelled-out count, two to sixty, of people, outcomes, time or payments
+    ("twelve businesses", "fifty new leads", "three conversions", "twenty
+    replies", "twenty hours", "two payments", "three times faster"), or a quantity word
+    (hundreds, thousands, doubled, tripled, half);
+  - a promised result, either way round ("more revenue", "more qualified
+    leads", "grow your leads"; "revenue increased", "results improved", "sales
+    are up"), or results described as good ("real results");
+  - a superlative ("the best", "#1", "number one", "fastest", "the only",
+    "best-in-class", "most trusted");
+  - the words guarantee(d), proven, booked, refund, money back, risk-free,
+    ROI, profit or savings.
+
+  It does **not** flag a spelled-out number that counts nothing a client could
+  hold us to ("Four dashboards, no answer", "One operating view, four
+  sections", "Yes, two.", "Three steps, and you stay in control"), a number
+  joined to a counted word by a connector rather than counting it ("Three
+  steps for clients": words in between may describe, never be "for", "of",
+  "your" and the like), or the bare
+  words client(s), result(s) and revenue ("Clients" as a section name, "Team,
+  Growth, Clients and Money in one view", "Do I have to share revenue or
+  budget?"). A question is linted like any sentence, so one with a real signal
+  ("Is it proven?") is still flagged. A currency note ("Prices in US dollars")
+  is money and stays flagged. The rules and their tests:
+  `lib/offer-pages/claims.ts` (`claimReasons`) and
+  `tests/offer-pages-claims.test.ts`.
 
 ## Not in this version
 
