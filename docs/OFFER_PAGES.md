@@ -163,7 +163,11 @@ video keeps the step.
     leads", "grow your leads"; "revenue increased", "results improved", "sales
     are up"), or results described as good ("real results");
   - a superlative ("the best", "#1", "number one", "fastest", "the only",
-    "best-in-class", "most trusted");
+    "best-in-class", "most trusted", "a leading", "award-winning");
+  - who else uses it ("trusted by", "used by", "relied on by", "serving twenty
+    clinics", "over eighty agencies", "serving one clinic");
+  - a time frame ("same-day", "overnight", "in days", "within hours", "within
+    one week", "within one business day");
   - the words guarantee(d), proven, booked, refund, money back, risk-free,
     ROI, profit or savings.
 
