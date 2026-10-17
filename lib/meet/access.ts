@@ -1,0 +1,229 @@
+/**
+ * lib/meet/access.ts - who may do what in an Oasis Meet room.
+ *
+ * HOST: a signed-in member of the room's workspace who made the room, or who
+ * runs the workspace (owner or admin). A host starts and ends the meeting,
+ * removes people and records. requireMeetHost answers that from the session.
+ *
+ * GUEST: anyone holding the link. Joining with a name gives them a participant
+ * token: an HMAC-signed claim (room, participant, role, expiry) under its own
+ * secret, MEET_TOKEN_SECRET, never shared with any other signer. It travels as
+ * an HttpOnly, Secure, SameSite=Lax cookie whose Path is the room's own API
+ * (/api/meet/abc-defg-hjk), so it is sent nowhere else. The token only says
+ * which participant row is calling: requireMeetParticipant re-reads that row on
+ * every request, so leaving, being removed or the room ending takes effect on
+ * the very next call, whatever the token's expiry says.
+ *
+ * No secret, no meetings: a missing or short MEET_TOKEN_SECRET throws
+ * MeetNotConfiguredError on sign and on verify alike, and the routes answer 503.
+ * There is no unsigned development mode.
+ */
+import "server-only";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import type { Client } from "@libsql/client";
+import { NextResponse } from "next/server";
+import { displayMeetCode, parseMeetCode, readMeetRoomByCode, type MeetRoom } from "./rooms";
+
+export type MeetRole = "host" | "guest";
+
+export const MEET_TOKEN_SECRET_ENV = "MEET_TOKEN_SECRET";
+/** The cookie holding a participant token. One name serves every room: each room's cookie has its own Path. */
+export const MEET_COOKIE = "oasis_meet";
+/** How long a participant token lasts: longer than any meeting, and a new join mints a new one. */
+export const MEET_TOKEN_TTL_S = 12 * 60 * 60;
+const MIN_SECRET_LENGTH = 32;
+const MAX_TOKEN_LENGTH = 1024;
+
+export class MeetNotConfiguredError extends Error {
+  constructor() {
+    super(`${MEET_TOKEN_SECRET_ENV} is missing or shorter than ${MIN_SECRET_LENGTH} characters`);
+    this.name = "MeetNotConfiguredError";
+  }
+}
+
+/** A participant token's claims. `role` is what they joined as; the participant row is what counts. */
+export type MeetTokenClaims = { roomId: string; participantId: string; role: MeetRole; exp: number };
+
+function secret(): string {
+  const value = process.env[MEET_TOKEN_SECRET_ENV];
+  if (!value || value.length < MIN_SECRET_LENGTH) throw new MeetNotConfiguredError();
+  return value;
+}
+
+/** The signature over a token's payload, domain-separated so it can never pass for another signer's. */
+function mac(payload: string): string {
+  return createHmac("sha256", secret()).update(`oasis-meet.v1.${payload}`).digest("base64url");
+}
+
+/** A participant token for a join: base64url(JSON claims) "." base64url(HMAC). */
+export function signMeetToken(claims: Omit<MeetTokenClaims, "exp">, nowMs: number = Date.now()): string {
+  const body = { v: 1, r: claims.roomId, p: claims.participantId, role: claims.role, exp: Math.floor(nowMs / 1000) + MEET_TOKEN_TTL_S };
+  const payload = Buffer.from(JSON.stringify(body)).toString("base64url");
+  return `${payload}.${mac(payload)}`;
+}
+
+/** The claims of a token this server signed and that has not expired; null for anything else. */
+export function verifyMeetToken(token: string | null | undefined, nowMs: number = Date.now()): MeetTokenClaims | null {
+  // The secret is checked first, so a missing one is an outage the route reports, never a quiet "not signed in".
+  secret();
+  if (typeof token !== "string" || token.length === 0 || token.length > MAX_TOKEN_LENGTH) return null;
+  const dot = token.indexOf(".");
+  if (dot <= 0 || dot !== token.lastIndexOf(".")) return null;
+  const payload = token.slice(0, dot);
+  const given = Buffer.from(token.slice(dot + 1));
+  const expected = Buffer.from(mac(payload));
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const { v, r, p, role, exp } = body ?? {};
+  if (v !== 1 || typeof r !== "string" || typeof p !== "string" || (role !== "host" && role !== "guest")) return null;
+  if (typeof exp !== "number" || exp * 1000 <= nowMs) return null;
+  return { roomId: r, participantId: p, role, exp };
+}
+
+/** The room's API path, the participant cookie's Path. Links and calls always use the dashed form. */
+export function meetApiPath(code: string): string {
+  return `/api/meet/${displayMeetCode(code)}`;
+}
+
+/** The cookie a join sets: the token, readable by no script, sent only to this room's API. */
+export function meetCookie(code: string, token: string) {
+  return {
+    name: MEET_COOKIE,
+    value: token,
+    options: { httpOnly: true, secure: true, sameSite: "lax" as const, path: meetApiPath(code), maxAge: MEET_TOKEN_TTL_S },
+  };
+}
+
+/**
+ * Who a signed-in person is in a room: its host (they made it, or they run the workspace), a guest (another
+ * member), or no one (another workspace, which is never told the room exists).
+ */
+export function meetRoleFor(
+  session: { tenantId: string; userId: string; isAdmin: boolean },
+  room: Pick<MeetRoom, "tenantId" | "hostUserId">,
+): MeetRole | null {
+  if (session.tenantId !== room.tenantId) return null;
+  return session.userId === room.hostUserId || session.isAdmin ? "host" : "guest";
+}
+
+const answer = (status: number, error: string) => ({ ok: false as const, response: NextResponse.json({ ok: false, error }, { status }) });
+
+type SessionLike = { ok: true; tenantId: string; userId: string; isAdmin: boolean } | { ok: false };
+
+export type MeetHostResult = { ok: true; tenantId: string; userId: string; room: MeetRoom } | { ok: false; response: NextResponse };
+
+/**
+ * The signed-in host of the room a link names, or the answer to send: 401 not signed in, 404 no such room (also
+ * another workspace's), 403 a member who is not its host. An ended room is still returned: a recording's last
+ * chunks arrive after the host ends the call, so each route decides what an ended room allows.
+ */
+export async function requireMeetHost(
+  db: Client,
+  rawCode: string,
+  resolveSession: () => Promise<SessionLike> = async () => (await import("@/lib/api-auth")).resolveSessionContext(),
+): Promise<MeetHostResult> {
+  const session = await resolveSession();
+  if (!session.ok) return answer(401, "sign_in_required");
+  const code = parseMeetCode(rawCode);
+  const room = code ? await readMeetRoomByCode(db, code) : null;
+  const role = room ? meetRoleFor(session, room) : null;
+  if (!room || role === null) return answer(404, "room_not_found");
+  if (role !== "host") return answer(403, "host_only");
+  return { ok: true, tenantId: room.tenantId, userId: session.userId, room };
+}
+
+export type MeetParticipant = {
+  id: string;
+  tenantId: string;
+  roomId: string;
+  role: MeetRole;
+  userId: string | null;
+  displayName: string;
+  consentAt: string | null;
+  sfuSessionId: string | null;
+  /** What they publish, as the SFU knows it: [{ trackName, kind }]. */
+  tracks: Array<{ trackName: string; kind: string }>;
+  joinedAt: string;
+  lastSeenAt: string;
+  leftAt: string | null;
+  removedAt: string | null;
+};
+
+const PARTICIPANT_COLUMNS =
+  "id, tenant_id, room_id, role, user_id, display_name, consent_at, sfu_session_id, tracks, joined_at, last_seen_at, left_at, removed_at";
+
+const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+
+function parseTracks(raw: unknown): MeetParticipant["tracks"] {
+  try {
+    const list = JSON.parse(String(raw ?? "[]")) as unknown;
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((t): t is { trackName: string; kind: string } => !!t && typeof (t as { trackName?: unknown }).trackName === "string")
+      .map((t) => ({ trackName: t.trackName, kind: String(t.kind ?? "") }));
+  } catch {
+    return [];
+  }
+}
+
+function toParticipant(row: Record<string, unknown>): MeetParticipant {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    roomId: String(row.room_id),
+    role: String(row.role) === "host" ? "host" : "guest",
+    userId: text(row.user_id),
+    displayName: String(row.display_name),
+    consentAt: text(row.consent_at),
+    sfuSessionId: text(row.sfu_session_id),
+    tracks: parseTracks(row.tracks),
+    joinedAt: String(row.joined_at),
+    lastSeenAt: String(row.last_seen_at),
+    leftAt: text(row.left_at),
+    removedAt: text(row.removed_at),
+  };
+}
+
+/** One participant of one room, read in the room's own workspace. */
+export async function readMeetParticipant(
+  db: Client,
+  where: { tenantId: string; roomId: string; participantId: string },
+): Promise<MeetParticipant | null> {
+  const rs = await db.execute({
+    sql: `SELECT ${PARTICIPANT_COLUMNS} FROM meet_participants WHERE tenant_id = ? AND room_id = ? AND id = ? LIMIT 1`,
+    args: [where.tenantId, where.roomId, where.participantId],
+  });
+  return rs.rows[0] ? toParticipant(rs.rows[0] as unknown as Record<string, unknown>) : null;
+}
+
+export type MeetParticipantResult =
+  | { ok: true; room: MeetRoom; participant: MeetParticipant }
+  | { ok: false; response: NextResponse };
+
+/**
+ * The participant calling this room's API, from their cookie, re-read from their row. The answer otherwise:
+ * 404 no such room, 401 no valid token for THIS room (or they left), 403 removed by the host, 410 the room ended.
+ * MeetNotConfiguredError propagates: the route answers 503.
+ */
+export async function requireMeetParticipant(
+  db: Client,
+  req: { cookies: { get(name: string): { value: string } | undefined } },
+  rawCode: string,
+  nowMs: number = Date.now(),
+): Promise<MeetParticipantResult> {
+  const code = parseMeetCode(rawCode);
+  const room = code ? await readMeetRoomByCode(db, code) : null;
+  if (!room) return answer(404, "room_not_found");
+  const claims = verifyMeetToken(req.cookies.get(MEET_COOKIE)?.value, nowMs);
+  if (!claims || claims.roomId !== room.id) return answer(401, "not_in_room");
+  if (room.status === "ended") return answer(410, "room_ended");
+  const participant = await readMeetParticipant(db, { tenantId: room.tenantId, roomId: room.id, participantId: claims.participantId });
+  if (!participant || participant.leftAt) return answer(401, "not_in_room");
+  if (participant.removedAt) return answer(403, "removed");
+  return { ok: true, room, participant };
+}
