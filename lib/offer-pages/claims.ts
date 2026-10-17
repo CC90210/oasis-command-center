@@ -63,7 +63,14 @@ function stable(v: unknown): string {
   return JSON.stringify(v);
 }
 
-type Confirmable = { kind: string; thing: unknown; get(): Confirmation | undefined; set(c: Confirmation): void };
+type Confirmable = {
+  kind: string;
+  /** Where it sits on the page, in words ("hero video rights", "pricing tier 2 \"Managed\""): what a person is told when one is lost. */
+  label: string;
+  thing: unknown;
+  get(): Confirmation | undefined;
+  set(c: Confirmation): void;
+};
 
 function withoutKey<T extends object>(o: T, key: string): Record<string, unknown> {
   const copy: Record<string, unknown> = { ...(o as Record<string, unknown>) };
@@ -74,45 +81,48 @@ function withoutKey<T extends object>(o: T, key: string): Record<string, unknown
 /** Every owner confirmation a document holds, with the thing it vouches for. */
 function confirmables(doc: OfferPageDoc): Confirmable[] {
   const out: Confirmable[] = [];
-  const video = (v: VideoRef | undefined | null) => {
+  const video = (v: VideoRef | undefined | null, where: string) => {
     if (!v) return;
-    out.push({ kind: "rights", thing: withoutKey(v, "rights"), get: () => v.rights, set: (c) => (v.rights = c) });
+    out.push({ kind: "rights", label: `${where} rights`, thing: withoutKey(v, "rights"), get: () => v.rights, set: (c) => (v.rights = c) });
   };
-  video(doc.hero.video);
+  video(doc.hero.video, "hero video");
   for (const s of doc.sections) {
-    if (s.key === "what_you_get" || s.key === "work") s.items.forEach((it) => video(it.video));
+    if (s.key === "what_you_get" || s.key === "work") s.items.forEach((it, i) => video(it.video, `${s.key} item ${i + 1} video`));
     if (s.key === "results") {
-      for (const it of s.items) {
+      s.items.forEach((it, i) => {
         const ev = it.evidence;
         out.push({
           kind: "evidence",
+          label: `results item ${i + 1} evidence`,
           thing: { ...withoutKey(it, "evidence"), evidence: withoutKey(ev, "confirmed") },
           get: () => ev.confirmed,
           set: (c) => (ev.confirmed = c),
         });
-        if (it.kind === "video") video(it.video);
-      }
+        if (it.kind === "video") video(it.video, `results item ${i + 1} video`);
+      });
     }
     if (s.key === "bonuses") {
-      for (const it of s.items) {
+      s.items.forEach((it, i) => {
         const value = it.value;
-        if (!value) continue;
+        if (!value) return;
         out.push({
           kind: "money",
+          label: `bonuses item ${i + 1} value`,
           thing: { cents: value.cents, currency: value.currency },
           get: () => value.confirmed,
           set: (c) => (value.confirmed = c),
         });
-      }
+      });
     }
     if (s.key === "pricing") {
-      for (const it of s.tiers) {
+      s.tiers.forEach((it, i) => {
         // Only a tier that carries a confirmation: registering an unconfirmed
         // one would have stampConfirmations sign it off on the owner's behalf.
-        if (!it.confirmed) continue;
+        if (!it.confirmed) return;
         const tier = it;
         out.push({
           kind: "price",
+          label: `pricing tier ${i + 1}${tier.name ? ` "${tier.name}"` : ""} price`,
           // The whole tier, not just the figure: a confirmation vouches for the
           // card as written (name, price, the Canadian price, cadence,
           // summary, what's included),
@@ -121,12 +131,13 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
           get: () => tier.confirmed,
           set: (c) => (tier.confirmed = c),
         });
-      }
+      });
     }
     if (s.key === "guarantee" && s.confirmed) {
       const g = s;
       out.push({
         kind: "guarantee",
+        label: "guarantee terms",
         thing: { body: g.body ?? "", terms_url: g.terms_url ?? "" },
         get: () => g.confirmed,
         set: (c) => (g.confirmed = c),
@@ -134,6 +145,35 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
     }
   }
   return out;
+}
+
+/** What a confirmation vouches for: its kind and the content it is bound to. Equal content, equal key. */
+const contentKey = (c: Confirmable): string => `${c.kind}|${stable(c.thing)}`;
+
+/** One recorded confirmation: its content AND who stamped it and when. The unit stampConfirmations keeps as it is. */
+const exactKey = (content: string, conf: Confirmation): string => `${content}|${conf.by}|${conf.at}`;
+
+export type HeldConfirmation = { kind: string; label: string; content: string; by: string; at: string };
+
+/** Every confirmation a document holds (one that is missing is not listed), in page order. */
+export function heldConfirmations(doc: OfferPageDoc): HeldConfirmation[] {
+  const out: HeldConfirmation[] = [];
+  for (const c of confirmables(doc)) {
+    const conf = c.get();
+    if (conf) out.push({ kind: c.kind, label: c.label, content: contentKey(c), by: conf.by, at: conf.at });
+  }
+  return out;
+}
+
+/**
+ * The confirmations `previous` holds that `next`, saved exactly as it stands,
+ * does not: the sign-offs a write of `next` over `previous` removes. A
+ * confirmation stays only when `next` carries the same content with the same
+ * stamp (who and when): the match stampConfirmations keeps one by.
+ */
+export function confirmationsNotCarried(previous: OfferPageDoc, next: OfferPageDoc): HeldConfirmation[] {
+  const kept = new Set(heldConfirmations(next).map((h) => exactKey(h.content, h)));
+  return heldConfirmations(previous).filter((h) => !kept.has(exactKey(h.content, h)));
 }
 
 /**
@@ -163,15 +203,15 @@ export function stampConfirmations(
     for (const c of confirmables(p)) {
       const conf = c.get();
       if (!conf) continue;
-      const content = `${c.kind}|${stable(c.thing)}`;
-      exact.add(`${content}|${conf.by}|${conf.at}`);
+      const content = contentKey(c);
+      exact.add(exactKey(content, conf));
       if (!onRecord.has(content)) onRecord.set(content, { by: conf.by, at: conf.at });
     }
   }
   for (const c of confirmables(doc)) {
     const conf = c.get();
-    const content = `${c.kind}|${stable(c.thing)}`;
-    if (conf && exact.has(`${content}|${conf.by}|${conf.at}`)) continue;
+    const content = contentKey(c);
+    if (conf && exact.has(exactKey(content, conf))) continue;
     const recorded = conf ? onRecord.get(content) : undefined;
     c.set(recorded ? { ...recorded } : { by: actor, at: now });
   }

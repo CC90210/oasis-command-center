@@ -326,6 +326,41 @@ async function main() {
     assert.deepEqual(conf(otherOwner), conf(first), "another owner's save of the same content took the confirmation over");
   });
 
+  await step("confirmationsNotCarried names the sign-offs a write removes, by the same match stampConfirmations keeps one by", () => {
+    const STAMP = { by: "u-cc", at: OK.at };
+    const doc = (quote: string, stamp: { by: string; at: string } | null, guarantee = true) =>
+      parseOfferPageDoc(
+        minimalDoc({
+          sections: [
+            { key: "results", items: [{ kind: "quote", quote, who: "Dana", evidence: { permission: true, confirmed: stamp ?? { by: "pending", at: OK.at } } }] },
+            { key: "pricing", tiers: [{ name: "Managed", price: "$2,500", ...(stamp ? { confirmed: stamp } : {}) }] },
+            ...(guarantee && stamp ? [{ key: "guarantee", body: "Keep the build.", confirmed: stamp }] : []),
+          ],
+        }),
+      );
+    const stored = doc("It works.", STAMP);
+    assert.deepEqual(
+      claims.heldConfirmations(stored).map((h) => [h.kind, h.label, h.by, h.at]),
+      [
+        ["evidence", "results item 1 evidence", "u-cc", OK.at],
+        ["price", 'pricing tier 1 "Managed" price', "u-cc", OK.at],
+        ["guarantee", "guarantee terms", "u-cc", OK.at],
+      ],
+    );
+    // Nothing is lost when the same page, with the same stamps, is written.
+    assert.deepEqual(claims.confirmationsNotCarried(stored, doc("It works.", STAMP)), []);
+    // A page with no sign-offs at all (a content file) loses every one.
+    assert.deepEqual(claims.confirmationsNotCarried(stored, doc("It works.", null, false)).map((h) => h.kind), ["evidence", "price", "guarantee"]);
+    // Edited content loses the old sign-off (stampConfirmations re-stamps it with the saver), and so does a different stamp on the same content.
+    assert.deepEqual(claims.confirmationsNotCarried(stored, doc("It works brilliantly.", STAMP)).map((h) => h.kind), ["evidence"]);
+    assert.deepEqual(claims.confirmationsNotCarried(stored, doc("It works.", { by: "u-adon", at: OK.at })).map((h) => h.kind), ["evidence", "price", "guarantee"]);
+    // Agreement with stampConfirmations: whatever it keeps for the saver is carried; what it re-stamps is what was not.
+    const echoed = claims.stampConfirmations(doc("It works.", { by: "pending", at: OK.at }), [stored], "u-adon", "2026-10-09T09:00:00.000Z");
+    assert.deepEqual(claims.confirmationsNotCarried(stored, echoed), [], "a save that kept every sign-off was reported as losing one");
+    const edited = claims.stampConfirmations(doc("It works brilliantly.", STAMP), [stored], "u-adon", "2026-10-09T09:00:00.000Z");
+    assert.deepEqual(claims.confirmationsNotCarried(stored, edited).map((h) => h.kind), ["evidence"], "a save that re-stamped one sign-off was not reported");
+  });
+
   await step("the guarantee blocks Publish while its terms have words and no owner's confirmation, and not once confirmed", () => {
     const withGuarantee = (confirmed?: { by: string; at: string }) =>
       parseOfferPageDoc(minimalDoc({ sections: [{ key: "guarantee", body: "Keep the build if we miss the date.", ...(confirmed ? { confirmed } : {}) }] }));
