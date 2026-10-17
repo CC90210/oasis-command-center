@@ -531,6 +531,9 @@ export default async function PipelinePage({
         basePath="/pipeline"
         variant="oasis"
         canManage={session.ok && session.isAdmin}
+        // Delete is an owner's power only (base role, never the admin_access
+        // grant); /api/leads/bulk op "delete" checks the same.
+        canDelete={session.ok && session.isTrueAdmin}
         // Every sales role may ADD a lead they sourced; the lead is stamped to
         // whoever created it, server-side. Administering other people's leads
         // (bulk assign, new-from-application) stays on canManage above.
