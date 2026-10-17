@@ -8,8 +8,6 @@ import { layoutDay, layoutSpans } from "../lib/calendar/layout";
 import { describeRecurrence, expandOccurrences, planCalendarRemoval, planDelete, planEdit, seriesStarts } from "../lib/calendar/recurrence";
 import { shabbatForWeekOf, sunTimes } from "../lib/calendar/sun";
 import { DEFAULT_PREFS, type EventRecord } from "../lib/calendar/types";
-import { pickLegacyWeek, planLegacyImport } from "../lib/calendar/legacy";
-import { createPlaceholderSchedule } from "../lib/schedule/model";
 import { inputForOccurrence } from "../components/calendar/ui";
 import { addsTime, shabbatConflict, validateEventInput, validateOps, validatePrefs } from "../lib/calendar/validate";
 
@@ -388,35 +386,6 @@ const take = <T>(g: Generator<T>, n: number) => {
   assert.ok(shabbatConflict(allDaySat, DEFAULT_PREFS));
   const allDayFri = { ...good, allDay: true, start: "2026-10-02", end: "2026-10-03" };
   assert.equal(shabbatConflict(allDayFri, DEFAULT_PREFS), null, "an all-day Friday marker is allowed");
-}
-
-// ── Legacy import (the old browser-only weekly template) ──────────────────
-
-{
-  const doc = createPlaceholderSchedule(local("2026-12-16T12:00")); // a winter week
-  const newer = { ...doc, updatedAt: "2099-01-01T00:00:00.000Z" };
-  assert.equal(pickLegacyWeek(["not json", JSON.stringify(doc), JSON.stringify(newer), null])?.updatedAt, newer.updatedAt);
-  const plan = planLegacyImport(doc, "cal", "America/Toronto", DEFAULT_PREFS);
-  assert.ok(!plan.events.some((e) => e.title.startsWith("Shabbat")), "Shabbat blocks are computed now, never imported");
-  assert.ok(!plan.events.some((e) => e.title === "Work"), "a Work container shown through its children is skipped");
-  // Weekly one-day series, plus single shortened Fridays (below).
-  assert.ok(plan.events.every((e) => (e.recurrence?.freq === "WEEKLY" && e.recurrence.byWeekday?.length === 1) || (!e.recurrence && new Date(e.start).getDay() === 5)));
-  const run = plan.events.find((e) => e.title === "Run" && new Date(e.start).getDay() === 1);
-  assert.ok(run && new Date(run.start).getHours() === 7 && new Date(run.start).getMinutes() === 30);
-  // Mid-December Montréal candle lighting is ~3:55pm: the Friday R&D block
-  // (3:30-5pm) collides on winter Fridays. It goes through the routine's
-  // Shabbat splitter (routine.ts planAroundShabbat) instead of being dropped
-  // for the whole year: a series bounded at the checked horizon, with the
-  // clashing weeks taken out and shortened single Fridays in their place.
-  assert.deepEqual(plan.skippedForShabbat, []);
-  assert.deepEqual(plan.adjustedForShabbat, ["Friday Agent training / R&D"]);
-  const fridayRnd = plan.events.filter((e) => e.title === "Agent training / R&D" && new Date(e.start).getDay() === 5);
-  const rndSeries = fridayRnd.filter((e) => e.recurrence);
-  assert.equal(rndSeries.length, 1);
-  assert.ok(rndSeries[0].recurrence?.until && rndSeries[0].exdates.length > 0, "bounded, with the clashing weeks taken out");
-  assert.ok(fridayRnd.some((e) => !e.recurrence && new Date(e.end).getHours() === 16), "a shortened January Friday ends before 4:20pm candles");
-  assert.equal(plan.events.filter((e) => e.recurrence).length, 54, "6 days x 9 blocks, every one kept");
-  for (const e of plan.events) assert.equal(shabbatConflict(e, DEFAULT_PREFS), null);
 }
 
 console.log("calendar-engine: all checks passed");

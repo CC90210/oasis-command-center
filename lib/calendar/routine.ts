@@ -1,7 +1,6 @@
 /**
  * CC's weekly routine as repeating calendar events (buildRoutineSeries), and
- * the Shabbat splitter the routine and the old-browser import share
- * (planAroundShabbat).
+ * the Shabbat splitter it uses (planAroundShabbat).
  *
  * WHY. The old Schedule page drew this routine on every device from
  * lib/schedule/model.ts createPlaceholderSchedule and kept only edits in the
@@ -51,7 +50,7 @@ const MINUTE_MS = 60_000;
 const WEEK_MS = 7 * 86_400_000;
 const DESCRIPTION_MAX = 8000;
 
-/** Calendar colour per old block category (the legacy import uses the same map). */
+/** Calendar colour per old block category. */
 export const BLOCK_HUE: Record<ScheduleBlock["category"], CalendarColor> = {
   morning: "saffron",
   work: "tide",
@@ -82,7 +81,7 @@ function blockKey(b: ScheduleBlock): string {
  * The blocks a person keeps, one per distinct block and time with the days it
  * repeats on. Computed Shabbat blocks, locked blocks and a container shown
  * through its children ("Work", split into three) are left out, as the old
- * page and the legacy import leave them out.
+ * page left them out.
  */
 export function routineBlocks(doc: ScheduleDocument = createPlaceholderSchedule()): RoutineBlock[] {
   const parents = new Set(doc.blocks.filter((b) => b.parentId).map((b) => b.parentId!));

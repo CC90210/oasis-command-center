@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { BOOK_FORM_SLUG } from "@/lib/forms/public-booking-config";
 import { publicBookingFormEnabled } from "@/lib/forms/public-booking";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { hostCalendarStatuses } from "@/lib/booking/host-calendar-status";
 import type { BookingSettings } from "@/lib/booking/hours";
 import { applyBookingSettingsEdit } from "@/lib/booking/settings-edit";
 import {
@@ -13,8 +14,6 @@ import {
 } from "@/lib/booking/settings-store";
 import { badRequest, errorResponse, forbidden, readJson, requireOwner, sameOrigin } from "@/lib/calendar/http";
 import { listCalendars } from "@/lib/calendar/store";
-import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
-import { personalGoogleStatus } from "@/lib/os/connectors";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
@@ -31,22 +30,6 @@ export const dynamic = "force-dynamic";
  * OASIS only for now: the public booking engine serves the OASIS workspace.
  * Any other workspace gets { available: false } and the card is not drawn.
  */
-
-/**
- * Whether each host's own Google Calendar can be read. Availability refuses to
- * substitute any other account for a host's free time, so a host who is not
- * connected closes their on-duty slots (the organizer: every slot). The card
- * says so in the same words Settings uses, never silence.
- */
-async function hostCalendarStatus(tenantId: string, userId: string): Promise<{ ready: boolean; label: string }> {
-  try {
-    const status = personalGoogleStatus(await readPersonalGoogleFact(tenantId, userId));
-    return { ready: status.state === "ready", label: status.label };
-  } catch (err) {
-    console.error("[calendar.booking.host-status]", err instanceof Error ? err.message : err);
-    return { ready: false, label: "Status unavailable" };
-  }
-}
 
 /**
  * The settings as the signed-in person may see them: everyone's hours, but only
@@ -81,9 +64,16 @@ export async function GET(): Promise<NextResponse> {
       publicBookingFormEnabled(getServiceSupabase(), BOOK_FORM_SLUG),
     ]);
     const identities = hostIdentities(roster);
-    const statuses = await Promise.all(
-      loaded.settings.hosts.map((host) => hostCalendarStatus(owner.tenantId, host.userId)),
-    );
+    // The same calendar read /book makes for each host, with each host's own
+    // address (lib/booking/host-calendar-status.ts). It spends Google calls, so
+    // each host's answer is kept for 30 seconds and one read gets 8 seconds. A
+    // host whose calendar cannot be read closes their on-duty slots; the card
+    // says why.
+    const statuses = await hostCalendarStatuses({
+      tenantId: owner.tenantId,
+      hosts: loaded.settings.hosts,
+      identities,
+    });
     return NextResponse.json(
       {
         ok: true,
