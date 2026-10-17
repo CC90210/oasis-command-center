@@ -8,6 +8,7 @@
  */
 import assert from "node:assert/strict";
 import {
+  ChunkUploadError,
   createMeetRecorder,
   pickMimeType,
   uploadToRoom,
@@ -33,6 +34,8 @@ class FakeRecorder implements RecorderLike {
   onstop: (() => void) | null = null;
   onerror: ((ev: unknown) => void) | null = null;
   started?: number;
+  /** When set, stop() returns at once and the last chunk and stop event come later (finishStop). */
+  deferStop = false;
   constructor(readonly mimeType: string, readonly stream: unknown) {}
   start(timesliceMs?: number) {
     this.state = "recording";
@@ -43,9 +46,16 @@ class FakeRecorder implements RecorderLike {
   }
   stop() {
     this.state = "inactive";
+    if (!this.deferStop) this.finishStop();
+  }
+  finishStop() {
     // A real MediaRecorder hands over its last data, then fires stop.
     this.ondataavailable?.({ data: new Blob(["final"]) });
     this.onstop?.();
+  }
+  fail() {
+    this.state = "inactive";
+    this.onerror?.({ error: "NotSupportedError" });
   }
 }
 
@@ -62,10 +72,11 @@ function factory(supported: string[]) {
   return { f, made };
 }
 
-function track(kind = "audio") {
+function track(kind = "audio", readyState = "live") {
   const listeners: Record<string, Array<() => void>> = {};
   return {
     kind,
+    readyState,
     addEventListener: (ev: string, fn: () => void) => {
       (listeners[ev] ??= []).push(fn);
     },
@@ -114,7 +125,7 @@ async function main() {
     assert.ok(host.every((c) => c.segmentId === "seg-1" && c.segmentStartedAt === 1_000));
     assert.ok(ada.every((c) => c.segmentId === "seg-2" && c.segmentStartedAt === 5_000), "Ada's start time is not her own");
     assert.ok(h.uploaded.every((c) => c.mimeType === "audio/webm;codecs=opus"));
-    assert.deepEqual(report, { sent: 5, failed: 0, segments: 2 });
+    assert.deepEqual(report, { sent: 5, failed: 0, segments: 2, errored: 0 });
   });
 
   await check("Safari records MP4/AAC; the container is whatever the browser supports", () => {
@@ -165,7 +176,7 @@ async function main() {
     const report = await h.rec.stop();
     assert.equal(got.length, 1);
     assert.deepEqual(h.slept, [10, 20], "no backoff between retries");
-    assert.deepEqual(report, { sent: 1, failed: 0, segments: 1 });
+    assert.deepEqual(report, { sent: 1, failed: 0, segments: 1, errored: 0 });
   });
 
   await check("a chunk that never uploads is reported, and stop() still returns", async () => {
@@ -173,7 +184,7 @@ async function main() {
     h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: track() });
     h.made[0].emit("a");
     const report = await h.rec.stop();
-    assert.deepEqual(report, { sent: 0, failed: 2, segments: 1 });
+    assert.deepEqual(report, { sent: 0, failed: 2, segments: 1, errored: 0 });
     // Two chunks retry concurrently, so their waits interleave: three each, the last delay repeating.
     assert.deepEqual([...h.slept].sort((a, b) => a - b), [10, 10, 20, 20, 20, 20], "retries did not repeat the last delay");
   });
@@ -192,6 +203,66 @@ async function main() {
     order.push("stopped");
     assert.deepEqual([...order].sort(), ["stopped", "up0", "up1"]);
     assert.equal(order[order.length - 1], "stopped", "stop() resolved before the uploads finished");
+  });
+
+  await check("stop() waits for a speaker who left just before End to hand over their last chunk (1c on #681)", async () => {
+    const h = harness();
+    h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: track() });
+    h.made[0].deferStop = true;
+    h.rec.removeTrack("g1"); // Ada leaves; her recorder is still flushing
+    setTimeout(() => h.made[0].finishStop(), 30); // her last chunk arrives after End is pressed
+    const report = await h.rec.stop();
+    assert.deepEqual(h.uploaded.map((c) => c.seq), [0], "Ada's last chunk was lost: stop() resolved before it arrived");
+    assert.equal(report.sent, 1);
+  });
+
+  await check("stop() stops waiting for a recorder that never fires stop", async () => {
+    const { f, made } = factory(["audio/webm;codecs=opus"]);
+    const rec = createMeetRecorder({
+      code: "abcdefghij", recorders: f, upload: async () => undefined, sleep: async () => undefined,
+      streamOf: (t) => t as unknown as MediaStream, flushTimeoutMs: 20,
+    });
+    rec.addTrack({ participantId: "g1", displayName: "Ada", track: track() });
+    made[0].deferStop = true; // never finishes
+    const started = Date.now();
+    await rec.stop();
+    assert.ok(Date.now() - started < 1_000, "End hung on a recorder that never stopped");
+  });
+
+  await check("a refusal is not retried: signed out, room ended, too large fail at once (1c on #681)", async () => {
+    for (const status of [400, 401, 403, 404, 410, 413]) {
+      const h = harness({ upload: async () => { throw new ChunkUploadError(status); } });
+      h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: track() });
+      const report = await h.rec.stop();
+      assert.deepEqual(h.slept, [], `${status} was retried`);
+      assert.equal(report.failed, 1);
+    }
+    for (const status of [408, 425, 429, 500, 503]) {
+      assert.equal(new ChunkUploadError(status).retryable, true, `${status} should be retried`);
+    }
+  });
+
+  await check("a recorder that dies restarts the speaker on a new segment, and the host is told (1c on #681)", async () => {
+    const h = harness();
+    h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: track() });
+    h.made[0].emit("a");
+    h.made[0].fail();
+    assert.equal(h.made.length, 2, "the rest of Ada's audio is not being recorded");
+    h.made[1].emit("b");
+    for (let i = 0; i < 5; i += 1) h.made[h.made.length - 1].fail(); // the last dead one reports again too
+    assert.equal(h.made.length, 4, "a recorder that keeps failing was restarted without limit");
+    const report = await h.rec.stop();
+    assert.equal(report.errored, 4);
+    const segs = [...new Set(h.uploaded.map((c) => c.segmentId))];
+    assert.ok(segs.length >= 2, "the restart reused the dead segment");
+  });
+
+  await check("a dead recorder on an ended track is not restarted", async () => {
+    const h = harness();
+    h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: track("audio", "ended") });
+    h.made[0].fail();
+    assert.equal(h.made.length, 1);
+    assert.equal((await h.rec.stop()).errored, 1);
   });
 
   await check("empty data is skipped, and nothing is recorded after stop()", async () => {

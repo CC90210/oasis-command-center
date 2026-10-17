@@ -68,9 +68,32 @@ export type MeetRecorderOptions = {
   sleep?: (ms: number) => Promise<void>;
   /** Wraps a single track as a stream (tests have no MediaStream). */
   streamOf?: (track: MediaStreamTrack) => MediaStream;
+  /** How long stop() waits for a recorder that is already stopping. */
+  flushTimeoutMs?: number;
 };
 
-export type StopReport = { sent: number; failed: number; segments: number };
+/**
+ * sent: chunks stored. failed: chunks that never were (logged each). segments:
+ * recorder runs started. errored: recorder runs that died mid-call; the speaker
+ * was restarted on a new segment when their track was still live, but some of
+ * their audio may be missing, which the host should be told.
+ */
+export type StopReport = { sent: number; failed: number; segments: number; errored: number };
+
+/**
+ * An upload the server answered. Only answers that can change on a retry are
+ * retried (a timeout, too many requests, a server error); a refusal (signed out,
+ * room ended, too large) fails the chunk at once instead of holding stop() for a
+ * minute of backoff. A thrown network error is always retried.
+ */
+export class ChunkUploadError extends Error {
+  constructor(readonly status: number) {
+    super(`chunk_upload_${status}`);
+  }
+  get retryable(): boolean {
+    return this.status === 408 || this.status === 425 || this.status === 429 || this.status >= 500;
+  }
+}
 
 export type MeetRecorder = {
   addTrack(input: { participantId: string; displayName: string; track: MediaStreamTrack }): void;
@@ -84,6 +107,10 @@ export const RECORDING_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/m
 export const DEFAULT_TIMESLICE_MS = 10_000;
 const DEFAULT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 const DEFAULT_MAX_ATTEMPTS = 8;
+/** A recorder told to stop hands over its last chunk and fires stop; past this, stop() stops waiting for it. */
+const DEFAULT_FLUSH_TIMEOUT_MS = 5_000;
+/** A speaker whose recorder keeps failing is restarted this many times, then reported. */
+const MAX_RESTARTS = 3;
 
 /** The first container this browser can record, or undefined to let it choose. */
 export function pickMimeType(isTypeSupported: (type: string) => boolean): string | undefined {
@@ -114,7 +141,7 @@ export function uploadToRoom(code: string): UploadChunk {
     });
     // 409 duplicate: the chunk is already stored (a retry after a lost response). Done.
     if (res.ok || res.status === 409) return;
-    throw new Error(`chunk_upload_${res.status}`);
+    throw new ChunkUploadError(res.status);
   };
 }
 
@@ -129,6 +156,7 @@ function browserRecorders(): RecorderFactory {
 type Running = {
   participantId: string;
   displayName: string;
+  track: MediaStreamTrack;
   segmentId: string;
   startedAt: number;
   seq: number;
@@ -146,13 +174,18 @@ export function createMeetRecorder(options: MeetRecorderOptions): MeetRecorder {
   const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const streamOf = options.streamOf ?? ((track: MediaStreamTrack) => new MediaStream([track]));
+  const flushTimeoutMs = options.flushTimeoutMs ?? DEFAULT_FLUSH_TIMEOUT_MS;
   const mimeType = pickMimeType((t) => recorders.isTypeSupported(t));
 
   const running = new Map<string, Running>();
+  /** Recorders told to stop whose last chunk and stop event have not arrived yet. */
+  const stopping = new Set<Promise<void>>();
   const pending = new Set<Promise<void>>();
+  const restarts = new Map<string, number>();
   let sent = 0;
   let failed = 0;
   let segments = 0;
+  let errored = 0;
   let closed = false;
 
   async function send(chunk: RecorderChunk): Promise<void> {
@@ -162,7 +195,8 @@ export function createMeetRecorder(options: MeetRecorderOptions): MeetRecorder {
         sent += 1;
         return;
       } catch (err) {
-        if (attempt >= maxAttempts) {
+        const final = attempt >= maxAttempts || (err instanceof ChunkUploadError && !err.retryable);
+        if (final) {
           failed += 1;
           console.error("[meet.recorder] chunk not uploaded", {
             participantId: chunk.participantId,
@@ -182,12 +216,57 @@ export function createMeetRecorder(options: MeetRecorderOptions): MeetRecorder {
     pending.add(p);
   }
 
+  /** Stop one speaker's recorder; stop() keeps waiting for it until its last chunk is handed over. */
   function stopOne(participantId: string): Promise<void> {
     const run = running.get(participantId);
     if (!run) return Promise.resolve();
     running.delete(participantId);
+    stopping.add(run.stopped);
+    void run.stopped.then(() => stopping.delete(run.stopped));
     if (run.recorder.state !== "inactive") run.recorder.stop();
     return run.stopped;
+  }
+
+  function startSegment(participantId: string, displayName: string, track: MediaStreamTrack) {
+    const recorder = recorders.create(streamOf(track), mimeType);
+    let resolveStopped: () => void = () => undefined;
+    const stopped = new Promise<void>((r) => {
+      resolveStopped = r;
+    });
+    const run: Running = { participantId, displayName, track, segmentId: newId(), startedAt: now(), seq: 0, recorder, stopped };
+    const type = recorder.mimeType || mimeType || "audio/webm";
+    recorder.ondataavailable = (ev) => {
+      if (!ev.data || ev.data.size === 0) return;
+      enqueue({
+        participantId: run.participantId,
+        displayName: run.displayName,
+        segmentId: run.segmentId,
+        seq: run.seq++,
+        segmentStartedAt: run.startedAt,
+        mimeType: type,
+        data: ev.data,
+      });
+    };
+    recorder.onstop = () => resolveStopped();
+    let failedOnce = false;
+    recorder.onerror = (ev) => {
+      if (failedOnce) return; // one dead recorder is one gap, however many errors it reports
+      failedOnce = true;
+      errored += 1;
+      console.error("[meet.recorder] recorder error", { participantId, error: String((ev as { error?: unknown })?.error ?? ev) });
+      resolveStopped();
+      // The rest of this speaker's audio is not lost quietly: a track still live gets a new segment.
+      if (running.get(participantId)?.segmentId !== run.segmentId) return;
+      running.delete(participantId);
+      const tries = restarts.get(participantId) ?? 0;
+      if (!closed && track.readyState !== "ended" && tries < MAX_RESTARTS) {
+        restarts.set(participantId, tries + 1);
+        startSegment(participantId, displayName, track);
+      }
+    };
+    running.set(participantId, run);
+    segments += 1;
+    recorder.start(timeslice);
   }
 
   return {
@@ -196,45 +275,12 @@ export function createMeetRecorder(options: MeetRecorderOptions): MeetRecorder {
       if (track.kind !== "audio") return;
       // A replaced track is a new segment: close the old one first.
       void stopOne(participantId);
-      const recorder = recorders.create(streamOf(track), mimeType);
-      let resolveStopped: () => void = () => undefined;
-      const stopped = new Promise<void>((r) => {
-        resolveStopped = r;
-      });
-      const run: Running = {
-        participantId,
-        displayName,
-        segmentId: newId(),
-        startedAt: now(),
-        seq: 0,
-        recorder,
-        stopped,
-      };
-      const type = recorder.mimeType || mimeType || "audio/webm";
-      recorder.ondataavailable = (ev) => {
-        if (!ev.data || ev.data.size === 0) return;
-        enqueue({
-          participantId: run.participantId,
-          displayName: run.displayName,
-          segmentId: run.segmentId,
-          seq: run.seq++,
-          segmentStartedAt: run.startedAt,
-          mimeType: type,
-          data: ev.data,
-        });
-      };
-      recorder.onstop = () => resolveStopped();
-      recorder.onerror = (ev) => {
-        console.error("[meet.recorder] recorder error", { participantId, error: String((ev as { error?: unknown })?.error ?? ev) });
-        resolveStopped();
-      };
-      // A track that ends (the speaker left, a device was unplugged) ends its segment.
+      restarts.delete(participantId);
+      startSegment(participantId, displayName, track);
+      // A track that ends (the speaker left, a device was unplugged) ends whichever segment records it.
       track.addEventListener?.("ended", () => {
-        if (running.get(participantId)?.segmentId === run.segmentId) void stopOne(participantId);
+        if (running.get(participantId)?.track === track) void stopOne(participantId);
       });
-      running.set(participantId, run);
-      segments += 1;
-      recorder.start(timeslice);
     },
 
     removeTrack(participantId) {
@@ -243,10 +289,20 @@ export function createMeetRecorder(options: MeetRecorderOptions): MeetRecorder {
 
     async stop() {
       closed = true;
-      // Every recorder flushes its last chunk on stop; then wait for every upload.
-      await Promise.all([...running.keys()].map((id) => stopOne(id)));
+      // Stop what is still recording, then wait for every recorder already stopping (a speaker who left
+      // just before End) to hand over its last chunk - bounded, so a recorder that never fires stop
+      // cannot hold the End button - and then for every upload.
+      for (const id of [...running.keys()]) void stopOne(id);
+      if (stopping.size) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<void>((r) => {
+          timer = setTimeout(r, flushTimeoutMs);
+        });
+        await Promise.race([Promise.all([...stopping]), timeout]);
+        if (timer) clearTimeout(timer);
+      }
       while (pending.size) await Promise.all([...pending]);
-      return { sent, failed, segments };
+      return { sent, failed, segments, errored };
     },
   };
 }
