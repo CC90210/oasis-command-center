@@ -34,6 +34,7 @@ import {
   isPublicBookingSurface,
 } from "@/lib/forms/public-booking-config";
 import type { BookMode } from "@/lib/offer-pages/types";
+import { firstContactStepIndex } from "@/lib/forms/contact-gate";
 import { ACCENT_BORDER, ACCENT_WASH } from "./styles";
 
 export type EmbeddedFormProps = Omit<Parameters<typeof FormPublicClient>[0], "chrome" | "onStepSubmitted">;
@@ -138,7 +139,9 @@ export function OfferBook({
         {...form}
         chrome="embedded"
         onStepSubmitted={(stepIndex) => {
-          if (stepIndex === 0) setContactDone(true);
+          // "Your details are in" once the details are: COMMUNITY asks two
+          // questions before its contact step (lib/forms/contact-gate.ts).
+          if (stepIndex === Math.max(0, firstContactStepIndex(form.steps))) setContactDone(true);
         }}
       />
     </div>

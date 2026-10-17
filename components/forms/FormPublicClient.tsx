@@ -35,6 +35,7 @@ import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
+import { contactGateAction, contactHandoff, firstContactStepIndex } from "@/lib/forms/contact-gate";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -246,6 +247,10 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
     "An earlier step is not finished yet. Go back and complete it, then continue.",
   anonymous_init_requires_step_0:
     "This form needs to be started from the beginning. Please reopen your link.",
+  route_only_requires_anonymous:
+    "This form needs to be started from the beginning. Please reopen your link.",
+  // No lead without a way to reach them (lib/forms/contact-gate.ts).
+  contact_required: "Add an email address or a phone number so we can reach you.",
 
   /*
    * THE LINK ITSELF IS BAD. `/api/forms/submit` builds these as
@@ -426,6 +431,12 @@ export function FormPublicClient({
   // remaining questions are optional.
   const [bookedEarly, setBookedEarly] = useState(alreadyBooked);
   const [skippedQuestions, setSkippedQuestions] = useState(false);
+  // The first step that asks for an email or phone (-1: none, the VSL router).
+  // Until a lead exists, the answers to the steps before it are held here, and
+  // how many of them already reached the server (lib/forms/contact-gate.ts).
+  const contactStep = useMemo(() => firstContactStepIndex(steps), [steps]);
+  const heldSteps = useRef<Array<Record<string, unknown> | undefined>>([]);
+  const heldStepsSent = useRef(0);
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
   // rendered as "continue now" buttons on the thank-you screen.
@@ -818,6 +829,150 @@ export function FormPublicClient({
     setEarlyCalendarStep(null);
   }
 
+  /**
+   * Show a refused submission as a plain sentence. Beacon only the failures
+   * nobody else can see or that mean a crash: a non-JSON response (platform
+   * error page, 413) or an explicit server_error, plus an error code with no
+   * copy, which means the route grew a rejection nobody wrote a sentence for.
+   * Validation and rate-limit responses are the system working, not a
+   * merchant being lost.
+   */
+  function showSubmitFailure(res: Response, data: SubmitResponse | null, payload: Record<string, unknown>) {
+    if (!data || data.error === "server_error") {
+      reportSubmitFailure(data ? "server_error" : `non_json_http_${res.status}`, payload);
+    }
+    if (data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
+      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload);
+    }
+    // The route writes a specific sentence for the rejections that can name
+    // their own problem (which field, what is missing). Prefer it; fall back to
+    // our copy for the code; never show the bare code.
+    const copy =
+      data?.message ||
+      (data?.error ? SUBMIT_ERROR_COPY[data.error] : undefined) ||
+      SUBMIT_ERROR_FALLBACK;
+    setServerError(copy);
+    // When the route names the offending field, put the message on the input
+    // too. A sentence at the bottom of a ten-field step does not tell a
+    // merchant WHICH box to fix.
+    if (data?.field) {
+      const fieldName = data.field;
+      setErrors((prev) => ({ ...prev, [fieldName]: copy }));
+    }
+  }
+
+  /** The form's last step was accepted: the next page, or the thanks. */
+  function finishForm(data: SubmitResponse) {
+    // Capture any continue-now links the server returned (interest form only)
+    // so the thank-you screen can offer them.
+    setNextForms(data.next_forms ?? []);
+    // V2 router routing: route_to is ANOTHER of this workspace's own pages
+    // (or the community route), not a generic redirect — carry forward the
+    // kw/cat/utm this visitor arrived with (read once on mount,
+    // utmFromUrlRef) and the visit id (sessionStorage also survives this
+    // same-tab navigation on its own, but the destination page's own
+    // /go/community link needs it in the URL, so it travels explicitly
+    // too) so attribution and the funnel stay continuous across the hop.
+    const routeTo = data.route_to;
+    const target =
+      typeof routeTo === "string" && routeTo
+        ? appendPreservedParams(routeTo, { ...utmFromUrlRef.current, v: getOrCreateVisitId() ?? undefined })
+        : data.redirect_url || redirectUrl;
+    if (target) {
+      window.location.href = target;
+    } else {
+      setDone(true);
+    }
+  }
+
+  /**
+   * What every submission says about how the visitor arrived. Channel of THIS
+   * submission: sent on every step so the operator notification (which fires
+   * on the LAST step) still knows how the merchant arrived, even though the
+   * query string was only present when they first landed. Anonymous links
+   * carry it in anonymous_init instead.
+   *
+   * V5a funnel tracking (HANDOVER section 5.3/5.4): the visit id links this
+   * visit's offer_funnel_events rows to the lead this submission resolves to
+   * (lib/offers/tracking-store.ts linkVisitToLead), and the UTM fields are
+   * stamped first-touch-only onto that same lead (lib/offer-pages/utm.ts).
+   * Both are best-effort on the server; sending them on every step is harmless
+   * (idempotent) and means attribution survives even if the visitor only
+   * completes a later step.
+   */
+  function submitMeta(): Record<string, unknown> {
+    const meta: Record<string, unknown> = {};
+    if (submissionSource) meta.submission_source = submissionSource;
+    if (submissionPath) meta.submission_path = submissionPath;
+    const visitId = getOrCreateVisitId();
+    if (visitId) meta.visit_id = visitId;
+    return Object.assign(meta, utmFromUrlRef.current);
+  }
+
+  /**
+   * Send the steps held before the contact step, in order: the first creates
+   * the lead with this step's contact details (the server refuses a lead
+   * without them), the rest follow on its token. A retry resumes after the
+   * last one that went through. False when one was refused (already shown).
+   */
+  async function sendHeldSteps(contact: Record<string, string> | null): Promise<boolean> {
+    for (let i = heldStepsSent.current; i < contactStep; i += 1) {
+      const payload = heldSteps.current[i] ?? {};
+      const body: Record<string, unknown> = { step_index: i, payload, ...submitMeta() };
+      if (tokenRef.current) {
+        body.token = tokenRef.current;
+      } else {
+        body.anonymous_init = anonymousInit;
+        if (contact) body.contact = contact;
+      }
+      const res = await fetch("/api/forms/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as SubmitResponse | null;
+      if (!data || !data.ok) {
+        showSubmitFailure(res, data, payload);
+        return false;
+      }
+      if (!tokenRef.current && data.minted_token) {
+        tokenRef.current = data.minted_token;
+        setToken(data.minted_token);
+      }
+      heldStepsSent.current = i + 1;
+    }
+    return true;
+  }
+
+  /**
+   * The last step of a form that never asks for an email or phone (the VSL
+   * router): the server reads every step's answers, picks where the visitor
+   * goes next, and stores nothing.
+   */
+  async function routeWithoutLead(lastPayload: Record<string, unknown>) {
+    const res = await fetch("/api/forms/submit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        step_index: currentStep,
+        anonymous_init: anonymousInit,
+        route_only: true,
+        steps_payload: steps.map((_, i) => (i === currentStep ? lastPayload : heldSteps.current[i] ?? {})),
+        ...submitMeta(),
+      }),
+    });
+    const data = (await res.json().catch(() => null)) as SubmitResponse | null;
+    if (!data || !data.ok) {
+      showSubmitFailure(res, data, lastPayload);
+      return;
+    }
+    if (tenantSlug && formSlug) {
+      trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
+    }
+    onStepSubmitted?.(currentStep, true);
+    finishForm(data);
+  }
+
   async function submit() {
     // HOLD FOR AN ADDRESS STILL RESOLVING. A merchant who picks a Google
     // suggestion and clicks Continue immediately would otherwise be rejected
@@ -879,6 +1034,32 @@ export function FormPublicClient({
         setServerError(built.error);
         return;
       }
+      // NO LEAD BEFORE CONTACT (CC, 2026-10-16: "If they don't input their
+      // email or phone number, then we do not need to store them or log
+      // them"). On an anonymous form, the steps before the first one that asks
+      // for an email or phone stay in this browser, and that step sends them
+      // first, carrying its contact so the lead is created with it. A form that
+      // never asks (the VSL router) only asks the server where to go next.
+      const gate = contactGateAction({
+        anonymous: !tokenRef.current && Boolean(anonymousInit),
+        contactStep,
+        currentStep,
+        stepCount: steps.length,
+      });
+      if (gate === "route") {
+        await routeWithoutLead(built.payload);
+        return;
+      }
+      if (gate === "hold") {
+        heldSteps.current[currentStep] = built.payload;
+        if (tenantSlug && formSlug) {
+          trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
+        }
+        onStepSubmitted?.(currentStep, false);
+        advanceFrom(currentStep, currentStep + 1);
+        return;
+      }
+      if (gate === "send-held" && !(await sendHeldSteps(contactHandoff(built.payload)))) return;
       // Anonymous flow: on step 0 we have no token yet, send
       // anonymous_init so the server mints + returns one. Personalized
       // flow: always send the existing token.
@@ -886,25 +1067,8 @@ export function FormPublicClient({
         step_index: currentStep,
         payload: built.payload,
         file_attachments: built.file_attachments,
+        ...submitMeta(),
       };
-
-      // Channel of THIS submission. Sent on every step so the operator
-      // notification (which fires on the LAST step) still knows how the
-      // merchant arrived, even though the query string was only present when
-      // they first landed. Anonymous links carry it in anonymous_init instead.
-      if (submissionSource) submitBody.submission_source = submissionSource;
-      if (submissionPath) submitBody.submission_path = submissionPath;
-
-      // V5a funnel tracking (HANDOVER section 5.3/5.4): the visit id links
-      // this visit's offer_funnel_events rows to the lead this submission
-      // resolves to (lib/offers/tracking-store.ts linkVisitToLead), and the
-      // UTM fields are stamped first-touch-only onto that same lead
-      // (lib/offer-pages/utm.ts). Both are best-effort on the server; sending
-      // them on every step is harmless (idempotent) and means attribution
-      // survives even if the visitor only completes a later step.
-      const visitId = getOrCreateVisitId();
-      if (visitId) submitBody.visit_id = visitId;
-      Object.assign(submitBody, utmFromUrlRef.current);
 
       // CONSENT EVIDENCE. Sealed from the BROWSER, because the evidence is only
       // worth having if it records the merchant's own IP — a call from our API
@@ -987,8 +1151,9 @@ export function FormPublicClient({
           submitBody.consent = receipt;
         }
       }
-      if (token) {
-        submitBody.token = token;
+      // Through the ref: the held steps above may have minted it just now.
+      if (tokenRef.current || token) {
+        submitBody.token = tokenRef.current || token;
       } else if (anonymousInit) {
         submitBody.anonymous_init = anonymousInit;
       }
@@ -1022,47 +1187,12 @@ export function FormPublicClient({
       // the merchant gets a plain sentence and a retry that can succeed.
       const data = (await res.json().catch(() => null)) as SubmitResponse | null;
       if (!data || !data.ok) {
-        // Beacon only the failures nobody else can see or that mean a crash:
-        // a non-JSON response (platform error page, 413) or an explicit
-        // server_error. Validation and rate-limit responses are the system
-        // working, not a merchant being lost.
-        if (!data || data.error === "server_error") {
-          reportSubmitFailure(
-            data ? "server_error" : `non_json_http_${res.status}`,
-            built.payload,
-          );
-        }
-        // An error code we have no copy for is itself a defect: it means the
-        // route grew a rejection nobody wrote a sentence for. The merchant
-        // still gets a plain sentence (below), but beacon it so it surfaces
-        // instead of being discovered by a merchant giving up.
-        if (data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
-          reportSubmitFailure(`unmapped_submit_error:${data.error}`, built.payload);
-        }
-        // The route writes a specific sentence for the rejections that can
-        // name their own problem (which field, what is missing). Prefer it;
-        // fall back to our copy for the code; never show the bare code.
-        setServerError(
-          data?.message ||
-            (data?.error ? SUBMIT_ERROR_COPY[data.error] : undefined) ||
-            SUBMIT_ERROR_FALLBACK,
-        );
-        // When the route names the offending field, put the message on the
-        // input too. A sentence at the bottom of a ten-field step does not
-        // tell a merchant WHICH box to fix.
-        if (data?.field) {
-          const fieldName = data.field;
-          const inlineCopy =
-            data.message ||
-            (data.error ? SUBMIT_ERROR_COPY[data.error] : undefined) ||
-            SUBMIT_ERROR_FALLBACK;
-          setErrors((prev) => ({ ...prev, [fieldName]: inlineCopy }));
-        }
+        showSubmitFailure(res, data, built.payload);
         return;
       }
       // Capture the freshly-signed token from an anonymous step 0 so
       // step 1+ uses it like any other personalized submit.
-      if (!token && data.minted_token) {
+      if (!tokenRef.current && data.minted_token) {
         tokenRef.current = data.minted_token;
         setToken(data.minted_token);
       }
@@ -1075,26 +1205,7 @@ export function FormPublicClient({
       if (data.next_step !== null && data.next_step !== undefined) {
         advanceFrom(currentStep, data.next_step);
       } else {
-        // Final step done. Capture any continue-now links the server returned
-        // (interest form only) so the thank-you screen can offer them.
-        setNextForms(data.next_forms ?? []);
-        // V2 router routing: route_to is ANOTHER of this workspace's own pages
-        // (or the community route), not a generic redirect — carry forward the
-        // kw/cat/utm this visitor arrived with (read once on mount,
-        // utmFromUrlRef) and the visit id (sessionStorage also survives this
-        // same-tab navigation on its own, but the destination page's own
-        // /go/community link needs it in the URL, so it travels explicitly
-        // too) so attribution and the funnel stay continuous across the hop.
-        const routeTo = data.route_to;
-        const target =
-          typeof routeTo === "string" && routeTo
-            ? appendPreservedParams(routeTo, { ...utmFromUrlRef.current, v: getOrCreateVisitId() ?? undefined })
-            : data.redirect_url || redirectUrl;
-        if (target) {
-          window.location.href = target;
-        } else {
-          setDone(true);
-        }
+        finishForm(data);
       }
     } catch (err) {
       // Browser-internal error text (WebKit's "The string did not match the

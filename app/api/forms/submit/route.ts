@@ -110,6 +110,7 @@ import {
 } from "@/lib/consent/ledger";
 import { consentDecisionsForStep } from "@/lib/consent/ledger-disclosure";
 import { parseFormRouting } from "@/lib/forms/routing";
+import { contactHandoff, firstContactStepIndex, hasReachableContact } from "@/lib/forms/contact-gate";
 import { resolveRouterDestination } from "@/lib/forms/routing-destination";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
@@ -187,6 +188,16 @@ type SubmitBody = {
    * when step 0 itself is a direct-to-storage upload and therefore needs the
    * token before the file can be selected. */
   initialize_only?: boolean;
+  /** Anonymous step 0 of a form that asks for contact on a LATER step: that
+   *  step's name, email, phone and company, so the lead is created with them
+   *  (lib/forms/contact-gate.ts contactHandoff). Only the identity is read
+   *  from it; step 0's own row stores step 0's answers. */
+  contact?: unknown;
+  /** A form that never asks for an email or phone (the VSL router): every
+   *  step's answers in one request, so the server picks the destination and
+   *  stores nothing (answerRouteOnly). */
+  route_only?: boolean;
+  steps_payload?: unknown;
   // -- V5a funnel tracking (HANDOVER section 5.3/5.4) --------------------
   /** The browser's per-tab visit id (lib/offers/tracking-client.ts,
    *  sessionStorage, never a cookie). Present on every step once the client
@@ -406,6 +417,112 @@ async function refuseInvalidAnonymousFirstStep(input: {
   });
 }
 
+/**
+ * A form that never asks for an email or phone (the VSL router): its answers
+ * only choose where the visitor goes next, so nothing is stored and no lead is
+ * made (CC, 2026-10-16: "If they don't input their email or phone number, then
+ * we do not need to store them or log them"). Before this every first click on
+ * the router created a pipeline lead with no name and no way to reach anyone.
+ *
+ * Every step's answers arrive in one request and are judged step by step,
+ * exactly as separate submissions would be, then the router's own rules pick
+ * the destination (resolveRouterDestination, on the same server-built answers).
+ * A form that does ask for contact is refused: its lead starts the ordinary way,
+ * at its contact step.
+ */
+async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<NextResponse> {
+  const tenantSlug = body.anonymous_init?.tenant_slug?.toLowerCase();
+  const formSlug = body.anonymous_init?.form_slug?.toLowerCase();
+  if (!tenantSlug || !formSlug || body.token) {
+    return NextResponse.json({ ok: false, error: "route_only_requires_anonymous" }, { status: 400 });
+  }
+  const ip = getClientIp(req);
+  const limit = rateLimit({
+    key: `forms-route-only:${ip === "unknown" ? "no-ip" : ip}:${tenantSlug}:${formSlug}`,
+    capacity: 10,
+    refillPerSec: 10 / 60,
+  });
+  if (!limit.allowed) {
+    return NextResponse.json({ ok: false, error: "rate_limited", retry_in_sec: limit.resetIn }, { status: 429 });
+  }
+  const db = getServiceSupabase();
+  const resolved = await resolvePublicForm(db, tenantSlug, formSlug);
+  if (!resolved.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  const form = resolved.form;
+  let steps: FormStep[];
+  try {
+    steps = parseFormSteps(form.steps);
+  } catch (err) {
+    if (err instanceof FormDefinitionError) {
+      return NextResponse.json(
+        { ok: false, error: "form_definition_corrupt", path: err.path, reason: err.reason },
+        { status: 500 },
+      );
+    }
+    throw err;
+  }
+  if (steps.length === 0) {
+    return NextResponse.json({ ok: false, error: "step_index_out_of_range", max: -1 }, { status: 400 });
+  }
+  if (firstContactStepIndex(steps) !== -1) {
+    return NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 });
+  }
+  const given = Array.isArray(body.steps_payload) ? body.steps_payload : null;
+  if (!given || given.length !== steps.length) {
+    return NextResponse.json({ ok: false, error: "invalid_step_index" }, { status: 400 });
+  }
+  const rows: Array<{ step_index: number; payload: Record<string, unknown> }> = [];
+  for (let i = 0; i < steps.length; i += 1) {
+    const raw = given[i];
+    const stepPayload = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    // A router takes no files: an inline file is not an answer here.
+    const invalid = refuseInvalidStep({
+      formSlug: form.slug,
+      step: steps[i],
+      payload: stepPayload,
+      answers: buildAnswerContext(steps, rows, i, stepPayload),
+      inlineFileNames: new Set(),
+      inlineFileCount: Object.values(stepPayload).filter(isInlineFile).length,
+    });
+    if (invalid) return invalid;
+    rows.push({ step_index: i, payload: stepPayload });
+  }
+  const last = steps.length - 1;
+  const answers = buildAnswerContext(steps, rows.slice(0, last), last, rows[last].payload);
+  let routeTo: string | null = null;
+  try {
+    // Its own query, as in handleSubmit: forms.routing is a later migration.
+    const routingRow = await db.from("forms").select("routing").eq("id", form.id).maybeSingle();
+    const rules = !routingRow.error && routingRow.data
+      ? parseFormRouting((routingRow.data as { routing?: unknown }).routing)
+      : [];
+    if (rules.length > 0) {
+      routeTo = await resolveRouterDestination(db, {
+        tenantId: form.tenant_id,
+        tenantSlug: resolved.tenant_slug,
+        routerFormSlug: form.slug,
+        rules,
+        answers,
+      });
+    }
+  } catch (err) {
+    console.error("[forms.submit.route_only] destination unresolved; falling back to the form's own redirect", {
+      form_id: form.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    routeTo = null;
+  }
+  return NextResponse.json({
+    ok: true,
+    submission_id: null,
+    next_step: null,
+    lead_stage: null,
+    route_to: routeTo,
+    redirect_url: form.redirect_url,
+    next_forms: [],
+  });
+}
+
 export async function POST(req: NextRequest) {
   // MERCHANT-FACING BOUNDARY. An uncaught throw here does not become a Next
   // error page — Vercel answers 500 with an EMPTY body, res.json() in the form
@@ -477,6 +594,10 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   if (supportDesk) {
     return handleWorkspaceSupportSubmission(req, body, supportDesk);
   }
+  // A form that only routes (the VSL router): no lead, no row, just where next.
+  if (body.route_only === true) {
+    return answerRouteOnly(req, body);
+  }
 
   // Two auth shapes:
   //   1. Personalized link (Solara's mint): body.token is an HMAC.
@@ -536,10 +657,22 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       const invalid = await refuseInvalidAnonymousFirstStep({ tenantSlug, formSlug, payload: body.payload });
       if (invalid) return invalid;
     }
+    // NO LEAD WITHOUT A WAY TO REACH THEM (CC, 2026-10-16: "If they don't
+    // input their email or phone number, then we do not need to store them or
+    // log them"). Judged on step 0's answers plus the contact a later step
+    // handed over (contactHandoff), before any lead is created or merged. A
+    // form that asks for contact after step 0 holds its earlier answers in the
+    // browser until then (FormPublicClient). initialize_only (an upload-first
+    // step 0) is the one exception: its file cannot be chosen without a token.
+    const stepZero = body.payload && typeof body.payload === "object" ? body.payload : {};
+    const identity = { ...stepZero, ...(contactHandoff(body.contact) ?? {}) };
+    if (body.initialize_only !== true && !hasReachableContact(identity)) {
+      return NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 });
+    }
     const anonResult = await initAnonymousLead({
       tenantSlug,
       formSlug,
-      payload: body.payload || {},
+      payload: identity,
       ip,
       rep: body.anonymous_init.rep,
       source: body.anonymous_init.source,
