@@ -3,8 +3,8 @@
  * OS shell (2026-10-01): ContentTabs, its layout, the breadcrumb alias, the
  * hidden founders banner, and one name for the hub.
  *
- *   1. ContentTabs lists Overview · Library · Content Tools · Performance in
- *      that order, each a founders page that gates itself; the active tab is the
+ *   1. ContentTabs lists Overview · Library · Extracted videos · Content Tools ·
+ *      Performance in that order, each a founders page that gates itself; the active tab is the
  *      longest matching one, Overview only on its exact path (an asset page
  *      lights no tab); every tab is a Link with aria-current on the active one;
  *      the bar scrolls on a phone (overflow-x-auto) and carries no founders
@@ -178,15 +178,17 @@ async function main() {
   const { foundersBannerHidden } = await import("../components/founders/FoundersPortalBanner");
 
   // ── 1. the tabs ──────────────────────────────────────────────────────────
-  await check("ContentTabs: Overview · Library · Content Tools · Performance, each a founders page that gates itself", () => {
+  await check("ContentTabs: Overview · Library · Extracted videos · Content Tools · Performance, each a founders page that gates itself", () => {
     assert.equal(CONTENT_ROOT, "/founders/marketing");
     // Content Tools took the Training tab's slot on 2026-10-06 (the whiteboard
     // moved in). The /train PAGE still exists by direct URL — the Overview's
     // Training card links to it — it is simply no longer a tab.
-    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Content Tools", "Performance"]);
+    // Extracted videos (2026-10-17, CC: "a separate category ... rather than
+    // the main library") sits beside the Library it was taken out of.
+    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Extracted videos", "Content Tools", "Performance"]);
     assert.deepEqual(
       CONTENT_TABS.map((t) => t.href),
-      [CONTENT_ROOT, `${CONTENT_ROOT}/library`, `${CONTENT_ROOT}/tools`, `${CONTENT_ROOT}/performance`],
+      [CONTENT_ROOT, `${CONTENT_ROOT}/library`, `${CONTENT_ROOT}/extracted`, `${CONTENT_ROOT}/tools`, `${CONTENT_ROOT}/performance`],
     );
     for (const t of CONTENT_TABS) {
       const page = `app${t.href}/page.tsx`;

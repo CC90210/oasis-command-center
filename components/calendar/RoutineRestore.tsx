@@ -45,15 +45,13 @@ type Props = {
   calendarName: string;
   now: Date;
   /**
-   * true when a restore is sent, false when it failed. Until its rows are
-   * read back the page must not plan the browser-week import against the
-   * empty calendar it still shows.
+   * true when a restore is sent, false when it failed. A failed restore can
+   * still have saved its rows (the reply is lost), so the page reads the
+   * calendar back.
    */
   onRestoring?: (pending: boolean) => void;
   onRestored: (result: RoutineRestored | { status: "already_restored" }) => void;
   onDismiss: () => void;
-  /** Set when this browser still holds the old page's saved week: opens its import instead. */
-  onUseBrowserCopy?: () => void;
 };
 
 export type RestoreOutcome = { ok: true; body: RoutineRestored | { status: "already_restored" } } | { ok: false; message: string };
@@ -111,7 +109,7 @@ function dateLabel(key: string): string {
   return `${monthShort(d.getMonth())} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
-export function RoutineRestore({ info, prefs, calendarName, now, onRestoring, onRestored, onDismiss, onUseBrowserCopy }: Props) {
+export function RoutineRestore({ info, prefs, calendarName, now, onRestoring, onRestored, onDismiss }: Props) {
   const [mode, setMode] = useState<"view" | "edit" | "confirm">("view");
   const [times, setTimes] = useState<Record<string, { start: string; end: string }>>(() =>
     Object.fromEntries(info.blocks.map((b) => [b.key, { start: hhmm(b.startMinute), end: hhmm(b.endMinute) }])),
@@ -176,24 +174,18 @@ export function RoutineRestore({ info, prefs, calendarName, now, onRestoring, on
           The old Schedule page showed these blocks every week. Restoring adds them to {calendarName} as repeating events in
           Montr&eacute;al time, so they show on every device you sign in from.
         </p>
-        {onUseBrowserCopy && (
-          <p className="mt-2 text-[12px] text-fg-muted">
-            This browser also holds the week you last saved on the old Schedule page, with any times you changed there.{" "}
-            <button type="button" className="font-semibold text-accent hover:underline" onClick={onUseBrowserCopy}>
-              Use that week instead
-            </button>
-          </p>
-        )}
 
-        <ul className="mt-3 grid gap-x-8 gap-y-1 sm:grid-cols-2" aria-label="Blocks to restore">
+        {/* A block's name and days are never cut: a long name wraps. Editing adds two time fields to every row, so
+            the list is then one column and, below sm, each row is two lines: the name and days, then the times. */}
+        <ul className={`mt-3 grid gap-x-8 ${mode === "edit" ? "gap-y-3 sm:gap-y-1" : "gap-y-1 sm:grid-cols-2"}`} aria-label="Blocks to restore">
           {shown.map((b) => (
-            <li key={b.key} className="flex min-w-0 items-center gap-3 py-0.5 text-[13px]">
+            <li key={b.key} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 py-0.5 text-[13px]">
               {mode === "edit" ? (
-                <span className="flex shrink-0 items-center gap-1">
+                <span className="order-last flex w-full shrink-0 items-center gap-1 sm:order-none sm:w-auto">
                   <input
                     type="time"
                     step={300}
-                    className="input h-7 w-[6.5rem] px-2 py-0 text-[12px]"
+                    className="input routine-time h-7 py-0"
                     aria-label={`${b.title} starts`}
                     value={times[b.key]?.start ?? ""}
                     onChange={(e) => setTimes((t) => ({ ...t, [b.key]: { ...t[b.key], start: e.target.value } }))}
@@ -204,7 +196,7 @@ export function RoutineRestore({ info, prefs, calendarName, now, onRestoring, on
                   <input
                     type="time"
                     step={300}
-                    className="input h-7 w-[6.5rem] px-2 py-0 text-[12px]"
+                    className="input routine-time h-7 py-0"
                     aria-label={`${b.title} ends`}
                     value={times[b.key]?.end ?? ""}
                     onChange={(e) => setTimes((t) => ({ ...t, [b.key]: { ...t[b.key], end: e.target.value } }))}
@@ -213,8 +205,8 @@ export function RoutineRestore({ info, prefs, calendarName, now, onRestoring, on
               ) : (
                 <span className="w-28 shrink-0 tabular-nums text-fg-muted">{formatTimeRange(at(b.startMinute), at(b.endMinute))}</span>
               )}
-              <span className="min-w-0 truncate text-fg">{b.title}</span>
-              <span className="ml-auto shrink-0 text-[12px] text-fg-dim">{weekdaysLabel(b.weekdays)}</span>
+              <span className="min-w-0 flex-1 break-words text-fg">{b.title}</span>
+              <span className="shrink-0 text-[12px] text-fg-dim">{weekdaysLabel(b.weekdays)}</span>
             </li>
           ))}
         </ul>

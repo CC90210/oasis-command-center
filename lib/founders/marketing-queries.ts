@@ -21,6 +21,7 @@ import {
   LIFECYCLE,
   brandFilterAllowed,
   brandGroup,
+  brandGroupFor,
   claimedBrandSlugs,
   libraryPageCount,
   parseSlideUrls,
@@ -520,6 +521,12 @@ export async function getMarketingAssets(
     pack?: string;
     /** Review + distribution bucket. The default view excludes archived. */
     lifecycle?: Lifecycle;
+    /**
+     * Every status, archived and rejected included. For Content > Extracted videos,
+     * which has no review lifecycle: a video there is either on the page or deleted,
+     * so its count matches the Overview tile's (which counts every status).
+     */
+    allStatuses?: boolean;
     /** 1-based. */
     page?: number;
     pageSize?: number;
@@ -574,7 +581,7 @@ export async function getMarketingAssets(
       // behind it cannot disagree. See scopeToLifecycle().
       if (opts.lifecycle) {
         q = scopeToLifecycle(q, opts.lifecycle);
-      } else if (!opts.status) {
+      } else if (!opts.status && !opts.allStatuses) {
         // DEFAULT VIEW HIDES ARCHIVED. Archiving something should remove it from
         // the working grid — that is the whole point of the verb — but it must
         // stay reachable, which is what the Archived pill is for. Skipped when an
@@ -1186,7 +1193,10 @@ export async function getMarketingFacets(tenantId: string): Promise<MarketingFac
             count: 1,
           });
         }
-        if (row.author_email) {
+        // An extracted video is not Library work (Content > Extracted videos), so
+        // its creator is no Library author: counted, the Library would offer a
+        // "By <email>" pill whose grid is empty on every tab.
+        if (row.author_email && brandGroupFor(row.brand_slug) !== "downloads") {
           authors.set(row.author_email, (authors.get(row.author_email) || 0) + 1);
         }
       }

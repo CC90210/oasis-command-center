@@ -55,6 +55,8 @@ import { SlideReorder } from "@/components/founders/SlideReorder";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { DownloadLink } from "@/components/founders/DownloadLink";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
+import { EXTRACTED_BRAND_SLUG, EXTRACTED_LABEL, EXTRACTED_ROOT, extractedHref } from "@/lib/founders/extracted-videos";
+import { ExtractedVideoActions } from "@/components/founders/ExtractedVideoActions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Asset · OASIS" };
@@ -263,15 +265,27 @@ export default async function AssetDetailPage({
         title={asset.title}
         subtitle={asset.hook || "No hook recorded"}
         action={
-          // Back to the Library view this asset was opened from, not page 1 of
-          // the default tab.
-          <Link
-            href={libraryBack}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent hover:underline"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Library
-          </Link>
+          // An extracted video was never Library work (CC, 2026-10-17): its way
+          // back is its card in Extracted videos.
+          asset.brand_slug === EXTRACTED_BRAND_SLUG ? (
+            <Link
+              href={extractedHref(asset.id)}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent hover:underline"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              {EXTRACTED_LABEL}
+            </Link>
+          ) : (
+            // Back to the Library view this asset was opened from, not page 1 of
+            // the default tab.
+            <Link
+              href={libraryBack}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent hover:underline"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Library
+            </Link>
+          )
         }
       />
 
@@ -327,6 +341,19 @@ export default async function AssetDetailPage({
         </PhoneEnlarge>
 
         <div className="space-y-6">
+          {/* An extracted video (Content > Extracted videos) is someone else's post
+              with unknown rights: it has no review lifecycle and is never posted, so
+              it gets Download and Delete only. Archive or Reject here used to hide it
+              from Extracted videos with no way back (OCC #684 review F1). */}
+          {asset.brand_slug === EXTRACTED_BRAND_SLUG ? (
+            <Card title="Extracted video" subtitle="Someone else's post, kept for reference">
+              <p className="mb-4 text-xs leading-5 text-fg-dim">
+                Saved with the Video extractor. It isn&apos;t reviewed or posted from OASIS&apos;s
+                accounts, so there is nothing to approve here.
+              </p>
+              <ExtractedVideoActions assetId={asset.id} title={asset.title} afterDeleteHref={EXTRACTED_ROOT} />
+            </Card>
+          ) : (
           <Card title="Status" subtitle="Where this sits, and what you can do about it">
             <div className="mb-4 flex items-center gap-3">
               <StatusTag status={asset.status} publishedAt={asset.published_at} />
@@ -342,6 +369,7 @@ export default async function AssetDetailPage({
                 "approve" does. */}
             <AssetActions id={asset.id} status={asset.status} title={asset.title} />
           </Card>
+          )}
 
           {isRenderableCarousel(asset.asset_type, slideUrls) && (
             <Card title="Slide order" subtitle="What the audience reads, and what publishes">
@@ -382,7 +410,7 @@ export default async function AssetDetailPage({
               Making a surface visible is not the same as making every control on
               it applicable, and shipping the second by accident is how the first
               becomes a bug report. Caught by Codex's audit of this change. */}
-          {isOwnBrand(asset.brand_slug) ? (
+          {asset.brand_slug === EXTRACTED_BRAND_SLUG ? null : isOwnBrand(asset.brand_slug) ? (
             <Card title="Post to channels" subtitle="Posted from OASIS's connected accounts">
               <AssetPublishPanel
                 assetId={asset.id}

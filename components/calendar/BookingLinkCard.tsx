@@ -29,7 +29,8 @@ type BookingInfo = {
     userId: string;
     name: string;
     role: "organizer" | "attendee";
-    calendar: { ready: boolean; label: string };
+    /** lib/booking/host-calendar-status.ts HostCalendarStatus: `kind` is what the card acts on, `label` the words. */
+    calendar: { ready: boolean; kind: "connected" | "workspace" | "needs_connection" | "unavailable"; label: string };
   }[];
   calendars: { id: string; name: string; isDefault: boolean }[];
 };
@@ -134,20 +135,19 @@ export function BookingLinkCard() {
     : null;
 
   return (
-    <section aria-labelledby="cal-booking-h" className="rounded-lg border border-hairline bg-bg-panel p-3 text-[12px]">
+    <section aria-labelledby="cal-booking-h" className="break-words rounded-lg border border-hairline bg-bg-panel p-3 text-[12px]">
       <div className="flex items-center justify-between gap-2">
         <h3 id="cal-booking-h" className="flex items-center gap-1.5 font-semibold text-fg">
           <CalendarClock className="h-3.5 w-3.5" aria-hidden /> Booking link
         </h3>
         <span className={info.live ? "text-status-engaged" : "text-status-warm"}>{info.live ? "Live" : "Not live"}</span>
       </div>
-      <p className="mt-2 truncate font-mono text-[11px] text-fg" title={url}>
-        {url.replace(/^https?:\/\//, "")}
-      </p>
-      <div className="mt-2 flex gap-1.5">
+      <p className="mt-2 break-all font-mono text-[11px] text-fg">{url.replace(/^https?:\/\//, "")}</p>
+      {/* Wraps in the 248px sidebar: Settings drops to a second row, never cut off. */}
+      <div className="mt-2 flex flex-wrap gap-1.5">
         <button
           type="button"
-          className="btn h-7 px-2 text-[12px]"
+          className="btn h-7 grow justify-center px-2 text-[12px]"
           onClick={async () => {
             try {
               await navigator.clipboard.writeText(url);
@@ -160,13 +160,13 @@ export function BookingLinkCard() {
         >
           <Copy className="h-3.5 w-3.5" aria-hidden /> {copied ? "Copied" : "Copy"}
         </button>
-        <a className="btn h-7 px-2 text-[12px]" href={info.path} target="_blank" rel="noopener noreferrer">
+        <a className="btn h-7 grow justify-center px-2 text-[12px]" href={info.path} target="_blank" rel="noopener noreferrer">
           <ExternalLink className="h-3.5 w-3.5" aria-hidden /> Open
         </a>
         {info.canEdit ? (
           <button
             type="button"
-            className="btn h-7 px-2 text-[12px]"
+            className="btn h-7 grow justify-center px-2 text-[12px]"
             onClick={() => {
               setConflictNote(null);
               setEditing(true);
@@ -192,7 +192,20 @@ export function BookingLinkCard() {
             <li key={host.userId}>
               <span className="text-fg">{you ? "You" : host.name}</span>
               {host.role === "organizer" ? " (hosts)" : " (joins)"}: {hours ? summarize(hours) : "No hours"}
-              {host.calendar.ready ? null : (
+              {host.calendar.ready ? (
+                // Ready through the workspace calendar, not their own sign-in: say so quietly.
+                host.calendar.kind === "workspace" ? (
+                  <span className="block text-fg-dim">Google Calendar: {host.calendar.label}.</span>
+                ) : null
+              ) : host.calendar.kind === "unavailable" ? (
+                // It could not be checked, which says nothing about whether they connected: no "connect it".
+                <span className="block text-status-warm">
+                  Google Calendar: {host.calendar.label}. It could not be checked just now, which does not mean it is disconnected.{" "}
+                  {host.role === "organizer"
+                    ? "Times may not be offered until it can be read."
+                    : "Times that need them may be closed until it can be read."}
+                </span>
+              ) : (
                 <span className="block text-status-warm">
                   Google Calendar: {host.calendar.label}.{" "}
                   {host.role === "organizer"
@@ -340,7 +353,7 @@ function BookingSettingsDialog({
       aria-labelledby="booking-settings-h"
       onKeyDown={(e) => e.key === "Escape" && onClose()}
     >
-      <div className="cal-float max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-hairline bg-bg-elev p-5 text-[13px]">
+      <div className="cal-float max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-hairline bg-bg-elev p-4 text-[13px] sm:p-5">
         <div className="flex items-center justify-between">
           <h2 id="booking-settings-h" className="text-[15px] font-semibold text-fg">Booking settings</h2>
           <button type="button" className="icon-btn h-8 w-8" aria-label="Close" onClick={onClose}>
@@ -367,21 +380,25 @@ function BookingSettingsDialog({
         </select>
 
         {s.hosts.map((host) => (
-          <fieldset key={host.userId} className="mt-5">
+          <fieldset key={host.userId} className="mt-5 min-w-0">
             <legend className="font-medium text-fg">
               {nameOf(host.userId)} {host.role === "organizer" ? "(hosts every call)" : "(joins when on duty)"}
             </legend>
-            <div className="mt-2 space-y-1.5">
+            <div className="mt-2 space-y-2 sm:space-y-1.5">
               {weeks[host.userId].map((d, i) => (
-                <div key={DAY_NAMES[i]} className="grid grid-cols-[6.5rem_1fr_auto_1fr] items-center gap-2">
-                  <label className="flex items-center gap-2 text-fg">
+                // On a phone the day sits above its two times; from sm up it is one row.
+                <div
+                  key={DAY_NAMES[i]}
+                  className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 sm:grid-cols-[6.5rem_minmax(0,1fr)_auto_minmax(0,1fr)]"
+                >
+                  <label className="col-span-3 flex items-center gap-2 text-fg sm:col-span-1">
                     <input type="checkbox" checked={d.on} onChange={(e) => setDay(host.userId, i, { on: e.target.checked })} />
                     {DAY_SHORT[i]}
                   </label>
                   <input
                     type="time"
                     step={900}
-                    className="input h-8"
+                    className="input time-field h-8"
                     aria-label={`${nameOf(host.userId)} ${DAY_NAMES[i]} start`}
                     disabled={!d.on}
                     value={d.start}
@@ -391,7 +408,7 @@ function BookingSettingsDialog({
                   <input
                     type="time"
                     step={900}
-                    className="input h-8"
+                    className="input time-field h-8"
                     aria-label={`${nameOf(host.userId)} ${DAY_NAMES[i]} end`}
                     disabled={!d.on}
                     value={d.end}
@@ -403,7 +420,7 @@ function BookingSettingsDialog({
           </fieldset>
         ))}
 
-        <div className="mt-5 grid grid-cols-3 gap-3">
+        <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
           <label className="block text-fg">
             <span className="font-medium">Notice</span>
             <select className="input mt-1 h-9" value={notice} onChange={(e) => setNotice(e.target.value)}>
