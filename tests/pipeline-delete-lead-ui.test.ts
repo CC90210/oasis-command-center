@@ -63,8 +63,13 @@ check("the route and bulk op refuse anyone but an owner, and need the confirm wo
   assert.match(route, /if \(!sameOrigin\(req\)\)/);
   assert.match(route, /!dryRun && body\.confirm !== "delete"/);
   const bulk = read("app/api/leads/bulk/route.ts");
-  assert.match(bulk, /op === "delete" && !sess\.isTrueAdmin/);
-  assert.match(bulk, /op === "delete" && body\.confirm !== "delete"/);
+  const deleteBlock = bulk.slice(bulk.indexOf('if (op === "delete") {'), bulk.indexOf('if (op === "delete") {') + 1500);
+  assert.ok(deleteBlock.length > 100, "the bulk route has no delete guard block");
+  assert.match(deleteBlock, /!sameOrigin\(req\)/, "bulk delete accepts a cross-origin request (Codex on #669)");
+  assert.match(deleteBlock, /startsWith\("application\/json"\)/, "bulk delete accepts a text/plain body");
+  assert.match(deleteBlock, /if \(!sess\.isTrueAdmin\)/);
+  assert.match(deleteBlock, /if \(body\.confirm !== "delete"\)/);
+  assert.match(deleteBlock, /key: "pipeline-delete:" \+ sess\.userId/, "bulk delete is not rate-limited with the single delete");
   assert.match(bulk, /const MAX_DELETE_IDS = 15;/);
 });
 
@@ -80,6 +85,20 @@ check("a blocker on live money or booking data fails closed; only a missing TABL
     assert.match(lib.slice(Math.max(0, at - 80), at), /required</, `${live} is read through optional()`);
   }
   assert.match(lib, /countLink\(db, table, column, tenantId, leadId, true\)\) blockers\.push\(message\)/, "customers/delivery/automation are not strict");
+});
+
+check("the parent delete is one guarded statement, and in-flight sends block (Codex on #669)", () => {
+  const lib = read("lib/pipeline/delete-lead.ts");
+  for (const table of ["website_deals", "website_onboarding", "website_sales_payment_receipts", "call_appointments", "customers"]) {
+    assert.match(lib, new RegExp(`\\["${table}", "[^"]+", true\\]`), `${table} is not a live guard of the parent delete`);
+  }
+  assert.match(lib, /"DELETE FROM tenant_records WHERE tenant_id = \? AND id = \? AND entity_type = 'lead'" \+\s*used\.map\(/);
+  assert.match(lib, /if \(!\(await guardedDeleteLead\(input\.tenantId, input\.leadId\)\)\)/, "the parent row is deleted without the guard");
+  assert.match(lib, /countStatus\(db, "drip_runs", tenantId, leadId, \["sending"\]\)/, "a drip in flight does not block");
+  // Dependents go only after the lead row did (no data loss when the guard refuses).
+  const body = lib.slice(lib.indexOf("export async function deletePipelineLead("));
+  assert.ok(body.indexOf("guardedDeleteLead(input.tenantId") < body.indexOf("await removeDependents(db, input.tenantId, input.leadId);\n    const plan"),
+    "form data is removed before the guarded delete");
 });
 
 check("the generic manifest DELETE can no longer hard-delete an OASIS lead", () => {

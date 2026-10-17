@@ -181,11 +181,13 @@ async function appointmentIds(db: SupabaseClient, tenantId: string, leadId: stri
     .map((row) => row.id);
 }
 
+/** Meeting reminders in `statuses`; mutate cancels them. Only `pending` is ever cancelled: a `sending` one is in flight and blocks instead. */
 async function meetingNotifications(
   db: SupabaseClient,
   tenantId: string,
   leadId: string,
   mutate: boolean,
+  statuses: string[] = ["pending"],
 ): Promise<number> {
   const ids = await appointmentIds(db, tenantId, leadId);
   if (!ids.length) return 0;
@@ -193,7 +195,7 @@ async function meetingNotifications(
     ? db.from("website_sales_meeting_notifications").update({ status: "cancelled" }, { count: "exact" })
     : db.from("website_sales_meeting_notifications").select("id", { count: "exact", head: true });
   return count(await optional<unknown[]>(
-    query.eq("tenant_id", tenantId).in("appointment_id", ids).in("status", ["pending", "sending"]),
+    query.eq("tenant_id", tenantId).in("appointment_id", ids).in("status", statuses),
     (mutate ? "cancelling" : "checking") + " website sales meeting notifications",
   ));
 }
@@ -230,15 +232,38 @@ async function blockersFor(
   // with it (website_deals, onboarding and payment receipts CASCADE from
   // tenant_records in production) or must never be orphaned. A missing one
   // fails the whole delete closed. Only retired and SunBiz tables are optional.
-  const appointments = rows(await required<Array<{ scheduled_for: string }>>(
-    db.from("call_appointments").select("scheduled_for")
-      .eq("tenant_id", tenantId).eq("lead_id", leadId)
-      .eq("status", "scheduled").eq("workflow_status", "active")
-      .gt("scheduled_for", new Date().toISOString()),
+  // Any booking that was not cancelled is booking history: a call still on the
+  // calendar (overdue or not) or one that took place. Only a cancelled booking
+  // lets the lead go (Codex on #669: a future-only check let an overdue or
+  // completed call through, leaving call_appointments pointing at nothing).
+  const appointments = rows(await required<Array<{ status: string; scheduled_for: string | null }>>(
+    db.from("call_appointments").select("status, scheduled_for")
+      .eq("tenant_id", tenantId).eq("lead_id", leadId).neq("status", "cancelled"),
     "checking booked calls",
   ));
   for (const appointment of appointments) {
-    blockers.push("This lead has a booked call on " + appointment.scheduled_for + ". Cancel the call first, then delete.");
+    blockers.push(
+      appointment.status === "scheduled"
+        ? "This lead has a booked call" + (appointment.scheduled_for ? " on " + appointment.scheduled_for : "") + ". Cancel the call first, then delete."
+        : "This lead has call history (" + appointment.status + "). Keep the lead with it.",
+    );
+  }
+
+  // A message a worker has already claimed is on its way to the provider, and
+  // cancelling it now would not stop it (Codex on #669). Wait for it instead.
+  const inFlight =
+    await countStatus(db, "drip_runs", tenantId, leadId, ["sending"]) +
+    await countStatus(db, "scheduled_sends", tenantId, leadId, ["sending"]) +
+    await countStatus(db, "sms_agent_jobs", tenantId, leadId, ["running"]) +
+    await meetingNotifications(db, tenantId, leadId, false, ["sending"]) +
+    rows(await optional<IdRow[]>(
+      db.from("lead_interactions").select("id")
+        .eq("tenant_id", tenantId).eq("lead_id", leadId).eq("channel", "email")
+        .eq("metadata->>status", "sending"),
+      "checking sending lead interactions",
+    )).length;
+  if (inFlight) {
+    blockers.push("A message to this lead is being sent right now. Try again in a minute.");
   }
 
   const documents = rows(await required<IdRow[]>(
@@ -429,6 +454,68 @@ async function deleteLinks(
   return removed;
 }
 
+/**
+ * Step 4: unlink the lead's history (set NULL) and delete its form data and
+ * other dependents. Idempotent and tenant-scoped; also the finish for a delete
+ * that stopped after the lead row went.
+ */
+async function removeDependents(
+  db: SupabaseClient,
+  tenantId: string,
+  leadId: string,
+): Promise<{ unlink: Record<string, number>; removed: Record<string, number> }> {
+  const unlink: Record<string, number> = {};
+  for (const [table, column] of UNLINK_TARGETS) {
+    unlink[table] = await updateLink(db, table, column, tenantId, leadId, { [column]: null });
+  }
+  unlink.sms_agent_conversations = await unlinkSms(db, tenantId, leadId);
+  return { unlink, removed: await deleteLinks(db, tenantId, leadId) };
+}
+
+/**
+ * Rows that must never be cascaded away or orphaned by the parent delete: the
+ * three CASCADE tables (live and retired copies), an uncancelled booking, and
+ * the client records. Live tables must exist (a missing one fails closed);
+ * retired copies are guarded when present.
+ */
+const DELETE_GUARDS: ReadonlyArray<readonly [table: string, where: string, live: boolean]> = [
+  ["website_deals", "lead_id = ?", true],
+  ["website_deals_v2_retired", "lead_id = ?", false],
+  ["website_onboarding", "lead_id = ?", true],
+  ["website_onboarding_v2_retired", "lead_id = ?", false],
+  ["website_sales_payment_receipts", "lead_id = ?", true],
+  ["website_sales_payment_receipts_v1_retired", "lead_id = ?", false],
+  ["call_appointments", "lead_id = ? AND status <> 'cancelled'", true],
+  ["customers", "source_lead_id = ?", true],
+  ["delivery_projects", "lead_id = ?", true],
+  ["client_automation_profiles", "lead_id = ?", true],
+];
+
+/**
+ * guardedDeleteLead: DELETE the lead row only if, in the same statement, none of DELETE_GUARDS
+ * matches: SQLite runs one statement atomically, so nothing created between the
+ * blocker check and the delete can be cascaded with it. True when the row went.
+ */
+export async function guardedDeleteLead(tenantId: string, leadId: string): Promise<boolean> {
+  const raw = getTursoClient();
+  const names = DELETE_GUARDS.map(([table]) => table);
+  const present = new Set(
+    (await raw.execute({
+      sql: `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${names.map(() => "?").join(", ")})`,
+      args: names,
+    })).rows.map((row) => String(row.name)),
+  );
+  const missing = DELETE_GUARDS.filter(([table, , live]) => live && !present.has(table)).map(([table]) => table);
+  if (missing.length) throw new Unavailable("guarding the delete", "missing " + missing.join(", "));
+  const used = DELETE_GUARDS.filter(([table]) => present.has(table));
+  const sql =
+    "DELETE FROM tenant_records WHERE tenant_id = ? AND id = ? AND entity_type = 'lead'" +
+    used.map(([table, where]) => ` AND NOT EXISTS (SELECT 1 FROM "${table}" WHERE tenant_id = ? AND ${where})`).join("");
+  const args = [tenantId, leadId, ...used.flatMap(() => [tenantId, leadId])];
+  const result = await raw.execute({ sql, args });
+  return result.rowsAffected === 1;
+}
+
 export async function deletePipelineLead(
   db: SupabaseClient,
   input: { tenantId: string; leadId: string; actorUserId: string; dryRun: boolean },
@@ -440,7 +527,12 @@ export async function deletePipelineLead(
         .eq("entity_type", "lead").maybeSingle(),
       "loading the lead",
     );
-    if (!found.data) return { ok: false, code: "not_found" };
+    if (!found.data) {
+      // An earlier delete that stopped after the lead row went (step 3 below):
+      // finish its clean-up. Tenant-scoped, so another tenant's id touches nothing.
+      if (!input.dryRun) await removeDependents(db, input.tenantId, input.leadId);
+      return { ok: false, code: "not_found" };
+    }
 
     const blockers = await blockersFor(db, input.tenantId, input.leadId, found.data);
     if (blockers.length) return { ok: false, code: "blocked", blockers };
@@ -458,25 +550,34 @@ export async function deletePipelineLead(
       sms_agent_jobs: await cancelSmsJobs(db, input.tenantId, input.leadId),
     };
 
-    const unlink: Record<string, number> = {};
-    for (const [table, column] of UNLINK_TARGETS) {
-      unlink[table] = await updateLink(db, table, column, input.tenantId, input.leadId, { [column]: null });
-    }
-    unlink.sms_agent_conversations = await unlinkSms(db, input.tenantId, input.leadId);
-    const removed = await deleteLinks(db, input.tenantId, input.leadId);
-
+    // Order (Codex on #669): 1 check, 2 cancel what is queued so nothing goes out,
+    // 3 delete the lead row atomically (guardedDeleteLead), 4 only then remove its
+    // form data and unlink its history. If 3 refuses (something appeared in the
+    // meantime), only cancellations happened and no data was lost; if the run
+    // stops after 3, a re-run finds no lead and finishes 4 (see not_found above).
     const finalBlockers = await blockersFor(db, input.tenantId, input.leadId, found.data);
     if (finalBlockers.length) return { ok: false, code: "blocked", blockers: finalBlockers };
 
-    const deleted = await required<unknown[]>(
-      db.from("tenant_records").delete({ count: "exact" })
-        .eq("tenant_id", input.tenantId).eq("id", input.leadId).eq("entity_type", "lead"),
-      "deleting the lead",
-    );
-    if (deleted.count !== 1) {
-      throw new Unavailable("deleting the lead", "expected one row, deleted " + (deleted.count ?? 0));
+    // The parent row goes in ONE statement that re-checks, at that instant, every
+    // row a delete would cascade or orphan (guardedDeleteLead): a deal or receipt
+    // created after the check above makes it delete nothing instead of taking
+    // that history with it (Codex on #669, critical).
+    if (!(await guardedDeleteLead(input.tenantId, input.leadId))) {
+      const still = await required<LeadRow | null>(
+        db.from("tenant_records").select("id, data")
+          .eq("tenant_id", input.tenantId).eq("id", input.leadId).eq("entity_type", "lead").maybeSingle(),
+        "re-reading the lead",
+      );
+      if (!still.data) return { ok: false, code: "not_found" };
+      const why = await blockersFor(db, input.tenantId, input.leadId, still.data);
+      return {
+        ok: false,
+        code: "blocked",
+        blockers: why.length ? why : ["Something linked to this lead changed while it was being deleted. Reload and try again."],
+      };
     }
 
+    const { unlink, removed } = await removeDependents(db, input.tenantId, input.leadId);
     const plan: DeletePlan = { blockers: [], cancel, unlink, delete: removed };
     await logTenantAudit({
       tenantId: input.tenantId,

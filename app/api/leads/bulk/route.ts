@@ -27,6 +27,8 @@ import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { deletePipelineLead } from "@/lib/pipeline/delete-lead";
+import { sameOrigin } from "@/lib/calendar/http";
+import { rateLimit } from "@/lib/rate-limit";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { declineLeadToApplication } from "@/lib/applications/decline-lead";
 import { canViewLead } from "@/lib/lead-scope";
@@ -121,11 +123,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid_op" }, { status: 400 });
   }
 
-  if (op === "delete" && !sess.isTrueAdmin) {
-    return NextResponse.json({ ok: false, error: "owner_only" }, { status: 403 });
-  }
-  if (op === "delete" && body.confirm !== "delete") {
-    return NextResponse.json({ ok: false, error: "confirmation_required" }, { status: 400 });
+  if (op === "delete") {
+    // The single delete's guards, here too (Codex on #669): a sibling origin can
+    // send a credentialed text/plain POST that SameSite=Lax lets through, and
+    // the constant confirm word is not a CSRF token.
+    if (!sameOrigin(req) || !(req.headers.get("content-type") || "").toLowerCase().startsWith("application/json")) {
+      return NextResponse.json({ ok: false, error: "same_origin_required" }, { status: 403 });
+    }
+    if (!sess.isTrueAdmin) {
+      return NextResponse.json({ ok: false, error: "owner_only" }, { status: 403 });
+    }
+    if (body.confirm !== "delete") {
+      return NextResponse.json({ ok: false, error: "confirmation_required" }, { status: 400 });
+    }
+    // The same bucket as POST /api/pipeline/[id]/delete.
+    const limited = rateLimit({ key: "pipeline-delete:" + sess.userId, capacity: 40, refillPerSec: 1 / 6 });
+    if (!limited.allowed) {
+      return NextResponse.json(
+        { ok: false, error: "rate_limited" },
+        { status: 429, headers: { "retry-after": String(limited.resetIn) } },
+      );
+    }
   }
 
   const ids = Array.isArray(body.ids)

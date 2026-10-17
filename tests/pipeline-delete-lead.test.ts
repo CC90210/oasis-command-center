@@ -46,6 +46,14 @@ const WON = "40000000-0000-4000-8000-000000000006";
 const DOCUMENT = "40000000-0000-4000-8000-000000000007";
 const OTHER_LEAD = "40000000-0000-4000-8000-000000000008";
 const ROUTE_LEAD = "40000000-0000-4000-8000-000000000009";
+// Codex on #669: in-flight sends, booking history beyond "future", the atomic
+// parent delete, and finishing an interrupted delete.
+const INFLIGHT = "40000000-0000-4000-8000-000000000010";
+const OVERDUE_CALL = "40000000-0000-4000-8000-000000000011";
+const COMPLETED_CALL = "40000000-0000-4000-8000-000000000012";
+const CANCELLED_CALL = "40000000-0000-4000-8000-000000000013";
+const GUARDED = "40000000-0000-4000-8000-000000000014";
+const HALF_DONE = "40000000-0000-4000-8000-000000000015";
 
 const TABLES = [
   "tenant_records",
@@ -206,6 +214,26 @@ async function main(): Promise<void> {
     lead(DOCUMENT),
     lead(OTHER_LEAD, OTHER_TENANT),
     lead(ROUTE_LEAD),
+    lead(INFLIGHT),
+    lead(OVERDUE_CALL),
+    lead(COMPLETED_CALL),
+    lead(CANCELLED_CALL),
+    lead(GUARDED),
+    { sql: "INSERT INTO drip_runs VALUES ('inflight-sending', ?, ?, 'sending')", args: [TENANT, INFLIGHT] },
+    {
+      sql: "INSERT INTO call_appointments VALUES ('overdue-call', ?, ?, 'scheduled', 'active', ?)",
+      args: [TENANT, OVERDUE_CALL, "2020-01-02T15:00:00.000Z"],
+    },
+    {
+      sql: "INSERT INTO call_appointments VALUES ('completed-call', ?, ?, 'completed', 'active', ?)",
+      args: [TENANT, COMPLETED_CALL, "2020-01-02T15:00:00.000Z"],
+    },
+    {
+      sql: "INSERT INTO call_appointments VALUES ('cancelled-call', ?, ?, 'cancelled', 'cancelled', ?)",
+      args: [TENANT, CANCELLED_CALL, "2099-01-02T15:00:00.000Z"],
+    },
+    { sql: "INSERT INTO form_submissions VALUES ('half-form', ?, ?)", args: [TENANT, HALF_DONE] },
+    { sql: "INSERT INTO form_views VALUES ('half-view', ?, ?)", args: [TENANT, HALF_DONE] },
     { sql: "INSERT INTO form_submissions VALUES ('dry-form', ?, ?)", args: [TENANT, DRY] },
     { sql: "INSERT INTO form_views VALUES ('dry-view', ?, ?)", args: [TENANT, DRY] },
     { sql: "INSERT INTO offer_funnel_visit_leads VALUES (?, 'dry-visit', ?)", args: [TENANT, DRY] },
@@ -221,7 +249,7 @@ async function main(): Promise<void> {
     { sql: "INSERT INTO offer_funnel_visit_leads VALUES (?, 'junk-visit', ?)", args: [TENANT, JUNK] },
     { sql: "INSERT INTO offer_funnel_events VALUES ('junk-event', ?, ?)", args: [TENANT, JUNK] },
     { sql: "INSERT INTO drip_runs VALUES ('junk-scheduled', ?, ?, 'scheduled')", args: [TENANT, JUNK] },
-    { sql: "INSERT INTO drip_runs VALUES ('junk-sending', ?, ?, 'sending')", args: [TENANT, JUNK] },
+    { sql: "INSERT INTO drip_runs VALUES ('junk-sent', ?, ?, 'sent')", args: [TENANT, JUNK] },
     {
       sql: "INSERT INTO lead_interactions (id, tenant_id, lead_id, metadata) VALUES ('junk-queued', ?, ?, ?)",
       args: [TENANT, JUNK, JSON.stringify({ status: "queued", campaign: "spring", attempt: 2 })],
@@ -286,7 +314,33 @@ async function main(): Promise<void> {
   await assertBlocked(RECEIPT, /payment receipt/i);
   await assertBlocked(WON, /won stage/i);
   await assertBlocked(DOCUMENT, /documents/i);
+  await assertBlocked(INFLIGHT, /being sent right now/i);
+  await assertBlocked(OVERDUE_CALL, /booked call.*cancel the call first/i);
+  await assertBlocked(COMPLETED_CALL, /call history/i);
   pass("every destructive-history blocker refuses with a readable reason and no writes");
+
+  // A cancelled booking is not booking history: the lead goes.
+  const cancelledCall = await remove(CANCELLED_CALL);
+  assert.equal(cancelledCall.ok, true, JSON.stringify(cancelledCall));
+  assert.equal(await count(seed, "tenant_records", "id = ?", [CANCELLED_CALL]), 0);
+  pass("a lead whose only booking was cancelled can be deleted");
+
+  // The parent delete is one guarded statement: with a deal present it deletes
+  // nothing, whatever the earlier checks saw (a deal created in between).
+  const { guardedDeleteLead } = await import("../lib/pipeline/delete-lead");
+  await seed.execute({ sql: "INSERT INTO website_deals VALUES ('race-deal', ?, ?)", args: [TENANT, GUARDED] });
+  assert.equal(await guardedDeleteLead(TENANT, GUARDED), false, "the guarded delete removed a lead with a deal");
+  assert.equal(await count(seed, "tenant_records", "id = ?", [GUARDED]), 1);
+  assert.equal(await count(seed, "website_deals", "id = 'race-deal'", []), 1, "the deal was cascaded away");
+  await seed.execute({ sql: "DELETE FROM website_deals WHERE id = 'race-deal'", args: [] });
+  assert.equal(await guardedDeleteLead(TENANT, GUARDED), true, "control: with nothing guarded it deletes");
+  pass("the parent delete re-checks every cascading row in the same statement");
+
+  // A delete that stopped after the lead row went: the next run finishes it.
+  assert.deepEqual(await remove(HALF_DONE), { ok: false, code: "not_found" });
+  assert.equal(await count(seed, "form_submissions", "lead_id = ?", [HALF_DONE]), 0, "leftover form data was kept");
+  assert.equal(await count(seed, "form_views", "lead_id = ?", [HALF_DONE]), 0);
+  pass("a re-run finishes an interrupted delete");
 
   const junkResult = await remove(JUNK);
   assert.equal(junkResult.ok, true);
@@ -301,7 +355,7 @@ async function main(): Promise<void> {
   const drips = await seed.execute({ sql: "SELECT id, status FROM drip_runs WHERE lead_id = ? ORDER BY id", args: [JUNK] });
   assert.deepEqual(drips.rows.map((row) => [row.id, row.status]), [
     ["junk-scheduled", "cancelled"],
-    ["junk-sending", "sending"],
+    ["junk-sent", "sent"],
   ]);
   const interactions = await seed.execute({
     sql: "SELECT id, metadata FROM lead_interactions WHERE lead_id = ? ORDER BY id",
@@ -357,11 +411,20 @@ async function main(): Promise<void> {
   assert.equal(await count(seed, "tenant_records", "id = ?", [ROUTE_LEAD]), 1);
   pass("pipeline delete route requires a true admin and exact confirmation");
 
-  const bulkResponse = await bulk.POST(new NextRequest("http://localhost/api/leads/bulk", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ op: "delete", ids: [DEAL, DRY], confirm: "delete" }),
-  }));
+  // Codex on #669: the bulk delete takes the single delete's same-origin and
+  // JSON-only guards; a sibling origin or a text/plain POST deletes nothing.
+  const bulkRequest = (origin: string, contentType: string) =>
+    new NextRequest("http://localhost/api/leads/bulk", {
+      method: "POST",
+      headers: { host: "localhost", origin, "content-type": contentType },
+      body: JSON.stringify({ op: "delete", ids: [DEAL, DRY], confirm: "delete" }),
+    });
+  for (const [origin, type] of [["http://evil.example", "application/json"], ["http://localhost", "text/plain"]]) {
+    const refused = await bulk.POST(bulkRequest(origin, type));
+    assert.equal(refused.status, 403, `${origin} ${type} was not refused`);
+    assert.equal(await count(seed, "tenant_records", "id = ?", [DRY]), 1, `${origin} ${type} deleted a lead`);
+  }
+  const bulkResponse = await bulk.POST(bulkRequest("http://localhost", "application/json"));
   assert.equal(bulkResponse.status, 200);
   const bulkBody = await bulkResponse.json() as {
     results: Array<{ id: string; ok: boolean; code?: string; blockers?: string[] }>;
