@@ -71,7 +71,7 @@ const PROBE_WINDOW_MS = 15 * 60_000;
 export const HOST_STATUS_TTL_MS = 30_000;
 
 /** The longest one host's status may take before the card says it could not be checked. */
-export const HOST_STATUS_DEADLINE_MS = 8_000;
+const HOST_STATUS_DEADLINE_MS = 8_000;
 
 const UNAVAILABLE_LABEL = "Status unavailable";
 const unavailable = (): HostCalendarStatus => ({ ready: false, kind: "unavailable", label: UNAVAILABLE_LABEL });

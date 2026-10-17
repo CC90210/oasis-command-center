@@ -206,6 +206,15 @@
   .cal .input.time-field::-webkit-calendar-picker-indicator { display: none; }
 }
 
+/* The two time fields of "Edit times" in the restore-routine card
+   (RoutineRestore): 12px type, 8px sides, each as wide as its own text needs.
+   `.input` comes after Tailwind's utilities, so the w-[6.5rem], px-2 and
+   text-[12px] the card used to carry did nothing: each field came out 125.7px
+   wide in 14px type, a row ran 30px past a 320px card and the card scrolled
+   sideways. `width: auto` sizes a field to its text, which a wider font cannot
+   clip the way a fixed width would. */
+.cal .input.routine-time { width: auto; padding-inline: 0.5rem; font-size: 12px; }
+
 /* Weekday/weekend toggles and view switcher share this segmented control. */
 .cal .seg {
   border: 1px solid rgb(var(--c-hairline));

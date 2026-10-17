@@ -16,6 +16,10 @@
  * at CC's request: "It doesn't even work." Its checks went with it. Section 4
  * pins that the page no longer reads that storage and no longer offers it.
  *
+ * Section 5 pins that "Edit times" fits a 320px phone: the time fields' sizing
+ * rule in calendar.css, and a row that stacks and wraps instead of cutting a
+ * block's name or scrolling the card sideways.
+ *
  * The card is a client component; it runs here with a minimal stand-in for
  * React's hooks (no DOM), so its real click handlers are exercised. The page
  * (CalendarApp) runs one level deep: its own hooks and effects, against a
@@ -26,8 +30,9 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parse } from "postcss";
 import * as ReactNS from "react";
-import { isValidElement, type ReactNode } from "react";
+import { Children, isValidElement, type ReactNode } from "react";
 
 // The page runs in the viewer's browser, in the viewer's zone.
 process.env.TZ = "America/Toronto";
@@ -523,6 +528,86 @@ async function main() {
       /still holds the week|Bring it into the calendar|Use it instead of the restored routine/,
       "the sidebar block is gone",
     );
+  });
+
+  // -- 5. "Edit times" fits a phone ---------------------------------------------
+  // CC asked for a Schedule page where all the text fits. Measured in Chromium at a 320px viewport, "Edit times"
+  // scrolled the card sideways (350px of content in a 320px card) and cut all nine block names ("W...") because
+  // `.input` (globals.css) comes after Tailwind's utilities and beat the fields' own w-[6.5rem], px-2 and
+  // text-[12px]: each field came out 125.7px wide in 14px type. This CI has no browser, so the rule that gives the
+  // fields their size is pinned where it lives, in the real CSS, and the row's layout in the markup the card draws.
+  const classesOf = (el: El) => String(el.props.className ?? "").split(/\s+/).filter(Boolean);
+  const blockRows = (tree: unknown) => {
+    const list = elements(tree).find((e) => e.type === "ul" && e.props["aria-label"] === "Blocks to restore");
+    assert.ok(list, "the block list is drawn");
+    const rows = Children.toArray(list.props.children as ReactNode).filter(isValidElement) as unknown as El[];
+    return {
+      list,
+      rows: rows.map((row) => {
+        const [times, name, days] = Children.toArray(row.props.children as ReactNode).filter(isValidElement) as unknown as El[];
+        assert.ok(times && name && days, "a row is the times, the name and the days");
+        return { row, times, name, days };
+      }),
+    };
+  };
+  const editing = () => {
+    const edited = card(() => undefined);
+    (button(edited(), /^Edit times$/).props.onClick as () => void)();
+    return edited();
+  };
+
+  await check("Edit times: the time fields' sizing is a real rule in calendar.css, scoped to .input.routine-time", () => {
+    const css = parse(readFileSync(join(ROOT, "components/calendar/calendar.css"), "utf8"));
+    const found: Array<Record<string, string>> = [];
+    css.walkRules((rule) => {
+      // Top level only: inside a media query the sizing would hold on some widths and not others.
+      if (rule.parent?.type !== "root" || !rule.selectors.includes(".cal .input.routine-time")) return;
+      const declared: Record<string, string> = {};
+      rule.walkDecls((decl) => void (declared[decl.prop] = decl.value));
+      found.push(declared);
+    });
+    assert.equal(found.length, 1, "exactly one .cal .input.routine-time rule, outside any media query");
+    assert.equal(found[0].width, "auto", "a field is as wide as its own text, which a wider font cannot clip the way a fixed width would");
+    assert.equal(found[0]["padding-inline"], "0.5rem", "8px sides");
+    assert.equal(found[0]["font-size"], "12px", "12px type");
+  });
+
+  await check("Edit times: every time field is .input.routine-time, and none carries a utility .input would silently beat", () => {
+    const fields = elements(editing()).filter((e) => e.type === "input" && e.props.type === "time");
+    assert.equal(fields.length, info.blocks.length * 2, "a start and an end for every block");
+    for (const field of fields) {
+      const classes = classesOf(field);
+      assert.ok(classes.includes("input") && classes.includes("routine-time"), `${String(field.props["aria-label"])} is .input.routine-time (it is: ${classes.join(" ")})`);
+      assert.deepEqual(
+        classes.filter((c) => /^(w-|px-|text-\[)/.test(c)),
+        [],
+        `${String(field.props["aria-label"])}: a width, side padding or type size on .input is overridden by .input; the rule sizes the field`,
+      );
+    }
+  });
+
+  await check("Edit times: a row is two lines below sm (name and days, then the times), one line from sm, in one column, and nothing truncates", () => {
+    const { list, rows } = blockRows(editing());
+    assert.equal(rows.length, info.blocks.length, "a row for every block");
+    assert.ok(!classesOf(list).includes("sm:grid-cols-2"), "the list is one column while editing: two columns leave a name about 70px");
+    for (const { row, times, name, days } of rows) {
+      assert.ok(classesOf(row).includes("flex-wrap"), "the row may wrap");
+      for (const c of ["order-last", "w-full", "sm:order-none", "sm:w-auto"]) assert.ok(classesOf(times).includes(c), `the times take ${c}: below sm they are their own last line`);
+      for (const c of ["min-w-0", "flex-1", "break-words"]) assert.ok(classesOf(name).includes(c), `the name takes ${c}: a long name wraps`);
+      assert.ok(!classesOf(name).includes("truncate") && !classesOf(days).includes("truncate"), "no name or day is cut with an ellipsis");
+      assert.ok(classesOf(days).includes("shrink-0"), "the days keep their width");
+    }
+  });
+
+  await check("The restore card: names wrap instead of being cut, and the list is two columns from sm until editing", () => {
+    const { list, rows } = blockRows(card(() => undefined)());
+    assert.equal(rows.length, info.blocks.length, "a row for every block");
+    assert.ok(classesOf(list).includes("sm:grid-cols-2"), "the unedited list keeps its two columns from sm");
+    for (const { row, name, days } of rows) {
+      assert.ok(classesOf(row).includes("flex-wrap"));
+      for (const c of ["min-w-0", "flex-1", "break-words"]) assert.ok(classesOf(name).includes(c), `the name takes ${c}`);
+      assert.ok(!classesOf(name).includes("truncate") && !classesOf(days).includes("truncate"), "no name or day is cut with an ellipsis");
+    }
   });
   globalThis.setTimeout = realSetTimeout;
 
