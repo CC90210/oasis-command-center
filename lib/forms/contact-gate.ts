@@ -48,6 +48,27 @@ export function firstContactStepIndex(steps: ReadonlyArray<{ fields: ReadonlyArr
   return steps.findIndex((step) => step.fields.some(isContactField));
 }
 
+/**
+ * The email and phone a step's own typed fields hold, under the standard
+ * names. The form builder names a renamed field by its label (`work_email`),
+ * but it is still the email field: read by type, the gate and the lead see it
+ * (Codex review of #668). The first non-blank value of each type wins.
+ */
+export function typedContact(
+  fields: ReadonlyArray<{ name: string; type: string }>,
+  values: Record<string, unknown>,
+): { email?: string; phone?: string } {
+  const out: { email?: string; phone?: string } = {};
+  for (const field of fields) {
+    const raw = values[field.name];
+    const value = typeof raw === "string" ? raw.trim() : "";
+    if (!value) continue;
+    if (field.type === "email" && !out.email) out.email = value;
+    if (field.type === "phone" && !out.phone) out.phone = value;
+  }
+  return out;
+}
+
 /** Do these answers hold an email or a phone we could actually reach? */
 export function hasReachableContact(values: Record<string, unknown>): boolean {
   const text = (key: string) => (typeof values[key] === "string" ? (values[key] as string).trim() : "");
@@ -61,9 +82,11 @@ export function hasReachableContact(values: Record<string, unknown>): boolean {
  *   hold         anonymous, before the contact step: keep the answers here
  *   route        anonymous, the last step of a form with no contact step (the
  *                VSL router): ask where next, store nothing
- *   send-held    anonymous, the contact step after held steps: send those
+ *   send-held    the contact step while held steps remain unsent: send those
  *                first (the first creates the lead with this step's contact),
- *                then this step
+ *                then this step. Still so once a token exists: a retry after
+ *                step 0 went through and a later held step failed must finish
+ *                the held steps, never skip them (Codex review of #668).
  *   send         everything else: the request it always was
  */
 export type ContactGateAction = "hold" | "route" | "send-held" | "send";
@@ -75,8 +98,11 @@ export function contactGateAction(input: {
   contactStep: number;
   currentStep: number;
   stepCount: number;
+  /** Steps this browser held are not all on the server yet. */
+  heldUnsent: boolean;
 }): ContactGateAction {
-  const { anonymous, contactStep, currentStep, stepCount } = input;
+  const { anonymous, contactStep, currentStep, stepCount, heldUnsent } = input;
+  if (heldUnsent && contactStep > 0 && currentStep === contactStep) return "send-held";
   if (!anonymous) return "send";
   if (contactStep === -1) return currentStep >= stepCount - 1 ? "route" : "hold";
   if (currentStep < contactStep) return "hold";

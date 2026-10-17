@@ -114,6 +114,7 @@ import {
   contactHandoff,
   firstContactStepIndex,
   hasReachableContact,
+  typedContact,
   LEAD_COMPANY_KEYS,
   LEAD_EMAIL_KEYS,
   LEAD_NAME_KEYS,
@@ -381,6 +382,15 @@ function refuseInvalidStep(input: {
  * definition, no first step, an incomplete address, a missing required field
  * or file, too many files) is given before any lead is touched.
  *
+ * NO LEAD WITHOUT A WAY TO REACH THEM (CC, 2026-10-16: "If they don't input
+ * their email or phone number, then we do not need to store them or log
+ * them"), judged here too, last. The visitor's identity is step 0's answers,
+ * the email and phone its typed fields hold under the standard names (a field
+ * the builder named `work_email` is still the email: Codex review of #668),
+ * and the contact a later step handed over (contactHandoff). Without a valid
+ * email or phone among them: 400 contact_required. Otherwise that identity is
+ * what initAnonymousLead creates the lead with.
+ *
  * initialize_only is not judged here: it mints the token an upload-first form
  * needs before its file can be chosen, and records no step.
  */
@@ -388,34 +398,39 @@ async function refuseInvalidAnonymousFirstStep(input: {
   tenantSlug: string;
   formSlug: string;
   payload: unknown;
-}): Promise<NextResponse | null> {
+  contact: unknown;
+}): Promise<{ refusal: NextResponse } | { identity: Record<string, unknown> }> {
   const resolved = await resolvePublicForm(getServiceSupabase(), input.tenantSlug, input.formSlug);
   // The same answer initAnonymousLead gives for a form it cannot find.
-  if (!resolved.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!resolved.ok) return { refusal: NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }) };
   let steps: FormStep[];
   try {
     steps = parseFormSteps(resolved.form.steps);
   } catch (err) {
     if (err instanceof FormDefinitionError) {
-      return NextResponse.json(
-        { ok: false, error: "form_definition_corrupt", path: err.path, reason: err.reason },
-        { status: 500 },
-      );
+      return {
+        refusal: NextResponse.json(
+          { ok: false, error: "form_definition_corrupt", path: err.path, reason: err.reason },
+          { status: 500 },
+        ),
+      };
     }
     throw err;
   }
   if (steps.length === 0) {
-    return NextResponse.json(
-      { ok: false, error: "step_index_out_of_range", max: -1 },
-      { status: 400 },
-    );
+    return {
+      refusal: NextResponse.json(
+        { ok: false, error: "step_index_out_of_range", max: -1 },
+        { status: 400 },
+      ),
+    };
   }
   const payload =
     input.payload && typeof input.payload === "object" ? (input.payload as Record<string, unknown>) : {};
   const inlineFieldNames = Object.entries(payload)
     .filter(([, value]) => isInlineFile(value))
     .map(([fieldName]) => fieldName);
-  return refuseInvalidStep({
+  const invalid = refuseInvalidStep({
     formSlug: resolved.form.slug,
     step: steps[0],
     payload,
@@ -423,6 +438,16 @@ async function refuseInvalidAnonymousFirstStep(input: {
     inlineFileNames: new Set(inlineFieldNames),
     inlineFileCount: inlineFieldNames.length,
   });
+  if (invalid) return { refusal: invalid };
+  const identity = {
+    ...typedContact(steps[0].fields, payload),
+    ...payload,
+    ...(contactHandoff(input.contact) ?? {}),
+  };
+  if (!hasReachableContact(identity)) {
+    return { refusal: NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 }) };
+  }
+  return { identity };
 }
 
 /**
@@ -500,7 +525,12 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   let routeTo: string | null = null;
   try {
     // Its own query, as in handleSubmit: forms.routing is a later migration.
-    const routingRow = await db.from("forms").select("routing").eq("id", form.id).maybeSingle();
+    const routingRow = await db
+      .from("forms")
+      .select("routing")
+      .eq("tenant_id", form.tenant_id)
+      .eq("id", form.id)
+      .maybeSingle();
     const rules = !routingRow.error && routingRow.data
       ? parseFormRouting((routingRow.data as { routing?: unknown }).routing)
       : [];
@@ -660,22 +690,21 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       );
     }
     // Judge the first step BEFORE any lead is created or merged
-    // (refuseInvalidAnonymousFirstStep): a rejected submission never writes one.
-    if (body.initialize_only !== true) {
-      const invalid = await refuseInvalidAnonymousFirstStep({ tenantSlug, formSlug, payload: body.payload });
-      if (invalid) return invalid;
-    }
-    // NO LEAD WITHOUT A WAY TO REACH THEM (CC, 2026-10-16: "If they don't
-    // input their email or phone number, then we do not need to store them or
-    // log them"). Judged on step 0's answers plus the contact a later step
-    // handed over (contactHandoff), before any lead is created or merged. A
+    // (refuseInvalidAnonymousFirstStep): a rejected submission never writes
+    // one, and a step with no way to reach the visitor makes no lead at all. A
     // form that asks for contact after step 0 holds its earlier answers in the
     // browser until then (FormPublicClient). initialize_only (an upload-first
     // step 0) is the one exception: its file cannot be chosen without a token.
-    const stepZero = body.payload && typeof body.payload === "object" ? body.payload : {};
-    const identity = { ...stepZero, ...(contactHandoff(body.contact) ?? {}) };
-    if (body.initialize_only !== true && !hasReachableContact(identity)) {
-      return NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 });
+    let identity: Record<string, unknown> = body.payload && typeof body.payload === "object" ? body.payload : {};
+    if (body.initialize_only !== true) {
+      const judged = await refuseInvalidAnonymousFirstStep({
+        tenantSlug,
+        formSlug,
+        payload: body.payload,
+        contact: body.contact,
+      });
+      if ("refusal" in judged) return judged.refusal;
+      identity = judged.identity;
     }
     const anonResult = await initAnonymousLead({
       tenantSlug,
@@ -2144,7 +2173,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // here costs nothing but the routing feature itself.
     let routingRules: ReturnType<typeof parseFormRouting> = [];
     try {
-      const routingRow = await db.from("forms").select("routing").eq("id", form.id).maybeSingle();
+      // Scoped to the workspace like every service-role read (Codex review of #668).
+      const routingRow = await db
+        .from("forms")
+        .select("routing")
+        .eq("tenant_id", form.tenant_id)
+        .eq("id", form.id)
+        .maybeSingle();
       if (!routingRow.error && routingRow.data) {
         routingRules = parseFormRouting((routingRow.data as { routing?: unknown }).routing);
       }

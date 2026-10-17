@@ -29,6 +29,7 @@ import {
   firstContactStepIndex,
   hasReachableContact,
   isContactField,
+  typedContact,
 } from "../lib/forms/contact-gate";
 
 // next/server's after() needs a request scope this harness doesn't open; the
@@ -55,6 +56,10 @@ const COMMUNITY_STEPS = [
   { key: "gate", title: "Two quick questions", fields: [select("free_self_serve", ["yes", "no"]), select("has_budget", ["yes", "no"])] },
   { key: "contact", title: "Where to send it", fields: [text("name", "text"), text("email", "email"), text("phone", "phone", false)] },
   { key: "upgrade", title: "One more", fields: [select("upgrade", ["yes", "no"], false)] },
+];
+// A form the builder made: its email and phone fields are named by their labels.
+const CUSTOM_STEPS = [
+  { key: "contact", title: "Reach you", fields: [text("full_name", "text"), text("work_email", "email", false), text("work_phone", "phone", false)] },
 ];
 const VSL_STEPS = [
   { key: "path", title: "Which is you?", fields: [select("path", ["community", "audit"])] },
@@ -85,6 +90,10 @@ async function main() {
     {
       sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, on_complete_stage) VALUES ('form-community', ?, 'community', 'COMMUNITY', ?, 'researched')",
       args: [OASIS, JSON.stringify(COMMUNITY_STEPS)],
+    },
+    {
+      sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('form-custom', ?, 'custom-contact', 'Custom', ?)",
+      args: [OASIS, JSON.stringify(CUSTOM_STEPS)],
     },
     {
       sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, redirect_url, routing) VALUES ('form-vsl', ?, 'vsl', 'Start here', ?, 'https://oasisai.work/thanks', ?)",
@@ -133,11 +142,22 @@ async function main() {
     );
     assert.equal(contactHandoff({ email: "x".repeat(400) })?.email.length, 320, "capped");
     for (const junk of [null, "ada@example.com", ["email"], { stage: "won" }]) assert.equal(contactHandoff(junk), null);
+    // Codex review of #668: a builder-named field is read by its type.
+    assert.deepEqual(
+      typedContact(CUSTOM_STEPS[0].fields, { full_name: "Ada", work_email: " ada@example.com ", work_phone: "" }),
+      { email: "ada@example.com" },
+    );
+    assert.deepEqual(typedContact(COMMUNITY_STEPS[0].fields, gateAnswers), {}, "a select is never contact");
+    assert.deepEqual(
+      contactHandoff({ ...typedContact(CUSTOM_STEPS[0].fields, { work_email: "ada@example.com" }), work_email: "ada@example.com" }),
+      { email: "ada@example.com" },
+      "the handoff carries a builder-named email under the standard name",
+    );
   });
 
   await check("the browser holds the steps before contact, routes a contactless form, and sends normally after", () => {
-    const act = (anonymous: boolean, contactStep: number, currentStep: number, stepCount = 3) =>
-      contactGateAction({ anonymous, contactStep, currentStep, stepCount });
+    const act = (anonymous: boolean, contactStep: number, currentStep: number, stepCount = 3, heldUnsent = false) =>
+      contactGateAction({ anonymous, contactStep, currentStep, stepCount, heldUnsent });
     assert.equal(act(true, 1, 0), "hold", "COMMUNITY's questions wait for the contact step");
     assert.equal(act(true, 1, 1), "send-held", "the contact step sends them first");
     assert.equal(act(true, 1, 2), "send", "a later step with no token sends as it always did");
@@ -146,6 +166,11 @@ async function main() {
     assert.equal(act(true, -1, 1, 2), "route", "the router's last step only asks where next");
     assert.equal(act(false, 1, 0), "send", "a lead token means a lead already exists");
     assert.equal(act(false, -1, 1, 2), "send");
+    // Codex review of #668: step 0 went through (a token now exists), a later
+    // held step did not: the retry must finish the held steps, not skip them.
+    assert.equal(act(false, 2, 2, 4, true), "send-held");
+    assert.equal(act(false, 2, 2, 4, false), "send", "nothing held: the ordinary request");
+    assert.equal(act(false, 2, 1, 4, true), "send", "only the contact step sends the held steps");
   });
 
   await check("step 0 with no way to reach them creates nothing", async () => {
@@ -194,6 +219,23 @@ async function main() {
     const second = await post({ step_index: 1, token, payload: { name: "Ada Lovelace", email: "ada@example.com" } });
     assert.equal(second.status, 200, JSON.stringify(second.json));
     assert.equal(second.json.next_step, 2);
+  });
+
+  await check("a builder-named email or phone field counts, and the lead gets it (Codex review of #668)", async () => {
+    const before = await leads();
+    const ok = await post({ step_index: 0, anonymous_init: anon("custom-contact"), payload: { full_name: "Ada Custom", work_email: "ada.custom@example.com" } });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.equal(await leads(), before + 1);
+    const lead = (await seed.execute({
+      sql: "SELECT data FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' ORDER BY created_at DESC LIMIT 1",
+      args: [OASIS],
+    })).rows[0];
+    assert.equal((JSON.parse(String(lead.data)) as Json).email, "ada.custom@example.com", "the lead was made without its builder-named email");
+    const phoneOnly = await post({ step_index: 0, anonymous_init: anon("custom-contact"), payload: { full_name: "Pat Custom", work_phone: "514 555 0166" } });
+    assert.equal(phoneOnly.status, 200, JSON.stringify(phoneOnly.json));
+    const none = await post({ step_index: 0, anonymous_init: anon("custom-contact"), payload: { full_name: "Nobody", work_email: "nope" } });
+    assert.equal(none.status, 400);
+    assert.equal(none.json.error, "contact_required");
   });
 
   await check("a valid phone alone is enough", async () => {
@@ -268,7 +310,17 @@ async function main() {
       /if \(gate === "hold"\) \{\s*heldSteps\.current\[currentStep\] = built\.payload;[\s\S]{0,300}advanceFrom\(currentStep, currentStep \+ 1\);\s*return;/,
       "a held step must stay in the browser and move on, with no request",
     );
-    assert.match(client, /if \(gate === "send-held" && !\(await sendHeldSteps\(contactHandoff\(built\.payload\)\)\)\) return;/);
+    assert.match(client, /heldUnsent: heldStepsSent\.current < heldSteps\.current\.length,/, "a retry after a partial send skips the held steps");
+    assert.match(
+      client,
+      /if \(gate === "send-held"\) \{[\s\S]{0,300}const contact = contactHandoff\(\{ \.\.\.typedContact\(steps\[currentStep\]\.fields, built\.payload\), \.\.\.built\.payload \}\);\s*if \(!\(await sendHeldSteps\(contact\)\)\) return;/,
+      "the contact step must hand over its contact under the standard names",
+    );
+    assert.match(
+      client,
+      /if \(currentStep < contactStep\) heldStepsSent\.current = Math\.max\(heldStepsSent\.current, currentStep \+ 1\);/,
+      "a held step sent the ordinary way (after Back) would be sent again from its stale copy",
+    );
     const held = client.slice(client.indexOf("async function sendHeldSteps"), client.indexOf("async function routeWithoutLead"));
     assert.match(held, /for \(let i = heldStepsSent\.current; i < contactStep; i \+= 1\)/, "a retry must resume after the last held step that went through");
     assert.match(held, /if \(tokenRef\.current\) \{\s*body\.token = tokenRef\.current;\s*\} else \{\s*body\.anonymous_init = anonymousInit;\s*if \(contact\) body\.contact = contact;/);
@@ -290,6 +342,13 @@ async function main() {
     for (let i = 0; i < contactAt; i += 1) assert.deepEqual(renderedChannelsForStep(steps[i], {}), [], `held step ${i} shows a consent box`);
     assert.deepEqual(renderedChannelsForStep(steps[contactAt], {}), ["email", "sms"], "the contact step is where the boxes are");
     for (const type of ["email", "phone"]) assert.equal(isContactField({ name: "anything", type }), true, `a ${type} field must count as contact`);
+  });
+
+  await check("both routing reads are scoped to the workspace (Codex review of #668)", () => {
+    const route = readFileSync(join(__dirname, "..", "app", "api", "forms", "submit", "route.ts"), "utf8");
+    const reads = route.match(/\.from\("forms"\)\s*\.select\("routing"\)\s*\.eq\("tenant_id", form\.tenant_id\)\s*\.eq\("id", form\.id\)/g) ?? [];
+    assert.equal(reads.length, 2, "a routing read without its tenant filter");
+    assert.doesNotMatch(route, /select\("routing"\)\.eq\("id"/);
   });
 
   await check("every new refusal has a sentence in the form", () => {

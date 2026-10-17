@@ -35,7 +35,7 @@ import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
-import { contactGateAction, contactHandoff, firstContactStepIndex } from "@/lib/forms/contact-gate";
+import { contactGateAction, contactHandoff, firstContactStepIndex, typedContact } from "@/lib/forms/contact-gate";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -1045,6 +1045,7 @@ export function FormPublicClient({
         contactStep,
         currentStep,
         stepCount: steps.length,
+        heldUnsent: heldStepsSent.current < heldSteps.current.length,
       });
       if (gate === "route") {
         await routeWithoutLead(built.payload);
@@ -1059,7 +1060,12 @@ export function FormPublicClient({
         advanceFrom(currentStep, currentStep + 1);
         return;
       }
-      if (gate === "send-held" && !(await sendHeldSteps(contactHandoff(built.payload)))) return;
+      if (gate === "send-held") {
+        // The contact under the standard names, whatever this form calls its
+        // fields (a builder-made `work_email` is still the email).
+        const contact = contactHandoff({ ...typedContact(steps[currentStep].fields, built.payload), ...built.payload });
+        if (!(await sendHeldSteps(contact))) return;
+      }
       // Anonymous flow: on step 0 we have no token yet, send
       // anonymous_init so the server mints + returns one. Personalized
       // flow: always send the existing token.
@@ -1196,6 +1202,9 @@ export function FormPublicClient({
         tokenRef.current = data.minted_token;
         setToken(data.minted_token);
       }
+      // A step the form once held, now on the server the ordinary way (the
+      // visitor went Back to it): the held copy must never be sent over it.
+      if (currentStep < contactStep) heldStepsSent.current = Math.max(heldStepsSent.current, currentStep + 1);
       if (tenantSlug && formSlug) {
         trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
       }
