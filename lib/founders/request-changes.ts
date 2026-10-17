@@ -33,8 +33,9 @@
  * open (500, nothing lost).
  *
  * The note is also closed, not deleted, when a later verdict settles the asset
- * (Approve, Archive, Reject on assets/[id]/route.ts stamp `acted_on_at`), so an
- * open `request_changes` row always belongs to an asset waiting on the agent.
+ * (Approve, Archive, Reject and Delete on assets/[id]/route.ts stamp
+ * `acted_on_at`), so an open `request_changes` row belongs to an asset waiting on
+ * the agent, bar the documented crash windows above.
  *
  * The database is passed in so tests/library-review.test.ts runs this against
  * real SQLite. The route (assets/[id]/request-changes/route.ts under
@@ -70,7 +71,7 @@ export function checkRequestChangesBody(body: unknown): NoteCheck {
 }
 
 export type RequestChangesResult =
-  | { ok: true; asset: { id: string; title: string; status: AssetStatus }; reviewId: string }
+  | { ok: true; asset: { id: string; title: string; status: AssetStatus } }
   | { ok: false; http: 404 | 409 | 500; error: string; current?: string | null };
 
 export async function requestChanges(
@@ -193,6 +194,5 @@ export async function requestChanges(
   return {
     ok: true,
     asset: { id: String(landed.id), title: String(landed.title ?? title), status: next },
-    reviewId,
   };
 }

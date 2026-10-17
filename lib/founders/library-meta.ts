@@ -221,7 +221,6 @@ export type HookVariantCard = {
   status: AssetStatus;
   /** The Library's own bucket for it (Needs review, Approved, Posted, Archived). */
   lifecycle: Lifecycle;
-  publishedAt: string | null;
   variantLabel: string;
   hookStyle: string | null;
   /** The opening line: meta.hook, else the asset's own hook column, else its title. */
@@ -261,7 +260,6 @@ export function hookVariantCards(tiles: readonly TileLike[], hrefFor: (id: strin
       title: t.asset.title,
       status,
       lifecycle: lifecycleOf({ status, published_at: t.asset.published_at ?? null }),
-      publishedAt: t.asset.published_at ?? null,
       variantLabel: hookVariantLabel(m.hookVariant),
       hookStyle: m.hookStyle,
       hook: m.hook ?? (t.asset.hook && t.asset.hook.trim() ? t.asset.hook.trim() : t.asset.title),

@@ -634,7 +634,7 @@ async function main() {
     ...Array.from({ length: MID }, (_, i): Seed => ({ id: `mid-${i + 1}`, tenant: OASIS, brand: "warner", created: day(i + 1), meta: pack(PACK_MID, "icp_ecommerce", i + 1) })),
     ...Array.from({ length: HUGE }, (_, i): Seed => ({ id: `huge-${i + 1}`, tenant: OASIS, brand: "warner", created: day(i + 1), meta: pack(PACK_HUGE, "icp_ecommerce", i + 1) })),
     // Assets for the checks that send one back and then settle it with a later verdict.
-    ...["approve", "archive", "reject", "restore", "other"].map((s, i): Seed => ({ id: `vd-${s}`, tenant: OASIS, brand: "warner", created: day(40 + i), meta: {} })),
+    ...["approve", "archive", "reject", "restore", "delete", "other"].map((s, i): Seed => ({ id: `vd-${s}`, tenant: OASIS, brand: "warner", created: day(40 + i), meta: {} })),
   ]);
 
   const { default: LibraryPage } = await import("../app/founders/marketing/library/page");
@@ -1174,7 +1174,7 @@ async function main() {
     await db.execute(`DELETE FROM marketing_review WHERE asset_id = 'ar-r3'`);
   });
 
-  await check("a verdict that settles the asset closes the request for changes still open on it (Approve, Archive, Reject), and touches nothing else", async () => {
+  await check("a verdict that settles the asset closes the request for changes still open on it (Approve, Archive, Reject, Delete), and touches nothing else", async () => {
     await login(USERS.cc);
     const requests = async (id: string) =>
       (await db.execute({ sql: `SELECT id, tenant_id, note, decision, acted_on_at FROM marketing_review WHERE asset_id = ? AND decision = 'request_changes' ORDER BY note`, args: [id] })).rows as unknown as Array<{ id: string; tenant_id: string; note: string; decision: string; acted_on_at: string | null }>;
@@ -1223,6 +1223,18 @@ async function main() {
     assert.equal((await post("vd-restore", { note: "Needs a tighter cut." })).status, 200);
     assert.equal((await post("vd-restore", { status: "in_review" }, "asset", "PATCH")).status, 200);
     assert.equal((await requests("vd-restore"))[0].acted_on_at, null, "restoring is no verdict");
+
+    // Deleting settles it for good: the request is closed (its row stays), but only
+    // once the delete is confirmed, and only that asset's.
+    assert.equal((await post("vd-delete", { note: "Never mind the cut, drop it." })).status, 200);
+    assert.equal((await requests("vd-delete"))[0].acted_on_at, null);
+    const deleted = await post("vd-delete", undefined, "asset", "DELETE");
+    assert.equal(deleted.status, 200);
+    assert.equal(await rowOf("vd-delete"), undefined, "the asset is gone");
+    const afterDelete = await requests("vd-delete");
+    assert.equal(afterDelete.length, 1, "its request row is kept as history, not deleted");
+    assert.notEqual(afterDelete[0].acted_on_at, null, "and closed: nothing is waiting on a deleted asset");
+    assert.equal((await requests("vd-other"))[0].acted_on_at, null, "another asset's request is still open");
   });
 
   await check("Delete (the existing route) removes the asset's rows and reports its files; it deletes no stored file and stays in the workspace", async () => {

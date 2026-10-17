@@ -346,7 +346,7 @@ async function main() {
         log: log.splice(0),
       };
     };
-    return { show, press, ended, snap, clips, log };
+    return { show, press, ended, snap };
   }
   const hook: Record<string, unknown> = {};
 
