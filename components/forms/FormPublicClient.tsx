@@ -458,9 +458,10 @@ export function FormPublicClient({
     if (tokenRef.current) return tokenRef.current;
     if (!anonymousInit) return null;
     if (tokenInitPromiseRef.current) return tokenInitPromiseRef.current;
+    // A filled honeypot gets no lead to upload to.
+    if (trapValue(trapRef.current, trapLatch)) return null;
     const pending = (async () => {
       try {
-        const honeypot = trapValue(trapRef.current, trapLatch);
         const res = await fetch("/api/forms/submit", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -469,7 +470,6 @@ export function FormPublicClient({
             payload: {},
             anonymous_init: anonymousInit,
             initialize_only: true,
-            ...(honeypot ? { [HONEYPOT_BODY_KEY]: honeypot } : {}),
           }),
         });
         const data = (await res.json().catch(() => ({}))) as SubmitResponse;
@@ -1057,6 +1057,22 @@ export function FormPublicClient({
       onStepSubmitted?.(currentStep, finished);
       if (finished) setDone(true);
       else advanceFrom(currentStep, currentStep + 1);
+      return;
+    }
+    // A FILLED HONEYPOT is a script. Nothing below runs for it: no consent
+    // capture, no tracking event, no held steps. One request tells the route,
+    // which drops and logs it, and the script sees the thanks (Codex review of #671).
+    if (trapValue(trapRef.current, trapLatch)) {
+      await fetch("/api/forms/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          step_index: currentStep,
+          ...(tokenRef.current ? { token: tokenRef.current } : { anonymous_init: anonymousInit }),
+          ...submitMeta(),
+        }),
+      }).catch(() => null);
+      setDone(true);
       return;
     }
     setSubmitting(true);

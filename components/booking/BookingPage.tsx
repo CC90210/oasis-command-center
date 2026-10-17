@@ -27,6 +27,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-disclosure";
 import { ConsentChoice } from "@/components/forms/ConsentChoice";
+import { HoneypotField } from "@/components/forms/HoneypotField";
+import { HONEYPOT_BODY_KEY, trapValue } from "@/lib/forms/honeypot";
 import { ZONE_CHOICES } from "@/lib/meeting-time";
 
 export type BookingField = {
@@ -177,6 +179,9 @@ export function BookingPage(props: Props) {
   const tokenRef = useRef<string | null>(null);
   const requestIdRef = useRef<{ slot: string; id: string } | null>(null);
   const detailsRef = useRef<HTMLDivElement | null>(null);
+  // The honeypot box (lib/forms/honeypot.ts) and what a script typed into it.
+  const trapRef = useRef<HTMLInputElement | null>(null);
+  const trapLatch = useRef("");
 
   useEffect(() => setZone(visitorZone()), []);
 
@@ -263,6 +268,23 @@ export function BookingPage(props: Props) {
   const submit = async () => {
     if ((!slot && !detailsOnly) || busy) return;
     if (!validate()) return;
+    // A filled honeypot is a script: no lead, no consent, no booking. One
+    // request tells the submit route, which drops and logs it; the script sees
+    // the "we have your details" screen.
+    const honeypot = trapValue(trapRef.current, trapLatch);
+    if (honeypot) {
+      await fetch("/api/forms/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          anonymous_init: { tenant_slug: props.tenantSlug, form_slug: props.formSlug },
+          step_index: 0,
+          [HONEYPOT_BODY_KEY]: honeypot,
+        }),
+      }).catch(() => null);
+      setLeftDetails(true);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -706,6 +728,9 @@ export function BookingPage(props: Props) {
                 >
                   {busy ? (slot ? "Booking..." : "Sending...") : slot ? "Book this time" : "Send my details"}
                 </button>
+
+                {/* The honeypot: last in the form. */}
+                <HoneypotField inputRef={trapRef} />
               </form>
             </div>
           ) : null}

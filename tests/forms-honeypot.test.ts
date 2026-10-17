@@ -192,9 +192,41 @@ async function main() {
     assert.match(client, /trapRef=\{trapRef\}/, "the public form does not draw the trap");
     const meta = client.slice(client.indexOf("function submitMeta()"), client.indexOf("function submitMeta()") + 700);
     assert.match(meta, /const honeypot = trapValue\(trapRef\.current, trapLatch\);\s*if \(honeypot\) meta\[HONEYPOT_BODY_KEY\] = honeypot;/, "submitMeta does not carry the trap (held steps, the router and every step use it)");
-    const init = client.slice(client.indexOf("initialize_only: true,") - 400, client.indexOf("initialize_only: true,") + 120);
-    assert.match(init, /\.\.\.\(honeypot \? \{ \[HONEYPOT_BODY_KEY\]: honeypot \} : \{\}\)/, "the upload-first start does not carry the trap");
     assert.match(read("app/api/forms/submit/route.ts"), /if \(!isHoneypotFilled\(b\.honeypot\)\) return null;/, "the route has its own rule for a filled trap");
+  });
+
+  await check("a trapped browser stops before consent, tracking, held steps and uploads (Codex review of #671)", () => {
+    const client = read("components/forms/FormPublicClient.tsx");
+    const submit = client.slice(client.indexOf("  async function submit() {"));
+    const trapAt = submit.indexOf("if (trapValue(trapRef.current, trapLatch)) {");
+    assert.ok(trapAt > submit.indexOf("if (preview) {"), "the trapped stop is missing, or runs before the owner's preview");
+    for (const effect of ["captureConsent(", "trackEvent(", "sendHeldSteps(", "routeWithoutLead(", "buildSubmitPayloadRef.current()"]) {
+      const at = submit.indexOf(effect);
+      assert.ok(at > 0 && trapAt < at, `a trapped script reaches ${effect}`);
+    }
+    assert.match(submit.slice(trapAt, trapAt + 600), /\.\.\.submitMeta\(\),[\s\S]*setDone\(true\);\s*return;/, "the trapped request does not tell the route, or the script does not see the thanks");
+    const upload = client.slice(client.indexOf("const ensureUploadToken = useCallback("));
+    assert.ok(
+      upload.indexOf("if (trapValue(trapRef.current, trapLatch)) return null;") > 0 &&
+        upload.indexOf("if (trapValue(trapRef.current, trapLatch)) return null;") < upload.indexOf("initialize_only: true"),
+      "an upload-first start mints a lead for a filled trap",
+    );
+  });
+
+  await check("/book carries the same trap and books nothing for it", () => {
+    const page = read("components/booking/BookingPage.tsx");
+    assert.match(page, /<HoneypotField inputRef=\{trapRef\} \/>\s*<\/form>/, "/book's form does not end with the trap");
+    const submit = page.slice(page.indexOf("const submit = async () => {"));
+    const trapAt = submit.indexOf("const honeypot = trapValue(trapRef.current, trapLatch);");
+    assert.ok(trapAt > submit.indexOf("if (!validate()) return;"), "the trap is read before the details are checked");
+    for (const effect of ["setBusy(true)", "consent_ledger:", 'fetch("/api/forms/booking"']) {
+      assert.ok(trapAt < submit.indexOf(effect), `a trapped script reaches ${effect}`);
+    }
+    const trapped = submit.slice(trapAt, submit.indexOf("setBusy(true)"));
+    assert.match(trapped, /^const honeypot = trapValue\(trapRef\.current, trapLatch\);\s*if \(honeypot\) \{/, "the stop does not run whenever the trap is filled");
+    assert.match(trapped, /\[HONEYPOT_BODY_KEY\]: honeypot,/, "the route is not told");
+    assert.doesNotMatch(trapped, /payload|consent_ledger/, "a trapped request carries the visitor's answers");
+    assert.match(trapped, /setLeftDetails\(true\);\s*return;/);
   });
 
   console.warn = realWarn;
