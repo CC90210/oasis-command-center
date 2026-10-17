@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import {
   claimPublicBooking,
+  confirmPublicBooking,
   PUBLIC_BOOKING_DAILY_CAP,
   publicBookingVisitorKey,
   releasePublicBooking,
@@ -54,13 +55,11 @@ async function main() {
   await check("a retry of the same booking request counts once, even at the cap (Codex review of #670)", async () => {
     const visitor = publicBookingVisitorKey("198.51.100.10");
     const first = req();
-    assert.deepEqual(
-      await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: first, now }),
-      { ok: true, fresh: true, tenantId: OASIS, requestId: first },
-    );
+    const took = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: first, now });
+    assert.ok(took.ok && took.fresh && took.requestId === first);
     for (let i = 0; i < 3; i += 1) {
       const retry = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: first, now });
-      assert.deepEqual(retry, { ok: true, fresh: false, tenantId: OASIS, requestId: first }, "a retry was refused or counted again");
+      assert.ok(retry.ok && !retry.fresh && retry.requestId === first, "a retry was refused or counted again");
     }
     assert.equal(await held(visitor), 1);
     // The cap is still 3 distinct bookings: two more fit.
@@ -81,6 +80,38 @@ async function main() {
     if (fresh.ok) await releasePublicBooking(db, fresh);
     assert.equal(await held(visitor), 0, "a booking that never happened kept its place");
     assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, true);
+  });
+
+  await check("a completed booking re-asserts its place after a sibling attempt gave it back (Codex review of #670)", async () => {
+    const visitor = publicBookingVisitorKey("198.51.100.12");
+    const id = req();
+    const first = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: id, now });
+    const sibling = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: id, now });
+    assert.ok(first.ok && first.fresh && sibling.ok && !sibling.fresh);
+    if (first.ok) await releasePublicBooking(db, first); // the first attempt failed before Google
+    assert.equal(await held(visitor), 0);
+    if (sibling.ok) await confirmPublicBooking(db, sibling, now); // the sibling booked
+    assert.equal(await held(visitor), 1, "a booking that completed holds no place");
+    if (sibling.ok) await confirmPublicBooking(db, sibling, now);
+    assert.equal(await held(visitor), 1, "confirming twice took a second place");
+    // So the cap still counts it: two more fit, then a refusal.
+    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, true);
+    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, true);
+    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, false);
+  });
+
+  await check("a missing claims table books uncapped instead of failing every booking (Codex review of #670)", async () => {
+    const bare = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "booking-cap-bare-")), "bare.db")}` });
+    const claim = await claimPublicBooking(bare, { tenantId: OASIS, visitorKey: key, requestId: req(), now });
+    assert.equal(claim.ok, true, "a missing table refused the booking");
+    assert.ok(claim.ok && claim.uncapped && !claim.fresh);
+    if (claim.ok) {
+      await releasePublicBooking(bare, claim);
+      await confirmPublicBooking(bare, claim, now);
+    }
+    // Any other failure still refuses: a closed client throws, never "uncapped".
+    bare.close();
+    await assert.rejects(claimPublicBooking(bare, { tenantId: OASIS, visitorKey: key, requestId: req(), now }));
   });
 
   await check("racing requests from two connections can never take more than the cap; racing retries count once", async () => {
@@ -143,6 +174,11 @@ async function main() {
     assert.match(route, /if \(PRE_PROVIDER_ERRORS\.has\(errorCode\)\) await giveBackClaim\(\);/, "a failure before Google kept its place (Codex review of #670)");
     assert.match(route, /if \(!meeting\) \{[\s\S]{0,200}await giveBackClaim\(\);/);
     assert.match(route, /if \(compensated\) await giveBackClaim\(\);/, "a booking left standing gave its place back");
+    // Re-asserted once the booking is recorded on the lead, before anything else.
+    assert.equal(route.match(/await confirmPublicBooking\(getTursoClient\(\), claim, new Date\(\)\);/g)?.length, 1);
+    const confirmAt = route.indexOf("await confirmPublicBooking(");
+    assert.ok(confirmAt > route.indexOf("if (transition.error || transitionData?.ok === false) {"), "confirmed before the booking was recorded");
+    assert.ok(confirmAt < route.indexOf("await activateVerifiedFounderMeeting(context.tenantId, meeting.appointmentId);"));
     assert.equal(route.match(/await giveBackClaim\(\)/g)?.length, 6, "a give-back in an unexpected place");
     // The pre-Google list names only codes the meeting service really throws
     // before its Google call, and never an in-flight or shared-request one.

@@ -30,6 +30,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import {
   claimPublicBooking,
+  confirmPublicBooking,
   publicBookingVisitorKey,
   releasePublicBooking,
   type PublicBookingClaim,
@@ -264,11 +265,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const attendee = slot.hosts.find((host) => host.role === "attendee") ?? null;
 
-  // One of today's places for this visitor (lib/forms/public-booking-cap.ts):
-  // claimed atomically before anything reaches Google, and given back by every
-  // failure below, so only a completed booking uses one. A replay of a booking
-  // already made returned above and never claims. A claim the database cannot
-  // answer refuses the booking rather than book uncapped.
+  // One of today's places for this visitor and booking request
+  // (lib/forms/public-booking-cap.ts): claimed atomically before anything
+  // reaches Google, given back only by the failures below that leave nothing
+  // booked, and re-asserted once the booking is recorded. A replay of a
+  // booking already made returned above and never claims. A claim the
+  // database cannot answer refuses the booking rather than book uncapped (a
+  // missing claims table, before migration 228, books uncapped and says so).
   let claim: Extract<PublicBookingClaim, { ok: true }>;
   try {
     const claimed = await claimPublicBooking(getTursoClient(), {
@@ -440,6 +443,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 503 },
     );
   }
+  // The booking is recorded: it holds its place even if a sibling attempt of
+  // the same request gave the claim back meanwhile (lib/forms/public-booking-cap.ts).
+  await confirmPublicBooking(getTursoClient(), claim, new Date());
   try {
     await activateVerifiedFounderMeeting(context.tenantId, meeting.appointmentId);
   } catch (error) {
