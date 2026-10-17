@@ -26,6 +26,7 @@ import { SignatureField } from "./SignaturePad";
 import { AddressAutocompleteField } from "./AddressAutocompleteField";
 import { ComboboxField } from "./ComboboxField";
 import { MultiFileDropzone, type UploadedDescriptor } from "./MultiFileDropzone";
+import { HoneypotField } from "./HoneypotField";
 
 type Props = {
   step: FormStep;
@@ -66,6 +67,13 @@ type Props = {
    * Distinct from `previewMode`, which disables submission altogether.
    */
   sandbox?: boolean;
+  /**
+   * The public form's honeypot (FormPublicClient, lib/forms/honeypot.ts): when
+   * given, the form ends with one text box no person sees or reaches
+   * (HoneypotField), and the client sends whatever a script typed into it so
+   * the submit route can drop the submission.
+   */
+  trapRef?: React.Ref<HTMLInputElement>;
 };
 
 export function FormRenderer({
@@ -85,6 +93,7 @@ export function FormRenderer({
   onAddressResolvingChange,
   belowFields,
   sandbox = false,
+  trapRef,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
 
@@ -205,6 +214,9 @@ export function FormRenderer({
           accent
         </p>
       )}
+
+      {/* The honeypot: last in the form, so every field id above it keeps its value. */}
+      {trapRef ? <HoneypotField inputRef={trapRef} /> : null}
     </form>
   );
 }

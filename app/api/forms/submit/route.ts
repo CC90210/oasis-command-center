@@ -121,6 +121,7 @@ import {
   LEAD_PHONE_KEYS,
 } from "@/lib/forms/contact-gate";
 import { resolveRouterDestination } from "@/lib/forms/routing-destination";
+import { isHoneypotFilled } from "@/lib/forms/honeypot";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
 
@@ -207,6 +208,9 @@ type SubmitBody = {
    *  stores nothing (answerRouteOnly). */
   route_only?: boolean;
   steps_payload?: unknown;
+  /** Whatever was typed into the form's honeypot box (lib/forms/honeypot.ts
+   *  HONEYPOT_BODY_KEY), which no person sees or reaches. Sent only when filled. */
+  honeypot?: unknown;
   // -- V5a funnel tracking (HANDOVER section 5.3/5.4) --------------------
   /** The browser's per-tab visit id (lib/offers/tracking-client.ts,
    *  sessionStorage, never a cookie). Present on every step once the client
@@ -568,6 +572,38 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   });
 }
 
+/**
+ * THE HONEYPOT (lib/forms/honeypot.ts). A filled one is a script, so it gets the
+ * answer a finished form gets and nothing runs: no lead, no row, no ticket, no
+ * alert, no database read. Logged without the payload so a wave is visible, at
+ * most a few lines a minute per IP, with the script's slugs cut short: the
+ * log is not a channel a script can fill (Codex review of #671).
+ */
+function honeypotDrop(req: NextRequest, body: unknown): NextResponse | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as SubmitBody;
+  if (!isHoneypotFilled(b.honeypot)) return null;
+  const ip = getClientIp(req);
+  const logged = rateLimit({ key: `forms-honeypot-log:${ip === "unknown" ? "no-ip" : ip}`, capacity: 5, refillPerSec: 5 / 60 });
+  if (logged.allowed) {
+    const short = (v: unknown) => (typeof v === "string" ? v.slice(0, 60) : null);
+    console.warn("[forms.submit] honeypot filled; submission dropped", {
+      tenant_slug: short(b.anonymous_init?.tenant_slug),
+      form_slug: short(b.anonymous_init?.form_slug),
+      step_index: typeof b.step_index === "number" ? b.step_index : null,
+    });
+  }
+  return NextResponse.json({
+    ok: true,
+    submission_id: null,
+    next_step: null,
+    lead_stage: null,
+    route_to: null,
+    redirect_url: null,
+    next_forms: [],
+  });
+}
+
 export async function POST(req: NextRequest) {
   // MERCHANT-FACING BOUNDARY. An uncaught throw here does not become a Next
   // error page — Vercel answers 500 with an EMPTY body, res.json() in the form
@@ -585,6 +621,8 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
+  const trapped = honeypotDrop(req, rawBody);
+  if (trapped) return trapped;
   try {
     return await handleSubmit(req, rawBody as SubmitBody);
   } catch (err) {
