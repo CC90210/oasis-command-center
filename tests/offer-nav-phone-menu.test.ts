@@ -66,9 +66,22 @@ check("a page with no pinned sections draws no menu button", () => {
 
 check("choosing a section, and Escape, close the menu; Escape gives focus back to the button", () => {
   const src = readFileSync(join(ROOT, "components/offer-pages/OfferNavMenu.tsx"), "utf8");
-  assert.match(src, /href=\{`#\$\{n\.anchor\}`\}\s*onClick=\{\(\) => setOpen\(false\)\}/, "a chosen section leaves the panel open over the page");
+  assert.match(src, /href=\{`#\$\{n\.anchor\}`\}\s*onClick=\{\(\) => choose\(n\.anchor\)\}/, "a chosen section does not go through choose()");
+  assert.match(src, /function choose\(anchor: string\) \{\s*setOpen\(false\);/, "a chosen section leaves the panel open over the page");
+  assert.match(src, /getElementById\(anchor\)[\s\S]{0,160}target\.focus\(\{ preventScroll: true \}\)/, "a chosen section drops keyboard focus instead of moving it there");
   assert.match(src, /if \(e\.key !== "Escape"\) return;\s*setOpen\(false\);[\s\S]{0,160}trigger\.current\?\.focus\(\);/, "Escape does not close the panel and return focus");
   assert.match(src, /<button\s+ref=\{trigger\}/, "the focus target is not the menu button");
+});
+
+// Codex on #665 (second pass): the Book button or the mark's #top, pressed with
+// the menu open, left the panel over the section they went to.
+check("a tap or focus outside the menu, or a hash change, closes it", () => {
+  const src = readFileSync(join(ROOT, "components/offer-pages/OfferNavMenu.tsx"), "utf8");
+  assert.match(src, /root\.current && !root\.current\.contains\(e\.target as Node\)\) setOpen\(false\)/, "outside does not close");
+  for (const ev of ['document.addEventListener("pointerdown", outside)', 'document.addEventListener("focusin", outside)', 'window.addEventListener("hashchange", onHash)']) {
+    assert.ok(src.includes(ev), `missing listener: ${ev}`);
+  }
+  assert.match(src, /<div ref=\{root\} className="md:hidden">/, "the outside test is not anchored on the menu");
 });
 
 // Codex on #665: a long menu on a short (landscape) phone ran past the screen,

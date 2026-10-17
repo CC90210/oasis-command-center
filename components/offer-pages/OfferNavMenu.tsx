@@ -21,6 +21,7 @@ export function OfferNavMenu({ nav }: { nav: DrawnPage["nav"] }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const trigger = useRef<HTMLButtonElement | null>(null);
+  const root = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -30,13 +31,41 @@ export function OfferNavMenu({ nav }: { nav: DrawnPage["nav"] }) {
       // The focused link is about to be hidden: keep focus visible on the button (WCAG 2.4.7).
       trigger.current?.focus();
     };
+    // Anything outside the menu closes it: a tap (the Book button, the mark's
+    // #top), focus moving out of it, or the page's hash changing. Otherwise the
+    // panel stays open over the section a sibling link just went to (Codex on #665).
+    const outside = (e: Event) => {
+      if (root.current && !root.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onHash = () => setOpen(false);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("focusin", outside);
+    window.addEventListener("hashchange", onHash);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("focusin", outside);
+      window.removeEventListener("hashchange", onHash);
+    };
   }, [open]);
+
+  // A chosen section: close, and put focus on that section once the anchor has
+  // scrolled to it, so a keyboard user carries on from there instead of from a
+  // link that is no longer on screen (Codex on #665).
+  function choose(anchor: string) {
+    setOpen(false);
+    requestAnimationFrame(() => {
+      const target = document.getElementById(anchor);
+      if (!target) return;
+      if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+      target.focus({ preventScroll: true });
+    });
+  }
 
   if (!nav.length) return null;
   return (
-    <div className="md:hidden">
+    <div ref={root} className="md:hidden">
       <button
         ref={trigger}
         type="button"
@@ -59,7 +88,7 @@ export function OfferNavMenu({ nav }: { nav: DrawnPage["nav"] }) {
             <li key={n.key}>
               <a
                 href={`#${n.anchor}`}
-                onClick={() => setOpen(false)}
+                onClick={() => choose(n.anchor)}
                 className="block py-3 text-[16px] font-medium tracking-[-0.01em] text-fg-muted transition-colors hover:text-fg"
               >
                 {n.label}
