@@ -52,31 +52,37 @@ async function main() {
     assert.match(text, /^[\x20-\x7E\n]*$/, "the alert text is not plain ASCII");
   });
 
-  await check("a lead's alert is claimed once; a booked lead or another workspace's lead never alerts", async () => {
+  await check("a lead's alert is claimed once a day; another workspace's lead never alerts", async () => {
     const db = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "details-only-")), "t.db")}` });
     await db.execute(`CREATE TABLE tenant_records (id text primary key, tenant_id text not null, entity_type text not null,
       data text not null, created_at text not null, updated_at text not null)`);
     const lead = async (id: string, tenant: string, data: Record<string, unknown>) =>
       db.execute({ sql: "INSERT INTO tenant_records VALUES (?, ?, 'lead', ?, '2026-10-17', '2026-10-17')", args: [id, tenant, JSON.stringify(data)] });
+    const now = new Date("2026-10-17T15:00:00.000Z");
     await lead("waiting", OASIS, { name: "Dana" });
-    await lead("booked", OASIS, { name: "Lee", calendar_appointment_id: "appt-1" });
+    // A past or cancelled call leaves its id on the lead: that is the route's
+    // check (bookedCallFromAppointment), never a reason to skip the claim.
+    await lead("old-call", OASIS, { name: "Lee", calendar_appointment_id: "appt-1" });
+    await lead("alerted-today", OASIS, { details_only_alerted_at: "2026-10-17T09:00:00.000Z" });
+    await lead("alerted-last-week", OASIS, { details_only_alerted_at: "2026-10-10T09:00:00.000Z" });
     await lead("theirs", OTHER, { name: "Sam" });
     await lead("racer", OASIS, {});
-    const now = new Date("2026-10-17T15:00:00.000Z");
 
     assert.equal(await claimDetailsOnlyAlert(db, { tenantId: OASIS, leadId: "waiting", now }), true);
     assert.equal(await claimDetailsOnlyAlert(db, { tenantId: OASIS, leadId: "waiting", now }), false, "a repeat alerted twice");
     const stamped = (await db.execute({ sql: "SELECT json_extract(data, '$.details_only_alerted_at') AS at, json_extract(data, '$.name') AS name FROM tenant_records WHERE id = 'waiting'", args: [] })).rows[0];
     assert.equal(stamped.at, now.toISOString());
     assert.equal(stamped.name, "Dana", "the claim changed the lead's other fields");
-    assert.equal(await claimDetailsOnlyAlert(db, { tenantId: OASIS, leadId: "booked", now }), false, "a booked lead was reported as waiting");
+    assert.equal(await claimDetailsOnlyAlert(db, { tenantId: OASIS, leadId: "old-call", now }), true, "an old call's id blocked the alert (Codex review of #677)");
+    assert.equal(await claimDetailsOnlyAlert(db, { tenantId: OASIS, leadId: "alerted-today", now }), false, "a lead alerted today alerted again");
+    assert.equal(await claimDetailsOnlyAlert(db, { tenantId: OASIS, leadId: "alerted-last-week", now }), true, "a lead who came back another day never alerts again");
     assert.equal(await claimDetailsOnlyAlert(db, { tenantId: OASIS, leadId: "theirs", now }), false, "another workspace's lead was claimed");
     const racing = await Promise.all(Array.from({ length: 4 }, () => claimDetailsOnlyAlert(db, { tenantId: OASIS, leadId: "racer", now })));
     assert.equal(racing.filter(Boolean).length, 1, "racing requests alerted more than once");
     db.close();
   });
 
-  await check("a rolled-back deploy (leads on Supabase) claims through the lead it read, and never for a stamped or booked lead (Codex review of #677)", async () => {
+  await check("a rolled-back deploy (leads on Supabase) claims through the lead it read, once a day (Codex review of #677)", async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const service = (error: unknown = null) => ({
       rpc: async (name: string, args: Record<string, unknown>) => {
@@ -91,9 +97,10 @@ async function main() {
       name: "patch_tenant_record_data",
       args: { p_id: "lead-1", p_tenant_id: OASIS, p_patch: { details_only_alerted_at: now.toISOString() } },
     });
-    assert.equal(await claimDetailsOnlyAlertLegacy(service(), { ...base, lead: { details_only_alerted_at: "earlier" } }), false);
-    assert.equal(await claimDetailsOnlyAlertLegacy(service(), { ...base, lead: { calendar_appointment_id: "appt-1" } }), false);
-    assert.equal(calls.length, 0, "a stamped or booked lead was written to");
+    assert.equal(await claimDetailsOnlyAlertLegacy(service(), { ...base, lead: { details_only_alerted_at: "2026-10-17T09:00:00.000Z" } }), false);
+    assert.equal(calls.length, 0, "a lead alerted today was written to");
+    assert.equal(await claimDetailsOnlyAlertLegacy(service(), { ...base, lead: { details_only_alerted_at: "2026-10-10T09:00:00.000Z" } }), true, "a lead alerted last week never alerts again");
+    calls.length = 0;
     assert.equal(await claimDetailsOnlyAlertLegacy(service({ message: "down" }), { ...base, lead: {} }), false, "a failed stamp still alerted");
   });
 
@@ -127,7 +134,15 @@ async function main() {
   await check("the route is same-origin, rate-limited, capped, token-proven, /book only, and claims before it alerts the sales desk", () => {
     const route = read("app", "api", "forms", "booking", "details-only", "route.ts");
     assert.match(route, /if \(!sameOrigin\(req\)\) \{\s*return NextResponse\.json\(\{ ok: false, error: "cross_origin_refused" \}, \{ status: 403 \}\);/);
-    assert.match(route, /rateLimit\(\{ key: `public-booking-details-only:\$\{getClientIp\(req\)\}`/);
+    assert.match(route, /rateLimit\(\{ key: `public-booking-details-only:\$\{getClientIp\(req\)\}`, capacity: 10, refillPerSec: 10 \/ 60 \}\)/, "the limit is tighter than the form's own, past the page's retry");
+    // A resolution read that fails is retryable (503); only a bad link, form or lead is final (Codex review of #677).
+    assert.match(route, /if \(resolutionIsFinal\(error\)\) \{\s*return NextResponse\.json\(\{ ok: false, error: "invalid_booking_token" \}, \{ status: 400 \}\);\s*\}[\s\S]{0,240}\{ status: 503 \}/);
+    assert.match(route, /return code\.startsWith\("token_"\) \|\| FINAL_RESOLUTION_ERRORS\.has\(code\);/);
+    // A live call is judged on the appointment, before the claim, tenant-scoped.
+    const liveAt = route.indexOf("if (await holdsLiveCall(db, context.tenantId, context.leadId,");
+    assert.ok(liveAt > 0 && liveAt < route.indexOf("const claimed = tursoHoldsTheLeads()"), "the live-call check is missing or after the claim");
+    assert.match(route, /\.eq\("tenant_id", tenantId\)\s*\.eq\("lead_id", leadId\)\s*\.eq\("id", appointmentId\)/);
+    assert.match(route, /return !appt\.error && Boolean\(bookedCallFromAppointment\(/);
     assert.match(route, /publicBookingDetailsOnlySchema\.safeParse\(await readPublicBookingJson\(req\)\)/, "the body is read without the 8 KB cap");
     assert.doesNotMatch(route, /req\.json\(/, "the body is read without the 8 KB cap");
     assert.match(route, /context = await resolvePublicFunnelBooking\(db, token\);/);
