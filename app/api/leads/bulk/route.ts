@@ -26,6 +26,9 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { deletePipelineLead, pipelineDeleteRateLimit } from "@/lib/pipeline/delete-lead";
+import { sameOrigin } from "@/lib/calendar/http";
+import { rateLimit } from "@/lib/rate-limit";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { declineLeadToApplication } from "@/lib/applications/decline-lead";
 import { canViewLead } from "@/lib/lead-scope";
@@ -65,6 +68,9 @@ export const maxDuration = 60;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_IDS = 200;
+// Each delete runs ~40 sequential checks and writes (lib/pipeline/delete-lead.ts):
+// 15 stays well inside the request's time on a Worker; the bar says to pick fewer.
+const MAX_DELETE_IDS = 15;
 /**
  * The email op only QUEUES rows (the 5-min dispatch-bulk-email cron does the
  * sending, throttled + daily-capped), so a blast's size is not a request-time
@@ -93,6 +99,7 @@ export async function POST(req: NextRequest) {
     assigned_to?: unknown;
     stage?: unknown;
     entity?: unknown;
+    confirm?: unknown;
     template_id?: unknown;
     custom?: unknown;
   };
@@ -108,11 +115,35 @@ export async function POST(req: NextRequest) {
       body.op === "email" ||
       body.op === "email_preflight" ||
       body.op === "cc_blast" ||
-      body.op === "decline"
+      body.op === "decline" ||
+      body.op === "delete"
       ? body.op
       : null;
   if (!op) {
     return NextResponse.json({ ok: false, error: "invalid_op" }, { status: 400 });
+  }
+
+  if (op === "delete") {
+    // The single delete's guards, here too (Codex on #669): a sibling origin can
+    // send a credentialed text/plain POST that SameSite=Lax lets through, and
+    // the constant confirm word is not a CSRF token.
+    if (!sameOrigin(req) || !(req.headers.get("content-type") || "").toLowerCase().startsWith("application/json")) {
+      return NextResponse.json({ ok: false, error: "same_origin_required" }, { status: 403 });
+    }
+    if (!sess.isTrueAdmin) {
+      return NextResponse.json({ ok: false, error: "owner_only" }, { status: 403 });
+    }
+    if (body.confirm !== "delete") {
+      return NextResponse.json({ ok: false, error: "confirmation_required" }, { status: 400 });
+    }
+    // The same bucket as POST /api/pipeline/[id]/delete.
+    const limited = rateLimit(pipelineDeleteRateLimit(sess.userId));
+    if (!limited.allowed) {
+      return NextResponse.json(
+        { ok: false, error: "rate_limited" },
+        { status: 429, headers: { "retry-after": String(limited.resetIn) } },
+      );
+    }
   }
 
   const ids = Array.isArray(body.ids)
@@ -122,12 +153,32 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "no_valid_ids" }, { status: 400 });
   }
   const idCap = op === "email" || op === "email_preflight" ? MAX_EMAIL_IDS : MAX_IDS;
-  if (ids.length > idCap) {
-    return NextResponse.json({ ok: false, error: "too_many_ids", max: idCap }, { status: 400 });
+  const cap = op === "delete" ? MAX_DELETE_IDS : idCap;
+  if (ids.length > cap) {
+    return NextResponse.json({ ok: false, error: "too_many_ids", max: cap }, { status: 400 });
   }
 
   const db = getServiceSupabase();
   const out: Outcome = { updated: 0, skipped: 0, failed: 0, trackingFailed: 0 };
+
+  if (op === "delete") {
+    const results: Array<{ id: string; ok: boolean; code?: string; blockers?: string[] }> = [];
+    for (const id of ids) {
+      const result = await deletePipelineLead(db, {
+        tenantId,
+        leadId: id,
+        actorUserId: sess.userId,
+        dryRun: false,
+      });
+      if (result.ok) results.push({ id, ok: true });
+      else if (result.code === "blocked") {
+        results.push({ id, ok: false, code: result.code, blockers: result.blockers });
+      } else {
+        results.push({ id, ok: false, code: result.code });
+      }
+    }
+    return NextResponse.json({ ok: true, results });
+  }
 
   if (op === "assign") {
     const bulkTenantSlug = await resolveOwnedSlug(tenantId);

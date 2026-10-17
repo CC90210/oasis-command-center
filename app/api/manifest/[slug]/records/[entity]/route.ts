@@ -38,6 +38,7 @@ import {
   roleMaySelfEditLead,
 } from "@/lib/oasis-sales-pipeline-policy";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { planOasisLeadCreate } from "@/lib/oasis-lead-create";
@@ -553,6 +554,10 @@ export async function DELETE(
 
   const id = req.nextUrl.searchParams.get("id");
   if (!id) return NextResponse.json({ ok: false, error: "id_required" }, { status: 400 });
+
+  if (entity.toLowerCase() === "lead" && isOasisInternalTenant(r.tenant_id)) {
+    return NextResponse.json({ error: "use_pipeline_delete" }, { status: 409 });
+  }
 
   try {
     await deleteRecord({
