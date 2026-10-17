@@ -70,23 +70,39 @@ export function AuditForm({
   const trapRef = useRef<HTMLInputElement | null>(null);
   const trapLatch = useRef("");
 
+  // Only a script fills the honeypot box. It gets one report the submit route
+  // drops (lib/forms/honeypot.ts), never the answers, and a plain thanks: no
+  // lead link, no funnel, no calendar. inFlight stays set, so it cannot submit
+  // again.
+  async function endTrapped(trapped: string) {
+    inFlight.current = true;
+    await reportTrappedSubmission(
+      { anonymous_init: { tenant_slug: AUDIT_FUNNEL.tenantSlug, form_slug: AUDIT_FUNNEL.formSlug }, step_index: 0 },
+      trapped,
+    );
+    setStatus("trapped");
+  }
+
+  // The browser's own checks (required, type="email") stop a submit before
+  // onSubmit runs and fire "invalid" instead. A script that filled the trap but
+  // left a box blank ends here, so it is still caught (Codex review of #672).
+  // A visitor's empty trap leaves the browser's message as it was.
+  function onInvalid() {
+    if (inFlight.current) return;
+    const trapped = trapValue(trapRef.current, trapLatch);
+    if (trapped) void endTrapped(trapped);
+  }
+
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (inFlight.current) return;
     inFlight.current = true;
 
-    // Only a script fills the honeypot box. Read before validation, so a script
-    // that leaves a required box blank is still caught, and before anything is
-    // tracked. It gets one report the submit route drops (lib/forms/honeypot.ts),
-    // never the answers, and a plain thanks: no lead link, no funnel, no calendar.
-    // inFlight stays set, so it cannot submit again.
+    // Read before the form's own checks below (they also refuse a value of only
+    // spaces, which the browser accepts) and before anything is tracked.
     const trapped = trapValue(trapRef.current, trapLatch);
     if (trapped) {
-      await reportTrappedSubmission(
-        { anonymous_init: { tenant_slug: AUDIT_FUNNEL.tenantSlug, form_slug: AUDIT_FUNNEL.formSlug }, step_index: 0 },
-        trapped,
-      );
-      setStatus("trapped");
+      await endTrapped(trapped);
       return;
     }
 
@@ -155,6 +171,7 @@ export function AuditForm({
   return (
     <form
       onSubmit={onSubmit}
+      onInvalidCapture={onInvalid}
       action="/api/forms/submit"
       method="post"
       className="w-full"
