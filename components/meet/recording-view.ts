@@ -30,6 +30,7 @@ export type RecordingView = {
   relayChunks: number;
   relayBytes: number;
   missingChunks: number;
+  recorderErrored: number;
   relayExpiresAt: string | null;
   job: { status: string; stage: string | null; errorCode: string | null; attempts: number } | null;
   runner: { label: string; lastSeenAt: string } | null;
@@ -73,7 +74,11 @@ const CHUNK_SECONDS = 10;
  * "a few moments" for what may be most of a speaker's meeting (#685 review, M2).
  */
 export function missingAudioLine(v: RecordingView): string | null {
-  if (!(v.missingChunks > 0)) return null;
+  if (!(v.missingChunks > 0)) {
+    return v.recorderErrored > 0
+      ? "The recording browser reported a problem during the call, so part of the audio may be missing from this transcript."
+      : null;
+  }
   const seconds = v.missingChunks * CHUNK_SECONDS;
   const amount = seconds < 120 ? `about ${seconds} seconds` : `about ${Math.round(seconds / 60)} minutes`;
   return `Some audio didn't reach the server during the call: ${amount} of it is missing from this transcript.`;
@@ -82,6 +87,7 @@ export function missingAudioLine(v: RecordingView): string | null {
 /** Something is still happening, so the panel reads the recording again in a while. */
 export function recordingBusy(v: RecordingView): boolean {
   if (ACTIVE.has(v.state)) return true;
+  if (v.state === "expired") return v.relayChunks > 0;
   return v.state === "deleted" && (v.relayChunks > 0 || v.deviceDelete?.status === "waiting");
 }
 
@@ -138,7 +144,10 @@ export function describeRecording(view: RecordingView): { headline: string; deta
         detail: t?.deviceLabel ? `Audio and transcript saved on ${t.deviceLabel}${t.folderName ? `, in the folder "${t.folderName}"` : ""}.` : null,
       };
     case "expired":
-      return { headline: `${PC} didn't take this recording within 30 days, so its audio was deleted without a transcript.`, detail: null };
+      // Deleted only once it is: the relay's cleanup takes a batch per run (Codex on #685, second pass).
+      return view.relayChunks > 0
+        ? { headline: `${PC} didn't take this recording within 30 days, so its audio is being deleted without a transcript.`, detail: null }
+        : { headline: `${PC} didn't take this recording within 30 days, so its audio was deleted without a transcript.`, detail: null };
     case "deleted": {
       // Deleted only for what is: the server's copies and the computer's copy each have their own state.
       const device = view.deviceDelete;

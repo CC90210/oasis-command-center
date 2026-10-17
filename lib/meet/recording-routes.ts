@@ -35,7 +35,9 @@ import {
   meetRecordingTablesInstalled,
   meetRecordingView,
   normalizeRecordingMime,
+  recordRecorderReport,
   type MeetStorage,
+  type RecorderReport,
 } from "./recording";
 
 export type RecordingDeps = {
@@ -174,22 +176,28 @@ export async function handleMeetChunk(req: Request, rawCode: string, deps: Recor
 export async function handleMeetFinalize(req: Request, rawCode: string, deps: RecordingDeps): Promise<Response> {
   const h = await host(req, rawCode, deps, true);
   if (!h.ok) return h.response;
-  const raw = await readBytesCapped(req, FINALIZE_BODY_MAX);
-  if (raw && raw.byteLength) {
-    try {
-      const report = JSON.parse(new TextDecoder().decode(raw)) as Record<string, unknown>;
-      const failed = Number(report.failed) || 0;
-      const errored = Number(report.errored) || 0;
-      if (failed > 0 || errored > 0) {
-        console.warn("[meet.recording] the recorder lost audio", { roomId: h.room.id, sent: Number(report.sent) || 0, failed, errored });
-      }
-    } catch {
-      // The report is diagnostics only: a malformed one changes nothing.
-    }
+  const report = recorderReportOf(await readBytesCapped(req, FINALIZE_BODY_MAX));
+  if (report.failed > 0 || report.errored > 0) {
+    console.warn("[meet.recording] the recorder lost audio", { roomId: h.room.id, ...report });
   }
-  const out = await ensureTranscriptJob(deps.db, h.room, h.userId, deps.now());
+  const now = deps.now();
+  const out = await ensureTranscriptJob(deps.db, h.room, h.userId, now);
   if (out.state === "not_ended") return refuse(409, "not_ended");
+  // Kept on the recording, so the panel can say how much is missing even where the rows show no gap.
+  await recordRecorderReport(deps.db, h.room, report, now);
   return json(200, { ok: true, state: out.state });
+}
+
+/** The recorder's report, as counts the server can trust the shape of: a whole number from 0 to 1,000,000 each, else 0. */
+function recorderReportOf(raw: Uint8Array | null): RecorderReport {
+  const count = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 1_000_000 ? v : 0);
+  if (!raw || !raw.byteLength) return { failed: 0, errored: 0 };
+  try {
+    const body = JSON.parse(new TextDecoder().decode(raw)) as Record<string, unknown>;
+    return { failed: count(body?.failed), errored: count(body?.errored) };
+  } catch {
+    return { failed: 0, errored: 0 };
+  }
 }
 
 // ---------------------------------------------------------------------------

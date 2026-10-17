@@ -23,7 +23,10 @@
 --   deleted       the host deleted the recording: the text is gone and the PC
 --                 is told to delete its copy (local_deleted_at when it has)
 -- relay_cleared_at is when the last relay chunk of a ready, expired or deleted
--- recording was deleted.
+-- recording was deleted. recorder_failed and recorder_errored are what the
+-- recording browser itself reported at the end (chunks it could not upload,
+-- recorder errors): a lost LAST chunk or a whole lost segment leaves no gap in
+-- the rows to infer it from.
 --
 -- Additive only: two new tables and their indexes, nothing existing touched.
 
@@ -68,7 +71,9 @@ CREATE TABLE IF NOT EXISTS meet_transcripts (
   ready_at           text,
   deleted_at         text,
   local_deleted_at   text,
-  relay_cleared_at   text
+  relay_cleared_at   text,
+  recorder_failed    integer not null default 0,
+  recorder_errored   integer not null default 0
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meet_transcripts_room ON meet_transcripts (tenant_id, room_id);

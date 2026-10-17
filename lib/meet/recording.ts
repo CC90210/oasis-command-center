@@ -189,6 +189,9 @@ export type MeetTranscript = {
   readyAt: string | null;
   deletedAt: string | null;
   localDeletedAt: string | null;
+  /** The recording browser's own count of chunks it could not upload, and of recorder errors. */
+  recorderFailed: number;
+  recorderErrored: number;
 };
 
 const str = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
@@ -209,7 +212,8 @@ function jsonArray(v: unknown): unknown[] {
 
 const TRANSCRIPT_COLUMNS =
   "id, tenant_id, room_id, status, job_id, segments_json, chunk_count, audio_bytes, missing_chunks, text, lines_json, model, " +
-  "transcribe_seconds, device_label, local_folder, relay_expires_at, created_at, updated_at, ready_at, deleted_at, local_deleted_at";
+  "transcribe_seconds, device_label, local_folder, relay_expires_at, created_at, updated_at, ready_at, deleted_at, local_deleted_at, " +
+  "recorder_failed, recorder_errored";
 
 function toTranscript(row: Record<string, unknown>): MeetTranscript {
   return {
@@ -234,6 +238,8 @@ function toTranscript(row: Record<string, unknown>): MeetTranscript {
     readyAt: str(row.ready_at),
     deletedAt: str(row.deleted_at),
     localDeletedAt: str(row.local_deleted_at),
+    recorderFailed: num(row.recorder_failed),
+    recorderErrored: num(row.recorder_errored),
   };
 }
 
@@ -882,10 +888,12 @@ export async function removeRelayChunks(
 }
 
 /**
- * A recording the PC did not take within its 30 days is expired: a job still
- * queued for it fails (relay_expired), and the row is marked expired so its
- * chunks go on the next cleanup. One in the PC's hands right now is left to
- * finish. Returns how many recordings expired.
+ * A recording the PC did not take within its 30 days is expired: its job fails
+ * (relay_expired) and the row is marked expired, so its chunks go on the next
+ * cleanup. Only a job the PC holds RIGHT NOW (a lease that has not lapsed) is
+ * left to finish; a claim whose PC vanished is no claim, and must not keep
+ * people's voices on the relay past the limit (Codex on #685, second pass).
+ * Returns how many recordings expired.
  */
 export async function expireRelay(db: Client, tenantIds: readonly string[], now: Date): Promise<number> {
   if (!tenantIds.length) return 0;
@@ -900,19 +908,20 @@ export async function expireRelay(db: Client, tenantIds: readonly string[], now:
     [
       {
         sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'relay_expired', error_message = ?, finished_at = ?, updated_at = ?
-               WHERE tenant_id IN (${tin}) AND tool_key = 'meet_transcribe' AND status = 'queued'
+               WHERE tenant_id IN (${tin}) AND tool_key = 'meet_transcribe'
+                 AND (status = 'queued' OR (status IN ('claimed', 'running') AND lease_expires_at < ?))
                  AND EXISTS (SELECT 1 FROM meet_transcripts t
                              WHERE t.tenant_id = tool_jobs.tenant_id AND t.job_id = tool_jobs.id AND t.relay_expires_at < ?)`,
-        args: [toolErrorLine("relay_expired", "runner"), at, at, ...tenantIds, at],
+        args: [toolErrorLine("relay_expired", "runner"), at, at, ...tenantIds, at, at],
       },
       {
         sql: `UPDATE meet_transcripts SET status = 'expired', segments_json = '[]', updated_at = ?
                WHERE tenant_id IN (${tin}) AND status IN ('queued', 'transcribing') AND relay_expires_at < ?
                  AND NOT EXISTS (SELECT 1 FROM tool_jobs j
                                  WHERE j.tenant_id = meet_transcripts.tenant_id AND j.id = meet_transcripts.job_id
-                                   AND j.status IN ('queued', 'claimed', 'running'))
+                                   AND (j.status = 'queued' OR (j.status IN ('claimed', 'running') AND j.lease_expires_at >= ?)))
                RETURNING room_id`,
-        args: [at, ...tenantIds, at],
+        args: [at, ...tenantIds, at, at],
       },
     ],
     "write",
@@ -920,6 +929,51 @@ export async function expireRelay(db: Client, tenantIds: readonly string[], now:
   const expired = results[1].rows.length;
   if (expired) console.warn("[meet.relay] recordings expired before the PC took them", { count: expired });
   return expired;
+}
+
+/**
+ * A recording nobody ever handed over that has been quiet for the relay's 30
+ * days (its browser never finalized and no PC's claim took it in time) gets a
+ * row of its own, expired, so the cleanup deletes its chunks. Without it such
+ * audio had no row to be found by and stayed on the relay for good (Codex on
+ * #685, second pass). Measured from its newest chunk, so a room that never
+ * ended is covered too. `tenantIds` null: every workspace (the relay cron).
+ */
+export async function expireUnfinalized(db: Client, tenantIds: readonly string[] | null, now: Date): Promise<number> {
+  if (tenantIds && !tenantIds.length) return 0;
+  const at = now.toISOString();
+  const scope = tenantIds ? ` AND c.tenant_id IN (${sqlPlaceholders(tenantIds.length)})` : "";
+  const rs = await db.execute({
+    sql: `INSERT OR IGNORE INTO meet_transcripts (id, tenant_id, room_id, status, relay_expires_at, created_at, updated_at)
+          SELECT lower(hex(randomblob(16))), c.tenant_id, c.room_id, 'expired', ?, ?, ?
+            FROM meet_recording_chunks c
+           WHERE NOT EXISTS (SELECT 1 FROM meet_transcripts t WHERE t.tenant_id = c.tenant_id AND t.room_id = c.room_id)${scope}
+           GROUP BY c.tenant_id, c.room_id
+          HAVING MAX(c.created_at) < ?
+           LIMIT 50`,
+    args: [at, at, at, ...(tenantIds ?? []), new Date(now.getTime() - RELAY_DAYS * DAY_MS).toISOString()],
+  });
+  if (rs.rowsAffected) console.warn("[meet.relay] recordings never handed over expired", { count: rs.rowsAffected });
+  return rs.rowsAffected;
+}
+
+/** What the recording browser said about its own losses at the end (lib/meet/recorder.ts StopReport). */
+export type RecorderReport = { failed: number; errored: number };
+
+/**
+ * Keep the recording browser's own count of what it lost. Chunks that never
+ * reached the server leave a gap in the rows only when later ones did: a lost
+ * last chunk or a whole lost segment leaves no trace, so without this the
+ * panel would present an incomplete transcript as whole (Codex on #685,
+ * second pass). The highest count reported is kept.
+ */
+export async function recordRecorderReport(db: Client, room: MeetRoom, report: RecorderReport, now: Date): Promise<void> {
+  if (!(report.failed > 0 || report.errored > 0)) return;
+  await db.execute({
+    sql: `UPDATE meet_transcripts SET recorder_failed = MAX(recorder_failed, ?), recorder_errored = MAX(recorder_errored, ?), updated_at = ?
+           WHERE tenant_id = ? AND room_id = ?`,
+    args: [report.failed, report.errored, now.toISOString(), room.tenantId, room.id],
+  });
 }
 
 /**
@@ -961,6 +1015,7 @@ export async function finalizeDueRooms(
 
 /** The three sweeps, in the order they feed each other. The runner's claim runs them while it serves meetings. */
 export async function meetRelaySweeps(db: Client, storage: MeetStorage | null, tenantIds: readonly string[], now: Date): Promise<void> {
+  await expireUnfinalized(db, tenantIds, now);
   await expireRelay(db, tenantIds, now);
   await finalizeDueRooms(db, tenantIds, now);
   await removeRelayChunks(db, storage, { tenantIds }, RELAY_CLEANUP_BATCH, now);
@@ -980,6 +1035,8 @@ export async function meetRelayCron(
   now: Date,
 ): Promise<{ tenants: number; expired: number; removed: number }> {
   const at = now.toISOString();
+  // First, give a row to every recording nobody handed over that is past its 30 days, so the reads below find it.
+  const abandoned = await expireUnfinalized(db, null, now);
   const rs = await db.execute({
     sql: `SELECT DISTINCT tenant_id FROM meet_transcripts
            WHERE (status IN ('ready', 'expired', 'deleted') AND relay_cleared_at IS NULL)
@@ -988,8 +1045,8 @@ export async function meetRelayCron(
     args: [at],
   });
   const tenantIds = rs.rows.map((r) => String(r.tenant_id));
-  if (!tenantIds.length) return { tenants: 0, expired: 0, removed: 0 };
-  const expired = await expireRelay(db, tenantIds, now);
+  if (!tenantIds.length) return { tenants: 0, expired: abandoned, removed: 0 };
+  const expired = abandoned + (await expireRelay(db, tenantIds, now));
   const removed = await removeRelayChunks(db, storage, { tenantIds }, RELAY_DELETE_BATCH, now);
   return { tenants: tenantIds.length, expired, removed };
 }
@@ -1082,7 +1139,14 @@ export type MeetRecordingView = {
   /** Chunks and bytes still on the relay. */
   relayChunks: number;
   relayBytes: number;
+  /**
+   * Chunks of audio missing from the transcript: the larger of the gaps the
+   * rows show and the count the recording browser reported (a lost last chunk
+   * or a whole lost segment shows in the report only).
+   */
   missingChunks: number;
+  /** Recorder errors the browser reported: part of the audio may be missing, by an amount nobody can count. */
+  recorderErrored: number;
   relayExpiresAt: string | null;
   job: JobState | null;
   /** The PC that transcribes meetings, when it checked in during the last 10 minutes. */
@@ -1133,7 +1197,8 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
     state,
     relayChunks: relay.chunks,
     relayBytes: relay.bytes,
-    missingChunks: t?.missingChunks ?? 0,
+    missingChunks: Math.max(t?.missingChunks ?? 0, t?.recorderFailed ?? 0),
+    recorderErrored: t?.recorderErrored ?? 0,
     relayExpiresAt: t?.relayExpiresAt ?? null,
     job,
     runner: live ? { label: live.label, lastSeenAt: live.lastSeenAt } : null,

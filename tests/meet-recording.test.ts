@@ -307,8 +307,17 @@ async function main() {
     await endRoom(r1.id, later(T0, minutes(8)));
     const first = await routes.handleMeetFinalize(hostReq(code1, "POST", "/finalize"), code1, rdeps(later(T0, minutes(8))));
     assert.deepEqual([first.status, (await body(first)).state], [200, "queued"]);
-    const second = await routes.handleMeetFinalize(hostReq(code1, "POST", "/finalize"), code1, rdeps(later(T0, minutes(9))));
+    // The recording browser's own report: 5 chunks it could not upload, 1 recorder error. Kept on the row,
+    // because a lost LAST chunk leaves no gap in the rows to infer it from (Codex on #685, second pass).
+    const reported = new Request(`${ORIGIN}/api/meet/${code1}/recording/finalize`, {
+      method: "POST",
+      headers: { origin: ORIGIN, "x-forwarded-host": "oasisai.work", "content-type": "application/json" },
+      body: JSON.stringify({ sent: 9, failed: 5, segments: 3, errored: 1 }),
+    });
+    const second = await routes.handleMeetFinalize(reported, code1, rdeps(later(T0, minutes(9))));
     assert.deepEqual([second.status, (await body(second)).state], [200, "queued"]);
+    const kept = await rec.readTranscript(db, OASIS, r1.id);
+    assert.deepEqual([kept?.recorderFailed, kept?.recorderErrored], [5, 1]);
     assert.equal(await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_transcribe'"), 1);
     const t = await rec.readTranscript(db, OASIS, r1.id);
     assert.equal(t?.status, "queued");
@@ -447,6 +456,8 @@ async function main() {
     assert.equal(view.transcript.folderName, "2026-10-17 Discovery call (abcd1234)");
     assert.doesNotMatch(JSON.stringify(view), /Users\\\\User/, "the full local path reached the page");
     assert.equal(view.transcript.startedAtMs, T0.getTime());
+    // 3 chunks are missing by the rows, 5 by the browser's own report: the larger is said.
+    assert.deepEqual([view.missingChunks, view.recorderErrored], [5, 1]);
     assert.equal((view.runner as { label: string }).label, "CCPC (Windows)");
     const guest = await routes.handleMeetRecordingGet(hostReq(code1, "GET"), code1, rdeps(later(T0, minutes(202)), as(USERS.rep.id)));
     assert.equal(guest.status, 403, "a member who is not the host read the transcript");
@@ -688,13 +699,24 @@ async function main() {
     const oldCode = displayMeetCode(old.code);
     await routes.handleMeetFinalize(hostReq(oldCode, "POST", "/finalize"), oldCode, rdeps(later(at, minutes(3))));
 
+    // A recording NOBODY handed over (the browser closed, the PC was off past the window): no row at all.
+    const lost = await liveRoom({ at });
+    const lostP = await participant(lost, "Never handed over");
+    assert.equal((await upload(lost, { participant: lostP, segment: crypto.randomUUID(), seq: 0, startedAt: at.getTime() }, later(at, minutes(1)))).status, 201);
+    await endRoom(lost.id, later(at, minutes(2)));
+
     const out = await rec.meetRelayCron(db, store.storage, later(at, minutes(31 * 24 * 60)));
-    assert.equal(out.expired, 1);
-    assert.ok(out.removed >= 51, JSON.stringify(out));
-    assert.equal(await count("SELECT COUNT(*) FROM meet_recording_chunks WHERE room_id IN (?, ?)", [big.id, old.id]), 0, "audio stayed on the relay with the PC off");
-    assert.equal((await rec.readTranscript(db, OASIS, old.id))?.status, "expired");
+    assert.equal(out.expired, 2, "the overdue recording and the one never handed over");
+    assert.ok(out.removed >= 52, JSON.stringify(out));
     assert.equal(
-      await count("SELECT COUNT(*) FROM meet_transcripts WHERE room_id IN (?, ?) AND relay_cleared_at IS NULL", [big.id, old.id]),
+      await count("SELECT COUNT(*) FROM meet_recording_chunks WHERE room_id IN (?, ?, ?)", [big.id, old.id, lost.id]),
+      0,
+      "audio stayed on the relay with the PC off",
+    );
+    assert.equal((await rec.readTranscript(db, OASIS, old.id))?.status, "expired");
+    assert.equal((await rec.readTranscript(db, OASIS, lost.id))?.status, "expired", "a recording nobody handed over has no way off the relay");
+    assert.equal(
+      await count("SELECT COUNT(*) FROM meet_transcripts WHERE room_id IN (?, ?, ?) AND relay_cleared_at IS NULL", [big.id, old.id, lost.id]),
       0,
       "a recording with nothing left on the relay is not marked cleared, so every run re-reads it",
     );
@@ -705,9 +727,20 @@ async function main() {
   await check("the panel says deleted only for what is, keeps reading while anything is left, and a failed action's error outlives the re-read", async () => {
     const v = await import("../components/meet/recording-view");
     const base: RecordingView = {
-      state: "deleted", relayChunks: 0, relayBytes: 0, missingChunks: 0, relayExpiresAt: null,
+      state: "deleted", relayChunks: 0, relayBytes: 0, missingChunks: 0, recorderErrored: 0, relayExpiresAt: null,
       job: null, runner: null, transcript: null, deviceDelete: null,
     };
+    // Expired is "being deleted" until the last relay copy is gone, and the panel keeps reading until then.
+    const expiring = { ...base, state: "expired" as const, relayChunks: 40 };
+    assert.match(v.describeRecording(expiring).headline, /is being deleted/);
+    assert.equal(v.recordingBusy(expiring), true);
+    const expired = { ...base, state: "expired" as const };
+    assert.match(v.describeRecording(expired).headline, /was deleted/);
+    assert.equal(v.recordingBusy(expired), false);
+    // Missing audio is said from the real count; a recorder error with no count still says something may be missing.
+    assert.match(v.missingAudioLine({ ...base, missingChunks: 18 }) ?? "", /about 3 minutes/);
+    assert.match(v.missingAudioLine({ ...base, recorderErrored: 1 }) ?? "", /may be missing/);
+    assert.equal(v.missingAudioLine(base), null);
     const device = (status: "not_needed" | "waiting" | "done" | "failed", errorCode: string | null = null) =>
       ({ status, errorCode, doneAt: status === "done" ? T0.toISOString() : null });
     const waiting = { ...base, deviceDelete: device("waiting") };
@@ -752,20 +785,32 @@ async function main() {
   // ---------------------------------------------------------------------
   // The rules the reviewers found unpinned
   // ---------------------------------------------------------------------
-  /** Claim until a meeting's transcription comes up, finishing any of the PC's delete jobs queued ahead of it. */
-  async function claimTranscription(at: Date, deps = runnerDeps(at)): Promise<Claimed> {
-    for (let i = 0; i < 5; i += 1) {
-      const got = (await answerOf(
+  /**
+   * Claim until THIS room's transcription comes up, as the PC would work through what is queued ahead of it:
+   * a delete job is done, another meeting's transcription is failed, and "no job, ask again now" (a job the
+   * claim ended as meeting_gone) is asked again.
+   */
+  async function claimTranscription(at: Date, roomId: string, deps = runnerDeps(at)): Promise<Claimed> {
+    for (let i = 0; i < 10; i += 1) {
+      const answer = (await answerOf(
         await h.handleToolsClaim(signedRequest("claim", { runner_id: RUNNER, label: "CCPC (Windows)", version: "1.0.0", tools: MEET_TOOLS }, at), deps),
-      )).body.job as Claimed | null;
-      assert.ok(got, "no meeting job to claim");
-      if (got.tool_key === "meet_transcribe") return got;
+      )).body;
+      const got = answer.job as Claimed | null;
+      if (!got) {
+        assert.equal(answer.poll_after_seconds, 0, "no meeting job to claim");
+        continue;
+      }
+      if (got.tool_key === "meet_transcribe" && got.input.room_id === roomId) return got;
+      if (got.tool_key === "meet_transcribe") {
+        await h.handleToolsFail(signedRequest("fail", { ...ref(got), error_code: "transcribe_failed" }, at), runnerDeps(at));
+        continue;
+      }
       await h.handleToolsComplete(
         signedRequest("complete", { ...ref(got), tool_key: "meet_delete_local", removed: [], already_gone: true, device_label: "CCPC (Windows)" }, at),
         runnerDeps(at),
       );
     }
-    throw new Error("no transcription came up");
+    throw new Error("this room's transcription never came up");
   }
   async function endedRecording(at: Date, name: string) {
     const r = await liveRoom({ at });
@@ -788,7 +833,8 @@ async function main() {
             const out = await target.execute(stmt);
             const sql = typeof stmt === "string" ? stmt : stmt.sql;
             // Right after the claim reads the room's chunks, the host's browser delivers one more.
-            if (!raced && /segment_started_ms, mime_type, bytes, storage_path\s+FROM meet_recording_chunks/.test(sql)) {
+            const args = typeof stmt === "string" ? [] : ((stmt.args ?? []) as unknown[]);
+            if (!raced && /segment_started_ms, mime_type, bytes, storage_path\s+FROM meet_recording_chunks/.test(sql) && args.includes(room.id)) {
               raced = await upload(room, { participant: p, segment: crypto.randomUUID(), seq: 0, startedAt: at.getTime() }, later(at, minutes(3)));
             }
             return out;
@@ -798,7 +844,7 @@ async function main() {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const job = await claimTranscription(later(at, minutes(3)), { ...runnerDeps(later(at, minutes(3))), db: proxy });
+    const job = await claimTranscription(later(at, minutes(3)), room.id, { ...runnerDeps(later(at, minutes(3))), db: proxy });
     assert.ok(raced, "the race was never staged");
     const declared = (job.input.segments as unknown[]).length;
     const stored = await count("SELECT COUNT(*) FROM meet_recording_chunks WHERE room_id = ?", [room.id]);
@@ -815,10 +861,12 @@ async function main() {
   await check("nothing is expired or deleted under the PC, the job is done only with its transcript, and a report must name the job's own tool", async () => {
     const at = later(T0, minutes(100_000));
     const { room } = await endedRecording(at, "Steady");
-    const job = await claimTranscription(later(at, minutes(3)));
+    const job = await claimTranscription(later(at, minutes(3)), room.id);
     assert.equal(job.input.room_id, room.id, "claimed another meeting's job");
-    // 31 days on, still in the PC's hands: neither expired nor freed (#685 review M10, M17).
+    // 31 days on, still in the PC's hands (its lease live: heartbeats kept it): neither expired nor freed
+    // (#685 review M10, M17).
     const late = later(at, minutes(31 * 24 * 60));
+    await db.execute({ sql: "UPDATE tool_jobs SET lease_expires_at = ? WHERE id = ?", args: [later(late, minutes(10)).toISOString(), job.job_id] });
     await rec.expireRelay(db, [OASIS], late);
     assert.equal(await rec.removeRelayChunks(db, store.storage, { tenantIds: [OASIS], roomId: room.id }, 300, late), 0);
     assert.equal((await rec.readTranscript(db, OASIS, room.id))?.status, "transcribing");
@@ -882,6 +930,20 @@ async function main() {
     assert.ok(big.length > 1.4 * 1024 * 1024, "the report is not as big as the check says");
     const ok = await answerOf(await h.handleToolsComplete(signedRequest("complete", null, later(at, minutes(6)), { raw: big }), runnerDeps(later(at, minutes(6)))));
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  });
+
+  await check("a claim whose PC vanished does not hold audio past 30 days: its lapsed lease lets the recording expire", async () => {
+    const at = later(T0, minutes(102_000));
+    const { room } = await endedRecording(at, "Vanished");
+    const job = await claimTranscription(later(at, minutes(3)), room.id);
+    assert.equal(job.input.room_id, room.id);
+    // The PC never heartbeats again: the lease lapsed long before the 30 days ran out.
+    const late = later(at, minutes(31 * 24 * 60));
+    assert.ok((await rec.expireRelay(db, [OASIS], late)) >= 1);
+    assert.equal((await rec.readTranscript(db, OASIS, room.id))?.status, "expired");
+    const failed = await getJob(db, OASIS, job.job_id);
+    assert.deepEqual([failed?.status, failed?.errorCode], ["failed", "relay_expired"]);
+    assert.equal(await rec.removeRelayChunks(db, store.storage, { tenantIds: [OASIS], roomId: room.id }, 300, late), 1);
   });
 
   await check("a speaker with no consent on record is never recorded; a download is still held 45 minutes at most", async () => {
