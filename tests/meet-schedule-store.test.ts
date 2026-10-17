@@ -40,7 +40,7 @@ async function main() {
   console.log("meet schedule (real store):");
   const db = createClient({ url: `file:${dbFile}` });
   await db.executeMultiple(readFileSync(join(__dirname, "..", "database", "turso", "186_calendar.turso.sql"), "utf8"));
-  const { addMeetingToSchedule } = await import("../lib/meet/schedule");
+  const { addMeetingToSchedule, removeMeetingFromSchedule } = await import("../lib/meet/schedule");
   const { listEvents } = await import("../lib/calendar/store");
   type Room = Parameters<typeof addMeetingToSchedule>[1];
   const room = (tenantId: string, startsAt: string, title = "Follow-up with Acme"): Room => ({
@@ -85,6 +85,18 @@ async function main() {
     const before = (await listEvents(owner)).events.length;
     assert.deepEqual(await addMeetingToSchedule(owner, room(OASIS, "2026-10-22T18:00:00.000Z"), { timeZone: "Not/AZone" }), { ok: false, reason: "time_zone_invalid" });
     assert.equal((await listEvents(owner)).events.length, before);
+  });
+
+  await check("a deleted meeting comes off the host's Schedule; nobody else's delete reaches it; one already gone is a quiet no-op", async () => {
+    const out = await addMeetingToSchedule(owner, room(OASIS, "2026-10-22T15:00:00.000Z"), { timeZone: "America/Toronto" });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    if (!out.ok) return;
+    const onSchedule = async () => (await listEvents(owner)).events.some((e) => e.id === out.eventId);
+    await removeMeetingFromSchedule({ tenantId: OASIS, userId: "someone-else" }, out.eventId);
+    assert.equal(await onSchedule(), true, "the store deletes only the owner's own events");
+    await removeMeetingFromSchedule(owner, out.eventId);
+    assert.equal(await onSchedule(), false);
+    await removeMeetingFromSchedule(owner, out.eventId);
   });
 
   if (failures) {

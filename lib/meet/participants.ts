@@ -198,6 +198,15 @@ export async function roomSessions(db: Client, room: Pick<MeetRoom, "tenantId" |
   return rs.rows.map((row) => String(row.s));
 }
 
+/**
+ * Delete a room and everyone's row in it (the host's "Delete meeting"). The recording goes first, through
+ * lib/meet/recording.ts deleteMeetRecording, which keeps its own tombstone rows: never delete those here.
+ */
+export async function deleteMeetRoomRows(db: Client, room: Pick<MeetRoom, "tenantId" | "id">): Promise<void> {
+  await db.execute({ sql: "DELETE FROM meet_participants WHERE tenant_id = ? AND room_id = ?", args: [room.tenantId, room.id] });
+  await db.execute({ sql: "DELETE FROM meet_rooms WHERE tenant_id = ? AND id = ?", args: [room.tenantId, room.id] });
+}
+
 /** End a room once. True when this call ended it; false when it had already ended. */
 export async function endMeetRoom(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, reason: MeetEndedReason, now: Date = new Date()): Promise<boolean> {
   const rs = await db.execute({

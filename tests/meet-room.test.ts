@@ -20,7 +20,7 @@ import { createClient } from "@libsql/client";
 import { NextRequest } from "next/server";
 import { publicAppBaseUrl } from "../lib/api-helpers";
 import { MEET_COOKIE, MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } from "../lib/meet/access";
-import { parseSfu } from "../lib/meet/bodies";
+import { parseHost, parseSfu } from "../lib/meet/bodies";
 import { handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
 import { MEET_HOST_GRACE_MS, MEET_MAX_PARTICIPANTS } from "../lib/meet/participants";
 import { displayMeetCode, readMeetRoomByCode } from "../lib/meet/rooms";
@@ -117,6 +117,13 @@ async function main() {
   const signedOut = async (): Promise<MeetSession> => ({ ok: false });
   const as = (userId: string, isTrueAdmin = false, tenantId = OASIS) => async (): Promise<MeetSession> => ({ ok: true, tenantId, userId, isTrueAdmin, email: "cc@oasisai.work" });
   const scheduled: Array<{ owner: { tenantId: string; userId: string }; startsAt: string | null; timeZone: string; minutes?: number }> = [];
+  const unscheduled: Array<{ owner: { tenantId: string; userId: string }; eventId: string }> = [];
+  // An OASIS workspace with recording installed, unless a check says otherwise.
+  const recording: MeetDeps["recording"] = {
+    available: async () => true,
+    served: () => true,
+    remove: async () => ({ relayRemaining: 0 }),
+  };
   const deps = (over: Partial<MeetDeps> = {}): MeetDeps => ({
     db,
     sfu: () => sfu.client,
@@ -126,6 +133,10 @@ async function main() {
       scheduled.push({ owner, startsAt: room.startsAt, timeZone: opts.timeZone, minutes: opts.minutes });
       return { ok: true, eventId: `evt-${scheduled.length}` };
     },
+    unschedule: async (owner, eventId) => {
+      unscheduled.push({ owner, eventId });
+    },
+    recording,
     now: () => new Date(clock),
     ...over,
   });
@@ -352,6 +363,83 @@ async function main() {
     assert.equal((await handleState(request(`/api/meet/${c2}/state`, { method: "GET", cookie: cookieOf(guest)!, ip: freshIp() }), c2, deps())).status, 410);
     assert.equal((await handleJoin(request(`/api/meet/${c2}/join`, { body: { name: "Late" }, ip: freshIp() }), c2, deps())).status, 410);
     assert.equal((await json(await handleHost(request(`/api/meet/${c2}/host`, { body: { action: "end" }, ip: freshIp() }), c2, deps({ session: as(CC) })))).alreadyEnded, true, "ending twice is fine");
+  });
+
+  await check("recording is offered only where it really happens, so a guest is never asked to agree to one nobody makes", async () => {
+    const off: MeetDeps["recording"] = { ...recording, available: async () => false, served: () => false };
+    assert.equal((await json(await handleListRooms(deps({ session: as(CC) })))).recordingAvailable, true);
+    assert.equal((await json(await handleListRooms(deps({ session: as(CC), recording: off })))).recordingAvailable, false);
+    const r = await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: true } }), deps({ session: as(CC), recording: off })));
+    assert.equal((r.room as Json).recordAudio, false, "asking to record where nothing records makes a room that does not");
+    const c = String((r.room as Json).code);
+    assert.equal((await handleJoin(request(`/api/meet/${c}/join`, { body: { name: "G" }, ip: freshIp() }), c, deps())).status, 200, "no notice to tick");
+    // A room made while this workspace recorded, joined by its creator once it no longer does.
+    const on = await json(await handleCreateRoom(request("/api/calendar/meet", { body: {} }), deps({ session: as(CC) })));
+    const c2 = String((on.room as Json).code);
+    const host = await json(await handleJoin(request(`/api/meet/${c2}/join`, { body: {}, ip: freshIp() }), c2, deps({ session: as(CC), recording: off })));
+    assert.equal(host.records, false, "a browser is told to record only where recording is served");
+  });
+
+  const deleteMeeting = (c: string, session: () => Promise<MeetSession>, over: Partial<MeetDeps> = {}) =>
+    handleHost(request(`/api/meet/${c}/host`, { body: { action: "delete" }, ip: freshIp() }), c, deps({ session, ...over }));
+  const roomRows = async (roomId: string) =>
+    Number((await db.execute({ sql: "SELECT (SELECT count(*) FROM meet_rooms WHERE id = ?) + (SELECT count(*) FROM meet_participants WHERE room_id = ?) AS n", args: [roomId, roomId] })).rows[0].n);
+
+  await check("Delete meeting: a host only; a meeting still going is ended and its media cut; the recording goes before the rows", async () => {
+    assert.deepEqual(parseHost({ action: "delete" }), { action: "delete" });
+    assert.equal(parseHost({ action: "delete", participantId: "x" }), null, "nothing else rides along");
+    const made = await json(await handleCreateRoom(request("/api/calendar/meet", { body: { title: "To delete", startsAt: "2026-10-22T14:00:00-04:00", timeZone: "America/Toronto" } }), deps({ session: as(CC) })));
+    const eventId = `evt-${scheduled.length}`;
+    const c = String((made.room as Json).code);
+    const roomId = String((made.room as Json).id);
+    assert.equal((await deleteMeeting(c, signedOut)).status, 401);
+    assert.equal((await deleteMeeting(c, as(REP))).status, 403, "a member who is not its host");
+    const host = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) })))!;
+    const guest = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: { name: "G", consent: true }, ip: freshIp() }), c, deps()))!;
+    for (const cookie of [host, guest]) await handleSfu(request(`/api/meet/${c}/sfu`, { body: { action: "session" }, cookie, ip: freshIp() }), c, deps());
+    const seen: Json[] = [];
+    const removing: MeetDeps["recording"] = {
+      ...recording,
+      remove: async (room, userId) => {
+        seen.push({ userId, status: (await readMeetRoomByCode(db, room.code))?.status ?? null, rows: await roomRows(room.id) });
+        return { relayRemaining: 3 };
+      },
+    };
+    const before = sfu.calls.length;
+    const unscheduledBefore = unscheduled.length;
+    const res = await deleteMeeting(c, as(CC), { recording: removing });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await json(res), { ok: true, deleted: true, relayRemaining: 3 }, "what is still on the relay, so the panel can say so");
+    assert.deepEqual(seen, [{ userId: CC, status: "ended", rows: 3 }], "the recording was removed while the room and its people's rows were all still there, the room already ended");
+    assert.equal(new Set(sfu.calls.slice(before).filter((x) => x.op === "tracks").map((x) => x.sessionId)).size, 2, "both sessions were cut");
+    assert.deepEqual(unscheduled.slice(unscheduledBefore), [{ owner: { tenantId: OASIS, userId: CC }, eventId }], "its entry comes off the creator's Schedule");
+    assert.equal(await roomRows(roomId), 0, "the room and everyone's row in it are gone");
+    assert.equal((await handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie: guest, ip: freshIp() }), c, deps())).status, 404, "the link is dead");
+  });
+
+  await check("Delete meeting: a recording that cannot be removed keeps the meeting; another host's delete leaves the creator's calendar alone", async () => {
+    const made = await json(await handleCreateRoom(request("/api/calendar/meet", { body: { startsAt: "2026-10-22T15:00:00-04:00", timeZone: "America/Toronto" } }), deps({ session: as(CC) })));
+    const c = String((made.room as Json).code);
+    const roomId = String((made.room as Json).id);
+    const unscheduledBefore = unscheduled.length;
+    const failing: MeetDeps["recording"] = { ...recording, remove: async () => { throw new Error("relay unreachable"); } };
+    const errors = console.error;
+    console.error = () => {}; // meetFailure logs the fault this check causes on purpose
+    let res: Response;
+    try {
+      res = await deleteMeeting(c, as(CC), { recording: failing });
+    } finally {
+      console.error = errors;
+    }
+    assert.equal(res.status, 500);
+    assert.equal(await roomRows(roomId), 1, "the meeting is kept, so its recording is never orphaned by a half-done delete");
+    assert.equal(unscheduled.length, unscheduledBefore, "and so is its Schedule entry");
+    const removedBy: string[] = [];
+    const nothingInstalled: MeetDeps["recording"] = { ...recording, remove: async (_room, userId) => { removedBy.push(userId); return null; } };
+    assert.deepEqual(await json(await deleteMeeting(c, as(ADON, true), { recording: nothingInstalled })), { ok: true, deleted: true, relayRemaining: 0 });
+    assert.deepEqual(removedBy, [ADON], "an owner or admin by base role may delete it");
+    assert.equal(unscheduled.length, unscheduledBefore, "the creator's calendar is theirs: another host's delete never writes to it");
+    assert.equal(await roomRows(roomId), 0);
   });
 
   await check("a live room whose host has been gone ten minutes ends itself", async () => {

@@ -8,7 +8,8 @@
  *   GET  /api/meet/[code]/state        who is here and what they publish; keeps the caller present
  *   POST /api/meet/[code]/sfu          one negotiation step on the caller's own SFU session
  *   POST /api/meet/[code]/leave        the caller leaves; their session is cut
- *   POST /api/meet/[code]/host         a host removes someone or ends the meeting; media is cut, not just tokens
+ *   POST /api/meet/[code]/host         a host removes someone, ends the meeting, or deletes it with its recording;
+ *                                      media is cut, not just tokens
  *
  * The /api/meet/ routes are public at the middleware (a guest has no account) and authenticate themselves:
  * every call but join needs a participant token for THIS room, re-read against the participant's row, and
@@ -38,6 +39,7 @@ import { meetFailure, meetRateLimited, roomView } from "./http";
 import type { RTCIceServerLike } from "./ice";
 import {
   MEET_MAX_TRACKS,
+  deleteMeetRoomRows,
   endMeetRoom,
   expireIfHostGone,
   joinMeetRoom,
@@ -65,6 +67,17 @@ export type MeetDeps = {
   ice: () => Promise<RTCIceServerLike[]>;
   /** Put a meeting made for later on its host's Schedule (lib/meet/schedule.ts addMeetingToSchedule). */
   schedule: (owner: { tenantId: string; userId: string }, room: MeetRoom, opts: { timeZone: string; minutes?: number }) => Promise<ScheduleOutcome>;
+  /** Take a deleted meeting off its creator's Schedule. Best effort: a failure is logged, the meeting is still deleted. */
+  unschedule: (owner: { tenantId: string; userId: string }, eventId: string) => Promise<void>;
+  /** The recording side (lib/meet/recording.ts, e9). */
+  recording: {
+    /** This workspace records (OASIS only) and the recording tables are installed. */
+    available: (tenantId: string) => Promise<boolean>;
+    /** This workspace's meetings may record at all (meetRecordingServed). */
+    served: (tenantId: string) => boolean;
+    /** Delete a meeting's recording here and on the PC; null when recording is not installed (nothing to delete). */
+    remove: (room: MeetRoom, userId: string, now: Date) => Promise<{ relayRemaining: number } | null>;
+  };
   now: () => Date;
 };
 
@@ -108,10 +121,15 @@ export async function handleListRooms(deps: MeetDeps): Promise<NextResponse> {
   try {
     const session = await deps.session();
     if (!session.ok) return meetError(401, "sign_in_required");
-    const rooms = await listMeetRooms(deps.db, { tenantId: session.tenantId, limit: 20 });
+    const [rooms, recordingAvailable] = await Promise.all([
+      listMeetRooms(deps.db, { tenantId: session.tenantId, limit: 20 }),
+      deps.recording.available(session.tenantId),
+    ]);
     return meetJson({
       ok: true,
       rooms: rooms.map((r) => ({ id: r.id, ...roomView(r), link: link(r), url: url(r), createdAt: r.createdAt, mine: r.hostUserId === session.userId })),
+      // The panel offers "Record and transcribe", and shows a meeting's transcript, only when this is true.
+      recordingAvailable,
     });
   } catch (err) {
     return meetFailure(err, "rooms.list");
@@ -125,12 +143,15 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
     if (!session.ok) return meetError(401, "sign_in_required");
     const body = parseCreateRoom(await readCappedJson(req, 4_000));
     if (!body) return meetError(400, "invalid_body");
+    // A room records only where recording really happens (an OASIS workspace with recording installed): guests
+    // are never asked to agree to a recording nobody makes.
+    const recordingAvailable = await deps.recording.available(session.tenantId);
     const room = await createMeetRoom(deps.db, {
       tenantId: session.tenantId,
       hostUserId: session.userId,
       title: body.title,
       startsAt: body.startsAt ?? null,
-      recordAudio: body.recordAudio ?? true,
+      recordAudio: recordingAvailable && (body.recordAudio ?? true),
       now: deps.now(),
     });
     // A meeting made for later also goes on the host's Schedule. The link works whether or not it could; a
@@ -163,13 +184,14 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
  * recording browser per room; the recording route refuses a second). If the creator is not in the call,
  * nothing records.
  */
-function joined(participant: MeetPresence, room: MeetRoom, iceServers: RTCIceServerLike[]) {
+function joined(participant: MeetPresence, room: MeetRoom, iceServers: RTCIceServerLike[], served: boolean) {
   return meetJson({
     ok: true,
     participantId: participant.id,
     role: participant.role,
     name: participant.displayName,
-    records: participant.role === "host" && room.recordAudio && participant.userId !== null && participant.userId === room.hostUserId,
+    records:
+      served && participant.role === "host" && room.recordAudio && participant.userId !== null && participant.userId === room.hostUserId,
     room: roomView(room),
     iceServers,
   });
@@ -197,7 +219,7 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
       if (before?.removedAt) return meetError(403, "removed");
       if (before && !before.leftAt && before.role === role) {
         await touchParticipant(deps.db, before, now);
-        return joined(before, room, await deps.ice());
+        return joined(before, room, await deps.ice(), deps.recording.served(room.tenantId));
       }
     }
 
@@ -216,7 +238,7 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
     if (!participant) return meetError(409, "room_full");
     const token = signMeetToken({ roomId: room.id, participantId: participant.id, role }, now.getTime());
     const current = (await readMeetRoomByCode(deps.db, code)) ?? room;
-    const res = joined(participant, current, await deps.ice());
+    const res = joined(participant, current, await deps.ice(), deps.recording.served(room.tenantId));
     const cookie = meetCookie(code, token);
     res.cookies.set(cookie.name, cookie.value, cookie.options);
     return res;
@@ -388,6 +410,24 @@ export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDe
       const sfu = sfuIfConfigured(deps);
       if (sfu) await cutSession(sfu, removed.sfuSessionId, "host.remove");
       return meetJson({ ok: true, removed: removed.id });
+    }
+
+    if (body.action === "delete") {
+      // A meeting still going is ended first, so nobody keeps talking into a room that no longer exists.
+      if (room.status !== "ended") {
+        await endMeetRoom(deps.db, room, "host_ended", now);
+        await cutRoom(deps, room);
+      }
+      // The recording goes first (e9's deleteMeetRecording: the transcript, the relay and the PC's copy). If it
+      // fails, the meeting is kept, so the recording can never be orphaned by a half-done delete.
+      const recording = await deps.recording.remove(room, auth.userId, now);
+      // The creator's own Schedule entry carries the dead link; another host's delete never touches someone
+      // else's calendar.
+      if (room.calendarEventId && room.hostUserId === auth.userId) {
+        await deps.unschedule({ tenantId: room.tenantId, userId: room.hostUserId }, room.calendarEventId);
+      }
+      await deleteMeetRoomRows(deps.db, room);
+      return meetJson({ ok: true, deleted: true, relayRemaining: recording?.relayRemaining ?? 0 });
     }
 
     const endedNow = await endMeetRoom(deps.db, room, "host_ended", now);

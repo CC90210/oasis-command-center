@@ -109,12 +109,13 @@ export function parseSfu(v: unknown): SfuBody | null {
   }
 }
 
-export type HostBody = { action: "remove"; participantId: string } | { action: "end" };
+export type HostBody = { action: "remove"; participantId: string } | { action: "end" } | { action: "delete" };
 
-/** POST /api/meet/[code]/host: a host removes someone or ends the meeting. */
+/** POST /api/meet/[code]/host: a host removes someone, ends the meeting, or deletes it with its recording. */
 export function parseHost(v: unknown): HostBody | null {
   if (!isRecord(v)) return null;
   if (v.action === "end") return onlyKeys(v, ["action"]) ? { action: "end" } : null;
+  if (v.action === "delete") return onlyKeys(v, ["action"]) ? { action: "delete" } : null;
   if (v.action === "remove" && onlyKeys(v, ["action", "participantId"]) && typeof v.participantId === "string" && v.participantId.length > 0 && v.participantId.length <= 64) {
     return { action: "remove", participantId: v.participantId };
   }

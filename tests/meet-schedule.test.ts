@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { CalendarStoreError } from "../lib/calendar/store";
 import type { CalendarPrefs, CalendarRecord, EventOp } from "../lib/calendar/types";
 import type { MeetRoom } from "../lib/meet/rooms";
-import { addMeetingToSchedule, type ScheduleStore } from "../lib/meet/schedule";
+import { addMeetingToSchedule, removeMeetingFromSchedule, type ScheduleStore } from "../lib/meet/schedule";
 
 let failures = 0;
 async function check(name: string, fn: () => Promise<void>) {
@@ -91,6 +91,26 @@ async function main() {
       throw new TypeError("network down");
     }) as unknown as ScheduleStore["applyOps"];
     await assert.rejects(addMeetingToSchedule(OWNER, room, { timeZone: "America/Toronto" }, broken.store), /network down/);
+  });
+
+  await check("a deleted meeting comes off its creator's Schedule by its event id; a fault there is logged, never thrown", async () => {
+    const { store, ops } = fakeStore();
+    await removeMeetingFromSchedule(OWNER, "evt-9", store);
+    assert.deepEqual(ops, [{ owner: OWNER, ops: [{ op: "delete", id: "evt-9" }] }]);
+    const broken = fakeStore();
+    broken.store.applyOps = (async () => {
+      throw new TypeError("network down");
+    }) as unknown as ScheduleStore["applyOps"];
+    const logged: unknown[][] = [];
+    const errors = console.error;
+    console.error = (...args: unknown[]) => void logged.push(args);
+    try {
+      await removeMeetingFromSchedule(OWNER, "evt-9", broken.store);
+    } finally {
+      console.error = errors;
+    }
+    assert.equal(logged.length, 1, "the meeting is deleted either way, and the fault is in the log");
+    assert.match(String(logged[0][1]), /network down/);
   });
 
   if (failures) {

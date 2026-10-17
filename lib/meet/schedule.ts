@@ -31,6 +31,20 @@ export type ScheduleStore = {
 
 const LIVE_STORE: ScheduleStore = { listCalendars, getPrefs, applyOps, origin: publicAppBaseUrl };
 
+/**
+ * Take a deleted meeting off its creator's Schedule, through the Schedule's own write path. Best effort: the
+ * meeting is deleted either way, and an event that is already gone, or a Schedule that cannot be reached, is
+ * logged, never thrown (the entry then simply holds a link that no longer works).
+ */
+export async function removeMeetingFromSchedule(owner: Owner, eventId: string, store: ScheduleStore = LIVE_STORE): Promise<void> {
+  try {
+    const prefs = await store.getPrefs(owner);
+    await store.applyOps(owner, [{ op: "delete", id: eventId }], prefs);
+  } catch (err) {
+    console.error("[meet.schedule] could not take a deleted meeting off the Schedule", err instanceof Error ? err.message : err);
+  }
+}
+
 export async function addMeetingToSchedule(
   owner: Owner,
   room: MeetRoom,
