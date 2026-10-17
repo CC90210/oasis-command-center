@@ -385,6 +385,7 @@ async function planFor(db: SupabaseClient, tenantId: string, leadId: string): Pr
   for (const [table, column] of DELETE_TARGETS) {
     remove[table] = await countLink(db, table, column, tenantId, leadId);
   }
+  remove.agent_event_copies = await eventCopies(tenantId, leadId, false);
   return { blockers: [], cancel, unlink, delete: remove };
 }
 
@@ -477,9 +478,38 @@ async function deleteLinks(
 }
 
 /**
+ * The lead's own details copied into its activity events. A stage change
+ * publishes the whole record as payload.data (lib/manifest/events.ts) so drips
+ * can fill in {{lead.first_name}}; after the delete nothing reads it, and the
+ * name, email and phone would outlive the lead (live E2E of #669, 2026-10-17).
+ * The event rows stay, so the history and its counts do; only the copy goes.
+ * Messages already sent keep their recipient, as sent history does everywhere
+ * else here. agent_events has no tenant_id column: the tenant is the payload's.
+ */
+const EVENT_COPY_WHERE =
+  "json_valid(payload) AND json_extract(payload, '$.tenant_id') = ?" +
+  " AND (json_extract(payload, '$.record_id') = ? OR json_extract(payload, '$.lead_id') = ?)" +
+  " AND json_type(payload, '$.data') IS NOT NULL";
+
+async function eventCopies(tenantId: string, leadId: string, redact: boolean): Promise<number> {
+  const raw = getTursoClient();
+  const args = [tenantId, leadId, leadId];
+  if (!redact) {
+    const found = await raw.execute({ sql: `SELECT count(*) AS n FROM agent_events WHERE ${EVENT_COPY_WHERE}`, args });
+    return Number(found.rows[0]?.n ?? 0);
+  }
+  const done = await raw.execute({
+    sql: `UPDATE agent_events SET payload = json_set(json_remove(payload, '$.data'), '$.data_removed', 'lead_deleted') WHERE ${EVENT_COPY_WHERE}`,
+    args,
+  });
+  return done.rowsAffected;
+}
+
+/**
  * Step 4: unlink the lead's history (set NULL) and delete its form data and
- * other dependents. Idempotent and tenant-scoped; also the finish for a delete
- * that stopped after the lead row went.
+ * other dependents, and the copies of its details in its activity events.
+ * Idempotent and tenant-scoped; also the finish for a delete that stopped after
+ * the lead row went.
  */
 async function removeDependents(
   db: SupabaseClient,
@@ -491,7 +521,9 @@ async function removeDependents(
     unlink[table] = await updateLink(db, table, column, tenantId, leadId, { [column]: null });
   }
   unlink.sms_agent_conversations = await unlinkSms(db, tenantId, leadId);
-  return { unlink, removed: await deleteLinks(db, tenantId, leadId) };
+  const removed = await deleteLinks(db, tenantId, leadId);
+  removed.agent_event_copies = await eventCopies(tenantId, leadId, true);
+  return { unlink, removed };
 }
 
 /**

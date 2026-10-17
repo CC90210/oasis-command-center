@@ -72,6 +72,7 @@ const TABLES = [
   "lead_interactions",
   "consent_events",
   "tenant_audit_log",
+  "agent_events",
 ] as const;
 
 function pass(name: string): void {
@@ -173,6 +174,10 @@ async function main(): Promise<void> {
       actor_email TEXT, actor_user_id TEXT, action_type TEXT, target_table TEXT,
       target_id TEXT, after TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+    -- The live shape that matters here: no tenant_id column, the tenant in the payload.
+    CREATE TABLE agent_events (
+      id TEXT PRIMARY KEY, event_type TEXT NOT NULL, publisher_agent TEXT, payload TEXT, correlation_id TEXT
+    );
   `);
 
   const lead = (id: string, tenantId = TENANT, stage = "assigned") => ({
@@ -258,6 +263,16 @@ async function main(): Promise<void> {
     { sql: "INSERT INTO form_views VALUES ('junk-view', ?, ?)", args: [TENANT, JUNK] },
     { sql: "INSERT INTO offer_funnel_visit_leads VALUES (?, 'junk-visit', ?)", args: [TENANT, JUNK] },
     { sql: "INSERT INTO offer_funnel_events VALUES ('junk-event', ?, ?)", args: [TENANT, JUNK] },
+    // A stage change copies the whole record into the event (lib/manifest/events.ts).
+    ...[
+      ["ev-dry", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: DRY, field: "stage", from: null, to: "assigned", data: { email: "dry@lead.test" }, tenant_id: TENANT }],
+      ["ev-junk-stage", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: JUNK, field: "stage", from: null, to: "assigned", data: { name: "Junk Lead", email: "junk@lead.test", phone: "+15145550142" }, tenant_id: TENANT }],
+      ["ev-junk-audit", "OASIS_AI_AUDIT_STARTED", { lead_id: JUNK, form_id: "f-1", tenant_id: TENANT }],
+      ["ev-junk-foreign", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: JUNK, data: { email: "theirs@other.test" }, tenant_id: OTHER_TENANT }],
+    ].map(([id, type, payload]) => ({
+      sql: "INSERT INTO agent_events (id, event_type, publisher_agent, payload, correlation_id) VALUES (?, ?, 'manifest-data', ?, ?)",
+      args: [id as string, type as string, JSON.stringify(payload), String((payload as { tenant_id: string }).tenant_id)],
+    })),
     { sql: "INSERT INTO drip_runs VALUES ('junk-scheduled', ?, ?, 'scheduled')", args: [TENANT, JUNK] },
     { sql: "INSERT INTO drip_runs VALUES ('junk-sent', ?, ?, 'sent')", args: [TENANT, JUNK] },
     {
@@ -312,6 +327,7 @@ async function main(): Promise<void> {
   assert.equal(dryResult.plan.delete.form_submissions, 1);
   assert.equal(dryResult.plan.delete.form_views, 1);
   assert.equal(dryResult.plan.delete.offer_funnel_visit_leads, 1);
+  assert.equal(dryResult.plan.delete.agent_event_copies, 1, "the dry run does not say the event copy goes");
   assert.deepEqual(await state(seed), dryBefore, "dry run changed the database");
   pass("dry run returns exact counts and writes nothing");
 
@@ -420,6 +436,18 @@ async function main(): Promise<void> {
   assert.equal(reserved.status, "cancelled", "a direct_reserved email survives the delete");
   assert.equal(await count(seed, "consent_events", "lead_id = ?", [JUNK]), 1);
   assert.equal(await count(seed, "tenant_audit_log", "target_id = ? AND actor_user_id = ?", [JUNK, OWNER]), 1);
+  // The copy of the lead's details in its stage event goes; the event stays
+  // (live E2E of #669: name, email and phone outlived the lead).
+  const payloadOf = async (id: string) =>
+    JSON.parse(String((await seed.execute({ sql: "SELECT payload FROM agent_events WHERE id = ?", args: [id] })).rows[0]?.payload)) as Record<string, unknown>;
+  assert.equal(junkResult.plan.delete.agent_event_copies, 1);
+  const stage = await payloadOf("ev-junk-stage");
+  assert.equal("data" in stage, false, "the lead's name, email and phone outlived it in agent_events");
+  assert.equal(stage.data_removed, "lead_deleted");
+  assert.deepEqual([stage.entity, stage.record_id, stage.to, stage.tenant_id], ["lead", JUNK, "assigned", TENANT], "the event itself was damaged");
+  assert.deepEqual(await payloadOf("ev-junk-audit"), { lead_id: JUNK, form_id: "f-1", tenant_id: TENANT }, "an event with no copy was rewritten");
+  assert.deepEqual((await payloadOf("ev-junk-foreign")).data, { email: "theirs@other.test" }, "another workspace's event was touched");
+  assert.deepEqual((await payloadOf("ev-dry")).data, { email: "dry@lead.test" }, "another lead's event was touched");
   const deletedState = await state(seed);
   assert.deepEqual(await remove(JUNK), { ok: false, code: "not_found" });
   assert.deepEqual(await state(seed), deletedState, "re-running a completed delete wrote again");

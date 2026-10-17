@@ -27,6 +27,7 @@ type Answer = { ok?: boolean; code?: string; blockers?: string[]; message?: stri
 /** Owner-facing words for what the delete touches; an unknown table shows its own name. */
 const WORDS: Record<string, string> = {
   form_submissions: "form answers",
+  agent_event_copies: "copies of their details in the activity log",
   form_views: "form views",
   offer_funnel_visit_leads: "page-visit links",
   clair_reports: "background reports",
