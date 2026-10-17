@@ -137,8 +137,11 @@ export function OfferBook({
       <FormPublicClient
         {...form}
         chrome="embedded"
-        onStepSubmitted={(stepIndex) => {
-          if (stepIndex === 0) setContactDone(true);
+        onStepSubmitted={() => {
+          // "Your details are in" from the first step the server accepted: a
+          // lead is only created with a reachable email or phone, and steps
+          // before one stay in the browser unreported (lib/forms/contact-gate.ts).
+          setContactDone(true);
         }}
       />
     </div>

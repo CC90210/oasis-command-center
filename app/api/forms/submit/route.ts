@@ -110,6 +110,16 @@ import {
 } from "@/lib/consent/ledger";
 import { consentDecisionsForStep } from "@/lib/consent/ledger-disclosure";
 import { parseFormRouting } from "@/lib/forms/routing";
+import {
+  contactHandoff,
+  hasReachableContact,
+  isContactField,
+  typedContact,
+  LEAD_COMPANY_KEYS,
+  LEAD_EMAIL_KEYS,
+  LEAD_NAME_KEYS,
+  LEAD_PHONE_KEYS,
+} from "@/lib/forms/contact-gate";
 import { resolveRouterDestination } from "@/lib/forms/routing-destination";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
@@ -187,6 +197,16 @@ type SubmitBody = {
    * when step 0 itself is a direct-to-storage upload and therefore needs the
    * token before the file can be selected. */
   initialize_only?: boolean;
+  /** Anonymous step 0 of a form that asks for contact on a LATER step: that
+   *  step's name, email, phone and company, so the lead is created with them
+   *  (lib/forms/contact-gate.ts contactHandoff). Only the identity is read
+   *  from it; step 0's own row stores step 0's answers. */
+  contact?: unknown;
+  /** A form that never asks for an email or phone (the VSL router): every
+   *  step's answers in one request, so the server picks the destination and
+   *  stores nothing (answerRouteOnly). */
+  route_only?: boolean;
+  steps_payload?: unknown;
   // -- V5a funnel tracking (HANDOVER section 5.3/5.4) --------------------
   /** The browser's per-tab visit id (lib/offers/tracking-client.ts,
    *  sessionStorage, never a cookie). Present on every step once the client
@@ -362,6 +382,15 @@ function refuseInvalidStep(input: {
  * definition, no first step, an incomplete address, a missing required field
  * or file, too many files) is given before any lead is touched.
  *
+ * NO LEAD WITHOUT A WAY TO REACH THEM (CC, 2026-10-16: "If they don't input
+ * their email or phone number, then we do not need to store them or log
+ * them"), judged here too, last. The visitor's identity is step 0's answers,
+ * the email and phone its typed fields hold under the standard names (a field
+ * the builder named `work_email` is still the email: Codex review of #668),
+ * and the contact a later step handed over (contactHandoff). Without a valid
+ * email or phone among them: 400 contact_required. Otherwise that identity is
+ * what initAnonymousLead creates the lead with.
+ *
  * initialize_only is not judged here: it mints the token an upload-first form
  * needs before its file can be chosen, and records no step.
  */
@@ -369,13 +398,96 @@ async function refuseInvalidAnonymousFirstStep(input: {
   tenantSlug: string;
   formSlug: string;
   payload: unknown;
-}): Promise<NextResponse | null> {
+  contact: unknown;
+}): Promise<{ refusal: NextResponse } | { identity: Record<string, unknown> }> {
   const resolved = await resolvePublicForm(getServiceSupabase(), input.tenantSlug, input.formSlug);
   // The same answer initAnonymousLead gives for a form it cannot find.
-  if (!resolved.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!resolved.ok) return { refusal: NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }) };
   let steps: FormStep[];
   try {
     steps = parseFormSteps(resolved.form.steps);
+  } catch (err) {
+    if (err instanceof FormDefinitionError) {
+      return {
+        refusal: NextResponse.json(
+          { ok: false, error: "form_definition_corrupt", path: err.path, reason: err.reason },
+          { status: 500 },
+        ),
+      };
+    }
+    throw err;
+  }
+  if (steps.length === 0) {
+    return {
+      refusal: NextResponse.json(
+        { ok: false, error: "step_index_out_of_range", max: -1 },
+        { status: 400 },
+      ),
+    };
+  }
+  const payload =
+    input.payload && typeof input.payload === "object" ? (input.payload as Record<string, unknown>) : {};
+  const inlineFieldNames = Object.entries(payload)
+    .filter(([, value]) => isInlineFile(value))
+    .map(([fieldName]) => fieldName);
+  const invalid = refuseInvalidStep({
+    formSlug: resolved.form.slug,
+    step: steps[0],
+    payload,
+    answers: buildAnswerContext(steps, [], 0, payload),
+    inlineFileNames: new Set(inlineFieldNames),
+    inlineFileCount: inlineFieldNames.length,
+  });
+  if (invalid) return { refusal: invalid };
+  // The typed values go after the raw answers: they hold only non-blank values,
+  // so a blank field merely NAMED `email` can never erase a filled email field
+  // the builder named otherwise (CodeRabbit on #668).
+  const identity = {
+    ...payload,
+    ...typedContact(steps[0].fields, payload),
+    ...(contactHandoff(input.contact) ?? {}),
+  };
+  if (!hasReachableContact(identity)) {
+    return { refusal: NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 }) };
+  }
+  return { identity };
+}
+
+/**
+ * A form that never asks for an email or phone (the VSL router): its answers
+ * only choose where the visitor goes next, so nothing is stored and no lead is
+ * made (CC, 2026-10-16: "If they don't input their email or phone number, then
+ * we do not need to store them or log them"). Before this every first click on
+ * the router created a pipeline lead with no name and no way to reach anyone.
+ *
+ * Every step's answers arrive in one request and are judged step by step,
+ * exactly as separate submissions would be, then the router's own rules pick
+ * the destination (resolveRouterDestination, on the same server-built answers).
+ * A form that does ask for contact is refused: its lead starts the ordinary way,
+ * at its contact step.
+ */
+async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<NextResponse> {
+  const tenantSlug = body.anonymous_init?.tenant_slug?.toLowerCase();
+  const formSlug = body.anonymous_init?.form_slug?.toLowerCase();
+  if (!tenantSlug || !formSlug || body.token) {
+    return NextResponse.json({ ok: false, error: "route_only_requires_anonymous" }, { status: 400 });
+  }
+  const ip = getClientIp(req);
+  const limit = rateLimit({
+    key: `forms-route-only:${ip === "unknown" ? "no-ip" : ip}:${tenantSlug}:${formSlug}`,
+    capacity: 10,
+    refillPerSec: 10 / 60,
+  });
+  if (!limit.allowed) {
+    return NextResponse.json({ ok: false, error: "rate_limited", retry_in_sec: limit.resetIn }, { status: 429 });
+  }
+  const db = getServiceSupabase();
+  const resolved = await resolvePublicForm(db, tenantSlug, formSlug);
+  if (!resolved.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  const form = resolved.form;
+  let steps: FormStep[];
+  try {
+    steps = parseFormSteps(form.steps);
   } catch (err) {
     if (err instanceof FormDefinitionError) {
       return NextResponse.json(
@@ -386,23 +498,73 @@ async function refuseInvalidAnonymousFirstStep(input: {
     throw err;
   }
   if (steps.length === 0) {
-    return NextResponse.json(
-      { ok: false, error: "step_index_out_of_range", max: -1 },
-      { status: 400 },
-    );
+    return NextResponse.json({ ok: false, error: "step_index_out_of_range", max: -1 }, { status: 400 });
   }
-  const payload =
-    input.payload && typeof input.payload === "object" ? (input.payload as Record<string, unknown>) : {};
-  const inlineFieldNames = Object.entries(payload)
-    .filter(([, value]) => isInlineFile(value))
-    .map(([fieldName]) => fieldName);
-  return refuseInvalidStep({
-    formSlug: resolved.form.slug,
-    step: steps[0],
-    payload,
-    answers: buildAnswerContext(steps, [], 0, payload),
-    inlineFileNames: new Set(inlineFieldNames),
-    inlineFileCount: inlineFieldNames.length,
+  const given = Array.isArray(body.steps_payload) ? body.steps_payload : null;
+  if (!given || given.length !== steps.length) {
+    return NextResponse.json({ ok: false, error: "invalid_step_index" }, { status: 400 });
+  }
+  const rows: Array<{ step_index: number; payload: Record<string, unknown> }> = [];
+  for (let i = 0; i < steps.length; i += 1) {
+    const raw = given[i];
+    const stepPayload = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    // A router takes no files: an inline file is not an answer here.
+    const invalid = refuseInvalidStep({
+      formSlug: form.slug,
+      step: steps[i],
+      payload: stepPayload,
+      answers: buildAnswerContext(steps, rows, i, stepPayload),
+      inlineFileNames: new Set(),
+      inlineFileCount: Object.values(stepPayload).filter(isInlineFile).length,
+    });
+    if (invalid) return invalid;
+    rows.push({ step_index: i, payload: stepPayload });
+  }
+  const last = steps.length - 1;
+  const answers = buildAnswerContext(steps, rows.slice(0, last), last, rows[last].payload);
+  // A form that SHOWED this visitor an email or phone field starts its lead the
+  // ordinary way, at that step: contact_required tells them what is missing.
+  // A field its conditions hid for these answers is not one they could fill,
+  // so it never blocks the route (Codex review of #668).
+  if (steps.some((step) => step.fields.some((field) => isContactField(field) && isFieldVisible(field, answers)))) {
+    return NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 });
+  }
+  let routeTo: string | null = null;
+  try {
+    // Its own query, as in handleSubmit: forms.routing is a later migration.
+    const routingRow = await db
+      .from("forms")
+      .select("routing")
+      .eq("tenant_id", form.tenant_id)
+      .eq("id", form.id)
+      .maybeSingle();
+    const rules = !routingRow.error && routingRow.data
+      ? parseFormRouting((routingRow.data as { routing?: unknown }).routing)
+      : [];
+    if (rules.length > 0) {
+      routeTo = await resolveRouterDestination(db, {
+        tenantId: form.tenant_id,
+        tenantSlug: resolved.tenant_slug,
+        routerFormSlug: form.slug,
+        rules,
+        answers,
+      });
+    }
+  } catch (err) {
+    console.error("[forms.submit.route_only] destination unresolved; falling back to the form's own redirect", {
+      form_id: form.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    routeTo = null;
+  }
+  return NextResponse.json({
+    ok: true,
+    submission_id: null,
+    next_step: null,
+    lead_stage: null,
+    route_to: routeTo,
+    redirect_url: form.redirect_url,
+    next_forms: [],
   });
 }
 
@@ -477,6 +639,10 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   if (supportDesk) {
     return handleWorkspaceSupportSubmission(req, body, supportDesk);
   }
+  // A form that only routes (the VSL router): no lead, no row, just where next.
+  if (body.route_only === true) {
+    return answerRouteOnly(req, body);
+  }
 
   // Two auth shapes:
   //   1. Personalized link (Solara's mint): body.token is an HMAC.
@@ -531,15 +697,26 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       );
     }
     // Judge the first step BEFORE any lead is created or merged
-    // (refuseInvalidAnonymousFirstStep): a rejected submission never writes one.
+    // (refuseInvalidAnonymousFirstStep): a rejected submission never writes
+    // one, and a step with no way to reach the visitor makes no lead at all. A
+    // form that asks for contact after step 0 holds its earlier answers in the
+    // browser until then (FormPublicClient). initialize_only (an upload-first
+    // step 0) is the one exception: its file cannot be chosen without a token.
+    let identity: Record<string, unknown> = body.payload && typeof body.payload === "object" ? body.payload : {};
     if (body.initialize_only !== true) {
-      const invalid = await refuseInvalidAnonymousFirstStep({ tenantSlug, formSlug, payload: body.payload });
-      if (invalid) return invalid;
+      const judged = await refuseInvalidAnonymousFirstStep({
+        tenantSlug,
+        formSlug,
+        payload: body.payload,
+        contact: body.contact,
+      });
+      if ("refusal" in judged) return judged.refusal;
+      identity = judged.identity;
     }
     const anonResult = await initAnonymousLead({
       tenantSlug,
       formSlug,
-      payload: body.payload || {},
+      payload: identity,
       ip,
       rep: body.anonymous_init.rep,
       source: body.anonymous_init.source,
@@ -2003,7 +2180,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // here costs nothing but the routing feature itself.
     let routingRules: ReturnType<typeof parseFormRouting> = [];
     try {
-      const routingRow = await db.from("forms").select("routing").eq("id", form.id).maybeSingle();
+      // Scoped to the workspace like every service-role read (Codex review of #668).
+      const routingRow = await db
+        .from("forms")
+        .select("routing")
+        .eq("tenant_id", form.tenant_id)
+        .eq("id", form.id)
+        .maybeSingle();
       if (!routingRow.error && routingRow.data) {
         routingRules = parseFormRouting((routingRow.data as { routing?: unknown }).routing);
       }
@@ -2214,21 +2397,23 @@ async function initAnonymousLead(input: {
    * Aliases are appended, never reordered: the intake vocabulary still wins
    * where both are present, so nothing about the existing forms changes.
    */
-  const name = trimmed("contact_name", "name", "full_name", "owner_full_name", "owner_name");
+  // The alias lists live in lib/forms/contact-gate.ts, shared with the gate
+  // that decides whether this lead may be created at all.
+  const name = trimmed(...LEAD_NAME_KEYS);
   if (name) contactFields[funding ? "contact_name" : "name"] = name;
-  const business = trimmed("business_name", "company", "business_legal_name", "legal_business_name", "dba");
+  const business = trimmed(...LEAD_COMPANY_KEYS);
   if (business) contactFields[funding ? "business_name" : "company"] = business;
   // `trimmed`, not `??`. Nullish coalescing treats an EMPTY canonical field as a
   // present value, so a payload carrying `phone: ""` alongside a real
   // `owner_cell` would select the blank and the lead would still have no number.
   // trimmed() skips blanks and keeps looking, which is the behaviour the name
   // and business lookups above have always had (Codex review 2026-08-26).
-  const emailRaw = trimmed("email", "owner_email", "contact_email");
+  const emailRaw = trimmed(...LEAD_EMAIL_KEYS);
   const email = emailRaw ? emailRaw.toLowerCase() : undefined;
   if (email) contactFields.email = email;
   // `owner_cell` is the full application's phone field. Without it the lead
   // carries no number at all and the rep cannot call a signed applicant.
-  const phone = trimmed("phone", "owner_cell", "cell_phone");
+  const phone = trimmed(...LEAD_PHONE_KEYS);
   if (phone) contactFields.phone = phone;
   const monthlyRev = pick("monthly_revenue");
   if (monthlyRev) contactFields.monthly_revenue = monthlyRev;
