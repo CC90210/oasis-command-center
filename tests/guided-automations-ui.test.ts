@@ -1693,14 +1693,16 @@ async function main() {
     };
 
     // Nothing reported yet (the page's first frame): the older list is unknown, so nothing is claimed and its own words stand.
-    const reported: number[] = [];
+    const reported: (number | null)[] = [];
     let tree = frameOf(ready([]), { onOthersLoaded: (n) => reported.push(n) });
     assert.equal(printed(tree, SENTENCE), false, "before the older list has reported, 'nothing yet' is not claimed");
     assert.equal(handed(tree)?.props.emptyHint, HINT, "and its own empty line is left to say it");
-    const report = handed(tree)?.props.onLoaded as ((count: number) => void) | undefined;
+    const report = handed(tree)?.props.onLoaded as ((count: number | null) => void) | undefined;
     assert.equal(typeof report, "function", "the older list is handed a way to report how many it shows");
     report!(4);
     assert.deepEqual(reported, [4], "and what it reports reaches the parent that keeps the count");
+    report!(null);
+    assert.deepEqual(reported, [4, null], "a later read that fails reaches the parent too, as not known");
 
     // It reported none: both are empty, so the list says so once and the older list stays quiet.
     tree = frameOf(ready([]), { othersCount: 0 });
@@ -1740,8 +1742,11 @@ async function main() {
       return el.type === GuidedAutomationsList ? el : listOf(el.props.children);
     };
     assert.equal(listOf(page())?.props.othersCount, null, "the page starts not knowing");
-    (listOf(page())?.props.onOthersLoaded as (count: number) => void)(0);
+    (listOf(page())?.props.onOthersLoaded as (count: number | null) => void)(0);
     assert.equal(listOf(page())?.props.othersCount, 0, "and learns it from the older list");
+    (listOf(page())?.props.onOthersLoaded as (count: number | null) => void)(null);
+    assert.equal(listOf(page())?.props.othersCount, null, "and forgets it when the older list's next read fails");
+    (listOf(page())?.props.onOthersLoaded as (count: number | null) => void)(0);
     assert.equal(listOf(page())?.props.others, older, "the older list is still the page's children");
 
     // The older list only reports after a clean read: a failed or migration-gapped read says nothing.
@@ -1752,7 +1757,8 @@ async function main() {
     assert.equal(loadedCount([], [], null, null), 0, "a clean read of nothing is none");
     assert.equal(loadedCount(some, some, null, null), 2, "its own rows and the team's both count");
     const manager = readFileSync(join(root, "components/automations/CronJobsManager.tsx"), "utf8");
-    assert.match(manager, /const count = loadedCount\(jobs, team, loadError, migrationGap\);\s*if \(count !== null\) onLoaded\?\.\(count\);/, "the older list reports through loadedCount");
+    assert.match(manager, /onLoaded\?\.\(loadedCount\(jobs, team, loadError, migrationGap\)\);/, "the older list reports through loadedCount, null included, so a failed refresh withdraws an earlier count");
+    assert.match(manager, /if \(jobs\.length === 0\) return loadError \|\| migrationGap \? "" : emptyListLine\(emptyHint\);/, "and its own line never says 'no automations yet' beside a read that failed");
   });
 
   await check("driven: a teammate's automation offers only Pause, and says why", async () => {

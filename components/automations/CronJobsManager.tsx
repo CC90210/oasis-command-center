@@ -73,9 +73,10 @@ type Props = {
    *  nothing at all when empty: GuidedAutomationsList sends it while its own rows are on screen, or not
    *  yet known, because "no automations yet" under real ones is false. Left out, the old words alone. */
   emptyHint?: string | null;
-  /** Told how many automations this list shows each time that changes after a good read. GuidedAutomationsList
-   *  uses it to say the whole "Your automations" section is empty, which only this list can know. */
-  onLoaded?: (count: number) => void;
+  /** Told how many automations this list shows each time that changes after a good read, and null again when a
+   *  later read fails or hits the migration gap, so a count from an earlier read is never kept as current.
+   *  GuidedAutomationsList uses it to say the whole "Your automations" section is empty, which only this list can know. */
+  onLoaded?: (count: number | null) => void;
 };
 
 /** O2 requirement G's exact empty-state words. */
@@ -292,8 +293,8 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint
   const activeDaemonControlRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    const count = loadedCount(jobs, team, loadError, migrationGap);
-    if (count !== null) onLoaded?.(count);
+    // null too: a refresh that fails after a good read withdraws that read's count instead of leaving it standing.
+    onLoaded?.(loadedCount(jobs, team, loadError, migrationGap));
   }, [jobs, team, loadError, migrationGap, onLoaded]);
 
   async function refresh() {
@@ -687,7 +688,8 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint
         <div className="text-xs text-fg-muted space-y-0.5">
           {(() => {
             if (jobs === null) return "Loading…";
-            if (jobs.length === 0) return emptyListLine(emptyHint);
+            // A list that could not be read again is not known to be empty: the banner above says why.
+            if (jobs.length === 0) return loadError || migrationGap ? "" : emptyListLine(emptyHint);
             const tenantCount = jobs.filter((j) => j.source === "tenant").length;
             const empireCount = jobs.filter((j) => j.source === "empire").length;
             // Counts the daemon-backed rows by what their process is doing,

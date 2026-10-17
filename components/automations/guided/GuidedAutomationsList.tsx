@@ -19,8 +19,8 @@
  *
  * The section says "nothing yet" (and points at the builder) only when BOTH are empty. This list cannot see
  * into `others`, which the page always passes, so the older list tells it: it reports how many it shows
- * after a good read (`onOthersLoaded`, kept by the parent as `othersCount`). Until that report, or if the
- * read failed, nothing is claimed.
+ * after a good read, and null again if a later read fails (`onOthersLoaded`, kept by the parent as
+ * `othersCount`). Until a good report, or while its reads are failing, nothing is claimed.
  */
 import { cloneElement, isValidElement, useRef, useState, type ReactElement, type ReactNode } from "react";
 import type { GuidedApi, GuidedAutomationView, TestResult } from "@/lib/automations/guided/api-types";
@@ -54,8 +54,8 @@ export type GuidedAutomationsListProps = {
   /** How many `others` reported it shows after a good read; null (or left out) until it has. Only 0 lets the
    *  section say "nothing yet": `others` is never empty to this list, it is a component with a list of its own. */
   othersCount?: number | null;
-  /** Handed to `others` so it can report that count (CronJobsManager's `onLoaded`). */
-  onOthersLoaded?: (count: number) => void;
+  /** Handed to `others` so it can report that count, or null when it stops being readable (CronJobsManager's `onLoaded`). */
+  onOthersLoaded?: (count: number | null) => void;
 };
 
 const BUTTON = `btn-secondary ${TAP} disabled:cursor-not-allowed disabled:opacity-50`;
@@ -66,12 +66,12 @@ const BUTTON = `btn-secondary ${TAP} disabled:cursor-not-allowed disabled:opacit
  * older list has not yet reported, so its own "none yet" is the only sentence there is). Only a component
  * gets the props: a plain tag would print them as attributes.
  */
-function wireOthers(others: ReactNode, speak: boolean, onLoaded: ((count: number) => void) | undefined): ReactNode {
+function wireOthers(others: ReactNode, speak: boolean, onLoaded: ((count: number | null) => void) | undefined): ReactNode {
   if (!isValidElement(others) || typeof others.type === "string") return others;
-  const wired: { onLoaded?: (count: number) => void; emptyHint?: string | null } = {};
+  const wired: { onLoaded?: (count: number | null) => void; emptyHint?: string | null } = {};
   if (onLoaded) wired.onLoaded = onLoaded;
   if (!speak) wired.emptyHint = null;
-  return cloneElement(others as ReactElement<{ emptyHint?: string | null; onLoaded?: (count: number) => void }>, wired);
+  return cloneElement(others as ReactElement<{ emptyHint?: string | null; onLoaded?: (count: number | null) => void }>, wired);
 }
 
 export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRemoved, onTested, onRetry, initialRows, others, othersCount = null, onOthersLoaded }: GuidedAutomationsListProps) {

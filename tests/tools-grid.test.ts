@@ -29,7 +29,7 @@ import {
   refusalLine,
   runTime,
   runsOnText,
-  seenText,
+  seenLine,
   statusLabel,
   urlFieldLine,
   variantLines,
@@ -93,8 +93,13 @@ async function main() {
     assert.deepEqual(variantLines({ chars: 600, max_chars: 500, over_limit: true }), ["600 of 500 characters", "Over the limit"]);
     assert.deepEqual(variantLines({ chars: 10, max_chars: 500, over_limit: false }), ["10 of 500 characters"]);
     assert.equal(runsOnText("CC's PC"), "Runs on CC's PC");
-    assert.equal(seenText(3.7), "seen 3 min ago");
-    assert.equal(seenText(-2), "seen 0 min ago");
+    // The runner's "seen" line speaks the one time-ago vocabulary (lib/devices/presence.ts timeAgo).
+    const now = Date.parse("2026-10-17T12:00:00Z");
+    const seenAt = (ms: number) => new Date(now - ms).toISOString();
+    assert.equal(seenLine(seenAt(3.7 * 60_000), now), "seen 3 min ago");
+    assert.equal(seenLine(seenAt(-120_000), now), "seen just now", "a check-in slightly ahead of this clock is not '0 min ago'");
+    assert.equal(seenLine(seenAt(75 * 60_000), now), "seen 1 h ago", "past the hour it says hours, not '75 min ago'");
+    assert.equal(seenLine("not a time", now), null);
   });
 
   await check("a run's time is the viewer's own clock, formatted on the client", () => {

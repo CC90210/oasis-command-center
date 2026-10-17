@@ -8,6 +8,7 @@
  * Everything here is a pure function of its arguments so tests/marketing-core.test.ts
  * can exercise it with no DB, no session and no network.
  */
+import { timeAgo } from "@/lib/devices/presence";
 
 // ─────────────────────────────────────────────────────────── taxonomy
 
@@ -561,20 +562,12 @@ export function fmtDuration(seconds: number | null | undefined): string {
 /**
  * Freshness stamp for a metric tile. One wrong or stale number kills trust in
  * every other number on the page, so the age is always rendered next to the
- * value rather than assumed.
+ * value rather than assumed. Worded by the one time-ago vocabulary (lib/devices/presence.ts timeAgo); a
+ * stamp that does not parse is "unknown", which tells it apart from one never captured.
  */
 export function freshnessLabel(capturedAt: string | null | undefined, now = new Date()): string {
-  if (!capturedAt) return "never";
-  const then = new Date(capturedAt);
-  if (Number.isNaN(then.getTime())) return "unknown";
-  const mins = Math.floor((now.getTime() - then.getTime()) / 60000);
-  if (mins < 0) return "just now";
-  if (mins < 2) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  if (capturedAt && Number.isNaN(Date.parse(capturedAt))) return "unknown";
+  return timeAgo(capturedAt, { now: now.getTime() });
 }
 
 /**
@@ -800,14 +793,8 @@ export function stalePublishWarning(
   if (Number.isNaN(created.getTime())) return null;
   const mins = Math.floor((now.getTime() - created.getTime()) / 60_000);
   if (mins < PUBLISH_STALE_AFTER_MINUTES) return null;
-  const age =
-    mins < 60
-      ? `${mins} minutes`
-      : mins < 1440
-        ? `${Math.floor(mins / 60)} hour${Math.floor(mins / 60) === 1 ? "" : "s"}`
-        : `${Math.floor(mins / 1440)} day${Math.floor(mins / 1440) === 1 ? "" : "s"}`;
   return (
-    `Queued ${age} ago and still not picked up — nothing has been posted yet. ` +
+    `Queued ${timeAgo(created, { now: now.getTime() })} and still not picked up — nothing has been posted yet. ` +
     `The publisher runs on the operator machine; if it is offline this waits ` +
     `rather than fails.`
   );

@@ -5,7 +5,9 @@
  * "never" here and a dash there, "5m ago" and "5 min ago" and "5 minutes ago",
  * and some turned into a date after 30 days while others counted days
  * forever. lib/devices/presence.ts timeAgo is now the only implementation;
- * this pins its wording and the options a screen may use to differ.
+ * this pins its wording and the options a screen may use to differ. A few
+ * stamps still word time their own way (NOT_MOVED_YET below, a follow-up),
+ * and the guard at the end stops any new one, whatever its helper is called.
  *
  * Pure. The date cases build their instants from LOCAL calendar parts so they
  * hold in any time zone the test runs in.
@@ -15,6 +17,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { relTime } from "../components/conversations/format";
 import { TIME_AGO_NEVER, timeAgo } from "../lib/devices/presence";
 
 const root = join(__dirname, "..");
@@ -122,6 +125,34 @@ check("moment: true is the device screens' wording: a moment once it is an hour 
   assert.match(earlier, /\d{1,2}/, "it carries a day of the month");
 });
 
+check("compact: true is the Conversations inbox's stamp, word for word what its relTime always said", () => {
+  // The inbox's helper as it was before the one vocabulary, with the clock passed in: the option must match it.
+  const before1017 = (at: number, now: number) => {
+    const min = Math.round((now - at) / 60_000);
+    if (min < 1) return "now";
+    if (min < 60) return `${min}m`;
+    const hr = Math.round(min / 60);
+    if (hr < 24) return `${hr}h`;
+    const day = Math.round(hr / 24);
+    if (day < 7) return `${day}d`;
+    return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  };
+  const c = (ms: number) => timeAgo(NOW - ms, { now: NOW, compact: true });
+  assert.equal(c(0), "now");
+  assert.equal(c(29_000), "now", "under half a minute rounds to now");
+  assert.equal(c(31_000), "1m", "and from half a minute it rounds up, as the inbox did");
+  assert.equal(c(59 * MIN), "59m");
+  assert.equal(c(2 * HOUR), "2h");
+  assert.equal(c(5 * DAY), "5d");
+  assert.equal(c(8 * DAY), new Date(NOW - 8 * DAY).toLocaleDateString(undefined, { month: "short", day: "numeric" }), "from a week, the short date");
+  assert.equal(c(-5 * MIN), "now", "a moment ahead of the clock");
+  assert.equal(timeAgo("not a date", { now: NOW, compact: true }), "never");
+  for (let ms = -HOUR; ms < 10 * DAY; ms += 7 * MIN + 13_000) assert.equal(c(ms), before1017(NOW - ms, NOW), `${ms} ms old`);
+  // relTime is that option on the real clock, and a time that does not parse is still an empty stamp.
+  assert.equal(relTime(new Date(Date.now() - 3 * MIN - 1_000).toISOString()), "3m");
+  assert.equal(relTime("not a date"), "");
+});
+
 check("with no options it reads the real clock", () => {
   assert.equal(timeAgo(new Date().toISOString()), "just now");
   assert.equal(timeAgo(Date.now() - 5 * MIN - 500), "5 min ago");
@@ -157,6 +188,55 @@ check("presence.ts is the only place that works out a time ago", () => {
   const unexpected = defining.filter((f) => f !== "lib/devices/presence.ts" && !(f in OWN_TIME_AGO));
   assert.deepEqual(unexpected, [], "a second timeAgo is a second vocabulary: call lib/devices/presence.ts and add an option there");
   assert.ok(defining.includes("lib/devices/presence.ts"), "presence.ts still defines it");
+});
+
+/** A file's code without its comments, so a comment quoting old wording is not counted. "https://" is kept. */
+const codeOf = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+/** A stamp that says "ago", built in code: `${n} min ago`, `${days}d ago`. */
+const AGO_STAMP = /\$\{[^}]*\}[^`\n]*\bago\b/;
+/** The clock minus a moment... */
+const ELAPSED = /Date\.now\(\)\s*-\s*[A-Za-z_(]/;
+/** ...made into a unit stamp: `${n}m`, `${h} h`, `${d} days`. */
+const UNIT_STAMP = /\$\{[^}]+\}\s?(?:s|m|h|d|mo|min|mins|hr|hrs|minutes?|hours?|days?)`/;
+
+/** Files the guard below matches that are not a time ago: a duration, a countdown, or a window or threshold named in a sentence. */
+const NOT_A_TIME_AGO: Record<string, string> = {
+  "components/automations/BackgroundWorkersPanel.tsx": "a worker's uptime, how long it has been running",
+  "components/ChatWidget.tsx": "the seconds a reply has been streaming, a running timer",
+  "components/conversations/CallsBoard.tsx": "a countdown to a booked call ('in 2h 5m'), coloured as it gets close",
+  "lib/bulk-email/dispatch.ts": "names the freshness window in a send error ('unsent after 24h')",
+  "lib/delivery/messages.ts": "how far past its SLA target a ticket is, the SLA clock's own duration ('2h 5m ago')",
+  "lib/founders-finances/invoices-io.ts": "names the reminder window ('reminded within the last 3 days')",
+  "lib/health/drip-checks.ts": "names the check's threshold ('queued more than 30 minutes ago')",
+  "lib/lenders/feedback-bias.ts": "names the lookback window ('in last 90d')",
+  "lib/os/connectors.ts": "names a threshold, not an age ('more than a week ago')",
+};
+
+/** Files that still word a time ago their own way. Known, and a follow-up: each should move onto timeAgo or an option of it. */
+const NOT_MOVED_YET: Record<string, string> = {
+  "app/pipeline/[id]/page.tsx": "Last touch counts whole days against the lead's SLA, set in days ('5d target' beside it); the same count raises the overdue warning",
+  "components/sunbiz/MyActiveDealsCard.tsx": "SunBiz is retired (lib/tenant/retired.ts); a deal's age in days",
+  "components/sunbiz/SunBizDashboard.tsx": OWN_TIME_AGO["components/sunbiz/SunBizDashboard.tsx"],
+  "components/underwriting/ApplicationUnderwritingReport.tsx": "'Started N minutes ago' on an underwriting run",
+  "lib/founders-performance-core.ts": "'Last posted N days ago', a whole-day count",
+  "lib/health/runner.ts": "health reasons say 'N min ago': the same minute words, but never hours or days",
+  "lib/skills/view.ts": "'Last checked in N days ago' marks a stale skill by whole days",
+  "lib/web-leads/trust.ts": "'Measured N months ago', a month count on a lead's site evidence",
+};
+
+check("nothing works out a time ago under another name", () => {
+  const found: string[] = [];
+  for (const dir of ["app", "components", "lib"]) {
+    for (const file of sources(join(root, dir))) {
+      const rel = relative(root, file).replace(/\\/g, "/");
+      if (rel === "lib/devices/presence.ts") continue;
+      const code = codeOf(readFileSync(file, "utf8"));
+      if (AGO_STAMP.test(code) || (ELAPSED.test(code) && UNIT_STAMP.test(code))) found.push(rel);
+    }
+  }
+  const known = { ...NOT_A_TIME_AGO, ...NOT_MOVED_YET };
+  assert.deepEqual(found.filter((f) => !(f in known)), [], "a time ago worked out here is a second vocabulary: call timeAgo (lib/devices/presence.ts) or add an option there; a duration or window goes in NOT_A_TIME_AGO with its reason");
+  assert.deepEqual(Object.keys(known).filter((f) => !found.includes(f)), [], "a listed file the guard no longer matches: take it off the list");
 });
 
 check("lib/fmt.ts passes timeAgo through and does not carry its own", () => {

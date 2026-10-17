@@ -121,7 +121,9 @@ export function AgentInboxList({
                       {m.subject || "(no subject)"}
                     </div>
                   </div>
-                  <span className="text-xs text-fg-dim font-mono flex-shrink-0">
+                  {/* Drawn on the server, then again in the browser, whose clock and zone differ (a month-old
+                      stamp is a date in the viewer's own zone): the browser's words win, without a mismatch. */}
+                  <span suppressHydrationWarning className="text-xs text-fg-dim font-mono flex-shrink-0">
                     {timeAgo(m.timestamp)}
                   </span>
                 </button>

@@ -57,6 +57,13 @@ export type TimeAgoOptions = {
    * still "just now".
    */
   moment?: boolean;
+  /**
+   * The Conversations inbox's compact stamp, for its dense rows and bubbles: "now", "3m", "2h", "5d", then the
+   * short date ("Jun 12") from a week out, rounded to the nearest unit and in the viewer's own locale, exactly as
+   * the inbox has always said it (components/conversations/format.ts relTime). No time at all is still "never";
+   * the inbox's helper turns that into an empty stamp.
+   */
+  compact?: boolean;
 };
 
 /** The one word for no time at all. */
@@ -87,13 +94,15 @@ const DATE_FROM_MS = 30 * DAY_MS;
  * really scheduled: "in under a minute", "in 5 min", "in 3 h", "in 2 d", then the date from 30 days out.
  * The date is en-US in the viewer's own zone, because it sits inside an English sentence.
  *
- * `moment: true` is the one deliberate exception, for the device screens (see TimeAgoOptions).
+ * `moment: true` (the device screens) and `compact: true` (the Conversations inbox) are the deliberate
+ * exceptions (see TimeAgoOptions).
  */
 export function timeAgo(when: TimeAgoInput, opts: TimeAgoOptions = {}): string {
   const at = when instanceof Date ? when.getTime() : typeof when === "number" ? when : when ? Date.parse(when) : NaN;
   if (!Number.isFinite(at)) return TIME_AGO_NEVER;
   const now = opts.now ?? Date.now();
   if (opts.moment) return momentWords(at, now);
+  if (opts.compact) return compactWords(at, now);
   const ahead = at > now;
   if (ahead && !opts.future) return "just now";
   const gap = Math.abs(now - at);
@@ -119,6 +128,18 @@ function momentWords(at: number, now: number): string {
     return when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   }
   return when.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/** timeAgo's `compact` wording, exactly as the Conversations inbox said it before the one vocabulary. */
+function compactWords(at: number, now: number): string {
+  const min = Math.round((now - at) / MINUTE_MS);
+  if (min < 1) return "now";
+  if (min < 60) return `${min}m`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `${day}d`;
+  return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 /** Every presence a screen shows for a computer: machineState's three, and busy (every slot has a run in it). */
