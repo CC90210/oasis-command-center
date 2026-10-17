@@ -16,8 +16,6 @@ import { meetError, meetJson } from "./answers";
 import { displayMeetCode, type MeetRoom } from "./rooms";
 import { SfuError } from "./sfu";
 
-export { meetError, meetJson };
-
 type Limit = { capacity: number; refillPerSec: number };
 
 /**

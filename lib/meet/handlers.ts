@@ -32,7 +32,8 @@ import {
   type MeetSession,
 } from "./access";
 import { parseCreateRoom, parseHost, parseJoin, parseSfu } from "./bodies";
-import { meetError, meetFailure, meetJson, meetRateLimited, roomView } from "./http";
+import { meetError, meetJson } from "./answers";
+import { meetFailure, meetRateLimited, roomView } from "./http";
 import type { RTCIceServerLike } from "./ice";
 import {
   MEET_MAX_TRACKS,
