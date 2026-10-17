@@ -62,8 +62,12 @@ import { notifyOasisFunnelSubmission } from "@/lib/forms/oasis-funnel-notify";
 import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
-import { buildPublicFunnelLeadPatch } from "@/lib/forms/public-booking";
-import { isOptionalPublicBookingFormSlug, isPublicBookingForm } from "@/lib/forms/public-booking-config";
+import { buildPublicFunnelLeadPatch, isPublicFunnelReadyForBooking } from "@/lib/forms/public-booking";
+import {
+  isEarlyPublicBookingFormSlug,
+  isPublicBookingForm,
+  publicBookingCompletionGatesCalendar,
+} from "@/lib/forms/public-booking-config";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
 import {
   ensureAiAuditSubmissionDelivery,
@@ -1228,6 +1232,10 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // reused to suppress the interest-form continue-now links for a merchant who
   // has already completed/submitted their application.
   let currentLeadStage: string | null = null;
+  // The lead's data as that read found it (before this step's writes), or null
+  // when it was not read or could not be: the 503 below asks it whether the
+  // contact step's record already unlocked the calendar.
+  let currentLeadData: Record<string, unknown> | null = null;
   const stepOutcomes = form.step_outcomes || {};
   const isLastStep = stepIndex === steps.length - 1;
   const fullApplicationCollectsDocuments =
@@ -1285,7 +1293,9 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         isDowngrade = true;
         stageWarning = { reason: "stage_read_failed", target_stage: targetStage };
       } else {
-        const curStage = (curRes.data as { data?: Record<string, unknown> } | null)?.data?.stage;
+        const curData = (curRes.data as { data?: Record<string, unknown> } | null)?.data;
+        currentLeadData = curData && typeof curData === "object" ? curData : null;
+        const curStage = curData?.stage;
         currentLeadStage = typeof curStage === "string" ? curStage : null;
         // Forward-only with terminal-stage policy: ghost/declined reactivate on a
         // new submission, default/opted_out are preserved, active + unknown
@@ -1749,6 +1759,51 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
 
+  // A contact step sent through a signed link (an operator's personalized link,
+  // or a lead token minted earlier) never ran initAnonymousLead, the only other
+  // place step 0 records the lead as inbound_lead. AI audit, COMMAND and FLEET
+  // open the calendar right after this step, and the booking gate needs that
+  // record (Codex review of #667), so it is written here, before the response
+  // reveals the calendar. The merge is forward-only (patch_tenant_record_data),
+  // so a lead already further on keeps its stage. A failure refuses the step
+  // (503, retryable) rather than open the calendar over stale contact details.
+  if (
+    stepIndex === 0 &&
+    !isLastStep &&
+    Boolean(body.token) &&
+    isPublicBookingForm({ tenantId: form.tenant_id, formSlug: form.slug }) &&
+    isEarlyPublicBookingFormSlug(form.slug)
+  ) {
+    const contactRecorded = await db.rpc("patch_tenant_record_data", {
+      p_id: link.lead_id,
+      p_tenant_id: form.tenant_id,
+      p_patch: buildPublicFunnelLeadPatch({ ...mergedAnswers }, "inbound_lead", new Date().toISOString(), form.slug),
+    });
+    if (contactRecorded.error) {
+      console.error("[forms.submit.public_booking_contact.failed]", {
+        lead_id: link.lead_id,
+        form_slug: form.slug,
+        error: contactRecorded.error.message,
+      });
+      // Refuse rather than open the calendar: a returning lead's earlier record
+      // would unlock it, and the booking would read the lead's OLD email or
+      // phone instead of the details just typed (Codex review of #667). The
+      // step is retryable, and its row is harmless to repeat.
+      return NextResponse.json({ ok: false, error: "funnel_stage_write_unavailable" }, { status: 503 });
+    }
+  }
+
+  // AI audit, COMMAND and FLEET: did the contact step's record land? Read from
+  // the lead as the stage guard found it, before this step's writes. Only then
+  // may a failed finish write answer 200: if the contact step's own write
+  // failed too, nothing unlocks the calendar, and the retry a 503 asks for is
+  // the visitor's only way to one (Codex review of #667). Unread or unreadable
+  // counts as not landed.
+  const calendarUnlockedAtContact =
+    isEarlyPublicBookingFormSlug(form.slug) &&
+    currentLeadData !== null &&
+    isPublicFunnelReadyForBooking(currentLeadData, { afterContactStep: true });
+
   // Every OASIS form whose next step is the inline founder calendar writes the
   // same normalized CRM vocabulary before the response reveals that calendar.
   // AI-audit scoring repeats this merge in its background ingestion so a
@@ -1784,12 +1839,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       // of #611). The form row is already durable and every step is idempotent,
       // so the browser can retry this same final step.
       funnelStageWriteFailed = true;
-      // PROTOCOL and COMMUNITY answer 200 even so (their call is optional; see
-      // the 503 at the end), so no browser retries this step. Retry the same
-      // idempotent merge once after the response instead, so the lead still
-      // reaches audit_requested and its optional calendar can open; a second
-      // failure is logged as loudly as the first (CodeRabbit on #655).
-      if (isOptionalPublicBookingFormSlug(form.slug)) {
+      // PROTOCOL and COMMUNITY (an optional call), and AI audit, COMMAND and
+      // FLEET once their contact step unlocked the calendar, answer 200 even
+      // so (see the 503 at the end), so no browser retries this step.
+      // Retry the same idempotent merge once after the response instead, so the
+      // lead still reaches audit_requested; a second failure is logged as
+      // loudly as the first (CodeRabbit on #655).
+      if (!publicBookingCompletionGatesCalendar(form.slug, { calendarUnlockedAtContact })) {
         after(async () => {
           const retried = await db.rpc("patch_tenant_record_data", {
             p_id: link.lead_id,
@@ -1983,8 +2039,10 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // is optional and their own next step (the thanks: checkout email, community
   // link) is already durable, so only their calendar fails (its availability
   // read refuses a lead not ready to book), never their completion (Codex
-  // review of #655).
-  if (funnelStageWriteFailed && !isOptionalPublicBookingFormSlug(form.slug)) {
+  // review of #655). On AI audit, COMMAND and FLEET the contact step unlocks
+  // the calendar, so the 503 is skipped only when the lead proved that record
+  // landed (calendarUnlockedAtContact, above).
+  if (funnelStageWriteFailed && publicBookingCompletionGatesCalendar(form.slug, { calendarUnlockedAtContact })) {
     return NextResponse.json(
       { ok: false, error: "funnel_stage_write_unavailable" },
       { status: 503 },
@@ -2246,11 +2304,24 @@ async function initAnonymousLead(input: {
     // fills in a lead that has none — an upgrade from "unknown", not a steal.
     const adopted = adoptLeadSource(existing.data, input.source, new Date().toISOString());
     if (adopted) Object.assign(merged, adopted);
-    await db
+    const mergedWrite = await db
       .from("tenant_records")
       .update({ data: merged })
       .eq("id", existing.id)
       .eq("tenant_id", form.tenant_id);
+    // AI audit, COMMAND and FLEET open the calendar right after this step,
+    // and the booking reads the lead's contact. If the returning visitor's new
+    // details did not land, the calendar would book against the old email or
+    // phone, so the step is refused and retried (Codex review of #667). Every
+    // other form keeps its old behaviour.
+    if (mergedWrite.error && isBookableOasisIntake && isEarlyPublicBookingFormSlug(form.slug)) {
+      console.error("[forms.submit.returning_lead_merge.failed]", {
+        lead_id: existing.id,
+        form_slug: form.slug,
+        error: mergedWrite.error.message,
+      });
+      return { ok: false, error: "funnel_stage_write_unavailable", status: 503 };
+    }
     lead = { id: existing.id, data: merged };
   } else {
     // Stage/source/signer are tenant-aware. SunBiz keeps its exact prior

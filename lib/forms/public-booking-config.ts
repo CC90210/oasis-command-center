@@ -27,6 +27,15 @@ export const PUBLIC_BOOKING_FORM_SLUGS = [AI_AUDIT_SLUG, "command", "fleet", BOO
 /** Forms whose call is optional: the calendar follows their own thanks, never replaces it. */
 export const PUBLIC_BOOKING_OPTIONAL_FORM_SLUGS = ["protocol", "community"] as const;
 
+/**
+ * Forms whose calendar opens right after the contact step (CC, 2026-10-16:
+ * "make joining as easy as possible, collect data ASAP"). Their first step
+ * asks for name, email, phone and company, which is everything a booking
+ * needs, so the remaining questions come after the call is booked and are
+ * optional. BOOK has one step, so its calendar already follows the contact.
+ */
+export const PUBLIC_BOOKING_EARLY_FORM_SLUGS = [AI_AUDIT_SLUG, "command", "fleet"] as const;
+
 const PUBLIC_BOOKING_DURATION_BY_FORM: Readonly<Record<(typeof PUBLIC_BOOKING_FORM_SLUGS)[number], number>> = {
   [AI_AUDIT_SLUG]: 15,
   command: 45,
@@ -62,6 +71,7 @@ const PUBLIC_BOOKING_FORM_NAME_BY_FORM: Readonly<Record<(typeof PUBLIC_BOOKING_F
 
 const publicBookingForms = new Set<string>(PUBLIC_BOOKING_FORM_SLUGS);
 const optionalBookingForms = new Set<string>(PUBLIC_BOOKING_OPTIONAL_FORM_SLUGS);
+const earlyBookingForms = new Set<string>(PUBLIC_BOOKING_EARLY_FORM_SLUGS);
 
 export function isPublicBookingFormSlug(formSlug: string): boolean {
   return publicBookingForms.has(formSlug.trim().toLowerCase());
@@ -70,6 +80,26 @@ export function isPublicBookingFormSlug(formSlug: string): boolean {
 /** The calendar is offered after this form's own next step, not as it. */
 export function isOptionalPublicBookingFormSlug(formSlug: string): boolean {
   return optionalBookingForms.has(formSlug.trim().toLowerCase());
+}
+
+/** The calendar opens after this form's contact step, before its other questions. */
+export function isEarlyPublicBookingFormSlug(formSlug: string): boolean {
+  return earlyBookingForms.has(formSlug.trim().toLowerCase());
+}
+
+/**
+ * Must the finished-form write land before this form's calendar may open?
+ * Yes for a required call that opens at the END (BOOK). Never for an optional
+ * call: it never holds up the form's own next step. For a form that books
+ * after its contact step, only when that step's record is not known to have
+ * landed (the submit route reads the lead to say so).
+ */
+export function publicBookingCompletionGatesCalendar(
+  formSlug: string,
+  context: { calendarUnlockedAtContact?: boolean } = {},
+): boolean {
+  if (!isPublicBookingFormSlug(formSlug) || isOptionalPublicBookingFormSlug(formSlug)) return false;
+  return !(isEarlyPublicBookingFormSlug(formSlug) && context.calendarUnlockedAtContact === true);
 }
 
 // Own keys only: never an inherited Object member for a slug like "constructor".

@@ -35,7 +35,11 @@ import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
-import { isOptionalPublicBookingFormSlug, isPublicBookingSurface } from "@/lib/forms/public-booking-config";
+import {
+  isEarlyPublicBookingFormSlug,
+  isOptionalPublicBookingFormSlug,
+  isPublicBookingSurface,
+} from "@/lib/forms/public-booking-config";
 import { normalizeFounderMeetingPhone } from "@/lib/website-sales-meeting";
 import { ConsentChoice } from "./ConsentChoice";
 
@@ -87,6 +91,19 @@ type Props = {
    * never the gate.
    */
   resumeBooking?: boolean;
+  /**
+   * The contact step was submitted before this page opened (the homepage
+   * audit form, AUDIT_FORM_HANDOFF), so a form that books after the contact
+   * step opens on its calendar, with the questions resuming at initialStep.
+   * Like resumeBooking, a convenience: the booking API checks the step itself.
+   */
+  contactStepHandoff?: boolean;
+  /**
+   * The lead already has its call booked (the server page read it on the
+   * lead): the calendar is not offered again, and finishing the questions
+   * ends on the booked "All set", after a reload or from a second tab.
+   */
+  callBooked?: boolean;
   redirectUrl: string | null;
   /**
    * Pre-signed HMAC token tied to a specific lead — used by Solara's
@@ -311,6 +328,8 @@ export function FormPublicClient({
   steps,
   initialStep,
   resumeBooking,
+  contactStepHandoff = false,
+  callBooked = false,
   redirectUrl,
   token: initialToken,
   anonymousInit,
@@ -387,6 +406,26 @@ export function FormPublicClient({
     else addressResolvingRef.current.delete(fieldName);
   }, []);
   const [done, setDone] = useState(Boolean(resumeBooking));
+  // AI audit, COMMAND, FLEET: the calendar opens once, right after the contact
+  // step, before the other questions (isEarlyPublicBookingFormSlug; CC,
+  // 2026-10-16: "make joining as easy as possible"). While it shows, the step
+  // the questions resume at; otherwise null.
+  const booksAfterContact = Boolean(
+    tenantSlug && formSlug && steps.length > 1 &&
+      isPublicBookingSurface({ tenantSlug, formSlug }) && isEarlyPublicBookingFormSlug(formSlug),
+  );
+  // Only these forms end on "All set" once booked: PROTOCOL's and COMMUNITY's
+  // own thanks carry their next step (the checkout email, the community link).
+  const alreadyBooked = callBooked && booksAfterContact;
+  // A homepage visitor arrives with the contact step already submitted.
+  const opensOnCalendar = contactStepHandoff && booksAfterContact && currentStep > 0 && !alreadyBooked;
+  const [earlyCalendarStep, setEarlyCalendarStep] = useState<number | null>(() => (opensOnCalendar ? currentStep : null));
+  // A lead whose call is already booked is never offered the calendar again.
+  const earlyCalendarOffered = useRef(opensOnCalendar || alreadyBooked);
+  // A call booked from that calendar (or before this page opened): the
+  // remaining questions are optional.
+  const [bookedEarly, setBookedEarly] = useState(alreadyBooked);
+  const [skippedQuestions, setSkippedQuestions] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
   // rendered as "continue now" buttons on the thank-you screen.
@@ -464,10 +503,12 @@ export function FormPublicClient({
     pageViewFired.current = true;
     trackEvent({ tenant: tenantSlug, form: formSlug, event: "page_view" });
   }, [preview, tenantSlug, formSlug]);
+  // Not while the early calendar shows: it is not a step, and its questions
+  // count as viewed when the visitor goes back to them (Codex review of #667).
   useEffect(() => {
-    if (preview || !tenantSlug || !formSlug) return;
+    if (preview || !tenantSlug || !formSlug || earlyCalendarStep !== null) return;
     trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_viewed", stepIndex: currentStep });
-  }, [preview, tenantSlug, formSlug, currentStep]);
+  }, [preview, tenantSlug, formSlug, currentStep, earlyCalendarStep]);
 
   // UTM/kw/cat read once from the page's own URL (never re-read mid-funnel —
   // the visitor is still on the same page). Forwarded on every step's submit
@@ -757,6 +798,26 @@ export function FormPublicClient({
     }
   }
 
+  /**
+   * Move on from a submitted step. On a form that books after the contact
+   * step, that step opens the calendar first (once: a visitor who chose the
+   * questions and comes back to fix a detail goes straight on to them).
+   */
+  function advanceFrom(step: number, next: number) {
+    if (step === 0 && booksAfterContact && !earlyCalendarOffered.current) {
+      earlyCalendarOffered.current = true;
+      setEarlyCalendarStep(next);
+    } else {
+      setCurrentStep(next);
+    }
+  }
+
+  /** Leave the early calendar for the remaining questions. */
+  function resumeQuestions() {
+    if (earlyCalendarStep !== null) setCurrentStep(earlyCalendarStep);
+    setEarlyCalendarStep(null);
+  }
+
   async function submit() {
     // HOLD FOR AN ADDRESS STILL RESOLVING. A merchant who picks a Google
     // suggestion and clicks Continue immediately would otherwise be rejected
@@ -806,7 +867,7 @@ export function FormPublicClient({
       const finished = currentStep >= steps.length - 1;
       onStepSubmitted?.(currentStep, finished);
       if (finished) setDone(true);
-      else setCurrentStep(currentStep + 1);
+      else advanceFrom(currentStep, currentStep + 1);
       return;
     }
     setSubmitting(true);
@@ -1012,7 +1073,7 @@ export function FormPublicClient({
 
       // Next-step navigation OR final-step completion.
       if (data.next_step !== null && data.next_step !== undefined) {
-        setCurrentStep(data.next_step);
+        advanceFrom(currentStep, data.next_step);
       } else {
         // Final step done. Capture any continue-now links the server returned
         // (interest form only) so the thank-you screen can offer them.
@@ -1113,7 +1174,8 @@ export function FormPublicClient({
   // unchanged, under the form's own header when it is the page. Split out so
   // the two shapes cannot drift; the page shape renders byte for byte as before
   // (tests/offer-pages-public.test.ts compares it with the markup it had).
-  const stepIndicator = steps.length > 1 && (
+  // No "Step 1 / 4" over the early calendar: it is not one of the steps.
+  const stepIndicator = steps.length > 1 && earlyCalendarStep === null && (
           <div className="flex items-center justify-center gap-1.5">
             {steps.map((_, idx) => (
               <div
@@ -1160,7 +1222,17 @@ export function FormPublicClient({
              * screen states progress, says plainly that the application is not
              * submitted, and makes the next step the largest thing on it.
              */
-            nextForms.length > 0 ? (
+            bookedEarly ? (
+              // The call was booked after the contact step, then the questions
+              // answered: no calendar again (copy by Maven, 2026-10-16).
+              <div className="text-center space-y-4 py-8">
+                <CheckCircle2 className="w-12 h-12 mx-auto" style={{ color: primary }} />
+                <h2 className="text-xl font-bold text-fg">All set.</h2>
+                <p className="text-sm text-fg-muted max-w-md mx-auto">
+                  Thanks. Your answers are in, and Conaugh reads every one personally.
+                </p>
+              </div>
+            ) : nextForms.length > 0 ? (
               <div className="text-center space-y-5 py-6">
                 {/* Progress, not completion. A ticked line above an ACTIVE line
                     reads as "part way" at a glance, which a single tick never
@@ -1257,6 +1329,44 @@ export function FormPublicClient({
                 ) : null}
               </>
             )
+          ) : earlyCalendarStep !== null && publicBookingFormSlug ? (
+            <PublicBookingCalendar
+              token={tokenRef.current || token}
+              primary={primary}
+              formSlug={publicBookingFormSlug}
+              completedStep={1}
+              preview={preview}
+              early={{
+                onAnswerFirst: resumeQuestions,
+                onBooked: () => setBookedEarly(true),
+                // Copy by Maven, 2026-10-16. "Skip" leaves the receipt alone:
+                // the questions are optional and nothing chases them later.
+                afterBooked: skippedQuestions ? null : (
+                  <div className="space-y-3 border-t border-bg-border pt-5">
+                    <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
+                      Answer the rest of the questions so the call starts with your business. Conaugh reads every one personally.
+                    </p>
+                    <div className="mx-auto flex max-w-sm flex-col gap-2 sm:flex-row">
+                      <button
+                        type="button"
+                        onClick={resumeQuestions}
+                        className="inline-flex min-h-11 flex-1 items-center justify-center rounded-lg px-4 py-2 text-sm font-bold"
+                        style={{ backgroundColor: primary, color: getContrastingTextColor(primary) }}
+                      >
+                        Answer the questions
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSkippedQuestions(true)}
+                        className="inline-flex min-h-11 flex-1 items-center justify-center rounded-lg border border-bg-border px-4 py-2 text-sm font-semibold text-fg"
+                      >
+                        Skip
+                      </button>
+                    </div>
+                  </div>
+                ),
+              }}
+            />
           ) : (
             <>
               {serverError && (
