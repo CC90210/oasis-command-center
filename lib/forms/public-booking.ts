@@ -108,6 +108,13 @@ const tokenField = trimmedField(4_096);
 export const publicBookingAvailabilitySchema = {
   safeParse: (input: unknown) => strictBody(input, { token: tokenField }),
 };
+/** POST /api/forms/booking/details-only: the lead's link and which "Leave your details instead" it was. */
+export const publicBookingDetailsOnlySchema = {
+  safeParse: (input: unknown) => strictBody(input, {
+    token: tokenField,
+    reason: (value) => (value === "calendar_error" || value === "no_times" ? value : undefined),
+  }),
+};
 export const publicBookingCreateSchema = {
   safeParse: (input: unknown) => strictBody(input, {
     token: tokenField,

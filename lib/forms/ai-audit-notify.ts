@@ -200,6 +200,22 @@ async function readBookedCall(
 ): Promise<string | undefined> {
   const lead = await readLeadData(db, tenantId, leadId, "ai-audit.notify");
   const appointmentId = typeof lead.calendar_appointment_id === "string" ? lead.calendar_appointment_id.trim() : "";
+  return readBookedAppointment(db, tenantId, leadId, appointmentId, "ai-audit.notify");
+}
+
+/**
+ * The live call a lead's appointment holds (bookedCallFromAppointment), read
+ * tenant- and lead-scoped, or undefined. A failed read counts as not booked and
+ * is logged under `tag`. Shared by the AI audit finish (readBookedCall) and the
+ * /book details-only alert (app/api/forms/booking/details-only).
+ */
+export async function readBookedAppointment(
+  db: Pick<SupabaseClient, "from">,
+  tenantId: string,
+  leadId: string,
+  appointmentId: string,
+  tag: string,
+): Promise<string | undefined> {
   if (!appointmentId) return undefined;
   try {
     const res = await db
@@ -210,12 +226,12 @@ async function readBookedCall(
       .eq("id", appointmentId)
       .maybeSingle();
     if (res.error) {
-      console.error("[ai-audit.notify] appointment read:", res.error.message);
+      console.error(`[${tag}] appointment read:`, res.error.message);
       return undefined;
     }
     return bookedCallFromAppointment(res.data as Parameters<typeof bookedCallFromAppointment>[0]);
   } catch (err) {
-    console.error("[ai-audit.notify] appointment read threw:", err);
+    console.error(`[${tag}] appointment read threw:`, err);
     return undefined;
   }
 }

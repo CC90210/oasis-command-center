@@ -55,3 +55,33 @@ export function buildBookedLeadAlert(input: {
   ];
   return lines.join("\n");
 }
+
+/**
+ * Why a /book visitor left details without picking a time (sent by the page:
+ * which "Leave your details instead" button it was). Shown, never trusted for
+ * anything else.
+ */
+export type DetailsOnlyReason = "calendar_error" | "no_times";
+
+/**
+ * The sales-desk alert for a /book visitor who asked for a call and could not
+ * pick a time: the calendar would not load, or every time was taken. Nobody is
+ * booked, so a person has to reach out (e9's call, 2026-10-17).
+ */
+export function buildDetailsOnlyLeadAlert(input: {
+  offerName: string;
+  name: string;
+  company: string;
+  reason: DetailsOnlyReason;
+  leadUrl: string;
+}): string {
+  const e = escapeTelegramHtml;
+  const cap = (s: string, n: number) => e(s.trim().slice(0, n));
+  const why = input.reason === "no_times" ? "Every open time was taken" : "The calendar would not load";
+  return [
+    `<b>${cap(input.offerName, 120)}: details left, no time picked</b>`,
+    `<b>${cap(input.name || "New lead", 120)}</b>${input.company ? ` - ${cap(input.company, 120)}` : ""}`,
+    `${why}, so they asked us to set the time. Reach out and book them.`,
+    `<a href="${input.leadUrl}">Open the lead in Command Center</a>`,
+  ].join("\n");
+}
