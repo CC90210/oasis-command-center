@@ -139,10 +139,15 @@ async function main() {
     assert.match(route, /if \(resolutionIsFinal\(error\)\) \{\s*return NextResponse\.json\(\{ ok: false, error: "invalid_booking_token" \}, \{ status: 400 \}\);\s*\}[\s\S]{0,240}\{ status: 503 \}/);
     assert.match(route, /return code\.startsWith\("token_"\) \|\| FINAL_RESOLUTION_ERRORS\.has\(code\);/);
     // A live call is judged on the appointment, before the claim, tenant-scoped.
-    const liveAt = route.indexOf("if (await holdsLiveCall(db, context.tenantId, context.leadId,");
+    const liveAt = route.indexOf("const liveCall = await readBookedAppointment(");
     assert.ok(liveAt > 0 && liveAt < route.indexOf("const claimed = tursoHoldsTheLeads()"), "the live-call check is missing or after the claim");
-    assert.match(route, /\.eq\("tenant_id", tenantId\)\s*\.eq\("lead_id", leadId\)\s*\.eq\("id", appointmentId\)/);
-    assert.match(route, /return !appt\.error && Boolean\(bookedCallFromAppointment\(/);
+    assert.match(route, /if \(liveCall\) return NextResponse\.json\(\{ ok: true, alerted: false \}\);/);
+    // The one shared read (lib/forms/ai-audit-notify.ts), tenant- and lead-scoped, judged by bookedCallFromAppointment.
+    const notify = read("lib", "forms", "ai-audit-notify.ts");
+    const shared = notify.slice(notify.indexOf("export async function readBookedAppointment("));
+    assert.match(shared, /\.eq\("tenant_id", tenantId\)\s*\.eq\("lead_id", leadId\)\s*\.eq\("id", appointmentId\)/);
+    assert.match(shared, /return bookedCallFromAppointment\(res\.data/);
+    assert.match(notify, /return readBookedAppointment\(db, tenantId, leadId, appointmentId, "ai-audit\.notify"\);/, "the AI audit finish reads the call its own way again");
     assert.match(route, /publicBookingDetailsOnlySchema\.safeParse\(await readPublicBookingJson\(req\)\)/, "the body is read without the 8 KB cap");
     assert.doesNotMatch(route, /req\.json\(/, "the body is read without the 8 KB cap");
     assert.match(route, /context = await resolvePublicFunnelBooking\(db, token\);/);

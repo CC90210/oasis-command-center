@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
 import { sameOrigin } from "@/lib/calendar/http";
-import { AI_AUDIT_ALERT_SOURCE, bookedCallFromAppointment } from "@/lib/forms/ai-audit-notify";
+import { AI_AUDIT_ALERT_SOURCE, readBookedAppointment } from "@/lib/forms/ai-audit-notify";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import {
@@ -39,29 +39,6 @@ const FINAL_RESOLUTION_ERRORS = new Set(["booking_form_not_found", "booking_form
 function resolutionIsFinal(error: unknown): boolean {
   const code = error instanceof Error ? error.message.split(":", 1)[0] : "";
   return code.startsWith("token_") || FINAL_RESOLUTION_ERRORS.has(code);
-}
-
-/** The lead's referenced call is live: scheduled, verified and in the future (bookedCallFromAppointment). */
-async function holdsLiveCall(
-  db: ReturnType<typeof getServiceSupabase>,
-  tenantId: string,
-  leadId: string,
-  appointmentId: string,
-): Promise<boolean> {
-  if (!appointmentId) return false;
-  try {
-    const appt = await db
-      .from("call_appointments")
-      .select("scheduled_for,status,calendar_status")
-      .eq("tenant_id", tenantId)
-      .eq("lead_id", leadId)
-      .eq("id", appointmentId)
-      .maybeSingle();
-    return !appt.error && Boolean(bookedCallFromAppointment(appt.data as Parameters<typeof bookedCallFromAppointment>[0]));
-  } catch (error) {
-    console.error("[public-booking.details-only.appointment]", error);
-    return false;
-  }
 }
 
 /**
@@ -114,9 +91,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // waiting. Judged on the appointment, not on the lead's appointment id: a
   // past or cancelled call leaves its id behind (Codex review of #677). A read
   // that fails counts as not booked: an extra alert beats a lost one.
-  if (await holdsLiveCall(db, context.tenantId, context.leadId, text(context.lead.calendar_appointment_id))) {
-    return NextResponse.json({ ok: true, alerted: false });
-  }
+  const liveCall = await readBookedAppointment(
+    db,
+    context.tenantId,
+    context.leadId,
+    text(context.lead.calendar_appointment_id),
+    "public-booking.details-only",
+  );
+  if (liveCall) return NextResponse.json({ ok: true, alerted: false });
 
   // Claimed on whichever store holds the leads: Turso, or Supabase on a rolled-back deploy.
   const claim = { tenantId: context.tenantId, leadId: context.leadId, now: new Date() };
