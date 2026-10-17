@@ -239,6 +239,29 @@ async function main() {
     assert.equal(await rows(), rowsBefore);
   });
 
+  await check("the form holds, sends held steps with the contact, and routes, as the rule says", () => {
+    // No DOM here: the decision itself is contactGateAction (tested above);
+    // these pin that the form acts on each answer it gives.
+    const client = readFileSync(join(__dirname, "..", "components", "forms", "FormPublicClient.tsx"), "utf8").replace(/\r\n/g, "\n");
+    assert.match(client, /anonymous: !tokenRef\.current && Boolean\(anonymousInit\),\s*contactStep,\s*currentStep,\s*stepCount: steps\.length,/);
+    assert.match(client, /if \(gate === "route"\) \{\s*await routeWithoutLead\(built\.payload\);\s*return;/);
+    assert.match(
+      client,
+      /if \(gate === "hold"\) \{\s*heldSteps\.current\[currentStep\] = built\.payload;[\s\S]{0,300}advanceFrom\(currentStep, currentStep \+ 1\);\s*return;/,
+      "a held step must stay in the browser and move on, with no request",
+    );
+    assert.match(client, /if \(gate === "send-held" && !\(await sendHeldSteps\(contactHandoff\(built\.payload\)\)\)\) return;/);
+    const held = client.slice(client.indexOf("async function sendHeldSteps"), client.indexOf("async function routeWithoutLead"));
+    assert.match(held, /for \(let i = heldStepsSent\.current; i < contactStep; i \+= 1\)/, "a retry must resume after the last held step that went through");
+    assert.match(held, /if \(tokenRef\.current\) \{\s*body\.token = tokenRef\.current;\s*\} else \{\s*body\.anonymous_init = anonymousInit;\s*if \(contact\) body\.contact = contact;/);
+    assert.match(held, /heldStepsSent\.current = i \+ 1;/);
+    const route = client.slice(client.indexOf("async function routeWithoutLead"), client.indexOf("async function submit()"));
+    assert.match(route, /route_only: true,\s*steps_payload: steps\.map\(\(_, i\) => \(i === currentStep \? lastPayload : heldSteps\.current\[i\] \?\? \{\}\)\),/);
+    assert.match(client, /if \(tokenRef\.current \|\| token\) \{\s*submitBody\.token = tokenRef\.current \|\| token;/, "the contact step must use the token its held steps just minted");
+    const book = readFileSync(join(__dirname, "..", "components", "offer-pages", "OfferBook.tsx"), "utf8");
+    assert.match(book, /if \(stepIndex === Math\.max\(0, firstContactStepIndex\(form\.steps\)\)\) setContactDone\(true\);/, "\"Your details are in\" before any details");
+  });
+
   await check("every new refusal has a sentence in the form", () => {
     const client = readFileSync(join(__dirname, "..", "components", "forms", "FormPublicClient.tsx"), "utf8");
     for (const code of ["contact_required", "route_only_requires_anonymous", "invalid_step_index"]) {
