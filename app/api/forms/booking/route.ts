@@ -73,10 +73,14 @@ const CONTACT_ERRORS = new Set(["invalid_client_phone", "client_phone_required",
  * BEFORE its Google call: this attempt booked nothing, so it gives back its
  * hold on the cap place (lib/forms/public-booking-cap.ts). The place itself is
  * freed only once no attempt of the request holds it, so a retry that hits one
- * of these never frees the place of an attempt still booking. Codes not listed
- * keep the hold.
+ * of these never frees the place of an attempt still booking. That includes
+ * the two a racing retry gets while a sibling attempt owns the booking
+ * (meeting_transition_pending, meeting_notification_in_progress; Codex review
+ * of #670): the sibling keeps its own hold. Codes not listed keep the hold.
  */
 const PRE_PROVIDER_ERRORS = new Set([
+  "meeting_transition_pending",
+  "meeting_notification_in_progress",
   "booking_confirmations_required",
   "client_agenda_required",
   "handoff_note_required",
@@ -354,10 +358,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       await giveBackClaim();
       return NextResponse.json({ ok: false, error: "retry_required" }, { status: 503 });
     }
-    // Refused before Google was called on this request (Codex review of #670):
-    // nothing can stand, so the place goes back. Anything else (a provider
-    // error, an unknown one) may have left an event, so the place stays used.
-    if (PRE_PROVIDER_ERRORS.has(errorCode)) await giveBackClaim();
+    // Refused by the meeting service before this attempt called Google (Codex
+    // review of #670): it booked nothing, so its hold goes back. `!meeting`
+    // keeps that true: the codes count only when the service itself threw,
+    // never a later step's. Anything else (a provider error, an unknown one)
+    // may have left an event, so the hold stays.
+    if (!meeting && PRE_PROVIDER_ERRORS.has(errorCode)) await giveBackClaim();
     const code = safeErrorCode(error, PROVIDER_ERRORS, "booking_create_failed");
     return NextResponse.json({ ok: false, error: code }, { status: 503 });
   }

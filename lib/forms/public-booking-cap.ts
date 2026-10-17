@@ -58,7 +58,9 @@ let warnedMissingSchema = false;
 
 /**
  * Hold one of today's places for this visitor and booking request, or refuse
- * when they are all taken. One statement does it:
+ * when they are all taken. A place no attempt holds (attempts 0: its delete is
+ * still running, or failed) is no place: it never counts, and a retry of it
+ * claims again under the cap (Codex review of #670). One statement does it:
  *
  * - a request with no place inserts one while the visitor holds fewer than
  *   the cap today;
@@ -86,9 +88,9 @@ export async function claimPublicBooking(
       sql: `INSERT INTO public_booking_claims (tenant_id, request_id, visitor_key, day, created_at, attempts)
             SELECT ?, ?, ?, ?, ?, 1
             WHERE (SELECT count(*) FROM public_booking_claims
-                   WHERE tenant_id = ? AND visitor_key = ? AND day = ?) < ?
+                   WHERE tenant_id = ? AND visitor_key = ? AND day = ? AND attempts > 0) < ?
                OR EXISTS (SELECT 1 FROM public_booking_claims
-                          WHERE tenant_id = ? AND request_id = ? AND day = ?)
+                          WHERE tenant_id = ? AND request_id = ? AND day = ? AND attempts > 0)
             ON CONFLICT (tenant_id, request_id) DO UPDATE SET
               attempts = attempts + 1,
               visitor_key = CASE WHEN day = excluded.day THEN visitor_key ELSE excluded.visitor_key END,
@@ -123,9 +125,10 @@ export async function claimPublicBooking(
  * place is freed once no attempt holds it. Call it at most once per claim,
  * and never for an attempt that may have booked: that one's count stays, so
  * its place does. Each statement holds on its own in any interleaving with
- * another attempt's claim: the delete only takes a place nobody holds. A
- * release that fails is logged and leaves the place held, which only ever
- * errs strict.
+ * another attempt's claim: the delete only takes a place nobody holds, and a
+ * claim never counts a place at zero, so a delete that is late or fails frees
+ * the place all the same. A release that fails outright is logged and leaves
+ * the place held, which only ever errs strict.
  */
 export async function releasePublicBooking(db: Client, claim: Extract<PublicBookingClaim, { ok: true }>): Promise<void> {
   if (claim.uncapped) return;

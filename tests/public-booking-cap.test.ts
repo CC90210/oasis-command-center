@@ -102,6 +102,17 @@ async function main() {
     assert.equal((await claimFor(visitor, req())).ok, true);
   });
 
+  await check("a place no attempt holds never counts, even when its delete is late or failed (Codex review of #670)", async () => {
+    const visitor = publicBookingVisitorKey("198.51.100.17");
+    const stuck = req();
+    assert.equal((await claimFor(visitor, stuck)).ok, true);
+    // The give-back's decrement landed; its delete did not.
+    await db.execute({ sql: "UPDATE public_booking_claims SET attempts = 0 WHERE request_id = ?", args: [stuck] });
+    for (let i = 0; i < 3; i += 1) assert.equal((await claimFor(visitor, req())).ok, true, `call ${i + 1} refused: an unheld place counted`);
+    // At the cap, a retry of the unheld place is a new booking, so it is refused.
+    assert.equal((await claimFor(visitor, stuck)).ok, false, "a retry of an unheld place slipped past the cap");
+  });
+
   await check("a sibling's give-back never frees a place a booking still holds (Codex review of #670)", async () => {
     const visitor = publicBookingVisitorKey("198.51.100.12");
     const id = req();
@@ -227,7 +238,7 @@ async function main() {
     assert.match(route, /if \(CONTACT_ERRORS\.has\(errorCode\)\) \{[\s\S]{0,200}await giveBackClaim\(\);\s*return/);
     assert.match(route, /founder_slot_overlap\)\/iu\.test\(error\.message\)\) \{\s*await giveBackClaim\(\);/);
     assert.match(route, /errorCode === "booking_request_cancelled"\) \{\s*await giveBackClaim\(\);/);
-    assert.match(route, /if \(PRE_PROVIDER_ERRORS\.has\(errorCode\)\) await giveBackClaim\(\);/, "a failure before Google kept its place (Codex review of #670)");
+    assert.match(route, /if \(!meeting && PRE_PROVIDER_ERRORS\.has\(errorCode\)\) await giveBackClaim\(\);/, "a failure before Google kept its place, or a later step's error gave one back (Codex review of #670)");
     assert.match(route, /if \(!meeting\) \{[\s\S]{0,200}await giveBackClaim\(\);/);
     assert.match(route, /if \(compensated\) await giveBackClaim\(\);/, "a booking left standing gave its place back");
     // Six give-backs, each on a path that returns at once, so no attempt gives back twice.
@@ -243,14 +254,30 @@ async function main() {
     const codes = [...list.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
     assert.ok(codes.length >= 10, "the pre-Google list is gone");
     for (const code of codes) assert.ok(service.includes(code) || meeting.includes(code), `"${code}" is not thrown by the meeting service`);
-    for (const never of ["meeting_transition_pending", "booking_request_mismatch", "meeting_booking_conflict", "calendar_create_failed"]) {
-      assert.ok(!codes.includes(never), `"${never}" may leave a booking or belong to another attempt`);
+    for (const never of ["meeting_booking_conflict", "calendar_create_failed", "meeting_receipt_write_failed", "meeting_notification_insert_failed"]) {
+      assert.ok(!codes.includes(never), `"${never}" may leave a booking`);
     }
     const createAt = service.indexOf("providerReceipt = await deps.createCalendar(calendarInput);");
     const fnAt = service.indexOf("export async function createVerifiedFounderMeeting(");
     for (const code of ["meeting_intent_insert_failed", "meeting_must_be_in_future", "sms_consent_requires_phone"]) {
       const at = service.indexOf(code, fnAt);
       assert.ok(at > fnAt && at < createAt, `"${code}" is no longer thrown before the Google call`);
+    }
+    // A racing retry's two codes (Codex review of #670): every throw of them in
+    // the booking function comes before its Google call, and so does the
+    // takeover helper that throws them too.
+    const takeoverAt = service.indexOf("async function reserveBookingTakeover(");
+    const takeoverEnd = service.indexOf("export async function activateVerifiedFounderMeeting(");
+    assert.ok(fnAt < createAt && createAt < takeoverAt && takeoverAt < takeoverEnd, "the meeting service moved");
+    const takeoverCall = service.indexOf("await reserveBookingTakeover(", fnAt);
+    assert.ok(takeoverCall > fnAt && takeoverCall < createAt, "the takeover runs after the Google call");
+    for (const code of ["meeting_transition_pending", "meeting_notification_in_progress"]) {
+      assert.ok(codes.includes(code), `a racing retry's "${code}" keeps its hold`);
+      const thrown = new RegExp(`throw new Error\\("${code}"\\)`, "g");
+      for (const m of service.slice(fnAt, takeoverAt).matchAll(thrown)) {
+        assert.ok(fnAt + (m.index ?? 0) < createAt, `"${code}" is thrown after the Google call`);
+      }
+      assert.ok(thrown.test(service.slice(fnAt, takeoverEnd)), `"${code}" is no longer thrown by the booking`);
     }
     const calendar = readFileSync(join(ROOT, "components", "forms", "PublicBookingCalendar.tsx"), "utf8");
     assert.match(calendar, /code === "daily_booking_limit"/, "the visitor sees the bare code");
