@@ -441,6 +441,8 @@ export function FormPublicClient({
   // The honeypot box (FormRenderer trapRef) and what a script typed into it.
   const trapRef = useRef<HTMLInputElement | null>(null);
   const trapLatch = useRef("");
+  // A caught script's ending: the plain thanks, never a calendar or a link.
+  const [trappedDone, setTrappedDone] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
   // rendered as "continue now" buttons on the thank-you screen.
@@ -1045,6 +1047,26 @@ export function FormPublicClient({
     // The merchant navigated away from the step this submit belongs to. Sending
     // now would mismatch payload and step_index.
     if (currentStepRef.current !== stepAtStart) return;
+    // A FILLED HONEYPOT is a script, caught before validation so a required box
+    // it left blank cannot hide it. Nothing below runs for it: no consent
+    // capture, no tracking event, no held steps. One request tells the route,
+    // which drops and logs it, and the script sees a thanks with no calendar
+    // (Codex and CodeRabbit reviews of #671). Never in the owner's preview,
+    // which sends nothing.
+    const trapped = preview ? "" : trapValue(trapRef.current, trapLatch);
+    if (trapped) {
+      await reportTrappedSubmission(
+        {
+          step_index: currentStep,
+          ...(tokenRef.current ? { token: tokenRef.current } : { anonymous_init: anonymousInit }),
+          ...submitMeta(),
+        },
+        trapped,
+      );
+      setTrappedDone(true);
+      setDone(true);
+      return;
+    }
     // Validate through a REF, not the `validate` captured by this render. After
     // the await above, execution resumes in the old closure, where `values`
     // still holds Google's ZIP-less label — so calling the captured `validate`
@@ -1059,22 +1081,6 @@ export function FormPublicClient({
       onStepSubmitted?.(currentStep, finished);
       if (finished) setDone(true);
       else advanceFrom(currentStep, currentStep + 1);
-      return;
-    }
-    // A FILLED HONEYPOT is a script. Nothing below runs for it: no consent
-    // capture, no tracking event, no held steps. One request tells the route,
-    // which drops and logs it, and the script sees the thanks (Codex review of #671).
-    const trapped = trapValue(trapRef.current, trapLatch);
-    if (trapped) {
-      await reportTrappedSubmission(
-        {
-          step_index: currentStep,
-          ...(tokenRef.current ? { token: tokenRef.current } : { anonymous_init: anonymousInit }),
-          ...submitMeta(),
-        },
-        trapped,
-      );
-      setDone(true);
       return;
     }
     setSubmitting(true);
@@ -1312,6 +1318,9 @@ export function FormPublicClient({
   // PROTOCOL and COMMUNITY: their own next step (the checkout email, the
   // community link) is the thanks, and the calendar is offered under it.
   const publicBookingOptional = publicBookingFormSlug !== null && isOptionalPublicBookingFormSlug(publicBookingFormSlug);
+  // The form ending's booking surface: none for a caught script, which would
+  // otherwise get a calendar holding a lead's link token (CodeRabbit on #671).
+  const endingBookingSlug = trappedDone ? null : publicBookingFormSlug;
   // The founder-meeting engine books only with a phone it can use
   // (client_phone_required, invalid_client_phone), and these two forms ask for
   // one as optional. A visitor who left it blank or typed one the engine would
@@ -1464,11 +1473,11 @@ export function FormPublicClient({
                     what this screen is for. */}
                 <p className="text-[11px] text-fg-dim">{handoff.footer}</p>
               </div>
-            ) : publicBookingFormSlug && !publicBookingOptional ? (
+            ) : endingBookingSlug && !publicBookingOptional ? (
               <PublicBookingCalendar
                 token={tokenRef.current || token}
                 primary={primary}
-                formSlug={publicBookingFormSlug}
+                formSlug={endingBookingSlug}
                 completedStep={steps.length}
                 preview={preview}
               />
@@ -1483,16 +1492,16 @@ export function FormPublicClient({
                 </div>
                 {/* COMMUNITY's next step IS the community: a link to click, not
                     only the address inside the thanks (review of #655). */}
-                {publicBookingFormSlug === "community" ? (
-                  <CommunityJoinLink formSlug={publicBookingFormSlug} completedStep={steps.length} primary={primary} preview={preview} />
+                {endingBookingSlug === "community" ? (
+                  <CommunityJoinLink formSlug={endingBookingSlug} completedStep={steps.length} primary={primary} preview={preview} />
                 ) : null}
-                {publicBookingFormSlug ? (
+                {endingBookingSlug ? (
                   <div className="border-t border-bg-border pt-5">
                     {optionalBookingPhone ? (
                       <PublicBookingCalendar
                         token={tokenRef.current || token}
                         primary={primary}
-                        formSlug={publicBookingFormSlug}
+                        formSlug={endingBookingSlug}
                         completedStep={steps.length}
                         optional
                         preview={preview}
