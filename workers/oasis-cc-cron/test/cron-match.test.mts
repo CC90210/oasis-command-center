@@ -77,7 +77,8 @@ test("a Vercel-identical minute fires the exact due set", () => {
   // (*/15 does NOT fire at :40 — 40 % 15 !== 0.) The SunBiz-only routes that
   // also fired here (dispatch-bulk-email, the weekly kixie scan,
   // scan-lender-replies, tps-enroll) were unscheduled when SunBiz was retired
-  // on 2026-09-28 (0860f968); none of them may come back.
+  // on 2026-09-28 (0860f968); none of them may come back. Oasis Meet's relay
+  // upkeep (*/5, #685) fires here too.
   const d = at("2026-08-31T13:40:00Z");
   const due = CRON_TABLE.filter((e) => cronMatches(e.schedule, d)).map((e) => e.path).sort();
   assert.deepEqual(due, [
@@ -87,6 +88,7 @@ test("a Vercel-identical minute fires the exact due set", () => {
     "/api/cron/dispatch-founder-meeting-reminders",
     "/api/cron/dispatch-scheduled-calls",
     "/api/cron/dispatch-scheduled-sends",
+    "/api/cron/meet-relay",
     "/api/cron/operator-email-agent?write=1",
     "/api/cron/sms-reply-agent",
   ].sort());

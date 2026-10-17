@@ -26,6 +26,11 @@ export const WORKER_INTERRUPTED_MINUTES = 5;
 export const SIGNATURE_WINDOW_SECONDS = 300;
 /** The largest signed runner request body. */
 export const RUNNER_BODY_MAX_BYTES = 64 * 1024;
+/**
+ * The largest signed body POST /api/internal/tools/complete takes: a meeting's
+ * transcript comes back in it, and an hour of talk is well past 64 KiB.
+ */
+export const COMPLETE_BODY_MAX_BYTES = 2 * 1024 * 1024;
 /** How long a presigned upload URL stays valid (lib/r2-storage.ts signs PUTs for this long). */
 export const UPLOAD_URL_TTL_SECONDS = 900;
 /**
@@ -34,6 +39,15 @@ export const UPLOAD_URL_TTL_SECONDS = 900;
  * minutes). A heartbeat after it is answered lease_lost.
  */
 export const MAX_LEASE_HOLD_SECONDS = RUN_TIMEOUT_SECONDS + UPLOAD_URL_TTL_SECONDS + 600;
+/**
+ * The same limit for a meeting transcription: 24 hours. It runs on a CPU, about
+ * 0.7 x real time PER SPEAKER TRACK with the small model (measured on OASIS's
+ * PC), and a room may hold eight tracks of four hours each, so four hours was
+ * shorter than recordings the relay accepts (Codex on #685, P2). The PC also
+ * drops to the faster model for a long recording (BEA scripts/meet/runner.py).
+ * The limit still ends a run that is stuck while its heartbeat beats.
+ */
+export const MEET_TRANSCRIBE_MAX_HOLD_SECONDS = 24 * 60 * 60;
 /** How long a runner waits between claims when there is nothing to do. */
 export const POLL_AFTER_SECONDS = 30;
 /** At most this many runner jobs queued or running per workspace. */

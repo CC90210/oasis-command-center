@@ -40,6 +40,8 @@ const UNLINK_TARGETS = [
   ["leadgen_businesses", "crm_record_id"],
   ["cold_leads", "promoted_lead_id"],
   ["calendar_events", "lead_id"],
+  // An Oasis Meet room keeps its recording and transcript: the lead goes, the meeting stays (bravo__230).
+  ["meet_rooms", "lead_id"],
 ] as const;
 const DELETE_TARGETS = [
   ["form_submissions", "lead_id"],
