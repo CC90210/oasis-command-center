@@ -123,17 +123,22 @@ assert.match(source, /visitId: getOrCreateVisitId\(\)/, "the established per-tab
 assert.match(source, /auditFormContinuationPath\(nextPath, context\)/, "the same attribution context survives the personalized hop");
 
 // 3b. The honeypot (lib/forms/honeypot.ts, #671): the box is the form's last
-// child, and a filled one sends one report with no answers, then hands off the
-// way a lead-less success does, before the lead request is ever made.
+// child. A filled one is read BEFORE validation and tracking, so a script that
+// leaves a required box blank is still caught; it sends one report with no
+// answers and ends on a plain thanks: no lead link, funnel or calendar.
 assert.match(source, /<HoneypotField inputRef=\{trapRef\} \/>\s*<\/form>/, "the honeypot box must be the form's last child");
 const trapAt = source.indexOf("const trapped = trapValue(trapRef.current, trapLatch);");
-assert.ok(trapAt > source.indexOf("const problem = auditFormProblem(body.payload);"), "the trap must run after validation");
+assert.ok(trapAt > source.indexOf("inFlight.current = true;"), "the trap must run inside the in-flight guard");
+assert.ok(trapAt < source.indexOf("const problem = auditFormProblem(body.payload);"), "a script that skips a required box must still be caught");
+assert.ok(trapAt < source.indexOf("visitId: getOrCreateVisitId()"), "a script must not be tracked as a visit");
 assert.ok(trapAt < source.indexOf('await fetch("/api/forms/submit"'), "a filled trap must stop before the lead request");
 assert.match(
   source,
-  /if \(trapped\) \{\s*await reportTrappedSubmission\(\{ anonymous_init: body\.anonymous_init, step_index: body\.step_index \}, trapped\);\s*window\.location\.href = auditFormContinuationPath\(AUDIT_FUNNEL\.path, context\);\s*return;\s*\}/,
-  "a trapped submit reports without the answers, then hands off like a lead-less success",
+  /if \(trapped\) \{\s*await reportTrappedSubmission\(\s*\{ anonymous_init: \{ tenant_slug: AUDIT_FUNNEL\.tenantSlug, form_slug: AUDIT_FUNNEL\.formSlug \}, step_index: 0 \},\s*trapped,\s*\);\s*setStatus\("trapped"\);\s*return;\s*\}/,
+  "a trapped submit reports without the answers and ends on the thanks, with no hand-off",
 );
+assert.match(source, /status === "trapped" \? "Thanks\. We'll be in touch\." :/, "a trapped submit shows a plain thanks");
+assert.match(source, /disabled=\{sending \|\| status === "trapped"\}/, "a trapped form can be sent again");
 
 // 3a. The personalized page accepts the handoff only for the canonical OASIS
 // ai-audit form, and the reusable form client clamps the requested index.

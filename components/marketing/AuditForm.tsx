@@ -40,7 +40,8 @@ import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
  * five-field marketing form needs.
  */
 
-type Status = "idle" | "sending" | "error";
+/** "trapped": the honeypot caught a script, which is shown a plain thanks. */
+type Status = "idle" | "sending" | "error" | "trapped";
 
 export function AuditForm({
   compact = false,
@@ -74,6 +75,21 @@ export function AuditForm({
     if (inFlight.current) return;
     inFlight.current = true;
 
+    // Only a script fills the honeypot box. Read before validation, so a script
+    // that leaves a required box blank is still caught, and before anything is
+    // tracked. It gets one report the submit route drops (lib/forms/honeypot.ts),
+    // never the answers, and a plain thanks: no lead link, no funnel, no calendar.
+    // inFlight stays set, so it cannot submit again.
+    const trapped = trapValue(trapRef.current, trapLatch);
+    if (trapped) {
+      await reportTrappedSubmission(
+        { anonymous_init: { tenant_slug: AUDIT_FUNNEL.tenantSlug, form_slug: AUDIT_FUNNEL.formSlug }, step_index: 0 },
+        trapped,
+      );
+      setStatus("trapped");
+      return;
+    }
+
     const context = {
       submissionPath: window.location.pathname,
       visitId: getOrCreateVisitId(),
@@ -90,16 +106,6 @@ export function AuditForm({
 
     setStatus("sending");
     setError(null);
-
-    // Only a script fills the honeypot box. It gets one report the submit route
-    // drops (lib/forms/honeypot.ts), never the answers and no lead request,
-    // then the same hand-off a visitor gets when no lead link comes back.
-    const trapped = trapValue(trapRef.current, trapLatch);
-    if (trapped) {
-      await reportTrappedSubmission({ anonymous_init: body.anonymous_init, step_index: body.step_index }, trapped);
-      window.location.href = auditFormContinuationPath(AUDIT_FUNNEL.path, context);
-      return;
-    }
 
     try {
       const res = await fetch("/api/forms/submit", {
@@ -221,7 +227,7 @@ export function AuditForm({
 
       <button
         type="submit"
-        disabled={sending}
+        disabled={sending || status === "trapped"}
         className={`${CTA_PRIMARY} mt-6 w-full sm:w-auto`}
       >
         {sending ? (
@@ -242,7 +248,7 @@ export function AuditForm({
         aria-live="polite"
         className={`mt-4 text-[14px] ${error ? "text-status-hot" : "text-fg-dim"}`}
       >
-        {error ?? "Three more screens after this. Takes about two minutes."}
+        {status === "trapped" ? "Thanks. We'll be in touch." : error ?? "Three more screens after this. Takes about two minutes."}
       </p>
 
       <HoneypotField inputRef={trapRef} />
