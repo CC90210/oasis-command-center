@@ -18,7 +18,7 @@
  *
  * STATUS DISCIPLINE (the runner acts on the status alone):
  *   401  unknown producer, bad signature, stale timestamp
- *   413  body over 64 KiB
+ *   413  body over 64 KiB (2 MiB on complete, which carries a transcript)
  *   422  not JSON, or a field refused (`field` names it)
  *   503  {"error":"not_installed","detail":...}: secret_not_set, tables_missing,
  *        storage_not_configured, database_not_configured. The runner retries.
@@ -64,6 +64,8 @@ export async function authenticateToolsRequest(
   req: Request,
   env: Record<string, string | undefined>,
   now: Date,
+  /** The body cap: 64 KiB on every route but complete, which takes a meeting's transcript (COMPLETE_BODY_MAX_BYTES). */
+  maxBytes: number = RUNNER_BODY_MAX_BYTES,
 ): Promise<ToolsAuth> {
   const producerHeader = (req.headers.get(HEADER_PRODUCER) || "").trim().toLowerCase();
   if (!(TOOLS_PRODUCERS as readonly string[]).includes(producerHeader)) {
@@ -78,8 +80,8 @@ export async function authenticateToolsRequest(
   }
 
   const declared = Number(req.headers.get("content-length") || "0");
-  if (declared > RUNNER_BODY_MAX_BYTES) return { ok: false, response: toolsRefuse(413, "body_too_large") };
-  const raw = await readBodyCapped(req, RUNNER_BODY_MAX_BYTES);
+  if (declared > maxBytes) return { ok: false, response: toolsRefuse(413, "body_too_large") };
+  const raw = await readBodyCapped(req, maxBytes);
   if (raw === null) return { ok: false, response: toolsRefuse(413, "body_too_large") };
 
   const ts = (req.headers.get(HEADER_TIMESTAMP) || "").trim();

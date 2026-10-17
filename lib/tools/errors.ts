@@ -44,12 +44,22 @@ export const RUNNER_ERROR_LINES: Readonly<Record<string, string>> = {
   extractor_error: RUNNER_FAILED,
   runner_error: RUNNER_FAILED,
   unknown: RUNNER_FAILED,
+  // Oasis Meet's runner (BEA scripts/meet/runner.py). Its jobs are never on a
+  // Tools card; the meeting's own panel words them (lib/meet/recording.ts).
+  download_failed: RUNNER_FAILED,
+  transcode_failed: RUNNER_FAILED,
+  transcribe_failed: RUNNER_FAILED,
+  unsafe_path: RUNNER_FAILED,
 };
 
 /** Codes only the Command Center writes (its sweeps). A runner cannot send these. */
 export const SWEEP_ERROR_LINES: Readonly<Record<string, string>> = {
   runner_offline: "The computer that runs downloads was offline, so this didn't run.",
   attempts_exhausted: "The download stopped three times and was given up.",
+  // Oasis Meet (lib/meet/recording.ts): a transcription the Command Center called off.
+  meeting_gone: "The meeting's recording was no longer waiting, so this was not run.",
+  meeting_deleted: "The recording was deleted, so this was stopped.",
+  relay_expired: "The computer did not take this recording within 30 days, so its audio was deleted.",
 };
 
 /** Codes a tool that runs inside the request writes. */

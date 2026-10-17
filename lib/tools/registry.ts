@@ -26,6 +26,7 @@ import {
   parseIngestUrl,
   type CorpusLabel,
 } from "@/lib/founders/ingest-core";
+import { MAX_LEASE_HOLD_SECONDS, MEET_TRANSCRIBE_MAX_HOLD_SECONDS } from "@/lib/tools/limits";
 import { TRAINS_LEGACY, isTrains, trainsOptions } from "@/lib/training/trains";
 
 export type ToolKey = "video_download" | "learn_from_link" | "repurpose_post";
@@ -296,7 +297,48 @@ export function toolByKey(k: unknown): ToolDef | null {
   return typeof k === "string" ? (TOOL_REGISTRY.find((t) => t.key === k) ?? null) : null;
 }
 
-/** The keys a runner may claim: registry tools that run on a runner. */
-export function runnerToolKeys(): ToolKey[] {
-  return TOOL_REGISTRY.filter((t) => t.runsOn === "runner").map((t) => t.key);
+/**
+ * SYSTEM RUNNER TOOLS: jobs the Command Center queues itself, never a person
+ * from a card. They are not in TOOL_REGISTRY, so no catalog shows them and
+ * POST /api/tools/run and GET /api/tools/jobs answer unknown_tool for them; only
+ * a runner may claim them (runnerToolKeys). Today: Oasis Meet's two jobs for
+ * OASIS's PC (lib/meet/recording.ts, BEA scripts/meet/runner.py).
+ *
+ * A system job WAITS for its runner: the runner_offline sweep never fails it (a
+ * meeting must not be lost because the PC was off overnight; its own limit is
+ * the 30-day relay), and it does not count toward a workspace's five downloads
+ * in flight (a meeting is never refused because downloads are busy, and the
+ * reverse).
+ */
+export type SystemRunnerToolKey = "meet_transcribe" | "meet_delete_local";
+export type RunnerToolKey = ToolKey | SystemRunnerToolKey;
+
+export type RunnerRules = {
+  /** The stages a heartbeat may report while this tool runs. */
+  stages: readonly string[];
+  /** How long one claim may keep the job by heartbeats, counted from the claim. */
+  maxHoldSeconds: number;
+};
+
+const DOWNLOAD_RULES: RunnerRules = { stages: ["downloading", "uploading"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS };
+
+export const SYSTEM_RUNNER_TOOLS: Readonly<Record<SystemRunnerToolKey, RunnerRules>> = {
+  meet_transcribe: { stages: ["downloading", "transcribing", "finishing"], maxHoldSeconds: MEET_TRANSCRIBE_MAX_HOLD_SECONDS },
+  meet_delete_local: { stages: ["downloading", "finishing"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS },
+};
+
+export const SYSTEM_RUNNER_TOOL_KEYS = Object.keys(SYSTEM_RUNNER_TOOLS) as SystemRunnerToolKey[];
+
+export function isSystemRunnerTool(k: unknown): k is SystemRunnerToolKey {
+  return typeof k === "string" && Object.prototype.hasOwnProperty.call(SYSTEM_RUNNER_TOOLS, k);
+}
+
+/** The keys a runner may claim: registry tools that run on a runner, and the system tools. */
+export function runnerToolKeys(): RunnerToolKey[] {
+  return [...TOOL_REGISTRY.filter((t) => t.runsOn === "runner").map((t) => t.key), ...SYSTEM_RUNNER_TOOL_KEYS];
+}
+
+/** A runner tool's heartbeat stages and hold limit. */
+export function runnerRules(k: RunnerToolKey): RunnerRules {
+  return isSystemRunnerTool(k) ? SYSTEM_RUNNER_TOOLS[k] : DOWNLOAD_RULES;
 }

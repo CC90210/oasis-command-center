@@ -159,6 +159,9 @@ async function main(): Promise<void> {
     CREATE TABLE offer_funnel_events (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT
     );
+    CREATE TABLE meet_rooms (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT
+    );
     CREATE TABLE drip_runs (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT NOT NULL, status TEXT NOT NULL
     );
@@ -266,6 +269,10 @@ async function main(): Promise<void> {
     { sql: "INSERT INTO form_views VALUES ('junk-view', ?, ?)", args: [TENANT, JUNK] },
     { sql: "INSERT INTO offer_funnel_visit_leads VALUES (?, 'junk-visit', ?)", args: [TENANT, JUNK] },
     { sql: "INSERT INTO offer_funnel_events VALUES ('junk-event', ?, ?)", args: [TENANT, JUNK] },
+    // A meeting with the lead keeps its recording: the delete unlinks it, never deletes it.
+    { sql: "INSERT INTO meet_rooms VALUES ('dry-room', ?, ?)", args: [TENANT, DRY] },
+    { sql: "INSERT INTO meet_rooms VALUES ('junk-room', ?, ?)", args: [TENANT, JUNK] },
+    { sql: "INSERT INTO meet_rooms VALUES ('foreign-room', ?, ?)", args: [OTHER_TENANT, JUNK] },
     // A stage change copies the whole record into the event (lib/manifest/events.ts).
     ...[
       ["ev-dry", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: DRY, field: "stage", from: null, to: "assigned", data: { email: "dry@lead.test" }, tenant_id: TENANT }],
@@ -342,6 +349,7 @@ async function main(): Promise<void> {
   assert.equal(dryResult.plan.cancel.drip_runs, 1);
   assert.equal(dryResult.plan.cancel.lead_interactions, 1);
   assert.equal(dryResult.plan.unlink.offer_funnel_events, 1);
+  assert.equal(dryResult.plan.unlink.meet_rooms, 1, "the dry run does not say the meeting is unlinked");
   assert.equal(dryResult.plan.delete.form_submissions, 1);
   assert.equal(dryResult.plan.delete.form_views, 1);
   assert.equal(dryResult.plan.delete.offer_funnel_visit_leads, 1);
@@ -428,6 +436,13 @@ async function main(): Promise<void> {
   assert.equal(await count(seed, "offer_funnel_visit_leads", "lead_id = ?", [JUNK]), 0);
   const event = await seed.execute({ sql: "SELECT lead_id FROM offer_funnel_events WHERE id = 'junk-event'", args: [] });
   assert.equal(event.rows[0].lead_id, null);
+  const rooms = await seed.execute({ sql: "SELECT id, lead_id FROM meet_rooms WHERE id IN ('junk-room', 'foreign-room') ORDER BY id", args: [] });
+  assert.deepEqual(
+    rooms.rows.map((row) => [row.id, row.lead_id]),
+    [["foreign-room", JUNK], ["junk-room", null]],
+    "the meeting was deleted with the lead, or another workspace's meeting was unlinked",
+  );
+  assert.equal(junkResult.plan.unlink.meet_rooms, 1);
   const drips = await seed.execute({ sql: "SELECT id, status FROM drip_runs WHERE lead_id = ? ORDER BY id", args: [JUNK] });
   assert.deepEqual(drips.rows.map((row) => [row.id, row.status]), [
     ["junk-scheduled", "cancelled"],

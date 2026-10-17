@@ -18,7 +18,8 @@
  *   attempts_exhausted  a runner job whose last allowed lease expired;
  *   runner_offline      a runner job no live runner can take: queued for 30
  *                       minutes, or its lease expired 30 minutes ago, while no
- *                       runner listing its tool was seen in 10 minutes;
+ *                       runner listing its tool was seen in 10 minutes (never
+ *                       a system job, which waits for its runner: registry.ts);
  *   interrupted         a run inside a request that has not finished in 5
  *                       minutes (the request was cut off).
  * The first two return any recorded upload path so the caller can delete the
@@ -36,7 +37,7 @@ import {
   RUNNER_LIVE_MINUTES,
   WORKER_INTERRUPTED_MINUTES,
 } from "@/lib/tools/limits";
-import { toolByKey } from "@/lib/tools/registry";
+import { SYSTEM_RUNNER_TOOL_KEYS, toolByKey } from "@/lib/tools/registry";
 import type { JobView, ToolJobStatus } from "@/lib/tools/types";
 
 export type { JobView, ToolJobStatus };
@@ -275,12 +276,15 @@ export async function insertJob(db: Client, job: NewJob, now: Date): Promise<"in
     await db.execute({ sql: `INSERT INTO tool_jobs (${cols}) VALUES (${placeholders(values.length)})`, args: values });
     return "inserted";
   }
+  // A system job (a meeting's transcription) never counts toward the five: it is
+  // not a person's download, and it may wait days for the PC (registry.ts).
   const rs = await db.execute({
     sql: `INSERT INTO tool_jobs (${cols})
           SELECT ${placeholders(values.length)}
           WHERE (SELECT COUNT(*) FROM tool_jobs
-                 WHERE tenant_id = ? AND runs_on = 'runner' AND status IN ('queued','claimed','running')) < ?`,
-    args: [...values, job.tenantId, MAX_RUNNER_JOBS_IN_FLIGHT],
+                 WHERE tenant_id = ? AND runs_on = 'runner' AND status IN ('queued','claimed','running')
+                   AND tool_key NOT IN (${placeholders(SYSTEM_RUNNER_TOOL_KEYS.length)})) < ?`,
+    args: [...values, job.tenantId, ...SYSTEM_RUNNER_TOOL_KEYS, MAX_RUNNER_JOBS_IN_FLIGHT],
   });
   return rs.rowsAffected === 1 ? "inserted" : "full";
 }
@@ -347,14 +351,16 @@ export async function sweepToolJobs(db: Client, tenantIds: readonly string[], no
   const tin = placeholders(tenantIds.length);
   const offlineCutoff = minutesBefore(now, QUEUED_OFFLINE_MINUTES);
   const interruptedCutoff = minutesBefore(now, WORKER_INTERRUPTED_MINUTES);
+  // System jobs wait for their runner (registry.ts): runner_offline never takes them.
+  const waits = placeholders(SYSTEM_RUNNER_TOOL_KEYS.length);
   const due = await db.execute({
     sql: `SELECT 1 AS due FROM tool_jobs
           WHERE tenant_id IN (${tin})
             AND ((runs_on = 'runner' AND status IN ('claimed','running') AND lease_expires_at < ?)
-              OR (runs_on = 'runner' AND status = 'queued' AND created_at < ?)
+              OR (runs_on = 'runner' AND status = 'queued' AND created_at < ? AND tool_key NOT IN (${waits}))
               OR (runs_on = 'worker' AND status = 'running' AND updated_at < ?))
           LIMIT 1`,
-    args: [...tenantIds, at, offlineCutoff, interruptedCutoff],
+    args: [...tenantIds, at, offlineCutoff, ...SYSTEM_RUNNER_TOOL_KEYS, interruptedCutoff],
   });
   if (!due.rows.length) return { failed: 0, orphanUploads: [] };
   const results = await db.batch(
@@ -370,13 +376,16 @@ export async function sweepToolJobs(db: Client, tenantIds: readonly string[], no
       {
         sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'runner_offline', error_message = ?,
                      finished_at = ?, updated_at = ?
-              WHERE runs_on = 'runner' AND tenant_id IN (${tin})
+              WHERE runs_on = 'runner' AND tenant_id IN (${tin}) AND tool_key NOT IN (${waits})
                 AND ((status = 'queued' AND created_at < ?) OR (status IN ('claimed','running') AND lease_expires_at < ?))
                 AND NOT EXISTS (SELECT 1 FROM tool_runners r
                                 WHERE r.tenant_id = tool_jobs.tenant_id AND r.last_seen_at >= ?
                                   AND EXISTS (SELECT 1 FROM json_each(r.tools_json) t WHERE t.value = tool_jobs.tool_key))
               RETURNING tenant_id, upload_path`,
-        args: [toolErrorLine("runner_offline", "runner"), at, at, ...tenantIds, offlineCutoff, offlineCutoff, minutesBefore(now, RUNNER_LIVE_MINUTES)],
+        args: [
+          toolErrorLine("runner_offline", "runner"), at, at, ...tenantIds, ...SYSTEM_RUNNER_TOOL_KEYS,
+          offlineCutoff, offlineCutoff, minutesBefore(now, RUNNER_LIVE_MINUTES),
+        ],
       },
       {
         sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'interrupted', error_message = ?,

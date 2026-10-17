@@ -556,6 +556,10 @@ async function main() {
       // Guided automations (2026-10-15): the every-minute dispatcher of a workspace's own
       // scheduled department tasks. Every query is scoped by the row's tenant_id.
       "dispatch-automations",
+      // Oasis Meet's relay upkeep (2026-10-17, #685): expires and deletes meeting audio. It only
+      // touches workspaces with meet_transcripts rows, and only OASIS's own workspaces can record
+      // (lib/meet/recording.ts meetRecordingServed), so a retired tenant has nothing it could reach.
+      "meet-relay",
     ].map((r) => `/api/cron/${r}`);
     assert.deepEqual([...new Set(CRON_TABLE.map((c) => base(c.path)))].sort(), [...KEPT].sort());
   });

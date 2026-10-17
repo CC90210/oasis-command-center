@@ -5,8 +5,9 @@
  *
  * Pins:
  *   - every worker tool has an executor (lib/tools/worker/index.ts) and every
- *     executor is a worker tool in the registry; the one runner tool is the
- *     video downloader;
+ *     executor is a worker tool in the registry; the one runner tool a person
+ *     runs is the video downloader (Oasis Meet's two system jobs are claimable
+ *     by a runner and nothing else);
  *   - POST /api/tools/run refuses an unknown key with 422 unknown_tool and
  *     writes nothing (through the real founders gate and a local database);
  *   - a runner job with a key outside the registry is never claimed, and a
@@ -35,7 +36,13 @@ async function main() {
   await check("every worker tool has an executor, and every executor is a worker tool in the registry", () => {
     const workerKeys = TOOL_REGISTRY.filter((t) => t.runsOn === "worker").map((t) => t.key).sort();
     assert.deepEqual(Object.keys(WORKER_EXECUTORS).sort(), workerKeys);
-    assert.deepEqual(runnerToolKeys(), ["video_download"]);
+    // The one runner tool a person runs is the video downloader; the other two are Oasis Meet's system
+    // jobs, claimable by a runner but never a card, never queued or listed through the session routes.
+    assert.deepEqual(runnerToolKeys(), ["video_download", "meet_transcribe", "meet_delete_local"]);
+    for (const k of ["meet_transcribe", "meet_delete_local"]) {
+      assert.equal(toolByKey(k), null, `${k} is not a person's tool`);
+      assert.ok(!TOOL_REGISTRY.some((t) => t.key === k), `${k} is not in the catalog's registry`);
+    }
     assert.equal(new Set(TOOL_REGISTRY.map((t) => t.key)).size, TOOL_REGISTRY.length, "no key twice");
     for (const t of TOOL_REGISTRY) {
       assert.ok(t.title && t.description && t.runLabel && t.fields.length > 0, `${t.key} is drawable`);
