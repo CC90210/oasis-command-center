@@ -79,6 +79,7 @@ import {
 import { parseOfferPageDoc, type OfferPageDoc } from "../lib/offer-pages/types";
 import { createOfferRow, isMissingOfferTable, readOfferRow, saveDraft } from "../lib/offer-pages/store";
 import { confirmationsNotCarried, lintDoc, type ClaimHit, type ClaimTick } from "../lib/offer-pages/claims";
+import { redactAll } from "../lib/secret-redaction";
 
 /** The only workspace this content belongs to. */
 export const OASIS_TENANT_SLUG = "oasis-ai-cc";
@@ -786,9 +787,14 @@ export function formatRefreshReport(report: RefreshReport): string[] {
   return out;
 }
 
-/** A stored value as one plain ASCII line fragment: it came from a database, so anything may be in it. */
-function plainText(s: string, max = 110): string {
-  const t = s.replace(/[^\x20-\x7E]/g, "?");
+/**
+ * A stored value as one plain ASCII line fragment: it came from a database, so
+ * anything may be in it, including a pasted key or keyed URL. Redacted first
+ * (lib/secret-redaction.ts), because this report is read by agents and logs
+ * (Codex review of #675).
+ */
+export function plainText(s: string, max = 110): string {
+  const t = redactAll(s).replace(/[^\x20-\x7E]/g, "?");
   return t.length > max ? `${t.slice(0, max - 3)}...` : t;
 }
 

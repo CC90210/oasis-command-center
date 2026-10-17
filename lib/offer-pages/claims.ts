@@ -169,11 +169,23 @@ export function heldConfirmations(doc: OfferPageDoc): HeldConfirmation[] {
  * The confirmations `previous` holds that `next`, saved exactly as it stands,
  * does not: the sign-offs a write of `next` over `previous` removes. A
  * confirmation stays only when `next` carries the same content with the same
- * stamp (who and when): the match stampConfirmations keeps one by.
+ * stamp (who and when): the match stampConfirmations keeps one by. Matched one
+ * for one: two identical confirmed items of which `next` keeps one lose one
+ * (Codex review of #675), so the kept ones are counted, not just collected.
  */
 export function confirmationsNotCarried(previous: OfferPageDoc, next: OfferPageDoc): HeldConfirmation[] {
-  const kept = new Set(heldConfirmations(next).map((h) => exactKey(h.content, h)));
-  return heldConfirmations(previous).filter((h) => !kept.has(exactKey(h.content, h)));
+  const kept = new Map<string, number>();
+  for (const h of heldConfirmations(next)) {
+    const key = exactKey(h.content, h);
+    kept.set(key, (kept.get(key) ?? 0) + 1);
+  }
+  return heldConfirmations(previous).filter((h) => {
+    const key = exactKey(h.content, h);
+    const left = kept.get(key) ?? 0;
+    if (left === 0) return true;
+    kept.set(key, left - 1);
+    return false;
+  });
 }
 
 /**

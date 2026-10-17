@@ -724,6 +724,9 @@ async function main() {
     ];
     assert.deepEqual([...listed].sort(), [...want].sort(), "the dry run did not name every sign-off");
     assert.ok(seed.formatRefreshReport(dry).every((l) => /^[\x20-\x7E]*$/.test(l)), "the report is not plain ASCII");
+    // Stored text is redacted before it is printed (Codex review of #675): a
+    // keyed URL pasted into the copy never reaches an agent's context.
+    assert.equal(seed.plainText("see https://x.example/a?key=abc123secret&b=1"), "see https://x.example/a?key=[REDACTED]&b=1");
     for (const slug of SLUGS_WITH_PAGE) printed(dry, slug);
     assert.deepEqual(await snapshot(mem), before, "a dry run wrote something");
 

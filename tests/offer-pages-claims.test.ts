@@ -359,6 +359,16 @@ async function main() {
     assert.deepEqual(claims.confirmationsNotCarried(stored, echoed), [], "a save that kept every sign-off was reported as losing one");
     const edited = claims.stampConfirmations(doc("It works brilliantly.", STAMP), [stored], "u-adon", "2026-10-09T09:00:00.000Z");
     assert.deepEqual(claims.confirmationsNotCarried(stored, edited).map((h) => h.kind), ["evidence"], "a save that re-stamped one sign-off was not reported");
+    // Matched one for one (Codex review of #675): two identical confirmed quotes,
+    // of which the written page keeps one, lose one.
+    const quotes = (n: number) =>
+      parseOfferPageDoc(
+        minimalDoc({
+          sections: [{ key: "results", items: Array.from({ length: n }, () => ({ kind: "quote", quote: "Same words.", who: "Dana", evidence: { permission: true, confirmed: STAMP } })) }],
+        }),
+      );
+    assert.equal(claims.confirmationsNotCarried(quotes(2), quotes(1)).length, 1, "a lost duplicate sign-off was hidden behind its twin");
+    assert.equal(claims.confirmationsNotCarried(quotes(2), quotes(2)).length, 0);
   });
 
   await step("the guarantee blocks Publish while its terms have words and no owner's confirmation, and not once confirmed", () => {
