@@ -28,6 +28,7 @@ import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { rateLimit } from "@/lib/rate-limit";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
+import { GoogleCalendarIntegrationError } from "@/lib/integrations/google-calendar";
 import {
   claimPublicBooking,
   publicBookingVisitorKey,
@@ -99,6 +100,29 @@ const PRE_PROVIDER_ERRORS = new Set([
   "meeting_intent_lookup_failed",
   "meeting_intent_insert_failed",
 ]);
+/**
+ * Thrown by the Google calendar code (lib/integrations/google-calendar.ts) while
+ * it sets up, before it sends Google any request: the input check, a host with no
+ * connected or wrongly scoped work account, an account that is not the approved
+ * one. No event can exist, so the hold goes back (Codex review of #670, pass 6).
+ * Token failures are NOT here: a token is refreshed again on a 401 in the middle
+ * of a call, after an event may exist. tests/public-booking-cap.test.ts fails if
+ * one of these codes is ever thrown once a request can have gone out.
+ */
+const CALENDAR_SETUP_ERRORS = new Set([
+  "invalid_request",
+  "google_calendar_not_connected",
+  "calendar_scope_required",
+  "calendar_organizer_mismatch",
+]);
+/** The service's limit on a handoff note (boundedRequired in lib/website-sales-founder-meeting.ts). */
+const HANDOFF_NOTE_MAX = 4000;
+
+/** The meeting failed in the calendar code's setup, so Google was never asked (CALENDAR_SETUP_ERRORS). */
+function calendarNeverAsked(error: unknown): boolean {
+  const cause = error instanceof Error ? error.cause : undefined;
+  return cause instanceof GoogleCalendarIntegrationError && !cause.eventId && CALENDAR_SETUP_ERRORS.has(cause.code);
+}
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -315,7 +339,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       offerLabel,
       contact: buildPublicBookingContact(combined),
       clientAgenda: `A ${durationMinutes}-minute ${context.formName} call with OASIS AI Solutions.`,
-      handoffNote: bottleneck || `Public ${context.formSlug} booking.`,
+      // A form answer has no length limit on the server, and one over the
+      // service's limit would refuse this lead's every booking.
+      handoffNote: (bottleneck || `Public ${context.formSlug} booking.`).slice(0, HANDOFF_NOTE_MAX),
       smsConsent: false,
       expectedOrganizerEmail: organizer.email,
       openerAttendee: attendee ? { email: attendee.email, displayName: attendee.displayName } : null,
@@ -367,9 +393,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // Refused by the meeting service before this attempt called Google (Codex
     // review of #670): it booked nothing, so its hold goes back. `!meeting`
     // keeps that true: the codes count only when the service itself threw,
-    // never a later step's. Anything else (a provider error, an unknown one)
-    // may have left an event, so the hold stays.
-    if (!meeting && PRE_PROVIDER_ERRORS.has(errorCode)) await giveBackClaim();
+    // never a later step's. So does a calendar failure in its setup, before
+    // Google was asked (calendarNeverAsked). Anything else (a provider error,
+    // a token failure, an unknown one) may have left an event, so the hold stays.
+    if (!meeting && (PRE_PROVIDER_ERRORS.has(errorCode) || calendarNeverAsked(error))) await giveBackClaim();
     const code = safeErrorCode(error, PROVIDER_ERRORS, "booking_create_failed");
     return NextResponse.json({ ok: false, error: code }, { status: 503 });
   }
