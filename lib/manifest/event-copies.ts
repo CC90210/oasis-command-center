@@ -12,7 +12,7 @@
  * This removes those fields and keeps the event rows, so history and its counts
  * do. A SENT message keeps its recipient: that is the record of what went out,
  * as sent history is everywhere else in the delete. agent_events has no
- * tenant_id column, so the tenant is the payload's.
+ * tenant_id column; its workspace is correlation_id.
  *
  * Turso only (raw SQL); the delete itself runs only there.
  */
@@ -20,10 +20,14 @@ import { getTursoClient } from "../turso";
 
 const DETAIL_PATHS = ["$.data", "$.to_email", "$.to_phone", "$.email", "$.phone", "$.name"] as const;
 
-// record_id names any manifest record (an application, an offer), so only a
-// lead's status events match on it; lead_id is always a lead (Codex on #674).
+// The workspace is correlation_id, agent_events' canonical tenancy
+// (docs/SECURITY_POSTURE.md); a row whose payload names another workspace is
+// never touched, and one whose payload names none is still cleaned (Codex on
+// #674, third pass). record_id names any manifest record (an application, an
+// offer), so only a lead's status events match on it; lead_id is always a lead.
 const WHERE =
-  "json_valid(payload) AND json_extract(payload, '$.tenant_id') = ?" +
+  "correlation_id = ? AND json_valid(payload)" +
+  " AND (json_extract(payload, '$.tenant_id') IS NULL OR json_extract(payload, '$.tenant_id') = ?)" +
   " AND ((json_extract(payload, '$.record_id') = ? AND json_extract(payload, '$.entity') = 'lead')" +
   " OR json_extract(payload, '$.lead_id') = ?)" +
   " AND event_type NOT LIKE '%\\_SENT' ESCAPE '\\'" +
@@ -33,7 +37,7 @@ const WHERE =
 export async function countLeadEventCopies(tenantId: string, leadId: string): Promise<number> {
   const found = await getTursoClient().execute({
     sql: `SELECT count(*) AS n FROM agent_events WHERE ${WHERE}`,
-    args: [tenantId, leadId, leadId],
+    args: [tenantId, tenantId, leadId, leadId],
   });
   return Number(found.rows[0]?.n ?? 0);
 }
@@ -43,7 +47,7 @@ export async function removeLeadEventCopies(tenantId: string, leadId: string): P
   const removePaths = DETAIL_PATHS.map((p) => `'${p}'`).join(", ");
   const done = await getTursoClient().execute({
     sql: `UPDATE agent_events SET payload = json_set(json_remove(payload, ${removePaths}), '$.details_removed', 'lead_deleted') WHERE ${WHERE}`,
-    args: [tenantId, leadId, leadId],
+    args: [tenantId, tenantId, leadId, leadId],
   });
   return done.rowsAffected;
 }

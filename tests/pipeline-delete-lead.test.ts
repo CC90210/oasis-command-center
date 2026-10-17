@@ -276,9 +276,14 @@ async function main(): Promise<void> {
       ["ev-junk-queued-email", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test", subject: "Hi", tenant_id: TENANT }],
       ["ev-junk-sent-email", "BRAVO_DASHBOARD_EMAIL_SENT", { lead_id: JUNK, to_email: "junk@lead.test", sent_as: "cc@oasis.test", tenant_id: TENANT }],
       ["ev-application", "BRAVO_RECORD_STATUS_CHANGED", { entity: "application", record_id: APPLICATION, field: "status", to: "submitted", data: { business_email: "owner@biz.test" }, tenant_id: TENANT }],
-    ].map(([id, type, payload]) => ({
+      // The workspace is correlation_id (Codex on #674, third pass): a row
+      // with no payload tenant is still ours; one filed under another
+      // workspace is never touched, whatever its payload says.
+      ["ev-junk-no-payload-tenant", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test" }, TENANT],
+      ["ev-junk-other-correlation", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test", tenant_id: TENANT }, OTHER_TENANT],
+    ].map(([id, type, payload, correlation]) => ({
       sql: "INSERT INTO agent_events (id, event_type, publisher_agent, payload, correlation_id) VALUES (?, ?, 'manifest-data', ?, ?)",
-      args: [id as string, type as string, JSON.stringify(payload), String((payload as { tenant_id: string }).tenant_id)],
+      args: [id as string, type as string, JSON.stringify(payload), String(correlation ?? (payload as { tenant_id: string }).tenant_id)],
     })),
     { sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'application', '{}')", args: [APPLICATION, TENANT] },
     { sql: "INSERT INTO drip_runs VALUES ('junk-scheduled', ?, ?, 'scheduled')", args: [TENANT, JUNK] },
@@ -448,7 +453,9 @@ async function main(): Promise<void> {
   // (live E2E of #669: name, email and phone outlived the lead).
   const payloadOf = async (id: string) =>
     JSON.parse(String((await seed.execute({ sql: "SELECT payload FROM agent_events WHERE id = ?", args: [id] })).rows[0]?.payload)) as Record<string, unknown>;
-  assert.equal(junkResult.plan.delete.agent_event_copies, 2);
+  assert.equal(junkResult.plan.delete.agent_event_copies, 3);
+  assert.equal("to_email" in (await payloadOf("ev-junk-no-payload-tenant")), false, "a row of ours with no payload tenant kept the address");
+  assert.equal((await payloadOf("ev-junk-other-correlation")).to_email, "junk@lead.test", "another workspace's event was rewritten");
   const stage = await payloadOf("ev-junk-stage");
   assert.equal("data" in stage, false, "the lead's name, email and phone outlived it in agent_events");
   assert.equal(stage.details_removed, "lead_deleted");
