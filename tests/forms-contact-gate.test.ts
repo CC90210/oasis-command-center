@@ -262,6 +262,18 @@ async function main() {
     assert.match(book, /if \(stepIndex === Math\.max\(0, firstContactStepIndex\(form\.steps\)\)\) setContactDone\(true\);/, "\"Your details are in\" before any details");
   });
 
+  await check("a held step can never carry consent boxes, so holding it loses no consent record", async () => {
+    // The consent ledger renders a box only on a step with an email or phone
+    // field, and every such field is a contact field: so each step before the
+    // first contact step, the only kind ever held, renders none.
+    const { renderedChannelsForStep } = await import("../lib/consent/ledger-disclosure");
+    const steps = COMMUNITY_STEPS as unknown as Parameters<typeof renderedChannelsForStep>[0][];
+    const contactAt = firstContactStepIndex(COMMUNITY_STEPS);
+    for (let i = 0; i < contactAt; i += 1) assert.deepEqual(renderedChannelsForStep(steps[i], {}), [], `held step ${i} shows a consent box`);
+    assert.deepEqual(renderedChannelsForStep(steps[contactAt], {}), ["email", "sms"], "the contact step is where the boxes are");
+    for (const type of ["email", "phone"]) assert.equal(isContactField({ name: "anything", type }), true, `a ${type} field must count as contact`);
+  });
+
   await check("every new refusal has a sentence in the form", () => {
     const client = readFileSync(join(__dirname, "..", "components", "forms", "FormPublicClient.tsx"), "utf8");
     for (const code of ["contact_required", "route_only_requires_anonymous", "invalid_step_index"]) {
