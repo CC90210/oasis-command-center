@@ -60,5 +60,20 @@ console.log(
       React.createElement(FormPublicClient, { ...base, tenantSlug: "oasis-ai-cc", formSlug: "ai-audit" }),
     ),
     auditLastScreen: lastScreen("oasis-ai-cc", "ai-audit"),
+    // The homepage form submitted the contact step, then opened the audit
+    // at step 2 (AUDIT_FORM_HANDOFF).
+    homepageHandoff: renderToStaticMarkup(
+      React.createElement(FormPublicClient, {
+        ...base, tenantSlug: "oasis-ai-cc", formSlug: "ai-audit", token: "token", initialStep: 1, contactStepHandoff: true,
+      }),
+    ),
+    resumeAtStep2: renderToStaticMarkup(
+      React.createElement(FormPublicClient, { ...base, tenantSlug: "oasis-ai-cc", formSlug: "ai-audit", token: "token", initialStep: 1 }),
+    ),
+    handoffOnProtocol: renderToStaticMarkup(
+      React.createElement(FormPublicClient, {
+        ...base, tenantSlug: "oasis-ai-cc", formSlug: "protocol", token: "token", initialStep: 1, contactStepHandoff: true,
+      }),
+    ),
   }),
 );

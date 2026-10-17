@@ -146,6 +146,19 @@ check("the form still opens on its contact step, and finishing first still ends 
   assert.ok(!html.auditLastScreen.includes(EARLY_HEADING));
 });
 
+check("a homepage visitor (contact step already sent) lands on the early calendar, and only there", () => {
+  assert.ok(html.homepageHandoff.includes(EARLY_HEADING), "the homepage's audit visitors never see the early calendar");
+  assert.ok(!html.homepageHandoff.includes("Step 2 / 4"), "the step counter over the calendar");
+  for (const kind of ["resumeAtStep2", "handoffOnProtocol"]) {
+    assert.ok(!html[kind].includes(EARLY_HEADING), `${kind}: the calendar opened without a contact-step handoff on an early form`);
+    assert.ok(html[kind].includes("Step 2 / "), `${kind}: the visitor did not resume at step 2`);
+  }
+  const page = readFileSync("app/f/[tenant_slug]/[form_slug]/[lead_token]/page.tsx", "utf8");
+  // initialStep is set ONLY by the narrow homepage handoff marker on the canonical audit form.
+  assert.match(page, /contactStepHandoff=\{initialStep !== undefined\}/);
+  assert.match(page, /const initialStep =\s*result\.tenant_slug === AI_AUDIT_TENANT_SLUG &&\s*result\.form\.slug === AI_AUDIT_SLUG &&\s*sp\[AUDIT_FORM_HANDOFF\.markerParam\]/);
+});
+
 check("the form opens the early calendar once, after the contact step, on both submit paths", () => {
   const src = readFileSync("components/forms/FormPublicClient.tsx", "utf8");
   assert.match(

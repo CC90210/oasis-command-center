@@ -334,6 +334,9 @@ export default async function PublicFormPage({
       steps={result.form.steps}
       initialStep={initialStep}
       resumeBooking={resumeBooking}
+      // The homepage form submitted the contact step: the AI audit books
+      // right after it, so the page opens on the calendar (book sooner).
+      contactStepHandoff={initialStep !== undefined}
       redirectUrl={result.form.redirect_url}
       token={result.token}
       prefill={result.prefill}

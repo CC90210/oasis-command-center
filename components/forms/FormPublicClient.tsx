@@ -91,6 +91,13 @@ type Props = {
    * never the gate.
    */
   resumeBooking?: boolean;
+  /**
+   * The contact step was submitted before this page opened (the homepage
+   * audit form, AUDIT_FORM_HANDOFF), so a form that books after the contact
+   * step opens on its calendar, with the questions resuming at initialStep.
+   * Like resumeBooking, a convenience: the booking API checks the step itself.
+   */
+  contactStepHandoff?: boolean;
   redirectUrl: string | null;
   /**
    * Pre-signed HMAC token tied to a specific lead — used by Solara's
@@ -315,6 +322,7 @@ export function FormPublicClient({
   steps,
   initialStep,
   resumeBooking,
+  contactStepHandoff = false,
   redirectUrl,
   token: initialToken,
   anonymousInit,
@@ -399,8 +407,10 @@ export function FormPublicClient({
     tenantSlug && formSlug && steps.length > 1 &&
       isPublicBookingSurface({ tenantSlug, formSlug }) && isEarlyPublicBookingFormSlug(formSlug),
   );
-  const [earlyCalendarStep, setEarlyCalendarStep] = useState<number | null>(null);
-  const earlyCalendarOffered = useRef(false);
+  // A homepage visitor arrives with the contact step already submitted.
+  const opensOnCalendar = contactStepHandoff && booksAfterContact && currentStep > 0;
+  const [earlyCalendarStep, setEarlyCalendarStep] = useState<number | null>(() => (opensOnCalendar ? currentStep : null));
+  const earlyCalendarOffered = useRef(opensOnCalendar);
   // A call booked from that calendar: the remaining questions are optional.
   const [bookedEarly, setBookedEarly] = useState(false);
   const [skippedQuestions, setSkippedQuestions] = useState(false);
