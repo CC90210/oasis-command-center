@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { FormPublicClient } from "../components/forms/FormPublicClient";
+import { PublicBookingCalendar } from "../components/forms/PublicBookingCalendar";
 
 type Props = Parameters<typeof FormPublicClient>[0];
 const base = JSON.parse(
@@ -43,5 +44,21 @@ console.log(
     command: lastScreen("oasis-ai-cc", "command"),
     vsl: lastScreen("oasis-ai-cc", "vsl"),
     otherWorkspace: lastScreen("other-co", "protocol"),
+    // Book sooner: the calendar FormPublicClient opens after the contact step,
+    // as it first draws (still reading the open times), and the same form's
+    // first screen, which must still be its first step.
+    earlyCalendar: renderToStaticMarkup(
+      React.createElement(PublicBookingCalendar, {
+        token: "token",
+        primary: "#e0b14a",
+        formSlug: "ai-audit",
+        completedStep: 1,
+        early: { onAnswerFirst: () => undefined, onBooked: () => undefined, afterBooked: null },
+      }),
+    ),
+    auditFirstScreen: renderToStaticMarkup(
+      React.createElement(FormPublicClient, { ...base, tenantSlug: "oasis-ai-cc", formSlug: "ai-audit" }),
+    ),
+    auditLastScreen: lastScreen("oasis-ai-cc", "ai-audit"),
   }),
 );

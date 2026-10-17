@@ -142,6 +142,36 @@ test("the no-call email promises only what is cleared: it never says it will com
   assert.ok(withLink.includes("pick a time that works for both founders here: https://x.test/b"));
 });
 
+// ── book sooner: the call can be booked before the questions are finished ──
+
+test("a lead who booked first: the alert gives the call, never 'needs follow-up'", () => {
+  const booked = buildAiAuditAlert(HOT, scoreAiAuditLead(HOT), { bookedCall: "Sat, Oct 17, 2:30 p.m. EDT" });
+  assert.match(booked, /📅 <b>Meeting:<\/b> booked for Sat, Oct 17, 2:30 p\.m\. EDT/);
+  assert.ok(!booked.includes("unbooked"), "a booked lead read as needing follow-up");
+  const unbooked = buildAiAuditAlert(HOT, scoreAiAuditLead(HOT), {});
+  assert.match(unbooked, /📅 <b>Meeting:<\/b> unbooked - needs follow-up/);
+  const evil = buildAiAuditAlert(HOT, scoreAiAuditLead(HOT), { bookedCall: "<b>x</b>" });
+  assert.ok(!evil.includes("<b>x</b>") && evil.includes("&lt;b&gt;x"), "the time is escaped like every other value");
+});
+
+test("a lead who booked first: the email confirms the call and links nowhere to book again", () => {
+  const links = { bookingUrl: "https://oasisai.work/f/oasis-ai-cc/ai-audit/T?book=1", communityUrl: "https://oasisai.work/go/community?from=audit_email" };
+  for (const answers of [HOT, COLD, { ...COLD, timeframe: "immediate" }]) {
+    const { subject, body } = composeAiAuditWelcome(answers, links, { booked: true });
+    assert.ok(
+      body.includes("Your call is booked, and the Google Calendar invite in your inbox has the time and the Meet link."),
+      "Maven's booked line is gone",
+    );
+    assert.ok(!body.includes(links.bookingUrl), "a booked lead was sent a link to book again");
+    assert.ok(!body.includes(links.communityUrl), "\"if now is not the right time\" to someone who just booked");
+    assert.ok(!/pick (a|the) time|two times/i.test(body), "a booked lead was asked to pick a time");
+    assert.ok(!/booking your AI audit call/.test(subject), subject);
+    assert.ok(body.includes("— Conaugh"));
+  }
+  // Not booked: exactly the email it was.
+  assert.deepEqual(composeAiAuditWelcome(HOT, links, { booked: false }), composeAiAuditWelcome(HOT, links));
+});
+
 test("welcome email degrades gracefully with no name", () => {
   const { subject, body } = composeAiAuditWelcome({ email: "x@y.co" });
   assert.ok(subject.includes("there"), subject);

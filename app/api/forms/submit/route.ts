@@ -63,7 +63,7 @@ import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { buildPublicFunnelLeadPatch } from "@/lib/forms/public-booking";
-import { isOptionalPublicBookingFormSlug, isPublicBookingForm } from "@/lib/forms/public-booking-config";
+import { isPublicBookingForm, publicBookingCompletionGatesCalendar } from "@/lib/forms/public-booking-config";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
 import {
   ensureAiAuditSubmissionDelivery,
@@ -1784,12 +1784,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       // of #611). The form row is already durable and every step is idempotent,
       // so the browser can retry this same final step.
       funnelStageWriteFailed = true;
-      // PROTOCOL and COMMUNITY answer 200 even so (their call is optional; see
-      // the 503 at the end), so no browser retries this step. Retry the same
-      // idempotent merge once after the response instead, so the lead still
-      // reaches audit_requested and its optional calendar can open; a second
-      // failure is logged as loudly as the first (CodeRabbit on #655).
-      if (isOptionalPublicBookingFormSlug(form.slug)) {
+      // PROTOCOL and COMMUNITY (an optional call), and AI audit, COMMAND and
+      // FLEET (their contact step already unlocked the calendar), answer 200
+      // even so (see the 503 at the end), so no browser retries this step.
+      // Retry the same idempotent merge once after the response instead, so the
+      // lead still reaches audit_requested; a second failure is logged as
+      // loudly as the first (CodeRabbit on #655).
+      if (!publicBookingCompletionGatesCalendar(form.slug)) {
         after(async () => {
           const retried = await db.rpc("patch_tenant_record_data", {
             p_id: link.lead_id,
@@ -1983,8 +1984,11 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // is optional and their own next step (the thanks: checkout email, community
   // link) is already durable, so only their calendar fails (its availability
   // read refuses a lead not ready to book), never their completion (Codex
-  // review of #655).
-  if (funnelStageWriteFailed && !isOptionalPublicBookingFormSlug(form.slug)) {
+  // review of #655). On AI audit, COMMAND and FLEET the contact step already
+  // unlocked the calendar (inbound_lead is enough for them), and the visitor
+  // may have booked before answering, so a 503 here would only ask them to
+  // press submit again for nothing.
+  if (funnelStageWriteFailed && publicBookingCompletionGatesCalendar(form.slug)) {
     return NextResponse.json(
       { ok: false, error: "funnel_stage_write_unavailable" },
       { status: 503 },

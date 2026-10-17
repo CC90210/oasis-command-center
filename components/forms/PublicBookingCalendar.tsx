@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CalendarDays, CheckCircle2, Loader2, Video } from "lucide-react";
 import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
@@ -57,6 +57,7 @@ export function PublicBookingCalendar({
   completedStep,
   optional = false,
   preview = false,
+  early = null,
 }: {
   token: string | null;
   primary: string;
@@ -76,6 +77,14 @@ export function PublicBookingCalendar({
    * so a preview never counts as a visitor's click.
    */
   preview?: boolean;
+  /**
+   * The calendar opens right after the contact step, before the other
+   * questions (isEarlyPublicBookingFormSlug; CC, 2026-10-16: "book sooner").
+   * The heading invites the booking now, "Answer the questions first"
+   * (onAnswerFirst) takes the community link's place, `onBooked` tells the
+   * form a call is booked, and `afterBooked` is drawn under the receipt.
+   */
+  early?: { onAnswerFirst: () => void; onBooked: () => void; afterBooked: ReactNode } | null;
 }) {
   const [availability, setAvailability] = useState<Availability | null>(null);
   const [loading, setLoading] = useState(true);
@@ -177,6 +186,7 @@ export function PublicBookingCalendar({
         return;
       }
       setReceipt(data);
+      early?.onBooked();
     } catch {
       setError(friendlyError("network"));
     } finally {
@@ -212,13 +222,21 @@ export function PublicBookingCalendar({
             <CalendarDays className="h-4 w-4" /> Open calendar
           </a>
         </div>
+        {early?.afterBooked}
       </div>
     );
   }
 
   return (
     <div className="space-y-5 py-3">
-      {optional ? (
+      {early ? (
+        <div className="space-y-2 text-center">
+          <h2 className="text-xl font-bold text-fg">Book your call now. The questions can wait.</h2>
+          <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
+            These are the live times our team has open. The call is {availability?.duration_minutes || 15} minutes and the Google Meet invite arrives instantly.
+          </p>
+        </div>
+      ) : optional ? (
         <div className="space-y-2 text-center">
           <h3 className="text-lg font-bold text-fg">Want to talk it through first?</h3>
           <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
@@ -295,7 +313,18 @@ export function PublicBookingCalendar({
         </button>
       )}
 
-      {optional ? null : (
+      {early ? (
+        <div className="border-t border-bg-border pt-4 text-center">
+          <button
+            type="button"
+            onClick={early.onAnswerFirst}
+            className="text-sm font-semibold underline underline-offset-4"
+            style={{ color: primary }}
+          >
+            Answer the questions first
+          </button>
+        </div>
+      ) : optional ? null : (
         <CommunityJoinLink
           formSlug={formSlug}
           completedStep={completedStep}

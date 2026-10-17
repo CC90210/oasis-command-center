@@ -30,6 +30,7 @@ import { marketingSendAllowed } from "@/lib/consent/marketing-send-gate";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import { isFirstSubmissionForLead } from "@/lib/forms/first-submission";
+import { formatBookedTime } from "@/lib/forms/public-booking-alert";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
 import {
   queueAiAuditConfirmation,
@@ -87,6 +88,8 @@ export async function ensureAiAuditSalesEvent(input: {
   submissionId?: string;
   score?: ScoreBreakdown;
   booking?: { startsAt: string; meetUrl: string; appointmentId: string };
+  /** Completed with the call already booked (upcomingBookedCall). */
+  bookedCall?: string;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const payload: Record<string, unknown> = {
@@ -100,7 +103,7 @@ export async function ensureAiAuditSalesEvent(input: {
       payload.score = input.score.score;
       payload.qualification = input.score.status;
     }
-    if (input.event === "completed") payload.booking_status = "unbooked";
+    if (input.event === "completed") payload.booking_status = input.bookedCall ? "booked" : "unbooked";
     if (input.booking) {
       payload.booking_status = "booked";
       payload.starts_at = input.booking.startsAt;
@@ -140,6 +143,7 @@ async function readLeadData(
   db: SupabaseClient,
   tenantId: string,
   leadId: string,
+  tag = "ai-audit.started",
 ): Promise<Record<string, unknown>> {
   try {
     const res = await db
@@ -150,7 +154,7 @@ async function readLeadData(
       .eq("id", leadId)
       .maybeSingle();
     if (res.error) {
-      console.error("[ai-audit.started] lead read:", res.error.message);
+      console.error(`[${tag}] lead read:`, res.error.message);
       return {};
     }
     let data: unknown = (res.data as { data?: unknown } | null)?.data;
@@ -158,9 +162,26 @@ async function readLeadData(
     if (typeof data === "string") data = JSON.parse(data);
     return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
   } catch (err) {
-    console.error("[ai-audit.started] lead read threw:", err);
+    console.error(`[${tag}] lead read threw:`, err);
     return {};
   }
+}
+
+/**
+ * The call this lead has on the calendar, as the alert prints it, or undefined.
+ *
+ * The calendar opens after the contact step (isEarlyPublicBookingFormSlug), so
+ * a lead can finish the questions with the call already booked. The lead's
+ * `founder_meeting_at` is the booked call every screen reads (the lead page,
+ * the Sales desk); one in the past is not a call to confirm. A failed lead read
+ * reads as not booked: the email then offers a time, as before, and the
+ * calendar refuses a second booking for a lead already booked.
+ */
+export function upcomingBookedCall(lead: Record<string, unknown>, nowMs = Date.now()): string | undefined {
+  const at = typeof lead.founder_meeting_at === "string" ? lead.founder_meeting_at.trim() : "";
+  const startsMs = Date.parse(at);
+  if (!at || !Number.isFinite(startsMs) || startsMs <= nowMs) return undefined;
+  return formatBookedTime(at);
 }
 
 /**
@@ -345,8 +366,10 @@ async function buildWelcomeLinks(input: {
 
 export async function ensureAiAuditSubmissionDelivery(
   input: AiAuditNotifyInput,
-): Promise<{ emailNote: string; salesEventOk: boolean }> {
+): Promise<{ emailNote: string; salesEventOk: boolean; bookedCall?: string }> {
   const { db, tenantId, formId, leadId, answers, score } = input;
+  // Booked before finishing? Then the event, the email and the alert say so.
+  const bookedCall = upcomingBookedCall(await readLeadData(db, tenantId, leadId, "ai-audit.notify"));
   const salesEvent = await ensureAiAuditSalesEvent({
     db,
     tenantId,
@@ -354,6 +377,7 @@ export async function ensureAiAuditSubmissionDelivery(
     leadId,
     event: "completed",
     score,
+    bookedCall,
   });
   if (!salesEvent.ok) {
     console.error("[ai-audit.notify] Sales event:", salesEvent.error);
@@ -362,7 +386,8 @@ export async function ensureAiAuditSubmissionDelivery(
   const toEmail = String(answers.email ?? "").trim().toLowerCase();
   const { subject, body } = composeAiAuditWelcome(
     answers,
-    await buildWelcomeLinks({ db, tenantId, formId, leadId, toEmail }),
+    bookedCall ? {} : await buildWelcomeLinks({ db, tenantId, formId, leadId, toEmail }),
+    { booked: Boolean(bookedCall) },
   );
   let emailNote = "";
   try {
@@ -392,7 +417,7 @@ export async function ensureAiAuditSubmissionDelivery(
     emailNote = "NOT queued — threw";
     console.error("[ai-audit.notify] confirmation queue threw:", err);
   }
-  return { emailNote, salesEventOk: salesEvent.ok };
+  return { emailNote, salesEventOk: salesEvent.ok, bookedCall };
 }
 
 export async function notifyAiAuditSubmission(
@@ -402,9 +427,10 @@ export async function notifyAiAuditSubmission(
   const toEmail = String(answers.email ?? "").trim().toLowerCase();
   // Both writes use deterministic keys. A repeat submission repairs a missing
   // event or queue row without duplicating either one.
-  const { emailNote } = await ensureAiAuditSubmissionDelivery(input);
+  const { emailNote, bookedCall } = await ensureAiAuditSubmissionDelivery(input);
 
   const alert = buildAiAuditAlert(answers, score, {
+    bookedCall,
     emailStatus: emailNote,
     inboxUrl: toEmail
       ? `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(toEmail)}`

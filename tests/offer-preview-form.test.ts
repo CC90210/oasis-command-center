@@ -112,7 +112,9 @@ async function main(): Promise<void> {
     assert.ok(previewAt < firstNetwork, "the preview branch comes after a request, an upload or a tracking event");
     const branch = submitFn.slice(previewAt, submitFn.indexOf("\n    }\n", previewAt));
     assert.match(branch, /onStepSubmitted\?\.\(currentStep, finished\)/, "the offer page is not told the step was done");
-    assert.match(branch, /if \(finished\) setDone\(true\);\s*else setCurrentStep\(currentStep \+ 1\);/);
+    // advanceFrom: the next step, or first the early calendar after the
+    // contact step on AI audit, COMMAND and FLEET (book sooner, 2026-10-16).
+    assert.match(branch, /if \(finished\) setDone\(true\);\s*else advanceFrom\(currentStep, currentStep \+ 1\);/);
     assert.match(branch, /return;/);
   });
 
@@ -122,8 +124,8 @@ async function main(): Promise<void> {
     assert.match(form, /if \(preview \|\| !tenantSlug \|\| !formSlug\) return;\s*trackEvent\(\{ tenant: tenantSlug, form: formSlug, event: "step_viewed"/);
     assert.equal(
       (form.match(/preview=\{preview\}/g) || []).length,
-      3,
-      "both calendars and COMMUNITY's own community link must know they are a preview",
+      4,
+      "all three calendars (required, optional, early) and COMMUNITY's own community link must know they are a preview",
     );
   });
 

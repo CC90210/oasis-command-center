@@ -247,6 +247,11 @@ export type AlertLoop = {
   inboxUrl?: string;
   /** Link that opens this lead in Command Center (lib/forms/lead-link.ts). */
   leadUrl?: string;
+  /**
+   * The call the lead booked BEFORE finishing (the calendar opens after the
+   * contact step), as a person reads the time. Absent: not booked yet.
+   */
+  bookedCall?: string;
 };
 
 export function buildAiAuditAlert(
@@ -304,9 +309,14 @@ export function buildAiAuditAlert(
     lines.push("", `✅ <b>ASKED TO BOOK A CALL</b>`);
   }
 
-  // Completion happens immediately before the inline calendar opens. The
-  // separate booked event carries the selected time once one exists.
-  lines.push("", "📅 <b>Meeting:</b> unbooked - needs follow-up");
+  // The calendar opens after the contact step, so a lead may finish the
+  // questions after booking: then the alert says booked, never "needs
+  // follow-up". Otherwise the separate booked event carries the time later.
+  if (loop?.bookedCall) {
+    lines.push("", `📅 <b>Meeting:</b> booked for ${e(loop.bookedCall)}`);
+  } else {
+    lines.push("", "📅 <b>Meeting:</b> unbooked - needs follow-up");
+  }
 
   if (s.reasons.length) {
     lines.push("", `<b>Why this score:</b> ${e(s.reasons.join(" · "))}`);
@@ -351,12 +361,23 @@ export type WelcomeLinks = {
   communityUrl?: string;
 };
 
-export function composeAiAuditWelcome(a: Record<string, unknown>, links: WelcomeLinks = {}): Composed {
+export function composeAiAuditWelcome(
+  a: Record<string, unknown>,
+  links: WelcomeLinks = {},
+  /**
+   * The lead booked the call before finishing (the calendar opens after the
+   * contact step). The email then confirms the call instead of offering a
+   * time, and carries no booking or community link.
+   */
+  state: { booked?: boolean } = {},
+): Composed {
   const first = (str(a.name).trim().split(/\s+/)[0] || "there").slice(0, 40);
   const goal = label(GOAL_LABELS, a.automation_goal);
   const urgent = str(a.timeframe) === "immediate" || str(a.timeframe) === "30_days";
-  const askedForCall = str(a.wants_call) === "yes";
-  const { bookingUrl, communityUrl } = links;
+  const booked = state.booked === true;
+  const askedForCall = !booked && str(a.wants_call) === "yes";
+  const { bookingUrl } = links;
+  const communityUrl = booked ? undefined : links.communityUrl;
 
   const subject = askedForCall
     ? `${first} — booking your AI audit call`
@@ -369,7 +390,7 @@ export function composeAiAuditWelcome(a: Record<string, unknown>, links: Welcome
   // With a signed link the email stands on its own: someone who closed the tab
   // before picking a time still has a way to book. Without one (the signing key
   // is unset) the copy keeps pointing at the page, as before.
-  const next = askedForCall
+  const offerCall = askedForCall
     ? bookingUrl
       ? `You asked for a call, so pick the time that works here: ${bookingUrl}\nThe Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
       : `You asked for a call, so use the live calendar on the page to pick the time that works. The Google invite arrives as soon as you book, and I'll have read your answers before we talk, not during.`
@@ -386,6 +407,10 @@ export function composeAiAuditWelcome(a: Record<string, unknown>, links: Welcome
       : bookingUrl
         ? `I read every one of these myself. If talking is easier, pick a time that works for both founders here: ${bookingUrl}`
         : `I read every one of these myself. If talking is easier, reply with two times that work and I'll send the invite.`;
+  // Booked: one sentence, no link to book again (copy by Maven, 2026-10-16).
+  const next = booked
+    ? "Your call is booked, and the Google Calendar invite in your inbox has the time and the Meet link."
+    : offerCall;
 
   // Quote their own bottleneck back at them. This is the single most
   // personal thing in the form — they typed it — and the email was

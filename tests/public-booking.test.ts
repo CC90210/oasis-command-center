@@ -16,10 +16,13 @@ import {
   PUBLIC_BOOKING_TIME_ZONE,
 } from "../lib/forms/public-booking";
 import {
+  isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
   isPublicBookingFormSlug,
+  publicBookingCompletionGatesCalendar,
   publicBookingDurationMinutes,
   publicBookingOfferLabel,
+  PUBLIC_BOOKING_EARLY_FORM_SLUGS,
   PUBLIC_BOOKING_FORM_SLUGS,
   PUBLIC_BOOKING_OPTIONAL_FORM_SLUGS,
 } from "../lib/forms/public-booking-config";
@@ -77,7 +80,7 @@ await check("normalizes every CRM field named in the funnel brief", () => {
 await check("does not reveal booking when the audit_requested write failed", () => {
   // The calendar stays hidden (503 at the end of the handler) ...
   assert.match(submitRoute, /funnelStageWriteFailed = true;/);
-  assert.match(submitRoute, /if \(funnelStageWriteFailed && !isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \},\s*\{ status: 503 \},/);
+  assert.match(submitRoute, /if \(funnelStageWriteFailed && publicBookingCompletionGatesCalendar\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \},\s*\{ status: 503 \},/);
   // ... but a failed stage write must NOT drop the speed-to-lead pipeline: the failure path
   // does not return, and the 503 comes after the scoring/alert/email after() blocks (#611 review).
   const failedBlock = submitRoute
@@ -88,7 +91,7 @@ await check("does not reveal booking when the audit_requested write failed", () 
     .replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(failedBlock, /\breturn\b/, "the failure path returns early again");
   assert.ok(
-    submitRoute.indexOf("ingestAiAuditSubmission({") < submitRoute.indexOf("if (funnelStageWriteFailed && !isOptionalPublicBookingFormSlug(form.slug)) {"),
+    submitRoute.indexOf("ingestAiAuditSubmission({") < submitRoute.indexOf("if (funnelStageWriteFailed && publicBookingCompletionGatesCalendar(form.slug)) {"),
     "the 503 must come after the completion pipeline is scheduled",
   );
   assert.equal(isPublicFunnelReadyForBooking({ funnel_stage: "inbound_lead" }), false);
@@ -102,6 +105,27 @@ await check("does not reveal booking when the audit_requested write failed", () 
     meeting_booked_at: "2026-10-12T13:00:00.000Z",
   }), true);
   assert.match(submitRoute, /funnel_stage_write_unavailable/);
+});
+
+await check("AI audit, COMMAND and FLEET book after the contact step; every other form still needs every step", () => {
+  // CC, 2026-10-16: "make joining as easy as possible, collect data ASAP".
+  assert.deepEqual(PUBLIC_BOOKING_EARLY_FORM_SLUGS, ["ai-audit", "command", "fleet"]);
+  for (const slug of ["ai-audit", "command", "fleet", " COMMAND "]) assert.equal(isEarlyPublicBookingFormSlug(slug), true, slug);
+  for (const slug of ["book", "protocol", "community", "vsl", "support"]) assert.equal(isEarlyPublicBookingFormSlug(slug), false, slug);
+  const contactStep = { funnel_stage: "inbound_lead", inbound_lead_at: "2026-10-16T12:00:00.000Z" };
+  assert.equal(isPublicFunnelReadyForBooking(contactStep, { afterContactStep: true }), true);
+  assert.equal(isPublicFunnelReadyForBooking(contactStep), false, "a form that books at the end still waits for the finish");
+  assert.equal(
+    isPublicFunnelReadyForBooking({ funnel_stage: "inbound_lead" }, { afterContactStep: true }),
+    false,
+    "a contact step with no recorded time is not proof it landed",
+  );
+  assert.equal(isPublicFunnelReadyForBooking({}, { afterContactStep: true }), false, "no stage, no calendar");
+  assert.equal(
+    isPublicFunnelReadyForBooking({ funnel_stage: "audit_requested", audit_requested_at: "2026-10-16T12:00:00.000Z" }, { afterContactStep: true }),
+    true,
+    "finishing first still books",
+  );
 });
 
 await check("keeps funnel lifecycle monotonic across a duplicate final-step patch", async () => {
@@ -217,10 +241,17 @@ await check("the lead records which form it started and finished (review of #655
   );
 });
 
-await check("a failed stage write blocks only a required booking form's completion, never an optional one's", () => {
+await check("a failed stage write blocks only a calendar that waits for it, never an optional or early one", () => {
   // Codex re-review of #655: PROTOCOL's and COMMUNITY's own next step (the
   // thanks) is durable and their call optional, so only their calendar fails.
-  assert.match(submitRoute, /if \(funnelStageWriteFailed && !isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \}/);
+  // Book sooner (2026-10-16): AI audit, COMMAND and FLEET unlocked their
+  // calendar at the contact step, so their completion never answers 503.
+  assert.match(submitRoute, /if \(funnelStageWriteFailed && publicBookingCompletionGatesCalendar\(form\.slug\)\) \{\s*return NextResponse\.json\(\s*\{ ok: false, error: "funnel_stage_write_unavailable" \}/);
+  assert.equal(publicBookingCompletionGatesCalendar("book"), true, "BOOK's calendar opens only once its one step is recorded");
+  for (const slug of ["ai-audit", "command", "fleet", "protocol", "community", " Fleet "]) {
+    assert.equal(publicBookingCompletionGatesCalendar(slug), false, `${slug}: a failed finish write must not answer 503`);
+  }
+  for (const slug of ["vsl", "support"]) assert.equal(publicBookingCompletionGatesCalendar(slug), false, `${slug} has no calendar`);
   assert.equal(submitRoute.match(/funnel_stage_write_unavailable/g)?.length, 1, "one place answers the stage-write failure");
   // CodeRabbit on #655: nothing retries an optional form's step (it answered
   // 200), so the route retries the same merge once after the response.
@@ -230,8 +261,8 @@ await check("a failed stage write blocks only a required booking form's completi
   );
   assert.match(
     failure,
-    /if \(isOptionalPublicBookingFormSlug\(form\.slug\)\) \{\s*after\(async \(\) => \{\s*const retried = await db\.rpc\("patch_tenant_record_data", \{\s*p_id: link\.lead_id,\s*p_tenant_id: form\.tenant_id,\s*p_patch: completedPatch,/,
-    "an optional form's failed stage write is never retried",
+    /if \(!publicBookingCompletionGatesCalendar\(form\.slug\)\) \{\s*after\(async \(\) => \{\s*const retried = await db\.rpc\("patch_tenant_record_data", \{\s*p_id: link\.lead_id,\s*p_tenant_id: form\.tenant_id,\s*p_patch: completedPatch,/,
+    "a failed stage write that answered 200 is never retried",
   );
   assert.match(failure, /\[forms\.submit\.public_booking_completion\.retry_failed\]/, "a failed retry is silent");
 });

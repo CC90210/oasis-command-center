@@ -124,4 +124,66 @@ check("an offer page whose form ends on the calendar shows no second booking lin
   assert.match(src, /isPublicBookingSurface\(\{ tenantSlug: form\.tenantSlug, formSlug: form\.formSlug \}\)/);
 });
 
+// ── Book sooner (CC, 2026-10-16: "make joining as easy as possible") ─────────
+const EARLY_HEADING = "Book your call now. The questions can wait.";
+
+check("AI audit, COMMAND and FLEET: the early calendar invites the booking, with the questions one click away", () => {
+  const page = html.earlyCalendar;
+  assert.ok(page.includes(EARLY_HEADING), "the early heading (copy by Maven) is gone");
+  assert.match(page, /<button type="button"[^>]*>Answer the questions first<\/button>/, "no way back to the questions");
+  assert.ok(!page.includes(REQUIRED_HEADING), "the after-the-form heading on the early calendar");
+  assert.ok(!page.includes(COMMUNITY_FOOTER), "the early calendar sends visitors to the community before the questions");
+  assert.ok(page.includes("Checking the calendar"), "the early calendar reads the live open times like the other");
+});
+
+check("the form still opens on its contact step, and finishing first still ends on the usual calendar", () => {
+  assert.match(html.auditFirstScreen, />Your name<span/, "the contact step is not the first screen");
+  assert.ok(html.auditFirstScreen.includes("Step 1 / 4"));
+  assert.ok(!html.auditFirstScreen.includes(EARLY_HEADING), "the calendar opened before the contact step");
+  assert.ok(!html.auditFirstScreen.includes("Checking the calendar"));
+  assert.ok(html.auditLastScreen.includes(REQUIRED_HEADING), "finish-first lost its calendar");
+  assert.ok(html.auditLastScreen.includes(COMMUNITY_FOOTER));
+  assert.ok(!html.auditLastScreen.includes(EARLY_HEADING));
+});
+
+check("the form opens the early calendar once, after the contact step, on both submit paths", () => {
+  const src = readFileSync("components/forms/FormPublicClient.tsx", "utf8");
+  assert.match(
+    src,
+    /const booksAfterContact = Boolean\(\s*tenantSlug && formSlug && steps\.length > 1 &&\s*isPublicBookingSurface\(\{ tenantSlug, formSlug \}\) && isEarlyPublicBookingFormSlug\(formSlug\),\s*\);/,
+  );
+  assert.match(
+    src,
+    /function advanceFrom\(step: number, next: number\) \{\s*if \(step === 0 && booksAfterContact && !earlyCalendarOffered\.current\) \{\s*earlyCalendarOffered\.current = true;\s*setEarlyCalendarStep\(next\);\s*\} else \{\s*setCurrentStep\(next\);/,
+  );
+  assert.match(src, /if \(finished\) setDone\(true\);\s*else advanceFrom\(currentStep, currentStep \+ 1\);/, "the preview skips the early calendar");
+  assert.match(src, /if \(data\.next_step !== null && data\.next_step !== undefined\) \{\s*advanceFrom\(currentStep, data\.next_step\);/, "a visitor skips the early calendar");
+  assert.equal(src.match(/setCurrentStep\(data\.next_step\)/g), null, "a submit path moves on without the early calendar");
+});
+
+check("after an early booking the questions are optional, and finishing them never shows the calendar again", () => {
+  const src = readFileSync("components/forms/FormPublicClient.tsx", "utf8");
+  const early = src.slice(src.indexOf("earlyCalendarStep !== null && publicBookingFormSlug ? ("), src.indexOf("{serverError && ("));
+  assert.match(early, /onAnswerFirst: resumeQuestions,\s*onBooked: \(\) => setBookedEarly\(true\),/);
+  assert.match(early, /afterBooked: skippedQuestions \? null : \(/, "Skip does not hide the invitation");
+  assert.ok(early.includes("Answer the rest of the questions so the call starts with your business. Conaugh reads every one personally."));
+  assert.match(early, /onClick=\{resumeQuestions\}[\s\S]{0,300}>\s*Answer the questions\s*</);
+  assert.match(early, /onClick=\{\(\) => setSkippedQuestions\(true\)\}[\s\S]{0,300}>\s*Skip\s*</);
+  const done = src.slice(src.indexOf("{done ? ("), src.indexOf("earlyCalendarStep !== null && publicBookingFormSlug ? ("));
+  assert.ok(done.indexOf("bookedEarly ? (") > 0, "the booked ending is gone");
+  assert.ok(done.indexOf("bookedEarly ? (") < done.indexOf("<PublicBookingCalendar"), "a booked visitor reaches the calendar again");
+  assert.ok(done.includes("Thanks. Your answers are in, and Conaugh reads every one personally."));
+  assert.match(src, /function resumeQuestions\(\) \{\s*if \(earlyCalendarStep !== null\) setCurrentStep\(earlyCalendarStep\);\s*setEarlyCalendarStep\(null\);/);
+  const calendar = readFileSync("components/forms/PublicBookingCalendar.tsx", "utf8");
+  assert.match(calendar, /setReceipt\(data\);\s*early\?\.onBooked\(\);/, "the form is never told the call is booked");
+  const receipt = calendar.slice(calendar.indexOf("if (receipt) {"), calendar.indexOf("return (\n    <div className=\"space-y-5 py-3\">"));
+  assert.ok(receipt.includes("{early?.afterBooked}"), "the questions invitation is not under the receipt");
+});
+
+check("on an offer page, no banner says the questions come first when the calendar comes first", () => {
+  const src = readFileSync("components/offer-pages/OfferBook.tsx", "utf8");
+  assert.match(src, /const callAfterContact = calendarOnPage && isEarlyPublicBookingFormSlug\(form\?\.formSlug \?\? ""\);/);
+  assert.match(src, /\{mode === "form_then_link" && contactDone && !callAfterContact \? \(/);
+});
+
 console.log("offer-book-calendar: all passed");
