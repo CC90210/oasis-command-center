@@ -633,8 +633,9 @@ async function main() {
       // The review only: requests left the count with the Requests card (D16).
       assert.match(text, /1 with the marketing agent/, "the open review, queued for the agent");
       assert.match(text, /Nothing waiting on you/);
-      assert.match(text, /Approve or archive each one; archived items can be restored\./, "only the buttons that exist");
-      assert.doesNotMatch(text, /ask for changes|reject it/, "there is no such button");
+      // The tiles' buttons: Approve, Request changes (sent back with a note), Archive.
+      assert.match(text, /For each one, approve it, send it back with a note, or archive it; archived items can be restored\./, "only the buttons that exist");
+      assert.doesNotMatch(text, /Approve or archive each one|reject it/, "the old two-verb copy is gone, and there is no Reject button");
       assert.doesNotMatch(text, /1 open\./, "no Requests card");
       assert.doesNotMatch(text, PERSONA, `a persona name or pronoun: ${text.match(PERSONA)?.[0]}`);
     } finally {

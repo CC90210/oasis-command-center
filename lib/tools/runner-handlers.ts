@@ -39,7 +39,9 @@
  * the relay's sweeps.
  *
  * WHERE THE VIDEO GOES. A third-party video with unknown rights: brand
- * `downloads` (its own Library tab, never OASIS's own counts), status draft,
+ * `downloads` (shown on Content > Extracted videos, not in the Library, never in
+ * OASIS's own counts; the slug is pinned to lib/founders/extracted-videos.ts
+ * EXTRACTED_BRAND_SLUG by tests/extracted-videos.test.ts), status draft,
  * meta.rights_status "unknown". The founders publish route refuses any brand
  * but OASIS's own, so a download cannot be posted from OASIS's accounts.
  */

@@ -67,6 +67,7 @@ import {
   type BrandGroupKey,
 } from "@/lib/founders-marketing-core";
 import { MarketingEmpty } from "@/components/founders/marketing-shared";
+import { EXTRACTED_BRAND_GROUP, EXTRACTED_LABEL, EXTRACTED_ROOT } from "@/lib/founders/extracted-videos";
 
 export const dynamic = "force-dynamic";
 
@@ -285,10 +286,11 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
         ) : needsYou === 0 ? (
           <MarketingEmpty
             headline="Nothing waiting on you"
-            // Only the buttons the tiles have: there is no "ask for changes" or
-            // "reject" control anywhere, so the page no longer offers them.
-            detail="When the marketing agent makes something, it lands here for your verdict. Approve or archive each one; archived items can be restored."
-            hint="Open any asset from the Library to approve or archive it."
+            // Only the buttons the tiles have: Approve, Request changes (sent back
+            // with a required note) and Archive. There is no "reject" control
+            // anywhere, so the page does not offer it.
+            detail="When the marketing agent makes something, it lands here for your verdict. For each one, approve it, send it back with a note, or archive it; archived items can be restored."
+            hint="Open any asset from the Library to approve it, send it back or archive it."
           />
         ) : (
           <Card noPadding>
@@ -312,8 +314,8 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
                           className="font-semibold text-accent hover:underline">
                       {awaitingVerdict} asset{awaitingVerdict === 1 ? "" : "s"}
                     </Link>{" "}
-                    awaiting your verdict. Approve or archive each one; archived items
-                    can be restored.
+                    awaiting your verdict. For each one, approve it, send it back with a
+                    note, or archive it; archived items can be restored.
                   </>
                 ) : (
                   <>{needsYou} item{needsYou === 1 ? "" : "s"} pending.</>
@@ -384,15 +386,22 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         {BRAND_GROUPS.map((g) => {
           const n = brandCount(g.key);
+          // The Video extractor's saves are not Library work (CC, 2026-10-17):
+          // their tile opens Content > Extracted videos.
+          const extracted = g.key === EXTRACTED_BRAND_GROUP;
           const hint =
             typeof n !== "number"
               ? "count unavailable"
-              : n === 0
-                ? "nothing registered yet"
-                : `${n === 1 ? "asset" : "assets"} in the library`;
+              : extracted
+                ? n === 0
+                  ? "nothing extracted yet"
+                  : `${n === 1 ? "video" : "videos"} extracted`
+                : n === 0
+                  ? "nothing registered yet"
+                  : `${n === 1 ? "asset" : "assets"} in the library`;
           return (
-            <Link key={g.key} href={`/founders/marketing/library?group=${g.key}`} className="block">
-              <Stat label={g.label} value={n} hint={hint} />
+            <Link key={g.key} href={extracted ? EXTRACTED_ROOT : `/founders/marketing/library?group=${g.key}`} className="block">
+              <Stat label={extracted ? EXTRACTED_LABEL : g.label} value={n} hint={hint} />
             </Link>
           );
         })}

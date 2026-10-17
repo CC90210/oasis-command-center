@@ -21,9 +21,14 @@
  *   after a delete, and nothing in the app can bring a deleted asset back.
  * - `router.refresh()` after a verdict so the counts in the header and the Studio pipeline
  *   agree with the grid. Without it the tile changes and the page still says 39 in review.
+ * - Approve moves the asset to approved and does nothing else: it books, schedules and
+ *   posts nothing. The poster and the spend gate act on their own.
+ * - Request changes (an in-review asset, drawn wherever the other verdicts are) opens a note box INSIDE the
+ *   tile and will not send without words in it. The note goes to the marketing agent through
+ *   POST .../request-changes (lib/founders/request-changes.ts); the asset goes back to draft.
  */
 
-import { useState, useTransition } from "react";
+import { useId, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { AssetStatus } from "@/lib/founders-marketing-core";
 
@@ -37,6 +42,18 @@ const LABEL: Record<Verdict, string> = {
   in_review: "Restore",
 };
 
+/** Mirrors REQUEST_CHANGES_NOTE_MAX in lib/founders/request-changes.ts (a server file this client component must not import). */
+const NOTE_MAX = 2000;
+
+/** What the request-changes route's error codes say to a person. */
+const REQUEST_REASON: Record<string, string> = {
+  note_required: "Add a note saying what should change.",
+  note_too_long: `That note is too long. Keep it under ${NOTE_MAX} characters.`,
+  not_in_review: "This asset is no longer in review, so there is nothing to send back.",
+  status_changed: "Someone changed this asset first. Reload the page to see where it is now.",
+  not_found: "This asset could not be found.",
+};
+
 export function AssetActions({
   id,
   status,
@@ -47,13 +64,20 @@ export function AssetActions({
   title: string;
 }) {
   const router = useRouter();
+  const noteId = useId();
   const [pending, start] = useTransition();
   const [shown, setShown] = useState<AssetStatus>(status);
   const [confirming, setConfirming] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [note, setNote] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
   const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inflight, setInflight] = useState(false);
   const busy = pending || inflight;
+  // Only an asset waiting on a verdict can be sent back; it is offered wherever the
+  // other verdicts are, to whoever the founders gate admits (the route's own gate).
+  const canAsk = shown === "in_review";
 
   async function verdict(next: Verdict) {
     // Guard synchronously. `pending` only flips inside start(), which runs AFTER
@@ -62,6 +86,7 @@ export function AssetActions({
     if (inflight) return;
     setInflight(true);
     setError(null);
+    setNotice(null);
     const previous = shown;
     setShown(next); // optimistic
     const res = await fetch(`/api/founders/marketing/assets/${id}`, {
@@ -99,6 +124,36 @@ export function AssetActions({
     start(() => router.refresh());
   }
 
+  async function sendBack() {
+    if (inflight) return;
+    const text = note.trim();
+    // The server refuses an empty note too (note_required); this keeps the round trip off.
+    if (!text) {
+      setError(REQUEST_REASON.note_required);
+      return;
+    }
+    setInflight(true);
+    setError(null);
+    const res = await fetch(`/api/founders/marketing/assets/${id}/request-changes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: text }),
+    }).catch(() => null);
+    const body = await res?.json().catch(() => null);
+    if (!res?.ok || !body?.ok) {
+      // The note stays in the box: a refusal must never cost the founder their words.
+      setError(REQUEST_REASON[String(body?.error)] ?? "Could not send it back. Your note is still here; try again.");
+      setInflight(false);
+      return;
+    }
+    setShown("draft");
+    setAsking(false);
+    setNote("");
+    setNotice("Sent back. The marketing agent will see your note.");
+    setInflight(false);
+    start(() => router.refresh());
+  }
+
   if (gone) {
     return (
       <div className="mt-2 rounded-lg border border-bg-border bg-bg-deep/60 px-3 py-2 text-[11px] text-fg-dim">
@@ -109,14 +164,60 @@ export function AssetActions({
 
   return (
     <div className="mt-2 flex flex-col gap-2">
+      {notice && (
+        <div role="status" className="rounded-lg border border-accent/30 bg-accent-soft px-3 py-1.5 text-[11px] text-accent">
+          {notice}
+        </div>
+      )}
       {error && (
         // Say what failed. "Something went wrong" is why people stop trusting a button.
-        <div className="rounded-lg border border-hot/40 bg-hot/10 px-3 py-1.5 text-[11px] text-hot">
+        <div role="alert" className="rounded-lg border border-hot/40 bg-hot/10 px-3 py-1.5 text-[11px] text-hot">
           {error}
         </div>
       )}
 
-      {confirming ? (
+      {asking ? (
+        <div className="flex flex-col gap-2">
+          <label htmlFor={noteId} className="text-[11px] leading-4 text-fg-muted">
+            {`What should change in "${title}"? The marketing agent reads this note.`}
+          </label>
+          <textarea
+            id={noteId}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            maxLength={NOTE_MAX}
+            rows={3}
+            disabled={busy}
+            placeholder="For example: the first three seconds are too slow."
+            className="w-full resize-y rounded-md border border-bg-border bg-bg-deep px-2.5 py-1.5 text-xs text-fg placeholder:text-fg-dim focus:border-accent/50 focus:outline-none disabled:opacity-50"
+          />
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={sendBack}
+              disabled={busy || !note.trim()}
+              className="rounded-md bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent transition-colors hover:bg-accent/25 disabled:opacity-40"
+            >
+              Send back
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAsking(false);
+                setError(null);
+              }}
+              disabled={busy}
+              className="rounded-md px-2.5 py-1 text-[11px] text-fg-dim transition-colors hover:text-fg"
+            >
+              Cancel
+            </button>
+            <span className="ml-auto text-[10px] tabular-nums text-fg-dim">
+              {note.length}/{NOTE_MAX}
+            </span>
+          </div>
+          {!note.trim() && <span className="text-[10px] text-fg-dim">A note is required.</span>}
+        </div>
+      ) : confirming ? (
         <div className="flex flex-col gap-2">
           <span className="text-[11px] leading-4 text-fg-muted">
             {`Delete "${title}" for good? It cannot be undone. Archive keeps it, and it can be restored.`}
@@ -181,23 +282,41 @@ export function AssetActions({
           </button>
         </div>
       ) : (
-        <div className="flex items-center gap-1.5">
-          {(["approved", "archived"] as const).map((v) => (
-            <button
-              key={v}
-              type="button"
-              onClick={() => verdict(v)}
-              disabled={busy || shown === v}
-              className={
-                "rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors disabled:opacity-40 " +
-                (v === "approved"
-                  ? "bg-accent/15 text-accent hover:bg-accent/25"
-                  : "bg-bg-deep text-fg-muted hover:text-fg")
-              }
-            >
-              {shown === v ? `${LABEL[v]}d` : LABEL[v]}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(["approved", "request", "archived"] as const)
+            .filter((v) => v !== "request" || canAsk)
+            .map((v) =>
+              v === "request" ? (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setNotice(null);
+                    setAsking(true);
+                  }}
+                  disabled={busy}
+                  className="rounded-md bg-status-warm/10 px-2.5 py-1 text-[11px] font-semibold text-status-warm transition-colors hover:bg-status-warm/20 disabled:opacity-40"
+                >
+                  Request changes
+                </button>
+              ) : (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => verdict(v)}
+                  disabled={busy || shown === v}
+                  className={
+                    "rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors disabled:opacity-40 " +
+                    (v === "approved"
+                      ? "bg-accent/15 text-accent hover:bg-accent/25"
+                      : "bg-bg-deep text-fg-muted hover:text-fg")
+                  }
+                >
+                  {shown === v ? `${LABEL[v]}d` : LABEL[v]}
+                </button>
+              ),
+            )}
           <button
             type="button"
             onClick={() => setConfirming(true)}

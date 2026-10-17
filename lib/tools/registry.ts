@@ -135,7 +135,7 @@ const videoDownload: ToolDef = {
   key: "video_download",
   // CC, 2026-10-17: "the first tool ... is a video extractor". Same key and runner.
   title: "Video extractor",
-  description: "Paste a TikTok, YouTube or Instagram link. OASIS fetches the video so you can download it here, and keeps a copy in the Library.",
+  description: "Paste a TikTok, YouTube or Instagram link. OASIS fetches the video so you can download it here, and keeps a copy under Content > Extracted videos.",
   runLabel: "Extract video",
   runsOn: "runner",
   needsAiAccount: false,

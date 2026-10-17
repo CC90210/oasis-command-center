@@ -121,11 +121,14 @@ export const BRAND_GROUPS: readonly BrandGroup[] = [
     empty: "Nothing under the personal brand yet. What the marketing agent makes for CC's own channels lands here.",
   },
   {
-    // Videos the Toolkit's "Download a video" saved from Instagram, TikTok or
+    // Videos the Video extractor (Content Tools) saved from Instagram, TikTok or
     // YouTube (lib/tools/runner-handlers.ts): someone else's work with unknown
-    // rights, kept for analysis. Their own tab, so they never sit in OASIS's
-    // tab or its counts, and the founders publish route refuses any brand but
-    // OASIS's own, so a download cannot be posted from OASIS's accounts.
+    // rights, kept for reference. Never in OASIS's tab or its counts, and the
+    // founders publish route refuses any brand but OASIS's own, so a download
+    // cannot be posted from OASIS's accounts. Since 2026-10-17 they are not a
+    // Library tab at all (LIBRARY_BRAND_GROUPS below) but their own page,
+    // Content > Extracted videos. The group stays HERE so its slug stays
+    // claimed: removed, every extracted video would fall into Clients.
     key: "downloads",
     label: "Downloads",
     slugs: ["downloads"],
@@ -138,6 +141,19 @@ export const BRAND_GROUPS: readonly BrandGroup[] = [
     empty: "No client deliverables in the library.",
   },
 ];
+
+/**
+ * The Library's own tabs: every group but `downloads`. CC, 2026-10-17:
+ * extracted videos are "a separate category ... rather than the main library",
+ * so they live on Content > Extracted videos (app/founders/marketing/extracted)
+ * and the Library sends ?group=downloads there.
+ */
+export const LIBRARY_BRAND_GROUPS: readonly BrandGroup[] = BRAND_GROUPS.filter((g) => g.key !== "downloads");
+
+/** A tab the Library itself draws (never `downloads`). */
+export function isLibraryBrandGroupKey(v: unknown): v is BrandGroupKey {
+  return typeof v === "string" && LIBRARY_BRAND_GROUPS.some((g) => g.key === v);
+}
 
 /**
  * The tab you land on. OASIS's own work stays the default view, which is what
@@ -1036,6 +1052,10 @@ export type LibraryState = {
   author?: string;
   status?: AssetStatus;
   lifecycle?: Lifecycle;
+  /** meta.icp_segment: the audience a creative was made for (lib/founders/library-meta.ts). */
+  icp?: string;
+  /** meta.pack_id: one pack of hook variants. */
+  pack?: string;
   view: LibraryView;
 };
 
@@ -1048,6 +1068,8 @@ export type LibraryHrefChange = {
   author?: string | null;
   status?: AssetStatus | null;
   lifecycle?: Lifecycle | null;
+  icp?: string | null;
+  pack?: string | null;
   page?: number;
   view?: LibraryView;
 };
@@ -1082,6 +1104,15 @@ export function libraryHref(state: LibraryState, next: LibraryHrefChange): strin
     ? undefined
     : next.brand === undefined ? state.brand : next.brand || undefined;
   const nextAuthor = next.author === undefined ? state.author : next.author || undefined;
+  // Audience and pack are facets of ONE tab's work, so a tab switch clears both
+  // (as it clears the brand), and a pack belongs to one audience: choosing a
+  // different audience drops the pack unless the same link names one.
+  const nextIcp = groupChanged ? undefined : next.icp === undefined ? state.icp : next.icp || undefined;
+  const nextPack = groupChanged
+    ? undefined
+    : next.pack === undefined
+      ? next.icp === undefined ? state.pack : undefined
+      : next.pack || undefined;
   // ONE OR THE OTHER, NEVER BOTH. They filter the same column with different
   // vocabularies, so carrying both produces `status = 'draft' AND status IN
   // ('archived',...)` — an empty grid under pills that promise rows. Setting
@@ -1101,6 +1132,8 @@ export function libraryHref(state: LibraryState, next: LibraryHrefChange): strin
   if (nextChannel) params.set("channel", nextChannel);
   if (nextBrand) params.set("brand", nextBrand);
   if (nextAuthor) params.set("author", nextAuthor);
+  if (nextIcp) params.set("icp", nextIcp);
+  if (nextPack) params.set("pack", nextPack);
   if (nextStatus) params.set("status", nextStatus);
   if (nextLifecycle) params.set("lifecycle", nextLifecycle);
   const nextView = next.view ?? state.view;
@@ -1115,7 +1148,7 @@ const LIBRARY_PATH = "/founders/marketing/library";
  * Every query parameter the Library page reads, in the order libraryHref writes
  * them (so a Library URL comes back unchanged); nothing else survives.
  */
-const LIBRARY_PARAMS = ["group", "track", "channel", "brand", "author", "status", "lifecycle", "view", "page"] as const;
+const LIBRARY_PARAMS = ["group", "track", "channel", "brand", "author", "icp", "pack", "status", "lifecycle", "view", "page"] as const;
 
 /**
  * Where the asset page's "Library" link goes: the Library view the asset was
