@@ -1765,8 +1765,8 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // open the calendar right after this step, and the booking gate needs that
   // record (Codex review of #667), so it is written here, before the response
   // reveals the calendar. The merge is forward-only (patch_tenant_record_data),
-  // so a lead already further on keeps its stage. A failure costs only the
-  // early calendar: the questions still work, and finishing unlocks it.
+  // so a lead already further on keeps its stage. A failure refuses the step
+  // (503, retryable) rather than open the calendar over stale contact details.
   if (
     stepIndex === 0 &&
     !isLastStep &&
@@ -1785,6 +1785,11 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         form_slug: form.slug,
         error: contactRecorded.error.message,
       });
+      // Refuse rather than open the calendar: a returning lead's earlier record
+      // would unlock it, and the booking would read the lead's OLD email or
+      // phone instead of the details just typed (Codex review of #667). The
+      // step is retryable, and its row is harmless to repeat.
+      return NextResponse.json({ ok: false, error: "funnel_stage_write_unavailable" }, { status: 503 });
     }
   }
 
@@ -2299,11 +2304,24 @@ async function initAnonymousLead(input: {
     // fills in a lead that has none — an upgrade from "unknown", not a steal.
     const adopted = adoptLeadSource(existing.data, input.source, new Date().toISOString());
     if (adopted) Object.assign(merged, adopted);
-    await db
+    const mergedWrite = await db
       .from("tenant_records")
       .update({ data: merged })
       .eq("id", existing.id)
       .eq("tenant_id", form.tenant_id);
+    // AI audit, COMMAND and FLEET open the calendar right after this step,
+    // and the booking reads the lead's contact. If the returning visitor's new
+    // details did not land, the calendar would book against the old email or
+    // phone, so the step is refused and retried (Codex review of #667). Every
+    // other form keeps its old behaviour.
+    if (mergedWrite.error && isBookableOasisIntake && isEarlyPublicBookingFormSlug(form.slug)) {
+      console.error("[forms.submit.returning_lead_merge.failed]", {
+        lead_id: existing.id,
+        form_slug: form.slug,
+        error: mergedWrite.error.message,
+      });
+      return { ok: false, error: "funnel_stage_write_unavailable", status: 503 };
+    }
     lead = { id: existing.id, data: merged };
   } else {
     // Stage/source/signer are tenant-aware. SunBiz keeps its exact prior
