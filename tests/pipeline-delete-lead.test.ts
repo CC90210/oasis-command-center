@@ -280,6 +280,11 @@ async function main(): Promise<void> {
       // with no payload tenant is still ours; one filed under another
       // workspace is never touched, whatever its payload says.
       ["ev-junk-no-payload-tenant", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test" }, TENANT],
+      // Codex on #674, fourth pass: a confirmed send logged as outbound.recorded
+      // is sent history; a Kixie call and an SMS handoff hold details elsewhere.
+      ["ev-junk-recorded-send", "outbound.recorded", { lead_id: JUNK, to_email: "junk@lead.test", tenant_id: TENANT }],
+      ["ev-junk-kixie", "KIXIE_CALL", { lead_id: JUNK, number: "+15145550142", recording_url: "https://rec.test/1.mp3", tenant_id: TENANT }],
+      ["ev-junk-sms-handoff", "SMS_HANDOFF", { lead_id: JUNK, customer_message: { phone: "+15145550142", text: "call me" }, tenant_id: TENANT }],
       ["ev-junk-other-correlation", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test", tenant_id: TENANT }, OTHER_TENANT],
     ].map(([id, type, payload, correlation]) => ({
       sql: "INSERT INTO agent_events (id, event_type, publisher_agent, payload, correlation_id) VALUES (?, ?, 'manifest-data', ?, ?)",
@@ -453,7 +458,11 @@ async function main(): Promise<void> {
   // (live E2E of #669: name, email and phone outlived the lead).
   const payloadOf = async (id: string) =>
     JSON.parse(String((await seed.execute({ sql: "SELECT payload FROM agent_events WHERE id = ?", args: [id] })).rows[0]?.payload)) as Record<string, unknown>;
-  assert.equal(junkResult.plan.delete.agent_event_copies, 3);
+  assert.equal(junkResult.plan.delete.agent_event_copies, 5);
+  assert.equal((await payloadOf("ev-junk-recorded-send")).to_email, "junk@lead.test", "a confirmed send's recipient was stripped from sent history");
+  const kixie = await payloadOf("ev-junk-kixie");
+  assert.equal("number" in kixie || "recording_url" in kixie, false, "a Kixie call kept the deleted lead's number or recording");
+  assert.equal("customer_message" in (await payloadOf("ev-junk-sms-handoff")), false, "an SMS handoff kept the deleted lead's message");
   assert.equal("to_email" in (await payloadOf("ev-junk-no-payload-tenant")), false, "a row of ours with no payload tenant kept the address");
   assert.equal((await payloadOf("ev-junk-other-correlation")).to_email, "junk@lead.test", "another workspace's event was rewritten");
   const stage = await payloadOf("ev-junk-stage");

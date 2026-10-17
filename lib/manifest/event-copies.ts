@@ -18,7 +18,18 @@
  */
 import { getTursoClient } from "../turso";
 
-const DETAIL_PATHS = ["$.data", "$.to_email", "$.to_phone", "$.email", "$.phone", "$.name"] as const;
+// Where each producer keeps a lead's details: the stage change's whole record
+// (data), queued messages (to_email, to_phone), Kixie call webhooks (number,
+// recording_url) and SMS handoffs (customer_message). A new producer that
+// stores lead details under another name belongs here (Codex on #674).
+const DETAIL_PATHS = [
+  "$.data", "$.to_email", "$.to_phone", "$.email", "$.phone", "$.name",
+  "$.number", "$.recording_url", "$.customer_message",
+] as const;
+
+// Sent history keeps its recipient: every *_SENT event, and outbound.recorded,
+// which is how /api/outbound/log records a confirmed send (lib/turso-rpc-shim.ts).
+const SENT_EVENT_TYPES = ["outbound.recorded"] as const;
 
 // The workspace is correlation_id, agent_events' canonical tenancy
 // (docs/SECURITY_POSTURE.md); a row whose payload names another workspace is
@@ -31,6 +42,7 @@ const WHERE =
   " AND ((json_extract(payload, '$.record_id') = ? AND json_extract(payload, '$.entity') = 'lead')" +
   " OR json_extract(payload, '$.lead_id') = ?)" +
   " AND event_type NOT LIKE '%\\_SENT' ESCAPE '\\'" +
+  " AND event_type NOT IN (" + SENT_EVENT_TYPES.map((t) => `'${t}'`).join(", ") + ")" +
   " AND (" + DETAIL_PATHS.map((p) => `json_type(payload, '${p}') IS NOT NULL`).join(" OR ") + ")";
 
 /** How many of the lead's events still hold a copy of its details (the dry run). */
