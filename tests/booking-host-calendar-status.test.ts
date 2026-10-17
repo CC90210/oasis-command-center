@@ -21,7 +21,8 @@
  *      stays) and shows the workspace route as a quiet line, not a warning;
  *   5. the card fits the 248px sidebar and the settings dialog fits a phone.
  *
- * The read is injected: nothing here reaches Google or the database.
+ * The read is injected: nothing here reaches Google or the database. The real
+ * route, with only Google's endpoints stood in for, is tests/booking-card-route.test.ts.
  * Run: node --conditions=react-server --import tsx tests/booking-host-calendar-status.test.ts
  */
 import assert from "node:assert/strict";
@@ -300,20 +301,9 @@ async function main(): Promise<void> {
     assert.match(JSON.stringify(calls), /booking_host_not_on_roster/);
   });
 
-  // -- 4. The route and the card -----------------------------------------------
-  const routeSrc = readFileSync(join(ROOT, "app/api/calendar/booking/route.ts"), "utf8");
+  // -- 4. The card -------------------------------------------------------------
+  // (The route itself runs, against real libSQL, in tests/booking-card-route.test.ts.)
   const cardSrc = readFileSync(join(ROOT, "components/calendar/BookingLinkCard.tsx"), "utf8");
-
-  await check("the route takes each host's status from the shared read, with the roster's identities, and no longer from the own-connection fact", () => {
-    assert.match(routeSrc, /import \{ hostCalendarStatuses \} from "@\/lib\/booking\/host-calendar-status";/);
-    assert.match(routeSrc, /const identities = hostIdentities\(roster\);/);
-    assert.match(
-      routeSrc,
-      /await hostCalendarStatuses\(\{\s*tenantId: owner\.tenantId,\s*hosts: loaded\.settings\.hosts,\s*identities,\s*\}\)/,
-    );
-    assert.match(routeSrc, /calendar: statuses\[index\]/);
-    assert.doesNotMatch(routeSrc, /readPersonalGoogleFact|personalGoogleStatus/, "the card no longer answers from the own-connection fact");
-  });
 
   await check("the card matches the phrase the status writes", () => {
     const phrase = /includes\("([^"]+)"\)/.exec(cardSrc)?.[1];

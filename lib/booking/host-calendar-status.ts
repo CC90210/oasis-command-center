@@ -43,12 +43,11 @@ export const WORKSPACE_CALENDAR_LABEL = "Connected through the workspace calenda
 /** How far ahead the status read looks: it only needs to see the calendar answer. */
 const PROBE_WINDOW_MS = 15 * 60_000;
 
-const NOT_CONNECTED = "Not connected";
 const STATUS_UNAVAILABLE = "Status unavailable";
 
 /** What a failed read means to the person who has to fix it. Any other code is "Status unavailable". */
 const READ_FAILURE_LABELS: Partial<Record<GoogleCalendarErrorCode, string>> = {
-  google_calendar_not_connected: NOT_CONNECTED,
+  google_calendar_not_connected: "Not connected",
   calendar_scope_required: "Needs calendar permission",
   calendar_organizer_mismatch: "Connected to a different Google account",
   token_refresh_failed: "Sign-in expired",
@@ -73,10 +72,11 @@ const LIVE_DEPS: HostCalendarStatusDeps = {
 };
 
 function logStatusProblem(userId: string, error: unknown): void {
+  const google = error instanceof GoogleCalendarIntegrationError ? error : null;
   console.error("[calendar.booking.host-status]", {
     userId,
-    code: error instanceof GoogleCalendarIntegrationError ? error.code : "unexpected",
-    detail: error instanceof GoogleCalendarIntegrationError ? error.detail : error instanceof Error ? error.message : String(error),
+    code: google?.code ?? "unexpected",
+    detail: google?.detail ?? (error instanceof Error ? error.message : String(error)),
   });
 }
 

@@ -62,15 +62,6 @@ function clock(minute: number): string {
   return m ? `${h12}:${String(m).padStart(2, "0")}${suffix}` : `${h12}${suffix}`;
 }
 
-/**
- * A ready host whose time is read through the workspace calendar, not their own
- * Google sign-in (lib/booking/host-calendar-status.ts WORKSPACE_CALENDAR_LABEL).
- * Worth a quiet line, so it is clear why the host is ready.
- */
-function readsThroughWorkspace(label: string): boolean {
-  return label.includes("through the workspace calendar");
-}
-
 /** "Sun-Thu 10am-9pm" style summary; days with different hours are listed apart. */
 function summarize(week: WeeklyHours): string {
   const parts: string[] = [];
@@ -201,7 +192,9 @@ export function BookingLinkCard() {
               <span className="text-fg">{you ? "You" : host.name}</span>
               {host.role === "organizer" ? " (hosts)" : " (joins)"}: {hours ? summarize(hours) : "No hours"}
               {host.calendar.ready ? (
-                readsThroughWorkspace(host.calendar.label) ? (
+                // Ready through the workspace calendar, not their own sign-in: say so quietly
+                // (lib/booking/host-calendar-status.ts WORKSPACE_CALENDAR_LABEL).
+                host.calendar.label.includes("through the workspace calendar") ? (
                   <span className="block text-fg-dim">Google Calendar: {host.calendar.label}.</span>
                 ) : null
               ) : (
