@@ -21,6 +21,7 @@
 import "server-only";
 import type { Client, ResultSet } from "@libsql/client";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { timeAgo } from "@/lib/devices/presence";
 import { supportInboxForDesk } from "@/lib/email/support-mailbox";
 import { isMissingSupportInboxSchema } from "@/lib/delivery/email-thread";
 import { deskForMailbox } from "@/lib/delivery/email-intake";
@@ -97,7 +98,7 @@ export function inboxHealth(mailbox: string, row: MailboxStatusRow | null, now: 
   return {
     state: "reading",
     minutesSinceRead: minutes,
-    sentence: `${mailbox} last read ${minutes === 0 ? "less than a minute" : `${minutes} minute${minutes === 1 ? "" : "s"}`} ago.`,
+    sentence: `${mailbox} last read ${timeAgo(since, { now: now.getTime() })}.`,
   };
 }
 

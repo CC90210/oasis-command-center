@@ -25,8 +25,7 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Info } from "lucide-react";
-import { machineState, presenceWords } from "@/lib/devices/presence";
-import { timeAgo } from "@/components/settings/YourComputersCard";
+import { machineState, presenceWords, timeAgo } from "@/lib/devices/presence";
 
 type Device = {
   id: string;

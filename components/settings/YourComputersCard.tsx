@@ -85,10 +85,6 @@ function blockedWords(reason: string): string {
   return BLOCKED_REASON_WORDS[reason] || reason.replace(/_/g, " ");
 }
 
-/** Exported so Devices (advanced) dates its rows the same way "Offline since" does here (CC 2026-10-16).
- *  It lives in lib/devices/presence.ts now, beside presenceWords, which writes that "Offline since". */
-export { timeAgo };
-
 /**
  * The exact row line (ui_changes section 1), from the one state. The state's
  * word is the one Settings > AI brain uses for it (lib/bridge-cli-status.ts

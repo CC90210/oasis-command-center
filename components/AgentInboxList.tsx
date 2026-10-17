@@ -5,6 +5,7 @@ import { Check, ChevronRight, Reply } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Tag } from "./Card";
 import type { InboxMessage, Priority } from "@/lib/agent-inbox-fs";
+import { timeAgo } from "@/lib/devices/presence";
 
 const TONE_BY_PRIORITY: Record<Priority, "warm" | "hot" | "neutral" | "info"> = {
   urgent: "hot",
@@ -12,16 +13,6 @@ const TONE_BY_PRIORITY: Record<Priority, "warm" | "hot" | "neutral" | "info"> = 
   normal: "info",
   low: "neutral",
 };
-
-function _relTime(iso: string): string {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return "—";
-  const d = (Date.now() - t) / 1000;
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86_400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86_400)}d ago`;
-}
 
 export function AgentInboxList({
   unread,
@@ -131,7 +122,7 @@ export function AgentInboxList({
                     </div>
                   </div>
                   <span className="text-xs text-fg-dim font-mono flex-shrink-0">
-                    {_relTime(m.timestamp)}
+                    {timeAgo(m.timestamp)}
                   </span>
                 </button>
                 {isOpen && (

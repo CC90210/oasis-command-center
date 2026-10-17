@@ -439,12 +439,12 @@ const label = (def: ConnectorDef, facts: ConnectorFacts) => {
   return `${s.kind} | ${s.label}`;
 };
 assert.equal(label(gws, { ...EMPTY, keyRows: gwsKeys() }), "configured | Set up · not tested yet");
-assert.equal(label(gws, { ...EMPTY, keyRows: gwsKeys({ last_test_ok: true, last_tested_at: iso(MIN) }) }), "connected | Connected · verified 1m ago");
+assert.equal(label(gws, { ...EMPTY, keyRows: gwsKeys({ last_test_ok: true, last_tested_at: iso(MIN) }) }), "connected | Connected · verified 1 min ago");
 assert.equal(
   label(gws, { ...EMPTY, keyRows: gwsKeys({ last_test_ok: false, last_tested_at: iso(MIN), last_test_error: "smtp_auth_failed" }) }),
   "attention | Could not sign in to Gmail",
 );
-assert.equal(label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(HOUR) }) }), "connected | Connected · verified 1h ago");
+assert.equal(label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(HOUR) }) }), "connected | Connected · verified 1 h ago");
 assert.equal(
   label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: false, last_tested_at: iso(MIN), last_test_error: "telegram_http_401" }) }),
   "attention | Bot token not accepted",
@@ -485,7 +485,7 @@ assert.equal(
 
   // A passing Test turns OASIS's own Telegram bot "Connected", and says what it checked.
   const passed = resolveConnectorStatus(telegram, withChecks(envTg, [check("telegram")]), NOW);
-  assert.equal(`${passed.kind} | ${passed.label}`, "connected | Connected · verified 5m ago");
+  assert.equal(`${passed.kind} | ${passed.label}`, "connected | Connected · verified 5 min ago");
   assert.match(passed.detail ?? "", /details set on OASIS's own server and passed/);
   // A failed Test says what it found, in the card's words.
   assert.equal(
@@ -501,20 +501,20 @@ assert.equal(
   assert.equal(label(telegram, withChecks(tgKeys(), [check("telegram")])), "configured | Set up · not tested yet");
   // A check that could not be read is unknown for server values only.
   assert.equal(label(telegram, withChecks(envTg, null)), "unknown | Status unavailable");
-  assert.equal(label(telegram, withChecks(tgKeys({ last_test_ok: true, last_tested_at: iso(MIN) }), null)), "connected | Connected · verified 1m ago");
+  assert.equal(label(telegram, withChecks(tgKeys({ last_test_ok: true, last_tested_at: iso(MIN) }), null)), "connected | Connected · verified 1 min ago");
 
   // Google: OASIS's own sender's last send is a real check of the mailbox, and
   // the newest real check wins, whichever kind it is.
   const sent = check("gws", { via: "send", checked_at: iso(3 * MIN) });
   const refused = check("gws", { via: "send", ok: false, code: "send_auth_failed", checked_at: iso(3 * MIN) });
   const viaSend = resolveConnectorStatus(gws, withChecks(envGws, [sent]), NOW);
-  assert.equal(`${viaSend.kind} | ${viaSend.label}`, "connected | Connected · last send worked 3m ago");
-  assert.match(viaSend.detail ?? "", /signed in to Gmail and sent an email from this mailbox 3m ago/);
+  assert.equal(`${viaSend.kind} | ${viaSend.label}`, "connected | Connected · last send worked 3 min ago");
+  assert.match(viaSend.detail ?? "", /signed in to Gmail and sent an email from this mailbox 3 min ago/);
   const refusedCard = resolveConnectorStatus(gws, withChecks(envGws, [refused]), NOW);
   assert.equal(`${refusedCard.kind} | ${refusedCard.label}`, "attention | Could not sign in to Gmail");
   assert.match(refusedCard.detail ?? "", /the last time OASIS sent an email from this mailbox/);
   assert.equal(label(gws, withChecks(envGws, [check("gws", { checked_at: iso(HOUR) }), refused])), "attention | Could not sign in to Gmail", "a newer refusal outranks an older pass");
-  assert.equal(label(gws, withChecks(envGws, [refused, check("gws", { checked_at: iso(MIN) })])), "connected | Connected · verified 1m ago", "a newer Test outranks an older refusal");
+  assert.equal(label(gws, withChecks(envGws, [refused, check("gws", { checked_at: iso(MIN) })])), "connected | Connected · verified 1 min ago", "a newer Test outranks an older refusal");
 
   // The rail's dot can be green for OASIS once every app set up is proven (W2).
   const oasisProven = withChecks([...envTg, ...envGws], [check("telegram"), sent]);
@@ -527,7 +527,7 @@ assert.equal(
   const DAY = 24 * HOUR;
   assert.equal(KEY_CHECK_FRESH_MS, 7 * DAY);
   const day = (msAgo: number) => new Date(NOW - msAgo).toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" });
-  assert.equal(label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(6 * DAY) }) }), "connected | Connected · verified 6d ago");
+  assert.equal(label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(6 * DAY) }) }), "connected | Connected · verified 6 d ago");
   const stale = resolveConnectorStatus(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(8 * DAY) }) }, NOW);
   assert.equal(`${stale.kind} | ${stale.label}`, `configured | Set up · last tested ${day(8 * DAY)}`);
   assert.match(stale.detail ?? "", /more than a week ago/);
@@ -549,7 +549,7 @@ assert.equal(
   assert.equal(label(twilio, withChecks(twilioKeys({ source: "environment" }), [check("twilio", { ok: false, code: "needs_number", outdated: true })])), changed);
   assert.equal(
     label(gws, withChecks(envGws, [check("gws", { ok: false, code: "smtp_auth_failed", checked_at: iso(MIN), outdated: true }), sent])),
-    "connected | Connected · last send worked 3m ago",
+    "connected | Connected · last send worked 3 min ago",
     "the sender's send describes the mailbox in use; the outdated Test is ignored",
   );
   assert.equal(connectionsDot(connectionsHealth(withChecks([...envTg, ...envGws], [check("telegram", { outdated: true }), sent]), NOW)), null, "an outdated pass proves nothing");

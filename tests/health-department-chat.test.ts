@@ -213,7 +213,7 @@ async function main() {
     assert.equal(r.verdict, "failing");
     assert.match(r.reason, /department chat is broken for Sales\./);
     assert.match(r.reason, /Sales: failing now, the model sent back an empty reply \(empty_reply_empty\)/);
-    assert.match(r.reason, /last good turn 14:40 UTC, 3h 20m ago/);
+    assert.match(r.reason, /last good turn 14:40 UTC, 3 h ago/);
     assert.ok(!/Marketing/.test(r.reason), "a healthy department was named in the alert");
     const text = outcomes.describe(r);
     assert.match(text, /https:\/\/oasisai\.work\/settings\/ai#engine/, "the alert must link to the engine settings");
@@ -256,7 +256,7 @@ async function main() {
     const r = await run(outcomes);
     assert.equal(r.verdict, "degraded", "an ended burst must not hold a failing page for the rest of the window");
     assert.equal(r.observed, 3);
-    assert.match(r.reason, /department chat recovered at 17:50 UTC, 10m ago after 3 failed turn\(s\); every department is answering again\./);
+    assert.match(r.reason, /department chat recovered at 17:50 UTC, 10 min ago after 3 failed turn\(s\); every department is answering again\./);
     assert.match(r.reason, /Last 6 h: 3 of 4 turns failed \(75%\)/);
     assert.match(r.reason, /Sales: answering again after 3 failed turn\(s\)/);
     assert.match(r.reason, /spent its whole answer budget thinking/);

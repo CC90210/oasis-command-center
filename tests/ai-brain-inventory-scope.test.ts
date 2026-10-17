@@ -201,7 +201,7 @@ async function main(): Promise<void> {
   console.log("  ok - the same computers read the same words on AI brain and Devices");
 
   // The Devices row line uses the same words for the computer's own state.
-  assert.equal(out.devices["Studio PC"].row, "Studio PC · Ready for agents, checked 5 s ago");
+  assert.equal(out.devices["Studio PC"].row, "Studio PC · Ready for agents, checked just now");
   assert.equal(out.devices.Laptop.row, "Laptop · Approval needed");
   assert.match(out.devices.Tower.row, /^Tower · Offline since /);
   assert.match(out.caption, /Each app reads the same here as in Settings > AI brain\. “Needs test” means it is installed and signed in/);
@@ -211,7 +211,7 @@ async function main(): Promise<void> {
   assert.equal(out.team.present, true);
   assert.equal(out.team.open, true, "Team computers starts open (a closed list read as none)");
   assert.deepEqual(out.team.rows, [
-    "Riley's laptop · Ready for agents, checked 5 s ago · Riley's computer",
+    "Riley's laptop · Ready for agents, checked just now · Riley's computer",
     "Riley's desktop · Online · Approval needed from Riley",
     "Riley's old PC · Idle · Approval needed from Riley",
   ]);
@@ -227,7 +227,7 @@ async function main(): Promise<void> {
   const teamRow = (label: string) => out.team.rows.find((row) => row.startsWith(`${label} · `))!;
   // Offline, the same computer on all three: Tower, last seen three days ago.
   const offline = brainSays.Tower;
-  assert.match(offline, /^Offline since [A-Z][a-z]{2} \d{1,2}/, `an offline computer says since when: ${offline}`);
+  assert.equal(offline, "Offline since 3 d ago", `an offline computer says since when, in the one time-ago wording: ${offline}`);
   assert.equal(advancedSays.Tower, offline, "Devices (advanced) says what AI brain says for Tower");
   assert.equal(cardSays(out.devices.Tower.row, "Tower"), offline, "and so does its Your computers row");
   // Online: AI brain's cards, Devices (advanced) and a Team computers row whose heartbeat is fresh.

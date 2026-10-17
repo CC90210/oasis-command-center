@@ -40,24 +40,58 @@ export function isOnline(lastSeenAt: string | null | undefined, nowMs: number): 
   return machineState(lastSeenAt, nowMs) === "online";
 }
 
+/** What timeAgo reads: an ISO string, epoch milliseconds or a Date. null, undefined and "" mean no time. */
+export type TimeAgoInput = string | number | Date | null | undefined;
+
+export type TimeAgoOptions = {
+  /** The clock, in epoch ms. Default Date.now(). A caller that already holds "now" passes it, so one render uses one clock and a test can pin it. */
+  now?: number;
+  /** The instant may really be ahead of the clock (a scheduled run, a booked call): say "in 5 min" instead of "just now". */
+  future?: boolean;
+};
+
+/** The one word for no time at all. */
+export const TIME_AGO_NEVER = "never";
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+/** From this age a count of days stops helping and the date says it better. */
+const DATE_FROM_MS = 30 * DAY_MS;
+
 /**
- * When a computer was last seen, as the device screens say it: "12 s ago", "4 min ago", a time today, or a
- * day and time before today. It lived in components/settings/YourComputersCard.tsx (which still exports
- * it); it is here so presenceWords owns the date in "Offline since".
+ * THE one "time ago" vocabulary, for every screen and message that says how long ago something happened
+ * (one-time-ago, 2026-10-17). About a dozen hand-rolled copies worded it a dozen ways: "never" here and a
+ * dash there, "5m ago" and "5 min ago" and "5 minutes ago", and some turned into a date after 30 days while
+ * others counted days forever. Do not write another: call this, and add an option here if a screen has a
+ * real reason to differ.
+ *
+ *   no time at all (null, "", not a date)   never
+ *   under a minute                          just now
+ *   under an hour                           N min ago
+ *   under a day                             N h ago
+ *   under 30 days                           N d ago
+ *   30 days or more                         Oct 3  (Oct 3, 2025 when it was not this year)
+ *
+ * Whole units, rounded down: "3 h ago" means three full hours have passed. A moment slightly ahead of the
+ * clock (two machines never agree to the second) is "just now". With `future: true`, for something that is
+ * really scheduled: "in under a minute", "in 5 min", "in 3 h", "in 2 d", then the date from 30 days out.
+ * The date is en-US in the viewer's own zone, because it sits inside an English sentence.
  */
-export function timeAgo(iso: string | null): string {
-  if (!iso) return "never";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (ms < 0) return "just now";
-  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} s ago`;
-  if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)} min ago`;
-  // Older than an hour: a bare "5:20 AM" could be yesterday's, last week's or
-  // last month's. Say which day when it is not today.
-  const at = new Date(iso);
-  if (at.toDateString() === new Date().toDateString()) {
-    return at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+export function timeAgo(when: TimeAgoInput, opts: TimeAgoOptions = {}): string {
+  const at = when instanceof Date ? when.getTime() : typeof when === "number" ? when : when ? Date.parse(when) : NaN;
+  if (!Number.isFinite(at)) return TIME_AGO_NEVER;
+  const now = opts.now ?? Date.now();
+  const ahead = at > now;
+  if (ahead && !opts.future) return "just now";
+  const gap = Math.abs(now - at);
+  if (gap < MINUTE_MS) return ahead ? "in under a minute" : "just now";
+  if (gap >= DATE_FROM_MS) {
+    const sameYear = new Date(at).getFullYear() === new Date(now).getFullYear();
+    return new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }) });
   }
-  return at.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const span = gap < HOUR_MS ? `${Math.floor(gap / MINUTE_MS)} min` : gap < DAY_MS ? `${Math.floor(gap / HOUR_MS)} h` : `${Math.floor(gap / DAY_MS)} d`;
+  return ahead ? `in ${span}` : `${span} ago`;
 }
 
 /** Every presence a screen shows for a computer: machineState's three, and busy (every slot has a run in it). */

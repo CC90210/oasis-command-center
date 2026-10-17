@@ -40,6 +40,7 @@ import "server-only";
 import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { DAEMON_HEALTH_STALE_MS } from "@/lib/automations/daemon-backed-crons";
+import { timeAgo } from "@/lib/devices/presence";
 import type { StatusReporter } from "@/lib/automations/worker-status";
 import {
   countColdLeads,
@@ -62,17 +63,9 @@ export const GUARD_REPORT_SERVICE = "guard_substrate";
 /** A guard report older than the daemon window is not a reading. */
 export const GUARD_REPORT_STALE_MS = DAEMON_HEALTH_STALE_MS;
 
-/** "40 s ago", "3 min ago", "3 h ago", "2 days ago". */
-export function formatAgo(iso: string | null, now: number): string {
-  const t = iso ? Date.parse(iso) : NaN;
-  if (!Number.isFinite(t)) return "at an unknown time";
-  const s = Math.max(0, Math.round((now - t) / 1000));
-  if (s < 60) return `${s} s ago`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.round(m / 60);
-  if (h < 48) return `${h} h ago`;
-  return `${Math.round(h / 24)} days ago`;
+/** A time inside a sentence ("checked in 3 min ago"): the one timeAgo wording, or "at an unknown time" when there is none to say ("checked in never" is not a sentence). */
+function whenWords(iso: string | null, now: number): string {
+  return iso && Number.isFinite(Date.parse(iso)) ? timeAgo(iso, { now }) : "at an unknown time";
 }
 
 // ── The Command Center's view of the bridge ───────────────────────────────
@@ -280,14 +273,14 @@ export function describeVerdict(input: { machines: PairedMachine[] | null; guard
   if (!pc) return { tone: "warn", text: "No computer is paired, so nothing runs or reports your guards." };
   const clause =
     pc.state === "offline"
-      ? `${pc.label} last checked in ${formatAgo(pc.lastSeenAt, now)}.`
-      : `${pc.label} checked in ${formatAgo(pc.lastSeenAt, now)}.`;
+      ? `${pc.label} last checked in ${whenWords(pc.lastSeenAt, now)}.`
+      : `${pc.label} checked in ${whenWords(pc.lastSeenAt, now)}.`;
   if (guards === null) return { tone: "unknown", text: `Couldn't check your guards: their report couldn't be read. ${clause}` };
   if (guards.freshness === "missing") {
     return { tone: "unknown", text: `Your guards aren't reported here yet: they run on your computer, which doesn't send them yet. ${clause}` };
   }
   if (guards.freshness === "stale") {
-    return { tone: "warn", text: `Can't verify your guards: ${pc.label} last reported them ${formatAgo(guards.reportedAt, now)}.` };
+    return { tone: "warn", text: `Can't verify your guards: ${pc.label} last reported them ${whenWords(guards.reportedAt, now)}.` };
   }
   if (guards.freshness === "failing") {
     return { tone: "warn", text: `Can't verify your guards: ${pc.label} couldn't read its guard logs. ${clause}` };

@@ -17,6 +17,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as ReactNS from "react";
 import { isValidElement, type ReactNode } from "react";
@@ -981,8 +982,8 @@ async function main() {
     assert.match(text[0], /Chief of Staff: Daily brief/);
     assert.equal(pillOf(items[0]), "On");
     assert.match(text[0], /Every weekday \(Monday to Friday\) at 7:30 AM, Toronto time/);
-    assert.match(text[0], /Next run: Fri, Oct 16, 7:30 AM EDT \(in 24 hours\)/);
-    assert.match(text[0], /Last run: Finished, Wed, Oct 14, 12:00 PM EDT \(20 hours ago\)\. Five things are waiting on you\./);
+    assert.match(text[0], /Next run: Fri, Oct 16, 7:30 AM EDT \(in 23 h\)/);
+    assert.match(text[0], /Last run: Finished, Wed, Oct 14, 12:00 PM EDT \(20 h ago\)\. Five things are waiting on you\./);
     assert.equal(pillOf(items[1]), "Paused");
     assert.match(text[1], /Sales: Follow-up drafts/);
     assert.match(text[1], /Not scheduled while it is paused\. Turn it on to start the schedule\./);
@@ -1664,6 +1665,94 @@ async function main() {
     const alone = squash(text(CronJobsManager({ agentKeys: [] })));
     assert.match(alone, /You have no automations yet\./);
     assert.doesNotMatch(alone, /Build your first one/);
+  });
+
+  await check("driven: 'build your first one above' shows only when the builder's list AND the older list are both empty, and the older list is the one that says so", async () => {
+    const { CronJobsManager, loadedCount } = await import("../components/automations/CronJobsManager");
+    const HINT = "Build your first one with New automation above.";
+    const SENTENCE = /build your first one above/;
+    const { api } = fakeApi();
+    const older = ReactNS.createElement(CronJobsManager, { agentKeys: [], emptyHint: HINT });
+    const common = { api, nowMs: NOW, onEdit: () => undefined, onItem: () => undefined, onRemoved: () => undefined, onTested: () => undefined, onRetry: () => undefined };
+    type ListProps = Parameters<typeof GuidedAutomationsList>[0];
+    /** One frame of the list. The count is the parent's to keep: the list is only told it (othersCount). */
+    const frameOf = (state: ListProps["state"], extra: Partial<ListProps> = {}) => GuidedAutomationsList({ ...common, state, others: older, ...extra });
+    /** Words printed by the list itself; the older list and the rows are components and are not opened. */
+    const printed = (node: unknown, re: RegExp): boolean => {
+      if (typeof node === "string") return re.test(node);
+      if (Array.isArray(node)) return node.some((n) => printed(n, re));
+      if (!isValidElement(node)) return false;
+      const el = node as unknown as El;
+      return typeof el.type !== "function" && printed(el.props.children, re);
+    };
+    const handed = (node: unknown): El | null => {
+      if (Array.isArray(node)) return node.map(handed).find(Boolean) ?? null;
+      if (!isValidElement(node)) return null;
+      const el = node as unknown as El;
+      return el.type === CronJobsManager ? el : typeof el.type === "function" ? null : handed(el.props.children);
+    };
+
+    // Nothing reported yet (the page's first frame): the older list is unknown, so nothing is claimed and its own words stand.
+    const reported: number[] = [];
+    let tree = frameOf(ready([]), { onOthersLoaded: (n) => reported.push(n) });
+    assert.equal(printed(tree, SENTENCE), false, "before the older list has reported, 'nothing yet' is not claimed");
+    assert.equal(handed(tree)?.props.emptyHint, HINT, "and its own empty line is left to say it");
+    const report = handed(tree)?.props.onLoaded as ((count: number) => void) | undefined;
+    assert.equal(typeof report, "function", "the older list is handed a way to report how many it shows");
+    report!(4);
+    assert.deepEqual(reported, [4], "and what it reports reaches the parent that keeps the count");
+
+    // It reported none: both are empty, so the list says so once and the older list stays quiet.
+    tree = frameOf(ready([]), { othersCount: 0 });
+    assert.equal(printed(tree, SENTENCE), true, "both empty: the sentence shows");
+    assert.equal(handed(tree)?.props.emptyHint, null, "and the older list does not say 'none yet' a second time");
+
+    // It reported some, or the count is unknown: not empty, so no 'nothing yet' above real automations.
+    for (const [why, othersCount] of [["the older list has automations", 3], ["the older list has not reported", null], ["the count was left out", undefined]] as const) {
+      assert.equal(printed(frameOf(ready([]), { othersCount }), SENTENCE), false, `${why}: no sentence`);
+    }
+
+    // The builder's own rows keep it away, whatever the older list says.
+    tree = frameOf(ready(LIST_ITEMS), { othersCount: 0 });
+    assert.equal(printed(tree, SENTENCE), false, "the builder has automations: no sentence");
+    assert.equal(handed(tree)?.props.emptyHint, null, "and the older list is quiet under them");
+
+    // Not loaded (still loading, could not load): never 'nothing yet', even if the older list says none.
+    for (const [why, state] of [
+      ["the builder's list is still loading", { kind: "loading" as const }],
+      ["the builder's list could not load", { kind: "error" as const, message: "We could not reach the server.", repair: null }],
+    ] as const) {
+      assert.equal(printed(frameOf(state as ListProps["state"], { othersCount: 0 }), SENTENCE), false, `${why}: no sentence`);
+    }
+
+    // No older list at all (the builder alone): the sentence shows as soon as the builder's list is empty.
+    assert.equal(printed(frameOf(ready([]), { others: undefined }), SENTENCE), true, "no older list: empty is empty");
+    const plain = ReactNS.createElement("div", null, "old");
+    assert.equal(printed(frameOf(ready([]), { others: plain, othersCount: null }), SENTENCE), false, "an older list this list cannot hear from claims nothing");
+
+    // The parent keeps the count: what the older list reports comes back down as othersCount.
+    const GuidedAutomations = (await import("../components/automations/guided/GuidedAutomations")).GuidedAutomations;
+    const page = mount(GuidedAutomations, () => ({ api, nowMs: NOW, initialContext: { kind: "loading" as const }, initialList: ready([]), children: older }));
+    const listOf = (node: unknown): El | null => {
+      if (Array.isArray(node)) return node.map(listOf).find(Boolean) ?? null;
+      if (!isValidElement(node)) return null;
+      const el = node as unknown as El;
+      return el.type === GuidedAutomationsList ? el : listOf(el.props.children);
+    };
+    assert.equal(listOf(page())?.props.othersCount, null, "the page starts not knowing");
+    (listOf(page())?.props.onOthersLoaded as (count: number) => void)(0);
+    assert.equal(listOf(page())?.props.othersCount, 0, "and learns it from the older list");
+    assert.equal(listOf(page())?.props.others, older, "the older list is still the page's children");
+
+    // The older list only reports after a clean read: a failed or migration-gapped read says nothing.
+    const some = [{}] as never[];
+    assert.equal(loadedCount(null, [], null, null), null, "not read yet");
+    assert.equal(loadedCount([], [], "http_500", null), null, "a failed read is not 'none'");
+    assert.equal(loadedCount([], [], null, { migration: "m", command: "c", hint: "h" }), null, "the migration gap is not 'none'");
+    assert.equal(loadedCount([], [], null, null), 0, "a clean read of nothing is none");
+    assert.equal(loadedCount(some, some, null, null), 2, "its own rows and the team's both count");
+    const manager = readFileSync(join(root, "components/automations/CronJobsManager.tsx"), "utf8");
+    assert.match(manager, /const count = loadedCount\(jobs, team, loadError, migrationGap\);\s*if \(count !== null\) onLoaded\?\.\(count\);/, "the older list reports through loadedCount");
   });
 
   await check("driven: a teammate's automation offers only Pause, and says why", async () => {

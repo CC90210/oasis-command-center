@@ -46,7 +46,8 @@ import {
   type CronInventoryJob,
 } from "@/lib/automations/cron-inventory";
 import { describeNextRun } from "@/lib/automations/cron-schedule";
-import { relativeTimeShort, summarizeRun, type RunSummary } from "@/lib/automations/run-summary";
+import { summarizeRun, type RunSummary } from "@/lib/automations/run-summary";
+import { timeAgo } from "@/lib/devices/presence";
 
 type ActionType = "script_run" | "snapshot_run" | "webhook_post";
 type CronJob = CronInventoryJob;
@@ -72,6 +73,9 @@ type Props = {
    *  nothing at all when empty: GuidedAutomationsList sends it while its own rows are on screen, or not
    *  yet known, because "no automations yet" under real ones is false. Left out, the old words alone. */
   emptyHint?: string | null;
+  /** Told how many automations this list shows each time that changes after a good read. GuidedAutomationsList
+   *  uses it to say the whole "Your automations" section is empty, which only this list can know. */
+  onLoaded?: (count: number) => void;
 };
 
 /** O2 requirement G's exact empty-state words. */
@@ -81,6 +85,15 @@ const NO_AUTOMATIONS_YET = "You have no automations yet.";
 export function emptyListLine(emptyHint?: string | null): string {
   if (emptyHint === null) return "";
   return emptyHint ? `${NO_AUTOMATIONS_YET} ${emptyHint}` : NO_AUTOMATIONS_YET;
+}
+
+/**
+ * What `onLoaded` is told: every row this list shows (its own and, for an owner or admin, the team's), or null
+ * while nothing has been read cleanly. A read that failed or hit the migration gap says nothing: "no
+ * automations" must never be claimed from a list that could not load. Exported for tests.
+ */
+export function loadedCount(jobs: CronJob[] | null, team: CronJob[], loadError: string | null, migrationGap: object | null): number | null {
+  return jobs !== null && loadError === null && migrationGap === null ? jobs.length + team.length : null;
 }
 
 const DAEMON_CONFIRM_TIMEOUT_MS = 75_000;
@@ -242,7 +255,7 @@ function humanizeCron(expr: string): string {
   return trimmed;
 }
 
-export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint }: Props) {
+export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint, onLoaded }: Props) {
   const [jobs, setJobs] = useState<CronJob[] | null>(null);
   // O2: everyone else's automations, present only for an owner/admin
   // (inventory.team_included says so). Switch-off only — see TeamJobRow.
@@ -277,6 +290,11 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint
   const [refreshing, setRefreshing] = useState(false);
   const mountedRef = useRef(false);
   const activeDaemonControlRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const count = loadedCount(jobs, team, loadError, migrationGap);
+    if (count !== null) onLoaded?.(count);
+  }, [jobs, team, loadError, migrationGap, onLoaded]);
 
   async function refresh() {
     setRefreshing(true);
@@ -1088,7 +1106,7 @@ function JobRow({
                   {/* For a daemon-backed row this is history from when the
                       shared scheduler still ran it — say so, rather than
                       letting it read as the process's last tick. */}
-                  {daemon ? `Last scheduler run ${relativeTimeShort(job.last_run_at)}` : run.lastRan.text}
+                  {daemon ? `Last scheduler run ${timeAgo(job.last_run_at)}` : run.lastRan.text}
                 </span>
                 <span className="text-fg-faint">·</span>
                 <span className="text-fg-faint">{job.run_count} total</span>
@@ -1208,7 +1226,7 @@ function DaemonBanner({ daemon }: { daemon: DaemonState }) {
         : daemon.state === "degraded"
           ? "bg-accent"
           : "bg-fg-dim";
-  const seen = relativeTimeShort(daemon.last_ping_at);
+  const seen = timeAgo(daemon.last_ping_at);
   const line =
     daemon.state === "running" ? (
       <>

@@ -127,7 +127,7 @@ async function main() {
   }) as typeof fetch;
 
   const { DevicesEditor } = await import("../components/settings/DevicesEditor");
-  const { timeAgo } = await import("../components/settings/YourComputersCard");
+  const { timeAgo } = await import("../lib/devices/presence");
 
   async function draw(installRepo: string | null) {
     const frames = framesOf(DevicesEditor as (p: { installRepo: string | null }) => unknown);
@@ -150,7 +150,7 @@ async function main() {
     JSON.stringify({
       owner: await draw("owner/repo"),
       notOwner: await draw(null),
-      // What "Offline since" says for the same moments (YourComputersCard's helper).
+      // What "Offline since" says for the same moments (lib/devices/presence.ts, the one helper).
       expected: {
         mineSeen: timeAgo(stamps.mineSeen),
         minePaired: timeAgo(stamps.minePaired),

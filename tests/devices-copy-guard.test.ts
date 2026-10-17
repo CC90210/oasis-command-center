@@ -608,13 +608,14 @@ check("the recovery hint without a known OS points at Settings > Devices on the 
       assert.equal(row(drawn.owner, "Riley's laptop").revoke, true, "a teammate's computer lost its only remove action");
       assert.ok(drawn.notOwner.every((x) => !x.revoke), "a viewer who is not the agents owner sees a Revoke");
     });
-    check("Settings > Devices (advanced): an old ping, a pairing and a revocation show their date, like Offline since", () => {
+    check("Settings > Devices (advanced): an old ping, a pairing and a revocation use the one time-ago wording, like Offline since", () => {
       const mine = row(drawn.owner, "CCPC");
-      assert.ok(!drawn.owner.some((x) => /\b\d+d ago\b/.test(x.text)), `a row still says "Nd ago": ${JSON.stringify(drawn.owner)}`);
-      assert.ok(/[A-Z][a-z]{2} \d{1,2}/.test(drawn.expected.mineSeen), `the shared helper gives no date for 5 days ago: ${drawn.expected.mineSeen}`);
+      assert.ok(!drawn.owner.some((x) => /\b\d+[smhd] ago\b/.test(x.text)), `a row still says the compact "5d ago": ${JSON.stringify(drawn.owner)}`);
+      assert.equal(drawn.expected.mineSeen, "5 d ago", "the shared helper counts days under 30");
+      assert.match(drawn.expected.minePaired, /^[A-Z][a-z]{2} \d{1,2}(, \d{4})?$/, `40 days is a date: ${drawn.expected.minePaired}`);
       assert.match(mine.text, new RegExp(`last ping ${drawn.expected.mineSeen.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · paired ${drawn.expected.minePaired.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(row(drawn.owner, "Riley's laptop").text, / s ago · paired /, "a recent ping still reads in seconds");
-      assert.ok(drawn.owner.some((x) => x.text.includes(`revoked ${drawn.expected.revoked}`)), "the revoked row has no date");
+      assert.match(row(drawn.owner, "Riley's laptop").text, /last ping just now · paired /, "a recent ping reads just now");
+      assert.ok(drawn.owner.some((x) => x.text.includes(`revoked ${drawn.expected.revoked}`)), "the revoked row has no time");
     });
   }
 }

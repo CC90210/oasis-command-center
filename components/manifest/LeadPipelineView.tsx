@@ -51,8 +51,8 @@ import {
   formatMoney,
   initialsOf,
   nonEmptyString,
-  relTime,
 } from "@/lib/format-helpers";
+import { timeAgo } from "@/lib/devices/presence";
 import {
   ACTIVE_STAGES as SUN_ACTIVE_STAGES,
   READY_TO_ADVANCE_STAGES as SUN_READY_TO_ADVANCE_STAGES,
@@ -701,7 +701,7 @@ export function LeadPipelineView({
         <div className="whitespace-nowrap font-mono text-[10.5px] text-fg-dim">
           updated{" "}
           {stats.mostRecentUpdate > 0
-            ? relTime(new Date(stats.mostRecentUpdate).toISOString())
+            ? timeAgo(stats.mostRecentUpdate)
             : "-"}
         </div>
       </div>
@@ -1739,7 +1739,7 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   const touchAnchorIso = lastTouchIso(row);
   const explicitTouchIso = lastTouchIso({ data: d, created_at: null });
   const cold = d.docs_on_file !== true && isGoingColdVariant(cfg, stage.key, touchAnchorIso);
-  const lastTouchLabel = explicitTouchIso ? relTime(explicitTouchIso) : "Never";
+  const lastTouchLabel = timeAgo(explicitTouchIso);
   const createdIso = row.created_at || null;
   const createdLabel = createdIso ? formatShortDate(createdIso) : "-";
   // ═══ THE WEB-LEAD HALF (2026-08-25) ═════════════════════════════════════
@@ -2173,7 +2173,7 @@ function rowModel(row: Row, stage: StageMeta) {
   const agentLabel = compactAgent(agentFull);
   const touchIso = lastTouchIso(row);
   const cold = d.docs_on_file !== true && isGoingColdSun(stage.key, touchIso);
-  const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
+  const lastTouchLabel = touchIso ? timeAgo(touchIso) : "-";
   const paper = str(d.paper_grade) || str(d.leverage_grade) || "-";
   const leverage = d.leverage != null ? String(d.leverage) : str(d.leverage_ratio) || "-";
   const monthlyRevRaw = d.monthly_revenue ?? d.avg_monthly_revenue ?? null;

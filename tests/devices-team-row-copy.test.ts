@@ -34,7 +34,7 @@ function check(name: string, fn: () => void) {
 
 async function main() {
   const { teamRowLine } = await import("../components/settings/YourComputersCard");
-  // timeAgo() (inside YourComputersCard.tsx) reads the real wall clock
+  // timeAgo() (lib/devices/presence.ts) reads the real wall clock
   // (Date.now()), not an injectable "now" -- so RECENT/OLD must be relative
   // to the ACTUAL current time, never a fixed calendar date, or "X ago"
   // reads as "just now" (ms < 0) whenever the fixed date is in the future
@@ -76,7 +76,7 @@ async function main() {
   });
 
   check("can_answer / busy / offline / blocked team rows say each state in AI brain's words (CC 2026-10-16)", () => {
-    assert.equal(teamRowLine("CC's computer", "CC", "can_answer", RECENT, RECENT, NOW), "CC's computer · Ready for agents, checked 10 s ago");
+    assert.equal(teamRowLine("CC's computer", "CC", "can_answer", RECENT, RECENT, NOW), "CC's computer · Ready for agents, checked just now");
     assert.equal(teamRowLine("CC's computer", "CC", "busy", null, RECENT, NOW), "CC's computer · Busy, finishing a reply");
     assert.equal(teamRowLine("CC's computer", "CC", "offline", null, OLD, NOW), "CC's computer · Offline since 20 min ago");
     assert.match(teamRowLine("CC's computer", "CC", "blocked:subscription_auth_failure", null, RECENT, NOW), /Claude Code is signed out/);
@@ -92,7 +92,7 @@ async function main() {
     ];
     assert.deepEqual(
       lines.map((l) => l.split(" · ").slice(1).join(" · ")),
-      [`${W.ready}, checked 10 s ago`, `${W.busy}, finishing a reply`, `Online · ${W.approval_needed} from CC`, `${W.offline} since 20 min ago`],
+      [`${W.ready}, checked just now`, `${W.busy}, finishing a reply`, `Online · ${W.approval_needed} from CC`, `${W.offline} since 20 min ago`],
     );
   });
 

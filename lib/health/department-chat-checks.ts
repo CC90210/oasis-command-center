@@ -67,6 +67,7 @@ import "server-only";
 import { CLI_ENGINE_LABEL, ENGINE_FALLBACK_PREFIX, ENGINE_SETTINGS_HREF, isCliEngine } from "@/lib/ai/agent-engine";
 import type { UsageSurface } from "@/lib/ai/usage";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
+import { timeAgo } from "@/lib/devices/presence";
 import { getTursoClient } from "@/lib/turso";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
@@ -211,9 +212,7 @@ function fmtWhen(iso: string, nowMs: number): string {
   const ms = Date.parse(iso);
   if (!Number.isFinite(ms)) return iso;
   const hhmm = new Date(ms).toISOString().slice(11, 16);
-  const mins = Math.max(0, Math.round((nowMs - ms) / 60_000));
-  const ago = mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
-  return `${hhmm} UTC, ${ago}`;
+  return `${hhmm} UTC, ${timeAgo(ms, { now: nowMs })}`;
 }
 
 type DepartmentState = {

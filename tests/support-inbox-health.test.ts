@@ -134,7 +134,7 @@ async function main() {
     assert.equal(a.status, 422);
   });
 
-  await check("what the desk and /operations say: last read N minutes ago, failing, or not read for N minutes", async () => {
+  await check("what the desk and /operations say: last read N min ago, failing, or not read for N minutes", async () => {
     const s = await status();
     assert.equal(health.inboxHealth(MAILBOX, s, at(10)).state, "failing");
     assert.match(health.inboxHealth(MAILBOX, s, at(10)).sentence, /imap_auth_failed/);
@@ -144,7 +144,7 @@ async function main() {
     assert.match(stale.sentence, /^support@oasisai\.work not read for 27 minutes\./);
     const fresh = health.inboxHealth(MAILBOX, { ...s, ok: true, last_error: null, last_ok_at: at(26).toISOString() }, at(27));
     assert.equal(fresh.state, "reading");
-    assert.equal(fresh.sentence, "support@oasisai.work last read 1 minute ago.");
+    assert.equal(fresh.sentence, "support@oasisai.work last read 1 min ago.");
     assert.equal(health.inboxHealth(MAILBOX, { ...s, ok: true, last_ok_at: at(7).toISOString() }, at(27)).state, "stale", "20 minutes exactly is stale");
     assert.equal(health.inboxHealth(MAILBOX, { ...s, ok: true, last_ok_at: at(8).toISOString() }, at(27)).state, "reading", "19 minutes is not");
   });
@@ -311,7 +311,7 @@ async function main() {
     await login(USERS.cc);
     const text = async () => textOf(await tickets({ searchParams: Promise.resolve({}) })).join("\n");
     await beat(new Date(Date.now() - 3 * 60_000));
-    assert.match(await text(), /support@oasisai\.work last read 3 minutes ago\./);
+    assert.match(await text(), /support@oasisai\.work last read 3 min ago\./);
     await beat(new Date(Date.now() - 45 * 60_000));
     await db.execute({ sql: "UPDATE support_mailbox_status SET last_ok_at = ? WHERE mailbox = ?", args: [new Date(Date.now() - 45 * 60_000).toISOString(), MAILBOX] });
     assert.match(await text(), /support@oasisai\.work not read for 45 minutes\. The reader runs on CC's PC/);

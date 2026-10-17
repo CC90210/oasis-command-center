@@ -47,6 +47,8 @@ export function GuidedAutomations({ api = guidedApi, nowMs, initialContext, init
   const [rechecking, setRechecking] = useState(false);
   const [recheckNote, setRecheckNote] = useState<string | null>(null);
   const [clock, setClock] = useState<number | null>(nowMs ?? null);
+  /** How many automations the older list (the children) reported after a good read; the list says "nothing yet" only at 0. */
+  const [othersCount, setOthersCount] = useState<number | null>(null);
   const builderTop = useRef<HTMLDivElement>(null);
 
   const loadWorkspace = useCallback(async () => {
@@ -145,6 +147,8 @@ export function GuidedAutomations({ api = guidedApi, nowMs, initialContext, init
         onRetry={() => void loadItems(false)}
         initialRows={initialRows}
         others={children}
+        othersCount={othersCount}
+        onOthersLoaded={setOthersCount}
       />
     </div>
   );

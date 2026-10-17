@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { nextRenewalDate, estCommissionUsd, type TermUnit } from "@/lib/renewals/derive";
+import { timeAgo } from "@/lib/devices/presence";
 
 type FieldErrors = Record<string, string>;
 
@@ -70,15 +71,6 @@ function fmtUsd(value: number): string {
     currency: "USD",
     maximumFractionDigits: 0,
   });
-}
-
-function relativeDate(value: string): string {
-  const elapsed = Date.now() - new Date(value).getTime();
-  const days = Math.max(0, Math.floor(elapsed / 86_400_000));
-  if (days === 0) return "Today";
-  if (days === 1) return "Yesterday";
-  if (days < 7) return `${days}d ago`;
-  return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function titleCase(value: string): string {
@@ -483,7 +475,7 @@ export default function RecordFundedDeal() {
                             {lead.email && <span className="flex min-w-0 items-center gap-1"><Mail size={11} /><span className="max-w-52 truncate">{lead.email}</span></span>}
                           </div>
                           <div className="mt-1.5 flex items-center gap-3 text-[10px] text-fg-dim">
-                            <span>{relativeDate(lead.updated_at)}</span>
+                            <span>{timeAgo(lead.updated_at)}</span>
                             {lead.amount_requested !== null && <span className="font-mono text-cyan-200/80">{fmtUsd(lead.amount_requested)} requested</span>}
                           </div>
                         </div>
