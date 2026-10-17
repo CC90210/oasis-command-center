@@ -63,7 +63,11 @@ import { buildOasisLeadPatch } from "@/lib/forms/oasis-funnel-format";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { buildPublicFunnelLeadPatch } from "@/lib/forms/public-booking";
-import { isPublicBookingForm, publicBookingCompletionGatesCalendar } from "@/lib/forms/public-booking-config";
+import {
+  isEarlyPublicBookingFormSlug,
+  isPublicBookingForm,
+  publicBookingCompletionGatesCalendar,
+} from "@/lib/forms/public-booking-config";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
 import {
   ensureAiAuditSubmissionDelivery,
@@ -1747,6 +1751,35 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         answers,
       }),
     );
+  }
+
+  // A contact step sent through a signed link (an operator's personalized link,
+  // or a lead token minted earlier) never ran initAnonymousLead, the only other
+  // place step 0 records the lead as inbound_lead. AI audit, COMMAND and FLEET
+  // open the calendar right after this step, and the booking gate needs that
+  // record (Codex review of #667), so it is written here, before the response
+  // reveals the calendar. The merge is forward-only (patch_tenant_record_data),
+  // so a lead already further on keeps its stage. A failure costs only the
+  // early calendar: the questions still work, and finishing unlocks it.
+  if (
+    stepIndex === 0 &&
+    !isLastStep &&
+    Boolean(body.token) &&
+    isPublicBookingForm({ tenantId: form.tenant_id, formSlug: form.slug }) &&
+    isEarlyPublicBookingFormSlug(form.slug)
+  ) {
+    const contactRecorded = await db.rpc("patch_tenant_record_data", {
+      p_id: link.lead_id,
+      p_tenant_id: form.tenant_id,
+      p_patch: buildPublicFunnelLeadPatch({ ...mergedAnswers }, "inbound_lead", new Date().toISOString(), form.slug),
+    });
+    if (contactRecorded.error) {
+      console.error("[forms.submit.public_booking_contact.failed]", {
+        lead_id: link.lead_id,
+        form_slug: form.slug,
+        error: contactRecorded.error.message,
+      });
+    }
   }
 
   // Every OASIS form whose next step is the inline founder calendar writes the

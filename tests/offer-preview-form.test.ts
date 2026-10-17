@@ -121,7 +121,7 @@ async function main(): Promise<void> {
   await check("the preview's form starts no upload lead and records no tracking event", () => {
     assert.match(form, /const ensureUploadToken = useCallback\(async \(\): Promise<string \| null> => \{\s*\/\/[^\n]*\n\s*if \(preview\) return null;/);
     assert.match(form, /if \(preview \|\| pageViewFired\.current \|\| !tenantSlug \|\| !formSlug\) return;/);
-    assert.match(form, /if \(preview \|\| !tenantSlug \|\| !formSlug\) return;\s*trackEvent\(\{ tenant: tenantSlug, form: formSlug, event: "step_viewed"/);
+    assert.match(form, /if \(preview \|\| !tenantSlug \|\| !formSlug \|\| earlyCalendarStep !== null\) return;\s*trackEvent\(\{ tenant: tenantSlug, form: formSlug, event: "step_viewed"/);
     assert.equal(
       (form.match(/preview=\{preview\}/g) || []).length,
       4,

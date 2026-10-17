@@ -17,16 +17,38 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { check, finish, OASIS, setupDatabase } from "./_delivery-harness";
 
 process.env.FORM_LINK_HMAC_KEY = "public-booking-early-test-key-that-is-long-enough-01";
+
+// next/server's after() needs a request scope this harness doesn't open; the
+// submit route's background alerts are not what this suite checks.
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- the real module is spread into the stand-in
+const realServer = require("next/server") as Record<string, unknown>;
+const serverPath = require.resolve("next/server");
+require.cache[serverPath] = {
+  id: serverPath,
+  filename: serverPath,
+  path: dirname(serverPath),
+  loaded: true,
+  children: [],
+  paths: [],
+  exports: { ...realServer, after: () => undefined },
+} as unknown as NodeModule;
 
 const ROOT = join(__dirname, "..");
 const AUDIT_FORM = "form-ai-audit-early";
 const COMMAND_FORM = "form-command-early";
 const PROTOCOL_FORM = "form-protocol-early";
-const step = (id: string) => ({ id, title: id, fields: [] });
+const field = (name: string, type: string) => ({ name, type, label: name, required: true });
+const step = (key: string) => ({
+  key,
+  title: key,
+  fields: key === "s0"
+    ? [field("name", "text"), field("email", "email"), field("phone", "phone"), field("company", "text")]
+    : [field(`answer_${key}`, "text")],
+});
 
 async function main() {
   const seed = await setupDatabase();
@@ -97,6 +119,10 @@ async function main() {
       founder_meeting_at: "2026-09-01T15:00:00.000Z",
     }),
     lead("never-booked", contactRecorded),
+    // Contact steps sent through a signed link (an operator's personalized link).
+    lead("link-audit", {}),
+    lead("link-protocol", {}),
+    lead("link-booked", { funnel_stage: "meeting_booked", meeting_booked_at: "2026-10-16T12:01:00.000Z", inbound_lead_at: "2026-10-16T11:00:00.000Z" }),
   ], "write");
 
   const { getServiceSupabase } = await import("../lib/supabase-server");
@@ -145,6 +171,48 @@ async function main() {
     assert.equal(await refusal(PROTOCOL_FORM, "protocol-contact"), "booking_form_not_completed");
     const finished = await resolvePublicFunnelBooking(db, token(PROTOCOL_FORM, "protocol-finished"));
     assert.equal(finished.formSlug, "protocol");
+  });
+
+  await check("a contact step sent through a signed link records the lead, so its calendar opens (Codex review of #667)", async () => {
+    const { NextRequest } = await import("next/server");
+    const route = await import("../app/api/forms/submit/route");
+    let ip = 0;
+    const contactStep = async (formId: string, leadId: string) => {
+      ip += 1;
+      const res = await route.POST(
+        new NextRequest("http://localhost/api/forms/submit", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-for": `10.7.0.${ip}` },
+          body: JSON.stringify({
+            token: token(formId, leadId),
+            step_index: 0,
+            payload: { name: "Lin Kwan", email: `${leadId}@acme.test`, phone: "+1 514 555 0142", company: "Kwan Co" },
+          }),
+        }),
+      );
+      assert.equal(res.status, 200, `${leadId}: ${JSON.stringify(await res.clone().json())}`);
+    };
+    const leadData = async (leadId: string) => {
+      const row = await seed.execute({ sql: "SELECT data FROM tenant_records WHERE tenant_id = ? AND id = ?", args: [OASIS, leadId] });
+      return JSON.parse(String(row.rows[0].data)) as Record<string, unknown>;
+    };
+
+    assert.equal(await refusal(AUDIT_FORM, "link-audit"), "booking_form_not_completed", "before the contact step");
+    await contactStep(AUDIT_FORM, "link-audit");
+    const audit = await leadData("link-audit");
+    assert.equal(audit.funnel_stage, "inbound_lead");
+    assert.ok(audit.inbound_lead_at, "the contact step's time is recorded");
+    assert.equal(audit.funnel_form, "ai-audit");
+    const opened = await resolvePublicFunnelBooking(db, token(AUDIT_FORM, "link-audit"));
+    assert.equal(opened.leadId, "link-audit", "the calendar opens after a signed-link contact step");
+
+    await contactStep(PROTOCOL_FORM, "link-protocol");
+    assert.equal((await leadData("link-protocol")).funnel_stage, undefined, "a form that books at the end is not stamped early");
+
+    await contactStep(AUDIT_FORM, "link-booked");
+    const booked = await leadData("link-booked");
+    assert.equal(booked.funnel_stage, "meeting_booked", "a booked lead is never moved back");
+    assert.equal(booked.inbound_lead_at, "2026-10-16T11:00:00.000Z", "its first-contact time is kept");
   });
 
   await check("only an upcoming call counts as booked", () => {

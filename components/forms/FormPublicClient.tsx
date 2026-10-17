@@ -491,10 +491,12 @@ export function FormPublicClient({
     pageViewFired.current = true;
     trackEvent({ tenant: tenantSlug, form: formSlug, event: "page_view" });
   }, [preview, tenantSlug, formSlug]);
+  // Not while the early calendar shows: it is not a step, and its questions
+  // count as viewed when the visitor goes back to them (Codex review of #667).
   useEffect(() => {
-    if (preview || !tenantSlug || !formSlug) return;
+    if (preview || !tenantSlug || !formSlug || earlyCalendarStep !== null) return;
     trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_viewed", stepIndex: currentStep });
-  }, [preview, tenantSlug, formSlug, currentStep]);
+  }, [preview, tenantSlug, formSlug, currentStep, earlyCalendarStep]);
 
   // UTM/kw/cat read once from the page's own URL (never re-read mid-funnel —
   // the visitor is still on the same page). Forwarded on every step's submit
