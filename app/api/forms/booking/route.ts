@@ -30,7 +30,6 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import {
   claimPublicBooking,
-  confirmPublicBooking,
   publicBookingVisitorKey,
   releasePublicBooking,
   type PublicBookingClaim,
@@ -71,10 +70,11 @@ const PROVIDER_ERRORS = new Set([
 const CONTACT_ERRORS = new Set(["invalid_client_phone", "client_phone_required", "client_email_required"]);
 /**
  * Thrown by createVerifiedFounderMeeting (lib/website-sales-founder-meeting.ts)
- * BEFORE its Google call, on a request's first attempt: no event can exist, so
- * a cap place taken for it goes back (lib/forms/public-booking-cap.ts). Only a
- * fresh claim is ever given back, so a retry that hits one of these never frees
- * the place of an attempt still booking. Codes not listed keep the place.
+ * BEFORE its Google call: this attempt booked nothing, so it gives back its
+ * hold on the cap place (lib/forms/public-booking-cap.ts). The place itself is
+ * freed only once no attempt of the request holds it, so a retry that hits one
+ * of these never frees the place of an attempt still booking. Codes not listed
+ * keep the hold.
  */
 const PRE_PROVIDER_ERRORS = new Set([
   "booking_confirmations_required",
@@ -266,12 +266,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const attendee = slot.hosts.find((host) => host.role === "attendee") ?? null;
 
   // One of today's places for this visitor and booking request
-  // (lib/forms/public-booking-cap.ts): claimed atomically before anything
-  // reaches Google, given back only by the failures below that leave nothing
-  // booked, and re-asserted once the booking is recorded. A replay of a
-  // booking already made returned above and never claims. A claim the
+  // (lib/forms/public-booking-cap.ts): held atomically before anything
+  // reaches Google, and given back only by the failures below that leave
+  // nothing booked. A booking that succeeds keeps its hold for good. A replay
+  // of a booking already made returned above and never claims. A claim the
   // database cannot answer refuses the booking rather than book uncapped (a
-  // missing claims table, before migration 228, books uncapped and says so).
+  // missing claims schema, before migrations 228 and 229, books uncapped and
+  // says so).
   let claim: Extract<PublicBookingClaim, { ok: true }>;
   try {
     const claimed = await claimPublicBooking(getTursoClient(), {
@@ -443,9 +444,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 503 },
     );
   }
-  // The booking is recorded: it holds its place even if a sibling attempt of
-  // the same request gave the claim back meanwhile (lib/forms/public-booking-cap.ts).
-  await confirmPublicBooking(getTursoClient(), claim, new Date());
   try {
     await activateVerifiedFounderMeeting(context.tenantId, meeting.appointmentId);
   } catch (error) {

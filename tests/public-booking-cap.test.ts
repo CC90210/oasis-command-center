@@ -1,10 +1,10 @@
 /**
  * A daily cap per visitor on public bookings (lib/forms/public-booking-cap.ts,
- * migration bravo__228). Since #667 a real Google slot (an invite to CC) can
- * be taken after the contact step alone; the booking POST's own rate limit is
- * in memory per isolate and never caps a day.
+ * migrations bravo__228 and bravo__229). Since #667 a real Google slot (an
+ * invite to CC) can be taken after the contact step alone; the booking POST's
+ * own rate limit is in memory per isolate and never caps a day.
  *
- * Real SQL on a throwaway libSQL file with the real migration applied.
+ * Real SQL on a throwaway libSQL file with the real migrations applied.
  *
  * Run: node --conditions=react-server --import tsx tests/public-booking-cap.test.ts
  */
@@ -12,10 +12,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createClient } from "@libsql/client";
+import { createClient, type Client } from "@libsql/client";
 import {
   claimPublicBooking,
-  confirmPublicBooking,
   PUBLIC_BOOKING_DAILY_CAP,
   publicBookingVisitorKey,
   releasePublicBooking,
@@ -35,83 +34,127 @@ const req = () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, "0"
 async function main() {
   console.log("public booking daily cap");
   const file = join(mkdtempSync(join(tmpdir(), "booking-cap-")), "test.db");
+  const migrate = async (client: Client, ...names: string[]) => {
+    for (const name of names) await client.executeMultiple(readFileSync(join(ROOT, "database", "turso", name), "utf8"));
+  };
   const db = createClient({ url: `file:${file}` });
-  await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__228_public_booking_daily_cap.sql"), "utf8"));
+  await migrate(db, "bravo__228_public_booking_daily_cap.sql", "bravo__229_public_booking_claim_attempts.sql");
   const now = new Date("2026-10-16T15:00:00.000Z");
+  const tomorrow = new Date(now.getTime() + 86_400_000);
   const key = publicBookingVisitorKey("203.0.113.7");
-  const held = async (visitorKey: string) =>
-    Number((await db.execute({ sql: "SELECT count(*) AS n FROM public_booking_claims WHERE visitor_key = ?", args: [visitorKey] })).rows[0].n);
+  const held = async (visitorKey: string, day?: string) =>
+    Number((await db.execute({
+      sql: `SELECT count(*) AS n FROM public_booking_claims WHERE visitor_key = ?${day ? " AND day = ?" : ""}`,
+      args: day ? [visitorKey, day] : [visitorKey],
+    })).rows[0].n);
+  const attempts = async (requestId: string) =>
+    Number((await db.execute({ sql: "SELECT attempts FROM public_booking_claims WHERE request_id = ?", args: [requestId] })).rows[0]?.attempts ?? 0);
+  const claimFor = (visitorKey: string, requestId: string, at = now, client: Client = db) =>
+    claimPublicBooking(client, { tenantId: OASIS, visitorKey, requestId, now: at });
+  const release = async (claim: Awaited<ReturnType<typeof claimPublicBooking>>, client: Client = db) => {
+    assert.ok(claim.ok, "released a refused claim");
+    if (claim.ok) await releasePublicBooking(client, claim);
+  };
 
   await check("three calls a day per visitor, then a refusal", async () => {
     assert.equal(PUBLIC_BOOKING_DAILY_CAP, 3);
     for (let i = 1; i <= 3; i += 1) {
-      const claim = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: key, requestId: req(), now });
-      assert.equal(claim.ok && claim.fresh, true, `call ${i} refused`);
+      assert.equal((await claimFor(key, req())).ok, true, `call ${i} refused`);
     }
-    const fourth = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: key, requestId: req(), now });
-    assert.deepEqual(fourth, { ok: false, reason: "daily_cap_reached" });
+    assert.deepEqual(await claimFor(key, req()), { ok: false, reason: "daily_cap_reached" });
   });
 
-  await check("a retry of the same booking request counts once, even at the cap (Codex review of #670)", async () => {
+  await check("a retry of the same booking request holds the same place, even at the cap (Codex review of #670)", async () => {
     const visitor = publicBookingVisitorKey("198.51.100.10");
     const first = req();
-    const took = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: first, now });
-    assert.ok(took.ok && took.fresh && took.requestId === first);
+    const took = await claimFor(visitor, first);
+    assert.ok(took.ok && took.requestId === first);
     for (let i = 0; i < 3; i += 1) {
-      const retry = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: first, now });
-      assert.ok(retry.ok && !retry.fresh && retry.requestId === first, "a retry was refused or counted again");
+      const retry = await claimFor(visitor, first);
+      assert.ok(retry.ok && retry.requestId === first, "a retry was refused");
     }
-    assert.equal(await held(visitor), 1);
+    assert.equal(await held(visitor), 1, "a retry took a second place");
+    assert.equal(await attempts(first), 4);
     // The cap is still 3 distinct bookings: two more fit.
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, true);
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, true);
+    assert.equal((await claimFor(visitor, req())).ok, true);
+    assert.equal((await claimFor(visitor, req())).ok, true);
     // And a retry of a booking at the cap still passes.
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: first, now })).ok, true);
+    assert.equal((await claimFor(visitor, first)).ok, true);
   });
 
-  await check("only the attempt that took the place gives it back", async () => {
+  await check("the place is freed only once every attempt holding it gave it back", async () => {
     const visitor = publicBookingVisitorKey("198.51.100.11");
     const id = req();
-    const fresh = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: id, now });
-    const retry = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: id, now });
-    assert.ok(fresh.ok && retry.ok);
-    if (retry.ok) await releasePublicBooking(db, retry);
+    const first = await claimFor(visitor, id);
+    const retry = await claimFor(visitor, id);
+    await release(retry);
     assert.equal(await held(visitor), 1, "a retry's failure freed the place of an attempt still booking");
-    if (fresh.ok) await releasePublicBooking(db, fresh);
+    await release(first);
     assert.equal(await held(visitor), 0, "a booking that never happened kept its place");
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, true);
+    // In the other order too: the first attempt's give-back leaves the retry's hold.
+    const id2 = req();
+    const a = await claimFor(visitor, id2);
+    const b = await claimFor(visitor, id2);
+    await release(a);
+    assert.equal(await held(visitor), 1, "the first attempt's failure freed the place of a retry still booking");
+    await release(b);
+    assert.equal(await held(visitor), 0);
+    assert.equal((await claimFor(visitor, req())).ok, true);
   });
 
-  await check("a completed booking re-asserts its place after a sibling attempt gave it back (Codex review of #670)", async () => {
+  await check("a sibling's give-back never frees a place a booking still holds (Codex review of #670)", async () => {
     const visitor = publicBookingVisitorKey("198.51.100.12");
     const id = req();
-    const first = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: id, now });
-    const sibling = await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: id, now });
-    assert.ok(first.ok && first.fresh && sibling.ok && !sibling.fresh);
-    if (first.ok) await releasePublicBooking(db, first); // the first attempt failed before Google
-    assert.equal(await held(visitor), 0);
-    if (sibling.ok) await confirmPublicBooking(db, sibling, now); // the sibling booked
-    assert.equal(await held(visitor), 1, "a booking that completed holds no place");
-    if (sibling.ok) await confirmPublicBooking(db, sibling, now);
-    assert.equal(await held(visitor), 1, "confirming twice took a second place");
-    // So the cap still counts it: two more fit, then a refusal.
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, true);
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, true);
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: visitor, requestId: req(), now })).ok, false);
+    const first = await claimFor(visitor, id);
+    const sibling = await claimFor(visitor, id); // goes on to book: never released
+    assert.ok(first.ok && sibling.ok);
+    await release(first); // the first attempt failed before Google
+    assert.equal(await held(visitor), 1, "the booking that completed holds no place");
+    // So nothing can take its place: two more fit, then a refusal (not a fourth call).
+    assert.equal((await claimFor(visitor, req())).ok, true);
+    assert.equal((await claimFor(visitor, req())).ok, true);
+    assert.equal((await claimFor(visitor, req())).ok, false, "another booking took the place a completed booking holds");
+    assert.equal(await held(visitor), 3);
   });
 
-  await check("a missing claims table books uncapped instead of failing every booking (Codex review of #670)", async () => {
+  await check("a retry after the UTC day changed counts against today, under today's limit (Codex review of #670)", async () => {
+    const visitor = publicBookingVisitorKey("198.51.100.13");
+    const kept = req(); // yesterday's attempt left its place held (an unknown outcome)
+    assert.equal((await claimFor(visitor, kept)).ok, true);
+    assert.equal((await claimFor(visitor, kept, tomorrow)).ok, true);
+    const today = tomorrow.toISOString().slice(0, 10);
+    assert.equal(await held(visitor, today), 1, "the retry took none of today's places");
+    assert.equal((await claimFor(visitor, req(), tomorrow)).ok, true);
+    assert.equal((await claimFor(visitor, req(), tomorrow)).ok, true);
+    assert.equal((await claimFor(visitor, req(), tomorrow)).ok, false, "a fourth call fit today");
+    // A visitor already at today's cap cannot bring yesterday's request back in.
+    const full = publicBookingVisitorKey("198.51.100.14");
+    const old = req();
+    assert.equal((await claimFor(full, old)).ok, true);
+    for (let i = 0; i < 3; i += 1) assert.equal((await claimFor(full, req(), tomorrow)).ok, true);
+    assert.equal((await claimFor(full, old, tomorrow)).ok, false, "yesterday's request slipped past today's cap");
+    // Retried today from another connection: it counts against the one today's cap checked.
+    const moved = publicBookingVisitorKey("198.51.100.15");
+    const roaming = req();
+    assert.equal((await claimFor(publicBookingVisitorKey("198.51.100.16"), roaming)).ok, true);
+    assert.equal((await claimFor(moved, roaming, tomorrow)).ok, true);
+    assert.equal(await held(moved, today), 1, "the moved place still counts against yesterday's connection");
+  });
+
+  await check("a missing claims table or column books uncapped instead of failing every booking (Codex review of #670)", async () => {
     const bare = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "booking-cap-bare-")), "bare.db")}` });
-    const claim = await claimPublicBooking(bare, { tenantId: OASIS, visitorKey: key, requestId: req(), now });
-    assert.equal(claim.ok, true, "a missing table refused the booking");
-    assert.ok(claim.ok && claim.uncapped && !claim.fresh);
-    if (claim.ok) {
-      await releasePublicBooking(bare, claim);
-      await confirmPublicBooking(bare, claim, now);
-    }
+    const claim = await claimFor(key, req(), now, bare);
+    assert.ok(claim.ok && claim.uncapped, "a missing table refused the booking");
+    await release(claim, bare);
+    // 228 applied, 229 not: the attempts column is missing.
+    const half = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "booking-cap-half-")), "half.db")}` });
+    await migrate(half, "bravo__228_public_booking_daily_cap.sql");
+    const partial = await claimFor(key, req(), now, half);
+    assert.ok(partial.ok && partial.uncapped, "a missing column refused the booking");
+    half.close();
     // Any other failure still refuses: a closed client throws, never "uncapped".
     bare.close();
-    await assert.rejects(claimPublicBooking(bare, { tenantId: OASIS, visitorKey: key, requestId: req(), now }));
+    await assert.rejects(claimFor(key, req(), now, bare));
   });
 
   await check("racing requests from two connections can never take more than the cap; racing retries count once", async () => {
@@ -128,17 +171,30 @@ async function main() {
       Array.from({ length: 6 }, (_, i) => claimPublicBooking(i % 2 ? a : b, { tenantId: OASIS, visitorKey: retrier, requestId: same, now })),
     );
     assert.equal(retries.filter((r) => r.ok).length, 6, "a concurrent retry was refused");
-    assert.equal(retries.filter((r) => r.ok && r.fresh).length, 1, "concurrent retries took more than one place");
-    assert.equal(await held(retrier), 1);
+    assert.equal(await held(retrier), 1, "concurrent retries took more than one place");
+    assert.equal(await attempts(same), 6);
+    // Retries racing give-backs of the same request are never refused while
+    // the visitor has room (Codex review of #670: a claim that read the place
+    // after a sibling freed it said "daily limit").
+    const busy = publicBookingVisitorKey("192.0.2.57");
+    assert.equal((await claimFor(busy, req())).ok, true);
+    assert.equal((await claimFor(busy, req())).ok, true);
+    const churn = req();
+    let previous = await claimFor(busy, churn);
+    for (let i = 0; i < 20; i += 1) {
+      const [next] = await Promise.all([claimFor(busy, churn, now, i % 2 ? a : b), release(previous, i % 2 ? b : a)]);
+      assert.ok(next.ok, `a retry racing a give-back was refused (round ${i})`);
+      previous = next;
+    }
+    assert.ok((await held(busy)) <= 3);
     a.close();
     b.close();
   });
 
   await check("each visitor, workspace and day has its own places", async () => {
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: publicBookingVisitorKey("203.0.113.8"), requestId: req(), now })).ok, true);
+    assert.equal((await claimFor(publicBookingVisitorKey("203.0.113.8"), req())).ok, true);
     assert.equal((await claimPublicBooking(db, { tenantId: OTHER, visitorKey: key, requestId: req(), now })).ok, true, "another workspace shared OASIS's cap");
-    const tomorrow = new Date(now.getTime() + 86_400_000);
-    assert.equal((await claimPublicBooking(db, { tenantId: OASIS, visitorKey: key, requestId: req(), now: tomorrow })).ok, true, "yesterday's places carried over");
+    assert.equal((await claimFor(key, req(), tomorrow)).ok, true, "yesterday's places carried over");
   });
 
   await check("no address is one shared key, so it cannot slip past; the address is never stored", async () => {
@@ -174,12 +230,11 @@ async function main() {
     assert.match(route, /if \(PRE_PROVIDER_ERRORS\.has\(errorCode\)\) await giveBackClaim\(\);/, "a failure before Google kept its place (Codex review of #670)");
     assert.match(route, /if \(!meeting\) \{[\s\S]{0,200}await giveBackClaim\(\);/);
     assert.match(route, /if \(compensated\) await giveBackClaim\(\);/, "a booking left standing gave its place back");
-    // Re-asserted once the booking is recorded on the lead, before anything else.
-    assert.equal(route.match(/await confirmPublicBooking\(getTursoClient\(\), claim, new Date\(\)\);/g)?.length, 1);
-    const confirmAt = route.indexOf("await confirmPublicBooking(");
-    assert.ok(confirmAt > route.indexOf("if (transition.error || transitionData?.ok === false) {"), "confirmed before the booking was recorded");
-    assert.ok(confirmAt < route.indexOf("await activateVerifiedFounderMeeting(context.tenantId, meeting.appointmentId);"));
+    // Six give-backs, each on a path that returns at once, so no attempt gives back twice.
     assert.equal(route.match(/await giveBackClaim\(\)/g)?.length, 6, "a give-back in an unexpected place");
+    for (const at of [...route.matchAll(/await giveBackClaim\(\);/g)].map((m) => m.index ?? 0)) {
+      assert.match(route.slice(at, at + 160), /^await giveBackClaim\(\);\s*(?:const code = [^\n]+\s*)?return NextResponse\.json/, "a give-back that does not end the request");
+    }
     // The pre-Google list names only codes the meeting service really throws
     // before its Google call, and never an in-flight or shared-request one.
     const service = readFileSync(join(ROOT, "lib", "website-sales-founder-meeting.ts"), "utf8");
