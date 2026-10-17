@@ -74,13 +74,19 @@ const CONTACT_ERRORS = new Set(["invalid_client_phone", "client_phone_required",
  * hold on the cap place (lib/forms/public-booking-cap.ts). The place itself is
  * freed only once no attempt of the request holds it, so a retry that hits one
  * of these never frees the place of an attempt still booking. That includes
- * the two a racing retry gets while a sibling attempt owns the booking
- * (meeting_transition_pending, meeting_notification_in_progress; Codex review
- * of #670): the sibling keeps its own hold. Codes not listed keep the hold.
+ * the ones a racing retry gets while a sibling attempt owns the booking
+ * (meeting_transition_pending, meeting_notification_in_progress,
+ * meeting_booking_conflict; Codex review of #670): the sibling keeps its own
+ * hold. tests/public-booking-cap.test.ts fails when the service throws a code
+ * before its Google call that is neither here nor handled above. Codes not
+ * listed keep the hold.
  */
 const PRE_PROVIDER_ERRORS = new Set([
   "meeting_transition_pending",
   "meeting_notification_in_progress",
+  "meeting_booking_conflict",
+  "meeting_intent_missing",
+  "booking_request_mismatch",
   "booking_confirmations_required",
   "client_agenda_required",
   "handoff_note_required",

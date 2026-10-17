@@ -254,7 +254,7 @@ async function main() {
     const codes = [...list.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
     assert.ok(codes.length >= 10, "the pre-Google list is gone");
     for (const code of codes) assert.ok(service.includes(code) || meeting.includes(code), `"${code}" is not thrown by the meeting service`);
-    for (const never of ["meeting_booking_conflict", "calendar_create_failed", "meeting_receipt_write_failed", "meeting_notification_insert_failed"]) {
+    for (const never of ["calendar_create_failed", "meeting_receipt_write_failed", "meeting_notification_insert_failed", "meeting_failure_write_failed"]) {
       assert.ok(!codes.includes(never), `"${never}" may leave a booking`);
     }
     const createAt = service.indexOf("providerReceipt = await deps.createCalendar(calendarInput);");
@@ -279,6 +279,16 @@ async function main() {
       }
       assert.ok(thrown.test(service.slice(fnAt, takeoverEnd)), `"${code}" is no longer thrown by the booking`);
     }
+    // Every code the booking throws before its Google call (in the function or
+    // the takeover it runs first) is handled: given back as pre-Google, a
+    // contact refusal, or a cancelled request (Codex review of #670, pass 5).
+    const contactList = route.slice(route.indexOf("const CONTACT_ERRORS = new Set(["), route.indexOf("]);", route.indexOf("const CONTACT_ERRORS")));
+    const handled = new Set([...codes, ...[...contactList.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]), "booking_request_cancelled"]);
+    const preGoogle = service.slice(fnAt, createAt) + service.slice(takeoverAt, takeoverEnd);
+    const thrownBefore = [...preGoogle.matchAll(/throw new Error\((?:"([a-z_]+)"|`([a-z_]+)[:`])/g)].map((m) => m[1] || m[2]);
+    assert.ok(thrownBefore.length >= 8, "the pre-Google throws are gone");
+    for (const code of thrownBefore) assert.ok(handled.has(code), `"${code}" is thrown before Google but keeps its hold`);
+    assert.ok(service.indexOf("assertSameRequest(appointment", fnAt) < createAt && codes.includes("booking_request_mismatch"), "a reused request id with a changed booking keeps its hold");
     const calendar = readFileSync(join(ROOT, "components", "forms", "PublicBookingCalendar.tsx"), "utf8");
     assert.match(calendar, /code === "daily_booking_limit"/, "the visitor sees the bare code");
   });
