@@ -70,6 +70,10 @@ async function main() {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS ux_lead_interactions_provider_msg
       ON lead_interactions(provider, provider_message_id);
+    CREATE TABLE call_appointments (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT NOT NULL,
+      scheduled_for TEXT NOT NULL, status TEXT NOT NULL, calendar_status TEXT NOT NULL
+    );
   `);
   await seed.executeMultiple(
     readFileSync(join(ROOT, "database", "turso", "bravo__214_consent_events.sql"), "utf8"),
@@ -87,6 +91,11 @@ async function main() {
     sql: "INSERT INTO form_submissions (form_id, tenant_id, lead_id, step_index, payload) VALUES (?, ?, ?, ?, ?)",
     args: [formId, OASIS, leadId, stepIndex, JSON.stringify({ [`answer_${stepIndex}`]: "yes" })],
   });
+  const appointment = (id: string, leadId: string, at: string, status: string, calendarStatus: string) => ({
+    sql: "INSERT INTO call_appointments (id, tenant_id, lead_id, scheduled_for, status, calendar_status) VALUES (?, ?, ?, ?, ?, ?)",
+    args: [id, OASIS, leadId, at, status, calendarStatus],
+  });
+  const inTwoDays = new Date(Date.now() + 2 * 86_400_000).toISOString();
   const contactRecorded = { funnel_stage: "inbound_lead", inbound_lead_at: "2026-10-16T12:00:00.000Z" };
   await seed.batch([
     form(AUDIT_FORM, "ai-audit", 4),
@@ -112,12 +121,24 @@ async function main() {
       funnel_stage: "meeting_booked",
       meeting_booked_at: "2026-10-16T12:01:00.000Z",
       stage: "founder_meeting_booked",
-      founder_meeting_at: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+      founder_meeting_at: inTwoDays,
+      calendar_appointment_id: "appt-booked-first",
     }),
+    appointment("appt-booked-first", "booked-first", inTwoDays, "scheduled", "verified"),
     lead("booked-long-ago", {
       funnel_stage: "meeting_booked",
       founder_meeting_at: "2026-09-01T15:00:00.000Z",
+      calendar_appointment_id: "appt-long-ago",
     }),
+    appointment("appt-long-ago", "booked-long-ago", "2026-09-01T15:00:00.000Z", "scheduled", "verified"),
+    // Cancelled through a path that changed only the appointment: the time stays on the lead.
+    lead("booked-then-cancelled", {
+      funnel_stage: "meeting_booked",
+      founder_meeting_at: inTwoDays,
+      calendar_appointment_id: "appt-cancelled",
+      calendar_event_status: "verified",
+    }),
+    appointment("appt-cancelled", "booked-then-cancelled", inTwoDays, "cancelled", "cancelled"),
     lead("never-booked", contactRecorded),
     // Contact steps sent through a signed link (an operator's personalized link).
     lead("link-audit", {}),
@@ -128,7 +149,7 @@ async function main() {
   const { getServiceSupabase } = await import("../lib/supabase-server");
   const { signFormLink } = await import("../lib/form-links");
   const { resolvePublicFunnelBooking } = await import("../lib/forms/public-booking");
-  const { ensureAiAuditSubmissionDelivery, upcomingBookedCall } = await import("../lib/forms/ai-audit-notify");
+  const { ensureAiAuditSubmissionDelivery, bookedCallFromAppointment } = await import("../lib/forms/ai-audit-notify");
   const { scoreAiAuditLead } = await import("../lib/forms/ai-audit-ingest");
   const db = getServiceSupabase();
   const token = (formId: string, leadId: string) => {
@@ -215,13 +236,15 @@ async function main() {
     assert.equal(booked.inbound_lead_at, "2026-10-16T11:00:00.000Z", "its first-contact time is kept");
   });
 
-  await check("only an upcoming call counts as booked", () => {
+  await check("only a scheduled, verified, upcoming appointment counts as booked", () => {
     const now = Date.parse("2026-10-16T12:00:00.000Z");
-    assert.equal(upcomingBookedCall({ founder_meeting_at: "2026-10-17T18:30:00.000Z" }, now), "Sat, Oct 17, 2:30 p.m. EDT");
-    assert.equal(upcomingBookedCall({ founder_meeting_at: "2026-10-15T18:30:00.000Z" }, now), undefined, "a past call");
-    assert.equal(upcomingBookedCall({ founder_meeting_at: "soon" }, now), undefined, "not a date");
-    assert.equal(upcomingBookedCall({ founder_meeting_at: "" }, now), undefined);
-    assert.equal(upcomingBookedCall({}, now), undefined);
+    const live = { scheduled_for: "2026-10-17T18:30:00.000Z", status: "scheduled", calendar_status: "verified" };
+    assert.equal(bookedCallFromAppointment(live, now), "Sat, Oct 17, 2:30 p.m. EDT");
+    assert.equal(bookedCallFromAppointment({ ...live, scheduled_for: "2026-10-15T18:30:00.000Z" }, now), undefined, "a past call");
+    assert.equal(bookedCallFromAppointment({ ...live, status: "cancelled" }, now), undefined, "a cancelled call");
+    assert.equal(bookedCallFromAppointment({ ...live, calendar_status: "pending" }, now), undefined, "not on the calendar yet");
+    assert.equal(bookedCallFromAppointment({ ...live, scheduled_for: "soon" }, now), undefined, "not a date");
+    assert.equal(bookedCallFromAppointment(null, now), undefined);
   });
 
   const answers = (email: string) => ({
@@ -272,8 +295,8 @@ async function main() {
     assert.doesNotMatch(subject, /booking your AI audit call/, "the subject does not ask them to book");
   });
 
-  await check("a lead with no upcoming call: unbooked, and the email offers the calendar as before", async () => {
-    for (const leadId of ["never-booked", "booked-long-ago"]) {
+  await check("a lead with no upcoming, live call (none, past, cancelled): unbooked, and the email offers the calendar as before", async () => {
+    for (const leadId of ["never-booked", "booked-long-ago", "booked-then-cancelled"]) {
       const result = await deliver(leadId);
       assert.equal(result.bookedCall, undefined, leadId);
       const { subject, body, event } = await delivered(leadId);

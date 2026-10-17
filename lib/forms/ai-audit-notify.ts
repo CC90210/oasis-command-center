@@ -88,7 +88,7 @@ export async function ensureAiAuditSalesEvent(input: {
   submissionId?: string;
   score?: ScoreBreakdown;
   booking?: { startsAt: string; meetUrl: string; appointmentId: string };
-  /** Completed with the call already booked (upcomingBookedCall). */
+  /** Completed with the call already booked (readBookedCall). */
   bookedCall?: string;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
@@ -168,20 +168,56 @@ async function readLeadData(
 }
 
 /**
- * The call this lead has on the calendar, as the alert prints it, or undefined.
+ * The call an appointment holds, as the alert prints it, or undefined.
  *
  * The calendar opens after the contact step (isEarlyPublicBookingFormSlug), so
- * a lead can finish the questions with the call already booked. The lead's
- * `founder_meeting_at` is the booked call every screen reads (the lead page,
- * the Sales desk); one in the past is not a call to confirm. A failed lead read
- * reads as not booked: the email then offers a time, as before, and the
- * calendar refuses a second booking for a lead already booked.
+ * a lead can finish the questions with the call already booked. Booked means
+ * the appointment is still scheduled, verified on Google Calendar, and in the
+ * future: some cancel paths change only the appointment, so a cancelled call's
+ * time can stay on the lead (Codex review of #667), and a call in the past is
+ * not one to confirm.
  */
-export function upcomingBookedCall(lead: Record<string, unknown>, nowMs = Date.now()): string | undefined {
-  const at = typeof lead.founder_meeting_at === "string" ? lead.founder_meeting_at.trim() : "";
+export function bookedCallFromAppointment(
+  row: { scheduled_for?: unknown; status?: unknown; calendar_status?: unknown } | null,
+  nowMs = Date.now(),
+): string | undefined {
+  if (!row || row.status !== "scheduled" || row.calendar_status !== "verified") return undefined;
+  const at = typeof row.scheduled_for === "string" ? row.scheduled_for.trim() : "";
   const startsMs = Date.parse(at);
   if (!at || !Number.isFinite(startsMs) || startsMs <= nowMs) return undefined;
   return formatBookedTime(at);
+}
+
+/**
+ * The call this lead has booked, read from its appointment (the one the lead
+ * points at), or undefined. A failed read counts as not booked: the email then
+ * offers a time, as before, and the calendar refuses a second booking.
+ */
+async function readBookedCall(
+  db: SupabaseClient,
+  tenantId: string,
+  leadId: string,
+): Promise<string | undefined> {
+  const lead = await readLeadData(db, tenantId, leadId, "ai-audit.notify");
+  const appointmentId = typeof lead.calendar_appointment_id === "string" ? lead.calendar_appointment_id.trim() : "";
+  if (!appointmentId) return undefined;
+  try {
+    const res = await db
+      .from("call_appointments")
+      .select("scheduled_for,status,calendar_status")
+      .eq("tenant_id", tenantId)
+      .eq("lead_id", leadId)
+      .eq("id", appointmentId)
+      .maybeSingle();
+    if (res.error) {
+      console.error("[ai-audit.notify] appointment read:", res.error.message);
+      return undefined;
+    }
+    return bookedCallFromAppointment(res.data as Parameters<typeof bookedCallFromAppointment>[0]);
+  } catch (err) {
+    console.error("[ai-audit.notify] appointment read threw:", err);
+    return undefined;
+  }
 }
 
 /**
@@ -369,7 +405,7 @@ export async function ensureAiAuditSubmissionDelivery(
 ): Promise<{ emailNote: string; salesEventOk: boolean; bookedCall?: string }> {
   const { db, tenantId, formId, leadId, answers, score } = input;
   // Booked before finishing? Then the event, the email and the alert say so.
-  const bookedCall = upcomingBookedCall(await readLeadData(db, tenantId, leadId, "ai-audit.notify"));
+  const bookedCall = await readBookedCall(db, tenantId, leadId);
   const salesEvent = await ensureAiAuditSalesEvent({
     db,
     tenantId,

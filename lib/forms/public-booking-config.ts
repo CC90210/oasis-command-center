@@ -89,14 +89,17 @@ export function isEarlyPublicBookingFormSlug(formSlug: string): boolean {
 
 /**
  * Must the finished-form write land before this form's calendar may open?
- * Only for a required call that opens at the END (BOOK). An optional call
- * never holds up the form's own next step, and a form that books after its
- * contact step had its calendar unlocked by that step.
+ * Yes for a required call that opens at the END (BOOK). Never for an optional
+ * call: it never holds up the form's own next step. For a form that books
+ * after its contact step, only when that step's record is not known to have
+ * landed (the submit route reads the lead to say so).
  */
-export function publicBookingCompletionGatesCalendar(formSlug: string): boolean {
-  return isPublicBookingFormSlug(formSlug) &&
-    !isOptionalPublicBookingFormSlug(formSlug) &&
-    !isEarlyPublicBookingFormSlug(formSlug);
+export function publicBookingCompletionGatesCalendar(
+  formSlug: string,
+  context: { calendarUnlockedAtContact?: boolean } = {},
+): boolean {
+  if (!isPublicBookingFormSlug(formSlug) || isOptionalPublicBookingFormSlug(formSlug)) return false;
+  return !(isEarlyPublicBookingFormSlug(formSlug) && context.calendarUnlockedAtContact === true);
 }
 
 // Own keys only: never an inherited Object member for a slug like "constructor".
