@@ -7,6 +7,7 @@
  * rendered as text would disagree with the browser's clock and redraw the page
  * (React #418). The grid renders no time at all in its first render.
  */
+import { timeAgo } from "@/lib/devices/presence";
 import type { ToolField } from "@/lib/tools/registry";
 import type { JobView } from "@/lib/tools/types";
 
@@ -103,12 +104,10 @@ export function runTime(iso: string, locale?: string, timeZone?: string): string
 }
 
 export const runsOnText = (label: string) => `Runs on ${label}`;
-export const seenText = (minutes: number) => `seen ${Math.max(0, Math.floor(minutes))} min ago`;
 
-/** "seen n min ago" for a runner last seen at `lastSeenAt` (ISO), on the viewer's clock; null when the time does not parse. */
+/** "seen 3 min ago" for a runner last seen at `lastSeenAt` (ISO), in the one time-ago vocabulary on the viewer's clock; null when the time does not parse. */
 export function seenLine(lastSeenAt: string, nowMs: number): string | null {
-  const seen = Date.parse(lastSeenAt);
-  return Number.isFinite(seen) ? seenText((nowMs - seen) / 60_000) : null;
+  return Number.isFinite(Date.parse(lastSeenAt)) ? `seen ${timeAgo(lastSeenAt, { now: nowMs })}` : null;
 }
 export const charsText = (n: number, max: number) => `${n} of ${max} characters`;
 export const OVER_LIMIT = "Over the limit";

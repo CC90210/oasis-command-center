@@ -30,6 +30,7 @@ import type { CronInventoryJob } from "@/lib/automations/cron-inventory";
 import { scheduleIntervalSeconds } from "@/lib/automations/cron-schedule";
 import { nextRuns } from "@/lib/automations/schedule-plan";
 import { isTimeZone, wallDateKey } from "@/lib/calendar/zone";
+import { timeAgo } from "@/lib/devices/presence";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -78,16 +79,6 @@ export function viewerTimeZone(): string {
 
 function zoneOf(opts: RunSummaryOptions): string {
   return opts.timeZone && isTimeZone(opts.timeZone) ? opts.timeZone : viewerTimeZone();
-}
-
-/** "2h ago": the short relative form the row has always used (moved here from CronJobsManager). */
-export function relativeTimeShort(iso: string | null | undefined, now: number = Date.now()): string {
-  if (!iso) return "never";
-  const diff = now - new Date(iso).getTime();
-  if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
-  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
-  return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
 /**
@@ -232,7 +223,7 @@ export function summarizeRun(job: RunSummaryJob, opts: RunSummaryOptions = {}): 
       failed: false,
       lastRan: lastRanAt
         ? {
-            text: `Last ran ${relativeTimeShort(lastRanAt, now)}${failures > 0 ? " and failed" : ""}`,
+            text: `Last ran ${timeAgo(lastRanAt, { now })}${failures > 0 ? " and failed" : ""}`,
             tone: failures > 0 ? "bad" : "neutral",
           }
         : null,
@@ -240,7 +231,7 @@ export function summarizeRun(job: RunSummaryJob, opts: RunSummaryOptions = {}): 
         kind === "missed"
           ? when ? `Last attempt: skipped at ${when}` : "Last attempt: skipped"
           : attemptAt
-            ? `Last attempt ${relativeTimeShort(attemptAt, now)}: ${verb}`
+            ? `Last attempt ${timeAgo(attemptAt, { now })}: ${verb}`
             : `Last attempt: ${verb}`,
       result: { text: explainSkippedResult(evidence ?? "", when), tone: "neutral" },
       details,
@@ -252,7 +243,7 @@ export function summarizeRun(job: RunSummaryJob, opts: RunSummaryOptions = {}): 
   const atWhen = when ? ` at ${when}` : "";
   const lastRan = ranAt
     ? {
-        text: `Last ran ${relativeTimeShort(ranAt, now)}`,
+        text: `Last ran ${timeAgo(ranAt, { now })}`,
         tone: (status === "success" ? "ok" : status === "error" ? "bad" : status === "unknown" ? "unclear" : "neutral") as RunTone,
       }
     : null;

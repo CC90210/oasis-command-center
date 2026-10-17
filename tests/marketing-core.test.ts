@@ -176,9 +176,10 @@ const now = new Date("2026-08-02T12:00:00Z");
 assert.equal(freshnessLabel(null, now), "never");
 assert.equal(freshnessLabel("not-a-date", now), "unknown");
 assert.equal(freshnessLabel("2026-08-02T11:59:30Z", now), "just now");
-assert.equal(freshnessLabel("2026-08-02T11:30:00Z", now), "30m ago");
-assert.equal(freshnessLabel("2026-08-02T09:00:00Z", now), "3h ago");
-assert.equal(freshnessLabel("2026-07-30T12:00:00Z", now), "3d ago");
+// The one time-ago vocabulary (lib/devices/presence.ts timeAgo).
+assert.equal(freshnessLabel("2026-08-02T11:30:00Z", now), "30 min ago");
+assert.equal(freshnessLabel("2026-08-02T09:00:00Z", now), "3 h ago");
+assert.equal(freshnessLabel("2026-07-30T12:00:00Z", now), "3 d ago");
 // Clock skew must not render as a negative age.
 assert.equal(freshnessLabel("2026-08-02T12:05:00Z", now), "just now");
 
@@ -492,12 +493,13 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
     );
   }
 
-  // Units read correctly at each scale; "Queued 180 minutes ago" is worse copy
-  // than "3 hours ago" and this is where an off-by-60 would hide.
-  assert.match(stalePublishWarning(queued, at(30))!, /30 minutes ago/);
-  assert.match(stalePublishWarning(queued, at(60))!, /1 hour ago/);
-  assert.match(stalePublishWarning(queued, at(180))!, /3 hours ago/);
-  assert.match(stalePublishWarning(queued, at(60 * 24 * 2))!, /2 days ago/);
+  // Units read correctly at each scale; "Queued 180 min ago" is worse copy than
+  // "3 h ago" and this is where an off-by-60 would hide. The words are the one
+  // time-ago vocabulary (lib/devices/presence.ts timeAgo).
+  assert.match(stalePublishWarning(queued, at(30))!, /Queued 30 min ago and/);
+  assert.match(stalePublishWarning(queued, at(60))!, /Queued 1 h ago and/);
+  assert.match(stalePublishWarning(queued, at(180))!, /Queued 3 h ago and/);
+  assert.match(stalePublishWarning(queued, at(60 * 24 * 2))!, /Queued 2 d ago and/);
 
   // Never throw on bad input: this renders inside a panel, and a crash here
   // would take the whole detail page with it.

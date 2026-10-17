@@ -329,7 +329,7 @@ async function main() {
     const guards = sh.describeGuards({ status: "healthy", last_ping_at: ago(40 * S), metadata: allOn }, NOW);
     const v = sh.describeVerdict({ machines: pc(40 * S), guards, now: NOW });
     assert.equal(v.tone, "ok");
-    assert.equal(v.text, "Everything is protected. CCPC (Windows) checked in 40 s ago.");
+    assert.equal(v.text, "Everything is protected. CCPC (Windows) checked in just now.");
   });
   await check("verdict: stale", () => {
     const guards = sh.describeGuards({ status: "healthy", last_ping_at: ago(3 * H), metadata: allOn }, NOW);
@@ -341,7 +341,7 @@ async function main() {
     const missing = sh.describeVerdict({ machines: pc(40 * S), guards: sh.describeGuards(null, NOW), now: NOW });
     assert.equal(missing.tone, "unknown");
     assert.match(missing.text, /^Your guards aren't reported here yet: they run on your computer/);
-    assert.match(missing.text, /CCPC \(Windows\) checked in 40 s ago\.$/);
+    assert.match(missing.text, /CCPC \(Windows\) checked in just now\.$/);
     const meta = { guards: { ...allOn.guards, coord_guard: { mode: "report" }, subprocess_guard: { mode: "off" } } };
     const partly = sh.describeVerdict({
       machines: pc(40 * S),
@@ -429,7 +429,7 @@ async function main() {
   await check("guards: the newest report wins over a month-old duplicate", () => {
     assert.equal(health.guards?.freshness, "fresh");
     assert.ok(health.guards?.guards.every((g) => g.state === "on"));
-    assert.equal(health.verdict.text, "Everything is protected. CCPC (Windows) checked in 40 s ago.");
+    assert.equal(health.verdict.text, "Everything is protected. CCPC (Windows) checked in just now.");
   });
   await check("workers: newest row per service; stale is down, stopped-by-you is not; another workspace's ping is not OASIS's", () => {
     const byService = new Map(health.workers?.map((w) => [w.service, w]));
@@ -537,7 +537,7 @@ async function main() {
   await walk(await HealthPage(), out, client);
   const text = out.join(" ").replace(/\s+/g, " ");
   await check("/health: the verdict, the sections and the COUNT tile render", () => {
-    assert.match(text, /Everything is protected\. CCPC \(Windows\) checked in \d+ s ago\./);
+    assert.match(text, /Everything is protected\. CCPC \(Windows\) checked in just now\./);
     for (const section of ["Your computer", "Safety guards", "Background work", "Automation signals", "Integration heartbeats"]) {
       assert.ok(text.includes(section), `missing section: ${section}`);
     }

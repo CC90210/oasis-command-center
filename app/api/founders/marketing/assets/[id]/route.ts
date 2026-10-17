@@ -47,6 +47,34 @@ const REACHABLE: AssetStatus[] = ["approved", "rejected", "archived", "in_review
 
 type Ctx = { params: Promise<{ id: string }> };
 
+/**
+ * Close the requests for changes still open on an asset that a verdict has just
+ * SETTLED. POST ../request-changes writes them with `acted_on_at` null: they are
+ * the marketing agent's inbox. Without this, Request changes and then Approve,
+ * Archive, Reject or Delete - two sequential clicks, no race - leaves an open
+ * request on an asset nobody is waiting on: the agent would rework an approved
+ * asset, and the tile keeps its unread dot. CLOSED, not deleted: the row stays as
+ * history. Scoped by workspace, asset and decision, and only rows still open.
+ * Best-effort like the verdict row (the verdict stands), but never silent.
+ */
+async function closeOpenRequests(
+  db: ReturnType<typeof getServiceSupabase>,
+  tenantId: string,
+  assetId: string,
+  at: string,
+) {
+  const closed = await db
+    .from("marketing_review")
+    .update({ acted_on_at: at })
+    .eq("tenant_id", tenantId)
+    .eq("asset_id", assetId)
+    .eq("decision", "request_changes")
+    .is("acted_on_at", null);
+  if (closed.error) {
+    console.warn("[founders.library] could not close the open requests for changes", closed.error.message);
+  }
+}
+
 export async function PATCH(req: Request, ctx: Ctx) {
   const founder = await resolveFounder();
   if (!founder) return notFound();
@@ -159,6 +187,12 @@ export async function PATCH(req: Request, ctx: Ctx) {
       })
     : null;
 
+  // A verdict that SETTLES the asset closes the requests still open on it. A move
+  // back to in review settles nothing, so it closes nothing.
+  if (next === "approved" || next === "rejected" || next === "archived") {
+    await closeOpenRequests(db, founder.tenantId, id, decided);
+  }
+
   return NextResponse.json({
     ok: true,
     asset: updated.data,
@@ -228,6 +262,12 @@ export async function DELETE(_req: Request, ctx: Ctx) {
   if (still.data) {
     return NextResponse.json({ ok: false, error: "delete_did_not_take" }, { status: 500 });
   }
+
+  // The asset is gone, so nobody is waiting on it: close the requests for changes
+  // still open on it (their rows stay, as every review row of a deleted asset
+  // always has). Only now, once the delete is confirmed: closing them for an
+  // asset that then failed to delete would hide a live request.
+  await closeOpenRequests(db, founder.tenantId, id, new Date().toISOString());
 
   return NextResponse.json({ ok: true, deleted: existing.data, orphan: orphans });
 }

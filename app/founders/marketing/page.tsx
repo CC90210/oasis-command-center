@@ -285,10 +285,11 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
         ) : needsYou === 0 ? (
           <MarketingEmpty
             headline="Nothing waiting on you"
-            // Only the buttons the tiles have: there is no "ask for changes" or
-            // "reject" control anywhere, so the page no longer offers them.
-            detail="When the marketing agent makes something, it lands here for your verdict. Approve or archive each one; archived items can be restored."
-            hint="Open any asset from the Library to approve or archive it."
+            // Only the buttons the tiles have: Approve, Request changes (sent back
+            // with a required note) and Archive. There is no "reject" control
+            // anywhere, so the page does not offer it.
+            detail="When the marketing agent makes something, it lands here for your verdict. For each one, approve it, send it back with a note, or archive it; archived items can be restored."
+            hint="Open any asset from the Library to approve it, send it back or archive it."
           />
         ) : (
           <Card noPadding>
@@ -312,8 +313,8 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
                           className="font-semibold text-accent hover:underline">
                       {awaitingVerdict} asset{awaitingVerdict === 1 ? "" : "s"}
                     </Link>{" "}
-                    awaiting your verdict. Approve or archive each one; archived items
-                    can be restored.
+                    awaiting your verdict. For each one, approve it, send it back with a
+                    note, or archive it; archived items can be restored.
                   </>
                 ) : (
                   <>{needsYou} item{needsYou === 1 ? "" : "s"} pending.</>

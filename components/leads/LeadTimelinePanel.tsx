@@ -36,7 +36,7 @@ import {
   Voicemail,
   type LucideIcon,
 } from "lucide-react";
-import { relTime } from "@/lib/format-helpers";
+import { timeAgo } from "@/lib/devices/presence";
 
 type TimelineEvent = {
   source: string;
@@ -221,7 +221,7 @@ function CallEventContent({ e }: { e: TimelineEvent }) {
           )}
         </div>
         <time title={absTime(e.at)} className="text-[10.5px] text-fg-dim font-mono shrink-0">
-          {relTime(e.at)}
+          {timeAgo(e.at)}
         </time>
       </div>
       {isCi && ciText ? (
@@ -402,7 +402,7 @@ export function LeadTimelinePanel({
                           title={absTime(e.at)}
                           className="text-[10.5px] text-fg-dim font-mono shrink-0"
                         >
-                          {relTime(e.at)}
+                          {timeAgo(e.at)}
                         </time>
                       </div>
                       {e.body && (

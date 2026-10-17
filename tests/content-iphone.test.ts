@@ -663,8 +663,12 @@ async function main() {
 
   await check("the copy describes only buttons that exist", () => {
     const overview = screenText("app/founders/marketing/page.tsx").join(" | ");
-    assert.doesNotMatch(overview, /ask for changes|reject it|request changes/i, "there is no such button");
-    assert.match(overview, /Approve or archive each one; archived items can be restored\./);
+    // The Library's tiles have Approve, Request changes (sent back with a note)
+    // and Archive; there is still no Reject, and the copy says what is there.
+    assert.doesNotMatch(overview, /reject it/i, "there is no Reject button");
+    assert.match(overview, /For each one, approve it, send it back with a note, or archive it; archived items can be restored\./);
+    assert.match(overview, /to approve it, send it back or archive it\./, "the hint names the same three");
+    assert.doesNotMatch(overview, /Approve or archive each one/, "the old two-verb copy is gone");
     assert.match(overview, /approved, not posted/);
     assert.match(overview, /queued by the poster/);
     assert.doesNotMatch(overview, /ready to book|"booked"/);
@@ -678,6 +682,9 @@ async function main() {
     assert.match(library, /New content appears here when the marketing agent or the daily poster adds it\./);
     assert.doesNotMatch(library, /Drop links/, "training material never adds to the Library");
     const actions = screenText("components/founders/AssetActions.tsx").join(" | ");
+    // "Send it back with a note" is a button: Request changes opens the note box, Send back sends it.
+    assert.match(actions, /Request changes/);
+    assert.match(actions, /Send back/);
     assert.match(actions, /for good\? It cannot be undone\. Archive keeps it, and it can be restored\./);
     assert.match(actions, /Archive instead/);
     assert.match(actions, /Deleted\. It is gone from the Library for good\./);

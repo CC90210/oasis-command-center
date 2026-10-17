@@ -3,19 +3,7 @@
 import { useState } from "react";
 import { Check, Loader2, MessageSquarePlus, Pencil, Trash2, X } from "lucide-react";
 import type { ConversationSummary, DeptChatState } from "./run-store";
-
-/** "just now", "5 min ago", "yesterday", else the date: a chat list is scanned by when, not by a timestamp. */
-export function whenLabel(iso: string, now: number = Date.now()): string {
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return "";
-  const mins = Math.floor((now - at) / 60_000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins} min ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} h ago`;
-  if (hours < 48) return "yesterday";
-  return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
+import { timeAgo } from "@/lib/devices/presence";
 
 function Row({
   c,
@@ -98,7 +86,7 @@ function Row({
               Working
             </>
           ) : (
-            whenLabel(c.lastMessageAt)
+            timeAgo(c.lastMessageAt)
           )}
         </span>
       </button>

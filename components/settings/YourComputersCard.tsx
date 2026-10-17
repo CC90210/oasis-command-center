@@ -85,10 +85,6 @@ function blockedWords(reason: string): string {
   return BLOCKED_REASON_WORDS[reason] || reason.replace(/_/g, " ");
 }
 
-/** Exported so Devices (advanced) dates its rows the same way "Offline since" does here (CC 2026-10-16).
- *  It lives in lib/devices/presence.ts now, beside presenceWords, which writes that "Offline since". */
-export { timeAgo };
-
 /**
  * The exact row line (ui_changes section 1), from the one state. The state's
  * word is the one Settings > AI brain uses for it (lib/bridge-cli-status.ts
@@ -98,7 +94,7 @@ export { timeAgo };
  * presenceWords', the computer's words on every screen.
  */
 function rowLine(label: string, state: ComputerAnswerState, claimStateAt: string | null, lastSeenAt: string | null): string {
-  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt)}`;
+  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt, { moment: true })}`;
   if (state === "busy") return `${label} · ${presenceWords("busy")}, finishing a reply`;
   if (state === "not_approved") return `${label} · ${runtimeStatusWords("approval_needed")}`;
   if (state === "offline") return `${label} · ${presenceWords("offline", lastSeenAt)}`;
@@ -133,7 +129,7 @@ function teamRowLine(
   lastSeenAt: string | null,
   nowMs: number,
 ): string {
-  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt)}`;
+  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt, { moment: true })}`;
   if (state === "busy") return `${label} · ${presenceWords("busy")}, finishing a reply`;
   if (state === "not_approved") {
     const presence = presenceWords(machineState(lastSeenAt, nowMs), lastSeenAt);
