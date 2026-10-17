@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { sameOrigin } from "@/lib/calendar/http";
-import { deletePipelineLead } from "@/lib/pipeline/delete-lead";
+import { deletePipelineLead, pipelineDeleteRateLimit } from "@/lib/pipeline/delete-lead";
 import { rateLimit } from "@/lib/rate-limit";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
@@ -21,14 +21,7 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
-  // Each delete is two requests (the dry run the page shows, then the delete),
-  // and an owner clearing a handful of junk leads one by one must not be cut off
-  // halfway: 40 at once, refilling one every 6 seconds.
-  const limited = rateLimit({
-    key: "pipeline-delete:" + session.userId,
-    capacity: 40,
-    refillPerSec: 1 / 6,
-  });
+  const limited = rateLimit(pipelineDeleteRateLimit(session.userId));
   if (!limited.allowed) {
     return NextResponse.json(
       { ok: false, error: "rate_limited" },

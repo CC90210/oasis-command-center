@@ -69,7 +69,8 @@ check("the route and bulk op refuse anyone but an owner, and need the confirm wo
   assert.match(deleteBlock, /startsWith\("application\/json"\)/, "bulk delete accepts a text/plain body");
   assert.match(deleteBlock, /if \(!sess\.isTrueAdmin\)/);
   assert.match(deleteBlock, /if \(body\.confirm !== "delete"\)/);
-  assert.match(deleteBlock, /key: "pipeline-delete:" \+ sess\.userId/, "bulk delete is not rate-limited with the single delete");
+  assert.match(deleteBlock, /rateLimit\(pipelineDeleteRateLimit\(sess\.userId\)\)/, "bulk delete is not rate-limited with the single delete");
+  assert.match(route, /rateLimit\(pipelineDeleteRateLimit\(session\.userId\)\)/, "the single delete has its own bucket");
   assert.match(bulk, /const MAX_DELETE_IDS = 15;/);
 });
 

@@ -21,6 +21,17 @@ export type DeletePipelineLeadResult =
   | { ok: false; code: "blocked"; blockers: string[] }
   | { ok: false; code: "unavailable"; message: string };
 
+/**
+ * The one rate-limit bucket for deleting leads, shared by POST
+ * /api/pipeline/[id]/delete and /api/leads/bulk op "delete". Each single delete
+ * is two requests (the dry run the page shows, then the delete), and an owner
+ * clearing a handful of junk leads must not be cut off halfway: 40 at once,
+ * refilling one every 6 seconds.
+ */
+export function pipelineDeleteRateLimit(userId: string): { key: string; capacity: number; refillPerSec: number } {
+  return { key: "pipeline-delete:" + userId, capacity: 40, refillPerSec: 1 / 6 };
+}
+
 const PROTECTED_STAGES = new Set(["won", "onboarding", "in_build", "client_review", "launched"]);
 const UNLINK_TARGETS = [
   ["offer_funnel_events", "lead_id"],

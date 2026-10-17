@@ -26,7 +26,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { deletePipelineLead } from "@/lib/pipeline/delete-lead";
+import { deletePipelineLead, pipelineDeleteRateLimit } from "@/lib/pipeline/delete-lead";
 import { sameOrigin } from "@/lib/calendar/http";
 import { rateLimit } from "@/lib/rate-limit";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
@@ -137,7 +137,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "confirmation_required" }, { status: 400 });
     }
     // The same bucket as POST /api/pipeline/[id]/delete.
-    const limited = rateLimit({ key: "pipeline-delete:" + sess.userId, capacity: 40, refillPerSec: 1 / 6 });
+    const limited = rateLimit(pipelineDeleteRateLimit(sess.userId));
     if (!limited.allowed) {
       return NextResponse.json(
         { ok: false, error: "rate_limited" },
