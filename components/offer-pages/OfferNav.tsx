@@ -1,7 +1,8 @@
 /**
  * OfferNav - the offer page's sticky header (design 2.3 and 2.5): the
  * workspace's mark, the pinned sections that are actually drawn, and the Book
- * button. Phones keep the mark and the button; the anchors are hidden there.
+ * button. Phones get the same sections behind a menu button (OfferNavMenu),
+ * so the header keeps its height there.
  *
  * Plain anchors: in-page links work without JavaScript, and Section's scroll-mt
  * keeps a heading clear of this bar. The mark is the one client piece
@@ -9,6 +10,7 @@
  */
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
 import { SafeLogo } from "@/components/brand/SafeLogo";
+import { OfferNavMenu } from "@/components/offer-pages/OfferNavMenu";
 import type { DrawnPage } from "@/lib/offer-pages/visibility";
 
 export function OfferNav({
@@ -44,9 +46,20 @@ export function OfferNav({
             ))}
           </nav>
         ) : null}
-        <a href="#book" className={`${CTA_PRIMARY} shrink-0 !px-4 !py-2`} data-section="nav">
-          {ctaLabel}
-        </a>
+        {/* On a phone the button's label may be up to 40 characters beside the
+            menu button: it is capped and ends in an ellipsis there, so the row
+            never overflows (Codex on #665); from sm up it shows in full. */}
+        <div className="flex min-w-0 items-center gap-1">
+          <OfferNavMenu nav={nav} />
+          <a
+            href="#book"
+            className={`${CTA_PRIMARY} min-w-0 max-w-[10.5rem] !px-4 !py-2 sm:max-w-none`}
+            data-section="nav"
+            title={ctaLabel}
+          >
+            <span className="min-w-0 truncate">{ctaLabel}</span>
+          </a>
+        </div>
       </div>
     </header>
   );

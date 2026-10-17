@@ -183,12 +183,13 @@ Copy from Maven (CMO-Agent `output/offer-pages/ai-audit.json`, 2026-10-16), load
 are optional, as the page says.
 
 - [ ] **"Conaugh reads every one personally"** (hero, book, what you get). Confirmed wording 2026-10-08.
-- [ ] **"Follows up with you personally"** on every completed audit (hero, how it works, FAQ).
-- [ ] **The follow-up gives "a straight answer on where AI fits".** No written report, instant reply or same-day call
+- [x] **No "follows up" promise** (Maven copy pass 2026-10-16): the page no longer says Conaugh follows up or that
+      "a call gets set up". The visitor books the call on the page, right after the contact details (book sooner).
+- [ ] **The call gives "a straight answer on where AI fits".** No written report, instant reply or same-day call
       is promised anywhere on the page.
 - [ ] **Routing:** larger operations to FLEET, unready ones to the free community (what you get, FAQ).
 - [x] **How a call gets booked** (FAQ "What happens after I submit?"). The calendar shipped (#655): the form opens it on
       the page. Maven's answer, applied to this file and the production draft 2026-10-16 (no number, so no new tick):
-      "Right after you submit, a calendar opens on this page so you can book a short call".
+      "As soon as you leave your details, a calendar opens on this page so you can book a short call" (reworded for book sooner).
 - [ ] **Hero video:** none yet. Maven's window-light audit film (9:16 and 16:9) waits on the narrator voice; attach it
       with its rights tick in the builder.
