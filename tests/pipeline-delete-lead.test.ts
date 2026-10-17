@@ -176,7 +176,8 @@ async function main(): Promise<void> {
     );
     -- The live shape that matters here: no tenant_id column, the tenant in the payload.
     CREATE TABLE agent_events (
-      id TEXT PRIMARY KEY, event_type TEXT NOT NULL, publisher_agent TEXT, payload TEXT, correlation_id TEXT
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), event_type TEXT NOT NULL,
+      publisher_agent TEXT, severity TEXT, target_agent TEXT, payload TEXT, correlation_id TEXT
     );
   `);
 
@@ -269,6 +270,9 @@ async function main(): Promise<void> {
       ["ev-junk-stage", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: JUNK, field: "stage", from: null, to: "assigned", data: { name: "Junk Lead", email: "junk@lead.test", phone: "+15145550142" }, tenant_id: TENANT }],
       ["ev-junk-audit", "OASIS_AI_AUDIT_STARTED", { lead_id: JUNK, form_id: "f-1", tenant_id: TENANT }],
       ["ev-junk-foreign", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: JUNK, data: { email: "theirs@other.test" }, tenant_id: OTHER_TENANT }],
+      // A dashboard email that was queued (and is cancelled by the delete) vs one that went out.
+      ["ev-junk-queued-email", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test", subject: "Hi", tenant_id: TENANT }],
+      ["ev-junk-sent-email", "BRAVO_DASHBOARD_EMAIL_SENT", { lead_id: JUNK, to_email: "junk@lead.test", sent_as: "cc@oasis.test", tenant_id: TENANT }],
     ].map(([id, type, payload]) => ({
       sql: "INSERT INTO agent_events (id, event_type, publisher_agent, payload, correlation_id) VALUES (?, ?, 'manifest-data', ?, ?)",
       args: [id as string, type as string, JSON.stringify(payload), String((payload as { tenant_id: string }).tenant_id)],
@@ -440,10 +444,19 @@ async function main(): Promise<void> {
   // (live E2E of #669: name, email and phone outlived the lead).
   const payloadOf = async (id: string) =>
     JSON.parse(String((await seed.execute({ sql: "SELECT payload FROM agent_events WHERE id = ?", args: [id] })).rows[0]?.payload)) as Record<string, unknown>;
-  assert.equal(junkResult.plan.delete.agent_event_copies, 1);
+  assert.equal(junkResult.plan.delete.agent_event_copies, 2);
   const stage = await payloadOf("ev-junk-stage");
   assert.equal("data" in stage, false, "the lead's name, email and phone outlived it in agent_events");
-  assert.equal(stage.data_removed, "lead_deleted");
+  assert.equal(stage.details_removed, "lead_deleted");
+  // Codex on #674: a queued (now cancelled) email is not sent history; a sent one is.
+  const queuedEmail = await payloadOf("ev-junk-queued-email");
+  assert.equal("to_email" in queuedEmail, false, "a cancelled email's address outlived the lead");
+  assert.equal(queuedEmail.subject, "Hi", "the queued event itself was damaged");
+  assert.deepEqual(
+    await payloadOf("ev-junk-sent-email"),
+    { lead_id: JUNK, to_email: "junk@lead.test", sent_as: "cc@oasis.test", tenant_id: TENANT },
+    "the record of a message that went out was rewritten",
+  );
   assert.deepEqual([stage.entity, stage.record_id, stage.to, stage.tenant_id], ["lead", JUNK, "assigned", TENANT], "the event itself was damaged");
   assert.deepEqual(await payloadOf("ev-junk-audit"), { lead_id: JUNK, form_id: "f-1", tenant_id: TENANT }, "an event with no copy was rewritten");
   assert.deepEqual((await payloadOf("ev-junk-foreign")).data, { email: "theirs@other.test" }, "another workspace's event was touched");
@@ -451,6 +464,16 @@ async function main(): Promise<void> {
   const deletedState = await state(seed);
   assert.deepEqual(await remove(JUNK), { ok: false, code: "not_found" });
   assert.deepEqual(await state(seed), deletedState, "re-running a completed delete wrote again");
+  // A stage change racing the delete writes its event after the cleanup ran
+  // (Codex on #674): the publisher removes the copy itself once the row is gone.
+  const { publishStatusChange } = await import("../lib/manifest/events");
+  await publishStatusChange({ tenantId: TENANT, entity: "lead", recordId: JUNK, field: "stage", from: "assigned", to: "lost", data: { email: "late@lead.test" } });
+  await publishStatusChange({ tenantId: TENANT, entity: "lead", recordId: DRY, field: "stage", from: "assigned", to: "qualified", data: { email: "dry@lead.test" } });
+  const racing = await seed.execute({ sql: "SELECT payload FROM agent_events WHERE json_extract(payload, '$.to') IN ('lost', 'qualified') ORDER BY json_extract(payload, '$.to')", args: [] });
+  const [lostEvent, liveEvent] = racing.rows.map((r) => JSON.parse(String(r.payload)) as Record<string, unknown>);
+  assert.equal(lostEvent?.to, "lost", "the racing event was not written at all");
+  assert.equal("data" in lostEvent, false, "an event written after the delete kept the deleted lead's details");
+  assert.deepEqual(liveEvent?.data, { email: "dry@lead.test" }, "a live lead's event lost the copy its drips read");
   pass("junk deletion cancels queued work, preserves history, unlinks funnel events, and audits last");
 
   const foreignResult = await remove(OTHER_LEAD);
