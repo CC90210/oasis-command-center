@@ -161,6 +161,9 @@ export async function requireMeetHost(
 /** A participant as the room's API sees them: their row, with what they publish (lib/meet/participants.ts). */
 export type MeetParticipant = MeetPresence;
 
+/** One participant of one room, read in the room's own workspace (the recording routes import it from here). */
+export { readPresence as readMeetParticipant };
+
 export type MeetParticipantResult =
   | { ok: true; room: MeetRoom; participant: MeetParticipant }
   | { ok: false; response: NextResponse };
