@@ -611,6 +611,7 @@ check("the recovery hint without a known OS points at Settings > Devices on the 
     check("Settings > Devices (advanced): an old ping, a pairing and a revocation show their date, like Offline since", () => {
       const mine = row(drawn.owner, "CCPC");
       assert.ok(!drawn.owner.some((x) => /\b\d+d ago\b/.test(x.text)), `a row still says "Nd ago": ${JSON.stringify(drawn.owner)}`);
+      assert.ok(!drawn.owner.some((x) => /\b\d+ d ago\b/.test(x.text)), `a row counts days where Offline since names the moment: ${JSON.stringify(drawn.owner)}`);
       assert.ok(/[A-Z][a-z]{2} \d{1,2}/.test(drawn.expected.mineSeen), `the shared helper gives no date for 5 days ago: ${drawn.expected.mineSeen}`);
       assert.match(mine.text, new RegExp(`last ping ${drawn.expected.mineSeen.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · paired ${drawn.expected.minePaired.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
       assert.match(row(drawn.owner, "Riley's laptop").text, / s ago · paired /, "a recent ping still reads in seconds");

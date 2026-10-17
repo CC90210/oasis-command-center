@@ -23,20 +23,11 @@ export function formatTimeRange(label: string | null | undefined): string {
   });
 }
 
-export function timeAgo(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const then = new Date(iso).getTime();
-  const now = Date.now();
-  const sec = Math.round((now - then) / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hrs = Math.round(min / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
+/**
+ * "5 min ago", "just now", "never": the one vocabulary lives in lib/devices/presence.ts. Re-exported, not
+ * copied, so the pages that already import it from here keep working.
+ */
+export { timeAgo } from "@/lib/devices/presence";
 
 export function truncate(text: string | null | undefined, max = 80): string {
   if (!text) return "";

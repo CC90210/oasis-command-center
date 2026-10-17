@@ -13,6 +13,7 @@
  */
 import type { DepartmentKey } from "@/lib/os/types";
 import { DEPARTMENT_PALETTES, DESK_TOOLS, type DeskToolName } from "@/lib/os/desk/catalog";
+import { timeAgo } from "@/lib/devices/presence";
 import { EVERY_HOURS, describePlan, formatClock, formatRunInstant, nextRuns, planToCron, type SchedulePlan } from "@/lib/automations/schedule-plan";
 import { defaultInputs, readToolsFor, templateById, templatesFor } from "./templates";
 import { GUIDED_ZONE, MIN_GAP_MINUTES, requiredConnectors, validateGuidedPayload } from "./validate";
@@ -807,17 +808,6 @@ export function runStatusLabel(status: string): string {
   return RUN_STATUS_LABEL[status] ?? "Unknown";
 }
 
-/** "in 3 hours", "2 days ago". */
-export function relativeTime(targetMs: number, nowMs: number): string {
-  const diff = targetMs - nowMs;
-  const minutes = Math.round(Math.abs(diff) / 60_000);
-  const future = diff >= 0;
-  if (minutes < 1) return future ? "in less than a minute" : "just now";
-  const [n, unit] = minutes < 60 ? [minutes, "minute"] : minutes < 1440 ? [Math.round(minutes / 60), "hour"] : [Math.round(minutes / 1440), "day"];
-  const text = plural(n as number, unit as string, `${unit}s`);
-  return future ? `in ${text}` : `${text} ago`;
-}
-
 /** An ISO instant in Toronto time with the zone's abbreviation in force then, or null when it is not a time. */
 export function instantText(iso: string): string | null {
   const ms = Date.parse(iso);
@@ -833,14 +823,14 @@ export function nextRunLine(item: GuidedAutomationView, nowMs: number | null): s
   const first = item.nextRuns[0];
   const text = first ? instantText(first) : null;
   if (!first || !text) return "The next run could not be worked out.";
-  const when = `${text}${nowMs === null ? "" : ` (${relativeTime(Date.parse(first), nowMs)})`}`;
+  const when = `${text}${nowMs === null ? "" : ` (${timeAgo(first, { now: nowMs, future: true })})`}`;
   return item.status === "needs_attention" ? `Its last run failed. Next try: ${when}` : `Next run: ${when}`;
 }
 
 /** The "Last run" line of a list row, before its one-sentence summary. */
 export function lastRunHead(run: LastRunView, nowMs: number | null): string {
   const when = instantText(run.at);
-  const rel = when && nowMs !== null ? ` (${relativeTime(Date.parse(run.at), nowMs)})` : "";
+  const rel = when && nowMs !== null ? ` (${timeAgo(run.at, { now: nowMs })})` : "";
   return `${runStatusLabel(run.status)}${when ? `, ${when}${rel}` : ""}`;
 }
 

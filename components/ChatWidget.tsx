@@ -19,6 +19,7 @@ import { PendingHarnessActions, pendingFromFrame, type PendingHarnessAction } fr
 import { ToolTimelineList } from "@/components/chat/ToolTimelineList";
 import { MessageDownloadMenu } from "@/components/chat/MessageDownloadMenu";
 import { mdToHtml } from "@/lib/markdown";
+import { timeAgo } from "@/lib/devices/presence";
 import { useSynthCalls, type SynthCliRuntime } from "@/lib/use-synth-calls";
 import {
   Send,
@@ -3479,7 +3480,7 @@ function Bubble({
             tappable) and hides it on desktop until the bubble's
             group-hover fires. See globals.css. */}
         <div className="hover-reveal flex items-center gap-2 px-1 text-[10px] text-fg-dim transition-opacity">
-          <span className="font-mono">{_relTime(at)}</span>
+          <span className="font-mono">{at ? timeAgo(at) : ""}</span>
           {!isUser && content && (
             <button
               type="button"
@@ -3767,15 +3768,6 @@ function ThinkingIndicator({
       </span>
     </div>
   );
-}
-
-function _relTime(at: number): string {
-  if (!at) return "";
-  const diff = Date.now() - at;
-  if (diff < 10_000) return "just now";
-  if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`;
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  return `${Math.floor(diff / 3_600_000)}h ago`;
 }
 
 function formatBytes(bytes: number): string {

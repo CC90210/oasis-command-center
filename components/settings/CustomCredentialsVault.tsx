@@ -36,6 +36,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { KeyRound, Trash2, Plus, Upload, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { timeAgo } from "@/lib/devices/presence";
 
 type CustomCredentialRow = {
   key: string;
@@ -48,21 +49,6 @@ type UpsertResult = {
   ok: boolean;
   error?: string;
 };
-
-function fmtUpdated(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  const ms = Date.now() - d.getTime();
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const days = Math.floor(h / 24);
-  if (days < 30) return `${days}d ago`;
-  return d.toLocaleDateString();
-}
 
 export function CustomCredentialsVault() {
   const [rows, setRows] = useState<CustomCredentialRow[]>([]);
@@ -235,7 +221,7 @@ export function CustomCredentialsVault() {
                 <div className="min-w-0">
                   <div className="font-mono text-sm text-fg truncate">{row.key}</div>
                   <div className="text-[10px] text-fg-dim mt-0.5">
-                    value masked · updated {fmtUpdated(row.updated_at)}
+                    value masked · updated {timeAgo(row.updated_at)}
                   </div>
                 </div>
                 <button

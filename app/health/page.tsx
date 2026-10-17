@@ -44,7 +44,8 @@ import { IntegrationDot } from "@/components/IntegrationDot";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { COLD_LEAD_MS, ATTENTION_LIST_LIMIT, loadWorkspaceOutcome, needsYouCount, type WorkerHealth } from "@/lib/admin/attention";
-import { formatAgo, loadSystemHealth, type GuardStatus, type SystemHealth } from "@/lib/admin/system-health";
+import { loadSystemHealth, type GuardStatus, type SystemHealth } from "@/lib/admin/system-health";
+import { timeAgo } from "@/lib/devices/presence";
 import { redirect } from "next/navigation";
 import { setupHref } from "@/lib/setup-links";
 import Link from "next/link";
@@ -198,7 +199,7 @@ export default async function HealthPage() {
                       </span>
                     )}
                   </div>
-                  <span className="text-[11px] text-fg-dim">{formatAgo(ev.publishedAt, now)}</span>
+                  <span className="text-[11px] text-fg-dim">{timeAgo(ev.publishedAt, { now })}</span>
                 </div>
                 {ev.payload && (
                   <div className="mt-1 max-h-24 overflow-y-auto break-words font-mono text-[11px] text-fg-muted">
@@ -315,7 +316,7 @@ function ComputerCard({ system, now }: { system: SystemHealth; now: number }) {
                 <Tag tone={m.state === "online" ? "engaged" : m.state === "idle" ? "accent" : "neutral"}>
                   {m.state === "online" ? "Online" : m.state === "idle" ? "Idle" : "Offline"}
                 </Tag>
-                {m.lastSeenAt ? `checked in ${formatAgo(m.lastSeenAt, now)}` : "never checked in"}
+                {m.lastSeenAt ? `checked in ${timeAgo(m.lastSeenAt, { now })}` : "never checked in"}
               </span>
             </li>
           ))}
@@ -355,7 +356,7 @@ function GuardsCard({ system, now }: { system: SystemHealth; now: number }) {
           )}
           {report.freshness === "stale" && (
             <p className="text-sm text-status-warm">
-              Not verified since {report.reportedAt ? formatAgo(report.reportedAt, now) : "an unknown time"}: the last guard report is too old to trust.
+              Not verified since {report.reportedAt ? timeAgo(report.reportedAt, { now }) : "an unknown time"}: the last guard report is too old to trust.
             </p>
           )}
           {report.freshness === "failing" && (
@@ -373,7 +374,7 @@ function GuardsCard({ system, now }: { system: SystemHealth; now: number }) {
                   <p className="mt-0.5 text-xs text-fg-dim">
                     Blocked {g.blocked24h} in the last 24 hours
                     {g.wouldBlock24h ? `, and would have blocked ${g.wouldBlock24h} more` : ""}
-                    {g.lastBlockAt ? `. Last block ${formatAgo(g.lastBlockAt, now)}.` : "."}
+                    {g.lastBlockAt ? `. Last block ${timeAgo(g.lastBlockAt, { now })}.` : "."}
                   </p>
                 )}
               </li>
@@ -425,7 +426,7 @@ function BackgroundCard({ system, now }: { system: SystemHealth; now: number }) 
                 <span className="text-fg">{w.label}</span>
                 <span className="flex items-center gap-2 text-xs text-fg-muted">
                   <Tag tone={workerTone(w)}>{WORKER_TAG[w.state]}</Tag>
-                  {w.state === "stale" && w.lastPingAt ? `last report ${formatAgo(w.lastPingAt, now)}` : null}
+                  {w.state === "stale" && w.lastPingAt ? `last report ${timeAgo(w.lastPingAt, { now })}` : null}
                 </span>
               </li>
             ))}
@@ -445,7 +446,7 @@ function BackgroundCard({ system, now }: { system: SystemHealth; now: number }) 
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-semibold text-fg">{c.name}</span>
                     <span className="text-[11px] text-fg-dim">
-                      {c.source === "platform" ? "OASIS platform" : "This workspace"} · {c.lastRunAt ? formatAgo(c.lastRunAt, now) : "never ran"}
+                      {c.source === "platform" ? "OASIS platform" : "This workspace"} · {c.lastRunAt ? timeAgo(c.lastRunAt, { now }) : "never ran"}
                     </span>
                   </div>
                   <p className="mt-1 text-[13px] text-fg">What to do: {c.whatToDo}</p>

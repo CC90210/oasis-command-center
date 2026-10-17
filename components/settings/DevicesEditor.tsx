@@ -25,8 +25,7 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Info } from "lucide-react";
-import { machineState, presenceWords } from "@/lib/devices/presence";
-import { timeAgo } from "@/components/settings/YourComputersCard";
+import { machineState, presenceWords, timeAgo } from "@/lib/devices/presence";
 
 type Device = {
   id: string;
@@ -212,7 +211,7 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
                     {d.machine_fingerprint || "no fingerprint"}
                   </div>
                   <div className="text-[10px] text-fg-muted font-mono mt-1">
-                    last ping {timeAgo(d.last_seen_at)} · paired {timeAgo(d.created_at)}
+                    last ping {timeAgo(d.last_seen_at, { moment: true })} · paired {timeAgo(d.created_at, { moment: true })}
                     {d.last_seen_ip && ` · ${d.last_seen_ip}`}
                   </div>
                 </div>
@@ -243,7 +242,7 @@ export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
               <li key={d.id} className="flex items-center gap-2">
                 <Check className="w-3 h-3 text-fg-faint" />
                 <span className="font-mono">{d.label}</span>
-                <span>· revoked {timeAgo(d.revoked_at)}</span>
+                <span>· revoked {timeAgo(d.revoked_at, { moment: true })}</span>
               </li>
             ))}
           </ul>
