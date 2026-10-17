@@ -7,7 +7,7 @@ import { normalizePhoneE164 } from "@/lib/conversation-threading";
 import { bottleneckLabel, leadRevenueAndBottleneck } from "@/lib/forms/ai-audit-format";
 import { normalizeFounderMeetingWebsite } from "@/lib/website-sales-meeting";
 import { AI_AUDIT_TENANT_ID, AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
-import { isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
+import { isEarlyPublicBookingFormSlug, isPublicBookingFormSlug } from "@/lib/forms/public-booking-config";
 import { GoogleCalendarIntegrationError, listGoogleCalendarBusy, type GoogleCalendarErrorCode } from "@/lib/integrations/google-calendar";
 import { getOasisPipelineAssignmentRoster, OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
 import { listCalendars, listEventsBetween, type Owner } from "@/lib/calendar/store";
@@ -52,8 +52,16 @@ export function isPublicBookingStageBookable(stage: unknown): boolean {
   return typeof stage === "string" && BOOKABLE_PIPELINE_STAGES.has(stage.trim());
 }
 
-export function isPublicFunnelReadyForBooking(lead: Record<string, unknown>): boolean {
+export function isPublicFunnelReadyForBooking(
+  lead: Record<string, unknown>,
+  /**
+   * The form books after its contact step (isEarlyPublicBookingFormSlug), so a
+   * lead the contact step recorded (inbound_lead, with its time) may book too.
+   */
+  options: { afterContactStep?: boolean } = {},
+): boolean {
   const stage = clean(lead.funnel_stage);
+  if (options.afterContactStep && stage === "inbound_lead") return Boolean(clean(lead.inbound_lead_at));
   if (stage === "audit_requested") return Boolean(clean(lead.audit_requested_at));
   if (stage === "meeting_booked") return Boolean(clean(lead.meeting_booked_at));
   return false;
@@ -344,7 +352,12 @@ export async function resolvePublicFunnelBooking(
         })()
       : [];
   if (parsedSteps.length === 0) throw new Error("booking_form_not_found");
-  if (!parsedSteps.every((_, step) => completed.has(step))) throw new Error("booking_form_not_completed");
+  // AI audit, COMMAND and FLEET book after the contact step (CC, 2026-10-16:
+  // "book sooner"), so their first step alone unlocks the calendar. Every other
+  // form still needs every step.
+  const afterContactStep = isEarlyPublicBookingFormSlug(form.slug);
+  const unlocked = afterContactStep ? completed.has(0) : parsedSteps.every((_, step) => completed.has(step));
+  if (!unlocked) throw new Error("booking_form_not_completed");
   const answers = rows.reduce<Record<string, unknown>>(
     (all, row) => ({ ...all, ...record((row as { payload?: unknown }).payload) }),
     {},
@@ -361,7 +374,7 @@ export async function resolvePublicFunnelBooking(
   // A form_submissions row is durable before the final lifecycle merge. If that
   // merge failed and the client received 503, the row set alone must not unlock
   // availability or provider writes. Both anonymous endpoints share this gate.
-  if (!isPublicFunnelReadyForBooking(lead)) throw new Error("booking_form_not_completed");
+  if (!isPublicFunnelReadyForBooking(lead, { afterContactStep })) throw new Error("booking_form_not_completed");
   return {
     tenantId: AI_AUDIT_TENANT_ID,
     formId: form.id,

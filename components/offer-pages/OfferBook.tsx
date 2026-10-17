@@ -10,7 +10,9 @@
  *
  *   - the form ends on the founder calendar on this page (every OASIS offer
  *     form, lib/forms/public-booking-config.ts): "Your details are in", and
- *     the time is picked inline at the end, never through a second link;
+ *     the time is picked inline at the end, never through a second link. On
+ *     AI audit, COMMAND and FLEET the calendar opens right after the contact
+ *     step instead, with no banner (isEarlyPublicBookingFormSlug);
  *   - a booking link is configured: a "Pick a time" button (a link in a new
  *     tab, never an embedded calendar), with the remaining questions below it;
  *   - none is configured: "Tell us two times that suit you", by email to the
@@ -26,7 +28,11 @@
 import { useState } from "react";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
-import { isOptionalPublicBookingFormSlug, isPublicBookingSurface } from "@/lib/forms/public-booking-config";
+import {
+  isEarlyPublicBookingFormSlug,
+  isOptionalPublicBookingFormSlug,
+  isPublicBookingSurface,
+} from "@/lib/forms/public-booking-config";
 import type { BookMode } from "@/lib/offer-pages/types";
 import { ACCENT_BORDER, ACCENT_WASH } from "./styles";
 
@@ -56,6 +62,10 @@ export function OfferBook({
   );
   // PROTOCOL and COMMUNITY offer the call, never require it (review of #655).
   const callOptional = calendarOnPage && isOptionalPublicBookingFormSlug(form?.formSlug ?? "");
+  // AI audit, COMMAND, FLEET: the calendar itself follows the contact step,
+  // under its own heading, so a banner saying the questions come first would
+  // contradict it (book sooner, 2026-10-16).
+  const callAfterContact = calendarOnPage && isEarlyPublicBookingFormSlug(form?.formSlug ?? "");
 
   if (!form) {
     return (
@@ -80,7 +90,7 @@ export function OfferBook({
 
   return (
     <div className="space-y-5">
-      {mode === "form_then_link" && contactDone ? (
+      {mode === "form_then_link" && contactDone && !callAfterContact ? (
         <div className={`rounded-xl border ${ACCENT_BORDER} ${ACCENT_WASH} p-5 sm:p-6`} role="status">
           {calendarOnPage ? (
             <>
@@ -127,8 +137,11 @@ export function OfferBook({
       <FormPublicClient
         {...form}
         chrome="embedded"
-        onStepSubmitted={(stepIndex) => {
-          if (stepIndex === 0) setContactDone(true);
+        onStepSubmitted={() => {
+          // "Your details are in" from the first step the server accepted: a
+          // lead is only created with a reachable email or phone, and steps
+          // before one stay in the browser unreported (lib/forms/contact-gate.ts).
+          setContactDone(true);
         }}
       />
     </div>

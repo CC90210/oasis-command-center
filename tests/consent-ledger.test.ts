@@ -598,15 +598,19 @@ async function main() {
       /ledgerRef\.current = \{ step: currentStep, channels: ledgerChannels, ticked: ledgerTicked \};/.test(src),
       "the ref must be re-pointed on every render, carrying the step its boxes belong to",
     );
+    // The read lives in consentLedgerFor (#668: a step the form holds until the
+    // visitor gives contact takes its boxes' answer with it, through the same read).
+    const helperAt = src.indexOf("function consentLedgerFor(step: number)");
+    assert.ok(helperAt > 0, "consentLedgerFor not found");
+    const helper = src.slice(helperAt, helperAt + 600);
     assert.ok(
-      /if \(ledgerNow\.step === stepAtStart && ledgerNow\.channels\.length > 0\) \{/.test(src),
+      /const now = ledgerRef\.current;\s*if \(now\.step !== step \|\| now\.channels\.length === 0\) return undefined;/.test(helper),
       "a Back click during a wait must never send the previous step's boxes as this step's answer",
     );
-    const at = src.indexOf("submitBody.consent_ledger = {");
+    assert.ok(!/ledgerTicked\.(email|sms)/.test(helper), "submit must not read the closure's tick state");
+    const at = src.indexOf("const ledger = consentLedgerFor(stepAtStart);");
     assert.ok(at > 0, "consent_ledger body not found");
-    const block = src.slice(Math.max(0, at - 400), at + 300);
-    assert.ok(/const ledgerNow = ledgerRef\.current;/.test(block), "submit must read the boxes through the ref");
-    assert.ok(!/ledgerTicked\.(email|sms)/.test(block), "submit must not read the closure's tick state");
+    assert.ok(/^const ledger = consentLedgerFor\(stepAtStart\);\s*if \(ledger\) submitBody\.consent_ledger = ledger;/.test(src.slice(at)));
     // Read AFTER every wait: the vault capture can take seconds with the boxes
     // still clickable, so the answer is taken immediately before the request.
     const vaultAt = src.indexOf("await captureConsent(");
