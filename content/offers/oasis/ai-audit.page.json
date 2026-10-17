@@ -19,7 +19,7 @@
   "hero": {
     "eyebrow": "Free AI Automation Audit",
     "headline": "Find out what AI should take off your plate, before you buy anything",
-    "subheadline": "A few questions about how your business runs today: where the work piles up, what you have already tried, and how soon it needs fixing. Conaugh reads every one personally and follows up with you. Free AI audit. No pitch.",
+    "subheadline": "A few questions about how your business runs today: where the work piles up, what you have already tried, and how soon it needs fixing. Conaugh reads every one personally, and you can book a short call as soon as you leave your details. Free AI audit. No pitch.",
     "cta_label": "Start my free audit",
     "video": null,
     "show_transcript": false,
@@ -67,7 +67,7 @@
         },
         {
           "title": "A straight answer on where AI fits",
-          "body": "In the follow-up you hear where AI would take real work off your plate, where it would only add cost or risk, and where a simpler fix is enough."
+          "body": "On the call you hear where AI would take real work off your plate, where it would only add cost or risk, and where a simpler fix is enough."
         },
         {
           "title": "The right next step, including the free ones",
@@ -85,16 +85,16 @@
       "title": "Three steps, and you stay in control",
       "items": [
         {
-          "title": "Answer a few questions",
-          "body": "Who you are, where the bottleneck is, the rough size of the business, and when you need it working. Revenue and budget are optional."
+          "title": "Leave your details, pick a time",
+          "body": "Your name and how to reach you, then the calendar opens right here."
         },
         {
-          "title": "Conaugh reads your answers",
-          "body": "Every audit goes to Conaugh personally, with your answers in front of him."
+          "title": "Answer the questions that help",
+          "body": "Where the bottleneck is, the rough size of the business and when you need it working. Revenue and budget are optional. Conaugh reads every one personally."
         },
         {
-          "title": "He follows up, and you decide",
-          "body": "You get a straight answer on where AI fits. If you asked to talk, a call gets set up. If not, the answer is yours to keep."
+          "title": "Get a straight answer, then decide",
+          "body": "On the call you hear where AI fits, where it would only add cost or risk, and where a simpler fix is enough. The next step is your choice."
         }
       ]
     },
@@ -120,7 +120,23 @@
         },
         {
           "q": "What happens after I submit?",
-          "a": "Conaugh reads every one personally. Right after you submit, a calendar opens on this page so you can book a short call, and the Google Meet invite goes to your email."
+          "a": "Conaugh reads every one personally. As soon as you leave your details, a calendar opens on this page so you can book a short call, and the Google Meet invite goes to your email."
+        },
+        {
+          "q": "What happens on the call?",
+          "a": "It is a video call on Google Meet. You walk through how the week runs today, and you hear where AI fits, where it would only add cost or risk, and where a simpler fix is enough. No pitch."
+        },
+        {
+          "q": "How long is the call?",
+          "a": "Short. The calendar shows the exact length when you pick a time."
+        },
+        {
+          "q": "Do I need to prepare anything?",
+          "a": "No. Your answers are enough. Bring the part of the week that frustrates you most."
+        },
+        {
+          "q": "What does it cost if I want OASIS to build something?",
+          "a": "That depends on what the audit finds, and it is a separate decision you make later. Every path lists its prices on its own page: start at oasisai.work/vsl."
         },
         {
           "q": "Is this for my size of business?",
@@ -136,7 +152,7 @@
   "book": {
     "eyebrow": "Free AI audit. No pitch.",
     "title": "Start your free audit",
-    "lede": "A few questions about how the business runs today. Conaugh reads every one personally.",
+    "lede": "Your details first, then pick a time. Conaugh reads every one personally.",
     "mode": "form_then_link",
     "qualify": "after"
   },

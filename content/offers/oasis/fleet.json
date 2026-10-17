@@ -279,6 +279,8 @@
         "items": [
           { "q": "What does the audit cover?", "a": "How work moves through your operation today, where AI would pay back, where it would add risk, and the security of the data it would touch. You get a written statement of work and a roadmap." },
           { "q": "Why start with an audit?", "a": "Because AI projects stall when they start with a tool. The audit decides what is worth building, and what is not, before money goes into a build. If you go ahead, the full audit fee is credited to the build." },
+          { "q": "What happens on the first call?", "a": "A video call about how work moves through your operation and where you think AI fits. If an audit makes sense, you hear what it would cover before anything is agreed." },
+          { "q": "Will it work with the software we already run?", "a": "That is what custom integrations are for: they connect the software you already run, through its APIs and webhooks, and replace the manual re-keying between it. The audit confirms what can connect." },
           { "q": "Who controls what the agents do?", "a": "You do. Each agent has an owner on your side, anything important waits for an approval, and every agent reports what it did in plain English." },
           { "q": "Is there an ongoing cost after launch?", "a": "A fleet runs on infrastructure that needs looking after, so a monthly infrastructure retainer follows launch. The amount is confirmed in your statement of work before any build starts." },
           { "q": "Can we start with something smaller?", "a": "Yes. The free AI Automation Audit suits owner-led businesses, and PROTOCOL has playbooks your team can run in-house. For the website alone, start with a website audit." },
@@ -289,7 +291,7 @@
     "book": {
       "eyebrow": "Next step",
       "title": "Request your audit",
-      "lede": "A few questions about your operation, then a time to talk.",
+      "lede": "Your details first, then pick a time to talk. The rest of the questions help us prepare.",
       "mode": "form_then_link",
       "qualify": "after"
     },

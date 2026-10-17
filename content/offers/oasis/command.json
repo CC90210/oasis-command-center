@@ -232,7 +232,9 @@
         "key": "faq",
         "title": "Questions",
         "items": [
+          { "q": "Is COMMAND for me?", "a": "It is built for service businesses where leads, clients and money run through a few people. Building your own tools on a budget? PROTOCOL fits better. A larger or multi-location operation? Look at FLEET." },
           { "q": "What happens on the discovery call?", "a": "It is a video call. You talk first: how leads come in, where they stall and what a good week looks like. Then you see the Command Center and how it would fit your business. If it is not a fit, you will hear that too." },
+          { "q": "How long is the discovery call?", "a": "The calendar shows the exact length when you pick a time." },
           { "q": "Which plan is right for me?", "a": "If you are comfortable configuring software, OS DIY. If you would rather hand it over, OS Turnkey. If you want a team running it alongside you every week, the managed operating partner. You get a recommendation on the call." },
           { "q": "What do you need from me to get started?", "a": "For Turnkey and Managed, the onboarding vault: you add the logins, sign the documents and choose your channels in one place. Setup starts when it is complete." },
           { "q": "What if the setup fee is too much right now?", "a": "Turnkey's setup can be split into two payments. You can also start on OS DIY with no setup fee, or join the free OASIS community and build alongside other owners first." },
@@ -244,7 +246,7 @@
     "book": {
       "eyebrow": "Next step",
       "title": "Book your discovery call",
-      "lede": "A few questions about your business, then a time to talk.",
+      "lede": "Your details first, then pick a time to talk. The rest of the questions are optional.",
       "mode": "form_then_link",
       "qualify": "after"
     },
