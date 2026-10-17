@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClient, type Client } from "@libsql/client";
@@ -57,6 +57,8 @@ const HALF_DONE = "40000000-0000-4000-8000-000000000015";
 // Codex on #669, second pass: direct-email states, a late deal after step 2.
 const DIRECT_ATTEMPT = "40000000-0000-4000-8000-000000000016";
 const LATE_DEAL = "40000000-0000-4000-8000-000000000017";
+// Codex on #674, second pass: a live application handed to the lead delete.
+const APPLICATION = "40000000-0000-4000-8000-000000000018";
 
 const TABLES = [
   "tenant_records",
@@ -72,6 +74,7 @@ const TABLES = [
   "lead_interactions",
   "consent_events",
   "tenant_audit_log",
+  "agent_events",
 ] as const;
 
 function pass(name: string): void {
@@ -173,6 +176,11 @@ async function main(): Promise<void> {
       actor_email TEXT, actor_user_id TEXT, action_type TEXT, target_table TEXT,
       target_id TEXT, after TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+    -- The live shape that matters here: no tenant_id column, the tenant in the payload.
+    CREATE TABLE agent_events (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), event_type TEXT NOT NULL,
+      publisher_agent TEXT, severity TEXT, target_agent TEXT, payload TEXT, correlation_id TEXT
+    );
   `);
 
   const lead = (id: string, tenantId = TENANT, stage = "assigned") => ({
@@ -258,6 +266,31 @@ async function main(): Promise<void> {
     { sql: "INSERT INTO form_views VALUES ('junk-view', ?, ?)", args: [TENANT, JUNK] },
     { sql: "INSERT INTO offer_funnel_visit_leads VALUES (?, 'junk-visit', ?)", args: [TENANT, JUNK] },
     { sql: "INSERT INTO offer_funnel_events VALUES ('junk-event', ?, ?)", args: [TENANT, JUNK] },
+    // A stage change copies the whole record into the event (lib/manifest/events.ts).
+    ...[
+      ["ev-dry", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: DRY, field: "stage", from: null, to: "assigned", data: { email: "dry@lead.test" }, tenant_id: TENANT }],
+      ["ev-junk-stage", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: JUNK, field: "stage", from: null, to: "assigned", data: { name: "Junk Lead", email: "junk@lead.test", phone: "+15145550142" }, tenant_id: TENANT }],
+      ["ev-junk-audit", "OASIS_AI_AUDIT_STARTED", { lead_id: JUNK, form_id: "f-1", tenant_id: TENANT }],
+      ["ev-junk-foreign", "BRAVO_RECORD_STATUS_CHANGED", { entity: "lead", record_id: JUNK, data: { email: "theirs@other.test" }, tenant_id: OTHER_TENANT }],
+      // A dashboard email that was queued (and is cancelled by the delete) vs one that went out.
+      ["ev-junk-queued-email", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test", subject: "Hi", tenant_id: TENANT }],
+      ["ev-junk-sent-email", "BRAVO_DASHBOARD_EMAIL_SENT", { lead_id: JUNK, to_email: "junk@lead.test", sent_as: "cc@oasis.test", tenant_id: TENANT }],
+      ["ev-application", "BRAVO_RECORD_STATUS_CHANGED", { entity: "application", record_id: APPLICATION, field: "status", to: "submitted", data: { business_email: "owner@biz.test" }, tenant_id: TENANT }],
+      // The workspace is correlation_id (Codex on #674, third pass): a row
+      // with no payload tenant is still ours; one filed under another
+      // workspace is never touched, whatever its payload says.
+      ["ev-junk-no-payload-tenant", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test" }, TENANT],
+      // Codex on #674, fourth pass: a confirmed send logged as outbound.recorded
+      // is sent history; a Kixie call and an SMS handoff hold details elsewhere.
+      ["ev-junk-recorded-send", "outbound.recorded", { lead_id: JUNK, to_email: "junk@lead.test", tenant_id: TENANT }],
+      ["ev-junk-kixie", "KIXIE_CALL", { lead_id: JUNK, number: "+15145550142", recording_url: "https://rec.test/1.mp3", tenant_id: TENANT }],
+      ["ev-junk-sms-handoff", "SMS_HANDOFF", { lead_id: JUNK, customer_message: { phone: "+15145550142", text: "call me" }, tenant_id: TENANT }],
+      ["ev-junk-other-correlation", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test", tenant_id: TENANT }, OTHER_TENANT],
+    ].map(([id, type, payload, correlation]) => ({
+      sql: "INSERT INTO agent_events (id, event_type, publisher_agent, payload, correlation_id) VALUES (?, ?, 'manifest-data', ?, ?)",
+      args: [id as string, type as string, JSON.stringify(payload), String(correlation ?? (payload as { tenant_id: string }).tenant_id)],
+    })),
+    { sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'application', '{}')", args: [APPLICATION, TENANT] },
     { sql: "INSERT INTO drip_runs VALUES ('junk-scheduled', ?, ?, 'scheduled')", args: [TENANT, JUNK] },
     { sql: "INSERT INTO drip_runs VALUES ('junk-sent', ?, ?, 'sent')", args: [TENANT, JUNK] },
     {
@@ -312,6 +345,7 @@ async function main(): Promise<void> {
   assert.equal(dryResult.plan.delete.form_submissions, 1);
   assert.equal(dryResult.plan.delete.form_views, 1);
   assert.equal(dryResult.plan.delete.offer_funnel_visit_leads, 1);
+  assert.equal(dryResult.plan.delete.agent_event_copies, 1, "the dry run does not say the event copy goes");
   assert.deepEqual(await state(seed), dryBefore, "dry run changed the database");
   pass("dry run returns exact counts and writes nothing");
 
@@ -420,9 +454,69 @@ async function main(): Promise<void> {
   assert.equal(reserved.status, "cancelled", "a direct_reserved email survives the delete");
   assert.equal(await count(seed, "consent_events", "lead_id = ?", [JUNK]), 1);
   assert.equal(await count(seed, "tenant_audit_log", "target_id = ? AND actor_user_id = ?", [JUNK, OWNER]), 1);
+  // The copy of the lead's details in its stage event goes; the event stays
+  // (live E2E of #669: name, email and phone outlived the lead).
+  const payloadOf = async (id: string) =>
+    JSON.parse(String((await seed.execute({ sql: "SELECT payload FROM agent_events WHERE id = ?", args: [id] })).rows[0]?.payload)) as Record<string, unknown>;
+  assert.equal(junkResult.plan.delete.agent_event_copies, 5);
+  assert.equal((await payloadOf("ev-junk-recorded-send")).to_email, "junk@lead.test", "a confirmed send's recipient was stripped from sent history");
+  const kixie = await payloadOf("ev-junk-kixie");
+  assert.equal("number" in kixie || "recording_url" in kixie, false, "a Kixie call kept the deleted lead's number or recording");
+  assert.equal("customer_message" in (await payloadOf("ev-junk-sms-handoff")), false, "an SMS handoff kept the deleted lead's message");
+  assert.equal("to_email" in (await payloadOf("ev-junk-no-payload-tenant")), false, "a row of ours with no payload tenant kept the address");
+  assert.equal((await payloadOf("ev-junk-other-correlation")).to_email, "junk@lead.test", "another workspace's event was rewritten");
+  const stage = await payloadOf("ev-junk-stage");
+  assert.equal("data" in stage, false, "the lead's name, email and phone outlived it in agent_events");
+  assert.equal(stage.details_removed, "lead_deleted");
+  // Codex on #674: a queued (now cancelled) email is not sent history; a sent one is.
+  const queuedEmail = await payloadOf("ev-junk-queued-email");
+  assert.equal("to_email" in queuedEmail, false, "a cancelled email's address outlived the lead");
+  assert.equal(queuedEmail.subject, "Hi", "the queued event itself was damaged");
+  assert.deepEqual(
+    await payloadOf("ev-junk-sent-email"),
+    { lead_id: JUNK, to_email: "junk@lead.test", sent_as: "cc@oasis.test", tenant_id: TENANT },
+    "the record of a message that went out was rewritten",
+  );
+  assert.deepEqual([stage.entity, stage.record_id, stage.to, stage.tenant_id], ["lead", JUNK, "assigned", TENANT], "the event itself was damaged");
+  assert.deepEqual(await payloadOf("ev-junk-audit"), { lead_id: JUNK, form_id: "f-1", tenant_id: TENANT }, "an event with no copy was rewritten");
+  assert.deepEqual((await payloadOf("ev-junk-foreign")).data, { email: "theirs@other.test" }, "another workspace's event was touched");
+  assert.deepEqual((await payloadOf("ev-dry")).data, { email: "dry@lead.test" }, "another lead's event was touched");
   const deletedState = await state(seed);
   assert.deepEqual(await remove(JUNK), { ok: false, code: "not_found" });
   assert.deepEqual(await state(seed), deletedState, "re-running a completed delete wrote again");
+  // A stage change racing the delete writes its event after the cleanup ran
+  // (Codex on #674): the publisher removes the copy itself once the row is gone.
+  const { publishStatusChange } = await import("../lib/manifest/events");
+  await publishStatusChange({ tenantId: TENANT, entity: "lead", recordId: JUNK, field: "stage", from: "assigned", to: "lost", data: { email: "late@lead.test" } });
+  await publishStatusChange({ tenantId: TENANT, entity: "lead", recordId: DRY, field: "stage", from: "assigned", to: "qualified", data: { email: "dry@lead.test" } });
+  const racing = await seed.execute({ sql: "SELECT payload FROM agent_events WHERE json_extract(payload, '$.to') IN ('lost', 'qualified') ORDER BY json_extract(payload, '$.to')", args: [] });
+  const [lostEvent, liveEvent] = racing.rows.map((r) => JSON.parse(String(r.payload)) as Record<string, unknown>);
+  assert.equal(lostEvent?.to, "lost", "the racing event was not written at all");
+  assert.equal("data" in lostEvent, false, "an event written after the delete kept the deleted lead's details");
+  assert.deepEqual(liveEvent?.data, { email: "dry@lead.test" }, "a live lead's event lost the copy its drips read");
+  // So does a queued email's event written through publishAgentEvent (a resume
+  // email racing the delete), and only for the lead that is gone.
+  const { publishAgentEvent } = await import("../lib/manifest/events");
+  await publishAgentEvent({ eventType: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", tenantId: TENANT, payload: { lead_id: JUNK, to_email: "late@lead.test", channel: "email" } });
+  await publishAgentEvent({ eventType: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", tenantId: TENANT, payload: { lead_id: DRY, to_email: "dry@lead.test", channel: "email" } });
+  const queuedLate = await seed.execute({ sql: "SELECT payload FROM agent_events WHERE json_extract(payload, '$.channel') = 'email' ORDER BY json_extract(payload, '$.lead_id')", args: [] });
+  const byLead = Object.fromEntries(queuedLate.rows.map((r) => {
+    const p = JSON.parse(String(r.payload)) as Record<string, unknown>;
+    return [String(p.lead_id), p];
+  }));
+  assert.equal("to_email" in byLead[JUNK], false, "a queued email's event written after the delete kept the address");
+  assert.equal(byLead[DRY].to_email, "dry@lead.test", "a live lead's queued email lost its address");
+  // The dashboard email route writes its queue event directly, so it runs the same check.
+  const emailRoute = readFileSync(join(process.cwd(), "app", "api", "leads", "[id]", "email", "route.ts"), "utf8");
+  assert.match(emailRoute, /if \(!queueEventFailure && [^\n]*tursoConfigured\(\)\) \{\s*await removeCopiesIfRecordGone\(sess\.tenantId, leadId\)/, "the email route's direct insert skips the check");
+  // A live application handed to the lead delete answers not found and its
+  // own status event keeps its data (Codex on #674, second pass).
+  assert.deepEqual(await remove(APPLICATION), { ok: false, code: "not_found" });
+  assert.deepEqual(
+    (JSON.parse(String((await seed.execute({ sql: "SELECT payload FROM agent_events WHERE id = 'ev-application'", args: [] })).rows[0].payload)) as Record<string, unknown>).data,
+    { business_email: "owner@biz.test" },
+    "deleting a non-lead id rewrote that record's history",
+  );
   pass("junk deletion cancels queued work, preserves history, unlinks funnel events, and audits last");
 
   const foreignResult = await remove(OTHER_LEAD);

@@ -17,6 +17,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { publishAgentEvent } from "@/lib/manifest/events";
+import { removeCopiesIfRecordGone } from "@/lib/manifest/event-copies";
+import { tursoConfigured } from "@/lib/turso";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
@@ -913,6 +915,13 @@ export async function POST(
       queueEventFailure = queueEvent.error;
     } catch (err) {
       queueEventFailure = err;
+    }
+    // The lead deleted while this was queued: its address does not outlive it
+    // in the event (lib/manifest/event-copies.ts, Codex on #674).
+    if (!queueEventFailure && process.env.EMPIRE_DATA_BACKEND === "turso_cloud" && tursoConfigured()) {
+      await removeCopiesIfRecordGone(sess.tenantId, leadId).catch((err: unknown) =>
+        console.error("[leads.email] event copy check failed", err instanceof Error ? err.message : String(err)),
+      );
     }
     if (queueEventFailure) {
       trackingWarnings.push("queue_event_publish_failed");

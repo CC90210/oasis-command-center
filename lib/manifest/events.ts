@@ -27,6 +27,8 @@
  */
 
 import { getServiceSupabase } from "../supabase-server";
+import { tursoConfigured } from "../turso";
+import { removeCopiesIfRecordGone } from "./event-copies";
 
 /**
  * Fields we treat as status fields for change-detection. Keep this list
@@ -98,6 +100,13 @@ export async function publishAgentEvent(input: AgentEventPublish): Promise<void>
         `[manifest.events.publishAgentEvent] insert failed for ${input.eventType}:`,
         error,
       );
+      return;
+    }
+    // An event about a lead deleted while it was being written (a queued
+    // resume email racing Delete lead) keeps no copy of its details either.
+    const leadId = input.payload?.lead_id;
+    if (typeof leadId === "string" && process.env.EMPIRE_DATA_BACKEND === "turso_cloud" && tursoConfigured()) {
+      await removeCopiesIfRecordGone(input.tenantId, leadId);
     }
   } catch (err) {
     console.error("[manifest.events.publishAgentEvent]", err);
@@ -127,6 +136,12 @@ export async function publishStatusChange(input: StatusChangePublish): Promise<v
     });
     if (error) {
       console.error("[manifest.events.publishStatusChange] insert failed:", error);
+      return;
+    }
+    // A record deleted while this event was being written keeps no copy of
+    // its details here either (lib/manifest/event-copies.ts, Codex on #674).
+    if (process.env.EMPIRE_DATA_BACKEND === "turso_cloud" && tursoConfigured()) {
+      await removeCopiesIfRecordGone(input.tenantId, input.recordId);
     }
   } catch (err) {
     // Logged but not re-thrown — record updates must not depend on

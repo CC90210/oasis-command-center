@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logTenantAudit } from "@/lib/audit/activity-feed";
+import { countLeadEventCopies, removeLeadEventCopies } from "@/lib/manifest/event-copies";
 import { cancelPendingApproval } from "@/lib/os/approvals/store";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 
@@ -385,6 +386,7 @@ async function planFor(db: SupabaseClient, tenantId: string, leadId: string): Pr
   for (const [table, column] of DELETE_TARGETS) {
     remove[table] = await countLink(db, table, column, tenantId, leadId);
   }
+  remove.agent_event_copies = await countLeadEventCopies(tenantId, leadId);
   return { blockers: [], cancel, unlink, delete: remove };
 }
 
@@ -478,8 +480,9 @@ async function deleteLinks(
 
 /**
  * Step 4: unlink the lead's history (set NULL) and delete its form data and
- * other dependents. Idempotent and tenant-scoped; also the finish for a delete
- * that stopped after the lead row went.
+ * other dependents, and the copies of its details in its activity events
+ * (lib/manifest/event-copies.ts). Idempotent and tenant-scoped; also the
+ * finish for a delete that stopped after the lead row went.
  */
 async function removeDependents(
   db: SupabaseClient,
@@ -491,7 +494,9 @@ async function removeDependents(
     unlink[table] = await updateLink(db, table, column, tenantId, leadId, { [column]: null });
   }
   unlink.sms_agent_conversations = await unlinkSms(db, tenantId, leadId);
-  return { unlink, removed: await deleteLinks(db, tenantId, leadId) };
+  const removed = await deleteLinks(db, tenantId, leadId);
+  removed.agent_event_copies = await removeLeadEventCopies(tenantId, leadId);
+  return { unlink, removed };
 }
 
 /**
