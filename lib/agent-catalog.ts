@@ -106,7 +106,7 @@ export const AGENT_CATALOG: Record<string, AgentCatalog> = {
       { name: "Training Corpus Ingest", kind: "cron", description: "Turns Train Maven links into brand-style exemplars.", location: "local", schedule: "*/5 * * * *" },
       { name: "Library Post Linker", kind: "cron", description: "Links Library assets to the posts that actually published.", location: "local", schedule: "17 * * * *" },
       { name: "Post Analytics Sync", kind: "cron", description: "Pulls real per-platform post performance into the founders Library.", location: "local", schedule: "17 * * * *" },
-      { name: "Maven — Carousel Post", kind: "cron", description: "Runs the complete GEN-10 author, render, plan, delivery, and Library chain.", location: "local", schedule: "0 8 * * *" },
+      { name: "Maven — Carousel Post", kind: "cron", description: "Writes, renders and books two OASIS tweet cards a day (2026-10-15 real-tweet design, small fixed text), then delivers and syncs them to the Library.", location: "local", schedule: "0 8 * * *" },
       { name: "Carousel Media Retention", kind: "cron", description: "Safely prunes old unbooked carousel renders after the 60-day retention window.", location: "local", schedule: "50 3 * * *" },
     ],
     processes: [
