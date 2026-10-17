@@ -208,6 +208,14 @@ async function main() {
     assert.match(code("lib/tools/registry.ts"), /Content > Extracted videos/);
   });
 
+  await check("the Overview's extracted tile and an extracted video's own page both lead to Extracted videos", () => {
+    const overview = code("app/founders/marketing/page.tsx");
+    assert.match(overview, /href=\{extracted \? EXTRACTED_ROOT : `\/founders\/marketing\/library\?group=\$\{g\.key\}`\}/);
+    assert.match(overview, /label=\{extracted \? EXTRACTED_LABEL : g\.label\}/);
+    const detail = code("app/founders/marketing/asset/[id]/page.tsx");
+    assert.match(detail, /asset\.brand_slug === EXTRACTED_BRAND_SLUG \? \(\s*<Link\s+href=\{extractedHref\(asset\.id\)\}/);
+  });
+
   finish("extracted-videos");
 }
 

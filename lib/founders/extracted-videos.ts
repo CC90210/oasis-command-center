@@ -26,6 +26,12 @@ export const EXTRACTED_ROOT = "/founders/marketing/extracted";
 /** The brand group the extractor writes under (lib/founders-marketing-core.ts BRAND_GROUPS). */
 export const EXTRACTED_BRAND_GROUP = "downloads" as const;
 
+/** The brand_slug on every extracted video's row (lib/tools/runner-handlers.ts). */
+export const EXTRACTED_BRAND_SLUG = "downloads";
+
+/** What the page, its tab and its Overview tile are called. */
+export const EXTRACTED_LABEL = "Extracted videos";
+
 /** The element id of one video's card, so a link can land on it. */
 export function extractedAnchor(assetId: string): string {
   return `video-${assetId}`;
