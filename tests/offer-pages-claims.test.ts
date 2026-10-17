@@ -343,7 +343,7 @@ async function main() {
       claims.heldConfirmations(stored).map((h) => [h.kind, h.label, h.by, h.at]),
       [
         ["evidence", "results item 1 evidence", "u-cc", OK.at],
-        ["price", 'pricing tier 1 "Managed" price', "u-cc", OK.at],
+        ["price", "pricing tier 1 price", "u-cc", OK.at],
         ["guarantee", "guarantee terms", "u-cc", OK.at],
       ],
     );

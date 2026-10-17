@@ -65,7 +65,7 @@ function stable(v: unknown): string {
 
 type Confirmable = {
   kind: string;
-  /** Where it sits on the page, in words ("hero video rights", "pricing tier 2 \"Managed\""): what a person is told when one is lost. */
+  /** Where it sits on the page, by position only ("hero video rights", "pricing tier 2 price"), never stored text: what a person is told when one is lost. */
   label: string;
   thing: unknown;
   get(): Confirmation | undefined;
@@ -122,7 +122,10 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
         const tier = it;
         out.push({
           kind: "price",
-          label: `pricing tier ${i + 1}${tier.name ? ` "${tier.name}"` : ""} price`,
+          // Position only, never the tier's own text: these labels are printed
+          // into agent and log context, and stored copy can hold anything
+          // (Codex review of #675).
+          label: `pricing tier ${i + 1} price`,
           // The whole tier, not just the figure: a confirmation vouches for the
           // card as written (name, price, the Canadian price, cadence,
           // summary, what's included),

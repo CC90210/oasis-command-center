@@ -569,7 +569,10 @@ export function signOffsCleared(
   const carried = new Set(written.claims.map((t) => t.hash));
   for (const t of stored.claims) {
     if (carried.has(t.hash)) continue;
-    out.push({ kind: "claim", label: `${t.excerpt ? `"${t.excerpt}" ` : ""}[${t.hash.slice(0, 8)}]`, by: t.by, at: t.at });
+    // The sentence's hash, never its stored excerpt: this report reaches agents
+    // and logs, and stored copy can hold anything (Codex review of #675). The
+    // builder flags the same sentences again once they need a tick.
+    out.push({ kind: "claim", label: `ticked sentence [${t.hash.slice(0, 8)}]`, by: t.by, at: t.at });
   }
   return out;
 }

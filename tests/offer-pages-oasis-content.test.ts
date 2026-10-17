@@ -711,18 +711,23 @@ async function main() {
     assert.ok(dryLines.includes("  owner ticks that would be cleared: 9"), dryLines.join("\n"));
     const listed = dryLines.filter((l) => l.startsWith("    - "));
     const want = [
-      `    - price: pricing tier 1 "Free community" price (stamped by ${PERSON} at ${EDITED_AT})`,
-      `    - price: pricing tier 2 "VIP mastermind" price (stamped by ${PERSON} at ${EDITED_AT})`,
-      `    - price: pricing tier 3 "Founder mentorship" price (stamped by ${OTHER} at ${STAMP_B.at})`,
+      `    - price: pricing tier 1 price (stamped by ${PERSON} at ${EDITED_AT})`,
+      `    - price: pricing tier 2 price (stamped by ${PERSON} at ${EDITED_AT})`,
+      `    - price: pricing tier 3 price (stamped by ${OTHER} at ${STAMP_B.at})`,
       `    - rights: hero video rights (stamped by ${OTHER} at ${STAMP_B.at})`,
       `    - guarantee: guarantee terms (stamped by ${PERSON} at ${EDITED_AT})`,
       `    - money: bonuses item 1 value (stamped by ${OTHER} at ${STAMP_B.at})`,
       `    - evidence: results item 1 evidence (stamped by ${PERSON} at ${EDITED_AT})`,
-      `    - claim: "Members meet every week." [bbbbbbbb] (stamped by ${PERSON} at ${EDITED_AT})`,
-      // A stored value is printed as plain ASCII, whatever the database holds.
-      `    - claim: "caf? ? claim" [cccccccc] (stamped by ${OTHER} at ${STAMP_B.at})`,
+      `    - claim: ticked sentence [bbbbbbbb] (stamped by ${PERSON} at ${EDITED_AT})`,
+      `    - claim: ticked sentence [cccccccc] (stamped by ${OTHER} at ${STAMP_B.at})`,
     ];
     assert.deepEqual([...listed].sort(), [...want].sort(), "the dry run did not name every sign-off");
+    // Stored copy never reaches the report (Codex review of #675): positions and
+    // hashes only, so no excerpt or tier name can carry a secret into an agent's context.
+    const report = seed.formatRefreshReport(dry).join("\n");
+    for (const stored of [TICK_A.excerpt, "Free community", "VIP mastermind", "Founder mentorship", "caf"]) {
+      assert.ok(!report.includes(stored), `stored text reached the report: ${stored}`);
+    }
     assert.ok(seed.formatRefreshReport(dry).every((l) => /^[\x20-\x7E]*$/.test(l)), "the report is not plain ASCII");
     // Stored text is redacted before it is printed (Codex review of #675): a
     // keyed URL pasted into the copy never reaches an agent's context.
@@ -750,7 +755,7 @@ async function main() {
     const mem2 = await signed();
     const dry2 = await run(mem2, { apply: false, includeEdited: ["community"], content: withCarried });
     assert.equal(printed(dry2, "community"), 8, "a confirmation the written draft carries was counted as lost");
-    assert.ok(!block(seed.formatRefreshReport(dry2), "community").some((l) => l.includes('pricing tier 1 "Free community"')), "the carried price was listed");
+    assert.ok(!block(seed.formatRefreshReport(dry2), "community").some((l) => l.includes("pricing tier 1 price")), "the carried price was listed");
     const applied2 = await run(mem2, { apply: true, includeEdited: ["community"], content: withCarried });
     assert.equal(printed(applied2, "community"), 8);
     assert.equal(await signOffsOn(mem2, "community"), 1, "the carried price lost its sign-off");
