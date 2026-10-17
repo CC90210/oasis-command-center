@@ -216,14 +216,26 @@ async function main() {
   await check("a trapped browser stops before consent, tracking, held steps and uploads (Codex review of #671)", () => {
     const client = read("components/forms/FormPublicClient.tsx");
     const submit = client.slice(client.indexOf("  async function submit() {"));
-    const trapAt = submit.indexOf("const trapped = trapValue(trapRef.current, trapLatch);");
-    assert.ok(trapAt > submit.indexOf("if (preview) {"), "the trapped stop is missing, or runs before the owner's preview");
-    assert.match(submit.slice(trapAt), /^const trapped = trapValue\(trapRef\.current, trapLatch\);\s*if \(trapped\) \{\s*await reportTrappedSubmission\(/, "the stop does not run whenever the trap is filled");
-    for (const effect of ["captureConsent(", "trackEvent(", "sendHeldSteps(", "routeWithoutLead(", "buildSubmitPayloadRef.current()"]) {
+    const trapAt = submit.indexOf('const trapped = preview ? "" : trapValue(trapRef.current, trapLatch);');
+    assert.ok(trapAt > submit.indexOf("if (currentStepRef.current !== stepAtStart) return;"), "the trapped stop is missing");
+    assert.match(
+      submit.slice(trapAt),
+      /^const trapped = preview \? "" : trapValue\(trapRef\.current, trapLatch\);\s*if \(trapped\) \{\s*await reportTrappedSubmission\(/,
+      "the stop does not run whenever the trap is filled, or the owner's preview could send",
+    );
+    // Before validation (CodeRabbit on #671): a required box left blank must not hide the trap.
+    for (const effect of ["validateRef.current()", "if (preview) {", "captureConsent(", "trackEvent(", "sendHeldSteps(", "routeWithoutLead(", "buildSubmitPayloadRef.current()"]) {
       const at = submit.indexOf(effect);
       assert.ok(at > 0 && trapAt < at, `a trapped script reaches ${effect}`);
     }
-    assert.match(submit.slice(trapAt, trapAt + 600), /\.\.\.submitMeta\(\),[\s\S]*setDone\(true\);\s*return;/, "the trapped request does not tell the route, or the script does not see the thanks");
+    assert.match(submit.slice(trapAt, trapAt + 600), /\.\.\.submitMeta\(\),[\s\S]*setTrappedDone\(true\);\s*setDone\(true\);\s*return;/, "the trapped request does not tell the route, or the script does not see the thanks");
+    // The caught script's ending offers no calendar and no link (CodeRabbit on
+    // #671): every booking surface in the ending reads endingBookingSlug.
+    assert.match(client, /const endingBookingSlug = trappedDone \? null : publicBookingFormSlug;/);
+    const ending = client.slice(client.indexOf("{done ? ("), client.indexOf(") : earlyCalendarStep !== null"));
+    assert.ok(ending.length > 1000, "the form's ending was not found");
+    assert.doesNotMatch(ending, /publicBookingFormSlug/, "a booking surface in the ending ignores a caught script");
+    assert.ok((ending.match(/endingBookingSlug/g) || []).length >= 5, "the ending's calendar, community link and optional calendar are not all gated");
     const upload = client.slice(client.indexOf("const ensureUploadToken = useCallback("));
     assert.ok(
       upload.indexOf("if (trapValue(trapRef.current, trapLatch)) return null;") > 0 &&
@@ -260,11 +272,11 @@ async function main() {
     assert.match(page, /<HoneypotField inputRef=\{trapRef\} \/>\s*<\/form>/, "/book's form does not end with the trap");
     const submit = page.slice(page.indexOf("const submit = async () => {"));
     const trapAt = submit.indexOf("const honeypot = trapValue(trapRef.current, trapLatch);");
-    assert.ok(trapAt > submit.indexOf("if (!validate()) return;"), "the trap is read before the details are checked");
-    for (const effect of ["setBusy(true)", "consent_ledger:", 'fetch("/api/forms/booking"']) {
+    assert.ok(trapAt > submit.indexOf("if ((!slot && !detailsOnly) || busy) return;"), "the trap is read before a time is chosen");
+    for (const effect of ["if (!validate()) return;", "setBusy(true)", "consent_ledger:", 'fetch("/api/forms/booking"']) {
       assert.ok(trapAt < submit.indexOf(effect), `a trapped script reaches ${effect}`);
     }
-    const trapped = submit.slice(trapAt, submit.indexOf("setBusy(true)"));
+    const trapped = submit.slice(trapAt, submit.indexOf("if (!validate()) return;"));
     assert.match(trapped, /^const honeypot = trapValue\(trapRef\.current, trapLatch\);\s*if \(honeypot\) \{/, "the stop does not run whenever the trap is filled");
     assert.match(
       trapped,

@@ -267,10 +267,10 @@ export function BookingPage(props: Props) {
 
   const submit = async () => {
     if ((!slot && !detailsOnly) || busy) return;
-    if (!validate()) return;
-    // A filled honeypot is a script: no lead, no consent, no booking. One
+    // A filled honeypot is a script: no lead, no consent, no booking. Caught
+    // before validation, so a required box it left blank cannot hide it. One
     // request tells the submit route, which drops and logs it; the script sees
-    // the "we have your details" screen.
+    // the "we have your details" screen, which offers nothing to book.
     const honeypot = trapValue(trapRef.current, trapLatch);
     if (honeypot) {
       await reportTrappedSubmission(
@@ -280,6 +280,7 @@ export function BookingPage(props: Props) {
       setLeftDetails(true);
       return;
     }
+    if (!validate()) return;
     setBusy(true);
     setError(null);
     try {
