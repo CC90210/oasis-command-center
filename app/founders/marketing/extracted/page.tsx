@@ -115,25 +115,29 @@ export default async function ExtractedVideosPage({ searchParams }: { searchPara
                   className="scroll-mt-24 space-y-3 rounded-lg border border-hairline p-3"
                   data-testid="extracted-video"
                 >
-                  {t.playbackUrl ? (
-                    // preload="none": nothing is fetched until play is pressed, so a page of
-                    // videos costs no bandwidth (the Library's TileVideo note: an MP4 whose
-                    // index sits at the end makes "metadata" fetch the whole file).
-                    <video
-                      src={t.playbackUrl}
-                      poster={t.posterUrl ?? undefined}
-                      controls
-                      preload="none"
-                      playsInline
-                      aria-label={a.title}
-                      className="w-full rounded-md bg-black"
-                      style={{ aspectRatio: t.mediaW && t.mediaH ? `${t.mediaW} / ${t.mediaH}` : "9 / 16", maxHeight: "28rem" }}
-                    />
-                  ) : (
-                    <div className="flex aspect-video items-center justify-center rounded-md bg-bg-elevated text-xs text-fg-muted">
-                      The video couldn&apos;t be loaded. Download still works.
-                    </div>
-                  )}
+                  {/* One frame height for every card, the video centred in it, so a
+                      tall TikTok and a wide YouTube clip line up in the grid. */}
+                  <div className="flex h-80 items-center justify-center overflow-hidden rounded-md bg-black">
+                    {t.playbackUrl ? (
+                      // preload="metadata" + #t=0.1 shows the first frame instead of a black
+                      // box, and costs little here: the extractor's MP4s carry their index
+                      // (moov) at the front (yt-dlp's ffmpeg merge; measured on 2026-10-17
+                      // downloads), so metadata is a small range read, not the whole file
+                      // (the Library's TileVideo note is about files that end with it).
+                      <video
+                        src={`${t.playbackUrl}#t=0.1`}
+                        poster={t.posterUrl ?? undefined}
+                        controls
+                        preload="metadata"
+                        playsInline
+                        aria-label={a.title}
+                        className="h-full max-w-full"
+                        style={{ aspectRatio: t.mediaW && t.mediaH ? `${t.mediaW} / ${t.mediaH}` : "9 / 16" }}
+                      />
+                    ) : (
+                      <p className="px-4 text-center text-xs text-fg-muted">The video couldn&apos;t be loaded. Download still works.</p>
+                    )}
+                  </div>
                   <div className="space-y-1">
                     <p className="line-clamp-2 text-sm font-medium text-fg">{f.postTitle ?? a.title}</p>
                     <p className="text-xs text-fg-muted">
