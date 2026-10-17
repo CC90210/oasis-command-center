@@ -11,7 +11,10 @@
  *      never another workspace's), each card carrying its anchor, Download and
  *      Delete; with none, it says how to extract one.
  *   3. The Content Tools card sends a finished extract to its card on this page,
- *      not to the Library.
+ *      not to the Library; so do the Overview's tile and the asset page.
+ *   4. The Library draws no Downloads tab (LIBRARY_BRAND_GROUPS), the slug stays
+ *      claimed so the residual Clients tab never takes them, and an old
+ *      ?group=downloads link redirects here.
  *
  * Run: node --conditions=react-server --import tsx tests/extracted-videos.test.ts
  */
@@ -32,6 +35,9 @@ function stubModule(id: string, exports: Record<string, unknown>) {
 stubModule("next/navigation", {
   notFound: () => {
     throw new Error("NEXT_HTTP_ERROR_FALLBACK;404");
+  },
+  redirect: (url: string) => {
+    throw new Error(`NEXT_REDIRECT;${url}`);
   },
   useRouter: () => ({ refresh: () => undefined }),
 });
@@ -214,6 +220,30 @@ async function main() {
     assert.match(overview, /label=\{extracted \? EXTRACTED_LABEL : g\.label\}/);
     const detail = code("app/founders/marketing/asset/[id]/page.tsx");
     assert.match(detail, /asset\.brand_slug === EXTRACTED_BRAND_SLUG \? \(\s*<Link\s+href=\{extractedHref\(asset\.id\)\}/);
+  });
+
+  // ── 4. the Library no longer holds them ──────────────────────────────────
+  await check("the Library draws no Downloads tab, yet extracted videos stay claimed (never Clients)", async () => {
+    const core = await import("../lib/founders-marketing-core");
+    assert.deepEqual(core.LIBRARY_BRAND_GROUPS.map((g) => g.key), ["oasis-ai", "conaugh", "clients"]);
+    assert.equal(core.isLibraryBrandGroupKey("downloads"), false);
+    assert.equal(core.isLibraryBrandGroupKey("oasis-ai"), true);
+    // The slug is still claimed by its group: the residual Clients tab never gets them.
+    assert.equal(core.brandGroupFor("downloads"), "downloads");
+    assert.ok(core.claimedBrandSlugs().includes("downloads"));
+    const page = code("app/founders/marketing/library/page.tsx");
+    assert.match(page, /LIBRARY_BRAND_GROUPS\.map\(\(g\) =>/, "the tab bar draws the Library's own tabs");
+    assert.doesNotMatch(page, /[^_]BRAND_GROUPS\.map\(/, "and nowhere the full list");
+    assert.match(page, /isLibraryBrandGroupKey\(sp\.group\)/);
+  });
+
+  await check("an old ?group=downloads Library link lands on Extracted videos", async () => {
+    await login(USERS.cc);
+    const Library = (await import("../app/founders/marketing/library/page")).default;
+    await assert.rejects(
+      () => Library({ searchParams: Promise.resolve({ group: "downloads" }) }),
+      (e: Error) => e.message === "NEXT_REDIRECT;/founders/marketing/extracted",
+    );
   });
 
   finish("extracted-videos");

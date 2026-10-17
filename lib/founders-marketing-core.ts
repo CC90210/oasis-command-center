@@ -121,11 +121,14 @@ export const BRAND_GROUPS: readonly BrandGroup[] = [
     empty: "Nothing under the personal brand yet. What the marketing agent makes for CC's own channels lands here.",
   },
   {
-    // Videos the Toolkit's "Download a video" saved from Instagram, TikTok or
+    // Videos the Video extractor (Content Tools) saved from Instagram, TikTok or
     // YouTube (lib/tools/runner-handlers.ts): someone else's work with unknown
-    // rights, kept for analysis. Their own tab, so they never sit in OASIS's
-    // tab or its counts, and the founders publish route refuses any brand but
-    // OASIS's own, so a download cannot be posted from OASIS's accounts.
+    // rights, kept for reference. Never in OASIS's tab or its counts, and the
+    // founders publish route refuses any brand but OASIS's own, so a download
+    // cannot be posted from OASIS's accounts. Since 2026-10-17 they are not a
+    // Library tab at all (LIBRARY_BRAND_GROUPS below) but their own page,
+    // Content > Extracted videos. The group stays HERE so its slug stays
+    // claimed: removed, every extracted video would fall into Clients.
     key: "downloads",
     label: "Downloads",
     slugs: ["downloads"],
@@ -138,6 +141,19 @@ export const BRAND_GROUPS: readonly BrandGroup[] = [
     empty: "No client deliverables in the library.",
   },
 ];
+
+/**
+ * The Library's own tabs: every group but `downloads`. CC, 2026-10-17:
+ * extracted videos are "a separate category ... rather than the main library",
+ * so they live on Content > Extracted videos (app/founders/marketing/extracted)
+ * and the Library sends ?group=downloads there.
+ */
+export const LIBRARY_BRAND_GROUPS: readonly BrandGroup[] = BRAND_GROUPS.filter((g) => g.key !== "downloads");
+
+/** A tab the Library itself draws (never `downloads`). */
+export function isLibraryBrandGroupKey(v: unknown): v is BrandGroupKey {
+  return typeof v === "string" && LIBRARY_BRAND_GROUPS.some((g) => g.key === v);
+}
 
 /**
  * The tab you land on. OASIS's own work stays the default view, which is what
