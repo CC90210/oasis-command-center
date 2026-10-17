@@ -44,6 +44,10 @@ function friendlyError(code: string | undefined): string {
   if (code === "invalid_client_phone" || code === "client_phone_required") {
     return "We couldn't use the phone number you entered, so we couldn't book this time. Your details are saved. Reply to your confirmation email with a good number and we'll book you in.";
   }
+  // lib/forms/public-booking-cap.ts: this connection already holds today's calls.
+  if (code === "daily_booking_limit") {
+    return "Too many calls were booked from this connection today. Your details are saved, and the team will follow up.";
+  }
   if (code === "lead_stage_not_bookable") {
     return "Your request is already with our team. Reply to your confirmation email and we'll set the time with you.";
   }

@@ -190,6 +190,10 @@ assert.equal(auditFormProblem(ok), null, "an international number with its count
 assert.equal(auditFormProblem({ ...ok, phone: "(514) 555-0123" }), null, "a North American number is accepted");
 assert.equal(auditFormProblem({ ...ok, website: "" }), null, "website stays optional");
 assert.match(auditFormProblem({ ...ok, phone: "call me" }) ?? "", /doesn't look right/, "a phone with no number in it is refused");
+// The send gate's own rule (normalizeConsentSubject): letters around digits are
+// refused, never stripped into a number nobody typed.
+assert.match(auditFormProblem({ ...ok, phone: "not-a-phone 5145550123" }) ?? "", /doesn't look right/);
+assert.match(auditFormProblem({ ...ok, phone: "514 555 0123 ext 22" }) ?? "", /doesn't look right/);
 assert.match(auditFormProblem({ ...ok, name: "", company: "" }) ?? "", /your name and your company/);
 const spaces = new FormData();
 for (const [key, value] of Object.entries({ ...typed, phone: "   " })) spaces.set(key, value);

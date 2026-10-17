@@ -1,5 +1,5 @@
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
-import { normalizePhoneE164 } from "@/lib/conversation-threading";
+import { normalizeConsentSubject } from "@/lib/consent/ledger-disclosure";
 import { appendPreservedParams, isSafeInternalPath } from "@/lib/offers/preserve-query";
 
 /**
@@ -122,7 +122,9 @@ export function auditFormProblem(payload: Record<AuditFormField, string>): strin
     const list = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
     return `Please add ${list}.`;
   }
-  if (!normalizePhoneE164(payload.phone)) {
+  // The one canonical phone the consent ledger and the send gate accept
+  // (normalizeConsentSubject): letters are refused, never stripped into digits.
+  if (!normalizeConsentSubject("sms", payload.phone)) {
     return "That mobile number doesn't look right. Include the country code, like +1 514 555 0123.";
   }
   return null;
