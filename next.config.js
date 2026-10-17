@@ -418,6 +418,14 @@ const nextConfig = {
           { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
         ],
       },
+      {
+        // Oasis Meet rooms (app/meet/[code]) are the one page that uses the camera and microphone: a call.
+        // With the rule above alone, getUserMedia answers NotAllowedError on /meet and nobody can be seen or
+        // heard. Later rules override earlier ones for the same header key (Next.js headers(); OpenNext's
+        // getNextConfigHeaders keeps that order), so every other page keeps camera=() and microphone=().
+        source: "/meet/:path*",
+        headers: [{ key: "Permissions-Policy", value: "camera=(self), microphone=(self), geolocation=(self), payment=()" }],
+      },
     ];
   },
 };

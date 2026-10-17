@@ -131,7 +131,10 @@ export function meetDisplayName(input: unknown): string | null {
   return name || null;
 }
 
-const answer = (status: number, error: string) => ({ ok: false as const, response: meetError(status, error) });
+const answer = (status: number, error: string, extra: Record<string, unknown> = {}) => ({
+  ok: false as const,
+  response: meetError(status, error, extra),
+});
 
 /** The signed-in person as Meet needs them (lib/api-auth.ts resolveSessionContext, narrowed). */
 export type MeetSession = { ok: true; tenantId: string; userId: string; isTrueAdmin: boolean; email?: string | null } | { ok: false };
@@ -184,7 +187,8 @@ export async function requireMeetParticipant(
   if (!room) return answer(404, "room_not_found");
   const claims = verifyMeetToken(req.cookies.get(MEET_COOKIE)?.value, nowMs);
   if (!claims || claims.roomId !== room.id) return answer(401, "not_in_room");
-  if (room.status === "ended") return answer(410, "room_ended");
+  // Why it ended (host_ended, host_left, expired), so the page can say "the host ended it" only when one did.
+  if (room.status === "ended") return answer(410, "room_ended", { reason: room.endedReason });
   const participant = await readPresence(db, { tenantId: room.tenantId, roomId: room.id, participantId: claims.participantId });
   if (!participant || participant.leftAt) return answer(401, "not_in_room");
   if (participant.removedAt) return answer(403, "removed");

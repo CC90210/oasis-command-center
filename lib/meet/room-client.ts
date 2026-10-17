@@ -104,7 +104,8 @@ const TRACK_CAM = "cam";
 const TRACK_SCREEN = "screen";
 
 class RoomCallError extends Error {
-  constructor(readonly status: number, readonly code: string) {
+  /** `reason` is why an ended room ended (host_ended, host_left, expired), when the answer says. */
+  constructor(readonly status: number, readonly code: string, readonly reason: string | null = null) {
     super(code);
   }
 }
@@ -215,7 +216,9 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     } catch {
       // the status below says what happened
     }
-    if (!res.ok || json.ok === false) throw new RoomCallError(res.status, String(json.error ?? `http_${res.status}`));
+    if (!res.ok || json.ok === false) {
+      throw new RoomCallError(res.status, String(json.error ?? `http_${res.status}`), typeof json.reason === "string" ? json.reason : null);
+    }
     return json as T;
   }
 
@@ -295,7 +298,9 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   function endedBy(err: unknown): boolean {
     if (!(err instanceof RoomCallError)) return false;
     if (err.code === "removed") ended("removed");
-    else if (err.status === 410) ended(me?.role === "host" ? "room_closed" : "host_ended");
+    // "The host ended the meeting" only when a host did; a room that closed itself (its host gone ten minutes)
+    // or any other end is "This meeting has ended."
+    else if (err.status === 410) ended(err.reason === "host_ended" && me?.role !== "host" ? "host_ended" : "room_closed");
     else if (err.status === 401 && phase.kind !== "joining") ended("left");
     else return false;
     return true;
@@ -487,6 +492,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     phase = { kind: "joining" };
     emit();
     await new Promise((r) => setTimeout(r, 1_000 * reconnects));
+    // Left (or removed) during the wait: the call stays ended.
+    if (closed) return;
     phase = { kind: "waiting_for_host" };
     notice = null;
     await connect();
@@ -498,7 +505,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     if (local.mic && me) recorder.addTrack({ participantId: me.id, displayName: me.name, track: local.mic });
   }
 
-  return {
+  const controller: MeetRoomController = {
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -519,6 +526,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
           ...(name ? { name } : {}),
           consent,
         });
+        // Left while the join was on its way: the call stays ended (the room drops a participant who never polls).
+        if (closed) return;
         me = { id: res.participantId, role: res.role, name: res.name };
         records = res.records === true;
         room = res.room;
@@ -591,7 +600,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       local.screen = track;
       // The browser's own "Stop sharing" button ends the track: the room hears about it the same way.
       track.addEventListener("ended", () => {
-        if (local.screen === track) void this.shareScreen(false);
+        if (local.screen === track) void controller.shareScreen(false);
       });
       emit();
       if (tx.screen) {
@@ -664,4 +673,5 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       ended("left");
     },
   };
+  return controller;
 }

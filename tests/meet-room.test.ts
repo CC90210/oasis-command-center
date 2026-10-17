@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { NextRequest } from "next/server";
+import { publicAppBaseUrl } from "../lib/api-helpers";
 import { MEET_COOKIE, MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } from "../lib/meet/access";
 import { parseSfu } from "../lib/meet/bodies";
 import { handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
@@ -144,12 +145,31 @@ async function main() {
     assert.equal(room.title, "Discovery call");
     assert.equal(room.recordAudio, true);
     assert.match(String(room.link), /^\/meet\/[a-z]{3}-[a-z]{4}-[a-z]{3}$/);
+    assert.equal(room.url, `${publicAppBaseUrl().replace(/\/+$/, "")}${room.link}`, "the whole link comes from the app's canonical address, not the request's host");
     assert.ok(!("tenantId" in room) && !("hostUserId" in room), "the room view never carries its workspace or host id");
     code = String(room.code);
     await handleCreateRoom(request("/api/calendar/meet", { body: { title: "Theirs" } }), deps({ session: as(REP, false, OTHER) }));
     const list = (await json(await handleListRooms(deps({ session: as(ADON) })))).rooms as Json[];
     assert.ok(list.some((r) => r.code === code) && !list.some((r) => r.title === "Theirs"), "the list is the workspace's own rooms");
     assert.equal(list.find((r) => r.code === code)?.mine, false, "Adon sees CC's room as not his own");
+    assert.equal(list.find((r) => r.code === code)?.url, room.url, "the list carries the same whole link");
+  });
+
+  await check("the room page may use the camera and microphone; every other page still may not", async () => {
+    // next.config.js headers(): the later matching rule wins for the same key (Next.js; OpenNext keeps the order).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const config = require("../next.config.js") as { headers: () => Promise<Array<{ source: string; headers: Array<{ key: string; value: string }> }>> };
+    const rules = await config.headers();
+    const policy = (source: string) => rules.findIndex((r) => r.source === source && r.headers.some((h) => h.key === "Permissions-Policy"));
+    const valueOf = (i: number) => rules[i].headers.find((h) => h.key === "Permissions-Policy")!.value;
+    const everywhere = policy("/:path*");
+    const meet = policy("/meet/:path*");
+    assert.ok(everywhere >= 0 && meet > everywhere, "the /meet rule comes after the site-wide one, so it wins on /meet");
+    assert.match(valueOf(everywhere), /camera=\(\)/);
+    assert.match(valueOf(everywhere), /microphone=\(\)/);
+    assert.match(valueOf(meet), /camera=\(self\)/);
+    assert.match(valueOf(meet), /microphone=\(self\)/);
+    assert.match(valueOf(meet), /payment=\(\)/, "the room page keeps every other restriction");
   });
 
   await check("a meeting made for later goes on the host's Schedule, in their time zone; the link works even when it cannot", async () => {

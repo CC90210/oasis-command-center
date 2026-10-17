@@ -109,12 +109,13 @@ class FakePeer extends EventTarget {
 type Person = { id: string; name: string; role: "host" | "guest"; tracks: Array<{ trackName: string; kind: "audio" | "video" }> };
 
 /** A stand-in room API: what the handlers answer, plus a log and a check that SFU steps never overlap. */
-function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio?: boolean }) {
+function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio?: boolean; joinDelayMs?: number; failPublishOnce?: boolean }) {
   const log: string[] = [];
   const me: Person = { id: "me", name: "Me", role: opts.role, tracks: [] };
   const others: Person[] = [];
   let hostPresent = opts.role === "host";
-  let stateError: { status: number; error: string } | null = null;
+  let stateError: { status: number; error: string; reason?: string } | null = null;
+  let publishFailures = opts.failPublishOnce ? 1 : 0;
   let sfuInFlight = 0;
   let overlapped = false;
   let pulledMid = 0;
@@ -124,11 +125,12 @@ function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio
     const path = String(input).replace(/^\/api\/meet\/[a-z-]+/, "");
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
     if (path === "/join") {
+      if (opts.joinDelayMs) await new Promise((r) => setTimeout(r, opts.joinDelayMs));
       log.push("join");
       return reply({ ok: true, participantId: me.id, role: me.role, name: me.name, records: opts.records === true, room: { code: "abc-defg-hjk", title: "Call", status: "live", recordAudio: opts.recordAudio ?? true, startedAt: null }, iceServers: [] });
     }
     if (path === "/state") {
-      if (stateError) return reply({ ok: false, error: stateError.error }, stateError.status);
+      if (stateError) return reply({ ok: false, error: stateError.error, ...(stateError.reason ? { reason: stateError.reason } : {}) }, stateError.status);
       return reply({
         ok: true,
         room: { code: "abc-defg-hjk", title: "Call", status: "live", recordAudio: opts.recordAudio ?? true, startedAt: null },
@@ -148,6 +150,11 @@ function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio
         log.push(`sfu:${action}`);
         if (action === "session") return hostPresent ? reply({ ok: true }) : reply({ ok: false, error: "waiting_for_host" }, 409);
         if (action === "publish") {
+          if (publishFailures > 0) {
+            publishFailures -= 1;
+            log.push("publish:failed");
+            return reply({ ok: false, error: "sfu_failed" }, 502);
+          }
           const tracks = body.tracks as Array<{ mid: string; trackName: string; kind: "audio" | "video" }>;
           log.push(`publish:${tracks.map((t) => `${t.trackName}@${t.mid}`).join(",")}`);
           for (const t of tracks) me.tracks.push({ trackName: t.trackName, kind: t.kind });
@@ -200,8 +207,8 @@ function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio
     setHostPresent: (v: boolean) => {
       hostPresent = v;
     },
-    failState: (status: number, error: string) => {
-      stateError = { status, error };
+    failState: (status: number, error: string, reason?: string) => {
+      stateError = { status, error, reason };
     },
     overlapped: () => overlapped,
     busyWith: () => busyWith,
@@ -330,20 +337,49 @@ async function main() {
     await leaveQuietly(c);
   });
 
-  await check("removed or ended: the call ends and the camera is released", async () => {
-    for (const [status, error, reason] of [[403, "removed", "removed"], [410, "room_ended", "host_ended"]] as const) {
+  await check("removed or ended: the call ends, says who ended it only when a host did, and releases the camera", async () => {
+    const cases = [
+      [403, "removed", undefined, "removed"],
+      [410, "room_ended", "host_ended", "host_ended"],
+      [410, "room_ended", "host_left", "room_closed"],
+      [410, "room_ended", undefined, "room_closed"],
+    ] as const;
+    for (const [status, error, why, reason] of cases) {
       const room = fakeRoom({ role: "guest" });
       room.setHostPresent(true);
       const { c, peers } = controller(room);
       const cam = new FakeTrack("video");
       await c.join({ name: "Jane", consent: true, mic: null, cam: cam as unknown as MediaStreamTrack });
       await waitFor("live", () => c.snapshot().phase.kind === "live");
-      room.failState(status, error);
+      room.failState(status, error, why);
       await waitFor(`ended ${reason}`, () => c.snapshot().phase.kind === "ended");
-      assert.deepEqual(c.snapshot().phase, { kind: "ended", reason });
+      assert.deepEqual(c.snapshot().phase, { kind: "ended", reason }, `${status} ${error} ${why ?? "-"}`);
       assert.equal(cam.readyState, "ended");
       assert.equal(peers[0].closed, true);
     }
+  });
+
+  await check("leaving while it reconnects, or while the join is on its way, stays left", async () => {
+    // A publish that fails makes the room reconnect after a wait; Leave during that wait must hold.
+    const flaky = fakeRoom({ role: "host", failPublishOnce: true });
+    const a = controller(flaky);
+    void a.c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("the first publish failed", () => flaky.log.includes("publish:failed"));
+    await waitFor("waiting to reconnect", () => a.c.snapshot().notice === "Reconnecting...");
+    await a.c.leave();
+    await new Promise((r) => setTimeout(r, 1_300)); // past the reconnect wait
+    await a.c.setMic(false); // any later update redraws the snapshot: it must still read ended
+    assert.deepEqual(a.c.snapshot().phase, { kind: "ended", reason: "left" });
+    assert.ok(!flaky.log.slice(flaky.log.indexOf("publish:failed") + 1).includes("sfu:session"), "and it did not connect again");
+
+    const slow = fakeRoom({ role: "guest", joinDelayMs: 80 });
+    slow.setHostPresent(true);
+    const b = controller(slow);
+    const joining = b.c.join({ name: "Jane", consent: true, mic: null, cam: null });
+    await b.c.leave();
+    await joining;
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepEqual(b.c.snapshot().phase, { kind: "ended", reason: "left" }, "the join's answer arriving after Leave does not bring the call back");
   });
 
   await check("only the browser the join names records; End stops the recorder, then ends, then finalizes", async () => {

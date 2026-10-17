@@ -17,6 +17,7 @@
 import "server-only";
 import type { Client } from "@libsql/client";
 import type { NextRequest, NextResponse } from "next/server";
+import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { readCappedJson, sameOrigin } from "@/lib/offer-pages/public-http";
 import {
   MEET_COOKIE,
@@ -68,6 +69,8 @@ export type MeetDeps = {
 };
 
 const link = (room: MeetRoom) => `/meet/${displayMeetCode(room.code)}`;
+/** The whole link from the app's canonical address, never the host the request came in on (a preview, say). */
+const url = (room: MeetRoom) => `${publicAppBaseUrl().replace(/\/+$/, "")}${link(room)}`;
 
 type Guarded = { ok: true; code: string } | { ok: false; response: NextResponse };
 
@@ -108,7 +111,7 @@ export async function handleListRooms(deps: MeetDeps): Promise<NextResponse> {
     const rooms = await listMeetRooms(deps.db, { tenantId: session.tenantId, limit: 20 });
     return meetJson({
       ok: true,
-      rooms: rooms.map((r) => ({ id: r.id, ...roomView(r), link: link(r), createdAt: r.createdAt, mine: r.hostUserId === session.userId })),
+      rooms: rooms.map((r) => ({ id: r.id, ...roomView(r), link: link(r), url: url(r), createdAt: r.createdAt, mine: r.hostUserId === session.userId })),
     });
   } catch (err) {
     return meetFailure(err, "rooms.list");
@@ -146,7 +149,7 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
       }
     }
     return meetJson(
-      { ok: true, room: { id: room.id, ...roomView(room), link: link(room), createdAt: room.createdAt, mine: true }, ...(schedule ? { schedule } : {}) },
+      { ok: true, room: { id: room.id, ...roomView(room), link: link(room), url: url(room), createdAt: room.createdAt, mine: true }, ...(schedule ? { schedule } : {}) },
       201,
     );
   } catch (err) {
@@ -181,7 +184,7 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
     if (!body) return meetError(400, "invalid_body");
     const room = await readMeetRoomByCode(deps.db, code);
     if (!room) return meetError(404, "room_not_found");
-    if (room.status === "ended") return meetError(410, "room_ended");
+    if (room.status === "ended") return meetError(410, "room_ended", { reason: room.endedReason });
     const now = deps.now();
     // Checked before anything is written: without its secret no token can be signed, and a join would be a stray row.
     const earlier = verifyMeetToken(req.cookies.get(MEET_COOKIE)?.value, now.getTime());
@@ -235,7 +238,7 @@ export async function handleState(req: NextRequest, rawCode: string, deps: MeetD
     await touchParticipant(deps.db, me, now);
     if (await expireIfHostGone(deps.db, room, now)) {
       await cutRoom(deps, room);
-      return meetError(410, "room_ended");
+      return meetError(410, "room_ended", { reason: "host_left" });
     }
     const present = await presentParticipants(deps.db, room, now);
     return meetJson({

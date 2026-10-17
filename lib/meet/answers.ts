@@ -9,6 +9,7 @@ export function meetJson(body: Record<string, unknown>, status = 200): NextRespo
   return NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
-export function meetError(status: number, error: string): NextResponse {
-  return meetJson({ ok: false, error }, status);
+/** A refusal. `extra` carries what the page needs to word it (an ended room's reason, say), never storage detail. */
+export function meetError(status: number, error: string, extra: Record<string, unknown> = {}): NextResponse {
+  return meetJson({ ok: false, error, ...extra }, status);
 }
