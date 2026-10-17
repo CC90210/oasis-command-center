@@ -47,7 +47,7 @@
  * pill with a count, and every archived tile carries Restore.
  */
 
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { LayoutGrid, Smartphone } from "lucide-react";
 import { Card, PageHeader } from "@/components/Card";
@@ -73,7 +73,6 @@ import {
   type LibraryPage,
 } from "@/lib/founders/marketing-queries";
 import {
-  BRAND_GROUPS,
   DEFAULT_BRAND_GROUP,
   LIFECYCLE,
   TRACKS,
@@ -82,7 +81,8 @@ import {
   channelLabel,
   channelsForTrack,
   isAssetStatus,
-  isBrandGroupKey,
+  isLibraryBrandGroupKey,
+  LIBRARY_BRAND_GROUPS,
   authorName,
   isLifecycle,
   libraryHref,
@@ -102,6 +102,7 @@ import {
   type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
+import { EXTRACTED_ROOT } from "@/lib/founders/extracted-videos";
 import { HookCompare } from "@/components/founders/HookCompare";
 import { AssetTile, MarketingEmpty } from "@/components/founders/marketing-shared";
 
@@ -136,9 +137,16 @@ export default async function MarketingLibraryPage({
   if (!founder) notFound();
 
   const sp = await searchParams;
+  // The Video extractor's saves left the Library (CC, 2026-10-17: "a separate
+  // category ... rather than the main library"): an old Downloads link lands on
+  // their own page.
+  if (sp.group === "downloads") {
+    const n = parseLibraryPage(sp.page);
+    redirect(n > 1 ? `${EXTRACTED_ROOT}?page=${n}` : EXTRACTED_ROOT);
+  }
   // An unknown ?group= falls back to the default tab rather than 404ing or
   // showing everything — a bad tab name is a typo, not a request for a wider view.
-  const group: BrandGroupKey = isBrandGroupKey(sp.group) ? sp.group : DEFAULT_BRAND_GROUP;
+  const group: BrandGroupKey = isLibraryBrandGroupKey(sp.group) ? sp.group : DEFAULT_BRAND_GROUP;
   const track = isTrack(sp.track) ? sp.track : undefined;
   const channel = isChannel(sp.channel) ? (sp.channel as Channel) : undefined;
   const brand = typeof sp.brand === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(sp.brand)
@@ -246,7 +254,7 @@ export default async function MarketingLibraryPage({
   // "Library" link to come back to.
   const thisView = pageHref(currentPage);
 
-  const activeGroup = BRAND_GROUPS.find((g) => g.key === group)!;
+  const activeGroup = LIBRARY_BRAND_GROUPS.find((g) => g.key === group)!;
   const filtered = !!(track || channel || brand || author || status || lifecycle);
 
   // The audience and pack options for THIS view (getMetaFacets). A chosen value
@@ -292,7 +300,7 @@ export default async function MarketingLibraryPage({
           bodies of work, and it should not look like the facets that narrow
           within one. */}
       <div className="-mb-px flex flex-wrap items-end gap-1 border-b border-bg-border">
-        {BRAND_GROUPS.map((g) => {
+        {LIBRARY_BRAND_GROUPS.map((g) => {
           const n = countFor(g.key);
           const active = g.key === group;
           return (

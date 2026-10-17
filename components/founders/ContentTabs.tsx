@@ -1,7 +1,8 @@
 "use client";
 
 /**
- * Content's tab bar: Overview - Library - Content Tools - Performance. The one
+ * Content's tab bar: Overview - Library - Extracted videos - Content Tools -
+ * Performance. The one
  * strip that reaches the Library from inside the OS shell (2026-10-01): the
  * rail draws Content as a single row and the breadcrumb knew no sub-pages, so
  * the Library was reachable only through the legacy founders banner, which CC
@@ -40,6 +41,9 @@ export const CONTENT_ROOT = "/founders/marketing";
 export const CONTENT_TABS = [
   { href: "/founders/marketing", label: "Overview" },
   { href: "/founders/marketing/library", label: "Library" },
+  // CC, 2026-10-17: extracted videos are "a separate category ... rather than
+  // the main library". The Video extractor's saves (brand `downloads`) live here.
+  { href: "/founders/marketing/extracted", label: "Extracted videos" },
   { href: "/founders/marketing/tools", label: "Content Tools" },
   { href: "/founders/marketing/performance", label: "Performance" },
 ] as const;

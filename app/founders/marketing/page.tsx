@@ -67,6 +67,7 @@ import {
   type BrandGroupKey,
 } from "@/lib/founders-marketing-core";
 import { MarketingEmpty } from "@/components/founders/marketing-shared";
+import { EXTRACTED_BRAND_GROUP, EXTRACTED_LABEL, EXTRACTED_ROOT } from "@/lib/founders/extracted-videos";
 
 export const dynamic = "force-dynamic";
 
@@ -385,15 +386,22 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         {BRAND_GROUPS.map((g) => {
           const n = brandCount(g.key);
+          // The Video extractor's saves are not Library work (CC, 2026-10-17):
+          // their tile opens Content > Extracted videos.
+          const extracted = g.key === EXTRACTED_BRAND_GROUP;
           const hint =
             typeof n !== "number"
               ? "count unavailable"
-              : n === 0
-                ? "nothing registered yet"
-                : `${n === 1 ? "asset" : "assets"} in the library`;
+              : extracted
+                ? n === 0
+                  ? "nothing extracted yet"
+                  : `${n === 1 ? "video" : "videos"} extracted`
+                : n === 0
+                  ? "nothing registered yet"
+                  : `${n === 1 ? "asset" : "assets"} in the library`;
           return (
-            <Link key={g.key} href={`/founders/marketing/library?group=${g.key}`} className="block">
-              <Stat label={g.label} value={n} hint={hint} />
+            <Link key={g.key} href={extracted ? EXTRACTED_ROOT : `/founders/marketing/library?group=${g.key}`} className="block">
+              <Stat label={extracted ? EXTRACTED_LABEL : g.label} value={n} hint={hint} />
             </Link>
           );
         })}
