@@ -2,8 +2,11 @@
  * lib/meet/access.ts - who may do what in an Oasis Meet room.
  *
  * HOST: a signed-in member of the room's workspace who made the room, or who
- * runs the workspace (owner or admin). A host starts and ends the meeting,
- * removes people and records. requireMeetHost answers that from the session.
+ * owns or administers the workspace by their base role (isTrueAdmin: the
+ * admin_access toggle opens screens, it does not make a host). A host starts
+ * and ends the meeting, removes people and records everyone's voice, so the
+ * bar is the same as deleting a lead's records. requireMeetHost answers that
+ * from the session.
  *
  * GUEST: anyone holding the link. Joining with a name gives them a participant
  * token: an HMAC-signed claim (room, participant, role, expiry) under its own
@@ -100,20 +103,30 @@ export function meetCookie(code: string, token: string) {
 }
 
 /**
- * Who a signed-in person is in a room: its host (they made it, or they run the workspace), a guest (another
- * member), or no one (another workspace, which is never told the room exists).
+ * Who a signed-in person is in a room: its host (they made it, or own or administer the workspace by base role),
+ * a guest (another member), or no one (another workspace, which is never told the room exists).
  */
 export function meetRoleFor(
-  session: { tenantId: string; userId: string; isAdmin: boolean },
+  session: { tenantId: string; userId: string; isTrueAdmin: boolean },
   room: Pick<MeetRoom, "tenantId" | "hostUserId">,
 ): MeetRole | null {
   if (session.tenantId !== room.tenantId) return null;
-  return session.userId === room.hostUserId || session.isAdmin ? "host" : "guest";
+  return session.userId === room.hostUserId || session.isTrueAdmin ? "host" : "guest";
+}
+
+/** The longest name a participant shows: it heads their tile and labels their lines in the transcript. */
+export const MEET_NAME_MAX = 60;
+
+/** A participant's name as it is kept: control characters and runs of spaces as one space, trimmed, capped. Null when nothing is left. */
+export function meetDisplayName(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const name = input.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, MEET_NAME_MAX).trim();
+  return name || null;
 }
 
 const answer = (status: number, error: string) => ({ ok: false as const, response: NextResponse.json({ ok: false, error }, { status }) });
 
-type SessionLike = { ok: true; tenantId: string; userId: string; isAdmin: boolean } | { ok: false };
+type SessionLike = { ok: true; tenantId: string; userId: string; isTrueAdmin: boolean } | { ok: false };
 
 export type MeetHostResult = { ok: true; tenantId: string; userId: string; room: MeetRoom } | { ok: false; response: NextResponse };
 

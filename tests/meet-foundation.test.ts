@@ -13,11 +13,13 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import {
   MEET_COOKIE,
+  MEET_NAME_MAX,
   MEET_TOKEN_SECRET_ENV,
   MEET_TOKEN_TTL_S,
   MeetNotConfiguredError,
   meetApiPath,
   meetCookie,
+  meetDisplayName,
   meetRoleFor,
   requireMeetHost,
   requireMeetParticipant,
@@ -135,24 +137,36 @@ async function main() {
     assert.equal((await listMeetRooms(db, { tenantId: OASIS, limit: 1 })).length, 1);
   });
 
-  await check("host: who made the room or runs the workspace; another member is a guest; another workspace is no one", () => {
-    assert.equal(meetRoleFor({ tenantId: OASIS, userId: CC, isAdmin: false }, room), "host");
-    assert.equal(meetRoleFor({ tenantId: OASIS, userId: ADON, isAdmin: true }, room), "host");
-    assert.equal(meetRoleFor({ tenantId: OASIS, userId: REP, isAdmin: false }, room), "guest");
-    assert.equal(meetRoleFor({ tenantId: OTHER, userId: CC, isAdmin: true }, room), null);
+  await check("host: who made the room or owns or runs the workspace by base role; another member is a guest; another workspace is no one", () => {
+    assert.equal(meetRoleFor({ tenantId: OASIS, userId: CC, isTrueAdmin: false }, room), "host");
+    assert.equal(meetRoleFor({ tenantId: OASIS, userId: ADON, isTrueAdmin: true }, room), "host");
+    assert.equal(meetRoleFor({ tenantId: OASIS, userId: REP, isTrueAdmin: false }, room), "guest");
+    assert.equal(meetRoleFor({ tenantId: OTHER, userId: CC, isTrueAdmin: true }, room), null);
+    // The admin_access toggle opens admin screens; it does not let a member record, remove or end.
+    const toggled = { tenantId: OASIS, userId: REP, isAdmin: true, isTrueAdmin: false };
+    assert.equal(meetRoleFor(toggled, room), "guest");
   });
 
   await check("requireMeetHost: 401 signed out, 404 no room or another workspace's, 403 a member who is not host", async () => {
-    const as = (s: { ok: true; tenantId: string; userId: string; isAdmin: boolean } | { ok: false }) => async () => s;
+    type Session = { ok: true; tenantId: string; userId: string; isAdmin?: boolean; isTrueAdmin: boolean } | { ok: false };
+    const as = (s: Session) => async () => s;
     const status = async (r: Awaited<ReturnType<typeof requireMeetHost>>) => (r.ok ? 200 : r.response.status);
     const code = displayMeetCode(room.code);
     assert.equal(await status(await requireMeetHost(db, code, as({ ok: false }))), 401);
-    assert.equal(await status(await requireMeetHost(db, "abc-defg-hjk", as({ ok: true, tenantId: OASIS, userId: CC, isAdmin: true }))), 404);
-    assert.equal(await status(await requireMeetHost(db, "not a code", as({ ok: true, tenantId: OASIS, userId: CC, isAdmin: true }))), 404);
-    assert.equal(await status(await requireMeetHost(db, code, as({ ok: true, tenantId: OTHER, userId: CC, isAdmin: true }))), 404);
-    assert.equal(await status(await requireMeetHost(db, code, as({ ok: true, tenantId: OASIS, userId: REP, isAdmin: false }))), 403);
-    const ok = await requireMeetHost(db, code, as({ ok: true, tenantId: OASIS, userId: CC, isAdmin: false }));
+    assert.equal(await status(await requireMeetHost(db, "abc-defg-hjk", as({ ok: true, tenantId: OASIS, userId: CC, isTrueAdmin: true }))), 404);
+    assert.equal(await status(await requireMeetHost(db, "not a code", as({ ok: true, tenantId: OASIS, userId: CC, isTrueAdmin: true }))), 404);
+    assert.equal(await status(await requireMeetHost(db, code, as({ ok: true, tenantId: OTHER, userId: CC, isTrueAdmin: true }))), 404);
+    assert.equal(await status(await requireMeetHost(db, code, as({ ok: true, tenantId: OASIS, userId: REP, isTrueAdmin: false }))), 403);
+    assert.equal(await status(await requireMeetHost(db, code, as({ ok: true, tenantId: OASIS, userId: REP, isAdmin: true, isTrueAdmin: false }))), 403, "the admin_access toggle is not host");
+    const ok = await requireMeetHost(db, code, as({ ok: true, tenantId: OASIS, userId: CC, isTrueAdmin: false }));
     assert.ok(ok.ok && ok.room.id === room.id && ok.tenantId === OASIS && ok.userId === CC);
+    assert.ok((await requireMeetHost(db, code, as({ ok: true, tenantId: OASIS, userId: ADON, isTrueAdmin: true }))).ok, "an owner or admin by base role");
+  });
+
+  await check("a participant's name is kept plain and short; nothing left is no name", () => {
+    assert.equal(meetDisplayName("  Jane \n  Doe "), "Jane Doe");
+    assert.equal(meetDisplayName("x".repeat(200))?.length, MEET_NAME_MAX);
+    for (const none of ["", "   ", "\u0000\u0007", null, 7]) assert.equal(meetDisplayName(none), null, JSON.stringify(none));
   });
 
   await check("a participant token: signed here, for one participant, until it expires", () => {
