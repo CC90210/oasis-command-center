@@ -20,9 +20,12 @@ import { getTursoClient } from "../turso";
 
 const DETAIL_PATHS = ["$.data", "$.to_email", "$.to_phone", "$.email", "$.phone", "$.name"] as const;
 
+// record_id names any manifest record (an application, an offer), so only a
+// lead's status events match on it; lead_id is always a lead (Codex on #674).
 const WHERE =
   "json_valid(payload) AND json_extract(payload, '$.tenant_id') = ?" +
-  " AND (json_extract(payload, '$.record_id') = ? OR json_extract(payload, '$.lead_id') = ?)" +
+  " AND ((json_extract(payload, '$.record_id') = ? AND json_extract(payload, '$.entity') = 'lead')" +
+  " OR json_extract(payload, '$.lead_id') = ?)" +
   " AND event_type NOT LIKE '%\\_SENT' ESCAPE '\\'" +
   " AND (" + DETAIL_PATHS.map((p) => `json_type(payload, '${p}') IS NOT NULL`).join(" OR ") + ")";
 

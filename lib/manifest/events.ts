@@ -100,6 +100,13 @@ export async function publishAgentEvent(input: AgentEventPublish): Promise<void>
         `[manifest.events.publishAgentEvent] insert failed for ${input.eventType}:`,
         error,
       );
+      return;
+    }
+    // An event about a lead deleted while it was being written (a queued
+    // resume email racing Delete lead) keeps no copy of its details either.
+    const leadId = input.payload?.lead_id;
+    if (typeof leadId === "string" && process.env.EMPIRE_DATA_BACKEND === "turso_cloud" && tursoConfigured()) {
+      await removeCopiesIfRecordGone(input.tenantId, leadId);
     }
   } catch (err) {
     console.error("[manifest.events.publishAgentEvent]", err);

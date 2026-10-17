@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClient, type Client } from "@libsql/client";
@@ -57,6 +57,8 @@ const HALF_DONE = "40000000-0000-4000-8000-000000000015";
 // Codex on #669, second pass: direct-email states, a late deal after step 2.
 const DIRECT_ATTEMPT = "40000000-0000-4000-8000-000000000016";
 const LATE_DEAL = "40000000-0000-4000-8000-000000000017";
+// Codex on #674, second pass: a live application handed to the lead delete.
+const APPLICATION = "40000000-0000-4000-8000-000000000018";
 
 const TABLES = [
   "tenant_records",
@@ -273,10 +275,12 @@ async function main(): Promise<void> {
       // A dashboard email that was queued (and is cancelled by the delete) vs one that went out.
       ["ev-junk-queued-email", "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", { lead_id: JUNK, to_email: "junk@lead.test", subject: "Hi", tenant_id: TENANT }],
       ["ev-junk-sent-email", "BRAVO_DASHBOARD_EMAIL_SENT", { lead_id: JUNK, to_email: "junk@lead.test", sent_as: "cc@oasis.test", tenant_id: TENANT }],
+      ["ev-application", "BRAVO_RECORD_STATUS_CHANGED", { entity: "application", record_id: APPLICATION, field: "status", to: "submitted", data: { business_email: "owner@biz.test" }, tenant_id: TENANT }],
     ].map(([id, type, payload]) => ({
       sql: "INSERT INTO agent_events (id, event_type, publisher_agent, payload, correlation_id) VALUES (?, ?, 'manifest-data', ?, ?)",
       args: [id as string, type as string, JSON.stringify(payload), String((payload as { tenant_id: string }).tenant_id)],
     })),
+    { sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'application', '{}')", args: [APPLICATION, TENANT] },
     { sql: "INSERT INTO drip_runs VALUES ('junk-scheduled', ?, ?, 'scheduled')", args: [TENANT, JUNK] },
     { sql: "INSERT INTO drip_runs VALUES ('junk-sent', ?, ?, 'sent')", args: [TENANT, JUNK] },
     {
@@ -474,6 +478,29 @@ async function main(): Promise<void> {
   assert.equal(lostEvent?.to, "lost", "the racing event was not written at all");
   assert.equal("data" in lostEvent, false, "an event written after the delete kept the deleted lead's details");
   assert.deepEqual(liveEvent?.data, { email: "dry@lead.test" }, "a live lead's event lost the copy its drips read");
+  // So does a queued email's event written through publishAgentEvent (a resume
+  // email racing the delete), and only for the lead that is gone.
+  const { publishAgentEvent } = await import("../lib/manifest/events");
+  await publishAgentEvent({ eventType: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", tenantId: TENANT, payload: { lead_id: JUNK, to_email: "late@lead.test", channel: "email" } });
+  await publishAgentEvent({ eventType: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD", tenantId: TENANT, payload: { lead_id: DRY, to_email: "dry@lead.test", channel: "email" } });
+  const queuedLate = await seed.execute({ sql: "SELECT payload FROM agent_events WHERE json_extract(payload, '$.channel') = 'email' ORDER BY json_extract(payload, '$.lead_id')", args: [] });
+  const byLead = Object.fromEntries(queuedLate.rows.map((r) => {
+    const p = JSON.parse(String(r.payload)) as Record<string, unknown>;
+    return [String(p.lead_id), p];
+  }));
+  assert.equal("to_email" in byLead[JUNK], false, "a queued email's event written after the delete kept the address");
+  assert.equal(byLead[DRY].to_email, "dry@lead.test", "a live lead's queued email lost its address");
+  // The dashboard email route writes its queue event directly, so it runs the same check.
+  const emailRoute = readFileSync(join(process.cwd(), "app", "api", "leads", "[id]", "email", "route.ts"), "utf8");
+  assert.match(emailRoute, /if \(!queueEventFailure && [^\n]*tursoConfigured\(\)\) \{\s*await removeCopiesIfRecordGone\(sess\.tenantId, leadId\)/, "the email route's direct insert skips the check");
+  // A live application handed to the lead delete answers not found and its
+  // own status event keeps its data (Codex on #674, second pass).
+  assert.deepEqual(await remove(APPLICATION), { ok: false, code: "not_found" });
+  assert.deepEqual(
+    (JSON.parse(String((await seed.execute({ sql: "SELECT payload FROM agent_events WHERE id = 'ev-application'", args: [] })).rows[0].payload)) as Record<string, unknown>).data,
+    { business_email: "owner@biz.test" },
+    "deleting a non-lead id rewrote that record's history",
+  );
   pass("junk deletion cancels queued work, preserves history, unlinks funnel events, and audits last");
 
   const foreignResult = await remove(OTHER_LEAD);
