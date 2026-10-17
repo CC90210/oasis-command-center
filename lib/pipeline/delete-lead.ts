@@ -91,11 +91,12 @@ function count(result: DbResult<unknown> | null): number {
   return Array.isArray(result.data) ? result.data.length : 0;
 }
 
-function dataOf(row: LeadRow): Record<string, unknown> {
-  if (row.data && typeof row.data === "object") return row.data;
-  if (typeof row.data !== "string") return {};
+/** A JSON column read as a plain object: an object as is, a JSON string parsed, anything else {}. */
+function objectOf(value: Record<string, unknown> | string | null): Record<string, unknown> {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string") return {};
   try {
-    const parsed = JSON.parse(row.data) as unknown;
+    const parsed = JSON.parse(value) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : {};
@@ -282,7 +283,7 @@ async function blockersFor(
   }
   if (commissions) blockers.push("This lead has a sales commission. Leads tied to compensation cannot be deleted.");
 
-  const stage = String(dataOf(lead).stage ?? "").trim().toLowerCase();
+  const stage = String(objectOf(lead.data).stage ?? "").trim().toLowerCase();
   if (PROTECTED_STAGES.has(stage)) {
     blockers.push("This lead is at the " + stage.replace(/_/g, " ") + " stage. Won and delivery-stage leads cannot be deleted.");
   }
@@ -340,23 +341,10 @@ async function planFor(db: SupabaseClient, tenantId: string, leadId: string): Pr
   return { blockers: [], cancel, unlink, delete: remove };
 }
 
-function metadataOf(value: InteractionRow["metadata"]): Record<string, unknown> {
-  if (value && typeof value === "object") return value;
-  if (typeof value !== "string") return {};
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
-}
-
 async function cancelInteractionRows(db: SupabaseClient, tenantId: string, leadId: string): Promise<number> {
   let changed = 0;
   for (const row of await queuedInteractions(db, tenantId, leadId)) {
-    const metadata = { ...metadataOf(row.metadata), status: "cancelled", cancelled_reason: "lead_deleted" };
+    const metadata = { ...objectOf(row.metadata), status: "cancelled", cancelled_reason: "lead_deleted" };
     changed += count(await optional<unknown[]>(
       db.from("lead_interactions").update({ metadata }, { count: "exact" })
         .eq("tenant_id", tenantId).eq("lead_id", leadId).eq("id", row.id)
