@@ -24,7 +24,8 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Client } from "@libsql/client";
-import { NextResponse } from "next/server";
+import type { NextResponse } from "next/server";
+import { meetError } from "./answers";
 import { readPresence, type MeetPresence } from "./participants";
 import { displayMeetCode, parseMeetCode, readMeetRoomByCode, wellFormedText, type MeetRoom } from "./rooms";
 
@@ -130,9 +131,10 @@ export function meetDisplayName(input: unknown): string | null {
   return name || null;
 }
 
-const answer = (status: number, error: string) => ({ ok: false as const, response: NextResponse.json({ ok: false, error }, { status }) });
+const answer = (status: number, error: string) => ({ ok: false as const, response: meetError(status, error) });
 
-type SessionLike = { ok: true; tenantId: string; userId: string; isTrueAdmin: boolean } | { ok: false };
+/** The signed-in person as Meet needs them (lib/api-auth.ts resolveSessionContext, narrowed). */
+export type MeetSession = { ok: true; tenantId: string; userId: string; isTrueAdmin: boolean; email?: string | null } | { ok: false };
 
 export type MeetHostResult = { ok: true; tenantId: string; userId: string; room: MeetRoom } | { ok: false; response: NextResponse };
 
@@ -144,7 +146,7 @@ export type MeetHostResult = { ok: true; tenantId: string; userId: string; room:
 export async function requireMeetHost(
   db: Client,
   rawCode: string,
-  resolveSession: () => Promise<SessionLike> = async () => (await import("@/lib/api-auth")).resolveSessionContext(),
+  resolveSession: () => Promise<MeetSession> = async () => (await import("@/lib/api-auth")).resolveSessionContext(),
 ): Promise<MeetHostResult> {
   const session = await resolveSession();
   if (!session.ok) return answer(401, "sign_in_required");

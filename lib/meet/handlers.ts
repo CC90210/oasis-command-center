@@ -29,6 +29,7 @@ import {
   signMeetToken,
   verifyMeetToken,
   type MeetRole,
+  type MeetSession,
 } from "./access";
 import { parseCreateRoom, parseHost, parseJoin, parseSfu } from "./bodies";
 import { meetError, meetFailure, meetJson, meetRateLimited, roomView } from "./http";
@@ -51,7 +52,7 @@ import {
 import { createMeetRoom, displayMeetCode, listMeetRooms, parseMeetCode, readMeetRoomByCode, type MeetRoom } from "./rooms";
 import { cutSession, type SfuClient } from "./sfu";
 
-export type MeetSession = { ok: true; tenantId: string; userId: string; isTrueAdmin: boolean; email?: string | null } | { ok: false };
+export type { MeetSession };
 
 export type MeetDeps = {
   db: Client;
@@ -63,6 +64,20 @@ export type MeetDeps = {
 };
 
 const link = (room: MeetRoom) => `/meet/${displayMeetCode(room.code)}`;
+
+type Guarded = { ok: true; code: string } | { ok: false; response: NextResponse };
+
+/**
+ * What every room route checks before it reads anything: a write comes from our own origin, the link is a real
+ * code, and this address and this room are inside their rate limit. One place, so no route can skip a step.
+ */
+function guard(req: NextRequest, rawCode: string, kind: Parameters<typeof meetRateLimited>[2], { write = true } = {}): Guarded {
+  if (write && !sameOrigin(req)) return { ok: false, response: meetError(403, "cross_origin_refused") };
+  const code = parseMeetCode(rawCode);
+  if (!code) return { ok: false, response: meetError(404, "room_not_found") };
+  const limited = meetRateLimited(req, code, kind);
+  return limited ? { ok: false, response: limited } : { ok: true, code };
+}
 
 /** The SFU client, or null when meetings are not set up: cutting media then has nothing to cut. */
 function sfuIfConfigured(deps: MeetDeps): SfuClient | null {
@@ -136,11 +151,9 @@ function joined(participant: MeetPresence, room: MeetRoom, iceServers: RTCIceSer
 }
 
 export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDeps): Promise<NextResponse> {
-  if (!sameOrigin(req)) return meetError(403, "cross_origin_refused");
-  const code = parseMeetCode(rawCode);
-  if (!code) return meetError(404, "room_not_found");
-  const limited = meetRateLimited(req, code, "join");
-  if (limited) return limited;
+  const g = guard(req, rawCode, "join");
+  if (!g.ok) return g.response;
+  const { code } = g;
   try {
     const body = parseJoin((await readCappedJson(req, 2_000)) ?? undefined);
     if (!body) return meetError(400, "invalid_body");
@@ -188,10 +201,10 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
 }
 
 export async function handleState(req: NextRequest, rawCode: string, deps: MeetDeps): Promise<NextResponse> {
-  const code = parseMeetCode(rawCode);
-  if (!code) return meetError(404, "room_not_found");
-  const limited = meetRateLimited(req, code, "state");
-  if (limited) return limited;
+  // A read (the 2-second poll): no same-origin check, like any GET.
+  const g = guard(req, rawCode, "state", { write: false });
+  if (!g.ok) return g.response;
+  const { code } = g;
   try {
     const now = deps.now();
     const auth = await requireMeetParticipant(deps.db, req, code, now.getTime());
@@ -222,11 +235,9 @@ export async function handleState(req: NextRequest, rawCode: string, deps: MeetD
 }
 
 export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDeps): Promise<NextResponse> {
-  if (!sameOrigin(req)) return meetError(403, "cross_origin_refused");
-  const code = parseMeetCode(rawCode);
-  if (!code) return meetError(404, "room_not_found");
-  const limited = meetRateLimited(req, code, "sfu");
-  if (limited) return limited;
+  const g = guard(req, rawCode, "sfu");
+  if (!g.ok) return g.response;
+  const { code } = g;
   try {
     const now = deps.now();
     const auth = await requireMeetParticipant(deps.db, req, code, now.getTime());
@@ -311,11 +322,9 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
 }
 
 export async function handleLeave(req: NextRequest, rawCode: string, deps: MeetDeps): Promise<NextResponse> {
-  if (!sameOrigin(req)) return meetError(403, "cross_origin_refused");
-  const code = parseMeetCode(rawCode);
-  if (!code) return meetError(404, "room_not_found");
-  const limited = meetRateLimited(req, code, "leave");
-  if (limited) return limited;
+  const g = guard(req, rawCode, "leave");
+  if (!g.ok) return g.response;
+  const { code } = g;
   try {
     const now = deps.now();
     const auth = await requireMeetParticipant(deps.db, req, code, now.getTime());
@@ -334,11 +343,9 @@ export async function handleLeave(req: NextRequest, rawCode: string, deps: MeetD
 }
 
 export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDeps): Promise<NextResponse> {
-  if (!sameOrigin(req)) return meetError(403, "cross_origin_refused");
-  const code = parseMeetCode(rawCode);
-  if (!code) return meetError(404, "room_not_found");
-  const limited = meetRateLimited(req, code, "action");
-  if (limited) return limited;
+  const g = guard(req, rawCode, "action");
+  if (!g.ok) return g.response;
+  const { code } = g;
   try {
     const body = parseHost(await readCappedJson(req, 1_000));
     if (!body) return meetError(400, "invalid_body");

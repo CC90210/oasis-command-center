@@ -12,16 +12,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { MeetNotConfiguredError } from "./access";
+import { meetError, meetJson } from "./answers";
 import { displayMeetCode, type MeetRoom } from "./rooms";
 import { SfuError } from "./sfu";
 
-export function meetJson(body: Record<string, unknown>, status = 200): NextResponse {
-  return NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
-}
-
-export function meetError(status: number, error: string): NextResponse {
-  return meetJson({ ok: false, error }, status);
-}
+export { meetError, meetJson };
 
 type Limit = { capacity: number; refillPerSec: number };
 

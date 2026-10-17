@@ -17,7 +17,7 @@
 import "server-only";
 import type { Client } from "@libsql/client";
 import type { MeetRole } from "./access";
-import type { MeetEndedReason, MeetRoom } from "./rooms";
+import { nullableText as text, type MeetEndedReason, type MeetRoom } from "./rooms";
 
 /** The most people in one room at once: a sales call is two or three; this is a ceiling against a leaked link. */
 export const MEET_MAX_PARTICIPANTS = 8;
@@ -30,8 +30,6 @@ export const MEET_MAX_TRACKS = 3;
 
 const PARTICIPANT_COLUMNS =
   "id, tenant_id, room_id, role, user_id, display_name, consent_at, sfu_session_id, tracks, joined_at, last_seen_at, left_at, removed_at";
-
-const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
 
 export type PublishedTrack = { trackName: string; kind: "audio" | "video"; mid: string };
 

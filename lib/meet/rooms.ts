@@ -97,7 +97,9 @@ export function meetTitle(input: unknown): string {
 const ROOM_COLUMNS =
   "id, tenant_id, code, title, host_user_id, status, record_audio, starts_at, calendar_event_id, lead_id, created_at, started_at, ended_at, ended_reason";
 
-const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+/** A nullable column as text: null stays null, anything else (libSQL can hand back numbers) becomes a string. */
+export const nullableText = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+const text = nullableText;
 
 /** A row as a room. libSQL over HTTP can hand integers back as strings, so the flag is compared as a number. */
 function toRoom(row: Record<string, unknown>): MeetRoom {
