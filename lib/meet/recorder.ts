@@ -97,7 +97,8 @@ export class ChunkUploadError extends Error {
 
 export type MeetRecorder = {
   addTrack(input: { participantId: string; displayName: string; track: MediaStreamTrack }): void;
-  removeTrack(participantId: string): void;
+  /** Stop a speaker's recording. With `track`, only if that track is still the one recorded (a stale remove after a replace does nothing). */
+  removeTrack(participantId: string, track?: MediaStreamTrack): void;
   stop(): Promise<StopReport>;
 };
 
@@ -123,22 +124,61 @@ export function pickMimeType(isTypeSupported: (type: string) => boolean): string
   });
 }
 
-/** The default upload: one chunk to the room's recording route, as the host. */
-export function uploadToRoom(code: string): UploadChunk {
+/** How long one chunk upload may take before it is abandoned and retried. */
+export const UPLOAD_TIMEOUT_MS = 30_000;
+
+/**
+ * The text with any lone UTF-16 surrogate replaced by U+FFFD. A name cut mid-emoji
+ * (a 60-character cap counts UTF-16 units) would otherwise make encodeURIComponent
+ * throw on every chunk. A loop, not a lookbehind regex, which older Safari cannot parse.
+ */
+export function wellFormed(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += text[i] + text[i + 1];
+        i += 1;
+      } else {
+        out += "\ufffd";
+      }
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      out += "\ufffd";
+    } else {
+      out += text[i];
+    }
+  }
+  return out;
+}
+
+/** The default upload: one chunk to the room's recording route, as the host, abandoned after timeoutMs. */
+export function uploadToRoom(code: string, { timeoutMs = UPLOAD_TIMEOUT_MS }: { timeoutMs?: number } = {}): UploadChunk {
   return async (chunk) => {
-    const res = await fetch(`/api/meet/${encodeURIComponent(code)}/recording/chunk`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "content-type": chunk.mimeType || "application/octet-stream",
-        "x-meet-participant": chunk.participantId,
-        "x-meet-display-name": encodeURIComponent(chunk.displayName),
-        "x-meet-segment": chunk.segmentId,
-        "x-meet-seq": String(chunk.seq),
-        "x-meet-segment-started-at": String(chunk.segmentStartedAt),
-      },
-      body: chunk.data,
-    });
+    // A request that never answers would otherwise hold stop() (and the End button) forever.
+    // An abort throws, and a throw is retried like any network error.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(`/api/meet/${encodeURIComponent(code)}/recording/chunk`, {
+        method: "POST",
+        credentials: "same-origin",
+        signal: controller.signal,
+        headers: {
+          "content-type": chunk.mimeType || "application/octet-stream",
+          "x-meet-participant": chunk.participantId,
+          "x-meet-display-name": encodeURIComponent(wellFormed(chunk.displayName)),
+          "x-meet-segment": chunk.segmentId,
+          "x-meet-seq": String(chunk.seq),
+          "x-meet-segment-started-at": String(chunk.segmentStartedAt),
+        },
+        body: chunk.data,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     // 409 duplicate: the chunk is already stored (a retry after a lost response). Done.
     if (res.ok || res.status === 409) return;
     throw new ChunkUploadError(res.status);
@@ -227,8 +267,20 @@ export function createMeetRecorder(options: MeetRecorderOptions): MeetRecorder {
     return run.stopped;
   }
 
+  /** A recorder that could not be made or started: counted and logged, never half-registered. */
+  function couldNotRecord(participantId: string, err: unknown) {
+    errored += 1;
+    console.error("[meet.recorder] could not start recording", { participantId, error: err instanceof Error ? err.message : String(err) });
+  }
+
   function startSegment(participantId: string, displayName: string, track: MediaStreamTrack) {
-    const recorder = recorders.create(streamOf(track), mimeType);
+    let recorder: RecorderLike;
+    try {
+      recorder = recorders.create(streamOf(track), mimeType);
+    } catch (err) {
+      couldNotRecord(participantId, err);
+      return;
+    }
     let resolveStopped: () => void = () => undefined;
     const stopped = new Promise<void>((r) => {
       resolveStopped = r;
@@ -264,15 +316,20 @@ export function createMeetRecorder(options: MeetRecorderOptions): MeetRecorder {
         startSegment(participantId, displayName, track);
       }
     };
+    try {
+      recorder.start(timeslice);
+    } catch (err) {
+      couldNotRecord(participantId, err);
+      return;
+    }
     running.set(participantId, run);
     segments += 1;
-    recorder.start(timeslice);
   }
 
   return {
     addTrack({ participantId, displayName, track }) {
       if (closed) return;
-      if (track.kind !== "audio") return;
+      if (track.kind !== "audio" || track.readyState === "ended") return;
       // A replaced track is a new segment: close the old one first.
       void stopOne(participantId);
       restarts.delete(participantId);
@@ -283,7 +340,9 @@ export function createMeetRecorder(options: MeetRecorderOptions): MeetRecorder {
       });
     },
 
-    removeTrack(participantId) {
+    removeTrack(participantId, track) {
+      // A stale remove (the old track, after a replace) must not stop the new segment.
+      if (track && running.get(participantId)?.track !== track) return;
       void stopOne(participantId);
     },
 

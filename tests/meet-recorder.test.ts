@@ -12,12 +12,21 @@ import {
   createMeetRecorder,
   pickMimeType,
   uploadToRoom,
+  wellFormed,
   type RecorderChunk,
   type RecorderFactory,
   type RecorderLike,
 } from "../lib/meet/recorder";
 
 let failures = 0;
+let finished = false;
+// A promise that never settles lets Node exit 0 mid-suite: that is a failure, never a pass.
+process.on("beforeExit", () => {
+  if (!finished) {
+    console.log("meet-recorder: exited before every check finished");
+    process.exitCode = 1;
+  }
+});
 async function check(name: string, fn: () => Promise<void> | void): Promise<void> {
   try {
     await fn();
@@ -259,10 +268,95 @@ async function main() {
 
   await check("a dead recorder on an ended track is not restarted", async () => {
     const h = harness();
-    h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: track("audio", "ended") });
+    const t = track();
+    h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: t });
+    (t as unknown as { readyState: string }).readyState = "ended";
     h.made[0].fail();
     assert.equal(h.made.length, 1);
     assert.equal((await h.rec.stop()).errored, 1);
+  });
+
+  await check("a recorder that cannot be made or started is counted, never half-registered (reviewer F1)", async () => {
+    for (const where of ["create", "start"] as const) {
+      const made: RecorderLike[] = [];
+      const f: RecorderFactory = {
+        create: (stream, mimeType) => {
+          if (where === "create") throw new Error("NotSupportedError");
+          const r = new FakeRecorder(mimeType ?? "", stream);
+          r.start = () => {
+            throw new Error("InvalidStateError");
+          };
+          made.push(r);
+          return r;
+        },
+        isTypeSupported: () => true,
+      };
+      const rec = createMeetRecorder({
+        code: "abcdefghij", recorders: f, upload: async () => undefined, sleep: async () => undefined,
+        streamOf: (t) => t as unknown as MediaStream,
+      });
+      assert.doesNotThrow(() => rec.addTrack({ participantId: "g1", displayName: "Ada", track: track() }), `${where} threw into the room`);
+      const report = await rec.stop();
+      assert.deepEqual(report, { sent: 0, failed: 0, segments: 0, errored: 1 }, `${where}: not counted, or counted as a segment`);
+    }
+  });
+
+  await check("a track that has already ended is not recorded (reviewer F1)", () => {
+    const h = harness();
+    h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: track("audio", "ended") });
+    assert.equal(h.made.length, 0);
+  });
+
+  await check("a stale remove for a replaced track does not stop the new segment (reviewer F2)", async () => {
+    const h = harness();
+    const oldTrack = track();
+    const newTrack = track();
+    h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: oldTrack });
+    h.rec.addTrack({ participantId: "g1", displayName: "Ada", track: newTrack });
+    h.rec.removeTrack("g1", oldTrack);
+    assert.equal(h.made[1].state, "recording", "a stale remove stopped the new segment");
+    h.rec.removeTrack("g1", newTrack);
+    assert.equal(h.made[1].state, "inactive");
+  });
+
+  await check("a name cut mid-emoji still uploads: lone surrogates become U+FFFD (reviewer F5)", async () => {
+    assert.equal(wellFormed("Ada \ud83d"), "Ada \ufffd");
+    assert.equal(wellFormed("\ude00x"), "\ufffdx");
+    assert.equal(wellFormed("ok \ud83d\ude00"), "ok \ud83d\ude00", "a whole emoji was changed");
+    const realFetch = globalThis.fetch;
+    let header = "";
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      header = (init.headers as Record<string, string>)["x-meet-display-name"];
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await uploadToRoom("c")({
+        participantId: "p", displayName: "Ada \ud83d", segmentId: "s", seq: 0, segmentStartedAt: 1, mimeType: "audio/webm", data: new Blob(["x"]),
+      });
+      assert.equal(header, "Ada%20%EF%BF%BD");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  await check("an upload that never answers is abandoned, so stop() cannot hang on it (reviewer F7)", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })) as unknown as typeof fetch;
+    try {
+      const started = Date.now();
+      await assert.rejects(
+        uploadToRoom("c", { timeoutMs: 30 })({
+          participantId: "p", displayName: "Ada", segmentId: "s", seq: 0, segmentStartedAt: 1, mimeType: "audio/webm", data: new Blob(["x"]),
+        }),
+        /aborted/,
+      );
+      assert.ok(Date.now() - started < 1_000, "the hung request was not abandoned");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
   await check("empty data is skipped, and nothing is recorded after stop()", async () => {
@@ -306,10 +400,12 @@ async function main() {
     }
   });
 
+  finished = true;
   if (failures) {
     console.log(`meet-recorder: ${failures} check(s) failed`);
     process.exit(1);
   }
+  finished = true;
   console.log("meet-recorder: all passed");
 }
 
