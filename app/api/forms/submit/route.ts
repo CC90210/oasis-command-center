@@ -575,17 +575,24 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
 /**
  * THE HONEYPOT (lib/forms/honeypot.ts). A filled one is a script, so it gets the
  * answer a finished form gets and nothing runs: no lead, no row, no ticket, no
- * alert, no database read. Logged without the payload so a wave is visible.
+ * alert, no database read. Logged without the payload so a wave is visible, at
+ * most a few lines a minute per IP, with the script's slugs cut short: the
+ * log is not a channel a script can fill (Codex review of #671).
  */
-function honeypotDrop(body: unknown): NextResponse | null {
+function honeypotDrop(req: NextRequest, body: unknown): NextResponse | null {
   if (!body || typeof body !== "object") return null;
   const b = body as SubmitBody;
   if (!isHoneypotFilled(b.honeypot)) return null;
-  console.warn("[forms.submit] honeypot filled; submission dropped", {
-    tenant_slug: b.anonymous_init?.tenant_slug ?? null,
-    form_slug: b.anonymous_init?.form_slug ?? null,
-    step_index: typeof b.step_index === "number" ? b.step_index : null,
-  });
+  const ip = getClientIp(req);
+  const logged = rateLimit({ key: `forms-honeypot-log:${ip === "unknown" ? "no-ip" : ip}`, capacity: 5, refillPerSec: 5 / 60 });
+  if (logged.allowed) {
+    const short = (v: unknown) => (typeof v === "string" ? v.slice(0, 60) : null);
+    console.warn("[forms.submit] honeypot filled; submission dropped", {
+      tenant_slug: short(b.anonymous_init?.tenant_slug),
+      form_slug: short(b.anonymous_init?.form_slug),
+      step_index: typeof b.step_index === "number" ? b.step_index : null,
+    });
+  }
   return NextResponse.json({
     ok: true,
     submission_id: null,
@@ -614,7 +621,7 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
-  const trapped = honeypotDrop(rawBody);
+  const trapped = honeypotDrop(req, rawBody);
   if (trapped) return trapped;
   try {
     return await handleSubmit(req, rawBody as SubmitBody);

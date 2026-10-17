@@ -155,7 +155,25 @@ async function main() {
     // lead path in it (the support branch stays handleSubmit's first statement).
     const route = read("app/api/forms/submit/route.ts");
     const entry = route.slice(route.indexOf("export async function POST("));
-    assert.match(entry, /const trapped = honeypotDrop\(rawBody\);\s*if \(trapped\) return trapped;\s*try \{\s*return await handleSubmit\(req,/, "the drop does not run before handleSubmit");
+    assert.match(entry, /const trapped = honeypotDrop\(req, rawBody\);\s*if \(trapped\) return trapped;\s*try \{\s*return await handleSubmit\(req,/, "the drop does not run before handleSubmit");
+  });
+
+  await check("a script cannot flood the log: a few lines a minute per IP, slugs cut short (Codex review of #671)", async () => {
+    const before = warnings.length;
+    const long = "x".repeat(500);
+    for (let i = 0; i < 20; i += 1) {
+      const res = await route.POST(
+        new NextRequest("http://localhost/api/forms/submit", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-for": "10.9.9.9" },
+          body: JSON.stringify({ step_index: 0, anonymous_init: anon(long, long), honeypot: TRAP }),
+        }),
+      );
+      assert.deepEqual(await res.json(), DONE, "a throttled log changed the script's answer");
+    }
+    const lines = warnings.slice(before).filter((w) => w.includes("honeypot filled"));
+    assert.ok(lines.length >= 1 && lines.length <= 5, `${lines.length} log lines from one IP`);
+    assert.ok(lines.every((l) => !l.includes("x".repeat(61))), "a script's slug reached the log uncut");
   });
 
   await check("every public form ends with the trap, which no person can see, reach or autofill", () => {
