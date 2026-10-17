@@ -1074,7 +1074,9 @@ export function FormPublicClient({
       );
       // Each held payload already dropped the fields its conditions hid.
       const fieldsSoFar = steps.slice(0, currentStep + 1).flatMap((s) => s.fields);
-      const contactSoFar = { ...typedContact(fieldsSoFar, answersSoFar), ...answersSoFar };
+      // Typed values last: they are only ever non-blank, so a blank field merely
+      // named `email` never erases a filled one the builder named otherwise.
+      const contactSoFar = { ...answersSoFar, ...typedContact(fieldsSoFar, answersSoFar) };
       const gate = contactGateAction({
         anonymous: !tokenRef.current && Boolean(anonymousInit),
         reachable: hasReachableContact(contactSoFar),

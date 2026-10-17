@@ -66,6 +66,11 @@ const PHONE_FIRST_STEPS = [
   { key: "about", title: "About you", fields: [text("name", "text"), text("phone", "phone", false)] },
   { key: "email", title: "Where to send it", fields: [text("email", "email")] },
 ];
+// A blank field merely NAMED email beside the builder's real email field
+// (CodeRabbit on #668): the blank must never erase the filled one.
+const BOTH_EMAILS_STEPS = [
+  { key: "contact", title: "Reach you", fields: [text("email", "text", false), text("work_email", "email", false)] },
+];
 // A router that asks for an email only on one path (Codex review of #668).
 const BRANCH_STEPS = [
   {
@@ -106,6 +111,10 @@ async function main() {
     {
       sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, on_complete_stage) VALUES ('form-community', ?, 'community', 'COMMUNITY', ?, 'researched')",
       args: [OASIS, JSON.stringify(COMMUNITY_STEPS)],
+    },
+    {
+      sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('form-both-emails', ?, 'both-emails', 'Both', ?)",
+      args: [OASIS, JSON.stringify(BOTH_EMAILS_STEPS)],
     },
     {
       sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, redirect_url) VALUES ('form-branch', ?, 'branch-router', 'Branch', ?, 'https://oasisai.work/thanks')",
@@ -285,6 +294,16 @@ async function main() {
     assert.equal(await leads(), before + 1);
   });
 
+  await check("a blank field named email never erases the builder's filled email field (CodeRabbit on #668)", async () => {
+    const res = await post({ step_index: 0, anonymous_init: anon("both-emails"), payload: { email: "", work_email: "both@example.com" } });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    const lead = (await seed.execute({
+      sql: "SELECT data FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' ORDER BY created_at DESC LIMIT 1",
+      args: [OASIS],
+    })).rows[0];
+    assert.equal((JSON.parse(String(lead.data)) as Json).email, "both@example.com");
+  });
+
   await check("a valid phone alone is enough", async () => {
     const before = await leads();
     const res = await post({ step_index: 0, anonymous_init: anon("community"), payload: gateAnswers, contact: { name: "Pat", phone: "(514) 555-0177" } });
@@ -378,7 +397,11 @@ async function main() {
       /const answersSoFar: Record<string, unknown> = Object\.assign\(\s*\{\},\s*\.\.\.heldSteps\.current\.slice\(0, currentStep\)\.filter\(Boolean\),\s*built\.payload,\s*\);/,
       "reachability must read every answer so far, not one step",
     );
-    assert.match(client, /const contactSoFar = \{ \.\.\.typedContact\(fieldsSoFar, answersSoFar\), \.\.\.answersSoFar \};/);
+    assert.match(
+      client,
+      /const contactSoFar = \{ \.\.\.answersSoFar, \.\.\.typedContact\(fieldsSoFar, answersSoFar\) \};/,
+      "a blank field named email must not erase a typed email (typed values last)",
+    );
     assert.match(
       client,
       /anonymous: !tokenRef\.current && Boolean\(anonymousInit\),\s*reachable: hasReachableContact\(contactSoFar\),\s*currentStep,\s*stepCount: steps\.length,/,

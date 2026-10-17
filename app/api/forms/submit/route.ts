@@ -439,9 +439,12 @@ async function refuseInvalidAnonymousFirstStep(input: {
     inlineFileCount: inlineFieldNames.length,
   });
   if (invalid) return { refusal: invalid };
+  // The typed values go after the raw answers: they hold only non-blank values,
+  // so a blank field merely NAMED `email` can never erase a filled email field
+  // the builder named otherwise (CodeRabbit on #668).
   const identity = {
-    ...typedContact(steps[0].fields, payload),
     ...payload,
+    ...typedContact(steps[0].fields, payload),
     ...(contactHandoff(input.contact) ?? {}),
   };
   if (!hasReachableContact(identity)) {
