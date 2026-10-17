@@ -76,6 +76,9 @@ export type MeetRoomItem = {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const orNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
+/** The whole link the server sends: a plain http(s) address, never anything a link could run. */
+const WHOLE_LINK = /^https?:\/\/[^\s"'<>]{1,300}$/i;
+
 /** A meeting from the API, or null when it is not shaped like one: the panel then says it could not load rather than draw junk. */
 export function parseRoomItem(v: unknown): MeetRoomItem | null {
   if (!isRecord(v)) return null;
@@ -84,6 +87,7 @@ export function parseRoomItem(v: unknown): MeetRoomItem | null {
   if (status !== "scheduled" && status !== "live" && status !== "ended") return null;
   return {
     id, code, title, status, link, createdAt,
+    ...(typeof v.url === "string" && WHOLE_LINK.test(v.url) ? { url: v.url } : {}),
     recordAudio: v.recordAudio === true,
     startsAt: orNull(v.startsAt),
     startedAt: orNull(v.startedAt),
@@ -126,7 +130,14 @@ export function scheduleLine(note: ScheduleNote, wordsFor: (reason: string) => s
   return note.added ? "Added to your Schedule." : `The link works, but it is not on your Schedule. ${wordsFor(note.reason)}`;
 }
 
-export function parseRoomList(v: unknown): MeetRoomItem[] | null {
+/**
+ * GET /api/calendar/meet: the workspace's meetings, and whether this workspace records at all. `recordingAvailable`
+ * is true only when the server says so; a missing or odd value is false, so the panel never offers recording the
+ * server cannot do.
+ */
+export type MeetRoomList = { rooms: MeetRoomItem[]; recordingAvailable: boolean };
+
+export function parseRoomList(v: unknown): MeetRoomList | null {
   if (!isRecord(v) || !Array.isArray(v.rooms)) return null;
   const rooms: MeetRoomItem[] = [];
   for (const item of v.rooms) {
@@ -134,7 +145,31 @@ export function parseRoomList(v: unknown): MeetRoomItem[] | null {
     if (!room) return null;
     rooms.push(room);
   }
-  return rooms;
+  return { rooms, recordingAvailable: v.recordingAvailable === true };
+}
+
+/**
+ * Does a meeting show its transcript? Only a finished one that recorded, in a workspace where recording runs:
+ * a meeting that never recorded has nothing to show, and where recording is not installed the transcript reads
+ * would answer 503 for every meeting.
+ */
+export function showsTranscript(room: Pick<MeetRoomItem, "status" | "recordAudio">, recordingAvailable: boolean): boolean {
+  return room.status === "ended" && room.recordAudio === true && recordingAvailable === true;
+}
+
+/** Delete is offered only on a meeting the person made (the list's `mine`). */
+export function canDelete(room: Pick<MeetRoomItem, "mine">): boolean {
+  return room.mine === true;
+}
+
+/**
+ * The list once one meeting is gone: its row leaves, and focus has somewhere to go (`focusId`): the row after it,
+ * else the one before it, else nowhere (null, so the list's heading). An id that is not in the list changes nothing.
+ */
+export function withoutMeeting(rooms: MeetRoomItem[], id: string): { rooms: MeetRoomItem[]; focusId: string | null } {
+  const at = rooms.findIndex((r) => r.id === id);
+  if (at === -1) return { rooms, focusId: null };
+  return { rooms: rooms.filter((r) => r.id !== id), focusId: (rooms[at + 1] ?? rooms[at - 1])?.id ?? null };
 }
 
 /** A formatter for "Sat, Oct 17, 4:05 PM" in a time zone (the viewer's own, once the page is in the browser). */
@@ -171,6 +206,15 @@ export function meetingUrl(origin: string, link: string): string {
   return `${origin.replace(/\/+$/, "")}${link.startsWith("/") ? link : `/${link}`}`;
 }
 
+/**
+ * The link to show and copy for a meeting: the server's whole one (`url`, from the app's canonical address) when
+ * it sent one, else the page's own origin plus the path. Opening a tab never uses this: the host is signed in on
+ * the page's own address, so that is where Join and Open go.
+ */
+export function linkToSend(origin: string, room: Pick<MeetRoomItem, "link" | "url">): string {
+  return room.url ?? meetingUrl(origin, room.link);
+}
+
 /** Plain words for what the Schedule panel's calls answered. Server text never reaches the screen. */
 export function panelErrorWords(status: number, code: string | null): string {
   if (status === 401 || code === "sign_in_required") return "Sign in again, then try once more.";
@@ -181,3 +225,30 @@ export function panelErrorWords(status: number, code: string | null): string {
 
 export const LIST_FAILED = "Your meetings could not load.";
 export const NO_CONNECTION = "No connection. Check it and try again.";
+
+// Deleting a meeting (POST /api/meet/<code>/host { action: "delete" })
+
+/** What the host reads before a meeting is deleted for good, said once and the same on every row. */
+export const DELETE_CONFIRM = "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone.";
+export const ALREADY_DELETED = "This meeting was already deleted.";
+export const DELETE_FAILED = "Couldn't delete the meeting. Try again.";
+
+/**
+ * The line shown once a meeting is gone. The server deletes the recording's audio a batch at a time and says how
+ * many copies are left; the page says so rather than claim it is all gone while some is still being removed.
+ */
+export function deletedNote(relayRemaining: number): string {
+  return relayRemaining > 0
+    ? "The meeting was deleted. Some of its audio is still being removed from the server."
+    : "The meeting was deleted.";
+}
+
+/** Plain words for what a refused delete answered, by status and code. Server text never reaches the screen. */
+export function deleteErrorWords(status: number, code: string | null): string {
+  if (status === 401 || code === "sign_in_required") return panelErrorWords(401, null);
+  if (code === "host_only") return "Only the host can delete this meeting.";
+  if (code === "room_not_found") return ALREADY_DELETED;
+  if (code === "cross_origin_refused") return panelErrorWords(403, code);
+  if (status === 429 || code === "rate_limited") return meetErrorWords("rate_limited");
+  return DELETE_FAILED;
+}

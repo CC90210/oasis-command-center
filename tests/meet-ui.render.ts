@@ -136,10 +136,14 @@ async function main() {
 
   // The Schedule panel body: its four list states, and the two things a link made for later can say.
   const none = { busy: false, error: null, made: null };
+  const noDelete = { asking: null, busy: false, error: null };
   const base = {
     list: { status: "loading" as const },
+    recordingAvailable: true,
     start: none,
     later: { title: "", startsAt: "", minutes: "", record: true, ...none },
+    del: noDelete,
+    note: null,
     copied: null,
     onStart: () => undefined,
     onTitle: () => undefined,
@@ -148,9 +152,13 @@ async function main() {
     onRecord: () => undefined,
     onCreate: () => undefined,
     onCopy: () => undefined,
+    onAskDelete: () => undefined,
+    onCancelDelete: () => undefined,
+    onDelete: () => undefined,
     onRetry: () => undefined,
   };
-  const row = (id: string, code: string, title: string, status: "scheduled" | "live" | "ended", statusWords: string, when: string) => ({
+  type Extra = { mine?: boolean; recordAudio?: boolean; url?: string };
+  const row = (id: string, code: string, title: string, status: "scheduled" | "live" | "ended", statusWords: string, when: string, extra: Extra = {}) => ({
     id,
     code,
     title,
@@ -158,6 +166,9 @@ async function main() {
     statusWords,
     when,
     link: `/meet/${code}`,
+    mine: extra.mine ?? true,
+    recordAudio: extra.recordAudio ?? true,
+    ...(extra.url ? { url: extra.url } : {}),
   });
   const panel = (over: object, renderEnded?: (code: string) => unknown) =>
     h(MeetPanelView, { ...base, ...over, renderEnded } as never);
@@ -207,6 +218,32 @@ async function main() {
     panel({ later: { title: "", startsAt: "", minutes: "", record: true, busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: false } } }),
   );
   draw("panel.laterUnticked", panel({ later: { title: "", startsAt: "", minutes: "", record: false, ...none } }));
+
+  // Where recording does not run: no box, no claim that a meeting records, no transcript slot.
+  const slot = (code: string) => h("div", { "data-transcript-slot": code }, `Transcript for ${code}`);
+  const mixed = {
+    status: "ready" as const,
+    rows: [
+      row("m1", "aaa-bbbb-ccc", "Mine (not started)", "scheduled", "Scheduled", "Mon, Oct 19, 2:00 PM", { mine: true, recordAudio: true }),
+      row("m2", "ddd-eeee-fff", "Theirs (live)", "live", "Live now", "Started Sat, Oct 17, 4:05 PM", { mine: false, recordAudio: true }),
+      row("m3", "ggg-hhhh-jjj", "Mine (ended, audio)", "ended", "Ended", "Ended Fri, Oct 16, 3:00 PM", { mine: true, recordAudio: true }),
+      row("m4", "kkk-mmmm-nnn", "Mine (ended, no audio)", "ended", "Ended", "Ended Thu, Oct 15, 3:00 PM", { mine: true, recordAudio: false }),
+      row("m5", "pqr-stuv-wxy", "Theirs (ended, audio)", "ended", "Ended", "Ended Wed, Oct 14, 3:00 PM", { mine: false, recordAudio: true }),
+    ],
+  };
+  draw("panel.mixedAvailable", panel({ list: mixed, recordingAvailable: true }, slot));
+  draw("panel.mixedUnavailable", panel({ list: mixed, recordingAvailable: false }, slot));
+  draw("panel.noRecording", panel({ recordingAvailable: false }));
+  draw("panel.noRecordingMadeStart", panel({ recordingAvailable: false, start: { busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: true, recorded: false } } }));
+  draw("panel.madeRecorded", panel({ later: { title: "", startsAt: "", minutes: "", record: true, busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: false, recorded: true } } }));
+  draw("panel.madeUnrecorded", panel({ later: { title: "", startsAt: "", minutes: "", record: true, busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: false, recorded: false } } }));
+
+  // Delete: the question open on a meeting that is the person's, working, refused, and the line after one is gone.
+  draw("panel.deleteAsk", panel({ list: mixed, del: { asking: "m3", busy: false, error: null } }, slot));
+  draw("panel.deleteBusy", panel({ list: mixed, del: { asking: "m3", busy: true, error: null } }, slot));
+  draw("panel.deleteError", panel({ list: mixed, del: { asking: "m3", busy: false, error: "Only the host can delete this meeting." } }, slot));
+  draw("panel.deleteAskNotMine", panel({ list: mixed, del: { asking: "m2", busy: false, error: null } }, slot));
+  draw("panel.deleteNote", panel({ list: { status: "ready", rows: [] }, note: "The meeting was deleted." }));
 
   process.stdout.write(JSON.stringify({ markup: out }));
 }

@@ -28,16 +28,24 @@ import ts from "typescript";
 import { loadMeetPage, meetViewerFor, sessionOrVisitor } from "../app/meet/[code]/load";
 import { deviceWords, listInputs, openDevices, problemOf } from "../components/meet/devices";
 import { messageFor } from "../components/calendar/useCalendarData";
-import { createMeeting, listMeetings } from "../components/meet/meet-api";
+import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody } from "../components/meet/meet-api";
 import {
+  ALREADY_DELETED,
+  DELETE_CONFIRM,
+  DELETE_FAILED,
   LENGTH_CHOICES,
   NAME_MAX_CHARS,
+  NO_CONNECTION,
   STATUS_WORDS,
   TITLE_MAX_CHARS,
+  canDelete,
+  deleteErrorWords,
+  deletedNote,
   gridClasses,
   gridFit,
   initialsOf,
   lengthWords,
+  linkToSend,
   meetingUrl,
   panelErrorWords,
   parseRoomItem,
@@ -45,8 +53,10 @@ import {
   parseScheduleNote,
   scheduleLine,
   sharerOf,
+  showsTranscript,
   timeFormatter,
   whenText,
+  withoutMeeting,
   type MeetRoomItem,
 } from "../components/meet/meet-format";
 import { CONSENT_LABEL, DEVICES_BUTTON, ENDED_WORDS, RECORDING_NOTICE, TICK_FIRST } from "../components/meet/meet-words";
@@ -582,6 +592,263 @@ async function main() {
     assert.ok(text(html).includes("With a time, the meeting is added to your Schedule too."));
   });
 
+  // ---- recording is offered only where it runs ----------------------------------------------------------------------------------
+
+  await check("no recording, no box: where recording does not run the panel draws no Record and transcribe box and no claim that a meeting records", () => {
+    for (const id of ["panel.noRecording", "panel.noRecordingMadeStart", "panel.mixedUnavailable"]) {
+      const html = markup[id];
+      const words = text(html);
+      assert.ok(!html.includes('id="meet-later-record"'), `${id}: no box`);
+      assert.ok(!words.includes("Record and transcribe"), `${id}: nor its words`);
+      assert.ok(!words.includes("Guests agree to this before they join."), `${id}: nor its explanation`);
+      assert.ok(!/\bchecked\b/.test(html), `${id}: nothing ticked`);
+      assert.ok(words.includes("Opens in a new tab."), `${id}: Start now still says it opens a tab`);
+      assert.ok(!words.includes("recorded and transcribed, and guests agree"), `${id}: and no longer says it records`);
+    }
+    // Where it runs, all of that is back exactly as it was.
+    const on = markup["panel.loading"];
+    assert.match(tags(on, "input").find((t) => t.includes('id="meet-later-record"')) ?? "", /\bchecked=""/);
+    assert.ok(text(on).includes("Record and transcribe") && text(on).includes("Guests agree to this before they join."));
+    assert.ok(text(on).includes("Opens in a new tab. It is recorded and transcribed, and guests agree to that before they join."));
+  });
+
+  await check("recordAudio true is asked for only where the list said recording runs: false where it does not, nothing before it has answered", () => {
+    // Where the list said recording does not run: false, whatever the box held (the box is not even drawn there).
+    for (const record of [true, false]) {
+      for (const startsAt of [undefined, "2030-01-01T15:00:00.000Z"]) {
+        const body = laterBody({ title: "  Kickoff ", startsAt, timeZone: "America/Toronto", minutes: "45", record, availability: "unavailable" });
+        assert.equal(body.recordAudio, false, `unavailable, box ${record}, time ${startsAt ?? "none"}`);
+      }
+    }
+    // Where it runs: the box. Before the list answers: nothing, so the server decides and a click that came before the list loaded never leaves a meeting unrecorded.
+    assert.equal(laterBody({ title: "", minutes: "", record: true, availability: "available" }).recordAudio, true, "available and ticked");
+    assert.equal(laterBody({ title: "", minutes: "", record: false, availability: "available" }).recordAudio, false, "available and not ticked");
+    for (const record of [true, false]) assert.ok(!("recordAudio" in laterBody({ title: "", minutes: "", record, availability: "unknown" })), `unknown, box ${record}: nothing sent`);
+    assert.deepEqual(startBody("available"), {}, "Start now where recording runs: nothing, the server's default stands");
+    assert.deepEqual(startBody("unknown"), {}, "and before the list has answered");
+    assert.deepEqual(startBody("unavailable"), { recordAudio: false });
+    // The body is exactly what the form holds, nothing more: a time brings its zone and length, no time brings neither.
+    assert.deepEqual(laterBody({ title: "  Kickoff ", startsAt: "2030-01-01T15:00:00.000Z", timeZone: "America/Toronto", minutes: "45", record: true, availability: "available" }), {
+      title: "Kickoff",
+      startsAt: "2030-01-01T15:00:00.000Z",
+      timeZone: "America/Toronto",
+      minutes: 45,
+      recordAudio: true,
+    });
+    assert.deepEqual(laterBody({ title: " ", timeZone: "America/Toronto", minutes: "45", record: true, availability: "available" }), { recordAudio: true });
+    // The panel hands both builders what the list said, and "available" is only ever the list's own word.
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.match(panel, /const availability: RecordingAvailability = load\.status !== "ready" \? "unknown" : load\.recordingAvailable \? "available" : "unavailable";/);
+    assert.match(panel, /const recordingAvailable = availability === "available";/);
+    assert.match(panel, /createMeeting\(startBody\(availability\)\)/);
+    assert.match(panel, /laterBody\(\{[^}]*\bavailability\b[^}]*\}\)/);
+  });
+
+  await check("the transcript slot draws only for a finished meeting that recorded, where recording runs", () => {
+    for (const status of ["scheduled", "live", "ended"] as const) {
+      for (const recordAudio of [true, false]) {
+        for (const available of [true, false]) {
+          assert.equal(showsTranscript({ status, recordAudio }, available), status === "ended" && recordAudio && available, `${status} / recordAudio ${recordAudio} / available ${available}`);
+        }
+      }
+    }
+    const slots = (id: string) => [...markup[id].matchAll(/data-transcript-slot="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(slots("panel.mixedAvailable"), ["ggg-hhhh-jjj", "pqr-stuv-wxy"], "ended and recorded: its own and someone else's");
+    assert.deepEqual(slots("panel.mixedUnavailable"), [], "not where recording does not run, whatever the meetings say");
+    assert.deepEqual(slots("panel.rows"), ["ggg-hhhh-jjj"], "the slot still hands over the meeting's dashed code");
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.match(panel, /showsTranscript\(\{ status: row\.status, recordAudio: row\.recordAudio \}, recordingAvailable\)/, "the panel asks showsTranscript, nothing else");
+    const app = readFileSync(join(root, "components", "calendar", "CalendarApp.tsx"), "utf8");
+    assert.match(app, /import \{ MeetRecording \} from "@\/components\/meet\/MeetRecording";/);
+    assert.match(app, /renderEnded=\{\(code\) => <MeetRecording code=\{code\} \/>\}/, "the Schedule puts the recording panel in the slot");
+    assert.match(app, /onMeetingDeleted=\{\(\) => void data\.reload\(\)\}/, "and loads its events again when a meeting that had a time is deleted (its Schedule entry goes with it)");
+  });
+
+  await check("a meeting just made says what the server did about recording; the list parser reads the whole link only if it is one", () => {
+    assert.ok(text(markup["panel.madeRecorded"]).includes("Recorded and transcribed. Guests agree to that before they join."));
+    assert.ok(text(markup["panel.madeUnrecorded"]).includes("Not recorded."));
+    assert.ok(!text(markup["panel.madeUnrecorded"]).includes("Recorded and transcribed"));
+    assert.ok(text(markup["panel.noRecordingMadeStart"]).includes("Not recorded."));
+    for (const id of ["panel.laterNoLine", "panel.startMade"]) {
+      assert.ok(!text(markup[id]).includes("Not recorded.") && !text(markup[id]).includes("Recorded and transcribed. Guests"), `${id}: no claim when the server did not say`);
+    }
+    const whole = "https://oasisai.work/meet/aaa-bbbb-ccc";
+    assert.equal(parseRoomItem(roomJson({ url: whole }))?.url, whole);
+    for (const bad of ["javascript:alert(1)", "/meet/aaa-bbbb-ccc", "ftp://oasisai.work/x", `${whole} extra`, `${whole}"onmouseover="x`, 42, null, ""]) {
+      assert.equal(parseRoomItem(roomJson({ url: bad }))?.url, undefined, `not a link to trust: ${String(bad)}`);
+    }
+    // Both ends of the link's journey: parsed from the list, then handed on when the Copy link button is pressed.
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.match(panel, /onCopy=\{\(key, link, url\) => void copy\(key, link, url\)\}/, "the whole link is not dropped on the way");
+    assert.match(panel, /url: r\.url,/, "and a row carries it");
+  });
+
+  // ---- delete a meeting ----------------------------------------------------------------------------------------------------------
+
+  await check("Delete is offered on the meetings the person made, and on no others", () => {
+    assert.equal(canDelete({ mine: true }), true);
+    assert.equal(canDelete({ mine: false }), false);
+    const html = markup["panel.mixedAvailable"];
+    const deletes = [...html.matchAll(/data-delete="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(deletes, ["m1", "m3", "m4"], "mine only: not the live one and the ended one that are someone else's");
+    assert.equal(count(html, /aria-label="Delete /g), 3);
+    assert.ok(html.includes('aria-label="Delete Mine (not started)"'), "each one is named for its meeting");
+    assert.deepEqual(markup["panel.empty"].match(/data-delete=/g) ?? [], []);
+    assert.deepEqual([...markup["panel.mixedUnavailable"].matchAll(/data-delete="([^"]+)"/g)].map((m) => m[1]), ["m1", "m3", "m4"], "delete does not depend on recording");
+  });
+
+  await check("Delete is two steps: the button only asks; the question, in plain words, holds Delete for good and Cancel", () => {
+    // Nothing is asked until Delete is pressed: no question, no Delete for good, anywhere.
+    for (const id of ["panel.mixedAvailable", "panel.rows", "panel.mixedUnavailable"]) {
+      assert.ok(!buttonNames(markup[id]).includes("Delete for good"), `${id}: no confirmation before Delete is pressed`);
+      assert.ok(!text(markup[id]).includes(DELETE_CONFIRM), `${id}: no question yet`);
+    }
+    assert.equal(DELETE_CONFIRM, "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone.");
+    const html = markup["panel.deleteAsk"];
+    assert.ok(text(html).includes("This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."));
+    assert.match(html, /<div role="group" aria-label="Delete Mine \(ended, audio\)"/, "a named group");
+    assert.equal(count(html, />Delete for good</g), 1, "one question, on one meeting");
+    assert.equal(count(html, /data-cancel-delete/g), 1);
+    assert.ok(buttonNames(html).includes("Cancel"));
+    assert.deepEqual([...html.matchAll(/data-delete="([^"]+)"/g)].map((m) => m[1]), ["m1", "m4"], "the one being asked about has no Delete button of its own while it asks");
+    // The click on Delete asks, only the one on Delete for good deletes: no other button is wired to delete.
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.equal(count(panel, /props\.onDelete\(/g), 1, "onDelete is bound once");
+    assert.match(panel, /onClick=\{\(\) => props\.onAskDelete\(row\.id\)\}/, "Delete asks");
+    assert.match(panel, /onClick=\{\(\) => props\.onDelete\(row\.id\)\}[^>]*>\s*\{del\.busy \? "Deleting\.\.\." : "Delete for good"\}/, "Delete for good deletes");
+    assert.match(panel, /if \(!room \|\| !canDelete\(room\)\) return;/, "and the delete call itself refuses a meeting that is not the person's");
+    // A question about a meeting that is not the person's is never drawn, whatever state it is handed.
+    assert.ok(!text(markup["panel.deleteAskNotMine"]).includes(DELETE_CONFIRM));
+    assert.ok(!buttonNames(markup["panel.deleteAskNotMine"]).includes("Delete for good"));
+  });
+
+  await check("while a delete runs the question is busy and cannot be answered twice; a refusal shows inside it, in words", () => {
+    const busy = markup["panel.deleteBusy"];
+    assert.ok(buttonNames(busy).includes("Deleting..."), "working");
+    assert.ok(!buttonNames(busy).includes("Delete for good"));
+    const disabled = [...busy.matchAll(/<button\b[^>]*\bdisabled=""[^>]*>([\s\S]*?)<\/button>/g)].map((m) => text(m[1]));
+    assert.deepEqual(disabled, ["Deleting...", "Cancel"], "both answers are off until the server has answered");
+    const refused = markup["panel.deleteError"];
+    assert.match(refused, /<p role="alert"[^>]*>Only the host can delete this meeting\.<\/p>/);
+    assert.ok(buttonNames(refused).includes("Delete for good") && buttonNames(refused).includes("Cancel"), "and the question stays open to try again or give up");
+    assert.match(markup["panel.deleteNote"], /<p role="status"[^>]*>The meeting was deleted\.<\/p>/, "the line after one is gone is a status");
+    assert.match(markup["panel.deleteNote"], /data-list-heading/, "the heading is where focus lands when the last row goes");
+    assert.equal(deletedNote(0), "The meeting was deleted.");
+    assert.equal(deletedNote(3), "The meeting was deleted. Some of its audio is still being removed from the server.");
+  });
+
+  await check("deleteMeeting asks the host route for a delete and maps every answer to plain words; only a real 404 means it is already gone", async () => {
+    const answer = async (status: number, json: unknown, throws = false, raw?: string) => deleteMeeting("abc-defg-hjk", fakeFetch({ status, json, throws, raw }).fetch);
+    const sent = fakeFetch({ status: 200, json: { ok: true, deleted: true, relayRemaining: 0 } });
+    assert.deepEqual(await deleteMeeting("abc-defg-hjk", sent.fetch), { ok: true, relayRemaining: 0 });
+    const call = c0(sent.calls);
+    assert.equal(call.url, "/api/meet/abc-defg-hjk/host");
+    assert.equal(call.init.method, "POST");
+    assert.equal(call.init.body, '{"action":"delete"}');
+    assert.equal((call.init.headers as Record<string, string>)["content-type"], "application/json");
+    assert.equal(call.init.credentials, "same-origin");
+    assert.equal(call.init.cache, "no-store");
+    const encoded = fakeFetch({ status: 200, json: { ok: true, deleted: true } });
+    await deleteMeeting("a b/c", encoded.fetch);
+    assert.equal(c0(encoded.calls).url, "/api/meet/a%20b%2Fc/host", "a code is encoded into the path");
+
+    // Deleted: how many relay copies are left is read as a count, never trusted as one.
+    assert.deepEqual(await answer(200, { ok: true, deleted: true, relayRemaining: 3 }), { ok: true, relayRemaining: 3 });
+    assert.deepEqual(await answer(200, { ok: true, deleted: true, relayRemaining: "2" }), { ok: true, relayRemaining: 2 });
+    for (const odd of [undefined, -4, "x", null, Number.NaN]) {
+      assert.deepEqual(await answer(200, { ok: true, deleted: true, relayRemaining: odd }), { ok: true, relayRemaining: 0 }, String(odd));
+    }
+    assert.deepEqual(await answer(200, { ok: true, deleted: true, relayRemaining: 2.9 }), { ok: true, relayRemaining: 2 });
+
+    // Not deleted, and the meeting is still there.
+    const refused = async (status: number, error: string) => {
+      const res = await answer(status, { ok: false, error });
+      assert.ok(!res.ok, `${status} ${error}`);
+      return { words: res.words, gone: res.gone };
+    };
+    assert.deepEqual(await refused(401, "sign_in_required"), { words: "Sign in again, then try once more.", gone: false });
+    assert.deepEqual(await refused(403, "host_only"), { words: "Only the host can delete this meeting.", gone: false });
+    assert.deepEqual(await refused(403, "cross_origin_refused"), { words: "This page could not reach the meeting service. Reload it and try again.", gone: false });
+    assert.deepEqual(await refused(429, "rate_limited"), { words: "Too many tries. Wait a moment and try again.", gone: false });
+    assert.deepEqual(await refused(500, "meet_unavailable"), { words: DELETE_FAILED, gone: false });
+    assert.deepEqual(await refused(400, "invalid_body"), { words: DELETE_FAILED, gone: false });
+    assert.deepEqual(await refused(502, "sfu_failed"), { words: DELETE_FAILED, gone: false });
+
+    // Not there: the meeting was already deleted, so its row goes too.
+    assert.deepEqual(await refused(404, "room_not_found"), { words: "This meeting was already deleted.", gone: true });
+    assert.equal(ALREADY_DELETED, "This meeting was already deleted.");
+
+    // Anything that is not the room API's own answer is a failure, never "gone".
+    const page = await answer(404, null, false, "<html>Not Found</html>");
+    assert.ok(!page.ok && !page.gone && page.words === DELETE_FAILED, "a 404 page from the platform");
+    const noCode = await answer(404, { ok: false });
+    assert.ok(!noCode.ok && !noCode.gone, "a 404 without the room API's code");
+    const oddOk = await answer(200, { ok: true });
+    assert.ok(!oddOk.ok && !oddOk.gone && oddOk.words === DELETE_FAILED, "ok without deleted: true is not a delete");
+    const notDeleted = await answer(200, { ok: true, deleted: false });
+    assert.ok(!notDeleted.ok && notDeleted.words === DELETE_FAILED);
+    const down = await answer(0, null, true);
+    assert.deepEqual(down, { ok: false, words: NO_CONNECTION, gone: false });
+    for (const [status, code, expected] of [
+      [401, null, "Sign in again, then try once more."],
+      [403, "host_only", "Only the host can delete this meeting."],
+      [404, "room_not_found", ALREADY_DELETED],
+      [429, null, "Too many tries. Wait a moment and try again."],
+      [500, null, DELETE_FAILED],
+    ] as const) {
+      assert.equal(deleteErrorWords(status, code), expected, `${status} ${String(code)}`);
+    }
+  });
+
+  await check("a deleted meeting leaves the list and focus has somewhere to go: the row after it, else the one before, else the heading", () => {
+    const room = (id: string): MeetRoomItem => {
+      const item = parseRoomItem(roomJson({ id }));
+      assert.ok(item, `room ${id}`);
+      return item;
+    };
+    const list = ["a", "b", "c"].map(room);
+    const cut = (rooms: MeetRoomItem[], id: string) => {
+      const res = withoutMeeting(rooms, id);
+      return { ids: res.rooms.map((r) => r.id), focusId: res.focusId };
+    };
+    assert.deepEqual(cut(list, "b"), { ids: ["a", "c"], focusId: "c" }, "from the middle: the one after");
+    assert.deepEqual(cut(list, "a"), { ids: ["b", "c"], focusId: "b" }, "the first: the one after");
+    assert.deepEqual(cut(list, "c"), { ids: ["a", "b"], focusId: "b" }, "the last: the one before");
+    assert.deepEqual(cut([room("a")], "a"), { ids: [], focusId: null }, "the only one: nowhere, so the heading");
+    assert.deepEqual(cut(list, "zzz"), { ids: ["a", "b", "c"], focusId: null }, "not in the list: nothing leaves");
+    assert.equal(withoutMeeting(list, "zzz").rooms, list, "and the same list comes back");
+    assert.deepEqual(list.map((r) => r.id), ["a", "b", "c"], "the list it was given is left as it was");
+  });
+
+  await check("the link to show and copy is the server's whole link when it sent one, else the page's own address plus the path", () => {
+    const link = "/meet/aaa-bbbb-ccc";
+    const whole = "https://oasisai.work/meet/aaa-bbbb-ccc";
+    assert.equal(linkToSend("https://preview.example.test", { link, url: whole }), whole, "the app's own address wins over the page's");
+    assert.equal(linkToSend("https://preview.example.test", { link }), "https://preview.example.test/meet/aaa-bbbb-ccc", "else the page's own");
+    assert.equal(linkToSend("https://preview.example.test/", { link: "meet/aaa-bbbb-ccc" }), "https://preview.example.test/meet/aaa-bbbb-ccc", "slashes are tidied as meetingUrl does");
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.equal(count(panel, /linkToSend\(window\.location\.origin, /g), 3, "the link shown after Start now, the one after Create link, and the one Copy puts on the clipboard");
+    assert.equal(count(panel, /meetingUrl\(window\.location\.origin, /g), 1, "the page's own address is used on its own only to open the tab, never to name a link to send");
+  });
+
+  await check("a deleted meeting's row, copy button and made link go too, and the panel wires it (the panel's own rules, in its source)", () => {
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.match(panel, /if \(!res\.ok && !res\.gone\) \{\s*setDeleteError\(res\.words\);\s*return;\s*\}/, "a refusal keeps the meeting and the question");
+    assert.match(panel, /const \{ focusId \} = withoutMeeting\(rooms, id\);/, "focus goes by the list the person was looking at");
+    assert.match(panel, /focusNext\.current = focusId \? \{ kind: "row", id: focusId \} : \{ kind: "heading" \};/, "next row, else the heading");
+    assert.match(panel, /rooms: withoutMeeting\(prev\.rooms, id\)\.rooms/, "its row is taken out of the list as it is now");
+    assert.match(panel, /setNote\(res\.ok \? deletedNote\(res\.relayRemaining\) : ALREADY_DELETED\)/, "and one line says which it was");
+    assert.match(panel, /if \(room\.startsAt\) onMeetingDeleted\?\.\(\);/, "a meeting that had a time takes its Schedule entry with it: the page is told");
+    assert.match(panel, /prev\?\.link === room\.link \? null : prev/, "a link just made for it is not left on the screen");
+    // Escape takes back the question before it closes the panel, and never while the server is working.
+    assert.match(panel, /if \(askingRef\.current !== null\) cancelDelete\(\);\s*else closePanel\(\);/);
+    assert.match(panel, /useDialogFocus\(panelRef, onEscape, open\);/);
+    assert.match(panel, /if \(deletingRef\.current\) return;/);
+    // The ref Escape reads and the state that draws change together, in one place, so they cannot drift apart.
+    assert.equal(count(panel, /askingRef\.current = /g), 1);
+    assert.equal(count(panel, /\bsetAsking\(/g), 1);
+  });
+
   // ---- shared rules over every screen --------------------------------------------------------------------------------------
 
   await check("every control on a screen is a 44 px touch target (a checkbox's label carries it)", () => {
@@ -798,10 +1065,28 @@ async function main() {
     assert.equal(panelErrorWords(503, "meet_not_configured"), meetErrorWords("meet_not_configured"));
   });
 
+  await check("listMeetings reads whether recording runs, and says false unless the server says true", async () => {
+    const rooms = [roomJson(), roomJson({ id: "r2", code: "ddd-eeee-fff", status: "live" })];
+    const read = async (extra: Record<string, unknown>) => {
+      const res = await listMeetings(fakeFetch({ status: 200, json: { ok: true, rooms, ...extra } }).fetch);
+      assert.ok(res.ok);
+      return res.value.recordingAvailable;
+    };
+    assert.equal(await read({ recordingAvailable: true }), true);
+    assert.equal(await read({ recordingAvailable: false }), false);
+    assert.equal(await read({}), false, "a missing field is false: a server that has not heard of recording does not record");
+    for (const odd of ["true", 1, "yes", null, {}, []]) assert.equal(await read({ recordingAvailable: odd }), false, `${JSON.stringify(odd)} is not true`);
+    const both = await listMeetings(fakeFetch({ status: 200, json: { ok: true, rooms, recordingAvailable: true } }).fetch);
+    assert.ok(both.ok && both.value.rooms.length === 2, "the meetings come with it");
+    assert.deepEqual(parseRoomList({ rooms: [], recordingAvailable: true }), { rooms: [], recordingAvailable: true });
+    assert.deepEqual(parseRoomList({ rooms: [] }), { rooms: [], recordingAvailable: false });
+    assert.equal(parseRoomList({ recordingAvailable: true }), null, "no rooms list is not a list");
+  });
+
   await check("the recent list: the API's meetings, or plain words when it cannot", async () => {
     const ok = await listMeetings(fakeFetch({ status: 200, json: { ok: true, rooms: [roomJson(), roomJson({ id: "r2", code: "ddd-eeee-fff", status: "live" })] } }).fetch);
     assert.ok(ok.ok);
-    assert.deepEqual(ok.value.map((r) => [r.code, r.status]), [["aaa-bbbb-ccc", "scheduled"], ["ddd-eeee-fff", "live"]]);
+    assert.deepEqual(ok.value.rooms.map((r) => [r.code, r.status]), [["aaa-bbbb-ccc", "scheduled"], ["ddd-eeee-fff", "live"]]);
     const get = fakeFetch({ status: 200, json: { ok: true, rooms: [] } });
     await listMeetings(get.fetch);
     assert.equal(c0(get.calls).init.method, "GET");
