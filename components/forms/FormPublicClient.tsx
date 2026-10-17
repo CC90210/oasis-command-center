@@ -35,7 +35,7 @@ import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
-import { contactGateAction, contactHandoff, firstContactStepIndex, typedContact } from "@/lib/forms/contact-gate";
+import { contactGateAction, contactHandoff, hasReachableContact, typedContact } from "@/lib/forms/contact-gate";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -431,11 +431,11 @@ export function FormPublicClient({
   // remaining questions are optional.
   const [bookedEarly, setBookedEarly] = useState(alreadyBooked);
   const [skippedQuestions, setSkippedQuestions] = useState(false);
-  // The first step that asks for an email or phone (-1: none, the VSL router).
-  // Until a lead exists, the answers to the steps before it are held here, and
-  // how many of them already reached the server (lib/forms/contact-gate.ts).
-  const contactStep = useMemo(() => firstContactStepIndex(steps), [steps]);
+  // Until the visitor has given an email or phone, their steps' answers are
+  // held here, and how many of them already reached the server
+  // (lib/forms/contact-gate.ts).
   const heldSteps = useRef<Array<Record<string, unknown> | undefined>>([]);
+  const heldLedgers = useRef<Array<{ email?: boolean; sms?: boolean } | undefined>>([]);
   const heldStepsSent = useRef(0);
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
@@ -781,7 +781,7 @@ export function FormPublicClient({
    * answers minus File objects — contact fields are what recovery needs; file
    * bytes are what made the request too big in the first place.
    */
-  function reportSubmitFailure(error: string, payload?: Record<string, unknown>) {
+  function reportSubmitFailure(error: string, payload?: Record<string, unknown>, stepIndex = currentStep) {
     try {
       const source = payload ?? values;
       const safe: Record<string, unknown> = {};
@@ -798,7 +798,7 @@ export function FormPublicClient({
         body: JSON.stringify({
           tenant_slug: anonymousInit?.tenant_slug,
           form_slug: anonymousInit?.form_slug,
-          step_index: currentStep,
+          step_index: stepIndex,
           error: error.slice(0, 400),
           payload: safe,
         }),
@@ -823,6 +823,20 @@ export function FormPublicClient({
     }
   }
 
+  /**
+   * The consent boxes the given step shows right now and whether each is
+   * ticked, as the submit route takes them, or undefined (none on that step,
+   * or the visitor is no longer on it). See the CONSENT LEDGER note in submit.
+   */
+  function consentLedgerFor(step: number): { email?: boolean; sms?: boolean } | undefined {
+    const now = ledgerRef.current;
+    if (now.step !== step || now.channels.length === 0) return undefined;
+    return {
+      email: now.channels.includes("email") ? now.ticked.email : undefined,
+      sms: now.channels.includes("sms") ? now.ticked.sms : undefined,
+    };
+  }
+
   /** Leave the early calendar for the remaining questions. */
   function resumeQuestions() {
     if (earlyCalendarStep !== null) setCurrentStep(earlyCalendarStep);
@@ -837,12 +851,18 @@ export function FormPublicClient({
    * Validation and rate-limit responses are the system working, not a
    * merchant being lost.
    */
-  function showSubmitFailure(res: Response, data: SubmitResponse | null, payload: Record<string, unknown>) {
+  function showSubmitFailure(
+    res: Response,
+    data: SubmitResponse | null,
+    payload: Record<string, unknown>,
+    /** The step the failed request was for, when not the one on screen (a held step). */
+    stepIndex = currentStep,
+  ) {
     if (!data || data.error === "server_error") {
-      reportSubmitFailure(data ? "server_error" : `non_json_http_${res.status}`, payload);
+      reportSubmitFailure(data ? "server_error" : `non_json_http_${res.status}`, payload, stepIndex);
     }
     if (data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
-      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload);
+      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex);
     }
     // The route writes a specific sentence for the rejections that can name
     // their own problem (which field, what is missing). Prefer it; fall back to
@@ -910,15 +930,17 @@ export function FormPublicClient({
   }
 
   /**
-   * Send the steps held before the contact step, in order: the first creates
-   * the lead with this step's contact details (the server refuses a lead
-   * without them), the rest follow on its token. A retry resumes after the
-   * last one that went through. False when one was refused (already shown).
+   * Send the steps held before this one, in order: the first creates the lead
+   * with the visitor's contact details (the server refuses a lead without
+   * them), the rest follow on its token. A retry resumes after the last one
+   * that went through. False when one was refused (already shown).
    */
   async function sendHeldSteps(contact: Record<string, string> | null): Promise<boolean> {
-    for (let i = heldStepsSent.current; i < contactStep; i += 1) {
+    for (let i = heldStepsSent.current; i < currentStep; i += 1) {
       const payload = heldSteps.current[i] ?? {};
       const body: Record<string, unknown> = { step_index: i, payload, ...submitMeta() };
+      const ledger = heldLedgers.current[i];
+      if (ledger) body.consent_ledger = ledger;
       if (tokenRef.current) {
         body.token = tokenRef.current;
       } else {
@@ -932,7 +954,9 @@ export function FormPublicClient({
       });
       const data = (await res.json().catch(() => null)) as SubmitResponse | null;
       if (!data || !data.ok) {
-        showSubmitFailure(res, data, payload);
+        // The recovery record names the held step that failed and keeps the
+        // contact: before a lead exists, it is the only copy (Codex review of #668).
+        showSubmitFailure(res, data, { ...payload, ...(contact ?? {}) }, i);
         return false;
       }
       if (!tokenRef.current && data.minted_token) {
@@ -1036,16 +1060,26 @@ export function FormPublicClient({
       }
       // NO LEAD BEFORE CONTACT (CC, 2026-10-16: "If they don't input their
       // email or phone number, then we do not need to store them or log
-      // them"). On an anonymous form, the steps before the first one that asks
-      // for an email or phone stay in this browser, and that step sends them
-      // first, carrying its contact so the lead is created with it. A form that
-      // never asks (the VSL router) only asks the server where to go next.
+      // them"). On an anonymous form, steps stay in this browser until the
+      // visitor has actually given a valid email or phone (by what they typed,
+      // not by where the field sits: an optional phone left blank is not
+      // contact), and then they all go first, carrying that contact so the lead
+      // is created with it. A form where none is ever given (the VSL router)
+      // only asks the server where to go next.
+      const answersSoFar: Record<string, unknown> = Object.assign(
+        {},
+        ...heldSteps.current.slice(0, currentStep).filter(Boolean),
+        built.payload,
+      );
+      // Each held payload already dropped the fields its conditions hid.
+      const fieldsSoFar = steps.slice(0, currentStep + 1).flatMap((s) => s.fields);
+      const contactSoFar = { ...typedContact(fieldsSoFar, answersSoFar), ...answersSoFar };
       const gate = contactGateAction({
         anonymous: !tokenRef.current && Boolean(anonymousInit),
-        contactStep,
+        reachable: hasReachableContact(contactSoFar),
         currentStep,
         stepCount: steps.length,
-        heldUnsent: heldStepsSent.current < heldSteps.current.length,
+        heldUnsent: heldStepsSent.current < Math.min(currentStep, heldSteps.current.length),
       });
       if (gate === "route") {
         await routeWithoutLead(built.payload);
@@ -1053,6 +1087,9 @@ export function FormPublicClient({
       }
       if (gate === "hold") {
         heldSteps.current[currentStep] = built.payload;
+        // A held step can show consent boxes (an optional phone left blank, an
+        // email not yet valid): its decision goes with it when it is sent.
+        heldLedgers.current[currentStep] = consentLedgerFor(stepAtStart);
         if (tenantSlug && formSlug) {
           trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
         }
@@ -1063,8 +1100,7 @@ export function FormPublicClient({
       if (gate === "send-held") {
         // The contact under the standard names, whatever this form calls its
         // fields (a builder-made `work_email` is still the email).
-        const contact = contactHandoff({ ...typedContact(steps[currentStep].fields, built.payload), ...built.payload });
-        if (!(await sendHeldSteps(contact))) return;
+        if (!(await sendHeldSteps(contactHandoff(contactSoFar)))) return;
         // The visitor went Back while the held steps were sending: this step's
         // answers and consent boxes are no longer the ones on screen, so stop,
         // as after the address wait above (Codex review of #668). The held
@@ -1180,13 +1216,8 @@ export function FormPublicClient({
       // If they navigated to another step during a wait, the boxes they can
       // see are not this step's: nothing is sent, so nothing is recorded,
       // which can only ever refuse a send.
-      const ledgerNow = ledgerRef.current;
-      if (ledgerNow.step === stepAtStart && ledgerNow.channels.length > 0) {
-        submitBody.consent_ledger = {
-          email: ledgerNow.channels.includes("email") ? ledgerNow.ticked.email : undefined,
-          sms: ledgerNow.channels.includes("sms") ? ledgerNow.ticked.sms : undefined,
-        };
-      }
+      const ledger = consentLedgerFor(stepAtStart);
+      if (ledger) submitBody.consent_ledger = ledger;
       const res = await fetch("/api/forms/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1209,7 +1240,7 @@ export function FormPublicClient({
       }
       // A step the form once held, now on the server the ordinary way (the
       // visitor went Back to it): the held copy must never be sent over it.
-      if (currentStep < contactStep) heldStepsSent.current = Math.max(heldStepsSent.current, currentStep + 1);
+      if (currentStep < heldSteps.current.length) heldStepsSent.current = Math.max(heldStepsSent.current, currentStep + 1);
       if (tenantSlug && formSlug) {
         trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
       }

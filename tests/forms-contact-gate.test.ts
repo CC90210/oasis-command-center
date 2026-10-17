@@ -61,6 +61,12 @@ const COMMUNITY_STEPS = [
 const CUSTOM_STEPS = [
   { key: "contact", title: "Reach you", fields: [text("full_name", "text"), text("work_email", "email", false), text("work_phone", "phone", false)] },
 ];
+// An optional phone first, the email after (Codex review of #668): a visitor
+// who leaves the phone blank gave no contact on step 0.
+const PHONE_FIRST_STEPS = [
+  { key: "about", title: "About you", fields: [text("name", "text"), text("phone", "phone", false)] },
+  { key: "email", title: "Where to send it", fields: [text("email", "email")] },
+];
 const VSL_STEPS = [
   { key: "path", title: "Which is you?", fields: [select("path", ["community", "audit"])] },
   { key: "budget", title: "Budget", fields: [select("budget", ["none_yet", "some"], false)] },
@@ -90,6 +96,10 @@ async function main() {
     {
       sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, on_complete_stage) VALUES ('form-community', ?, 'community', 'COMMUNITY', ?, 'researched')",
       args: [OASIS, JSON.stringify(COMMUNITY_STEPS)],
+    },
+    {
+      sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('form-phone-first', ?, 'phone-first', 'Phone first', ?)",
+      args: [OASIS, JSON.stringify(PHONE_FIRST_STEPS)],
     },
     {
       sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('form-custom', ?, 'custom-contact', 'Custom', ?)",
@@ -155,22 +165,24 @@ async function main() {
     );
   });
 
-  await check("the browser holds the steps before contact, routes a contactless form, and sends normally after", () => {
-    const act = (anonymous: boolean, contactStep: number, currentStep: number, stepCount = 3, heldUnsent = false) =>
-      contactGateAction({ anonymous, contactStep, currentStep, stepCount, heldUnsent });
-    assert.equal(act(true, 1, 0), "hold", "COMMUNITY's questions wait for the contact step");
-    assert.equal(act(true, 1, 1), "send-held", "the contact step sends them first");
-    assert.equal(act(true, 1, 2), "send", "a later step with no token sends as it always did");
-    assert.equal(act(true, 0, 0), "send", "a form that asks for contact first is unchanged");
-    assert.equal(act(true, -1, 0, 2), "hold", "the router's first step waits");
-    assert.equal(act(true, -1, 1, 2), "route", "the router's last step only asks where next");
-    assert.equal(act(false, 1, 0), "send", "a lead token means a lead already exists");
-    assert.equal(act(false, -1, 1, 2), "send");
+  await check("the browser holds until the visitor is reachable, routes when they never are, and sends normally after", () => {
+    const act = (anonymous: boolean, reachable: boolean, currentStep: number, stepCount = 3, heldUnsent = false) =>
+      contactGateAction({ anonymous, reachable, currentStep, stepCount, heldUnsent });
+    assert.equal(act(true, false, 0), "hold", "COMMUNITY's questions wait for contact");
+    assert.equal(act(true, true, 1, 3, true), "send-held", "the step that brings contact sends the held ones first");
+    assert.equal(act(true, true, 0), "send", "a form that asks for contact first is unchanged");
+    assert.equal(act(true, false, 0, 2), "hold", "the router's first step waits");
+    assert.equal(act(true, false, 1, 2), "route", "the router's last step only asks where next");
+    assert.equal(act(true, false, 2, 3), "route", "a contact form that never got contact asks too, and is told what is missing");
+    // Codex review of #668 (pass 3): an optional phone left blank on step 0 is
+    // no contact, so step 0 waits for the email on step 1 instead of being sent.
+    assert.equal(act(true, false, 0, 2), "hold");
+    assert.equal(act(true, true, 1, 2, true), "send-held");
+    assert.equal(act(false, false, 1), "send", "a lead token means a lead already exists");
     // Codex review of #668: step 0 went through (a token now exists), a later
     // held step did not: the retry must finish the held steps, not skip them.
-    assert.equal(act(false, 2, 2, 4, true), "send-held");
-    assert.equal(act(false, 2, 2, 4, false), "send", "nothing held: the ordinary request");
-    assert.equal(act(false, 2, 1, 4, true), "send", "only the contact step sends the held steps");
+    assert.equal(act(false, true, 2, 4, true), "send-held");
+    assert.equal(act(false, true, 2, 4, false), "send", "nothing held: the ordinary request");
   });
 
   await check("step 0 with no way to reach them creates nothing", async () => {
@@ -238,6 +250,21 @@ async function main() {
     assert.equal(none.json.error, "contact_required");
   });
 
+  await check("an optional phone left blank is no contact: step 0 goes with the later email (Codex review of #668)", async () => {
+    const before = await leads();
+    const blank = await post({ step_index: 0, anonymous_init: anon("phone-first"), payload: { name: "Pat Blank", phone: "" } });
+    assert.equal(blank.status, 400, "a blank optional phone made a lead");
+    assert.equal(blank.json.error, "contact_required");
+    const withEmail = await post({
+      step_index: 0,
+      anonymous_init: anon("phone-first"),
+      payload: { name: "Pat Blank", phone: "" },
+      contact: { name: "Pat Blank", email: "pat.blank@example.com" },
+    });
+    assert.equal(withEmail.status, 200, JSON.stringify(withEmail.json));
+    assert.equal(await leads(), before + 1);
+  });
+
   await check("a valid phone alone is enough", async () => {
     const before = await leads();
     const res = await post({ step_index: 0, anonymous_init: anon("community"), payload: gateAnswers, contact: { name: "Pat", phone: "(514) 555-0177" } });
@@ -303,33 +330,51 @@ async function main() {
     // No DOM here: the decision itself is contactGateAction (tested above);
     // these pin that the form acts on each answer it gives.
     const client = readFileSync(join(__dirname, "..", "components", "forms", "FormPublicClient.tsx"), "utf8").replace(/\r\n/g, "\n");
-    assert.match(client, /anonymous: !tokenRef\.current && Boolean\(anonymousInit\),\s*contactStep,\s*currentStep,\s*stepCount: steps\.length,/);
+    assert.match(
+      client,
+      /const answersSoFar: Record<string, unknown> = Object\.assign\(\s*\{\},\s*\.\.\.heldSteps\.current\.slice\(0, currentStep\)\.filter\(Boolean\),\s*built\.payload,\s*\);/,
+      "reachability must read every answer so far, not one step",
+    );
+    assert.match(client, /const contactSoFar = \{ \.\.\.typedContact\(fieldsSoFar, answersSoFar\), \.\.\.answersSoFar \};/);
+    assert.match(
+      client,
+      /anonymous: !tokenRef\.current && Boolean\(anonymousInit\),\s*reachable: hasReachableContact\(contactSoFar\),\s*currentStep,\s*stepCount: steps\.length,/,
+      "the gate must decide by what the visitor gave, not where the field sits",
+    );
     assert.match(client, /if \(gate === "route"\) \{\s*await routeWithoutLead\(built\.payload\);\s*return;/);
     assert.match(
       client,
-      /if \(gate === "hold"\) \{\s*heldSteps\.current\[currentStep\] = built\.payload;[\s\S]{0,300}advanceFrom\(currentStep, currentStep \+ 1\);\s*return;/,
+      /if \(gate === "hold"\) \{\s*heldSteps\.current\[currentStep\] = built\.payload;[\s\S]{0,700}advanceFrom\(currentStep, currentStep \+ 1\);\s*return;/,
       "a held step must stay in the browser and move on, with no request",
     );
-    assert.match(client, /heldUnsent: heldStepsSent\.current < heldSteps\.current\.length,/, "a retry after a partial send skips the held steps");
+    assert.match(client, /heldUnsent: heldStepsSent\.current < Math\.min\(currentStep, heldSteps\.current\.length\),/, "a retry after a partial send skips the held steps");
     assert.match(
       client,
-      /if \(gate === "send-held"\) \{[\s\S]{0,300}const contact = contactHandoff\(\{ \.\.\.typedContact\(steps\[currentStep\]\.fields, built\.payload\), \.\.\.built\.payload \}\);\s*if \(!\(await sendHeldSteps\(contact\)\)\) return;/,
-      "the contact step must hand over its contact under the standard names",
+      /if \(gate === "send-held"\) \{[\s\S]{0,300}if \(!\(await sendHeldSteps\(contactHandoff\(contactSoFar\)\)\)\) return;/,
+      "the held steps must carry the contact under the standard names",
     );
     // Codex review of #668: Back during the held-step send moved the consent
     // boxes off this step, so posting it then would drop its consent decision.
     assert.match(
       client,
-      /if \(!\(await sendHeldSteps\(contact\)\)\) return;[\s\S]{0,500}if \(currentStepRef\.current !== stepAtStart\) return;\s*\}/,
+      /if \(!\(await sendHeldSteps\(contactHandoff\(contactSoFar\)\)\)\) return;[\s\S]{0,500}if \(currentStepRef\.current !== stepAtStart\) return;\s*\}/,
       "the contact step posts after the visitor went Back mid-send",
     );
     assert.match(
       client,
-      /if \(currentStep < contactStep\) heldStepsSent\.current = Math\.max\(heldStepsSent\.current, currentStep \+ 1\);/,
+      /if \(currentStep < heldSteps\.current\.length\) heldStepsSent\.current = Math\.max\(heldStepsSent\.current, currentStep \+ 1\);/,
       "a held step sent the ordinary way (after Back) would be sent again from its stale copy",
     );
     const held = client.slice(client.indexOf("async function sendHeldSteps"), client.indexOf("async function routeWithoutLead"));
-    assert.match(held, /for \(let i = heldStepsSent\.current; i < contactStep; i \+= 1\)/, "a retry must resume after the last held step that went through");
+    assert.match(held, /for \(let i = heldStepsSent\.current; i < currentStep; i \+= 1\)/, "a retry must resume after the last held step that went through");
+    // Codex review of #668 (pass 3): before a lead exists, the failure report is
+    // the only copy of the contact, and it must name the held step that failed.
+    assert.match(held, /showSubmitFailure\(res, data, \{ \.\.\.payload, \.\.\.\(contact \?\? \{\}\) \}, i\);/);
+    assert.match(client, /step_index: stepIndex,/, "the failure report stamps the step on screen, not the one that failed");
+    // A held step's consent boxes (an optional phone left blank, an email not
+    // yet valid) travel with it: the server binds each to that step's own field.
+    assert.match(client, /heldLedgers\.current\[currentStep\] = consentLedgerFor\(stepAtStart\);/);
+    assert.match(held, /const ledger = heldLedgers\.current\[i\];\s*if \(ledger\) body\.consent_ledger = ledger;/);
     assert.match(held, /if \(tokenRef\.current\) \{\s*body\.token = tokenRef\.current;\s*\} else \{\s*body\.anonymous_init = anonymousInit;\s*if \(contact\) body\.contact = contact;/);
     assert.match(held, /heldStepsSent\.current = i \+ 1;/);
     const route = client.slice(client.indexOf("async function routeWithoutLead"), client.indexOf("async function submit()"));
@@ -337,18 +382,6 @@ async function main() {
     assert.match(client, /if \(tokenRef\.current \|\| token\) \{\s*submitBody\.token = tokenRef\.current \|\| token;/, "the contact step must use the token its held steps just minted");
     const book = readFileSync(join(__dirname, "..", "components", "offer-pages", "OfferBook.tsx"), "utf8");
     assert.match(book, /if \(stepIndex === Math\.max\(0, firstContactStepIndex\(form\.steps\)\)\) setContactDone\(true\);/, "\"Your details are in\" before any details");
-  });
-
-  await check("a held step can never carry consent boxes, so holding it loses no consent record", async () => {
-    // The consent ledger renders a box only on a step with an email or phone
-    // field, and every such field is a contact field: so each step before the
-    // first contact step, the only kind ever held, renders none.
-    const { renderedChannelsForStep } = await import("../lib/consent/ledger-disclosure");
-    const steps = COMMUNITY_STEPS as unknown as Parameters<typeof renderedChannelsForStep>[0][];
-    const contactAt = firstContactStepIndex(COMMUNITY_STEPS);
-    for (let i = 0; i < contactAt; i += 1) assert.deepEqual(renderedChannelsForStep(steps[i], {}), [], `held step ${i} shows a consent box`);
-    assert.deepEqual(renderedChannelsForStep(steps[contactAt], {}), ["email", "sms"], "the contact step is where the boxes are");
-    for (const type of ["email", "phone"]) assert.equal(isContactField({ name: "anything", type }), true, `a ${type} field must count as contact`);
   });
 
   await check("both routing reads are scoped to the workspace (Codex review of #668)", () => {

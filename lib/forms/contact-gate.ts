@@ -77,16 +77,21 @@ export function hasReachableContact(values: Record<string, unknown>): boolean {
 }
 
 /**
- * What the form in the browser does with a validated step.
+ * What the form in the browser does with a validated step. Decided by what the
+ * visitor has actually given so far, never by where a contact field sits in the
+ * form: an optional phone left blank, or an email hidden by a condition, is no
+ * way to reach anyone, and a static "contact step" would send the step without
+ * one and dead-end the visitor on contact_required (Codex review of #668).
  *
- *   hold         anonymous, before the contact step: keep the answers here
- *   route        anonymous, the last step of a form with no contact step (the
- *                VSL router): ask where next, store nothing
- *   send-held    the contact step while held steps remain unsent: send those
- *                first (the first creates the lead with this step's contact),
- *                then this step. Still so once a token exists: a retry after
- *                step 0 went through and a later held step failed must finish
- *                the held steps, never skip them (Codex review of #668).
+ *   hold         anonymous, no email or phone given yet: keep the answers here
+ *   route        anonymous, the last step, still none given: ask where next
+ *                and store nothing (the VSL router; a form that does ask for
+ *                contact answers contact_required, which says what is missing)
+ *   send-held    held steps remain unsent and the visitor is now reachable (or
+ *                a token already exists: a retry after step 0 went through and
+ *                a later held step failed): send those first, the first one
+ *                carrying the contact so the lead is created with it, then this
+ *                step
  *   send         everything else: the request it always was
  */
 export type ContactGateAction = "hold" | "route" | "send-held" | "send";
@@ -94,19 +99,17 @@ export type ContactGateAction = "hold" | "route" | "send-held" | "send";
 export function contactGateAction(input: {
   /** No lead token yet, and the form is the anonymous kind. */
   anonymous: boolean;
-  /** firstContactStepIndex for the form. */
-  contactStep: number;
+  /** The held steps and this one hold a valid email or phone (hasReachableContact). */
+  reachable: boolean;
   currentStep: number;
   stepCount: number;
-  /** Steps this browser held are not all on the server yet. */
+  /** Steps this browser held before this one are not all on the server yet. */
   heldUnsent: boolean;
 }): ContactGateAction {
-  const { anonymous, contactStep, currentStep, stepCount, heldUnsent } = input;
-  if (heldUnsent && contactStep > 0 && currentStep === contactStep) return "send-held";
-  if (!anonymous) return "send";
-  if (contactStep === -1) return currentStep >= stepCount - 1 ? "route" : "hold";
-  if (currentStep < contactStep) return "hold";
-  return currentStep === contactStep && contactStep > 0 ? "send-held" : "send";
+  const { anonymous, reachable, currentStep, stepCount, heldUnsent } = input;
+  if (!anonymous) return heldUnsent ? "send-held" : "send";
+  if (!reachable) return currentStep >= stepCount - 1 ? "route" : "hold";
+  return heldUnsent ? "send-held" : "send";
 }
 
 /**
