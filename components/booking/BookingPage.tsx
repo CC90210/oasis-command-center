@@ -30,6 +30,7 @@ import { ConsentChoice } from "@/components/forms/ConsentChoice";
 import { HoneypotField } from "@/components/forms/HoneypotField";
 import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import type { DetailsOnlyReason } from "@/lib/forms/public-booking-alert";
+import { fetchWithRetry } from "@/lib/retry";
 import { ZONE_CHOICES } from "@/lib/meeting-time";
 
 export type BookingField = {
@@ -76,24 +77,21 @@ const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * Tell the sales desk a visitor left details without a time
- * (app/api/forms/booking/details-only). Three tries: a network error, a 5xx or
- * a 429 tries again (a 429 after the wait the server names, at most a minute);
- * any other answer is final, since a retry cannot change it.
+ * (app/api/forms/booking/details-only), through the shared retry
+ * (lib/retry.ts): three tries, again on a network error, a 408/425/429 or a
+ * 5xx; any other answer is final, since a retry cannot change it.
  */
 export async function raiseDetailsOnlyAlert(token: string, reason: DetailsOnlyReason): Promise<void> {
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const res = await fetch("/api/forms/booking/details-only", {
+  await fetchWithRetry(
+    "/api/forms/booking/details-only",
+    {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ token, reason }),
       keepalive: true,
-    }).catch(() => null);
-    if (res && res.status < 500 && res.status !== 429) return;
-    if (attempt === 3) return;
-    const named = res?.status === 429 ? Number((await res.json().catch(() => null))?.retry_in_sec) : NaN;
-    const waitMs = Number.isFinite(named) && named > 0 ? Math.min(named, 60) * 1000 : 2000 * attempt;
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-  }
+    },
+    { attempts: 3 },
+  ).catch(() => undefined);
 }
 
 function visitorZone(): string {
@@ -343,9 +341,8 @@ export function BookingPage(props: Props) {
         // They asked for a call and could not pick a time: the sales desk hears
         // about it once (app/api/forms/booking/details-only). Never awaited and
         // never shown, since the visitor's details are already saved, but
-        // retried in the background on a network error, a 5xx or a rate limit
-        // (Codex review of #677). The lead also shows as unbooked on the Sales
-        // desk either way.
+        // retried in the background on a failure a retry can fix (Codex review
+        // of #677). The lead also shows as unbooked on the Sales desk either way.
         if (detailsOnly) void raiseDetailsOnlyAlert(token, detailsWhy);
         setLeftDetails(true);
         return;

@@ -149,7 +149,8 @@ async function main() {
     const callAt = page.indexOf("if (detailsOnly) void raiseDetailsOnlyAlert(token, detailsWhy);");
     assert.ok(callAt > 0, "the page never raises the alert on the details-only submit");
     assert.equal(page.split("raiseDetailsOnlyAlert(").length - 1, 2, "the alert is raised from more than one place");
-    assert.equal(page.split('fetch("/api/forms/booking/details-only"').length - 1, 1);
+    assert.equal(page.match(/fetchWithRetry\(\s*"\/api\/forms\/booking\/details-only",/g)?.length, 1, "the alert does not go through the shared retry");
+    assert.doesNotMatch(page, /\bfetch\(\s*"\/api\/forms\/booking\/details-only"/, "the alert bypasses the shared retry");
     assert.match(page.slice(callAt - 600, callAt), /if \(detailsOnly \|\| !slot\) \{/, "the alert is not tied to the details-only submit");
     assert.ok(callAt > page.indexOf("tokenRef.current = token;"), "the alert is raised before the lead is saved");
     assert.ok(callAt > page.indexOf("const honeypot = trapValue(trapRef.current, trapLatch);"), "a script could raise the alert");
@@ -157,7 +158,7 @@ async function main() {
     assert.equal(page.match(/setDetailsWhy\("no_times"\);\s*setDetailsOnly\(true\);/g)?.length, 1);
   });
 
-  await check("the page retries a network error, a 5xx or a 429 up to three times, and stops on any other answer (Codex review of #677)", async () => {
+  await check("the page retries (lib/retry.ts) a network error, a 5xx or a 429 up to three times, and stops on any other answer (Codex review of #677)", async () => {
     const { raiseDetailsOnlyAlert } = await import("../components/booking/BookingPage");
     const realFetch = globalThis.fetch;
     const realTimeout = globalThis.setTimeout;
@@ -186,8 +187,8 @@ async function main() {
       assert.equal((await run([400])).length, 1, "a refusal a retry cannot fix was retried");
       assert.equal((await run([503, "network", 200])).length, 3, "a 5xx or network error was not retried");
       assert.equal((await run([503])).length, 3, "it retried more than three times");
-      assert.equal((await run([429, 200])).length, 2);
-      assert.deepEqual(waits, [7000], "a 429 did not wait the time the server named");
+      assert.equal((await run([429, 200])).length, 2, "a rate limit was not retried");
+      assert.equal(waits.length, 1, "a retry did not back off");
       assert.deepEqual(JSON.parse((await run([200]))[0]), { token: "tok", reason: "no_times" });
     } finally {
       globalThis.fetch = realFetch;
