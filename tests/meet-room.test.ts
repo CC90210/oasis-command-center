@@ -162,10 +162,10 @@ async function main() {
     const row = await readMeetRoomByCode(db, String((later.room as Json).code).replace(/-/g, ""));
     assert.equal(row?.calendarEventId, `evt-${scheduled.length}`, "the room remembers its Schedule event");
     const shabbat = await make({ startsAt: "2026-10-24T16:00:00Z", timeZone: "America/Toronto" }, { schedule: async () => ({ ok: false, reason: "shabbat_protected" }) });
-    assert.deepEqual(shabbat.schedule, { added: false, why: "It falls on Shabbat, which your Schedule keeps free." });
+    assert.deepEqual(shabbat.schedule, { added: false, reason: "shabbat_protected" }, "the Schedule's own code, which the panel words with its messageFor");
     assert.ok((shabbat.room as Json).link, "the link is made either way");
     const noZone = await make({ startsAt: "2026-10-21T18:00:00Z" });
-    assert.deepEqual(noZone.schedule, { added: false, why: "Your time zone could not be read." });
+    assert.deepEqual(noZone.schedule, { added: false, reason: "time_zone_invalid" });
     const now = await make({});
     assert.equal(now.schedule, undefined, "Start now has no time, so nothing goes on the Schedule");
     assert.equal(scheduled.length, before + 1, "the Schedule was asked once: for the meeting with a time and a zone");

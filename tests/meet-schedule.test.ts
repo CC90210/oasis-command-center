@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { CalendarStoreError } from "../lib/calendar/store";
 import type { CalendarPrefs, CalendarRecord, EventOp } from "../lib/calendar/types";
 import type { MeetRoom } from "../lib/meet/rooms";
-import { addMeetingToSchedule, scheduleReasonWords, type ScheduleStore } from "../lib/meet/schedule";
+import { addMeetingToSchedule, type ScheduleStore } from "../lib/meet/schedule";
 
 let failures = 0;
 async function check(name: string, fn: () => Promise<void>) {
@@ -78,7 +78,6 @@ async function main() {
     const shabbat = fakeStore({ refuse: new CalendarStoreError("shabbat_protected", 409) });
     const out = await addMeetingToSchedule(OWNER, room, { timeZone: "America/Toronto" }, shabbat.store);
     assert.deepEqual(out, { ok: false, reason: "shabbat_protected" });
-    assert.equal(scheduleReasonWords("shabbat_protected"), "It falls on Shabbat, which your Schedule keeps free.");
     const badZone = fakeStore();
     assert.deepEqual(await addMeetingToSchedule(OWNER, room, { timeZone: "Mars/Olympus" }, badZone.store), { ok: false, reason: "time_zone_invalid" });
     assert.equal(badZone.ops.length, 0);

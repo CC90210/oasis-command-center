@@ -7,7 +7,8 @@
  * length and a 10-minute reminder. It carries the meeting's link, so it can be opened from the Schedule.
  *
  * The meeting exists either way: a time the Schedule refuses (Shabbat, a bad zone) leaves a link that works and
- * a sentence saying why it is not on the Schedule.
+ * the Schedule's own reason code, which the Meet panel words with the Schedule's own messageFor
+ * (components/calendar/useCalendarData.ts), so a refusal reads the same in both places.
  */
 import "server-only";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
@@ -19,14 +20,6 @@ import { displayMeetCode, type MeetRoom } from "./rooms";
 const REMINDER_MINUTES = 10;
 
 export type ScheduleOutcome = { ok: true; eventId: string } | { ok: false; reason: string };
-
-/** Plain words for why a meeting is not on the Schedule (the link still works). */
-export function scheduleReasonWords(reason: string): string {
-  if (/shabbat/i.test(reason)) return "It falls on Shabbat, which your Schedule keeps free.";
-  if (reason === "time_zone_invalid") return "Your time zone could not be read.";
-  if (reason === "calendar_storage_missing") return "The Schedule is not set up yet.";
-  return "Your Schedule could not be reached.";
-}
 
 /** The Schedule's store, as this file uses it (tests pass their own). */
 export type ScheduleStore = {

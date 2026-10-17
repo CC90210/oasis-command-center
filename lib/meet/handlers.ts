@@ -51,7 +51,7 @@ import {
   type MeetPresence,
 } from "./participants";
 import { createMeetRoom, displayMeetCode, listMeetRooms, parseMeetCode, readMeetRoomByCode, setRoomCalendarEvent, type MeetRoom } from "./rooms";
-import { scheduleReasonWords, type ScheduleOutcome } from "./schedule";
+import type { ScheduleOutcome } from "./schedule";
 import { cutSession, type SfuClient } from "./sfu";
 
 export type { MeetSession };
@@ -130,8 +130,9 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
       recordAudio: body.recordAudio ?? true,
       now: deps.now(),
     });
-    // A meeting made for later also goes on the host's Schedule. The link works whether or not it could.
-    let schedule: { added: true } | { added: false; why: string } | undefined;
+    // A meeting made for later also goes on the host's Schedule. The link works whether or not it could; a
+    // refusal comes back as the Schedule's own code (shabbat_protected...), worded by the Schedule's messageFor.
+    let schedule: { added: true } | { added: false; reason: string } | undefined;
     if (room.startsAt) {
       const outcome = body.timeZone
         ? await deps.schedule({ tenantId: session.tenantId, userId: session.userId }, room, { timeZone: body.timeZone, minutes: body.minutes })
@@ -141,7 +142,7 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
         room.calendarEventId = outcome.eventId;
         schedule = { added: true };
       } else {
-        schedule = { added: false, why: scheduleReasonWords(outcome.reason) };
+        schedule = { added: false, reason: outcome.reason };
       }
     }
     return meetJson(
