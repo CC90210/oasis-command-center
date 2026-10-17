@@ -27,6 +27,13 @@ import { buildBookedLeadAlert } from "@/lib/forms/public-booking-alert";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { rateLimit } from "@/lib/rate-limit";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getTursoClient } from "@/lib/turso";
+import {
+  claimPublicBooking,
+  publicBookingVisitorKey,
+  releasePublicBooking,
+  type PublicBookingClaim,
+} from "@/lib/forms/public-booking-cap";
 import {
   activateVerifiedFounderMeeting,
   compensatePendingFounderMeetingBooking,
@@ -237,6 +244,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const attendee = slot.hosts.find((host) => host.role === "attendee") ?? null;
 
+  // One of today's places for this visitor (lib/forms/public-booking-cap.ts):
+  // claimed atomically before anything reaches Google, and given back by every
+  // failure below, so only a completed booking uses one. A replay of a booking
+  // already made returned above and never claims. A claim the database cannot
+  // answer refuses the booking rather than book uncapped.
+  let claim: Extract<PublicBookingClaim, { ok: true }>;
+  try {
+    const claimed = await claimPublicBooking(getTursoClient(), {
+      tenantId: context.tenantId,
+      visitorKey: publicBookingVisitorKey(getClientIp(req)),
+      now: new Date(),
+    });
+    if (!claimed.ok) {
+      return NextResponse.json({ ok: false, error: "daily_booking_limit" }, { status: 429 });
+    }
+    claim = claimed;
+  } catch (error) {
+    console.error("[public-booking.cap] claim failed", error);
+    return NextResponse.json({ ok: false, error: "availability_unavailable" }, { status: 503 });
+  }
+  const giveBackClaim = () => releasePublicBooking(getTursoClient(), claim, new Date());
+
   const endAt = new Date(Date.parse(startsAt) + durationMinutes * 60_000).toISOString();
   let meeting: Awaited<ReturnType<typeof createVerifiedFounderMeeting>> | null = null;
   try {
@@ -280,7 +309,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const errorCode = error instanceof Error ? error.message.split(":", 1)[0] : "";
     if (CONTACT_ERRORS.has(errorCode)) {
       // Thrown by the service's own validation before any row or event exists:
-      // nothing to compensate.
+      // nothing to compensate, and nothing booked, so the place goes back.
+      await giveBackClaim();
       return NextResponse.json({ ok: false, error: errorCode }, { status: 422 });
     }
     const compensated = await compensatePublicBooking({
@@ -292,16 +322,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
     console.error("[public-booking.provider]", error);
     if (error instanceof Error && /meeting_intent_insert_failed:.*(?:unique|constraint|founder_slot_overlap)/iu.test(error.message)) {
+      await giveBackClaim();
       return NextResponse.json({ ok: false, error: "slot_unavailable" }, { status: 409 });
     }
     if (compensated || errorCode === "booking_compensated" || errorCode === "booking_request_cancelled") {
+      await giveBackClaim();
       return NextResponse.json({ ok: false, error: "retry_required" }, { status: 503 });
     }
+    // Anything else: the Google event may exist, so the place stays used.
     const code = safeErrorCode(error, PROVIDER_ERRORS, "booking_create_failed");
     return NextResponse.json({ ok: false, error: code }, { status: 503 });
   }
   if (!meeting) {
     await compensatePublicBooking({ db, tenantId: context.tenantId, leadId: context.leadId, requestId });
+    await giveBackClaim();
     return NextResponse.json({ ok: false, error: "booking_create_failed" }, { status: 503 });
   }
 
@@ -375,6 +409,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     console.error("[public-booking.transition]", {
       error: transition.error?.message || transitionData?.error,
     });
+    // Only a booking undone gives its place back; one left standing keeps it.
+    if (compensated) await giveBackClaim();
     return NextResponse.json(
       { ok: false, error: compensated ? "retry_required" : "booking_transition_failed" },
       { status: 503 },
