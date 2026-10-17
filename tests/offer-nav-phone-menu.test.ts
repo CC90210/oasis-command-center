@@ -84,6 +84,19 @@ check("a tap or focus outside the menu, or a hash change, closes it", () => {
   assert.match(src, /<div ref=\{root\} className="md:hidden">/, "the outside test is not anchored on the menu");
 });
 
+// Codex on #665 (third pass): the panel's room is measured from where it starts
+// (an owner's preview banner pushes it down); rotating past md closes it; a
+// hash change while a panel link has focus carries focus to where the page went.
+check("the panel's height comes from where it starts; rotating past md and Back keep focus visible", () => {
+  const src = readFileSync(join(ROOT, "components/offer-pages/OfferNavMenu.tsx"), "utf8");
+  assert.match(src, /panel\.current\?\.getBoundingClientRect\(\)\.top[\s\S]{0,120}window\.innerHeight - top/, "the panel height ignores where it starts");
+  assert.match(src, /style=\{maxHeight \? \{ maxHeight \} : undefined\}/, "the measured height is not applied");
+  assert.match(src, /matchMedia\("\(min-width: 768px\)"\)[\s\S]{0,200}if \(!wide\.matches\) return;\s*const hadFocus[\s\S]{0,80}setOpen\(false\);/, "crossing md leaves a stale open panel");
+  assert.match(src, /if \(hadFocus && !focusTarget\(window\.location\.hash\.slice\(1\)\)\) trigger\.current\?\.focus\(\);/, "a hash change drops focus");
+  assert.ok(src.includes('wide.addEventListener("change", onWide);'), "the md breakpoint is never listened for");
+  assert.ok(src.includes('wide.removeEventListener("change", onWide);'), "the md listener outlives the open menu");
+});
+
 // Codex on #665: a long menu on a short (landscape) phone ran past the screen,
 // and a long CTA label beside the new button overflowed a 320px header.
 check("the open panel scrolls within the screen under the bar", () => {
