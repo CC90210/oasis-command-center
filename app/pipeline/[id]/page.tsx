@@ -25,6 +25,7 @@ import { BattleCard } from "@/components/web-leads/BattleCard";
 import { factsFrom } from "@/lib/web-leads/claim";
 import { visibleToViewer } from "@/lib/web-leads/data";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
+import { DeleteLeadButton } from "./DeleteLeadButton";
 import { ClientRecordCard } from "@/components/os/landings/clients-record-card";
 import { resolveSessionContext } from "@/lib/api-auth";
 import {
@@ -485,6 +486,15 @@ export default async function PipelineLeadDetailPage({
           <LeadDocumentsPanel tenantId={tenantId} leadId={id} canMutate={canMutateLead} />
         </div>
       </CollapsibleSection>
+
+      {/* Owners only (an owner or admin by base role; never the admin_access
+          grant): the route enforces the same rule on its own. */}
+      {session.ok && session.isTrueAdmin ? (
+        <DeleteLeadButton
+          leadId={id}
+          leadLabel={nonEmptyString(contactNameFor(activeRecord.data)) || nonEmptyString(activeRecord.data.company) || "this lead"}
+        />
+      ) : null}
     </div>
   );
 }

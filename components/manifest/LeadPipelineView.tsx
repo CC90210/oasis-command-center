@@ -22,6 +22,7 @@ import {
   Mail,
   Plus,
   Square,
+  Trash2,
   UserPlus,
   X,
   Zap,
@@ -125,6 +126,13 @@ type Props = {
    * canManage for both is what hid the button from every rep. CC, 2026-09-08.
    */
   canCreateLead?: boolean;
+  /**
+   * May this viewer DELETE leads (Select mode's "Delete")? An owner or admin
+   * by base role only (session.isTrueAdmin), never the admin_access grant: the
+   * bulk route and lib/pipeline/delete-lead.ts enforce the same rule. CC,
+   * 2026-10-16: junk and test leads must be removable.
+   */
+  canDelete?: boolean;
   /**
    * OASIS stage keys this viewer may add a lead to. Each matching column gets
    * a "+" that opens the new-lead form with that stage preselected. Computed
@@ -256,6 +264,7 @@ export function LeadPipelineView({
   // Defaults to canManage so any caller that has not been updated keeps its
   // current behaviour rather than silently gaining a button.
   canCreateLead,
+  canDelete = false,
   creatableStageKeys,
   resultWindow,
 }: Props) {
@@ -521,6 +530,54 @@ export function LeadPipelineView({
       router.refresh();
     } catch (e) {
       setBulkMsg(`Couldn't ${verb}: ${(e as Error).message || "network error"}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  /**
+   * Select mode's Delete: one request, each lead judged on its own by
+   * lib/pipeline/delete-lead.ts. A lead with a booked call, a deal, a payment,
+   * documents or client work is kept and its first reason shown; the rest go.
+   */
+  async function runBulkDelete() {
+    if (selected.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkMsg(null);
+    try {
+      const r = await fetch("/api/leads/bulk", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: [...selected], op: "delete", confirm: "delete" }),
+      });
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        max?: number;
+        results?: { id: string; ok: boolean; code?: string; blockers?: string[] }[];
+      };
+      if (!r.ok || !body.ok || !Array.isArray(body.results)) {
+        setBulkMsg(
+          r.status === 403
+            ? "Only an owner can delete leads."
+            : body.error === "too_many_ids"
+              ? `Select up to ${body.max ?? 15} leads at a time to delete. Nothing was deleted.`
+              : `Couldn't delete: ${body.error || "try again"}. Nothing else was changed.`,
+        );
+        return;
+      }
+      const done = body.results.filter((x) => x.ok).length;
+      const kept = body.results.filter((x) => !x.ok);
+      const bits = [`${done} deleted`];
+      if (kept.length) {
+        const why = kept[0].blockers?.[0] || (kept[0].code === "not_found" ? "already gone" : "couldn't be deleted");
+        bits.push(`${kept.length} kept (${why}${kept.length > 1 ? "; open each to see why" : ""})`);
+      }
+      setBulkMsg(bits.join(" \u00b7 "));
+      setSelected(new Set(kept.map((x) => x.id)));
+      router.refresh();
+    } catch (e) {
+      setBulkMsg(`Couldn't delete: ${(e as Error).message || "network error"}. Reload to see what changed.`);
     } finally {
       setBulkBusy(false);
     }
@@ -926,6 +983,7 @@ export function LeadPipelineView({
           }
           onOpenEmail={() => setEmailDialogOpen(true)}
           onCcBlast={(templateId) => runBulk({ op: "cc_blast", template_id: templateId }, "sent")}
+          onDelete={canDelete && entityName === "lead" ? runBulkDelete : undefined}
           onClear={() => setSelected(new Set())}
         />
       )}
@@ -953,6 +1011,7 @@ function BulkActionBar({
   onDecline,
   onOpenEmail,
   onCcBlast,
+  onDelete,
   onClear,
 }: {
   count: number;
@@ -969,11 +1028,15 @@ function BulkActionBar({
   onDecline?: () => void;
   onOpenEmail: () => void;
   onCcBlast: (templateId: string) => void;
+  /** Owners only (canDelete): permanent, so it asks for the exact count first. */
+  onDelete?: () => void;
   onClear: () => void;
 }) {
   // Two-step confirm before a template blast — picking from the dropdown stages
   // the send; the operator must then confirm the exact count.
   const [pendingCc, setPendingCc] = useState<{ id: string; label: string } | null>(null);
+  // The same two steps for Delete: the first press only asks.
+  const [confirmDelete, setConfirmDelete] = useState(false);
   return (
     <div className="sticky bottom-3 z-20 mx-auto flex w-fit max-w-full flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-bg-elev/95 px-4 py-2.5 shadow-lg backdrop-blur">
       <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-fg">
@@ -1120,6 +1183,43 @@ function BulkActionBar({
       {entityName === "lead" && (
         <SendToDialerControl selectedIds={selectedIds} disabled={busy} />
       )}
+
+      {onDelete ? (
+        confirmDelete ? (
+          <span className="inline-flex items-center gap-2 text-[11px] text-red-200">
+            Delete {count} lead{count === 1 ? "" : "s"} permanently?
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmDelete(false);
+                onDelete();
+              }}
+              disabled={busy}
+              className="rounded-md bg-red-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-red-500 disabled:opacity-60"
+            >
+              Delete {count}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(false)}
+              disabled={busy}
+              className="text-[11px] text-fg-dim hover:text-fg disabled:opacity-60"
+            >
+              Keep
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            disabled={busy}
+            className="inline-flex items-center gap-1 rounded-md border border-red-400/40 px-2 py-1 text-[11px] text-red-200 hover:bg-red-500/10 disabled:opacity-60"
+          >
+            <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+            Delete
+          </button>
+        )
+      ) : null}
 
       <button
         type="button"

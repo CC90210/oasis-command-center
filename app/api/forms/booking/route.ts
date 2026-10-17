@@ -27,6 +27,13 @@ import { buildBookedLeadAlert } from "@/lib/forms/public-booking-alert";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { rateLimit } from "@/lib/rate-limit";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getTursoClient } from "@/lib/turso";
+import {
+  claimPublicBooking,
+  publicBookingVisitorKey,
+  releasePublicBooking,
+  type PublicBookingClaim,
+} from "@/lib/forms/public-booking-cap";
 import {
   activateVerifiedFounderMeeting,
   compensatePendingFounderMeetingBooking,
@@ -61,6 +68,37 @@ const PROVIDER_ERRORS = new Set([
  * no retry could ever fix.
  */
 const CONTACT_ERRORS = new Set(["invalid_client_phone", "client_phone_required", "client_email_required"]);
+/**
+ * Thrown by createVerifiedFounderMeeting (lib/website-sales-founder-meeting.ts)
+ * BEFORE its Google call: this attempt booked nothing, so it gives back its
+ * hold on the cap place (lib/forms/public-booking-cap.ts). The place itself is
+ * freed only once no attempt of the request holds it, so a retry that hits one
+ * of these never frees the place of an attempt still booking. That includes
+ * the ones a racing retry gets while a sibling attempt owns the booking
+ * (meeting_transition_pending, meeting_notification_in_progress,
+ * meeting_booking_conflict; Codex review of #670): the sibling keeps its own
+ * hold. tests/public-booking-cap.test.ts fails when the service throws a code
+ * before its Google call that is neither here nor handled above. Codes not
+ * listed keep the hold.
+ */
+const PRE_PROVIDER_ERRORS = new Set([
+  "meeting_transition_pending",
+  "meeting_notification_in_progress",
+  "meeting_booking_conflict",
+  "meeting_intent_missing",
+  "booking_request_mismatch",
+  "booking_confirmations_required",
+  "client_agenda_required",
+  "handoff_note_required",
+  "audit_host_email_required",
+  "meeting_must_be_in_future",
+  "sms_consent_requires_phone",
+  "invalid_client_website",
+  "meeting_duration_invalid",
+  "meeting_offer_label_invalid",
+  "meeting_intent_lookup_failed",
+  "meeting_intent_insert_failed",
+]);
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -237,6 +275,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const attendee = slot.hosts.find((host) => host.role === "attendee") ?? null;
 
+  // One of today's places for this visitor and booking request
+  // (lib/forms/public-booking-cap.ts): held atomically before anything
+  // reaches Google, and given back only by the failures below that leave
+  // nothing booked. A booking that succeeds keeps its hold for good. A replay
+  // of a booking already made returned above and never claims. A claim the
+  // database cannot answer refuses the booking rather than book uncapped (a
+  // missing claims schema, before migrations 228 and 229, books uncapped and
+  // says so).
+  let claim: Extract<PublicBookingClaim, { ok: true }>;
+  try {
+    const claimed = await claimPublicBooking(getTursoClient(), {
+      tenantId: context.tenantId,
+      visitorKey: publicBookingVisitorKey(getClientIp(req)),
+      requestId,
+      now: new Date(),
+    });
+    if (!claimed.ok) {
+      return NextResponse.json({ ok: false, error: "daily_booking_limit" }, { status: 429 });
+    }
+    claim = claimed;
+  } catch (error) {
+    console.error("[public-booking.cap] claim failed", error);
+    return NextResponse.json({ ok: false, error: "availability_unavailable" }, { status: 503 });
+  }
+  const giveBackClaim = () => releasePublicBooking(getTursoClient(), claim);
+
   const endAt = new Date(Date.parse(startsAt) + durationMinutes * 60_000).toISOString();
   let meeting: Awaited<ReturnType<typeof createVerifiedFounderMeeting>> | null = null;
   try {
@@ -280,7 +344,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const errorCode = error instanceof Error ? error.message.split(":", 1)[0] : "";
     if (CONTACT_ERRORS.has(errorCode)) {
       // Thrown by the service's own validation before any row or event exists:
-      // nothing to compensate.
+      // nothing to compensate, and nothing booked, so the place goes back.
+      await giveBackClaim();
       return NextResponse.json({ ok: false, error: errorCode }, { status: 422 });
     }
     const compensated = await compensatePublicBooking({
@@ -292,16 +357,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
     console.error("[public-booking.provider]", error);
     if (error instanceof Error && /meeting_intent_insert_failed:.*(?:unique|constraint|founder_slot_overlap)/iu.test(error.message)) {
+      await giveBackClaim();
       return NextResponse.json({ ok: false, error: "slot_unavailable" }, { status: 409 });
     }
     if (compensated || errorCode === "booking_compensated" || errorCode === "booking_request_cancelled") {
+      await giveBackClaim();
       return NextResponse.json({ ok: false, error: "retry_required" }, { status: 503 });
     }
+    // Refused by the meeting service before this attempt called Google (Codex
+    // review of #670): it booked nothing, so its hold goes back. `!meeting`
+    // keeps that true: the codes count only when the service itself threw,
+    // never a later step's. Anything else (a provider error, an unknown one)
+    // may have left an event, so the hold stays.
+    if (!meeting && PRE_PROVIDER_ERRORS.has(errorCode)) await giveBackClaim();
     const code = safeErrorCode(error, PROVIDER_ERRORS, "booking_create_failed");
     return NextResponse.json({ ok: false, error: code }, { status: 503 });
   }
   if (!meeting) {
     await compensatePublicBooking({ db, tenantId: context.tenantId, leadId: context.leadId, requestId });
+    await giveBackClaim();
     return NextResponse.json({ ok: false, error: "booking_create_failed" }, { status: 503 });
   }
 
@@ -375,6 +449,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     console.error("[public-booking.transition]", {
       error: transition.error?.message || transitionData?.error,
     });
+    // Only a booking undone gives its place back; one left standing keeps it.
+    if (compensated) await giveBackClaim();
     return NextResponse.json(
       { ok: false, error: compensated ? "retry_required" : "booking_transition_failed" },
       { status: 503 },
