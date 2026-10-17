@@ -316,6 +316,13 @@ async function main() {
       /if \(gate === "send-held"\) \{[\s\S]{0,300}const contact = contactHandoff\(\{ \.\.\.typedContact\(steps\[currentStep\]\.fields, built\.payload\), \.\.\.built\.payload \}\);\s*if \(!\(await sendHeldSteps\(contact\)\)\) return;/,
       "the contact step must hand over its contact under the standard names",
     );
+    // Codex review of #668: Back during the held-step send moved the consent
+    // boxes off this step, so posting it then would drop its consent decision.
+    assert.match(
+      client,
+      /if \(!\(await sendHeldSteps\(contact\)\)\) return;[\s\S]{0,500}if \(currentStepRef\.current !== stepAtStart\) return;\s*\}/,
+      "the contact step posts after the visitor went Back mid-send",
+    );
     assert.match(
       client,
       /if \(currentStep < contactStep\) heldStepsSent\.current = Math\.max\(heldStepsSent\.current, currentStep \+ 1\);/,

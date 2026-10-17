@@ -1065,6 +1065,11 @@ export function FormPublicClient({
         // fields (a builder-made `work_email` is still the email).
         const contact = contactHandoff({ ...typedContact(steps[currentStep].fields, built.payload), ...built.payload });
         if (!(await sendHeldSteps(contact))) return;
+        // The visitor went Back while the held steps were sending: this step's
+        // answers and consent boxes are no longer the ones on screen, so stop,
+        // as after the address wait above (Codex review of #668). The held
+        // steps stay sent; this step goes the ordinary way on its next Next.
+        if (currentStepRef.current !== stepAtStart) return;
       }
       // Anonymous flow: on step 0 we have no token yet, send
       // anonymous_init so the server mints + returns one. Personalized
