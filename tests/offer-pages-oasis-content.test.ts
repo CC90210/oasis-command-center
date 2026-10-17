@@ -621,6 +621,153 @@ async function main() {
     assert.deepEqual(outcomes(none), { "ai-audit": "no_content" });
   });
 
+  await step("refresh: the owner sign-offs it clears (claim ticks and the confirmations inside a draft) are counted and named by the dry run; the apply prints the same count and the database loses exactly that many", async () => {
+    // 2026-10-16: an apply cleared 3 ticks on COMMUNITY that the dry run never mentioned.
+    const OTHER = "0d000000-0000-4000-8000-000000000003";
+    const STAMP_A = { by: PERSON, at: EDITED_AT };
+    const STAMP_B = { by: OTHER, at: "2026-10-15T09:00:00.000Z" };
+    // Built from code points: the stored excerpt holds characters the report must not print.
+    const nonAscii = `caf${String.fromCodePoint(0xe9)} ${String.fromCodePoint(0x2014)} claim`;
+    const TICK_A = { hash: "b".repeat(64), excerpt: "Members meet every week.", by: PERSON, at: EDITED_AT };
+    const TICK_B = { hash: "c".repeat(64), excerpt: nonAscii, by: OTHER, at: STAMP_B.at };
+    /** The community content with a person's sign-offs on it: three prices, the top video's rights, a guarantee, a bonus value, a result. */
+    const signedDoc = (): Raw => {
+      const d = JSON.parse(JSON.stringify(bySlug("community").doc)) as Raw;
+      const tiers = d.sections.find((s: Raw) => s.key === "pricing").tiers as Raw[];
+      tiers[0].confirmed = STAMP_A;
+      tiers[1].confirmed = STAMP_A;
+      tiers[2].confirmed = STAMP_B;
+      d.hero.video = { source: "youtube", id: "dQw4w9WgXcQ", aspect: "16:9", rights: STAMP_B };
+      d.sections.push(
+        { key: "guarantee", body: "Cancel any month.", confirmed: STAMP_A },
+        { key: "bonuses", items: [{ title: "Starter pack", value: { cents: 9700, currency: "USD", confirmed: STAMP_B } }] },
+        { key: "results", items: [{ kind: "quote", quote: "It paid for itself.", who: "A member", evidence: { permission: true, confirmed: STAMP_A } }] },
+      );
+      return d;
+    };
+    /** A production-shaped database where a person saved community with those sign-offs and two ticked claims. */
+    const signed = async (): Promise<Client> => {
+      const mem = await production();
+      await mem.execute({
+        sql: "UPDATE form_offer_pages SET draft = ?, claims_confirmed = ? WHERE form_id = ?",
+        args: [JSON.stringify(signedDoc()), JSON.stringify([TICK_A, TICK_B]), IDS.community],
+      });
+      return mem;
+    };
+    /** Sign-offs a page holds, counted straight off the stored row (every {by, at} stamp in the draft, plus the ticks column), not through the code under test. */
+    const stamps = (v: unknown): number =>
+      Array.isArray(v)
+        ? v.reduce((n: number, x: unknown) => n + stamps(x), 0)
+        : v && typeof v === "object"
+          ? (typeof (v as Raw).by === "string" && typeof (v as Raw).at === "string" ? 1 : 0) + Object.values(v as Raw).reduce((n: number, x: unknown) => n + stamps(x), 0)
+          : 0;
+    const signOffsOn = async (mem: Client, slug: string): Promise<number> => {
+      const row = await pageRow(mem, slug);
+      return stamps(JSON.parse(String(row.draft))) + (JSON.parse(String(row.claims_confirmed)) as unknown[]).length;
+    };
+    const SLUGS_WITH_PAGE = ["ai-audit", "vsl", "protocol", "command", "community", "fleet"];
+    type Report = Awaited<ReturnType<typeof seed.refreshOasisOfferDrafts>>;
+    const pageOf = (r: Report, slug: string) => r.pages.find((p) => p.slug === slug)!;
+    /** One page's lines in the printed report: from its heading to the next blank line. */
+    const block = (lines: string[], slug: string): string[] => {
+      const rest = lines.slice(lines.findIndex((l) => l.startsWith(`${slug} (/f/`)) + 1);
+      const end = rest.indexOf("");
+      return end < 0 ? rest : rest.slice(0, end);
+    };
+    const COUNT_LINE = /^ {2}owner ticks (?:that would be )?cleared: (\d+)$/;
+    /** The number a page's block prints. Exactly one count line per page, or the test fails. */
+    const printed = (r: Report, slug: string): number => {
+      const found = block(seed.formatRefreshReport(r), slug).map((l) => COUNT_LINE.exec(l)).filter((m) => m !== null);
+      assert.equal(found.length, 1, `${slug}: expected exactly one "owner ticks ... cleared: N" line`);
+      return Number(found[0]![1]);
+    };
+    const run = (mem: Client, o: { apply: boolean; includeEdited?: string[]; content?: typeof content }) =>
+      seed.refreshOasisOfferDrafts(mem, { tenantSlug: "oasis-ai-cc", apply: o.apply, content: o.content ?? content, pageOnly: auditOnly(), includeEdited: o.includeEdited, now: T_REFRESH });
+
+    const mem = await signed();
+    const before = await snapshot(mem);
+    const heldBefore: Record<string, number> = {};
+    for (const slug of SLUGS_WITH_PAGE) heldBefore[slug] = await signOffsOn(mem, slug);
+    assert.equal(heldBefore.community, 9, "the fixture holds 7 confirmations (3 prices, video rights, guarantee, bonus value, result) and 2 ticks");
+
+    // A dry run that does not name community: the page is left alone, and the number --include-edited would clear is still shown.
+    const left = await run(mem, { apply: false });
+    assert.equal(outcomes(left).community, "edited_left");
+    assert.equal(printed(left, "community"), 9, "the dry run did not say what naming community would clear");
+    assert.ok(block(seed.formatRefreshReport(left), "community").includes("    (only if --include-edited community replaces this page; this run leaves it alone)"));
+    assert.equal(printed(left, "command"), 0, "a published page loses nothing");
+    assert.equal(printed(left, "protocol"), 0, "an unchanged page loses nothing");
+    assert.deepEqual(await snapshot(mem), before, "a dry run wrote something");
+
+    // The dry run for the apply that will follow: counts and names every sign-off, who stamped it and when.
+    const dry = await run(mem, { apply: false, includeEdited: ["community"] });
+    assert.equal(outcomes(dry).community, "would_refresh_edited");
+    const community = pageOf(dry, "community");
+    assert.equal(community.ticks, 9);
+    const kinds: Record<string, number> = {};
+    for (const s of community.signOffs) kinds[s.kind] = (kinds[s.kind] ?? 0) + 1;
+    assert.deepEqual(kinds, { price: 3, rights: 1, guarantee: 1, money: 1, evidence: 1, claim: 2 });
+    const dryLines = block(seed.formatRefreshReport(dry), "community");
+    assert.ok(dryLines.includes("  owner ticks that would be cleared: 9"), dryLines.join("\n"));
+    const listed = dryLines.filter((l) => l.startsWith("    - "));
+    const want = [
+      `    - price: pricing tier 1 price (stamped by ${PERSON} at ${EDITED_AT})`,
+      `    - price: pricing tier 2 price (stamped by ${PERSON} at ${EDITED_AT})`,
+      `    - price: pricing tier 3 price (stamped by ${OTHER} at ${STAMP_B.at})`,
+      `    - rights: hero video rights (stamped by ${OTHER} at ${STAMP_B.at})`,
+      `    - guarantee: guarantee terms (stamped by ${PERSON} at ${EDITED_AT})`,
+      `    - money: bonuses item 1 value (stamped by ${OTHER} at ${STAMP_B.at})`,
+      `    - evidence: results item 1 evidence (stamped by ${PERSON} at ${EDITED_AT})`,
+      `    - claim: ticked sentence [bbbbbbbb] (stamped by ${PERSON} at ${EDITED_AT})`,
+      `    - claim: ticked sentence [cccccccc] (stamped by ${OTHER} at ${STAMP_B.at})`,
+    ];
+    assert.deepEqual([...listed].sort(), [...want].sort(), "the dry run did not name every sign-off");
+    // Stored copy never reaches the report (Codex review of #675): positions and
+    // hashes only, so no excerpt or tier name can carry a secret into an agent's context.
+    const report = seed.formatRefreshReport(dry).join("\n");
+    for (const stored of [TICK_A.excerpt, "Free community", "VIP mastermind", "Founder mentorship", "caf"]) {
+      assert.ok(!report.includes(stored), `stored text reached the report: ${stored}`);
+    }
+    assert.ok(seed.formatRefreshReport(dry).every((l) => /^[\x20-\x7E]*$/.test(l)), "the report is not plain ASCII");
+    // Stored text is redacted before it is printed (Codex review of #675): a
+    // keyed URL pasted into the copy never reaches an agent's context.
+    assert.equal(seed.plainText("see https://x.example/a?key=abc123secret&b=1"), "see https://x.example/a?key=[REDACTED]&b=1");
+    for (const slug of SLUGS_WITH_PAGE) printed(dry, slug);
+    assert.deepEqual(await snapshot(mem), before, "a dry run wrote something");
+
+    // The apply prints the same number and the same names, and the database loses exactly that many, page by page.
+    const applied = await run(mem, { apply: true, includeEdited: ["community"] });
+    assert.equal(outcomes(applied).community, "refreshed_edited");
+    assert.ok(block(seed.formatRefreshReport(applied), "community").includes("  owner ticks cleared: 9"));
+    assert.deepEqual(block(seed.formatRefreshReport(applied), "community").filter((l) => l.startsWith("    - ")), listed, "the apply named other sign-offs than the dry run");
+    for (const slug of SLUGS_WITH_PAGE) {
+      const lost = heldBefore[slug] - (await signOffsOn(mem, slug));
+      assert.equal(printed(dry, slug), lost, `${slug}: the dry run's count is not what the apply cleared`);
+      assert.equal(printed(applied, slug), lost, `${slug}: the apply's count is not what it cleared`);
+    }
+    assert.equal(await signOffsOn(mem, "community"), 0);
+    assert.ok(heldBefore.vsl === 1 && printed(applied, "vsl") === 1, "vsl's one tick was not counted");
+
+    // What the written draft carries with the same stamp is not lost: the count follows the rule, it does not just count everything.
+    const carried = JSON.parse(JSON.stringify(bySlug("community").doc)) as Raw;
+    carried.sections.find((s: Raw) => s.key === "pricing").tiers[0].confirmed = STAMP_A;
+    const withCarried = content.map((c) => (c.slug === "community" ? { ...c, doc: parseOfferPageDoc(carried) } : c));
+    const mem2 = await signed();
+    const dry2 = await run(mem2, { apply: false, includeEdited: ["community"], content: withCarried });
+    assert.equal(printed(dry2, "community"), 8, "a confirmation the written draft carries was counted as lost");
+    assert.ok(!block(seed.formatRefreshReport(dry2), "community").some((l) => l.includes("pricing tier 1 price")), "the carried price was listed");
+    const applied2 = await run(mem2, { apply: true, includeEdited: ["community"], content: withCarried });
+    assert.equal(printed(applied2, "community"), 8);
+    assert.equal(await signOffsOn(mem2, "community"), 1, "the carried price lost its sign-off");
+
+    // A stored draft that no longer parses: its confirmations cannot be listed, and the report says so instead of undercounting silently.
+    const mem3 = await production();
+    await mem3.execute({ sql: "UPDATE form_offer_pages SET draft = ? WHERE form_id = ?", args: [JSON.stringify({ v: 2 }), IDS.vsl] });
+    const dry3 = await run(mem3, { apply: false, content: [bySlug("vsl")] });
+    assert.deepEqual([pageOf(dry3, "vsl").outcome, pageOf(dry3, "vsl").draftUnreadable, pageOf(dry3, "vsl").ticks], ["would_refresh", true, 1]);
+    assert.ok(block(seed.formatRefreshReport(dry3), "vsl").includes("    (the stored draft does not parse: confirmations inside it could not be counted)"));
+  });
+
   await step("refresh --apply: only never-published, never-person-saved drafts are written, CAS on the version read; no form row changes; a re-run is unchanged", async () => {
     const mem = await production();
     const before = await snapshot(mem);

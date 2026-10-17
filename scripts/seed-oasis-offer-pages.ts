@@ -45,7 +45,12 @@
  * saveDraft, compare-and-swap on the version just read (with the same
  * conditions in the statement), so a concurrent save or publish makes it a
  * "conflict", never an overwrite. The owner's claim ticks are cleared on a
- * refreshed draft: the copy they vouched for was replaced.
+ * refreshed draft: the copy they vouched for was replaced. So is every
+ * confirmation inside the replaced draft (a price's, the guarantee's, a bonus
+ * value's, a result's, a video's rights) that the content does not carry. Each
+ * page's report states how many owner sign-offs that is, and which (who stamped
+ * each, and when): "owner ticks that would be cleared: N" in a dry run, "owner
+ * ticks cleared: N" after an apply. See signOffsCleared.
  *
  * Run from the repo root (credentials in the environment, never in argv):
  *   node --import tsx scripts/seed-oasis-offer-pages.ts --tenant-slug oasis-ai-cc --dry-run
@@ -73,7 +78,8 @@ import {
 } from "../lib/forms/types";
 import { parseOfferPageDoc, type OfferPageDoc } from "../lib/offer-pages/types";
 import { createOfferRow, isMissingOfferTable, readOfferRow, saveDraft } from "../lib/offer-pages/store";
-import { lintDoc, type ClaimHit } from "../lib/offer-pages/claims";
+import { confirmationsNotCarried, lintDoc, type ClaimHit, type ClaimTick } from "../lib/offer-pages/claims";
+import { redactAll } from "../lib/secret-redaction";
 
 /** The only workspace this content belongs to. */
 export const OASIS_TENANT_SLUG = "oasis-ai-cc";
@@ -501,8 +507,11 @@ export type RefreshPageReport = {
   editedAt: string | null;
   /** Top-level parts of the stored draft that differ from the content: what a refresh replaces, or what a person merges. */
   differences: string[];
-  /** Owner ticks on the stored draft, cleared by a refresh that writes (it saves with none). */
+  /** Owner sign-offs on the stored draft that writing this page's content over it removes (signOffsCleared); ticks is their count. */
+  signOffs: SignOff[];
   ticks: number;
+  /** The stored draft does not parse, so the confirmations inside it could not be listed: signOffs holds the claim ticks only. */
+  draftUnreadable: boolean;
   /** Sentences in the content the claims linter flags (each needs an owner's tick before publish). */
   hits: number;
   detail: string | null;
@@ -517,6 +526,55 @@ function plain(v: unknown): unknown {
 
 function sameContent(a: unknown, b: unknown): boolean {
   return isDeepStrictEqual(plain(a), plain(b));
+}
+
+/**
+ * The claim ticks a refresh saves with: none. The write below passes this very
+ * list to saveDraft, and signOffsCleared counts against it, so what is reported
+ * and what is written cannot drift apart.
+ */
+const REFRESH_CLAIM_TICKS: readonly ClaimTick[] = Object.freeze([]);
+
+/** One owner sign-off a refresh removes: who stamped it and when are the stored values. */
+export type SignOff = {
+  /** "claim" (a ticked sentence), or the confirmation's kind: price, guarantee, money, evidence, rights. */
+  kind: string;
+  /** What it vouches for, in words (a ticked claim's sentence, or where on the page the confirmation sits). */
+  label: string;
+  by: string;
+  at: string;
+};
+
+/**
+ * Every owner sign-off on the stored page that writing `written` over it
+ * removes. Two kinds, each judged by the rule that decides what survives:
+ *   - confirmations inside the draft (a price tier's, the guarantee's, a bonus
+ *     value's, a result's evidence, a video's rights): those the written draft
+ *     does not hold with the same content and the same stamp, as
+ *     stampConfirmations decides (claims.ts confirmationsNotCarried). The
+ *     refresh writes the content as it is, with no stamping, so none survive
+ *     unless the content itself carried them;
+ *   - claim ticks (row.claims, by the sentence's hash): those the written ticks
+ *     do not carry. REFRESH_CLAIM_TICKS is empty, so all go.
+ * An unreadable stored draft has no confirmations to list (the caller says so).
+ */
+export function signOffsCleared(
+  stored: { draft: OfferPageDoc | null; claims: ClaimTick[] },
+  written: { draft: OfferPageDoc; claims: readonly ClaimTick[] },
+): SignOff[] {
+  const out: SignOff[] = [];
+  if (stored.draft) {
+    for (const h of confirmationsNotCarried(stored.draft, written.draft)) out.push({ kind: h.kind, label: h.label, by: h.by, at: h.at });
+  }
+  const carried = new Set(written.claims.map((t) => t.hash));
+  for (const t of stored.claims) {
+    if (carried.has(t.hash)) continue;
+    // The sentence's hash, never its stored excerpt: this report reaches agents
+    // and logs, and stored copy can hold anything (Codex review of #675). The
+    // builder flags the same sentences again once they need a tick.
+    out.push({ kind: "claim", label: `ticked sentence [${t.hash.slice(0, 8)}]`, by: t.by, at: t.at });
+  }
+  return out;
 }
 
 /**
@@ -592,7 +650,9 @@ export async function refreshOasisOfferDrafts(
       editedBy: null,
       editedAt: null,
       differences: [],
+      signOffs: [],
       ticks: 0,
+      draftUnreadable: false,
       hits: t.doc ? lintDoc(t.doc, { fallbackHeadline: t.headline }).length : 0,
       detail: null,
     };
@@ -614,6 +674,7 @@ export async function refreshOasisOfferDrafts(
     }
     const row = read.row;
     const edited = row.draftUpdatedBy !== null;
+    const signOffs = signOffsCleared({ draft: row.draft, claims: row.claims }, { draft: doc, claims: REFRESH_CLAIM_TICKS });
     const seen: RefreshPageReport = {
       ...base,
       formId: form.id,
@@ -621,7 +682,9 @@ export async function refreshOasisOfferDrafts(
       editedBy: row.draftUpdatedBy,
       editedAt: edited ? row.draftUpdatedAt : null,
       differences: topLevelDifferences(row.draft, doc),
-      ticks: row.claims.length,
+      signOffs,
+      ticks: signOffs.length,
+      draftUnreadable: row.draft === null,
     };
     if (row.live || row.published !== null || row.publishedVersion !== 0 || row.publishedAt !== null) {
       pages.push({ ...seen, outcome: "published_left" });
@@ -648,7 +711,7 @@ export async function refreshOasisOfferDrafts(
       formId: form.id,
       draft: doc,
       expectedVersion: row.draftVersion,
-      claims: [],
+      claims: [...REFRESH_CLAIM_TICKS],
       actor: null,
       now,
       // The same conditions as the read, in the one statement: a page published
@@ -720,12 +783,53 @@ export function formatRefreshReport(report: RefreshReport): string[] {
             : "differs from the content";
       out.push(`  ${label}: ${p.differences.join(", ")}`);
     }
-    if (writes) {
-      if (p.outcome === "refreshed" || p.outcome === "refreshed_edited") out.push(`  now  : draft version ${(p.version ?? 0) + 1}, still a draft`);
-      if (p.ticks) out.push(`  owner ticks ${p.outcome.startsWith("would") ? "it would clear" : "cleared"}: ${p.ticks} (tick the flagged sentences again in the builder)`);
-      out.push(`  claims the linter flags (each needs an owner's tick before publish): ${p.hits}`);
-    }
+    if (p.outcome === "refreshed" || p.outcome === "refreshed_edited") out.push(`  now  : draft version ${(p.version ?? 0) + 1}, still a draft`);
+    out.push(...formatSignOffs(p, report.apply));
+    if (writes) out.push(`  claims the linter flags (each needs an owner's tick before publish): ${p.hits}`);
   }
+  return out;
+}
+
+/**
+ * A stored value as one plain ASCII line fragment: it came from a database, so
+ * anything may be in it, including a pasted key or keyed URL. Redacted first
+ * (lib/secret-redaction.ts), because this report is read by agents and logs
+ * (Codex review of #675).
+ */
+export function plainText(s: string, max = 110): string {
+  const t = redactAll(s).replace(/[^\x20-\x7E]/g, "?");
+  return t.length > max ? `${t.slice(0, max - 3)}...` : t;
+}
+
+/**
+ * The owner sign-offs a page loses, one count line for every page the report shows:
+ *   apply                          "owner ticks cleared: N", N = what the write removed (0 when nothing was written)
+ *   dry run, a page it would write "owner ticks that would be cleared: N"
+ *   dry run, a person's edited page that --include-edited has not named
+ *                                  N = what naming it would clear, with a note that this run leaves the page alone
+ *   dry run, any other page        0 (nothing is written)
+ * With N above 0 each sign-off is listed: what it vouches for, who stamped it, when.
+ */
+function formatSignOffs(p: RefreshPageReport, apply: boolean): string[] {
+  const out: string[] = [];
+  const wrote = p.outcome === "refreshed" || p.outcome === "refreshed_edited";
+  const wouldWrite = p.outcome === "would_refresh" || p.outcome === "would_refresh_edited";
+  const leftEdited = p.outcome === "edited_left";
+  const n = p.signOffs.length;
+  const shown = wrote || (!apply && (wouldWrite || leftEdited)) ? n : 0;
+  out.push(`  ${apply ? "owner ticks cleared" : "owner ticks that would be cleared"}: ${shown}`);
+  if (leftEdited && n > 0) {
+    out.push(
+      apply
+        ? `    (the page was left alone; --include-edited ${p.slug} would have cleared ${n})`
+        : `    (only if --include-edited ${p.slug} replaces this page; this run leaves it alone)`,
+    );
+  }
+  if (shown > 0 || (leftEdited && n > 0)) {
+    if (shown > 0 && !leftEdited) out.push("    (tick them again in the builder)");
+    for (const s of p.signOffs) out.push(`    - ${s.kind}: ${plainText(s.label)} (stamped by ${plainText(s.by, 40)} at ${plainText(s.at, 40)})`);
+  }
+  if (p.draftUnreadable) out.push("    (the stored draft does not parse: confirmations inside it could not be counted)");
   return out;
 }
 
