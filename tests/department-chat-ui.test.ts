@@ -375,7 +375,7 @@ async function main() {
   await check("past chats: the current one marked, a working one says Working, rename and delete are there, an empty list explains itself", () => {
     assert.match(html.rail, /aria-current="true"/);
     assert.match(text(html.rail), /Pipeline check Working/);
-    assert.match(text(html.rail), /Follow-ups \w{3} \d{1,2}/);
+    assert.match(text(html.rail), /Follow-ups 3 d ago/);
     assert.match(html.rail, /aria-label="Rename Pipeline check"/);
     assert.match(html.rail, /aria-label="Delete Follow-ups"/);
     assert.match(text(html.rail), /New chat/);

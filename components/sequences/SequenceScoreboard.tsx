@@ -24,6 +24,7 @@ import { AlertTriangle, CheckCircle2, HelpCircle, Mail, MessageSquare, Moon, Pau
 import type { SequenceScore, ScoreVerdict } from "@/lib/drips/scoreboard-core";
 import { verdictFor } from "@/lib/drips/scoreboard-core";
 import { OPERATOR_TIME_ZONE } from "@/lib/dates";
+import { timeAgo } from "@/lib/devices/presence";
 
 const VERDICT: Record<ScoreVerdict, { label: string; dot: string; ring: string; Icon: typeof CheckCircle2 }> = {
   ok: { label: "Delivering", dot: "bg-emerald-400", ring: "border-emerald-500/30", Icon: CheckCircle2 },
@@ -33,20 +34,6 @@ const VERDICT: Record<ScoreVerdict, { label: string; dot: string; ring: string; 
   unconfirmed: { label: "Unconfirmed", dot: "bg-sky-400", ring: "border-sky-500/40", Icon: HelpCircle },
   idle: { label: "Nothing sent", dot: "bg-fg-dim", ring: "border-bg-border", Icon: Moon },
 };
-
-function ago(iso: string | null): string {
-  if (!iso) return "never";
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return "never";
-  const diff = t - Date.now();
-  const mins = Math.round(Math.abs(diff) / 60_000);
-  const label =
-    mins < 60 ? `${mins}m` : mins < 60 * 48 ? `${Math.round(mins / 60)}h` : `${Math.round(mins / 1440)}d`;
-  // A scheduled row can be in the FUTURE. Saying "3h ago" about something that
-  // has not happened yet is the kind of small lie that makes an operator stop
-  // trusting the whole screen.
-  return diff > 0 ? `in ${label}` : `${label} ago`;
-}
 
 function exact(iso: string | null): string {
   if (!iso) return "no activity in this window";
@@ -214,7 +201,10 @@ export function SequenceScoreboard({
                 </div>
 
                 <div className="mt-2 text-[10px] text-fg-dim" title={exact(s.lastActivityAt)}>
-                  last activity {ago(s.lastActivityAt)}
+                  {/* A scheduled row can be in the FUTURE. Saying "3 h ago" about something that
+                      has not happened yet is the kind of small lie that makes an operator stop
+                      trusting the whole screen. */}
+                  last activity {timeAgo(s.lastActivityAt, { future: true })}
                   {/* Confirmed-rate is over TEXT sends only, so the denominator
                       is delivered+failed+unconfirmed rather than `sent` — on a
                       mixed sequence `sent` includes emails and would silently

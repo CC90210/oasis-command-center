@@ -167,7 +167,7 @@ const missed = sum(dailySkip);
 assert.equal(missed.result?.text, "Skipped: the computer was off at 5:30 AM, so it waited for its next slot.");
 assert.equal(missed.result?.tone, "neutral");
 // 2. "Last ran" and "Last attempt" are two lines when they differ.
-assert.equal(missed.lastRan?.text, "Last ran 1d ago");
+assert.equal(missed.lastRan?.text, "Last ran 1 d ago");
 assert.equal(missed.lastRan?.tone, "neutral", "no success tick: the stored result is the skip, not that run's verdict");
 assert.equal(missed.lastAttempt, "Last attempt: skipped at 5:30 AM");
 // 3. Not red.
@@ -207,7 +207,7 @@ assert.equal(slotNamedInText("skipped: waiting until 09:00", at), null, "only a 
 const missedAfterFailures = sum({ ...dailySkip, fail_count: 2 });
 assert.equal(normalizeEmpireRow(row({ ...dailySkip, fail_count: 2 })).last_run_status, "error");
 assert.equal(missedAfterFailures.failed, false, "a skip never paints the card red");
-assert.equal(missedAfterFailures.lastRan?.text, "Last ran 1d ago and failed");
+assert.equal(missedAfterFailures.lastRan?.text, "Last ran 1 d ago and failed");
 assert.equal(missedAfterFailures.lastRan?.tone, "bad");
 assert.equal(missedAfterFailures.result?.tone, "neutral");
 // The Morning Brief shape from /health: a skip the job wrote, counter at 2.
@@ -218,7 +218,7 @@ const heldBriefing = sum({
 });
 assert.equal(heldBriefing.failed, false);
 assert.equal(heldBriefing.result?.text, "Skipped at 8:00 AM; it runs again at its next scheduled time.");
-assert.equal(heldBriefing.lastAttempt, "Last attempt 3h ago: skipped");
+assert.equal(heldBriefing.lastAttempt, "Last attempt 3 h ago: skipped");
 assert.equal(heldBriefing.lastRan, null, "the job stamped last_run_at at the skip, so the real run before it is unknown");
 
 // Deferred: the attempt's own time (the scheduler stamps last_run_at for it).
@@ -227,7 +227,7 @@ const deferred = sum({
   last_run_at: "2026-10-15T12:00:00Z",
 });
 assert.equal(deferred.result?.text, "Deferred at 8:00 AM: the AI usage limit was reached, so it tries again on its own.");
-assert.equal(deferred.lastAttempt, "Last attempt 3h ago: held back");
+assert.equal(deferred.lastAttempt, "Last attempt 3 h ago: held back");
 assert.equal(deferred.lastRan, null);
 assert.equal(deferred.failed, false);
 assert.equal(
@@ -240,7 +240,7 @@ const fine = sum({ last_result: { drained: 0 }, last_run_at: "2026-10-15T12:00:0
 assert.equal(fine.result?.text, "Ran fine at 8:00 AM.");
 assert.equal(fine.result?.tone, "ok");
 assert.equal(fine.details, '{"drained":0}');
-assert.equal(fine.lastRan?.text, "Last ran 3h ago", "one line when the last attempt WAS the last run");
+assert.equal(fine.lastRan?.text, "Last ran 3 h ago", "one line when the last attempt WAS the last run");
 assert.equal(fine.lastAttempt, null);
 assert.equal(fine.failed, false);
 

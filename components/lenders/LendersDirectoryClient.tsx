@@ -15,7 +15,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { formatMoney, relTime } from "@/lib/format-helpers";
+import { formatMoney } from "@/lib/format-helpers";
+import { timeAgo } from "@/lib/devices/presence";
 import { lenderNetworkOf } from "@/lib/lenders/lender-network";
 import { Landmark, Loader2, Plus, Save, Trash2, X } from "lucide-react";
 
@@ -578,7 +579,7 @@ function LenderRow({
         </button>
       </td>
       <td className="px-3 py-2.5 text-[11px] text-fg-dim whitespace-nowrap">
-        {relTime(record.updated_at)}
+        {timeAgo(record.updated_at)}
       </td>
     </tr>
   );

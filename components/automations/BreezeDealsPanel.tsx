@@ -19,6 +19,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { timeAgo } from "@/lib/devices/presence";
 import { Banknote, AlertCircle, CheckCircle2, XCircle, Hourglass, RefreshCw, PhoneOff, Check, X, RotateCw } from "lucide-react";
 
 type Deal = {
@@ -356,7 +357,7 @@ function DealRowView({
           )}
           <div className="text-[11px] text-fg-dim mt-1 flex items-center gap-3 flex-wrap">
             <span className={statusClass}>{statusLabel}</span>
-            <span>{relativeTime(deal.created_at)}</span>
+            <span>{timeAgo(deal.created_at)}</span>
             {deal.source_file && (
               <span className="font-mono truncate max-w-[280px]">{deal.source_file}</span>
             )}
@@ -429,13 +430,4 @@ function DealRowView({
 
 function formatMoney(n: number): string {
   return `$${Math.round(Number(n)).toLocaleString("en-US")}`;
-}
-
-function relativeTime(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return new Date(iso).toLocaleDateString();
-  if (ms < 3_600_000) return `${Math.max(1, Math.round(ms / 60_000))}m ago`;
-  if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h ago`;
-  if (ms < 30 * 86_400_000) return `${Math.round(ms / 86_400_000)}d ago`;
-  return new Date(iso).toLocaleDateString();
 }

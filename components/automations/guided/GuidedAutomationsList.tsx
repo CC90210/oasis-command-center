@@ -11,11 +11,16 @@
  * Every line about a run or a status is the server's: this component states nothing it was not told.
  *
  * `others` (the page's scheduled-jobs list: automations made before this builder) is listed in the same
- * section, after these rows. With it present the section never says "nothing yet" and shows no count of
- * its own: the older list carries its own counts, and claiming an empty list above real automations is
- * exactly what hid CC's on 2026-10-16. The older list cannot see these rows, so unless this list has
- * loaded with none it is handed `emptyHint: null` (see quietWhenEmpty): its "You have no automations
- * yet" under the builder's rows, or beside a list still loading or that failed, would be false.
+ * section, after these rows. With it present the section shows no count of its own: the older list carries
+ * its own counts, and claiming an empty list above real automations is exactly what hid CC's on
+ * 2026-10-16. The older list cannot see these rows, so unless this list has loaded with none it is handed
+ * `emptyHint: null` (see wireOthers): its "You have no automations yet" under the builder's rows, or beside
+ * a list still loading or that failed, would be false.
+ *
+ * The section says "nothing yet" (and points at the builder) only when BOTH are empty. This list cannot see
+ * into `others`, which the page always passes, so the older list tells it: it reports how many it shows
+ * after a good read, and null again if a later read fails (`onOthersLoaded`, kept by the parent as
+ * `othersCount`). Until a good report, or while its reads are failing, nothing is claimed.
  */
 import { cloneElement, isValidElement, useRef, useState, type ReactElement, type ReactNode } from "react";
 import type { GuidedApi, GuidedAutomationView, TestResult } from "@/lib/automations/guided/api-types";
@@ -46,25 +51,36 @@ export type GuidedAutomationsListProps = {
   initialRows?: Readonly<Record<string, RowInitial>>;
   /** Automations made another way, listed in this section after the builder's rows. */
   others?: ReactNode;
+  /** How many `others` reported it shows after a good read; null (or left out) until it has. Only 0 lets the
+   *  section say "nothing yet": `others` is never empty to this list, it is a component with a list of its own. */
+  othersCount?: number | null;
+  /** Handed to `others` so it can report that count, or null when it stops being readable (CronJobsManager's `onLoaded`). */
+  onOthersLoaded?: (count: number | null) => void;
 };
 
 const BUTTON = `btn-secondary ${TAP} disabled:cursor-not-allowed disabled:opacity-50`;
 
 /**
- * `others` told to say nothing when it is empty itself (CronJobsManager's `emptyHint: null`). Only a
- * component gets the prop: a plain tag would print it as an attribute.
+ * `others` wired to this list (CronJobsManager's props): `onLoaded`, so it can report how many it shows, and
+ * `emptyHint: null` to say nothing when it is empty itself, unless `speak` (this list's rows are none and the
+ * older list has not yet reported, so its own "none yet" is the only sentence there is). Only a component
+ * gets the props: a plain tag would print them as attributes.
  */
-function quietWhenEmpty(others: ReactNode): ReactNode {
-  return isValidElement(others) && typeof others.type !== "string"
-    ? cloneElement(others as ReactElement<{ emptyHint?: string | null }>, { emptyHint: null })
-    : others;
+function wireOthers(others: ReactNode, speak: boolean, onLoaded: ((count: number | null) => void) | undefined): ReactNode {
+  if (!isValidElement(others) || typeof others.type === "string") return others;
+  const wired: { onLoaded?: (count: number | null) => void; emptyHint?: string | null } = {};
+  if (onLoaded) wired.onLoaded = onLoaded;
+  if (!speak) wired.emptyHint = null;
+  return cloneElement(others as ReactElement<{ emptyHint?: string | null; onLoaded?: (count: number | null) => void }>, wired);
 }
 
-export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRemoved, onTested, onRetry, initialRows, others }: GuidedAutomationsListProps) {
+export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRemoved, onTested, onRetry, initialRows, others, othersCount = null, onOthersLoaded }: GuidedAutomationsListProps) {
   const hasOthers = others !== undefined && others !== null && others !== false;
   const count = state.kind === "ready" && !hasOthers ? state.data.length : null;
   // Only a list that loaded with nothing lets the older one say "none yet" and point at the builder.
   const builderEmpty = state.kind === "ready" && state.data.length === 0;
+  // "Nothing yet" is true only when the older list is empty too: not passed at all, or it reported none.
+  const bothEmpty = builderEmpty && (!hasOthers || othersCount === 0);
   return (
     <section aria-labelledby="guided-list-h" aria-busy={state.kind === "loading"} className="space-y-3">
       <h2 id="guided-list-h" className="text-base font-semibold text-fg">
@@ -89,7 +105,7 @@ export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRem
         </div>
       )}
 
-      {state.kind === "ready" && state.data.length === 0 && !hasOthers && (
+      {bothEmpty && (
         <div className="rounded-xl border border-dashed border-bg-border-strong p-5">
           <p className="max-w-prose text-sm leading-relaxed text-fg-muted">Automations you save show up here with their next run and last result, so build your first one above.</p>
         </div>
@@ -103,7 +119,7 @@ export function GuidedAutomationsList({ state, api, nowMs, onEdit, onItem, onRem
         </ul>
       )}
 
-      {hasOthers && <div data-testid="automations-made-before">{builderEmpty ? others : quietWhenEmpty(others)}</div>}
+      {hasOthers && <div data-testid="automations-made-before">{wireOthers(others, builderEmpty && othersCount === null, onOthersLoaded)}</div>}
     </section>
   );
 }

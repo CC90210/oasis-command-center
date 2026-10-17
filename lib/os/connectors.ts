@@ -42,6 +42,7 @@
 
 import type { DepartmentKey } from "@/lib/os/types";
 import { isVerifiedHealthy } from "@/lib/connections/rules";
+import { timeAgo } from "@/lib/devices/presence";
 import { SLACK_APPROVAL_RULE } from "@/lib/slack/copy";
 import { TWILIO_FAILURE_STATES } from "@/lib/twilio/shared";
 
@@ -1182,22 +1183,6 @@ export type ConnectorFacts = {
   oasisWorkspace?: boolean | null;
 };
 
-/** "5m ago" / "3h ago" / "Aug 3" — computed from an explicit now, so a test can pin it. */
-export function formatVerifiedAgo(iso: string | null, nowMs: number): string {
-  if (!iso) return "—";
-  const then = Date.parse(iso);
-  if (!Number.isFinite(then)) return "—";
-  const sec = Math.max(0, Math.round((nowMs - then) / 1000));
-  if (sec < 60) return "just now";
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hrs = Math.round(min / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(then).toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" });
-}
-
 /** "Oct 1, 2026": the day a check ran, for a pass too old to count as connected. */
 function formatCheckDate(iso: string): string {
   return new Date(Date.parse(iso)).toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" });
@@ -1386,7 +1371,7 @@ function keyedStatus(
             detail: `The last Test passed on ${day}, more than a week ago. Nothing re-checks these keys on its own: run Test to check them now.`,
           };
     }
-    const ago = formatVerifiedAgo(verifiedAt, nowMs);
+    const ago = timeAgo(verifiedAt, { now: nowMs });
     if (bySend) {
       return {
         kind: "connected",
@@ -1472,7 +1457,7 @@ function frameworkStatus(
   if (isVerifiedHealthy(row, nowMs)) {
     return {
       kind: "connected",
-      label: `Connected · verified ${formatVerifiedAgo(row.last_health_at, nowMs)}`,
+      label: `Connected · verified ${timeAgo(row.last_health_at, { now: nowMs })}`,
       detail: `The last live check with ${def.name} passed.`,
       account,
     };

@@ -29,7 +29,8 @@ import { ScheduleCallControl } from "./ScheduleCallControl";
 import { humanLeadDocSize, leadDocTypeLabel, LEAD_DOC_TYPES } from "@/lib/lead-doc-display";
 import { ApplicationEditForm } from "@/components/applications/ApplicationEditForm";
 import { SalesMetricCard } from "@/components/underwriting/SalesMetricCard";
-import { formatMoney, relTime } from "@/lib/format-helpers";
+import { formatMoney } from "@/lib/format-helpers";
+import { timeAgo } from "@/lib/devices/presence";
 import { lastTouchIsoFlat } from "@/lib/lead-staleness";
 import {
   SUNBIZ_EMAIL_TEMPLATES,
@@ -3314,7 +3315,7 @@ function OwnerAssignedRow({ record }: { record: Record<string, unknown> }) {
         {lastTouchIso && (
           <div className="text-[10.5px] text-fg-dim mt-1.5">
             <span className="uppercase tracking-wider mr-1">Last touch</span>
-            {relTime(lastTouchIso)}
+            {timeAgo(lastTouchIso)}
           </div>
         )}
       </div>

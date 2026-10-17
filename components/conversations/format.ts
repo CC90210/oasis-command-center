@@ -4,20 +4,12 @@
  * ContactChip, SegmentCounter, MessageList day dividers). No React, no
  * fetch — safe to import from any client component.
  */
+import { timeAgo } from "@/lib/devices/presence";
 
-/** "3m" / "2h" / "5d" / "Jun 12" — same vocabulary as the old ConversationsClient. */
+/** "now" / "3m" / "2h" / "5d" / "Jun 12": the inbox's compact stamp, kept with the one time-ago vocabulary
+ *  (lib/devices/presence.ts, `compact`). A time that does not parse is an empty stamp, as it always was here. */
 export function relTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return "";
-  const diff = Date.now() - then;
-  const min = Math.round(diff / 60_000);
-  if (min < 1) return "now";
-  if (min < 60) return `${min}m`;
-  const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr}h`;
-  const day = Math.round(hr / 24);
-  if (day < 7) return `${day}d`;
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return Number.isFinite(Date.parse(iso)) ? timeAgo(iso, { compact: true }) : "";
 }
 
 /** Display formatter: E.164 "+15551234567" -> "(555) 123-4567". Falls back

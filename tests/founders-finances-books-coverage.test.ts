@@ -583,7 +583,7 @@ async function main() {
     assert.equal(wonCount({ won: 1, onboarding: 1, in_build: 1, client_review: 1, launched: 2, lost: 3, new: 5 }), 6);
     assert.equal(wonCount({ lost: 3 }), 0);
     const now = Date.parse("2026-09-30T12:00:00Z");
-    assert.equal(stripeMrrHint({ lastSyncAt: "2026-09-30T09:00:00Z" }, now, null), "Last synced 3 hours ago");
+    assert.equal(stripeMrrHint({ lastSyncAt: "2026-09-30T09:00:00Z" }, now, null), "Last synced 3 h ago");
     assert.equal(stripeMrrHint({ lastSyncAt: null }, now, "$72"), "Never synced · ≈ $72 USD");
     assert.equal(stripeMrrHint(null, now, null), "Stripe sync: couldn't check");
     const page = code("app/analytics/page.tsx");
