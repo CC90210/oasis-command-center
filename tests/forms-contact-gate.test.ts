@@ -142,7 +142,12 @@ async function main() {
     assert.equal(hasReachableContact({ email: "ada@example.com" }), true);
     assert.equal(hasReachableContact({ phone: "+1 514 555 0142" }), true);
     assert.equal(hasReachableContact({ owner_cell: "(514) 555-0142" }), true);
-    for (const junk of [{}, { email: "nope" }, { email: "  " }, { phone: "123" }, { name: "Ada", company: "Acme" }, { email: 42 }]) {
+    // Codex review of #668 (pass 4): letters are refused, never stripped into
+    // digits; reachable means the consent ledger's canonical destination.
+    for (const junk of [
+      {}, { email: "nope" }, { email: "  " }, { phone: "123" }, { name: "Ada", company: "Acme" }, { email: 42 },
+      { phone: "not-a-phone 12345678" }, { phone: "514 555 0142 ext 22" }, { email: "a b@example.com" },
+    ]) {
       assert.equal(hasReachableContact(junk as Json), false, JSON.stringify(junk));
     }
     assert.deepEqual(
@@ -380,8 +385,14 @@ async function main() {
     const route = client.slice(client.indexOf("async function routeWithoutLead"), client.indexOf("async function submit()"));
     assert.match(route, /route_only: true,\s*steps_payload: steps\.map\(\(_, i\) => \(i === currentStep \? lastPayload : heldSteps\.current\[i\] \?\? \{\}\)\),/);
     assert.match(client, /if \(tokenRef\.current \|\| token\) \{\s*submitBody\.token = tokenRef\.current \|\| token;/, "the contact step must use the token its held steps just minted");
+    // onStepSubmitted means "the server accepted this step" (its contract):
+    // never for a held step or the router, which store nothing (Codex review of #668).
+    const holdBranch = client.slice(client.indexOf('if (gate === "hold") {'), client.indexOf('if (gate === "send-held") {'));
+    assert.doesNotMatch(holdBranch, /onStepSubmitted\?\.\(/, "a held step told the offer page it was accepted");
+    assert.doesNotMatch(route, /onStepSubmitted\?\.\(/, "the router told the offer page a step was accepted");
+    assert.match(held, /heldStepsSent\.current = i \+ 1;\s*onStepSubmitted\?\.\(i, false\);/, "a held step the server accepted is not reported");
     const book = readFileSync(join(__dirname, "..", "components", "offer-pages", "OfferBook.tsx"), "utf8");
-    assert.match(book, /if \(stepIndex === Math\.max\(0, firstContactStepIndex\(form\.steps\)\)\) setContactDone\(true\);/, "\"Your details are in\" before any details");
+    assert.match(book, /onStepSubmitted=\{\(\) => \{[\s\S]{0,400}setContactDone\(true\);\s*\}\}/, "\"Your details are in\" before any details");
   });
 
   await check("both routing reads are scoped to the workspace (Codex review of #668)", () => {

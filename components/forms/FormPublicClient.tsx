@@ -964,6 +964,7 @@ export function FormPublicClient({
         setToken(data.minted_token);
       }
       heldStepsSent.current = i + 1;
+      onStepSubmitted?.(i, false);
     }
     return true;
   }
@@ -993,7 +994,7 @@ export function FormPublicClient({
     if (tenantSlug && formSlug) {
       trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
     }
-    onStepSubmitted?.(currentStep, true);
+    // No onStepSubmitted: the router stored nothing, so no step was accepted.
     finishForm(data);
   }
 
@@ -1093,7 +1094,8 @@ export function FormPublicClient({
         if (tenantSlug && formSlug) {
           trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
         }
-        onStepSubmitted?.(currentStep, false);
+        // No onStepSubmitted: the server has not accepted this step (its
+        // contract), so an offer page must not say "Your details are in" yet.
         advanceFrom(currentStep, currentStep + 1);
         return;
       }

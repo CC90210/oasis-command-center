@@ -11,9 +11,7 @@
  * Pure (no server-only import): the form in the browser and the submit route
  * ask the same questions, so they can never disagree about what counts.
  */
-import { normalizePhoneE164 } from "@/lib/conversation-threading";
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+import { normalizeConsentSubject } from "@/lib/consent/ledger-disclosure";
 
 /**
  * Every name a form may give a lead's email, phone, person and company, in the
@@ -69,11 +67,17 @@ export function typedContact(
   return out;
 }
 
-/** Do these answers hold an email or a phone we could actually reach? */
+/**
+ * Do these answers hold an email or a phone we could actually reach? Judged
+ * by the consent ledger's one canonical destination (normalizeConsentSubject),
+ * the same test the send gate applies before anything is sent, so "reachable"
+ * here is exactly "contactable" there. A phone with letters in it
+ * ("not-a-phone 12345678") is refused, not stripped into digits (Codex
+ * review of #668).
+ */
 export function hasReachableContact(values: Record<string, unknown>): boolean {
-  const text = (key: string) => (typeof values[key] === "string" ? (values[key] as string).trim() : "");
-  return EMAIL_KEYS.some((key) => EMAIL_RE.test(text(key))) ||
-    PHONE_KEYS.some((key) => normalizePhoneE164(text(key)) !== null);
+  return EMAIL_KEYS.some((key) => normalizeConsentSubject("email", values[key]) !== null) ||
+    PHONE_KEYS.some((key) => normalizeConsentSubject("sms", values[key]) !== null);
 }
 
 /**
