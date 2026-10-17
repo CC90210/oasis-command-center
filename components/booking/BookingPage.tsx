@@ -255,6 +255,9 @@ export function BookingPage(props: Props) {
 
   const chooseSlot = (iso: string) => {
     setSlot(iso);
+    // Picking a time after "Leave your details instead" (then "Try again")
+    // books that time: it is no longer a details-only visit (CodeRabbit on #677).
+    setDetailsOnly(false);
     setError(null);
     setNotice(null);
     requestAnimationFrame(() => detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));

@@ -174,6 +174,8 @@ async function main() {
     assert.match(page.slice(callAt - 600, callAt), /if \(detailsOnly \|\| !slot\) \{/, "the alert is not tied to the details-only submit");
     assert.ok(callAt > page.indexOf("tokenRef.current = token;"), "the alert is raised before the lead is saved");
     assert.ok(callAt > page.indexOf("const honeypot = trapValue(trapRef.current, trapLatch);"), "a script could raise the alert");
+    // A time picked after "Leave your details instead" books that time, never the details-only path.
+    assert.match(page, /const chooseSlot = \(iso: string\) => \{\s*setSlot\(iso\);[\s\S]{0,300}setDetailsOnly\(false\);/, "a picked time still took the details-only path");
     assert.equal(page.match(/setDetailsWhy\("calendar_error"\);\s*setDetailsOnly\(true\);/g)?.length, 1);
     assert.equal(page.match(/setDetailsWhy\("no_times"\);\s*setDetailsOnly\(true\);/g)?.length, 1);
   });
