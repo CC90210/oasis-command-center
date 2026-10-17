@@ -27,9 +27,13 @@
  * in flight). `keepMounted` hides the closed section with the `hidden`
  * attribute instead of removing it from the tree.
  *
- * The Tools section (components/tools/ToolsSection.tsx: Repurpose a post,
- * Download a video while the computer that runs downloads is on) sits above
- * the board. "Score a hook" was removed from the product on 2026-10-10 (dead
+ * The Tools section (components/tools/ToolsSection.tsx) sits above the board.
+ * Since 2026-10-17 it leads with the Video extractor (CC: "the first tool ... is a
+ * video extractor"): paste a TikTok, YouTube or Instagram link, CMO-Agent's
+ * scripts/content_tools_runner.py fetches it on OASIS's PC, and the finished run
+ * offers Download and Open in Library. Repurpose a post is off this page
+ * (lib/tools/catalog.ts CONTENT_TOOLS_HIDDEN). More runner tools plug in the same
+ * way: a registry entry here and a handler in the runner's TOOLS. "Score a hook" was removed from the product on 2026-10-10 (dead
  * code, including its worker and tests); "Learn from a link" moved the same
  * day to Admin > Agent training (app/admin/agent-training/page.tsx),
  * OASIS-operators-only - this page's catalog (the default "client" audience,

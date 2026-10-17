@@ -29,7 +29,14 @@ export type JobView = {
   asset_id: string | null;
 };
 
-export type CatalogToolState = "ready" | "needs_ai_account" | "ai_account_unreadable";
+/**
+ * runner_offline (2026-10-17): a runner tool whose runner has not checked in for
+ * RUNNER_LIVE_MINUTES. The card stays on the page and says so, with its past runs
+ * and their downloads, instead of vanishing: CC read a missing card as "the tool
+ * is broken". It still offers no Run button (POST /api/tools/run answers 409
+ * runner_offline), so there is no button that cannot work.
+ */
+export type CatalogToolState = "ready" | "needs_ai_account" | "ai_account_unreadable" | "runner_offline";
 
 export type CatalogTool = {
   key: ToolKey;

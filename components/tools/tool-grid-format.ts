@@ -20,6 +20,9 @@ export const STATUS_FAILED = "Failed";
 export const NOT_SET_UP = "Tools are not set up yet.";
 export const CONNECT_AI = "Connect an AI account in Settings > AI brain to use this tool.";
 export const AI_UNREADABLE = "Couldn't read the AI account. Try again.";
+/** A runner tool whose computer has not checked in lately (CatalogToolState runner_offline). */
+export const RUNNER_OFFLINE =
+  "This tool runs on the OASIS PC, which is offline right now. Turn it on, give it a minute, then reload this page. Past runs stay below.";
 export const SAVED_TO_TRAINING = "Saved to Training material.";
 export const RUN_STOPPED = "This run stopped before it finished. Run it again.";
 

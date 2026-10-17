@@ -132,9 +132,10 @@ export const LEARN_DEFAULT_LABEL: CorpusLabel = "exemplar";
 
 const videoDownload: ToolDef = {
   key: "video_download",
-  title: "Download a video",
-  description: "Paste an Instagram, TikTok or YouTube link. The video is saved to the Library.",
-  runLabel: "Download",
+  // CC, 2026-10-17: "the first tool ... is a video extractor". Same key and runner.
+  title: "Video extractor",
+  description: "Paste a TikTok, YouTube or Instagram link. OASIS fetches the video so you can download it here, and keeps a copy in the Library.",
+  runLabel: "Extract video",
   runsOn: "runner",
   needsAiAccount: false,
   produces: "library_asset",
