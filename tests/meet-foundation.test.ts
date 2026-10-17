@@ -222,7 +222,7 @@ async function main() {
 
     const ok = await call(tokenFor("here"));
     assert.ok(ok.ok, "a participant in the room");
-    if (ok.ok) assert.deepEqual(ok.participant.tracks, [{ trackName: "a1", kind: "audio" }], "a malformed track entry is dropped");
+    if (ok.ok) assert.deepEqual(ok.participant.tracks, [{ trackName: "a1", kind: "audio", mid: "" }], "a malformed track entry is dropped");
     assert.equal(status(await call(undefined)), 401, "no cookie");
     assert.equal(status(await call(tokenFor("here", "another-room"))), 401, "a token for another room");
     assert.equal(status(await call(tokenFor("nobody"))), 401, "a participant who is not in the room");

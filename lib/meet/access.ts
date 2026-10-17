@@ -25,7 +25,8 @@ import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Client } from "@libsql/client";
 import { NextResponse } from "next/server";
-import { displayMeetCode, parseMeetCode, readMeetRoomByCode, type MeetRoom } from "./rooms";
+import { readPresence, type MeetPresence } from "./participants";
+import { displayMeetCode, parseMeetCode, readMeetRoomByCode, wellFormedText, type MeetRoom } from "./rooms";
 
 export type MeetRole = "host" | "guest";
 
@@ -37,9 +38,10 @@ export const MEET_TOKEN_TTL_S = 12 * 60 * 60;
 const MIN_SECRET_LENGTH = 32;
 const MAX_TOKEN_LENGTH = 1024;
 
+/** Meetings cannot run: a secret or the Realtime app is not set. Routes answer 503 meet_not_configured. */
 export class MeetNotConfiguredError extends Error {
-  constructor() {
-    super(`${MEET_TOKEN_SECRET_ENV} is missing or shorter than ${MIN_SECRET_LENGTH} characters`);
+  constructor(message = `${MEET_TOKEN_SECRET_ENV} is missing or shorter than ${MIN_SECRET_LENGTH} characters`) {
+    super(message);
     this.name = "MeetNotConfiguredError";
   }
 }
@@ -117,10 +119,14 @@ export function meetRoleFor(
 /** The longest name a participant shows: it heads their tile and labels their lines in the transcript. */
 export const MEET_NAME_MAX = 60;
 
-/** A participant's name as it is kept: control characters and runs of spaces as one space, trimmed, capped. Null when nothing is left. */
+/**
+ * A participant's name as it is kept: control characters and runs of spaces as one space, a broken half of an
+ * emoji as U+FFFD, trimmed and capped by characters (never cutting an emoji in two). Null when nothing is left.
+ */
 export function meetDisplayName(input: unknown): string | null {
   if (typeof input !== "string") return null;
-  const name = input.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, MEET_NAME_MAX).trim();
+  const plain = wellFormedText(input).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  const name = Array.from(plain).slice(0, MEET_NAME_MAX).join("").trim();
   return name || null;
 }
 
@@ -150,69 +156,8 @@ export async function requireMeetHost(
   return { ok: true, tenantId: room.tenantId, userId: session.userId, room };
 }
 
-export type MeetParticipant = {
-  id: string;
-  tenantId: string;
-  roomId: string;
-  role: MeetRole;
-  userId: string | null;
-  displayName: string;
-  consentAt: string | null;
-  sfuSessionId: string | null;
-  /** What they publish, as the SFU knows it: [{ trackName, kind }]. */
-  tracks: Array<{ trackName: string; kind: string }>;
-  joinedAt: string;
-  lastSeenAt: string;
-  leftAt: string | null;
-  removedAt: string | null;
-};
-
-const PARTICIPANT_COLUMNS =
-  "id, tenant_id, room_id, role, user_id, display_name, consent_at, sfu_session_id, tracks, joined_at, last_seen_at, left_at, removed_at";
-
-const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
-
-function parseTracks(raw: unknown): MeetParticipant["tracks"] {
-  try {
-    const list = JSON.parse(String(raw ?? "[]")) as unknown;
-    if (!Array.isArray(list)) return [];
-    return list
-      .filter((t): t is { trackName: string; kind: string } => !!t && typeof (t as { trackName?: unknown }).trackName === "string")
-      .map((t) => ({ trackName: t.trackName, kind: String(t.kind ?? "") }));
-  } catch {
-    return [];
-  }
-}
-
-function toParticipant(row: Record<string, unknown>): MeetParticipant {
-  return {
-    id: String(row.id),
-    tenantId: String(row.tenant_id),
-    roomId: String(row.room_id),
-    role: String(row.role) === "host" ? "host" : "guest",
-    userId: text(row.user_id),
-    displayName: String(row.display_name),
-    consentAt: text(row.consent_at),
-    sfuSessionId: text(row.sfu_session_id),
-    tracks: parseTracks(row.tracks),
-    joinedAt: String(row.joined_at),
-    lastSeenAt: String(row.last_seen_at),
-    leftAt: text(row.left_at),
-    removedAt: text(row.removed_at),
-  };
-}
-
-/** One participant of one room, read in the room's own workspace. */
-export async function readMeetParticipant(
-  db: Client,
-  where: { tenantId: string; roomId: string; participantId: string },
-): Promise<MeetParticipant | null> {
-  const rs = await db.execute({
-    sql: `SELECT ${PARTICIPANT_COLUMNS} FROM meet_participants WHERE tenant_id = ? AND room_id = ? AND id = ? LIMIT 1`,
-    args: [where.tenantId, where.roomId, where.participantId],
-  });
-  return rs.rows[0] ? toParticipant(rs.rows[0] as unknown as Record<string, unknown>) : null;
-}
+/** A participant as the room's API sees them: their row, with what they publish (lib/meet/participants.ts). */
+export type MeetParticipant = MeetPresence;
 
 export type MeetParticipantResult =
   | { ok: true; room: MeetRoom; participant: MeetParticipant }
@@ -235,7 +180,7 @@ export async function requireMeetParticipant(
   const claims = verifyMeetToken(req.cookies.get(MEET_COOKIE)?.value, nowMs);
   if (!claims || claims.roomId !== room.id) return answer(401, "not_in_room");
   if (room.status === "ended") return answer(410, "room_ended");
-  const participant = await readMeetParticipant(db, { tenantId: room.tenantId, roomId: room.id, participantId: claims.participantId });
+  const participant = await readPresence(db, { tenantId: room.tenantId, roomId: room.id, participantId: claims.participantId });
   if (!participant || participant.leftAt) return answer(401, "not_in_room");
   if (participant.removedAt) return answer(403, "removed");
   return { ok: true, room, participant };

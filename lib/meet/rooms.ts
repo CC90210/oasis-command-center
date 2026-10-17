@@ -74,10 +74,24 @@ export function parseMeetCode(input: unknown): string | null {
   return code;
 }
 
-/** A title as it is kept: control characters as spaces, trimmed, capped; none at all is "Meeting". */
+/** U+FFFD, built from its code so this file stays ASCII (tests/worker-source-one-byte.test.ts). */
+const REPLACEMENT_CHARACTER = String.fromCharCode(0xfffd);
+
+/** Text with any lone UTF-16 surrogate (half an emoji) replaced by U+FFFD, so it encodes, stores and prints. */
+export function wellFormedText(text: string): string {
+  return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, REPLACEMENT_CHARACTER);
+}
+
+/** A title as it is kept: control characters as spaces, a broken half of an emoji as U+FFFD, trimmed, capped by characters; none at all is "Meeting". */
 export function meetTitle(input: unknown): string {
-  const text = typeof input === "string" ? input.replace(/[\u0000-\u001f\u007f]/g, " ").trim() : "";
-  return text.slice(0, MEET_TITLE_MAX).trim() || MEET_DEFAULT_TITLE;
+  const text =
+    typeof input === "string"
+      ? wellFormedText(input)
+
+          .replace(/[\u0000-\u001f\u007f]/g, " ")
+          .trim()
+      : "";
+  return Array.from(text).slice(0, MEET_TITLE_MAX).join("").trim() || MEET_DEFAULT_TITLE;
 }
 
 const ROOM_COLUMNS =
