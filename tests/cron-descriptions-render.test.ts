@@ -76,6 +76,7 @@ const SEEDED_JOB_NAMES = new Set<string>([
   "Bravo — Sleep Agent (Memory Consolidation)",
   "Break-Glass Drill (quarterly)",
   "Carousel Media Retention",
+  "Content Tools Runner",
   "Cross-Agent Self-Improvement Sweep",
   "Daily Automation Register",
   "Daily Bravo Brief",
