@@ -13,7 +13,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = process.cwd();
-const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
+// LF, whatever the checkout: the patterns below span lines, and a Windows
+// checkout (core.autocrlf=true) hands back CRLF.
+const read = (p: string) => readFileSync(join(ROOT, p), "utf8").replace(/\r\n/g, "\n");
 let failures = 0;
 function check(name: string, fn: () => void): void {
   try {
