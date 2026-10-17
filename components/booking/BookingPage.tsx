@@ -74,6 +74,28 @@ type Booked = { startsAt: string; endsAt: string; meetUrl: string };
 const FALLBACK_ZONE = "America/Toronto";
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * Tell the sales desk a visitor left details without a time
+ * (app/api/forms/booking/details-only). Three tries: a network error, a 5xx or
+ * a 429 tries again (a 429 after the wait the server names, at most a minute);
+ * any other answer is final, since a retry cannot change it.
+ */
+export async function raiseDetailsOnlyAlert(token: string, reason: DetailsOnlyReason): Promise<void> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const res = await fetch("/api/forms/booking/details-only", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token, reason }),
+      keepalive: true,
+    }).catch(() => null);
+    if (res && res.status < 500 && res.status !== 429) return;
+    if (attempt === 3) return;
+    const named = res?.status === 429 ? Number((await res.json().catch(() => null))?.retry_in_sec) : NaN;
+    const waitMs = Number.isFinite(named) && named > 0 ? Math.min(named, 60) * 1000 : 2000 * attempt;
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
+
 function visitorZone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || FALLBACK_ZONE;
@@ -320,15 +342,11 @@ export function BookingPage(props: Props) {
       if (detailsOnly || !slot) {
         // They asked for a call and could not pick a time: the sales desk hears
         // about it once (app/api/forms/booking/details-only). Never awaited and
-        // never shown: the visitor's details are already saved.
-        if (detailsOnly) {
-          void fetch("/api/forms/booking/details-only", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ token, reason: detailsWhy }),
-            keepalive: true,
-          }).catch(() => null);
-        }
+        // never shown, since the visitor's details are already saved, but
+        // retried in the background on a network error, a 5xx or a rate limit
+        // (Codex review of #677). The lead also shows as unbooked on the Sales
+        // desk either way.
+        if (detailsOnly) void raiseDetailsOnlyAlert(token, detailsWhy);
         setLeftDetails(true);
         return;
       }

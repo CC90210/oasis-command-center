@@ -146,15 +146,53 @@ async function main() {
 
   await check("/book raises it only on the explicit details-only submit, after the lead is saved, never for a script", () => {
     const page = read("components", "booking", "BookingPage.tsx");
-    const callAt = page.indexOf('void fetch("/api/forms/booking/details-only", {');
-    assert.ok(callAt > 0, "the page never raises the alert");
-    assert.equal(page.split('fetch("/api/forms/booking/details-only"').length - 1, 1, "the alert is raised from more than one place");
-    assert.match(page.slice(callAt - 400, callAt), /if \(detailsOnly \|\| !slot\) \{[\s\S]*if \(detailsOnly\) \{\s*$/, "the alert is not tied to the details-only submit");
+    const callAt = page.indexOf("if (detailsOnly) void raiseDetailsOnlyAlert(token, detailsWhy);");
+    assert.ok(callAt > 0, "the page never raises the alert on the details-only submit");
+    assert.equal(page.split("raiseDetailsOnlyAlert(").length - 1, 2, "the alert is raised from more than one place");
+    assert.equal(page.split('fetch("/api/forms/booking/details-only"').length - 1, 1);
+    assert.match(page.slice(callAt - 600, callAt), /if \(detailsOnly \|\| !slot\) \{/, "the alert is not tied to the details-only submit");
     assert.ok(callAt > page.indexOf("tokenRef.current = token;"), "the alert is raised before the lead is saved");
     assert.ok(callAt > page.indexOf("const honeypot = trapValue(trapRef.current, trapLatch);"), "a script could raise the alert");
-    assert.match(page, /body: JSON\.stringify\(\{ token, reason: detailsWhy \}\),/);
     assert.equal(page.match(/setDetailsWhy\("calendar_error"\);\s*setDetailsOnly\(true\);/g)?.length, 1);
     assert.equal(page.match(/setDetailsWhy\("no_times"\);\s*setDetailsOnly\(true\);/g)?.length, 1);
+  });
+
+  await check("the page retries a network error, a 5xx or a 429 up to three times, and stops on any other answer (Codex review of #677)", async () => {
+    const { raiseDetailsOnlyAlert } = await import("../components/booking/BookingPage");
+    const realFetch = globalThis.fetch;
+    const realTimeout = globalThis.setTimeout;
+    const waits: number[] = [];
+    // Waits are recorded, not slept, so the test is instant.
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      waits.push(ms ?? 0);
+      fn();
+      return 0;
+    }) as unknown as typeof setTimeout;
+    const run = async (answers: Array<number | "network">) => {
+      const sent: string[] = [];
+      let i = 0;
+      globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+        sent.push(String(init?.body));
+        const a = answers[Math.min(i++, answers.length - 1)];
+        if (a === "network") throw new TypeError("offline");
+        return new Response(JSON.stringify(a === 429 ? { ok: false, retry_in_sec: 7 } : { ok: a < 300 }), { status: a });
+      }) as typeof fetch;
+      waits.length = 0;
+      await raiseDetailsOnlyAlert("tok", "no_times");
+      return sent;
+    };
+    try {
+      assert.equal((await run([200])).length, 1);
+      assert.equal((await run([400])).length, 1, "a refusal a retry cannot fix was retried");
+      assert.equal((await run([503, "network", 200])).length, 3, "a 5xx or network error was not retried");
+      assert.equal((await run([503])).length, 3, "it retried more than three times");
+      assert.equal((await run([429, 200])).length, 2);
+      assert.deepEqual(waits, [7000], "a 429 did not wait the time the server named");
+      assert.deepEqual(JSON.parse((await run([200]))[0]), { token: "tok", reason: "no_times" });
+    } finally {
+      globalThis.fetch = realFetch;
+      globalThis.setTimeout = realTimeout;
+    }
   });
 
   console.log("public-booking-details-only: all passed");
