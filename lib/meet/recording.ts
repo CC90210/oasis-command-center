@@ -42,6 +42,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement, InValue } from "@libsql/client";
+import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant } from "@/lib/storage-helpers";
 import { toolErrorLine } from "@/lib/tools/errors";
@@ -52,9 +53,9 @@ import { readMeetRoom, type MeetRoom } from "./rooms";
 export const MEET_RELAY_BUCKET = "meet-relay";
 /** The largest chunk taken. Ten seconds of speech is a small fraction of it at any browser's default rate. */
 export const MAX_CHUNK_BYTES = 512 * 1024;
-/** A room's ceiling: eight speakers for four hours of 10-second chunks, with room to spare. */
-export const MAX_ROOM_CHUNKS = 12_000;
-export const MAX_ROOM_BYTES = 1536 * 1024 * 1024;
+/** A room's ceiling: eight speakers for four hours is 11,520 chunks of 10 seconds; a ninth or a longer call fits too. */
+export const MAX_ROOM_CHUNKS = 15_000;
+export const MAX_ROOM_BYTES = 2048 * 1024 * 1024;
 /** The highest sequence number one segment's chunk may carry. */
 export const MAX_CHUNK_SEQ = 100_000;
 /** How long after End a chunk is still taken: a recorder's last uploads finish after the call ends. */
@@ -63,13 +64,25 @@ export const LATE_CHUNK_MS = 10 * 60_000;
 export const RECORDER_HANDOVER_MS = 2 * 60_000;
 /** How long the relay holds a recording for the PC, counted from the meeting's end. */
 export const RELAY_DAYS = 30;
+/** Relay objects one runner claim deletes (each delete is one call to R2, and the claim has other work). */
 export const RELAY_CLEANUP_BATCH = 100;
+/** Relay objects one host Delete, or one relay cron run, deletes before it answers. */
+export const RELAY_DELETE_BATCH = 300;
+/** How many R2 deletes run at once (a Worker keeps at most six connections open). */
+const RELAY_DELETE_CONCURRENCY = 6;
 export const FINALIZE_SWEEP_BATCH = 5;
-/** How long one chunk's download URL lasts: the PC fetches a long meeting's chunks one after another. */
+/** How long one chunk's download URL lasts. The PC asks for one page at a time, just before it downloads it. */
 export const DOWNLOAD_URL_TTL_SECONDS = 1800;
+/** The most chunk URLs one download-urls answer carries: a long meeting is fetched page by page. */
+export const DOWNLOAD_PAGE_MAX = 300;
 export const MAX_TRANSCRIPT_CHARS = 1_000_000;
 export const MAX_TRANSCRIPT_LINES = 20_000;
-export const MAX_LINE_CHARS = 4000;
+/**
+ * The longest line taken. Generous on purpose: the PC splits a speaker's long
+ * run of talk into lines of about 1,500 characters, and one over-long line must
+ * never cost the whole transcript (the report is refused as a unit).
+ */
+export const MAX_LINE_CHARS = 20_000;
 
 const DAY_MS = 86_400_000;
 const IN_FLIGHT = new Set(["queued", "claimed", "running"]);
@@ -109,6 +122,17 @@ export function r2MeetStorage(): MeetStorage | null {
       if (r.error) throw new Error(r.error.message);
     },
   };
+}
+
+/**
+ * Whether a workspace's meetings can be recorded at all: only where a PC
+ * transcribes them. Today that is OASIS's own workspaces, the ones the `bea`
+ * runner serves (lib/tools/runner-handlers.ts PRODUCER_TENANTS, pinned equal by
+ * tests/meet-recording.test.ts). Anywhere else the audio would sit on the relay
+ * with nothing to take it, so it is never recorded (Codex on #685, P1).
+ */
+export function meetRecordingServed(tenantId: string): boolean {
+  return OASIS_INTERNAL_TENANT_IDS.has(tenantId);
 }
 
 /** All three Meet tables present (bravo__230 and bravo__231)? False = not installed; any other error throws. */
@@ -353,26 +377,37 @@ export async function acceptChunk(db: Client, storage: MeetStorage, c: ChunkInpu
     return { ok: false, status: 502, error: "storage_failed" };
   }
 
-  const rs = await db.execute({
-    sql: `INSERT INTO meet_recording_chunks (id, tenant_id, room_id, participant_id, display_name, segment_id, seq,
-                                             segment_started_ms, mime_type, bytes, storage_path, uploaded_by, created_at)
-          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-          WHERE ${chunkGateSql()}
-          ON CONFLICT (tenant_id, room_id, participant_id, segment_id, seq) DO NOTHING`,
-    args: [
-      randomUUID(), c.room.tenantId, c.room.id, c.participantId, c.displayName, c.segmentId, c.seq,
-      c.segmentStartedMs, c.mimeType, c.bytes.byteLength, path, c.uploadedBy, c.now.toISOString(),
-      ...chunkGateArgs(c),
-    ],
-  });
+  const forget = async (why: string) => {
+    try {
+      await storage.remove(path);
+    } catch (err) {
+      console.error(`[meet.recording] could not delete ${why}`, { tenantId: c.room.tenantId, path, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  let rs;
+  try {
+    rs = await db.execute({
+      sql: `INSERT INTO meet_recording_chunks (id, tenant_id, room_id, participant_id, display_name, segment_id, seq,
+                                               segment_started_ms, mime_type, bytes, storage_path, uploaded_by, created_at)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE ${chunkGateSql()}
+            ON CONFLICT (tenant_id, room_id, participant_id, segment_id, seq) DO NOTHING`,
+      args: [
+        randomUUID(), c.room.tenantId, c.room.id, c.participantId, c.displayName, c.segmentId, c.seq,
+        c.segmentStartedMs, c.mimeType, c.bytes.byteLength, path, c.uploadedBy, c.now.toISOString(),
+        ...chunkGateArgs(c),
+      ],
+    });
+  } catch (err) {
+    // The object is stored but no row says so, and every sweep is row-driven: take it back now (the
+    // recorder retries the 500 and puts it again), unless a row for this very chunk exists after all.
+    if (!(await chunkExists(db, c).catch(() => true))) await forget("a chunk whose row failed");
+    throw err;
+  }
   if (rs.rowsAffected === 1) return { ok: true, status: 201 };
   if (await chunkExists(db, c)) return { ok: false, status: 409, error: "duplicate" };
   // The gate closed between the check and the write: the object is nobody's.
-  try {
-    await storage.remove(path);
-  } catch (err) {
-    console.error("[meet.recording] could not delete a refused chunk", { tenantId: c.room.tenantId, path, error: err instanceof Error ? err.message : String(err) });
-  }
+  await forget("a refused chunk");
   return (await chunkRefusal(db, c)) ?? { ok: false, status: 410, error: "recording_closed" };
 }
 
@@ -381,7 +416,7 @@ export async function acceptChunk(db: Client, storage: MeetStorage, c: ChunkInpu
 // ---------------------------------------------------------------------------
 
 export type HandOver =
-  | { state: "not_ended" | "nothing_recorded" | "ready" | "expired" | "deleted" }
+  | { state: "unavailable" | "not_ended" | "nothing_recorded" | "ready" | "expired" | "deleted" }
   | { state: "queued" | "transcribing"; jobId: string };
 
 function handOverStatements(room: MeetRoom, jobId: string, actorUserId: string | null, relayExpiresAt: string, now: Date): InStatement[] {
@@ -425,6 +460,8 @@ function handOverState(t: MeetTranscript | null): HandOver {
  * extended by a retry.
  */
 export async function ensureTranscriptJob(db: Client, room: MeetRoom, actorUserId: string | null, now: Date): Promise<HandOver> {
+  // No PC transcribes this workspace's meetings: a job would wait forever (meetRecordingServed).
+  if (!meetRecordingServed(room.tenantId)) return { state: "unavailable" };
   if (room.status !== "ended") return { state: "not_ended" };
   const t = await readTranscript(db, room.tenantId, room.id);
   if (t && t.status !== "queued" && t.status !== "transcribing") return { state: t.status };
@@ -460,8 +497,16 @@ type ChunkRow = {
 };
 
 /**
- * Each segment's unbroken run of chunks from 0, oldest segment first, and what
- * was left out. A segment with no chunk 0 has no header and is left out whole.
+ * Every segment that can be decoded, oldest first, with ALL of its chunks, and
+ * how many chunks are missing. A segment needs its chunk 0 (the container
+ * header); after that a lost chunk is a gap, not the end: WebM clusters and
+ * fragmented MP4 carry their own timestamps, so the PC joins what arrived and
+ * ffmpeg fills the gap with silence (BEA scripts/meet/transcript.py to_wav),
+ * keeping every later word at its true time. Cutting at the first gap instead
+ * discarded the rest of that speaker's meeting (#685 review, M2). A segment
+ * with no chunk 0 cannot be read at all; its chunks count as missing.
+ * missingChunks is in chunks of DEFAULT_TIMESLICE (10 s): the panel says how
+ * much audio that is.
  */
 export function declareSegments(rows: readonly ChunkRow[]): {
   segments: DeclaredSegment[];
@@ -482,24 +527,22 @@ export function declareSegments(rows: readonly ChunkRow[]): {
   let missingChunks = 0;
   for (const list of groups.values()) {
     const sorted = [...list].sort((a, b) => a.seq - b.seq);
-    let run = 0;
-    let bytes = 0;
-    while (run < sorted.length && sorted[run].seq === run) {
-      bytes += sorted[run].bytes;
-      run += 1;
-    }
-    missingChunks += sorted.length - run;
-    if (run === 0) continue;
-    chunkCount += run;
-    audioBytes += bytes;
     const first = sorted[0];
+    if (first.seq !== 0) {
+      // No header: none of it can be decoded.
+      missingChunks += sorted[sorted.length - 1].seq + 1;
+      continue;
+    }
+    missingChunks += sorted[sorted.length - 1].seq + 1 - sorted.length;
+    chunkCount += sorted.length;
+    audioBytes += sorted.reduce((n, r) => n + r.bytes, 0);
     segments.push({
       participant_id: first.participant_id,
       display_name: first.display_name,
       segment_id: first.segment_id,
       started_at_ms: first.segment_started_ms,
       mime_type: first.mime_type,
-      chunk_count: run,
+      chunk_count: sorted.length,
     });
   }
   segments.sort((a, b) => a.started_at_ms - b.started_at_ms || a.participant_id.localeCompare(b.participant_id));
@@ -542,13 +585,24 @@ export async function meetTranscribeClaim(
   const roomId = typeof job.input.room_id === "string" ? job.input.room_id : "";
   const room = roomId ? await readMeetRoom(db, { tenantId: job.tenantId, roomId }) : null;
   if (!room) return null;
+  const at = now.toISOString();
+  const where = "tenant_id = ? AND room_id = ? AND job_id = ?";
+  // CLOSE FIRST, then read. Once the row says transcribing, the chunk gate
+  // refuses every new chunk (it takes them only while queued), so the read below
+  // is the whole recording. Reading first left a window where a late chunk was
+  // answered 201, missed by this read, and deleted with the relay unheard
+  // (#685 review, M1).
+  const closed = await db.execute({
+    sql: `UPDATE meet_transcripts SET status = 'transcribing', updated_at = ? WHERE ${where} AND status IN ('queued', 'transcribing')`,
+    args: [at, room.tenantId, room.id, job.id],
+  });
+  if (closed.rowsAffected !== 1) return null;
   const declared = declareSegments(await chunkRows(db, room.tenantId, room.id));
   const up = await db.execute({
-    sql: `UPDATE meet_transcripts
-             SET status = 'transcribing', segments_json = ?, chunk_count = ?, audio_bytes = ?, missing_chunks = ?, updated_at = ?
-           WHERE tenant_id = ? AND room_id = ? AND job_id = ? AND status IN ('queued', 'transcribing')`,
+    sql: `UPDATE meet_transcripts SET segments_json = ?, chunk_count = ?, audio_bytes = ?, missing_chunks = ?, updated_at = ?
+           WHERE ${where} AND status = 'transcribing'`,
     args: [
-      JSON.stringify(declared.segments), declared.chunkCount, declared.audioBytes, declared.missingChunks, now.toISOString(),
+      JSON.stringify(declared.segments), declared.chunkCount, declared.audioBytes, declared.missingChunks, at,
       room.tenantId, room.id, job.id,
     ],
   });
@@ -568,24 +622,38 @@ export async function meetTranscribeClaim(
 
 export type DownloadFile = { participant_id: string; segment_id: string; seq: number; bytes: number; url: string };
 
+export type DownloadPage = { files: DownloadFile[]; total: number; nextOffset: number | null };
+
 /**
- * Signed GET URLs for exactly the chunks the claim declared, in order. Null
- * when this job no longer holds the room's recording.
+ * One page of signed GET URLs for exactly the chunks the claim declared, in a
+ * fixed order (participant, segment, seq), from `offset`, at most `limit`
+ * (capped at DOWNLOAD_PAGE_MAX). Paged so a long meeting is neither one
+ * multi-megabyte answer nor a set of URLs that expire while the PC is still
+ * downloading the first ones (Codex on #685, P2): the PC asks for each page
+ * just before it fetches it. The order cannot shift under the pages: the
+ * declared set is fixed at the claim, and no relay chunk is deleted before the
+ * transcript lands. Null when this job no longer holds the room's recording.
  */
 export async function meetDownloadFiles(
   db: Client,
   storage: MeetStorage,
   job: { id: string; tenantId: string; input: Record<string, unknown> },
-): Promise<DownloadFile[] | null> {
+  page: { offset: number; limit: number } = { offset: 0, limit: DOWNLOAD_PAGE_MAX },
+): Promise<DownloadPage | null> {
   const roomId = typeof job.input.room_id === "string" ? job.input.room_id : "";
   const t = roomId ? await readTranscript(db, job.tenantId, roomId) : null;
   if (!t || t.status !== "transcribing" || t.jobId !== job.id) return null;
-  const want = new Map(t.segments.map((s) => [`${s.participant_id}|${s.segment_id}`, Number(s.chunk_count)]));
+  // Every chunk of every declared segment: the claim closed the room to new chunks before it declared them,
+  // so this is exactly what it counted.
+  const declared = new Set(t.segments.map((s) => `${s.participant_id}|${s.segment_id}`));
   const rows = (await chunkRows(db, job.tenantId, roomId))
-    .filter((r) => r.seq < (want.get(`${r.participant_id}|${r.segment_id}`) ?? 0))
+    .filter((r) => declared.has(`${r.participant_id}|${r.segment_id}`))
     .sort((a, b) => a.participant_id.localeCompare(b.participant_id) || a.segment_id.localeCompare(b.segment_id) || a.seq - b.seq);
+  const offset = Math.max(0, Math.floor(page.offset));
+  const limit = Math.min(Math.max(1, Math.floor(page.limit)), DOWNLOAD_PAGE_MAX);
+  const slice = rows.slice(offset, offset + limit);
   const files: DownloadFile[] = [];
-  for (const r of rows) {
+  for (const r of slice) {
     if (!pathBelongsToTenant(job.tenantId, r.storage_path)) throw new Error("a relay chunk's path is outside its workspace");
     files.push({
       participant_id: r.participant_id,
@@ -595,7 +663,8 @@ export async function meetDownloadFiles(
       url: await storage.signedGetUrl(r.storage_path, DOWNLOAD_URL_TTL_SECONDS),
     });
   }
-  return files;
+  const next = offset + slice.length;
+  return { files, total: rows.length, nextOffset: next < rows.length ? next : null };
 }
 
 export type TranscriptReport = {
@@ -739,50 +808,76 @@ export function meetDeleteLocalCompleteStatements(
 // ---------------------------------------------------------------------------
 
 /**
- * Delete up to `limit` relay chunks nobody needs any more: their recording is
- * ready, expired or deleted, or their room is gone. Object first, then its
- * row, so a failed delete leaves the row to be tried again. Stops at the first
- * storage failure (R2 is having a moment; the next sweep goes on).
+ * Delete up to `limit` relay chunks nobody needs any more: those of a
+ * recording that is ready, expired or deleted. Never a recording still queued
+ * or transcribing: the PC does not have it yet. Object first, then its row, so
+ * a failed delete leaves the row to be tried again; stops starting new deletes
+ * at the first storage failure (R2 is having a moment; the next run goes on).
+ * Driven by the recordings not yet cleared (relay_cleared_at, a partial
+ * index), so the cost does not grow with every meeting ever held, and a
+ * recording is stamped cleared once its last chunk is gone.
+ *
+ * A room row deleted outright no longer frees its audio here (that deleted
+ * untranscribed audio at once and never told the PC, #685 review M8): a
+ * feature that deletes rooms calls deleteMeetRecording first, and the R2
+ * lifecycle rule on meet-relay/ is the backstop for anything else.
  */
 export async function removeRelayChunks(
   db: Client,
   storage: MeetStorage | null,
   scope: { tenantIds: readonly string[]; roomId?: string },
   limit: number = RELAY_CLEANUP_BATCH,
+  now: Date = new Date(),
 ): Promise<number> {
   if (!storage || !scope.tenantIds.length || limit < 1) return 0;
   const tin = sqlPlaceholders(scope.tenantIds.length);
+  const room = scope.roomId ? " AND t.room_id = ?" : "";
+  const roomArgs = scope.roomId ? [scope.roomId] : [];
   const rs = await db.execute({
-    sql: `SELECT c.id, c.tenant_id, c.storage_path FROM meet_recording_chunks c
-          WHERE c.tenant_id IN (${tin})${scope.roomId ? " AND c.room_id = ?" : ""}
-            AND (EXISTS (SELECT 1 FROM meet_transcripts t
-                         WHERE t.tenant_id = c.tenant_id AND t.room_id = c.room_id AND t.status IN ('ready', 'expired', 'deleted'))
-                 OR NOT EXISTS (SELECT 1 FROM meet_rooms r WHERE r.tenant_id = c.tenant_id AND r.id = c.room_id))
+    sql: `SELECT c.id, c.tenant_id, c.storage_path FROM meet_transcripts t
+          JOIN meet_recording_chunks c ON c.tenant_id = t.tenant_id AND c.room_id = t.room_id
+          WHERE t.tenant_id IN (${tin})${room} AND t.status IN ('ready', 'expired', 'deleted') AND t.relay_cleared_at IS NULL
           LIMIT ?`,
-    args: [...scope.tenantIds, ...(scope.roomId ? [scope.roomId] : []), limit],
+    args: [...scope.tenantIds, ...roomArgs, limit],
   });
   const gone: string[] = [];
-  for (const row of rs.rows) {
-    const tenantId = String(row.tenant_id);
-    const path = String(row.storage_path);
-    if (!pathBelongsToTenant(tenantId, path)) {
-      console.error("[meet.relay] a chunk row's path is outside its workspace; left alone", { tenantId, id: String(row.id) });
-      continue;
+  const queue = [...rs.rows];
+  let failed = false;
+  // A few deletes at a time; after the first failure no new one starts (the rest wait for the next run).
+  const worker = async () => {
+    for (let row = queue.shift(); row && !failed; row = queue.shift()) {
+      const tenantId = String(row.tenant_id);
+      const path = String(row.storage_path);
+      if (!pathBelongsToTenant(tenantId, path)) {
+        console.error("[meet.relay] a chunk row's path is outside its workspace; left alone", { tenantId, id: String(row.id) });
+        continue;
+      }
+      try {
+        await storage.remove(path);
+        gone.push(String(row.id));
+      } catch (err) {
+        failed = true;
+        console.error("[meet.relay] could not delete a relay chunk", { tenantId, path, error: err instanceof Error ? err.message : String(err) });
+      }
     }
-    try {
-      await storage.remove(path);
-      gone.push(String(row.id));
-    } catch (err) {
-      console.error("[meet.relay] could not delete a relay chunk", { tenantId, path, error: err instanceof Error ? err.message : String(err) });
-      break;
-    }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(RELAY_DELETE_CONCURRENCY, queue.length) }, worker));
   if (gone.length) {
     await db.execute({
       sql: `DELETE FROM meet_recording_chunks WHERE tenant_id IN (${tin}) AND id IN (${sqlPlaceholders(gone.length)})`,
       args: [...scope.tenantIds, ...gone],
     });
   }
+  // A finished recording with no chunk left is cleared for good: nothing can add one (the chunk gate takes
+  // chunks only while a recording is queued), so later runs never look at it again.
+  await db.execute({
+    sql: `UPDATE meet_transcripts SET relay_cleared_at = ?
+           WHERE tenant_id IN (${tin})${scope.roomId ? " AND room_id = ?" : ""}
+             AND status IN ('ready', 'expired', 'deleted') AND relay_cleared_at IS NULL
+             AND NOT EXISTS (SELECT 1 FROM meet_recording_chunks c
+                             WHERE c.tenant_id = meet_transcripts.tenant_id AND c.room_id = meet_transcripts.room_id)`,
+    args: [now.toISOString(), ...scope.tenantIds, ...roomArgs],
+  });
   return gone.length;
 }
 
@@ -830,7 +925,9 @@ export async function expireRelay(db: Client, tenantIds: readonly string[], now:
 /**
  * Hand over the recordings of meetings that ended LATE_CHUNK_MS ago or more
  * and were never handed over (the host's browser closed before it could say
- * so). At most `limit` per call.
+ * so). At most `limit` per call. Only meetings that ended within the relay's
+ * window: older ones are past their 30 days, and without the bound every claim
+ * would re-check every meeting ever held.
  */
 export async function finalizeDueRooms(
   db: Client,
@@ -841,11 +938,16 @@ export async function finalizeDueRooms(
   if (!tenantIds.length) return 0;
   const rs = await db.execute({
     sql: `SELECT r.tenant_id, r.id FROM meet_rooms r
-          WHERE r.tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND r.status = 'ended' AND r.ended_at < ?
+          WHERE r.tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND r.status = 'ended' AND r.ended_at < ? AND r.ended_at > ?
             AND EXISTS (SELECT 1 FROM meet_recording_chunks c WHERE c.tenant_id = r.tenant_id AND c.room_id = r.id)
             AND NOT EXISTS (SELECT 1 FROM meet_transcripts t WHERE t.tenant_id = r.tenant_id AND t.room_id = r.id)
           ORDER BY r.ended_at ASC LIMIT ?`,
-    args: [...tenantIds, new Date(now.getTime() - LATE_CHUNK_MS).toISOString(), limit],
+    args: [
+      ...tenantIds,
+      new Date(now.getTime() - LATE_CHUNK_MS).toISOString(),
+      new Date(now.getTime() - RELAY_DAYS * DAY_MS).toISOString(),
+      limit,
+    ],
   });
   let handed = 0;
   for (const row of rs.rows) {
@@ -861,7 +963,35 @@ export async function finalizeDueRooms(
 export async function meetRelaySweeps(db: Client, storage: MeetStorage | null, tenantIds: readonly string[], now: Date): Promise<void> {
   await expireRelay(db, tenantIds, now);
   await finalizeDueRooms(db, tenantIds, now);
-  await removeRelayChunks(db, storage, { tenantIds });
+  await removeRelayChunks(db, storage, { tenantIds }, RELAY_CLEANUP_BATCH, now);
+}
+
+/**
+ * The relay's own upkeep, for GET /api/cron/meet-relay (every 5 minutes, from
+ * the oasis-cc-cron Worker): expire what is overdue and delete what nobody
+ * needs, in every workspace that has any, WITHOUT the PC. A recording the host
+ * deleted, or one the PC never came back for, must not wait for the PC to
+ * leave the relay (Codex on #685, P1). Handing a recording over stays the PC's
+ * claim (finalizeDueRooms): it only means something where a PC takes it.
+ */
+export async function meetRelayCron(
+  db: Client,
+  storage: MeetStorage | null,
+  now: Date,
+): Promise<{ tenants: number; expired: number; removed: number }> {
+  const at = now.toISOString();
+  const rs = await db.execute({
+    sql: `SELECT DISTINCT tenant_id FROM meet_transcripts
+           WHERE (status IN ('ready', 'expired', 'deleted') AND relay_cleared_at IS NULL)
+              OR (status IN ('queued', 'transcribing') AND relay_expires_at < ?)
+          LIMIT 50`,
+    args: [at],
+  });
+  const tenantIds = rs.rows.map((r) => String(r.tenant_id));
+  if (!tenantIds.length) return { tenants: 0, expired: 0, removed: 0 };
+  const expired = await expireRelay(db, tenantIds, now);
+  const removed = await removeRelayChunks(db, storage, { tenantIds }, RELAY_DELETE_BATCH, now);
+  return { tenants: tenantIds.length, expired, removed };
 }
 
 // ---------------------------------------------------------------------------
@@ -920,7 +1050,9 @@ export async function deleteMeetRecording(
     ],
     "write",
   );
-  await removeRelayChunks(db, storage, { tenantIds: [room.tenantId], roomId: room.id });
+  // The first RELAY_DELETE_BATCH go now; the panel asks again while any are left, and the relay cron
+  // (every 5 minutes) finishes the rest whether or not anyone is watching.
+  await removeRelayChunks(db, storage, { tenantIds: [room.tenantId], roomId: room.id }, RELAY_DELETE_BATCH, now);
   const left = await relayTotals(db, room.tenantId, room.id);
   const queued = await db.execute({
     sql: "SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running') LIMIT 1",
@@ -934,6 +1066,7 @@ export async function deleteMeetRecording(
 // ---------------------------------------------------------------------------
 
 export type MeetRecordingState =
+  | "unavailable"
   | "off"
   | "none"
   | "recording"
@@ -968,7 +1101,13 @@ export type MeetRecordingView = {
     readyAt: string | null;
     transcribeSeconds: number | null;
   } | null;
-  deviceDeletedAt: string | null;
+  /**
+   * After a delete, the PC's own copy: not_needed (the PC never took this
+   * recording), waiting (told, not done yet: it does it when it is next on),
+   * done, or failed (errorCode says why; Delete again tells it again). Null
+   * until the recording is deleted. The panel says "deleted" only for what is.
+   */
+  deviceDelete: { status: "not_needed" | "waiting" | "done" | "failed"; errorCode: string | null; doneAt: string | null } | null;
 };
 
 /** The recording of one room, as its host sees it. Expires an overdue recording first, so the panel never shows a stale wait. */
@@ -983,7 +1122,8 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
   const live = await liveRunnerForTool(db, room.tenantId, "meet_transcribe", now);
 
   let state: MeetRecordingState;
-  if (!t) state = relay.chunks > 0 ? (room.status === "ended" ? "waiting" : "recording") : room.recordAudio ? "none" : "off";
+  if (!t && relay.chunks === 0 && !meetRecordingServed(room.tenantId)) state = "unavailable";
+  else if (!t) state = relay.chunks > 0 ? (room.status === "ended" ? "waiting" : "recording") : room.recordAudio ? "none" : "off";
   else if (t.status === "queued" || t.status === "transcribing") {
     state = !job || job.status === "failed" ? "failed" : job.status === "queued" ? "waiting" : "transcribing";
   } else state = t.status;
@@ -1010,6 +1150,22 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
             transcribeSeconds: t.transcribeSeconds,
           }
         : null,
-    deviceDeletedAt: t?.localDeletedAt ?? null,
+    deviceDelete: t?.status === "deleted" ? await deviceDeleteState(db, room, t) : null,
   };
+}
+
+async function deviceDeleteState(db: Client, room: MeetRoom, t: MeetTranscript): Promise<NonNullable<MeetRecordingView["deviceDelete"]>> {
+  if (t.localDeletedAt) return { status: "done", errorCode: null, doneAt: t.localDeletedAt };
+  const rs = await db.execute({
+    sql: `SELECT status, error_code FROM tool_jobs
+          WHERE tenant_id = ? AND tool_key = 'meet_delete_local' AND dedupe_key = ?
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+    args: [room.tenantId, `meet_delete_local:${room.id}`],
+  });
+  const job = rs.rows[0];
+  if (!job) return { status: "not_needed", errorCode: null, doneAt: null };
+  const status = String(job.status);
+  if (status === "failed") return { status: "failed", errorCode: str(job.error_code), doneAt: null };
+  // "done" with no stamp cannot happen (the stamp and the done commit together); read it as still waiting.
+  return { status: "waiting", errorCode: null, doneAt: null };
 }

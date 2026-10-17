@@ -32,8 +32,8 @@
  *
  * ONE MEETING (system jobs, lib/meet/recording.ts): the claim fixes which
  * relay chunks the transcription gets and hands them over as segments;
- * download-urls signs a GET per chunk; heartbeats report downloading,
- * transcribing and finishing for up to four hours; complete carries the
+ * download-urls signs a GET per chunk, a page at a time; heartbeats report
+ * downloading, transcribing and finishing for up to 24 hours; complete carries the
  * transcript (or, for meet_delete_local, the PC's word that its copy is gone)
  * and names its tool_key. The claim of a runner that serves meetings also runs
  * the relay's sweeps.
@@ -50,6 +50,7 @@ import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant, sanitizeStorageFilename } from "@/lib/storage-helpers";
 import {
+  DOWNLOAD_PAGE_MAX,
   DOWNLOAD_URL_TTL_SECONDS,
   meetDeleteLocalCompleteStatements,
   meetDownloadFiles,
@@ -242,8 +243,8 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
     // meet_transcribe: the segments are fixed now, at the claim (lib/meet/recording.ts).
     const meet = await meetTranscribeClaim(deps.db, job, ident.tenantIds, deps.now);
     if (meet) return answer(meet.input, { ...hold, queue_depth: meet.queueDepth });
-    // The recording is no longer waiting on this job (deleted, or replaced by a newer one): end it, and the
-    // runner asks again at once.
+    // The recording is no longer waiting on this job (deleted, or replaced by a newer one): end it. The runner
+    // takes the next job on its next run.
     const at = deps.now.toISOString();
     await deps.db.execute({
       sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'meeting_gone', error_message = ?, finished_at = ?, updated_at = ?
@@ -274,7 +275,7 @@ export async function handleToolsHeartbeat(req: Request, deps: RunnerDeps): Prom
   const at = deps.now.toISOString();
   const expires = new Date(deps.now.getTime() + LEASE_SECONDS * 1000).toISOString();
   // A heartbeat extends the lease only within its tool's hold limit, counted
-  // from the claim (45 minutes for a download, four hours for a meeting's
+  // from the claim (45 minutes for a download, 24 hours for a meeting's
   // transcription): a runner whose work is stuck while its heartbeat still
   // beats cannot hold a job forever. Past it the answer is lease_lost; the
   // lease then runs out and the job is taken again or given up (attempts),
@@ -589,7 +590,7 @@ async function completeSystemJob(
   if (results[results.length - 1].rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, toolKey);
   if (toolKey === "meet_transcribe") {
     try {
-      await removeRelayChunks(deps.db, deps.meetStorage ?? null, { tenantIds: [job.tenantId], roomId });
+      await removeRelayChunks(deps.db, deps.meetStorage ?? null, { tenantIds: [job.tenantId], roomId }, undefined, deps.now);
     } catch (err) {
       console.error("[tools.complete] the relay cleanup failed; the sweeps will retry it", {
         jobId: job.id,
@@ -613,15 +614,21 @@ async function systemRepeatOrLost(db: Client, ref: LeaseRef, toolKey: SystemRunn
 // ---------------------------------------------------------------------------
 
 /**
- * The signed GET URLs for a claimed meet_transcribe job's chunks: exactly the
- * ones its claim declared, in order, each valid DOWNLOAD_URL_TTL_SECONDS. A
- * bearer credential per object: never logged, here or on the runner.
+ * One page of signed GET URLs for a claimed meet_transcribe job's chunks:
+ * exactly the ones its claim declared, in a fixed order, from `offset` (default
+ * 0), at most `limit` (default and cap DOWNLOAD_PAGE_MAX), each valid
+ * DOWNLOAD_URL_TTL_SECONDS. `next_offset` is null on the last page. A bearer
+ * credential per object: never logged, here or on the runner.
  */
 export async function handleToolsDownloadUrls(req: Request, deps: RunnerDeps): Promise<Response> {
   const auth = await authenticateToolsRequest(req, deps.env, deps.now);
   if (!auth.ok) return auth.response;
   const ref = leaseRef(auth.producer, auth.body);
   if ("field" in ref) return invalid(ref.field);
+  const offset = auth.body.offset ?? 0;
+  if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0) return invalid("offset");
+  const limit = auth.body.limit ?? DOWNLOAD_PAGE_MAX;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1) return invalid("limit");
   if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
   if (!(await meetRecordingTablesInstalled(deps.db))) return notInstalled("tables_missing");
   if (!deps.meetStorage) return notInstalled("storage_not_configured");
@@ -629,10 +636,16 @@ export async function handleToolsDownloadUrls(req: Request, deps: RunnerDeps): P
   const job = await jobUnderLease(deps.db, ref);
   if (!job) return leaseLost();
   if (job.toolKey !== "meet_transcribe") return invalid("job_id");
-  const files = await meetDownloadFiles(deps.db, deps.meetStorage, job);
+  const page = await meetDownloadFiles(deps.db, deps.meetStorage, job, { offset, limit });
   // The recording is no longer this job's (deleted, or handed to a newer job): the lease is as good as lost.
-  if (!files) return leaseLost();
-  return toolsJson(200, { ok: true, files, expires_in: DOWNLOAD_URL_TTL_SECONDS });
+  if (!page) return leaseLost();
+  return toolsJson(200, {
+    ok: true,
+    files: page.files,
+    total: page.total,
+    next_offset: page.nextOffset,
+    expires_in: DOWNLOAD_URL_TTL_SECONDS,
+  });
 }
 
 /** A repeat for a job this runner and lease already finished is a success; anything else lost the lease. */

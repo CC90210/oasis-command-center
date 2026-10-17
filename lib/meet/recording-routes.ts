@@ -31,6 +31,7 @@ import {
   acceptChunk,
   deleteMeetRecording,
   ensureTranscriptJob,
+  meetRecordingServed,
   meetRecordingTablesInstalled,
   meetRecordingView,
   normalizeRecordingMime,
@@ -99,6 +100,8 @@ export async function handleMeetChunk(req: Request, rawCode: string, deps: Recor
   const h = await host(req, rawCode, deps, true);
   if (!h.ok) return h.response;
   const room = h.room;
+  // No PC transcribes this workspace's meetings, so its audio would only sit on the relay (meetRecordingServed).
+  if (!meetRecordingServed(room.tenantId)) return refuse(403, "recording_unavailable");
   if (!deps.storage) return notInstalled("storage_not_configured");
   if (!room.recordAudio) return refuse(403, "recording_off");
 
@@ -138,6 +141,10 @@ export async function handleMeetChunk(req: Request, rawCode: string, deps: Recor
   // request's): it labels their lines in the transcript.
   const participant = await readMeetParticipant(deps.db, { tenantId: room.tenantId, roomId: room.id, participantId });
   if (!participant) return refuse(422, "invalid_payload", { field: "participant" });
+  // No voice reaches the relay without its consent on record (Law 25): every row of a recorded room gets
+  // consent_at at join, a guest's only after they tick the notice (1c's PR 1), so NULL here is a client
+  // that started recording too early, and the answer is final.
+  if (!participant.consentAt) return refuse(403, "consent_missing");
 
   const out = await acceptChunk(deps.db, deps.storage, {
     room,

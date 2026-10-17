@@ -40,11 +40,14 @@ export const UPLOAD_URL_TTL_SECONDS = 900;
  */
 export const MAX_LEASE_HOLD_SECONDS = RUN_TIMEOUT_SECONDS + UPLOAD_URL_TTL_SECONDS + 600;
 /**
- * The same limit for a meeting transcription: four hours. It runs on a CPU
- * (about 0.7 x real time per speaker with the small model, measured on OASIS's
- * PC), so a long meeting needs far more than a download's 45 minutes.
+ * The same limit for a meeting transcription: 24 hours. It runs on a CPU, about
+ * 0.7 x real time PER SPEAKER TRACK with the small model (measured on OASIS's
+ * PC), and a room may hold eight tracks of four hours each, so four hours was
+ * shorter than recordings the relay accepts (Codex on #685, P2). The PC also
+ * drops to the faster model for a long recording (BEA scripts/meet/runner.py).
+ * The limit still ends a run that is stuck while its heartbeat beats.
  */
-export const MEET_TRANSCRIBE_MAX_HOLD_SECONDS = 4 * 60 * 60;
+export const MEET_TRANSCRIBE_MAX_HOLD_SECONDS = 24 * 60 * 60;
 /** How long a runner waits between claims when there is nothing to do. */
 export const POLL_AFTER_SECONDS = 30;
 /** At most this many runner jobs queued or running per workspace. */

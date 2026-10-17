@@ -117,7 +117,8 @@ jobs:
               ROUTES="/api/cron/dispatch-engine-fallbacks
                       /api/cron/dispatch-automations" ;;
             "*/5 * * * *")
-              ROUTES="/api/cron/dispatch-drips
+              ROUTES="/api/cron/meet-relay
+                      /api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders
                       /api/cron/sms-reply-agent

@@ -50,6 +50,7 @@ export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/finance-books?job=stripe-reconcile", schedule: "53 21 * * *" },
   { path: "/api/cron/finance-books?job=wise-reconcile", schedule: "7 22 * * *" },
   { path: "/api/cron/finance-books?job=wise-sync", schedule: "29 22 * * *" },
+  { path: "/api/cron/meet-relay", schedule: "*/5 * * * *" },
 ];
 
 // Self-contained runtime types: this dir sits inside the Next app's tsconfig

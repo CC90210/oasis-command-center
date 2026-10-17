@@ -22,6 +22,8 @@
 --                 (relay_expires_at): the audio was deleted unheard
 --   deleted       the host deleted the recording: the text is gone and the PC
 --                 is told to delete its copy (local_deleted_at when it has)
+-- relay_cleared_at is when the last relay chunk of a ready, expired or deleted
+-- recording was deleted.
 --
 -- Additive only: two new tables and their indexes, nothing existing touched.
 
@@ -65,8 +67,13 @@ CREATE TABLE IF NOT EXISTS meet_transcripts (
   updated_at         text not null,
   ready_at           text,
   deleted_at         text,
-  local_deleted_at   text
+  local_deleted_at   text,
+  relay_cleared_at   text
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meet_transcripts_room ON meet_transcripts (tenant_id, room_id);
 CREATE INDEX IF NOT EXISTS idx_meet_transcripts_status_expiry ON meet_transcripts (status, relay_expires_at);
+-- The relay cleanup reads only recordings that are done with but may still
+-- have chunks (relay_cleared_at stamps the moment the last one went), so its
+-- cost does not grow with every meeting ever held.
+CREATE INDEX IF NOT EXISTS idx_meet_transcripts_uncleared ON meet_transcripts (tenant_id, status) WHERE relay_cleared_at IS NULL;
