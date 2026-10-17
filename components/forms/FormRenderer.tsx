@@ -66,6 +66,12 @@ type Props = {
    * Distinct from `previewMode`, which disables submission altogether.
    */
   sandbox?: boolean;
+  /**
+   * The public form's honeypot (FormPublicClient): when given, the form ends
+   * with one text box no person sees or reaches, and the client sends whatever
+   * a script typed into it so the submit route can drop the submission.
+   */
+  trapRef?: React.Ref<HTMLInputElement>;
 };
 
 export function FormRenderer({
@@ -85,6 +91,7 @@ export function FormRenderer({
   onAddressResolvingChange,
   belowFields,
   sandbox = false,
+  trapRef,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
 
@@ -205,6 +212,22 @@ export function FormRenderer({
           accent
         </p>
       )}
+
+      {/* THE HONEYPOT. Off-screen rather than display:none, because scripts
+          that fill every box skip display:none; out of the tab order and
+          hidden from screen readers; a name browser autofill does not know.
+          Last in the form, so every field id above it keeps its value. */}
+      {trapRef ? (
+        <div
+          aria-hidden="true"
+          style={{ position: "absolute", left: "-10000px", top: "auto", width: "1px", height: "1px", overflow: "hidden" }}
+        >
+          <label>
+            Leave this field empty
+            <input ref={trapRef} type="text" name="hp_website" tabIndex={-1} autoComplete="off" />
+          </label>
+        </div>
+      ) : null}
     </form>
   );
 }

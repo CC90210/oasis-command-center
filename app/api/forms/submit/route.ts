@@ -207,6 +207,9 @@ type SubmitBody = {
    *  stores nothing (answerRouteOnly). */
   route_only?: boolean;
   steps_payload?: unknown;
+  /** Whatever was typed into the form's honeypot box (FormRenderer trapRef),
+   *  which no person sees or reaches. Present only when it was filled. */
+  honeypot?: unknown;
   // -- V5a funnel tracking (HANDOVER section 5.3/5.4) --------------------
   /** The browser's per-tab visit id (lib/offers/tracking-client.ts,
    *  sessionStorage, never a cookie). Present on every step once the client
@@ -568,6 +571,31 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   });
 }
 
+/**
+ * THE HONEYPOT. A filled one (FormRenderer trapRef) is a script, so it gets the
+ * answer a finished form gets and nothing runs: no lead, no row, no ticket, no
+ * alert, no database read. Logged without the payload so a wave is visible.
+ */
+function honeypotDrop(body: unknown): NextResponse | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as SubmitBody;
+  if (typeof b.honeypot !== "string" || b.honeypot.trim() === "") return null;
+  console.warn("[forms.submit] honeypot filled; submission dropped", {
+    tenant_slug: b.anonymous_init?.tenant_slug ?? null,
+    form_slug: b.anonymous_init?.form_slug ?? null,
+    step_index: typeof b.step_index === "number" ? b.step_index : null,
+  });
+  return NextResponse.json({
+    ok: true,
+    submission_id: null,
+    next_step: null,
+    lead_stage: null,
+    route_to: null,
+    redirect_url: null,
+    next_forms: [],
+  });
+}
+
 export async function POST(req: NextRequest) {
   // MERCHANT-FACING BOUNDARY. An uncaught throw here does not become a Next
   // error page — Vercel answers 500 with an EMPTY body, res.json() in the form
@@ -585,6 +613,8 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
+  const trapped = honeypotDrop(rawBody);
+  if (trapped) return trapped;
   try {
     return await handleSubmit(req, rawBody as SubmitBody);
   } catch (err) {

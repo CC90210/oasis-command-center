@@ -327,6 +327,14 @@ function useConsentIdempotencyKey() {
   return ref;
 }
 
+/** What a script typed into the honeypot box, latched: once it was filled,
+ *  every later request says so, even after the box renders empty on a new step. */
+function trapValue(input: HTMLInputElement | null, latch: { current: string }): string {
+  const typed = input?.value.trim() ?? "";
+  if (typed) latch.current = typed.slice(0, 200);
+  return latch.current;
+}
+
 export function FormPublicClient({
   formName,
   branding,
@@ -437,6 +445,9 @@ export function FormPublicClient({
   const heldSteps = useRef<Array<Record<string, unknown> | undefined>>([]);
   const heldLedgers = useRef<Array<{ email?: boolean; sms?: boolean } | undefined>>([]);
   const heldStepsSent = useRef(0);
+  // The honeypot box (FormRenderer trapRef) and what a script typed into it.
+  const trapRef = useRef<HTMLInputElement | null>(null);
+  const trapLatch = useRef("");
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
   // rendered as "continue now" buttons on the thank-you screen.
@@ -456,6 +467,7 @@ export function FormPublicClient({
     if (tokenInitPromiseRef.current) return tokenInitPromiseRef.current;
     const pending = (async () => {
       try {
+        const honeypot = trapValue(trapRef.current, trapLatch);
         const res = await fetch("/api/forms/submit", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -464,6 +476,7 @@ export function FormPublicClient({
             payload: {},
             anonymous_init: anonymousInit,
             initialize_only: true,
+            ...(honeypot ? { honeypot } : {}),
           }),
         });
         const data = (await res.json().catch(() => ({}))) as SubmitResponse;
@@ -926,6 +939,9 @@ export function FormPublicClient({
     if (submissionPath) meta.submission_path = submissionPath;
     const visitId = getOrCreateVisitId();
     if (visitId) meta.visit_id = visitId;
+    // Only a script fills the honeypot; the submit route drops what it sends.
+    const honeypot = trapValue(trapRef.current, trapLatch);
+    if (honeypot) meta.honeypot = honeypot;
     return Object.assign(meta, utmFromUrlRef.current);
   }
 
@@ -1552,6 +1568,7 @@ export function FormPublicClient({
                 ensureUploadToken={ensureUploadToken}
                 onAddressResolvingChange={setAddressResolving}
                 sandbox={preview}
+                trapRef={trapRef}
                 belowFields={
                   ledgerChannels.length > 0 ? (
                     // THE CONSENT LEDGER'S OWN BOXES. Separate, unticked, one per
