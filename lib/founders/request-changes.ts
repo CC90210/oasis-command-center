@@ -39,23 +39,11 @@ import {
   statusAfterDecision,
   type AssetStatus,
 } from "@/lib/founders-marketing-core";
-import type { Persona } from "@/lib/role-surfaces";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
 /** The longest note accepted. marketing_review.note is free text; this keeps one row readable. */
 export const REQUEST_CHANGES_NOTE_MAX = 2000;
-
-/**
- * Who may send an asset back. The workspace's owners and admins (and whoever an
- * admin granted full access), which is the persona the offer pages and forms
- * already ask for before they let anyone change anything. Everyone else the
- * founders portal admits - the marketing and builder seats - can still read the
- * Library and use its existing verdicts, but not this one.
- */
-export function mayRequestChanges(persona: Persona): boolean {
-  return persona === "founder";
-}
 
 export type NoteCheck = { ok: true; note: string } | { ok: false; error: "note_required" | "note_too_long" | "invalid_body" };
 

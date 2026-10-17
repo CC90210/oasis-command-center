@@ -8,17 +8,15 @@
  * lib/founders/request-changes.ts.
  *
  * GUARDS, in the order they are checked:
- *   1. Founders portal only: resolveFounder() (the founders tenant, a persona
+ *   1. Founders portal only: resolveFounder() (the founders tenant, and a persona
  *      that may see Marketing). Anyone else gets 404, never 403 - a 403 would
- *      confirm the route exists (lib/founders/gate.ts).
- *   2. Owners and admins only: the persona resolved from the VERIFIED session
- *      must be "founder" (an owner, an admin, or someone an admin granted full
- *      access). The marketing and builder seats the portal also admits get 403
- *      with a sentence, because they are signed in to the portal and the Library
- *      shows them everything else.
- *   3. The note is required: a request with no words in it says something was
+ *      confirm the route exists (lib/founders/gate.ts). This is EXACTLY the gate
+ *      on the sibling verbs (../route.ts: Approve, Archive, Restore, Delete), so
+ *      whoever can pass a verdict in the Library can also send an asset back;
+ *      the mildest verb is not stricter than the rest.
+ *   2. The note is required: a request with no words in it says something was
  *      wrong and not where, so it is refused (400 note_required) before any read.
- *   4. The asset must be in the founder's own workspace (tenant_id on every
+ *   3. The asset must be in the founder's own workspace (tenant_id on every
  *      query) and still in review (409 not_in_review / status_changed).
  *
  * Does NOT book, schedule or post anything, and touches no stored file.
@@ -26,11 +24,9 @@
 
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveSessionContext } from "@/lib/api-auth";
-import { resolvePersona } from "@/lib/role-surfaces";
 import { resolveFounder } from "@/lib/founders/gate";
 import { methodNotHere } from "@/lib/founders/method-guard";
-import { checkRequestChangesBody, mayRequestChanges, requestChanges } from "@/lib/founders/request-changes";
+import { checkRequestChangesBody, requestChanges } from "@/lib/founders/request-changes";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,14 +41,6 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function POST(req: Request, ctx: Ctx) {
   const founder = await resolveFounder();
   if (!founder) return notFound();
-
-  const session = await resolveSessionContext();
-  if (!session.ok || !mayRequestChanges(resolvePersona(session))) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden", message: "Only the workspace's owners and admins can send an asset back for changes." },
-      { status: 403 },
-    );
-  }
 
   const { id } = await ctx.params;
   if (!ASSET_ID.test(id)) return notFound();

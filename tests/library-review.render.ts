@@ -144,14 +144,12 @@ async function main() {
     ],
     (id) => `/founders/marketing/asset/${id}?from=%2Ffounders%2Fmarketing%2Flibrary`,
   );
-  const compare = (canRequestChanges: boolean) =>
-    renderToStaticMarkup(
-      React.createElement(HookCompare, { heading: "b2b operator - leads left waiting - 4 variants", cards, canRequestChanges }),
-    );
+  const compare = () =>
+    renderToStaticMarkup(React.createElement(HookCompare, { heading: "b2b operator - leads left waiting - 4 variants", cards }));
 
   // -- the verdict buttons, drawn ------------------------------------------------
-  const actions = (status: string, canRequestChanges: boolean) =>
-    renderToStaticMarkup(React.createElement(AssetActions, { id: "a1", status, title: "Cut a1", canRequestChanges } as Parameters<typeof AssetActions>[0]));
+  const actions = (status: string) =>
+    renderToStaticMarkup(React.createElement(AssetActions, { id: "a1", status, title: "Cut a1" } as Parameters<typeof AssetActions>[0]));
 
   // -- the verdict buttons, driven -----------------------------------------------
   type Call = { url: string; method: string | null; body: unknown };
@@ -180,7 +178,7 @@ async function main() {
     (t.props.onChange as (e: { target: { value: string } }) => void)({ target: { value } });
   };
 
-  const props = { id: "a1", status: "in_review", title: "Cut a1", canRequestChanges: true } as Parameters<typeof AssetActions>[0];
+  const props = { id: "a1", status: "in_review", title: "Cut a1" } as Parameters<typeof AssetActions>[0];
   const flow: Record<string, unknown> = {};
 
   // Request changes: the note box, refusing words-less sends, the request, the result.
@@ -210,10 +208,10 @@ async function main() {
   flow.requestCalls = calls.map((c) => ({ ...c }));
   calls.length = 0;
 
-  // The same tile without the role: no such button, whatever the status.
+  // A tile whose asset is not waiting on a verdict (a draft): no such button.
   {
     const d = driver(AssetActions);
-    flow.noRole = snapshot(d.render({ ...props, canRequestChanges: false }));
+    flow.draftTile = snapshot(d.render({ ...props, status: "draft" }));
   }
 
   // Delete asks first, inside the tile; Keep puts it back; only the second press sends it.
@@ -244,14 +242,13 @@ async function main() {
   }
 
   const out = {
-    compare: { owner: compare(true), member: compare(false) },
+    compare: compare(),
     cards,
     actions: {
-      inReviewOwner: actions("in_review", true),
-      inReviewMember: actions("in_review", false),
-      approvedOwner: actions("approved", true),
-      draftOwner: actions("draft", true),
-      archivedOwner: actions("archived", true),
+      inReview: actions("in_review"),
+      approved: actions("approved"),
+      draft: actions("draft"),
+      archived: actions("archived"),
     },
     flow,
   };

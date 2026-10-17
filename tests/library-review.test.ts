@@ -18,9 +18,10 @@
  *  3. Approve changes the status and NOTHING else - no schedule, no post, no
  *     publish intent, no other column. (Asked for by CC: posting stays with the
  *     marketing agent's scheduler and the spend gate.)
- *  4. Request changes: a note is required (refused before anything is read or
- *     written); only owners and admins (the marketing seat gets 403, anyone
- *     outside the founders portal 404); only in the founder's own workspace;
+ *  4. Request changes: gated exactly like Approve, Archive and Delete (anyone
+ *     outside the founders portal gets 404, and the marketing seat, which can
+ *     pass those verdicts, can send back too); a note is required (refused
+ *     before anything is read or written); only in the founder's own workspace;
  *     only while the asset is in review; the note lands in marketing_review
  *     where the marketing agent reads it, the asset goes to draft, and a lost
  *     race or a failed write leaves nothing half-done.
@@ -71,7 +72,6 @@ import {
 import {
   REQUEST_CHANGES_NOTE_MAX,
   checkRequestChangesBody,
-  mayRequestChanges,
   requestChanges,
 } from "../lib/founders/request-changes";
 import { libraryHref, libraryReturnPath, type LibraryState } from "../lib/founders-marketing-core";
@@ -332,13 +332,6 @@ async function main() {
     assert.equal(checkRequestChangesBody({ note: ` ${"x".repeat(2000)} ` }).ok, true, "the cap is on the trimmed note");
   });
 
-  await check("who may send an asset back: the founder persona only", () => {
-    assert.equal(mayRequestChanges("founder"), true);
-    for (const p of ["marketing", "builder", "manager", "sales", "worker", "legacy", "readonly"] as const) {
-      assert.equal(mayRequestChanges(p), false, p);
-    }
-  });
-
   // ============================================================== 2. the readers
   const mem = createClient({ url: ":memory:" });
   await mem.executeMultiple(DDL);
@@ -464,8 +457,15 @@ async function main() {
   await db.executeMultiple(DDL);
   const MKT = { id: "0e000000-0000-4000-8000-0000000000a1", email: "schneur@oasisai.work" };
   const MEMBER = { id: "0e000000-0000-4000-8000-0000000000a2", email: "member@oasisai.work" };
+  const BUILDER = { id: "0e000000-0000-4000-8000-0000000000a3", email: "builder@oasisai.work" };
   await db.batch(
     [
+      { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [BUILDER.id, BUILDER.email] },
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, full_name, joined_at, updated_at)
+              VALUES ('p-builder', ?, ?, ?, 'builder', 0, '2026-09-01T00:00:00Z', 'Builder', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`,
+        args: [BUILDER.id, BUILDER.email, OASIS],
+      },
       { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [MKT.id, MKT.email] },
       {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, full_name, joined_at, updated_at)
@@ -538,7 +538,7 @@ async function main() {
     const p = await render({ pack: PACK_A });
     assert.equal(p.compare.length, 1);
     assert.equal(p.tiles.length, 0, "no phones: the comparison replaces them");
-    const props = p.compare[0] as { heading: string; cards: Array<{ id: string; hook: string; variantLabel: string; hookStyle: string | null; offerSlug: string | null; burnedCaptions: boolean; href: string }>; canRequestChanges: boolean };
+    const props = p.compare[0] as { heading: string; cards: Array<{ id: string; hook: string; variantLabel: string; hookStyle: string | null; offerSlug: string | null; burnedCaptions: boolean; href: string }> };
     assert.equal(props.heading, "b2b operator - leads left waiting - 6 variants");
     assert.deepEqual(props.cards.map((c) => c.id), REVIEW_IDS, "variant 1..6, not newest-first");
     assert.deepEqual(props.cards.map((c) => c.variantLabel), [1, 2, 3, 4, 5, 6].map((n) => `Variant ${n}`));
@@ -549,7 +549,6 @@ async function main() {
     assert.ok(!props.cards.some((c) => c.id === "ca-1" || c.id === "ar-client"), "another workspace's pack and another tab's are not in it");
     assert.match(props.cards[0].href, /^\/founders\/marketing\/asset\/ar-r1\?from=/, "each links to its asset page, carrying this view");
     assert.ok(decodeURIComponent(props.cards[0].href).includes(`pack=${PACK_A}`), "and the way back keeps the pack");
-    assert.equal(props.canRequestChanges, true);
     assert.ok(!p.text.includes("Library layout"), "the Phone / Grid toggle has nothing to switch");
   });
 
@@ -582,12 +581,21 @@ async function main() {
     assert.equal(byId("ar-plain").burnedCaptions, false);
   });
 
-  await check("only owners and admins are offered Request changes; an unknown or junk filter value is handled", async () => {
-    for (const [user, want] of [[USERS.cc, true], [USERS.adon, true], [MKT, false]] as const) {
+  await check("every seat the founders portal admits sees the same comparison and tiles - no role switch on the page; an unknown or junk filter value is handled", async () => {
+    const seen: string[][] = [];
+    for (const user of [USERS.cc, USERS.adon, MKT]) {
       await login(user);
       const p = await render({ pack: PACK_A });
-      assert.equal((p.compare[0] as { canRequestChanges: boolean }).canRequestChanges, want, user.email);
+      assert.equal(p.compare.length, 1, user.email);
+      const props = p.compare[0] as { cards: Array<{ id: string }> } & Record<string, unknown>;
+      seen.push(props.cards.map((c) => c.id));
+      assert.deepEqual(Object.keys(props).sort(), ["cards", "heading"], "the comparison is handed no role flag: the buttons are the verdict buttons, drawn for whoever sees the page");
+      const tiles = await render({});
+      assert.ok(tiles.tiles.length > 0, user.email);
+      for (const t of tiles.tiles) assert.ok(!("canRequestChanges" in t), `${user.email}: a tile carries no role flag`);
     }
+    assert.deepEqual(seen[1], seen[0]);
+    assert.deepEqual(seen[2], seen[0]);
     await login(USERS.cc);
     // A well-formed id nothing carries: the pill that narrows the grid is lit and can be cleared, in the id's own words.
     const none = await render({ icp: "icp_brand_new_thing" });
@@ -652,16 +660,43 @@ async function main() {
     assert.deepEqual(await rowOf("ar-r3"), asset);
   });
 
-  await check("the marketing seat can see the Library but is refused Request changes: 403, nothing written", async () => {
+  await check("Request changes is gated exactly like Approve, Archive and Delete: the same callers are let in and the same are 404, for every seat", async () => {
+    const before = await counts();
+    const outcomes: Record<string, [number, number]> = {};
+    for (const [name, user] of [["signed out", null], ["sales seat", USERS.rep], ["member", MEMBER], ["marketing seat", MKT], ["builder seat", BUILDER], ["admin", USERS.adon], ["owner", USERS.cc]] as const) {
+      await login(user);
+      // Each call is refused for its BODY if the caller gets past the gate (400), so nothing is written either way.
+      const sibling = await post("ar-r3", { status: "not-a-status" }, "asset", "PATCH");
+      const mine = await post("ar-r3", {});
+      outcomes[name] = [sibling.status, mine.status];
+      assert.equal(mine.status === 404, sibling.status === 404, `${name}: the sibling verbs answer ${sibling.status} and Request changes ${mine.status}`);
+    }
+    assert.deepEqual(outcomes, {
+      "signed out": [404, 404], "sales seat": [404, 404], member: [404, 404],
+      "marketing seat": [400, 400], "builder seat": [400, 400], admin: [400, 400], owner: [400, 400],
+    });
+    assert.deepEqual(delta(before, await counts()), {}, "nothing written by either probe");
+  });
+
+  await check("the marketing seat can send an asset back, with its own name on the note", async () => {
     await login(MKT);
     const before = await counts();
-    const res = await post("ar-r3", { note: "Too slow." });
-    assert.equal(res.status, 403);
-    const body = await json(res);
-    assert.equal(body.error, "forbidden");
-    assert.match(String(body.message), /owners and admins/);
-    assert.deepEqual(delta(before, await counts()), {});
-    assert.equal((await rowOf("ar-r3"))!.status, "in_review");
+    const asset = (await rowOf("ar-r6"))!;
+    const res = await post("ar-r6", { note: "The hook is buried." });
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    assert.deepEqual(await json(res), { ok: true, asset: { id: "ar-r6", title: "Cut ar-r6", status: "draft" }, review_recorded: true });
+    assert.deepEqual(changedColumns(asset, (await rowOf("ar-r6"))!), ["status", "updated_at"]);
+    assert.deepEqual(delta(before, await counts()), { marketing_review: 1, marketing_event: 1 });
+    const rv = await reviews("ar-r6");
+    assert.equal(rv.length, 1);
+    assert.equal(rv[0].decision, "request_changes");
+    assert.equal(rv[0].reviewer, "Schneur");
+    assert.equal(rv[0].tenant_id, OASIS);
+    assert.equal(rv[0].acted_on_at, null);
+    // Put the fixture back for the checks that follow.
+    await db.execute(`UPDATE marketing_asset SET status = 'in_review' WHERE id = 'ar-r6'`);
+    await db.execute(`DELETE FROM marketing_review WHERE asset_id = 'ar-r6'`);
+    await db.execute(`DELETE FROM marketing_event WHERE asset_id = 'ar-r6'`);
   });
 
   await check("a note is required: empty, blank, missing, not a string, not an object, broken JSON - 400, nothing read or written", async () => {
@@ -879,7 +914,7 @@ async function main() {
     });
     assert.equal(child.status, 0, `render child failed:\n${child.stderr}`);
     const d = JSON.parse(child.stdout) as {
-      compare: { owner: string; member: string };
+      compare: string;
       cards: Array<{ id: string; hook: string }>;
       actions: Record<string, string>;
       flow: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- the render child's report, asserted field by field below
@@ -889,7 +924,7 @@ async function main() {
     const attr = (tag: string, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1] ?? null;
 
     // The comparison.
-    const html = d.compare.owner;
+    const html = d.compare;
     assert.deepEqual(d.cards.map((c) => c.id), ["v1", "v2", "v3", "vx"], "numbered variants first, the unnumbered one last");
     const order = ["First opening", "Second opening", "Third opening"].map((s) => html.indexOf(s));
     assert.ok(order.every((n) => n > 0) && order[0] < order[1] && order[1] < order[2], `hook lines in variant order: ${order}`);
@@ -909,16 +944,14 @@ async function main() {
     assert.ok(textOf(html).includes("does not schedule or post it"), "the page says what Approve does not do");
     assert.ok(html.includes("Offer: fleet") && html.includes("Captions in picture"), "the read-only badges");
     assert.ok(html.includes("/founders/marketing/asset/v1?from="), "each card links to its asset page");
-    // Request changes: on the in-review variants only, and only for the role.
+    // Request changes: drawn with the other verdicts, on the in-review variants only.
     assert.equal((textOf(html).match(/Request changes/g) ?? []).length, 3, "v1, v3 and vx are in review; v2 is approved");
-    assert.ok(!textOf(d.compare.member).includes("Request changes"), "no button for a seat that would be refused");
-    assert.ok(textOf(d.compare.member).includes("Approve"), "the other verdicts are unchanged for them");
+    assert.equal((textOf(html).match(/Approve/g) ?? []).length >= 4, true, "and beside every variant's Approve");
 
     // The tile's own buttons.
-    assert.ok(textOf(d.actions.inReviewOwner).includes("Request changes"));
-    assert.ok(!textOf(d.actions.inReviewMember).includes("Request changes"));
-    for (const k of ["approvedOwner", "draftOwner", "archivedOwner"]) assert.ok(!textOf(d.actions[k]).includes("Request changes"), `${k}: only an asset in review can be sent back`);
-    const order4 = ["Approve", "Request changes", "Archive", "Delete"].map((s) => textOf(d.actions.inReviewOwner).indexOf(s));
+    assert.ok(textOf(d.actions.inReview).includes("Request changes"));
+    for (const k of ["approved", "draft", "archived"]) assert.ok(!textOf(d.actions[k]).includes("Request changes"), `${k}: only an asset in review can be sent back`);
+    const order4 = ["Approve", "Request changes", "Archive", "Delete"].map((s) => textOf(d.actions.inReview).indexOf(s));
     assert.ok(order4.every((n) => n >= 0) && order4.every((n, i) => i === 0 || order4[i - 1] < n), `Approve / Request changes / Archive / Delete: ${order4}`);
 
     const f = d.flow;
@@ -945,7 +978,7 @@ async function main() {
     assert.ok(f.sent.text.includes("Sent back. The marketing agent will see your note."));
     assert.deepEqual(buttons(f.sent), ["Approve", "Archive", "Delete"], "a draft cannot be sent back again");
     assert.equal(f.refreshes, 1, "the page is refreshed once, so the counts follow");
-    assert.deepEqual(buttons(f.noRole), ["Approve", "Archive", "Delete"]);
+    assert.deepEqual(buttons(f.draftTile), ["Approve", "Archive", "Delete"]);
     // Delete asks first, inside the tile, and Keep takes it back without a request.
     assert.ok(f.deleteAsk.text.includes('Delete "Cut a1" for good? It cannot be undone.'), f.deleteAsk.text);
     assert.deepEqual(buttons(f.deleteAsk), ["Delete for good", "Archive instead", "Keep"]);
@@ -975,11 +1008,14 @@ async function main() {
     assert.equal((compare.match(/<video\b/g) ?? []).length, 1);
     assert.match(compare, /preload="none"/);
     assert.doesNotMatch(compare, /preload="(metadata|auto)"/);
-    // The route's guards, in the order they must run: founder gate, role, id, body.
+    // The route's guards, in the order they must run: the founders gate, the id, the body, the note.
     const route = code("app/api/founders/marketing/assets/[id]/request-changes/route.ts");
     const at = (re: RegExp) => route.search(re);
-    assert.ok(at(/resolveFounder\(\)/) > 0 && at(/resolveFounder\(\)/) < at(/mayRequestChanges\(/), "founder gate before the role gate");
-    assert.ok(at(/mayRequestChanges\(/) < at(/req\.json\(\)/), "the role is checked before the body is read");
+    const gate = /const founder = await resolveFounder\(\);\s*if \(!founder\) return notFound\(\);/;
+    assert.match(route, gate, "the founders gate, answering 404");
+    assert.match(code("app/api/founders/marketing/assets/[id]/route.ts"), gate, "and it is the very gate the sibling verbs open with");
+    assert.ok(at(gate) >= 0 && at(gate) < at(/req\.json\(\)/), "the founders gate runs before the body is read");
+    assert.doesNotMatch(route, /api-auth|role-surfaces|resolvePersona|resolveSessionContext|isTrueAdmin|forbidden|403/, "no check beyond the siblings' own gate");
     assert.ok(at(/req\.json\(\)/) < at(/checkRequestChangesBody\(/) && at(/checkRequestChangesBody\(/) < at(/requestChanges\(\s*getServiceSupabase/), "the note is checked before any database work");
     assert.match(route, /tenantId: founder\.tenantId/, "the workspace comes from the verified founder, never from the request");
     const lib = code("lib/founders/request-changes.ts");

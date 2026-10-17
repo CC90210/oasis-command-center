@@ -23,7 +23,7 @@
  *   agree with the grid. Without it the tile changes and the page still says 39 in review.
  * - Approve moves the asset to approved and does nothing else: it books, schedules and
  *   posts nothing. The poster and the spend gate act on their own.
- * - Request changes (an in-review asset, owners and admins only) opens a note box INSIDE the
+ * - Request changes (an in-review asset, drawn wherever the other verdicts are) opens a note box INSIDE the
  *   tile and will not send without words in it. The note goes to the marketing agent through
  *   POST .../request-changes (lib/founders/request-changes.ts); the asset goes back to draft.
  */
@@ -49,7 +49,6 @@ const NOTE_MAX = 2000;
 const REQUEST_REASON: Record<string, string> = {
   note_required: "Add a note saying what should change.",
   note_too_long: `That note is too long. Keep it under ${NOTE_MAX} characters.`,
-  forbidden: "Only owners and admins can send an asset back for changes.",
   not_in_review: "This asset is no longer in review, so there is nothing to send back.",
   status_changed: "Someone changed this asset first. Reload the page to see where it is now.",
   not_found: "This asset could not be found.",
@@ -59,13 +58,10 @@ export function AssetActions({
   id,
   status,
   title,
-  canRequestChanges = false,
 }: {
   id: string;
   status: AssetStatus;
   title: string;
-  /** Owners and admins only; the route refuses anyone else, this just does not offer the button. */
-  canRequestChanges?: boolean;
 }) {
   const router = useRouter();
   const noteId = useId();
@@ -79,7 +75,9 @@ export function AssetActions({
   const [error, setError] = useState<string | null>(null);
   const [inflight, setInflight] = useState(false);
   const busy = pending || inflight;
-  const canAsk = canRequestChanges && shown === "in_review";
+  // Only an asset waiting on a verdict can be sent back; it is offered wherever the
+  // other verdicts are, to whoever the founders gate admits (the route's own gate).
+  const canAsk = shown === "in_review";
 
   async function verdict(next: Verdict) {
     // Guard synchronously. `pending` only flips inside start(), which runs AFTER

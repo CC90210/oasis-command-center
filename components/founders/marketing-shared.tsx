@@ -299,7 +299,6 @@ export function AssetTile({
   returnTo,
   offerSlug,
   burnedCaptions,
-  canRequestChanges,
 }: {
   id: string;
   title: string;
@@ -326,8 +325,6 @@ export function AssetTile({
   /** meta.offer_slug / meta.burned_captions, shown as read-only badges when set. */
   offerSlug?: string | null;
   burnedCaptions?: boolean;
-  /** Offer Request changes on an in-review tile (owners and admins; the route enforces it). */
-  canRequestChanges?: boolean;
 }) {
   const duration = fmtDuration(durationS);
   const platforms = parsePlatforms(platformsRaw);
@@ -404,7 +401,7 @@ export function AssetTile({
       {/* The verdict lives on the tile. Sending the operator somewhere else to approve
           something they are already looking at is how 39 assets ended up sitting in
           review with no way to clear them. */}
-      <AssetActions id={id} status={status} title={title} canRequestChanges={canRequestChanges} />
+      <AssetActions id={id} status={status} title={title} />
     </div>
   );
 

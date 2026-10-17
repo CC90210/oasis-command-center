@@ -49,11 +49,9 @@ type Mode = "idle" | "together" | "order";
 export function HookCompare({
   heading,
   cards,
-  canRequestChanges,
 }: {
   heading: string;
   cards: HookVariantCard[];
-  canRequestChanges: boolean;
 }) {
   const videos = useRef<Array<HTMLVideoElement | null>>([]);
   // The variant the sequence is on. A ref as well as state: a video's `ended`
@@ -242,12 +240,7 @@ export function HookCompare({
 
             <MetaBadges offerSlug={card.offerSlug} burnedCaptions={card.burnedCaptions} />
 
-            <AssetActions
-              id={card.id}
-              status={card.status}
-              title={card.title}
-              canRequestChanges={canRequestChanges}
-            />
+            <AssetActions id={card.id} status={card.status} title={card.title} />
           </article>
         ))}
       </div>

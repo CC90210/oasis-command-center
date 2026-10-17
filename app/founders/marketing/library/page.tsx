@@ -52,10 +52,7 @@ import Link from "next/link";
 import { LayoutGrid, Smartphone } from "lucide-react";
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
-import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveFounder } from "@/lib/founders/gate";
-import { mayRequestChanges } from "@/lib/founders/request-changes";
-import { resolvePersona } from "@/lib/role-surfaces";
 import {
   assetMetaView,
   hookVariantCards,
@@ -171,7 +168,7 @@ export default async function MarketingLibraryPage({
   // and signs media for those rows only; the tab and pill numbers come from
   // COUNT queries. The page used to read up to 200 rows and sign every one, and
   // the browser then fetched media for every tile: minutes, not seconds.
-  const [pageOrNull, facets, metaFacets, lc, tabCounts, canRequestChanges] = await Promise.all([
+  const [pageOrNull, facets, metaFacets, lc, tabCounts] = await Promise.all([
     safe<LibraryPage | null>(
       "marketing.library",
       loadLibraryPage(founder.tenantId, {
@@ -189,13 +186,6 @@ export default async function MarketingLibraryPage({
       counts: { "oasis-ai": 0, conaugh: 0, downloads: 0, clients: 0 },
       degraded: true,
     }),
-    // Request changes is for owners and admins (the route enforces it; this only
-    // decides whether to draw the button). Fails closed: no session, no button.
-    safe(
-      "marketing.library.reviewer",
-      resolveSessionContext().then((s) => s.ok && mayRequestChanges(resolvePersona(s))),
-      false,
-    ),
   ]);
   // "All N" is the tab's own number (getBrandTabCounts counts what each tab's
   // grid shows: archived and rejected sit behind the Archived pill), so the tab,
@@ -594,7 +584,6 @@ export default async function MarketingLibraryPage({
             <HookCompare
               heading={`${packLabel(pack)} - ${signed.length} ${signed.length === 1 ? "variant" : "variants"}`}
               cards={hookVariantCards(signed, (id) => assetHref(id, thisView))}
-              canRequestChanges={canRequestChanges}
             />
           ) : (
           /* Phones take as many columns as fit at 232px or wider: narrower than
@@ -638,7 +627,6 @@ export default async function MarketingLibraryPage({
                   returnTo={thisView}
                   offerSlug={meta.offerSlug}
                   burnedCaptions={meta.burnedCaptions}
-                  canRequestChanges={canRequestChanges}
                 />
               );
             })}
