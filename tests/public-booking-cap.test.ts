@@ -238,7 +238,7 @@ async function main() {
     assert.match(route, /if \(CONTACT_ERRORS\.has\(errorCode\)\) \{[\s\S]{0,200}await giveBackClaim\(\);\s*return/);
     assert.match(route, /founder_slot_overlap\)\/iu\.test\(error\.message\)\) \{\s*await giveBackClaim\(\);/);
     assert.match(route, /errorCode === "booking_request_cancelled"\) \{\s*await giveBackClaim\(\);/);
-    assert.match(route, /if \(!meeting && PRE_PROVIDER_ERRORS\.has\(errorCode\)\) await giveBackClaim\(\);/, "a failure before Google kept its place, or a later step's error gave one back (Codex review of #670)");
+    assert.match(route, /if \(!meeting && \(PRE_PROVIDER_ERRORS\.has\(errorCode\) \|\| calendarNeverAsked\(error\)\)\) await giveBackClaim\(\);/, "a failure before Google kept its place, or a later step's error gave one back (Codex review of #670)");
     assert.match(route, /if \(!meeting\) \{[\s\S]{0,200}await giveBackClaim\(\);/);
     assert.match(route, /if \(compensated\) await giveBackClaim\(\);/, "a booking left standing gave its place back");
     // Six give-backs, each on a path that returns at once, so no attempt gives back twice.
@@ -289,6 +289,45 @@ async function main() {
     assert.ok(thrownBefore.length >= 8, "the pre-Google throws are gone");
     for (const code of thrownBefore) assert.ok(handled.has(code), `"${code}" is thrown before Google but keeps its hold`);
     assert.ok(service.indexOf("assertSameRequest(appointment", fnAt) < createAt && codes.includes("booking_request_mismatch"), "a reused request id with a changed booking keeps its hold");
+    // A calendar failure in its setup gives back too (Codex review of #670, pass 6),
+    // but only for codes the calendar code throws before it can send any request:
+    // never in the authorized fetch, the token refresh it reruns on a 401, or the
+    // create path once the session is open (lib/integrations/google-calendar.ts).
+    const google = readFileSync(join(ROOT, "lib", "integrations", "google-calendar.ts"), "utf8").replace(/\r\n/g, "\n");
+    const between = (start: string, end: string) => {
+      const from = google.indexOf(start);
+      const to = google.indexOf(end, from + start.length);
+      assert.ok(from >= 0 && to > from, `google-calendar.ts moved: ${start}`);
+      return google.slice(from, to);
+    };
+    const afterRequestCanGoOut = [
+      between("const refresh = async () => {", "const authorizedFetch: AuthorizedCalendarFetch"),
+      between("const authorizedFetch: AuthorizedCalendarFetch", "return { dependencies, bundle: sessionBundle, authorizedFetch"),
+      between("async function refreshAccessToken(", "\nasync function "),
+      between("export async function createFounderMeetingCalendarEvent(", "export async function listGoogleCalendarBusy(")
+        .split("await openAuthorizedCalendarSession(")[1] ?? "",
+      between("const receipt = await createFounderMeetingCalendarEvent(", "export function updateGoogleFounderMeeting("),
+    ];
+    assert.ok(afterRequestCanGoOut.every((part) => part.length > 200), "a google-calendar.ts section is empty");
+    const setupList = route.slice(route.indexOf("const CALENDAR_SETUP_ERRORS = new Set(["), route.indexOf("]);", route.indexOf("const CALENDAR_SETUP_ERRORS")));
+    const setupCodes = [...setupList.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(setupCodes.sort(), ["calendar_organizer_mismatch", "calendar_scope_required", "google_calendar_not_connected", "invalid_request"]);
+    for (const code of setupCodes) {
+      assert.ok(google.includes(`"${code}"`), `"${code}" is not a calendar code`);
+      for (const part of afterRequestCanGoOut) assert.ok(!part.includes(`"${code}"`), `"${code}" can be thrown after a request went out`);
+    }
+    for (const token of ["token_refresh_failed", "workspace_calendar_token_invalid", "google_oauth_config_missing"]) {
+      assert.ok(!setupCodes.includes(token), `"${token}" can come from a refresh in the middle of a call`);
+    }
+    assert.match(
+      route,
+      /return cause instanceof GoogleCalendarIntegrationError && !cause\.eventId && CALENDAR_SETUP_ERRORS\.has\(cause\.code\);/,
+      "a setup give-back must come from the calendar code itself, with no event behind it",
+    );
+    // A handoff note over the service's limit would refuse every booking for that lead.
+    const serviceMax = service.match(/boundedRequired\(input\.handoffNote, (\d+), "handoff_note_required"\)/)?.[1];
+    assert.equal(route.match(/const HANDOFF_NOTE_MAX = (\d+);/)?.[1], serviceMax, "the route's handoff limit is not the service's");
+    assert.match(route, /handoffNote: \(bottleneck \|\| `Public \$\{context\.formSlug\} booking\.`\)\.slice\(0, HANDOFF_NOTE_MAX\),/, "a long answer can block a lead's every booking");
     const calendar = readFileSync(join(ROOT, "components", "forms", "PublicBookingCalendar.tsx"), "utf8");
     assert.match(calendar, /code === "daily_booking_limit"/, "the visitor sees the bare code");
   });
