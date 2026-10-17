@@ -8,6 +8,17 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
+import { tursoConfigured } from "@/lib/turso";
+
+/**
+ * Turso holds the leads: the same switch getServiceSupabase reads
+ * (lib/supabase-server.ts). Otherwise the deploy has been rolled back to
+ * Supabase, and a stamp written to Turso would land on a stale copy of the lead
+ * (Codex review of #677).
+ */
+export function tursoHoldsTheLeads(env: Record<string, string | undefined> = process.env): boolean {
+  return env.EMPIRE_DATA_BACKEND === "turso_cloud" && tursoConfigured();
+}
 
 /**
  * Claim this lead's details-only alert, once. One statement stamps
@@ -30,4 +41,30 @@ export async function claimDetailsOnlyAlert(
     args: [at, at, input.tenantId, input.leadId],
   });
   return res.rows.length > 0;
+}
+
+/** The part of the service client the rollback path uses. */
+type LeadPatcher = {
+  rpc(name: string, args: Record<string, unknown>): PromiseLike<{ error: unknown }>;
+};
+
+/**
+ * The same claim when the deploy is rolled back to Supabase: judged on the lead
+ * as just read, then stamped through patch_tenant_record_data. Not atomic, so
+ * two racing requests can both alert; acceptable on a rollback-only path, and
+ * still never for a lead that is stamped or booked.
+ */
+export async function claimDetailsOnlyAlertLegacy(
+  service: LeadPatcher,
+  input: { tenantId: string; leadId: string; lead: Record<string, unknown>; now: Date },
+): Promise<boolean> {
+  if (input.lead.details_only_alerted_at) return false;
+  const appointment = input.lead.calendar_appointment_id;
+  if (typeof appointment === "string" && appointment.trim()) return false;
+  const res = await service.rpc("patch_tenant_record_data", {
+    p_id: input.leadId,
+    p_tenant_id: input.tenantId,
+    p_patch: { details_only_alerted_at: input.now.toISOString() },
+  });
+  return !res.error;
 }

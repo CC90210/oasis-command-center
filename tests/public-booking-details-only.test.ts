@@ -14,7 +14,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { buildDetailsOnlyLeadAlert } from "../lib/forms/public-booking-alert";
-import { claimDetailsOnlyAlert } from "../lib/forms/public-booking-details-only";
+import { publicBookingDetailsOnlySchema } from "../lib/forms/public-booking";
+import {
+  claimDetailsOnlyAlert,
+  claimDetailsOnlyAlertLegacy,
+  tursoHoldsTheLeads,
+} from "../lib/forms/public-booking-details-only";
 
 async function check(name: string, fn: () => void | Promise<void>) {
   await fn();
@@ -71,13 +76,68 @@ async function main() {
     db.close();
   });
 
-  await check("the route is same-origin, rate-limited, token-proven, /book only, and claims before it alerts the sales desk", () => {
+  await check("a rolled-back deploy (leads on Supabase) claims through the lead it read, and never for a stamped or booked lead (Codex review of #677)", async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const service = (error: unknown = null) => ({
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args });
+        return { error };
+      },
+    });
+    const now = new Date("2026-10-17T15:00:00.000Z");
+    const base = { tenantId: OASIS, leadId: "lead-1", now };
+    assert.equal(await claimDetailsOnlyAlertLegacy(service(), { ...base, lead: { name: "Dana" } }), true);
+    assert.deepEqual(calls.pop(), {
+      name: "patch_tenant_record_data",
+      args: { p_id: "lead-1", p_tenant_id: OASIS, p_patch: { details_only_alerted_at: now.toISOString() } },
+    });
+    assert.equal(await claimDetailsOnlyAlertLegacy(service(), { ...base, lead: { details_only_alerted_at: "earlier" } }), false);
+    assert.equal(await claimDetailsOnlyAlertLegacy(service(), { ...base, lead: { calendar_appointment_id: "appt-1" } }), false);
+    assert.equal(calls.length, 0, "a stamped or booked lead was written to");
+    assert.equal(await claimDetailsOnlyAlertLegacy(service({ message: "down" }), { ...base, lead: {} }), false, "a failed stamp still alerted");
+  });
+
+  await check("Turso holds the leads only on the turso_cloud backend with Turso configured, the switch getServiceSupabase reads", () => {
+    const saved = { url: process.env.TURSO_DATABASE_URL, path: process.env.TURSO_DB_PATH, dbUrl: process.env.TURSO_DB_URL };
+    try {
+      process.env.TURSO_DATABASE_URL = "libsql://example.turso.io";
+      assert.equal(tursoHoldsTheLeads({ EMPIRE_DATA_BACKEND: "turso_cloud" }), true);
+      assert.equal(tursoHoldsTheLeads({ EMPIRE_DATA_BACKEND: "supabase_legacy" }), false, "a rolled-back deploy stamped Turso");
+      assert.equal(tursoHoldsTheLeads({}), false);
+      delete process.env.TURSO_DATABASE_URL;
+      delete process.env.TURSO_DB_PATH;
+      delete process.env.TURSO_DB_URL;
+      assert.equal(tursoHoldsTheLeads({ EMPIRE_DATA_BACKEND: "turso_cloud" }), false, "an unconfigured Turso was written to");
+    } finally {
+      for (const [k, v] of [["TURSO_DATABASE_URL", saved.url], ["TURSO_DB_PATH", saved.path], ["TURSO_DB_URL", saved.dbUrl]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  await check("the request body is exactly a token and a known reason (Codex review of #677)", () => {
+    assert.deepEqual(publicBookingDetailsOnlySchema.safeParse({ token: "t", reason: "no_times" }), { success: true, data: { token: "t", reason: "no_times" } });
+    assert.equal(publicBookingDetailsOnlySchema.safeParse({ token: "t", reason: "other" }).success, false);
+    assert.equal(publicBookingDetailsOnlySchema.safeParse({ token: "t" }).success, false);
+    assert.equal(publicBookingDetailsOnlySchema.safeParse({ token: "t", reason: "no_times", tenant_id: "x" }).success, false, "an extra field was accepted");
+    assert.equal(publicBookingDetailsOnlySchema.safeParse({ token: "x".repeat(4097), reason: "no_times" }).success, false);
+  });
+
+  await check("the route is same-origin, rate-limited, capped, token-proven, /book only, and claims before it alerts the sales desk", () => {
     const route = read("app", "api", "forms", "booking", "details-only", "route.ts");
     assert.match(route, /if \(!sameOrigin\(req\)\) \{\s*return NextResponse\.json\(\{ ok: false, error: "cross_origin_refused" \}, \{ status: 403 \}\);/);
     assert.match(route, /rateLimit\(\{ key: `public-booking-details-only:\$\{getClientIp\(req\)\}`/);
+    assert.match(route, /publicBookingDetailsOnlySchema\.safeParse\(await readPublicBookingJson\(req\)\)/, "the body is read without the 8 KB cap");
+    assert.doesNotMatch(route, /req\.json\(/, "the body is read without the 8 KB cap");
     assert.match(route, /context = await resolvePublicFunnelBooking\(db, token\);/);
     assert.match(route, /if \(context\.formSlug !== BOOK_FORM_SLUG\) \{/, "any form's lead could raise the /book alert");
-    const claimAt = route.indexOf("await claimDetailsOnlyAlert(getTursoClient(), {");
+    assert.match(
+      route,
+      /const claimed = tursoHoldsTheLeads\(\)\s*\? await claimDetailsOnlyAlert\(getTursoClient\(\), claim\)\s*: await claimDetailsOnlyAlertLegacy\(db, \{ \.\.\.claim, lead: context\.lead \}\);/,
+      "the claim ignores which store holds the leads",
+    );
+    const claimAt = route.indexOf("const claimed = tursoHoldsTheLeads()");
     assert.ok(claimAt > 0 && claimAt < route.indexOf("await pushWorkspaceAlert("), "the alert is sent before it is claimed");
     assert.match(route, /if \(!claimed\) return NextResponse\.json\(\{ ok: true, alerted: false \}\);/);
     assert.match(route, /\{ desk: "sales" \},/, "the alert does not go to the sales desk");

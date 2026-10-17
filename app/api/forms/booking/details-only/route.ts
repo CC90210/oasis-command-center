@@ -4,10 +4,18 @@ import { sameOrigin } from "@/lib/calendar/http";
 import { AI_AUDIT_ALERT_SOURCE } from "@/lib/forms/ai-audit-notify";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
-import { resolvePublicFunnelBooking } from "@/lib/forms/public-booking";
+import {
+  publicBookingDetailsOnlySchema,
+  readPublicBookingJson,
+  resolvePublicFunnelBooking,
+} from "@/lib/forms/public-booking";
 import { buildDetailsOnlyLeadAlert, type DetailsOnlyReason } from "@/lib/forms/public-booking-alert";
 import { BOOK_FORM_SLUG } from "@/lib/forms/public-booking-config";
-import { claimDetailsOnlyAlert } from "@/lib/forms/public-booking-details-only";
+import {
+  claimDetailsOnlyAlert,
+  claimDetailsOnlyAlertLegacy,
+  tursoHoldsTheLeads,
+} from "@/lib/forms/public-booking-details-only";
 import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 import { rateLimit } from "@/lib/rate-limit";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -37,12 +45,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!limit.allowed) {
     return NextResponse.json({ ok: false, error: "rate_limited", retry_in_sec: limit.resetIn }, { status: 429 });
   }
-  const body = (await req.json().catch(() => null)) as { token?: unknown; reason?: unknown } | null;
-  const token = text(body?.token);
-  if (!token || token.length > 4096) {
-    return NextResponse.json({ ok: false, error: "invalid_booking_token" }, { status: 400 });
+  // The booking routes' own capped reader and strict shape: an anonymous body
+  // is read through an 8 KB cap and must hold exactly these two fields (Codex
+  // review of #677).
+  const parsed = publicBookingDetailsOnlySchema.safeParse(await readPublicBookingJson(req));
+  if (!parsed.success) {
+    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
-  const reason: DetailsOnlyReason = body?.reason === "no_times" ? "no_times" : "calendar_error";
+  const token = parsed.data.token;
+  const reason = parsed.data.reason as DetailsOnlyReason;
 
   const db = getServiceSupabase();
   let context: Awaited<ReturnType<typeof resolvePublicFunnelBooking>>;
@@ -55,11 +66,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: "not_a_book_lead" }, { status: 400 });
   }
 
-  const claimed = await claimDetailsOnlyAlert(getTursoClient(), {
-    tenantId: context.tenantId,
-    leadId: context.leadId,
-    now: new Date(),
-  });
+  // Claimed on whichever store holds the leads: Turso, or Supabase on a rolled-back deploy.
+  const claim = { tenantId: context.tenantId, leadId: context.leadId, now: new Date() };
+  const claimed = tursoHoldsTheLeads()
+    ? await claimDetailsOnlyAlert(getTursoClient(), claim)
+    : await claimDetailsOnlyAlertLegacy(db, { ...claim, lead: context.lead });
   if (!claimed) return NextResponse.json({ ok: true, alerted: false });
 
   const combined = { ...context.answers, ...context.lead };
