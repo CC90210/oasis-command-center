@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { MeetEnded } from "@/components/meet/MeetEnded";
-import { MeetRoom } from "@/components/meet/MeetRoom";
+import { MeetRoomLive } from "@/components/meet/MeetRoomLive";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getTursoClient } from "@/lib/turso";
 import { loadMeetPage, sessionOrVisitor } from "./load";
@@ -38,6 +38,6 @@ export default async function MeetPage({ params }: { params: Promise<{ code: str
     case "ended":
       return <MeetEnded reason="room_closed" isHost={data.viewer === "host"} />;
     case "room":
-      return <MeetRoom {...data.props} />;
+      return <MeetRoomLive {...data.props} />;
   }
 }

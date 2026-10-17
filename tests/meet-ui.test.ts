@@ -162,6 +162,14 @@ async function main() {
     assert.equal(mayAskForDevices({ needsNotice: false, ticked: false }), true, "no notice to tick: the camera step is open");
   });
 
+  await check("the Meet button sits at the far right of the Schedule's toolbar, and a meeting for later refreshes the calendar", () => {
+    const toolbar = readFileSync(join(root, "components", "calendar", "Toolbar.tsx"), "utf8");
+    const right = toolbar.slice(toolbar.indexOf('<div className="ml-auto flex items-center gap-1">'));
+    assert.ok(right.indexOf("{meet ?") > right.indexOf('role="group" aria-label="View"'), "after the view switcher, the last thing on the right");
+    const app = readFileSync(join(root, "components", "calendar", "CalendarApp.tsx"), "utf8");
+    assert.match(app, /meet=\{<MeetPanel onScheduleAdded=\{\(\) => void data\.reload\(\)\}/, "the panel's 'added to your Schedule' reloads the events");
+  });
+
   await check("a refused join shows the field the server asked for, read from its code, not its words", () => {
     assert.deepEqual(preJoinNeeds({ viewer: "host", recordAudio: true, failedCode: null }), { notice: false, name: false });
     assert.deepEqual(preJoinNeeds({ viewer: "visitor", recordAudio: true, failedCode: null }), { notice: true, name: true });
@@ -731,7 +739,7 @@ async function main() {
     assert.match(page, /params: Promise<\{ code: string \}>/);
     assert.match(page, /notFound\(\);/);
     assert.match(page, /redirect\(data\.to\);/);
-    assert.match(page, /<MeetRoom \{\.\.\.data\.props\} \/>/);
+    assert.match(page, /<MeetRoomLive \{\.\.\.data\.props\} \/>/, "the room, with the host-browser recorder plugged in (components/meet/MeetRoomLive.tsx)");
     assert.match(page, /robots: \{ index: false, follow: false \}/);
     for (const secret of ["tenantId", "hostUserId", "leadId"]) assert.ok(!page.includes(secret), `the page names ${secret}`);
   });

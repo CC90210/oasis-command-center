@@ -31,6 +31,7 @@ import { ShortcutsDialog } from "./ShortcutsDialog";
 import { Sidebar } from "./Sidebar";
 import { TimeGrid } from "./TimeGrid";
 import { Toolbar } from "./Toolbar";
+import { MeetPanel } from "@/components/meet/MeetPanel";
 import { CalendarApiError, messageFor, useCalendarData } from "./useCalendarData";
 import { useReminders } from "./useReminders";
 import { YearView } from "./YearView";
@@ -444,6 +445,7 @@ export function CalendarApp() {
         onQuery={setQuery}
         onSettings={() => setPanel({ kind: "settings" })}
         onShortcuts={() => setPanel({ kind: "shortcuts" })}
+        meet={<MeetPanel onScheduleAdded={() => void data.reload()} />}
       />
       {data.truncated && <p className="border-b border-hairline bg-status-warm/10 px-4 py-1.5 text-[12px] text-fg">Showing your first 5,000 events. Older ones are not loaded.</p>}
       <div className="relative flex min-h-0 flex-1">
