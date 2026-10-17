@@ -26,7 +26,6 @@ import { check, finish, OASIS, setupDatabase } from "./_delivery-harness";
 import {
   contactGateAction,
   contactHandoff,
-  firstContactStepIndex,
   hasReachableContact,
   isContactField,
   typedContact,
@@ -67,6 +66,17 @@ const PHONE_FIRST_STEPS = [
   { key: "about", title: "About you", fields: [text("name", "text"), text("phone", "phone", false)] },
   { key: "email", title: "Where to send it", fields: [text("email", "email")] },
 ];
+// A router that asks for an email only on one path (Codex review of #668).
+const BRANCH_STEPS = [
+  {
+    key: "path",
+    title: "Which is you?",
+    fields: [
+      select("path", ["browse", "talk"]),
+      { ...text("email", "email", false), show_if: { field: "path", equals: "talk" } },
+    ],
+  },
+];
 const VSL_STEPS = [
   { key: "path", title: "Which is you?", fields: [select("path", ["community", "audit"])] },
   { key: "budget", title: "Budget", fields: [select("budget", ["none_yet", "some"], false)] },
@@ -96,6 +106,10 @@ async function main() {
     {
       sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, on_complete_stage) VALUES ('form-community', ?, 'community', 'COMMUNITY', ?, 'researched')",
       args: [OASIS, JSON.stringify(COMMUNITY_STEPS)],
+    },
+    {
+      sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, redirect_url) VALUES ('form-branch', ?, 'branch-router', 'Branch', ?, 'https://oasisai.work/thanks')",
+      args: [OASIS, JSON.stringify(BRANCH_STEPS)],
     },
     {
       sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('form-phone-first', ?, 'phone-first', 'Phone first', ?)",
@@ -137,8 +151,9 @@ async function main() {
     assert.equal(isContactField({ name: "work_email", type: "email" }), true);
     assert.equal(isContactField({ name: "owner_cell", type: "text" }), true);
     assert.equal(isContactField({ name: "has_budget", type: "select" }), false);
-    assert.equal(firstContactStepIndex(COMMUNITY_STEPS), 1);
-    assert.equal(firstContactStepIndex(VSL_STEPS), -1);
+    assert.equal(COMMUNITY_STEPS[0].fields.some(isContactField), false, "COMMUNITY's questions ask no contact");
+    assert.equal(COMMUNITY_STEPS[1].fields.some(isContactField), true);
+    assert.equal(VSL_STEPS.some((step) => step.fields.some(isContactField)), false, "the router never asks");
     assert.equal(hasReachableContact({ email: "ada@example.com" }), true);
     assert.equal(hasReachableContact({ phone: "+1 514 555 0142" }), true);
     assert.equal(hasReachableContact({ owner_cell: "(514) 555-0142" }), true);
@@ -313,11 +328,34 @@ async function main() {
     assert.equal(await rows(), rowsBefore, "the router stored answers");
   });
 
+  await check("a contact field hidden by its condition never blocks the route; a shown one does (Codex review of #668)", async () => {
+    const [leadsBefore, rowsBefore] = [await leads(), await rows()];
+    const hidden = await post({ step_index: 0, anonymous_init: anon("branch-router"), route_only: true, steps_payload: [{ path: "browse" }] });
+    assert.equal(hidden.status, 200, JSON.stringify(hidden.json));
+    assert.equal(hidden.json.redirect_url, "https://oasisai.work/thanks");
+    const shown = await post({ step_index: 0, anonymous_init: anon("branch-router"), route_only: true, steps_payload: [{ path: "talk" }] });
+    assert.equal(shown.status, 400);
+    assert.equal(shown.json.error, "contact_required", "a visitor shown an email field skipped their lead");
+    assert.equal(await leads(), leadsBefore);
+    assert.equal(await rows(), rowsBefore);
+  });
+
   await check("the router path is refused for a form with a contact step, a missing answer, or a lead token", async () => {
     const [leadsBefore, rowsBefore] = [await leads(), await rows()];
+    // COMMUNITY's contact step is required, so the router path stops at it like
+    // any submission would; a shown-but-optional one answers contact_required
+    // (the branch-router check above).
     const contactForm = await post({ step_index: 2, anonymous_init: anon("community"), route_only: true, steps_payload: [gateAnswers, {}, {}] });
     assert.equal(contactForm.status, 400);
-    assert.equal(contactForm.json.error, "contact_required", "a form that collects contact skipped its lead");
+    assert.equal(contactForm.json.error, "missing_required_field", "a form that collects contact skipped its lead");
+    const filledButNoContact = await post({
+      step_index: 2,
+      anonymous_init: anon("community"),
+      route_only: true,
+      steps_payload: [gateAnswers, { name: "No Contact", email: "not-an-email" }, {}],
+    });
+    assert.equal(filledButNoContact.status, 400);
+    assert.equal(filledButNoContact.json.error, "contact_required", "a shown email field, filled with junk, skipped the lead");
     const blank = await post({ step_index: 1, anonymous_init: anon("vsl"), route_only: true, steps_payload: [{}, {}] });
     assert.equal(blank.status, 400);
     assert.equal(blank.json.error, "missing_required_field");

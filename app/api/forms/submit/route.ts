@@ -112,8 +112,8 @@ import { consentDecisionsForStep } from "@/lib/consent/ledger-disclosure";
 import { parseFormRouting } from "@/lib/forms/routing";
 import {
   contactHandoff,
-  firstContactStepIndex,
   hasReachableContact,
+  isContactField,
   typedContact,
   LEAD_COMPANY_KEYS,
   LEAD_EMAIL_KEYS,
@@ -497,9 +497,6 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   if (steps.length === 0) {
     return NextResponse.json({ ok: false, error: "step_index_out_of_range", max: -1 }, { status: 400 });
   }
-  if (firstContactStepIndex(steps) !== -1) {
-    return NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 });
-  }
   const given = Array.isArray(body.steps_payload) ? body.steps_payload : null;
   if (!given || given.length !== steps.length) {
     return NextResponse.json({ ok: false, error: "invalid_step_index" }, { status: 400 });
@@ -522,6 +519,13 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   }
   const last = steps.length - 1;
   const answers = buildAnswerContext(steps, rows.slice(0, last), last, rows[last].payload);
+  // A form that SHOWED this visitor an email or phone field starts its lead the
+  // ordinary way, at that step: contact_required tells them what is missing.
+  // A field its conditions hid for these answers is not one they could fill,
+  // so it never blocks the route (Codex review of #668).
+  if (steps.some((step) => step.fields.some((field) => isContactField(field) && isFieldVisible(field, answers)))) {
+    return NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 });
+  }
   let routeTo: string | null = null;
   try {
     // Its own query, as in handleSubmit: forms.routing is a later migration.

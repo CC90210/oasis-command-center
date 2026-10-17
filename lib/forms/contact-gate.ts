@@ -41,11 +41,6 @@ export function isContactField(field: { name: string; type: string }): boolean {
     EMAIL_KEYS.includes(field.name) || PHONE_KEYS.includes(field.name);
 }
 
-/** The first step that asks for an email or phone, or -1 when the form never does. */
-export function firstContactStepIndex(steps: ReadonlyArray<{ fields: ReadonlyArray<{ name: string; type: string }> }>): number {
-  return steps.findIndex((step) => step.fields.some(isContactField));
-}
-
 /**
  * The email and phone a step's own typed fields hold, under the standard
  * names. The form builder names a renamed field by its label (`work_email`),
