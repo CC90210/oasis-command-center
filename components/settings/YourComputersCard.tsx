@@ -94,7 +94,7 @@ function blockedWords(reason: string): string {
  * presenceWords', the computer's words on every screen.
  */
 function rowLine(label: string, state: ComputerAnswerState, claimStateAt: string | null, lastSeenAt: string | null): string {
-  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt)}`;
+  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt, { moment: true })}`;
   if (state === "busy") return `${label} · ${presenceWords("busy")}, finishing a reply`;
   if (state === "not_approved") return `${label} · ${runtimeStatusWords("approval_needed")}`;
   if (state === "offline") return `${label} · ${presenceWords("offline", lastSeenAt)}`;
@@ -129,7 +129,7 @@ function teamRowLine(
   lastSeenAt: string | null,
   nowMs: number,
 ): string {
-  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt)}`;
+  if (state === "can_answer") return `${label} · ${runtimeStatusWords("ready")}, checked ${timeAgo(claimStateAt, { moment: true })}`;
   if (state === "busy") return `${label} · ${presenceWords("busy")}, finishing a reply`;
   if (state === "not_approved") {
     const presence = presenceWords(machineState(lastSeenAt, nowMs), lastSeenAt);

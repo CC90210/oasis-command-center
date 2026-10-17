@@ -201,7 +201,7 @@ async function main(): Promise<void> {
   console.log("  ok - the same computers read the same words on AI brain and Devices");
 
   // The Devices row line uses the same words for the computer's own state.
-  assert.equal(out.devices["Studio PC"].row, "Studio PC · Ready for agents, checked just now");
+  assert.equal(out.devices["Studio PC"].row, "Studio PC · Ready for agents, checked 5 s ago");
   assert.equal(out.devices.Laptop.row, "Laptop · Approval needed");
   assert.match(out.devices.Tower.row, /^Tower · Offline since /);
   assert.match(out.caption, /Each app reads the same here as in Settings > AI brain\. “Needs test” means it is installed and signed in/);
@@ -211,7 +211,7 @@ async function main(): Promise<void> {
   assert.equal(out.team.present, true);
   assert.equal(out.team.open, true, "Team computers starts open (a closed list read as none)");
   assert.deepEqual(out.team.rows, [
-    "Riley's laptop · Ready for agents, checked just now · Riley's computer",
+    "Riley's laptop · Ready for agents, checked 5 s ago · Riley's computer",
     "Riley's desktop · Online · Approval needed from Riley",
     "Riley's old PC · Idle · Approval needed from Riley",
   ]);
