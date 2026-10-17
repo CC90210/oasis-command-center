@@ -270,7 +270,20 @@ await check("a failed stage write blocks only a calendar that waits for it, neve
     "the unlock must be read from the lead BEFORE this step's finish write",
   );
   for (const slug of ["vsl", "support"]) assert.equal(publicBookingCompletionGatesCalendar(slug), false, `${slug} has no calendar`);
-  assert.equal(submitRoute.match(/funnel_stage_write_unavailable/g)?.length, 1, "one place answers the stage-write failure");
+  // Three places answer it: the finish write, and (book sooner) the contact
+  // step's own record, on a signed link and for a returning visitor, so the
+  // early calendar never opens over stale contact details (Codex review of #667).
+  assert.equal(submitRoute.match(/funnel_stage_write_unavailable/g)?.length, 3, "a stage-write failure answered somewhere unexpected");
+  assert.match(
+    submitRoute,
+    /if \(contactRecorded\.error\) \{[\s\S]{0,700}return NextResponse\.json\(\{ ok: false, error: "funnel_stage_write_unavailable" \}, \{ status: 503 \}\);/,
+    "a failed signed-link contact record must refuse the step, not open the calendar",
+  );
+  assert.match(
+    submitRoute,
+    /if \(mergedWrite\.error && isBookableOasisIntake && isEarlyPublicBookingFormSlug\(form\.slug\)\) \{[\s\S]{0,400}return \{ ok: false, error: "funnel_stage_write_unavailable", status: 503 \};/,
+    "a returning visitor's failed contact merge must refuse the step on an early form",
+  );
   // CodeRabbit on #655: nothing retries an optional form's step (it answered
   // 200), so the route retries the same merge once after the response.
   const failure = submitRoute.slice(
