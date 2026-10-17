@@ -96,6 +96,7 @@ type LoadResult =
       prefill: Record<string, unknown>;
       /** The lead already finished the form (funnel stage), so the calendar may open straight away. */
       bookingReady: boolean;
+      callBooked: boolean;
     }
   | { ok: false; reason: "token" | "tenant_mismatch" | "form_disabled" | "form_corrupt" | "not_found"; detail?: string };
 
@@ -231,6 +232,10 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
   // form), never an error.
   const prefill: Record<string, unknown> = {};
   let bookingReady = false;
+  // The lead already has its call (the same signal the availability route
+  // refuses with already_booked): the form must not offer the calendar again,
+  // after a reload or from another tab (Codex review of #667).
+  let callBooked = false;
   try {
     const leadRow = await db
       .from("tenant_records")
@@ -245,6 +250,7 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
       // meeting_booked would get a calendar whose availability answers
       // already_booked, so it showed "already has a meeting" over an empty grid.
       bookingReady = ld.funnel_stage === "audit_requested" && isPublicFunnelReadyForBooking(ld);
+      callBooked = typeof ld.calendar_appointment_id === "string" && ld.calendar_appointment_id.trim() !== "";
       for (const k of PREFILL_LEAD_KEYS) {
         const v = ld[k];
         if (v !== undefined && v !== null && v !== "") prefill[k] = v;
@@ -258,6 +264,7 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
     ok: true,
     prefill,
     bookingReady,
+    callBooked,
     form: {
       id: form.id,
       tenant_id: form.tenant_id,
@@ -337,6 +344,7 @@ export default async function PublicFormPage({
       // The homepage form submitted the contact step: the AI audit books
       // right after it, so the page opens on the calendar (book sooner).
       contactStepHandoff={initialStep !== undefined}
+      callBooked={result.callBooked}
       redirectUrl={result.form.redirect_url}
       token={result.token}
       prefill={result.prefill}

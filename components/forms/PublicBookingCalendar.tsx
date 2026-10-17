@@ -130,6 +130,9 @@ export function PublicBookingCalendar({
       const data = await response.json() as Availability;
       setAvailability(data);
       if (!response.ok || !data.ok) setError(friendlyError(data.error));
+      // Booked from another tab, or before a reload: the questions that follow
+      // end on the booked "All set", never on this calendar again.
+      if (data.error === "already_booked") early?.onBooked();
     } catch {
       setAvailability({ ok: false, error: "network" });
       setError(friendlyError("network"));
@@ -174,6 +177,7 @@ export function PublicBookingCalendar({
       const data = await response.json() as Receipt | { ok: false; error?: string };
       if (!response.ok || !data.ok) {
         setError(friendlyError("error" in data ? data.error : undefined));
+        if ("error" in data && data.error === "already_booked") early?.onBooked();
         if ("error" in data && (data.error === "slot_unavailable" || data.error === "retry_required")) {
           bookingRequest.current = null;
         }

@@ -159,6 +159,22 @@ check("a homepage visitor (contact step already sent) lands on the early calenda
   assert.match(page, /const initialStep =\s*result\.tenant_slug === AI_AUDIT_TENANT_SLUG &&\s*result\.form\.slug === AI_AUDIT_SLUG &&\s*sp\[AUDIT_FORM_HANDOFF\.markerParam\]/);
 });
 
+check("a lead whose call is already booked is never offered the calendar again (Codex review of #667)", () => {
+  assert.ok(!html.handoffAlreadyBooked.includes(EARLY_HEADING), "a reload opened the calendar over a booked call");
+  assert.ok(html.handoffAlreadyBooked.includes("Step 2 / 4"), "the booked visitor did not resume at the questions");
+  assert.ok(html.auditFinishedAlreadyBooked.includes("Thanks. Your answers are in, and Conaugh reads every one personally."));
+  assert.ok(!html.auditFinishedAlreadyBooked.includes(REQUIRED_HEADING), "finishing after a reload ended on a calendar");
+  // PROTOCOL's own thanks is its next step: a booked call never replaces it.
+  assert.ok(html.protocolFinishedAlreadyBooked.includes(THANKS));
+  assert.ok(!html.protocolFinishedAlreadyBooked.includes("Your answers are in"));
+  const page = readFileSync("app/f/[tenant_slug]/[form_slug]/[lead_token]/page.tsx", "utf8");
+  assert.match(page, /callBooked = typeof ld\.calendar_appointment_id === "string" && ld\.calendar_appointment_id\.trim\(\) !== "";/);
+  assert.match(page, /callBooked=\{result\.callBooked\}/);
+  const calendar = readFileSync("components/forms/PublicBookingCalendar.tsx", "utf8");
+  assert.match(calendar, /if \(data\.error === "already_booked"\) early\?\.onBooked\(\);/, "a second tab's open times do not learn of the booking");
+  assert.match(calendar, /if \("error" in data && data\.error === "already_booked"\) early\?\.onBooked\(\);/, "a second tab's booking attempt does not learn of it");
+});
+
 check("the form opens the early calendar once, after the contact step, on both submit paths", () => {
   const src = readFileSync("components/forms/FormPublicClient.tsx", "utf8");
   assert.match(

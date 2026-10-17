@@ -70,6 +70,29 @@ console.log(
     resumeAtStep2: renderToStaticMarkup(
       React.createElement(FormPublicClient, { ...base, tenantSlug: "oasis-ai-cc", formSlug: "ai-audit", token: "token", initialStep: 1 }),
     ),
+    // The lead already has its call (a reload, or a second tab): no calendar
+    // again, and the last screen is the booked "All set" (Codex review of #667).
+    handoffAlreadyBooked: renderToStaticMarkup(
+      React.createElement(FormPublicClient, {
+        ...base, tenantSlug: "oasis-ai-cc", formSlug: "ai-audit", token: "token", initialStep: 1, contactStepHandoff: true, callBooked: true,
+      }),
+    ),
+    auditFinishedAlreadyBooked: renderToStaticMarkup(
+      React.createElement(FormPublicClient, {
+        ...base, tenantSlug: "oasis-ai-cc", formSlug: "ai-audit", resumeBooking: true, callBooked: true,
+      }),
+    ),
+    protocolFinishedAlreadyBooked: renderToStaticMarkup(
+      React.createElement(FormPublicClient, {
+        ...base,
+        branding: { ...base.branding, thanks_message: THANKS },
+        tenantSlug: "oasis-ai-cc",
+        formSlug: "protocol",
+        resumeBooking: true,
+        callBooked: true,
+        prefill: PHONE,
+      }),
+    ),
     handoffOnProtocol: renderToStaticMarkup(
       React.createElement(FormPublicClient, {
         ...base, tenantSlug: "oasis-ai-cc", formSlug: "protocol", token: "token", initialStep: 1, contactStepHandoff: true,

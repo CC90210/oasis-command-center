@@ -98,6 +98,12 @@ type Props = {
    * Like resumeBooking, a convenience: the booking API checks the step itself.
    */
   contactStepHandoff?: boolean;
+  /**
+   * The lead already has its call booked (the server page read it on the
+   * lead): the calendar is not offered again, and finishing the questions
+   * ends on the booked "All set", after a reload or from a second tab.
+   */
+  callBooked?: boolean;
   redirectUrl: string | null;
   /**
    * Pre-signed HMAC token tied to a specific lead — used by Solara's
@@ -323,6 +329,7 @@ export function FormPublicClient({
   initialStep,
   resumeBooking,
   contactStepHandoff = false,
+  callBooked = false,
   redirectUrl,
   token: initialToken,
   anonymousInit,
@@ -407,12 +414,17 @@ export function FormPublicClient({
     tenantSlug && formSlug && steps.length > 1 &&
       isPublicBookingSurface({ tenantSlug, formSlug }) && isEarlyPublicBookingFormSlug(formSlug),
   );
+  // Only these forms end on "All set" once booked: PROTOCOL's and COMMUNITY's
+  // own thanks carry their next step (the checkout email, the community link).
+  const alreadyBooked = callBooked && booksAfterContact;
   // A homepage visitor arrives with the contact step already submitted.
-  const opensOnCalendar = contactStepHandoff && booksAfterContact && currentStep > 0;
+  const opensOnCalendar = contactStepHandoff && booksAfterContact && currentStep > 0 && !alreadyBooked;
   const [earlyCalendarStep, setEarlyCalendarStep] = useState<number | null>(() => (opensOnCalendar ? currentStep : null));
-  const earlyCalendarOffered = useRef(opensOnCalendar);
-  // A call booked from that calendar: the remaining questions are optional.
-  const [bookedEarly, setBookedEarly] = useState(false);
+  // A lead whose call is already booked is never offered the calendar again.
+  const earlyCalendarOffered = useRef(opensOnCalendar || alreadyBooked);
+  // A call booked from that calendar (or before this page opened): the
+  // remaining questions are optional.
+  const [bookedEarly, setBookedEarly] = useState(alreadyBooked);
   const [skippedQuestions, setSkippedQuestions] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
