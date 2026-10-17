@@ -122,6 +122,34 @@ assert.match(source, /submissionPath: window\.location\.pathname/, "the exact pu
 assert.match(source, /visitId: getOrCreateVisitId\(\)/, "the established per-tab visit id is submitted");
 assert.match(source, /auditFormContinuationPath\(nextPath, context\)/, "the same attribution context survives the personalized hop");
 
+// 3b. The honeypot (lib/forms/honeypot.ts, #671): the box is the form's last
+// child. A filled one ends in one place (endTrapped): one report with no
+// answers, then a plain thanks with no lead link, funnel or calendar. It is
+// read on submit BEFORE the form's own checks and tracking, and on the
+// browser's "invalid" event, which fires instead of submit when a script
+// leaves a required box blank (Codex review of #672).
+assert.match(source, /<HoneypotField inputRef=\{trapRef\} \/>\s*<\/form>/, "the honeypot box must be the form's last child");
+assert.match(
+  source,
+  /async function endTrapped\(trapped: string\) \{\s*inFlight\.current = true;\s*await reportTrappedSubmission\(\s*\{ anonymous_init: \{ tenant_slug: AUDIT_FUNNEL\.tenantSlug, form_slug: AUDIT_FUNNEL\.formSlug \}, step_index: 0 \},\s*trapped,\s*\);\s*setStatus\("trapped"\);\s*\}/,
+  "a trapped submit reports without the answers and ends on the thanks, with no hand-off",
+);
+const submitAt = source.indexOf("async function onSubmit(");
+const trapAt = source.indexOf("const trapped = trapValue(trapRef.current, trapLatch);", submitAt);
+assert.ok(trapAt > source.indexOf("inFlight.current = true;", submitAt), "the trap must run inside the in-flight guard");
+assert.ok(trapAt < source.indexOf("const problem = auditFormProblem(body.payload);"), "a script whose answers fail the form's checks must still be caught");
+assert.ok(trapAt < source.indexOf("visitId: getOrCreateVisitId()"), "a script must not be tracked as a visit");
+assert.ok(trapAt < source.indexOf('await fetch("/api/forms/submit"'), "a filled trap must stop before the lead request");
+assert.match(source.slice(trapAt), /^const trapped = trapValue\(trapRef\.current, trapLatch\);\s*if \(trapped\) \{\s*await endTrapped\(trapped\);\s*return;\s*\}/, "a filled trap on submit must end trapped");
+assert.match(source, /onInvalidCapture=\{onInvalid\}/, "a script the browser's own checks stop is never caught");
+assert.match(
+  source,
+  /function onInvalid\(\) \{\s*if \(inFlight\.current\) return;\s*const trapped = trapValue\(trapRef\.current, trapLatch\);\s*if \(trapped\) void endTrapped\(trapped\);\s*\}/,
+  "the invalid path must end trapped only when the trap is filled, and only once",
+);
+assert.match(source, /status === "trapped" \? "Thanks\. We'll be in touch\." :/, "a trapped submit shows a plain thanks");
+assert.match(source, /disabled=\{sending \|\| status === "trapped"\}/, "a trapped form can be sent again");
+
 // 3a. The personalized page accepts the handoff only for the canonical OASIS
 // ai-audit form, and the reusable form client clamps the requested index.
 const tokenPageSource = readFileSync(join(root, "app/f/[tenant_slug]/[form_slug]/[lead_token]/page.tsx"), "utf8");

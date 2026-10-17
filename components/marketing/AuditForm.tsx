@@ -13,6 +13,8 @@ import {
 } from "@/components/marketing/audit-form-body";
 import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-disclosure";
 import { ConsentChoice } from "@/components/forms/ConsentChoice";
+import { HoneypotField } from "@/components/forms/HoneypotField";
+import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
 /**
@@ -38,7 +40,8 @@ import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
  * five-field marketing form needs.
  */
 
-type Status = "idle" | "sending" | "error";
+/** "trapped": the honeypot caught a script, which is shown a plain thanks. */
+type Status = "idle" | "sending" | "error" | "trapped";
 
 export function AuditForm({
   compact = false,
@@ -63,11 +66,45 @@ export function AuditForm({
   // affordance, not a guarantee — it only takes effect after that same
   // render.
   const inFlight = useRef(false);
+  // The honeypot box (components/forms/HoneypotField.tsx) and what a script typed into it.
+  const trapRef = useRef<HTMLInputElement | null>(null);
+  const trapLatch = useRef("");
+
+  // Only a script fills the honeypot box. It gets one report the submit route
+  // drops (lib/forms/honeypot.ts), never the answers, and a plain thanks: no
+  // lead link, no funnel, no calendar. inFlight stays set, so it cannot submit
+  // again.
+  async function endTrapped(trapped: string) {
+    inFlight.current = true;
+    await reportTrappedSubmission(
+      { anonymous_init: { tenant_slug: AUDIT_FUNNEL.tenantSlug, form_slug: AUDIT_FUNNEL.formSlug }, step_index: 0 },
+      trapped,
+    );
+    setStatus("trapped");
+  }
+
+  // The browser's own checks (required, type="email") stop a submit before
+  // onSubmit runs and fire "invalid" instead. A script that filled the trap but
+  // left a box blank ends here, so it is still caught (Codex review of #672).
+  // A visitor's empty trap leaves the browser's message as it was.
+  function onInvalid() {
+    if (inFlight.current) return;
+    const trapped = trapValue(trapRef.current, trapLatch);
+    if (trapped) void endTrapped(trapped);
+  }
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (inFlight.current) return;
     inFlight.current = true;
+
+    // Read before the form's own checks below (they also refuse a value of only
+    // spaces, which the browser accepts) and before anything is tracked.
+    const trapped = trapValue(trapRef.current, trapLatch);
+    if (trapped) {
+      await endTrapped(trapped);
+      return;
+    }
 
     const context = {
       submissionPath: window.location.pathname,
@@ -134,6 +171,7 @@ export function AuditForm({
   return (
     <form
       onSubmit={onSubmit}
+      onInvalidCapture={onInvalid}
       action="/api/forms/submit"
       method="post"
       className="w-full"
@@ -206,7 +244,7 @@ export function AuditForm({
 
       <button
         type="submit"
-        disabled={sending}
+        disabled={sending || status === "trapped"}
         className={`${CTA_PRIMARY} mt-6 w-full sm:w-auto`}
       >
         {sending ? (
@@ -227,8 +265,10 @@ export function AuditForm({
         aria-live="polite"
         className={`mt-4 text-[14px] ${error ? "text-status-hot" : "text-fg-dim"}`}
       >
-        {error ?? "Three more screens after this. Takes about two minutes."}
+        {status === "trapped" ? "Thanks. We'll be in touch." : error ?? "Three more screens after this. Takes about two minutes."}
       </p>
+
+      <HoneypotField inputRef={trapRef} />
     </form>
   );
 }
