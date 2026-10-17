@@ -10,9 +10,9 @@
  *
  *   1. buildRoutineSeries: Sunday-to-Thursday series and Friday series with
  *      the exact old times, in America/Toronto, on a UTC server;
- *   2. no occurrence of the restored routine (or of the legacy import) meets a
- *      Shabbat window across the whole planned horizon, winter Fridays
- *      included, and every row passes the server's own Shabbat check;
+ *   2. no occurrence of the restored routine meets a Shabbat window across
+ *      the whole planned horizon, winter Fridays included, and every row
+ *      passes the server's own Shabbat check;
  *   3. POST /api/calendar/routine against real libSQL and a real signed
  *      session: OASIS only, cross-origin refused, edited times applied and
  *      validated, idempotent (already_restored), and race-safe;
@@ -123,8 +123,7 @@ async function main() {
   type EventRecord = import("../lib/calendar/types").EventRecord;
   const { expandOccurrences } = await import("../lib/calendar/recurrence");
   const { overlapsShabbat, shabbatForWeekOf } = await import("../lib/calendar/sun");
-  const { shabbatConflict, validateEventInput, validateOps, validatePrefs } = await import("../lib/calendar/validate");
-  const validateOpsOk = (ops: unknown) => validateOps(ops).ok;
+  const { shabbatConflict, validateEventInput, validatePrefs } = await import("../lib/calendar/validate");
 
   const record = (e: EventInput, id: string): EventRecord => ({ ...e, id, createdAt: "", updatedAt: "" });
   const FROM = new Date("2026-09-30T16:00:00Z"); // a Wednesday in Montréal
@@ -405,25 +404,6 @@ async function main() {
     const rnd = events.find((e) => e.title === "Agent training / R&D" && e.recurrence?.byWeekday?.join("") === "5")!;
     await store.applyOps(owner, [{ op: "update", id: rnd.id, patch: { title: "R&D" } }], await store.getPrefs(owner));
     assert.equal((await store.listEvents(owner)).events.find((e) => e.id === rnd.id)?.title, "R&D");
-  });
-
-  await check("The browser-week import replaces a restored routine in ONE request the store accepts, leaving each block once", async () => {
-    const legacy = await import("../lib/calendar/legacy");
-    const owner = { tenantId: OASIS, userId: USERS.adon.id };
-    const prefs = await store.getPrefs(owner);
-    const before = (await store.listEvents(owner)).events;
-    const routineRows = before.filter((e) => e.id.startsWith(routine.ROUTINE_ID_PREFIX)).length;
-    assert.ok(routineRows >= 18, "precondition: Adon's routine was restored above");
-    const [calendar] = await store.listCalendars(owner);
-    const week = legacy.planLegacyImport(createPlaceholderSchedule(FROM), calendar.id, "UTC", prefs);
-    const writes = legacy.legacyImportWrites(week.events, before);
-    assert.equal(writes.batches.length, 1);
-    assert.equal(writes.replacing, routineRows);
-    assert.ok(validateOpsOk(writes.batches[0]), "the request passes the route's own validation");
-    await store.applyOps(owner, writes.batches[0], prefs);
-    const after = (await store.listEvents(owner)).events;
-    assert.equal(after.filter((e) => e.id.startsWith(routine.ROUTINE_ID_PREFIX)).length, 0, "the restored rows are gone");
-    assert.equal(after.length, week.events.length, "and exactly this browser's week is in their place");
   });
 
   await check("Prefs: OASIS gets Montréal + the lock, a client gets neither, and a saved row wins", async () => {

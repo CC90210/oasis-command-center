@@ -1,26 +1,20 @@
 /**
- * The routine restore card and the browser-week import, as the page runs them.
+ * The routine restore card, as the page runs it.
  *
- * WHY THIS EXISTS. Two defects the audit of PR #493 found in the client:
+ * WHY THIS EXISTS. Defects the audit of PR #493 found in the client:
  *
- *   1. Restoring the routine and then clicking the old "Bring it into the
- *      calendar" import put every block in twice, in one click, with no
- *      confirm and no undo: the restore and the import write the same routine
- *      as separate rows and nothing linked them. Now the import asks first,
- *      and when the calendar already holds the restored routine it REPLACES
- *      it (lib/calendar/legacy.ts legacyImportWrites) instead of adding a
- *      second copy, in one request the page can undo.
- *   2. The card's restore wrapped everything, including onRestored (which runs
+ *   1. The card's restore wrapped everything, including onRestored (which runs
  *      after the server already answered 201), in a bare `catch {}` that
  *      logged nothing and always said "Could not reach the server". A network
  *      failure is now logged, and a failure after a successful write says the
  *      routine was saved.
- *   3. (CodeRabbit, PR #493) The import's confirm step wrote the writes planned
- *      when it OPENED. Opened while a restore was still in flight, it planned
- *      create-only writes on the empty calendar; confirmed after the restore
- *      landed, it put every block in twice. The writes are now worked out from
- *      the calendar as it is when confirmed, nothing is written while it is
- *      being read back, and the import is not offered while a restore is sent.
+ *   2. A restore whose reply is lost can still have saved its rows, so a failed
+ *      restore is read back, and the card goes once the rows are there.
+ *
+ * The old "browser-week import" (the week the old Schedule page saved in this
+ * browser, offered as "Bring it into the calendar") was removed on 2026-10-17
+ * at CC's request: "It doesn't even work." Its checks went with it. Section 4
+ * pins that the page no longer reads that storage and no longer offers it.
  *
  * The card is a client component; it runs here with a minimal stand-in for
  * React's hooks (no DOM), so its real click handlers are exercised. The page
@@ -30,12 +24,12 @@
  * Run: node --conditions=react-server --import tsx tests/calendar-routine-card.test.ts
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as ReactNS from "react";
 import { isValidElement, type ReactNode } from "react";
 
-// The import runs in the viewer's browser, in the viewer's zone.
+// The page runs in the viewer's browser, in the viewer's zone.
 process.env.TZ = "America/Toronto";
 const ROOT = join(__dirname, "..");
 
@@ -156,159 +150,23 @@ async function check(name: string, fn: () => void | Promise<void>) {
 }
 
 async function main() {
-  const legacy = await import("../lib/calendar/legacy");
   const routine = await import("../lib/calendar/routine");
-  const { expandOccurrences } = await import("../lib/calendar/recurrence");
   const { createPlaceholderSchedule } = await import("../lib/schedule/model");
   const { DEFAULT_PREFS } = await import("../lib/calendar/types");
-  const { LIMITS } = await import("../lib/calendar/validate");
-  const { LegacyImport } = await import("../components/calendar/LegacyImport");
   const { RoutineRestore, sendRoutineRestore } = await import("../components/calendar/RoutineRestore");
   type EventRecord = import("../lib/calendar/types").EventRecord;
   type EventInput = import("../lib/calendar/types").EventInput;
 
   const FROM = new Date("2026-09-30T12:00:00-04:00");
   const record = (e: EventInput, id: string): EventRecord => ({ ...e, id, createdAt: "", updatedAt: "" });
-  // The routine as a restore wrote it, and this browser's old saved week.
+  // The routine as a restore wrote it.
   const restoredPlan = routine.buildRoutineSeries(routine.routineBlocks(), { calendarId: "cal", prefs: DEFAULT_PREFS, from: FROM });
   const restored = [...restoredPlan.series, ...restoredPlan.singles].map(({ event }, i) => record(event, `${routine.ROUTINE_ID_PREFIX}${i}`));
-  const browserWeek = legacy.planLegacyImport(createPlaceholderSchedule(FROM), "cal", "America/Toronto", DEFAULT_PREFS);
-  // An event the user made, and a one-day edit made to a restored series.
-  const dentist: EventRecord = { ...restored[0], id: "user-dentist", title: "Dentist", recurrence: null, exdates: [] };
-  const override: EventRecord = { ...restored[0], id: "user-override", title: "Wake up late", recurrence: null, recurringEventId: restored[0].id, originalStart: restored[0].start };
 
-  /** The calendar after a batch list is applied in order (creates get fresh ids). */
-  const apply = (rows: EventRecord[], batches: import("../lib/calendar/types").EventOp[][]) => {
-    let next = rows;
-    let n = 0;
-    for (const op of batches.flat()) {
-      if (op.op === "create") next = [...next, record(op.event, `new-${n++}`)];
-      else if (op.op === "delete") next = next.filter((r) => r.id !== op.id);
-    }
-    return next;
-  };
-  const wednesday = (rows: EventRecord[]) =>
-    expandOccurrences(rows, new Date(2026, 9, 7), new Date(2026, 9, 8))
-      .filter((o) => o.event.calendarId === "cal")
-      .map((o) => o.event.title)
-      .sort();
-
-  // ── 1. The import's writes ─────────────────────────────────────────────────
-  await check("precondition: importing the browser week on top of the restored routine doubles every block", () => {
-    assert.ok(browserWeek.events.length > 0 && restored.length > 0);
-    const naive = apply(restored, [browserWeek.events.map((event) => ({ op: "create" as const, event }))]);
-    assert.equal(wednesday(naive).filter((t) => t === "Wake up").length, 2);
-  });
-
-  await check("legacyImportWrites: with the routine restored, the browser week replaces it and each block is in once", () => {
-    const existing = [...restored, override, dentist];
-    const writes = legacy.legacyImportWrites(browserWeek.events, existing);
-    assert.equal(writes.replacing, restored.length + 1, "the restored rows and the one-day edit made to them");
-    const ops = writes.batches.flat();
-    const deletes = ops.filter((o) => o.op === "delete").map((o) => (o as { id: string }).id).sort();
-    assert.deepEqual(deletes, [...restored.map((r) => r.id), "user-override"].sort());
-    assert.ok(!deletes.includes("user-dentist"), "an event the user made is never touched");
-    const lastCreate = ops.map((o) => o.op).lastIndexOf("create");
-    const firstDelete = ops.map((o) => o.op).indexOf("delete");
-    assert.ok(lastCreate < firstDelete, "every create lands before anything is removed");
-    assert.ok(writes.batches[writes.batches.length - 1].some((o) => o.op === "delete"), "the removal rides with the last creates");
-    const after = apply(existing, writes.batches);
-    const titles = wednesday(after);
-    assert.deepEqual(titles.filter((t) => t !== "Dentist"), [...new Set(titles.filter((t) => t !== "Dentist"))], `each block once: ${titles.join(", ")}`);
-    assert.ok(titles.includes("Wake up") && titles.includes("Agent training / R&D"));
-  });
-
-  await check("legacyImportWrites: the whole import, removal included, is ONE request (one undo, never half-applied)", () => {
-    const replace = legacy.legacyImportWrites(browserWeek.events, restored);
-    assert.equal(replace.batches.length, 1, `${browserWeek.events.length} creates + ${restored.length} deletes in one request`);
-    assert.ok(replace.batches[0].length <= LIMITS.opsPerBatch, "within the server's per-request limit");
-    const add = legacy.legacyImportWrites(browserWeek.events, [dentist]);
-    assert.equal(add.replacing, 0);
-    assert.equal(add.batches.length, 1);
-    assert.ok(add.batches[0].every((o) => o.op === "create") && add.batches[0].length === browserWeek.events.length, "without a restored routine it only adds");
-    assert.deepEqual(legacy.legacyImportWrites([], restored), { batches: [], replacing: 0 }, "an empty import never deletes the routine");
-  });
-
-  await check("legacyImportWrites: past the per-request limit it splits, creates first and the removal last", () => {
-    const many = Array.from({ length: 130 }, () => browserWeek.events[0]);
-    const kinds = (b: import("../lib/calendar/types").EventOp[][]) => b.map((ops) => `${ops.filter((o) => o.op === "create").length}c${ops.filter((o) => o.op === "delete").length}d`);
-    assert.deepEqual(kinds(legacy.legacyImportWrites(many, restored, 60).batches), ["60c0d", "60c0d", `10c${restored.length}d`]);
-    assert.deepEqual(kinds(legacy.legacyImportWrites(many.slice(0, 55), restored, 60).batches), ["55c0d", `0c${restored.length}d`], "a removal that does not fit goes in its own last request");
-  });
-
-  // ── 2. The confirm step ───────────────────────────────────────────────────
-  const dialog = (p: Partial<Parameters<typeof LegacyImport>[0]>) => {
-    const calls: string[] = [];
-    const tree = mount(() =>
-      LegacyImport({
-        adds: 54,
-        singles: 0,
-        replacing: 0,
-        calendarName: "Personal",
-        adjusted: [],
-        skipped: [],
-        busy: false,
-        onConfirm: () => calls.push("confirm"),
-        onCancel: () => calls.push("cancel"),
-        ...p,
-      }),
-    )();
-    return { tree, text: flat(tree), calls };
-  };
-
-  await check("The import asks first: it says what it adds, and replacing the restored routine is spelled out", () => {
-    const add = dialog({});
-    assert.match(add.text, /Bring in this browser.s saved week\?/);
-    assert.match(add.text, /This adds 54 repeating events to Personal/);
-    (button(add.tree, /^Add them$/).props.onClick as () => void)();
-    assert.deepEqual(add.calls, ["confirm"]);
-
-    // The browser week as planned: the shortened Fridays are single events, not repeating ones.
-    const singles = browserWeek.events.filter((e) => !e.recurrence).length;
-    assert.ok(singles > 0, "precondition: the saved week has Fridays shortened for Shabbat");
-    const mixed = dialog({ adds: browserWeek.events.length, singles });
-    assert.match(
-      mixed.text,
-      new RegExp(`This adds ${browserWeek.events.length - singles} repeating events and ${singles} single events shortened for Shabbat to Personal`),
-    );
-    assert.doesNotMatch(mixed.text, new RegExp(`${browserWeek.events.length} repeating`), "never counts a single week as a repeating event");
-
-    const replace = dialog({ replacing: 37 });
-    assert.match(replace.text, /Replace the restored routine\?/);
-    assert.match(replace.text, /Personal already has the weekly routine restored from the old Schedule page \(37 events\)/);
-    assert.match(replace.text, /would put each block in twice/);
-    assert.match(replace.text, /Replacing removes those 37 events, with any changes you made to them, and adds 54 events/);
-    const keep = button(replace.tree, /^Keep the restored routine$/);
-    assert.equal(keep.props["data-autofocus"], true, "the safe choice has the focus");
-    (keep.props.onClick as () => void)();
-    (button(replace.tree, /^Replace them$/).props.onClick as () => void)();
-    assert.deepEqual(replace.calls, ["cancel", "confirm"]);
-
-    const busy = dialog({ replacing: 37, busy: true });
-    assert.equal(button(busy.tree, /^Replacing/).props.disabled, true);
-    (button(busy.tree, /^Keep the restored routine$/).props.onClick as () => void)();
-    assert.deepEqual(busy.calls, [], "it cannot be cancelled while it writes");
-
-    const none = dialog({ adds: 0, replacing: 37, skipped: ["fri Agent training / R&D"] });
-    assert.match(none.text, /Nothing to bring in/);
-    assert.doesNotMatch(none.text, /Replac/, "nothing is removed when nothing is added");
-    assert.match(none.text, /Left out, every week falls inside Shabbat: fri Agent training \/ R&D\./);
-  });
-
-  await check("CalendarApp: the sidebar and the card open the confirm step; the import writes through legacyImportWrites", () => {
-    const src = readFileSync(join(ROOT, "components/calendar/CalendarApp.tsx"), "utf8");
-    assert.match(src, /onImportLegacy=\{askLegacy\}/);
-    assert.match(src, /onUseBrowserCopy=\{legacyMode \? askLegacy : undefined\}/);
-    assert.match(src, /legacyImportWrites\(plan\.events, events\)/);
-    assert.match(src, /<LegacyImport[\s\S]*?onConfirm=\{\(\) => void importLegacy\(\)\}/);
-    assert.match(src, /restoredRoutineIds\(events\)\.length \? "replace" : "add"/);
-    assert.match(src, /setRoutineSyncing\(true\);\s*void data\.reload\(\)\.finally\(\(\) => setRoutineSyncing\(false\)\)/);
-    assert.match(src, /singles=\{legacyAsk\.plan\.events\.filter\(\(e\) => !e\.recurrence\)\.length\}/, "the dialog is told which events do not repeat");
-  });
-
+  // -- 1. The page's wiring -----------------------------------------------------
   await check("CalendarApp: the restore card shows only on an EMPTY calendar; a client's first paint has no city and no lock", () => {
     const src = readFileSync(join(ROOT, "components/calendar/CalendarApp.tsx"), "utf8");
-    // Restoring on top of events already there (a browser-week import, say) would put every block in twice.
+    // Restoring on top of events already there would put every block in twice.
     assert.match(src, /const emptyCalendar = data\.load\.status === "ready" && events\.length === 0;/);
     assert.match(src, /\{emptyCalendar && routine && routineState === "checked" && \(\s*<RoutineRestore/);
     assert.match(src, /if \(emptyCalendar && !routineAsked\.current\) void checkRoutine\(\);/, "the server is asked only for an empty calendar");
@@ -316,7 +174,7 @@ async function main() {
     assert.match(data, /useState<CalendarPrefs>\(NEUTRAL_PREFS\)/, "until the server answers: no place, no Shabbat lock");
   });
 
-  // ── 3. The restore request ─────────────────────────────────────────────────
+  // -- 2. The restore request -------------------------------------------------
   const answer = (status: number, body: unknown) =>
     (async () => new Response(typeof body === "string" ? body : JSON.stringify(body), { status, headers: { "content-type": "application/json" } })) as typeof fetch;
 
@@ -353,7 +211,7 @@ async function main() {
     assert.deepEqual(await sendRoutineRestore([]), { ok: true, body: { ok: true, status: "restored", created: [], adjusted: [], dropped: [] } });
   });
 
-  // ── 4. The card, clicked through ────────────────────────────────────────────
+  // -- 3. The card, clicked through --------------------------------------------
   const info = { available: true as const, restored: false, timeZone: "America/Toronto", windDownMinutes: 18, blocks: routine.routineBlocks() };
   const card = (onRestored: (r: unknown) => void) =>
     mount(() => RoutineRestore({ info, prefs: DEFAULT_PREFS, calendarName: "Personal", now: FROM, onRestored, onDismiss: () => undefined }));
@@ -430,18 +288,6 @@ async function main() {
     assert.deepEqual(bodies, [{ times: [{ key: "wake-up", startMinute: 360, endMinute: 420 }] }, {}]);
   });
 
-  await check("RoutineRestore: with this browser's old week saved, the card offers it as the alternative", () => {
-    const opened: string[] = [];
-    const tree = mount(() =>
-      RoutineRestore({ info, prefs: DEFAULT_PREFS, calendarName: "Personal", now: FROM, onRestored: () => undefined, onDismiss: () => undefined, onUseBrowserCopy: () => opened.push("legacy") }),
-    )();
-    assert.match(flat(tree), /This browser also holds the week you last saved on the old Schedule page/);
-    (button(tree, /^Use that week instead$/).props.onClick as () => void)();
-    assert.deepEqual(opened, ["legacy"]);
-    const without = card(() => undefined)();
-    assert.doesNotMatch(flat(without), /This browser also holds/);
-  });
-
   await check("RoutineRestore: tells the page when a restore is sent, and when it failed", async () => {
     const told: boolean[] = [];
     const restoring = () =>
@@ -471,12 +317,11 @@ async function main() {
     assert.deepEqual(told, [true], "a restore that landed is handed on through onRestored, never called failed");
   });
 
-  // ── 5. The page, run: the import writes from the calendar as it is when confirmed ──
+  // -- 4. The page, run: a restore is read back, and the old browser week is neither read nor offered --
   // A client component's stylesheet import is the bundler's business.
   (require as unknown as { extensions: Record<string, (m: { exports: unknown }) => void> }).extensions[".css"] = (m) => void (m.exports = {});
   const { CalendarApp } = await import("../components/calendar/CalendarApp");
   const { Sidebar } = await import("../components/calendar/Sidebar");
-  type EventOp = import("../lib/calendar/types").EventOp;
   /** The elements a component returned, its children left uncalled. */
   const shallow = (node: unknown, out: El[] = []): El[] => {
     if (Array.isArray(node)) node.forEach((n) => shallow(n, out));
@@ -496,51 +341,47 @@ async function main() {
     return typeof el.type === "function" ? "" : ownText(el.props.children as ReactNode);
   };
 
-  /** CalendarApp on an empty calendar, with the routine restorable and this browser's old week saved. */
+  /**
+   * CalendarApp on an empty calendar, with the routine restorable. This browser
+   * still holds the week the old Schedule page saved (what the removed import
+   * used to offer), and every touch of storage is recorded.
+   */
   async function openPage() {
-    const server = { events: [] as EventRecord[], posts: [] as EventOp[][], reads: 0, unexpected: [] as string[], hold: null as Promise<void> | null };
+    const server = { events: [] as EventRecord[], reads: 0, unexpected: [] as string[] };
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     const cal = { id: "cal", name: "Personal", color: "tide", visible: true, isDefault: true, position: 0, createdAt: "", updatedAt: "" };
-    let seq = 0;
     globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
       const method = init?.method ?? "GET";
       const path = String(url);
       if (method === "GET" && path === "/api/calendar") {
-        if (server.hold) await server.hold;
         server.reads += 1;
         return json(200, { ok: true, calendars: [cal], events: server.events, prefs: DEFAULT_PREFS, truncated: false });
       }
       if (method === "GET" && path === "/api/calendar/routine") return json(200, { ok: true, ...info });
-      if (method === "POST" && path === "/api/calendar/events") {
-        const { ops } = JSON.parse(String(init?.body)) as { ops: EventOp[] };
-        server.posts.push(ops);
-        const results = ops.map((op) => {
-          if (op.op === "create") {
-            const row = record(op.event, `srv-${seq++}`);
-            server.events = [...server.events, row];
-            return { op: "create", id: row.id, tempId: op.tempId, event: row };
-          }
-          if (op.op === "delete") {
-            server.events = server.events.filter((r) => r.id !== op.id);
-            return { op: "delete", id: op.id };
-          }
-          throw new Error(`unexpected op ${op.op}`);
-        });
-        return json(200, { ok: true, results });
-      }
       server.unexpected.push(`${method} ${path}`);
       return json(500, { ok: false, error: "unexpected" });
     }) as typeof fetch;
-    const stored = new Map([[`${legacy.LEGACY_KEY_PREFIX}.week`, JSON.stringify(createPlaceholderSchedule(FROM))]]);
+    const stored = new Map([["oasis.schedule.week", JSON.stringify(createPlaceholderSchedule(FROM))]]);
+    const storage = { read: [] as string[], written: [] as string[], scans: 0 };
     (globalThis as unknown as { window: unknown }).window = {
       innerWidth: 1280,
       localStorage: {
         get length() {
+          storage.scans += 1;
           return stored.size;
         },
-        key: (i: number) => [...stored.keys()][i] ?? null,
-        getItem: (k: string) => stored.get(k) ?? null,
-        setItem: (k: string, v: string) => void stored.set(k, String(v)),
+        key: (i: number) => {
+          storage.scans += 1;
+          return [...stored.keys()][i] ?? null;
+        },
+        getItem: (k: string) => {
+          storage.read.push(k);
+          return stored.get(k) ?? null;
+        },
+        setItem: (k: string, v: string) => {
+          storage.written.push(k);
+          stored.set(k, String(v));
+        },
       },
       addEventListener: () => undefined,
       removeEventListener: () => undefined,
@@ -550,6 +391,7 @@ async function main() {
     const of = <P,>(type: unknown) => shallow(tree).find((e) => e.type === type)?.props as P | undefined;
     const p = {
       server,
+      storage,
       /** Renders, runs the effects, lets the requests answer, and renders again. */
       async settle() {
         for (let k = 0; k < 4; k++) {
@@ -558,15 +400,12 @@ async function main() {
           tree = page();
         }
       },
-      render: () => void (tree = page()),
       text: () => ownText(tree).replace(/\s+/g, " "),
       card: () => of<Parameters<typeof RoutineRestore>[0]>(RoutineRestore),
-      dialog: () => of<Parameters<typeof LegacyImport>[0]>(LegacyImport),
       sidebar: () => of<Parameters<typeof Sidebar>[0]>(Sidebar),
     };
     await p.settle();
-    assert.ok(p.card()?.onUseBrowserCopy, `precondition: the restore card offers this browser's week: ${p.text()}`);
-    assert.equal(p.sidebar()?.legacy, "add");
+    assert.ok(p.card(), `precondition: the restore card is on an empty calendar: ${p.text()}`);
     return p;
   }
   // A toast's 5-second timer must not hold the run open.
@@ -577,87 +416,113 @@ async function main() {
     return t;
   }) as typeof setTimeout;
 
-  await check("CalendarApp: a restore that lands while the import's confirm step is open turns it into a replace, never a second copy", async () => {
+  await check("CalendarApp: a restore that fails is read back, and the card goes once its rows are there", async () => {
     const p = await openPage();
     try {
-      // Opened on the empty calendar (a restore still in flight), it plans to add.
-      p.card()!.onUseBrowserCopy!();
-      p.render();
-      assert.equal(p.dialog()?.adds, browserWeek.events.length);
-      assert.equal(p.dialog()?.replacing, 0, "planned on the empty calendar, it only adds");
-      // The restore lands under the open dialog and the calendar is read back.
+      const reads = p.server.reads;
+      // A restore that is only sent needs no read: the card is waiting on its answer.
+      p.card()!.onRestoring!(true);
+      await p.settle();
+      assert.equal(p.server.reads, reads, "sending a restore does not re-read the calendar");
+      // The restore failed, but its rows were saved before the reply was lost: the read-back finds them.
+      p.server.events = restored;
+      p.card()!.onRestoring!(false);
+      await p.settle();
+      assert.equal(p.server.reads, reads + 1, "a failed restore is read back");
+      assert.equal(p.card(), undefined, "the calendar is not empty any more, so the card is gone");
+    } finally {
+      unmount();
+    }
+  });
+
+  await check("CalendarApp: a restore that lands is read back, the card goes, and the page says what it added", async () => {
+    const p = await openPage();
+    try {
+      const reads = p.server.reads;
       p.server.events = restored;
       p.card()!.onRestored({ status: "restored", created: restored, adjusted: [], dropped: [] });
       await p.settle();
-      const shown = p.dialog()?.replacing;
-      p.dialog()!.onConfirm();
-      await p.settle();
-      assert.equal(p.server.posts.length, 1, "one request");
-      const ops = p.server.posts[0];
-      assert.deepEqual(
-        ops.filter((o) => o.op === "delete").map((o) => (o as { id: string }).id).sort(),
-        restored.map((r) => r.id).sort(),
-        "the restored routine is replaced, not doubled",
-      );
-      assert.equal(ops.filter((o) => o.op === "create").length, browserWeek.events.length);
-      const titles = wednesday(p.server.events);
-      assert.deepEqual(titles, [...new Set(titles)], `each block once on the server: ${titles.join(", ")}`);
-      assert.ok(titles.includes("Wake up") && titles.includes("Agent training / R&D"));
-      assert.equal(shown, restored.length, "and the dialog said so before it was confirmed");
-      assert.equal(p.dialog(), undefined, "the confirm step closed");
+      assert.equal(p.server.reads, reads + 1, "the calendar is read again so the new rows show");
+      assert.equal(p.card(), undefined, "the card is gone");
+      assert.match(p.text(), /Restored your weekly routine: \d+ repeating events/);
       assert.deepEqual(p.server.unexpected, []);
     } finally {
       unmount();
     }
   });
 
-  await check("CalendarApp: confirmed while the calendar is still being read back, the import writes nothing and says so", async () => {
+  await check("CalendarApp: with the old Schedule page's week still saved in this browser, the page never reads it and offers nothing", async () => {
     const p = await openPage();
     try {
-      p.card()!.onUseBrowserCopy!();
-      p.render();
-      let release!: () => void;
-      p.server.hold = new Promise<void>((r) => (release = r));
-      p.server.events = restored;
-      p.card()!.onRestored({ status: "restored", created: restored, adjusted: [], dropped: [] });
-      await p.settle();
-      p.dialog()!.onConfirm();
-      await p.settle();
-      assert.equal(p.server.posts.length, 0, "nothing is written against a calendar that is not current");
-      assert.match(p.text(), /The calendar is still catching up, so nothing was imported yet\. Try again in a moment\./);
-      assert.ok(p.dialog(), "the confirm step stays open");
-      p.server.hold = null;
-      release();
-      await p.settle();
-      assert.equal(p.dialog()?.replacing, restored.length);
-      p.dialog()!.onConfirm();
-      await p.settle();
-      assert.equal(p.server.posts.length, 1);
-      const titles = wednesday(p.server.events);
-      assert.deepEqual(titles, [...new Set(titles)], `each block once on the server: ${titles.join(", ")}`);
+      const touched = [...p.storage.read, ...p.storage.written];
+      assert.deepEqual(
+        touched.filter((k) => /^oasis\.schedule|legacy/i.test(k)),
+        [],
+        `the page touches only its own keys: ${touched.join(", ") || "(none)"}`,
+      );
+      assert.equal(p.storage.scans, 0, "storage is never scanned for keys");
+      const sidebar = p.sidebar();
+      assert.ok(sidebar, "the sidebar is drawn");
+      assert.equal("legacy" in sidebar, false, "the sidebar is not told this browser holds a week");
+      assert.equal("onImportLegacy" in sidebar, false, "and has no import to run");
+      assert.equal("onUseBrowserCopy" in p.card()!, false, "the restore card has no 'use that week instead' either");
+      assert.doesNotMatch(p.text(), /still holds the week|Bring it into the calendar|Use that week instead|Use it instead of the restored routine|saved in this browser/i);
+      assert.deepEqual(p.server.unexpected, [], "the page asked the server for the calendar and the routine, nothing else");
     } finally {
       unmount();
     }
   });
 
-  await check("CalendarApp: from the moment a restore is sent until the calendar is read back, the browser week is not offered", async () => {
-    const p = await openPage();
-    try {
-      p.card()!.onRestoring!(true);
-      p.render();
-      assert.equal(p.sidebar()?.legacy, null, "the sidebar does not offer it");
-      assert.equal(p.card()?.onUseBrowserCopy, undefined, "nor does the card");
-      // The restore failed, but its rows were saved before the reply was lost: the read-back finds them.
-      const reads = p.server.reads;
-      p.server.events = restored;
-      p.card()!.onRestoring!(false);
-      await p.settle();
-      assert.equal(p.server.reads, reads + 1, "a failed restore is read back before the import is offered again");
-      assert.equal(p.sidebar()?.legacy, "replace", "offered again as a replace of the routine the server holds");
-      assert.equal(p.card(), undefined, "the calendar is not empty any more, so the card is gone");
-    } finally {
-      unmount();
+  await check("Sidebar: has no 'still holds the week' block, even when handed the old props", () => {
+    const noop = () => undefined;
+    const props = {
+      cursor: FROM,
+      now: FROM,
+      prefs: DEFAULT_PREFS,
+      calendars: [],
+      busyDays: new Set<number>(),
+      rangeStart: FROM,
+      rangeEnd: FROM,
+      onCreate: noop,
+      onPick: noop,
+      onToggle: noop,
+      onAddCalendar: async () => undefined,
+      onEditCalendar: async () => undefined,
+      onDeleteCalendar: noop,
+      onOpenSettings: noop,
+    };
+    const tree = mount(() => Sidebar({ ...props, legacy: "replace", onImportLegacy: noop } as never))();
+    const text = ownText(tree).replace(/\s+/g, " ");
+    assert.match(text, /My calendars/, "precondition: the sidebar's own markup was read");
+    assert.doesNotMatch(text, /still holds the week|Bring it into the calendar|Use it instead of the restored routine|saved in this browser/i);
+    assert.equal(elements(tree).filter((e) => e.type === "button" && /instead of the restored routine|Bring it into/.test(textOf(e.props.children))).length, 0);
+  });
+
+  await check("RoutineRestore: never offers this browser's old week, even when handed the old prop", () => {
+    const tree = mount(() =>
+      RoutineRestore({ info, prefs: DEFAULT_PREFS, calendarName: "Personal", now: FROM, onRestored: () => undefined, onDismiss: () => undefined, onUseBrowserCopy: () => undefined } as never),
+    )();
+    assert.match(flat(tree), /Restore my weekly routine/, "precondition: the card drew");
+    assert.doesNotMatch(flat(tree), /This browser also holds|Use that week instead|saved on the old Schedule page, with any times/);
+  });
+
+  await check("The old browser-week import is gone from the source: no files, no storage keys, no wiring", () => {
+    for (const gone of ["components/calendar/LegacyImport.tsx", "lib/calendar/legacy.ts"]) {
+      assert.equal(existsSync(join(ROOT, gone)), false, `${gone} is deleted`);
     }
+    for (const file of ["CalendarApp", "Sidebar", "RoutineRestore"]) {
+      const src = readFileSync(join(ROOT, `components/calendar/${file}.tsx`), "utf8");
+      assert.doesNotMatch(
+        src,
+        /oasis\.schedule|LEGACY_KEY_PREFIX|calendar\/legacy|LegacyImport|legacyImported|onImportLegacy|onUseBrowserCopy|localStorage\.key\(/,
+        `${file} does not read the old page's storage or carry its import`,
+      );
+    }
+    assert.doesNotMatch(
+      readFileSync(join(ROOT, "components/calendar/Sidebar.tsx"), "utf8"),
+      /still holds the week|Bring it into the calendar|Use it instead of the restored routine/,
+      "the sidebar block is gone",
+    );
   });
   globalThis.setTimeout = realSetTimeout;
 
