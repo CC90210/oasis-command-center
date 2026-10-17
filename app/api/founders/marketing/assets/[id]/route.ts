@@ -36,6 +36,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveFounder } from "@/lib/founders/gate";
 import { isAssetStatus, reviewDecisionFor, type AssetStatus } from "@/lib/founders-marketing-core";
 import { methodNotHere } from "@/lib/founders/method-guard";
+import { EXTRACTED_BRAND_SLUG } from "@/lib/founders/extracted-videos";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -111,7 +112,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
   // founder must not be able to act on another tenant's row by pasting a uuid.
   const existing = await db
     .from("marketing_asset")
-    .select("id, title, status")
+    .select("id, title, status, brand_slug")
     .eq("tenant_id", founder.tenantId)
     .eq("id", id)
     .maybeSingle();
@@ -119,6 +120,13 @@ export async function PATCH(req: Request, ctx: Ctx) {
     return NextResponse.json({ ok: false, error: "read_failed" }, { status: 500 });
   }
   if (!existing.data) return notFound();
+  // An extracted video (Content > Extracted videos) is someone else's post: it has
+  // no review lifecycle, so no verdict applies. Refused here, it can never reach
+  // in_review and from there Request changes and the marketing agent's inbox
+  // (OCC #684 review F5). Delete (below) still works for it.
+  if (existing.data.brand_slug === EXTRACTED_BRAND_SLUG) {
+    return NextResponse.json({ ok: false, error: "not_reviewable" }, { status: 409 });
+  }
   if (from !== undefined && existing.data.status !== from) return statusChanged(String(existing.data.status));
 
   let update = db

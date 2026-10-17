@@ -9,15 +9,24 @@
  * These are other people's posts (TikTok, YouTube, Instagram) with unknown
  * rights, saved for reference. So this page offers what that work is for:
  * watch, see where it came from, Download, Delete. It offers no review verdicts
- * and no posting, and the founders publish route refuses any brand but OASIS's
- * own, so nothing here can go out from OASIS's accounts.
+ * and no posting: the founders publish route refuses any brand but OASIS's own,
+ * and the asset PATCH route refuses any verdict on an extracted video.
  *
  * THE SAME ROWS, A DIFFERENT PAGE. The runner still writes brand `downloads`
  * (lib/tools/runner-handlers.ts). This page reads that group through the
  * Library's own loader (loadLibraryPage: tenant-scoped, one page plus a COUNT,
- * media signed for that page only), so a video extracted before this page
- * existed shows here with no migration. The Library no longer has a Downloads
- * tab (LIBRARY_BRAND_GROUPS) and sends ?group=downloads here.
+ * media signed for that page only), every status included (allStatuses: there
+ * is no review lifecycle here, so a video is on this page or deleted, and the
+ * count matches the Overview tile's). A video extracted before this page
+ * existed shows here with no migration. The Library has no Downloads tab
+ * (LIBRARY_BRAND_GROUPS) and sends ?group=downloads here.
+ *
+ * ?video=<id> (Content Tools' "Open in Extracted videos", the asset page's way
+ * back) shows that one video first, even when it sits past page one.
+ *
+ * Videos mount lazily (components/founders/LazyVideo.tsx): the server markup
+ * holds no <video>, so a page of 24 cards fetches nothing until a card nears
+ * the screen.
  *
  * FOUNDERS ONLY: resolveFounder() here and in the layouts above, so a client
  * gets a 404, never the tab bar.
@@ -27,12 +36,20 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { PageFrame } from "@/components/os/PageFrame";
 import { ExtractedVideoActions } from "@/components/founders/ExtractedVideoActions";
+import { LazyVideo } from "@/components/founders/LazyVideo";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
-import { loadLibraryPage, type LibraryPage } from "@/lib/founders/marketing-queries";
+import {
+  getMarketingAsset,
+  loadLibraryPage,
+  signMediaUrl,
+  type LibraryPage,
+  type LibraryTile,
+} from "@/lib/founders/marketing-queries";
 import { libraryPageCount, parseLibraryPage } from "@/lib/founders-marketing-core";
 import {
   EXTRACTED_BRAND_GROUP,
+  EXTRACTED_BRAND_SLUG,
   EXTRACTED_ROOT,
   extractedAnchor,
   extractedVideoFacts,
@@ -42,24 +59,100 @@ import {
 } from "@/lib/founders/extracted-videos";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Extracted videos · Content · OASIS" };
+export const metadata = { title: "Extracted videos \u00B7 Content \u00B7 OASIS" };
 
 const TOOLS_HREF = "/founders/marketing/tools";
+const DOT = " \u00B7 ";
+const ASSET_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export default async function ExtractedVideosPage({ searchParams }: { searchParams: Promise<{ page?: string }> }) {
+/** One extracted video by id, signed, or null when it is not this workspace's extracted video. */
+async function pinnedTile(tenantId: string, id: string): Promise<LibraryTile | null> {
+  const asset = await getMarketingAsset(tenantId, id);
+  if (!asset || asset.brand_slug !== EXTRACTED_BRAND_SLUG) return null;
+  const video = (asset.media || []).find((m) => m.kind === "video");
+  return {
+    asset,
+    playbackUrl: video ? await signMediaUrl(video.storage_bucket, video.storage_path) : null,
+    posterUrl: null,
+    mediaW: video?.width ?? null,
+    mediaH: video?.height ?? null,
+    slideUrls: [],
+  };
+}
+
+function VideoCard({ t, pinned = false }: { t: LibraryTile; pinned?: boolean }) {
+  const a = t.asset;
+  const f = extractedVideoFacts((a as { meta?: unknown }).meta);
+  const stats = [
+    f.views !== null ? `${formatCount(f.views)} views` : null,
+    f.likes !== null ? `${formatCount(f.likes)} likes` : null,
+    f.comments !== null ? `${formatCount(f.comments)} comments` : null,
+  ].filter(Boolean);
+  return (
+    <li
+      id={extractedAnchor(a.id)}
+      className={`scroll-mt-24 space-y-3 rounded-lg border p-3 ${pinned ? "border-accent" : "border-hairline"}`}
+      data-testid={pinned ? "extracted-pinned" : "extracted-video"}
+    >
+      {/* One frame height for every card, the video centred in it, so a tall
+          TikTok and a wide YouTube clip line up in the grid. */}
+      <div className="flex h-80 items-center justify-center overflow-hidden rounded-md bg-black">
+        {t.playbackUrl ? (
+          <LazyVideo src={t.playbackUrl} posterUrl={t.posterUrl} width={t.mediaW} height={t.mediaH} title={a.title} />
+        ) : (
+          <p className="px-4 text-center text-xs text-fg-muted">The video couldn&apos;t be loaded. Download still works.</p>
+        )}
+      </div>
+      <div className="space-y-1">
+        <p className="line-clamp-2 text-sm font-medium text-fg">{f.postTitle ?? a.title}</p>
+        <p className="text-xs text-fg-muted">{[f.platform, f.creator].filter(Boolean).join(DOT) || "Source unknown"}</p>
+        <p className="text-[11px] text-fg-dim">
+          {[
+            formatDuration(a.duration_s),
+            formatBytes(f.bytes),
+            f.hasAudio === false ? "no sound" : null,
+            f.postedOn ? `posted ${f.postedOn}` : null,
+            `saved ${String(a.created_at).slice(0, 10)}`,
+          ]
+            .filter(Boolean)
+            .join(DOT)}
+        </p>
+        {stats.length > 0 && <p className="text-[11px] text-fg-dim">{stats.join(DOT)} when saved</p>}
+        {f.originalUrl && (
+          <a href={f.originalUrl} target="_blank" rel="noopener noreferrer" className="inline-block text-xs text-accent hover:underline">
+            Open the original post
+          </a>
+        )}
+      </div>
+      <ExtractedVideoActions assetId={a.id} title={a.title} />
+    </li>
+  );
+}
+
+export default async function ExtractedVideosPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string; video?: string }>;
+}) {
   const founder = await resolveFounder();
   if (!founder) notFound();
 
   const sp = await searchParams;
   const requestedPage = parseLibraryPage(sp.page);
-  const lib = await safe<LibraryPage | null>(
-    "marketing.extracted",
-    loadLibraryPage(founder.tenantId, { group: EXTRACTED_BRAND_GROUP, page: requestedPage }),
-    null,
-  );
+  const wanted = typeof sp.video === "string" && ASSET_ID.test(sp.video) ? sp.video : null;
+  const [lib, pinned] = await Promise.all([
+    safe<LibraryPage | null>(
+      "marketing.extracted",
+      loadLibraryPage(founder.tenantId, { group: EXTRACTED_BRAND_GROUP, allStatuses: true, page: requestedPage }),
+      null,
+    ),
+    wanted ? safe<LibraryTile | null>("marketing.extracted.pinned", pinnedTile(founder.tenantId, wanted), null) : null,
+  ]);
 
   const pages = lib ? libraryPageCount(lib.total, lib.pageSize) : 0;
   const pageHref = (n: number) => (n <= 1 ? EXTRACTED_ROOT : `${EXTRACTED_ROOT}?page=${n}`);
+  // The opened video leads; the grid below never repeats it.
+  const rest = lib ? lib.tiles.filter((t) => t.asset.id !== pinned?.asset.id) : [];
 
   return (
     <PageFrame
@@ -80,6 +173,14 @@ export default async function ExtractedVideosPage({ searchParams }: { searchPara
       }
       className="space-y-6"
     >
+      {pinned && (
+        <section aria-label="The video you opened" className="space-y-2">
+          <p className="px-1 text-xs text-fg-muted">The video you opened</p>
+          <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <VideoCard t={pinned} pinned />
+          </ul>
+        </section>
+      )}
       {!lib ? (
         <p className="text-[13px] text-status-hot" data-testid="extracted-error">
           Couldn&apos;t load the extracted videos. Reload the page.
@@ -97,80 +198,13 @@ export default async function ExtractedVideosPage({ searchParams }: { searchPara
           <p className="px-1 text-xs text-fg-muted" data-testid="extracted-count">
             {lib.total === 1 ? "1 video" : `${lib.total} videos`}
           </p>
-          <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {lib.tiles.map((t) => {
-              const a = t.asset;
-              const f = extractedVideoFacts((a as { meta?: unknown }).meta);
-              const length = formatDuration(a.duration_s);
-              const size = formatBytes(f.bytes);
-              const stats = [
-                f.views !== null ? `${formatCount(f.views)} views` : null,
-                f.likes !== null ? `${formatCount(f.likes)} likes` : null,
-                f.comments !== null ? `${formatCount(f.comments)} comments` : null,
-              ].filter(Boolean);
-              return (
-                <li
-                  key={a.id}
-                  id={extractedAnchor(a.id)}
-                  className="scroll-mt-24 space-y-3 rounded-lg border border-hairline p-3"
-                  data-testid="extracted-video"
-                >
-                  {/* One frame height for every card, the video centred in it, so a
-                      tall TikTok and a wide YouTube clip line up in the grid. */}
-                  <div className="flex h-80 items-center justify-center overflow-hidden rounded-md bg-black">
-                    {t.playbackUrl ? (
-                      // preload="metadata" + #t=0.1 shows the first frame instead of a black
-                      // box, and costs little here: the extractor's MP4s carry their index
-                      // (moov) at the front (yt-dlp's ffmpeg merge; measured on 2026-10-17
-                      // downloads), so metadata is a small range read, not the whole file
-                      // (the Library's TileVideo note is about files that end with it).
-                      <video
-                        src={`${t.playbackUrl}#t=0.1`}
-                        poster={t.posterUrl ?? undefined}
-                        controls
-                        preload="metadata"
-                        playsInline
-                        aria-label={a.title}
-                        className="h-full max-w-full"
-                        style={{ aspectRatio: t.mediaW && t.mediaH ? `${t.mediaW} / ${t.mediaH}` : "9 / 16" }}
-                      />
-                    ) : (
-                      <p className="px-4 text-center text-xs text-fg-muted">The video couldn&apos;t be loaded. Download still works.</p>
-                    )}
-                  </div>
-                  <div className="space-y-1">
-                    <p className="line-clamp-2 text-sm font-medium text-fg">{f.postTitle ?? a.title}</p>
-                    <p className="text-xs text-fg-muted">
-                      {[f.platform, f.creator].filter(Boolean).join(" · ") || "Source unknown"}
-                    </p>
-                    <p className="text-[11px] text-fg-dim">
-                      {[
-                        length,
-                        size,
-                        f.hasAudio === false ? "no sound" : null,
-                        f.postedOn ? `posted ${f.postedOn}` : null,
-                        `saved ${String(a.created_at).slice(0, 10)}`,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </p>
-                    {stats.length > 0 && <p className="text-[11px] text-fg-dim">{stats.join(" · ")} when saved</p>}
-                    {f.originalUrl && (
-                      <a
-                        href={f.originalUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block text-xs text-accent hover:underline"
-                      >
-                        Open the original post
-                      </a>
-                    )}
-                  </div>
-                  <ExtractedVideoActions assetId={a.id} title={a.title} />
-                </li>
-              );
-            })}
-          </ul>
+          {rest.length > 0 && (
+            <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {rest.map((t) => (
+                <VideoCard key={t.asset.id} t={t} />
+              ))}
+            </ul>
+          )}
           {pages > 1 && (
             <nav className="flex items-center justify-between text-xs" aria-label="Extracted videos pages">
               {lib.page > 1 ? (

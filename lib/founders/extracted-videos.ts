@@ -37,9 +37,13 @@ export function extractedAnchor(assetId: string): string {
   return `video-${assetId}`;
 }
 
-/** Where "Open in Extracted videos" goes for one finished run. */
+/**
+ * Where "Open in Extracted videos" goes for one finished run: the page with that
+ * video shown first (?video=), so it is found even past page one. An anchor alone
+ * landed nowhere once the video had moved off the first page (OCC #684 review F6).
+ */
 export function extractedHref(assetId: string): string {
-  return `${EXTRACTED_ROOT}#${extractedAnchor(assetId)}`;
+  return `${EXTRACTED_ROOT}?video=${encodeURIComponent(assetId)}`;
 }
 
 export type ExtractedVideoFacts = {

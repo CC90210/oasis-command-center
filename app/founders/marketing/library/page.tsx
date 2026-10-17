@@ -140,7 +140,10 @@ export default async function MarketingLibraryPage({
   // The Video extractor's saves left the Library (CC, 2026-10-17: "a separate
   // category ... rather than the main library"): an old Downloads link lands on
   // their own page.
-  if (sp.group === "downloads") redirect(EXTRACTED_ROOT);
+  if (sp.group === "downloads") {
+    const n = parseLibraryPage(sp.page);
+    redirect(n > 1 ? `${EXTRACTED_ROOT}?page=${n}` : EXTRACTED_ROOT);
+  }
   // An unknown ?group= falls back to the default tab rather than 404ing or
   // showing everything — a bad tab name is a typo, not a request for a wider view.
   const group: BrandGroupKey = isLibraryBrandGroupKey(sp.group) ? sp.group : DEFAULT_BRAND_GROUP;
