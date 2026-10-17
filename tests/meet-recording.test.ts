@@ -649,6 +649,31 @@ async function main() {
     assert.equal((await view(9))?.status, "waiting");
   });
 
+  await check("a recording whose browser uploaded nothing at all is 'lost', never 'Nothing was recorded'", async () => {
+    const at = later(T0, minutes(64_000));
+    const r = await liveRoom({ at });
+    const p = await participant(r, "Offline host");
+    await endRoom(r.id, later(at, minutes(30)));
+    const code = displayMeetCode(r.code);
+    const fin = (body: Record<string, unknown>) =>
+      routes.handleMeetFinalize(
+        new Request(`${ORIGIN}/api/meet/${code}/recording/finalize`, {
+          method: "POST",
+          headers: { origin: ORIGIN, "x-forwarded-host": "oasisai.work", "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        code,
+        rdeps(later(at, minutes(31))),
+      );
+    // Control: a browser that lost nothing, and no chunk: nothing was recorded, and nothing is written.
+    assert.equal((await (await fin({ sent: 0, failed: 0, errored: 0 })).json() as { state: string }).state, "nothing_recorded");
+    assert.equal((await (await fin({ sent: 0, failed: 180, errored: 0 })).json() as { state: string }).state, "lost");
+    const view = (await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(at, minutes(32)))))).recording as { state: string };
+    assert.equal(view.state, "lost");
+    const straggler = await upload(r, { participant: p, segment: crypto.randomUUID(), seq: 0, startedAt: at.getTime() }, later(at, minutes(33)));
+    assert.equal(straggler.status, 410, "a lost recording took a chunk after it was declared lost");
+  });
+
   await check("a workspace no PC transcribes for is never recorded: the chunk is refused, nothing is handed over, the panel says so", async () => {
     const { PRODUCER_TENANTS } = h;
     const { OASIS_INTERNAL_TENANT_IDS } = await import("../lib/ai/tools/client-safe-registry");
@@ -728,6 +753,18 @@ async function main() {
     assert.deepEqual([noStorage.status, (await body(noStorage)).error], [503, "storage_not_configured"]);
     const healthy = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(at, minutes(31 * 24 * 60 + 10)) });
     assert.equal(healthy.status, 200);
+    // R2 refusing deletes (bad credentials, an outage) is a failed run too, never a healthy tick (fourth pass).
+    const stuck = await liveRoom({ at });
+    const stuckP = await participant(stuck, "Stuck");
+    assert.equal((await upload(stuck, { participant: stuckP, segment: crypto.randomUUID(), seq: 0, startedAt: at.getTime() }, later(at, minutes(1)))).status, 201);
+    const stuckCode = displayMeetCode(stuck.code);
+    await routes.handleMeetRecordingDelete(hostReq(stuckCode, "DELETE"), stuckCode, rdeps(later(at, minutes(2)), as(CC), fakeMeetStorage({ removeFailsAfter: 0 }).storage));
+    assert.equal(await count("SELECT COUNT(*) FROM meet_recording_chunks WHERE room_id = ?", [stuck.id]), 1, "control: the delete really failed");
+    const refusing = await routes.handleMeetRelayCron({ db, storage: fakeMeetStorage({ removeFailsAfter: 0 }).storage, now: () => later(at, minutes(3)) });
+    assert.deepEqual([refusing.status, (await body(refusing)).error], [503, "relay_delete_failed"]);
+    const retried = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(at, minutes(4)) });
+    assert.equal(retried.status, 200);
+    assert.equal(await count("SELECT COUNT(*) FROM meet_recording_chunks WHERE room_id = ?", [stuck.id]), 0);
   });
 
   await check("the panel says deleted only for what is, keeps reading while anything is left, and a failed action's error outlives the re-read", async () => {
@@ -749,6 +786,12 @@ async function main() {
     assert.equal(v.missingAudioLine(base), null);
     const device = (status: "not_needed" | "waiting" | "done" | "failed", errorCode: string | null = null) =>
       ({ status, errorCode, doneAt: status === "done" ? T0.toISOString() : null });
+    // Expired, with the PC told to delete its copy: said, watched, and offered again if the PC failed.
+    const expiredWaiting = { ...base, state: "expired" as const, deviceDelete: device("waiting") };
+    assert.match(v.describeRecording(expiredWaiting).detail ?? "", /Waiting for .+ to delete its copy/);
+    assert.equal(v.recordingBusy(expiredWaiting), true);
+    assert.equal(v.recordingDeletable({ ...base, state: "expired" as const, deviceDelete: device("failed") }), true);
+    assert.match(v.describeRecording({ ...base, state: "lost" as const }).headline, /couldn't upload any of the audio/);
     const waiting = { ...base, deviceDelete: device("waiting") };
     assert.doesNotMatch(JSON.stringify(v.describeRecording(waiting)), /copy was deleted/, "the PC's copy was called deleted while the PC had not");
     assert.match(v.describeRecording(waiting).detail ?? "", /Waiting for .+ to delete its copy/);
@@ -960,6 +1003,18 @@ async function main() {
     const failed = await getJob(db, OASIS, job.job_id);
     assert.deepEqual([failed?.status, failed?.errorCode], ["failed", "relay_expired"]);
     assert.equal(await rec.removeRelayChunks(db, store.storage, { tenantIds: [OASIS], roomId: room.id }, 300, late), 1);
+    // That PC took the audio before it vanished, so it may hold a copy: it is told to delete it, and the panel
+    // says it is waiting for that, never that the audio is simply gone (Codex on #685, fourth pass).
+    assert.equal(
+      await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key = ? AND status = 'queued'", [`meet_delete_local:${room.id}`]),
+      1,
+      "an expired recording the PC had claimed left its copy on the PC",
+    );
+    const after = (await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(late, minutes(1)))))).recording as {
+      state: string;
+      deviceDelete: { status: string } | null;
+    };
+    assert.deepEqual([after.state, after.deviceDelete?.status], ["expired", "waiting"]);
   });
 
   await check("a speaker with no consent on record is never recorded; a download is still held 45 minutes at most", async () => {

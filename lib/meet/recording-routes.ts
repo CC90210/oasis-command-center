@@ -37,6 +37,7 @@ import {
   meetRelayCron,
   normalizeRecordingMime,
   recordRecorderReport,
+  recordTotalLoss,
   type MeetStorage,
   type RecorderReport,
 } from "./recording";
@@ -184,6 +185,11 @@ export async function handleMeetFinalize(req: Request, rawCode: string, deps: Re
   const now = deps.now();
   const out = await ensureTranscriptJob(deps.db, h.room, h.userId, now);
   if (out.state === "not_ended") return refuse(409, "not_ended");
+  // Nothing reached the relay, but the browser says it lost audio: that is a failed recording, not an empty one.
+  if (out.state === "nothing_recorded" && (report.failed > 0 || report.errored > 0)) {
+    await recordTotalLoss(deps.db, h.room, report, now);
+    return json(200, { ok: true, state: "lost" });
+  }
   // Kept on the recording, so the panel can say how much is missing even where the rows show no gap.
   await recordRecorderReport(deps.db, h.room, report, now);
   return json(200, { ok: true, state: out.state });
@@ -216,6 +222,9 @@ export async function handleMeetRelayCron(deps: { db: Client; storage: MeetStora
   if (!(await meetRecordingTablesInstalled(deps.db))) return json(200, { ok: true, skipped: "not_installed" });
   const result = await meetRelayCron(deps.db, deps.storage, deps.now());
   if (!deps.storage) return json(503, { ok: false, error: "storage_not_configured", ...result });
+  // R2 refused a delete (credentials, permissions, an outage): audio past its time is still there. A failed
+  // run, said as one, so the driver reports it rather than a healthy tick (Codex on #685, fourth pass).
+  if (result.deleteFailed) return json(503, { ok: false, error: "relay_delete_failed", ...result });
   return json(200, { ok: true, ...result });
 }
 

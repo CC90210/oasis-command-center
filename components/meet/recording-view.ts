@@ -13,6 +13,7 @@
 export type RecordingLine = { at_ms: number; end_ms: number; participant_id: string; speaker: string; text: string };
 
 export type RecordingState =
+  | "lost"
   | "unavailable"
   | "off"
   | "none"
@@ -87,13 +88,25 @@ export function missingAudioLine(v: RecordingView): string | null {
 /** Something is still happening, so the panel reads the recording again in a while. */
 export function recordingBusy(v: RecordingView): boolean {
   if (ACTIVE.has(v.state)) return true;
-  if (v.state === "expired") return v.relayChunks > 0;
-  return v.state === "deleted" && (v.relayChunks > 0 || v.deviceDelete?.status === "waiting");
+  if (v.state !== "deleted" && v.state !== "expired") return false;
+  return v.relayChunks > 0 || v.deviceDelete?.status === "waiting";
 }
 
 /** Delete is offered while there is something to delete, and again when the computer could not delete its copy. */
 export function recordingDeletable(v: RecordingView): boolean {
-  return DELETABLE.has(v.state) || (v.state === "deleted" && v.deviceDelete?.status === "failed");
+  return DELETABLE.has(v.state) || ((v.state === "deleted" || v.state === "expired") && v.deviceDelete?.status === "failed");
+}
+
+/** The line about the computer's own copy, once the recording is deleted or expired. */
+function deviceLine(view: RecordingView, fallback: string | null): string | null {
+  const device = view.deviceDelete;
+  if (device?.status === "waiting") return `Waiting for ${PC} to delete its copy. It does when it's next on.`;
+  if (device?.status === "done") return "The computer's copy was deleted too.";
+  if (device?.status === "failed") {
+    const why = (device.errorCode && FAILED_BECAUSE[device.errorCode]) || "it reported an error";
+    return `${PC} couldn't delete its copy: ${why}. Delete again to retry.`;
+  }
+  return fallback;
 }
 
 export function clock(ms: number): string {
@@ -144,24 +157,29 @@ export function describeRecording(view: RecordingView): { headline: string; deta
         detail: t?.deviceLabel ? `Audio and transcript saved on ${t.deviceLabel}${t.folderName ? `, in the folder "${t.folderName}"` : ""}.` : null,
       };
     case "expired":
-      // Deleted only once it is: the relay's cleanup takes a batch per run (Codex on #685, second pass).
-      return view.relayChunks > 0
-        ? { headline: `${PC} didn't take this recording within 30 days, so its audio is being deleted without a transcript.`, detail: null }
-        : { headline: `${PC} didn't take this recording within 30 days, so its audio was deleted without a transcript.`, detail: null };
+      // Deleted only once it is: the relay's cleanup takes a batch per run (Codex on #685, second pass), and a PC
+      // that had claimed it is told to delete its partial copy (fourth pass).
+      return {
+        headline:
+          view.relayChunks > 0
+            ? `${PC} didn't take this recording within 30 days, so its audio is being deleted without a transcript.`
+            : `${PC} didn't take this recording within 30 days, so its audio was deleted without a transcript.`,
+        detail: deviceLine(view, null),
+      };
+    case "lost":
+      return {
+        headline: "This meeting wasn't recorded: the recording browser couldn't upload any of the audio.",
+        detail: "Check that browser's connection before the next recorded meeting.",
+      };
     case "deleted": {
       // Deleted only for what is: the server's copies and the computer's copy each have their own state.
-      const device = view.deviceDelete;
       const serverLeft = view.relayChunks > 0;
-      const headline = serverLeft
-        ? "Deleting the recording. The transcript is gone; the audio on the server is still being removed."
-        : "The recording and transcript were deleted from the Command Center.";
-      if (device?.status === "waiting") return { headline, detail: `Waiting for ${PC} to delete its copy. It does when it's next on.` };
-      if (device?.status === "done") return { headline, detail: "The computer's copy was deleted too." };
-      if (device?.status === "failed") {
-        const why = (device.errorCode && FAILED_BECAUSE[device.errorCode]) || "it reported an error";
-        return { headline, detail: `${PC} couldn't delete its copy: ${why}. Delete again to retry.` };
-      }
-      return { headline, detail: serverLeft ? null : "The computer never had a copy." };
+      return {
+        headline: serverLeft
+          ? "Deleting the recording. The transcript is gone; the audio on the server is still being removed."
+          : "The recording and transcript were deleted from the Command Center.",
+        detail: deviceLine(view, serverLeft ? null : "The computer never had a copy."),
+      };
     }
   }
 }

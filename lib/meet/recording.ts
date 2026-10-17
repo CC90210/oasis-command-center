@@ -165,7 +165,7 @@ export type DeclaredSegment = {
 /** One line of a transcript, as the PC sends it (BEA scripts/meet/transcript.py). */
 export type TranscriptLine = { at_ms: number; end_ms: number; participant_id: string; speaker: string; text: string };
 
-export type TranscriptStatus = "queued" | "transcribing" | "ready" | "expired" | "deleted";
+export type TranscriptStatus = "queued" | "transcribing" | "ready" | "expired" | "deleted" | "lost";
 
 export type MeetTranscript = {
   id: string;
@@ -424,7 +424,7 @@ export async function acceptChunk(db: Client, storage: MeetStorage, c: ChunkInpu
 // ---------------------------------------------------------------------------
 
 export type HandOver =
-  | { state: "unavailable" | "not_ended" | "nothing_recorded" | "ready" | "expired" | "deleted" }
+  | { state: "unavailable" | "not_ended" | "nothing_recorded" | "ready" | "expired" | "deleted" | "lost" }
   | { state: "queued" | "transcribing"; jobId: string };
 
 function handOverStatements(room: MeetRoom, jobId: string, actorUserId: string | null, relayExpiresAt: string, now: Date): InStatement[] {
@@ -829,6 +829,9 @@ export function meetDeleteLocalCompleteStatements(
  * untranscribed audio at once and never told the PC, #685 review M8): a
  * feature that deletes rooms calls deleteMeetRecording first, and the R2
  * lifecycle rule on meet-relay/ is the backstop for anything else.
+ *
+ * Returns how many were deleted; removeRelayChunksReport also says whether a
+ * delete failed, which the relay cron must report (Codex on #685, fourth pass).
  */
 export async function removeRelayChunks(
   db: Client,
@@ -837,7 +840,17 @@ export async function removeRelayChunks(
   limit: number = RELAY_CLEANUP_BATCH,
   now: Date = new Date(),
 ): Promise<number> {
-  if (!storage || !scope.tenantIds.length || limit < 1) return 0;
+  return (await removeRelayChunksReport(db, storage, scope, limit, now)).removed;
+}
+
+export async function removeRelayChunksReport(
+  db: Client,
+  storage: MeetStorage | null,
+  scope: { tenantIds: readonly string[]; roomId?: string },
+  limit: number = RELAY_CLEANUP_BATCH,
+  now: Date = new Date(),
+): Promise<{ removed: number; failed: boolean }> {
+  if (!storage || !scope.tenantIds.length || limit < 1) return { removed: 0, failed: false };
   const tin = sqlPlaceholders(scope.tenantIds.length);
   const room = scope.roomId ? " AND t.room_id = ?" : "";
   const roomArgs = scope.roomId ? [scope.roomId] : [];
@@ -886,7 +899,7 @@ export async function removeRelayChunks(
                              WHERE c.tenant_id = meet_transcripts.tenant_id AND c.room_id = meet_transcripts.room_id)`,
     args: [now.toISOString(), ...scope.tenantIds, ...roomArgs],
   });
-  return gone.length;
+  return { removed: gone.length, failed };
 }
 
 /**
@@ -922,15 +935,22 @@ export async function expireRelay(db: Client, tenantIds: readonly string[], now:
                  AND NOT EXISTS (SELECT 1 FROM tool_jobs j
                                  WHERE j.tenant_id = meet_transcripts.tenant_id AND j.id = meet_transcripts.job_id
                                    AND (j.status = 'queued' OR (j.status IN ('claimed', 'running') AND j.lease_expires_at >= ?)))
-               RETURNING room_id`,
+               RETURNING tenant_id, room_id, local_folder`,
         args: [at, ...tenantIds, at, at],
       },
     ],
     "write",
   );
-  const expired = results[1].rows.length;
-  if (expired) console.warn("[meet.relay] recordings expired before the PC took them", { count: expired });
-  return expired;
+  const rows = results[1].rows;
+  // A PC that claimed one of these and then vanished may hold a partial copy: tell it to delete that too
+  // (only where a transcription was ever claimed; deviceDeleteStatement checks).
+  for (const r of rows) {
+    await db.execute(
+      deviceDeleteStatement({ tenantId: String(r.tenant_id), roomId: String(r.room_id), title: null, localFolder: str(r.local_folder) }, null, now),
+    );
+  }
+  if (rows.length) console.warn("[meet.relay] recordings expired before the PC took them", { count: rows.length });
+  return rows.length;
 }
 
 /**
@@ -961,6 +981,24 @@ export async function expireUnfinalized(db: Client, tenantIds: readonly string[]
 
 /** What the recording browser said about its own losses at the end (lib/meet/recorder.ts StopReport). */
 export type RecorderReport = { failed: number; errored: number };
+
+/**
+ * The recording browser says it lost audio and not one chunk reached the relay:
+ * a row of its own, 'lost', so the panel says the recording failed instead of
+ * "Nothing was recorded" (Codex on #685, fourth pass). Only where no chunk
+ * exists and no row does yet.
+ */
+export async function recordTotalLoss(db: Client, room: MeetRoom, report: RecorderReport, now: Date): Promise<boolean> {
+  const at = now.toISOString();
+  const rs = await db.execute({
+    sql: `INSERT INTO meet_transcripts (id, tenant_id, room_id, status, relay_expires_at, created_at, updated_at, recorder_failed, recorder_errored)
+          SELECT ?, ?, ?, 'lost', ?, ?, ?, ?, ?
+          WHERE NOT EXISTS (SELECT 1 FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?)
+          ON CONFLICT (tenant_id, room_id) DO NOTHING`,
+    args: [randomUUID(), room.tenantId, room.id, at, at, at, report.failed, report.errored, room.tenantId, room.id],
+  });
+  return rs.rowsAffected === 1;
+}
 
 /**
  * Keep the recording browser's own count of what it lost. Chunks that never
@@ -1035,7 +1073,7 @@ export async function meetRelayCron(
   db: Client,
   storage: MeetStorage | null,
   now: Date,
-): Promise<{ tenants: number; expired: number; removed: number }> {
+): Promise<{ tenants: number; expired: number; removed: number; deleteFailed: boolean }> {
   const at = now.toISOString();
   // First, give a row to every recording nobody handed over that is past its 30 days, so the reads below find it.
   const abandoned = await expireUnfinalized(db, null, now);
@@ -1047,10 +1085,10 @@ export async function meetRelayCron(
     args: [at],
   });
   const tenantIds = rs.rows.map((r) => String(r.tenant_id));
-  if (!tenantIds.length) return { tenants: 0, expired: abandoned, removed: 0 };
+  if (!tenantIds.length) return { tenants: 0, expired: abandoned, removed: 0, deleteFailed: false };
   const expired = abandoned + (await expireRelay(db, tenantIds, now));
-  const removed = await removeRelayChunks(db, storage, { tenantIds }, RELAY_DELETE_BATCH, now);
-  return { tenants: tenantIds.length, expired, removed };
+  const cleanup = await removeRelayChunksReport(db, storage, { tenantIds }, RELAY_DELETE_BATCH, now);
+  return { tenants: tenantIds.length, expired, removed: cleanup.removed, deleteFailed: cleanup.failed };
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1096,37 @@ export async function meetRelayCron(
 // ---------------------------------------------------------------------------
 
 export type DeleteOutcome = { relayRemaining: number; deviceDeleteQueued: boolean };
+
+/**
+ * Tell the PC to delete its copy of a meeting (a meet_delete_local job), but
+ * only if it may have one: a transcription of this room was ever claimed. Not
+ * twice at once, and not again once it has confirmed. Used when the host
+ * deletes a recording, and when a recording the PC had claimed expires (its PC
+ * vanished mid-way, so a partial copy may sit in its Meetings folder: Codex on
+ * #685, fourth pass). The PC finds the folder by `local_folder`, else by room.
+ */
+function deviceDeleteStatement(
+  rec: { tenantId: string; roomId: string; title: string | null; localFolder: string | null },
+  actorUserId: string | null,
+  now: Date,
+): InStatement {
+  const at = now.toISOString();
+  const transcribeKey = `meet_transcribe:${rec.roomId}`;
+  const deleteKey = `meet_delete_local:${rec.roomId}`;
+  const input = { room_id: rec.roomId, title: rec.title, local_folder: rec.localFolder };
+  return {
+    sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, idempotency_key,
+                                 dedupe_key, created_by, created_by_email, created_at, updated_at)
+          SELECT ?, ?, 'meet_delete_local', 'runner', 'queued', ?, ?, NULL, ?, ?, NULL, ?, ?
+          WHERE EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND attempts > 0)
+            AND NOT EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running'))
+            AND NOT EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND local_deleted_at IS NOT NULL)`,
+    args: [
+      randomUUID(), rec.tenantId, JSON.stringify(input), inputHashOf("meet_delete_local", input), deleteKey, actorUserId, at, at,
+      rec.tenantId, transcribeKey, rec.tenantId, deleteKey, rec.tenantId, rec.roomId,
+    ],
+  };
+}
 
 /**
  * Delete a meeting's recording and transcript, for good: the transcript text
@@ -1078,7 +1147,6 @@ export async function deleteMeetRecording(
   const t = await readTranscript(db, room.tenantId, room.id);
   const transcribeKey = `meet_transcribe:${room.id}`;
   const deleteKey = `meet_delete_local:${room.id}`;
-  const input = { room_id: room.id, title: room.title, local_folder: t?.localFolder ?? null };
   await db.batch(
     [
       {
@@ -1094,18 +1162,7 @@ export async function deleteMeetRecording(
                WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running')`,
         args: [toolErrorLine("meeting_deleted", "runner"), at, at, room.tenantId, transcribeKey],
       },
-      {
-        sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, idempotency_key,
-                                     dedupe_key, created_by, created_by_email, created_at, updated_at)
-              SELECT ?, ?, 'meet_delete_local', 'runner', 'queued', ?, ?, NULL, ?, ?, NULL, ?, ?
-              WHERE EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND attempts > 0)
-                AND NOT EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running'))
-                AND NOT EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND local_deleted_at IS NOT NULL)`,
-        args: [
-          randomUUID(), room.tenantId, JSON.stringify(input), inputHashOf("meet_delete_local", input), deleteKey, actorUserId, at, at,
-          room.tenantId, transcribeKey, room.tenantId, deleteKey, room.tenantId, room.id,
-        ],
-      },
+      deviceDeleteStatement({ tenantId: room.tenantId, roomId: room.id, title: room.title, localFolder: t?.localFolder ?? null }, actorUserId, now),
     ],
     "write",
   );
@@ -1125,6 +1182,7 @@ export async function deleteMeetRecording(
 // ---------------------------------------------------------------------------
 
 export type MeetRecordingState =
+  | "lost"
   | "unavailable"
   | "off"
   | "none"
@@ -1220,7 +1278,8 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
             transcribeSeconds: t.transcribeSeconds,
           }
         : null,
-    deviceDelete: t?.status === "deleted" ? await deviceDeleteState(db, room, t) : null,
+    // A deleted recording, and an expired one the PC had claimed, each tell the PC to delete its copy.
+    deviceDelete: t?.status === "deleted" || t?.status === "expired" ? await deviceDeleteState(db, room, t) : null,
   };
 }
 

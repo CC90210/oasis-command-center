@@ -22,6 +22,8 @@
 --                 (relay_expires_at): the audio was deleted unheard
 --   deleted       the host deleted the recording: the text is gone and the PC
 --                 is told to delete its copy (local_deleted_at when it has)
+--   lost          the recording browser could upload none of the audio: it
+--                 said so at the end (recorder_failed), and nothing reached here
 -- relay_cleared_at is when the last relay chunk of a ready, expired or deleted
 -- recording was deleted. recorder_failed and recorder_errored are what the
 -- recording browser itself reported at the end (chunks it could not upload,
@@ -53,7 +55,7 @@ CREATE TABLE IF NOT EXISTS meet_transcripts (
   id                 text not null primary key,
   tenant_id          text not null,
   room_id            text not null,
-  status             text not null default 'queued' check (status in ('queued', 'transcribing', 'ready', 'expired', 'deleted')),
+  status             text not null default 'queued' check (status in ('queued', 'transcribing', 'ready', 'expired', 'deleted', 'lost')),
   job_id             text,
   segments_json      text not null default '[]',
   chunk_count        integer not null default 0,
