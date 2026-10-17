@@ -16,6 +16,12 @@
  * checked: a host's card says ready exactly when the read /book makes for that
  * host works. (tests/booking-host-calendar-status.test.ts pins the wording.)
  *
+ * Also through the real route: the card's GET spends Google calls, so a host's
+ * answer is kept for 30 seconds and a repeat load costs none; a Google outage
+ * is not a refused sign-in; and a saved value that will not decrypt is "Status
+ * unavailable", where /book (whose reader turns it into an empty bundle) treats
+ * the host as not connected.
+ *
  * Run: node --conditions=react-server --import tsx tests/booking-card-route.test.ts
  */
 import "./_delivery-harness";
@@ -46,15 +52,19 @@ type GoogleCall =
   | { kind: "token"; refreshToken: string }
   | { kind: "events"; bearer: string; calendar: string; minutes: number };
 const googleCalls: GoogleCall[] = [];
-let workspaceTokenDead = false;
+// What Google answers when the workspace credential is refreshed: fine, refused for good, or down.
+let workspaceToken: "ok" | "dead" | "down" = "ok";
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   if (url.origin === "https://oauth2.googleapis.com" && url.pathname === "/token") {
     const refreshToken = new URLSearchParams(String(init?.body ?? "")).get("refresh_token") ?? "";
     googleCalls.push({ kind: "token", refreshToken });
-    if (workspaceTokenDead && refreshToken === WORKSPACE_REFRESH) {
+    if (workspaceToken === "dead" && refreshToken === WORKSPACE_REFRESH) {
       return json(400, { error: "invalid_grant", error_description: "Token has been expired or revoked." });
+    }
+    if (workspaceToken === "down" && refreshToken === WORKSPACE_REFRESH) {
+      return json(503, { error: { code: 503, message: "The service is currently unavailable.", status: "UNAVAILABLE" } });
     }
     return json(200, { access_token: `access-${refreshToken}`, expires_in: 3600 });
   }
@@ -99,11 +109,16 @@ async function main() {
   const { loadPublicBookingAvailability } = await import("../lib/forms/public-booking");
   const { GoogleCalendarIntegrationError, listGoogleCalendarBusy } = await import("../lib/integrations/google-calendar");
   const { setUserIntegrationBundle } = await import("../lib/user-integration-store");
+  const { clearHostCalendarStatusCache } = await import("../lib/booking/host-calendar-status");
   await login(USERS.cc);
 
-  type CardHost = { userId: string; role: string; calendar: { ready: boolean; label: string } };
-  /** What the signed-in owner's card is told, host by host (the organizer first). */
-  async function cardHosts() {
+  type CardHost = { userId: string; role: string; calendar: { ready: boolean; kind: string; label: string } };
+  /**
+   * What the signed-in owner's card is told, host by host (the organizer first). The route keeps each host's
+   * answer for 30 seconds, so every state below starts from nothing kept unless it asks to keep them.
+   */
+  async function cardHosts(options: { keep?: boolean } = {}) {
+    if (!options.keep) clearHostCalendarStatusCache();
     const { value, calls } = await logged(async () => {
       const res = await route.GET();
       assert.equal(res.status, 200);
@@ -157,8 +172,8 @@ async function main() {
     assert.deepEqual(
       hosts.map((h) => [h.role, h.calendar]),
       [
-        ["organizer", { ready: true, label: `Connected through the workspace calendar (${USERS.cc.email})` }],
-        ["attendee", { ready: false, label: "Not connected" }],
+        ["organizer", { ready: true, kind: "workspace", label: `Connected through the workspace calendar (${USERS.cc.email})` }],
+        ["attendee", { ready: false, kind: "needs_connection", label: "Not connected" }],
       ],
       `the card says ${JSON.stringify(hosts.map((h) => [h.role, h.calendar]))}`,
     );
@@ -175,6 +190,22 @@ async function main() {
     agree(hosts, offered.reads);
   });
 
+  await check("Loading the card again inside 30 seconds spends no Google call at all (a loop of GETs cannot burn CC's Calendar quota); once the answer is forgotten it reads again", async () => {
+    clearHostCalendarStatusCache();
+    googleCalls.length = 0;
+    const first = await cardHosts({ keep: true });
+    const spent = googleCalls.length;
+    assert.equal(spent, 2, "the first load made CC's token and events reads");
+    for (let i = 0; i < 5; i++) {
+      const again = await cardHosts({ keep: true });
+      assert.deepEqual(again.hosts, first.hosts, "the same answer");
+    }
+    assert.equal(googleCalls.length, spent, "five more loads: not one more Google call");
+    clearHostCalendarStatusCache();
+    await cardHosts({ keep: true });
+    assert.equal(googleCalls.length, spent + 2, "after the answer is forgotten the next load reads again");
+  });
+
   await check("Adon connects his own Google: his card turns ready with his own label, CC's stays through the workspace, and /book offers both", async () => {
     const saved = await setUserIntegrationBundle(OASIS, USERS.adon.id, "gmail_oauth", {
       refresh_token: "adon-refresh-token",
@@ -186,8 +217,8 @@ async function main() {
     assert.deepEqual(
       hosts.map((h) => h.calendar),
       [
-        { ready: true, label: `Connected through the workspace calendar (${USERS.cc.email})` },
-        { ready: true, label: "Connected" },
+        { ready: true, kind: "workspace", label: `Connected through the workspace calendar (${USERS.cc.email})` },
+        { ready: true, kind: "connected", label: "Connected" },
       ],
       `the card says ${JSON.stringify(hosts.map((h) => h.calendar))}`,
     );
@@ -197,14 +228,14 @@ async function main() {
     agree(hosts, offered.reads);
   });
 
-  await check("The workspace credential dies: CC's card says Sign-in expired and is logged, /book fails for the organizer, Adon stays ready", async () => {
-    workspaceTokenDead = true;
+  await check("The workspace credential is refused for good: CC's card says Sign-in expired and is logged, /book fails for the organizer, Adon stays ready", async () => {
+    workspaceToken = "dead";
     const { hosts, logs } = await cardHosts();
     assert.deepEqual(
       hosts.map((h) => h.calendar),
       [
-        { ready: false, label: "Sign-in expired" },
-        { ready: true, label: "Connected" },
+        { ready: false, kind: "needs_connection", label: "Sign-in expired" },
+        { ready: true, kind: "connected", label: "Connected" },
       ],
       `the card says ${JSON.stringify(hosts.map((h) => h.calendar))}`,
     );
@@ -215,7 +246,46 @@ async function main() {
     assert.ok(offered.error instanceof GoogleCalendarIntegrationError && offered.error.code === "token_refresh_failed", "/book fails closed with the organizer's reason");
     assert.deepEqual(offered.slots, []);
     agree(hosts, offered.reads);
-    workspaceTokenDead = false;
+  });
+
+  await check("Google is down when the workspace credential is refreshed (a 503, not a refusal): CC's card says Status unavailable with no sign-in claim, and /book fails closed the same way", async () => {
+    workspaceToken = "down";
+    const { hosts, logs } = await cardHosts();
+    assert.deepEqual(
+      hosts.map((h) => h.calendar),
+      [
+        { ready: false, kind: "unavailable", label: "Status unavailable" },
+        { ready: true, kind: "connected", label: "Connected" },
+      ],
+      `the card says ${JSON.stringify(hosts.map((h) => h.calendar))}`,
+    );
+    assert.equal(logs.length, 1, "logged once");
+    assert.match(JSON.stringify(logs[0][1]), /token_refresh_failed/);
+    const offered = await book();
+    assert.ok(offered.error instanceof GoogleCalendarIntegrationError && offered.error.code === "token_refresh_failed", "/book fails closed for the organizer");
+    agree(hosts, offered.reads);
+  });
+
+  await check("Adon's saved Google value will not decrypt: /book leaves him off as not connected, but the card says Status unavailable instead of telling him to connect", async () => {
+    workspaceToken = "ok";
+    // A value the field encryption cannot open (a rotated key, say), in place of his real tokens.
+    await db.execute({ sql: "UPDATE user_integration_credentials SET encrypted_value = 'not-a-ciphertext' WHERE tenant_id = ? AND user_id = ?", args: [OASIS, USERS.adon.id] });
+    const { hosts, logs } = await cardHosts();
+    assert.deepEqual(
+      hosts.map((h) => h.calendar),
+      [
+        { ready: true, kind: "workspace", label: `Connected through the workspace calendar (${USERS.cc.email})` },
+        { ready: false, kind: "unavailable", label: "Status unavailable" },
+      ],
+      `the card says ${JSON.stringify(hosts.map((h) => h.calendar))}`,
+    );
+    const ours = logs.filter((l) => l[0] === "[calendar.booking.host-status]");
+    assert.equal(ours.length, 1, "the status reader's refusal is logged by the card");
+    assert.match(JSON.stringify(ours[0][1]), /personal_integration_decrypt_failed/);
+    const offered = await book();
+    assert.equal(offered.reads.get(USERS.adon.id), "google_calendar_not_connected", "/book's own reader sees an empty bundle and treats him as not connected");
+    assert.ok(hostIds(offered.slots).every((ids) => ids.length === 1 && ids[0] === USERS.cc.id), "CC alone: Adon is left off");
+    agree(hosts, offered.reads);
   });
 
   finish("booking-card-route");

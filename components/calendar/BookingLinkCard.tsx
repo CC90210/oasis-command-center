@@ -29,7 +29,8 @@ type BookingInfo = {
     userId: string;
     name: string;
     role: "organizer" | "attendee";
-    calendar: { ready: boolean; label: string };
+    /** lib/booking/host-calendar-status.ts HostCalendarStatus: `kind` is what the card acts on, `label` the words. */
+    calendar: { ready: boolean; kind: "connected" | "workspace" | "needs_connection" | "unavailable"; label: string };
   }[];
   calendars: { id: string; name: string; isDefault: boolean }[];
 };
@@ -192,11 +193,18 @@ export function BookingLinkCard() {
               <span className="text-fg">{you ? "You" : host.name}</span>
               {host.role === "organizer" ? " (hosts)" : " (joins)"}: {hours ? summarize(hours) : "No hours"}
               {host.calendar.ready ? (
-                // Ready through the workspace calendar, not their own sign-in: say so quietly
-                // (lib/booking/host-calendar-status.ts WORKSPACE_CALENDAR_LABEL).
-                host.calendar.label.includes("through the workspace calendar") ? (
+                // Ready through the workspace calendar, not their own sign-in: say so quietly.
+                host.calendar.kind === "workspace" ? (
                   <span className="block text-fg-dim">Google Calendar: {host.calendar.label}.</span>
                 ) : null
+              ) : host.calendar.kind === "unavailable" ? (
+                // It could not be checked, which says nothing about whether they connected: no "connect it".
+                <span className="block text-status-warm">
+                  Google Calendar: {host.calendar.label}. It could not be checked just now, which does not mean it is disconnected.{" "}
+                  {host.role === "organizer"
+                    ? "Times may not be offered until it can be read."
+                    : "Times that need them may be closed until it can be read."}
+                </span>
               ) : (
                 <span className="block text-status-warm">
                   Google Calendar: {host.calendar.label}.{" "}
@@ -390,7 +398,7 @@ function BookingSettingsDialog({
                   <input
                     type="time"
                     step={900}
-                    className="input h-8"
+                    className="input time-field h-8"
                     aria-label={`${nameOf(host.userId)} ${DAY_NAMES[i]} start`}
                     disabled={!d.on}
                     value={d.start}
@@ -400,7 +408,7 @@ function BookingSettingsDialog({
                   <input
                     type="time"
                     step={900}
-                    className="input h-8"
+                    className="input time-field h-8"
                     aria-label={`${nameOf(host.userId)} ${DAY_NAMES[i]} end`}
                     disabled={!d.on}
                     value={d.end}

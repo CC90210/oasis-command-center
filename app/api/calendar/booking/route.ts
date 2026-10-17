@@ -65,8 +65,10 @@ export async function GET(): Promise<NextResponse> {
     ]);
     const identities = hostIdentities(roster);
     // The same calendar read /book makes for each host, with each host's own
-    // address (lib/booking/host-calendar-status.ts). A host whose calendar
-    // cannot be read closes their on-duty slots; the card says why.
+    // address (lib/booking/host-calendar-status.ts). It spends Google calls, so
+    // each host's answer is kept for 30 seconds and one read gets 8 seconds. A
+    // host whose calendar cannot be read closes their on-duty slots; the card
+    // says why.
     const statuses = await hostCalendarStatuses({
       tenantId: owner.tenantId,
       hosts: loaded.settings.hosts,
