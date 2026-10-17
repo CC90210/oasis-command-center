@@ -33,6 +33,7 @@ import {
   type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
+import { tallyMetaFacets, type PackFacet, type SegmentFacet } from "@/lib/founders/library-meta";
 
 /**
  * Restrict a `marketing_asset` query to one brand tab.
@@ -177,6 +178,13 @@ export type MarketingAssetRow = {
   published_at: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Maven's free-form stamps (icp_segment, pack_id, hook, hook_variant,
+   * hook_style, offer_slug, burned_captions). An object from the Turso bridge,
+   * possibly JSON text elsewhere: read it through assetMetaView
+   * (lib/founders/library-meta.ts), never directly.
+   */
+  meta?: unknown;
   media?: MarketingMediaRow[];
   open_reviews?: number;
 };
@@ -506,6 +514,10 @@ export async function getMarketingAssets(
     brand?: string;
     /** `author_email`, for the by-author facet. */
     author?: string;
+    /** `meta.icp_segment`: the audience a creative was made for. */
+    icp?: string;
+    /** `meta.pack_id`: one pack of hook variants. */
+    pack?: string;
     /** Review + distribution bucket. The default view excludes archived. */
     lifecycle?: Lifecycle;
     /** 1-based. */
@@ -531,6 +543,11 @@ export async function getMarketingAssets(
       if (opts.track) q = q.eq("track", opts.track);
       if (opts.channel) q = q.eq("channel", opts.channel);
       if (opts.author) q = q.eq("author_email", opts.author);
+      // The audience and pack facets read Maven's stamps in `meta`. The JSON path
+      // compiles to json_extract on the Turso bridge and is PostgREST's own
+      // `->>` elsewhere; the value is always a bound parameter.
+      if (opts.icp) q = q.eq("meta->>icp_segment", opts.icp);
+      if (opts.pack) q = q.eq("meta->>pack_id", opts.pack);
 
       // `status` and `lifecycle` ARE TWO VOCABULARIES FOR ONE COLUMN, so applying
       // both ANDs them into a contradiction: ?status=draft&lifecycle=archived
@@ -1165,6 +1182,66 @@ export async function getMarketingFacets(tenantId: string): Promise<MarketingFac
     // Never throw from a read path (the file convention), but do not claim the
     // library has no brands either — that would empty the tab bar.
     return { brands: [], authors: [], degraded: true };
+  }
+}
+
+/**
+ * The audience and pack filters' options: which `meta.icp_segment` and
+ * `meta.pack_id` values the current view holds, with how many assets each.
+ *
+ * SCOPED TO THE VIEW THE GRID IS IN, unlike the brand facets above: a pill that
+ * says "Sales bottleneck 6" has to open a grid of 6, so the read is narrowed by
+ * the brand tab and by the lifecycle (or, with a Studio ?status= link, no
+ * archived filter), the same two rules the grid applies. The other filters
+ * (channel, brand, author) are left out on purpose: these are options to switch
+ * between, not a count of the current slice.
+ *
+ * Only the two JSON paths are read (aliased, so the row keys are the same on
+ * PostgREST and on the Turso bridge), and the tally is a pure function. A failed
+ * page degrades the result rather than emptying it: counts are then a floor, and
+ * the page says the filters did not load instead of hiding them.
+ */
+export type MetaFacets = {
+  segments: SegmentFacet[];
+  packs: PackFacet[];
+  degraded: boolean;
+};
+
+export const EMPTY_META_FACETS: MetaFacets = { segments: [], packs: [], degraded: false };
+export const DEGRADED_META_FACETS: MetaFacets = { segments: [], packs: [], degraded: true };
+
+export async function getMetaFacets(
+  tenantId: string,
+  view: { group: BrandGroupKey; lifecycle?: Lifecycle; status?: AssetStatus },
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<MetaFacets> {
+  if (!tenantId) return EMPTY_META_FACETS;
+  try {
+    const rows: Array<{ icp_segment?: unknown; pack_id?: unknown }> = [];
+    const outcome = await pageAll<{ icp_segment?: unknown; pack_id?: unknown }>(
+      "meta_facets",
+      () => {
+        let q = scopeToBrandGroup(
+          db
+            .from("marketing_asset")
+            .select("icp_segment:meta->>icp_segment, pack_id:meta->>pack_id")
+            .eq("tenant_id", tenantId) as unknown as BrandFilterable,
+          view.group,
+        ) as unknown as LifecycleFilterable;
+        // The grid's own rule (getMarketingAssets): a lifecycle wins; with none,
+        // archived and rejected are hidden unless a Studio ?status= link asked
+        // for one stage.
+        if (view.lifecycle) q = scopeToLifecycle(q, view.lifecycle);
+        else if (!view.status) q = hideArchived(q);
+        return q as unknown as PagedQuery<{ icp_segment?: unknown; pack_id?: unknown }>;
+      },
+      (got) => rows.push(...got),
+    );
+    if (outcome === "absent") return EMPTY_META_FACETS;
+    return { ...tallyMetaFacets(rows), degraded: outcome === "degraded" };
+  } catch (e) {
+    console.warn("[marketing:meta_facets] unexpected", e);
+    return DEGRADED_META_FACETS;
   }
 }
 

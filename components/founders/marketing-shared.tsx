@@ -12,6 +12,7 @@ import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { CarouselFrame } from "@/components/founders/CarouselFrame";
 import { DownloadLink } from "@/components/founders/DownloadLink";
+import { MetaBadges } from "@/components/founders/MetaBadges";
 import { EnlargeButton, PhoneEnlarge } from "@/components/founders/PhoneEnlarge";
 import { PhoneFrame, PhoneTextCard, type PhoneFrameShape } from "@/components/founders/PhoneFrame";
 import { TileVideo } from "@/components/founders/TileVideo";
@@ -296,6 +297,9 @@ export function AssetTile({
   openReviews = 0,
   presentation = "grid",
   returnTo,
+  offerSlug,
+  burnedCaptions,
+  canRequestChanges,
 }: {
   id: string;
   title: string;
@@ -319,6 +323,11 @@ export function AssetTile({
   presentation?: LibraryView;
   /** The Library view this tile is drawn in, so the asset page can link back to it. */
   returnTo?: string;
+  /** meta.offer_slug / meta.burned_captions, shown as read-only badges when set. */
+  offerSlug?: string | null;
+  burnedCaptions?: boolean;
+  /** Offer Request changes on an in-review tile (owners and admins; the route enforces it). */
+  canRequestChanges?: boolean;
 }) {
   const duration = fmtDuration(durationS);
   const platforms = parsePlatforms(platformsRaw);
@@ -380,6 +389,7 @@ export function AssetTile({
         </span>
         <StatusTag status={status} publishedAt={publishedAt} />
       </div>
+      <MetaBadges offerSlug={offerSlug} burnedCaptions={burnedCaptions} />
       {phone && (
         <div className="flex items-center justify-between gap-2">
           <span className="text-[10px] tabular-nums text-fg-dim">
@@ -394,7 +404,7 @@ export function AssetTile({
       {/* The verdict lives on the tile. Sending the operator somewhere else to approve
           something they are already looking at is how 39 assets ended up sitting in
           review with no way to clear them. */}
-      <AssetActions id={id} status={status} title={title} />
+      <AssetActions id={id} status={status} title={title} canRequestChanges={canRequestChanges} />
     </div>
   );
 

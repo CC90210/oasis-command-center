@@ -52,12 +52,25 @@ import Link from "next/link";
 import { LayoutGrid, Smartphone } from "lucide-react";
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
+import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveFounder } from "@/lib/founders/gate";
+import { mayRequestChanges } from "@/lib/founders/request-changes";
+import { resolvePersona } from "@/lib/role-surfaces";
+import {
+  assetMetaView,
+  hookVariantCards,
+  icpSegmentLabel,
+  isPackId,
+  isSegmentId,
+  packLabel,
+} from "@/lib/founders/library-meta";
 import {
   DEGRADED_MARKETING_FACETS,
+  DEGRADED_META_FACETS,
   getBrandTabCounts,
   getLifecycleCounts,
   getMarketingFacets,
+  getMetaFacets,
   loadLibraryPage,
   type LibraryPage,
 } from "@/lib/founders/marketing-queries";
@@ -66,6 +79,7 @@ import {
   DEFAULT_BRAND_GROUP,
   LIFECYCLE,
   TRACKS,
+  assetHref,
   brandGroupFor,
   channelLabel,
   channelsForTrack,
@@ -90,6 +104,7 @@ import {
   type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
+import { HookCompare } from "@/components/founders/HookCompare";
 import { AssetTile, MarketingEmpty } from "@/components/founders/marketing-shared";
 
 export const dynamic = "force-dynamic";
@@ -111,6 +126,8 @@ export default async function MarketingLibraryPage({
     channel?: string;
     brand?: string;
     author?: string;
+    icp?: string;
+    pack?: string;
     status?: string;
     lifecycle?: string;
     page?: string;
@@ -130,6 +147,10 @@ export default async function MarketingLibraryPage({
     ? sp.brand
     : undefined;
   const author = typeof sp.author === "string" && sp.author.length <= 320 ? sp.author : undefined;
+  // Audience (meta.icp_segment) and pack (meta.pack_id): kept in the URL like
+  // every other filter, validated so an arbitrary string never reaches the query.
+  const icp = isSegmentId(sp.icp) ? sp.icp : undefined;
+  const pack = isPackId(sp.pack) ? sp.pack : undefined;
   // Studio's pipeline tiles link here with ?status=; validated against the
   // canonical list so an arbitrary string never reaches the query.
   const status = isAssetStatus(sp.status) ? sp.status : undefined;
@@ -150,15 +171,16 @@ export default async function MarketingLibraryPage({
   // and signs media for those rows only; the tab and pill numbers come from
   // COUNT queries. The page used to read up to 200 rows and sign every one, and
   // the browser then fetched media for every tile: minutes, not seconds.
-  const [pageOrNull, facets, lc, tabCounts] = await Promise.all([
+  const [pageOrNull, facets, metaFacets, lc, tabCounts, canRequestChanges] = await Promise.all([
     safe<LibraryPage | null>(
       "marketing.library",
       loadLibraryPage(founder.tenantId, {
-        group, track, channel, brand, author, status, lifecycle, page: requestedPage,
+        group, track, channel, brand, author, icp, pack, status, lifecycle, page: requestedPage,
       }),
       null,
     ),
     safe("marketing.library.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
+    safe("marketing.library.meta", getMetaFacets(founder.tenantId, { group, lifecycle, status }), DEGRADED_META_FACETS),
     safe("marketing.library.lifecycle", getLifecycleCounts(founder.tenantId, group), {
       counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
       degraded: true,
@@ -167,6 +189,13 @@ export default async function MarketingLibraryPage({
       counts: { "oasis-ai": 0, conaugh: 0, downloads: 0, clients: 0 },
       degraded: true,
     }),
+    // Request changes is for owners and admins (the route enforces it; this only
+    // decides whether to draw the button). Fails closed: no session, no button.
+    safe(
+      "marketing.library.reviewer",
+      resolveSessionContext().then((s) => s.ok && mayRequestChanges(resolvePersona(s))),
+      false,
+    ),
   ]);
   // "All N" is the tab's own number (getBrandTabCounts counts what each tab's
   // grid shows: archived and rejected sit behind the Archived pill), so the tab,
@@ -211,7 +240,7 @@ export default async function MarketingLibraryPage({
   // Every link on the page goes through libraryHref (lib/founders-marketing-core.ts),
   // which keeps every filter unless one is explicitly changed; the pager keeps
   // them all and changes only the page.
-  const here = { group, track, channel, brand, author, status, lifecycle, view };
+  const here = { group, track, channel, brand, author, icp, pack, status, lifecycle, view };
   const filterHref = (next: LibraryHrefChange) => libraryHref(here, next);
   const pageHref = (n: number) => filterHref({ page: n });
   // This exact view - tab, filters, view and page - for the asset page's
@@ -220,6 +249,23 @@ export default async function MarketingLibraryPage({
 
   const activeGroup = BRAND_GROUPS.find((g) => g.key === group)!;
   const filtered = !!(track || channel || brand || author || status || lifecycle);
+
+  // The audience and pack options for THIS view (getMetaFacets). A chosen value
+  // that the view holds nothing of (a bookmark, an archived-only pack) is still
+  // drawn, lit, so the filter that is narrowing the grid can always be cleared.
+  const segmentOptions =
+    icp && !metaFacets.segments.some((s) => s.id === icp)
+      ? [...metaFacets.segments, { id: icp, count: 0 }]
+      : metaFacets.segments;
+  // A pack belongs to one audience: with an audience chosen, only its packs.
+  const inAudience = metaFacets.packs.filter((p) => !icp || p.icp === icp);
+  const packOptions =
+    pack && !inAudience.some((p) => p.id === pack)
+      ? [...inAudience, { id: pack, icp: icp ?? null, count: 0 }]
+      : inAudience;
+  // A pack chosen: its variants are compared side by side (HookCompare) instead
+  // of drawn as phones.
+  const comparing = !!pack && signed.length > 0;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -332,6 +378,49 @@ export default async function MarketingLibraryPage({
         </div>
       )}
 
+      {/* Audience and pack (CC, 2026-10-08, through Maven). Who a creative was
+          made for (meta.icp_segment) and the pack of hook variants it belongs to
+          (meta.pack_id). Both rows draw only when the view holds some (or one is
+          already chosen), so a library without them is unchanged. Choosing a
+          pack swaps the grid for the hook comparison. */}
+      {(segmentOptions.length > 0 || icp) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Audience</span>
+          <FilterPill href={filterHref({ icp: null, pack: null })} label="All" active={!icp} subtle />
+          {segmentOptions.map((s) => (
+            <FilterPill
+              key={s.id}
+              href={filterHref({ icp: s.id })}
+              label={`${icpSegmentLabel(s.id)} ${s.count}`}
+              title={s.id}
+              active={icp === s.id}
+              subtle
+            />
+          ))}
+        </div>
+      )}
+      {(packOptions.length > 0 || pack) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Pack</span>
+          <FilterPill href={filterHref({ pack: null })} label="All" active={!pack} subtle />
+          {packOptions.map((p) => (
+            <FilterPill
+              key={p.id}
+              href={filterHref({ pack: p.id })}
+              label={`${packLabel(p.id)} ${p.count}`}
+              title={p.id}
+              active={pack === p.id}
+              subtle
+            />
+          ))}
+        </div>
+      )}
+      {metaFacets.degraded && (
+        <p className="text-[11px] text-fg-dim">
+          The audience and pack filters did not fully load, so some may be missing or low. Nothing has been lost.
+        </p>
+      )}
+
       {/* A status filter arrives from Studio's pipeline tiles, never from a pill
           here, so without this row the page silently showed a subset with no
           indication of why — and no way back. */}
@@ -426,14 +515,17 @@ export default async function MarketingLibraryPage({
           {/* Phone frames are the default (CC: "the preferred iPhone view");
               Grid is the plain card grid, where a video is still a phone
               (AssetTile). The page you are on is kept. */}
-          <div className="flex items-center gap-1" role="group" aria-label="Library layout">
-            <ViewLink href={filterHref({ view: "phone", page: currentPage })} active={view === "phone"} label="Phone">
-              <Smartphone className="h-3.5 w-3.5" />
-            </ViewLink>
-            <ViewLink href={filterHref({ view: "grid", page: currentPage })} active={view === "grid"} label="Grid">
-              <LayoutGrid className="h-3.5 w-3.5" />
-            </ViewLink>
-          </div>
+          {/* The comparison is its own layout, so the toggle has nothing to switch. */}
+          {!comparing && (
+            <div className="flex items-center gap-1" role="group" aria-label="Library layout">
+              <ViewLink href={filterHref({ view: "phone", page: currentPage })} active={view === "phone"} label="Phone">
+                <Smartphone className="h-3.5 w-3.5" />
+              </ViewLink>
+              <ViewLink href={filterHref({ view: "grid", page: currentPage })} active={view === "grid"} label="Grid">
+                <LayoutGrid className="h-3.5 w-3.5" />
+              </ViewLink>
+            </div>
+          )}
         </div>
       )}
 
@@ -459,6 +551,10 @@ export default async function MarketingLibraryPage({
                 ? "Nothing at this stage"
                 : lifecycle
                   ? `Nothing ${lifecycleLabel(lifecycle).toLowerCase()}`
+                  : pack
+                  ? "Nothing in this pack"
+                  : icp
+                  ? "Nothing for this audience"
                   : track || channel
                     ? "Nothing in this channel yet"
                     : author
@@ -474,6 +570,8 @@ export default async function MarketingLibraryPage({
                 ? "No assets are sitting at this stage right now. Clear the stage to see the rest of the library."
                 : lifecycle
                   ? `Nothing in this tab is ${lifecycleHint(lifecycle)}. The library is not empty — pick another state above to see the rest.`
+                  : pack || icp
+                  ? "No assets in this tab carry that audience or pack. Clear the filter to see the rest of the library."
                   : track || channel
                     ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
                     : author
@@ -489,9 +587,19 @@ export default async function MarketingLibraryPage({
         </Card>
       ) : (
         <>
-          {/* Phones take as many columns as fit at 232px or wider: narrower than
+          {comparing && pack ? (
+            // A pack is chosen: its variants, hook against hook, instead of phones.
+            // Every filter above still applies (the variants shown are the ones the
+            // pills describe), and the links come back to this exact view.
+            <HookCompare
+              heading={`${packLabel(pack)} - ${signed.length} ${signed.length === 1 ? "variant" : "variants"}`}
+              cards={hookVariantCards(signed, (id) => assetHref(id, thisView))}
+              canRequestChanges={canRequestChanges}
+            />
+          ) : (
+          /* Phones take as many columns as fit at 232px or wider: narrower than
               that the verdict row under each phone cannot fit and the page
-              scrolls sideways (it did at 390px and 768px with fixed breakpoints). */}
+              scrolls sideways (it did at 390px and 768px with fixed breakpoints). */
           <div
             className={
               view === "phone"
@@ -503,32 +611,39 @@ export default async function MarketingLibraryPage({
                 shape. Without it the grid stretches every tile to the tallest in its row,
                 leaving a 9:16 tile's worth of empty panel beside every 16:9 one — dead
                 space created BY the fix. */}
-            {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH, slideUrls }) => (
-              <AssetTile
-                key={asset.id}
-                id={asset.id}
-                title={asset.title}
-                brandName={asset.brand_name}
-                channel={asset.channel}
-                status={asset.status}
-                publishedAt={asset.published_at}
-                hook={asset.hook}
-                aspect={asset.aspect}
-                durationS={asset.duration_s}
-                format={asset.format}
-                platforms={asset.platforms}
-                assetType={asset.asset_type}
-                slideUrls={slideUrls}
-                playbackUrl={playbackUrl}
-                posterUrl={posterUrl}
-                mediaW={mediaW}
-                mediaH={mediaH}
-                openReviews={asset.open_reviews}
-                presentation={view}
-                returnTo={thisView}
-              />
-            ))}
+            {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH, slideUrls }) => {
+              const meta = assetMetaView(asset.meta);
+              return (
+                <AssetTile
+                  key={asset.id}
+                  id={asset.id}
+                  title={asset.title}
+                  brandName={asset.brand_name}
+                  channel={asset.channel}
+                  status={asset.status}
+                  publishedAt={asset.published_at}
+                  hook={asset.hook}
+                  aspect={asset.aspect}
+                  durationS={asset.duration_s}
+                  format={asset.format}
+                  platforms={asset.platforms}
+                  assetType={asset.asset_type}
+                  slideUrls={slideUrls}
+                  playbackUrl={playbackUrl}
+                  posterUrl={posterUrl}
+                  mediaW={mediaW}
+                  mediaH={mediaH}
+                  openReviews={asset.open_reviews}
+                  presentation={view}
+                  returnTo={thisView}
+                  offerSlug={meta.offerSlug}
+                  burnedCaptions={meta.burnedCaptions}
+                  canRequestChanges={canRequestChanges}
+                />
+              );
+            })}
           </div>
+          )}
           {pageCount > 1 && (
             <nav className="flex flex-wrap items-center justify-center gap-1.5 pt-2" aria-label="Library pages">
               {currentPage > 1 ? (
@@ -588,11 +703,14 @@ function FilterPill({
   label,
   active,
   subtle = false,
+  title,
 }: {
   href: string;
   label: string;
   active: boolean;
   subtle?: boolean;
+  /** The raw value behind a friendly label (an audience or pack id), for hover. */
+  title?: string;
 }) {
   const base = "px-3 py-1.5 rounded-full text-xs border transition-all";
   const cls = active
@@ -601,7 +719,7 @@ function FilterPill({
       ? "bg-bg-deep/40 text-fg-dim border-bg-border hover:bg-bg-hover font-medium"
       : "bg-bg-elev text-fg-muted border-bg-border hover:bg-bg-hover font-medium";
   return (
-    <Link href={href} className={`${base} ${cls}`}>
+    <Link href={href} title={title} className={`${base} ${cls}`}>
       {label}
     </Link>
   );
