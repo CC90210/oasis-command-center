@@ -34,6 +34,7 @@ import {
   meetRecordingServed,
   meetRecordingTablesInstalled,
   meetRecordingView,
+  meetRelayCron,
   normalizeRecordingMime,
   recordRecorderReport,
   type MeetStorage,
@@ -198,6 +199,24 @@ function recorderReportOf(raw: Uint8Array | null): RecorderReport {
   } catch {
     return { failed: 0, errored: 0 };
   }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/cron/meet-relay (the route checks the cron auth, then calls this)
+// ---------------------------------------------------------------------------
+
+/**
+ * The relay's upkeep run (meetRelayCron). With no relay storage nothing can be
+ * deleted, so the 30-day promise cannot be kept: that is a failed run the cron
+ * driver reports (503), never a quiet 200 (Codex on #685, third pass). Expiry
+ * still runs first, so recordings are marked even while storage is missing.
+ */
+export async function handleMeetRelayCron(deps: { db: Client; storage: MeetStorage | null; now: () => Date }): Promise<Response> {
+  // Migration bravo__231 not applied yet: nothing to keep, and not a failure.
+  if (!(await meetRecordingTablesInstalled(deps.db))) return json(200, { ok: true, skipped: "not_installed" });
+  const result = await meetRelayCron(deps.db, deps.storage, deps.now());
+  if (!deps.storage) return json(503, { ok: false, error: "storage_not_configured", ...result });
+  return json(200, { ok: true, ...result });
 }
 
 // ---------------------------------------------------------------------------

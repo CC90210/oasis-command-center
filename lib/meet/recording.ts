@@ -252,15 +252,17 @@ export async function readTranscript(db: Client, tenantId: string, roomId: strin
   return rs.rows[0] ? toTranscript(rs.rows[0] as unknown as Record<string, unknown>) : null;
 }
 
-type JobState = { status: string; stage: string | null; errorCode: string | null; attempts: number };
+type JobState = { status: string; stage: string | null; errorCode: string | null; attempts: number; leaseExpiresAt: string | null };
 
 async function jobState(db: Client, tenantId: string, jobId: string): Promise<JobState | null> {
   const rs = await db.execute({
-    sql: "SELECT status, stage, error_code, attempts FROM tool_jobs WHERE tenant_id = ? AND id = ? LIMIT 1",
+    sql: "SELECT status, stage, error_code, attempts, lease_expires_at FROM tool_jobs WHERE tenant_id = ? AND id = ? LIMIT 1",
     args: [tenantId, jobId],
   });
   const r = rs.rows[0];
-  return r ? { status: String(r.status), stage: str(r.stage), errorCode: str(r.error_code), attempts: num(r.attempts) } : null;
+  return r
+    ? { status: String(r.status), stage: str(r.stage), errorCode: str(r.error_code), attempts: num(r.attempts), leaseExpiresAt: str(r.lease_expires_at) }
+    : null;
 }
 
 async function relayTotals(db: Client, tenantId: string, roomId: string): Promise<{ chunks: number; bytes: number }> {
@@ -1189,7 +1191,10 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
   if (!t && relay.chunks === 0 && !meetRecordingServed(room.tenantId)) state = "unavailable";
   else if (!t) state = relay.chunks > 0 ? (room.status === "ended" ? "waiting" : "recording") : room.recordAudio ? "none" : "off";
   else if (t.status === "queued" || t.status === "transcribing") {
-    state = !job || job.status === "failed" ? "failed" : job.status === "queued" ? "waiting" : "transcribing";
+    // Transcribing only while a PC holds it now: a claim whose lease lapsed (the PC crashed or went off) is
+    // waiting to be taken again, not being worked on (Codex on #685, third pass).
+    const held = (job?.status === "claimed" || job?.status === "running") && !!job.leaseExpiresAt && job.leaseExpiresAt >= now.toISOString();
+    state = !job || job.status === "failed" ? "failed" : held ? "transcribing" : "waiting";
   } else state = t.status;
 
   const folderName = t?.localFolder ? (t.localFolder.split(/[\\/]/).filter(Boolean).pop() ?? null) : null;

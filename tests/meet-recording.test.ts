@@ -722,6 +722,12 @@ async function main() {
     );
     const quiet = await rec.meetRelayCron(db, store.storage, later(at, minutes(31 * 24 * 60 + 5)));
     assert.deepEqual([quiet.expired, quiet.removed], [0, 0], "a second run found work the first should have done");
+    // The cron route's answer: a run with no relay storage cannot delete anything, so it fails loudly (503),
+    // never a quiet 200 the driver would count as healthy (Codex on #685, third pass).
+    const noStorage = await routes.handleMeetRelayCron({ db, storage: null, now: () => later(at, minutes(31 * 24 * 60 + 10)) });
+    assert.deepEqual([noStorage.status, (await body(noStorage)).error], [503, "storage_not_configured"]);
+    const healthy = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(at, minutes(31 * 24 * 60 + 10)) });
+    assert.equal(healthy.status, 200);
   });
 
   await check("the panel says deleted only for what is, keeps reading while anything is left, and a failed action's error outlives the re-read", async () => {
@@ -779,7 +785,11 @@ async function main() {
     assert.equal((await v.runRecordingAction("delete", "/b", throwing)).ok, false);
     // The screen shows a failure only AFTER it re-read the recording, so the re-read cannot wipe it (Codex on #685).
     const screen = readFileSync(join(ROOT, "components", "meet", "MeetRecording.tsx"), "utf8");
-    assert.match(screen, /await load\(true\);\s*\n\s*\/\/[^\n]*\n\s*if \(!outcome\.ok/, "the action's error is set before the re-read");
+    assert.match(screen, /await load\(\);\s*\n\s*\/\/[^\n]*\n\s*if \(!outcome\.ok[^\n]*setActionError/, "the action's error is set before the re-read");
+    // A failed READ is its own state, cleared by the next read that works: one bad poll must not leave
+    // "Couldn't load" on a panel that has since loaded (Codex on #685, third pass).
+    assert.match(screen, /setLoadError\(null\);\s*\n\s*setView\(body\.recording\)/, "a read that works does not clear the failed read's message");
+    assert.doesNotMatch(screen, /setLoadError\(null\)[\s\S]{0,40}setActionError|setActionError\(null\);\s*\n\s*setView/, "a read clears an action's error");
   });
 
   // ---------------------------------------------------------------------
@@ -934,9 +944,15 @@ async function main() {
 
   await check("a claim whose PC vanished does not hold audio past 30 days: its lapsed lease lets the recording expire", async () => {
     const at = later(T0, minutes(102_000));
-    const { room } = await endedRecording(at, "Vanished");
+    const { room, code } = await endedRecording(at, "Vanished");
     const job = await claimTranscription(later(at, minutes(3)), room.id);
     assert.equal(job.input.room_id, room.id);
+    // While the PC holds it, the panel says transcribing; once the lease has lapsed, it is waiting, not
+    // "transcribing" for days on a PC that is gone (Codex on #685, third pass).
+    const stateAt = async (m: number) =>
+      ((await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(at, minutes(m)))))).recording as { state: string }).state;
+    assert.equal(await stateAt(5), "transcribing");
+    assert.equal(await stateAt(60), "waiting");
     // The PC never heartbeats again: the lease lapsed long before the 30 days ran out.
     const late = later(at, minutes(31 * 24 * 60));
     assert.ok((await rec.expireRelay(db, [OASIS], late)) >= 1);

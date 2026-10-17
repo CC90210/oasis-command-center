@@ -39,31 +39,32 @@ export function MeetRecording({ code }: { code: string }) {
 function MeetRecordingPanel({ code }: { code: string }) {
   const base = `/api/meet/${encodeURIComponent(code)}/recording`;
   const [view, setView] = useState<RecordingView | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Two kinds of trouble, kept apart: a read that failed clears itself when a later read works; an action
+  // that failed (Try again, Delete) stays until the next action (Codex on #685, third pass).
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const error = actionError ?? loadError;
   const [busy, setBusy] = useState<"retry" | "delete" | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [copied, setCopied] = useState(false);
   const alive = useRef(true);
 
-  /** Read the recording again. Clears a previous load error, never an action's (`keepError`). */
-  const load = useCallback(
-    async (keepError = false) => {
-      try {
-        const res = await fetch(base, { credentials: "same-origin", cache: "no-store" });
-        const body = (await res.json().catch(() => null)) as { ok?: boolean; recording?: RecordingView } | null;
-        if (!alive.current) return;
-        if (!res.ok || !body?.ok || !body.recording) {
-          setError(LOAD_FAILED);
-          return;
-        }
-        if (!keepError) setError(null);
-        setView(body.recording);
-      } catch {
-        if (alive.current) setError(LOAD_FAILED);
+  /** Read the recording again. A read that works clears a failed read's message; an action's stays. */
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(base, { credentials: "same-origin", cache: "no-store" });
+      const body = (await res.json().catch(() => null)) as { ok?: boolean; recording?: RecordingView } | null;
+      if (!alive.current) return;
+      if (!res.ok || !body?.ok || !body.recording) {
+        setLoadError(LOAD_FAILED);
+        return;
       }
-    },
-    [base],
-  );
+      setLoadError(null);
+      setView(body.recording);
+    } catch {
+      if (alive.current) setLoadError(LOAD_FAILED);
+    }
+  }, [base]);
 
   useEffect(() => {
     alive.current = true;
@@ -76,20 +77,20 @@ function MeetRecordingPanel({ code }: { code: string }) {
   const polling = view ? recordingBusy(view) : false;
   useEffect(() => {
     if (!polling) return;
-    const timer = setInterval(() => void load(true), POLL_MS);
+    const timer = setInterval(() => void load(), POLL_MS);
     return () => clearInterval(timer);
   }, [polling, load]);
 
   async function act(kind: "retry" | "delete") {
     if (busy) return;
     setBusy(kind);
-    setError(null);
+    setActionError(null);
     try {
       const outcome = await runRecordingAction(kind, base, (input, init) => fetch(input, init), () => alive.current);
       setConfirming(false);
-      await load(true);
-      // After the re-read, so the re-read can never wipe it.
-      if (!outcome.ok && alive.current) setError(outcome.error);
+      await load();
+      // After the re-read, and in its own state, so no read can ever wipe it.
+      if (!outcome.ok && alive.current) setActionError(outcome.error);
     } finally {
       if (alive.current) setBusy(null);
     }
@@ -105,7 +106,7 @@ function MeetRecordingPanel({ code }: { code: string }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      setError("Couldn't copy. Select the transcript and copy it instead.");
+      setActionError("Couldn't copy. Select the transcript and copy it instead.");
     }
   }
 
