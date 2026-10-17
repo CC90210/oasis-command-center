@@ -34,6 +34,7 @@
 
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import type { BrandKey } from "@/lib/email/brands";
+import { isTenantBrand, type TenantBrand } from "@/lib/email/brand-for-tenant";
 import type { OasisMailPurpose } from "@/lib/email/support-mailbox";
 import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
 
@@ -136,6 +137,43 @@ export function oasisSupportFooter(unsubscribeUrl: string): string {
   );
 }
 
+/**
+ * The footer on a client workspace's OWN email (a TenantBrand, registered in
+ * Settings > Brand): the workspace's legal name, its postal address and an
+ * address that reaches it (CASL s.6(2) and its regulations: name, mailing
+ * address, and an email address), then the recipient's own opt-out link.
+ *
+ * Nothing of OASIS's. The mail is the client's, so the footer names only the
+ * client: no OASIS name, street or support address, and no sentence about why
+ * the reader is getting it, which only the client could know.
+ *
+ * Fails closed. Without a legal name, a postal address (decision D11: it is
+ * required) or a real unsubscribe link this throws instead of returning a
+ * footer that would not satisfy the law it exists for.
+ */
+export function tenantSenderFooter(brand: TenantBrand, unsubscribeUrl: string): string {
+  const legalName = (brand.legalName || "").trim();
+  const postalAddress = (brand.postalAddress || "").trim();
+  const contact = (brand.replyTo || brand.fromAddress || "").trim();
+  if (!legalName || !postalAddress || !contact.includes("@")) {
+    throw new Error(
+      "tenantSenderFooter: a workspace's footer needs its legal name, postal address and an email address. " +
+        "Refusing to send commercial email without them.",
+    );
+  }
+  const optOutUrl = (unsubscribeUrl || "").trim();
+  if (!/^https?:\/\/\S+$/.test(optOutUrl)) {
+    throw new Error(
+      "tenantSenderFooter: a workspace's email needs the recipient's unsubscribe link. " +
+        "Refusing to send it with an opt-out that nothing records.",
+    );
+  }
+  return (
+    `\n\n---\n${legalName}\n${postalAddress}\n${contact}\n\n` +
+    `To stop receiving these emails, unsubscribe here: ${optOutUrl}`
+  );
+}
+
 export function appendSignatureAndFooter(
   body: string,
   /**
@@ -158,14 +196,19 @@ export function appendSignatureAndFooter(
    * (lib/email/tracked-html.ts unsubscribeUrl), REQUIRED with purpose
    * "support": support mail without an opt-out that is recorded throws here
    * rather than goes out.
+   *
+   * `brand` may be a client workspace's own TenantBrand (2026-10-02). That mail
+   * is signed by `signer` or by nobody, never by a name from OASIS's roster,
+   * and closes with tenantSenderFooter, which needs `unsubscribeUrl` too.
    */
-  opts: { signer?: EmailSigner | null; fromAddress?: string; brand: BrandKey; purpose?: OasisMailPurpose; unsubscribeUrl?: string },
+  opts: { signer?: EmailSigner | null; fromAddress?: string; brand: BrandKey | TenantBrand; purpose?: OasisMailPurpose; unsubscribeUrl?: string },
 ): string {
   const trimmed = body.replace(/\s+$/, "");
+  const tenantBrand = isTenantBrand(opts.brand) ? opts.brand : null;
   const support = opts.purpose === "support";
   if (support && opts.brand !== "oasis") {
     throw new Error(
-      `appendSignatureAndFooter: support mail is OASIS's, not ${JSON.stringify(opts.brand)}'s. ` +
+      `appendSignatureAndFooter: support mail is OASIS's, not ${JSON.stringify(tenantBrand ? `workspace ${tenantBrand.tenantId}` : opts.brand)}'s. ` +
         "Refusing to put OASIS's support footer on another company's email.",
     );
   }
@@ -176,6 +219,9 @@ export function appendSignatureAndFooter(
         "Refusing to send it with an opt-out that nothing records.",
     );
   }
+  // A workspace's own footer is built first: it throws on a missing identity
+  // or opt-out link, and nothing is signed for a message that cannot go out.
+  const tenantFooter = tenantBrand ? tenantSenderFooter(tenantBrand, optOutUrl) : null;
   // THE BRAND HAS TO REACH THE FALLBACK TOO.
   //
   // This resolved the signer with no brand, so a caller that passed
@@ -184,7 +230,10 @@ export function appendSignatureAndFooter(
   // defect, arriving through the back door. Threading opts.brand closes it for
   // every present and future caller rather than for the one route that was
   // reported.
-  const signer = support
+  //
+  // A workspace's own mail never reaches that fallback: OASIS's roster names
+  // OASIS's people, and none of them signs a client's email.
+  const signer = support || isTenantBrand(opts.brand)
     ? opts.signer ?? null
     : opts.signer ?? resolveSignerForOperator(opts.fromAddress, { brand: opts.brand });
   const name = (signer?.name || "").trim();
@@ -215,7 +264,7 @@ export function appendSignatureAndFooter(
   // legal identity. An invalid value at runtime (untyped JS caller, bad JSON)
   // throws rather than defaulting — a commercial email must not go out
   // attributed to whoever happens to be first in the table.
-  const footer = support ? oasisSupportFooter(optOutUrl) : BRAND_FOOTERS[opts.brand];
+  const footer = tenantFooter ?? (support ? oasisSupportFooter(optOutUrl) : BRAND_FOOTERS[opts.brand as BrandKey]);
   if (!footer) {
     throw new Error(
       `appendSignatureAndFooter: no footer for brand ${JSON.stringify(opts.brand)}. ` +
