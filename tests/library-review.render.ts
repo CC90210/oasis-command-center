@@ -208,6 +208,23 @@ async function main() {
   flow.requestCalls = calls.map((c) => ({ ...c }));
   calls.length = 0;
 
+  // Sent back, then approved from the same tile. The tile is a draft now and Approve is still an
+  // ordinary verdict button: it sends the status and nothing else (the server closes the open
+  // request for changes), the "Sent back" notice goes, and the tile reads Approved.
+  {
+    const d = driver(AssetActions);
+    await press(d.render(props), "Request changes");
+    type(d.render(props), "Too slow.");
+    reply(true, { ok: true });
+    await press(d.render(props), "Send back");
+    flow.sentBackThenApproveBefore = snapshot(d.render(props));
+    calls.length = 0;
+    reply(true, { ok: true });
+    await press(d.render(props), "Approve");
+    flow.sentBackThenApprove = { calls: calls.map((c) => ({ ...c })), after: snapshot(d.render(props)) };
+    calls.length = 0;
+  }
+
   // A tile whose asset is not waiting on a verdict (a draft): no such button.
   {
     const d = driver(AssetActions);
@@ -241,9 +258,216 @@ async function main() {
     calls.length = 0;
   }
 
+  // -- the hook comparison, DRIVEN -----------------------------------------------
+  // Fake <video> elements the component's ref callbacks are handed, the way React
+  // attaches them: each render detaches the old callback (null) and attaches the
+  // new one, and a card that left the page gets its callback called with null.
+  function fakeClip(log: string[], id: string, rejectPlay: boolean) {
+    return {
+      paused: true,
+      muted: false,
+      currentTime: 0,
+      play() {
+        log.push(`play ${id}${this.muted ? " muted" : ""}`);
+        if (rejectPlay) return Promise.reject(new Error("autoplay refused"));
+        this.paused = false;
+        return Promise.resolve();
+      },
+      pause() {
+        if (!this.paused) log.push(`pause ${id}`);
+        this.paused = true;
+      },
+      scrollIntoView() {},
+    };
+  }
+  type CardList = ReturnType<typeof hookVariantCards>;
+  const cardsOf = (ids: string[], noVideo: string[] = []): CardList =>
+    hookVariantCards(
+      ids.map((id) => tile(id, "in_review", `variant_${id.slice(1)}`, noVideo.includes(id) ? { playbackUrl: null } : {}, { hook: `Opening of ${id}` })),
+      (id) => `/founders/marketing/asset/${id}`,
+    );
+  function rig(initial: CardList, rejectPlay: string[] = []) {
+    const log: string[] = [];
+    const clips = new Map<string, ReturnType<typeof fakeClip>>();
+    const mounted = new Map<string, (el: unknown) => void>();
+    const d = driver(HookCompare);
+    let current = initial;
+    let tree: El = d.render({ heading: "pack", cards: current } as Parameters<typeof HookCompare>[0]);
+    const videoEls = () => all(tree).filter((e) => e.type === "video");
+    const idOf = (e: El) => String(e.props.src).replace(/^.*\/([^/]+)\.mp4$/, "$1");
+    /** One frame, then what React does with the refs after it. */
+    function show(next?: CardList): El {
+      if (next) current = next;
+      tree = d.render({ heading: "pack", cards: current } as Parameters<typeof HookCompare>[0]);
+      const present = new Set<string>();
+      for (const v of videoEls()) {
+        const id = idOf(v);
+        present.add(id);
+        const ref = v.props.ref as (el: unknown) => void;
+        if (!clips.has(id)) clips.set(id, fakeClip(log, id, rejectPlay.includes(id)));
+        mounted.get(id)?.(null);
+        ref(clips.get(id));
+        mounted.set(id, ref);
+      }
+      for (const [id, ref] of [...mounted]) {
+        if (!present.has(id)) {
+          ref(null);
+          mounted.delete(id);
+        }
+      }
+      return tree;
+    }
+    show();
+    const press = (label: string) => {
+      const b = buttonsOf(tree).find((x) => textOf(x).trim() === label);
+      if (!b) throw new Error(`no button "${label}"`);
+      (b.props.onClick as () => unknown)();
+      return show();
+    };
+    const ended = (id: string) => {
+      const v = videoEls().find((e) => idOf(e) === id);
+      if (!v) throw new Error(`no video ${id}`);
+      // A media element that has ended is paused, as in a browser.
+      const clip = clips.get(id);
+      if (clip) clip.paused = true;
+      (v.props.onEnded as () => unknown)();
+      return show();
+    };
+    const snap = () => {
+      const buttons = buttonsOf(tree);
+      const pressed = (label: string) => buttons.find((x) => textOf(x).trim() === label)?.props["aria-pressed"] === true;
+      const status = all(tree).find((e) => e.type === "span" && e.props.role === "status");
+      return {
+        status: status ? textOf(status).trim() : null,
+        stop: buttons.some((x) => textOf(x).trim() === "Stop"),
+        together: pressed("Play all together"),
+        order: pressed("Play one after another"),
+        videos: videoEls().map(idOf),
+        log: log.splice(0),
+      };
+    };
+    return { show, press, ended, snap, clips, log };
+  }
+  const hook: Record<string, unknown> = {};
+
+  // A sequence, and a card that is NOT the playing one leaves (Delete, Archive): the position follows the card.
+  {
+    const r = rig(cardsOf(["v1", "v2", "v3", "v4"]));
+    r.press("Play one after another");
+    hook.seqStart = r.snap();
+    r.show(cardsOf(["v1", "v2", "v4"]));
+    hook.seqAfterLaterCardLeft = r.snap();
+    r.ended("v1");
+    hook.seqSecond = r.snap();
+    r.show(cardsOf(["v2", "v4"]));
+    hook.seqAfterEarlierCardLeft = r.snap();
+    r.ended("v2");
+    hook.seqLast = r.snap();
+    r.ended("v4");
+    hook.seqDone = r.snap();
+  }
+  // The PLAYING card leaves: the sequence is over, nothing throws, nothing points past the end.
+  {
+    const r = rig(cardsOf(["v1", "v2", "v3", "v4"]));
+    r.press("Play one after another");
+    r.ended("v1");
+    hook.gonePlaying = r.snap();
+    let threw: string | null = null;
+    try {
+      r.show(cardsOf(["v1", "v3", "v4"]));
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    hook.goneAfter = { threw, ...r.snap() };
+    // ...and it can start again from the top.
+    r.press("Play one after another");
+    hook.goneRestart = r.snap();
+  }
+  // The LAST card plays and leaves (its position is now past the end of the list).
+  {
+    const r = rig(cardsOf(["v1", "v2"]));
+    r.press("Play one after another");
+    r.ended("v1");
+    r.snap();
+    let threw: string | null = null;
+    try {
+      r.show(cardsOf(["v1"]));
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    hook.lastGone = { threw, ...r.snap() };
+  }
+  // A sequence skips a card with no video, and ends after the last one.
+  {
+    const r = rig(cardsOf(["v1", "v2", "v3"], ["v2"]));
+    r.press("Play one after another");
+    r.snap();
+    r.ended("v1");
+    hook.skipsNoVideo = r.snap();
+    r.ended("v3");
+    hook.skipEnd = r.snap();
+  }
+
+  // "Play all together": over when every clip has ended.
+  {
+    const r = rig(cardsOf(["v1", "v2", "v3", "v4"], ["v4"]));
+    r.press("Play all together");
+    hook.togetherStart = r.snap();
+    r.ended("v1");
+    r.ended("v2");
+    hook.togetherTwoEnded = r.snap();
+    r.ended("v3");
+    hook.togetherAllEnded = r.snap();
+    // Pressed again, it plays again.
+    r.press("Play all together");
+    hook.togetherAgain = r.snap();
+    r.press("Stop");
+    hook.togetherStopped = r.snap();
+  }
+  // One clip refuses to play (autoplay policy, a dead URL): it counts as done, so the others can finish it.
+  {
+    const r = rig(cardsOf(["v1", "v2", "v3"]), ["v2"]);
+    r.press("Play all together");
+    await Promise.resolve();
+    await Promise.resolve();
+    r.show();
+    hook.refusedStart = r.snap();
+    r.ended("v1");
+    r.ended("v3");
+    hook.refusedEnd = r.snap();
+  }
+  // A clip's card leaves while the rest play: the rest are what it waits for.
+  {
+    const r = rig(cardsOf(["v1", "v2", "v3"]));
+    r.press("Play all together");
+    r.snap();
+    r.show(cardsOf(["v1", "v2"]));
+    hook.togetherCardLeft = r.snap();
+    r.ended("v1");
+    r.ended("v2");
+    hook.togetherCardLeftEnd = r.snap();
+  }
+  // Every clip's card leaves while "all together" plays.
+  {
+    const r = rig(cardsOf(["v1", "v2"]));
+    r.press("Play all together");
+    r.snap();
+    let threw: string | null = null;
+    try {
+      r.show(cardsOf([]));
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    hook.togetherEmpty = { threw, ...r.snap() };
+  }
+
   const out = {
     compare: compare(),
+    compareNote: renderToStaticMarkup(
+      React.createElement(HookCompare, { heading: "pack - first 4 of 9 variants", cards, note: "Showing the first 4 of 9 variants in this pack, newest first." }),
+    ),
     cards,
+    hook,
     actions: {
       inReview: actions("in_review"),
       approved: actions("approved"),

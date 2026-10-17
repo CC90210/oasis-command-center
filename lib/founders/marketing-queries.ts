@@ -33,7 +33,7 @@ import {
   type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
-import { tallyMetaFacets, type PackFacet, type SegmentFacet } from "@/lib/founders/library-meta";
+import { PACK_COMPARE_CAP, tallyMetaFacets, type PackFacet, type SegmentFacet } from "@/lib/founders/library-meta";
 
 /**
  * Restrict a `marketing_asset` query to one brand tab.
@@ -761,6 +761,30 @@ export async function loadLibraryPage(
 }
 
 /**
+ * One pack, whole: the data path of the hook comparison.
+ *
+ * A comparison of a SLICE of a pack is worse than none: it sorts, plays and
+ * "picks the strongest opening" from whatever happened to land on the first
+ * Library page (Codex on #679). So a chosen pack is read in ONE page of up to
+ * PACK_COMPARE_CAP assets, never paged, and signed the way every Library page
+ * is (loadLibraryPage). `total` is still the COUNT of the whole pack under the
+ * view's filters, so the caller can say "showing the first N of M" when the
+ * pack is larger than the cap (page.total > page.tiles.length) instead of
+ * pretending it showed everything.
+ *
+ * The cap is a ceiling on what one request reads and signs, not a target: a pack
+ * is at most six variants today (CMO-Agent pack_ledger MAX_VARIANTS), so it is
+ * ten times that.
+ */
+export async function loadPackComparison(
+  tenantId: string,
+  opts: Omit<NonNullable<Parameters<typeof getMarketingAssets>[1]>, "page" | "pageSize"> & { pack: string },
+  deps: Parameters<typeof loadLibraryPage>[2] = {},
+): Promise<LibraryPage> {
+  return loadLibraryPage(tenantId, { ...opts, page: 1, pageSize: PACK_COMPARE_CAP }, deps);
+}
+
+/**
  * Signed URL for inline playback. Supabase Storage objects are private; the
  * browser never gets the service key, it gets a short-lived URL per object.
  * Returns null rather than throwing so one bad object cannot blank the grid.
@@ -1185,22 +1209,7 @@ export async function getMarketingFacets(tenantId: string): Promise<MarketingFac
   }
 }
 
-/**
- * The audience and pack filters' options: which `meta.icp_segment` and
- * `meta.pack_id` values the current view holds, with how many assets each.
- *
- * SCOPED TO THE VIEW THE GRID IS IN, unlike the brand facets above: a pill that
- * says "Sales bottleneck 6" has to open a grid of 6, so the read is narrowed by
- * the brand tab and by the lifecycle (or, with a Studio ?status= link, no
- * archived filter), the same two rules the grid applies. The other filters
- * (channel, brand, author) are left out on purpose: these are options to switch
- * between, not a count of the current slice.
- *
- * Only the two JSON paths are read (aliased, so the row keys are the same on
- * PostgREST and on the Turso bridge), and the tally is a pure function. A failed
- * page degrades the result rather than emptying it: counts are then a floor, and
- * the page says the filters did not load instead of hiding them.
- */
+/** The audience and pack options of one Library view, with the number of assets behind each. */
 export type MetaFacets = {
   segments: SegmentFacet[];
   packs: PackFacet[];
@@ -1210,6 +1219,31 @@ export type MetaFacets = {
 export const EMPTY_META_FACETS: MetaFacets = { segments: [], packs: [], degraded: false };
 export const DEGRADED_META_FACETS: MetaFacets = { segments: [], packs: [], degraded: true };
 
+/**
+ * The audience and pack filters' options: which `meta.icp_segment` and
+ * `meta.pack_id` values the current view holds, with how many assets each.
+ *
+ * SCOPED TO THE VIEW THE GRID IS IN, unlike the brand facets above: a pill that
+ * says "Sales bottleneck 6" has to open a grid of 6, so the read is narrowed by
+ * the brand tab and by the stage, exactly as getMarketingAssets narrows the
+ * grid: a lifecycle if there is one, else an explicit ?status= (a Studio
+ * pipeline link), else everything but archived. The other filters (track,
+ * channel, brand, author) are left out on purpose: these are options to switch
+ * between, not a count of the current slice, so with one of those active a pill
+ * can count more than the grid it opens.
+ *
+ * THE STAGE RULE IS COPIED HERE, NOT SHARED, and it drifted once: this read
+ * applied the lifecycle and the archived rule but forgot an explicit ?status=,
+ * so under ?status=approved a pill counted every stage while its link opened the
+ * approved ones (Codex on #679). tests/library-review.test.ts now holds every
+ * option's count to its grid's total for every status and lifecycle, so a change
+ * to one that the other does not follow fails there.
+ *
+ * Only the two JSON paths are read (aliased, so the row keys are the same on
+ * PostgREST and on the Turso bridge), and the tally is a pure function. A failed
+ * page degrades the result rather than emptying it: counts are then a floor, and
+ * the page says the filters did not load instead of hiding them.
+ */
 export async function getMetaFacets(
   tenantId: string,
   view: { group: BrandGroupKey; lifecycle?: Lifecycle; status?: AssetStatus },
@@ -1228,11 +1262,13 @@ export async function getMetaFacets(
             .eq("tenant_id", tenantId) as unknown as BrandFilterable,
           view.group,
         ) as unknown as LifecycleFilterable;
-        // The grid's own rule (getMarketingAssets): a lifecycle wins; with none,
-        // archived and rejected are hidden unless a Studio ?status= link asked
-        // for one stage.
+        // The grid's own stage rule (getMarketingAssets), branch for branch: a
+        // lifecycle wins; else an explicit ?status= (Studio's deep links, which
+        // address stages the lifecycles merge); else archived and rejected are
+        // hidden.
         if (view.lifecycle) q = scopeToLifecycle(q, view.lifecycle);
-        else if (!view.status) q = hideArchived(q);
+        else if (view.status) q = q.eq("status", view.status);
+        else q = hideArchived(q);
         return q as unknown as PagedQuery<{ icp_segment?: unknown; pack_id?: unknown }>;
       },
       (got) => rows.push(...got),

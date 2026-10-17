@@ -24,8 +24,17 @@
  * crash between the two leaves an open note on an asset still in review (the
  * agent revises, nobody is hurt); the other order leaves a draft with no reason
  * on it, which is the one outcome that loses the founder's words. If the status
- * change is refused (someone else moved the asset first) the review row this
- * call made is removed again, so a lost race leaves nothing behind.
+ * change is refused (zero rows: someone else moved the asset first) the review
+ * row this call made is removed again, so a lost race leaves nothing behind.
+ * If it FAILS with an error instead, the outcome is ambiguous (the write may
+ * have committed and only its answer been lost), so the asset is re-read and the
+ * note is taken back only when another verdict got there first: a draft means it
+ * landed (success, note kept); still in review, or unreadable, leaves the note
+ * open (500, nothing lost).
+ *
+ * The note is also closed, not deleted, when a later verdict settles the asset
+ * (Approve, Archive, Reject on assets/[id]/route.ts stamp `acted_on_at`), so an
+ * open `request_changes` row always belongs to an asset waiting on the agent.
  *
  * The database is passed in so tests/library-review.test.ts runs this against
  * real SQLite. The route (assets/[id]/request-changes/route.ts under
@@ -117,27 +126,57 @@ export async function requestChanges(
     .select("id, title, status")
     .maybeSingle();
 
-  if (moved.error || !moved.data) {
-    // Take the note back: it describes a change that did not happen.
-    const undo = await db
-      .from("marketing_review")
-      .delete()
-      .eq("tenant_id", tenantId)
-      .eq("id", reviewId);
-    if (undo.error) {
-      console.error("[founders.request-changes] could not remove the unused note", reviewId, undo.error.message);
-    }
-    if (moved.error) {
-      console.error("[founders.request-changes] status change failed", moved.error.message);
-      return { ok: false, http: 500, error: "update_failed" };
-    }
+  let landed: { id: unknown; title?: unknown } | null = !moved.error && moved.data ? moved.data : null;
+  let current: string | null = null;
+
+  if (!landed) {
+    // The write did not hand back the row. Two very different things look like
+    // this, and only one of them may take the note back:
+    //
+    //   ZERO ROWS, no error: the guard refused it - someone moved the asset first.
+    //   That is DEFINITE. The note describes a change that did not happen, so it
+    //   goes (below), and the answer says where the asset is now.
+    //
+    //   AN ERROR: AMBIGUOUS. The adapter turns any driver error into {error}
+    //   (lib/turso-postgrest.ts run), a timeout after the commit included, so the
+    //   write may well have landed with its answer lost on the way back. Deleting
+    //   the note then would leave a draft with no reason on it, the exact outcome
+    //   the write order exists to avoid, and the retry would meet a 409. So LOOK.
     const now = await db
       .from("marketing_asset")
-      .select("status")
+      .select("id, title, status")
       .eq("tenant_id", tenantId)
       .eq("id", assetId)
       .maybeSingle();
-    return { ok: false, http: 409, error: "status_changed", current: now.data ? String(now.data.status) : null };
+    current = now.data ? String(now.data.status) : null;
+
+    if (moved.error) {
+      console.error("[founders.request-changes] status change failed", moved.error.message);
+      if (!now.error && now.data && current === next) {
+        // It committed; only the answer was lost. The note stays and this is a success.
+        landed = now.data;
+      } else if (now.error || !now.data || current === "in_review") {
+        // Could not look, or it did not commit: either way the note STAYS. An open
+        // note on an asset still in review is the documented harmless state (the
+        // agent acts on a note whose asset is a draft), and the founder's words
+        // are not lost. A retry writes a second note with the same words.
+        return { ok: false, http: 500, error: "update_failed" };
+      }
+      // Anything else: another verdict got there first. Fall through, as a refusal.
+    }
+
+    if (!landed) {
+      // Take the note back: it describes a change that did not happen.
+      const undo = await db
+        .from("marketing_review")
+        .delete()
+        .eq("tenant_id", tenantId)
+        .eq("id", reviewId);
+      if (undo.error) {
+        console.error("[founders.request-changes] could not remove the unused note", reviewId, undo.error.message);
+      }
+      return { ok: false, http: 409, error: "status_changed", current };
+    }
   }
 
   // The activity trail. Best effort - the verdict and its note are already
@@ -153,7 +192,7 @@ export async function requestChanges(
 
   return {
     ok: true,
-    asset: { id: String(moved.data.id), title: String(moved.data.title ?? title), status: next },
+    asset: { id: String(landed.id), title: String(landed.title ?? title), status: next },
     reviewId,
   };
 }

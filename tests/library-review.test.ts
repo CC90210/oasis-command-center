@@ -53,9 +53,11 @@ import {
   getMarketingAssets,
   getMetaFacets,
   loadLibraryPage,
+  loadPackComparison,
 } from "../lib/founders/marketing-queries";
 import {
   ICP_SEGMENTS,
+  PACK_COMPARE_CAP,
   assetMetaView,
   hookStyleLabel,
   hookVariantCards,
@@ -74,13 +76,19 @@ import {
   checkRequestChangesBody,
   requestChanges,
 } from "../lib/founders/request-changes";
-import { libraryHref, libraryReturnPath, type LibraryState } from "../lib/founders-marketing-core";
+import { LIBRARY_PAGE_SIZE, LIFECYCLE, STATUSES, libraryHref, libraryReturnPath, type LibraryState } from "../lib/founders-marketing-core";
 
 const ROOT = join(__dirname, "..");
 const T = "tenant-review";
 const OTHER = "tenant-elsewhere";
 const PACK_A = "icp_sales_bottleneck_b2b-operator_leads-left-waiting";
 const PACK_B = "icp_ops_bottleneck_b2b-operator_everything-routes-through-you";
+// Two packs bigger than one Library page (LIBRARY_PAGE_SIZE = 24): one the comparison
+// can read whole, one bigger than the comparison's own cap (PACK_COMPARE_CAP = 60).
+const PACK_MID = "icp_ecommerce_shopify-owner_returns-flood";
+const PACK_HUGE = "icp_ecommerce_shopify-owner_every-angle";
+const MID = 30;
+const HUGE = 70;
 
 process.env.FOUNDERS_TENANT_IDS = `${OASIS},${CLIENT_A}`;
 
@@ -251,6 +259,8 @@ async function main() {
     assert.equal(packLabel(PACK_A), "b2b operator - leads left waiting");
     assert.equal(packLabel(PACK_B), "b2b operator - everything routes through you");
     assert.equal(packLabel("icp_ecommerce_shopify_returns"), "shopify - returns");
+    assert.equal(packLabel("brand_vsl_founder_second-shift"), "founder - second shift", "the brand segment's packs read the same way");
+    assert.equal(packLabel("brand_vsl"), "brand_vsl");
     assert.equal(packLabel("spring-launch"), "spring-launch");
     assert.equal(packLabel("icp_ops"), "icp_ops");
   });
@@ -410,6 +420,132 @@ async function main() {
     assert.deepEqual((await getMetaFacets("", { group: "oasis-ai" }, memDb)).segments, []);
   });
 
+  await check("the options are the grid's own counts under EVERY stage: a Studio ?status= link, each lifecycle, both at once, and the default view", async () => {
+    const stageDb = createClient({ url: ":memory:" });
+    await stageDb.executeMultiple(DDL);
+    // A different number of assets per stage and audience, so a count that ignores
+    // the stage cannot match the grid by luck.
+    const rows: Seed[] = [];
+    STATUSES.forEach((status, i) => {
+      for (let n = 0; n <= i; n++) {
+        rows.push({ id: `st-${status}-sales-${n}`, status, created: day(i * 10 + n), meta: pack(PACK_A, "icp_sales_bottleneck", n + 1) });
+      }
+      rows.push({ id: `st-${status}-ops`, status, created: day(i * 10 + 9), meta: pack(PACK_B, "icp_ops_bottleneck", 1) });
+    });
+    // Posted: approved AND dated, so the lifecycle buckets and the statuses differ.
+    rows.push({ id: "st-posted", status: "approved", published: true, created: day(90), meta: pack(PACK_A, "icp_sales_bottleneck", 9) });
+    await seed(stageDb, rows);
+    const db = createTursoPostgrest(stageDb) as never;
+
+    type View = { status?: (typeof STATUSES)[number]; lifecycle?: (typeof LIFECYCLE)[number] };
+    const views: Array<[string, View]> = [
+      ["the default view", {}],
+      ...STATUSES.map((s): [string, View] => [`?status=${s}`, { status: s }]),
+      ...LIFECYCLE.map((l): [string, View] => [`?lifecycle=${l}`, { lifecycle: l }]),
+      ["?status=draft&lifecycle=archived (the lifecycle wins)", { status: "draft", lifecycle: "archived" }],
+    ];
+    for (const [name, view] of views) {
+      const f = await getMetaFacets(T, { group: "oasis-ai", ...view }, db);
+      assert.equal(f.degraded, false, name);
+      const all = await getMarketingAssets(T, { ...view, pageSize: 500 }, db);
+      assert.ok(all.total > 0, `${name}: the view holds assets, or this proves nothing`);
+      let bySegment = 0;
+      for (const s of f.segments) {
+        const grid = await getMarketingAssets(T, { ...view, icp: s.id, pageSize: 500 }, db);
+        assert.equal(grid.total, s.count, `${name}: the ${s.id} pill says ${s.count} and its grid holds ${grid.total}`);
+        bySegment += s.count;
+      }
+      let byPack = 0;
+      for (const p of f.packs) {
+        const grid = await getMarketingAssets(T, { ...view, pack: p.id, pageSize: 500 }, db);
+        assert.equal(grid.total, p.count, `${name}: the ${p.id} pill says ${p.count} and its grid holds ${grid.total}`);
+        byPack += p.count;
+      }
+      // Every asset in the view carries one audience and one pack: the pills add up to the whole grid.
+      assert.equal(bySegment, all.total, `${name}: the audience pills cover the grid, no more and no less`);
+      assert.equal(byPack, all.total, `${name}: so do the pack pills`);
+    }
+
+    // Absolute, as well as in agreement: the grid and the options could drift TOGETHER.
+    const at = (s: (typeof STATUSES)[number]) => STATUSES.indexOf(s);
+    const approved = await getMetaFacets(T, { group: "oasis-ai", status: "approved" }, db);
+    assert.deepEqual(
+      approved.segments,
+      [{ id: "icp_ops_bottleneck", count: 1 }, { id: "icp_sales_bottleneck", count: at("approved") + 1 + 1 }],
+      "?status=approved: the approved assets (one is also posted), not every stage's",
+    );
+    assert.deepEqual(approved.packs.map((p) => p.count), [at("approved") + 2, 1]);
+    const scheduled = await getMetaFacets(T, { group: "oasis-ai", status: "scheduled" }, db);
+    assert.deepEqual(scheduled.segments, [{ id: "icp_ops_bottleneck", count: 1 }, { id: "icp_sales_bottleneck", count: at("scheduled") + 1 }]);
+    const archived = await getMetaFacets(T, { group: "oasis-ai", status: "archived" }, db);
+    assert.deepEqual(archived.segments, [{ id: "icp_ops_bottleneck", count: 1 }, { id: "icp_sales_bottleneck", count: at("archived") + 1 }], "an explicit ?status=archived shows archived");
+    const def = await getMetaFacets(T, { group: "oasis-ai" }, db);
+    const everySales = STATUSES.reduce((n, _s, i) => n + i + 1, 0) + 1;
+    assert.equal(
+      def.segments.find((s) => s.id === "icp_sales_bottleneck")!.count,
+      everySales - (at("archived") + 1) - (at("rejected") + 1),
+      "the default view hides archived and rejected",
+    );
+  });
+
+  await check("a chosen pack is read WHOLE: more than a Library page, up to the cap, never paged, and the total says what was left out", async () => {
+    const bigDb = createClient({ url: ":memory:" });
+    await bigDb.executeMultiple(DDL);
+    const rows: Seed[] = [];
+    // Variant n is created on day n, and the Library pages newest first: on a Library
+    // page of 24, variants 1 to 6 of the 30 land on page two.
+    for (let n = 1; n <= MID; n++) rows.push({ id: `mid-${n}`, created: day(n), meta: pack(PACK_MID, "icp_ecommerce", n) });
+    for (let n = 1; n <= HUGE; n++) rows.push({ id: `huge-${n}`, created: day(n), meta: pack(PACK_HUGE, "icp_ecommerce", n) });
+    rows.push({ id: "mid-elsewhere", tenant: OTHER, created: day(1), meta: pack(PACK_MID, "icp_ecommerce", 1) });
+    await seed(bigDb, rows);
+    const db = createTursoPostgrest(bigDb) as never;
+    const signedAssets = new Set<string>();
+    const deps = {
+      db,
+      sign: async (refs: Array<{ bucket: string; path: string }>) => {
+        for (const r of refs) signedAssets.add(r.path.split("/")[1]);
+        return new Map(refs.map((r) => [`${r.bucket}\n${r.path}`, `https://signed.test/${r.path}`]));
+      },
+    };
+    const cardsOf = (page: Awaited<ReturnType<typeof loadPackComparison>>) =>
+      hookVariantCards(page.tiles, (id) => `/asset/${id}`);
+
+    assert.equal(PACK_COMPARE_CAP, 60);
+    assert.ok(PACK_COMPARE_CAP > LIBRARY_PAGE_SIZE && MID > LIBRARY_PAGE_SIZE && HUGE > PACK_COMPARE_CAP, "the fixtures straddle the page size and the cap");
+
+    // What the Library's own page would do to it: the first 24, newest first.
+    const cut = await loadLibraryPage(T, { pack: PACK_MID }, deps);
+    assert.equal(cut.tiles.length, LIBRARY_PAGE_SIZE);
+    assert.equal(cut.total, MID);
+    assert.equal(cardsOf(cut)[0].variantLabel,`Variant ${MID - LIBRARY_PAGE_SIZE + 1}`, "a paged read starts mid-pack: variants 1 to 6 are on page two");
+
+    // The comparison: the whole 30, one page, sorted from variant 1.
+    signedAssets.clear();
+    const mid = await loadPackComparison(T, { pack: PACK_MID }, deps);
+    assert.equal(mid.tiles.length, MID, "every variant of a pack bigger than a Library page");
+    assert.equal(mid.total, MID, "another workspace's copy of the pack is not counted");
+    assert.equal(mid.page, 1);
+    assert.deepEqual(cardsOf(mid).map((c) => c.variantLabel), Array.from({ length: MID }, (_, i) => `Variant ${i + 1}`));
+    assert.equal(signedAssets.size, MID, "media is signed for the pack and nothing else");
+
+    // A pack bigger than the cap: the newest PACK_COMPARE_CAP, with the total saying there are more.
+    signedAssets.clear();
+    const huge = await loadPackComparison(T, { pack: PACK_HUGE }, deps);
+    assert.equal(huge.tiles.length, PACK_COMPARE_CAP);
+    assert.equal(huge.total, HUGE, "the total is the whole pack, so the page can say 'first 60 of 70'");
+    assert.equal(huge.pageSize, PACK_COMPARE_CAP);
+    assert.deepEqual(
+      cardsOf(huge).map((c) => c.variantLabel),
+      Array.from({ length: PACK_COMPARE_CAP }, (_, i) => `Variant ${HUGE - PACK_COMPARE_CAP + 1 + i}`),
+      "the newest 60, in variant order",
+    );
+    assert.equal(signedAssets.size, PACK_COMPARE_CAP, "signing is bounded by the cap");
+
+    // The view's other filters still apply to it.
+    assert.equal((await loadPackComparison(T, { pack: PACK_MID, lifecycle: "archived" }, deps)).tiles.length, 0);
+    assert.equal((await loadPackComparison(T, { pack: PACK_MID, status: "in_review" }, deps)).total, MID);
+  });
+
   await check("the options read two JSON paths per row, tenant-scoped, and no whole rows", async () => {
     const statements: string[] = [];
     const spy = new Proxy(mem, {
@@ -493,6 +629,12 @@ async function main() {
     { id: "ar-client", tenant: OASIS, created: day(32), brand: "warner", meta: pack(PACK_A, "icp_sales_bottleneck", 9) },
     // Another workspace with the very same pack id: must never appear for OASIS.
     { id: "ca-1", tenant: CLIENT_A, created: day(33), meta: pack(PACK_A, "icp_sales_bottleneck", 1) },
+    // Two packs bigger than a Library page, on the Clients tab so the OASIS tab the other
+    // checks read is untouched. Variant n is created on day n; the Library pages newest first.
+    ...Array.from({ length: MID }, (_, i): Seed => ({ id: `mid-${i + 1}`, tenant: OASIS, brand: "warner", created: day(i + 1), meta: pack(PACK_MID, "icp_ecommerce", i + 1) })),
+    ...Array.from({ length: HUGE }, (_, i): Seed => ({ id: `huge-${i + 1}`, tenant: OASIS, brand: "warner", created: day(i + 1), meta: pack(PACK_HUGE, "icp_ecommerce", i + 1) })),
+    // Assets for the checks that send one back and then settle it with a later verdict.
+    ...["approve", "archive", "reject", "restore", "other"].map((s, i): Seed => ({ id: `vd-${s}`, tenant: OASIS, brand: "warner", created: day(40 + i), meta: {} })),
   ]);
 
   const { default: LibraryPage } = await import("../app/founders/marketing/library/page");
@@ -569,6 +711,59 @@ async function main() {
     assert.ok(lit.includes("Sales bottleneck 6"), `lit: ${lit.join(" | ")}`);
   });
 
+  await check("under a Studio ?status= link the pills count that stage, and the links keep it", async () => {
+    await login(USERS.cc);
+    // Every OASIS-tab asset is in review: that stage holds the six sales cuts, the ops one, and the two without an audience.
+    const inReview = await render({ status: "in_review" });
+    assert.ok(inReview.text.includes("Sales bottleneck 6"), "the in-review stage: six sales cuts");
+    assert.ok(inReview.text.includes("Ops bottleneck 1"));
+    const links = inReview.text.filter((s) => s.startsWith("/founders/marketing/library"));
+    assert.ok(links.includes("/founders/marketing/library?icp=icp_sales_bottleneck&status=in_review"), `the link keeps the stage: ${links.join(" | ")}`);
+    // Nothing is approved yet. Before this was fixed the pills still said "Sales bottleneck 6" and their links opened an empty grid.
+    const approved = await render({ status: "approved" });
+    assert.equal(approved.tiles.length, 0, "no asset is approved");
+    assert.ok(!approved.text.some((s) => /^(Sales bottleneck|Ops bottleneck)\b/.test(s)), `a pill promises assets the stage does not hold: ${approved.text.filter((s) => /bottleneck/.test(s)).join(" | ")}`);
+    // And each pill's number is what its link opens.
+    const sales = await render({ status: "in_review", icp: "icp_sales_bottleneck" });
+    assert.equal(sales.tiles.length, 6);
+  });
+
+  await check("a chosen pack is compared WHOLE: one bigger than a Library page is not cut, one bigger than the cap says so, and neither is paged", async () => {
+    await login(USERS.cc);
+    type Props = { heading: string; note?: string; cards: Array<{ id: string; variantLabel: string }> };
+    const labels = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `Variant ${from + i}`);
+
+    const mid = await render({ group: "clients", pack: PACK_MID });
+    assert.equal(mid.compare.length, 1);
+    const midProps = mid.compare[0] as unknown as Props;
+    assert.equal(midProps.cards.length, MID, "all 30, though a Library page holds 24");
+    assert.deepEqual(midProps.cards.map((c) => c.variantLabel), labels(1, MID), "variant 1 first - the Library would have put 1 to 6 on page two");
+    assert.equal(midProps.heading, "shopify owner - returns flood - 30 variants");
+    assert.equal(midProps.note, undefined, "a whole pack says nothing about what is left out");
+    assert.ok(!mid.text.includes("Library pages"), "no pager under a comparison");
+    // ?page= does not slice it either (a bookmark from before, a hand-typed 2).
+    const second = await render({ group: "clients", pack: PACK_MID, page: "2" });
+    assert.deepEqual((second.compare[0] as unknown as Props).cards.map((c) => c.id), midProps.cards.map((c) => c.id));
+
+    const huge = await render({ group: "clients", pack: PACK_HUGE });
+    const hugeProps = huge.compare[0] as unknown as Props;
+    assert.equal(hugeProps.cards.length, PACK_COMPARE_CAP, "the cap");
+    assert.deepEqual(hugeProps.cards.map((c) => c.variantLabel), labels(HUGE - PACK_COMPARE_CAP + 1, HUGE), "the newest 60, in variant order");
+    assert.equal(hugeProps.heading, "shopify owner - every angle - first 60 of 70 variants");
+    assert.equal(
+      hugeProps.note,
+      "Showing the first 60 of 70 variants in this pack, newest first. Archive or delete the ones you are done with to see the rest.",
+      "an honest line about what is not shown",
+    );
+    assert.ok(!huge.text.includes("Library pages"), "no pager, even over the cap: it is one capped page");
+    const hugePage2 = await render({ group: "clients", pack: PACK_HUGE, page: "2" });
+    assert.deepEqual((hugePage2.compare[0] as unknown as Props).cards.map((c) => c.id), hugeProps.cards.map((c) => c.id), "?page=2 shows the same capped page, not the next 60");
+    // The phone grid of the same tab is still paged as ever.
+    const grid = await render({ group: "clients" });
+    assert.equal(grid.tiles.length, LIBRARY_PAGE_SIZE, "without a pack the Library still reads one page");
+    assert.ok(grid.text.includes("Library pages"));
+  });
+
   await check("the offer and captions badges ride on the tiles; nothing else about a tile changes", async () => {
     await login(USERS.cc);
     const p = await render({});
@@ -589,7 +784,11 @@ async function main() {
       assert.equal(p.compare.length, 1, user.email);
       const props = p.compare[0] as { cards: Array<{ id: string }> } & Record<string, unknown>;
       seen.push(props.cards.map((c) => c.id));
-      assert.deepEqual(Object.keys(props).sort(), ["cards", "heading"], "the comparison is handed no role flag: the buttons are the verdict buttons, drawn for whoever sees the page");
+      assert.deepEqual(
+        Object.keys(props).filter((k) => !["cards", "heading", "note"].includes(k)),
+        [],
+        "the comparison is handed no role flag: the buttons are the verdict buttons, drawn for whoever sees the page",
+      );
       const tiles = await render({});
       assert.ok(tiles.tiles.length > 0, user.email);
       for (const t of tiles.tiles) assert.ok(!("canRequestChanges" in t), `${user.email}: a tile carries no role flag`);
@@ -823,7 +1022,7 @@ async function main() {
     }
   });
 
-  await check("a note that cannot be saved changes nothing, and a status change that cannot be saved takes its note back", async () => {
+  await check("a note that cannot be saved changes nothing; a status change that fails with an error keeps the note (it may have committed)", async () => {
     await login(USERS.cc);
     await db.execute(`CREATE TRIGGER no_notes BEFORE INSERT ON marketing_review BEGIN SELECT RAISE(ABORT, 'disk full'); END`);
     try {
@@ -842,10 +1041,99 @@ async function main() {
       const res = await post("ar-r3", { note: "Cannot move." });
       assert.equal(res.status, 500);
       assert.equal((await json(res)).error, "update_failed");
-      assert.deepEqual(delta(before, await counts()), {}, "no orphan note");
+      // An ERROR from the write is ambiguous (it may have committed, only its answer
+      // lost), so the founder's note is never deleted on one: the asset is still in
+      // review, and an open note on it is the documented harmless state.
+      assert.deepEqual(delta(before, await counts()), { marketing_review: 1 }, "the note stays");
+      assert.equal((await rowOf("ar-r3"))!.status, "in_review");
+      const rv = await reviews("ar-r3");
+      assert.equal(rv.length, 1);
+      assert.equal(rv[0].note, "Cannot move.");
+      assert.equal(rv[0].acted_on_at, null);
     } finally {
       await db.execute(`DROP TRIGGER no_moves`);
+      await db.execute(`DELETE FROM marketing_review WHERE asset_id = 'ar-r3'`);
     }
+  });
+
+  await check("a status write that fails AFTER it committed keeps the note and reports success; one that did not commit keeps the note; another verdict's win takes it back", async () => {
+    const flakyDb = createClient({ url: ":memory:" });
+    await flakyDb.executeMultiple(DDL);
+    await seed(flakyDb, ["lost", "refused", "beaten", "blind"].map((id): Seed => ({ id: `fl-${id}`, created: day(1), status: "in_review", meta: {} })));
+    const real = createTursoPostgrest(flakyDb);
+    /**
+     * The adapter's own failure shape ({ error }, lib/turso-postgrest.ts run), at the
+     * marketing_asset call numbered by `steps`: 0 is the pre-read, 1 the status write,
+     * 2 the re-read.
+     *   commit-then-lose   the write COMMITS, then its answer is lost (a timeout after the commit)
+     *   lose               the write never reaches the database
+     *   approve-then-lose  another verdict lands instead, and the answer is lost
+     *   lose-always        every marketing_asset call from this step on fails (the re-read too)
+     */
+    type Step = "real" | "commit-then-lose" | "lose" | "approve-then-lose" | "lose-always";
+    const flaky = (assetId: string, steps: Step[]) => {
+      let n = 0;
+      let always = false;
+      return {
+        from(table: string) {
+          const builder = real.from(table);
+          if (table !== "marketing_asset") return builder;
+          const step: Step = always ? "lose" : (steps[n++] ?? "real");
+          if (step === "lose-always") always = true;
+          if (step === "real") return builder;
+          const lost = { data: null, error: { message: "connection reset" }, count: null, status: 400, statusText: "Bad Request" };
+          const proxy: unknown = new Proxy(builder, {
+            get(target, prop) {
+              const value = Reflect.get(target, prop, target);
+              if (prop === "then") {
+                return (ok: (v: unknown) => unknown, bad: (e: unknown) => unknown) => {
+                  if (step === "commit-then-lose") return Promise.resolve(target.then(() => lost)).then(ok, bad);
+                  if (step === "approve-then-lose") {
+                    return flakyDb
+                      .execute({ sql: `UPDATE marketing_asset SET status = 'approved' WHERE id = ?`, args: [assetId] })
+                      .then(() => lost)
+                      .then(ok, bad);
+                  }
+                  return Promise.resolve(lost).then(ok, bad);
+                };
+              }
+              if (typeof value !== "function") return value;
+              return (...args: unknown[]) => {
+                const out = value.apply(target, args);
+                return out === target ? proxy : out;
+              };
+            },
+          });
+          return proxy;
+        },
+      } as never;
+    };
+    const state = async (id: string) => ({
+      status: String((await flakyDb.execute({ sql: `SELECT status FROM marketing_asset WHERE id = ?`, args: [id] })).rows[0].status),
+      notes: (await flakyDb.execute({ sql: `SELECT note, acted_on_at FROM marketing_review WHERE asset_id = ? AND decision = 'request_changes'`, args: [id] })).rows.map((r) => ({ note: String(r.note), open: r.acted_on_at === null })),
+      events: Number((await flakyDb.execute({ sql: `SELECT count(*) AS n FROM marketing_event WHERE asset_id = ?`, args: [id] })).rows[0].n),
+    });
+    const ask = (id: string, steps: Step[]) => requestChanges(flaky(id, steps), { tenantId: T, assetId: id, note: `Reason for ${id}.`, reviewer: "Tester" });
+
+    // The write commits and only the answer is lost: a SUCCESS, the note kept, a retry would meet 409.
+    const lost = await ask("fl-lost", ["real", "commit-then-lose"]);
+    assert.equal(lost.ok, true, JSON.stringify(lost));
+    assert.deepEqual(await state("fl-lost"), { status: "draft", notes: [{ note: "Reason for fl-lost.", open: true }], events: 1 }, "a draft WITH its reason, and the activity row");
+
+    // The write never happened and the asset is still in review: 500, the note left open, nothing lost.
+    const refused = await ask("fl-refused", ["real", "lose"]);
+    assert.deepEqual(refused, { ok: false, http: 500, error: "update_failed" });
+    assert.deepEqual(await state("fl-refused"), { status: "in_review", notes: [{ note: "Reason for fl-refused.", open: true }], events: 0 });
+
+    // Another verdict won and the answer was lost: that is a lost race, so the note is taken back.
+    const beaten = await ask("fl-beaten", ["real", "approve-then-lose"]);
+    assert.deepEqual(beaten, { ok: false, http: 409, error: "status_changed", current: "approved" });
+    assert.deepEqual(await state("fl-beaten"), { status: "approved", notes: [], events: 0 });
+
+    // Cannot even look afterwards: the note stays, 500.
+    const blind = await ask("fl-blind", ["real", "lose-always"]);
+    assert.deepEqual(blind, { ok: false, http: 500, error: "update_failed" });
+    assert.deepEqual(await state("fl-blind"), { status: "in_review", notes: [{ note: "Reason for fl-blind.", open: true }], events: 0 });
   });
 
   await check("requestChanges(): the verdict is the function's own - the same asset, tenant-scoped, through an injected client", async () => {
@@ -886,6 +1174,57 @@ async function main() {
     await db.execute(`DELETE FROM marketing_review WHERE asset_id = 'ar-r3'`);
   });
 
+  await check("a verdict that settles the asset closes the request for changes still open on it (Approve, Archive, Reject), and touches nothing else", async () => {
+    await login(USERS.cc);
+    const requests = async (id: string) =>
+      (await db.execute({ sql: `SELECT id, tenant_id, note, decision, acted_on_at FROM marketing_review WHERE asset_id = ? AND decision = 'request_changes' ORDER BY note`, args: [id] })).rows as unknown as Array<{ id: string; tenant_id: string; note: string; decision: string; acted_on_at: string | null }>;
+    const OLD_CLOSED = "2026-01-01T00:00:00.000Z";
+    // Bystanders: a request already closed earlier (its timestamp must not move), another
+    // workspace's open request naming the same asset id, an open row of another decision on the
+    // same asset, and an open request on another asset.
+    await db.batch(
+      [
+        { sql: `INSERT INTO marketing_review (tenant_id, asset_id, decision, note, acted_on_at) VALUES (?, 'vd-approve', 'request_changes', 'Old, already acted on.', ?)`, args: [OASIS, OLD_CLOSED] },
+        { sql: `INSERT INTO marketing_review (tenant_id, asset_id, decision, note, acted_on_at) VALUES (?, 'vd-approve', 'request_changes', 'Foreign workspace.', NULL)`, args: [CLIENT_A] },
+        { sql: `INSERT INTO marketing_review (tenant_id, asset_id, decision, note, acted_on_at) VALUES (?, 'vd-approve', 'comment', 'A comment, still open.', NULL)`, args: [OASIS] },
+        { sql: `INSERT INTO marketing_review (tenant_id, asset_id, decision, note, acted_on_at) VALUES (?, 'vd-other', 'request_changes', 'Another asset.', NULL)`, args: [OASIS] },
+      ],
+      "write",
+    );
+    for (const [id, status, decision] of [["vd-approve", "approved", "approve"], ["vd-archive", "archived", "comment"], ["vd-reject", "rejected", "reject"]] as const) {
+      const text = `Send ${id} back.`;
+      assert.equal((await post(id, { note: text })).status, 200, id);
+      assert.equal((await rowOf(id))!.status, "draft");
+      const asked = (await requests(id)).find((r) => r.note === text)!;
+      assert.equal(asked.acted_on_at, null, `${id}: open after Request changes - the agent's inbox`);
+
+      // Two sequential clicks, no race: the verdict that follows.
+      const res = await post(id, { status }, "asset", "PATCH");
+      assert.equal(res.status, 200, `${id}: ${JSON.stringify(await res.clone().json())}`);
+      assert.equal((await rowOf(id))!.status, status);
+      const closed = (await requests(id)).find((r) => r.note === text)!;
+      assert.notEqual(closed.acted_on_at, null, `${id}: the verdict closed the request for changes`);
+      assert.equal(closed.id, asked.id, "the same row, closed - not deleted and not replaced");
+      assert.equal(closed.decision, "request_changes");
+      // ...and the verdict itself is recorded beside it, as before.
+      const verdicts = (await db.execute({ sql: `SELECT acted_on_at FROM marketing_review WHERE asset_id = ? AND decision = ?`, args: [id, decision] })).rows;
+      assert.equal(verdicts.length, 1, `${id}: its own verdict row`);
+    }
+    const open = Number((await db.execute({ sql: `SELECT count(*) AS n FROM marketing_review WHERE tenant_id = ? AND decision = 'request_changes' AND acted_on_at IS NULL AND asset_id IN ('vd-approve','vd-archive','vd-reject')`, args: [OASIS] })).rows[0].n);
+    assert.equal(open, 0, "nothing settled is still waiting on the agent");
+
+    // The bystanders are exactly as they were.
+    assert.equal((await requests("vd-approve")).find((r) => r.note === "Old, already acted on.")!.acted_on_at, OLD_CLOSED, "an already closed request keeps its own time");
+    assert.equal((await requests("vd-approve")).find((r) => r.note === "Foreign workspace.")!.acted_on_at, null, "another workspace's request is not ours to close");
+    assert.equal((await db.execute(`SELECT acted_on_at FROM marketing_review WHERE note = 'A comment, still open.'`)).rows[0].acted_on_at, null, "only requests for changes are closed");
+    assert.equal((await requests("vd-other"))[0].acted_on_at, null, "another asset's request is not touched");
+
+    // A move back to in review is not a verdict: it settles nothing and closes nothing.
+    assert.equal((await post("vd-restore", { note: "Needs a tighter cut." })).status, 200);
+    assert.equal((await post("vd-restore", { status: "in_review" }, "asset", "PATCH")).status, 200);
+    assert.equal((await requests("vd-restore"))[0].acted_on_at, null, "restoring is no verdict");
+  });
+
   await check("Delete (the existing route) removes the asset's rows and reports its files; it deletes no stored file and stays in the workspace", async () => {
     await login(USERS.clientA);
     const before = await counts();
@@ -905,7 +1244,18 @@ async function main() {
   });
 
   // =========================================================== 5. what is on screen
-  await check("the client components, drawn and driven in full React", () => {
+  type RenderReport = {
+    compare: string;
+    compareNote: string;
+    cards: Array<{ id: string; hook: string }>;
+    actions: Record<string, string>;
+    flow: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- the render child's report, asserted field by field below
+    hook: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- same
+  };
+  // The render child runs once; every check below reads its report.
+  let rendered: RenderReport | null = null;
+  const renderChild = (): RenderReport => {
+    if (rendered) return rendered;
     const child = spawnSync(process.execPath, ["--import", "tsx", join("tests", "library-review.render.ts")], {
       cwd: ROOT,
       encoding: "utf8",
@@ -913,12 +1263,12 @@ async function main() {
       env: { ...process.env, NODE_OPTIONS: (process.env.NODE_OPTIONS || "").split(/\s+/).filter((t) => t && !/^(--conditions|-C)(=|$)/.test(t) && t !== "react-server").join(" ") },
     });
     assert.equal(child.status, 0, `render child failed:\n${child.stderr}`);
-    const d = JSON.parse(child.stdout) as {
-      compare: string;
-      cards: Array<{ id: string; hook: string }>;
-      actions: Record<string, string>;
-      flow: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- the render child's report, asserted field by field below
-    };
+    rendered = JSON.parse(child.stdout) as RenderReport;
+    return rendered;
+  };
+
+  await check("the client components, drawn and driven in full React", () => {
+    const d = renderChild();
     const textOf = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ");
     const tags = (html: string, name: string) => html.match(new RegExp(`<${name}\\b[^>]*>`, "g")) ?? [];
     const attr = (tag: string, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1] ?? null;
@@ -990,6 +1340,100 @@ async function main() {
     // Approve sends the status and nothing else.
     assert.deepEqual(f.approveCalls, [{ url: "/api/founders/marketing/assets/a1", method: "PATCH", body: { status: "approved" } }]);
     assert.deepEqual(buttons(f.approveAfter), ["Approved", "Archive", "Delete"], "approved is a state, not a request to post");
+    // Sent back, then approved from the same tile: Approve is live on the draft and is a plain verdict.
+    const before = f.sentBackThenApproveBefore;
+    assert.ok(before.text.includes("Sent back. The marketing agent will see your note."));
+    assert.deepEqual(buttons(before), ["Approve", "Archive", "Delete"]);
+    assert.equal(before.buttons.find((b: { text: string }) => b.text === "Approve").disabled, false, "Approve works on a sent-back tile");
+    assert.deepEqual(
+      f.sentBackThenApprove.calls,
+      [{ url: "/api/founders/marketing/assets/a1", method: "PATCH", body: { status: "approved" } }],
+      "the same verdict request as ever; closing the open request for changes is the server's job",
+    );
+    assert.ok(!f.sentBackThenApprove.after.text.includes("Sent back."), "the notice does not outlive the next verdict");
+    assert.deepEqual(buttons(f.sentBackThenApprove.after), ["Approved", "Archive", "Delete"]);
+  });
+
+  await check("the comparison says what it left out: a pack larger than the cap gets its 'showing the first N of M' line, a whole pack gets none", () => {
+    const d = renderChild();
+    const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    assert.ok(text(d.compareNote).includes("Showing the first 4 of 9 variants in this pack, newest first."));
+    assert.ok(!text(d.compare).includes("Showing the first"), "a whole pack says nothing about what is left out");
+  });
+
+  await check("the comparison follows its cards by id: a card that leaves mid-sequence never throws or points at the wrong clip", () => {
+    const h = renderChild().hook;
+    const playing = (s: { status: string; stop: boolean; order: boolean; together: boolean }, status: string) => {
+      assert.equal(s.status, status);
+      assert.equal(s.stop, true, "Stop is offered while something plays");
+      assert.equal(s.order, true);
+      assert.equal(s.together, false);
+    };
+    const idle = (s: { status: string; stop: boolean; order: boolean; together: boolean }, why: string) => {
+      assert.equal(s.status, "", `${why}: the status line is empty`);
+      assert.equal(s.stop, false, `${why}: no Stop over a page where nothing plays`);
+      assert.equal(s.order, false, why);
+      assert.equal(s.together, false, why);
+    };
+    // A sequence of four. A card AFTER the playing one leaves, then one BEFORE it: the position is the playing card's, looked up by id.
+    playing(h.seqStart, "Playing Variant 1 (1 of 4).");
+    assert.deepEqual(h.seqStart.log, ["play v1"]);
+    playing(h.seqAfterLaterCardLeft, "Playing Variant 1 (1 of 3).");
+    assert.deepEqual(h.seqAfterLaterCardLeft.videos, ["v1", "v2", "v4"]);
+    playing(h.seqSecond, "Playing Variant 2 (2 of 3).");
+    assert.ok(h.seqSecond.log.includes("play v2") && !h.seqSecond.log.some((l: string) => l.startsWith("play v3")), `the card that left is not played: ${h.seqSecond.log}`);
+    playing(h.seqAfterEarlierCardLeft, "Playing Variant 2 (1 of 2).");
+    playing(h.seqLast, "Playing Variant 4 (2 of 2).");
+    assert.ok(h.seqLast.log.includes("play v4"));
+    idle(h.seqDone, "the last clip ended");
+    // The PLAYING card leaves: the sequence is over, and the page can start it again from the top.
+    playing(h.gonePlaying, "Playing Variant 2 (2 of 4).");
+    assert.equal(h.goneAfter.threw, null, "removing the playing card must not throw");
+    idle(h.goneAfter, "the playing card left");
+    assert.deepEqual(h.goneAfter.videos, ["v1", "v3", "v4"]);
+    playing(h.goneRestart, "Playing Variant 1 (1 of 3).");
+    // The last card plays and leaves: its old position is past the end of the list.
+    assert.equal(h.lastGone.threw, null, "a position past the end of the list must not throw");
+    idle(h.lastGone, "the last card left");
+    // A card with no video is skipped, and the sequence ends after the last clip.
+    playing(h.skipsNoVideo, "Playing Variant 3 (3 of 3).");
+    assert.ok(h.skipsNoVideo.log.includes("play v3"));
+    idle(h.skipEnd, "the last clip ended");
+  });
+
+  await check("'Play all together' is over when every clip has ended, or refused to play, or left the page", () => {
+    const h = renderChild().hook;
+    const together = "Playing all together, muted. Unmute one to hear it.";
+    assert.deepEqual(h.togetherStart.log, ["play v1 muted", "play v2 muted", "play v3 muted"], "every clip that has a video starts, muted");
+    assert.equal(h.togetherStart.status, together);
+    assert.equal(h.togetherStart.stop, true);
+    assert.equal(h.togetherStart.together, true);
+    assert.equal(h.togetherStart.order, false);
+    // Two of three ended: still going.
+    assert.equal(h.togetherTwoEnded.status, together);
+    assert.equal(h.togetherTwoEnded.stop, true);
+    // The last one ended: idle, with the controls to match.
+    assert.equal(h.togetherAllEnded.status, "", "nothing is playing, so the line says nothing");
+    assert.equal(h.togetherAllEnded.stop, false, "no Stop once every clip has ended");
+    assert.equal(h.togetherAllEnded.together, false, "and the button is no longer pressed");
+    // It can be started again, and Stop ends it.
+    assert.equal(h.togetherAgain.status, together);
+    assert.deepEqual(h.togetherAgain.log, ["play v1 muted", "play v2 muted", "play v3 muted"]);
+    assert.equal(h.togetherStopped.status, "");
+    assert.equal(h.togetherStopped.stop, false);
+    assert.ok(h.togetherStopped.log.includes("pause v1"), `Stop pauses what plays: ${h.togetherStopped.log}`);
+    // A clip that refuses to play counts as done, so the others can finish the run.
+    assert.equal(h.refusedStart.status, together, "the other two are still playing");
+    assert.equal(h.refusedEnd.status, "", "v1 and v3 ended; v2 was refused and is not waited for");
+    assert.equal(h.refusedEnd.stop, false);
+    // A clip's card leaves the page: it is no longer waited for.
+    assert.equal(h.togetherCardLeft.status, together);
+    assert.equal(h.togetherCardLeftEnd.status, "");
+    assert.equal(h.togetherCardLeftEnd.stop, false);
+    // Every card leaves: nothing to wait for, nothing thrown.
+    assert.equal(h.togetherEmpty.threw, null);
+    assert.equal(h.togetherEmpty.status, "");
+    assert.equal(h.togetherEmpty.stop, false);
   });
 
   await check("wiring: no confirm(), no button reaches a publish or schedule endpoint, no video loads on arrival, nothing non-ASCII was added", () => {
@@ -1008,6 +1452,10 @@ async function main() {
     assert.equal((compare.match(/<video\b/g) ?? []).length, 1);
     assert.match(compare, /preload="none"/);
     assert.doesNotMatch(compare, /preload="(metadata|auto)"/);
+    // Text that cannot break (a pack id with no spaces, a hook with none) wraps instead of pushing a phone-width page wider.
+    assert.match(compare, /<h2 className="[^"]*\bbreak-words\b/, "the heading wraps");
+    assert.match(compare, /<blockquote className="[^"]*\bbreak-words\b/, "the hook line wraps");
+    assert.match(code("app/founders/marketing/library/page.tsx"), /const base = "[^"]*\bmax-w-full \[overflow-wrap:anywhere\]/, "the pills wrap, flex items included");
     // The route's guards, in the order they must run: the founders gate, the id, the body, the note.
     const route = code("app/api/founders/marketing/assets/[id]/request-changes/route.ts");
     const at = (re: RegExp) => route.search(re);

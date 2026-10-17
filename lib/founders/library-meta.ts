@@ -137,13 +137,22 @@ export function hookStyleLabel(v: string | null | undefined): string {
  */
 export function packLabel(id: string): string {
   const parts = id.split("_");
-  if (parts.length >= 4 && parts[0] === "icp") {
+  // `icp_...` segments and the brand one (`brand_vsl`) both lead a pack id.
+  if (parts.length >= 4 && (parts[0] === "icp" || parts[0] === "brand")) {
     const avatar = parts[parts.length - 2].replace(/-/g, " ");
     const concept = parts[parts.length - 1].replace(/-/g, " ");
     if (avatar && concept) return `${avatar} - ${concept}`;
   }
   return id;
 }
+
+/**
+ * The most assets the hook comparison reads, signs and draws for one pack. A pack
+ * is at most six variants today (CMO-Agent pack_ledger MAX_VARIANTS), so this is
+ * headroom, not a page size: the comparison is never paged, and a pack larger
+ * than this says "showing the first N of M" (loadPackComparison).
+ */
+export const PACK_COMPARE_CAP = 60;
 
 /**
  * Variants in the order Maven numbered them. A variant with no number goes after

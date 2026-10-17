@@ -69,6 +69,7 @@ import {
   getMarketingFacets,
   getMetaFacets,
   loadLibraryPage,
+  loadPackComparison,
   type LibraryPage,
 } from "@/lib/founders/marketing-queries";
 import {
@@ -168,12 +169,19 @@ export default async function MarketingLibraryPage({
   // and signs media for those rows only; the tab and pill numbers come from
   // COUNT queries. The page used to read up to 200 rows and sign every one, and
   // the browser then fetched media for every tile: minutes, not seconds.
+  //
+  // A CHOSEN PACK IS THE ONE EXCEPTION: it is read whole (loadPackComparison, up
+  // to PACK_COMPARE_CAP assets, never paged), because the hook comparison sorts
+  // and plays what it is given and a comparison of one page of a larger pack
+  // would pick a winner from a slice.
   const [pageOrNull, facets, metaFacets, lc, tabCounts] = await Promise.all([
     safe<LibraryPage | null>(
       "marketing.library",
-      loadLibraryPage(founder.tenantId, {
-        group, track, channel, brand, author, icp, pack, status, lifecycle, page: requestedPage,
-      }),
+      pack
+        ? loadPackComparison(founder.tenantId, { group, track, channel, brand, author, icp, pack, status, lifecycle })
+        : loadLibraryPage(founder.tenantId, {
+            group, track, channel, brand, author, icp, pack, status, lifecycle, page: requestedPage,
+          }),
       null,
     ),
     safe("marketing.library.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
@@ -198,7 +206,8 @@ export default async function MarketingLibraryPage({
   const signed = assetsOrNull ?? [];
   const total = pageOrNull?.total ?? 0;
   const currentPage = pageOrNull?.page ?? 1;
-  const pageCount = libraryPageCount(total, pageOrNull?.pageSize);
+  // A chosen pack is one unpaged page (see above), so there is no pager for it.
+  const pageCount = pack ? 1 : libraryPageCount(total, pageOrNull?.pageSize);
   const firstShown = signed.length ? (currentPage - 1) * (pageOrNull?.pageSize ?? 0) + 1 : 0;
   const lastShown = firstShown ? firstShown + signed.length - 1 : 0;
 
@@ -256,6 +265,8 @@ export default async function MarketingLibraryPage({
   // A pack chosen: its variants are compared side by side (HookCompare) instead
   // of drawn as phones.
   const comparing = !!pack && signed.length > 0;
+  // The pack holds more than the comparison reads (PACK_COMPARE_CAP): say so.
+  const packCapped = comparing && total > signed.length;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -581,8 +592,18 @@ export default async function MarketingLibraryPage({
             // A pack is chosen: its variants, hook against hook, instead of phones.
             // Every filter above still applies (the variants shown are the ones the
             // pills describe), and the links come back to this exact view.
+            // A pack larger than the cap shows its newest PACK_COMPARE_CAP and says so.
             <HookCompare
-              heading={`${packLabel(pack)} - ${signed.length} ${signed.length === 1 ? "variant" : "variants"}`}
+              heading={
+                packCapped
+                  ? `${packLabel(pack)} - first ${signed.length} of ${total} variants`
+                  : `${packLabel(pack)} - ${signed.length} ${signed.length === 1 ? "variant" : "variants"}`
+              }
+              note={
+                packCapped
+                  ? `Showing the first ${signed.length} of ${total} variants in this pack, newest first. Archive or delete the ones you are done with to see the rest.`
+                  : undefined
+              }
               cards={hookVariantCards(signed, (id) => assetHref(id, thisView))}
             />
           ) : (
@@ -700,7 +721,10 @@ function FilterPill({
   /** The raw value behind a friendly label (an audience or pack id), for hover. */
   title?: string;
 }) {
-  const base = "px-3 py-1.5 rounded-full text-xs border transition-all";
+  // `max-w-full` and anywhere-wrapping: a pack id with no spaces in it (the label
+  // falls back to the raw id) must wrap inside the pill, not push the page wider
+  // than a phone.
+  const base = "px-3 py-1.5 rounded-full text-xs border transition-all max-w-full [overflow-wrap:anywhere]";
   const cls = active
     ? "bg-accent-soft text-accent border-accent/30 font-semibold"
     : subtle

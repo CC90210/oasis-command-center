@@ -159,6 +159,27 @@ export async function PATCH(req: Request, ctx: Ctx) {
       })
     : null;
 
+  // A verdict that SETTLES the asset closes the requests for changes still open
+  // on it (POST ../request-changes writes them, with `acted_on_at` null: they are
+  // the marketing agent's inbox). Without this, Request changes and then Approve,
+  // Archive or Reject - two sequential clicks, no race - leaves an open request on
+  // an asset nobody is waiting on: the agent would rework an approved asset, and
+  // the tile keeps its unread dot. CLOSED, not deleted: the row stays as history.
+  // Scoped by workspace, asset and decision, and only rows still open. Best-effort
+  // like the verdict row above (the status change stands), but never silent.
+  if (next === "approved" || next === "rejected" || next === "archived") {
+    const closed = await db
+      .from("marketing_review")
+      .update({ acted_on_at: decided })
+      .eq("tenant_id", founder.tenantId)
+      .eq("asset_id", id)
+      .eq("decision", "request_changes")
+      .is("acted_on_at", null);
+    if (closed.error) {
+      console.warn("[founders.library] could not close the open requests for changes", closed.error.message);
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     asset: updated.data,

@@ -12,9 +12,11 @@
  *   Play all together     every video starts at the beginning at once, muted
  *                         (a browser will not start several with sound), so the
  *                         openings can be compared frame for frame; unmute the
- *                         one you want to hear with its own controls.
+ *                         one you want to hear with its own controls. It is over,
+ *                         and the controls say so, when every clip has ended.
  *   Play one after another  variant 1 with sound, and each starts when the one
- *                         before it ends. Stop ends either.
+ *                         before it ends. Stop ends either. A card removed by a
+ *                         verdict while it plays ends the sequence.
  *
  * NOTHING LOADS UNTIL PRESSED. Every video is preload="none", the rule the rest
  * of the Library follows (components/founders/TileVideo.tsx: a page that fetched
@@ -49,59 +51,89 @@ type Mode = "idle" | "together" | "order";
 export function HookCompare({
   heading,
   cards,
+  note,
 }: {
   heading: string;
   cards: HookVariantCard[];
+  /** An honest line about what is NOT shown (the pack is larger than the comparison reads). */
+  note?: string;
 }) {
-  const videos = useRef<Array<HTMLVideoElement | null>>([]);
+  // Everything below is keyed by a card's ID, never by its position. A verdict
+  // that removes a card (Delete, Archive, Approve under a stage filter) refreshes
+  // `cards` while a clip may be playing, and a stored position would then point
+  // at the wrong card or past the end (Codex on #679).
+  const videos = useRef(new Map<string, HTMLVideoElement>());
   // The variant the sequence is on. A ref as well as state: a video's `ended`
   // handler must read the CURRENT one, not the value from the render it was made in.
-  const current = useRef<number | null>(null);
+  const current = useRef<string | null>(null);
   const [mode, setMode] = useState<Mode>("idle");
-  const [playing, setPlaying] = useState<number | null>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  // "All together": the clips that have not ended yet.
+  const [waiting, setWaiting] = useState<string[]>([]);
 
   const playable = cards.filter((c) => c.playbackUrl).length;
 
-  function setCurrent(i: number | null) {
-    current.current = i;
-    setPlaying(i);
+  // WHAT IS ACTUALLY HAPPENING, derived on every render from the cards on the
+  // page. A sequence whose playing variant is gone (its card was removed) is
+  // over, and "all together" is over when every clip still on the page has ended;
+  // neither can leave the controls saying "playing" over a page where nothing is.
+  const playingIndex = playingId === null ? -1 : cards.findIndex((c) => c.id === playingId);
+  const waitingHere = waiting.filter((id) => cards.some((c) => c.id === id));
+  const active: Mode =
+    mode === "order" && playingIndex >= 0 ? "order" : mode === "together" && waitingHere.length > 0 ? "together" : "idle";
+
+  function setCurrent(id: string | null) {
+    current.current = id;
+    setPlayingId(id);
   }
 
   function stop() {
-    for (const v of videos.current) v?.pause();
+    for (const v of videos.current.values()) v.pause();
     setCurrent(null);
+    setWaiting([]);
     setMode("idle");
+  }
+
+  /** One "all together" clip is done (ended, or refused to play): one fewer to wait for. */
+  function finish(id: string) {
+    setWaiting((w) => w.filter((x) => x !== id));
   }
 
   function together() {
     setCurrent(null);
-    setMode("together");
-    for (const v of videos.current) {
+    const ids: string[] = [];
+    for (const card of cards) {
+      const v = videos.current.get(card.id);
       if (!v) continue;
+      ids.push(card.id);
       v.pause();
       v.currentTime = 0;
       v.muted = true;
-      v.play().catch(() => undefined);
+      v.play().catch(() => finish(card.id));
     }
+    setWaiting(ids);
+    setMode(ids.length ? "together" : "idle");
   }
 
   /** Play variant `from`, or the next one after it that has a video; finish when none is left. */
   function inOrder(from: number) {
     let i = from;
-    while (i < cards.length && !videos.current[i]) i += 1;
+    while (i < cards.length && !videos.current.get(cards[i].id)) i += 1;
     if (i >= cards.length) {
       setCurrent(null);
       setMode("idle");
       return;
     }
-    videos.current.forEach((v, k) => {
-      if (v && k !== i) v.pause();
-    });
-    const v = videos.current[i]!;
+    const id = cards[i].id;
+    for (const [other, clip] of videos.current) {
+      if (other !== id) clip.pause();
+    }
+    const v = videos.current.get(id)!;
     v.currentTime = 0;
     v.muted = false;
+    setWaiting([]);
     setMode("order");
-    setCurrent(i);
+    setCurrent(id);
     v.scrollIntoView({ block: "nearest", behavior: "smooth" });
     // A browser that refuses unmuted playback gets it muted; if even that is
     // refused the video stays put and its own play button is the way on.
@@ -112,9 +144,9 @@ export function HookCompare({
   }
 
   const status =
-    mode === "order" && playing !== null
-      ? `Playing ${cards[playing].variantLabel} (${playing + 1} of ${cards.length}).`
-      : mode === "together"
+    active === "order"
+      ? `Playing ${cards[playingIndex].variantLabel} (${playingIndex + 1} of ${cards.length}).`
+      : active === "together"
         ? "Playing all together, muted. Unmute one to hear it."
         : "";
 
@@ -124,10 +156,11 @@ export function HookCompare({
   return (
     <section aria-label={heading} className="space-y-4">
       <div className="space-y-1">
-        <h2 className="text-sm font-semibold text-fg">{heading}</h2>
+        <h2 className="break-words text-sm font-semibold text-fg">{heading}</h2>
         <p className="text-xs leading-5 text-fg-muted">
           Compare how each variant opens. Approve marks a variant approved and nothing more: it does not schedule or post it.
         </p>
+        {note && <p className="text-xs leading-5 text-fg-muted">{note}</p>}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -135,9 +168,9 @@ export function HookCompare({
           type="button"
           onClick={together}
           disabled={playable === 0}
-          aria-pressed={mode === "together"}
+          aria-pressed={active === "together"}
           className={`${button} ${
-            mode === "together"
+            active === "together"
               ? "border-accent/30 bg-accent-soft text-accent"
               : "border-bg-border bg-bg-elev text-fg-muted hover:bg-bg-hover hover:text-fg"
           }`}
@@ -149,9 +182,9 @@ export function HookCompare({
           type="button"
           onClick={() => inOrder(0)}
           disabled={playable === 0}
-          aria-pressed={mode === "order"}
+          aria-pressed={active === "order"}
           className={`${button} ${
-            mode === "order"
+            active === "order"
               ? "border-accent/30 bg-accent-soft text-accent"
               : "border-bg-border bg-bg-elev text-fg-muted hover:bg-bg-hover hover:text-fg"
           }`}
@@ -159,7 +192,7 @@ export function HookCompare({
           <Play aria-hidden className="h-3.5 w-3.5" />
           Play one after another
         </button>
-        {mode !== "idle" && (
+        {active !== "idle" && (
           <button
             type="button"
             onClick={stop}
@@ -180,7 +213,7 @@ export function HookCompare({
             key={card.id}
             className={
               "flex flex-col gap-3 rounded-xl border bg-bg-panel p-3 shadow-card transition-colors " +
-              (playing === i ? "border-accent/60" : "border-bg-border")
+              (active === "order" && playingIndex === i ? "border-accent/60" : "border-bg-border")
             }
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -197,7 +230,8 @@ export function HookCompare({
               {card.playbackUrl ? (
                 <video
                   ref={(el) => {
-                    videos.current[i] = el;
+                    if (el) videos.current.set(card.id, el);
+                    else videos.current.delete(card.id);
                   }}
                   src={card.playbackUrl}
                   poster={card.posterUrl ?? undefined}
@@ -206,7 +240,11 @@ export function HookCompare({
                   playsInline
                   aria-label={`${card.variantLabel}: ${card.title}`}
                   onEnded={() => {
-                    if (current.current === i) inOrder(i + 1);
+                    // In a sequence the clip that ends hands over to the next card
+                    // (looked up by id, then by this render's position); in "all
+                    // together" every clip that ends is one fewer to wait for.
+                    if (current.current === card.id) inOrder(i + 1);
+                    else finish(card.id);
                   }}
                   className="h-full w-full bg-black object-contain"
                 />
@@ -221,7 +259,7 @@ export function HookCompare({
               )}
             </div>
 
-            <blockquote className="border-l-2 border-accent/50 pl-3 text-sm font-medium leading-snug text-fg">
+            <blockquote className="break-words border-l-2 border-accent/50 pl-3 text-sm font-medium leading-snug text-fg">
               {card.hook}
             </blockquote>
 
