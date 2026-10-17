@@ -48,6 +48,15 @@ export type TimeAgoOptions = {
   now?: number;
   /** The instant may really be ahead of the clock (a scheduled run, a booked call): say "in 5 min" instead of "just now". */
   future?: boolean;
+  /**
+   * Say a MOMENT, not a duration: the device screens' wording (the 2026-10-16 presence audit pinned it), for
+   * "Offline since ..." and Settings > Devices (advanced) last ping / paired / revoked. A computer that has been
+   * quiet for hours is told apart by WHEN it went quiet, which "3 h ago" blurs. Under an hour it is relative as
+   * before ("12 s ago", "4 min ago"); an hour or more is the time today ("5:20 AM") or the day and time ("Oct 14,
+   * 5:20 AM"), in the viewer's own locale. No time at all is still "never", and a moment ahead of the clock is
+   * still "just now".
+   */
+  moment?: boolean;
 };
 
 /** The one word for no time at all. */
@@ -77,11 +86,14 @@ const DATE_FROM_MS = 30 * DAY_MS;
  * clock (two machines never agree to the second) is "just now". With `future: true`, for something that is
  * really scheduled: "in under a minute", "in 5 min", "in 3 h", "in 2 d", then the date from 30 days out.
  * The date is en-US in the viewer's own zone, because it sits inside an English sentence.
+ *
+ * `moment: true` is the one deliberate exception, for the device screens (see TimeAgoOptions).
  */
 export function timeAgo(when: TimeAgoInput, opts: TimeAgoOptions = {}): string {
   const at = when instanceof Date ? when.getTime() : typeof when === "number" ? when : when ? Date.parse(when) : NaN;
   if (!Number.isFinite(at)) return TIME_AGO_NEVER;
   const now = opts.now ?? Date.now();
+  if (opts.moment) return momentWords(at, now);
   const ahead = at > now;
   if (ahead && !opts.future) return "just now";
   const gap = Math.abs(now - at);
@@ -92,6 +104,21 @@ export function timeAgo(when: TimeAgoInput, opts: TimeAgoOptions = {}): string {
   }
   const span = gap < HOUR_MS ? `${Math.floor(gap / MINUTE_MS)} min` : gap < DAY_MS ? `${Math.floor(gap / HOUR_MS)} h` : `${Math.floor(gap / DAY_MS)} d`;
   return ahead ? `in ${span}` : `${span} ago`;
+}
+
+/** timeAgo's `moment` wording, exactly as the device screens said it before the one vocabulary. */
+function momentWords(at: number, now: number): string {
+  const ms = now - at;
+  if (ms < 0) return "just now";
+  if (ms < MINUTE_MS) return `${Math.max(1, Math.round(ms / 1000))} s ago`;
+  if (ms < HOUR_MS) return `${Math.round(ms / MINUTE_MS)} min ago`;
+  // Older than an hour: a bare "5:20 AM" could be yesterday's, last week's or
+  // last month's. Say which day when it is not today.
+  const when = new Date(at);
+  if (when.toDateString() === new Date(now).toDateString()) {
+    return when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  return when.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 /** Every presence a screen shows for a computer: machineState's three, and busy (every slot has a run in it). */
@@ -110,7 +137,7 @@ export function presenceWords(state: PresenceState, lastSeenAt?: string | null):
   if (state === "idle") return "Idle";
   if (state === "busy") return runtimeStatusWords("busy");
   // "since never" said nothing true: a computer never seen is just Offline.
-  return lastSeenAt ? `${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt)}` : runtimeStatusWords("offline");
+  return lastSeenAt ? `${runtimeStatusWords("offline")} since ${timeAgo(lastSeenAt, { moment: true })}` : runtimeStatusWords("offline");
 }
 
 /**

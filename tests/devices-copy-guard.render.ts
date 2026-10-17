@@ -150,12 +150,12 @@ async function main() {
     JSON.stringify({
       owner: await draw("owner/repo"),
       notOwner: await draw(null),
-      // What "Offline since" says for the same moments (lib/devices/presence.ts, the one helper).
+      // What "Offline since" says for the same moments (lib/devices/presence.ts timeAgo, moment: true).
       expected: {
-        mineSeen: timeAgo(stamps.mineSeen),
-        minePaired: timeAgo(stamps.minePaired),
-        theirsPaired: timeAgo(stamps.theirsPaired),
-        revoked: timeAgo(stamps.revoked),
+        mineSeen: timeAgo(stamps.mineSeen, { moment: true }),
+        minePaired: timeAgo(stamps.minePaired, { moment: true }),
+        theirsPaired: timeAgo(stamps.theirsPaired, { moment: true }),
+        revoked: timeAgo(stamps.revoked, { moment: true }),
       },
     }),
   );

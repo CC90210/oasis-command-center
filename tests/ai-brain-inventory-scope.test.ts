@@ -227,7 +227,8 @@ async function main(): Promise<void> {
   const teamRow = (label: string) => out.team.rows.find((row) => row.startsWith(`${label} · `))!;
   // Offline, the same computer on all three: Tower, last seen three days ago.
   const offline = brainSays.Tower;
-  assert.equal(offline, "Offline since 3 d ago", `an offline computer says since when, in the one time-ago wording: ${offline}`);
+  assert.match(offline, /^Offline since [A-Z][a-z]{2} \d{1,2}/, `an offline computer says since when: ${offline}`);
+  assert.doesNotMatch(offline, /\bago\b/, `Offline since names the moment, not a duration: ${offline}`);
   assert.equal(advancedSays.Tower, offline, "Devices (advanced) says what AI brain says for Tower");
   assert.equal(cardSays(out.devices.Tower.row, "Tower"), offline, "and so does its Your computers row");
   // Online: AI brain's cards, Devices (advanced) and a Team computers row whose heartbeat is fresh.

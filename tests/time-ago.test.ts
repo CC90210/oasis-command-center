@@ -103,6 +103,25 @@ check("future: true reads a scheduled moment as in, never as ago", () => {
   assert.equal(f(-DAY), "1 d ago");
 });
 
+check("moment: true is the device screens' wording: a moment once it is an hour old, relative before that", () => {
+  const m = (ms: number) => timeAgo(NOW - ms, { now: NOW, moment: true });
+  // Same words as the default under an hour, except seconds are counted ("a recent ping still reads in seconds").
+  assert.equal(m(20_000), "20 s ago");
+  assert.equal(m(1), "1 s ago", "never '0 s ago'");
+  assert.equal(m(4 * MIN), "4 min ago");
+  assert.equal(timeAgo(NOW + 5_000, { now: NOW, moment: true }), "just now", "a moment ahead of the clock");
+  for (const none of [null, undefined, "", "not a date"]) assert.equal(timeAgo(none, { now: NOW, moment: true }), "never");
+  // An hour or more: the time today, or the day and time before today. Never a count of hours or days.
+  const sameDay = m(3 * HOUR);
+  assert.equal(sameDay, new Date(NOW - 3 * HOUR).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), "today: the time");
+  const earlier = m(2 * DAY);
+  assert.equal(earlier, new Date(NOW - 2 * DAY).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }), "an earlier day: the day and time");
+  assert.equal(m(40 * DAY), new Date(NOW - 40 * DAY).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }), "a pairing months ago keeps its day and time");
+  for (const text of [sameDay, earlier, m(40 * DAY)]) assert.doesNotMatch(text, /\bago\b/, text);
+  assert.notEqual(earlier, timeAgo(NOW - 2 * DAY, { now: NOW }), "and it is not the default wording");
+  assert.match(earlier, /\d{1,2}/, "it carries a day of the month");
+});
+
 check("with no options it reads the real clock", () => {
   assert.equal(timeAgo(new Date().toISOString()), "just now");
   assert.equal(timeAgo(Date.now() - 5 * MIN - 500), "5 min ago");

@@ -82,6 +82,13 @@ async function main() {
     assert.match(teamRowLine("CC's computer", "CC", "blocked:subscription_auth_failure", null, RECENT, NOW), /Claude Code is signed out/);
   });
 
+  check("an offline team row older than an hour names the moment it went quiet, never 'N h ago' (the 2026-10-16 presence audit)", () => {
+    const THREE_HOURS = new Date(NOW - 3 * 3_600_000).toISOString();
+    const line = teamRowLine("CC's computer", "CC", "offline", null, THREE_HOURS, NOW);
+    assert.match(line, /^CC's computer \S+ Offline since \S/);
+    assert.doesNotMatch(line, /\bago\b/, `a duration where a moment belongs: ${line}`);
+  });
+
   const { RUNTIME_STATUS_WORDS: W } = await import("../lib/bridge-cli-status");
   check("every state word on a team row is the shared one, never typed again in the card", () => {
     const lines = [
