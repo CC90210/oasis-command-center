@@ -64,10 +64,22 @@ check("a page with no pinned sections draws no menu button", () => {
   assert.match(html.withoutNav, /href="#book"/, "control: the Book button is still there");
 });
 
-check("choosing a section, and Escape, close the menu", () => {
+check("choosing a section, and Escape, close the menu; Escape gives focus back to the button", () => {
   const src = readFileSync(join(ROOT, "components/offer-pages/OfferNavMenu.tsx"), "utf8");
   assert.match(src, /href=\{`#\$\{n\.anchor\}`\}\s*onClick=\{\(\) => setOpen\(false\)\}/, "a chosen section leaves the panel open over the page");
-  assert.match(src, /e\.key === "Escape"\) setOpen\(false\)/, "Escape does not close the panel");
+  assert.match(src, /if \(e\.key !== "Escape"\) return;\s*setOpen\(false\);[\s\S]{0,160}trigger\.current\?\.focus\(\);/, "Escape does not close the panel and return focus");
+  assert.match(src, /<button\s+ref=\{trigger\}/, "the focus target is not the menu button");
+});
+
+// Codex on #665: a long menu on a short (landscape) phone ran past the screen,
+// and a long CTA label beside the new button overflowed a 320px header.
+check("the open panel scrolls within the screen under the bar", () => {
+  assert.match(html.withNav, /<nav id="[^"]+" aria-label="On this page" hidden="" class="[^"]*max-h-\[calc\(100dvh-4rem\)\][^"]*overflow-y-auto/);
+});
+
+check("on a phone the Book label is capped with an ellipsis, in full from sm up", () => {
+  assert.match(html.withNav, /<a href="#book" class="[^"]*min-w-0 max-w-\[10\.5rem\][^"]*sm:max-w-none"[^>]*><span class="min-w-0 truncate">Request the audit<\/span><\/a>/);
+  assert.match(html.withNav, /<div class="flex min-w-0 items-center gap-1"><div class="md:hidden">/, "the button cluster cannot shrink");
 });
 
 if (failures) {

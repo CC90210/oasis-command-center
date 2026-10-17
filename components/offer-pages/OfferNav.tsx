@@ -46,10 +46,18 @@ export function OfferNav({
             ))}
           </nav>
         ) : null}
-        <div className="flex shrink-0 items-center gap-1">
+        {/* On a phone the button's label may be up to 40 characters beside the
+            menu button: it is capped and ends in an ellipsis there, so the row
+            never overflows (Codex on #665); from sm up it shows in full. */}
+        <div className="flex min-w-0 items-center gap-1">
           <OfferNavMenu nav={nav} />
-          <a href="#book" className={`${CTA_PRIMARY} shrink-0 !px-4 !py-2`} data-section="nav">
-            {ctaLabel}
+          <a
+            href="#book"
+            className={`${CTA_PRIMARY} min-w-0 max-w-[10.5rem] !px-4 !py-2 sm:max-w-none`}
+            data-section="nav"
+            title={ctaLabel}
+          >
+            <span className="min-w-0 truncate">{ctaLabel}</span>
           </a>
         </div>
       </div>

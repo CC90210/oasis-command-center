@@ -8,21 +8,27 @@
  * A button in the header opens the same anchors the desktop nav draws, in a
  * panel under the bar; choosing one closes it and the browser follows the
  * plain anchor, so the header keeps its height and Section's scroll-mt still
- * clears it. Escape and a second press close it too. md and up never render
+ * clears it. Escape and a second press close it too; Escape puts focus back on
+ * the button. The panel scrolls within the screen under the 4rem bar, so every
+ * section stays reachable on a short (landscape) phone. md and up never render
  * it: OfferNav's own row is there.
  */
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Menu, X } from "lucide-react";
 import type { DrawnPage } from "@/lib/offer-pages/visibility";
 
 export function OfferNavMenu({ nav }: { nav: DrawnPage["nav"] }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
+  const trigger = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      // The focused link is about to be hidden: keep focus visible on the button (WCAG 2.4.7).
+      trigger.current?.focus();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -32,6 +38,7 @@ export function OfferNavMenu({ nav }: { nav: DrawnPage["nav"] }) {
   return (
     <div className="md:hidden">
       <button
+        ref={trigger}
         type="button"
         aria-expanded={open}
         aria-controls={panelId}
@@ -45,7 +52,7 @@ export function OfferNavMenu({ nav }: { nav: DrawnPage["nav"] }) {
         id={panelId}
         aria-label="On this page"
         hidden={!open}
-        className="absolute inset-x-0 top-full border-b border-ops-line bg-ops-void/95 px-5 py-2 backdrop-blur-md"
+        className="absolute inset-x-0 top-full max-h-[calc(100dvh-4rem)] overflow-y-auto overscroll-contain border-b border-ops-line bg-ops-void/95 px-5 py-2 backdrop-blur-md"
       >
         <ul className="flex flex-col">
           {nav.map((n) => (
