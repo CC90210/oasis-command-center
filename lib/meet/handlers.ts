@@ -118,12 +118,18 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
 }
 
 // The room
+/**
+ * What a join answers. `records`: this browser runs the recording, which is only ever the room creator's (one
+ * recording browser per room; the recording route refuses a second). If the creator is not in the call,
+ * nothing records.
+ */
 function joined(participant: MeetPresence, room: MeetRoom, iceServers: RTCIceServerLike[]) {
   return meetJson({
     ok: true,
     participantId: participant.id,
     role: participant.role,
     name: participant.displayName,
+    records: participant.role === "host" && room.recordAudio && participant.userId !== null && participant.userId === room.hostUserId,
     room: roomView(room),
     iceServers,
   });

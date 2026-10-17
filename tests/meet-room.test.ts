@@ -189,11 +189,16 @@ async function main() {
     const res = await handleJoin(request(`/api/meet/${code}/join`, { body: {}, ip: freshIp() }), code, deps({ session: as(CC) }));
     const body = await json(res);
     assert.equal(body.role, "host", "the creator is host, and needs no tick or typed name");
+    assert.equal(body.records, true, "the creator's browser records a recorded room");
     assert.equal((body.room as Json).status, "live");
+    const admin = await json(await handleJoin(request(`/api/meet/${code}/join`, { body: {}, ip: freshIp() }), code, deps({ session: as(ADON, true) })));
+    assert.equal(admin.role, "host");
+    assert.equal(admin.records, false, "a second host never starts a second recording");
     hostCookie = cookieOf(res)!;
     hostId = String(body.participantId);
     const member = await json(await handleJoin(request(`/api/meet/${code}/join`, { body: { name: "Rep", consent: true }, ip: freshIp() }), code, deps({ session: as(REP) })));
     assert.equal(member.role, "guest", "a member who is not host or a base-role admin joins as a guest");
+    assert.equal(member.records, false);
   });
 
   // the SFU, through the room's checks
