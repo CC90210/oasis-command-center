@@ -1,0 +1,1015 @@
+/**
+ * lib/meet/recording.ts - Oasis Meet's recording relay and its transcripts
+ * (migration bravo__231).
+ *
+ * CC (2026-10-17): no vendor bill for recording, and the recordings live on
+ * OASIS's own computer. So the Command Center is a RELAY, never the archive:
+ *
+ *   1 RECORD      the host's browser records each speaker's voice
+ *                 (lib/meet/recorder.ts) and POSTs 10-second chunks to
+ *                 /api/meet/<code>/recording/chunk. Each lands in R2 at
+ *                 meet-relay/<tenant>/<room>/<participant>/<segment>/<seq> and
+ *                 gets a meet_recording_chunks row (acceptChunk).
+ *   2 HAND OVER   once the meeting has ended (ensureTranscriptJob): the host's
+ *                 browser right after End, or the PC's own claim 10 minutes
+ *                 after the end if that browser never said so
+ *                 (finalizeDueRooms). That makes the room's meet_transcripts row
+ *                 and a meet_transcribe job for the PC.
+ *   3 TRANSCRIBE  OASIS's PC (BEA scripts/meet/runner.py) claims the job. The
+ *                 claim fixes exactly which chunks it gets (segments_json,
+ *                 meetTranscribeClaim); download-urls signs them; the PC keeps
+ *                 the audio in its Meetings folder, transcribes it on the CPU
+ *                 and posts the transcript back (complete).
+ *   4 FORGET      only then are the relay copies deleted (removeRelayChunks),
+ *                 at most RELAY_CLEANUP_BATCH per request: each delete is one
+ *                 call to R2 and a Worker request may make only so many. The
+ *                 rest go on the next claim, every minute while the PC is on.
+ *
+ * The audio waits for the PC at most 30 days from the meeting's end
+ * (relay_expires_at, expireRelay): a PC that never comes back must not turn the
+ * relay into an archive of people's voices. An R2 lifecycle rule on
+ * meet-relay/ is the backstop for any object whose row is gone.
+ *
+ * A SEGMENT is one MediaRecorder run. Its container header is in chunk 0 only,
+ * so a segment is usable up to its first missing chunk and no further: the
+ * claim hands over each segment's unbroken run from 0 (declareSegments) and
+ * counts the rest as missing_chunks, so the panel can say what was not heard.
+ *
+ * WHO. The host routes (lib/meet/recording-routes.ts) pass requireMeetHost; the
+ * runner routes (lib/tools/runner-handlers.ts) pass the signed tools auth and
+ * serve OASIS's own workspaces. Every statement names the room's tenant_id.
+ */
+import "server-only";
+import { randomUUID } from "node:crypto";
+import type { Client, InStatement, InValue } from "@libsql/client";
+import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
+import { pathBelongsToTenant } from "@/lib/storage-helpers";
+import { toolErrorLine } from "@/lib/tools/errors";
+import { LEASE_GUARD, inputHashOf, liveRunnerForTool, sqlPlaceholders } from "@/lib/tools/store";
+import { readMeetRoom, type MeetRoom } from "./rooms";
+
+/** The logical bucket the relay copies live in: private (never in PUBLIC_BUCKET_PREFIXES), signed URLs only. */
+export const MEET_RELAY_BUCKET = "meet-relay";
+/** The largest chunk taken. Ten seconds of speech is a small fraction of it at any browser's default rate. */
+export const MAX_CHUNK_BYTES = 512 * 1024;
+/** A room's ceiling: eight speakers for four hours of 10-second chunks, with room to spare. */
+export const MAX_ROOM_CHUNKS = 12_000;
+export const MAX_ROOM_BYTES = 1536 * 1024 * 1024;
+/** The highest sequence number one segment's chunk may carry. */
+export const MAX_CHUNK_SEQ = 100_000;
+/** How long after End a chunk is still taken: a recorder's last uploads finish after the call ends. */
+export const LATE_CHUNK_MS = 10 * 60_000;
+/** One browser records a room: another host's chunks are refused while the first one sent a chunk this recently. */
+export const RECORDER_HANDOVER_MS = 2 * 60_000;
+/** How long the relay holds a recording for the PC, counted from the meeting's end. */
+export const RELAY_DAYS = 30;
+export const RELAY_CLEANUP_BATCH = 100;
+export const FINALIZE_SWEEP_BATCH = 5;
+/** How long one chunk's download URL lasts: the PC fetches a long meeting's chunks one after another. */
+export const DOWNLOAD_URL_TTL_SECONDS = 1800;
+export const MAX_TRANSCRIPT_CHARS = 1_000_000;
+export const MAX_TRANSCRIPT_LINES = 20_000;
+export const MAX_LINE_CHARS = 4000;
+
+const DAY_MS = 86_400_000;
+const IN_FLIGHT = new Set(["queued", "claimed", "running"]);
+const CONTROL = /[\u0000-\u001f\u007f]/;
+const UNIQUE_FAILED = /UNIQUE constraint failed/i;
+
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+
+/** The relay's object store, as much of it as this file uses (R2 in production, a fake in tests). */
+export type MeetStorage = {
+  /** Store one chunk, overwriting a retry of the same chunk. Throws when it could not be stored. */
+  put(path: string, bytes: Uint8Array, contentType: string): Promise<void>;
+  /** A short-lived GET URL for one object. */
+  signedGetUrl(path: string, ttlSeconds: number): Promise<string>;
+  /** Delete one object; one already gone is not an error. Throws when it could not be deleted. */
+  remove(path: string): Promise<void>;
+};
+
+/** The meet-relay bucket on R2, or null when R2 is not configured (never the Supabase fallback). */
+export function r2MeetStorage(): MeetStorage | null {
+  if (!r2Configured()) return null;
+  const bucket = r2StorageSurface().from(MEET_RELAY_BUCKET);
+  return {
+    async put(path, bytes, contentType) {
+      const r = await bucket.upload(path, bytes, { contentType, upsert: true });
+      if (r.error) throw new Error(r.error.message);
+    },
+    async signedGetUrl(path, ttlSeconds) {
+      const r = await bucket.createSignedUrl(path, ttlSeconds);
+      if (r.error || !r.data?.signedUrl) throw new Error(r.error?.message || "no signed URL");
+      return r.data.signedUrl;
+    },
+    async remove(path) {
+      const r = await bucket.remove([path]);
+      if (r.error) throw new Error(r.error.message);
+    },
+  };
+}
+
+/** All three Meet tables present (bravo__230 and bravo__231)? False = not installed; any other error throws. */
+export async function meetRecordingTablesInstalled(db: Client): Promise<boolean> {
+  try {
+    await db.execute(
+      "SELECT (SELECT COUNT(*) FROM meet_rooms WHERE 0) AS r, (SELECT COUNT(*) FROM meet_recording_chunks WHERE 0) AS c, (SELECT COUNT(*) FROM meet_transcripts WHERE 0) AS t",
+    );
+    return true;
+  } catch (err) {
+    if (/no such table|no such column/i.test(err instanceof Error ? err.message : String(err))) return false;
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rows
+// ---------------------------------------------------------------------------
+
+/** One speaker's one recorder run, as the PC is given it. */
+export type DeclaredSegment = {
+  participant_id: string;
+  display_name: string;
+  segment_id: string;
+  started_at_ms: number;
+  mime_type: string;
+  chunk_count: number;
+};
+
+/** One line of a transcript, as the PC sends it (BEA scripts/meet/transcript.py). */
+export type TranscriptLine = { at_ms: number; end_ms: number; participant_id: string; speaker: string; text: string };
+
+export type TranscriptStatus = "queued" | "transcribing" | "ready" | "expired" | "deleted";
+
+export type MeetTranscript = {
+  id: string;
+  tenantId: string;
+  roomId: string;
+  status: TranscriptStatus;
+  jobId: string | null;
+  segments: DeclaredSegment[];
+  chunkCount: number;
+  audioBytes: number;
+  missingChunks: number;
+  text: string | null;
+  lines: TranscriptLine[];
+  model: string | null;
+  transcribeSeconds: number | null;
+  deviceLabel: string | null;
+  localFolder: string | null;
+  relayExpiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+  readyAt: string | null;
+  deletedAt: string | null;
+  localDeletedAt: string | null;
+};
+
+const str = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
+const num = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+function jsonArray(v: unknown): unknown[] {
+  if (typeof v !== "string" || !v) return [];
+  try {
+    const parsed = JSON.parse(v) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+const TRANSCRIPT_COLUMNS =
+  "id, tenant_id, room_id, status, job_id, segments_json, chunk_count, audio_bytes, missing_chunks, text, lines_json, model, " +
+  "transcribe_seconds, device_label, local_folder, relay_expires_at, created_at, updated_at, ready_at, deleted_at, local_deleted_at";
+
+function toTranscript(row: Record<string, unknown>): MeetTranscript {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    roomId: String(row.room_id),
+    status: String(row.status) as TranscriptStatus,
+    jobId: str(row.job_id),
+    segments: jsonArray(row.segments_json) as DeclaredSegment[],
+    chunkCount: num(row.chunk_count),
+    audioBytes: num(row.audio_bytes),
+    missingChunks: num(row.missing_chunks),
+    text: str(row.text),
+    lines: jsonArray(row.lines_json) as TranscriptLine[],
+    model: str(row.model),
+    transcribeSeconds: row.transcribe_seconds === null || row.transcribe_seconds === undefined ? null : num(row.transcribe_seconds),
+    deviceLabel: str(row.device_label),
+    localFolder: str(row.local_folder),
+    relayExpiresAt: String(row.relay_expires_at),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    readyAt: str(row.ready_at),
+    deletedAt: str(row.deleted_at),
+    localDeletedAt: str(row.local_deleted_at),
+  };
+}
+
+/** The room's transcript row, or null before its recording was handed over. */
+export async function readTranscript(db: Client, tenantId: string, roomId: string): Promise<MeetTranscript | null> {
+  const rs = await db.execute({
+    sql: `SELECT ${TRANSCRIPT_COLUMNS} FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? LIMIT 1`,
+    args: [tenantId, roomId],
+  });
+  return rs.rows[0] ? toTranscript(rs.rows[0] as unknown as Record<string, unknown>) : null;
+}
+
+type JobState = { status: string; stage: string | null; errorCode: string | null; attempts: number };
+
+async function jobState(db: Client, tenantId: string, jobId: string): Promise<JobState | null> {
+  const rs = await db.execute({
+    sql: "SELECT status, stage, error_code, attempts FROM tool_jobs WHERE tenant_id = ? AND id = ? LIMIT 1",
+    args: [tenantId, jobId],
+  });
+  const r = rs.rows[0];
+  return r ? { status: String(r.status), stage: str(r.stage), errorCode: str(r.error_code), attempts: num(r.attempts) } : null;
+}
+
+async function relayTotals(db: Client, tenantId: string, roomId: string): Promise<{ chunks: number; bytes: number }> {
+  const rs = await db.execute({
+    sql: "SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?",
+    args: [tenantId, roomId],
+  });
+  return { chunks: num(rs.rows[0]?.n), bytes: num(rs.rows[0]?.b) };
+}
+
+// ---------------------------------------------------------------------------
+// 1 RECORD: one chunk
+// ---------------------------------------------------------------------------
+
+const RECORDING_MIME = /^audio\/(webm|ogg|mp4)(;codecs=[a-z0-9.]+)?$/;
+
+/** A recorder's MIME type as stored ("audio/webm;codecs=opus"), or null for anything that is not one of ours. */
+export function normalizeRecordingMime(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length > 100) return null;
+  const v = raw.toLowerCase().replace(/\s+/g, "").replace(/"/g, "");
+  return RECORDING_MIME.test(v) ? v : null;
+}
+
+export type ChunkInput = {
+  room: MeetRoom;
+  /** The signed-in host whose browser sent it. */
+  uploadedBy: string;
+  participantId: string;
+  /** The participant row's own name (never the request's). */
+  displayName: string;
+  segmentId: string;
+  seq: number;
+  segmentStartedMs: number;
+  mimeType: string;
+  bytes: Uint8Array;
+  now: Date;
+};
+
+/**
+ * 201 stored; 409 duplicate (the recorder counts it done: the same chunk is
+ * already here); 410 recording_closed (the PC already took this recording, or
+ * it was deleted); 413 room_full; 423 another_recorder (another host's browser
+ * is recording this room); 502 storage_failed (retried by the recorder).
+ */
+export type ChunkResult = { ok: true; status: 201 } | { ok: false; status: 409 | 410 | 413 | 423 | 502; error: string };
+
+/** The conditions a chunk row is written under, checked again inside the INSERT itself. */
+function chunkGateSql(): string {
+  return `(SELECT COUNT(*) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?) < ?
+      AND (SELECT COALESCE(SUM(bytes), 0) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?) + ? <= ?
+      AND NOT EXISTS (SELECT 1 FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ? AND uploaded_by <> ? AND created_at > ?)
+      AND NOT EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND status <> 'queued')`;
+}
+
+function chunkGateArgs(c: ChunkInput): InValue[] {
+  const t = c.room.tenantId;
+  const r = c.room.id;
+  const handover = new Date(c.now.getTime() - RECORDER_HANDOVER_MS).toISOString();
+  return [t, r, MAX_ROOM_CHUNKS, t, r, c.bytes.byteLength, MAX_ROOM_BYTES, t, r, c.uploadedBy, handover, t, r];
+}
+
+/** Why the gate would refuse this chunk now, or null when it would pass. */
+async function chunkRefusal(db: Client, c: ChunkInput): Promise<ChunkResult | null> {
+  const t = c.room.tenantId;
+  const r = c.room.id;
+  const handover = new Date(c.now.getTime() - RECORDER_HANDOVER_MS).toISOString();
+  const rs = await db.execute({
+    sql: `SELECT
+            (SELECT status FROM meet_transcripts WHERE tenant_id = ? AND room_id = ?) AS transcript,
+            (SELECT COUNT(*) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?) AS n,
+            (SELECT COALESCE(SUM(bytes), 0) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?) AS b,
+            (SELECT COUNT(*) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ? AND uploaded_by <> ? AND created_at > ?) AS others`,
+    args: [t, r, t, r, t, r, t, r, c.uploadedBy, handover],
+  });
+  const row = rs.rows[0] ?? {};
+  const transcript = str((row as Record<string, unknown>).transcript);
+  if (transcript && transcript !== "queued") return { ok: false, status: 410, error: "recording_closed" };
+  if (num((row as Record<string, unknown>).others) > 0) return { ok: false, status: 423, error: "another_recorder" };
+  if (num((row as Record<string, unknown>).n) >= MAX_ROOM_CHUNKS) return { ok: false, status: 413, error: "room_full" };
+  if (num((row as Record<string, unknown>).b) + c.bytes.byteLength > MAX_ROOM_BYTES) return { ok: false, status: 413, error: "room_full" };
+  return null;
+}
+
+async function chunkExists(db: Client, c: ChunkInput): Promise<boolean> {
+  const rs = await db.execute({
+    sql: `SELECT 1 FROM meet_recording_chunks
+          WHERE tenant_id = ? AND room_id = ? AND participant_id = ? AND segment_id = ? AND seq = ? LIMIT 1`,
+    args: [c.room.tenantId, c.room.id, c.participantId, c.segmentId, c.seq],
+  });
+  return rs.rows.length > 0;
+}
+
+/** The relay path of one chunk, always under its own workspace and room. */
+export function chunkPath(tenantId: string, roomId: string, participantId: string, segmentId: string, seq: number): string {
+  return `${tenantId}/${roomId}/${participantId}/${segmentId}/${seq}`;
+}
+
+/**
+ * Keep one chunk: refused up front if the gate says no (nothing is uploaded),
+ * stored in R2, then its row written under the same gate, re-checked in the
+ * INSERT. A row that loses a race to the gate leaves an object nothing points
+ * at, which is deleted again; one that loses to the same chunk (a retry that
+ * crossed) is a duplicate, and the object is that chunk's own.
+ */
+export async function acceptChunk(db: Client, storage: MeetStorage, c: ChunkInput): Promise<ChunkResult> {
+  if (await chunkExists(db, c)) return { ok: false, status: 409, error: "duplicate" };
+  const refused = await chunkRefusal(db, c);
+  if (refused) return refused;
+
+  const path = chunkPath(c.room.tenantId, c.room.id, c.participantId, c.segmentId, c.seq);
+  try {
+    await storage.put(path, c.bytes, c.mimeType);
+  } catch (err) {
+    console.error("[meet.recording] could not store a chunk", {
+      tenantId: c.room.tenantId,
+      roomId: c.room.id,
+      seq: c.seq,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, status: 502, error: "storage_failed" };
+  }
+
+  const rs = await db.execute({
+    sql: `INSERT INTO meet_recording_chunks (id, tenant_id, room_id, participant_id, display_name, segment_id, seq,
+                                             segment_started_ms, mime_type, bytes, storage_path, uploaded_by, created_at)
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE ${chunkGateSql()}
+          ON CONFLICT (tenant_id, room_id, participant_id, segment_id, seq) DO NOTHING`,
+    args: [
+      randomUUID(), c.room.tenantId, c.room.id, c.participantId, c.displayName, c.segmentId, c.seq,
+      c.segmentStartedMs, c.mimeType, c.bytes.byteLength, path, c.uploadedBy, c.now.toISOString(),
+      ...chunkGateArgs(c),
+    ],
+  });
+  if (rs.rowsAffected === 1) return { ok: true, status: 201 };
+  if (await chunkExists(db, c)) return { ok: false, status: 409, error: "duplicate" };
+  // The gate closed between the check and the write: the object is nobody's.
+  try {
+    await storage.remove(path);
+  } catch (err) {
+    console.error("[meet.recording] could not delete a refused chunk", { tenantId: c.room.tenantId, path, error: err instanceof Error ? err.message : String(err) });
+  }
+  return (await chunkRefusal(db, c)) ?? { ok: false, status: 410, error: "recording_closed" };
+}
+
+// ---------------------------------------------------------------------------
+// 2 HAND OVER
+// ---------------------------------------------------------------------------
+
+export type HandOver =
+  | { state: "not_ended" | "nothing_recorded" | "ready" | "expired" | "deleted" }
+  | { state: "queued" | "transcribing"; jobId: string };
+
+function handOverStatements(room: MeetRoom, jobId: string, actorUserId: string | null, relayExpiresAt: string, now: Date): InStatement[] {
+  const at = now.toISOString();
+  const input = { room_id: room.id, title: room.title };
+  return [
+    {
+      // A first hand-over makes the row; a retry after a failed job points it at the new job. A row that is
+      // ready, expired or deleted is never touched, so the job below is not written either.
+      sql: `INSERT INTO meet_transcripts (id, tenant_id, room_id, status, job_id, relay_expires_at, created_at, updated_at)
+            VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
+            ON CONFLICT (tenant_id, room_id) DO UPDATE SET status = 'queued', job_id = excluded.job_id, updated_at = excluded.updated_at
+            WHERE meet_transcripts.status IN ('queued', 'transcribing')`,
+      args: [randomUUID(), room.tenantId, room.id, jobId, relayExpiresAt, at, at],
+    },
+    {
+      // dedupe_key: one transcription of a room in flight at a time (uq_tool_jobs_tenant_inflight).
+      sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, idempotency_key,
+                                   dedupe_key, created_by, created_by_email, created_at, updated_at)
+            SELECT ?, ?, 'meet_transcribe', 'runner', 'queued', ?, ?, NULL, ?, ?, NULL, ?, ?
+            WHERE EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND job_id = ? AND status = 'queued')`,
+      args: [
+        jobId, room.tenantId, JSON.stringify(input), inputHashOf("meet_transcribe", input), `meet_transcribe:${room.id}`,
+        actorUserId, at, at, room.tenantId, room.id, jobId,
+      ],
+    },
+  ];
+}
+
+function handOverState(t: MeetTranscript | null): HandOver {
+  if (!t) return { state: "nothing_recorded" };
+  if (t.status === "queued" || t.status === "transcribing") return { state: t.status, jobId: t.jobId ?? "" };
+  return { state: t.status };
+}
+
+/**
+ * Hand an ended meeting's recording to the PC: its transcript row and a
+ * meet_transcribe job. Idempotent: a job already in flight is the answer, and a
+ * recording that is ready, expired or deleted is left alone. After a failed job
+ * this is the retry. The relay window counts from the meeting's end and is never
+ * extended by a retry.
+ */
+export async function ensureTranscriptJob(db: Client, room: MeetRoom, actorUserId: string | null, now: Date): Promise<HandOver> {
+  if (room.status !== "ended") return { state: "not_ended" };
+  const t = await readTranscript(db, room.tenantId, room.id);
+  if (t && t.status !== "queued" && t.status !== "transcribing") return { state: t.status };
+  if (t?.jobId) {
+    const job = await jobState(db, room.tenantId, t.jobId);
+    if (job && IN_FLIGHT.has(job.status)) return handOverState(t);
+  }
+  if (!t && (await relayTotals(db, room.tenantId, room.id)).chunks === 0) return { state: "nothing_recorded" };
+
+  const endedMs = room.endedAt && Number.isFinite(Date.parse(room.endedAt)) ? Date.parse(room.endedAt) : now.getTime();
+  const relayExpiresAt = new Date(endedMs + RELAY_DAYS * DAY_MS).toISOString();
+  try {
+    await db.batch(handOverStatements(room, randomUUID(), actorUserId, relayExpiresAt, now), "write");
+  } catch (err) {
+    // Two hand-overs in the same instant: the batch is one transaction, so the loser wrote nothing.
+    if (!UNIQUE_FAILED.test(err instanceof Error ? err.message : String(err))) throw err;
+  }
+  return handOverState(await readTranscript(db, room.tenantId, room.id));
+}
+
+// ---------------------------------------------------------------------------
+// 3 TRANSCRIBE: the claim, the downloads, the report
+// ---------------------------------------------------------------------------
+
+type ChunkRow = {
+  participant_id: string;
+  display_name: string;
+  segment_id: string;
+  seq: number;
+  segment_started_ms: number;
+  mime_type: string;
+  bytes: number;
+};
+
+/**
+ * Each segment's unbroken run of chunks from 0, oldest segment first, and what
+ * was left out. A segment with no chunk 0 has no header and is left out whole.
+ */
+export function declareSegments(rows: readonly ChunkRow[]): {
+  segments: DeclaredSegment[];
+  chunkCount: number;
+  audioBytes: number;
+  missingChunks: number;
+} {
+  const groups = new Map<string, ChunkRow[]>();
+  for (const r of rows) {
+    const key = `${r.participant_id}|${r.segment_id}`;
+    const list = groups.get(key);
+    if (list) list.push(r);
+    else groups.set(key, [r]);
+  }
+  const segments: DeclaredSegment[] = [];
+  let chunkCount = 0;
+  let audioBytes = 0;
+  let missingChunks = 0;
+  for (const list of groups.values()) {
+    const sorted = [...list].sort((a, b) => a.seq - b.seq);
+    let run = 0;
+    let bytes = 0;
+    while (run < sorted.length && sorted[run].seq === run) {
+      bytes += sorted[run].bytes;
+      run += 1;
+    }
+    missingChunks += sorted.length - run;
+    if (run === 0) continue;
+    chunkCount += run;
+    audioBytes += bytes;
+    const first = sorted[0];
+    segments.push({
+      participant_id: first.participant_id,
+      display_name: first.display_name,
+      segment_id: first.segment_id,
+      started_at_ms: first.segment_started_ms,
+      mime_type: first.mime_type,
+      chunk_count: run,
+    });
+  }
+  segments.sort((a, b) => a.started_at_ms - b.started_at_ms || a.participant_id.localeCompare(b.participant_id));
+  return { segments, chunkCount, audioBytes, missingChunks };
+}
+
+async function chunkRows(db: Client, tenantId: string, roomId: string): Promise<Array<ChunkRow & { storage_path: string }>> {
+  const rs = await db.execute({
+    sql: `SELECT participant_id, display_name, segment_id, seq, segment_started_ms, mime_type, bytes, storage_path
+          FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?`,
+    args: [tenantId, roomId],
+  });
+  return rs.rows.map((r) => ({
+    participant_id: String(r.participant_id),
+    display_name: String(r.display_name),
+    segment_id: String(r.segment_id),
+    seq: num(r.seq),
+    segment_started_ms: num(r.segment_started_ms),
+    mime_type: String(r.mime_type),
+    bytes: num(r.bytes),
+    storage_path: String(r.storage_path),
+  }));
+}
+
+export type MeetClaim = { input: Record<string, unknown>; queueDepth: number };
+
+/**
+ * What a claimed meet_transcribe job is given: the room's title and start, and
+ * every segment it gets - fixed HERE, at the claim, so a chunk that arrived
+ * after the hand-over is still in it, and download-urls signs exactly this.
+ * Null when the job is no longer wanted (the room or its recording is gone, or
+ * another job replaced it): the caller ends the job.
+ */
+export async function meetTranscribeClaim(
+  db: Client,
+  job: { id: string; tenantId: string; input: Record<string, unknown> },
+  tenantIds: readonly string[],
+  now: Date,
+): Promise<MeetClaim | null> {
+  const roomId = typeof job.input.room_id === "string" ? job.input.room_id : "";
+  const room = roomId ? await readMeetRoom(db, { tenantId: job.tenantId, roomId }) : null;
+  if (!room) return null;
+  const declared = declareSegments(await chunkRows(db, room.tenantId, room.id));
+  const up = await db.execute({
+    sql: `UPDATE meet_transcripts
+             SET status = 'transcribing', segments_json = ?, chunk_count = ?, audio_bytes = ?, missing_chunks = ?, updated_at = ?
+           WHERE tenant_id = ? AND room_id = ? AND job_id = ? AND status IN ('queued', 'transcribing')`,
+    args: [
+      JSON.stringify(declared.segments), declared.chunkCount, declared.audioBytes, declared.missingChunks, now.toISOString(),
+      room.tenantId, room.id, job.id,
+    ],
+  });
+  if (up.rowsAffected !== 1) return null;
+  const queued = await db.execute({
+    sql: `SELECT COUNT(*) AS n FROM tool_jobs
+          WHERE tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND tool_key = 'meet_transcribe' AND status = 'queued'`,
+    args: [...tenantIds],
+  });
+  const started = room.startedAt && Number.isFinite(Date.parse(room.startedAt)) ? Date.parse(room.startedAt) : null;
+  const earliest = declared.segments.length ? Math.min(...declared.segments.map((s) => s.started_at_ms)) : null;
+  return {
+    input: { room_id: room.id, title: room.title, started_at_ms: started ?? earliest, segments: declared.segments },
+    queueDepth: num(queued.rows[0]?.n),
+  };
+}
+
+export type DownloadFile = { participant_id: string; segment_id: string; seq: number; bytes: number; url: string };
+
+/**
+ * Signed GET URLs for exactly the chunks the claim declared, in order. Null
+ * when this job no longer holds the room's recording.
+ */
+export async function meetDownloadFiles(
+  db: Client,
+  storage: MeetStorage,
+  job: { id: string; tenantId: string; input: Record<string, unknown> },
+): Promise<DownloadFile[] | null> {
+  const roomId = typeof job.input.room_id === "string" ? job.input.room_id : "";
+  const t = roomId ? await readTranscript(db, job.tenantId, roomId) : null;
+  if (!t || t.status !== "transcribing" || t.jobId !== job.id) return null;
+  const want = new Map(t.segments.map((s) => [`${s.participant_id}|${s.segment_id}`, Number(s.chunk_count)]));
+  const rows = (await chunkRows(db, job.tenantId, roomId))
+    .filter((r) => r.seq < (want.get(`${r.participant_id}|${r.segment_id}`) ?? 0))
+    .sort((a, b) => a.participant_id.localeCompare(b.participant_id) || a.segment_id.localeCompare(b.segment_id) || a.seq - b.seq);
+  const files: DownloadFile[] = [];
+  for (const r of rows) {
+    if (!pathBelongsToTenant(job.tenantId, r.storage_path)) throw new Error("a relay chunk's path is outside its workspace");
+    files.push({
+      participant_id: r.participant_id,
+      segment_id: r.segment_id,
+      seq: r.seq,
+      bytes: r.bytes,
+      url: await storage.signedGetUrl(r.storage_path, DOWNLOAD_URL_TTL_SECONDS),
+    });
+  }
+  return files;
+}
+
+export type TranscriptReport = {
+  text: string;
+  lines: TranscriptLine[];
+  model: string;
+  transcribeSeconds: number;
+  deviceLabel: string;
+  localFolder: string;
+};
+
+type Parsed<T> = { ok: true; value: T } | { ok: false; field: string };
+
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+
+function shortText(v: unknown, max: number): string | null {
+  return typeof v === "string" && v.trim().length >= 1 && v.length <= max && !CONTROL.test(v) ? v : null;
+}
+
+function nonNegativeInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0;
+}
+
+/** The PC's transcript report (POST complete for meet_transcribe), every field checked. */
+export function parseTranscriptReport(b: Record<string, unknown>): Parsed<TranscriptReport> {
+  if (typeof b.transcript_text !== "string" || b.transcript_text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, field: "transcript_text" };
+  if (!Array.isArray(b.lines) || b.lines.length > MAX_TRANSCRIPT_LINES) return { ok: false, field: "lines" };
+  const lines: TranscriptLine[] = [];
+  for (const raw of b.lines) {
+    const l = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+    if (!l) return { ok: false, field: "lines" };
+    const participant = shortText(l.participant_id, 64);
+    const speaker = shortText(l.speaker, 120);
+    if (!nonNegativeInt(l.at_ms) || !nonNegativeInt(l.end_ms) || l.end_ms < l.at_ms) return { ok: false, field: "lines" };
+    if (!participant || !speaker || typeof l.text !== "string" || l.text.length > MAX_LINE_CHARS) return { ok: false, field: "lines" };
+    lines.push({ at_ms: l.at_ms, end_ms: l.end_ms, participant_id: participant, speaker, text: l.text });
+  }
+  if (typeof b.model !== "string" || !MODEL_RE.test(b.model)) return { ok: false, field: "model" };
+  const seconds = b.transcribe_seconds;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0 || seconds > 2 * 86_400) return { ok: false, field: "transcribe_seconds" };
+  const device = shortText(b.device_label, 120);
+  if (!device) return { ok: false, field: "device_label" };
+  const folder = shortText(b.local_folder, 500);
+  if (!folder) return { ok: false, field: "local_folder" };
+  return { ok: true, value: { text: b.transcript_text, lines, model: b.model, transcribeSeconds: seconds, deviceLabel: device, localFolder: folder } };
+}
+
+export type LeaseHold = { runnerKey: string; leaseId: string; tenantIds: readonly string[] };
+
+function leaseHolds(jobId: string, lease: LeaseHold): { sql: string; args: InValue[] } {
+  return {
+    sql: `EXISTS (SELECT 1 FROM tool_jobs WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(lease.tenantIds.length)}))`,
+    args: [jobId, lease.runnerKey, lease.leaseId, ...lease.tenantIds],
+  };
+}
+
+/**
+ * The transcript and the job's "done", in one transaction: the transcript only
+ * while this lease holds the job and the row is still this job's, the job last
+ * and only if the transcript landed (rowsAffected 1 on the last = both did). A
+ * recording deleted meanwhile writes nothing.
+ */
+export function meetTranscribeCompleteStatements(
+  job: { id: string; tenantId: string },
+  roomId: string,
+  lease: LeaseHold,
+  r: TranscriptReport,
+  now: Date,
+): InStatement[] {
+  const at = now.toISOString();
+  const holds = leaseHolds(job.id, lease);
+  const tin = sqlPlaceholders(lease.tenantIds.length);
+  return [
+    {
+      sql: `UPDATE meet_transcripts
+               SET status = 'ready', text = ?, lines_json = ?, model = ?, transcribe_seconds = ?, device_label = ?, local_folder = ?,
+                   ready_at = ?, updated_at = ?
+             WHERE tenant_id = ? AND room_id = ? AND job_id = ? AND status = 'transcribing' AND ${holds.sql}`,
+      args: [r.text, JSON.stringify(r.lines), r.model, r.transcribeSeconds, r.deviceLabel, r.localFolder, at, at, job.tenantId, roomId, job.id, ...holds.args],
+    },
+    {
+      sql: `UPDATE tool_jobs
+               SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+             WHERE ${LEASE_GUARD} AND tenant_id IN (${tin})
+               AND EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND job_id = ? AND status = 'ready')`,
+      args: [
+        JSON.stringify({ room_id: roomId, lines: r.lines.length, model: r.model }), at, at,
+        job.id, lease.runnerKey, lease.leaseId, ...lease.tenantIds, job.tenantId, roomId, job.id,
+      ],
+    },
+  ];
+}
+
+export type DeleteLocalReport = { removed: string[]; alreadyGone: boolean; deviceLabel: string };
+
+/** The PC's report that it deleted its copy (POST complete for meet_delete_local). */
+export function parseDeleteLocalReport(b: Record<string, unknown>): Parsed<DeleteLocalReport> {
+  if (!Array.isArray(b.removed) || b.removed.length > 10) return { ok: false, field: "removed" };
+  const removed: string[] = [];
+  for (const p of b.removed) {
+    const s = shortText(p, 500);
+    if (!s) return { ok: false, field: "removed" };
+    removed.push(s);
+  }
+  if (typeof b.already_gone !== "boolean") return { ok: false, field: "already_gone" };
+  const device = shortText(b.device_label, 120);
+  if (!device) return { ok: false, field: "device_label" };
+  return { ok: true, value: { removed, alreadyGone: b.already_gone, deviceLabel: device } };
+}
+
+/** The device's deletion stamped on the transcript row, and the job's "done" (the commit signal, last). */
+export function meetDeleteLocalCompleteStatements(
+  job: { id: string; tenantId: string },
+  roomId: string,
+  lease: LeaseHold,
+  r: DeleteLocalReport,
+  now: Date,
+): InStatement[] {
+  const at = now.toISOString();
+  const holds = leaseHolds(job.id, lease);
+  return [
+    {
+      sql: `UPDATE meet_transcripts SET local_deleted_at = ?, device_label = ?, updated_at = ?
+             WHERE tenant_id = ? AND room_id = ? AND ${holds.sql}`,
+      args: [at, r.deviceLabel, at, job.tenantId, roomId, ...holds.args],
+    },
+    {
+      sql: `UPDATE tool_jobs
+               SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+             WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(lease.tenantIds.length)})`,
+      args: [
+        JSON.stringify({ room_id: roomId, removed: r.removed.length, already_gone: r.alreadyGone }), at, at,
+        job.id, lease.runnerKey, lease.leaseId, ...lease.tenantIds,
+      ],
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// 4 FORGET, and the sweeps
+// ---------------------------------------------------------------------------
+
+/**
+ * Delete up to `limit` relay chunks nobody needs any more: their recording is
+ * ready, expired or deleted, or their room is gone. Object first, then its
+ * row, so a failed delete leaves the row to be tried again. Stops at the first
+ * storage failure (R2 is having a moment; the next sweep goes on).
+ */
+export async function removeRelayChunks(
+  db: Client,
+  storage: MeetStorage | null,
+  scope: { tenantIds: readonly string[]; roomId?: string },
+  limit: number = RELAY_CLEANUP_BATCH,
+): Promise<number> {
+  if (!storage || !scope.tenantIds.length || limit < 1) return 0;
+  const tin = sqlPlaceholders(scope.tenantIds.length);
+  const rs = await db.execute({
+    sql: `SELECT c.id, c.tenant_id, c.storage_path FROM meet_recording_chunks c
+          WHERE c.tenant_id IN (${tin})${scope.roomId ? " AND c.room_id = ?" : ""}
+            AND (EXISTS (SELECT 1 FROM meet_transcripts t
+                         WHERE t.tenant_id = c.tenant_id AND t.room_id = c.room_id AND t.status IN ('ready', 'expired', 'deleted'))
+                 OR NOT EXISTS (SELECT 1 FROM meet_rooms r WHERE r.tenant_id = c.tenant_id AND r.id = c.room_id))
+          LIMIT ?`,
+    args: [...scope.tenantIds, ...(scope.roomId ? [scope.roomId] : []), limit],
+  });
+  const gone: string[] = [];
+  for (const row of rs.rows) {
+    const tenantId = String(row.tenant_id);
+    const path = String(row.storage_path);
+    if (!pathBelongsToTenant(tenantId, path)) {
+      console.error("[meet.relay] a chunk row's path is outside its workspace; left alone", { tenantId, id: String(row.id) });
+      continue;
+    }
+    try {
+      await storage.remove(path);
+      gone.push(String(row.id));
+    } catch (err) {
+      console.error("[meet.relay] could not delete a relay chunk", { tenantId, path, error: err instanceof Error ? err.message : String(err) });
+      break;
+    }
+  }
+  if (gone.length) {
+    await db.execute({
+      sql: `DELETE FROM meet_recording_chunks WHERE tenant_id IN (${tin}) AND id IN (${sqlPlaceholders(gone.length)})`,
+      args: [...scope.tenantIds, ...gone],
+    });
+  }
+  return gone.length;
+}
+
+/**
+ * A recording the PC did not take within its 30 days is expired: a job still
+ * queued for it fails (relay_expired), and the row is marked expired so its
+ * chunks go on the next cleanup. One in the PC's hands right now is left to
+ * finish. Returns how many recordings expired.
+ */
+export async function expireRelay(db: Client, tenantIds: readonly string[], now: Date): Promise<number> {
+  if (!tenantIds.length) return 0;
+  const at = now.toISOString();
+  const tin = sqlPlaceholders(tenantIds.length);
+  const due = await db.execute({
+    sql: `SELECT 1 FROM meet_transcripts WHERE tenant_id IN (${tin}) AND status IN ('queued', 'transcribing') AND relay_expires_at < ? LIMIT 1`,
+    args: [...tenantIds, at],
+  });
+  if (!due.rows.length) return 0;
+  const results = await db.batch(
+    [
+      {
+        sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'relay_expired', error_message = ?, finished_at = ?, updated_at = ?
+               WHERE tenant_id IN (${tin}) AND tool_key = 'meet_transcribe' AND status = 'queued'
+                 AND EXISTS (SELECT 1 FROM meet_transcripts t
+                             WHERE t.tenant_id = tool_jobs.tenant_id AND t.job_id = tool_jobs.id AND t.relay_expires_at < ?)`,
+        args: [toolErrorLine("relay_expired", "runner"), at, at, ...tenantIds, at],
+      },
+      {
+        sql: `UPDATE meet_transcripts SET status = 'expired', segments_json = '[]', updated_at = ?
+               WHERE tenant_id IN (${tin}) AND status IN ('queued', 'transcribing') AND relay_expires_at < ?
+                 AND NOT EXISTS (SELECT 1 FROM tool_jobs j
+                                 WHERE j.tenant_id = meet_transcripts.tenant_id AND j.id = meet_transcripts.job_id
+                                   AND j.status IN ('queued', 'claimed', 'running'))
+               RETURNING room_id`,
+        args: [at, ...tenantIds, at],
+      },
+    ],
+    "write",
+  );
+  const expired = results[1].rows.length;
+  if (expired) console.warn("[meet.relay] recordings expired before the PC took them", { count: expired });
+  return expired;
+}
+
+/**
+ * Hand over the recordings of meetings that ended LATE_CHUNK_MS ago or more
+ * and were never handed over (the host's browser closed before it could say
+ * so). At most `limit` per call.
+ */
+export async function finalizeDueRooms(
+  db: Client,
+  tenantIds: readonly string[],
+  now: Date,
+  limit: number = FINALIZE_SWEEP_BATCH,
+): Promise<number> {
+  if (!tenantIds.length) return 0;
+  const rs = await db.execute({
+    sql: `SELECT r.tenant_id, r.id FROM meet_rooms r
+          WHERE r.tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND r.status = 'ended' AND r.ended_at < ?
+            AND EXISTS (SELECT 1 FROM meet_recording_chunks c WHERE c.tenant_id = r.tenant_id AND c.room_id = r.id)
+            AND NOT EXISTS (SELECT 1 FROM meet_transcripts t WHERE t.tenant_id = r.tenant_id AND t.room_id = r.id)
+          ORDER BY r.ended_at ASC LIMIT ?`,
+    args: [...tenantIds, new Date(now.getTime() - LATE_CHUNK_MS).toISOString(), limit],
+  });
+  let handed = 0;
+  for (const row of rs.rows) {
+    const room = await readMeetRoom(db, { tenantId: String(row.tenant_id), roomId: String(row.id) });
+    if (!room) continue;
+    const out = await ensureTranscriptJob(db, room, null, now);
+    if (out.state === "queued") handed += 1;
+  }
+  return handed;
+}
+
+/** The three sweeps, in the order they feed each other. The runner's claim runs them while it serves meetings. */
+export async function meetRelaySweeps(db: Client, storage: MeetStorage | null, tenantIds: readonly string[], now: Date): Promise<void> {
+  await expireRelay(db, tenantIds, now);
+  await finalizeDueRooms(db, tenantIds, now);
+  await removeRelayChunks(db, storage, { tenantIds });
+}
+
+// ---------------------------------------------------------------------------
+// The host's delete
+// ---------------------------------------------------------------------------
+
+export type DeleteOutcome = { relayRemaining: number; deviceDeleteQueued: boolean };
+
+/**
+ * Delete a meeting's recording and transcript, for good: the transcript text
+ * goes now, a transcription in flight is called off (meeting_deleted), the PC is
+ * told to delete its own copy if it may have one (a transcription of this room
+ * was ever claimed), and the relay chunks go - the first batch here, the rest
+ * on the next sweeps. The row stays, as status 'deleted', so the recording can
+ * never be handed over again.
+ */
+export async function deleteMeetRecording(
+  db: Client,
+  storage: MeetStorage | null,
+  room: MeetRoom,
+  actorUserId: string,
+  now: Date,
+): Promise<DeleteOutcome> {
+  const at = now.toISOString();
+  const t = await readTranscript(db, room.tenantId, room.id);
+  const transcribeKey = `meet_transcribe:${room.id}`;
+  const deleteKey = `meet_delete_local:${room.id}`;
+  const input = { room_id: room.id, title: room.title, local_folder: t?.localFolder ?? null };
+  await db.batch(
+    [
+      {
+        sql: `INSERT INTO meet_transcripts (id, tenant_id, room_id, status, relay_expires_at, created_at, updated_at, deleted_at)
+              VALUES (?, ?, ?, 'deleted', ?, ?, ?, ?)
+              ON CONFLICT (tenant_id, room_id) DO UPDATE SET
+                status = 'deleted', text = NULL, lines_json = NULL, segments_json = '[]',
+                deleted_at = COALESCE(meet_transcripts.deleted_at, excluded.deleted_at), updated_at = excluded.updated_at`,
+        args: [randomUUID(), room.tenantId, room.id, at, at, at, at],
+      },
+      {
+        sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'meeting_deleted', error_message = ?, finished_at = ?, updated_at = ?
+               WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running')`,
+        args: [toolErrorLine("meeting_deleted", "runner"), at, at, room.tenantId, transcribeKey],
+      },
+      {
+        sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, idempotency_key,
+                                     dedupe_key, created_by, created_by_email, created_at, updated_at)
+              SELECT ?, ?, 'meet_delete_local', 'runner', 'queued', ?, ?, NULL, ?, ?, NULL, ?, ?
+              WHERE EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND attempts > 0)
+                AND NOT EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running'))
+                AND NOT EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND local_deleted_at IS NOT NULL)`,
+        args: [
+          randomUUID(), room.tenantId, JSON.stringify(input), inputHashOf("meet_delete_local", input), deleteKey, actorUserId, at, at,
+          room.tenantId, transcribeKey, room.tenantId, deleteKey, room.tenantId, room.id,
+        ],
+      },
+    ],
+    "write",
+  );
+  await removeRelayChunks(db, storage, { tenantIds: [room.tenantId], roomId: room.id });
+  const left = await relayTotals(db, room.tenantId, room.id);
+  const queued = await db.execute({
+    sql: "SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running') LIMIT 1",
+    args: [room.tenantId, deleteKey],
+  });
+  return { relayRemaining: left.chunks, deviceDeleteQueued: queued.rows.length > 0 };
+}
+
+// ---------------------------------------------------------------------------
+// What the meeting's panel shows
+// ---------------------------------------------------------------------------
+
+export type MeetRecordingState =
+  | "off"
+  | "none"
+  | "recording"
+  | "waiting"
+  | "transcribing"
+  | "ready"
+  | "failed"
+  | "expired"
+  | "deleted";
+
+export type MeetRecordingView = {
+  state: MeetRecordingState;
+  /** Chunks and bytes still on the relay. */
+  relayChunks: number;
+  relayBytes: number;
+  missingChunks: number;
+  relayExpiresAt: string | null;
+  job: JobState | null;
+  /** The PC that transcribes meetings, when it checked in during the last 10 minutes. */
+  runner: { label: string; lastSeenAt: string } | null;
+  transcript: {
+    /** Each line's at_ms and end_ms are on the meeting's wall clock (ms since the epoch). */
+    lines: TranscriptLine[];
+    /** The PC's own rendering, "[hh:mm:ss] Name: words" per line, timed from startedAtMs. */
+    text: string | null;
+    /** When the meeting started, the zero of the [hh:mm:ss] times. */
+    startedAtMs: number | null;
+    model: string | null;
+    deviceLabel: string | null;
+    /** The folder's own name only: the full path names the PC's user account. */
+    folderName: string | null;
+    readyAt: string | null;
+    transcribeSeconds: number | null;
+  } | null;
+  deviceDeletedAt: string | null;
+};
+
+/** The recording of one room, as its host sees it. Expires an overdue recording first, so the panel never shows a stale wait. */
+export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): Promise<MeetRecordingView> {
+  let t = await readTranscript(db, room.tenantId, room.id);
+  if (t && (t.status === "queued" || t.status === "transcribing") && t.relayExpiresAt < now.toISOString()) {
+    await expireRelay(db, [room.tenantId], now);
+    t = await readTranscript(db, room.tenantId, room.id);
+  }
+  const relay = await relayTotals(db, room.tenantId, room.id);
+  const job = t?.jobId ? await jobState(db, room.tenantId, t.jobId) : null;
+  const live = await liveRunnerForTool(db, room.tenantId, "meet_transcribe", now);
+
+  let state: MeetRecordingState;
+  if (!t) state = relay.chunks > 0 ? (room.status === "ended" ? "waiting" : "recording") : room.recordAudio ? "none" : "off";
+  else if (t.status === "queued" || t.status === "transcribing") {
+    state = !job || job.status === "failed" ? "failed" : job.status === "queued" ? "waiting" : "transcribing";
+  } else state = t.status;
+
+  const folderName = t?.localFolder ? (t.localFolder.split(/[\\/]/).filter(Boolean).pop() ?? null) : null;
+  return {
+    state,
+    relayChunks: relay.chunks,
+    relayBytes: relay.bytes,
+    missingChunks: t?.missingChunks ?? 0,
+    relayExpiresAt: t?.relayExpiresAt ?? null,
+    job,
+    runner: live ? { label: live.label, lastSeenAt: live.lastSeenAt } : null,
+    transcript:
+      t && t.status === "ready"
+        ? {
+            lines: t.lines,
+            text: t.text,
+            startedAtMs: room.startedAt && Number.isFinite(Date.parse(room.startedAt)) ? Date.parse(room.startedAt) : null,
+            model: t.model,
+            deviceLabel: t.deviceLabel,
+            folderName,
+            readyAt: t.readyAt,
+            transcribeSeconds: t.transcribeSeconds,
+          }
+        : null,
+    deviceDeletedAt: t?.localDeletedAt ?? null,
+  };
+}

@@ -6,6 +6,7 @@
  * /api/internal/tools/* through and the handler authenticates first. The work
  * is lib/tools/runner-handlers.ts handleToolsClaim.
  */
+import { r2MeetStorage } from "@/lib/meet/recording";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { handleToolsClaim, r2ToolStorage } from "@/lib/tools/runner-handlers";
 
@@ -17,7 +18,13 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ ok: false, error: "not_installed", detail: "database_not_configured" }, { status: 503 });
   }
   try {
-    return await handleToolsClaim(req, { db: getTursoClient(), env: process.env, now: new Date(), storage: await r2ToolStorage() });
+    return await handleToolsClaim(req, {
+      db: getTursoClient(),
+      env: process.env,
+      now: new Date(),
+      storage: await r2ToolStorage(),
+      meetStorage: r2MeetStorage(),
+    });
   } catch (err) {
     console.error("[tools.claim] failed", err instanceof Error ? err.stack : err);
     return Response.json({ ok: false, error: "claim_failed" }, { status: 500 });

@@ -26,6 +26,11 @@ export const WORKER_INTERRUPTED_MINUTES = 5;
 export const SIGNATURE_WINDOW_SECONDS = 300;
 /** The largest signed runner request body. */
 export const RUNNER_BODY_MAX_BYTES = 64 * 1024;
+/**
+ * The largest signed body POST /api/internal/tools/complete takes: a meeting's
+ * transcript comes back in it, and an hour of talk is well past 64 KiB.
+ */
+export const COMPLETE_BODY_MAX_BYTES = 2 * 1024 * 1024;
 /** How long a presigned upload URL stays valid (lib/r2-storage.ts signs PUTs for this long). */
 export const UPLOAD_URL_TTL_SECONDS = 900;
 /**
@@ -34,6 +39,12 @@ export const UPLOAD_URL_TTL_SECONDS = 900;
  * minutes). A heartbeat after it is answered lease_lost.
  */
 export const MAX_LEASE_HOLD_SECONDS = RUN_TIMEOUT_SECONDS + UPLOAD_URL_TTL_SECONDS + 600;
+/**
+ * The same limit for a meeting transcription: four hours. It runs on a CPU
+ * (about 0.7 x real time per speaker with the small model, measured on OASIS's
+ * PC), so a long meeting needs far more than a download's 45 minutes.
+ */
+export const MEET_TRANSCRIBE_MAX_HOLD_SECONDS = 4 * 60 * 60;
 /** How long a runner waits between claims when there is nothing to do. */
 export const POLL_AFTER_SECONDS = 30;
 /** At most this many runner jobs queued or running per workspace. */

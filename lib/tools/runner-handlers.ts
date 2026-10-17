@@ -1,15 +1,16 @@
 /**
- * lib/tools/runner-handlers.ts - the five routes a tool runner calls
- * (claim, heartbeat, upload-url, complete, fail), as plain handlers taking
- * {db, env, now, storage} so tests drive them with a local database and a fake
- * object store. The routes under app/api/internal/tools/ are thin wrappers.
+ * lib/tools/runner-handlers.ts - the six routes a tool runner calls
+ * (claim, heartbeat, upload-url, complete, fail, and download-urls for Oasis
+ * Meet), as plain handlers taking {db, env, now, storage} so tests drive them
+ * with a local database and a fake object store. The routes under
+ * app/api/internal/tools/ are thin wrappers.
  *
  * ONE DOWNLOAD, END TO END
  *   claim       the runner checks in (tool_runners) and takes the oldest job
  *               of OASIS's own workspaces, with a lease (lib/tools/store.ts)
  *   heartbeat   every 60 s while it works: the lease is extended, the stage
  *               (downloading, uploading) shown on the card; never past 45
- *               minutes from the claim (MAX_LEASE_HOLD_SECONDS)
+ *               minutes from the claim (registry.ts runnerRules)
  *   upload-url  the file's size and hashes are recorded; the server reserves
  *               the Library asset id and the storage path ONCE per job (a retry
  *               overwrites the same object) and answers a presigned PUT for that
@@ -29,6 +30,14 @@
  * is guarded on this runner and this lease. No tenant id is ever sent to the
  * runner, and none is read from its body.
  *
+ * ONE MEETING (system jobs, lib/meet/recording.ts): the claim fixes which
+ * relay chunks the transcription gets and hands them over as segments;
+ * download-urls signs a GET per chunk; heartbeats report downloading,
+ * transcribing and finishing for up to four hours; complete carries the
+ * transcript (or, for meet_delete_local, the PC's word that its copy is gone)
+ * and names its tool_key. The claim of a runner that serves meetings also runs
+ * the relay's sweeps.
+ *
  * WHERE THE VIDEO GOES. A third-party video with unknown rights: brand
  * `downloads` (its own Library tab, never OASIS's own counts), status draft,
  * meta.rights_status "unknown". The founders publish route refuses any brand
@@ -40,18 +49,37 @@ import type { Client, InStatement } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant, sanitizeStorageFilename } from "@/lib/storage-helpers";
+import {
+  DOWNLOAD_URL_TTL_SECONDS,
+  meetDeleteLocalCompleteStatements,
+  meetDownloadFiles,
+  meetRecordingTablesInstalled,
+  meetRelaySweeps,
+  meetTranscribeClaim,
+  meetTranscribeCompleteStatements,
+  parseDeleteLocalReport,
+  parseTranscriptReport,
+  removeRelayChunks,
+  type MeetStorage,
+} from "@/lib/meet/recording";
 import { isRunnerCodeShape, storedRunnerCode, toolErrorLine } from "@/lib/tools/errors";
 import {
+  COMPLETE_BODY_MAX_BYTES,
   HEARTBEAT_SECONDS,
   LEASE_SECONDS,
   MARKETING_MEDIA_BUCKET,
-  MAX_LEASE_HOLD_SECONDS,
   MAX_VIDEO_BYTES,
   POLL_AFTER_SECONDS,
   RUN_TIMEOUT_SECONDS,
   UPLOAD_URL_TTL_SECONDS,
 } from "@/lib/tools/limits";
-import { runnerToolKeys } from "@/lib/tools/registry";
+import {
+  isSystemRunnerTool,
+  runnerRules,
+  runnerToolKeys,
+  type RunnerToolKey,
+  type SystemRunnerToolKey,
+} from "@/lib/tools/registry";
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import {
   LEASE_GUARD,
@@ -81,6 +109,8 @@ export type RunnerDeps = {
   now: Date;
   /** null: R2 is not configured, so nothing can be uploaded (never the Supabase fallback). */
   storage: ToolStorage | null;
+  /** Oasis Meet's relay (lib/meet/recording.ts r2MeetStorage); absent or null: not configured. */
+  meetStorage?: MeetStorage | null;
 };
 
 /** The workspaces each producer's runner serves. OASIS's own, for now. */
@@ -176,29 +206,54 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
   await upsertRunner(deps.db, { tenantIds: ident.tenantIds, runnerKey: ident.runnerKey, label: label.trim(), tools, version, now: deps.now });
   const swept = await sweepToolJobs(deps.db, ident.tenantIds, deps.now);
   await removeUnusedUploads(deps.storage, swept.orphanUploads, "claim.sweep");
+  // A runner that serves meetings also keeps the relay moving: overdue
+  // recordings expire, ended ones nobody handed over are handed over, and the
+  // next batch of relay copies the PC already has is deleted. Logged, never the
+  // answer: a sweep that fails must not stop the claim (it runs again next minute).
+  if (tools.some(isSystemRunnerTool)) {
+    try {
+      if (await meetRecordingTablesInstalled(deps.db)) await meetRelaySweeps(deps.db, deps.meetStorage ?? null, ident.tenantIds, deps.now);
+    } catch (err) {
+      console.error("[tools.claim] the meeting relay sweeps failed", err instanceof Error ? (err.stack ?? err.message) : String(err));
+    }
+  }
 
   const leaseId = newLeaseId();
   const job = await claimNextJob(deps.db, { tenantIds: ident.tenantIds, toolKeys: tools, runnerKey: ident.runnerKey, leaseId, now: deps.now });
   if (!job) return toolsJson(200, { ok: true, job: null, poll_after_seconds: POLL_AFTER_SECONDS });
-  return toolsJson(200, {
-    ok: true,
-    poll_after_seconds: 0,
-    job: {
-      job_id: job.id,
-      lease_id: leaseId,
-      tool_key: job.toolKey,
-      attempt: job.attempt,
-      // Only what the tool needs: the link and its platform. Never the workspace.
-      input: { url: job.input.url, platform: job.input.platform },
-      limits: {
-        max_bytes: MAX_VIDEO_BYTES,
-        lease_seconds: LEASE_SECONDS,
-        heartbeat_seconds: HEARTBEAT_SECONDS,
-        run_timeout_seconds: RUN_TIMEOUT_SECONDS,
-      },
-      created_at: job.createdAt,
-    },
-  });
+  const limits = {
+    max_bytes: MAX_VIDEO_BYTES,
+    lease_seconds: LEASE_SECONDS,
+    heartbeat_seconds: HEARTBEAT_SECONDS,
+    run_timeout_seconds: RUN_TIMEOUT_SECONDS,
+  };
+  const answer = (input: Record<string, unknown>, extra: Record<string, number> = {}) =>
+    toolsJson(200, {
+      ok: true,
+      poll_after_seconds: 0,
+      job: { job_id: job.id, lease_id: leaseId, tool_key: job.toolKey, attempt: job.attempt, input, limits: { ...limits, ...extra }, created_at: job.createdAt },
+    });
+
+  if (isSystemRunnerTool(job.toolKey)) {
+    const hold = { max_hold_seconds: runnerRules(job.toolKey).maxHoldSeconds };
+    if (job.toolKey === "meet_delete_local") {
+      return answer({ room_id: job.input.room_id, title: job.input.title, local_folder: job.input.local_folder ?? null }, hold);
+    }
+    // meet_transcribe: the segments are fixed now, at the claim (lib/meet/recording.ts).
+    const meet = await meetTranscribeClaim(deps.db, job, ident.tenantIds, deps.now);
+    if (meet) return answer(meet.input, { ...hold, queue_depth: meet.queueDepth });
+    // The recording is no longer waiting on this job (deleted, or replaced by a newer one): end it, and the
+    // runner asks again at once.
+    const at = deps.now.toISOString();
+    await deps.db.execute({
+      sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'meeting_gone', error_message = ?, finished_at = ?, updated_at = ?
+            WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ident.tenantIds.length)})`,
+      args: [toolErrorLine("meeting_gone", "runner"), at, at, job.id, ident.runnerKey, leaseId, ...ident.tenantIds],
+    });
+    return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
+  }
+  // Only what the tool needs: the link and its platform. Never the workspace.
+  return answer({ url: job.input.url, platform: job.input.platform });
 }
 
 // ---------------------------------------------------------------------------
@@ -211,24 +266,30 @@ export async function handleToolsHeartbeat(req: Request, deps: RunnerDeps): Prom
   const ref = leaseRef(auth.producer, auth.body);
   if ("field" in ref) return invalid(ref.field);
   const stage = auth.body.stage;
-  if (stage !== "downloading" && stage !== "uploading") return invalid("stage");
+  // The tools whose runs may report this stage (registry.ts runnerRules): a download's two, a meeting's own.
+  const reporting = typeof stage === "string" ? runnerToolKeys().filter((k) => runnerRules(k).stages.includes(stage)) : [];
+  if (!reporting.length) return invalid("stage");
   if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
 
   const at = deps.now.toISOString();
   const expires = new Date(deps.now.getTime() + LEASE_SECONDS * 1000).toISOString();
-  // A heartbeat extends the lease only within MAX_LEASE_HOLD_SECONDS of the
-  // claim: a runner whose work is stuck while its heartbeat still beats cannot
-  // hold a job (and one of the five in-flight places) forever. Past it the
-  // answer is lease_lost; the lease then runs out and the job is taken again or
-  // given up (attempts), like any lease that expires.
-  const claimedSince = new Date(deps.now.getTime() - MAX_LEASE_HOLD_SECONDS * 1000).toISOString();
+  // A heartbeat extends the lease only within its tool's hold limit, counted
+  // from the claim (45 minutes for a download, four hours for a meeting's
+  // transcription): a runner whose work is stuck while its heartbeat still
+  // beats cannot hold a job forever. Past it the answer is lease_lost; the
+  // lease then runs out and the job is taken again or given up (attempts),
+  // like any lease that expires.
+  const holds = reporting.map(() => "(tool_key = ? AND claimed_at >= ?)").join(" OR ");
+  const holdArgs = reporting.flatMap((k) => [k, new Date(deps.now.getTime() - runnerRules(k).maxHoldSeconds * 1000).toISOString()]);
   const rs = await deps.db.execute({
     sql: `UPDATE tool_jobs SET status = 'running', stage = ?, heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
-          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)}) AND claimed_at >= ?`,
-    args: [stage, at, expires, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds, claimedSince],
+          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)}) AND (${holds})`,
+    args: [stage as string, at, expires, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds, ...holdArgs],
   });
   if (rs.rowsAffected !== 1) {
-    if (await jobUnderLease(deps.db, ref)) {
+    const held = await jobUnderLease(deps.db, ref);
+    if (held && !runnerRules(held.toolKey as RunnerToolKey).stages.includes(stage as string)) return invalid("stage");
+    if (held) {
       console.warn("[tools.heartbeat] refused: the job has been held past its limit", { jobId: ref.jobId, runner: ref.runnerKey });
     }
     return leaseLost();
@@ -431,9 +492,15 @@ function parseExtractor(v: unknown): Parsed<{ tool_version: string | null; ytdlp
 const normalizedEtag = (etag: string | null) => (etag ?? "").replace(/"/g, "").trim().toLowerCase();
 
 export async function handleToolsComplete(req: Request, deps: RunnerDeps): Promise<Response> {
-  const auth = await authenticateToolsRequest(req, deps.env, deps.now);
+  // The larger cap: a meeting's transcript comes back in this body.
+  const auth = await authenticateToolsRequest(req, deps.env, deps.now, COMPLETE_BODY_MAX_BYTES);
   if (!auth.ok) return auth.response;
   const b = auth.body;
+  // A system job's report names its tool; a download's never has (its shape is below, unchanged).
+  if (b.tool_key !== undefined) {
+    if (!isSystemRunnerTool(b.tool_key)) return invalid("tool_key");
+    return completeSystemJob(auth.producer, b, b.tool_key, deps);
+  }
   const ref = leaseRef(auth.producer, b);
   if ("field" in ref) return invalid(ref.field);
   if (typeof b.storage_path !== "string" || !b.storage_path || b.storage_path.length > 1024) return invalid("storage_path");
@@ -479,6 +546,93 @@ export async function handleToolsComplete(req: Request, deps: RunnerDeps): Promi
   const results = await deps.db.batch(statements, "write");
   if (results[results.length - 1].rowsAffected !== 1) return completeRepeatOrLost(deps.db, ref);
   return toolsJson(200, { ok: true, asset_id: job.assetId, duplicate: false });
+}
+
+/**
+ * A system job's report (lib/meet/recording.ts): the transcript of a meeting,
+ * or the PC's word that it deleted its copy. Same discipline as a download's:
+ * every field checked, the write guarded on this lease, the job's "done" last,
+ * a repeat of a finished report a success. A transcript that lands frees the
+ * relay: its first batch of chunks is deleted here, the rest on the sweeps.
+ */
+async function completeSystemJob(
+  producer: ToolsProducer,
+  b: Record<string, unknown>,
+  toolKey: SystemRunnerToolKey,
+  deps: RunnerDeps,
+): Promise<Response> {
+  const ref = leaseRef(producer, b);
+  if ("field" in ref) return invalid(ref.field);
+  const transcript = toolKey === "meet_transcribe" ? parseTranscriptReport(b) : null;
+  const deleted = toolKey === "meet_delete_local" ? parseDeleteLocalReport(b) : null;
+  if (transcript && !transcript.ok) return invalid(transcript.field);
+  if (deleted && !deleted.ok) return invalid(deleted.field);
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return systemRepeatOrLost(deps.db, ref, toolKey);
+  if (job.toolKey !== toolKey) return invalid("tool_key");
+  const roomId = typeof job.input.room_id === "string" ? job.input.room_id : "";
+  if (!roomId) {
+    console.error("[tools.complete] a meeting job without its room", { jobId: job.id });
+    return toolsRefuse(500, "complete_failed");
+  }
+  const lease = { runnerKey: ref.runnerKey, leaseId: ref.leaseId, tenantIds: ref.tenantIds };
+  const statements =
+    transcript?.ok
+      ? meetTranscribeCompleteStatements(job, roomId, lease, transcript.value, deps.now)
+      : deleted?.ok
+        ? meetDeleteLocalCompleteStatements(job, roomId, lease, deleted.value, deps.now)
+        : null;
+  if (!statements) return invalid("tool_key");
+  const results = await deps.db.batch(statements, "write");
+  if (results[results.length - 1].rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, toolKey);
+  if (toolKey === "meet_transcribe") {
+    try {
+      await removeRelayChunks(deps.db, deps.meetStorage ?? null, { tenantIds: [job.tenantId], roomId });
+    } catch (err) {
+      console.error("[tools.complete] the relay cleanup failed; the sweeps will retry it", {
+        jobId: job.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return toolsJson(200, { ok: true, duplicate: false });
+}
+
+async function systemRepeatOrLost(db: Client, ref: LeaseRef, toolKey: SystemRunnerToolKey): Promise<Response> {
+  const job = await jobInTenants(db, ref.tenantIds, ref.jobId);
+  if (job && job.toolKey === toolKey && job.status === "done" && job.claimedBy === ref.runnerKey && job.leaseId === ref.leaseId) {
+    return toolsJson(200, { ok: true, duplicate: true });
+  }
+  return leaseLost();
+}
+
+// ---------------------------------------------------------------------------
+// download-urls (Oasis Meet)
+// ---------------------------------------------------------------------------
+
+/**
+ * The signed GET URLs for a claimed meet_transcribe job's chunks: exactly the
+ * ones its claim declared, in order, each valid DOWNLOAD_URL_TTL_SECONDS. A
+ * bearer credential per object: never logged, here or on the runner.
+ */
+export async function handleToolsDownloadUrls(req: Request, deps: RunnerDeps): Promise<Response> {
+  const auth = await authenticateToolsRequest(req, deps.env, deps.now);
+  if (!auth.ok) return auth.response;
+  const ref = leaseRef(auth.producer, auth.body);
+  if ("field" in ref) return invalid(ref.field);
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  if (!(await meetRecordingTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  if (!deps.meetStorage) return notInstalled("storage_not_configured");
+
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return leaseLost();
+  if (job.toolKey !== "meet_transcribe") return invalid("job_id");
+  const files = await meetDownloadFiles(deps.db, deps.meetStorage, job);
+  // The recording is no longer this job's (deleted, or handed to a newer job): the lease is as good as lost.
+  if (!files) return leaseLost();
+  return toolsJson(200, { ok: true, files, expires_in: DOWNLOAD_URL_TTL_SECONDS });
 }
 
 /** A repeat for a job this runner and lease already finished is a success; anything else lost the lease. */
