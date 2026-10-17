@@ -50,7 +50,7 @@ import {
   type MeetRoomItem,
 } from "../components/meet/meet-format";
 import { CONSENT_LABEL, DEVICES_BUTTON, ENDED_WORDS, RECORDING_NOTICE, TICK_FIRST } from "../components/meet/meet-words";
-import { mayAskForDevices, needsRecordingNotice } from "../components/meet/notice";
+import { mayAskForDevices, needsRecordingNotice, preJoinNeeds } from "../components/meet/notice";
 import { MEET_NAME_MAX } from "../lib/meet/access";
 import { endMeetRoom } from "../lib/meet/participants";
 import { MEET_TITLE_MAX, createMeetRoom, displayMeetCode } from "../lib/meet/rooms";
@@ -160,6 +160,17 @@ async function main() {
     assert.equal(mayAskForDevices({ needsNotice: true, ticked: false }), false, "notice shown, not ticked: no camera");
     assert.equal(mayAskForDevices({ needsNotice: true, ticked: true }), true);
     assert.equal(mayAskForDevices({ needsNotice: false, ticked: false }), true, "no notice to tick: the camera step is open");
+  });
+
+  await check("a refused join shows the field the server asked for, read from its code, not its words", () => {
+    assert.deepEqual(preJoinNeeds({ viewer: "host", recordAudio: true, failedCode: null }), { notice: false, name: false });
+    assert.deepEqual(preJoinNeeds({ viewer: "visitor", recordAudio: true, failedCode: null }), { notice: true, name: true });
+    // A host whose session ran out is refused as a guest: the tick and the name come back.
+    assert.deepEqual(preJoinNeeds({ viewer: "host", recordAudio: true, failedCode: "consent_required" }), { notice: true, name: false });
+    assert.deepEqual(preJoinNeeds({ viewer: "host", recordAudio: false, failedCode: "name_required" }), { notice: false, name: true });
+    assert.deepEqual(preJoinNeeds({ viewer: "member", recordAudio: false, failedCode: "room_full" }), { notice: false, name: false }, "any other failure asks for nothing more");
+    const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
+    assert.doesNotMatch(room, /=== meetErrorWords\(/, "no decision is made by comparing words");
   });
 
   await check("(a) a visitor or member in a recorded room: the notice and a required unticked box come first; nothing asks for the camera", () => {

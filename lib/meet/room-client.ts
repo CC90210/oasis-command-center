@@ -43,7 +43,8 @@ export type MeetPhase =
   | { kind: "connecting" }
   | { kind: "live" }
   | { kind: "ended"; reason: MeetEndReason }
-  | { kind: "failed"; error: string };
+  /** `error` is what to show; `code` is the room API's code, for a page that acts on the kind of failure (never on the words). */
+  | { kind: "failed"; error: string; code?: string };
 
 export type MeetRoomInfo = { code: string; title: string; status: string; recordAudio: boolean; startedAt: string | null };
 
@@ -273,8 +274,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     emit();
   }
 
-  function failed(error: string) {
-    phase = { kind: "failed", error };
+  function failed(error: string, code?: string) {
+    phase = code ? { kind: "failed", error, code } : { kind: "failed", error };
     teardown();
     emit();
   }
@@ -479,7 +480,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         emit();
         return;
       }
-      if (err instanceof RoomCallError && err.code === "meet_not_configured") return failed(meetErrorWords(err.code));
+      if (err instanceof RoomCallError && err.code === "meet_not_configured") return failed(meetErrorWords(err.code), err.code);
       if (reconnects < 3) return void reconnect();
       failed("Could not connect to the meeting. Check your connection and try again.");
     }
@@ -540,7 +541,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       } catch (err) {
         const code = err instanceof RoomCallError ? err.code : "unknown";
         if (code === "removed") return ended("removed");
-        phase = { kind: "failed", error: meetErrorWords(code) };
+        phase = { kind: "failed", error: meetErrorWords(code), code };
         for (const t of [local.mic, local.cam]) t?.stop();
         local.mic = local.cam = null;
         emit();

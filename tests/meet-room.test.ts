@@ -165,11 +165,8 @@ async function main() {
     const everywhere = policy("/:path*");
     const meet = policy("/meet/:path*");
     assert.ok(everywhere >= 0 && meet > everywhere, "the /meet rule comes after the site-wide one, so it wins on /meet");
-    assert.match(valueOf(everywhere), /camera=\(\)/);
-    assert.match(valueOf(everywhere), /microphone=\(\)/);
-    assert.match(valueOf(meet), /camera=\(self\)/);
-    assert.match(valueOf(meet), /microphone=\(self\)/);
-    assert.match(valueOf(meet), /payment=\(\)/, "the room page keeps every other restriction");
+    assert.equal(valueOf(everywhere), "camera=(), microphone=(), geolocation=(self), payment=()", "every other page: exactly the policy it had");
+    assert.equal(valueOf(meet), "camera=(self), microphone=(self), geolocation=(self), payment=()", "the room page: camera and microphone, every other restriction kept");
   });
 
   await check("a meeting made for later goes on the host's Schedule, in their time zone; the link works even when it cannot", async () => {

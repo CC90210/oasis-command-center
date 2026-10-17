@@ -21,3 +21,16 @@ export function needsRecordingNotice(input: { viewer: MeetViewer; recordAudio: b
 export function mayAskForDevices(input: { needsNotice: boolean; ticked: boolean }): boolean {
   return !input.needsNotice || input.ticked;
 }
+
+/**
+ * What the pre-join screen must ask for: the recording notice (by the rule above, or because a join came back
+ * consent_required) and a name (a visitor always, or a join that came back name_required). A host whose session
+ * ran out between loading the page and Join now is refused as a guest; this shows the field the server asked for,
+ * read from the answer's code, never from its words.
+ */
+export function preJoinNeeds(input: { viewer: MeetViewer; recordAudio: boolean; failedCode: string | null }): { notice: boolean; name: boolean } {
+  return {
+    notice: needsRecordingNotice(input) || input.failedCode === "consent_required",
+    name: input.viewer === "visitor" || input.failedCode === "name_required",
+  };
+}

@@ -14,6 +14,14 @@ process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||= process.env.BRAVO_SUPABASE_ANON_KE
 // setting below reads this one value.
 const WORKER_BUILD = process.env.CF_MIGRATION_BUILD === "1";
 
+// The browser features the app turns off (Permissions-Policy, in headers() below). Built from one list, so the
+// one exception (Oasis Meet rooms may use the camera and microphone) can never drift from the rest of the policy.
+const PERMISSIONS = { camera: "()", microphone: "()", geolocation: "(self)", payment: "()" };
+const permissionsPolicy = (allow = {}) =>
+  Object.entries({ ...PERMISSIONS, ...allow })
+    .map(([feature, origins]) => `${feature}=${origins}`)
+    .join(", ");
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
@@ -409,7 +417,7 @@ const nextConfig = {
           // Disable browser features the dashboard doesn't need —
           // prevents an XSS-able vulnerability in a sub-component from
           // turning into a microphone/camera/geolocation hijack.
-          { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(self), payment=()" },
+          { key: "Permissions-Policy", value: permissionsPolicy() },
           // HTTPS-only for the next 2 years across every subdomain
           // (oasisai.work + bridge.oasisai.work + www.oasisai.work).
           // Safe to enable because the migration today established all
@@ -424,7 +432,7 @@ const nextConfig = {
         // heard. Later rules override earlier ones for the same header key (Next.js headers(); OpenNext's
         // getNextConfigHeaders keeps that order), so every other page keeps camera=() and microphone=().
         source: "/meet/:path*",
-        headers: [{ key: "Permissions-Policy", value: "camera=(self), microphone=(self), geolocation=(self), payment=()" }],
+        headers: [{ key: "Permissions-Policy", value: permissionsPolicy({ camera: "(self)", microphone: "(self)" }) }],
       },
     ];
   },

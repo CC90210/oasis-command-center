@@ -423,7 +423,7 @@ async function main() {
     const { c } = controller(refusing);
     const cam = new FakeTrack("video");
     await c.join({ name: "Jane", consent: true, mic: null, cam: cam as unknown as MediaStreamTrack });
-    assert.deepEqual(c.snapshot().phase, { kind: "failed", error: "This meeting is full." });
+    assert.deepEqual(c.snapshot().phase, { kind: "failed", error: "This meeting is full.", code: "room_full" }, "the words to show, and the code a page acts on");
     assert.equal(cam.readyState, "ended", "the camera is released");
   });
 

@@ -16,11 +16,11 @@
  */
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { createMeetRoomController, meetErrorWords, type RecorderPort } from "@/lib/meet/room-client";
+import { createMeetRoomController, type RecorderPort } from "@/lib/meet/room-client";
 import { CallScreen } from "./CallScreen";
 import { Lobby } from "./Lobby";
 import { MeetEnded } from "./MeetEnded";
-import { mayAskForDevices, needsRecordingNotice, type MeetViewer } from "./notice";
+import { mayAskForDevices, preJoinNeeds, type MeetViewer } from "./notice";
 import { PreJoin } from "./PreJoin";
 import { useJoinDevices } from "./useJoinDevices";
 
@@ -51,10 +51,9 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, recorder }:
   const consentRef = useRef<HTMLInputElement>(null);
 
   const failure = phase.kind === "failed" ? phase.error : null;
-  // A host whose session ran out between loading the page and Join now is refused as a guest: show the field
-  // the server asked for rather than leave them with an error and nothing to fix.
-  const needsNotice = needsRecordingNotice({ viewer, recordAudio }) || failure === meetErrorWords("consent_required");
-  const nameRequired = viewer === "visitor" || failure === meetErrorWords("name_required");
+  const needs = preJoinNeeds({ viewer, recordAudio, failedCode: phase.kind === "failed" ? (phase.code ?? null) : null });
+  const needsNotice = needs.notice;
+  const nameRequired = needs.name;
   const devicesOpen = mayAskForDevices({ needsNotice, ticked: consent });
   const devices = useJoinDevices(devicesOpen);
   const releaseDevices = devices.release;
