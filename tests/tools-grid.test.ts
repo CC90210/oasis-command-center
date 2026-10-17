@@ -24,6 +24,7 @@ import {
   CONNECT_AI,
   NOT_SET_UP,
   RUN_STOPPED,
+  RUNNER_OFFLINE,
   charsText,
   isInFlight,
   refusalLine,
@@ -127,12 +128,13 @@ async function main() {
     { id: "noAi", catalog: noAi },
     { id: "unreadable", catalog: unreadable },
     { id: "notSetUp", catalog: { installed: false } },
+    { id: "offline", catalog: { installed: true, tools: [card("video_download", "runner_offline")] } },
   ]);
 
   await check("every catalog card is drawn, each with its Run button, and nothing else", () => {
     const html = markup.full;
     assert.equal(articles(html), 3);
-    assert.deepEqual(buttons(html), ["Repurpose", "Learn", "Download"]);
+    assert.deepEqual(buttons(html), ["Repurpose", "Learn", "Extract video"]);
     for (const t of full.installed ? full.tools : []) assert.ok(decode(html).includes(t.title), t.title);
     assert.ok(decode(html).includes("Runs on CC's PC"), "the runner is named");
     assert.ok(html.includes(">Tools<"), "the section heading");
@@ -150,6 +152,15 @@ async function main() {
     assert.deepEqual(buttons(markup.unreadable), []);
     assert.equal(u.split(AI_UNREADABLE).length - 1, 2);
     assert.ok(!u.includes("Open Settings"), "an unreadable account is not a missing one");
+  });
+
+  await check("runner offline (2026-10-17): the Video extractor card stays and says so, with NO field and NO Run button", () => {
+    const html = decode(markup.offline);
+    assert.equal(articles(markup.offline), 1);
+    assert.ok(html.includes("Video extractor"));
+    assert.ok(html.includes(RUNNER_OFFLINE), "the offline line");
+    assert.deepEqual(buttons(markup.offline), [], "no button that cannot work");
+    assert.ok(!/<input[^>]*id="tool-video_download-url"/.test(markup.offline), "no link field while offline");
   });
 
   await check("not set up: one line, no cards", () => {

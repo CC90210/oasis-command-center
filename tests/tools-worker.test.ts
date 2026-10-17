@@ -667,34 +667,35 @@ async function main() {
     assert.deepEqual([sixth.status, sixth.body.error, sixth.body.message], [429, "too_many_in_flight", "Five downloads are already in progress."]);
   });
 
-  await check("the catalog: Repurpose by the account's state; Download ONLY while a live runner lists it; Learn from a link only in the operator audience", async () => {
-    const { getToolCatalog } = await import("../lib/tools/catalog");
+  await check("the catalog: the Video extractor first (live, or offline in OASIS's own workspaces only); Repurpose off the page; Learn from a link only in the operator audience", async () => {
+    const { getToolCatalog, CONTENT_TOOLS_HIDDEN } = await import("../lib/tools/catalog");
     const now = new Date();
-    const keys = (c: Awaited<ReturnType<typeof getToolCatalog>>) => (c.installed ? c.tools.map((t) => `${t.key}:${t.state}`) : ["not installed"]);
-    // No runner seen for CLIENT_A, ever: no Download card. The default
-    // ("client") audience never carries learn_from_link: it is operatorOnly.
+    const keys = (c: Awaited<ReturnType<typeof getToolCatalog>>) => (c.installed ? c.tools.map((tl) => `${tl.key}:${tl.state}`) : ["not installed"]);
+    // CC, 2026-10-17: Repurpose (answering ai_failed) is off the Content Tools page.
+    assert.ok(CONTENT_TOOLS_HIDDEN.has("repurpose_post"));
+    // A client workspace: no runner can ever serve it, so no extractor card, and
+    // Repurpose is hidden: nothing. The default audience never carries learn_from_link.
     const client = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => null });
-    assert.deepEqual(keys(client), ["repurpose_post:needs_ai_account"]);
-    const local = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => ({ ...ACCOUNT, provider: "ollama" }) });
-    assert.deepEqual(keys(local), ["repurpose_post:needs_ai_account"], "a local model is no account here");
-    const quiet = console.error;
-    console.error = () => undefined;
-    const broken = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => { throw new Error("read failed"); } }).finally(() => {
-      console.error = quiet;
-    });
-    assert.deepEqual(keys(broken), ["repurpose_post:ai_account_unreadable"]);
-    // OASIS with a runner seen 4 minutes ago: the Download card, naming the runner.
+    assert.deepEqual(keys(client), []);
+    // OASIS, runner last seen an hour ago (an earlier check seeded one live): the card
+    // stays and says the PC is offline (no runner named).
+    await seedRunner(db, later(now, -minutes(60)));
+    const never = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
+    assert.deepEqual(keys(never), ["video_download:runner_offline"]);
+    assert.equal(never.installed ? never.tools[0].runner : "x", undefined);
+    // OASIS with a runner seen 4 minutes ago: ready, naming the runner.
     await seedRunner(db, later(now, -minutes(4)));
     const live = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
-    assert.deepEqual(keys(live), ["repurpose_post:ready", "video_download:ready"]);
-    const dl = live.installed ? live.tools.find((t) => t.key === "video_download") : undefined;
+    assert.deepEqual(keys(live), ["video_download:ready"]);
+    const dl = live.installed ? live.tools.find((tl) => tl.key === "video_download") : undefined;
+    assert.equal(dl?.title, "Video extractor");
     // The catalog hands the grid the check-in time itself; the grid counts the minutes on the viewer's clock.
     assert.equal(dl?.runner?.label, "CC's PC");
     assert.equal(Math.round((now.getTime() - Date.parse(dl?.runner?.lastSeenAt ?? "")) / 60_000), 4, "the runner's check-in time, 4 minutes ago");
-    // Eleven minutes: not live, no card.
+    // Eleven minutes: not live; the card stays, offline.
     await seedRunner(db, later(now, -minutes(11)));
     const stale = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
-    assert.ok(!keys(stale).some((k) => k.startsWith("video_download")));
+    assert.deepEqual(keys(stale), ["video_download:runner_offline"]);
     assert.deepEqual(await getToolCatalog({ tenantId: OASIS }, { db: emptyDatabase(), now, readAccount: async () => ACCOUNT }), { installed: false });
 
     // The "operator" audience (Admin > Agent training): ONLY the operatorOnly
@@ -705,6 +706,14 @@ async function main() {
     assert.deepEqual(keys(operatorView), ["learn_from_link:ready"]);
     const operatorNeedsAccount = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => null }, { audience: "operator" });
     assert.deepEqual(keys(operatorNeedsAccount), ["learn_from_link:needs_ai_account"]);
+    const operatorLocal = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => ({ ...ACCOUNT, provider: "ollama" }) }, { audience: "operator" });
+    assert.deepEqual(keys(operatorLocal), ["learn_from_link:needs_ai_account"], "a local model is no account here");
+    const quiet = console.error;
+    console.error = () => undefined;
+    const broken = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => { throw new Error("read failed"); } }, { audience: "operator" }).finally(() => {
+      console.error = quiet;
+    });
+    assert.deepEqual(keys(broken), ["learn_from_link:ai_account_unreadable"]);
   });
 
   await check("tables not installed: run and jobs answer 503 not_set_up with the plain line", async () => {

@@ -6,9 +6,11 @@
  * a Run button, the result of its last run and its recent runs.
  *
  * Every card works end to end or is not drawn: a tool that needs an AI account
- * shows the connect line and a link instead of fields; the video downloader is
- * in the catalog only while its runner is live. No founders imports here, so a
- * per-workspace Toolkit page can mount the same grid later.
+ * shows the connect line and a link instead of fields; a runner tool whose
+ * computer is offline (runner_offline) says so and keeps its past runs, with no
+ * Run button. A finished video run offers Download (the file) next to Open in
+ * Library. No founders imports here, so a per-workspace Toolkit page can mount
+ * the same grid later; the download URL comes in as a prefix.
  *
  * The first render shows no time and no run (runs load after mount), so the
  * server's markup and the browser's first paint are the same (React #418).
@@ -27,6 +29,7 @@ import {
   CONNECT_AI,
   NOT_SET_UP,
   RUN_STOPPED,
+  RUNNER_OFFLINE,
   SAVED_TO_TRAINING,
   SEEN_REFRESH_MS,
   TOOL_RUN_FINISHED_EVENT,
@@ -49,6 +52,8 @@ export type ToolGridProps = {
   jobsEndpoint?: string;
   /** A download opens in the Library at this prefix + its asset id. */
   assetHrefPrefix: string;
+  /** Download saves the file from this prefix + asset id + "/download"; empty = no Download button. */
+  assetDownloadPrefix?: string;
   settingsAiHref?: string;
   /** Founders see a failure's code next to its line; a client workspace never does. */
   showCodes?: boolean;
@@ -66,6 +71,7 @@ export function ToolGrid({
   runEndpoint = "/api/tools/run",
   jobsEndpoint = "/api/tools/jobs",
   assetHrefPrefix,
+  assetDownloadPrefix = "",
   settingsAiHref = setupHref("ai_account"),
   showCodes = false,
   className = "",
@@ -89,6 +95,7 @@ export function ToolGrid({
               runEndpoint={runEndpoint}
               jobsEndpoint={jobsEndpoint}
               assetHrefPrefix={assetHrefPrefix}
+              assetDownloadPrefix={assetDownloadPrefix}
               settingsAiHref={settingsAiHref}
               showCodes={showCodes}
             />
@@ -101,7 +108,7 @@ export function ToolGrid({
 
 type CardProps = Required<Omit<ToolGridProps, "catalog" | "className" | "showHeading">> & { tool: CatalogTool };
 
-function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAiHref, showCodes }: CardProps) {
+function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownloadPrefix, settingsAiHref, showCodes }: CardProps) {
   const def = toolByKey(tool.key);
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(tool.fields.map((f) => [f.name, f.defaultValue ?? ""])),
@@ -118,6 +125,8 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
   const [reads, setReads] = useState(0);
   const pollStart = useRef<number | null>(null);
   const ready = tool.state === "ready";
+  /** Offline runner: no form, but the past runs (and their downloads) still show. */
+  const showsRuns = ready || tool.state === "runner_offline";
   const lastSeenAt = tool.runner?.lastSeenAt ?? null;
 
   const load = useCallback(async () => {
@@ -136,12 +145,12 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
 
   useEffect(() => {
     setMounted(true);
-    if (!ready) return;
+    if (!showsRuns) return;
     void load();
     const onFocus = () => void load();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [ready, load]);
+  }, [showsRuns, load]);
 
   useEffect(() => {
     if (!lastSeenAt) return;
@@ -233,6 +242,11 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
         </div>
       )}
       {tool.state === "ai_account_unreadable" && <p className="text-xs text-fg-muted">{AI_UNREADABLE}</p>}
+      {tool.state === "runner_offline" && (
+        <p className="text-xs leading-5 text-fg-muted" data-testid={`tool-${tool.key}-offline`}>
+          {RUNNER_OFFLINE}
+        </p>
+      )}
 
       {ready && (
         <form
@@ -327,13 +341,13 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
         </form>
       )}
 
-      {ready && latest && (
+      {showsRuns && latest && (
         <div aria-live="polite" className="space-y-2 border-t border-bg-border pt-3">
-          <LatestRun job={latest} tool={tool} assetHrefPrefix={assetHrefPrefix} showCodes={showCodes} />
+          <LatestRun job={latest} tool={tool} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} showCodes={showCodes} />
         </div>
       )}
 
-      {ready && jobs && jobs.length > 0 && (
+      {showsRuns && jobs && jobs.length > 0 && (
         <details className="group">
           <summary className={`flex cursor-pointer items-center text-xs font-medium text-fg-muted ${TAP}`}>Recent runs</summary>
           <ul className="mt-1 divide-y divide-bg-border">
@@ -342,6 +356,11 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
                 <span className="font-medium text-fg-muted">{statusLabel(j, tool.runsOn)}</span>
                 {mounted && <span>{runTime(j.created_at)}</span>}
                 <span className="min-w-0 max-w-full truncate">{j.input_summary}</span>
+                {j.status === "done" && j.asset_id && assetDownloadPrefix && (
+                  <a className="text-accent hover:underline" href={`${assetDownloadPrefix}${j.asset_id}/download`}>
+                    Download
+                  </a>
+                )}
                 {j.status === "done" && j.asset_id && (
                   <a className="text-accent hover:underline" href={`${assetHrefPrefix}${j.asset_id}`}>
                     Open in Library
@@ -358,7 +377,7 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
 }
 
 /** The last run of a card, as the card shows it. Exported so tests render every result with real payloads. */
-export function LatestRun({ job, tool, assetHrefPrefix, showCodes }: { job: JobView; tool: Pick<CatalogTool, "key" | "runsOn">; assetHrefPrefix: string; showCodes: boolean }) {
+export function LatestRun({ job, tool, assetHrefPrefix, assetDownloadPrefix = "", showCodes }: { job: JobView; tool: Pick<CatalogTool, "key" | "runsOn">; assetHrefPrefix: string; assetDownloadPrefix?: string; showCodes: boolean }) {
   if (isInFlight(job)) return <p className="text-xs font-medium text-fg-muted">{statusLabel(job, tool.runsOn)}</p>;
   if (job.status === "failed") {
     return (
@@ -379,6 +398,11 @@ export function LatestRun({ job, tool, assetHrefPrefix, showCodes }: { job: JobV
       return (
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-xs font-medium text-fg-muted">{statusLabel(job, tool.runsOn)}</span>
+          {job.asset_id && assetDownloadPrefix && (
+            <a href={`${assetDownloadPrefix}${job.asset_id}/download`} className={`btn-primary inline-flex items-center ${TAP}`}>
+              Download
+            </a>
+          )}
           {job.asset_id && (
             <a href={`${assetHrefPrefix}${job.asset_id}`} className={`btn-secondary inline-flex items-center ${TAP}`}>
               Open in Library

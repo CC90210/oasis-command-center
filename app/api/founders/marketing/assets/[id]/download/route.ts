@@ -8,8 +8,8 @@
  * The bytes never pass through this Worker: it answers with a redirect to a
  * five-minute R2 URL signed with `Content-Disposition: attachment`, so R2 serves
  * the file and the browser saves it under a readable name (see
- * lib/founders/asset-download). Tenant-scoped and own-brand only, exactly like
- * the publish route beside it: a uuid in the URL proves nothing.
+ * lib/founders/asset-download). Tenant-scoped (a uuid in the URL proves nothing),
+ * any brand: Content Tools downloads live under the `downloads` brand.
  */
 import { NextResponse } from "next/server";
 
@@ -39,14 +39,18 @@ export async function GET(req: Request, ctx: Ctx) {
   const db = getServiceSupabase();
   const asset = await db
     .from("marketing_asset")
-    .select("id, title, brand_slug, media_urls")
+    .select("id, title, media_urls")
     .eq("tenant_id", founder.tenantId)
     .eq("id", id)
     .maybeSingle();
   if (asset.error) {
     return NextResponse.json({ ok: false, error: "read_failed" }, { status: 500 });
   }
-  if (!asset.data || asset.data.brand_slug !== "oasis-ai") return notFound();
+  // Tenant-scoped, any brand: saving a file is not publishing it. The Content Tools
+  // video extractor writes its downloads under the `downloads` brand (rights unknown,
+  // never postable from OASIS's accounts: the publish route keeps its own oasis-ai
+  // check), and the whole point of that tool is to hand the file to the operator.
+  if (!asset.data) return notFound();
 
   const media = await db
     .from("marketing_asset_media")

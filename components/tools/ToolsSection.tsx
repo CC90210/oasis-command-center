@@ -31,6 +31,7 @@ import type { ToolCatalog } from "@/lib/tools/types";
 export async function ToolsSection({
   tenantId,
   assetHrefPrefix = "/founders/marketing/asset/",
+  assetDownloadPrefix = "/api/founders/marketing/assets/",
   showCodes = false,
   className = "mb-8",
   audience = "client",
@@ -39,6 +40,8 @@ export async function ToolsSection({
 }: {
   tenantId: string;
   assetHrefPrefix?: string;
+  /** Download = this prefix + asset id + "/download" (the founders download route); "" turns it off. */
+  assetDownloadPrefix?: string;
   showCodes?: boolean;
   className?: string;
   audience?: CatalogOptions["audience"];
@@ -64,7 +67,7 @@ export async function ToolsSection({
       </section>
     );
   }
-  return <ToolGrid catalog={withFieldDefaults(catalog, fieldDefaults)} assetHrefPrefix={assetHrefPrefix} showCodes={showCodes} className={className} showHeading={showHeading} />;
+  return <ToolGrid catalog={withFieldDefaults(catalog, fieldDefaults)} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} showCodes={showCodes} className={className} showHeading={showHeading} />;
 }
 
 /** The catalog with some fields starting on a value the page chose. A value a select does not offer is ignored. */
