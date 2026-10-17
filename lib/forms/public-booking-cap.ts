@@ -9,8 +9,10 @@
  *
  * A booking CLAIMS a place before anything reaches Google, with one atomic
  * statement, so two racing requests can never both take the last place (a
- * count-then-book check could). A booking that then fails gives its place
- * back, so a taken slot or a provider hiccup never uses up the allowance.
+ * count-then-book check could). A place belongs to a booking REQUEST (the id
+ * the booking saga already keys on), so a retry of the same booking finds its
+ * own place instead of taking another (Codex review of #670). Only the attempt
+ * that took the place may give it back, and only when nothing was booked.
  */
 import "server-only";
 import { createHash } from "node:crypto";
@@ -37,53 +39,66 @@ export function publicBookingCapDay(now: Date): string {
 }
 
 export type PublicBookingClaim =
-  | { ok: true; tenantId: string; visitorKey: string; day: string; count: number }
+  /** `fresh`: this attempt took the place (a retry of the same request did not). */
+  | { ok: true; fresh: boolean; tenantId: string; requestId: string }
   | { ok: false; reason: "daily_cap_reached" };
 
 /**
- * Take one of today's places for this visitor, or refuse when they are all
- * taken. One statement: insert the first place, or add one while under the
- * cap; RETURNING says whether it happened. Throws when the database cannot
- * answer: the caller refuses the booking rather than book uncapped.
+ * Take one of today's places for this visitor and booking request, or refuse
+ * when they are all taken. One statement inserts the request's place only
+ * while the visitor holds fewer than the cap; a request that already holds a
+ * place (a retry) is allowed without taking another. Throws when the
+ * database cannot answer: the caller refuses the booking rather than book
+ * uncapped.
  */
 export async function claimPublicBooking(
   db: Client,
-  input: { tenantId: string; visitorKey: string; now: Date; cap?: number },
+  input: { tenantId: string; visitorKey: string; requestId: string; now: Date; cap?: number },
 ): Promise<PublicBookingClaim> {
   const cap = input.cap ?? PUBLIC_BOOKING_DAILY_CAP;
   const day = publicBookingCapDay(input.now);
-  const at = input.now.toISOString();
-  const rs = await db.execute({
-    sql: `INSERT INTO public_booking_daily_claims (tenant_id, visitor_key, day, count, updated_at)
-          VALUES (?, ?, ?, 1, ?)
-          ON CONFLICT (tenant_id, visitor_key, day)
-          DO UPDATE SET count = public_booking_daily_claims.count + 1, updated_at = excluded.updated_at
-          WHERE public_booking_daily_claims.count < ?
-          RETURNING count`,
-    args: [input.tenantId, input.visitorKey, day, at, cap],
+  const taken = await db.execute({
+    sql: `INSERT INTO public_booking_claims (tenant_id, request_id, visitor_key, day, created_at)
+          SELECT ?, ?, ?, ?, ?
+          WHERE (SELECT count(*) FROM public_booking_claims
+                 WHERE tenant_id = ? AND visitor_key = ? AND day = ?) < ?
+          ON CONFLICT (tenant_id, request_id) DO NOTHING
+          RETURNING request_id`,
+    args: [
+      input.tenantId, input.requestId, input.visitorKey, day, input.now.toISOString(),
+      input.tenantId, input.visitorKey, day, cap,
+    ],
   });
-  const row = rs.rows[0];
-  if (!row) return { ok: false, reason: "daily_cap_reached" };
-  // Best effort: a week-old place is never read again.
-  const cutoff = publicBookingCapDay(new Date(input.now.getTime() - PRUNE_AFTER_DAYS * 86_400_000));
-  await db
-    .execute({ sql: "DELETE FROM public_booking_daily_claims WHERE tenant_id = ? AND day < ?", args: [input.tenantId, cutoff] })
-    .catch((error: unknown) => console.error("[public-booking.cap] prune failed", error instanceof Error ? error.message : error));
-  return { ok: true, tenantId: input.tenantId, visitorKey: input.visitorKey, day, count: Number(row.count) };
+  if (taken.rows.length > 0) {
+    // Best effort: a week-old place is never read again.
+    const cutoff = publicBookingCapDay(new Date(input.now.getTime() - PRUNE_AFTER_DAYS * 86_400_000));
+    await db
+      .execute({ sql: "DELETE FROM public_booking_claims WHERE tenant_id = ? AND day < ?", args: [input.tenantId, cutoff] })
+      .catch((error: unknown) => console.error("[public-booking.cap] prune failed", error instanceof Error ? error.message : error));
+    return { ok: true, fresh: true, tenantId: input.tenantId, requestId: input.requestId };
+  }
+  // Nothing inserted: either this request already holds a place (a retry, so
+  // allowed and counted once), or the visitor's places are all taken.
+  const own = await db.execute({
+    sql: "SELECT 1 FROM public_booking_claims WHERE tenant_id = ? AND request_id = ? LIMIT 1",
+    args: [input.tenantId, input.requestId],
+  });
+  if (own.rows.length > 0) return { ok: true, fresh: false, tenantId: input.tenantId, requestId: input.requestId };
+  return { ok: false, reason: "daily_cap_reached" };
 }
 
 /**
- * Give back a place a booking claimed and then did not use (the slot was
- * taken, Google failed, the lead could not move). Never below zero, and on
- * the claim's own day, even when the failure lands after midnight. A release
- * that fails is logged and leaves the place used, which only ever errs strict.
+ * Give back the place a booking took and then did not use. Only the attempt
+ * that took it (`fresh`) may: a retry's failure must never free the place of
+ * an attempt that may still be booking. A release that fails is logged and
+ * leaves the place used, which only ever errs strict.
  */
-export async function releasePublicBooking(db: Client, claim: Extract<PublicBookingClaim, { ok: true }>, now: Date): Promise<void> {
+export async function releasePublicBooking(db: Client, claim: Extract<PublicBookingClaim, { ok: true }>): Promise<void> {
+  if (!claim.fresh) return;
   try {
     await db.execute({
-      sql: `UPDATE public_booking_daily_claims SET count = count - 1, updated_at = ?
-            WHERE tenant_id = ? AND visitor_key = ? AND day = ? AND count > 0`,
-      args: [now.toISOString(), claim.tenantId, claim.visitorKey, claim.day],
+      sql: "DELETE FROM public_booking_claims WHERE tenant_id = ? AND request_id = ?",
+      args: [claim.tenantId, claim.requestId],
     });
   } catch (error) {
     console.error("[public-booking.cap] release failed", error instanceof Error ? error.message : error);

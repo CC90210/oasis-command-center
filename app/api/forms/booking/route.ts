@@ -68,6 +68,26 @@ const PROVIDER_ERRORS = new Set([
  * no retry could ever fix.
  */
 const CONTACT_ERRORS = new Set(["invalid_client_phone", "client_phone_required", "client_email_required"]);
+/**
+ * Thrown by createVerifiedFounderMeeting (lib/website-sales-founder-meeting.ts)
+ * BEFORE its Google call, on a request's first attempt: no event can exist, so
+ * a cap place taken for it goes back (lib/forms/public-booking-cap.ts). Only a
+ * fresh claim is ever given back, so a retry that hits one of these never frees
+ * the place of an attempt still booking. Codes not listed keep the place.
+ */
+const PRE_PROVIDER_ERRORS = new Set([
+  "booking_confirmations_required",
+  "client_agenda_required",
+  "handoff_note_required",
+  "audit_host_email_required",
+  "meeting_must_be_in_future",
+  "sms_consent_requires_phone",
+  "invalid_client_website",
+  "meeting_duration_invalid",
+  "meeting_offer_label_invalid",
+  "meeting_intent_lookup_failed",
+  "meeting_intent_insert_failed",
+]);
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -254,6 +274,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const claimed = await claimPublicBooking(getTursoClient(), {
       tenantId: context.tenantId,
       visitorKey: publicBookingVisitorKey(getClientIp(req)),
+      requestId,
       now: new Date(),
     });
     if (!claimed.ok) {
@@ -264,7 +285,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     console.error("[public-booking.cap] claim failed", error);
     return NextResponse.json({ ok: false, error: "availability_unavailable" }, { status: 503 });
   }
-  const giveBackClaim = () => releasePublicBooking(getTursoClient(), claim, new Date());
+  const giveBackClaim = () => releasePublicBooking(getTursoClient(), claim);
 
   const endAt = new Date(Date.parse(startsAt) + durationMinutes * 60_000).toISOString();
   let meeting: Awaited<ReturnType<typeof createVerifiedFounderMeeting>> | null = null;
@@ -329,7 +350,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       await giveBackClaim();
       return NextResponse.json({ ok: false, error: "retry_required" }, { status: 503 });
     }
-    // Anything else: the Google event may exist, so the place stays used.
+    // Refused before Google was called on this request (Codex review of #670):
+    // nothing can stand, so the place goes back. Anything else (a provider
+    // error, an unknown one) may have left an event, so the place stays used.
+    if (PRE_PROVIDER_ERRORS.has(errorCode)) await giveBackClaim();
     const code = safeErrorCode(error, PROVIDER_ERRORS, "booking_create_failed");
     return NextResponse.json({ ok: false, error: code }, { status: 503 });
   }
