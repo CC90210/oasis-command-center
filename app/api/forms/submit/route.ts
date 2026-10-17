@@ -110,7 +110,15 @@ import {
 } from "@/lib/consent/ledger";
 import { consentDecisionsForStep } from "@/lib/consent/ledger-disclosure";
 import { parseFormRouting } from "@/lib/forms/routing";
-import { contactHandoff, firstContactStepIndex, hasReachableContact } from "@/lib/forms/contact-gate";
+import {
+  contactHandoff,
+  firstContactStepIndex,
+  hasReachableContact,
+  LEAD_COMPANY_KEYS,
+  LEAD_EMAIL_KEYS,
+  LEAD_NAME_KEYS,
+  LEAD_PHONE_KEYS,
+} from "@/lib/forms/contact-gate";
 import { resolveRouterDestination } from "@/lib/forms/routing-destination";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
@@ -2347,21 +2355,23 @@ async function initAnonymousLead(input: {
    * Aliases are appended, never reordered: the intake vocabulary still wins
    * where both are present, so nothing about the existing forms changes.
    */
-  const name = trimmed("contact_name", "name", "full_name", "owner_full_name", "owner_name");
+  // The alias lists live in lib/forms/contact-gate.ts, shared with the gate
+  // that decides whether this lead may be created at all.
+  const name = trimmed(...LEAD_NAME_KEYS);
   if (name) contactFields[funding ? "contact_name" : "name"] = name;
-  const business = trimmed("business_name", "company", "business_legal_name", "legal_business_name", "dba");
+  const business = trimmed(...LEAD_COMPANY_KEYS);
   if (business) contactFields[funding ? "business_name" : "company"] = business;
   // `trimmed`, not `??`. Nullish coalescing treats an EMPTY canonical field as a
   // present value, so a payload carrying `phone: ""` alongside a real
   // `owner_cell` would select the blank and the lead would still have no number.
   // trimmed() skips blanks and keeps looking, which is the behaviour the name
   // and business lookups above have always had (Codex review 2026-08-26).
-  const emailRaw = trimmed("email", "owner_email", "contact_email");
+  const emailRaw = trimmed(...LEAD_EMAIL_KEYS);
   const email = emailRaw ? emailRaw.toLowerCase() : undefined;
   if (email) contactFields.email = email;
   // `owner_cell` is the full application's phone field. Without it the lead
   // carries no number at all and the rep cannot call a signed applicant.
-  const phone = trimmed("phone", "owner_cell", "cell_phone");
+  const phone = trimmed(...LEAD_PHONE_KEYS);
   if (phone) contactFields.phone = phone;
   const monthlyRev = pick("monthly_revenue");
   if (monthlyRev) contactFields.monthly_revenue = monthlyRev;

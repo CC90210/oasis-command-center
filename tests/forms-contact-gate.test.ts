@@ -203,6 +203,24 @@ async function main() {
     assert.equal(await leads(), before + 1);
   });
 
+  await check("the gate and the lead read the same field names (one list, contact-gate.ts)", async () => {
+    // owner_cell is an alias the lead builder reads as the phone: the gate lets
+    // it through only because it reads the same list, and the lead gets it.
+    const res = await post({ step_index: 0, anonymous_init: anon("community"), payload: gateAnswers, contact: { owner_full_name: "Owen Alias", owner_cell: "(514) 555-0188" } });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    const lead = (await seed.execute({
+      sql: "SELECT data FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead' ORDER BY created_at DESC LIMIT 1",
+      args: [OASIS],
+    })).rows[0];
+    const data = JSON.parse(String(lead.data)) as Json;
+    assert.equal(data.phone, "(514) 555-0188", "the gate passed a phone the lead never received");
+    assert.equal(data.name, "Owen Alias");
+    const route = readFileSync(join(__dirname, "..", "app", "api", "forms", "submit", "route.ts"), "utf8");
+    for (const list of ["LEAD_NAME_KEYS", "LEAD_COMPANY_KEYS", "LEAD_EMAIL_KEYS", "LEAD_PHONE_KEYS"]) {
+      assert.match(route, new RegExp(`trimmed\\(\\.\\.\\.${list}\\)`), `initAnonymousLead keeps its own copy of ${list}`);
+    }
+  });
+
   await check("the VSL router: answers in, a destination out, nothing stored", async () => {
     const [leadsBefore, rowsBefore] = [await leads(), await rows()];
     const routed = await post({

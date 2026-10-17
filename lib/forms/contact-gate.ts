@@ -15,21 +15,26 @@ import { normalizePhoneE164 } from "@/lib/conversation-threading";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** Where the submit route reads a lead's email and phone (initAnonymousLead reads the same keys). */
-const EMAIL_KEYS = ["email", "owner_email", "contact_email"];
-const PHONE_KEYS = ["phone", "owner_cell", "cell_phone"];
+/**
+ * Every name a form may give a lead's email, phone, person and company, in the
+ * order the submit route's initAnonymousLead reads them (first non-blank
+ * wins; aliases are appended, never reordered). One list for both, so the
+ * contact gate and the lead it lets through can never disagree on a field.
+ */
+export const LEAD_EMAIL_KEYS = ["email", "owner_email", "contact_email"] as const;
+export const LEAD_PHONE_KEYS = ["phone", "owner_cell", "cell_phone"] as const;
+export const LEAD_NAME_KEYS = ["contact_name", "name", "full_name", "owner_full_name", "owner_name"] as const;
+export const LEAD_COMPANY_KEYS = ["business_name", "company", "business_legal_name", "legal_business_name", "dba"] as const;
+
+const EMAIL_KEYS: readonly string[] = LEAD_EMAIL_KEYS;
+const PHONE_KEYS: readonly string[] = LEAD_PHONE_KEYS;
 
 /**
  * The details a contact step hands to the first step, so the lead is created
  * with them: the person, the company, the email and the phone, under every
  * name initAnonymousLead reads them by.
  */
-const HANDOFF_KEYS = new Set([
-  ...EMAIL_KEYS,
-  ...PHONE_KEYS,
-  "contact_name", "name", "full_name", "owner_full_name", "owner_name",
-  "business_name", "company", "business_legal_name", "legal_business_name", "dba",
-]);
+const HANDOFF_KEYS = new Set<string>([...LEAD_EMAIL_KEYS, ...LEAD_PHONE_KEYS, ...LEAD_NAME_KEYS, ...LEAD_COMPANY_KEYS]);
 const HANDOFF_MAX_CHARS = 320;
 
 /** A field that asks for an email address or a phone number. */
