@@ -122,6 +122,19 @@ assert.match(source, /submissionPath: window\.location\.pathname/, "the exact pu
 assert.match(source, /visitId: getOrCreateVisitId\(\)/, "the established per-tab visit id is submitted");
 assert.match(source, /auditFormContinuationPath\(nextPath, context\)/, "the same attribution context survives the personalized hop");
 
+// 3b. The honeypot (lib/forms/honeypot.ts, #671): the box is the form's last
+// child, and a filled one sends one report with no answers, then hands off the
+// way a lead-less success does, before the lead request is ever made.
+assert.match(source, /<HoneypotField inputRef=\{trapRef\} \/>\s*<\/form>/, "the honeypot box must be the form's last child");
+const trapAt = source.indexOf("const trapped = trapValue(trapRef.current, trapLatch);");
+assert.ok(trapAt > source.indexOf("const problem = auditFormProblem(body.payload);"), "the trap must run after validation");
+assert.ok(trapAt < source.indexOf('await fetch("/api/forms/submit"'), "a filled trap must stop before the lead request");
+assert.match(
+  source,
+  /if \(trapped\) \{\s*await reportTrappedSubmission\(\{ anonymous_init: body\.anonymous_init, step_index: body\.step_index \}, trapped\);\s*window\.location\.href = auditFormContinuationPath\(AUDIT_FUNNEL\.path, context\);\s*return;\s*\}/,
+  "a trapped submit reports without the answers, then hands off like a lead-less success",
+);
+
 // 3a. The personalized page accepts the handoff only for the canonical OASIS
 // ai-audit form, and the reusable form client clamps the requested index.
 const tokenPageSource = readFileSync(join(root, "app/f/[tenant_slug]/[form_slug]/[lead_token]/page.tsx"), "utf8");

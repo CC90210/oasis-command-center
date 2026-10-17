@@ -13,6 +13,8 @@ import {
 } from "@/components/marketing/audit-form-body";
 import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-disclosure";
 import { ConsentChoice } from "@/components/forms/ConsentChoice";
+import { HoneypotField } from "@/components/forms/HoneypotField";
+import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
 /**
@@ -63,6 +65,9 @@ export function AuditForm({
   // affordance, not a guarantee — it only takes effect after that same
   // render.
   const inFlight = useRef(false);
+  // The honeypot box (components/forms/HoneypotField.tsx) and what a script typed into it.
+  const trapRef = useRef<HTMLInputElement | null>(null);
+  const trapLatch = useRef("");
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -85,6 +90,16 @@ export function AuditForm({
 
     setStatus("sending");
     setError(null);
+
+    // Only a script fills the honeypot box. It gets one report the submit route
+    // drops (lib/forms/honeypot.ts), never the answers and no lead request,
+    // then the same hand-off a visitor gets when no lead link comes back.
+    const trapped = trapValue(trapRef.current, trapLatch);
+    if (trapped) {
+      await reportTrappedSubmission({ anonymous_init: body.anonymous_init, step_index: body.step_index }, trapped);
+      window.location.href = auditFormContinuationPath(AUDIT_FUNNEL.path, context);
+      return;
+    }
 
     try {
       const res = await fetch("/api/forms/submit", {
@@ -229,6 +244,8 @@ export function AuditForm({
       >
         {error ?? "Three more screens after this. Takes about two minutes."}
       </p>
+
+      <HoneypotField inputRef={trapRef} />
     </form>
   );
 }
