@@ -36,7 +36,7 @@ import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
 import { contactGateAction, contactHandoff, hasReachableContact, typedContact } from "@/lib/forms/contact-gate";
-import { HONEYPOT_BODY_KEY, trapValue } from "@/lib/forms/honeypot";
+import { HONEYPOT_BODY_KEY, reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -933,6 +933,8 @@ export function FormPublicClient({
     const visitId = getOrCreateVisitId();
     if (visitId) meta.visit_id = visitId;
     // Only a script fills the honeypot; the submit route drops what it sends.
+    // submit() stops before sending once it is filled; this also covers a box
+    // filled while a submit was already in flight (held steps, the payload build).
     const honeypot = trapValue(trapRef.current, trapLatch);
     if (honeypot) meta[HONEYPOT_BODY_KEY] = honeypot;
     return Object.assign(meta, utmFromUrlRef.current);
@@ -1062,16 +1064,16 @@ export function FormPublicClient({
     // A FILLED HONEYPOT is a script. Nothing below runs for it: no consent
     // capture, no tracking event, no held steps. One request tells the route,
     // which drops and logs it, and the script sees the thanks (Codex review of #671).
-    if (trapValue(trapRef.current, trapLatch)) {
-      await fetch("/api/forms/submit", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+    const trapped = trapValue(trapRef.current, trapLatch);
+    if (trapped) {
+      await reportTrappedSubmission(
+        {
           step_index: currentStep,
           ...(tokenRef.current ? { token: tokenRef.current } : { anonymous_init: anonymousInit }),
           ...submitMeta(),
-        }),
-      }).catch(() => null);
+        },
+        trapped,
+      );
       setDone(true);
       return;
     }

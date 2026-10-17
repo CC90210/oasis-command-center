@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { check, finish, OASIS, setupDatabase } from "./_delivery-harness";
-import { HONEYPOT_BODY_KEY, isHoneypotFilled, trapValue } from "../lib/forms/honeypot";
+import { HONEYPOT_BODY_KEY, isHoneypotFilled, reportTrappedSubmission, trapValue } from "../lib/forms/honeypot";
 
 // next/server's after() needs a request scope this harness doesn't open.
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- the real module is spread into the stand-in
@@ -198,8 +198,9 @@ async function main() {
   await check("a trapped browser stops before consent, tracking, held steps and uploads (Codex review of #671)", () => {
     const client = read("components/forms/FormPublicClient.tsx");
     const submit = client.slice(client.indexOf("  async function submit() {"));
-    const trapAt = submit.indexOf("if (trapValue(trapRef.current, trapLatch)) {");
+    const trapAt = submit.indexOf("const trapped = trapValue(trapRef.current, trapLatch);");
     assert.ok(trapAt > submit.indexOf("if (preview) {"), "the trapped stop is missing, or runs before the owner's preview");
+    assert.match(submit.slice(trapAt), /^const trapped = trapValue\(trapRef\.current, trapLatch\);\s*if \(trapped\) \{\s*await reportTrappedSubmission\(/, "the stop does not run whenever the trap is filled");
     for (const effect of ["captureConsent(", "trackEvent(", "sendHeldSteps(", "routeWithoutLead(", "buildSubmitPayloadRef.current()"]) {
       const at = submit.indexOf(effect);
       assert.ok(at > 0 && trapAt < at, `a trapped script reaches ${effect}`);
@@ -213,6 +214,29 @@ async function main() {
     );
   });
 
+  await check("reportTrappedSubmission sends the form's identity with the trap, and never throws", async () => {
+    const realFetch = globalThis.fetch;
+    const sent: Array<{ url: string; body: Json }> = [];
+    try {
+      globalThis.fetch = (async (url: string, init: { body: string }) => {
+        sent.push({ url, body: JSON.parse(init.body) as Json });
+        return new Response("{}");
+      }) as unknown as typeof fetch;
+      await reportTrappedSubmission({ anonymous_init: anon("audit-like"), step_index: 0 }, "spam");
+      assert.deepEqual(sent, [{ url: "/api/forms/submit", body: { anonymous_init: anon("audit-like"), step_index: 0, honeypot: "spam" } }]);
+      globalThis.fetch = (async () => {
+        throw new Error("offline");
+      }) as unknown as typeof fetch;
+      await reportTrappedSubmission({ step_index: 0 }, "spam");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    // The route answers a real request with that body by dropping it.
+    const before = await leads();
+    assert.deepEqual((await post(sent[0].body)).json, DONE);
+    assert.equal(await leads(), before);
+  });
+
   await check("/book carries the same trap and books nothing for it", () => {
     const page = read("components/booking/BookingPage.tsx");
     assert.match(page, /<HoneypotField inputRef=\{trapRef\} \/>\s*<\/form>/, "/book's form does not end with the trap");
@@ -224,7 +248,11 @@ async function main() {
     }
     const trapped = submit.slice(trapAt, submit.indexOf("setBusy(true)"));
     assert.match(trapped, /^const honeypot = trapValue\(trapRef\.current, trapLatch\);\s*if \(honeypot\) \{/, "the stop does not run whenever the trap is filled");
-    assert.match(trapped, /\[HONEYPOT_BODY_KEY\]: honeypot,/, "the route is not told");
+    assert.match(
+      trapped,
+      /await reportTrappedSubmission\(\s*\{ anonymous_init: \{ tenant_slug: props\.tenantSlug, form_slug: props\.formSlug \}, step_index: 0 \},\s*honeypot,\s*\);/,
+      "the route is not told",
+    );
     assert.doesNotMatch(trapped, /payload|consent_ledger/, "a trapped request carries the visitor's answers");
     assert.match(trapped, /setLeftDetails\(true\);\s*return;/);
   });

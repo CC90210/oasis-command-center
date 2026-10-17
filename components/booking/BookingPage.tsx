@@ -28,7 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-disclosure";
 import { ConsentChoice } from "@/components/forms/ConsentChoice";
 import { HoneypotField } from "@/components/forms/HoneypotField";
-import { HONEYPOT_BODY_KEY, trapValue } from "@/lib/forms/honeypot";
+import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import { ZONE_CHOICES } from "@/lib/meeting-time";
 
 export type BookingField = {
@@ -273,15 +273,10 @@ export function BookingPage(props: Props) {
     // the "we have your details" screen.
     const honeypot = trapValue(trapRef.current, trapLatch);
     if (honeypot) {
-      await fetch("/api/forms/submit", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          anonymous_init: { tenant_slug: props.tenantSlug, form_slug: props.formSlug },
-          step_index: 0,
-          [HONEYPOT_BODY_KEY]: honeypot,
-        }),
-      }).catch(() => null);
+      await reportTrappedSubmission(
+        { anonymous_init: { tenant_slug: props.tenantSlug, form_slug: props.formSlug }, step_index: 0 },
+        honeypot,
+      );
       setLeftDetails(true);
       return;
     }
