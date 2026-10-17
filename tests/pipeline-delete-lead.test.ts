@@ -54,6 +54,9 @@ const COMPLETED_CALL = "40000000-0000-4000-8000-000000000012";
 const CANCELLED_CALL = "40000000-0000-4000-8000-000000000013";
 const GUARDED = "40000000-0000-4000-8000-000000000014";
 const HALF_DONE = "40000000-0000-4000-8000-000000000015";
+// Codex on #669, second pass: direct-email states, a late deal after step 2.
+const DIRECT_ATTEMPT = "40000000-0000-4000-8000-000000000016";
+const LATE_DEAL = "40000000-0000-4000-8000-000000000017";
 
 const TABLES = [
   "tenant_records",
@@ -219,6 +222,13 @@ async function main(): Promise<void> {
     lead(COMPLETED_CALL),
     lead(CANCELLED_CALL),
     lead(GUARDED),
+    lead(DIRECT_ATTEMPT),
+    lead(LATE_DEAL),
+    {
+      sql: "INSERT INTO lead_interactions (id, tenant_id, lead_id, metadata) VALUES ('direct-attempting', ?, ?, ?)",
+      args: [TENANT, DIRECT_ATTEMPT, JSON.stringify({ status: "direct_attempting" })],
+    },
+    { sql: "INSERT INTO drip_runs VALUES ('late-drip', ?, ?, 'scheduled')", args: [TENANT, LATE_DEAL] },
     { sql: "INSERT INTO drip_runs VALUES ('inflight-sending', ?, ?, 'sending')", args: [TENANT, INFLIGHT] },
     {
       sql: "INSERT INTO call_appointments VALUES ('overdue-call', ?, ?, 'scheduled', 'active', ?)",
@@ -257,6 +267,10 @@ async function main(): Promise<void> {
     {
       sql: "INSERT INTO lead_interactions (id, tenant_id, lead_id, metadata) VALUES ('junk-sent', ?, ?, ?)",
       args: [TENANT, JUNK, JSON.stringify({ status: "sent", campaign: "spring" })],
+    },
+    {
+      sql: "INSERT INTO lead_interactions (id, tenant_id, lead_id, metadata) VALUES ('junk-reserved', ?, ?, ?)",
+      args: [TENANT, JUNK, JSON.stringify({ status: "direct_reserved" })],
     },    {
       sql: "INSERT INTO lead_interactions (id, tenant_id, lead_id, channel, metadata) VALUES ('junk-sms', ?, ?, 'sms', ?)",
       args: [TENANT, JUNK, JSON.stringify({ status: "queued", campaign: "sms" })],
@@ -317,7 +331,35 @@ async function main(): Promise<void> {
   await assertBlocked(INFLIGHT, /being sent right now/i);
   await assertBlocked(OVERDUE_CALL, /booked call.*cancel the call first/i);
   await assertBlocked(COMPLETED_CALL, /call history/i);
+  await assertBlocked(DIRECT_ATTEMPT, /being sent right now/i);
   pass("every destructive-history blocker refuses with a readable reason and no writes");
+
+  // Codex on #669, second pass: outside the Turso backend nothing is attempted.
+  {
+    const before = await state(seed);
+    process.env.EMPIRE_DATA_BACKEND = "supabase_cloud";
+    const refused = await remove(JUNK);
+    process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
+    assert.equal(refused.ok, false);
+    assert.equal(!refused.ok && refused.code, "unavailable");
+    assert.deepEqual(await state(seed), before, "a non-Turso backend wrote something");
+  }
+  pass("outside the Turso backend a delete changes nothing");
+
+  // A deal that appears after step 2 (simulated by a trigger on the drip cancel):
+  // the lead and the deal stay, and the owner is told the queued message is gone.
+  await seed.execute(`CREATE TRIGGER late_deal AFTER UPDATE OF status ON drip_runs
+    WHEN NEW.lead_id = '${LATE_DEAL}' AND NEW.status = 'cancelled'
+    BEGIN INSERT INTO website_deals VALUES ('late-deal', NEW.tenant_id, NEW.lead_id); END`);
+  const late = await remove(LATE_DEAL);
+  assert.equal(late.ok, false);
+  if (late.ok || late.code !== "blocked") throw new Error("a late deal did not stop the delete");
+  assert.ok(late.blockers.some((m) => /website deal/i.test(m)), JSON.stringify(late.blockers));
+  assert.ok(late.blockers.some((m) => /1 queued message was already cancelled/i.test(m)), JSON.stringify(late.blockers));
+  assert.equal(await count(seed, "tenant_records", "id = ?", [LATE_DEAL]), 1, "the lead was deleted with a deal on it");
+  assert.equal(await count(seed, "website_deals", "id = 'late-deal'", []), 1, "the late deal was cascaded away");
+  assert.equal(await count(seed, "tenant_audit_log", "target_id = ? AND action_type = 'pipeline_lead_delete_stopped'", [LATE_DEAL]), 1);
+  pass("a deal that appears mid-delete keeps the lead, and the cancelled message is said out loud");
 
   // A cancelled booking is not booking history: the lead goes.
   const cancelledCall = await remove(CANCELLED_CALL);
@@ -371,7 +413,11 @@ async function main(): Promise<void> {
     cancelled_reason: "lead_deleted",
   });
   assert.equal(sent.status, "sent");
-  assert.equal(sms.status, "queued");
+  // A queued transactional SMS is work still to send, like a queued email
+  // (Codex on #669, second pass); so is the direct route's reservation.
+  assert.equal(sms.status, "cancelled", "a queued SMS to the deleted lead is still queued");
+  const reserved = JSON.parse(String(interactions.rows.find((row) => row.id === "junk-reserved")?.metadata));
+  assert.equal(reserved.status, "cancelled", "a direct_reserved email survives the delete");
   assert.equal(await count(seed, "consent_events", "lead_id = ?", [JUNK]), 1);
   assert.equal(await count(seed, "tenant_audit_log", "target_id = ? AND actor_user_id = ?", [JUNK, OWNER]), 1);
   const deletedState = await state(seed);

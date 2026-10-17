@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logTenantAudit } from "@/lib/audit/activity-feed";
 import { cancelPendingApproval } from "@/lib/os/approvals/store";
-import { getTursoClient } from "@/lib/turso";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
 
 type DbError = { message: string; code?: string };
 type DbResult<T> = { data: T | null; error: DbError | null; count: number | null };
@@ -208,6 +208,17 @@ async function approvalRows(db: SupabaseClient, tenantId: string, leadId: string
   ));
 }
 
+/**
+ * Outbound lead_interactions that are work still to send (Codex on #669, second
+ * pass): email and SMS alike (lib/forms/transactional-outbox.ts queues consented
+ * SMS as channel "sms"), and the direct-email route's reservation
+ * ("direct_reserved", which stale-reservation recovery would turn back into
+ * "queued"). These are cancelled; the IN_FLIGHT states block instead.
+ */
+const OUTBOUND_CHANNELS = ["email", "sms"];
+const CANCELLABLE_SEND_STATES = ["queued", "direct_reserved"];
+const IN_FLIGHT_SEND_STATES = ["sending", "direct_attempting"];
+
 async function queuedInteractions(
   db: SupabaseClient,
   tenantId: string,
@@ -215,8 +226,8 @@ async function queuedInteractions(
 ): Promise<InteractionRow[]> {
   return rows(await optional<InteractionRow[]>(
     db.from("lead_interactions").select("id, metadata")
-      .eq("tenant_id", tenantId).eq("lead_id", leadId).eq("channel", "email")
-      .eq("metadata->>status", "queued"),
+      .eq("tenant_id", tenantId).eq("lead_id", leadId).in("channel", OUTBOUND_CHANNELS)
+      .in("metadata->>status", CANCELLABLE_SEND_STATES),
     "checking queued lead interactions",
   ));
 }
@@ -258,8 +269,8 @@ async function blockersFor(
     await meetingNotifications(db, tenantId, leadId, false, ["sending"]) +
     rows(await optional<IdRow[]>(
       db.from("lead_interactions").select("id")
-        .eq("tenant_id", tenantId).eq("lead_id", leadId).eq("channel", "email")
-        .eq("metadata->>status", "sending"),
+        .eq("tenant_id", tenantId).eq("lead_id", leadId).in("channel", OUTBOUND_CHANNELS)
+        .in("metadata->>status", IN_FLIGHT_SEND_STATES),
       "checking sending lead interactions",
     )).length;
   if (inFlight) {
@@ -373,7 +384,7 @@ async function cancelInteractionRows(db: SupabaseClient, tenantId: string, leadI
     changed += count(await optional<unknown[]>(
       db.from("lead_interactions").update({ metadata }, { count: "exact" })
         .eq("tenant_id", tenantId).eq("lead_id", leadId).eq("id", row.id)
-        .eq("channel", "email").eq("metadata->>status", "queued"),
+        .in("channel", OUTBOUND_CHANNELS).in("metadata->>status", CANCELLABLE_SEND_STATES),
       "cancelling a queued lead interaction",
     ));
   }
@@ -520,6 +531,18 @@ export async function deletePipelineLead(
   db: SupabaseClient,
   input: { tenantId: string; leadId: string; actorUserId: string; dryRun: boolean },
 ): Promise<DeletePipelineLeadResult> {
+  // guardedDeleteLead runs on Turso. Every other step uses `db`, which follows
+  // EMPIRE_DATA_BACKEND; in any other mode the steps would split across two
+  // databases (Codex on #669, second pass), so nothing is attempted.
+  if (process.env.EMPIRE_DATA_BACKEND !== "turso_cloud" || !tursoConfigured()) {
+    return {
+      ok: false,
+      code: "unavailable",
+      message: "Deleting a lead needs the Turso database, which is not the active one here. Nothing was changed.",
+    };
+  }
+  // What step 2 cancelled, so a delete that stops after it says so out loud.
+  let cancelled: Record<string, number> | null = null;
   try {
     const found = await required<LeadRow>(
       db.from("tenant_records").select("id, data")
@@ -549,6 +572,7 @@ export async function deletePipelineLead(
       approvals: await cancelApprovals(db, input.tenantId, input.leadId, input.actorUserId),
       sms_agent_jobs: await cancelSmsJobs(db, input.tenantId, input.leadId),
     };
+    cancelled = cancel;
 
     // Order (Codex on #669): 1 check, 2 cancel what is queued so nothing goes out,
     // 3 delete the lead row atomically (guardedDeleteLead), 4 only then remove its
@@ -556,7 +580,9 @@ export async function deletePipelineLead(
     // meantime), only cancellations happened and no data was lost; if the run
     // stops after 3, a re-run finds no lead and finishes 4 (see not_found above).
     const finalBlockers = await blockersFor(db, input.tenantId, input.leadId, found.data);
-    if (finalBlockers.length) return { ok: false, code: "blocked", blockers: finalBlockers };
+    if (finalBlockers.length) {
+      return { ok: false, code: "blocked", blockers: await stoppedAfterCancelling(input, cancel, finalBlockers) };
+    }
 
     // The parent row goes in ONE statement that re-checks, at that instant, every
     // row a delete would cascade or orphan (guardedDeleteLead): a deal or receipt
@@ -573,7 +599,11 @@ export async function deletePipelineLead(
       return {
         ok: false,
         code: "blocked",
-        blockers: why.length ? why : ["Something linked to this lead changed while it was being deleted. Reload and try again."],
+        blockers: await stoppedAfterCancelling(
+          input,
+          cancel,
+          why.length ? why : ["Something linked to this lead changed while it was being deleted. Reload and try again."],
+        ),
       };
     }
 
@@ -590,10 +620,40 @@ export async function deletePipelineLead(
     return { ok: true, dryRun: false, plan };
   } catch (error) {
     console.error("[pipeline.delete-lead]", error instanceof Error ? error.message : String(error));
+    const lost = cancelled ? totalOf(cancelled) : 0;
     return {
       ok: false,
       code: "unavailable",
-      message: "This lead could not be deleted safely. Reload the pipeline before trying again.",
+      message:
+        "This lead could not be deleted safely. Reload the pipeline before trying again." +
+        (lost ? ` ${lost} queued message${lost === 1 ? " was" : "s were"} already cancelled; the lead is kept.` : ""),
     };
   }
+}
+
+function totalOf(counts: Record<string, number>): number {
+  return Object.values(counts).reduce((sum, n) => sum + n, 0);
+}
+
+/**
+ * A delete refused AFTER step 2 keeps the lead, but its queued messages are
+ * already cancelled. Say so in the owner's words and in the audit log, never
+ * silently (Codex on #669, second pass); the cancellations are not undone.
+ */
+async function stoppedAfterCancelling(
+  input: { tenantId: string; leadId: string; actorUserId: string },
+  cancel: Record<string, number>,
+  blockers: string[],
+): Promise<string[]> {
+  const n = totalOf(cancel);
+  if (!n) return blockers;
+  await logTenantAudit({
+    tenantId: input.tenantId,
+    actorUserId: input.actorUserId,
+    actionType: "pipeline_lead_delete_stopped",
+    targetTable: "tenant_records",
+    targetId: input.leadId,
+    after: { cancel, blockers },
+  });
+  return [...blockers, `The lead was kept, but ${n} queued message${n === 1 ? " was" : "s were"} already cancelled before this was found.`];
 }
