@@ -1,7 +1,7 @@
 /**
  * The public form's honeypot (CC, 2026-10-16: "make sure our funnels are
  * secure"). Every public form ends with one text box no person sees or reaches
- * (components/forms/FormRenderer.tsx trapRef). Only a script that fills every
+ * (components/forms/HoneypotField.tsx, lib/forms/honeypot.ts). Only a script that fills every
  * box puts anything there, and the client then sends it as `honeypot`. The
  * submit route answers that request like a finished form and does nothing:
  * no lead, no row, no token, no database read.
@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { check, finish, OASIS, setupDatabase } from "./_delivery-harness";
+import { HONEYPOT_BODY_KEY, isHoneypotFilled, trapValue } from "../lib/forms/honeypot";
 
 // next/server's after() needs a request scope this harness doesn't open.
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- the real module is spread into the stand-in
@@ -159,10 +160,10 @@ async function main() {
 
   await check("every public form ends with the trap, which no person can see, reach or autofill", () => {
     const renderer = read("components/forms/FormRenderer.tsx");
-    const at = renderer.indexOf("{trapRef ? (");
+    const at = renderer.indexOf("{trapRef ? <HoneypotField inputRef={trapRef} /> : null}");
     assert.ok(at > renderer.indexOf("{previewMode && ("), "the trap is not the form's last child (every field id after it would change)");
-    assert.match(renderer.slice(at, renderer.indexOf("</form>", at)), /\) : null\}\s*$/, "something follows the trap inside the form");
-    const trap = renderer.slice(at, renderer.indexOf(") : null}", at));
+    assert.match(renderer.slice(at, renderer.indexOf("</form>", at)), /^\{trapRef \? <HoneypotField inputRef=\{trapRef\} \/> : null\}\s*$/, "something follows the trap inside the form");
+    const trap = read("components/forms/HoneypotField.tsx");
     assert.match(trap, /aria-hidden="true"/);
     assert.match(trap, /position: "absolute", left: "-10000px"/, "hidden with display:none, which form-filling scripts skip");
     assert.match(trap, /tabIndex=\{-1\}/);
@@ -176,13 +177,24 @@ async function main() {
   });
 
   await check("the client sends what the trap holds on every request, latched", () => {
+    assert.equal(HONEYPOT_BODY_KEY, "honeypot", "the client and the route disagree on the body key");
+    const latch = { current: "" };
+    const box = (value: string) => ({ value }) as HTMLInputElement;
+    assert.equal(trapValue(null, latch), "", "no box, no trap");
+    assert.equal(trapValue(box("   "), latch), "", "whitespace is not a trap");
+    assert.equal(trapValue(box(" spam "), latch), "spam");
+    assert.equal(trapValue(box(""), latch), "spam", "a box that re-renders empty on a later step cleared the trap");
+    assert.equal(trapValue(null, latch), "spam");
+    assert.equal(trapValue(box("x".repeat(500)), { current: "" }).length, 200, "uncapped");
+    for (const v of ["spam", " x "]) assert.equal(isHoneypotFilled(v), true);
+    for (const v of ["", "  ", 1, null, undefined, ["spam"], { a: 1 }]) assert.equal(isHoneypotFilled(v), false, JSON.stringify(v));
     const client = read("components/forms/FormPublicClient.tsx");
     assert.match(client, /trapRef=\{trapRef\}/, "the public form does not draw the trap");
-    assert.match(client, /if \(typed\) latch\.current = typed\.slice\(0, 200\);\s*return latch\.current;/, "a box that re-renders empty clears the trap");
     const meta = client.slice(client.indexOf("function submitMeta()"), client.indexOf("function submitMeta()") + 700);
-    assert.match(meta, /if \(honeypot\) meta\.honeypot = honeypot;/, "submitMeta does not carry the trap (held steps, the router and every step use it)");
+    assert.match(meta, /const honeypot = trapValue\(trapRef\.current, trapLatch\);\s*if \(honeypot\) meta\[HONEYPOT_BODY_KEY\] = honeypot;/, "submitMeta does not carry the trap (held steps, the router and every step use it)");
     const init = client.slice(client.indexOf("initialize_only: true,") - 400, client.indexOf("initialize_only: true,") + 120);
-    assert.match(init, /\.\.\.\(honeypot \? \{ honeypot \} : \{\}\)/, "the upload-first start does not carry the trap");
+    assert.match(init, /\.\.\.\(honeypot \? \{ \[HONEYPOT_BODY_KEY\]: honeypot \} : \{\}\)/, "the upload-first start does not carry the trap");
+    assert.match(read("app/api/forms/submit/route.ts"), /if \(!isHoneypotFilled\(b\.honeypot\)\) return null;/, "the route has its own rule for a filled trap");
   });
 
   console.warn = realWarn;

@@ -36,6 +36,7 @@ import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
 import { contactGateAction, contactHandoff, hasReachableContact, typedContact } from "@/lib/forms/contact-gate";
+import { HONEYPOT_BODY_KEY, trapValue } from "@/lib/forms/honeypot";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -327,14 +328,6 @@ function useConsentIdempotencyKey() {
   return ref;
 }
 
-/** What a script typed into the honeypot box, latched: once it was filled,
- *  every later request says so, even after the box renders empty on a new step. */
-function trapValue(input: HTMLInputElement | null, latch: { current: string }): string {
-  const typed = input?.value.trim() ?? "";
-  if (typed) latch.current = typed.slice(0, 200);
-  return latch.current;
-}
-
 export function FormPublicClient({
   formName,
   branding,
@@ -476,7 +469,7 @@ export function FormPublicClient({
             payload: {},
             anonymous_init: anonymousInit,
             initialize_only: true,
-            ...(honeypot ? { honeypot } : {}),
+            ...(honeypot ? { [HONEYPOT_BODY_KEY]: honeypot } : {}),
           }),
         });
         const data = (await res.json().catch(() => ({}))) as SubmitResponse;
@@ -941,7 +934,7 @@ export function FormPublicClient({
     if (visitId) meta.visit_id = visitId;
     // Only a script fills the honeypot; the submit route drops what it sends.
     const honeypot = trapValue(trapRef.current, trapLatch);
-    if (honeypot) meta.honeypot = honeypot;
+    if (honeypot) meta[HONEYPOT_BODY_KEY] = honeypot;
     return Object.assign(meta, utmFromUrlRef.current);
   }
 
