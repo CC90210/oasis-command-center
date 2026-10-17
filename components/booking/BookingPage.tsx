@@ -29,6 +29,7 @@ import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-discl
 import { ConsentChoice } from "@/components/forms/ConsentChoice";
 import { HoneypotField } from "@/components/forms/HoneypotField";
 import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
+import type { DetailsOnlyReason } from "@/lib/forms/public-booking-alert";
 import { ZONE_CHOICES } from "@/lib/meeting-time";
 
 export type BookingField = {
@@ -175,6 +176,8 @@ export function BookingPage(props: Props) {
   const [showNote, setShowNote] = useState(false);
   // No time could be shown: take the details alone (see the header comment).
   const [detailsOnly, setDetailsOnly] = useState(false);
+  // Which "Leave your details instead" it was: told to the sales desk's alert.
+  const [detailsWhy, setDetailsWhy] = useState<DetailsOnlyReason>("calendar_error");
   const [leftDetails, setLeftDetails] = useState(false);
   const tokenRef = useRef<string | null>(null);
   const requestIdRef = useRef<{ slot: string; id: string } | null>(null);
@@ -315,6 +318,17 @@ export function BookingPage(props: Props) {
         tokenRef.current = token;
       }
       if (detailsOnly || !slot) {
+        // They asked for a call and could not pick a time: the sales desk hears
+        // about it once (app/api/forms/booking/details-only). Never awaited and
+        // never shown: the visitor's details are already saved.
+        if (detailsOnly) {
+          void fetch("/api/forms/booking/details-only", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ token, reason: detailsWhy }),
+            keepalive: true,
+          }).catch(() => null);
+        }
         setLeftDetails(true);
         return;
       }
@@ -492,7 +506,10 @@ export function BookingPage(props: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setDetailsOnly(true)}
+                  onClick={() => {
+                    setDetailsWhy("calendar_error");
+                    setDetailsOnly(true);
+                  }}
                   className="mt-4 ml-2 rounded-md border border-ops-edge px-4 py-2 text-[14px] text-fg hover:border-fg-dim"
                 >
                   Leave your details instead
@@ -505,7 +522,10 @@ export function BookingPage(props: Props) {
                 </p>
                 <button
                   type="button"
-                  onClick={() => setDetailsOnly(true)}
+                  onClick={() => {
+                    setDetailsWhy("no_times");
+                    setDetailsOnly(true);
+                  }}
                   className="mt-4 rounded-md border border-ops-edge px-4 py-2 text-[14px] text-fg hover:border-fg-dim"
                 >
                   Leave your details instead
