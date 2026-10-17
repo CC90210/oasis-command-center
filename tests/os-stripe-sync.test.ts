@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { STRIPE_SYNC_STALE_AFTER_MS, stripeSyncLine, syncedAgo } from "../lib/founders-finances/stripe-sync-status";
+import { STRIPE_SYNC_STALE_AFTER_MS, stripeSyncLine } from "../lib/founders-finances/stripe-sync-status";
 import { buildDepartmentCards, stripeConnection, FINANCE_STRIPE_HREF } from "../components/os/today/model";
 import { mrrTile } from "../components/os/department/money-rules";
 
@@ -39,21 +39,23 @@ function check(name: string, fn: () => void) {
   }
 }
 
-check("the relative time reads like a person: just now, minutes, hours, days", () => {
-  assert.equal(syncedAgo(NOW - 20_000, NOW), "just now");
-  assert.equal(syncedAgo(NOW - 60_000, NOW), "1 minute ago");
-  assert.equal(syncedAgo(NOW - 12 * 60_000, NOW), "12 minutes ago");
-  assert.equal(syncedAgo(NOW - 3 * H, NOW), "3 hours ago");
-  assert.equal(syncedAgo(NOW - 47 * H, NOW), "47 hours ago");
-  assert.equal(syncedAgo(NOW - 5 * 24 * H, NOW), "5 days ago");
+check("the note reads in the one time-ago wording: just now, minutes, hours, days, then the date", () => {
+  const note = (ms: number) => stripeSyncLine(ago(ms), NOW).note;
+  assert.equal(note(20_000), "Last synced just now");
+  assert.equal(note(60_000), "Last synced 1 min ago");
+  assert.equal(note(12 * 60_000), "Last synced 12 min ago");
+  assert.equal(note(3 * H), "Last synced 3 h ago");
+  assert.equal(note(47 * H), "Last synced 1 d ago");
+  assert.equal(note(5 * 24 * H), "Last synced 5 d ago");
+  assert.match(note(45 * 24 * H), /^Last synced [A-Z][a-z]{2} \d{1,2}(, \d{4})?$/, "past 30 days it is the date");
 });
 
 check("never synced / synced / stale", () => {
   assert.deepEqual(stripeSyncLine(null, NOW), { state: "never", note: "Never synced" });
   assert.deepEqual(stripeSyncLine("not a time", NOW), { state: "never", note: "Never synced" });
-  assert.deepEqual(stripeSyncLine(ago(3 * H), NOW), { state: "live", note: "Last synced 3 hours ago" });
+  assert.deepEqual(stripeSyncLine(ago(3 * H), NOW), { state: "live", note: "Last synced 3 h ago" });
   assert.equal(stripeSyncLine(ago(STRIPE_SYNC_STALE_AFTER_MS + H), NOW).state, "stale", "a daily job that has not run for two days is flagged");
-  assert.equal(stripeSyncLine(ago(5 * 24 * H), NOW).note, "Last synced 5 days ago");
+  assert.equal(stripeSyncLine(ago(5 * 24 * H), NOW).note, "Last synced 5 d ago");
 });
 
 check("the Finance card's Stripe line: not connected, couldn't check, never synced, last synced, stale", () => {
@@ -62,8 +64,8 @@ check("the Finance card's Stripe line: not connected, couldn't check, never sync
   assert.deepEqual(stripeConnection(true, { ok: false }, NOW), { label: "Stripe", state: "error", note: "Couldn't check", href: null });
   assert.deepEqual(stripeConnection(true, null, NOW), { label: "Stripe", state: "error", note: "Couldn't check", href: null }, "pinned, but when it synced was not read");
   assert.deepEqual(stripeConnection(true, { ok: true, lastSyncAt: null }, NOW), { label: "Stripe", state: "no_data", note: "Never synced", href: null });
-  assert.deepEqual(stripeConnection(true, { ok: true, lastSyncAt: ago(3 * H) }, NOW), { label: "Stripe", state: "live", note: "Last synced 3 hours ago", href: null });
-  assert.deepEqual(stripeConnection(true, { ok: true, lastSyncAt: ago(5 * 24 * H) }, NOW), { label: "Stripe", state: "error", note: "Last synced 5 days ago", href: null });
+  assert.deepEqual(stripeConnection(true, { ok: true, lastSyncAt: ago(3 * H) }, NOW), { label: "Stripe", state: "live", note: "Last synced 3 h ago", href: null });
+  assert.deepEqual(stripeConnection(true, { ok: true, lastSyncAt: ago(5 * 24 * H) }, NOW), { label: "Stripe", state: "error", note: "Last synced 5 d ago", href: null });
 });
 
 check("Today's Finance card carries the line, pinned or not, with or without a goal", () => {
@@ -80,7 +82,7 @@ check("Today's Finance card carries the line, pinned or not, with or without a g
       routines: null,
       nowMs: NOW,
     })[0];
-  assert.equal(card(true, { ok: true, lastSyncAt: ago(2 * H) }).connection?.note, "Last synced 2 hours ago");
+  assert.equal(card(true, { ok: true, lastSyncAt: ago(2 * H) }).connection?.note, "Last synced 2 h ago");
   assert.equal(card(true, { ok: true, lastSyncAt: null }).connection?.note, "Never synced");
   assert.equal(card(false, null).connection?.note, "Not connected");
   for (const c of [card(true, { ok: true, lastSyncAt: ago(2 * H) }), card(true, { ok: true, lastSyncAt: null }), card(null, null)]) {
@@ -94,11 +96,11 @@ check("the Finance tab's MRR tile is live only while Stripe's sync is; stale or 
     label: "MRR",
     value: "CA$72",
     status: "live",
-    hint: "1 live Stripe subscription · Last synced 3 hours ago",
+    hint: "1 live Stripe subscription · Last synced 3 h ago",
   });
   const stale = mrrTile(mrr, { ok: true, lastSyncAt: ago(5 * 24 * H) }, NOW);
   assert.equal(stale.status, "error", "a sync five days old is not live");
-  assert.equal(stale.hint, "CA$72 from 1 live Stripe subscription · Last synced 5 days ago", "the amount stays visible, with how old it is");
+  assert.equal(stale.hint, "CA$72 from 1 live Stripe subscription · Last synced 5 d ago", "the amount stays visible, with how old it is");
   const unread = mrrTile(mrr, { ok: false }, NOW);
   assert.equal(unread.status, "error", "a sync time that could not be read is not live");
   assert.equal(unread.hint, "CA$72 from 1 live Stripe subscription · Stripe sync: couldn't check");

@@ -19,7 +19,8 @@
 
 import { StatusLine } from "@/components/os/connections/StatusLine";
 import { ConnectorDrawerButton } from "@/components/os/connections/ConnectorDrawerButton";
-import { formatVerifiedAgo, type ConnectorStatus } from "@/lib/os/connectors";
+import type { ConnectorStatus } from "@/lib/os/connectors";
+import { timeAgo } from "@/lib/devices/presence";
 import type { PublicConnection } from "@/lib/connections/store";
 import type { JevStats, ResolvedJevMode } from "@/lib/jev/mode";
 
@@ -123,7 +124,7 @@ export function JevCard({
               {s.calls} {s.calls === 1 ? "answer" : "answers"} recorded
               {s.agreementPct === null ? ", none comparable yet" : `, agreed with OASIS ${s.agreementPct}% of the time`}
               {s.failed > 0 ? `; ${s.failed} did not answer` : ""}.
-              {s.lastLatencyMs !== null && ` Last call took ${s.lastLatencyMs} ms${s.lastAt ? `, ${formatVerifiedAgo(s.lastAt, nowMs)}` : ""}.`}
+              {s.lastLatencyMs !== null && ` Last call took ${s.lastLatencyMs} ms${s.lastAt ? `, ${timeAgo(s.lastAt, { now: nowMs })}` : ""}.`}
             </>
           )}
         </dd>

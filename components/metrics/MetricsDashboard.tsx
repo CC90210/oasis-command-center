@@ -7,6 +7,7 @@ import { Donut } from "@/components/charts/Donut";
 import { TrendArea } from "@/components/metrics/TrendArea";
 import { LeadSourceBreakdown } from "@/components/charts/LeadSourceBreakdown";
 import { DripTrackerClient } from "@/components/drips/DripTrackerClient";
+import { timeAgo } from "@/lib/devices/presence";
 import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth, SmsMetrics, CallMetrics, CallNumberHealth } from "@/lib/metrics";
 import type { EmailMetrics, MetricSource } from "@/lib/metrics/types";
 
@@ -755,14 +756,4 @@ function exportCsv(payload: MetricsPayload) {
   a.download = `metrics-${payload.windowDays}d.csv`;
   a.click();
   URL.revokeObjectURL(url);
-}
-
-function timeAgo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
 }

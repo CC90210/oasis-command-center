@@ -9,7 +9,7 @@
  * shows the connect line and a link instead of fields; a runner tool whose
  * computer is offline (runner_offline) says so and keeps its past runs, with no
  * Run button. A finished video run offers Download (the file) next to Open in
- * Library. No founders imports here, so a per-workspace Toolkit page can mount
+ * Extracted videos. No founders imports here, so a per-workspace Toolkit page can mount
  * the same grid later; the download URL comes in as a prefix.
  *
  * The first render shows no time and no run (runs load after mount), so the
@@ -50,7 +50,7 @@ export type ToolGridProps = {
   catalog: ToolCatalog;
   runEndpoint?: string;
   jobsEndpoint?: string;
-  /** A download opens in the Library at this prefix + its asset id. */
+  /** A finished extract opens at this prefix + its asset id (Content > Extracted videos). */
   assetHrefPrefix: string;
   /** Download saves the file from this prefix + asset id + "/download"; empty = no Download button. */
   assetDownloadPrefix?: string;
@@ -363,7 +363,7 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
                 )}
                 {j.status === "done" && j.asset_id && (
                   <a className="text-accent hover:underline" href={`${assetHrefPrefix}${j.asset_id}`}>
-                    Open in Library
+                    Open in Extracted videos
                   </a>
                 )}
                 {j.status === "failed" && j.error_message && <span className="w-full">{j.error_message}</span>}
@@ -405,7 +405,7 @@ export function LatestRun({ job, tool, assetHrefPrefix, assetDownloadPrefix = ""
           )}
           {job.asset_id && (
             <a href={`${assetHrefPrefix}${job.asset_id}`} className={`btn-secondary inline-flex items-center ${TAP}`}>
-              Open in Library
+              Open in Extracted videos
             </a>
           )}
         </div>

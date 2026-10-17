@@ -34,7 +34,7 @@ function check(name: string, fn: () => void) {
 
 async function main() {
   const { teamRowLine } = await import("../components/settings/YourComputersCard");
-  // timeAgo() (inside YourComputersCard.tsx) reads the real wall clock
+  // timeAgo() (lib/devices/presence.ts) reads the real wall clock
   // (Date.now()), not an injectable "now" -- so RECENT/OLD must be relative
   // to the ACTUAL current time, never a fixed calendar date, or "X ago"
   // reads as "just now" (ms < 0) whenever the fixed date is in the future
@@ -80,6 +80,13 @@ async function main() {
     assert.equal(teamRowLine("CC's computer", "CC", "busy", null, RECENT, NOW), "CC's computer · Busy, finishing a reply");
     assert.equal(teamRowLine("CC's computer", "CC", "offline", null, OLD, NOW), "CC's computer · Offline since 20 min ago");
     assert.match(teamRowLine("CC's computer", "CC", "blocked:subscription_auth_failure", null, RECENT, NOW), /Claude Code is signed out/);
+  });
+
+  check("an offline team row older than an hour names the moment it went quiet, never 'N h ago' (the 2026-10-16 presence audit)", () => {
+    const THREE_HOURS = new Date(NOW - 3 * 3_600_000).toISOString();
+    const line = teamRowLine("CC's computer", "CC", "offline", null, THREE_HOURS, NOW);
+    assert.match(line, /^CC's computer \S+ Offline since \S/);
+    assert.doesNotMatch(line, /\bago\b/, `a duration where a moment belongs: ${line}`);
   });
 
   const { RUNTIME_STATUS_WORDS: W } = await import("../lib/bridge-cli-status");

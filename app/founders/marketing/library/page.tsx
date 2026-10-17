@@ -47,30 +47,42 @@
  * pill with a count, and every archived tile carries Restore.
  */
 
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { LayoutGrid, Smartphone } from "lucide-react";
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
+  assetMetaView,
+  hookVariantCards,
+  icpSegmentLabel,
+  isPackId,
+  isSegmentId,
+  packLabel,
+} from "@/lib/founders/library-meta";
+import {
   DEGRADED_MARKETING_FACETS,
+  DEGRADED_META_FACETS,
   getBrandTabCounts,
   getLifecycleCounts,
   getMarketingFacets,
+  getMetaFacets,
   loadLibraryPage,
+  loadPackComparison,
   type LibraryPage,
 } from "@/lib/founders/marketing-queries";
 import {
-  BRAND_GROUPS,
   DEFAULT_BRAND_GROUP,
   LIFECYCLE,
   TRACKS,
+  assetHref,
   brandGroupFor,
   channelLabel,
   channelsForTrack,
   isAssetStatus,
-  isBrandGroupKey,
+  isLibraryBrandGroupKey,
+  LIBRARY_BRAND_GROUPS,
   authorName,
   isLifecycle,
   libraryHref,
@@ -90,6 +102,8 @@ import {
   type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
+import { EXTRACTED_ROOT } from "@/lib/founders/extracted-videos";
+import { HookCompare } from "@/components/founders/HookCompare";
 import { AssetTile, MarketingEmpty } from "@/components/founders/marketing-shared";
 
 export const dynamic = "force-dynamic";
@@ -111,6 +125,8 @@ export default async function MarketingLibraryPage({
     channel?: string;
     brand?: string;
     author?: string;
+    icp?: string;
+    pack?: string;
     status?: string;
     lifecycle?: string;
     page?: string;
@@ -121,15 +137,26 @@ export default async function MarketingLibraryPage({
   if (!founder) notFound();
 
   const sp = await searchParams;
+  // The Video extractor's saves left the Library (CC, 2026-10-17: "a separate
+  // category ... rather than the main library"): an old Downloads link lands on
+  // their own page.
+  if (sp.group === "downloads") {
+    const n = parseLibraryPage(sp.page);
+    redirect(n > 1 ? `${EXTRACTED_ROOT}?page=${n}` : EXTRACTED_ROOT);
+  }
   // An unknown ?group= falls back to the default tab rather than 404ing or
   // showing everything — a bad tab name is a typo, not a request for a wider view.
-  const group: BrandGroupKey = isBrandGroupKey(sp.group) ? sp.group : DEFAULT_BRAND_GROUP;
+  const group: BrandGroupKey = isLibraryBrandGroupKey(sp.group) ? sp.group : DEFAULT_BRAND_GROUP;
   const track = isTrack(sp.track) ? sp.track : undefined;
   const channel = isChannel(sp.channel) ? (sp.channel as Channel) : undefined;
   const brand = typeof sp.brand === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(sp.brand)
     ? sp.brand
     : undefined;
   const author = typeof sp.author === "string" && sp.author.length <= 320 ? sp.author : undefined;
+  // Audience (meta.icp_segment) and pack (meta.pack_id): kept in the URL like
+  // every other filter, validated so an arbitrary string never reaches the query.
+  const icp = isSegmentId(sp.icp) ? sp.icp : undefined;
+  const pack = isPackId(sp.pack) ? sp.pack : undefined;
   // Studio's pipeline tiles link here with ?status=; validated against the
   // canonical list so an arbitrary string never reaches the query.
   const status = isAssetStatus(sp.status) ? sp.status : undefined;
@@ -150,15 +177,23 @@ export default async function MarketingLibraryPage({
   // and signs media for those rows only; the tab and pill numbers come from
   // COUNT queries. The page used to read up to 200 rows and sign every one, and
   // the browser then fetched media for every tile: minutes, not seconds.
-  const [pageOrNull, facets, lc, tabCounts] = await Promise.all([
+  //
+  // A CHOSEN PACK IS THE ONE EXCEPTION: it is read whole (loadPackComparison, up
+  // to PACK_COMPARE_CAP assets, never paged), because the hook comparison sorts
+  // and plays what it is given and a comparison of one page of a larger pack
+  // would pick a winner from a slice.
+  const [pageOrNull, facets, metaFacets, lc, tabCounts] = await Promise.all([
     safe<LibraryPage | null>(
       "marketing.library",
-      loadLibraryPage(founder.tenantId, {
-        group, track, channel, brand, author, status, lifecycle, page: requestedPage,
-      }),
+      pack
+        ? loadPackComparison(founder.tenantId, { group, track, channel, brand, author, icp, pack, status, lifecycle })
+        : loadLibraryPage(founder.tenantId, {
+            group, track, channel, brand, author, icp, pack, status, lifecycle, page: requestedPage,
+          }),
       null,
     ),
     safe("marketing.library.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
+    safe("marketing.library.meta", getMetaFacets(founder.tenantId, { group, lifecycle, status }), DEGRADED_META_FACETS),
     safe("marketing.library.lifecycle", getLifecycleCounts(founder.tenantId, group), {
       counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
       degraded: true,
@@ -179,7 +214,8 @@ export default async function MarketingLibraryPage({
   const signed = assetsOrNull ?? [];
   const total = pageOrNull?.total ?? 0;
   const currentPage = pageOrNull?.page ?? 1;
-  const pageCount = libraryPageCount(total, pageOrNull?.pageSize);
+  // A chosen pack is one unpaged page (see above), so there is no pager for it.
+  const pageCount = pack ? 1 : libraryPageCount(total, pageOrNull?.pageSize);
   const firstShown = signed.length ? (currentPage - 1) * (pageOrNull?.pageSize ?? 0) + 1 : 0;
   const lastShown = firstShown ? firstShown + signed.length - 1 : 0;
 
@@ -211,15 +247,34 @@ export default async function MarketingLibraryPage({
   // Every link on the page goes through libraryHref (lib/founders-marketing-core.ts),
   // which keeps every filter unless one is explicitly changed; the pager keeps
   // them all and changes only the page.
-  const here = { group, track, channel, brand, author, status, lifecycle, view };
+  const here = { group, track, channel, brand, author, icp, pack, status, lifecycle, view };
   const filterHref = (next: LibraryHrefChange) => libraryHref(here, next);
   const pageHref = (n: number) => filterHref({ page: n });
   // This exact view - tab, filters, view and page - for the asset page's
   // "Library" link to come back to.
   const thisView = pageHref(currentPage);
 
-  const activeGroup = BRAND_GROUPS.find((g) => g.key === group)!;
+  const activeGroup = LIBRARY_BRAND_GROUPS.find((g) => g.key === group)!;
   const filtered = !!(track || channel || brand || author || status || lifecycle);
+
+  // The audience and pack options for THIS view (getMetaFacets). A chosen value
+  // that the view holds nothing of (a bookmark, an archived-only pack) is still
+  // drawn, lit, so the filter that is narrowing the grid can always be cleared.
+  const segmentOptions =
+    icp && !metaFacets.segments.some((s) => s.id === icp)
+      ? [...metaFacets.segments, { id: icp, count: 0 }]
+      : metaFacets.segments;
+  // A pack belongs to one audience: with an audience chosen, only its packs.
+  const inAudience = metaFacets.packs.filter((p) => !icp || p.icp === icp);
+  const packOptions =
+    pack && !inAudience.some((p) => p.id === pack)
+      ? [...inAudience, { id: pack, icp: icp ?? null, count: 0 }]
+      : inAudience;
+  // A pack chosen: its variants are compared side by side (HookCompare) instead
+  // of drawn as phones.
+  const comparing = !!pack && signed.length > 0;
+  // The pack holds more than the comparison reads (PACK_COMPARE_CAP): say so.
+  const packCapped = comparing && total > signed.length;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -245,7 +300,7 @@ export default async function MarketingLibraryPage({
           bodies of work, and it should not look like the facets that narrow
           within one. */}
       <div className="-mb-px flex flex-wrap items-end gap-1 border-b border-bg-border">
-        {BRAND_GROUPS.map((g) => {
+        {LIBRARY_BRAND_GROUPS.map((g) => {
           const n = countFor(g.key);
           const active = g.key === group;
           return (
@@ -330,6 +385,49 @@ export default async function MarketingLibraryPage({
             />
           ))}
         </div>
+      )}
+
+      {/* Audience and pack (CC, 2026-10-08, through Maven). Who a creative was
+          made for (meta.icp_segment) and the pack of hook variants it belongs to
+          (meta.pack_id). Both rows draw only when the view holds some (or one is
+          already chosen), so a library without them is unchanged. Choosing a
+          pack swaps the grid for the hook comparison. */}
+      {(segmentOptions.length > 0 || icp) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Audience</span>
+          <FilterPill href={filterHref({ icp: null, pack: null })} label="All" active={!icp} subtle />
+          {segmentOptions.map((s) => (
+            <FilterPill
+              key={s.id}
+              href={filterHref({ icp: s.id })}
+              label={`${icpSegmentLabel(s.id)} ${s.count}`}
+              title={s.id}
+              active={icp === s.id}
+              subtle
+            />
+          ))}
+        </div>
+      )}
+      {(packOptions.length > 0 || pack) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">Pack</span>
+          <FilterPill href={filterHref({ pack: null })} label="All" active={!pack} subtle />
+          {packOptions.map((p) => (
+            <FilterPill
+              key={p.id}
+              href={filterHref({ pack: p.id })}
+              label={`${packLabel(p.id)} ${p.count}`}
+              title={p.id}
+              active={pack === p.id}
+              subtle
+            />
+          ))}
+        </div>
+      )}
+      {metaFacets.degraded && (
+        <p className="text-[11px] text-fg-dim">
+          The audience and pack filters did not fully load, so some may be missing or low. Nothing has been lost.
+        </p>
       )}
 
       {/* A status filter arrives from Studio's pipeline tiles, never from a pill
@@ -426,14 +524,17 @@ export default async function MarketingLibraryPage({
           {/* Phone frames are the default (CC: "the preferred iPhone view");
               Grid is the plain card grid, where a video is still a phone
               (AssetTile). The page you are on is kept. */}
-          <div className="flex items-center gap-1" role="group" aria-label="Library layout">
-            <ViewLink href={filterHref({ view: "phone", page: currentPage })} active={view === "phone"} label="Phone">
-              <Smartphone className="h-3.5 w-3.5" />
-            </ViewLink>
-            <ViewLink href={filterHref({ view: "grid", page: currentPage })} active={view === "grid"} label="Grid">
-              <LayoutGrid className="h-3.5 w-3.5" />
-            </ViewLink>
-          </div>
+          {/* The comparison is its own layout, so the toggle has nothing to switch. */}
+          {!comparing && (
+            <div className="flex items-center gap-1" role="group" aria-label="Library layout">
+              <ViewLink href={filterHref({ view: "phone", page: currentPage })} active={view === "phone"} label="Phone">
+                <Smartphone className="h-3.5 w-3.5" />
+              </ViewLink>
+              <ViewLink href={filterHref({ view: "grid", page: currentPage })} active={view === "grid"} label="Grid">
+                <LayoutGrid className="h-3.5 w-3.5" />
+              </ViewLink>
+            </div>
+          )}
         </div>
       )}
 
@@ -459,6 +560,10 @@ export default async function MarketingLibraryPage({
                 ? "Nothing at this stage"
                 : lifecycle
                   ? `Nothing ${lifecycleLabel(lifecycle).toLowerCase()}`
+                  : pack
+                  ? "Nothing in this pack"
+                  : icp
+                  ? "Nothing for this audience"
                   : track || channel
                     ? "Nothing in this channel yet"
                     : author
@@ -474,6 +579,8 @@ export default async function MarketingLibraryPage({
                 ? "No assets are sitting at this stage right now. Clear the stage to see the rest of the library."
                 : lifecycle
                   ? `Nothing in this tab is ${lifecycleHint(lifecycle)}. The library is not empty — pick another state above to see the rest.`
+                  : pack || icp
+                  ? "No assets in this tab carry that audience or pack. Clear the filter to see the rest of the library."
                   : track || channel
                     ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
                     : author
@@ -489,9 +596,28 @@ export default async function MarketingLibraryPage({
         </Card>
       ) : (
         <>
-          {/* Phones take as many columns as fit at 232px or wider: narrower than
+          {comparing && pack ? (
+            // A pack is chosen: its variants, hook against hook, instead of phones.
+            // Every filter above still applies (the variants shown are the ones the
+            // pills describe), and the links come back to this exact view.
+            // A pack larger than the cap shows its newest PACK_COMPARE_CAP and says so.
+            <HookCompare
+              heading={
+                packCapped
+                  ? `${packLabel(pack)} - first ${signed.length} of ${total} variants`
+                  : `${packLabel(pack)} - ${signed.length} ${signed.length === 1 ? "variant" : "variants"}`
+              }
+              note={
+                packCapped
+                  ? `Showing the first ${signed.length} of ${total} variants in this pack, newest first. Archive or delete the ones you are done with to see the rest.`
+                  : undefined
+              }
+              cards={hookVariantCards(signed, (id) => assetHref(id, thisView))}
+            />
+          ) : (
+          /* Phones take as many columns as fit at 232px or wider: narrower than
               that the verdict row under each phone cannot fit and the page
-              scrolls sideways (it did at 390px and 768px with fixed breakpoints). */}
+              scrolls sideways (it did at 390px and 768px with fixed breakpoints). */
           <div
             className={
               view === "phone"
@@ -503,32 +629,38 @@ export default async function MarketingLibraryPage({
                 shape. Without it the grid stretches every tile to the tallest in its row,
                 leaving a 9:16 tile's worth of empty panel beside every 16:9 one — dead
                 space created BY the fix. */}
-            {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH, slideUrls }) => (
-              <AssetTile
-                key={asset.id}
-                id={asset.id}
-                title={asset.title}
-                brandName={asset.brand_name}
-                channel={asset.channel}
-                status={asset.status}
-                publishedAt={asset.published_at}
-                hook={asset.hook}
-                aspect={asset.aspect}
-                durationS={asset.duration_s}
-                format={asset.format}
-                platforms={asset.platforms}
-                assetType={asset.asset_type}
-                slideUrls={slideUrls}
-                playbackUrl={playbackUrl}
-                posterUrl={posterUrl}
-                mediaW={mediaW}
-                mediaH={mediaH}
-                openReviews={asset.open_reviews}
-                presentation={view}
-                returnTo={thisView}
-              />
-            ))}
+            {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH, slideUrls }) => {
+              const meta = assetMetaView(asset.meta);
+              return (
+                <AssetTile
+                  key={asset.id}
+                  id={asset.id}
+                  title={asset.title}
+                  brandName={asset.brand_name}
+                  channel={asset.channel}
+                  status={asset.status}
+                  publishedAt={asset.published_at}
+                  hook={asset.hook}
+                  aspect={asset.aspect}
+                  durationS={asset.duration_s}
+                  format={asset.format}
+                  platforms={asset.platforms}
+                  assetType={asset.asset_type}
+                  slideUrls={slideUrls}
+                  playbackUrl={playbackUrl}
+                  posterUrl={posterUrl}
+                  mediaW={mediaW}
+                  mediaH={mediaH}
+                  openReviews={asset.open_reviews}
+                  presentation={view}
+                  returnTo={thisView}
+                  offerSlug={meta.offerSlug}
+                  burnedCaptions={meta.burnedCaptions}
+                />
+              );
+            })}
           </div>
+          )}
           {pageCount > 1 && (
             <nav className="flex flex-wrap items-center justify-center gap-1.5 pt-2" aria-label="Library pages">
               {currentPage > 1 ? (
@@ -588,20 +720,26 @@ function FilterPill({
   label,
   active,
   subtle = false,
+  title,
 }: {
   href: string;
   label: string;
   active: boolean;
   subtle?: boolean;
+  /** The raw value behind a friendly label (an audience or pack id), for hover. */
+  title?: string;
 }) {
-  const base = "px-3 py-1.5 rounded-full text-xs border transition-all";
+  // `max-w-full` and anywhere-wrapping: a pack id with no spaces in it (the label
+  // falls back to the raw id) must wrap inside the pill, not push the page wider
+  // than a phone.
+  const base = "px-3 py-1.5 rounded-full text-xs border transition-all max-w-full [overflow-wrap:anywhere]";
   const cls = active
     ? "bg-accent-soft text-accent border-accent/30 font-semibold"
     : subtle
       ? "bg-bg-deep/40 text-fg-dim border-bg-border hover:bg-bg-hover font-medium"
       : "bg-bg-elev text-fg-muted border-bg-border hover:bg-bg-hover font-medium";
   return (
-    <Link href={href} className={`${base} ${cls}`}>
+    <Link href={href} title={title} className={`${base} ${cls}`}>
       {label}
     </Link>
   );

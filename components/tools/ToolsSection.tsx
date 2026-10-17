@@ -30,7 +30,9 @@ import type { ToolCatalog } from "@/lib/tools/types";
 
 export async function ToolsSection({
   tenantId,
-  assetHrefPrefix = "/founders/marketing/asset/",
+  // A finished extract opens Content > Extracted videos with that video first
+  // (lib/founders/extracted-videos.ts extractedHref), not the Library.
+  assetHrefPrefix = "/founders/marketing/extracted?video=",
   assetDownloadPrefix = "/api/founders/marketing/assets/",
   showCodes = false,
   className = "mb-8",

@@ -204,7 +204,7 @@ async function main() {
   // Times are taken from the clock when they are written, and every "N ago"
   // the checks below assert is either in hours (stable for half an hour of
   // test time) or computed against an explicit clock: the cards compute "ago"
-  // from the real clock, and a slow run must not turn "1m ago" into "2m ago"
+  // from the real clock, and a slow run must not turn "1 min ago" into "2 min ago"
   // (PR #558 review: 4 of 7 runs failed that way on a loaded machine).
   const at = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
   const TESTED_AGO_MS = 2 * 60 * 60_000;
@@ -305,7 +305,7 @@ async function main() {
     const oasis = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id })).telegram;
     assert.deepEqual([oasis.kind, oasis.label], ["configured", "Set up on OASIS's server · not tested yet"], "the env-key heartbeat must not read as verified");
     const client = (await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id })).telegram;
-    assert.deepEqual([client.kind, client.label], ["connected", "Connected · verified 2h ago"]);
+    assert.deepEqual([client.kind, client.label], ["connected", "Connected · verified 2 h ago"]);
   });
 
   await check("System health's integration card and the Connections card agree a key-name heartbeat is not a connection", async () => {
@@ -675,7 +675,7 @@ async function main() {
 
     // Its next send goes out: "last send worked", and the scan keeps that too.
     // The card is read against the clock the send was written with, so a slow
-    // run cannot turn "1m ago" into "2m ago".
+    // run cannot turn "1 min ago" into "2 min ago".
     const sentMs = Date.now() - 60_000;
     await db.execute({
       sql: "UPDATE integrations_health SET status = 'healthy', last_error = NULL, metadata = ?, last_ping_at = ? WHERE profile_id = ? AND service = 'gws'",
@@ -683,7 +683,7 @@ async function main() {
     });
     assert.equal((await bridgePing()).real_results_kept, 1);
     assert.equal(JSON.parse(String((await ccRow("gws")).metadata)).source, "send_gateway.smtp_send");
-    assert.equal(kl(await google(sentMs + 60_000)), "connected | Connected · last send worked 1m ago");
+    assert.equal(kl(await google(sentMs + 60_000)), "connected | Connected · last send worked 1 min ago");
 
     // The rail: every app OASIS has set up (Telegram, Google) is proven, so its dot is green (W2).
     const facts = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
@@ -758,9 +758,9 @@ async function main() {
 
     // The other way: the sender's last send worked, and a forged refusal does not turn it red.
     await senderWrites("healthy");
-    assert.equal(await google(), "connected | Connected · last send worked 2h ago");
+    assert.equal(await google(), "connected | Connected · last send worked 2 h ago");
     await postAs("status-integrity-rep-bridge-token", { gws: { status: "down", last_error: "SMTP authentication failed", metadata: {} } });
-    assert.equal(await google(), "connected | Connected · last send worked 2h ago", "a forged refusal is not the sender's");
+    assert.equal(await google(), "connected | Connected · last send worked 2 h ago", "a forged refusal is not the sender's");
 
     // CC's own computer is no different: through the route, the sender's words
     // are a computer's report. It replaces his row, so the card has no send
@@ -770,7 +770,7 @@ async function main() {
     assert.equal(await google(), "configured | Set up on OASIS's server · not tested yet");
     // The sender's next real write is read again (and the later checks start from a send that worked).
     await senderWrites("healthy");
-    assert.equal(await google(), "connected | Connected · last send worked 2h ago");
+    assert.equal(await google(), "connected | Connected · last send worked 2 h ago");
   });
 
   // -- 5d. Lines that name an app say no more than its card (PR #553 review F3, F4, F7) --
@@ -860,7 +860,7 @@ async function main() {
     const noBot = "Not sent: no Telegram bot connected";
     assert.deepEqual(noteFor(noBot, null), [noBot, setup], "card not read: the record as it was");
     assert.deepEqual(noteFor(noBot, { kind: "not_connected", label: "Not connected" }), [noBot, setup]);
-    assert.deepEqual(noteFor(noBot, { kind: "connected", label: "Connected · verified 2m ago" }), ["Not sent: no Telegram bot was connected then", model.FEED_NEEDS_HREF]);
+    assert.deepEqual(noteFor(noBot, { kind: "connected", label: "Connected · verified 2 min ago" }), ["Not sent: no Telegram bot was connected then", model.FEED_NEEDS_HREF]);
     const clientBCard = await loadTelegramCard(CLIENT_B);
     assert.ok(clientBCard.ok);
     assert.deepEqual(

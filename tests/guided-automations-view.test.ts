@@ -51,7 +51,6 @@ import {
   pickDepartment,
   planFor,
   readyMadeCount,
-  relativeTime,
   requiredSlugs,
   reviewActions,
   reviewSentence,
@@ -652,27 +651,29 @@ async function main() {
     assert.deepEqual(["done", "failed", "missed", "cancelled", "running", "queued", "weird"].map(runStatusLabel), ["Finished", "Failed", "Missed", "Cancelled", "Running now", "Waiting to start", "Unknown"]);
   });
 
-  await check("relative time reads like a person", () => {
-    const r = (ms: number) => relativeTime(NOW + ms, NOW);
-    assert.equal(r(3 * 3_600_000), "in 3 hours");
-    assert.equal(r(60_000), "in 1 minute");
-    assert.equal(r(5 * 60_000), "in 5 minutes");
-    assert.equal(r(2 * 86_400_000), "in 2 days");
-    assert.equal(r(-2 * 86_400_000), "2 days ago");
-    assert.equal(r(-3_600_000), "1 hour ago");
-    assert.equal(r(20_000), "in less than a minute");
-    assert.equal(r(-20_000), "just now");
+  await check("the lines say the time the one time-ago way: ahead for the next run, behind for the last (lib/devices/presence.ts)", () => {
+    const next = (ms: number) => nextRunLine(itemFrom(draftOf("daily_brief", "chief_of_staff"), "on", { nextRuns: [new Date(NOW + ms).toISOString()] }), NOW);
+    const last = (ms: number) => lastRunHead({ at: new Date(NOW + ms).toISOString(), status: "failed", summary: "It could not read the pipeline.", receiptId: "r1", preview: false }, NOW);
+    assert.match(next(3 * 3_600_000), /\(in 3 h\)$/);
+    assert.match(next(60_000), /\(in 1 min\)$/);
+    assert.match(next(5 * 60_000), /\(in 5 min\)$/);
+    assert.match(next(2 * 86_400_000), /\(in 2 d\)$/);
+    assert.match(next(20_000), /\(in under a minute\)$/);
+    assert.match(last(-2 * 86_400_000), /\(2 d ago\)$/);
+    assert.match(last(-3_600_000), /\(1 h ago\)$/);
+    assert.match(last(-20_000), /\(just now\)$/);
+    assert.match(last(20_000), /\(just now\)$/, "a last run never reads as in the future");
   });
 
   await check("the next-run line: manual, paused, needs attention and on each say the truth", () => {
     const on = itemFrom(draftOf("daily_brief", "chief_of_staff"), "on", { nextRuns: [new Date(NOW + 3 * 3_600_000).toISOString()] });
-    assert.equal(nextRunLine(on, NOW), "Next run: Thu, Oct 15, 11:00 AM EDT (in 3 hours)");
+    assert.equal(nextRunLine(on, NOW), "Next run: Thu, Oct 15, 11:00 AM EDT (in 3 h)");
     assert.equal(nextRunLine(on, null), "Next run: Thu, Oct 15, 11:00 AM EDT", "no clock yet: the time alone");
     assert.equal(nextRunLine({ ...on, status: "paused", nextRuns: [] }, NOW), "Not scheduled while it is paused. Turn it on to start the schedule.");
     const problem = { code: "missing_connection:google-workspace", message: "Google is not connected.", repair: null };
     assert.equal(nextRunLine({ ...on, status: "needs_attention", problems: [problem], nextRuns: [] }, NOW), "Not scheduled until the problem below is fixed.");
     // No problem listed means only its last run failed: it is still scheduled, so the line must say when it tries again.
-    assert.equal(nextRunLine({ ...on, status: "needs_attention", problems: [] }, NOW), "Its last run failed. Next try: Thu, Oct 15, 11:00 AM EDT (in 3 hours)");
+    assert.equal(nextRunLine({ ...on, status: "needs_attention", problems: [] }, NOW), "Its last run failed. Next try: Thu, Oct 15, 11:00 AM EDT (in 3 h)");
     assert.equal(runStatusLabel("interrupted"), "Interrupted");
     assert.equal(runStatusLabel("something_new"), "Unknown");
     assert.equal(nextRunLine({ ...on, nextRuns: [] }, NOW), "The next run could not be worked out.");
@@ -682,7 +683,7 @@ async function main() {
 
   await check("the last-run head names the result and the time, and a bad time is not printed", () => {
     const run: LastRunView = { at: new Date(NOW - 2 * 3_600_000).toISOString(), status: "failed", summary: "It could not read the pipeline.", receiptId: "r1", preview: false };
-    assert.equal(lastRunHead(run, NOW), "Failed, Thu, Oct 15, 6:00 AM EDT (2 hours ago)");
+    assert.equal(lastRunHead(run, NOW), "Failed, Thu, Oct 15, 6:00 AM EDT (2 h ago)");
     assert.equal(lastRunHead(run, null), "Failed, Thu, Oct 15, 6:00 AM EDT");
     assert.equal(lastRunHead({ ...run, at: "not a time" }, NOW), "Failed");
     assert.equal(instantText("nope"), null);

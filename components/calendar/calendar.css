@@ -195,6 +195,26 @@
 .cal .input.w-20 { width: 5rem; }
 .cal .input.py-0, .cal .select.py-0 { padding-block: 0; }
 
+/* The weekly-hours time fields in Booking settings (BookingLinkCard). A day's
+   two fields share one row, so below 360px each is about 113px wide and the
+   clock icon takes about 29px of that: "10:00 AM" lost its last letter.
+   Measured in Chromium at 320px, the visible area goes from 58px to 87px for
+   65px of text. The icon only opens the picker, which the field itself does on
+   a phone, so it goes. (Padding would not do this job: `.input` comes after
+   Tailwind's utilities and beats them, and 8px of padding left 1.6px to spare.) */
+@media (max-width: 359.98px) {
+  .cal .input.time-field::-webkit-calendar-picker-indicator { display: none; }
+}
+
+/* The two time fields of "Edit times" in the restore-routine card
+   (RoutineRestore): 12px type, 8px sides, each as wide as its own text needs.
+   `.input` comes after Tailwind's utilities, so the w-[6.5rem], px-2 and
+   text-[12px] the card used to carry did nothing: each field came out 125.7px
+   wide in 14px type, a row ran 30px past a 320px card and the card scrolled
+   sideways. `width: auto` sizes a field to its text, which a wider font cannot
+   clip the way a fixed width would. */
+.cal .input.routine-time { width: auto; padding-inline: 0.5rem; font-size: 12px; }
+
 /* Weekday/weekend toggles and view switcher share this segmented control. */
 .cal .seg {
   border: 1px solid rgb(var(--c-hairline));
