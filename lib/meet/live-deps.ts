@@ -8,6 +8,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getTursoClient } from "@/lib/turso";
 import type { MeetDeps } from "./handlers";
 import { meetIceServers } from "./ice";
+import { addMeetingToSchedule } from "./schedule";
 import { sfuClient } from "./sfu";
 
 export function liveMeetDeps(): MeetDeps {
@@ -19,6 +20,7 @@ export function liveMeetDeps(): MeetDeps {
       return s.ok ? { ok: true, tenantId: s.tenantId, userId: s.userId, isTrueAdmin: s.isTrueAdmin, email: s.email } : { ok: false };
     },
     ice: () => meetIceServers(),
+    schedule: (owner, room, opts) => addMeetingToSchedule(owner, room, opts),
     now: () => new Date(),
   };
 }

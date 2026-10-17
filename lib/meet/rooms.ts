@@ -190,6 +190,14 @@ export async function readMeetRoom(db: Client, where: { tenantId: string; roomId
   return rs.rows[0] ? toRoom(rs.rows[0] as unknown as Record<string, unknown>) : null;
 }
 
+/** The Schedule event a meeting made for later sits on (lib/meet/schedule.ts). */
+export async function setRoomCalendarEvent(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, eventId: string): Promise<void> {
+  await db.execute({
+    sql: "UPDATE meet_rooms SET calendar_event_id = ? WHERE tenant_id = ? AND id = ?",
+    args: [eventId, room.tenantId, room.id],
+  });
+}
+
 /** A workspace's rooms, newest first, for the Schedule's Meet panel. */
 export async function listMeetRooms(db: Client, where: { tenantId: string; limit?: number }): Promise<MeetRoom[]> {
   const limit = Math.min(Math.max(1, Math.floor(where.limit ?? 20)), 100);

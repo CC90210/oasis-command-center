@@ -32,14 +32,16 @@ function list<T>(v: unknown, min: number, max: number, item: (x: unknown) => T |
   return out;
 }
 
-export type CreateRoomBody = { title?: string; startsAt?: string | null; recordAudio?: boolean };
+export type CreateRoomBody = { title?: string; startsAt?: string | null; recordAudio?: boolean; timeZone?: string; minutes?: number };
 
-/** POST /api/calendar/meet: all optional. */
+/** POST /api/calendar/meet: all optional. A time (`startsAt`) also puts the meeting on the host's Schedule, in their `timeZone`. */
 export function parseCreateRoom(v: unknown): CreateRoomBody | null {
-  if (!isRecord(v) || !onlyKeys(v, ["title", "startsAt", "recordAudio"])) return null;
+  if (!isRecord(v) || !onlyKeys(v, ["title", "startsAt", "recordAudio", "timeZone", "minutes"])) return null;
   if (v.title !== undefined && (typeof v.title !== "string" || v.title.length > 400)) return null;
   if (v.startsAt !== undefined && v.startsAt !== null && (typeof v.startsAt !== "string" || !Number.isFinite(Date.parse(v.startsAt)))) return null;
   if (v.recordAudio !== undefined && typeof v.recordAudio !== "boolean") return null;
+  if (v.timeZone !== undefined && (typeof v.timeZone !== "string" || v.timeZone.length < 1 || v.timeZone.length > 64)) return null;
+  if (v.minutes !== undefined && (!Number.isInteger(v.minutes) || (v.minutes as number) < 15 || (v.minutes as number) > 480)) return null;
   return v as CreateRoomBody;
 }
 

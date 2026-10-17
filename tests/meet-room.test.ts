@@ -115,11 +115,16 @@ async function main() {
   const sfu = fakeSfu();
   const signedOut = async (): Promise<MeetSession> => ({ ok: false });
   const as = (userId: string, isTrueAdmin = false, tenantId = OASIS) => async (): Promise<MeetSession> => ({ ok: true, tenantId, userId, isTrueAdmin, email: "cc@oasisai.work" });
+  const scheduled: Array<{ owner: { tenantId: string; userId: string }; startsAt: string | null; timeZone: string; minutes?: number }> = [];
   const deps = (over: Partial<MeetDeps> = {}): MeetDeps => ({
     db,
     sfu: () => sfu.client,
     session: signedOut,
     ice: async () => [{ urls: ["stun:stun.cloudflare.com:3478"] }],
+    schedule: async (owner, room, opts) => {
+      scheduled.push({ owner, startsAt: room.startsAt, timeZone: opts.timeZone, minutes: opts.minutes });
+      return { ok: true, eventId: `evt-${scheduled.length}` };
+    },
     now: () => new Date(clock),
     ...over,
   });
@@ -145,6 +150,26 @@ async function main() {
     const list = (await json(await handleListRooms(deps({ session: as(ADON) })))).rooms as Json[];
     assert.ok(list.some((r) => r.code === code) && !list.some((r) => r.title === "Theirs"), "the list is the workspace's own rooms");
     assert.equal(list.find((r) => r.code === code)?.mine, false, "Adon sees CC's room as not his own");
+  });
+
+  await check("a meeting made for later goes on the host's Schedule, in their time zone; the link works even when it cannot", async () => {
+    const make = async (body: Record<string, unknown>, over: Partial<MeetDeps> = {}) =>
+      json(await handleCreateRoom(request("/api/calendar/meet", { body }), deps({ session: as(CC), ...over })));
+    const before = scheduled.length;
+    const later = await make({ title: "Follow-up", startsAt: "2026-10-21T14:00:00-04:00", timeZone: "America/Toronto", minutes: 45 });
+    assert.deepEqual(later.schedule, { added: true });
+    assert.deepEqual(scheduled.at(-1), { owner: { tenantId: OASIS, userId: CC }, startsAt: "2026-10-21T18:00:00.000Z", timeZone: "America/Toronto", minutes: 45 });
+    const row = await readMeetRoomByCode(db, String((later.room as Json).code).replace(/-/g, ""));
+    assert.equal(row?.calendarEventId, `evt-${scheduled.length}`, "the room remembers its Schedule event");
+    const shabbat = await make({ startsAt: "2026-10-24T16:00:00Z", timeZone: "America/Toronto" }, { schedule: async () => ({ ok: false, reason: "shabbat_protected" }) });
+    assert.deepEqual(shabbat.schedule, { added: false, why: "It falls on Shabbat, which your Schedule keeps free." });
+    assert.ok((shabbat.room as Json).link, "the link is made either way");
+    const noZone = await make({ startsAt: "2026-10-21T18:00:00Z" });
+    assert.deepEqual(noZone.schedule, { added: false, why: "Your time zone could not be read." });
+    const now = await make({});
+    assert.equal(now.schedule, undefined, "Start now has no time, so nothing goes on the Schedule");
+    assert.equal(scheduled.length, before + 1, "the Schedule was asked once: for the meeting with a time and a zone");
+    assert.equal((await handleCreateRoom(request("/api/calendar/meet", { body: { minutes: 5 } }), deps({ session: as(CC) }))).status, 400, "a length outside 15-480 minutes is refused");
   });
 
   // people join

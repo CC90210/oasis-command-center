@@ -50,7 +50,8 @@ import {
   touchParticipant,
   type MeetPresence,
 } from "./participants";
-import { createMeetRoom, displayMeetCode, listMeetRooms, parseMeetCode, readMeetRoomByCode, type MeetRoom } from "./rooms";
+import { createMeetRoom, displayMeetCode, listMeetRooms, parseMeetCode, readMeetRoomByCode, setRoomCalendarEvent, type MeetRoom } from "./rooms";
+import { scheduleReasonWords, type ScheduleOutcome } from "./schedule";
 import { cutSession, type SfuClient } from "./sfu";
 
 export type { MeetSession };
@@ -61,6 +62,8 @@ export type MeetDeps = {
   sfu: () => SfuClient;
   session: () => Promise<MeetSession>;
   ice: () => Promise<RTCIceServerLike[]>;
+  /** Put a meeting made for later on its host's Schedule (lib/meet/schedule.ts addMeetingToSchedule). */
+  schedule: (owner: { tenantId: string; userId: string }, room: MeetRoom, opts: { timeZone: string; minutes?: number }) => Promise<ScheduleOutcome>;
   now: () => Date;
 };
 
@@ -127,7 +130,24 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
       recordAudio: body.recordAudio ?? true,
       now: deps.now(),
     });
-    return meetJson({ ok: true, room: { id: room.id, ...roomView(room), link: link(room), createdAt: room.createdAt, mine: true } }, 201);
+    // A meeting made for later also goes on the host's Schedule. The link works whether or not it could.
+    let schedule: { added: true } | { added: false; why: string } | undefined;
+    if (room.startsAt) {
+      const outcome = body.timeZone
+        ? await deps.schedule({ tenantId: session.tenantId, userId: session.userId }, room, { timeZone: body.timeZone, minutes: body.minutes })
+        : ({ ok: false, reason: "time_zone_invalid" } as const);
+      if (outcome.ok) {
+        await setRoomCalendarEvent(deps.db, room, outcome.eventId);
+        room.calendarEventId = outcome.eventId;
+        schedule = { added: true };
+      } else {
+        schedule = { added: false, why: scheduleReasonWords(outcome.reason) };
+      }
+    }
+    return meetJson(
+      { ok: true, room: { id: room.id, ...roomView(room), link: link(room), createdAt: room.createdAt, mine: true }, ...(schedule ? { schedule } : {}) },
+      201,
+    );
   } catch (err) {
     return meetFailure(err, "rooms.create");
   }
