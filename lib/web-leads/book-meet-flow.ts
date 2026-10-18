@@ -166,7 +166,7 @@ export function buildBookFounderBody(
   };
 }
 
-/* ── Copy ─────────────────────────────────────────────────────────────── */
+/* -- Copy --------------------------------------------------------------- */
 
 export const BOOK_MEET_COPY: Record<string, string> = {
   network: "We could not reach the server.",
@@ -238,7 +238,7 @@ export const BOOK_MEET_COPY: Record<string, string> = {
   calendar_create_failed: "Google or our records did not finish the booking.",
   calendar_reconcile_failed: "Google accepted the booking but we could not read it back.",
   calendar_read_failed: "Google Calendar could not be read just now.",
-  google_meet_link_missing: "Google created the event but has not returned the Meet link yet.",
+  google_meet_link_missing: "Google created the event but has not returned its video call link yet.",
   invalid_request: "Google rejected the booking details.",
   meeting_intent_lookup_failed: "Our records did not finish the booking.",
   meeting_intent_insert_failed: "Our records did not finish the booking.",
@@ -272,7 +272,7 @@ export function bookMeetMessage(code: string, kind: BookMeetResult["kind"]): str
   return `${what} ${KIND_SENTENCE[kind]}`;
 }
 
-/* ── Classification ───────────────────────────────────────────────────── */
+/* -- Classification ----------------------------------------------------- */
 
 const FIELD_FOR: Record<string, BookMeetField> = {
   client_email_required: "email",
@@ -340,7 +340,7 @@ function classifyBooking(r: HttpResult): BookMeetResult {
   return { kind: "blocked", code, message: bookMeetMessage(code, "blocked") };
 }
 
-/* ── The flow ─────────────────────────────────────────────────────────── */
+/* -- The flow ----------------------------------------------------------- */
 
 export async function runBookMeetFlow(
   d: BookMeetDraft,

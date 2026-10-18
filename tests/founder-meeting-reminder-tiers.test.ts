@@ -10,9 +10,11 @@ import {
   reminderKindFor,
   reminderTierStillValid,
   SMS_STOP_FOOTER,
+  validateMeetingLink,
   withSmsFooter,
 } from "../lib/website-sales-meeting";
 import { countSegments } from "../lib/sms-segments";
+import { teamInviteOrigin } from "../lib/team-invite-email";
 
 const migration167 = readFileSync(
   "database/turso/167_founder_meeting_closed_loop.turso.sql",
@@ -35,6 +37,11 @@ assert.doesNotMatch(
   "delivery must branch on the numeric tier, never the legacy reporting kind",
 );
 
+const oasisMeetingLink = `${teamInviteOrigin()}/meet/abc-defg-hjk`;
+assert.equal(validateMeetingLink("https://meet.google.com/abc-defg-hij"), "https://meet.google.com/abc-defg-hij");
+assert.equal(validateMeetingLink(oasisMeetingLink), oasisMeetingLink);
+assert.throws(() => validateMeetingLink("https://evil.example/meet/abc-defg-hjk"), /google_meet_link_missing/);
+assert.throws(() => validateMeetingLink(`${teamInviteOrigin()}/meet/abc-defg-hil`), /google_meet_link_missing/);
 assert.deepEqual(FOUNDER_REMINDER_TIERS, [60, 30, 10]);
 assert.equal(reminderKindFor(60), "reminder_60");
 assert.equal(reminderKindFor(30), "reminder_30");
@@ -138,7 +145,13 @@ const clamped = clampSmsBody(
 assert(countSegments(clamped) <= 2, "outbound reminder stays within two SMS segments");
 assert.match(clamped, /meet\.google\.com\/abc-defg-hij/);
 assert(clamped.endsWith(SMS_STOP_FOOTER), "segment clamping never drops the STOP footer");
-assert.doesNotMatch(clamped, /detailed discovery item/, "agenda is dropped before protected content");
+assert.doesNotMatch(clamped, /detailed discovery item/, "agenda is dropped before protected content");const oasisClamped = clampSmsBody(
+  `${SMS_STOP_FOOTER}\n${"Long agenda text ".repeat(50)}\nJoin: ${oasisMeetingLink}`,
+  2,
+);
+assert.match(oasisClamped, /oasisai\.work\/meet\/abc-defg-hjk/);
+assert(oasisClamped.endsWith(SMS_STOP_FOOTER), "Oasis link clamping keeps protected compliance text");
+
 
 async function main() {
 const db = createClient({ url: ":memory:" });

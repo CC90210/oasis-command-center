@@ -17,7 +17,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
  * GET /api/forms/booking/slots), then takes the four details a call needs, then
  * books: the lead is created or matched once (POST /api/forms/submit, the "book"
  * form, lib/forms/oasis-book-seed.ts) and the call is booked with that lead's
- * token (POST /api/forms/booking). Same Google Meet invite, Sales pipeline move,
+ * token (POST /api/forms/booking). Same video call invite, Sales pipeline move,
  * sales-desk alert and Schedule copy as every other booking.
  *
  * When the "book" form is missing or switched off the page says so and points
@@ -28,7 +28,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Book a call | OASIS AI",
-  description: "Pick a time for a 30-minute Google Meet with OASIS AI.",
+  description: "Pick a time for a 30-minute video call with OASIS AI.",
   alternates: { canonical: "/book" },
   // Like every public form page: reached by link, not by search.
   robots: { index: false, follow: false },

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
+import { liveBookingMeetRooms } from "@/lib/booking/meet-room";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sendSmsDirectTwilio, tenantHasDirectTwilio } from "@/lib/sms-direct-twilio";
@@ -161,17 +162,17 @@ type SenderPass = {
 };
 
 /**
- * Whether an EMAIL row's sender may still send as themselves — mirrors
+ * Whether an EMAIL row's sender may still send as themselves -- mirrors
  * app/api/cron/dispatch-scheduled-sends senderMayDispatch. A founder-meeting
  * email goes out from the host's own Gmail, so a row queued before the host
  * was deactivated must not fire. Returns false once the row has been marked.
  * SMS rows never come here: they leave from the tenant's Twilio line.
  *
- *  - deactivated → permanent fail `sender_deactivated`; retrying cannot bring
+ *  - deactivated -> permanent fail `sender_deactivated`; retrying cannot bring
  *    the host back. Collected for the pass's operator alert.
- *  - not_member → today's behaviour: sendGmailAsOperator's own tenant-scoped
+ *  - not_member -> today's behaviour: sendGmailAsOperator's own tenant-scoped
  *    mailbox lookup decides.
- *  - read error → the normal retry path, never a send. Not cached, so the
+ *  - read error -> the normal retry path, never a send. Not cached, so the
  *    sender's next row asks again.
  */
 async function senderMayDispatch(db: Db, row: NotificationRow, pass: SenderPass): Promise<boolean> {
@@ -452,7 +453,7 @@ async function processRow(
       }
       // Derived from the row's tenant, fail-closed. Founder meetings are an
       // OASIS product, but the brand is resolved rather than assumed so this
-      // stays correct if the surface is ever offered to another tenant — and
+      // stays correct if the surface is ever offered to another tenant -- and
       // so a mapping gap surfaces as a failed row rather than as a reminder
       // signed by the wrong company.
       const reminderBrand = brandForTenant({ tenantId: row.tenant_id });
@@ -585,7 +586,7 @@ async function handle(req: NextRequest) {
   const stale = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
   let reconciliation: FounderMeetingReconciliationResult;
   try {
-    reconciliation = await reconcileFounderMeetingSagas({ now: new Date(now), limit: BATCH_LIMIT });
+    reconciliation = await reconcileFounderMeetingSagas({ now: new Date(now), limit: BATCH_LIMIT }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "meeting_saga_reconciliation_failed";
     console.error("[founder-meeting-reminders] saga reconciliation degraded", detail);

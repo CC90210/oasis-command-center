@@ -34,8 +34,8 @@ const page = readFileSync("app/pipeline/[id]/page.tsx", "utf8").replace(/\r\n/g,
 
 assert.match(lifecycle, /<LifecycleProgress activeIndex=\{activeMilestone\}/);
 assert.match(lifecycle, /aria-current=\{index === activeIndex \? "step"/);
-assert.match(lifecycle, /1 · Place the call/);
-assert.match(lifecycle, /2 · Choose one outcome/);
+assert.match(lifecycle, /1 - Place the call/);
+assert.match(lifecycle, /2 - Choose one outcome/);
 assert.match(lifecycle, /callOutcome === "attempted" \|\| callOutcome === "voicemail"/);
 assert.match(lifecycle, /callOutcome === "lost" \? \(/);
 assert.doesNotMatch(lifecycle, /role="checkbox"/, "qualification and confirmation use native controls");
@@ -43,8 +43,8 @@ assert.doesNotMatch(lifecycle, /role="checkbox"/, "qualification and confirmatio
 for (const step of ["Contact", "Host & time", "Agenda", "Confirm", "Review"]) {
   assert(lifecycle.includes(step), `booking keeps ${step} as a discrete screen`);
 }
-assert.match(lifecycle, /Create Google Meet invite/);
-assert.match(lifecycle, /Create Google Meet & send invite/);
+assert.match(lifecycle, /Create video call invite/);
+assert.match(lifecycle, /Create video call & send invite/);
 assert.match(lifecycle, /contactConfirmed &&[\s\S]*clientAgreedToTime &&[\s\S]*handoffComplete/);
 for (const inferred of [
   "effectiveContactConfirmed",
@@ -61,7 +61,7 @@ const coachingBranch = lifecycle.slice(coachingStart, coachingEnd);
 for (const control of ["<button", "<input", "<select", "<textarea"]) {
   assert(!coachingBranch.includes(control), `coaching mode must not mount ${control}`);
 }
-assert.match(coachingBranch, /Manager coaching view · read only/);
+assert.match(coachingBranch, /Manager coaching view - read only/);
 
 assert.match(page, /canReadOasisSalesTeamPipeline/);
 assert.match(page, /getOasisSalesRepRoster/);
@@ -159,7 +159,7 @@ for (const label of ["Revenue band", "Team size", "Primary bottleneck", "Current
 assert.match(
   page,
   /\["founder_meeting_booked",[\s\S]*?<HandoffSummary/,
-  "a booked lead must expose its verified Google Meet and Calendar receipt before the demo",
+  "a booked lead must expose its verified video call and Calendar receipt before the demo",
 );
 
 assert.match(lifecycle, /Call already happened/);

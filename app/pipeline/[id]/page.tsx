@@ -137,7 +137,7 @@ export default async function PipelineLeadDetailPage({
       <div className="space-y-4 animate-fade-in">
         <PageHeader
           title="Lead not found"
-          subtitle={`No accessible lead with id ${id.slice(0, 8)}…`}
+          subtitle={`No accessible lead with id ${id.slice(0, 8)}\u2026`}
           action={<BackToPipeline />}
         />
         <Card>
@@ -176,7 +176,7 @@ export default async function PipelineLeadDetailPage({
     ownsOasisSalesRecord(activeRecord, session.userId);
   const canRunDeal =
     session.ok &&
-    // ONE list (DEAL_CLOSING_ROLES via mayQuoteAndClose) — a hand-copied array
+    // ONE list (DEAL_CLOSING_ROLES via mayQuoteAndClose) -- a hand-copied array
     // here is how UI and API drifted apart before. Ownership stays separate.
     (session.isTrueAdmin || (mayQuoteAndClose(session.teamRole) && repOwnsDeal));
   const canRunDelivery =
@@ -247,7 +247,7 @@ export default async function PipelineLeadDetailPage({
   const webLeadBusinessId = nonEmptyString(activeRecord.data.webdev_source_business_id);
 
   /**
-   * ═══ TWO DOORS, TWO RULES, AND THEY DO NOT AGREE (review, 2026-08-25) ══════
+   * === TWO DOORS, TWO RULES, AND THEY DO NOT AGREE (review, 2026-08-25) ======
    *
    * This page admits a viewer through `canOpenOasisSalesRecord`, which accepts
    * the assignee OR anyone listed in `collaborators` -- that is what makes the
@@ -266,7 +266,7 @@ export default async function PipelineLeadDetailPage({
    * business; asking the same function the API asks just means they are not
    * shown a panel that would only render an error.
    *
-   * ▶ FOLLOW-UP, deliberately not done here: teach `visibleToViewer` about
+   * > FOLLOW-UP, deliberately not done here: teach `visibleToViewer` about
    * collaborators so the two doors genuinely match rather than this page
    * routing around the gap. That widens the boundary PR #237 established and
    * deserves its own review.
@@ -301,10 +301,10 @@ export default async function PipelineLeadDetailPage({
               >
                 {funnelStage}
               </span>
-              <span>Lead workspace · closed-loop lifecycle</span>
+              <span>Lead workspace - closed-loop lifecycle</span>
             </span>
           ) : (
-            "Lead workspace · closed-loop lifecycle"
+            "Lead workspace - closed-loop lifecycle"
           )
         }
         action={<BackToPipeline />}
@@ -323,7 +323,7 @@ export default async function PipelineLeadDetailPage({
           leadId={id}
           // The PERSON to ask for, not the business. This seeds the founder
           // meeting's "Contact name", which is saved with the handoff and used
-          // for the Google Calendar invite — so `data.name` put the COMPANY on
+          // for the Google Calendar invite -- so `data.name` put the COMPANY on
           // an invite addressed to a human on 1,684 of 1,685 owner-named leads.
           // Empty when we truly know nobody; the booking step still accepts the
           // company alone (founderNameValid checks name OR company).
@@ -397,7 +397,7 @@ export default async function PipelineLeadDetailPage({
       </CollapsibleSection>
 
       {/*
-        ═══ THE BATTLE CARD, ON THE CRM RECORD (Adon, 2026-08-25) ═════════════
+        === THE BATTLE CARD, ON THE CRM RECORD (Adon, 2026-08-25) =============
         "we have to ensure that the leads tab and the pipeline are completely
         synonymous... The pipeline is how we're going to track whose lead is
         who. It should be what's going to be used more than the leads tab...
@@ -461,7 +461,7 @@ export default async function PipelineLeadDetailPage({
             initial={activeRecord.data}
             bookingUrl={BOOKING_URL}
             // A booked founder meeting suppresses the self-scheduling link in
-            // the quick email — see LeadQuickEmail's hasBookedMeeting note.
+            // the quick email -- see LeadQuickEmail's hasBookedMeeting note.
             hasBookedMeeting={Boolean(nonEmptyString(activeRecord.data.founder_meeting_at))}
           />
         </CollapsibleSection>
@@ -714,7 +714,7 @@ function ContactCell({
           {external && <ExternalLink className="h-3 w-3 shrink-0" aria-hidden />}
         </a>
       ) : (
-        <div className={valueClass}>{value || "—"}</div>
+        <div className={valueClass}>{value || "--"}</div>
       )}
     </div>
   );
@@ -768,7 +768,7 @@ function LeadMetricsBand({
         }
         warning={isOverdue}
       />
-      <CompactMetric label="Touches" value={metrics.touchCount === null ? "—" : String(metrics.touchCount)} />
+      <CompactMetric label="Touches" value={metrics.touchCount === null ? "--" : String(metrics.touchCount)} />
       <CompactMetric
         label="Next"
         value={metrics.nextScheduledAt ? formatDateTime(metrics.nextScheduledAt) : "Not scheduled"}
@@ -848,7 +848,7 @@ function HandoffSummary({
         <div className="mt-4 flex flex-wrap gap-2">
           {meetUrl && (
             <a href={meetUrl} target="_blank" rel="noopener noreferrer" className="btn-primary inline-flex items-center gap-2 !px-3 !py-2 text-xs">
-              Join Google Meet
+              Join the call
               <ExternalLink className="h-3.5 w-3.5" aria-hidden />
             </a>
           )}
@@ -895,7 +895,7 @@ function SummaryCell({
   return (
     <div className={`rounded-lg border border-bg-border/70 bg-bg-elev/30 p-3 ${roomy ? "min-h-24" : ""}`}>
       <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">{label}</div>
-      <div className="mt-1.5 whitespace-pre-wrap break-words text-sm text-fg-muted">{value || "—"}</div>
+      <div className="mt-1.5 whitespace-pre-wrap break-words text-sm text-fg-muted">{value || "--"}</div>
     </div>
   );
 }
@@ -930,7 +930,7 @@ function renderContactPreview(data: Record<string, unknown>): ReactNode {
     nonEmptyString(data.company),
     nonEmptyString(data.website),
   ].filter((value): value is string => Boolean(value));
-  return parts.length ? <span className="font-mono text-xs">{parts.join(" · ")}</span> : null;
+  return parts.length ? <span className="font-mono text-xs">{parts.join(" - ")}</span> : null;
 }
 
 function numberValue(value: unknown): number | null {

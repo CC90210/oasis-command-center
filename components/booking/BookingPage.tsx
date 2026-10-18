@@ -12,7 +12,7 @@
  *      lead is created or matched by email/phone and a signed token minted;
  *      the consent boxes are recorded in the consent ledger here.
  *   2. POST /api/forms/booking {token, starts_at, request_id}: availability is
- *      re-read fresh, the Google Meet is created, the lead moves to "Founder
+ *      re-read fresh, the video call is created, the lead moves to "Founder
  *      meeting booked", the call lands on the hosts' Schedule.
  * A failed step 2 never loses the visitor: the lead already exists, the chosen
  * details stay filled in, and a taken slot sends them back to fresh times.
@@ -154,7 +154,8 @@ function icsHref(booked: Booked, title: string): string {
     `DTEND:${icsStamp(booked.endsAt)}`,
     `SUMMARY:${title}`,
     `LOCATION:${booked.meetUrl}`,
-    `DESCRIPTION:Join with Google Meet: ${booked.meetUrl}`,
+    `DESCRIPTION:Join the call: ${booked.meetUrl}`,
+    `URL:${booked.meetUrl}`,
     "END:VEVENT",
     "END:VCALENDAR",
   ];
@@ -433,7 +434,7 @@ export function BookingPage(props: Props) {
               rel="noopener noreferrer"
               className="inline-flex items-center justify-center rounded-md bg-signal px-5 py-2.5 text-[15px] font-semibold text-ops-void hover:brightness-110"
             >
-              Google Meet link
+              Join the call
             </a>
             <a
               href={icsHref(booked, callTitle)}
@@ -446,7 +447,7 @@ export function BookingPage(props: Props) {
         </div>
         <p className="mt-6 text-[15px] leading-relaxed text-fg-muted">
           {props.thanksMessage ||
-            "The Google Calendar invite with the Meet link is on its way to your inbox."}
+            "The calendar invite with the video call link is on its way to your inbox."}
         </p>
       </main>
     );
@@ -473,7 +474,7 @@ export function BookingPage(props: Props) {
             </div>
             <div className="flex gap-3">
               <dt className="w-24 shrink-0 font-data text-[11px] uppercase tracking-[0.18em] text-fg-dim">Where</dt>
-              <dd className="text-fg">Google Meet video call</dd>
+              <dd className="text-fg">Video call</dd>
             </div>
             <div className="flex items-center gap-3">
               <dt className="w-24 shrink-0 font-data text-[11px] uppercase tracking-[0.18em] text-fg-dim">

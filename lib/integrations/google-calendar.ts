@@ -26,7 +26,7 @@ const DEFAULT_POLL_ATTEMPTS = 4;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 
 export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
-/** The parent scope. Strictly contains CALENDAR_EVENTS_SCOPE — see hasRequiredScope. */
+/** The parent scope. Strictly contains CALENDAR_EVENTS_SCOPE -- see hasRequiredScope. */
 export const CALENDAR_FULL_SCOPE = "https://www.googleapis.com/auth/calendar";
 
 export type GoogleCalendarErrorCode =
@@ -90,6 +90,7 @@ export type FounderMeetingCalendarRequest = {
   businessName?: string;
   website?: string;
   clientAgenda?: string;
+  meetingLink?: string;
   durationMinutes?: number;
   offerLabel?: string;
 };
@@ -109,7 +110,7 @@ export type FounderMeetingCalendarRequest = {
  *                                             These used to be the SAME client as
  *                                             personal mode, which was not a
  *                                             choice but an unwritten constraint
- *                                             — see systemCalendarConfig().
+ *                                             -- see systemCalendarConfig().
  *   GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN      long-lived refresh token for the
  *                                             OASIS workspace account, granted
  *                                             calendar.events or the broader
@@ -138,7 +139,7 @@ export type SystemCalendarConfig = {
 };
 
 export function systemCalendarConfig(): SystemCalendarConfig | null {
-  // ═══ THE WORKSPACE CALENDAR IS ITS OWN IDENTITY ═════════════════════════
+  // === THE WORKSPACE CALENDAR IS ITS OWN IDENTITY =========================
   //
   // A Google refresh token can ONLY be exchanged by its paired OAuth client.
   // Until now this function returned no client at all and the
@@ -243,6 +244,7 @@ export type CreateGoogleFounderMeetingInput = {
   website?: string;
   /** Client-visible agenda only. Internal qualification/handoff notes are forbidden. */
   clientAgenda: string;
+  meetingLink?: string;
 };
 
 export type UpdateGoogleFounderMeetingInput = {
@@ -263,6 +265,7 @@ export type UpdateGoogleFounderMeetingInput = {
   website?: string;
   /** Client-visible agenda only. Internal qualification/handoff notes are forbidden. */
   clientAgenda: string;
+  meetingLink?: string;
 };
 
 export type CancelGoogleFounderMeetingInput = {
@@ -294,6 +297,7 @@ type GoogleCalendarEvent = {
   status?: string;
   summary?: string;
   description?: string;
+  location?: string;
   attendees?: Array<{ email?: string; responseStatus?: string }>;
   htmlLink?: string;
   iCalUID?: string;
@@ -710,7 +714,7 @@ type ExpectedFounderMeetingEvent = {
   /**
    * Exact lowercase invitee set sent with the request. Google may additionally
    * echo the organizing account among attendees on reads, so the organizer is
-   * tolerated separately — any other address fails closed.
+   * tolerated separately -- any other address fails closed.
    */
   attendeeEmails: string[];
   organizerEmail?: string;
@@ -761,15 +765,16 @@ function assertFounderMeetingEventIdentity(
 function eventTitle(durationMinutes: number, offerLabel: string, businessName?: string): string {
   const business = businessName?.trim();
   return business
-    ? `OASIS ${durationMinutes}-minute ${offerLabel} — ${business}`
+    ? `OASIS ${durationMinutes}-minute ${offerLabel} \u2014 ${business}`
     : `OASIS ${durationMinutes}-minute ${offerLabel}`;
 }
 
-function publicEventDescription(durationMinutes: number, offerLabel: string, clientAgenda?: string, website?: string): string {
+function publicEventDescription(durationMinutes: number, offerLabel: string, clientAgenda?: string, website?: string, meetingLink?: string): string {
   const agenda = clientAgenda?.trim();
   const sections = [`A ${durationMinutes}-minute ${offerLabel} with OASIS AI Solutions.`];
   if (agenda) sections.push(`Agenda:\n${agenda}`);
   if (website) sections.push(`Website: ${website}`);
+  if (meetingLink) sections.push(`Join the video call: ${meetingLink}`);
   return sections.join("\n\n");
 }
 
@@ -777,7 +782,7 @@ type FounderMeetingInvitee = { email: string; displayName?: string };
 
 /**
  * Deduplicated invite list for a founder-audit event: host (workspace-fallback
- * only — otherwise the host IS the organizer), opener rep, client, and the
+ * only -- otherwise the host IS the organizer), opener rep, client, and the
  * central ops inbox. First occurrence wins, so an opener who is also the host,
  * or the CC address that matches any invitee/organizer, is never doubled.
  */
@@ -912,7 +917,7 @@ async function openAuthorizedCalendarSession(args: {
   /**
    * Refresh, and FALL BACK IF THE HOST'S TOKEN HAS BEEN REVOKED.
    *
-   * ═══ THE GAP THIS CLOSES (live, 2026-08-26) ══════════════════════════════
+   * === THE GAP THIS CLOSES (live, 2026-08-26) ==============================
    *
    * The workspace fallback above triggers on a token that is MISSING or
    * WRONG-SCOPED. It does not trigger on a token that is PRESENT and DEAD --
@@ -1083,6 +1088,7 @@ export async function createFounderMeetingCalendarEvent(
   dependencyOverrides: Partial<GoogleCalendarDependencies> = {},
 ): Promise<FounderMeetingCalendarReceipt> {
   const normalized = validateRequest(args);
+  const meetingLink = args.meetingLink?.trim() || undefined;
   const { dependencies, bundle, authorizedFetch, systemFallback, calendarId: sessionCalendarId } =
     await openAuthorizedCalendarSession({
       tenantId: args.tenantId,
@@ -1119,11 +1125,11 @@ export async function createFounderMeetingCalendarEvent(
   const insertUrl = new URL(
     `${CALENDAR_API}/calendars/${encodeURIComponent(sessionCalendarId)}/events`,
   );
-  insertUrl.searchParams.set("conferenceDataVersion", "1");
+  if (!meetingLink) insertUrl.searchParams.set("conferenceDataVersion", "1");
   insertUrl.searchParams.set("sendUpdates", "all");
 
   // Workspace fallback: the workspace account is the organizer, so the human
-  // host is invited explicitly — otherwise the booking would never reach the
+  // host is invited explicitly -- otherwise the booking would never reach the
   // person expected to run the call.
   const hostAttendeeEmail =
     systemFallback && args.expectedOrganizerEmail?.trim()
@@ -1144,7 +1150,7 @@ export async function createFounderMeetingCalendarEvent(
     attendeeEmails: attendees.map((attendee) => attendee.email),
     organizerEmail: bundle.gmail_address || undefined,
     summary: eventTitle(normalized.durationMinutes, normalized.offerLabel, args.businessName),
-    description: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, args.clientAgenda, normalized.website),
+    description: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, args.clientAgenda, normalized.website, meetingLink),
   };
   const eventPayload = {
     id: eventId,
@@ -1155,16 +1161,20 @@ export async function createFounderMeetingCalendarEvent(
     attendees,
     guestsCanInviteOthers: false,
     guestsCanModify: false,
-    conferenceData: {
-      createRequest: {
-        requestId: founderMeetingConferenceRequestId(
-          args.tenantId,
-          args.organizerUserId,
-          args.bookingRequestId,
-        ),
-        conferenceSolutionKey: { type: "hangoutsMeet" },
-      },
-    },
+    ...(meetingLink
+      ? { location: meetingLink }
+      : {
+          conferenceData: {
+            createRequest: {
+              requestId: founderMeetingConferenceRequestId(
+                args.tenantId,
+                args.organizerUserId,
+                args.bookingRequestId,
+              ),
+              conferenceSolutionKey: { type: "hangoutsMeet" },
+            },
+          },
+        }),
   };
 
   let createResponse: Response;
@@ -1214,7 +1224,7 @@ export async function createFounderMeetingCalendarEvent(
     reconciled ? "calendar_reconcile_failed" : "calendar_create_failed",
   );
 
-  let meetUrl = extractMeetUrl(event);
+  let meetUrl = meetingLink || extractMeetUrl(event);
   const pollAttempts = Math.max(0, Math.min(10, dependencies.pollAttempts));
   const pollIntervalMs = Math.max(0, Math.min(5_000, dependencies.pollIntervalMs));
   for (let attempt = 0; !meetUrl && attempt < pollAttempts; attempt += 1) {
@@ -1362,6 +1372,7 @@ export async function createGoogleFounderMeeting(
       businessName: input.company,
       website: input.website,
       clientAgenda: input.clientAgenda,
+      meetingLink: input.meetingLink,
     },
     dependencyOverrides,
   );
@@ -1407,6 +1418,7 @@ export async function updateGoogleFounderMeeting(
     );
   }
   const eventId = validatedEventId(input.eventId);
+  const meetingLink = input.meetingLink?.trim() || undefined;
   const normalized = validateRequest({
     tenantId: input.tenantId,
     organizerUserId: input.hostUserId,
@@ -1423,6 +1435,7 @@ export async function updateGoogleFounderMeeting(
     businessName: input.company,
     website: input.website,
     clientAgenda: input.clientAgenda,
+    meetingLink: input.meetingLink,
   });
   const { dependencies, bundle, authorizedFetch, systemFallback, calendarId: sessionCalendarId } =
     await openAuthorizedCalendarSession({
@@ -1436,7 +1449,7 @@ export async function updateGoogleFounderMeeting(
     sessionCalendarId,
   )}/events/${eventId}`;
   const patchUrl = new URL(eventUrl);
-  patchUrl.searchParams.set("conferenceDataVersion", "1");
+  if (!meetingLink) patchUrl.searchParams.set("conferenceDataVersion", "1");
   patchUrl.searchParams.set("sendUpdates", "all");
   const hostAttendeeEmail =
     systemFallback && input.expectedOrganizerEmail?.trim()
@@ -1457,7 +1470,7 @@ export async function updateGoogleFounderMeeting(
     attendeeEmails: attendees.map((attendee) => attendee.email),
     organizerEmail: bundle.gmail_address || undefined,
     summary: eventTitle(normalized.durationMinutes, normalized.offerLabel, input.company),
-    description: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, input.clientAgenda, normalized.website),
+    description: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, input.clientAgenda, normalized.website, meetingLink),
   };
   const response = await authorizedFetch(
     patchUrl.toString(),
@@ -1472,6 +1485,7 @@ export async function updateGoogleFounderMeeting(
         attendees,
         guestsCanInviteOthers: false,
         guestsCanModify: false,
+        ...(meetingLink ? { location: meetingLink } : {}),
       }),
     },
     "calendar_update_failed",
@@ -1513,7 +1527,7 @@ export async function updateGoogleFounderMeeting(
     return verified;
   };
 
-  let meetLink = extractMeetUrl(event);
+  let meetLink = meetingLink || extractMeetUrl(event);
   const pollAttempts = Math.max(0, Math.min(10, dependencies.pollAttempts));
   const pollIntervalMs = Math.max(0, Math.min(5_000, dependencies.pollIntervalMs));
   for (let attempt = 0; !meetLink && attempt < pollAttempts; attempt += 1) {

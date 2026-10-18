@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createClient, type Client } from "@libsql/client";
 import { createTursoPostgrest } from "../lib/turso-postgrest";
+import type { BookingMeetRooms } from "../lib/booking/meet-room";
 import {
   activateVerifiedFounderMeeting,
   backfillFounderMeetingNotifications,
@@ -73,7 +74,9 @@ type CalendarCalls = {
   created: number;
   createdDurations: number[];
   createdOfferLabels: string[];
+  createdMeetingLinks: Array<string | undefined>;
   updated: string[];
+  updatedMeetingLinks: Array<string | undefined>;
   cancelled: string[];
 };
 
@@ -141,37 +144,48 @@ function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
 
 async function fixture() {
   const raw = createClient({ url: ":memory:" });
-  const [migration167, migration169, migration224] = await import("node:fs").then(({ readFileSync }) => [
+  const [migration167, migration169, migration224, migration232] = await import("node:fs").then(({ readFileSync }) => [
     readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8"),
     readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8"),
     readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8"),
+    readFileSync("database/turso/bravo__232_booking_meet_room.sql", "utf8"),
   ]);
-  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}\n${migration224}`);
+  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}\n${migration224}\n${migration232}`);
   const db = createTursoPostgrest(raw);
-  const calls: CalendarCalls = { created: 0, createdDurations: [], createdOfferLabels: [], updated: [], cancelled: [] };
+  const calls: CalendarCalls = {
+    created: 0,
+    createdDurations: [],
+    createdOfferLabels: [],
+    createdMeetingLinks: [],
+    updated: [],
+    updatedMeetingLinks: [],
+    cancelled: [],
+  };
   const deps = {
     db: db as never,
     now: () => NOW,
-    createCalendar: async (input: { durationMinutes: number; offerLabel?: string }) => {
+    createCalendar: async (input: { durationMinutes: number; offerLabel?: string; meetingLink?: string }) => {
       calls.created += 1;
       calls.createdDurations.push(input.durationMinutes);
       calls.createdOfferLabels.push(input.offerLabel || "");
+      calls.createdMeetingLinks.push(input.meetingLink);
       return {
         calendarId: "primary",
         eventId: "event12345",
         htmlLink: "https://calendar.google.com/calendar/event?eid=test",
-        meetLink: "https://meet.google.com/abc-defg-hij",
+        meetLink: input.meetingLink || "https://meet.google.com/abc-defg-hij",
         iCalUID: "ical-1",
         organizerEmail: ORGANIZER,
       };
     },
-    updateCalendar: async (input: { meetingAt: string }) => {
+    updateCalendar: async (input: { meetingAt: string; meetingLink?: string }) => {
       calls.updated.push(input.meetingAt);
+      calls.updatedMeetingLinks.push(input.meetingLink);
       return {
         calendarId: "primary",
         eventId: "event12345",
         htmlLink: "https://calendar.google.com/calendar/event?eid=test",
-        meetLink: "https://meet.google.com/abc-defg-hij",
+        meetLink: input.meetingLink || "https://meet.google.com/abc-defg-hij",
         iCalUID: "ical-1",
         organizerEmail: ORGANIZER,
       };
@@ -184,6 +198,52 @@ async function fixture() {
   return { raw, db, deps, calls };
 }
 
+type FakeMeetRooms = BookingMeetRooms & {
+  calls: {
+    created: Array<{ id: string; title: string; startsAt: string }>;
+    found: string[];
+    rescheduled: Array<{ id: string; startsAt: string }>;
+    removed: string[];
+  };
+  rescheduleOutcomes: boolean[];
+};
+
+function fakeMeetRooms(isReady = true): FakeMeetRooms {
+  const rooms = new Map<string, { id: string; url: string; status: string }>();
+  const calls: FakeMeetRooms["calls"] = {
+    created: [],
+    found: [],
+    rescheduled: [],
+    removed: [],
+  };
+  const rescheduleOutcomes: boolean[] = [];
+  const codes = ["aaa-bbbb-ccc", "ddd-eeee-fff", "ggg-hhhh-jjj"];
+  return {
+    calls,
+    rescheduleOutcomes,
+    ready: () => isReady,
+    create: async (input) => {
+      const id = `room-${calls.created.length + 1}`;
+      const url = `https://oasisai.work/meet/${codes[calls.created.length] || "mmm-nnnn-ooo"}`;
+      calls.created.push({ id, title: input.title, startsAt: input.startsAt });
+      rooms.set(id, { id, url, status: "scheduled" });
+      return { id, url };
+    },
+    find: async (_tenantId, roomId) => {
+      calls.found.push(roomId);
+      return rooms.get(roomId) || null;
+    },
+    reschedule: async (_tenantId, roomId, startsAt) => {
+      calls.rescheduled.push({ id: roomId, startsAt });
+      const outcome = rescheduleOutcomes.length ? rescheduleOutcomes.shift()! : rooms.has(roomId);
+      return outcome;
+    },
+    remove: async (_tenantId, roomId) => {
+      calls.removed.push(roomId);
+      rooms.delete(roomId);
+    },
+  };
+}
 function bookingInput(requestId = "book-request-1") {
   return {
     tenantId: TENANT,
@@ -315,6 +375,103 @@ async function testCreateAuditAndFullIdempotency() {
   await raw.close();
 }
 
+async function testOasisMeetRoomLifecycle() {
+  const { raw, deps, calls } = await fixture();
+  const meetRooms = fakeMeetRooms();
+  const liveDeps = { ...deps, meetRooms };
+  const input = bookingInput("oasis-room-lifecycle");
+  const meeting = await createVerifiedFounderMeeting(input, liveDeps);
+  const createdRow = await appointment(raw, meeting.appointmentId);
+  assert.equal(meetRooms.calls.created.length, 1);
+  assert.equal(meetRooms.calls.created[0].title, "OASIS call with Taylor");
+  assert.equal(createdRow.meet_room_id, "room-1");
+  assert.deepEqual(calls.createdMeetingLinks, ["https://oasisai.work/meet/aaa-bbbb-ccc"]);
+  assert.equal(meeting.receipt.meetLink, "https://oasisai.work/meet/aaa-bbbb-ccc");
+
+  const replay = await createVerifiedFounderMeeting(input, liveDeps);
+  assert.equal(replay.appointmentId, meeting.appointmentId);
+  assert.equal(meetRooms.calls.created.length, 1, "a replay never creates a second room");
+
+  await activateVerifiedFounderMeeting(TENANT, meeting.appointmentId, liveDeps);
+  const moved = await rescheduleVerifiedFounderMeeting({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: meeting.appointmentId,
+    requestId: "oasis-room-move",
+    meetingAt: LATER,
+  }, liveDeps);
+  assert.equal(meetRooms.calls.rescheduled.at(-1)?.id, "room-1");
+  assert.equal(meetRooms.calls.rescheduled.at(-1)?.startsAt, LATER);
+  assert.equal(calls.updatedMeetingLinks.at(-1), "https://oasisai.work/meet/aaa-bbbb-ccc");
+  assert.equal(moved.receipt.meetLink, "https://oasisai.work/meet/aaa-bbbb-ccc");
+
+  await activateVerifiedFounderMeeting(TENANT, meeting.appointmentId, liveDeps);
+  const cancelled = await cancelVerifiedFounderMeeting({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: meeting.appointmentId,
+    requestId: "oasis-room-cancel",
+  }, liveDeps);
+  assert.equal(cancelled.disposition, "cancelled");
+  assert.deepEqual(meetRooms.calls.removed, ["room-1"]);
+  assert.equal((await appointment(raw, meeting.appointmentId)).meet_room_id, null);
+  await raw.close();
+}
+
+async function testOasisMeetRoomReplacementAndFallback() {
+  const replacement = await fixture();
+  const replacementRooms = fakeMeetRooms();
+  const replacementDeps = { ...replacement.deps, meetRooms: replacementRooms };
+  const booked = await createVerifiedFounderMeeting(bookingInput("oasis-room-replace"), replacementDeps);
+  await activateVerifiedFounderMeeting(TENANT, booked.appointmentId, replacementDeps);
+  replacementRooms.rescheduleOutcomes.push(false);
+  const moved = await rescheduleVerifiedFounderMeeting({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: booked.appointmentId,
+    requestId: "oasis-room-replace-move",
+    meetingAt: LATER,
+  }, replacementDeps);
+  assert.equal(replacementRooms.calls.created.length, 2, "an ended room is replaced once");
+  assert.equal((await appointment(replacement.raw, booked.appointmentId)).meet_room_id, "room-2");
+  assert.equal(moved.receipt.meetLink, "https://oasisai.work/meet/ddd-eeee-fff");
+  assert.equal(replacement.calls.updatedMeetingLinks.at(-1), "https://oasisai.work/meet/ddd-eeee-fff");
+  await replacement.raw.close();
+
+  const fallback = await fixture();
+  const unavailableRooms = fakeMeetRooms(false);
+  const fallbackMeeting = await createVerifiedFounderMeeting(
+    bookingInput("oasis-room-not-ready"),
+    { ...fallback.deps, meetRooms: unavailableRooms },
+  );
+  assert.equal(unavailableRooms.calls.created.length, 0);
+  assert.equal((await appointment(fallback.raw, fallbackMeeting.appointmentId)).meet_room_id, null);
+  assert.deepEqual(fallback.calls.createdMeetingLinks, [undefined]);
+  assert.equal(fallbackMeeting.receipt.meetLink, "https://meet.google.com/abc-defg-hij");
+  await fallback.raw.close();
+}
+
+async function testOasisMeetRoomCalendarFailureCompensates() {
+  const { raw, deps } = await fixture();
+  const meetRooms = fakeMeetRooms();
+  await assert.rejects(
+    createVerifiedFounderMeeting(bookingInput("oasis-room-calendar-failure"), {
+      ...deps,
+      meetRooms,
+      createCalendar: async () => {
+        throw new Error("calendar_create_failed");
+      },
+    }),
+    /calendar_create_failed/,
+  );
+  const failed = await raw.execute({
+    sql: "SELECT meet_room_id FROM call_appointments WHERE booking_request_id = ?",
+    args: ["oasis-room-calendar-failure"],
+  });
+  assert.equal(failed.rows[0].meet_room_id, null);
+  assert.deepEqual(meetRooms.calls.removed, ["room-1"]);
+  await raw.close();
+}
 async function testCreatePreservesCustomDuration() {
   const { raw, deps, calls } = await fixture();
   const meeting = await createVerifiedFounderMeeting({
@@ -1336,6 +1493,9 @@ async function main() {
   testBackfillChunkRotatesBeyondFirstFiveHundred();
   testConsentReplayErrorResponseClassification();
   await testCreateAuditAndFullIdempotency();
+  await testOasisMeetRoomLifecycle();
+  await testOasisMeetRoomReplacementAndFallback();
+  await testOasisMeetRoomCalendarFailureCompensates();
   await testCreatePreservesCustomDuration();
   await testReceiptWriteCompensationInvalidatesTheRequestId();
   await testPendingBookingCompensationCancelsProviderAndMirror();

@@ -2,6 +2,7 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import type { BookingMeetRooms } from "@/lib/booking/meet-room";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
@@ -69,6 +70,7 @@ type AppointmentRow = {
   google_event_id: string | null;
   google_event_html_link: string | null;
   google_meet_link: string | null;
+  meet_room_id: string | null;
   google_ical_uid: string | null;
   calendar_status: string;
   calendar_error: string | null;
@@ -163,6 +165,7 @@ export type FounderMeetingServiceDependencies = {
   updateCalendar: typeof updateGoogleFounderMeeting;
   cancelCalendar: typeof cancelGoogleFounderMeeting;
   memberStanding: typeof memberStanding;
+  meetRooms?: BookingMeetRooms;
 };
 
 function dependencies(
@@ -175,6 +178,7 @@ function dependencies(
     updateCalendar: overrides.updateCalendar ?? updateGoogleFounderMeeting,
     cancelCalendar: overrides.cancelCalendar ?? cancelGoogleFounderMeeting,
     memberStanding: overrides.memberStanding ?? memberStanding,
+    meetRooms: overrides.meetRooms,
   };
 }
 
@@ -233,13 +237,158 @@ function asReceipt(row: AppointmentRow): GoogleCalendarReceipt | null {
   };
 }
 
+function isGoogleMeetingLink(value: string | null): boolean {
+  return /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i.test(value || "");
+}
+
+function bookingMeetRoomTitle(clientName: string): string {
+  const firstName = clientName.trim().split(/\s+/, 1)[0] || "";
+  return (firstName ? `OASIS call with ${firstName}` : "OASIS call").slice(0, 120);
+}
+
+async function storeMeetRoomId(
+  db: Db,
+  appointment: AppointmentRow,
+  roomId: string | null,
+): Promise<AppointmentRow> {
+  let query = db.from("call_appointments").update({
+    meet_room_id: roomId,
+    updated_at: new Date().toISOString(),
+  }).eq("tenant_id", appointment.tenant_id)
+    .eq("id", appointment.id)
+    .eq("lead_id", appointment.lead_id)
+    .eq("revision", Number(appointment.revision));
+  query = appointment.meet_room_id
+    ? query.eq("meet_room_id", appointment.meet_room_id)
+    : query.is("meet_room_id", null);
+  const saved = await query.select("*").maybeSingle();
+  if (saved.error || !saved.data) {
+    throw new Error(`meet_room_write_failed:${saved.error?.message || "row_changed"}`);
+  }
+  return saved.data as AppointmentRow;
+}
+
+async function removeMeetRoomForAppointment(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  actorUserId: string | null = null,
+): Promise<AppointmentRow> {
+  const roomId = appointment.meet_room_id;
+  if (!roomId || !deps.meetRooms) return appointment;
+  try {
+    await deps.meetRooms.remove(
+      appointment.tenant_id,
+      roomId,
+      actorUserId || appointment.assigned_to || appointment.created_by,
+    );
+  } catch (error) {
+    console.error("[founder-meeting] Oasis room removal failed", {
+      appointmentId: appointment.id,
+      roomId,
+      code: errorCode(error, "meet_room_remove_failed"),
+    });
+  }
+  try {
+    return await storeMeetRoomId(deps.db, appointment, null);
+  } catch (error) {
+    console.error("[founder-meeting] Oasis room reference clear failed", {
+      appointmentId: appointment.id,
+      roomId,
+      code: errorCode(error, "meet_room_clear_failed"),
+    });
+    return appointment;
+  }
+}
+
+async function createAndStoreMeetRoom(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  input: { hostUserId: string; startsAt: string; clientName: string },
+): Promise<{ appointment: AppointmentRow; room: { id: string; url: string } }> {
+  if (!deps.meetRooms) throw new Error("meet_room_port_missing");
+  const room = await deps.meetRooms.create({
+    tenantId: appointment.tenant_id,
+    hostUserId: input.hostUserId,
+    leadId: appointment.lead_id || null,
+    startsAt: input.startsAt,
+    title: bookingMeetRoomTitle(input.clientName),
+  });
+  try {
+    const saved = await storeMeetRoomId(deps.db, appointment, room.id);
+    return { appointment: saved, room };
+  } catch (error) {
+    try {
+      await deps.meetRooms.remove(appointment.tenant_id, room.id, input.hostUserId);
+    } catch (cleanupError) {
+      console.error("[founder-meeting] unpersisted Oasis room cleanup failed", {
+        appointmentId: appointment.id,
+        roomId: room.id,
+        code: errorCode(cleanupError, "meet_room_remove_failed"),
+      });
+    }
+    throw error;
+  }
+}
+
+async function meetRoomForBooking(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  input: { hostUserId: string; startsAt: string; clientName: string },
+): Promise<{ appointment: AppointmentRow; room: { id: string; url: string } } | null> {
+  if (!deps.meetRooms?.ready()) return null;
+  if (appointment.meet_room_id) {
+    const existing = await deps.meetRooms.find(appointment.tenant_id, appointment.meet_room_id);
+    if (existing) return { appointment, room: existing };
+  }
+  return createAndStoreMeetRoom(appointment, deps, input);
+}
+
+type RescheduledMeetRoom = {
+  appointment: AppointmentRow;
+  meetingLink?: string;
+  moved: boolean;
+  created: boolean;
+  previousRoomId: string | null;
+};
+
+async function meetRoomForReschedule(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  startsAt: string,
+): Promise<RescheduledMeetRoom> {
+  const fallback = isGoogleMeetingLink(appointment.google_meet_link)
+    ? undefined
+    : appointment.google_meet_link || undefined;
+  if (!deps.meetRooms?.ready()) {
+    return { appointment, meetingLink: fallback, moved: false, created: false, previousRoomId: appointment.meet_room_id };
+  }
+  const previousRoomId = appointment.meet_room_id;
+  if (previousRoomId) {
+    const existing = await deps.meetRooms.find(appointment.tenant_id, previousRoomId);
+    if (existing && await deps.meetRooms.reschedule(appointment.tenant_id, previousRoomId, startsAt)) {
+      return { appointment, meetingLink: existing.url, moved: true, created: false, previousRoomId };
+    }
+  }
+  const created = await createAndStoreMeetRoom(appointment, deps, {
+    hostUserId: appointment.assigned_to || appointment.created_by,
+    startsAt,
+    clientName: appointment.client_name_snapshot || "",
+  });
+  return {
+    appointment: created.appointment,
+    meetingLink: created.room.url,
+    moved: false,
+    created: true,
+    previousRoomId,
+  };
+}
 function assertOrganizer(receipt: GoogleCalendarReceipt, expectedOrganizerEmail: string): void {
   const organizer = receipt.organizerEmail.trim().toLowerCase();
   if (organizer === expectedOrganizerEmail) return;
   // Workspace fallback (2026-08-25): when the booking ran on the workspace
   // identity because the host has no personal work connection, Google reports
   // the workspace address as organizer. That is the sanctioned shape, not a
-  // mismatch — reject only an unexpected third identity.
+  // mismatch -- reject only an unexpected third identity.
   const systemAddress = systemOrganizerEmail();
   if (systemAddress && organizer === systemAddress) return;
   throw new Error("calendar_organizer_mismatch");
@@ -1329,6 +1478,12 @@ export async function createVerifiedFounderMeeting(input: {
     if (!leaseToken) throw new Error("meeting_transition_pending");
     let providerReceipt: GoogleCalendarReceipt | null = null;
     try {
+      const roomResult = await meetRoomForBooking(appointment, deps, {
+        hostUserId: input.hostUserId,
+        startsAt: meetingAt,
+        clientName: contact.name || "",
+      });
+      if (roomResult) appointment = roomResult.appointment;
       const calendarInput = {
         tenantId: input.tenantId,
         hostUserId: input.hostUserId,
@@ -1344,6 +1499,7 @@ export async function createVerifiedFounderMeeting(input: {
         website: contact.website || undefined,
         clientAgenda,
         expectedOrganizerEmail,
+        ...(roomResult ? { meetingLink: roomResult.room.url } : {}),
       };
       providerReceipt = await deps.createCalendar(calendarInput);
       assertOrganizer(providerReceipt, expectedOrganizerEmail);
@@ -1393,6 +1549,7 @@ export async function createVerifiedFounderMeeting(input: {
           });
         }
       }
+      appointment = await removeMeetRoomForAppointment(appointment, deps, input.hostUserId);
       const reason = errorCode(error, "calendar_create_failed");
       const failurePatch = compensated
         ? {
@@ -1400,12 +1557,14 @@ export async function createVerifiedFounderMeeting(input: {
             workflow_status: "cancelled",
             calendar_status: "cancelled",
             google_event_id: eventId,
+            meet_room_id: null,
             ...clearPendingFields(nowIso),
           }
         : {
             calendar_status: "failed",
             calendar_error: reason.slice(0, 500),
             ...(eventId ? { google_event_id: eventId } : {}),
+            meet_room_id: null,
             updated_at: nowIso,
           };
       const failure = await db.from("call_appointments").update(failurePatch)
@@ -1453,11 +1612,13 @@ export async function createVerifiedFounderMeeting(input: {
         expectedOrganizerEmail,
       };
       await deps.cancelCalendar(cancelInput);
+      appointment = await removeMeetRoomForAppointment(appointment, deps, input.hostUserId);
       await cancelOutstandingNotifications(db, appointment, "booking_compensated", nowIso);
       await db.from("call_appointments").update({
         status: "cancelled",
         workflow_status: "cancelled",
         calendar_status: "cancelled",
+        meet_room_id: null,
         ...clearPendingFields(nowIso),
       }).eq("tenant_id", input.tenantId).eq("id", appointment.id);
     } catch (compensationError) {
@@ -1635,8 +1796,10 @@ export async function compensatePendingFounderMeetingBooking(input: {
     await markPendingError(deps.db, appointment, leaseToken, code, nowIso);
     throw new Error(code, { cause: error });
   }
+  appointment = await removeMeetRoomForAppointment(appointment, deps, hostUserId);
   const providerApplied = await deps.db.from("call_appointments").update({
     pending_compensation_applied_at: nowIso,
+    meet_room_id: null,
     updated_at: nowIso,
   }).eq("tenant_id", input.tenantId)
     .eq("id", appointment.id)
@@ -1655,6 +1818,7 @@ export async function compensatePendingFounderMeetingBooking(input: {
     status: "cancelled",
     workflow_status: "cancelled",
     calendar_status: "cancelled",
+    meet_room_id: null,
     last_compensated_request_id: input.requestId,
     cancelled_at: nowIso,
     ...clearPendingFields(nowIso),
@@ -1744,7 +1908,7 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   // A reschedule is LIVE work for the host: Google re-sends the invite from
   // their calendar and every new reminder row goes out as them. A host
   // deactivated since booking must not get either, so refuse before anything
-  // is reserved, patched or queued. A failed read refuses too (retryable) —
+  // is reserved, patched or queued. A failed read refuses too (retryable) --
   // an unknown standing must not send as the person.
   let hostStanding: MemberStanding;
   try {
@@ -1770,9 +1934,13 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   const clientAgenda = boundedRequired(appointment.client_agenda, 500, "client_agenda_required");
   const currentRevision = Number(appointment.revision || 1);
   const nowIso = new Date(deps.now()).toISOString();
+  const previousStartsAt = appointment.previous_scheduled_for;
 
   let receipt: GoogleCalendarReceipt;
+  let roomChange: RescheduledMeetRoom | null = null;
   try {
+    roomChange = await meetRoomForReschedule(appointment, deps, meetingAt);
+    appointment = roomChange.appointment;
     const calendarInput = {
       tenantId: input.tenantId,
       hostUserId,
@@ -1788,10 +1956,35 @@ export async function rescheduleVerifiedFounderMeeting(input: {
       website: contact.website || undefined,
       clientAgenda,
       expectedOrganizerEmail,
+      ...(roomChange.meetingLink ? { meetingLink: roomChange.meetingLink } : {}),
     };
     receipt = await deps.updateCalendar(calendarInput);
     assertOrganizer(receipt, expectedOrganizerEmail);
   } catch (error) {
+    if (roomChange?.created && appointment.meet_room_id) {
+      appointment = await removeMeetRoomForAppointment(appointment, deps, hostUserId);
+      if (roomChange.previousRoomId) {
+        try {
+          appointment = await storeMeetRoomId(db, appointment, roomChange.previousRoomId);
+        } catch (rollbackError) {
+          console.error("[founder-meeting] Oasis room reference rollback failed", {
+            appointmentId: appointment.id,
+            roomId: roomChange.previousRoomId,
+            code: errorCode(rollbackError, "meet_room_rollback_failed"),
+          });
+        }
+      }
+    } else if (roomChange?.moved && roomChange.previousRoomId && previousStartsAt && deps.meetRooms) {
+      try {
+        await deps.meetRooms.reschedule(input.tenantId, roomChange.previousRoomId, previousStartsAt);
+      } catch (rollbackError) {
+        console.error("[founder-meeting] Oasis room reschedule rollback failed", {
+          appointmentId: appointment.id,
+          roomId: roomChange.previousRoomId,
+          code: errorCode(rollbackError, "meet_room_reschedule_rollback_failed"),
+        });
+      }
+    }
     const reason = errorCode(error, "calendar_update_failed");
     await markPendingError(db, appointment, leaseToken, reason, nowIso);
     throw new Error(reason, { cause: error });
@@ -1873,6 +2066,7 @@ async function finalizeCancellation(
     status: "cancelled",
     workflow_status: "cancelled",
     calendar_status: "cancelled",
+    meet_room_id: null,
     last_cancel_request_id: requestId,
     cancelled_at: nowIso,
     ...clearPendingFields(nowIso),
@@ -1945,8 +2139,10 @@ export async function cancelVerifiedFounderMeeting(input: {
       expectedOrganizerEmail: appointment.organizer_email_snapshot!,
     };
     await deps.cancelCalendar(cancelInput);
+    appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
     const providerMark = await db.from("call_appointments").update({
       pending_provider_applied_at: nowIso,
+      meet_room_id: null,
       updated_at: nowIso,
     }).eq("tenant_id", input.tenantId)
       .eq("id", appointment.id)
@@ -2269,17 +2465,22 @@ async function compensateReschedule(
     !appointment.pending_request_id ||
     !appointment.pending_lease_token
   ) return false;
-  const contact = contactFromAppointment(appointment);
-  const clientAgenda = boundedRequired(appointment.client_agenda, 500, "client_agenda_required");
+  const previousStartsAt = appointment.previous_scheduled_for;
+  const hostUserId = appointment.assigned_to;
+  let working = appointment;
+  const roomChange = await meetRoomForReschedule(working, deps, previousStartsAt);
+  working = roomChange.appointment;
+  const contact = contactFromAppointment(working);
+  const clientAgenda = boundedRequired(working.client_agenda, 500, "client_agenda_required");
   const expectedOrganizerEmail = normalizedEmail(
     appointment.organizer_email_snapshot,
     "calendar_organizer_mismatch",
   );
   const calendarInput = {
     tenantId: appointment.tenant_id,
-    hostUserId: appointment.assigned_to,
+    hostUserId,
     eventId: appointment.google_event_id,
-    meetingAt: appointment.previous_scheduled_for,
+    meetingAt: previousStartsAt,
     timezone: FOUNDER_MEETING_TIMEZONE,
     durationMinutes: normalizedMeetingDuration(appointment.duration_minutes),
     offerLabel: normalizedOfferLabel(appointment.offer_label, normalizedMeetingDuration(appointment.duration_minutes)),
@@ -2289,16 +2490,16 @@ async function compensateReschedule(
     website: contact.website || undefined,
     clientAgenda,
     expectedOrganizerEmail,
+    ...(roomChange.meetingLink ? { meetingLink: roomChange.meetingLink } : {}),
   };
   const nowIso = new Date(nowMs).toISOString();
-  let working = appointment;
   let receipt = asReceipt(working);
   if (!working.pending_compensation_applied_at) {
     receipt = await deps.updateCalendar(calendarInput);
     assertOrganizer(receipt, expectedOrganizerEmail);
     const phaseRevision = Number(working.revision) + 1;
     const phase = await deps.db.from("call_appointments").update({
-      scheduled_for: working.previous_scheduled_for,
+      scheduled_for: previousStartsAt,
       status: working.previous_status || "scheduled",
       workflow_status: "pending_transition",
       google_calendar_id: receipt.calendarId,
@@ -2452,8 +2653,10 @@ async function reconcileTenantFounderMeetingSagas(
           };
           await deps.cancelCalendar(cancelInput);
         }
+        appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
         const providerApplied = await deps.db.from("call_appointments").update({
           pending_compensation_applied_at: nowIso,
+          meet_room_id: null,
           updated_at: nowIso,
         }).eq("tenant_id", tenantId)
           .eq("id", appointment.id)
@@ -2472,6 +2675,7 @@ async function reconcileTenantFounderMeetingSagas(
           status: "cancelled",
           workflow_status: "cancelled",
           calendar_status: "cancelled",
+          meet_room_id: null,
           last_compensated_request_id: appointment.pending_request_id,
           cancelled_at: nowIso,
           ...clearPendingFields(nowIso),
@@ -2529,8 +2733,10 @@ async function reconcileTenantFounderMeetingSagas(
           eventId: appointment.google_event_id,
           expectedOrganizerEmail,
         });
+        appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
         const providerMark = await deps.db.from("call_appointments").update({
           pending_provider_applied_at: nowIso,
+          meet_room_id: null,
           updated_at: nowIso,
         }).eq("tenant_id", tenantId)
           .eq("id", appointment.id)

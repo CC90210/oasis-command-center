@@ -1,5 +1,6 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
+import { liveBookingMeetRooms } from "@/lib/booking/meet-room";
 import { sameOrigin } from "@/lib/calendar/http";
 import { AI_AUDIT_ALERT_SOURCE, ensureAiAuditSalesEvent } from "@/lib/forms/ai-audit-notify";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
@@ -150,7 +151,7 @@ async function compensatePublicBooking(input: {
       leadId,
       appointmentId,
       requestId,
-    });
+    }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
     providerCompensated = true;
   } catch (error) {
     console.error("[public-booking.compensate.calendar]", error);
@@ -350,7 +351,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         clientAgreedToTime: true,
         handoffComplete: true,
       },
-    });
+    }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
     await mirrorPublicBookingToSchedules({
       db,
       tenantId: context.tenantId,
@@ -452,7 +453,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     p_action: "public_funnel_booking",
     p_interaction_type: "calendar_booking",
     p_subject: `${context.formName} booked`,
-    p_content: `${context.formName} booked for ${startsAt}. Google Meet: ${meeting.receipt.meetLink}`,
+    p_content: `${context.formName} booked for ${startsAt}. Video call: ${meeting.receipt.meetLink}`,
     p_is_call: false,
     p_metadata: {
       appointment_id: meeting.appointmentId,
