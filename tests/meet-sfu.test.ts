@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { MeetNotConfiguredError } from "../lib/meet/access";
 import { STUN_ONLY, meetIceServers } from "../lib/meet/ice";
-import { SFU_BASE, SfuError, cutSession, sfuClient } from "../lib/meet/sfu";
+import { SFU_BASE, SfuError, cutSession, settledMids, sfuClient } from "../lib/meet/sfu";
 
 let failures = 0;
 async function check(name: string, fn: () => Promise<void>) {
@@ -133,7 +133,8 @@ async function main() {
       ],
       close: async (_s: string, mids: string[], offerArg?: unknown) => {
         calls.push(`${mids.join(",")}|${offerArg === undefined ? "forced" : "negotiated"}`);
-        return { sessionDescription: null, tracks: [] };
+        // One closed now, one already gone: both settled.
+        return { sessionDescription: null, tracks: [{ mid: "0" }, { mid: "r2", errorCode: "close_track_error" }] };
       },
     } as unknown as Parameters<typeof cutSession>[0];
     assert.equal(await cutSession(fake, "S1", "test"), true);
@@ -149,13 +150,18 @@ async function main() {
       console.error = errors;
     }
     assert.equal(await cutSession(failing(new SfuError("session_not_found", "gone", 404)), "S1", "test"), true, "a session the SFU no longer has carries no media");
+    const closing = (tracks: Array<{ mid?: string; errorCode?: string }>) =>
+      ({ ...fake, close: async () => ({ sessionDescription: null, tracks }) }) as unknown as Parameters<typeof cutSession>[0];
     const closeFails = { ...fake, close: async () => { throw new SfuError("sfu_http_502", "bad gateway", 502); } } as unknown as Parameters<typeof cutSession>[0];
     console.error = () => {};
     try {
       assert.equal(await cutSession(closeFails, "S1", "test"), false, "tracks it could not close are still to cut");
+      assert.equal(await cutSession(closing([{ mid: "0" }, { mid: "r2", errorCode: "internal_error" }]), "S1", "test"), false, "a 200 that carries a failed track is not a cut");
+      assert.equal(await cutSession(closing([{ mid: "0" }]), "S1", "test"), false, "nor one that leaves a track unreported");
     } finally {
       console.error = errors;
     }
+    assert.deepEqual([...settledMids({ tracks: [{ mid: "0" }, { mid: "1", errorCode: "close_track_error" }, { mid: "2", errorCode: "internal_error" }, { errorCode: "x" }] })], ["0", "1"]);
   });
 
   await check("TURN: credentials minted from the key per join, port 53 dropped; unset or down falls back to STUN", async () => {

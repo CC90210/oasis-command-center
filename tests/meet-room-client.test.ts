@@ -122,7 +122,16 @@ class FakePeer extends EventTarget {
 type Person = { id: string; name: string; role: "host" | "guest"; tracks: Array<{ trackName: string; kind: "audio" | "video" }> };
 
 /** A stand-in room API: what the handlers answer, plus a log and a check that SFU steps never overlap. */
-function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio?: boolean; joinDelayMs?: number; failPublishOnce?: boolean }) {
+function fakeRoom(opts: {
+  role: "host" | "guest";
+  records?: boolean;
+  recordAudio?: boolean;
+  joinDelayMs?: number;
+  failPublishOnce?: boolean;
+  /** How long an SFU action takes (ms): a pull 40 and the rest 3, unless set; long enough to act while one is on its way. */
+  delays?: Partial<Record<"session" | "publish" | "pull" | "renegotiate" | "close", number>>;
+}) {
+  const delays = { pull: 40, ...opts.delays };
   const log: string[] = [];
   const me: Person = { id: "me", name: "Me", role: opts.role, tracks: [] };
   const others: Person[] = [];
@@ -161,7 +170,7 @@ function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio
       busyWith = String(body.action);
       try {
         // A pull takes a while, so a test can start something else while it is in flight.
-        await new Promise((r) => setTimeout(r, body.action === "pull" ? 40 : 3));
+        await new Promise((r) => setTimeout(r, delays[body.action as keyof typeof delays] ?? 3));
         const action = String(body.action);
         log.push(`sfu:${action}`);
         if (action === "session") return hostPresent ? reply({ ok: true }) : reply({ ok: false, error: "waiting_for_host" }, 409);
@@ -507,7 +516,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 200));
     assert.ok(!gathering.log.includes("sfu:renegotiate"), "an answer for a call that has ended is never sent");
 
-    const closing = fakeRoom({ role: "host" });
+    const closing = fakeRoom({ role: "host", delays: { close: 60 } });
     const second = controller(closing);
     await second.c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
     await waitFor("live", () => second.c.snapshot().phase.kind === "live");
@@ -518,6 +527,18 @@ async function main() {
     await second.c.leave();
     await new Promise((r) => setTimeout(r, 40));
     assert.deepEqual(second.c.snapshot().phase, { kind: "ended", reason: "left" });
+
+    // Leaving while a screen share is being published: no "Could not share your screen" for a call that is over.
+    const sharing = fakeRoom({ role: "host", delays: { publish: 60 } });
+    const third = controller(sharing);
+    await third.c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => third.c.snapshot().phase.kind === "live");
+    const share = third.c.shareScreen(true);
+    await waitFor("the share on its way", () => sharing.busyWith() === "publish");
+    await third.c.leave();
+    await share;
+    assert.deepEqual(third.c.snapshot().phase, { kind: "ended", reason: "left" });
+    assert.equal(third.c.snapshot().notice, null);
   });
 
   await check("a join the room refuses is said in plain words, and nothing is held", async () => {

@@ -59,7 +59,7 @@ import {
 } from "./participants";
 import { createMeetRoom, displayMeetCode, listMeetRooms, parseMeetCode, readMeetRoomByCode, setRoomCalendarEvent, type MeetRoom } from "./rooms";
 import type { ScheduleOutcome } from "./schedule";
-import { cutSession, type SfuClient } from "./sfu";
+import { cutSession, settledMids, type SfuClient } from "./sfu";
 
 export type { MeetSession };
 
@@ -430,8 +430,7 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
 
     // close: the caller's own tracks on its own session; what it published stops being offered to the room.
     const result = await sfu.close(me.sfuSessionId, body.mids, body.offer);
-    const failed = new Set(result.tracks.filter((t) => t.errorCode && t.errorCode !== "close_track_error").map((t) => t.mid));
-    const closed = new Set(body.mids.filter((m) => !failed.has(m)));
+    const closed = settledMids(result);
     const remaining = me.tracks.filter((t) => !closed.has(t.mid));
     if (remaining.length !== me.tracks.length) await setParticipantTracks(deps.db, me, remaining);
     return meetJson({

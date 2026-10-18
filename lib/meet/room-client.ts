@@ -640,16 +640,18 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       }
       try {
         await serial(async () => {
-          const peer = pc!;
+          const peer = pc;
+          if (!peer || closed) return;
           tx.screen = peer.addTransceiver(track!, { direction: "sendonly" });
           await peer.setLocalDescription(await peer.createOffer());
           await gathered(peer);
+          if (moot(peer)) return;
           const res = await sfu<{ sessionDescription: RTCSessionDescriptionInit | null }>({
             action: "publish",
             offer: { type: "offer", sdp: peer.localDescription?.sdp ?? "" },
             tracks: [{ mid: tx.screen.mid, trackName: TRACK_SCREEN, kind: "video" }],
           });
-          if (res.sessionDescription) await peer.setRemoteDescription(res.sessionDescription);
+          if (res.sessionDescription && !moot(peer)) await peer.setRemoteDescription(res.sessionDescription);
         });
       } catch (err) {
         if (endedBy(err)) return;

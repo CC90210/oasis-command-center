@@ -70,17 +70,30 @@ export type SfuClient = {
 };
 
 /**
+ * The mids a close settled: closed now, or already gone (close_track_error). Cloudflare reports each track on its
+ * own, a 200 can carry failures, and a mid the answer does not report is not settled ("retain failed or
+ * unreported resources for cleanup", OpenAPI realtime-api-2024-05-21, tracks/close).
+ */
+export function settledMids(result: { tracks: SfuTrackResult[] }): Set<string> {
+  return new Set(result.tracks.filter((t) => t.mid && (!t.errorCode || t.errorCode === "close_track_error")).map((t) => t.mid as string));
+}
+
+/**
  * Cut a session off: every active track on it, sent and received, closed by force. Used when a participant is
  * removed or leaves and when a room ends, so a browser that ignores the room's answers still stops getting media.
- * True once nothing is left to cut: no session, a session the SFU no longer has, or every track closed. False when
- * the SFU could not be asked or refused (logged here): the caller keeps the session id, so a later step tries again.
+ * True once nothing is left to cut: no session, a session the SFU no longer has, or every track settled. False
+ * when the SFU could not be asked, refused, or left a track open (logged here): the caller keeps the session id,
+ * so a later step tries again.
  */
 export async function cutSession(sfu: SfuClient, sessionId: string | null, where: string): Promise<boolean> {
   if (!sessionId) return true;
   try {
     const mids = (await sfu.sessionTracks(sessionId)).filter((t) => t.status !== "inactive" && t.mid).map((t) => t.mid as string);
-    if (mids.length) await sfu.close(sessionId, mids);
-    return true;
+    if (!mids.length) return true;
+    const settled = settledMids(await sfu.close(sessionId, mids));
+    const open = mids.filter((mid) => !settled.has(mid)).length;
+    if (open) console.error(`[meet.${where}] the SFU left ${open} of a session's ${mids.length} tracks open`);
+    return open === 0;
   } catch (err) {
     if (err instanceof SfuError && err.status === 404) return true;
     console.error(`[meet.${where}] could not close a session's tracks`, err instanceof SfuError ? `${err.code}: ${err.message}` : err);
