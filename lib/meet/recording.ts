@@ -13,7 +13,9 @@
  *   2 HAND OVER   once the meeting has ended (ensureTranscriptJob): the host's
  *                 browser right after End, or the PC's own claim 10 minutes
  *                 after the end if that browser never said so
- *                 (finalizeDueRooms). That makes the room's meet_transcripts row
+ *                 (finalizeDueRooms). A call whose every tab closed without End
+ *                 is ended by that same claim first (endAbandonedRooms, in
+ *                 meetRelaySweeps). That makes the room's meet_transcripts row
  *                 and a meet_transcribe job for the PC.
  *   3 TRANSCRIBE  OASIS's PC (BEA scripts/meet/runner.py) claims the job. The
  *                 claim fixes exactly which chunks it gets (segments_json,
