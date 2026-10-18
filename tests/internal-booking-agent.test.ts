@@ -246,6 +246,15 @@ async function testBookNamedOrMatchedLead() {
   assert.equal(named.calls.rpc[0].p_expected_owner_id, "adon");
   assert.equal((named.calls.rpc[0].p_patch as Record<string, unknown>).assigned_to, "adon", "the lead's owner keeps the deal");
 
+  const stale = fakeDeps({ matched: { id: "wrong-contact-match", data: { stage: "researched" } } });
+  res = await handleAgentBook(signed("/api/internal/booking/book", { ...BOOK, lead_id: "abcdef12-0000-4000-8000-000000000099" }), stale.deps);
+  assert.equal(res.status, 422);
+  assert.deepEqual(await json(res), { ok: false, error: "lead_not_found", field: "lead_id" });
+  assert.deepEqual(stale.calls.readLead, ["abcdef12-0000-4000-8000-000000000099"]);
+  assert.equal(stale.calls.findLead, 0, "an unknown explicit lead fell back to contact matching");
+  assert.equal(stale.calls.createLead.length, 0, "an unknown explicit lead created a different CRM record");
+  assert.equal(stale.calls.meetings.length, 0, "an unknown explicit lead still booked a meeting");
+
   const matched = fakeDeps({ matched: { id: "form-lead", data: { stage: "researched" } } });
   let matchedWith: Record<string, unknown> | null = null;
   const findLead = matched.deps.findLead;

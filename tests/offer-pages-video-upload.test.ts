@@ -93,7 +93,30 @@ async function main() {
   await stubDerivedKeys();
   const db = await setupOfferDatabase();
   const fake = fakeOfferUploadStorage();
-  await stubOfferUploadStorage(fake.storage);
+  const faults: {
+    finalInfoThrows: boolean;
+    finalInfoSizeDelta: number;
+    finalInfoContentType?: string;
+    removeThrows: boolean;
+  } = { finalInfoThrows: false, finalInfoSizeDelta: 0, removeThrows: false };
+  const storage = {
+    ...fake.storage,
+    async info(path: string) {
+      const head = await fake.storage.info(path);
+      if (path.includes("/offer-pages/_staging/") || !head) return head;
+      if (faults.finalInfoThrows) throw new Error("final storage unreachable");
+      return {
+        ...head,
+        size: head.size + faults.finalInfoSizeDelta,
+        contentType: faults.finalInfoContentType ?? head.contentType,
+      };
+    },
+    async remove(path: string) {
+      if (faults.removeThrows) throw new Error("remove unreachable");
+      await fake.storage.remove(path);
+    },
+  };
+  await stubOfferUploadStorage(storage);
 
   await db.batch(
     [
@@ -315,6 +338,63 @@ async function main() {
     const retry = await json(await confirm(FORM, { upload_token: token }));
     assert.equal(retry.status, 200, JSON.stringify(retry.body));
     assert.ok(fake.objects.has(String(retry.body.path)), "the retry's final object does not exist");
+  });
+
+  await step("a copied object is removed before its failed claim is released", async () => {
+    await login(USERS.cc);
+
+    const failAfterCopy = async (
+      suffix: string,
+      configure: (enabled: boolean) => void,
+      expectedError: string,
+    ) => {
+      const minted = await json(await init(FORM, { kind: "video", filename: `${suffix}.mp4`, mime_type: "video/mp4", size_bytes: 1_100_000 }));
+      const stagingPath = String(minted.body.storage_path);
+      const token = String(minted.body.upload_token);
+      fake.put(stagingPath, 1_100_000, "video/mp4");
+      const removedBefore = fake.removed.length;
+      configure(true);
+      const failed = await json(await confirm(FORM, { upload_token: token }));
+      configure(false);
+      assert.equal(failed.body.error, expectedError, JSON.stringify(failed.body));
+      const finalPath = fake.copies.at(-1)?.dest;
+      assert.ok(finalPath, `${suffix}: no final copy was attempted`);
+      assert.equal(fake.objects.has(finalPath), false, `${suffix}: failed final copy was orphaned`);
+      assert.ok(fake.removed.slice(removedBefore).includes(finalPath), `${suffix}: final copy was not removed`);
+      const [body] = token.split(".");
+      const nonce = (JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { nonce: string }).nonce;
+      const claims = await db.execute({ sql: "SELECT token_nonce FROM offer_upload_confirms WHERE token_nonce = ?", args: [nonce] });
+      assert.equal(claims.rows.length, 0, `${suffix}: failed promotion kept its claim`);
+    };
+
+    await failAfterCopy("final-head-error", (enabled) => { faults.finalInfoThrows = enabled; }, "storage_unavailable");
+    await failAfterCopy("final-size-change", (enabled) => { faults.finalInfoSizeDelta = enabled ? 1 : 0; }, "swapped");
+    await failAfterCopy("final-type-change", (enabled) => {
+      if (enabled) faults.finalInfoContentType = "text/html";
+      else delete faults.finalInfoContentType;
+    }, "wrong_type");
+  });
+
+  await step("a failed copied-object delete is logged without masking the verification error", async () => {
+    await login(USERS.cc);
+    const minted = await json(await init(FORM, { kind: "video", filename: "cleanup-outage.mp4", mime_type: "video/mp4", size_bytes: 1_250_000 }));
+    const stagingPath = String(minted.body.storage_path);
+    fake.put(stagingPath, 1_250_000, "video/mp4");
+    const logs: unknown[][] = [];
+    const realError = console.error;
+    faults.finalInfoSizeDelta = 1;
+    faults.removeThrows = true;
+    console.error = (...args: unknown[]) => { logs.push(args); };
+    let failed: Awaited<ReturnType<typeof json>>;
+    try {
+      failed = await json(await confirm(FORM, { upload_token: minted.body.upload_token }));
+    } finally {
+      console.error = realError;
+      faults.finalInfoSizeDelta = 0;
+      faults.removeThrows = false;
+    }
+    assert.equal(failed.body.error, "swapped", "the cleanup outage replaced the original verification error");
+    assert.ok(logs.some((args) => String(args[0]).includes("removing a failed copied object failed")), "the cleanup outage was swallowed");
   });
 
   await step("another tenant cannot read a claim, even knowing its token_nonce", async () => {

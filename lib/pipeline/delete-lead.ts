@@ -503,9 +503,9 @@ async function removeDependents(
 
 /**
  * Rows that must never be cascaded away or orphaned by the parent delete: the
- * three CASCADE tables (live and retired copies), an uncancelled booking, and
- * the client records. Live tables must exist (a missing one fails closed);
- * retired copies are guarded when present.
+ * three CASCADE tables (live and retired copies), an active document, an
+ * uncancelled booking, and the client records. Live tables must exist (a
+ * missing one fails closed); retired copies are guarded when present.
  */
 const DELETE_GUARDS: ReadonlyArray<readonly [table: string, where: string, live: boolean]> = [
   ["website_deals", "lead_id = ?", true],
@@ -514,6 +514,7 @@ const DELETE_GUARDS: ReadonlyArray<readonly [table: string, where: string, live:
   ["website_onboarding_v2_retired", "lead_id = ?", false],
   ["website_sales_payment_receipts", "lead_id = ?", true],
   ["website_sales_payment_receipts_v1_retired", "lead_id = ?", false],
+  ["lead_documents", "lead_id = ? AND metadata->>'deleted_at' IS NULL", true],
   ["call_appointments", "lead_id = ? AND status <> 'cancelled'", true],
   ["customers", "source_lead_id = ?", true],
   ["delivery_projects", "lead_id = ?", true],
@@ -527,22 +528,43 @@ const DELETE_GUARDS: ReadonlyArray<readonly [table: string, where: string, live:
  */
 export async function guardedDeleteLead(tenantId: string, leadId: string): Promise<boolean> {
   const raw = getTursoClient();
-  const names = DELETE_GUARDS.map(([table]) => table);
-  const present = new Set(
-    (await raw.execute({
-      sql: `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${names.map(() => "?").join(", ")})`,
-      args: names,
-    })).rows.map((row) => String(row.name)),
-  );
-  const missing = DELETE_GUARDS.filter(([table, , live]) => live && !present.has(table)).map(([table]) => table);
-  if (missing.length) throw new Unavailable("guarding the delete", "missing " + missing.join(", "));
-  const used = DELETE_GUARDS.filter(([table]) => present.has(table));
-  const sql =
-    "DELETE FROM tenant_records WHERE tenant_id = ? AND id = ? AND entity_type = 'lead'" +
-    used.map(([table, where]) => ` AND NOT EXISTS (SELECT 1 FROM "${table}" WHERE tenant_id = ? AND ${where})`).join("");
-  const args = [tenantId, leadId, ...used.flatMap(() => [tenantId, leadId])];
-  const result = await raw.execute({ sql, args });
-  return result.rowsAffected === 1;
+  const tx = await raw.transaction("write");
+  try {
+    const names = DELETE_GUARDS.map(([table]) => table);
+    const present = new Set(
+      (await tx.execute({
+        sql: `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${names.map(() => "?").join(", ")})`,
+        args: names,
+      })).rows.map((row) => String(row.name)),
+    );
+    const missing = DELETE_GUARDS.filter(([table, , live]) => live && !present.has(table)).map(([table]) => table);
+    if (missing.length) throw new Unavailable("guarding the delete", "missing " + missing.join(", "));
+    const used = DELETE_GUARDS.filter(([table]) => present.has(table));
+    const sql =
+      "DELETE FROM tenant_records WHERE tenant_id = ? AND id = ? AND entity_type = 'lead'" +
+      used.map(([table, where]) => ` AND NOT EXISTS (SELECT 1 FROM "${table}" WHERE tenant_id = ? AND ${where})`).join("");
+    const args = [tenantId, leadId, ...used.flatMap(() => [tenantId, leadId])];
+
+    // 2026-10-18: cancelled appointments are the only appointment rows the
+    // guard allows. Remove them first in this write transaction; if any guard
+    // refuses the parent delete, rollback restores them too.
+    await tx.execute({
+      sql: "DELETE FROM call_appointments WHERE tenant_id = ? AND lead_id = ? AND status = 'cancelled'",
+      args: [tenantId, leadId],
+    });
+    const result = await tx.execute({ sql, args });
+    if (result.rowsAffected !== 1) {
+      await tx.rollback();
+      return false;
+    }
+    await tx.commit();
+    return true;
+  } catch (error) {
+    if (!tx.closed) await tx.rollback();
+    throw error;
+  } finally {
+    tx.close();
+  }
 }
 
 export async function deletePipelineLead(
