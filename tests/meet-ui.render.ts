@@ -59,6 +59,8 @@ function snapshot(over: Partial<MeetSnapshot> = {}): MeetSnapshot {
     camOn: true,
     sharing: false,
     recording: false,
+    // The recording is running: the room records and its creator (whose browser records) is in the call.
+    roomRecording: true,
     notice: null,
     ...over,
   };
@@ -110,14 +112,24 @@ async function main() {
     draw(`ended.${reason}.host`, h(MeetEnded, { reason, isHost: true }));
   }
 
-  // The call: a guest, a host, a shared screen, and the Recording indicator's two conditions.
-  const call = (snap: MeetSnapshot, over: { canShare?: boolean; recordAudio?: boolean } = {}) =>
-    h(CallScreen, { controller, snapshot: snap, code: "abc-defg-hjk", title: "Quarterly review", recordAudio: over.recordAudio ?? true, canShare: over.canShare ?? true });
+  // The call: a guest, a host, a shared screen, and the Recording indicator, which follows the room's own answer
+  // (`roomRecording`: the room records and its creator is in the call), never the room's setting alone.
+  const call = (snap: MeetSnapshot, over: { canShare?: boolean } = {}) =>
+    h(CallScreen, { controller, snapshot: snap, code: "abc-defg-hjk", title: "Quarterly review", canShare: over.canShare ?? true });
   draw("call.guest", call(snapshot()));
   draw("call.guestNoShare", call(snapshot(), { canShare: false }));
   draw("call.host", call(snapshot({ me: { id: "p-host", role: "host", name: "CC" } })));
-  draw("call.noHostYet", call(snapshot({ hostPresent: false })));
-  draw("call.notRecorded", call(snapshot({ room: { code: "abc-defg-hjk", title: "Quarterly review", status: "live", recordAudio: false, startedAt: null } }), { recordAudio: false }));
+  draw("call.noHostYet", call(snapshot({ hostPresent: false, roomRecording: false })));
+  draw("call.notRecorded", call(snapshot({ room: { code: "abc-defg-hjk", title: "Quarterly review", status: "live", recordAudio: false, startedAt: null }, roomRecording: false })));
+  // A recorded room whose creator is not in the call: a second host (an admin) is the host who is present, and nothing is recording.
+  draw(
+    "call.secondHostAlone",
+    call(snapshot({ me: { id: "p-adon", role: "host", name: "Adon" }, tiles: [tile({ participantId: "p-adon", name: "Adon", role: "host", me: true, video: track("video"), camOn: true })], roomRecording: false })),
+  );
+  draw(
+    "call.guestWithSecondHost",
+    call(snapshot({ tiles: [tile({ participantId: "p-adon", name: "Adon", role: "host" }), tile({ participantId: "p-me", name: "Jane Doe", me: true })], roomRecording: false })),
+  );
   draw("call.notice", call(snapshot({ notice: "Reconnecting..." })));
   draw(
     "call.sharing",
@@ -224,6 +236,12 @@ async function main() {
     "panel.laterNotAddedOther",
     panel({
       later: { title: "", startsAt: "", minutes: "", record: true, busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: false, schedule: { added: false, reason: "time_zone_invalid" } } },
+    }),
+  );
+  draw(
+    "panel.laterScheduleUnreached",
+    panel({
+      later: { title: "", startsAt: "", minutes: "", record: true, busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: false, schedule: { added: false, reason: "schedule_unavailable" } } },
     }),
   );
   draw(

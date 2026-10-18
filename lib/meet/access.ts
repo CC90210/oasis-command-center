@@ -26,7 +26,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Client } from "@libsql/client";
 import type { NextResponse } from "next/server";
 import { meetError } from "./answers";
-import { readPresence, type MeetPresence } from "./participants";
+import { isStale, readPresence, type MeetPresence } from "./participants";
 import { displayMeetCode, parseMeetCode, readMeetRoomByCode, wellFormedText, type MeetRoom } from "./rooms";
 
 export type MeetRole = "host" | "guest";
@@ -50,10 +50,15 @@ export class MeetNotConfiguredError extends Error {
 /** A participant token's claims. `role` is what they joined as; the participant row is what counts. */
 export type MeetTokenClaims = { roomId: string; participantId: string; role: MeetRole; exp: number };
 
-function secret(): string {
+/** The participant token's secret is set (long enough to sign with): without it nobody can join a room. */
+export function meetTokenConfigured(): boolean {
   const value = process.env[MEET_TOKEN_SECRET_ENV];
-  if (!value || value.length < MIN_SECRET_LENGTH) throw new MeetNotConfiguredError();
-  return value;
+  return !!value && value.length >= MIN_SECRET_LENGTH;
+}
+
+function secret(): string {
+  if (!meetTokenConfigured()) throw new MeetNotConfiguredError();
+  return process.env[MEET_TOKEN_SECRET_ENV]!;
 }
 
 /** The signature over a token's payload, domain-separated so it can never pass for another signer's. */
@@ -173,8 +178,8 @@ export type MeetParticipantResult =
 
 /**
  * The participant calling this room's API, from their cookie, re-read from their row. The answer otherwise:
- * 404 no such room, 401 no valid token for THIS room (or they left), 403 removed by the host, 410 the room ended.
- * MeetNotConfiguredError propagates: the route answers 503.
+ * 404 no such room, 401 no valid token for THIS room (or they left, or have not been heard from for MEET_STALE_MS),
+ * 403 removed by the host, 410 the room ended. MeetNotConfiguredError propagates: the route answers 503.
  */
 export async function requireMeetParticipant(
   db: Client,
@@ -192,5 +197,7 @@ export async function requireMeetParticipant(
   const participant = await readPresence(db, { tenantId: room.tenantId, roomId: room.id, participantId: claims.participantId });
   if (!participant || participant.leftAt) return answer(401, "not_in_room");
   if (participant.removedAt) return answer(403, "removed");
+  // Silent that long, they have left (lib/meet/participants.ts leaveStale): back only through the join and its cap.
+  if (isStale(participant, new Date(nowMs))) return answer(401, "not_in_room");
   return { ok: true, room, participant };
 }

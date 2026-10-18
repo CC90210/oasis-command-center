@@ -19,6 +19,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import type { NextRequest, NextResponse } from "next/server";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
+import { fnv1a32 } from "@/lib/automations/schedule-plan";
 import { readCappedJson, sameOrigin } from "@/lib/offer-pages/public-http";
 import {
   MEET_COOKIE,
@@ -26,6 +27,7 @@ import {
   meetCookie,
   meetDisplayName,
   meetRoleFor,
+  meetTokenConfigured,
   requireMeetHost,
   requireMeetParticipant,
   signMeetToken,
@@ -38,14 +40,17 @@ import { meetError, meetJson } from "./answers";
 import { meetFailure, meetRateLimited, roomView } from "./http";
 import type { RTCIceServerLike } from "./ice";
 import {
+  MEET_MAX_PARTICIPANTS,
   MEET_MAX_TRACKS,
   deleteMeetRoomRows,
   endAbandonedRooms,
   endMeetRoom,
   expireIfHostGone,
   forgetSession,
+  isStale,
   joinMeetRoom,
   leaveMeet,
+  leaveStale,
   pendingCuts,
   presentParticipants,
   readPresence,
@@ -82,8 +87,12 @@ export type MeetDeps = {
     /** Delete a meeting's recording here and on the PC; null when recording is not installed (nothing to delete). */
     remove: (room: MeetRoom, userId: string, now: Date) => Promise<{ relayRemaining: number } | null>;
   };
-  /** Work that runs after the answer has gone (live: ctx.waitUntil, lib/os/runs/keepalive.ts), never on a poll's path. */
-  later: (label: string, work: () => Promise<unknown>) => void;
+  /**
+   * Work that runs after the answer has gone (live: ctx.waitUntil, lib/os/runs/keepalive.ts), never on a poll's
+   * path. Resolves once the work is handed over, not when it is done: await it, so the platform holds the work
+   * before the answer is sent.
+   */
+  later: (label: string, work: () => Promise<unknown>) => Promise<void>;
   now: () => Date;
 };
 
@@ -115,8 +124,11 @@ function sfuIfConfigured(deps: MeetDeps): SfuClient | null {
   }
 }
 
-/** The video service (the Cloudflare Realtime app) is set up, so a call can connect: a meeting is only made, and only offered, where it is. */
-const mediaReady = (deps: MeetDeps) => sfuIfConfigured(deps) !== null;
+/**
+ * A call can connect: the video service (the Cloudflare Realtime app) is set up, and so is the participant token's
+ * secret, without which nobody can join. A meeting is only made, and only offered, where both are.
+ */
+const mediaReady = (deps: MeetDeps) => meetTokenConfigured() && sfuIfConfigured(deps) !== null;
 
 let noSfuLogged = false;
 
@@ -133,7 +145,12 @@ async function cutHeld(deps: MeetDeps, room: Pick<MeetRoom, "tenantId" | "id">, 
     return true;
   }
   if (!(await cutSession(sfu, held.sessionId, where))) return false;
-  await forgetSession(deps.db, room, held);
+  try {
+    await forgetSession(deps.db, room, held);
+  } catch (err) {
+    // The media is cut either way; the row keeps the id, so a later step cuts it again (it is already closed).
+    console.error(`[meet.${where}] a cut session could not be forgotten`, err instanceof Error ? err.message : err);
+  }
   return true;
 }
 
@@ -147,20 +164,54 @@ async function cutRoom(deps: MeetDeps, room: Pick<MeetRoom, "tenantId" | "id">, 
   return results.every((r) => r.status === "fulfilled" && r.value);
 }
 
-/** How often one room retries the cuts that failed (per Worker isolate): an SFU that is down costs a retry per half minute, not one per poll. */
-const RETRY_CUTS_EVERY_MS = 30_000;
-const lastRetry = new Map<string, number>();
+/** How often one room is tidied (per Worker isolate): an SFU that is down costs a retry per half minute, not one per poll. */
+const TIDY_EVERY_MS = 30_000;
+const lastTidy = new Map<string, number>();
 
-/** After a host's poll has been answered: try again to cut the sessions of people who left or were removed. */
-function retryCutsLater(deps: MeetDeps, room: MeetRoom, now: Date) {
+/**
+ * After a poll has been answered: whoever has gone silent for MEET_STALE_MS has left, and the sessions of people
+ * who left or were removed whose cut has not gone through are cut again.
+ */
+async function tidyRoomLater(deps: MeetDeps, room: MeetRoom, now: Date): Promise<void> {
   const at = now.getTime();
-  if (at - (lastRetry.get(room.id) ?? Number.NEGATIVE_INFINITY) < RETRY_CUTS_EVERY_MS) return;
-  if (lastRetry.size > 500) lastRetry.clear();
-  lastRetry.set(room.id, at);
-  deps.later("state.retry_cuts", async () => {
-    const held = await pendingCuts(deps.db, room, now);
-    await Promise.allSettled(held.map((h) => cutHeld(deps, room, h, "state.retry_cuts")));
+  if (at - (lastTidy.get(room.id) ?? Number.NEGATIVE_INFINITY) < TIDY_EVERY_MS) return;
+  if (lastTidy.size > 500) lastTidy.clear();
+  lastTidy.set(room.id, at);
+  await deps.later("state.tidy", async () => {
+    await leaveStale(deps.db, room, now);
+    const held = await pendingCuts(deps.db, room, now, MEET_MAX_PARTICIPANTS);
+    await Promise.allSettled(held.map((h) => cutHeld(deps, room, h, "state.tidy")));
   });
+}
+
+/**
+ * Re-read after a slow SFU call: a leave, a removal or the room's end may have landed meanwhile, and cut and forgotten
+ * the session this call just added to. Then what it added is cut too, and the answer is the one the caller gets now.
+ */
+async function goneMeanwhile(deps: MeetDeps, room: MeetRoom, me: MeetPresence, sfu: SfuClient, sessionId: string): Promise<NextResponse | null> {
+  const [nowRoom, row] = await Promise.all([
+    readMeetRoomByCode(deps.db, room.code),
+    readPresence(deps.db, { tenantId: room.tenantId, roomId: room.id, participantId: me.id }),
+  ]);
+  const why = !nowRoom
+    ? meetError(404, "room_not_found")
+    : nowRoom.status === "ended"
+      ? meetError(410, "room_ended", { reason: nowRoom.endedReason })
+      : row?.removedAt
+        ? meetError(403, "removed")
+        : !row || row.leftAt
+          ? meetError(401, "not_in_room")
+          : null;
+  if (why) await cutSession(sfu, sessionId, "sfu.gone_meanwhile");
+  return why;
+}
+
+/**
+ * A short tag for a participant's current SFU session, never the session id itself (that stays on the server): it
+ * changes when they reconnect, so the others' browsers pull what they publish anew (lib/meet/room-client.ts).
+ */
+function sessionTag(sessionId: string | null): string | null {
+  return sessionId ? fnv1a32(sessionId).toString(36) : null;
 }
 
 /** The reason a meeting made for later says it is not on the Schedule when the Schedule itself could not be reached. */
@@ -174,7 +225,7 @@ export async function handleListRooms(deps: MeetDeps): Promise<NextResponse> {
     // A call left without its host that nobody polls any more ends here (and in the recording relay's sweep), so
     // the list never shows it live and its recording is handed over.
     for (const room of await endAbandonedRooms(deps.db, [session.tenantId], deps.now())) {
-      deps.later("rooms.abandoned", () => cutRoom(deps, room, "room.abandoned"));
+      await deps.later("rooms.abandoned", () => cutRoom(deps, room, "room.abandoned"));
     }
     const [rooms, recordingAvailable] = await Promise.all([
       // A person sees the meetings they made; an owner or admin by base role, who hosts every meeting in the
@@ -292,10 +343,11 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
     const role: MeetRole = session.ok ? (meetRoleFor(session, room) ?? "guest") : "guest";
 
     // The same browser coming back (a refresh, a dropped connection): its token still names someone in this room.
+    // One silent for MEET_STALE_MS has left, and comes back as a new join, through the cap.
     if (earlier && earlier.roomId === room.id) {
       const before = await readPresence(deps.db, { tenantId: room.tenantId, roomId: room.id, participantId: earlier.participantId });
       if (before?.removedAt) return meetError(403, "removed");
-      if (before && !before.leftAt && before.role === role) {
+      if (before && !before.leftAt && before.role === role && !isStale(before, now)) {
         await touchParticipant(deps.db, before, now);
         return joined(before, room, await deps.ice(), deps.recording.served(room.tenantId));
       }
@@ -342,21 +394,26 @@ export async function handleState(req: NextRequest, rawCode: string, deps: MeetD
     const { room, participant: me } = auth;
     await touchParticipant(deps.db, me, now);
     if (await expireIfHostGone(deps.db, room, now)) {
-      deps.later("room.expire", () => cutRoom(deps, room, "room.expire"));
+      await deps.later("room.expire", () => cutRoom(deps, room, "room.expire"));
       return meetError(410, "room_ended", { reason: "host_left" });
     }
-    if (me.role === "host") retryCutsLater(deps, room, now);
+    await tidyRoomLater(deps, room, now);
     const present = await presentParticipants(deps.db, room, now);
     return meetJson({
       ok: true,
       room: roomView(room),
       me: { id: me.id, role: me.role, name: me.displayName },
       hostPresent: present.some((p) => p.role === "host"),
+      // Recording now: the room records and the one browser that records it, its creator's, is in the call. The page
+      // says "recorded" from this, never from a host being present (a second host records nothing).
+      recording:
+        room.recordAudio && deps.recording.served(room.tenantId) && present.some((p) => p.role === "host" && p.userId !== null && p.userId === room.hostUserId),
       participants: present.map((p) => ({
         id: p.id,
         name: p.displayName,
         role: p.role,
         me: p.id === me.id,
+        session: sessionTag(p.sfuSessionId),
         tracks: p.tracks.map((t) => ({ trackName: t.trackName, kind: t.kind })),
       })),
     });
@@ -383,7 +440,9 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
       if (me.role === "guest" && !(await presentParticipants(deps.db, room, now)).some((p) => p.role === "host")) {
         return meetError(409, "waiting_for_host");
       }
-      if (me.sfuSessionId) await cutSession(sfu, me.sfuSessionId, "sfu.reconnect");
+      // A reconnect replaces the session only once the old one is cut: the row is the only record of it, and an id
+      // overwritten uncut would be a session nobody could ever close. The browser tries again (room-client reconnect).
+      if (me.sfuSessionId && !(await cutSession(sfu, me.sfuSessionId, "sfu.reconnect"))) return meetError(502, "sfu_failed");
       await setParticipantSession(deps.db, me, await sfu.newSession());
       return meetJson({ ok: true });
     }
@@ -394,6 +453,8 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
       const kept = me.tracks.filter((t) => !body.tracks.some((n) => n.trackName === t.trackName));
       if (kept.length + body.tracks.length > MEET_MAX_TRACKS) return meetError(400, "too_many_tracks");
       const result = await sfu.publish(me.sfuSessionId, body.offer, body.tracks.map(({ mid, trackName }) => ({ mid, trackName })));
+      const gone = await goneMeanwhile(deps, room, me, sfu, me.sfuSessionId);
+      if (gone) return gone;
       const published = body.tracks.flatMap((t) => {
         const r = result.tracks.find((x) => x.trackName === t.trackName);
         return r?.errorCode ? [] : [{ trackName: t.trackName, kind: t.kind, mid: r?.mid || t.mid }];
@@ -417,6 +478,8 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
         wanted.push({ sessionId: owner.sfuSessionId, trackName: track.trackName, participantId: owner.id });
       }
       const result = await sfu.pull(me.sfuSessionId, wanted.map(({ sessionId, trackName }) => ({ sessionId, trackName })));
+      const gone = await goneMeanwhile(deps, room, me, sfu, me.sfuSessionId);
+      if (gone) return gone;
       const owners = new Map(wanted.map((w) => [`${w.sessionId}\n${w.trackName}`, w.participantId]));
       return meetJson({
         ok: true,
@@ -490,7 +553,7 @@ export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDe
       if (target && target.userId && target.userId === auth.userId) return meetError(400, "cannot_remove_self");
       const removed = await removeParticipant(deps.db, room, body.participantId, now);
       if (!removed) return meetError(404, "participant_not_found");
-      // A cut that fails keeps the session id: the host's next polls try again (retryCutsLater).
+      // A cut that fails keeps the session id: the room's next polls try again (tidyRoomLater).
       const mediaCut = removed.sfuSessionId
         ? await cutHeld(deps, room, { participantId: removed.id, sessionId: removed.sfuSessionId }, "host.remove")
         : true;

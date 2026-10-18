@@ -31,9 +31,12 @@ keeps the transcript. No meeting vendor bill: media runs on Cloudflare Realtime 
 ## Limits, on purpose
 
 - Eight people per room at most (one statement with the join, so it cannot be overshot).
-- A live room ends itself when no host has been seen for 10 minutes, but only after a call happened in it (a guest was there while a host was). A host who opens a meeting alone, to test or early, leaves it waiting for its guests. A call nobody polls any more (every tab closed) ends when a host opens the Meet panel, and in the recording relay's sweep, so its recording is handed over.
+- A live room ends itself when no host has been seen for 10 minutes, but only after a call happened in it: two different people in the room at once, one of them a host (CC and Adon, both owners, are both hosts; one person in two tabs is not a call). A host who opens a meeting alone, to test or early, leaves it waiting for its guests. A call nobody polls any more (every tab closed) ends when a host opens the Meet panel, and in the recording relay's sweep, so its recording is handed over. Backstop: a room nobody has been in for 12 hours, whose start (if it has one) is 12 hours past, ends as `expired`.
+- Someone not heard from for 2 minutes has left (their session is cut; coming back is a new join, through the cap), so a browser that stops polling but keeps its connection is never left listening unseen. Up to 30 seconds is only a gap in the People list.
+- A reconnect replaces the SFU session only once the old one is cut. The others see each person's session as a tag that changes on a reconnect, and pull their tracks anew.
+- "Recorded" is shown in the call only while the room's creator, whose browser records, is in it.
 - End asks the room to end before the recorder stops: an End that fails keeps the meeting going and recorded.
-- Media is cut at the SFU on leave, remove, end and delete. A row keeps its session id until the cut goes through; a failed one is retried from the host's polls (after the answer, at most every 30 seconds per room) for an hour, and by Delete. Delete never waits on an SFU that does not answer.
+- Media is cut at the SFU on leave, remove, end and delete. A row keeps its session id until the cut goes through; a failed one is retried from the room's polls (after the answer, at most every 30 seconds per room) for an hour, and by Delete. Delete never waits on an SFU that does not answer.
 - Only the room creator's browser records; if the creator is not in the call, nothing records.
 - Remove is not a ban: the person can come back with the link from a new browser window (there is no account to ban).
 - Rate limits are per Worker isolate (a slowdown for guessing links); the participant cap is the hard ceiling. Up to eight people behind one office address fit the poll limit.

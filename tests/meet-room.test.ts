@@ -22,7 +22,16 @@ import { publicAppBaseUrl } from "../lib/api-helpers";
 import { MEET_COOKIE, MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } from "../lib/meet/access";
 import { parseHost, parseSfu } from "../lib/meet/bodies";
 import { handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
-import { MEET_CUT_RETRY_MS, MEET_HOST_GRACE_MS, MEET_MAX_PARTICIPANTS, endAbandonedRooms, pendingCuts } from "../lib/meet/participants";
+import {
+  MEET_CUT_RETRY_MS,
+  MEET_HOST_GRACE_MS,
+  MEET_IDLE_MS,
+  MEET_MAX_PARTICIPANTS,
+  MEET_STALE_MS,
+  endAbandonedRooms,
+  forgetSession,
+  pendingCuts,
+} from "../lib/meet/participants";
 import { displayMeetCode, readMeetRoomByCode } from "../lib/meet/rooms";
 import { SfuError, type SfuClient } from "../lib/meet/sfu";
 
@@ -73,6 +82,8 @@ function fakeSfu() {
   const sessions = new Map<string, Array<{ mid: string; location: string; trackName: string; status: string }>>();
   const down = new Set<string>();
   const gone = new Set<string>();
+  /** Run while a pull is on its way: after the SFU has the request, before it adds the pulled track. */
+  const hooks: { duringPull?: () => Promise<unknown> } = {};
   let reading = 0;
   let widest = 0;
   let n = 0;
@@ -95,6 +106,7 @@ function fakeSfu() {
     },
     async pull(sessionId, tracks) {
       calls.push({ op: "pull", sessionId, tracks });
+      if (hooks.duringPull) await hooks.duringPull();
       const list = sessions.get(sessionId)!;
       const out = tracks.map((t, i) => ({ location: "remote" as const, sessionId: t.sessionId, trackName: t.trackName, mid: `r${list.length + i}` }));
       for (const o of out) list.push({ mid: o.mid, location: "remote", trackName: o.trackName, status: "active" });
@@ -123,7 +135,7 @@ function fakeSfu() {
     },
   };
   return {
-    client, calls, sessions, down, gone,
+    client, calls, sessions, down, gone, hooks,
     widest: () => widest,
     resetWidest: () => {
       widest = 0;
@@ -160,7 +172,9 @@ async function main() {
       unscheduled.push({ owner, eventId });
     },
     recording,
-    later: (_label, work) => void background.push(work()),
+    later: async (_label, work) => {
+      background.push(work());
+    },
     now: () => new Date(clock),
     ...over,
   });
@@ -171,6 +185,13 @@ async function main() {
   };
   const heldSession = async (participantId: string) =>
     (await db.execute({ sql: "SELECT sfu_session_id AS s FROM meet_participants WHERE id = ?", args: [participantId] })).rows[0]?.s ?? null;
+  /** Let time pass while these people keep polling, once a minute (inside MEET_STALE_MS, so they stay in the room). */
+  const passWhilePolling = async (ms: number, polls: Array<() => Promise<Response>>) => {
+    for (let left = ms; left > 0; left -= 60_000) {
+      clock += Math.min(60_000, left);
+      for (const poll of polls) await poll();
+    }
+  };
   const json = async (res: Response) => (await res.json()) as Json;
   const cookieOf = (res: Response) => (res as unknown as { cookies: { get(n: string): { value: string } | undefined } }).cookies.get(MEET_COOKIE)?.value;
 
@@ -529,9 +550,9 @@ async function main() {
     await handleJoin(request(`/api/meet/${c3}/join`, { body: {}, ip: freshIp() }), c3, deps({ session: as(CC) }));
     const guest = cookieOf(await handleJoin(request(`/api/meet/${c3}/join`, { body: { name: "G" }, ip: freshIp() }), c3, deps()))!;
     const poll = () => handleState(request(`/api/meet/${c3}/state`, { method: "GET", cookie: guest, ip: freshIp() }), c3, deps());
-    clock += MEET_HOST_GRACE_MS - 60_000;
+    await passWhilePolling(MEET_HOST_GRACE_MS - 60_000, [poll]);
     assert.equal((await poll()).status, 200, "nine minutes: still waiting for the host");
-    clock += 120_000;
+    await passWhilePolling(120_000, [poll]);
     assert.equal((await poll()).status, 410);
     const room = await readMeetRoomByCode(db, c3.replace(/-/g, ""));
     assert.equal(room?.endedReason, "host_left");
@@ -562,7 +583,7 @@ async function main() {
   };
   const reads = (sessionId: string) => sfu.calls.filter((x) => x.op === "tracks" && x.sessionId === sessionId).length;
 
-  await check("a removed guest whose cut failed is cut again from the host's next polls, at most every 30 seconds; a session the SFU no longer has counts as cut", async () => {
+  await check("a removed guest whose cut failed is cut again from the room's next polls, at most every 30 seconds; a session the SFU no longer has counts as cut", async () => {
     const call = await callWith(2);
     const [guest, other] = call.guests;
     const session = call.sessions[1];
@@ -645,9 +666,10 @@ async function main() {
     await poll(host.cookie);
     for (const p of [host, guest]) await handleSfu(request(`/api/meet/${c}/sfu`, { body: { action: "session" }, cookie: p.cookie, ip: freshIp() }), c, deps());
     await poll(guest.cookie);
-    clock += MEET_HOST_GRACE_MS - 60_000; // the host's tab died
+    const guestPolls = () => poll(guest.cookie);
+    await passWhilePolling(MEET_HOST_GRACE_MS - 60_000, [guestPolls]); // the host's tab died; the guest waits on
     assert.equal((await poll(guest.cookie)).status, 200, "nine minutes on, still waiting for the host");
-    clock += 120_000;
+    await passWhilePolling(120_000, [guestPolls]);
     assert.equal((await poll(guest.cookie)).status, 410);
     assert.equal((await readMeetRoomByCode(db, c.replace(/-/g, "")))?.endedReason, "host_left");
     await settle();
@@ -672,6 +694,136 @@ async function main() {
     assert.equal((await readMeetRoomByCode(db, e.replace(/-/g, "")))?.status, "live", "another workspace's rooms are its own list's business");
     const swept = await endAbandonedRooms(db, [OTHER, OASIS], new Date(clock));
     assert.deepEqual(swept.map((r) => r.tenantId), [OTHER], "the relay's sweep ends them for every workspace it is given");
+  });
+
+  await check("a call between two hosts, or a host and a guest, ends once its hosts are gone; one person in two tabs, or a guest who left before any host came, is not a call", async () => {
+    const make = async () => String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false } }), deps({ session: as(CC) })))).room as Json).code);
+    const join = (c: string, session?: () => Promise<MeetSession>, body: Record<string, unknown> = {}) =>
+      handleJoin(request(`/api/meet/${c}/join`, { body, ip: freshIp() }), c, deps(session ? { session } : {}));
+    // CC and Adon are both owners, so both host every room: a call between just the two of them is still a call.
+    const hosts = await make();
+    await join(hosts, as(CC));
+    await join(hosts, as(ADON, true));
+    const twoTabs = await make();
+    await join(twoTabs, as(CC));
+    await join(twoTabs, as(CC));
+    const early = await make();
+    const left = cookieOf(await join(early, undefined, { name: "Too early" }))!;
+    await handleLeave(request(`/api/meet/${early}/leave`, { cookie: left, ip: freshIp() }), early, deps());
+    clock += 60_000;
+    await join(early, as(CC));
+    clock += MEET_HOST_GRACE_MS + 60_000; // every tab closed without a word
+    const list = (await json(await handleListRooms(deps({ session: as(CC) })))).rooms as Json[];
+    await settle();
+    const status = (c: string) => list.find((r) => r.code === c)?.status;
+    assert.equal(status(hosts), "ended", "two hosts in the room together were a call: it ends, and its recording is handed over");
+    assert.equal(status(twoTabs), "live", "one person in two tabs is not a call: it waits for its meeting");
+    assert.equal(status(early), "live", "nor a guest who had left before any host came");
+  });
+
+  await check("a reconnect replaces the session only once the old one is cut: until then the row keeps it, and the browser tries again", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    const reconnect = () => handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "session" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps());
+    sfu.down.add(call.sessions[1]);
+    assert.equal((await quietly(reconnect)).status, 502);
+    assert.equal(await heldSession(guest.id), call.sessions[1], "the old session is still on the row, so it can still be cut");
+    sfu.down.delete(call.sessions[1]);
+    assert.equal((await reconnect()).status, 200);
+    const next = await heldSession(guest.id);
+    assert.ok(next && next !== call.sessions[1], "a new session, once the old one was cut");
+  });
+
+  await check("each person's session reaches the others only as a tag, and the tag changes when they reconnect", async () => {
+    const call = await callWith(1);
+    const tag = async () =>
+      ((await json(await handleState(request(`/api/meet/${call.c}/state`, { method: "GET", cookie: call.host.cookie, ip: freshIp() }), call.c, deps()))).participants as Json[])
+        .find((p) => p.id === call.guests[0].id)?.session;
+    const first = await tag();
+    assert.ok(typeof first === "string" && first.length > 0 && !call.sessions.some((s) => String(first).includes(s)), "a tag, never the session id");
+    await handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "session" }, cookie: call.guests[0].cookie, ip: freshIp() }), call.c, deps());
+    assert.notEqual(await tag(), first, "a reconnect is a new tag, so the others pull what they publish anew");
+  });
+
+  await check("forgetting a cut session never clears the one a reconnect put in its place", async () => {
+    const call = await callWith(1);
+    const room = (await readMeetRoomByCode(db, call.c.replace(/-/g, "")))!;
+    await forgetSession(db, room, { participantId: call.guests[0].id, sessionId: "an-older-session" });
+    assert.equal(await heldSession(call.guests[0].id), call.sessions[1]);
+  });
+
+  await check("silent for two minutes, a participant's own calls are refused and their old token makes a new place, before anything has tidied the room", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    clock += MEET_STALE_MS + 1_000; // nobody polled: the room has not been tidied
+    assert.equal((await handleState(request(`/api/meet/${call.c}/state`, { method: "GET", cookie: guest.cookie, ip: freshIp() }), call.c, deps())).status, 401);
+    const back = await json(await handleJoin(request(`/api/meet/${call.c}/join`, { body: { name: "G0" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps()));
+    assert.ok(back.participantId && back.participantId !== guest.id, "not revived by the old token: a new join, through the cap");
+  });
+
+  await check("someone silent for two minutes has left: their calls are refused, their session is cut, and coming back goes through the cap", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    const hostPolls = () => handleState(request(`/api/meet/${call.c}/state`, { method: "GET", cookie: call.host.cookie, ip: freshIp() }), call.c, deps());
+    await passWhilePolling(MEET_STALE_MS + 60_000, [hostPolls]); // the guest's page stopped polling, its connection still open
+    await settle();
+    assert.equal((await handleState(request(`/api/meet/${call.c}/state`, { method: "GET", cookie: guest.cookie, ip: freshIp() }), call.c, deps())).status, 401);
+    assert.equal((await handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "session" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps())).status, 401);
+    assert.equal(await heldSession(guest.id), null, "the room's polls marked them left and cut what they still held");
+    const back = await json(await handleJoin(request(`/api/meet/${call.c}/join`, { body: { name: "G0" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps()));
+    assert.ok(back.participantId && back.participantId !== guest.id, "a new place in the room, taken through the cap");
+  });
+
+  await check("a removal that lands while a pull is on its way: what the pull added is cut too, and the puller is told", async () => {
+    const call = await callWith(2);
+    const [puller, publisher] = call.guests;
+    await handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "publish", offer, tracks: [{ mid: "0", trackName: "mic", kind: "audio" }] }, cookie: publisher.cookie, ip: freshIp() }), call.c, deps());
+    sfu.hooks.duringPull = () => handleHost(request(`/api/meet/${call.c}/host`, { body: { action: "remove", participantId: puller.id }, ip: freshIp() }), call.c, deps({ session: as(CC) }));
+    const res = await handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "pull", tracks: [{ participantId: publisher.id, trackName: "mic" }] }, cookie: puller.cookie, ip: freshIp() }), call.c, deps());
+    sfu.hooks.duringPull = undefined;
+    assert.equal(res.status, 403, "removed while the pull was on its way");
+    assert.ok(sfu.sessions.get(call.sessions[1])!.every((t) => t.status === "inactive"), "the track the pull added after the removal's cut is closed as well");
+  });
+
+  await check("calls connect only with the participant token's secret set too: without it the list says not ready and nothing is made", async () => {
+    const secret = process.env[MEET_TOKEN_SECRET_ENV];
+    delete process.env[MEET_TOKEN_SECRET_ENV];
+    try {
+      assert.equal((await json(await handleListRooms(deps({ session: as(CC) })))).mediaReady, false);
+      assert.equal((await handleCreateRoom(request("/api/calendar/meet", { body: {} }), deps({ session: as(CC) }))).status, 503);
+    } finally {
+      process.env[MEET_TOKEN_SECRET_ENV] = secret;
+    }
+  });
+
+  await check("the room says it is being recorded only while its creator, whose browser records it, is in the call", async () => {
+    const c = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: {} }), deps({ session: as(CC) })))).room as Json).code);
+    const admin = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: { consent: true }, ip: freshIp() }), c, deps({ session: as(ADON, true) })))!;
+    const recording = async () => (await json(await handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie: admin, ip: freshIp() }), c, deps()))).recording;
+    assert.equal(await recording(), false, "a second host is in and the creator is not: nothing records");
+    const creator = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) })))!;
+    assert.equal(await recording(), true);
+    await handleLeave(request(`/api/meet/${c}/leave`, { cookie: creator, ip: freshIp() }), c, deps());
+    assert.equal(await recording(), false, "and stops saying so when the creator leaves");
+  });
+
+  await check("the backstop: a room nobody has been in for twelve hours ends (expired), but never one made for a time still ahead", async () => {
+    const join = async (c: string) => cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) })))!;
+    const leave = (c: string, cookie: string) => handleLeave(request(`/api/meet/${c}/leave`, { cookie, ip: freshIp() }), c, deps());
+    const now = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false } }), deps({ session: as(CC) })))).room as Json).code);
+    await leave(now, await join(now)); // the creator alone, then the tab closed
+    const startsAt = new Date(clock + 20 * 60 * 60_000).toISOString(); // tomorrow
+    const tomorrow = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false, startsAt, timeZone: "America/Toronto" } }), deps({ session: as(CC) })))).room as Json).code);
+    await leave(tomorrow, await join(tomorrow)); // tested early
+    const read = (c: string) => readMeetRoomByCode(db, c.replace(/-/g, ""));
+    clock += MEET_IDLE_MS + 60_000;
+    await handleListRooms(deps({ session: as(CC) }));
+    assert.equal((await read(now))?.endedReason, "expired", "started now and left alone for twelve hours: it has ended");
+    assert.equal((await read(tomorrow))?.status, "live", "tomorrow's meeting, tested early, keeps its link");
+    clock += 21 * 60 * 60_000; // its time came and went, more than twelve hours ago, with nobody in it
+    await handleListRooms(deps({ session: as(CC) }));
+    assert.equal((await read(tomorrow))?.endedReason, "expired");
+    await settle();
   });
 
   await check("nothing runs without its secrets: no token secret is 503 before any row is written; no SFU app is 503", async () => {

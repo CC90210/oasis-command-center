@@ -8,8 +8,10 @@
  * runs from the real controller and from a stand-in in tests. Other people's voices play through hidden
  * <audio> elements, one per remote microphone; every <video> is muted.
  *
- * RECORDING: the indicator is a red dot WITH the word, shown to everyone while the room records and its host is
- * in it (not by colour alone, and not only to the host).
+ * RECORDING: the indicator is a red dot WITH the word, shown to everyone while the recording is running (not by
+ * colour alone, and not only to the host). "Running" is the room's own answer, snapshot.roomRecording: the room
+ * records AND its creator, whose browser is the one that records, is in the call. A recorded room with only a
+ * second host in it records nothing, so it shows nothing: the badge is never claimed from `recordAudio` alone.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -30,7 +32,6 @@ export function CallScreen({
   snapshot,
   code,
   title,
-  recordAudio,
   canShare,
 }: {
   controller: MeetRoomController;
@@ -39,7 +40,6 @@ export function CallScreen({
   code: string;
   /** What the page was told; the room's own answer replaces it once the first state arrives. */
   title: string;
-  recordAudio: boolean;
   canShare: boolean;
 }) {
   const [peopleOpen, setPeopleOpen] = useState(false);
@@ -68,7 +68,7 @@ export function CallScreen({
   const tiles = snapshot.tiles;
   const sharer = sharerOf(tiles);
   const isHost = snapshot.me?.role === "host";
-  const recording = (snapshot.room?.recordAudio ?? recordAudio) && snapshot.hostPresent;
+  const recording = snapshot.roomRecording;
   const line = problem ?? snapshot.notice;
   const heading = snapshot.room?.title ?? title;
 

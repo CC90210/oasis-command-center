@@ -10,10 +10,14 @@
  * Off means released: a camera or microphone that is turned off is stopped (its light goes out) and asked for
  * again when turned back on. Joining hands the room COPIES of the held tracks (takeForJoin), so a join that
  * fails leaves the preview running for another try; release() stops the originals once a join has worked.
+ *
+ * An answer from the browser can arrive late: after a newer request for the same device, after release or a join,
+ * after consent was withdrawn, after the screen is gone. devices.ts createDeviceRequests numbers every request and
+ * stops the tracks of an answer that is no longer wanted, so a late camera never stays on.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { deviceWords, listInputs, openDevices, type DeviceChoice, type PolicyLike } from "./devices";
+import { createDeviceRequests, deviceWords, listInputs, openDevices, type DeviceChoice, type PolicyLike } from "./devices";
 
 export type JoinDevices = {
   /** The person has taken the camera and microphone step (even if nothing came back). */
@@ -58,6 +62,8 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
   const [inputs, setInputs] = useState<{ mics: DeviceChoice[]; cams: DeviceChoice[] }>({ mics: [], cams: [] });
   const [micId, setMicId] = useState("");
   const [camId, setCamId] = useState("");
+  // Which request for the devices still counts (devices.ts): one for the life of the screen.
+  const [requests] = useState(createDeviceRequests);
   // What an async handler must see after an await, where state would be stale. One object, changed in place.
   const live = useRef<{ mic: MediaStreamTrack | null; cam: MediaStreamTrack | null; allowed: boolean; micId: string; camId: string }>({
     mic: null,
@@ -84,6 +90,7 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
 
   const ask = useCallback(
     async (want: { mic: boolean; cam: boolean }) => {
+      const ticket = requests.begin(want);
       setAsking(true);
       const opened = await openDevices({
         allowed: live.current.allowed,
@@ -93,40 +100,41 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
         camId: live.current.camId,
         policy: currentPolicy(),
       });
-      setAsking(false);
-      if (!live.current.allowed) {
-        // The notice was un-ticked while the browser's own prompt was open: take nothing.
-        opened.mic?.stop();
-        opened.cam?.stop();
-        return;
-      }
-      if (opened.mic) hold("mic", opened.mic);
-      if (opened.cam) hold("cam", opened.cam);
+      // What came back is kept only if it is still wanted: not superseded by a newer request for the same device, not
+      // cancelled (released, joined, left, consent withdrawn), and the notice still ticked. The rest is stopped here.
+      const settled = requests.settle(ticket, opened, live.current.allowed);
+      setAsking(settled.pending);
+      if (!settled.current) return;
+      if (settled.mic) hold("mic", settled.mic);
+      if (settled.cam) hold("cam", settled.cam);
       setAsked(true);
       setWords(deviceWords(opened.problems));
-      if (opened.mic || opened.cam) await refreshInputs();
+      if (settled.mic || settled.cam) await refreshInputs();
     },
-    [hold, refreshInputs],
+    [hold, refreshInputs, requests],
   );
 
   // Consent withdrawn: let go of everything and go back to the step before the camera.
   useEffect(() => {
     if (allowed) return;
+    requests.cancel();
     hold("mic", null);
     hold("cam", null);
     setAsked(false);
     setWords(null);
     setInputs({ mics: [], cams: [] });
-  }, [allowed, hold]);
+  }, [allowed, hold, requests]);
 
   // Leaving the screen for any other reason: the camera must not outlive it. (The room's copies are not touched.)
+  // A request still open when it goes is cancelled, so its answer is stopped when it arrives.
   useEffect(() => {
     const store = live.current;
     return () => {
+      requests.cancel();
       store.mic?.stop();
       store.cam?.stop();
     };
-  }, []);
+  }, [requests]);
 
   useEffect(() => {
     const media = currentMedia();
@@ -137,9 +145,10 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
   }, [asked, refreshInputs]);
 
   const release = useCallback(() => {
+    requests.cancel();
     hold("mic", null);
     hold("cam", null);
-  }, [hold]);
+  }, [hold, requests]);
 
   const toggle = useCallback(
     (kind: Kind) => {
@@ -177,7 +186,11 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
     toggleCam: () => toggle("cam"),
     pickMic: (id) => pick("mic", id),
     pickCam: (id) => pick("cam", id),
-    takeForJoin: () => ({ mic: live.current.mic?.clone() ?? null, cam: live.current.cam?.clone() ?? null }),
+    // The room takes its copies now: a request still open belongs to no one once they are made.
+    takeForJoin: () => {
+      requests.cancel();
+      return { mic: live.current.mic?.clone() ?? null, cam: live.current.cam?.clone() ?? null };
+    },
     release,
   };
 }

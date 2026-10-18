@@ -73,7 +73,9 @@ async function main() {
     schedule: async () => ({ ok: false, reason: "no_calendar" }),
     unschedule: async () => {},
     recording: meetRecordingDeps(db, () => storage),
-    later: (_label, work) => void work().catch((err: unknown) => console.error("[test.later]", err)),
+    later: async (_label, work) => {
+      void work().catch((err: unknown) => console.error("[test.later]", err));
+    },
     now: () => new Date(clock),
   });
   const json = async (res: Response) => (await res.json()) as Record<string, unknown>;

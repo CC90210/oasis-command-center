@@ -28,7 +28,10 @@ export function liveMeetDeps(): MeetDeps {
     schedule: (owner, room, opts) => addMeetingToSchedule(owner, room, opts),
     unschedule: (owner, eventId) => removeMeetingFromSchedule(owner, eventId),
     recording: meetRecordingDeps(db, r2MeetStorage),
-    later: (label, work) => void keepAlive(work(), `meet.${label}`),
+    // Awaited by the routes: keepAlive resolves once ctx.waitUntil holds the work, before the answer goes.
+    later: async (label, work) => {
+      await keepAlive(work(), `meet.${label}`);
+    },
     now: () => new Date(),
   };
 }

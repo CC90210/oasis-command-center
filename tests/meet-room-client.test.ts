@@ -14,7 +14,7 @@
  * Run: node --conditions=react-server --import tsx tests/meet-room-client.test.ts
  */
 import assert from "node:assert/strict";
-import { createMeetRoomController, type MeetRoomController, type RecorderPort } from "../lib/meet/room-client";
+import { createMeetRoomController, type MeetRoomController, type MeetRoomOptions, type RecorderPort } from "../lib/meet/room-client";
 
 let failures = 0;
 async function check(name: string, fn: () => Promise<void>) {
@@ -119,7 +119,8 @@ class FakePeer extends EventTarget {
   }
 }
 
-type Person = { id: string; name: string; role: "host" | "guest"; tracks: Array<{ trackName: string; kind: "audio" | "video" }> };
+/** `session` stands for the tag the server sends of their SFU session: it changes when they reconnect. */
+type Person = { id: string; name: string; role: "host" | "guest"; session?: string; tracks: Array<{ trackName: string; kind: "audio" | "video" }> };
 
 /** A stand-in room API: what the handlers answer, plus a log and a check that SFU steps never overlap. */
 function fakeRoom(opts: {
@@ -130,6 +131,8 @@ function fakeRoom(opts: {
   failPublishOnce?: boolean;
   /** How long an SFU action takes (ms): a pull 40 and the rest 3, unless set; long enough to act while one is on its way. */
   delays?: Partial<Record<"session" | "publish" | "pull" | "renegotiate" | "close", number>>;
+  /** How long a host action (end, remove) takes, in ms. */
+  hostDelayMs?: number;
 }) {
   const delays = { pull: 40, ...opts.delays };
   const log: string[] = [];
@@ -139,6 +142,7 @@ function fakeRoom(opts: {
   let stateError: { status: number; error: string; reason?: string } | null = null;
   let hostError: { status: number; error: string } | null = null;
   let statePolls = 0;
+  let recording = false;
   let publishFailures = opts.failPublishOnce ? 1 : 0;
   let sfuInFlight = 0;
   let overlapped = false;
@@ -161,7 +165,8 @@ function fakeRoom(opts: {
         room: { code: "abc-defg-hjk", title: "Call", status: "live", recordAudio: opts.recordAudio ?? true, startedAt: null },
         me: { id: me.id, role: me.role, name: me.name },
         hostPresent,
-        participants: [me, ...others].map((p) => ({ id: p.id, name: p.name, role: p.role, me: p.id === me.id, tracks: p.tracks })),
+        recording,
+        participants: [me, ...others].map((p) => ({ id: p.id, name: p.name, role: p.role, me: p.id === me.id, session: p.session ?? null, tracks: p.tracks })),
       });
     }
     if (path === "/sfu") {
@@ -212,6 +217,7 @@ function fakeRoom(opts: {
       }
     }
     if (path === "/host") {
+      if (opts.hostDelayMs) await new Promise((r) => setTimeout(r, opts.hostDelayMs));
       log.push(`host:${String(body.action)}${hostError ? `:${hostError.status}` : ""}`);
       return hostError ? reply({ ok: false, error: hostError.error }, hostError.status) : reply({ ok: true });
     }
@@ -239,6 +245,9 @@ function fakeRoom(opts: {
       hostError = failure;
     },
     polls: () => statePolls,
+    setRecording: (v: boolean) => {
+      recording = v;
+    },
     overlapped: () => overlapped,
     busyWith: () => busyWith,
   };
@@ -252,7 +261,28 @@ async function waitFor(what: string, test: () => boolean, ms = 2_000) {
   }
 }
 
-function controller(room: ReturnType<typeof fakeRoom>, extra: { recorder?: () => RecorderPort; gatherMs?: number } = {}) {
+/** A browser whose camera, microphone and screen answers are released by hand, so a test can make one come late. */
+function heldMedia() {
+  const waiting: Array<{ release: () => FakeTrack }> = [];
+  const answer = (kind: "audio" | "video", label: string, wrap: (t: FakeTrack) => unknown) =>
+    new Promise((resolve) => {
+      waiting.push({
+        release: () => {
+          const track = new FakeTrack(kind, label);
+          resolve(wrap(track));
+          return track;
+        },
+      });
+    });
+  const media = {
+    getUserMedia: (c: MediaStreamConstraints) =>
+      answer(c.audio ? "audio" : "video", c.audio ? "mic" : "cam", (t) => ({ getAudioTracks: () => (c.audio ? [t] : []), getVideoTracks: () => (c.video ? [t] : []) })),
+    getDisplayMedia: () => answer("video", "screen", (t) => ({ getVideoTracks: () => [t] })),
+  } as unknown as MeetRoomOptions["media"];
+  return { media, waiting };
+}
+
+function controller(room: ReturnType<typeof fakeRoom>, extra: { recorder?: () => RecorderPort; gatherMs?: number; media?: MeetRoomOptions["media"] } = {}) {
   const peers: FakePeer[] = [];
   const c = createMeetRoomController({
     code: "abc-defg-hjk",
@@ -414,13 +444,17 @@ async function main() {
   });
 
   const REPORT = 'finalize:{"sent":3,"failed":0,"segments":2,"errored":0}';
-  /** A stand-in recorder that writes what it is told into the room's own log, so the order is one timeline. */
-  const recorderInto = (log: string[], events: string[] = []) => () => ({
+  /**
+   * A stand-in recorder that writes what it is told into the room's own log, so the order is one timeline. `stopMs`:
+   * how long stop() takes to hand over its last chunks (a real one waits for its uploads).
+   */
+  const recorderInto = (log: string[], events: string[] = [], stopMs = 0) => () => ({
     addTrack: ({ participantId }: { participantId: string }) => events.push(`add:${participantId}`),
     removeTrack: (participantId: string) => events.push(`remove:${participantId}`),
     stop: async () => {
       events.push("stop");
       log.push("recorder:stop");
+      if (stopMs) await new Promise((r) => setTimeout(r, stopMs));
       return { sent: 3, failed: 0, segments: 2, errored: 0 };
     },
   });
@@ -539,6 +573,109 @@ async function main() {
     await share;
     assert.deepEqual(third.c.snapshot().phase, { kind: "ended", reason: "left" });
     assert.equal(third.c.snapshot().notice, null);
+  });
+
+  await check("someone who reconnects is pulled anew, and their new microphone recorded: a track from their old session never stands in for them", async () => {
+    const events: string[] = [];
+    const room = fakeRoom({ role: "host", records: true });
+    const { c } = controller(room, { recorder: recorderInto(room.log, events) });
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    room.others.push({ id: "g1", name: "Guest", role: "guest", session: "s1", tracks: [{ trackName: "mic", kind: "audio" }] });
+    await waitFor("recorded", () => events.includes("add:g1"));
+    const pulls = room.log.filter((l) => l.startsWith("pull:")).length;
+    room.others[0].session = "s2"; // they reconnected and published the same tracks again, all between two polls
+    await waitFor("pulled again", () => room.log.filter((l) => l.startsWith("pull:")).length > pulls);
+    await waitFor("the old one closed", () => room.log.some((l) => l.startsWith("close:")));
+    await waitFor("recorded again", () => events.filter((e) => e === "add:g1").length === 2);
+    assert.equal(c.snapshot().tiles.filter((t) => t.participantId === "g1").length, 1, "still one tile for them");
+    await leaveQuietly(c);
+  });
+
+  await check("End and a poll that sees the end land together: the recording is finished, and the PC told, exactly once", async () => {
+    const room = fakeRoom({ role: "host", records: true, hostDelayMs: 60 });
+    // The recorder takes longer to hand over its last chunks than End's answer takes to arrive, so End comes to the
+    // recorder while the poll's stop is still under way.
+    const { c } = controller(room, { recorder: recorderInto(room.log, [], 150) });
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    const ending = c.end(); // the room ends at once; its answer takes a while to come back
+    room.failState(410, "room_ended", "host_ended"); // so a poll sees the end first
+    await ending;
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(room.log.filter((l) => l === "recorder:stop").length, 1, "the recorder is stopped once");
+    assert.equal(room.log.filter((l) => l.startsWith("finalize:")).length, 1, "and the PC is told once");
+    assert.equal(c.snapshot().phase.kind, "ended");
+  });
+
+  await check("a camera, microphone or screen answered after it stopped being wanted is stopped, never held: no light left on", async () => {
+    // Camera tapped twice: only the second answer is kept.
+    {
+      const room = fakeRoom({ role: "host" });
+      const held = heldMedia();
+      const { c } = controller(room, { media: held.media });
+      await c.join({ consent: true, mic: null, cam: null });
+      await waitFor("live", () => c.snapshot().phase.kind === "live");
+      const first = c.setCam(true);
+      const second = c.setCam(true);
+      await waitFor("two asks", () => held.waiting.length === 2);
+      const a = held.waiting[0].release();
+      const b = held.waiting[1].release();
+      await Promise.all([first, second]);
+      assert.equal(a.readyState, "ended", "the first answer is stopped");
+      assert.equal(b.readyState, "live");
+      assert.equal(c.snapshot().camOn, true);
+      await leaveQuietly(c);
+      assert.equal(b.readyState, "ended");
+    }
+    // Answered after Leave, or after it was turned off again: camera, microphone and screen alike.
+    for (const [ask, then] of [["cam", "leave"], ["mic", "leave"], ["screen", "leave"], ["cam", "off"], ["mic", "off"], ["screen", "off"]] as const) {
+      const room = fakeRoom({ role: "host" });
+      const held = heldMedia();
+      const { c } = controller(room, { media: held.media });
+      await c.join({ consent: true, mic: null, cam: null });
+      await waitFor("live", () => c.snapshot().phase.kind === "live");
+      const asking = ask === "cam" ? c.setCam(true) : ask === "mic" ? c.setMic(true) : c.shareScreen(true);
+      await waitFor("asked", () => held.waiting.length === 1);
+      if (then === "leave") await c.leave();
+      else await (ask === "cam" ? c.setCam(false) : ask === "mic" ? c.setMic(false) : c.shareScreen(false));
+      const late = held.waiting[0].release();
+      await asking;
+      assert.equal(late.readyState, "ended", `${ask} answered after ${then} is stopped`);
+      assert.equal(c.snapshot()[ask === "cam" ? "camOn" : ask === "mic" ? "micOn" : "sharing"], false, `${ask} after ${then}: not on`);
+      if (then === "off") await leaveQuietly(c);
+    }
+  });
+
+  await check("a recorder that cannot stop cleanly never keeps the call from ending", async () => {
+    const room = fakeRoom({ role: "host", records: true });
+    const broken = () => ({ addTrack: () => undefined, removeTrack: () => undefined, stop: async () => { throw new Error("recorder died"); } });
+    const { c } = controller(room, { recorder: broken });
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    const errors = console.error;
+    console.error = () => {}; // the failure is logged on purpose
+    try {
+      await c.end();
+    } finally {
+      console.error = errors;
+    }
+    assert.deepEqual(c.snapshot().phase, { kind: "ended", reason: "host_ended" });
+    assert.ok(!room.log.some((l) => l.startsWith("finalize:")), "no report to send: the server hands the recording over on its own");
+  });
+
+  await check("the room's recording is shown as running only when the room says so", async () => {
+    const room = fakeRoom({ role: "guest" });
+    room.setHostPresent(true);
+    const { c } = controller(room);
+    await c.join({ name: "Jane", consent: true, mic: null, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    assert.equal(c.snapshot().roomRecording, false, "a host is here, but not the browser that records");
+    room.setRecording(true);
+    await waitFor("shown", () => c.snapshot().roomRecording === true);
+    room.setRecording(false);
+    await waitFor("no longer shown", () => c.snapshot().roomRecording === false);
+    await leaveQuietly(c);
   });
 
   await check("a join the room refuses is said in plain words, and nothing is held", async () => {

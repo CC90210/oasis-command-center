@@ -23,6 +23,14 @@ import { nullableText as text, type MeetEndedReason, type MeetRoom } from "./roo
 export const MEET_MAX_PARTICIPANTS = 8;
 /** A participant not heard from for this long is gone (the room page polls every 2 seconds). */
 export const MEET_PRESENCE_MS = 30_000;
+/**
+ * A participant not heard from for this long has left: their session is cut and their token stops, so a browser
+ * that stopped polling but kept its connection is not left listening unseen, and coming back goes through the join
+ * and its cap. Longer than MEET_PRESENCE_MS, so a short network drop is only a gap in the People list.
+ */
+export const MEET_STALE_MS = 2 * 60_000;
+/** A live room nobody has been in for this long, and whose start is this long past, has ended (`expired`). */
+export const MEET_IDLE_MS = 12 * 60 * 60_000;
 /** A live room with no host present for this long ends itself. */
 export const MEET_HOST_GRACE_MS = 10 * 60_000;
 /** The most tracks one participant publishes: microphone, camera and a shared screen. */
@@ -223,6 +231,24 @@ export async function pendingCuts(db: Client, room: Pick<MeetRoom, "tenantId" | 
   return heldSessions(rs.rows as unknown as Array<Record<string, unknown>>);
 }
 
+/**
+ * Everyone in the room not heard from for MEET_STALE_MS has left (their left_at is stamped): pendingCuts then cuts
+ * the sessions they still hold. Returns how many. Read on the room's polls, so it needs no scheduler.
+ */
+export async function leaveStale(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, now: Date): Promise<number> {
+  const rs = await db.execute({
+    sql: `UPDATE meet_participants SET left_at = ?
+           WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at <= ?`,
+    args: [now.toISOString(), room.tenantId, room.id, new Date(now.getTime() - MEET_STALE_MS).toISOString()],
+  });
+  return rs.rowsAffected;
+}
+
+/** Not heard from for MEET_STALE_MS: they have left, whether or not leaveStale has stamped it yet. */
+export function isStale(p: Pick<MeetPresence, "lastSeenAt">, now: Date): boolean {
+  return now.getTime() - Date.parse(p.lastSeenAt) > MEET_STALE_MS;
+}
+
 /** A cut went through: the row lets go of that session and what it published there (unless a reconnect replaced it). */
 export async function forgetSession(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, held: HeldSession): Promise<void> {
   await db.execute({
@@ -251,9 +277,11 @@ export async function endMeetRoom(db: Client, room: Pick<MeetRoom, "tenantId" | 
 
 /**
  * A live room ends on its own (host_left) once its hosts have all been gone for MEET_HOST_GRACE_MS AND a call
- * happened in it: some guest was in the room while a host was. A host who opened the room alone (to test their
- * camera, or early) leaves it waiting for its meeting, so the first guest to arrive is never shown "ended".
- * `?` is the cutoff (now - MEET_HOST_GRACE_MS). A host's last sighting is their last poll; with none, the start.
+ * happened in it: two different people were in the room at the same time, one of them a host. Two hosts count (CC
+ * and Adon, both owners, are both hosts of every room); one signed-in person in two tabs does not. A host who
+ * opened the room alone (to test their camera, or early) leaves it waiting for its meeting, so the first guest to
+ * arrive is never shown "ended". `?` is the cutoff (now - MEET_HOST_GRACE_MS). A host's last sighting is their last
+ * poll; with none, the start.
  */
 const HOSTS_GONE_AFTER_A_CALL = `r.status = 'live'
   AND COALESCE(
@@ -263,8 +291,20 @@ const HOSTS_GONE_AFTER_A_CALL = `r.status = 'live'
   AND EXISTS (
         SELECT 1 FROM meet_participants g
           JOIN meet_participants h ON h.tenant_id = g.tenant_id AND h.room_id = g.room_id AND h.role = 'host'
-         WHERE g.tenant_id = r.tenant_id AND g.room_id = r.id AND g.role = 'guest'
+         WHERE g.tenant_id = r.tenant_id AND g.room_id = r.id
+           AND g.id <> h.id AND (g.user_id IS NULL OR h.user_id IS NULL OR g.user_id <> h.user_id)
            AND g.joined_at <= h.last_seen_at AND h.joined_at <= g.last_seen_at)`;
+
+/**
+ * The backstop for a live room no call ever ended: nobody has been in it for MEET_IDLE_MS and its start, if it has
+ * one, is that far behind (a creator who recorded alone and closed the tab). A room made for later is never ended
+ * before its time, whatever was tested in it early. `?` twice: now - MEET_IDLE_MS.
+ */
+const IDLE_PAST_ITS_TIME = `r.status = 'live'
+  AND COALESCE(
+        (SELECT max(p.last_seen_at) FROM meet_participants p WHERE p.tenant_id = r.tenant_id AND p.room_id = r.id),
+        r.started_at, r.created_at) <= ?
+  AND (r.starts_at IS NULL OR r.starts_at <= ?)`;
 
 const graceCutoff = (now: Date) => new Date(now.getTime() - MEET_HOST_GRACE_MS).toISOString();
 
@@ -282,16 +322,26 @@ export async function expireIfHostGone(db: Client, room: MeetRoom, now: Date = n
 /**
  * The same rule for rooms nobody polls any more: a call whose host's tab died after everyone else left would stay
  * live forever, and its recording would never be handed over (lib/meet/recording.ts finalizeDueRooms takes ended
- * rooms only). Run when a host opens the Schedule's meetings and by the recording relay's sweep. Returns the rooms
- * it ended, for the caller to cut their media.
+ * rooms only). Then the backstop (IDLE_PAST_ITS_TIME, ended `expired`) for a room no call ever ended. Run when a
+ * host opens the Schedule's meetings and by the recording relay's sweep. Returns the rooms it ended, for the caller
+ * to cut their media.
  */
 export async function endAbandonedRooms(db: Client, tenantIds: readonly string[], now: Date = new Date()): Promise<Array<Pick<MeetRoom, "tenantId" | "id">>> {
   if (!tenantIds.length) return [];
-  const rs = await db.execute({
-    sql: `UPDATE meet_rooms AS r SET status = 'ended', ended_at = ?, ended_reason = 'host_left'
-           WHERE r.tenant_id IN (${tenantIds.map(() => "?").join(", ")}) AND ${HOSTS_GONE_AFTER_A_CALL}
-       RETURNING tenant_id, id`,
-    args: [now.toISOString(), ...tenantIds, graceCutoff(now)],
-  });
-  return rs.rows.map((row) => ({ tenantId: String(row.tenant_id), id: String(row.id) }));
+  const inTenants = `r.tenant_id IN (${tenantIds.map(() => "?").join(", ")})`;
+  const idle = new Date(now.getTime() - MEET_IDLE_MS).toISOString();
+  const ended: Array<Pick<MeetRoom, "tenantId" | "id">> = [];
+  for (const [reason, rule, cutoffs] of [
+    ["host_left", HOSTS_GONE_AFTER_A_CALL, [graceCutoff(now)]],
+    ["expired", IDLE_PAST_ITS_TIME, [idle, idle]],
+  ] as const) {
+    const rs = await db.execute({
+      sql: `UPDATE meet_rooms AS r SET status = 'ended', ended_at = ?, ended_reason = '${reason}'
+             WHERE ${inTenants} AND ${rule}
+         RETURNING tenant_id, id`,
+      args: [now.toISOString(), ...tenantIds, ...cutoffs],
+    });
+    for (const row of rs.rows) ended.push({ tenantId: String(row.tenant_id), id: String(row.id) });
+  }
+  return ended;
 }
