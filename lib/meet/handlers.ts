@@ -19,6 +19,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import type { NextRequest, NextResponse } from "next/server";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
+import { fnv1a32 } from "@/lib/automations/schedule-plan";
 import { readCappedJson, sameOrigin } from "@/lib/offer-pages/public-http";
 import {
   MEET_COOKIE,
@@ -210,10 +211,7 @@ async function goneMeanwhile(deps: MeetDeps, room: MeetRoom, me: MeetPresence, s
  * changes when they reconnect, so the others' browsers pull what they publish anew (lib/meet/room-client.ts).
  */
 function sessionTag(sessionId: string | null): string | null {
-  if (!sessionId) return null;
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < sessionId.length; i += 1) hash = Math.imul(hash ^ sessionId.charCodeAt(i), 0x01000193) >>> 0;
-  return hash.toString(36);
+  return sessionId ? fnv1a32(sessionId).toString(36) : null;
 }
 
 /** The reason a meeting made for later says it is not on the Schedule when the Schedule itself could not be reached. */
