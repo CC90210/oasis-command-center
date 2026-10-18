@@ -159,9 +159,11 @@ test("a lead who booked first: the email confirms the call and links nowhere to 
   for (const answers of [HOT, COLD, { ...COLD, timeframe: "immediate" }]) {
     const { subject, body } = composeAiAuditWelcome(answers, links, { booked: true });
     assert.ok(
-      body.includes("Your call is booked, and the Google Calendar invite in your inbox has the time and the Meet link."),
+      body.includes("Your call is booked, and the Google Calendar invite in your inbox has the time and your video call link."),
       "Maven's booked line is gone",
     );
+    assert.ok(!body.includes("Meet link"), "\"Meet link\" beside \"Google Calendar\" reads as Google Meet (Maven, 2026-10-18)");
+    assert.ok(!body.includes("We record and transcribe"), "Conaugh's note carries no recording notice (Maven)");
     assert.ok(!body.includes(links.bookingUrl), "a booked lead was sent a link to book again");
     assert.ok(!body.includes(links.communityUrl), "\"if now is not the right time\" to someone who just booked");
     assert.ok(!/pick (a|the) time|two times/i.test(body), "a booked lead was asked to pick a time");

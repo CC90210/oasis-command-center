@@ -407,9 +407,11 @@ export function composeAiAuditWelcome(
       : bookingUrl
         ? `I read every one of these myself. If talking is easier, pick a time that works for both founders here: ${bookingUrl}`
         : `I read every one of these myself. If talking is easier, reply with two times that work and I'll send the invite.`;
-  // Booked: one sentence, no link to book again (copy by Maven, 2026-10-16).
+  // Booked: one sentence, no link to book again (copy by Maven, 2026-10-16; "your video call link", 2026-10-18: the
+  // room is an Oasis Meet room, and "Meet link" beside "Google Calendar" read as Google Meet). No recording notice
+  // here: this is Conaugh's first-person note, and the notice is in the invite and the room's consent box (Maven).
   const next = booked
-    ? "Your call is booked, and the Google Calendar invite in your inbox has the time and the Meet link."
+    ? "Your call is booked, and the Google Calendar invite in your inbox has the time and your video call link."
     : offerCall;
 
   // Quote their own bottleneck back at them. This is the single most
