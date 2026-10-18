@@ -8,3 +8,15 @@
  * (a client component) renders it too.
  */
 export const MEET_RECORDING_NOTICE = "We record and transcribe this call for our notes. You'll be asked to agree when you join.";
+
+/**
+ * A confirmation line, then the notice as its own sentence when the call is recorded. A line that does not end its
+ * sentence (a workspace's custom thanks message, Maven's review) gets a full stop first, so the two never run
+ * together. Unrecorded, the line comes back exactly as given.
+ */
+export function withRecordingNotice(line: string, recorded: boolean): string {
+  if (!recorded) return line;
+  const text = line.trim();
+  if (!text) return MEET_RECORDING_NOTICE;
+  return `${/[.!?]["')\]]?$/.test(text) ? text : `${text}.`} ${MEET_RECORDING_NOTICE}`;
+}
