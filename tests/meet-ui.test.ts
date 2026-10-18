@@ -64,7 +64,7 @@ import {
   withoutMeeting,
   type MeetRoomItem,
 } from "../components/meet/meet-format";
-import { CONSENT_LABEL, DEVICES_BUTTON, ENDED_WORDS, RECORDING_NOTICE, TICK_FIRST } from "../components/meet/meet-words";
+import { CONSENT_LABEL, DEVICES_BUTTON, ENDED_WORDS, RECORDING_NOTICE, TICK_FIRST, WAITING_FOR_HOST } from "../components/meet/meet-words";
 import { mayAskForDevices, needsRecordingNotice, preJoinNeeds } from "../components/meet/notice";
 import { MEET_NAME_MAX } from "../lib/meet/access";
 import { endMeetRoom } from "../lib/meet/participants";
@@ -772,6 +772,43 @@ async function main() {
     assert.match(pre, /<button type="submit" disabled=\{devices\.asking\}/, "Join now is off while the browser has not answered");
     assert.match(pre, /<button type="button" onClick=\{props\.onJoinWithout\}/, "the way out is its own button");
     assert.equal(count(pre, /props\.onJoinWithout/g), 1, "and nothing else calls it");
+  });
+
+  // ---- the quiet screens between Join now and the call ---------------------------------------------------------------------
+
+  await check("every lobby offers Leave, the first join and a dropped line's wait included: MeetRoom hands one to each, and the Lobby draws it in every mode", () => {
+    // What each screen draws.
+    const words = { joining: "Joining...", connecting: "Joining...", waiting: WAITING_FOR_HOST } as const;
+    for (const mode of ["joining", "connecting", "waiting"] as const) {
+      const html = markup[`lobby.${mode}`];
+      assert.deepEqual(buttonNames(html), ["Leave"], `${mode}: one button, and it is Leave`);
+      assert.match(html, /<button type="button"[^>]*>\s*Leave\s*<\/button>/, `${mode}: a plain button`);
+      assert.ok(text(html).includes(words[mode]), `${mode}: its words`);
+      assert.deepEqual(buttonNames(markup[`lobby.${mode}.bare`]), [], `${mode}: the Lobby draws no button it was given no way to use`);
+    }
+    // What MeetRoom hands each one: every <Lobby> in it has a mode and the call that leaves. Read with the parser, so
+    // the way the lines are broken cannot hide a missing one.
+    const file = join(root, "components", "meet", "MeetRoom.tsx");
+    const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const lobbies: Array<{ mode: string; onLeave: string }> = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(sf) === "Lobby") {
+        const attribute = (name: string) => node.attributes.properties.find((p): p is ts.JsxAttribute => ts.isJsxAttribute(p) && p.name.getText(sf) === name)?.initializer;
+        const mode = attribute("mode");
+        const onLeave = attribute("onLeave");
+        lobbies.push({
+          mode: mode && ts.isStringLiteral(mode) ? mode.text : "?",
+          onLeave: onLeave && ts.isJsxExpression(onLeave) && onLeave.expression ? onLeave.expression.getText(sf).replace(/\s+/g, " ") : "",
+        });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    assert.deepEqual(
+      lobbies.sort((a, b) => a.mode.localeCompare(b.mode)),
+      ["connecting", "joining", "waiting"].map((mode) => ({ mode, onLeave: "() => void controller.leave()" })),
+      "one Lobby per mode, each with the call that leaves",
+    );
   });
 
   // ---- the ending screens ------------------------------------------------------------------------------------------------

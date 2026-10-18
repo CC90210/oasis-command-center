@@ -537,10 +537,14 @@ async function main() {
     slow.setHostPresent(true);
     const b = controller(slow);
     const joining = b.c.join({ name: "Jane", consent: true, mic: null, cam: null });
-    await b.c.leave();
+    const leaving = b.c.leave();
+    assert.deepEqual(b.c.snapshot().phase, { kind: "ended", reason: "left" }, "out at once, before the join answers");
+    await leaving;
     await joining;
     await new Promise((r) => setTimeout(r, 60));
     assert.deepEqual(b.c.snapshot().phase, { kind: "ended", reason: "left" }, "the join's answer arriving after Leave does not bring the call back");
+    // The place is made when the join answers, and only that answer carries the cookie a leave needs.
+    assert.deepEqual(slow.log.filter((l) => l === "join" || l === "leave"), ["join", "leave"], "the room is told once the join has answered, so it frees the place");
 
     const refused = fakeRoom({ role: "guest", joinDelayMs: 80, refuseJoins: { times: 1, status: 409, error: "room_full" } });
     const d = controller(refused);
@@ -794,9 +798,9 @@ async function main() {
     const madeFor = new WeakMap<AbortSignal, number>();
     const { c } = controller(room, {
       deadline: (ms) => {
-        const signal = AbortSignal.timeout(ms);
+        const signal = new AbortController().signal; // never fires: only the length asked for is read here
         madeFor.set(signal, ms);
-        return signal;
+        return { signal, done: () => undefined };
       },
     }); // no lengths set: the defaults
     const length = (path: string) => {
@@ -812,16 +816,14 @@ async function main() {
     assert.equal(length("/leave"), REQUEST_TIMEOUT_MS, "and so does the leave");
   });
 
-  await check("a join that never answers gives up at its deadline, and the person can try again; Safari before 16 too", async () => {
+  await check("a join that never answers gives up at its deadline, and the person can try again, in a browser without AbortSignal.timeout too", async () => {
     const timeout = AbortSignal.timeout;
-    for (const browser of ["today's", "without AbortSignal.timeout"]) {
+    for (const browser of ["today's", "without AbortSignal.timeout (Safari before 16)"]) {
       if (browser !== "today's") (AbortSignal as unknown as { timeout?: unknown }).timeout = undefined;
       try {
         const room = fakeRoom({ role: "host", hangJoins: 1 });
-        // Short deadlines for the polls too: the fallback's timers are not unref'd, and must not hold the run open.
-        const { c } = controller(room, { requestTimeoutMs: 50, pollTimeoutMs: 50 });
+        const { c } = controller(room, { requestTimeoutMs: 50 });
         const joining = c.join({ consent: true, mic: null, cam: null });
-        // waitFor's own timer keeps the run going while the deadline (an unref'd timer in Node) is all that is left.
         await waitFor(`${browser}: given up, not left on "Joining..."`, () => c.snapshot().phase.kind === "failed");
         await joining;
         assert.ok(room.log.includes("join:hung"), browser);
