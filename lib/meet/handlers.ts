@@ -115,6 +115,9 @@ function sfuIfConfigured(deps: MeetDeps): SfuClient | null {
   }
 }
 
+/** The video service (the Cloudflare Realtime app) is set up, so a call can connect: a meeting is only made, and only offered, where it is. */
+const mediaReady = (deps: MeetDeps) => sfuIfConfigured(deps) !== null;
+
 let noSfuLogged = false;
 
 /**
@@ -184,9 +187,9 @@ export async function handleListRooms(deps: MeetDeps): Promise<NextResponse> {
       rooms: rooms.map((r) => ({ id: r.id, ...roomView(r), link: link(r), url: url(r), createdAt: r.createdAt, mine: r.hostUserId === session.userId })),
       // The panel offers "Record and transcribe", and shows a meeting's transcript, only when this is true.
       recordingAvailable,
-      // The video service (the Cloudflare Realtime app) is set up. Until it is, a call cannot connect, so the panel
-      // says so and offers no meeting to make: nobody sends a client a link that fails when they open it.
-      mediaReady: sfuIfConfigured(deps) !== null,
+      // Until the video service is set up the panel says so and offers no meeting to make: nobody sends a client a
+      // link that fails when they open it.
+      mediaReady: mediaReady(deps),
     });
   } catch (err) {
     return meetFailure(err, "rooms.list");
@@ -199,7 +202,7 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
     const session = await deps.session();
     if (!session.ok) return meetError(401, "sign_in_required");
     // A meeting whose call cannot connect is never made: no link goes out that fails when it is opened.
-    if (!sfuIfConfigured(deps)) return meetError(503, "meet_not_configured");
+    if (!mediaReady(deps)) return meetError(503, "meet_not_configured");
     const body = parseCreateRoom(await readCappedJson(req, 4_000));
     if (!body) return meetError(400, "invalid_body");
     // A room records only where recording really happens (an OASIS workspace with recording installed): guests
