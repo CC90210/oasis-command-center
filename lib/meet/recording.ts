@@ -49,8 +49,10 @@ import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant } from "@/lib/storage-helpers";
 import { toolErrorLine } from "@/lib/tools/errors";
 import { LEASE_GUARD, inputHashOf, liveRunnerForTool, sqlPlaceholders } from "@/lib/tools/store";
-import { endAbandonedRooms } from "./participants";
+import { MeetNotConfiguredError } from "./access";
+import { endAbandonedRooms, forgetSession, roomSessions } from "./participants";
 import { readMeetRoom, type MeetRoom } from "./rooms";
+import { cutSession, sfuClient, type SfuClient } from "./sfu";
 
 /** The logical bucket the relay copies live in: private (never in PUBLIC_BUCKET_PREFIXES), signed URLs only. */
 export const MEET_RELAY_BUCKET = "meet-relay";
@@ -1056,14 +1058,68 @@ export async function finalizeDueRooms(
   return handed;
 }
 
+/** How long after a room ends the claim's sweep keeps cutting the media sessions its rows still hold, and how many rooms a run. */
+export const ENDED_CUT_RETRY_MS = 60 * 60_000;
+const ENDED_CUT_BATCH = 10;
+let noSfuLogged = false;
+
+/** This Worker's SFU client, or null when no Realtime app is set (nothing could have been connected through it). */
+export function meetSfuIfConfigured(): SfuClient | null {
+  try {
+    return sfuClient();
+  } catch (err) {
+    if (err instanceof MeetNotConfiguredError) return null;
+    throw err;
+  }
+}
+
+/**
+ * Cut the media sessions still held by the rows of rooms that ended within ENDED_CUT_RETRY_MS, whatever ended them:
+ * a room this sweep just ended (nobody polls it, so no request ever cuts it), or one whose own cut failed. A browser
+ * that stopped polling but kept its WebRTC connection must not go on sending or hearing media in an ended room
+ * (Codex on #688, P1). The same steps as lib/meet/handlers.ts cutHeld: forgetSession only after a cut went through,
+ * so a cut that fails keeps its id for the next run, every minute while the PC is on.
+ */
+async function cutEndedRoomSessions(db: Client, sfu: SfuClient | null, tenantIds: readonly string[], now: Date): Promise<void> {
+  if (!tenantIds.length) return;
+  const rs = await db.execute({
+    sql: `SELECT r.tenant_id, r.id FROM meet_rooms r
+           WHERE r.tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND r.status = 'ended' AND r.ended_at > ?
+             AND EXISTS (SELECT 1 FROM meet_participants p WHERE p.tenant_id = r.tenant_id AND p.room_id = r.id AND p.sfu_session_id IS NOT NULL)
+           ORDER BY r.ended_at DESC LIMIT ?`,
+    args: [...tenantIds, new Date(now.getTime() - ENDED_CUT_RETRY_MS).toISOString(), ENDED_CUT_BATCH],
+  });
+  if (!rs.rows.length) return;
+  if (!sfu) {
+    if (!noSfuLogged) console.error("[meet.relay] no SFU app is set; sessions held by ended rooms cannot be cut");
+    noSfuLogged = true;
+    return;
+  }
+  for (const row of rs.rows) {
+    const room = { tenantId: String(row.tenant_id), id: String(row.id) };
+    const held = await roomSessions(db, room);
+    await Promise.allSettled(held.map(async (h) => {
+      if (await cutSession(sfu, h.sessionId, "relay.ended_room")) await forgetSession(db, room, h);
+    }));
+  }
+}
+
 /**
  * The sweeps, in the order they feed each other. The runner's claim runs them while it serves meetings. A call
  * left with no host and nobody polling (every tab closed without End) is ended first (lib/meet/participants.ts
  * endAbandonedRooms), so finalizeDueRooms hands its recording over 10 minutes later. Without it such a room stayed
- * live, was never handed over, and its audio expired untranscribed after 30 days (#687 review, Codex P1).
+ * live, was never handed over, and its audio expired untranscribed after 30 days (#687 review, Codex P1). The media
+ * sessions of ended rooms are cut next (cutEndedRoomSessions), since no request will.
  */
-export async function meetRelaySweeps(db: Client, storage: MeetStorage | null, tenantIds: readonly string[], now: Date): Promise<void> {
+export async function meetRelaySweeps(
+  db: Client,
+  storage: MeetStorage | null,
+  tenantIds: readonly string[],
+  now: Date,
+  sfu: SfuClient | null = null,
+): Promise<void> {
   await endAbandonedRooms(db, tenantIds, now);
+  await cutEndedRoomSessions(db, sfu, tenantIds, now);
   await expireUnfinalized(db, tenantIds, now);
   await expireRelay(db, tenantIds, now);
   await finalizeDueRooms(db, tenantIds, now);
