@@ -213,7 +213,8 @@ async function readRecorder(db: Client, room: Pick<MeetRoom, "tenantId" | "id">)
  * nobody holds it, or its holder has left, been removed or gone unheard for MEET_PRESENCE_MS (a laptop asleep, a tab
  * closed), and keeps it while it is there, so a host coming back never takes it back from the one recording now. The
  * take is one conditional UPDATE, so two hosts polling at once cannot both take it; a holder keeps it by polling,
- * with no write. The chunk route takes audio only from the holder (lib/meet/recording.ts).
+ * with no write. The take also notes which browser had it and when, so the recorder taken over may still send its
+ * last chunks. The chunk route takes audio only from these (lib/meet/recording.ts ANOTHER_RECORDER).
  */
 export async function claimRecorder(
   db: Client,
@@ -226,7 +227,8 @@ export async function claimRecorder(
   const holderPresent = held.seen !== null && held.seen > presentSince(now);
   if (mayRecord && held.holder !== me.id && !holderPresent) {
     const rs = await db.execute({
-      sql: `UPDATE meet_rooms SET recorder_participant_id = ?
+      // SET reads the row as it was: recorder_previous_id gets the holder being replaced.
+      sql: `UPDATE meet_rooms SET recorder_previous_id = recorder_participant_id, recorder_changed_at = ?, recorder_participant_id = ?
              WHERE tenant_id = ? AND id = ? AND status = 'live' AND record_audio = 1
                AND EXISTS (SELECT 1 FROM meet_participants m
                             WHERE m.tenant_id = meet_rooms.tenant_id AND m.room_id = meet_rooms.id AND m.id = ?
@@ -235,7 +237,7 @@ export async function claimRecorder(
                      SELECT 1 FROM meet_participants p
                       WHERE p.tenant_id = meet_rooms.tenant_id AND p.room_id = meet_rooms.id AND p.id = meet_rooms.recorder_participant_id
                         AND p.left_at IS NULL AND p.removed_at IS NULL AND p.last_seen_at > ?))`,
-      args: [me.id, room.tenantId, room.id, me.id, presentSince(now)],
+      args: [now.toISOString(), me.id, room.tenantId, room.id, me.id, presentSince(now)],
     });
     if (rs.rowsAffected > 0) return { mine: true, inCall: true };
     // Another host took it first, or the room ended meanwhile: say what the room says now.

@@ -11,7 +11,7 @@
  *    mid-call records from then, the voices already in the call too, and one it is taken from stops without
  *    handing it over; End asks the room to end first and stops the recorder only once it has (an End that fails
  *    keeps the call recorded), then finalizes; a room that ends some other way finalizes too, and leaving only
- *    stops it.
+ *    stops it; the recorder's clock is the room's, read off the quickest answer.
  *
  * Run: node --conditions=react-server --import tsx tests/meet-room-client.test.ts
  */
@@ -162,6 +162,8 @@ function fakeRoom(opts: {
   hangJoins?: number;
   /** The room never answers a leave (a dropped network). */
   hangLeave?: boolean;
+  /** What the server's clock reads on each join and poll answer (default: Date.now()). */
+  serverTime?: () => number;
 }) {
   let joinHangs = opts.hangJoins ?? 0;
   /** The deadline each kind of request was last sent with, by path. */
@@ -187,6 +189,7 @@ function fakeRoom(opts: {
   let recording = false;
   /** What each poll says about this browser recording the room; undefined says nothing (a server from before). */
   let recordsNow: boolean | undefined = opts.records === true;
+  const serverTime = opts.serverTime ?? (() => Date.now());
   let publishFailures = opts.failPublishOnce ? 1 : 0;
   let sfuInFlight = 0;
   let overlapped = false;
@@ -210,7 +213,10 @@ function fakeRoom(opts: {
         return reply({ ok: false, error: opts.refuseJoins.error }, opts.refuseJoins.status);
       }
       log.push("join");
-      return reply({ ok: true, participantId: me.id, role: me.role, name: me.name, records: opts.records === true, room: { code: "abc-defg-hjk", title: "Call", status: "live", recordAudio: opts.recordAudio ?? true, startedAt: null }, iceServers: [] });
+      return reply({
+        ok: true, participantId: me.id, role: me.role, name: me.name, records: opts.records === true, serverTime: serverTime(),
+        room: { code: "abc-defg-hjk", title: "Call", status: "live", recordAudio: opts.recordAudio ?? true, startedAt: null }, iceServers: [],
+      });
     }
     if (path === "/state") {
       statePolls += 1;
@@ -226,6 +232,7 @@ function fakeRoom(opts: {
         me: { id: me.id, role: me.role, name: me.name },
         hostPresent,
         ...(recordsNow === undefined ? {} : { records: recordsNow }),
+        serverTime: serverTime(),
         recording,
         participants: [me, ...others].map((p) => ({ id: p.id, name: p.name, role: p.role, me: p.id === me.id, session: p.session ?? null, tracks: p.tracks })),
       });
@@ -383,7 +390,7 @@ function heldMedia() {
 
 function controller(
   room: ReturnType<typeof fakeRoom>,
-  extra: Pick<MeetRoomOptions, "recorder" | "gatherMs" | "media" | "pollTimeoutMs" | "requestTimeoutMs" | "reconnectMs" | "deadline"> = {},
+  extra: Pick<MeetRoomOptions, "recorder" | "gatherMs" | "media" | "pollTimeoutMs" | "requestTimeoutMs" | "reconnectMs" | "deadline" | "now"> = {},
 ) {
   const peers: FakePeer[] = [];
   const c = createMeetRoomController({
@@ -662,6 +669,57 @@ async function main() {
     await waitFor("the room's poll goes on", () => room.polls() >= polls + 3);
     assert.equal(c.snapshot().recording, true);
     assert.ok(!room.log.includes("recorder:stop"));
+    await leaveQuietly(c);
+  });
+
+  await check("the recorder's segment times come from the room's clock, read off the quickest answer: two hosts' recordings line up whatever their own clocks say", async () => {
+    const HOUR = 3_600_000;
+    // This browser's own clock, moved by the stand-in room: each answer spends `rtt` ms in transit and reads the
+    // server's clock at its midpoint, `skew` ms ahead, so each reading alone puts the room's clock exactly `skew` ahead.
+    let t = 5_000_000;
+    let usual = { rtt: 80, skew: HOUR }; // the join, and the polls until told otherwise: a slow line
+    const next: Array<{ rtt: number; skew: number }> = [];
+    const room = fakeRoom({
+      role: "host",
+      records: true,
+      serverTime: () => {
+        const step = next.shift() ?? usual;
+        const at = t + step.rtt / 2 + step.skew;
+        t += step.rtt;
+        return at;
+      },
+    });
+    const clocks: Array<{ now: () => number }> = [];
+    const make = recorderInto(room.log);
+    const { c } = controller(room, {
+      now: () => t,
+      recorder: (clock) => {
+        clocks.push(clock);
+        return make();
+      },
+    });
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("recording", () => c.snapshot().recording);
+    const ahead = () => clocks[0].now() - t;
+    assert.equal(ahead(), HOUR, "read off the join, 80 ms in transit");
+    /** One answer read this way: a poll's request goes only once the one before was answered, so two more did. */
+    const answered = async (step?: { rtt: number; skew: number }) => {
+      if (step) next.push(step);
+      const polls = room.polls();
+      await waitFor("answered", () => next.length === 0 && room.polls() >= polls + 2);
+    };
+    usual = { rtt: 2, skew: HOUR + 500 };
+    await answered();
+    assert.equal(ahead(), HOUR + 500, "a quicker answer (2 ms) replaces it");
+    // From here every poll is a little slower, with a reading of its own: one taken wrongly would stay visible.
+    usual = { rtt: 3, skew: HOUR + 300 };
+    await answered({ rtt: 60, skew: HOUR + 9_000 });
+    assert.equal(ahead(), HOUR + 500, "a slower one never does");
+    await answered({ rtt: 2, skew: HOUR + 7_000 });
+    assert.equal(ahead(), HOUR + 500, "nor one no quicker");
+    await answered({ rtt: 1, skew: HOUR + 600 });
+    assert.equal(ahead(), HOUR + 600, "a quicker one does");
+    assert.equal(clocks.length, 1, "one recorder, which reads the clock each time");
     await leaveQuietly(c);
   });
 

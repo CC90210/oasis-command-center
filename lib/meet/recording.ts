@@ -327,18 +327,22 @@ export type ChunkResult = { ok: true; status: 201 } | { ok: false; status: 409 |
 
 /**
  * The room's recorder is another browser, and the one sending is still in the call: two browsers would record the
- * same voices. A browser that left or was removed sends its last chunks for LATE_CHUNK_MS after (its recorder
- * stopped as it went, and the next host's took over from there); one that names no participant is refused whenever
- * a browser records the room. While none does (a page opened before the room had a recorder), anyone's is taken.
+ * same voices. Two kinds of browser send their last chunks for LATE_CHUNK_MS after, since the next host's recorder
+ * took over from there (at worst a timeslice of overlap, never a gap):
+ *   - the recorder just taken over (recorder_previous_id), which may have gone silent rather than leave;
+ *   - any browser that left or was removed (its recorder stopped as it went).
+ * One that names no participant is refused whenever a browser records the room. While none does (a page opened
+ * before the room had a recorder), anyone's is taken. IFNULL: a NULL comparison must never pass for an exemption.
  */
 const ANOTHER_RECORDER = `SELECT 1 FROM meet_rooms r
    WHERE r.tenant_id = ? AND r.id = ? AND r.recorder_participant_id IS NOT NULL AND r.recorder_participant_id IS NOT ?
+     AND NOT IFNULL(r.recorder_previous_id = ? AND r.recorder_changed_at > ?, 0)
      AND NOT EXISTS (SELECT 1 FROM meet_participants u
                       WHERE u.tenant_id = r.tenant_id AND u.room_id = r.id AND u.id = ? AND (u.left_at > ? OR u.removed_at > ?))`;
 
 function anotherRecorderArgs(c: ChunkInput): InValue[] {
   const lastChunks = new Date(c.now.getTime() - LATE_CHUNK_MS).toISOString();
-  return [c.room.tenantId, c.room.id, c.uploader, c.uploader, lastChunks, lastChunks];
+  return [c.room.tenantId, c.room.id, c.uploader, c.uploader, lastChunks, c.uploader, lastChunks, lastChunks];
 }
 
 /** The conditions a chunk row is written under, checked again inside the INSERT itself. */

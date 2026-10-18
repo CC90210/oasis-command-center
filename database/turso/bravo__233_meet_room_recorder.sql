@@ -6,8 +6,14 @@
 --
 -- A host's browser takes it on its join or poll when nobody holds it, or its holder has left, been removed or gone
 -- silent (lib/meet/participants.ts claimRecorder): one conditional UPDATE, so two hosts never both take it. There is
--- no timestamp here: the holder's own last_seen_at, which its poll already keeps, says whether it is still there.
+-- no lease time here: the holder's own last_seen_at, which its poll already keeps, says whether it is still there.
+--
+-- recorder_previous_id and recorder_changed_at: the browser that recorded it before the last change, and when that
+-- was. The recorder taken over may still send its last chunks for a while after (lib/meet/recording.ts
+-- ANOTHER_RECORDER), even when it went silent instead of leaving.
 --
 -- Additive only. Runs once: scripts/apply_turso_migration.py records it in its ledger and skips it after that.
 
 ALTER TABLE "meet_rooms" ADD COLUMN "recorder_participant_id" TEXT;
+ALTER TABLE "meet_rooms" ADD COLUMN "recorder_previous_id" TEXT;
+ALTER TABLE "meet_rooms" ADD COLUMN "recorder_changed_at" TEXT;

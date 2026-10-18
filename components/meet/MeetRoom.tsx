@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { createMeetRoomController, type RecorderPort } from "@/lib/meet/room-client";
+import { createMeetRoomController, type MeetRoomOptions } from "@/lib/meet/room-client";
 import { CallScreen } from "./CallScreen";
 import { Lobby } from "./Lobby";
 import { MeetEnded } from "./MeetEnded";
@@ -46,8 +46,8 @@ export type MeetRoomProps = {
   startsAt: string | null;
   /** The first name of the lead who booked this room, for a visitor's name field to start with (they can change it); else null. */
   guestName: string | null;
-  /** Made for the host in a recorded room once they are in the call. */
-  recorder?: () => RecorderPort;
+  /** Made for a host whose browser the room names its recorder, once they are in the call (lib/meet/room-client.ts). */
+  recorder?: MeetRoomOptions["recorder"];
 };
 
 const IN_CALL = new Set(["joining", "waiting_for_host", "connecting", "live"]);

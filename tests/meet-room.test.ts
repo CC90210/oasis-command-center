@@ -176,7 +176,7 @@ function racing(base: Client, n: number) {
       if (prop !== "execute") return typeof value === "function" ? value.bind(target) : value;
       return async (stmt: InStatement) => {
         const sql = typeof stmt === "string" ? stmt : stmt.sql;
-        if (/UPDATE meet_rooms SET recorder_participant_id/.test(sql) && waiting.length < n) {
+        if (/UPDATE meet_rooms SET recorder_/.test(sql) && waiting.length < n) {
           await new Promise<void>((resolve) => {
             waiting.push(resolve);
             if (waiting.length === n) for (const go of waiting) go();
@@ -1130,6 +1130,14 @@ async function main() {
     assert.equal(raced.held(), 2, "both joins reached the take having read that nobody records");
     assert.equal([cc.records, adon.records].filter((r) => r === true).length, 1, JSON.stringify([cc.records, adon.records]));
     assert.equal(await recorderOf(c), cc.records ? cc.id : adon.id, "the room names the one that records");
+  });
+
+  await check("the join and every poll say the room's own time: a recorder's segment times are taken from it", async () => {
+    const c = await newRoom();
+    const res = await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) }));
+    assert.equal((await json(res)).serverTime, clock);
+    clock += 1_234;
+    assert.equal((await pollAs(c, cookieOf(res)!)).serverTime, clock);
   });
 
   await check("one browser, not one person: the same host on two devices records on the first only", async () => {
