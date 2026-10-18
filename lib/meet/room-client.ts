@@ -60,8 +60,13 @@ export type MeetSnapshot = {
   micOn: boolean;
   camOn: boolean;
   sharing: boolean;
-  /** The host's recorder is running. */
+  /** This browser's recorder is running (only ever the room creator's). */
   recording: boolean;
+  /**
+   * The room's recording is running now: it records, and the browser that records it (its creator's) is in the
+   * call. What the page says "recorded" from, for everyone in the call; a host being present is not enough.
+   */
+  roomRecording: boolean;
   /** One plain sentence about something that went wrong but did not end the call. */
   notice: string | null;
 };
@@ -100,8 +105,23 @@ export type MeetRoomOptions = {
   connectMs?: number;
 };
 
-type Participant = { id: string; name: string; role: MeetRole; me: boolean; tracks: Array<{ trackName: string; kind: "audio" | "video" }> };
+/** `session` is a tag of their current SFU session (never the session itself): it changes when they reconnect. */
+type Participant = {
+  id: string;
+  name: string;
+  role: MeetRole;
+  me: boolean;
+  session: string | null;
+  tracks: Array<{ trackName: string; kind: "audio" | "video" }>;
+};
 type Pulled = { participantId: string; trackName: string; mid: string | null; track: MediaStreamTrack | null };
+
+/**
+ * What a pull is kept under: the participant, their session's tag and the track's name. A participant who
+ * reconnects publishes the same names on a new session, so their tracks get a new key and are pulled anew (and the
+ * old ones closed), instead of a track from a session that no longer exists standing in for them all call long.
+ */
+const pullKey = (participantId: string, session: string | null, trackName: string) => `${participantId}:${session ?? "-"}:${trackName}`;
 
 const TRACK_MIC = "mic";
 const TRACK_CAM = "cam";
@@ -155,6 +175,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   let iceServers: RTCIceServer[] = [];
   let participants: Participant[] = [];
   let hostPresent = false;
+  let roomRecording = false;
   let notice: string | null = null;
 
   let pc: RTCPeerConnection | null = null;
@@ -167,7 +188,6 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   let recorder: RecorderPort | null = null;
   /** The join said this browser records (the room creator's, in a recorded room). */
   let records = false;
-  const recorded = new Map<string, MediaStreamTrack>();
 
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let pollFailures = 0;
@@ -185,7 +205,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
           video: local.cam, screen: local.screen, micOn, camOn: !!local.cam, sharing: !!local.screen,
         };
       }
-      const get = (name: string) => pulled.get(`${p.id}:${name}`)?.track ?? null;
+      const get = (name: string) => pulled.get(pullKey(p.id, p.session, name))?.track ?? null;
       const live = (t: MediaStreamTrack | null) => !!t && t.readyState === "live" && !t.muted;
       const audio = get(TRACK_MIC);
       const video = get(TRACK_CAM);
@@ -197,7 +217,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     });
     return {
       phase, room, me, tiles, hostPresent, micOn, camOn: !!local.cam, sharing: !!local.screen,
-      recording: !!recorder, notice,
+      recording: !!recorder, roomRecording, notice,
     };
   }
 
@@ -307,7 +327,15 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     const running = recorder;
     recorder = null;
     if (!running) return;
-    const report = await running.stop();
+    let report: unknown;
+    try {
+      report = await running.stop();
+    } catch (err) {
+      // A recorder that cannot stop cleanly must not keep the call from ending; the server hands the recording
+      // over ten minutes after the end without the report.
+      console.error("[meet.room] the recorder did not stop cleanly", err instanceof Error ? err.message : err);
+      return;
+    }
     if ((report as { errored?: number } | null)?.errored) {
       notice = "Part of the audio may be missing from the recording.";
       emit();
@@ -343,14 +371,16 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       const state = await call<{
         room: MeetRoomInfo;
         hostPresent: boolean;
+        recording?: boolean;
         me: { id: string; role: MeetRole; name: string };
-        participants: Array<{ id: string; name: string; role: MeetRole; me: boolean; tracks: Participant["tracks"] }>;
+        participants: Array<{ id: string; name: string; role: MeetRole; me: boolean; session?: string | null; tracks: Participant["tracks"] }>;
       }>("/state", undefined, "GET");
       pollFailures = 0;
       room = state.room;
       me = state.me;
       hostPresent = state.hostPresent;
-      participants = state.participants.map((p) => ({ ...p, tracks: p.tracks ?? [] }));
+      roomRecording = state.recording === true;
+      participants = state.participants.map((p) => ({ ...p, session: p.session ?? null, tracks: p.tracks ?? [] }));
       if (notice === "Reconnecting to the room...") notice = null;
       if (phase.kind === "waiting_for_host" && hostPresent) void connect();
       if (phase.kind === "live") void syncPulls();
@@ -368,10 +398,10 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
 
   /** Pull what others publish and is not pulled yet; close what was pulled from someone who left or stopped. */
   async function syncPulls() {
-    const wanted = new Map<string, { participantId: string; trackName: string }>();
+    const wanted = new Map<string, { participantId: string; trackName: string; session: string | null }>();
     for (const p of participants) {
       if (p.me) continue;
-      for (const t of p.tracks) wanted.set(`${p.id}:${t.trackName}`, { participantId: p.id, trackName: t.trackName });
+      for (const t of p.tracks) wanted.set(pullKey(p.id, p.session, t.trackName), { participantId: p.id, trackName: t.trackName, session: p.session });
     }
     const toPull = [...wanted.entries()].filter(([key]) => !pulled.has(key) && !inFlight.has(key));
     const toDrop = [...pulled.keys()].filter((key) => !wanted.has(key));
@@ -387,7 +417,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   /** The call ended, or reconnected onto a new connection, while a step was waiting: the step's answer is moot. */
   const moot = (peer: RTCPeerConnection) => closed || pc !== peer;
 
-  async function pull(list: Array<{ participantId: string; trackName: string }>) {
+  async function pull(list: Array<{ participantId: string; trackName: string; session: string | null }>) {
     const peer = pc;
     if (!peer || closed) return;
     let res: {
@@ -395,8 +425,10 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       sessionDescription: RTCSessionDescriptionInit | null;
       tracks: Array<{ participantId: string | null; trackName: string | null; mid: string | null; errorCode: string | null }>;
     };
+    // Each answer is kept under the session tag the poll showed when it was asked for.
+    const sessionOf = new Map(list.map((w) => [`${w.participantId}\n${w.trackName}`, w.session]));
     try {
-      res = await sfu({ action: "pull", tracks: list });
+      res = await sfu({ action: "pull", tracks: list.map(({ participantId, trackName }) => ({ participantId, trackName })) });
     } catch (err) {
       if (endedBy(err)) return;
       // A track that went away between the poll and the pull: the next poll sorts it out.
@@ -406,7 +438,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     if (moot(peer)) return;
     for (const t of res.tracks) {
       if (!t.participantId || !t.trackName || t.errorCode || !t.mid) continue;
-      const key = `${t.participantId}:${t.trackName}`;
+      const key = pullKey(t.participantId, sessionOf.get(`${t.participantId}\n${t.trackName}`) ?? null, t.trackName);
       pulled.set(key, { participantId: t.participantId, trackName: t.trackName, mid: t.mid, track: null });
       byMid.set(t.mid, key);
     }
@@ -427,7 +459,6 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       const p = pulled.get(key);
       if (!p) continue;
       if (p.trackName === TRACK_MIC && p.track && recorder) recorder.removeTrack(p.participantId, p.track);
-      recorded.delete(p.participantId);
       if (p.mid) {
         mids.push(p.mid);
         byMid.delete(p.mid);
@@ -457,7 +488,6 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     if (entry.trackName === TRACK_MIC && recorder) {
       const name = participants.find((p) => p.id === entry.participantId)?.name ?? "Guest";
       recorder.addTrack({ participantId: entry.participantId, displayName: name, track: event.track });
-      recorded.set(entry.participantId, event.track);
     }
     emit();
   }
@@ -563,7 +593,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         records = res.records === true;
         room = res.room;
         iceServers = res.iceServers ?? [];
-        participants = [{ id: me.id, name: me.name, role: me.role, me: true, tracks: [] }];
+        participants = [{ id: me.id, name: me.name, role: me.role, me: true, session: null, tracks: [] }];
         phase = { kind: "waiting_for_host" };
         emit();
         schedulePoll(0);

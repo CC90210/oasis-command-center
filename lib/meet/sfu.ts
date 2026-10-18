@@ -95,6 +95,8 @@ export async function cutSession(sfu: SfuClient, sessionId: string | null, where
     if (open) console.error(`[meet.${where}] the SFU left ${open} of a session's ${mids.length} tracks open`);
     return open === 0;
   } catch (err) {
+    // 404: the SFU no longer has the session (its browser closed long ago), so no media flows through it. A wrong
+    // app id would answer 404 as well, but then no session could have been opened with it, nor any call made.
     if (err instanceof SfuError && err.status === 404) return true;
     console.error(`[meet.${where}] could not close a session's tracks`, err instanceof SfuError ? `${err.code}: ${err.message}` : err);
     return false;
