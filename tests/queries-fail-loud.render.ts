@@ -3,7 +3,7 @@
  *
  * WHY A SEPARATE PROCESS. The suite runs with `--conditions=react-server`,
  * under which `react-dom/server` does not resolve and `react` has no
- * `useState`. IntegrationDot, ProviderAccountsCard, AgentConfigEditor (and its
+ * `useState`. ProviderAccountsCard, AgentConfigEditor (and its
  * BridgeToolAccess strip), OsRail and BridgeCliPanel are client components, so the only way
  * to see what they draw when a page hands
  * them null ("the read failed") is to render them where React is whole — the
@@ -155,7 +155,6 @@ async function main() {
       React.createElement("a", { href, ...rest }, children as React.ReactNode),
   });
   const { renderToStaticMarkup } = await import("react-dom/server");
-  const { IntegrationDot } = await import("../components/IntegrationDot");
   const { ProviderAccountsCard } = await import("../components/settings/ProviderAccountsCard");
   const { AgentConfigEditor, BridgeToolAccess } = await import("../components/settings/AgentConfigEditor");
   const { OsRail } = await import("../components/os/OsRail");
@@ -209,20 +208,7 @@ async function main() {
       }),
     );
 
-  const health = {
-    id: "placeholder-openrouter",
-    profile_id: null,
-    tenant_id: "tenant-a",
-    service: "openrouter",
-    status: "unconfigured" as const,
-    last_ping_at: null,
-    last_error: null,
-    metadata: {},
-    updated_at: "2026-09-29T00:00:00Z",
-  };
   const out: Record<string, string> = {
-    dotUnknown: renderToStaticMarkup(React.createElement(IntegrationDot, { health, connection: { hasCredentials: null } })),
-    dotKnownMissing: renderToStaticMarkup(React.createElement(IntegrationDot, { health, connection: { hasCredentials: false } })),
     accountsUnknown: renderToStaticMarkup(
       React.createElement(ProviderAccountsCard, { connectedServices: null, bridgeOnline: null, canManageTeam: true, canInstallBridge: true }),
     ),

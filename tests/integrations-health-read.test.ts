@@ -1,6 +1,6 @@
 /**
  * integrations-health-read.test.ts — a failed heartbeat read is unknown, never
- * "every service unconfigured" (CodeRabbit, PR #477).
+ * "every service unconfigured", and retired bridge services stay absent.
  *
  * integrationsHealth (lib/queries.ts) expands the services a read did not list
  * into "unconfigured" placeholders. It used to ignore the read's error, so a
@@ -11,7 +11,7 @@
  * Run: node --conditions=react-server --import tsx tests/integrations-health-read.test.ts
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
@@ -24,6 +24,9 @@ delete process.env.TURSO_DB_URL;
 
 async function main() {
   const { integrationsHealth } = await import("../lib/queries");
+  const { KNOWN_INTEGRATIONS } = await import("../lib/integrations-registry");
+  const registryRoute = await import("../app/api/integrations/registry/route");
+  const agentToolsSource = readFileSync("lib/agent-tools.ts", "utf8");
 
   // No table yet: the read fails, and the failure reaches the caller.
   await assert.rejects(() => integrationsHealth("tenant-a"), /integrations_health read failed/);
@@ -62,18 +65,33 @@ async function main() {
   assert.equal(stripe.length, 1, "one card per service");
   assert.equal(stripe[0].id, "s-new", "the newest heartbeat wins over a stale duplicate");
 
-  // Retired providers draw no card, even with a row and a fresh ping.
+  // Retired services never return, even when an old row still has a fresh ping.
+  const retired = [
+    "supabase", "vercel", "text_torrent", "kixie", "whisper", "ffmpeg",
+    "remotion", "playwright", "browser_harness", "obsidian", "notion", "openai_codex",
+    "n8n_inbound",
+  ];
+  const values = retired.map((service, index) => `('r-${index}', 'tenant-a', '${service}', 'healthy', '2026-09-29T12:00:00Z', '{}')`).join(",");
   await db.execute(
-    `INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata)
-     VALUES ('r-1', 'tenant-a', 'vercel', 'healthy', '2026-09-29T12:00:00Z', '{}'),
-            ('r-2', 'tenant-a', 'supabase', 'healthy', '2026-09-29T12:00:00Z', '{}'),
-            ('r-3', 'tenant-a', 'n8n_inbound', 'healthy', '2026-09-29T12:00:00Z', '{}')`,
+    `INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata) VALUES ${values}`,
   );
   const services = new Set((await integrationsHealth("tenant-a")).map((r) => r.service));
-  for (const retired of ["vercel", "supabase", "n8n_inbound"]) assert.ok(!services.has(retired), `${retired} still drawn`);
-  assert.ok(![...services].some((s) => ["vercel", "supabase", "n8n_inbound"].includes(s)));
+  for (const service of retired) assert.ok(!services.has(service), `${service} still returned`);
+
+  // The bridge catalog and its public API payload are the same pruned list.
+  const known = new Set(KNOWN_INTEGRATIONS.map((entry) => entry.service));
+  for (const service of retired) assert.ok(!known.has(service), `${service} remains in KNOWN_INTEGRATIONS`);
+  assert.match(agentToolsSource, /integrationsHealth\(ctx\.tenantId\)/, "the chat tool uses the tenant-scoped newest-row reader");
+  assert.doesNotMatch(agentToolsSource, /from\("integrations_health"\)/, "the chat tool does not return retired raw rows");
+
+  const response = await registryRoute.GET();
+  const payload = (await response.json()) as { count: number; entries: Array<{ service: string }> };
+  assert.equal(payload.count, KNOWN_INTEGRATIONS.length);
+  const apiServices = new Set(payload.entries.map((entry) => entry.service));
+  for (const service of retired) assert.ok(!apiServices.has(service), `${service} remains in /api/integrations/registry`);
+
   const placeholders = new Set((await integrationsHealth(null)).map((r) => r.service));
-  assert.ok(!placeholders.has("supabase") && !placeholders.has("vercel"), "no placeholder card for a retired provider either");
+  for (const service of retired) assert.ok(!placeholders.has(service), `${service} has a placeholder`);
 
   console.log("integrations-health-read: all passed");
 }

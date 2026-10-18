@@ -1,7 +1,7 @@
 /**
  * The facts the Connections hub computes statuses from, read once per render.
  *
- * Four reads, each failing on its own: a failed read becomes `null`, which
+ * Five reads, each failing on its own: a failed read becomes `null`, which
  * lib/os/connectors.ts turns into "Status unavailable" for exactly the cards
  * that depend on it. None of them is ever turned into "not connected", and no
  * credential VALUE leaves this file — listTenantIntegrationStatus returns
@@ -22,11 +22,12 @@
  *                      values OASIS sets on its server, which have no saved
  *                      row (lib/integrations/server-checks.ts — the latest Test
  *                      of each app, and the mailbox's last send).
+ *   agentChecks        newest tenant-scoped service check reported by the
+ *                      agents on OASIS's computer (integrationsHealth).
  *
- * A heartbeat that only says a key NAME is in an env file on OASIS's computer
- * is never read as a check (2026-10-08): it proved nothing and showed
- * "Connected, verified just now". The one heartbeat read is OASIS's own email
- * sender's report of a real Gmail sign-in, through server-checks.ts.
+ * Agent checks are read only for cards whose source is agent_check
+ * (2026-10-18). They never prove a tenant key-store card is connected; those
+ * cards still require their own provider test or server check.
  */
 
 import "server-only";
@@ -36,11 +37,13 @@ import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tena
 import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
 import { listServerChecks } from "@/lib/integrations/server-checks";
 import { listActiveConnections } from "@/lib/connections/store";
+import { integrationsHealth } from "@/lib/queries";
 import { PROVIDERS, missingProviderEnv, providerAvailability } from "@/lib/connections/registry";
 import {
   CONNECTOR_CATALOG,
   connectorBySlug,
   resolveConnectorStatus,
+  type AgentCheckFact,
   type ConnectionFact,
   type ConnectorFacts,
   type ConnectorStatus,
@@ -92,6 +95,21 @@ async function loadServerChecks(tenantId: string): Promise<ServerCheckFact[] | n
   }
 }
 
+async function loadAgentChecks(tenantId: string): Promise<AgentCheckFact[] | null> {
+  try {
+    const rows = await integrationsHealth(tenantId);
+    return rows.map((row) => ({
+      service: row.service,
+      status: row.status,
+      last_ping_at: row.last_ping_at,
+      metadata: row.metadata,
+    }));
+  } catch (error) {
+    console.error("[connections.facts.agent_checks]", error);
+    return null;
+  }
+}
+
 async function loadConnections(tenantId: string): Promise<ConnectionFact[] | null> {
   try {
     const rows = await listActiveConnections(getTursoClient(), tenantId);
@@ -132,15 +150,17 @@ export async function loadConnectorFacts(input: {
    */
   viewerIsOperator?: boolean;
 }): Promise<ConnectorFacts> {
-  const [keyRows, personalGoogle, connections, serverChecks] = await Promise.all([
+  const [keyRows, personalGoogle, connections, serverChecks, agentChecks] = await Promise.all([
     loadKeyRows(input.tenantId),
     input.personal === false ? Promise.resolve(undefined) : loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
     loadServerChecks(input.tenantId),
+    loadAgentChecks(input.tenantId),
   ]);
   return {
     keyRows,
     serverChecks,
+    agentChecks,
     ...(personalGoogle === undefined ? {} : { personalGoogle }),
     connections,
     appNotConfigured: appNotConfiguredProviders(),
@@ -180,10 +200,12 @@ export async function loadWorkspaceConnectorStatus(
   const def = connectorBySlug(slug);
   if (!def) return null;
   const framework = def.live?.source.kind === "tenant_connection";
-  const [keyRows, connections, serverChecks] = await Promise.all([
-    framework ? Promise.resolve([] as KeyRowFact[]) : loadKeyRows(tenantId),
+  const agent = def.live?.source.kind === "agent_check";
+  const [keyRows, connections, serverChecks, agentChecks] = await Promise.all([
+    framework || agent ? Promise.resolve([] as KeyRowFact[]) : loadKeyRows(tenantId),
     framework ? loadConnections(tenantId) : Promise.resolve([] as ConnectionFact[]),
-    framework ? Promise.resolve([] as ServerCheckFact[]) : loadServerChecks(tenantId),
+    framework || agent ? Promise.resolve([] as ServerCheckFact[]) : loadServerChecks(tenantId),
+    agent ? loadAgentChecks(tenantId) : Promise.resolve([] as AgentCheckFact[]),
   ]);
   return resolveConnectorStatus(
     def,
@@ -191,6 +213,7 @@ export async function loadWorkspaceConnectorStatus(
       // No personal read: no workspace card's state depends on the viewer.
       keyRows,
       serverChecks,
+      agentChecks,
       connections,
       appNotConfigured: appNotConfiguredProviders(),
       oasisWorkspace: tenantMayUseEnvFallback(tenantId),

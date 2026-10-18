@@ -147,10 +147,8 @@ export const CC_NAV: NavItem[] = [
   //                      plan was never implemented — that path doesn't exist.)
   //
   // Routes reachable by direct URL but intentionally NOT in this sidebar:
-  //   /integrations  — app/integrations/page.tsx exists and is functional,
-  //                    but it's setup-time work (paste a Stripe key once),
-  //                    not daily. Reach via direct URL or deep-link from
-  //                    /settings.
+  //   /integrations  - redirects to /settings/connections (2026-10-18);
+  //                    Connections is the one setup surface.
   //   /feed          — app/feed/page.tsx exists and
   //                    renders the agent_events stream. /operations shows
   //                    the same stream styled as an Activity Tape; CC reads

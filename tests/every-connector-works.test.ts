@@ -643,6 +643,12 @@ async function main() {
           assert.ok(connect.messageSource.trim());
           break;
         }
+        case "managed":
+          assert.equal(source.kind, "agent_check", `${def.slug}: a managed card reads the agents' check`);
+          assert.equal(def.clientsUnavailable, true, `${def.slug}: a client must not receive a dead connect action`);
+          assert.match(connect.label, /managed|agents/i, `${def.slug}: the drawer must explain who manages it`);
+          assert.match(def.docs?.href ?? "", /^https:\/\//, `${def.slug}: the vendor's setup documentation is missing`);
+          break;
         case "link":
           assert.ok(pageExists(connect.href), `${def.slug}: the page ${connect.href} does not exist`);
           break;
@@ -653,10 +659,11 @@ async function main() {
   await check("the catalog's sections: Accounting, Banking, Meetings, Messaging & chat and Ads & social each hold the apps CC named", () => {
     const by = (category: string) => connectors.CONNECTOR_CATALOG.filter((d) => d.category === category).map((d) => d.slug).sort();
     assert.deepEqual(by("accounting"), ["quickbooks", "xero"]);
-    assert.deepEqual(by("banking"), ["plaid"]);
+    assert.deepEqual(by("banking"), ["plaid", "wise"]);
     assert.ok(by("meetings").includes("zoom"));
     for (const slug of ["slack", "whatsapp", "discord", "microsoft-teams"]) assert.ok(by("messaging").includes(slug), `${slug}: in Messaging & chat`);
     assert.ok(by("ads_social").includes("meta"));
+    assert.deepEqual(by("website_hosting"), ["cloudflare", "firecrawl", "github", "hostinger"]);
     for (const c of connectors.CONNECTOR_CATEGORIES) assert.ok(connectors.CONNECTOR_CATALOG.some((d) => d.category === c.key), `${c.key}: an empty section`);
   });
 

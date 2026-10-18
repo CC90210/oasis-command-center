@@ -1,16 +1,14 @@
 /**
  * GET /api/integrations/registry — canonical integration list.
  *
- * Returns the same data the dashboard renders on /integrations: service
- * slug, category, label, env_key (when api_key style), so the bridge
- * daemon can scan .env.agents for known env_keys without carrying its
- * own hardcoded copy of the registry. Single source of truth in
- * lib/integrations-registry.ts; this endpoint just serializes it.
+ * Returns the live check catalog for the bridge: service slug, category,
+ * label and env_key (when api_key style). The bridge can scan .env.agents
+ * without carrying its own hardcoded list. Settings > Connections is the
+ * only user-facing connections catalog (2026-10-18).
  *
- * Public (no auth) since the data is static + non-sensitive — service
- * names + env-var names that the operator already sees on /integrations.
- * No tenant data leaks. Cached for 5 minutes via Cache-Control to keep
- * bridge fetch overhead low.
+ * Public (no auth) since the data is static and non-sensitive: service
+ * names and env-var names only. No tenant data leaks. Cached for 5 minutes
+ * via Cache-Control to keep bridge fetch overhead low.
  */
 
 import { NextResponse } from "next/server";

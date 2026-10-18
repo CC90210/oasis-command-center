@@ -189,7 +189,6 @@ async function main() {
   const { loadConnectorFacts, loadConnectorStatuses, loadWorkspaceConnectorStatus } = await import("../components/os/connections/connector-facts");
   const store = await import("../lib/tenant-integration-store");
   const { setUserIntegrationBundle, setUserIntegrationValue } = await import("../lib/user-integration-store");
-  const { heartbeatVerdict } = await import("../lib/integrations/presence-heartbeat");
   const { loadCalendarStatus } = await import("../components/os/today/loaders");
   const { loadSlackPresence, slackHomeFor } = await import("../lib/slack/status");
   const { getTursoClient } = await import("../lib/turso");
@@ -306,22 +305,6 @@ async function main() {
     assert.deepEqual([oasis.kind, oasis.label], ["configured", "Set up on OASIS's server · not tested yet"], "the env-key heartbeat must not read as verified");
     const client = (await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id })).telegram;
     assert.deepEqual([client.kind, client.label], ["connected", "Connected · verified 2 h ago"]);
-  });
-
-  await check("System health's integration card and the Connections card agree a key-name heartbeat is not a connection", async () => {
-    const health = { id: "h1", profile_id: null, service: "telegram", status: "healthy", last_ping_at: at(20_000), last_error: null, metadata: { via: "env_key_present" }, updated_at: at(20_000) };
-    const verdict = heartbeatVerdict({ builtIn: false, status: health.status, lastPingAt: health.last_ping_at, metadata: health.metadata, hasCredentials: false }, Date.now());
-    const markup = renderClient([{ id: "dot", kind: "integration_dot", health, hasCredentials: false }]);
-    await login(USERS.cc);
-    const hub = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id })).telegram;
-    const proven = (yes: boolean) => (yes ? "proven connected" : "not proven");
-    agree("Telegram, OASIS: proven or not", [
-      ["Settings > Connections", proven(hub.kind === "connected")],
-      ["System health card (verdict)", proven(verdict === "connected")],
-      ["System health card (rendered)", proven(/\bConnected\b/.test(text(markup.dot)))],
-    ]);
-    assert.match(text(markup.dot), /Key on file/);
-    assert.doesNotMatch(text(markup.dot), /last ping/, "no internal word on the card");
   });
 
   // -- 2. Telegram: your own bot ------------------------------------------------------
@@ -659,9 +642,6 @@ async function main() {
     assert.equal(kl(refusedCard), "attention | Could not sign in to Gmail");
     assert.match(refusedCard.detail ?? "", /Gmail refused the App Password the last time OASIS sent an email from this mailbox/);
     assert.doesNotMatch(refusedCard.detail ?? "", /SMTP|send_gateway|GMAIL_/);
-    // System health reads the same row: not connected either.
-    assert.equal(heartbeatVerdict({ builtIn: false, status: String(kept.status), lastPingAt: String(kept.last_ping_at), metadata: kept.metadata, hasCredentials: true }, Date.now()), "down");
-
     // A key-name report carrying another status takes the same guarded write
     // (PR #558 review): an older bridge's "unconfigured" scan keeps it too.
     const unconfigured = await pingRoute.POST(post("/api/bridge/ping", "POST", {
@@ -685,10 +665,19 @@ async function main() {
     assert.equal(JSON.parse(String((await ccRow("gws")).metadata)).source, "send_gateway.smtp_send");
     assert.equal(kl(await google(sentMs + 60_000)), "connected | Connected · last send worked 1 min ago");
 
-    // The rail: every app OASIS has set up (Telegram, Google) is proven, so its dot is green (W2).
+    // The rail: Telegram and Google are proven. Wise's only row is the scan's key name, so its card (an agent check,
+    // 2026-10-18) is set up but not proven, and the dot is not green until a real check lands (W2).
     const facts = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
-    assert.deepEqual(connectors.connectionsHealth(facts, Date.now()), { setUp: 2, attention: 0, connected: 2, unknown: 0 });
-    assert.equal(connectors.connectionsDot(connectors.connectionsHealth(facts, Date.now())), "ok");
+    assert.deepEqual(connectors.connectionsHealth(facts, Date.now()), { setUp: 3, attention: 0, connected: 2, unknown: 0 });
+    assert.equal(connectors.connectionsDot(connectors.connectionsHealth(facts, Date.now())), null);
+    // A real check from OASIS's agents (no key-name marker) proves it, and every app set up is proven: green.
+    await db.execute({
+      sql: "UPDATE integrations_health SET status = 'healthy', metadata = ?, last_ping_at = ? WHERE profile_id = ? AND service = 'wise'",
+      args: [JSON.stringify({ source: "service_check" }), new Date().toISOString(), `p-${USERS.cc.id}`],
+    });
+    const proven = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
+    assert.deepEqual(connectors.connectionsHealth(proven, Date.now()), { setUp: 3, attention: 0, connected: 3, unknown: 0 });
+    assert.equal(connectors.connectionsDot(connectors.connectionsHealth(proven, Date.now())), "ok");
 
     // Only a real Gmail sign-in is a check of the mailbox; a key name never is.
     const t = at(60_000);
@@ -1027,8 +1016,8 @@ async function main() {
         if (app.connector === "google-workspace") assert.equal(app.label, "Google Workspace", `${d.key}: "${app.label}" is not what the card checks`);
       }
     }
-    // The facts loader reads no heartbeat: a key name on OASIS's computer is not a check.
-    assert.doesNotMatch(read("components/os/connections/connector-facts.ts"), /from\("integrations_health"\)/);
+    // Only cards explicitly backed by an agent check read integrations_health.
+    assert.match(read("components/os/connections/connector-facts.ts"), /integrationsHealth\(tenantId\)/);
     // The setup check's line for a paired computer says the one online rule's
     // cutoff, never a number of its own (PR #558 review, CodeRabbit).
     const readiness = read("lib/setup-readiness.ts");
@@ -1051,7 +1040,6 @@ async function main() {
       "components/settings/PersonalIntegrationsPanel.tsx",
       "components/settings/TelegramConnectCard.tsx",
       "app/settings/notifications/page.tsx",
-      "components/IntegrationDot.tsx",
     ]) {
       const src = read(f).replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
       assert.doesNotMatch(src, jargon, f);

@@ -48,6 +48,7 @@ import { TWILIO_FAILURE_STATES } from "../lib/twilio/shared";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
 import { findIntegrationSchema, findTenantManuallyEditableIntegrationSchema } from "../lib/tenant-integration-schemas";
 import { providerById } from "../lib/connections/registry";
+import { KNOWN_INTEGRATIONS } from "../lib/integrations-registry";
 import {
   SETTINGS_SECTIONS,
   legacyAnchorTargets,
@@ -79,8 +80,26 @@ const REQUIRED = [
   "google-workspace", "slack", "telegram", "meta", "stripe", "quickbooks", "xero", "plaid",
   "gohighlevel", "zoom", "calendly", "cal-com", "fathom", "fireflies", "twilio",
   "constant-contact", "zernio", "discord", "microsoft-teams", "whatsapp",
+  "cloudflare", "hostinger", "github", "firecrawl", "wise",
 ];
 for (const slug of REQUIRED) assert.ok(connectorBySlug(slug), `the hub is missing ${slug}`);
+
+const AGENT_CONNECTORS = {
+  cloudflare: ["website_hosting", "Domains, DNS and the Workers that host the Command Center", "cloudflare"],
+  hostinger: ["website_hosting", "The VPS and GPU server", "hostinger"],
+  github: ["website_hosting", "Source code; a merge to main deploys the Command Center", "github"],
+  firecrawl: ["website_hosting", "Reads web pages for research", "firecrawl"],
+  wise: ["banking", "Multi-currency business account", "wise"],
+} as const;
+for (const [slug, [category, summary, service]] of Object.entries(AGENT_CONNECTORS)) {
+  const def = connectorBySlug(slug)!;
+  assert.equal(def.category, category, `${slug}: category`);
+  assert.equal(def.summary, summary, `${slug}: summary`);
+  assert.deepEqual(def.live?.source, { kind: "agent_check", service });
+  assert.equal(def.live?.connect.kind, "managed", `${slug}: no fake connect form`);
+  assert.equal(def.clientsUnavailable, true, `${slug}: clients cannot use OASIS's own key`);
+}
+assert.equal(connectorBySlug("firecrawl")!.icon.kind, "monogram", "Firecrawl is not in the pinned Simple Icons set");
 
 const categoryKeys = new Set(CONNECTOR_CATEGORIES.map((c) => c.key));
 const departmentKeys = new Set(OS_DEPARTMENTS.map((d) => d.key));
@@ -173,6 +192,7 @@ const LIVE = [
   "stripe", "google-workspace", "telegram", "twilio", "constant-contact", "slack", "jev",
   "calendly", "cal-com", "fathom", "fireflies", "zernio", "gohighlevel", "smtp",
   "quickbooks", "xero", "plaid", "zoom", "whatsapp", "discord", "microsoft-teams", "meta",
+  "cloudflare", "hostinger", "github", "firecrawl", "wise",
 ].sort();
 assert.deepEqual(
   CONNECTOR_CATALOG.filter((c) => c.live).map((c) => c.slug).sort(),
@@ -188,6 +208,11 @@ for (const def of CONNECTOR_CATALOG) {
     continue;
   }
   const src = def.live.source;
+  if (src.kind === "agent_check") {
+    assert.ok(KNOWN_INTEGRATIONS.some((entry) => entry.service === src.service), `${def.slug}: bridge does not check ${src.service}`);
+    assert.match(factsSource, /integrationsHealth\(tenantId\)/, `${def.slug}: agent checks are never loaded`);
+    continue;
+  }
   if (src.kind === "tenant_connection") {
     // A Connections-framework card reads tenant_connections, which the facts
     // loader must actually load; the provider must be LIVE in the registry
@@ -214,14 +239,14 @@ for (const def of CONNECTOR_CATALOG) {
   ];
   for (const f of named) assert.ok(fields.has(f), `${def.slug}: "${src.service}.${f}" is not a stored field`);
 }
-// No card is proven by a heartbeat any more (2026-10-08): the Google and
-// Telegram heartbeats only said a key NAME was in an env file on OASIS's
-// computer, and read as "Connected, verified just now".
+// Only the OASIS-owned infrastructure cards explicitly use the bridge's
+// newest tenant-scoped service check. Key-store cards still require their own
+// provider test and never borrow an agent heartbeat.
 assert.ok(
-  CONNECTOR_CATALOG.every((d) => !d.live || ["tenant_connection", "tenant_keys", "oauth_tokens"].includes(d.live.source.kind)),
-  "a card reads a check or a connection, never a heartbeat",
+  CONNECTOR_CATALOG.every((d) => !d.live || ["agent_check", "tenant_connection", "tenant_keys", "oauth_tokens"].includes(d.live.source.kind)),
+  "every card reads a declared check or connection source",
 );
-assert.doesNotMatch(factsSource, /from\("integrations_health"\)/, "the facts loader reads no heartbeat");
+assert.match(factsSource, /integrationsHealth\(tenantId\)/, "agent checks use the tenant-scoped reader");
 
 // Hostile facts: every service anyone could name, every field present, every
 // test passing a minute ago, every heartbeat healthy a minute ago.
@@ -245,6 +270,7 @@ const GREEN: ConnectorFacts = {
     provider, status: "connected", account_id: "acct_hostile", account_label: "Hostile", environment: "live",
     last_health_at: iso(MIN), last_health_verdict: "healthy", last_health_code: null, last_health_detail: null,
   })),
+  agentChecks: [...everyService].map((service) => ({ service, status: "healthy" as const, last_ping_at: iso(MIN) })),
 };
 
 for (const def of CONNECTOR_CATALOG) {
@@ -272,7 +298,7 @@ assert.equal(resolveConnectorStatus(connectorBySlug("google-workspace")!, GREEN,
 
 // Every lookup failed: "status unavailable" for every live card — never
 // "not connected", never "connected".
-const FAILED: ConnectorFacts = { keyRows: null, personalGoogle: null, connections: null };
+const FAILED: ConnectorFacts = { keyRows: null, personalGoogle: null, connections: null, agentChecks: null };
 for (const def of CONNECTOR_CATALOG) {
   const s = resolveConnectorStatus(def, FAILED, NOW);
   assert.equal(s.kind, def.live ? "unknown" : "coming_soon", `${def.slug}: a failed lookup resolved to "${s.kind}"`);
@@ -288,9 +314,30 @@ const EMPTY: ConnectorFacts = {
   keyRows: [],
   personalGoogle: { linked: false, calendarScope: false, address: null, workEmail: "me@workspace.test" },
   connections: [],
+  agentChecks: [],
 };
 for (const slug of LIVE) {
   assert.equal(resolveConnectorStatus(connectorBySlug(slug)!, EMPTY, NOW).kind, "not_connected", slug);
+}
+
+// Agent-managed cards are green only for a fresh healthy check; a stale,
+// missing, failed or client-workspace fact stays honest.
+for (const slug of Object.keys(AGENT_CONNECTORS)) {
+  const def = connectorBySlug(slug)!;
+  const fact = (status: "healthy" | "degraded" | "down", age: number): ConnectorFacts => ({
+    ...EMPTY,
+    oasisWorkspace: true,
+    agentChecks: [{ service: slug, status, last_ping_at: iso(age) }],
+  });
+  assert.equal(resolveConnectorStatus(def, fact("healthy", MIN), NOW).kind, "connected", `${slug}: fresh healthy check`);
+  assert.equal(resolveConnectorStatus(def, fact("healthy", 25 * HOUR), NOW).kind, "configured", `${slug}: stale check`);
+  assert.equal(resolveConnectorStatus(def, { ...EMPTY, oasisWorkspace: true, agentChecks: [] }, NOW).kind, "not_connected", `${slug}: missing check`);
+  assert.equal(resolveConnectorStatus(def, { ...EMPTY, oasisWorkspace: true, agentChecks: null }, NOW).kind, "unknown", `${slug}: failed read`);
+  assert.equal(resolveConnectorStatus(def, fact("down", MIN), NOW).kind, "attention", `${slug}: fresh failed check`);
+  const presenceOnly = fact("healthy", MIN);
+  presenceOnly.agentChecks = [{ service: slug, status: "healthy", last_ping_at: iso(MIN), metadata: { via: "env_key_present" } }];
+  assert.equal(resolveConnectorStatus(def, presenceOnly, NOW).kind, "configured", `${slug}: key presence is not a check`);
+  assert.equal(resolveConnectorStatus(def, { ...fact("healthy", MIN), oasisWorkspace: false }, NOW).kind, "coming_soon", `${slug}: client workspace`);
 }
 
 const keyRow = (service: string, field_key: string, over: Partial<KeyRowFact> = {}): KeyRowFact => ({
@@ -888,10 +935,12 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   // The drawer sets the app up in place; the hub opens it for keys and ?app=.
   const drawer = read("components/os/connections/ConnectorDrawer.tsx");
   assert.match(drawer, /<ServiceKeysForm/);
+  assert.match(drawer, /const managed = live\?\.connect\.kind === "managed"/);
+  assert.match(drawer, /managed &&[\s\S]{0,220}How it is managed/, "agent-managed keys are explained without a form");
   assert.match(drawer, /def\.yourAccount === "google" && personalGoogle[\s\S]{0,400}<PersonalIntegrationsPanel/);
   // What a click does is connectorClickAction (keys open the drawer), proven by
   // render in tests/connections-everywhere.test.ts; the hub acts on it.
-  assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys"\) return "drawer"/);
+  assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys" \|\| action\.kind === "managed"\) return "drawer"/);
   // A card this workspace cannot connect yet (coming_soon) also opens the drawer.
   assert.match(hub, /const next = connectorClickAction\(def, embedded\);[\s\S]{0,300}if \(next === "drawer" \|\| !action \|\| statuses\[def\.slug\]\?\.kind === "coming_soon"\) return openDrawer\(def\.slug\);/);
   assert.match(hub, /initialApp === "custom-keys"[\s\S]{0,120}connectorBySlug\(initialApp\)\) openDrawer\(initialApp\)/);
