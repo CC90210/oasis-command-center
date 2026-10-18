@@ -32,6 +32,7 @@ import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import type { DetailsOnlyReason } from "@/lib/forms/public-booking-alert";
 import { fetchWithRetry } from "@/lib/retry";
 import { ZONE_CHOICES } from "@/lib/meeting-time";
+import { MEET_RECORDING_NOTICE } from "@/lib/meet/recording-notice";
 
 export type BookingField = {
   name: string;
@@ -70,7 +71,8 @@ type SlotState =
   | { status: "ready"; slots: string[] }
   | { status: "error"; message: string };
 
-type Booked = { startsAt: string; endsAt: string; meetUrl: string };
+/** `recorded`: the call's Oasis Meet room records it, so the confirmation and the .ics say so (MEET_RECORDING_NOTICE). */
+type Booked = { startsAt: string; endsAt: string; meetUrl: string; recorded: boolean };
 
 const FALLBACK_ZONE = "America/Toronto";
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -154,7 +156,7 @@ function icsHref(booked: Booked, title: string): string {
     `DTEND:${icsStamp(booked.endsAt)}`,
     `SUMMARY:${title}`,
     `LOCATION:${booked.meetUrl}`,
-    `DESCRIPTION:Join the call: ${booked.meetUrl}`,
+    `DESCRIPTION:Join the call: ${booked.meetUrl}${booked.recorded ? `\\n${MEET_RECORDING_NOTICE}` : ""}`,
     `URL:${booked.meetUrl}`,
     "END:VEVENT",
     "END:VCALENDAR",
@@ -362,10 +364,10 @@ export function BookingPage(props: Props) {
         body: JSON.stringify({ token, starts_at: slot, request_id: requestIdRef.current.id }),
       });
       const data = (await res.json().catch(() => null)) as
-        | { ok?: boolean; error?: string; starts_at?: string; ends_at?: string; meet_url?: string }
+        | { ok?: boolean; error?: string; starts_at?: string; ends_at?: string; meet_url?: string; call_recorded?: boolean }
         | null;
       if (data?.ok && data.starts_at && data.ends_at && data.meet_url) {
-        setBooked({ startsAt: data.starts_at, endsAt: data.ends_at, meetUrl: data.meet_url });
+        setBooked({ startsAt: data.starts_at, endsAt: data.ends_at, meetUrl: data.meet_url, recorded: data.call_recorded === true });
         return;
       }
       const code = data?.error;
@@ -448,6 +450,8 @@ export function BookingPage(props: Props) {
         <p className="mt-6 text-[15px] leading-relaxed text-fg-muted">
           {props.thanksMessage ||
             "The calendar invite with the video call link is on its way to your inbox."}
+          {/* One text run, never an extra element: the notice must not shift this tree's markup. */}
+          {booked.recorded ? ` ${MEET_RECORDING_NOTICE}` : ""}
         </p>
       </main>
     );

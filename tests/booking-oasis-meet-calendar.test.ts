@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bookingMeetRoomDeps, bookingMeetRoomTitle, liveBookingMeetRooms } from "../lib/booking/meet-room";
+import { createClient } from "@libsql/client";
+import { bookingMeetRoomDeps, bookingMeetRoomTitle, liveBookingMeetRooms, meetLinkRecords } from "../lib/booking/meet-room";
+import { MEET_RECORDING_NOTICE } from "../lib/meet/recording-notice";
 import {
   createGoogleFounderMeeting,
   founderMeetingEventId,
@@ -124,10 +126,86 @@ async function testRescheduleKeepsOasisRoomWithoutConference(): Promise<void> {
   assert.equal(receipt.meetLink, ROOM_URL);
 }
 
+async function testRecordedRoomInviteCarriesTheNotice(): Promise<void> {
+  // Maven's line, directly under the link, when the room records; on the create and the move alike.
+  const eventId = founderMeetingEventId(TENANT, HOST, REQUEST);
+  const payloads: Array<Record<string, unknown>> = [];
+  const capture = dependencies(async (_input, init) => {
+    const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    payloads.push(payload);
+    return response(providerEvent(eventId, payload));
+  });
+  const base = {
+    tenantId: TENANT,
+    hostUserId: HOST,
+    expectedOrganizerEmail: ORGANIZER,
+    timezone: "America/Toronto",
+    durationMinutes: 30,
+    offerLabel: "discovery call",
+    clientEmail: "client@example.com",
+    clientAgenda: "A 30-minute discovery call with OASIS AI Solutions.",
+    meetingLink: ROOM_URL,
+  };
+  await createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: true }, capture);
+  await updateGoogleFounderMeeting({ ...base, eventId, meetingAt: "2026-10-20T17:00:00.000Z", meetingRecorded: true }, capture);
+  for (const payload of payloads) {
+    assert.ok(
+      String(payload.description).endsWith(`\n\nJoin the video call: ${ROOM_URL}\n${MEET_RECORDING_NOTICE}`),
+      `the notice sits directly under the link: ${JSON.stringify(payload.description)}`,
+    );
+  }
+  // A room that does not record, or a Google Meet invite, never says so.
+  payloads.length = 0;
+  await createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: false }, capture);
+  assert.equal(String(payloads[0].description).includes(MEET_RECORDING_NOTICE), false);
+
+  // Rollout (Codex on the booking agent PR): an earlier build created this request's event without the notice and
+  // died before saving the receipt. The retry meets Google's 409 on the fixed id and must read that event as this
+  // booking, never as a mismatch whose compensation would cancel the client's live invite.
+  let legacyPayload: Record<string, unknown> | null = null;
+  const legacy = dependencies(async (_input, init) => {
+    if ((init?.method || "GET").toUpperCase() === "POST") {
+      legacyPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ error: { code: 409 } }), { status: 409, headers: { "content-type": "application/json" } });
+    }
+    assert(legacyPayload);
+    const description = String(legacyPayload.description).replace(`\n${MEET_RECORDING_NOTICE}`, "");
+    return response(providerEvent(eventId, { ...legacyPayload, description }));
+  });
+  const replayed = await createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: true }, legacy);
+  assert.equal(replayed.meetLink, ROOM_URL);
+  // ...but an event with no description, or another one, is still a mismatch.
+  const blank = dependencies(async (_input, init) => {
+    if ((init?.method || "GET").toUpperCase() === "POST") {
+      legacyPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ error: { code: 409 } }), { status: 409, headers: { "content-type": "application/json" } });
+    }
+    const { description: _dropped, ...rest } = legacyPayload as Record<string, unknown>;
+    return response(providerEvent(eventId, rest));
+  });
+  await assert.rejects(
+    createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: true }, blank),
+    (error: unknown) => String((error as { detail?: unknown }).detail ?? "").includes("identity mismatch: description"),
+  );
+}
+
 function testLivePortUsesTheLeadTitleRule(): void {
   assert.equal(typeof liveBookingMeetRooms, "function");
   assert.equal(bookingMeetRoomTitle("Taylor", "OASIS call with Fallback"), "OASIS call with Taylor");
   assert.equal(bookingMeetRoomTitle(null, "OASIS call with Fallback"), "OASIS call with Fallback");
+}
+
+async function testCallRecordedReadsOnlyThisWorkspacesRoom(): Promise<void> {
+  // The confirmation's recording notice is read from the room itself, with the workspace in the query.
+  const db = createClient({ url: ":memory:" });
+  await db.execute("CREATE TABLE meet_rooms (tenant_id TEXT NOT NULL, code TEXT NOT NULL, record_audio INTEGER NOT NULL)");
+  await db.execute({ sql: "INSERT INTO meet_rooms VALUES (?, ?, ?), (?, ?, ?)", args: ["t1", "abcdefghjk", 1, "t2", "quietroomz", 0] });
+  assert.equal(await meetLinkRecords(db, "t1", "https://oasisai.work/meet/abc-defg-hjk"), true);
+  assert.equal(await meetLinkRecords(db, "t2", "https://oasisai.work/meet/abc-defg-hjk"), false, "another workspace's room");
+  assert.equal(await meetLinkRecords(db, "t2", "https://oasisai.work/meet/qui-etro-omz"), false, "a room that does not record");
+  assert.equal(await meetLinkRecords(db, "t1", "https://meet.google.com/abc-defg-hjk"), false, "a Google Meet link");
+  assert.equal(await meetLinkRecords(db, "t1", "not a url"), false);
+  await db.close();
 }
 
 function testNoTursoMeansNoRoomPort() {
@@ -156,8 +234,10 @@ function testNoTursoMeansNoRoomPort() {
 async function main() {
   await testCreateUsesOasisRoomWithoutGoogleConference();
   await testRescheduleKeepsOasisRoomWithoutConference();
+  await testRecordedRoomInviteCarriesTheNotice();
   testLivePortUsesTheLeadTitleRule();
   testNoTursoMeansNoRoomPort();
+  await testCallRecordedReadsOnlyThisWorkspacesRoom();
   console.log("booking-oasis-meet-calendar: OK");
 }
 
