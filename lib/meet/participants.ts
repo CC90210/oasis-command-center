@@ -94,8 +94,10 @@ function toPresence(row: Record<string, unknown>): MeetPresence {
 const presentSince = (now: Date) => new Date(now.getTime() - MEET_PRESENCE_MS).toISOString();
 
 /**
- * Add a person to a room, unless it already holds MEET_MAX_PARTICIPANTS present people: one statement, so the
- * last place cannot be taken twice. A host's join also opens a scheduled room. Null when the room is full.
+ * Add a person to a room, unless it is full: one statement, so the last place cannot be taken twice. Guests can
+ * hold at most MEET_MAX_PARTICIPANTS - 1 places, so a host can always get in: a leaked link filled with guests can
+ * never lock its host out of the room they need to be in to remove them. A host joins while fewer than
+ * MEET_MAX_PARTICIPANTS people are present. A host's join also opens a scheduled room. Null when the room is full.
  */
 export async function joinMeetRoom(
   db: Client,
@@ -109,10 +111,12 @@ export async function joinMeetRoom(
     sql: `INSERT INTO meet_participants (${PARTICIPANT_COLUMNS})
           SELECT ?, ?, ?, ?, ?, ?, ?, NULL, '[]', ?, ?, NULL, NULL
           WHERE (SELECT count(*) FROM meet_participants
-                 WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at > ?) < ?`,
+                 WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at > ?
+                   AND (? = 'host' OR role = 'guest')) < ?`,
     args: [
       id, room.tenantId, room.id, input.role, input.userId, input.displayName, input.consentAt, at, at,
-      room.tenantId, room.id, presentSince(now), MEET_MAX_PARTICIPANTS,
+      room.tenantId, room.id, presentSince(now), input.role,
+      input.role === "host" ? MEET_MAX_PARTICIPANTS : MEET_MAX_PARTICIPANTS - 1,
     ],
   });
   if (rs.rowsAffected === 0) return null;

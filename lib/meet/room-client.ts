@@ -420,11 +420,25 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     const toDrop = [...pulled.keys()].filter((key) => !wanted.has(key));
     if (toPull.length) {
       for (const [key] of toPull) inFlight.add(key);
-      await serial(() => pull(toPull.map(([, w]) => w))).finally(() => {
+      try {
+        await serial(() => pull(toPull.map(([, w]) => w)));
+      } catch (err) {
+        // The exchange did not finish (an answer the browser or the SFU refused), so no media comes for these:
+        // forget them, and the next poll pulls them again rather than leave the person silent all call long.
+        for (const [key] of toPull) {
+          const entry = pulled.get(key);
+          if (entry?.mid) byMid.delete(entry.mid);
+          pulled.delete(key);
+        }
+        console.error("[meet.room] a pull did not finish; the next poll tries again", err instanceof Error ? err.message : err);
+      } finally {
         for (const [key] of toPull) inFlight.delete(key);
-      });
+      }
     }
-    if (toDrop.length) await serial(() => drop(toDrop));
+    if (toDrop.length) {
+      // What is dropped is already forgotten here; a close the SFU refused only leaves tracks the room's end cuts.
+      await serial(() => drop(toDrop)).catch((err: unknown) => console.error("[meet.room] a close did not finish", err instanceof Error ? err.message : err));
+    }
   }
 
   /** The call ended, or reconnected onto a new connection, while a step was waiting: the step's answer is moot. */
@@ -715,6 +729,11 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       } catch (err) {
         if (endedBy(err)) return;
         notice = "Could not share your screen. Try again.";
+        // The SFU never took this transceiver's track: take it back, so the next share publishes anew instead of
+        // feeding a sender nobody receives. (Set inside the publish step, which the type narrowing cannot see.)
+        const unpublished = tx.screen as RTCRtpTransceiver | undefined;
+        unpublished?.stop();
+        tx.screen = undefined;
         local.screen?.stop();
         local.screen = null;
         emit();

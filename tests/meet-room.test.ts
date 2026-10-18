@@ -422,14 +422,16 @@ async function main() {
     assert.equal((await handleLeave(request(`/api/meet/${code}/leave`, { cookie, ip: freshIp() }), code, deps())).status, 200);
   });
 
-  await check("the room holds eight people at most, counted in the same statement as the join", async () => {
+  await check("the room holds eight people at most, counted in the same statement as the join; guests can never fill it against its host", async () => {
     const r = await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false } }), deps({ session: as(CC) })));
     const full = String((r.room as Json).code);
     const statuses: number[] = [];
-    for (let i = 0; i < MEET_MAX_PARTICIPANTS + 1; i += 1) {
+    for (let i = 0; i < MEET_MAX_PARTICIPANTS; i += 1) {
       statuses.push((await handleJoin(request(`/api/meet/${full}/join`, { body: { name: `P${i}` }, ip: freshIp() }), full, deps())).status);
     }
-    assert.deepEqual(statuses, [...Array(MEET_MAX_PARTICIPANTS).fill(200), 409]);
+    assert.deepEqual(statuses, [...Array(MEET_MAX_PARTICIPANTS - 1).fill(200), 409], "guests hold seven places at most: a leaked link cannot fill the room");
+    assert.equal((await handleJoin(request(`/api/meet/${full}/join`, { body: {}, ip: freshIp() }), full, deps({ session: as(CC) }))).status, 200, "so its host can always get in, and remove them");
+    assert.equal((await handleJoin(request(`/api/meet/${full}/join`, { body: { consent: true }, ip: freshIp() }), full, deps({ session: as(ADON, true) }))).status, 409, "eight people in all");
     clock += 31_000; // everyone stopped polling: they are gone, and their places are free again
     assert.equal((await handleJoin(request(`/api/meet/${full}/join`, { body: { name: "Late" }, ip: freshIp() }), full, deps())).status, 200);
   });

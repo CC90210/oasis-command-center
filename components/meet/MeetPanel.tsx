@@ -14,8 +14,9 @@
  *
  * RECORDING IS OFFERED ONLY WHERE IT RUNS. GET /api/calendar/meet says `recordingAvailable`; until it says true
  * (and while the list has not loaded) there is no "Record and transcribe" box, nothing says a meeting is
- * recorded, every meeting is asked for with recordAudio false, and no Transcript button is drawn. A meeting that
- * was just made says what the server did with it ("Recorded and transcribed" / "Not recorded").
+ * recorded, and no Transcript button is drawn. Once the list says recording does not run, meetings are asked for
+ * with recordAudio false; before it answers, nothing is sent and the server decides (startBody, laterBody). A
+ * meeting that was just made says what the server did with it ("Recorded and transcribed" / "Not recorded").
  *
  * VIDEO CALLS MAY NOT BE SWITCHED ON YET. The list also says `mediaReady`; once it says false (the video service is
  * not connected: a one-time step for an owner) the panel puts one plain line at the top and switches off Start a

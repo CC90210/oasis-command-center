@@ -133,7 +133,13 @@ function fakeRoom(opts: {
   delays?: Partial<Record<"session" | "publish" | "pull" | "renegotiate" | "close", number>>;
   /** How long a host action (end, remove) takes, in ms. */
   hostDelayMs?: number;
+  /** The SFU refuses this many answers to its pull offers, then takes them. */
+  failRenegotiate?: number;
+  /** The SFU refuses this many screen publishes, then takes them. */
+  failScreenPublish?: number;
 }) {
+  let renegotiateFailures = opts.failRenegotiate ?? 0;
+  let screenFailures = opts.failScreenPublish ?? 0;
   const delays = { pull: 40, ...opts.delays };
   const log: string[] = [];
   const me: Person = { id: "me", name: "Me", role: opts.role, tracks: [] };
@@ -186,6 +192,11 @@ function fakeRoom(opts: {
             return reply({ ok: false, error: "sfu_failed" }, 502);
           }
           const tracks = body.tracks as Array<{ mid: string; trackName: string; kind: "audio" | "video" }>;
+          if (screenFailures > 0 && tracks.some((t) => t.trackName === "screen")) {
+            screenFailures -= 1;
+            log.push("publish:screen:failed");
+            return reply({ ok: false, error: "sfu_failed" }, 502);
+          }
           log.push(`publish:${tracks.map((t) => `${t.trackName}@${t.mid}`).join(",")}`);
           for (const t of tracks) me.tracks.push({ trackName: t.trackName, kind: t.kind });
           return reply({ ok: true, sessionDescription: { type: "answer", sdp: "answer" }, tracks: tracks.map((t) => ({ trackName: t.trackName, mid: t.mid, errorCode: null })) });
@@ -205,7 +216,14 @@ function fakeRoom(opts: {
             tracks: results.map(({ kind: _kind, ...r }) => r),
           });
         }
-        if (action === "renegotiate") return reply({ ok: true });
+        if (action === "renegotiate") {
+          if (renegotiateFailures > 0) {
+            renegotiateFailures -= 1;
+            log.push("renegotiate:failed");
+            return reply({ ok: false, error: "sfu_failed" }, 502);
+          }
+          return reply({ ok: true });
+        }
         if (action === "close") {
           log.push(`close:${(body.mids as string[]).join(",")}`);
           return reply({ ok: true, sessionDescription: { type: "answer", sdp: "answer" }, tracks: [] });
@@ -645,6 +663,38 @@ async function main() {
       assert.equal(c.snapshot()[ask === "cam" ? "camOn" : ask === "mic" ? "micOn" : "sharing"], false, `${ask} after ${then}: not on`);
       if (then === "off") await leaveQuietly(c);
     }
+  });
+
+  await check("a pull whose answer the SFU refused is pulled again on the next poll, never left silent", async () => {
+    const room = fakeRoom({ role: "host", failRenegotiate: 1 });
+    const { c } = controller(room);
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    const errors = console.error;
+    console.error = () => {}; // the refused answer is logged on purpose
+    try {
+      room.others.push({ id: "g1", name: "Guest", role: "guest", tracks: [{ trackName: "mic", kind: "audio" }] });
+      await waitFor("refused once", () => room.log.includes("renegotiate:failed"));
+      await waitFor("pulled again and answered", () => room.log.filter((l) => l.startsWith("pull:g1.mic")).length >= 2 && room.log.includes("sfu:renegotiate"));
+      await waitFor("their voice arrives", () => c.snapshot().tiles.some((t) => t.participantId === "g1" && t.audio));
+    } finally {
+      console.error = errors;
+    }
+    await leaveQuietly(c);
+  });
+
+  await check("a screen share the SFU refused is published anew next time, never fed to a sender nobody receives", async () => {
+    const room = fakeRoom({ role: "host", failScreenPublish: 1 });
+    const { c } = controller(room);
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    await c.shareScreen(true);
+    assert.equal(c.snapshot().notice, "Could not share your screen. Try again.");
+    assert.equal(c.snapshot().sharing, false);
+    await c.shareScreen(true);
+    assert.ok(room.log.some((l) => /^publish:screen@/.test(l)), "the second try publishes the screen to the SFU");
+    assert.equal(c.snapshot().sharing, true);
+    await leaveQuietly(c);
   });
 
   await check("a recorder that cannot stop cleanly never keeps the call from ending", async () => {
