@@ -795,7 +795,7 @@ async function testOasisMeetRoomFourthReviewFixes() {
     startsAt: String(row.scheduled_for),
     clientName: "Taylor Client",
   });
-  assert.equal(chosen?.room.id, "room-2", "an ended room was reused");
+  assert.equal(chosen.room?.id, "room-2", "an ended room was reused");
   assert.deepEqual(reuseRooms.calls.removed, ["room-1"]);
   assert.equal((await appointment(reuse.raw, reused.appointmentId)).meet_room_id, "room-2");
   await reuse.raw.close();
@@ -827,6 +827,150 @@ async function testOasisMeetRoomFourthReviewFixes() {
   assert.equal((await appointment(retry.raw, meeting.appointmentId)).meet_room_id, null, "the reconciler never retried the room delete");
   assert.deepEqual(retryRooms.calls.removed, ["room-1", "room-1", "room-1"]);
   await retry.raw.close();
+}
+
+async function testOasisMeetRoomFinalReviewFixes() {
+  const originalConsoleError = console.error;
+  const booking = { clientName: "Taylor Client" };
+  const roomInput = (row: Record<string, unknown>) => ({
+    hostUserId: String(row.assigned_to),
+    startsAt: String(row.scheduled_for),
+    ...booking,
+  });
+
+  // (a) A stored reference to a room that is gone, or ended, is cleared before the fall back to Google, even when no
+  //     replacement can be made: a later reschedule would read the Google booking as an Oasis one.
+  for (const [label, prepare] of [
+    ["gone", (_rooms: FakeMeetRooms) => undefined],
+    ["ended", (rooms: FakeMeetRooms) => { rooms.seed("room-1"); rooms.end("room-1"); }],
+  ] as const) {
+    const stale = await fixture();
+    const booked = await createVerifiedFounderMeeting(
+      bookingInput(`oasis-room-${label}-fallback`),
+      { ...stale.deps, meetRooms: fakeMeetRooms() },
+    );
+    const row = await appointment(stale.raw, booked.appointmentId);
+    assert.equal(row.meet_room_id, "room-1");
+    const rooms = fakeMeetRooms();
+    prepare(rooms);
+    rooms.createErrors.push(new Error("room_create_failed"));
+    console.error = () => undefined;
+    let chosen;
+    try {
+      chosen = await meetRoomForBooking(row as never, { ...stale.deps, meetRooms: rooms } as never, roomInput(row));
+    } finally {
+      console.error = originalConsoleError;
+    }
+    assert.equal(chosen.room, null, `${label}: no room, so Google Meet`);
+    assert.equal(chosen.appointment.meet_room_id, null, `${label}: the caller was handed the stale reference`);
+    assert.equal((await appointment(stale.raw, booked.appointmentId)).meet_room_id, null, `${label}: the reference survived the fallback`);
+    if (label === "ended") assert.deepEqual(rooms.calls.removed, ["room-1"]);
+
+    // A reference that cannot be cleared fails the booking rather than fall back with it.
+    const unclearable = fakeMeetRooms();
+    await assert.rejects(
+      meetRoomForBooking(
+        { ...row, meet_room_id: "room-9", revision: Number(row.revision) + 7 } as never,
+        { ...stale.deps, meetRooms: unclearable } as never,
+        roomInput(row),
+      ),
+      /meet_room_write_failed/,
+    );
+    assert.equal(unclearable.calls.created.length, 0, `${label}: a room was made over a stale reference`);
+    await stale.raw.close();
+  }
+
+  // (b) An earlier attempt that reached Google with no room booked Google Meet; its retry keeps Google Meet, since
+  //     the retry finds that event by its fixed id and checks it matches.
+  const retried = await fixture();
+  const googleBooked = await createVerifiedFounderMeeting(bookingInput("oasis-room-google-retry"), retried.deps);
+  const googleRow = await appointment(retried.raw, googleBooked.appointmentId);
+  assert.ok(googleRow.google_event_id);
+  assert.equal(googleRow.meet_room_id, null);
+  const retryRooms = fakeMeetRooms();
+  const kept = await meetRoomForBooking(
+    googleRow as never,
+    { ...retried.deps, meetRooms: retryRooms } as never,
+    roomInput(googleRow),
+  );
+  assert.equal(kept.room, null, "a retry of a Google booking was given a room");
+  assert.equal(retryRooms.calls.created.length, 0);
+  await retried.raw.close();
+
+  // (c) The Schedule copy's link follows the appointment on every meeting change, not only when that change made a
+  //     room: a copy left on an old link (by a retry or a compensation) is repaired by the next change.
+  const mirror = await fixture();
+  const mirrorRooms = fakeMeetRooms();
+  const mirrorDeps = { ...mirror.deps, meetRooms: mirrorRooms };
+  const mirrored = await createVerifiedFounderMeeting(bookingInput("oasis-room-mirror-repair"), mirrorDeps);
+  await activateVerifiedFounderMeeting(TENANT, mirrored.appointmentId, mirrorDeps);
+  await mirror.raw.execute({
+    sql: "INSERT INTO calendar_events (id, tenant_id, appointment_id, description, location) VALUES (?, ?, ?, ?, ?)",
+    args: [
+      "stale-link-mirror",
+      TENANT,
+      mirrored.appointmentId,
+      "Lead lead-a\nhttps://oasisai.work/meet/zzz-zzzz-zzz",
+      "https://oasisai.work/meet/zzz-zzzz-zzz",
+    ],
+  });
+  await rescheduleVerifiedFounderMeeting({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: mirrored.appointmentId,
+    requestId: "oasis-room-mirror-repair-move",
+    meetingAt: LATER,
+  }, mirrorDeps);
+  assert.equal(mirrorRooms.calls.created.length, 1, "the room moved; no new one");
+  const repaired = await mirror.raw.execute({
+    sql: "SELECT description, location FROM calendar_events WHERE id = ?",
+    args: ["stale-link-mirror"],
+  });
+  assert.deepEqual({ ...repaired.rows[0] }, {
+    description: "Lead lead-a\nhttps://oasisai.work/meet/aaa-bbbb-ccc",
+    location: "https://oasisai.work/meet/aaa-bbbb-ccc",
+  }, "the Schedule copy kept a dead link");
+  await mirror.raw.close();
+
+  // (d) The booking carries the cleared row on. A retry whose stored room is gone, whose new room cannot be made and
+  //     whose Google call fails ends with no reference: its failure write must not put the stale one back.
+  const carried = await fixture();
+  const failingGoogle = async () => {
+    throw new Error("calendar_create_failed");
+  };
+  const firstRooms = fakeMeetRooms();
+  firstRooms.removeErrors.push(new Error("room_delete_failed"));
+  const carriedRoomId = async () =>
+    (await carried.raw.execute({
+      sql: "SELECT meet_room_id FROM call_appointments WHERE booking_request_id = ?",
+      args: ["oasis-room-carried"],
+    })).rows[0].meet_room_id;
+  console.error = () => undefined;
+  try {
+    await assert.rejects(
+      createVerifiedFounderMeeting(bookingInput("oasis-room-carried"), {
+        ...carried.deps, meetRooms: firstRooms, createCalendar: failingGoogle,
+      }),
+      /calendar_create_failed/,
+    );
+    assert.equal(await carriedRoomId(), "room-1", "the first attempt's failed delete keeps its reference");
+    await carried.raw.execute({
+      sql: "UPDATE call_appointments SET pending_started_at = ? WHERE booking_request_id = ?",
+      args: ["2026-09-01T13:00:00.000Z", "oasis-room-carried"],
+    });
+    const secondRooms = fakeMeetRooms();
+    secondRooms.createErrors.push(new Error("room_create_failed"));
+    await assert.rejects(
+      createVerifiedFounderMeeting(bookingInput("oasis-room-carried"), {
+        ...carried.deps, meetRooms: secondRooms, createCalendar: failingGoogle,
+      }),
+      /calendar_create_failed/,
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(await carriedRoomId(), null, "the failure wrote the stale room reference back");
+  await carried.raw.close();
 }
 
 async function testGoogleOnlyRoomWritesAreOmitted() {
@@ -1958,6 +2102,7 @@ async function main() {
   await testOasisMeetRoomRescheduleRollback();
   await testOasisMeetRoomMovesWhenMediaIsUnavailable();
   await testOasisMeetRoomFourthReviewFixes();
+  await testOasisMeetRoomFinalReviewFixes();
   await testGoogleOnlyRoomWritesAreOmitted();
   await testCreatePreservesCustomDuration();
   await testReceiptWriteCompensationInvalidatesTheRequestId();

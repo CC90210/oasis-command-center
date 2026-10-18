@@ -35,11 +35,15 @@ export function bookingMeetRoomTitle(firstName: string | null, fallback: string)
 }
 
 /**
- * The founder-meeting service's room dependency for a route: the live port when Turso is configured, nothing
- * otherwise. Without the port a booking takes the Google Meet path, which needs no Turso (Codex on the booking PR).
+ * The founder-meeting service's room dependency for a route: the live port when appointments live on Turso (the
+ * same test as getServiceSupabase), nothing otherwise. Without the port a booking takes the Google Meet path, which
+ * needs no Turso. Turso configured is not enough: on a Supabase rollback the appointments have no meet_room_id
+ * column (Codex on the booking PR).
  */
 export function bookingMeetRoomDeps(): { meetRooms?: BookingMeetRooms } {
-  return tursoConfigured() ? { meetRooms: liveBookingMeetRooms(getTursoClient()) } : {};
+  return process.env.EMPIRE_DATA_BACKEND === "turso_cloud" && tursoConfigured()
+    ? { meetRooms: liveBookingMeetRooms(getTursoClient()) }
+    : {};
 }
 
 export function liveBookingMeetRooms(db: Client): BookingMeetRooms {

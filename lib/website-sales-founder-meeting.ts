@@ -254,7 +254,7 @@ function isGoogleMeetingLink(value: string | null): boolean {
  * The room's title when its lead record carries no name (the live port prefers the lead record, through the same
  * rule as the room page's prefill, lib/meet/guest-name.ts). Only a first name: anyone who holds the link sees it.
  */
-function bookingMeetRoomTitle(clientName: string): string {
+function fallbackMeetRoomTitle(clientName: string): string {
   const firstName = firstNameOf(clientName, "");
   // Not cut here: createMeetRoom keeps a title by characters, and a cut by UTF-16 units could split one.
   return firstName === "there" ? "OASIS call" : `OASIS call with ${firstName}`;
@@ -326,7 +326,7 @@ async function createAndStoreMeetRoom(
     hostUserId: input.hostUserId,
     leadId: appointment.lead_id || null,
     startsAt: input.startsAt,
-    title: bookingMeetRoomTitle(input.clientName),
+    title: fallbackMeetRoomTitle(input.clientName),
   });
   try {
     const saved = await storeMeetRoomId(deps.db, appointment, room.id);
@@ -335,6 +335,9 @@ async function createAndStoreMeetRoom(
     try {
       await deps.meetRooms.remove(appointment.tenant_id, room.id, input.hostUserId);
     } catch (cleanupError) {
+      // Known limit (Codex on the booking PR): when both the save and this delete fail, no row points at the room,
+      // so no retry finds it. It stays a scheduled room nobody was sent the link to: it holds no call, no media and
+      // no recording, and the error below names it for a manual delete.
       console.error("[founder-meeting] unpersisted Oasis room cleanup failed", {
         appointmentId: appointment.id,
         roomId: room.id,
@@ -345,38 +348,52 @@ async function createAndStoreMeetRoom(
   }
 }
 
-/** The room a booking uses: its stored one when still scheduled or live, else a new one. Exported for the tests. */
+/**
+ * The room a booking uses: its stored one when still scheduled or live, else a new one; `room` is null for the
+ * Google Meet path. The appointment returned is the row as it now stands, room reference included, so the caller
+ * never writes back a reference this cleared. Exported for the tests.
+ */
 export async function meetRoomForBooking(
   appointment: AppointmentRow,
   deps: FounderMeetingServiceDependencies,
   input: { hostUserId: string; startsAt: string; clientName: string },
-): Promise<{ appointment: AppointmentRow; room: { id: string; url: string } } | null> {
-  if (!deps.meetRooms?.ready()) return null;
-  if (appointment.meet_room_id) {
-    const existing = await deps.meetRooms.find(appointment.tenant_id, appointment.meet_room_id);
-    // Only a scheduled or live room is reused. An ended one (an earlier cleanup ended it, then failed) would answer
-    // room_ended to the guest, so it is cleared away and replaced (Codex on the booking PR).
-    if (existing && existing.status !== "ended") return { appointment, room: existing };
+): Promise<{ appointment: AppointmentRow; room: { id: string; url: string } | null }> {
+  if (!deps.meetRooms) return { appointment, room: null };
+  // An earlier attempt reached Google with no room, so it booked Google Meet and its event may exist. The retry's
+  // insert finds that event by its fixed id and checks it matches, so the retry keeps Google Meet (Codex on the
+  // booking PR).
+  if (appointment.google_event_id && !appointment.meet_room_id) return { appointment, room: null };
+  let current = appointment;
+  if (current.meet_room_id) {
+    const existing = await deps.meetRooms.find(current.tenant_id, current.meet_room_id);
+    // Only a scheduled or live room is reused, also while media is down (a reschedule keeps its room then too). An
+    // ended one (an earlier cleanup ended it, then failed) would answer room_ended to the guest, so it is cleared
+    // away and replaced (Codex on the booking PR).
+    if (existing && existing.status !== "ended") return { appointment: current, room: existing };
     if (existing) {
       try {
-        await deps.meetRooms.remove(appointment.tenant_id, existing.id, input.hostUserId);
+        await deps.meetRooms.remove(current.tenant_id, existing.id, input.hostUserId);
       } catch (error) {
         console.error("[founder-meeting] ended Oasis room removal failed before its replacement", {
-          appointmentId: appointment.id,
+          appointmentId: current.id,
           roomId: existing.id,
           code: errorCode(error, "meet_room_remove_failed"),
         });
       }
     }
+    // The reference is dead either way. It goes before anything else, so a fall back to Google never carries it
+    // (a later reschedule would read it as an Oasis booking). If it cannot be cleared, the booking fails here.
+    current = await storeMeetRoomId(deps.db, current, null);
   }
+  if (!deps.meetRooms.ready()) return { appointment: current, room: null };
   try {
-    return await createAndStoreMeetRoom(appointment, deps, input);
+    return await createAndStoreMeetRoom(current, deps, input);
   } catch (error) {
     console.error("[founder-meeting] Oasis room creation failed; using Google Meet", {
-      appointmentId: appointment.id,
+      appointmentId: current.id,
       code: errorCode(error, "meet_room_create_failed"),
     });
-    return null;
+    return { appointment: current, room: null };
   }
 }
 
@@ -1334,7 +1351,6 @@ async function syncScheduleMirrors(
   db: Db,
   tenantId: string,
   appointmentId: string,
-  options: { meetingLinkChanged?: boolean } = {},
 ): Promise<void> {
   try {
     const row = await db
@@ -1360,7 +1376,9 @@ async function syncScheduleMirrors(
     }
     const start = Date.parse(call.scheduled_for);
     if (!Number.isFinite(start)) return;
-    const meetingFields = options.meetingLinkChanged && call.google_meet_link
+    // The link follows the row too, every time: a run that only rewrote it when this call changed the room left a
+    // copy on a dead room after a retry or a compensation (Codex on the booking PR). Rewriting the same link is a no-op.
+    const meetingFields = call.google_meet_link
       ? publicBookingScheduleMeetingFields({ leadId: call.lead_id, meetUrl: call.google_meet_link })
       : {};
     const updated = await db
@@ -1571,7 +1589,7 @@ export async function createVerifiedFounderMeeting(input: {
         startsAt: meetingAt,
         clientName: contact.name || "",
       });
-      if (roomResult) appointment = roomResult.appointment;
+      appointment = roomResult.appointment;
       const calendarInput = {
         tenantId: input.tenantId,
         hostUserId: input.hostUserId,
@@ -1587,7 +1605,7 @@ export async function createVerifiedFounderMeeting(input: {
         website: contact.website || undefined,
         clientAgenda,
         expectedOrganizerEmail,
-        ...(roomResult ? { meetingLink: roomResult.room.url } : {}),
+        ...(roomResult.room ? { meetingLink: roomResult.room.url } : {}),
       };
       providerReceipt = await deps.createCalendar(calendarInput);
       assertOrganizer(providerReceipt, expectedOrganizerEmail);
@@ -2131,9 +2149,7 @@ export async function rescheduleVerifiedFounderMeeting(input: {
     deps.now(),
   );
   // The Schedule copies follow the new time and, for a replacement room, its new link.
-  await syncScheduleMirrors(db, input.tenantId, appointment.id, {
-    meetingLinkChanged: roomChange.created,
-  });
+  await syncScheduleMirrors(db, input.tenantId, appointment.id);
   return meeting;
 }
 
@@ -2671,10 +2687,8 @@ async function compensateReschedule(
     .select("*")
     .maybeSingle();
   if (restored.error || !restored.data) return false;
-  // The call is back on its old time, so the Schedule copies go back with it.
-  await syncScheduleMirrors(deps.db, working.tenant_id, working.id, {
-    meetingLinkChanged: roomChange.created,
-  });
+  // The call is back on its old time, so the Schedule copies go back with it, link included.
+  await syncScheduleMirrors(deps.db, working.tenant_id, working.id);
   return true;
 }
 

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { bookingMeetRoomDeps, bookingMeetRoomTitle, liveBookingMeetRooms } from "../lib/booking/meet-room";
 import {
   createGoogleFounderMeeting,
@@ -131,12 +133,22 @@ function testLivePortUsesTheLeadTitleRule(): void {
 function testNoTursoMeansNoRoomPort() {
   // Codex on the booking PR: building the port called getTursoClient(), which throws without Turso, so a Google-only
   // deployment could not book at all. Without Turso the routes get no port and take the Google Meet path.
-  const keys = ["TURSO_DB_PATH", "TURSO_DATABASE_URL", "TURSO_DB_URL"] as const;
+  const keys = ["TURSO_DB_PATH", "TURSO_DATABASE_URL", "TURSO_DB_URL", "EMPIRE_DATA_BACKEND"] as const;
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   for (const k of keys) delete process.env[k];
   try {
     assert.deepEqual(bookingMeetRoomDeps(), {});
+    process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
+    assert.deepEqual(bookingMeetRoomDeps(), {}, "turso_cloud with no Turso configured");
+    // Turso configured while appointments live on Supabase (a rollback): those rows have no meet_room_id column, so
+    // no port either (Codex on the booking PR).
+    process.env.TURSO_DB_PATH = `file:${join(tmpdir(), "booking-meet-room-never-opened.db")}`;
+    for (const backend of ["supabase_cloud", ""]) {
+      process.env.EMPIRE_DATA_BACKEND = backend;
+      assert.deepEqual(bookingMeetRoomDeps(), {}, `backend ${JSON.stringify(backend)} got the room port`);
+    }
   } finally {
+    for (const k of keys) delete process.env[k];
     for (const k of keys) if (saved[k] !== undefined) process.env[k] = saved[k];
   }
 }
