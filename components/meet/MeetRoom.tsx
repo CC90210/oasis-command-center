@@ -11,6 +11,9 @@
  * The recording notice rule is applied in one place below (components/meet/notice.ts): `devicesOpen` is what
  * lets the camera step exist at all, and the hook that asks for the devices refuses while it is false.
  *
+ * A meeting made for a time says when it starts, on the pre-join screen and in the waiting lobby (useStartsLine, in the
+ * viewer's own time zone); a lead who booked it finds their first name already in the name field.
+ *
  * `recorder` is the host's recording engine (lib/meet/recorder.ts), wired by the page that mounts this once it
  * exists; without it the room simply does not record.
  */
@@ -20,9 +23,11 @@ import { createMeetRoomController, type RecorderPort } from "@/lib/meet/room-cli
 import { CallScreen } from "./CallScreen";
 import { Lobby } from "./Lobby";
 import { MeetEnded } from "./MeetEnded";
+import { clampName } from "./meet-format";
 import { mayAskForDevices, preJoinNeeds, type MeetViewer } from "./notice";
 import { PreJoin } from "./PreJoin";
 import { useJoinDevices } from "./useJoinDevices";
+import { useStartsLine } from "./useStartsLine";
 
 export type MeetRoomProps = {
   /** The dashed code, "abc-defg-hjk". */
@@ -37,19 +42,26 @@ export type MeetRoomProps = {
    * the page from the session and the room (app/meet/[code]/load.ts meetCreatorFor), never from `viewer`.
    */
   creator: boolean;
+  /** When a meeting made for a time is for (ISO), else null: the pre-join screen and the waiting lobby say when it starts. */
+  startsAt: string | null;
+  /** The first name of the lead who booked this room, for a visitor's name field to start with (they can change it); else null. */
+  guestName: string | null;
   /** Made for the host in a recorded room once they are in the call. */
   recorder?: () => RecorderPort;
 };
 
 const IN_CALL = new Set(["joining", "waiting_for_host", "connecting", "live"]);
 
-export function MeetRoom({ code, title, status, recordAudio, viewer, creator, recorder }: MeetRoomProps) {
+export function MeetRoom({ code, title, status, recordAudio, viewer, creator, startsAt, guestName, recorder }: MeetRoomProps) {
   // One controller for the life of the page. `recorder` is read once, when the room is made.
   const [controller] = useState(() => createMeetRoomController({ code, recorder }));
   const snapshot = useSyncExternalStore(controller.subscribe, controller.snapshot, controller.snapshot);
   const phase = snapshot.phase;
 
-  const [name, setName] = useState("");
+  // A lead who booked this meeting finds their first name already there. It is only where the field starts: they can
+  // change it, and everything the field is checked for is unchanged.
+  const [name, setName] = useState(() => clampName(guestName ?? ""));
+  const startsLine = useStartsLine(startsAt);
   const [consent, setConsent] = useState(false);
   const [tried, setTried] = useState(false);
   const [canShare, setCanShare] = useState(false);
@@ -141,6 +153,7 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, re
           mode="waiting"
           title={heading}
           preview={snapshot.tiles.find((t) => t.me)?.video ?? null}
+          startsLine={startsLine}
           onLeave={() => void controller.leave()}
         />
       );
@@ -148,6 +161,7 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, re
       return (
         <PreJoin
           title={title}
+          startsLine={startsLine}
           recordAudio={recordAudio}
           needsNotice={needsNotice}
           nameRequired={nameRequired}

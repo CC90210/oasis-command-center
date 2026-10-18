@@ -63,6 +63,7 @@ import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody, type 
 import { FOCUS } from "./meet-classes";
 import {
   ALREADY_DELETED,
+  BOOKED_BY_LEAD,
   LENGTH_CHOICES,
   MADE_BOX_LATER,
   MADE_BOX_START,
@@ -72,6 +73,7 @@ import {
   canDelete,
   deleteConfirm,
   deletedNote,
+  leadPagePath,
   lengthWords,
   linkToSend,
   meetingUrl,
@@ -105,6 +107,8 @@ export type PanelRow = {
   url?: string;
   /** The person made this meeting: Delete is theirs. */
   mine: boolean;
+  /** The lead who booked this meeting, if one did: no Delete, a link to their page instead (canDelete). */
+  leadId: string | null;
   /** This meeting recorded: a finished one offers its transcript, and Delete says a recording goes with it. */
   recordAudio: boolean;
 };
@@ -428,6 +432,14 @@ export function MeetPanelView(props: MeetPanelViewProps) {
                       </button>
                     ) : null}
                   </div>
+                  {row.leadId ? (
+                    // A plain <a>, like "Back to Schedule": this file is shared with the room page, which has no app shell.
+                    <div className="mt-2">
+                      <a href={leadPagePath(row.leadId)} className={`inline-flex ${TAP} items-center text-[13px] font-medium text-fg underline underline-offset-4 ${FOCUS}`}>
+                        {BOOKED_BY_LEAD}
+                      </a>
+                    </div>
+                  ) : null}
                   {asking ? (
                     <div role="group" aria-label={`Delete ${row.title}`} className="mt-2 rounded-lg border border-status-hot/40 bg-status-hot/10 p-3">
                       <p className="text-xs leading-5 text-fg">{deleteConfirm(row)}</p>
@@ -797,6 +809,7 @@ export function MeetPanel({
             link: r.link,
             url: r.url,
             mine: r.mine,
+            leadId: r.leadId,
             recordAudio: r.recordAudio,
           })),
         }

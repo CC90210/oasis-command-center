@@ -14,7 +14,8 @@ import "server-only";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { CalendarStoreError, applyOps, getPrefs, listCalendars, type Owner } from "@/lib/calendar/store";
 import { validateEventInput } from "@/lib/calendar/validate";
-import { displayMeetCode, type MeetRoom } from "./rooms";
+import { meetRoomUrl } from "./links";
+import type { MeetRoom } from "./rooms";
 
 /** The reminder the Schedule's editor gives a new timed event. */
 const REMINDER_MINUTES = 10;
@@ -52,7 +53,7 @@ export async function addMeetingToSchedule(
   store: ScheduleStore = LIVE_STORE,
 ): Promise<ScheduleOutcome> {
   if (!room.startsAt) return { ok: false, reason: "no_time" };
-  const link = `${store.origin()}/meet/${displayMeetCode(room.code)}`;
+  const link = meetRoomUrl(room, store.origin());
   const { listCalendars, getPrefs, applyOps } = store;
   try {
     const [calendars, prefs] = await Promise.all([listCalendars(owner), getPrefs(owner)]);

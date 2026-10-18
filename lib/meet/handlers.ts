@@ -18,7 +18,6 @@
 import "server-only";
 import type { Client } from "@libsql/client";
 import type { NextRequest, NextResponse } from "next/server";
-import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { fnv1a32 } from "@/lib/automations/schedule-plan";
 import { readCappedJson, sameOrigin } from "@/lib/offer-pages/public-http";
 import {
@@ -64,7 +63,8 @@ import {
   type HeldSession,
   type MeetPresence,
 } from "./participants";
-import { createMeetRoom, displayMeetCode, listMeetRooms, parseMeetCode, readMeetRoomByCode, setRoomCalendarEvent, type MeetRoom } from "./rooms";
+import { meetRoomPath, meetRoomUrl } from "./links";
+import { createMeetRoom, listMeetRooms, parseMeetCode, readMeetRoomByCode, setRoomCalendarEvent, type MeetRoom } from "./rooms";
 import type { ScheduleOutcome } from "./schedule";
 import { cutSession, settledMids, type SfuClient } from "./sfu";
 
@@ -98,9 +98,6 @@ export type MeetDeps = {
   now: () => Date;
 };
 
-const link = (room: MeetRoom) => `/meet/${displayMeetCode(room.code)}`;
-/** The whole link from the app's canonical address, never the host the request came in on (a preview, say). */
-const url = (room: MeetRoom) => `${publicAppBaseUrl().replace(/\/+$/, "")}${link(room)}`;
 
 type Guarded = { ok: true; code: string } | { ok: false; response: NextResponse };
 
@@ -117,7 +114,7 @@ function guard(req: NextRequest, rawCode: string, kind: Parameters<typeof meetRa
 }
 
 /** The SFU client, or null when meetings are not set up: cutting media then has nothing to cut. */
-function sfuIfConfigured(deps: MeetDeps): SfuClient | null {
+function sfuIfConfigured(deps: Pick<MeetDeps, "sfu">): SfuClient | null {
   try {
     return deps.sfu();
   } catch (err) {
@@ -128,9 +125,10 @@ function sfuIfConfigured(deps: MeetDeps): SfuClient | null {
 
 /**
  * A call can connect: the video service (the Cloudflare Realtime app) is set up, and so is the participant token's
- * secret, without which nobody can join. A meeting is only made, and only offered, where both are.
+ * secret, without which nobody can join. A meeting is only made, and only offered, where both are. A booking asks it
+ * too (`meetMediaReady(liveMeetDeps())`) and gives the lead a Google Meet link instead when it is false.
  */
-const mediaReady = (deps: MeetDeps) => meetTokenConfigured() && sfuIfConfigured(deps) !== null;
+export const meetMediaReady = (deps: Pick<MeetDeps, "sfu">): boolean => meetTokenConfigured() && sfuIfConfigured(deps) !== null;
 
 let noSfuLogged = false;
 
@@ -241,12 +239,16 @@ export async function handleListRooms(deps: MeetDeps): Promise<NextResponse> {
     ]);
     return meetJson({
       ok: true,
-      rooms: rooms.map((r) => ({ id: r.id, ...roomView(r), link: link(r), url: url(r), createdAt: r.createdAt, mine: r.hostUserId === session.userId })),
+      // `leadId`: a meeting a lead booked is the booking's to cancel (from the lead), not the panel's to delete. The list
+      // is a host's own view of their workspace; a guest's answers (roomView) never carry it.
+      rooms: rooms.map((r) => ({
+        id: r.id, ...roomView(r), link: meetRoomPath(r), url: meetRoomUrl(r), createdAt: r.createdAt, mine: r.hostUserId === session.userId, leadId: r.leadId,
+      })),
       // The panel offers "Record and transcribe", and shows a meeting's transcript, only when this is true.
       recordingAvailable,
       // Until the video service is set up the panel says so and offers no meeting to make: nobody sends a client a
       // link that fails when they open it.
-      mediaReady: mediaReady(deps),
+      mediaReady: meetMediaReady(deps),
     });
   } catch (err) {
     return meetFailure(err, "rooms.list");
@@ -259,7 +261,7 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
     const session = await deps.session();
     if (!session.ok) return meetError(401, "sign_in_required");
     // A meeting whose call cannot connect is never made: no link goes out that fails when it is opened.
-    if (!mediaReady(deps)) return meetError(503, "meet_not_configured");
+    if (!meetMediaReady(deps)) return meetError(503, "meet_not_configured");
     const body = parseCreateRoom(await readCappedJson(req, 4_000));
     if (!body) return meetError(400, "invalid_body");
     // A room records only where recording really happens (an OASIS workspace with recording installed): guests
@@ -305,7 +307,7 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
       }
     }
     return meetJson(
-      { ok: true, room: { id: room.id, ...roomView(room), link: link(room), url: url(room), createdAt: room.createdAt, mine: true }, ...(schedule ? { schedule } : {}) },
+      { ok: true, room: { id: room.id, ...roomView(room), link: meetRoomPath(room), url: meetRoomUrl(room), createdAt: room.createdAt, mine: true }, ...(schedule ? { schedule } : {}) },
       201,
     );
   } catch (err) {
@@ -542,6 +544,35 @@ export async function handleLeave(req: NextRequest, rawCode: string, deps: MeetD
   }
 }
 
+/**
+ * Delete a meeting with its recording, in the one safe order. The host's Delete uses it, and so does a booking that
+ * is cancelled (server-side, with liveMeetDeps; `actorUserId` is who deletes, and a booking passes its room's host).
+ * Throws, keeping the meeting, when the recording cannot be deleted.
+ */
+export async function deleteMeetRoom(
+  deps: MeetDeps,
+  room: MeetRoom,
+  actorUserId: string,
+  now: Date,
+): Promise<{ relayRemaining: number; mediaCut: boolean }> {
+  // A meeting still going is ended first, so nobody keeps talking into a room that no longer exists.
+  if (room.status !== "ended") await endMeetRoom(deps.db, room, "host_ended", now);
+  // Every session the rows still hold is cut, whatever the status: an end whose cut failed left its ids here, and
+  // deleting the rows loses them for good. One that still fails is logged and the delete goes on: an SFU that does not
+  // answer must never keep a meeting, and its recording, from being deleted.
+  const mediaCut = await cutRoom(deps, room, "room.delete");
+  // The recording goes next (e9's deleteMeetRecording: the transcript, the relay and the PC's copy). If it fails, the
+  // meeting is kept, so the recording can never be orphaned by a half-done delete.
+  const recording = await deps.recording.remove(room, actorUserId, now);
+  // The creator's own Schedule entry, which Meet made, carries the dead link. Another host's delete never touches
+  // someone else's calendar, and a booked meeting's calendar entries belong to its booking (calendarEventId is null).
+  if (room.calendarEventId && room.hostUserId === actorUserId) {
+    await deps.unschedule({ tenantId: room.tenantId, userId: room.hostUserId }, room.calendarEventId);
+  }
+  await deleteMeetRoomRows(deps.db, room);
+  return { relayRemaining: recording?.relayRemaining ?? 0, mediaCut };
+}
+
 export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDeps): Promise<NextResponse> {
   const g = guard(req, rawCode, "action");
   if (!g.ok) return g.response;
@@ -568,22 +599,10 @@ export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDe
     }
 
     if (body.action === "delete") {
-      // A meeting still going is ended first, so nobody keeps talking into a room that no longer exists.
-      if (room.status !== "ended") await endMeetRoom(deps.db, room, "host_ended", now);
-      // Every session the rows still hold is cut, whatever the status: an end whose cut failed left its ids here,
-      // and deleting the rows loses them for good. One that still fails is logged and the delete goes on: an SFU
-      // that does not answer must never keep a meeting, and its recording, from being deleted.
-      const mediaCut = await cutRoom(deps, room, "room.delete");
-      // The recording goes next (e9's deleteMeetRecording: the transcript, the relay and the PC's copy). If it
-      // fails, the meeting is kept, so the recording can never be orphaned by a half-done delete.
-      const recording = await deps.recording.remove(room, auth.userId, now);
-      // The creator's own Schedule entry carries the dead link; another host's delete never touches someone
-      // else's calendar.
-      if (room.calendarEventId && room.hostUserId === auth.userId) {
-        await deps.unschedule({ tenantId: room.tenantId, userId: room.hostUserId }, room.calendarEventId);
-      }
-      await deleteMeetRoomRows(deps.db, room);
-      return meetJson({ ok: true, deleted: true, relayRemaining: recording?.relayRemaining ?? 0, mediaCut });
+      // A meeting a lead booked is the booking's: cancelling it from the lead deletes this room and the booking's own
+      // calendar entries and invite together. Deleting only the room would leave those holding a dead link.
+      if (room.leadId) return meetError(409, "booked_meeting");
+      return meetJson({ ok: true, deleted: true, ...(await deleteMeetRoom(deps, room, auth.userId, now)) });
     }
 
     const endedNow = await endMeetRoom(deps.db, room, "host_ended", now);

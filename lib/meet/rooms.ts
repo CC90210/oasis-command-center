@@ -198,7 +198,20 @@ export async function setRoomCalendarEvent(db: Client, room: Pick<MeetRoom, "ten
   });
 }
 
-/** A workspace's rooms, newest first, for the Schedule's Meet panel. */
+/**
+ * A booked meeting moved to another time. The room keeps its code, so the link the lead already holds still works.
+ * Any room not over yet moves (one a host opened early to test it is live, not over); an ended one does not, and
+ * then this is false and the booking makes a new room. False too for a time that is not one.
+ */
+export async function rescheduleMeetRoom(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, startsAt: string): Promise<boolean> {
+  if (!Number.isFinite(Date.parse(startsAt))) return false;
+  const rs = await db.execute({
+    sql: "UPDATE meet_rooms SET starts_at = ? WHERE tenant_id = ? AND id = ? AND status != 'ended'",
+    args: [new Date(startsAt).toISOString(), room.tenantId, room.id],
+  });
+  return rs.rowsAffected > 0;
+}
+
 /** A workspace's newest rooms; with `hostUserId`, only the ones that person made. */
 export async function listMeetRooms(db: Client, where: { tenantId: string; hostUserId?: string; limit?: number }): Promise<MeetRoom[]> {
   const limit = Math.min(Math.max(1, Math.floor(where.limit ?? 20)), 100);

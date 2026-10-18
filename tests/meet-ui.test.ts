@@ -31,7 +31,10 @@ import { messageFor } from "../components/calendar/useCalendarData";
 import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody } from "../components/meet/meet-api";
 import {
   ALREADY_DELETED,
+  BOOKED_BY_LEAD,
+  BOOKED_DELETE_REFUSED,
   DELETE_FAILED,
+  EARLY_START_MIN,
   LENGTH_CHOICES,
   MADE_BOX_LATER,
   MADE_BOX_START,
@@ -41,12 +44,15 @@ import {
   STATUS_WORDS,
   TITLE_MAX_CHARS,
   canDelete,
+  clampName,
   deleteConfirm,
   deleteErrorWords,
   deletedNote,
+  englishLocaleOf,
   gridClasses,
   gridFit,
   initialsOf,
+  leadPagePath,
   lengthWords,
   linkToSend,
   meetingUrl,
@@ -57,6 +63,7 @@ import {
   scheduleLine,
   sharerOf,
   showsTranscript,
+  startsLine,
   timeFormatter,
   toggledTranscript,
   transcriptBoxId,
@@ -67,7 +74,7 @@ import {
 import { CONSENT_LABEL, DEVICES_BUTTON, ENDED_WORDS, RECORDING_NOTICE, TICK_FIRST, WAITING_FOR_HOST } from "../components/meet/meet-words";
 import { mayAskForDevices, needsRecordingNotice, preJoinNeeds } from "../components/meet/notice";
 import { MEET_NAME_MAX } from "../lib/meet/access";
-import { endMeetRoom } from "../lib/meet/participants";
+import { MEET_EARLY_START_MIN, endMeetRoom } from "../lib/meet/participants";
 import { MEET_TITLE_MAX, createMeetRoom, displayMeetCode } from "../lib/meet/rooms";
 import { meetErrorWords, type MeetTile } from "../lib/meet/room-client";
 import { FULL_BLEED_PREFIXES, isFullBleedPath } from "../lib/os/full-bleed";
@@ -277,6 +284,78 @@ async function main() {
       assert.equal(count(html, /<video\b/g), 0, "no preview until the person turns the camera on");
       assert.ok(buttonNames(html).includes(DEVICES_BUTTON));
     }
+  });
+
+  // ---- a room a lead booked ------------------------------------------------------------------------------------------------
+
+  await check("a booked room: the name field starts with the lead's first name, can be changed and is checked as ever; the server draws no time line", () => {
+    const field = (id: string) => tags(markup[id], "input").find((t) => t.includes('id="meet-name"')) ?? "";
+    assert.match(field("room.bookedVisitor"), /\bvalue="Jane"/, "the lead's first name is already there");
+    assert.match(field("room.bookedVisitor"), /\brequired=""/, "a visitor still gives a name: it is checked as ever");
+    assert.ok(!/\b(readonly|disabled)=/i.test(field("room.bookedVisitor")), "and it can be changed");
+    assert.match(field("room.bookedVisitor"), /maxlength="60"/i, "to the same length as ever");
+    assert.match(field("room.bookedVisitorNoName"), /\bvalue=""/, "no name to give: the field starts empty");
+    assert.match(field("room.bookedLongName"), new RegExp(`value="${"J".repeat(60)}"`), "a name longer than the server keeps is cut to it");
+    assert.ok(!field("room.bookedLongName").includes("J".repeat(61)));
+    assert.match(field("room.bookedMember"), /\bvalue=""/, "a member's name field starts empty");
+    assert.match(field("room.visitorRecorded"), /\bvalue=""/, "a room no lead booked: empty, as before");
+    // The server cannot know the viewer's zone or clock, so it says nothing of the time: the browser adds it once the page is up.
+    for (const id of ["room.bookedVisitor", "room.bookedVisitorNoName", "room.bookedMember"]) {
+      assert.ok(!text(markup[id]).includes("Your call starts"), `${id}: no time line in the server's markup (it would disagree with the browser's)`);
+    }
+    // The clock is read after the page is drawn, never while drawing it.
+    const hook = readFileSync(join(root, "components", "meet", "useStartsLine.ts"), "utf8");
+    assert.match(hook, /useState<string \| null>\(null\)/, "null until the browser has worked it out");
+    assert.doesNotMatch(hook.slice(0, hook.indexOf("useEffect(")), /Date\.now\(\)|new Date\(/, "the clock is read inside the effect only");
+    const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
+    assert.match(room, /const \[name, setName\] = useState\(\(\) => clampName\(guestName \?\? ""\)\);/, "the lead's name is where the field starts, and only that");
+    const long = `${"a".repeat(NAME_MAX_CHARS - 1)}\u{1F600}b`;
+    assert.equal(clampName(long), `${"a".repeat(NAME_MAX_CHARS - 1)}\u{1F600}`, "cut by whole characters, as the server counts: the emoji at the edge is kept whole");
+    assert.equal(clampName("Jane"), "Jane");
+  });
+
+  await check("a meeting made for a time says when it starts: under its name on the pre-join screen and under the waiting line in the lobby, and nowhere else", () => {
+    const pre = text(markup["prejoin.starts"]);
+    const line = "Your call starts at 2:00 PM.";
+    assert.ok(pre.indexOf("Quarterly review") < pre.indexOf(line) && pre.indexOf(line) < pre.indexOf(RECORDING_NOTICE), "under the title, before the notice");
+    assert.ok(!text(markup["prejoin.notWaiting"]).includes("Your call starts"), "no time, no line");
+    const lobby = text(markup["lobby.waiting.starts"]);
+    assert.ok(lobby.indexOf(WAITING_FOR_HOST) >= 0 && lobby.indexOf(WAITING_FOR_HOST) < lobby.indexOf("Your call starts on Tuesday, October 20 at 2:00 PM."), "under the waiting line");
+    for (const mode of ["joining", "connecting", "waiting"]) assert.ok(!text(markup[`lobby.${mode}`]).includes("Your call starts"), `${mode}: nothing unless it is handed a line`);
+    // MeetRoom hands the line to the pre-join screen and to the waiting lobby, and to no other screen.
+    const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
+    assert.equal(count(room, /startsLine=\{startsLine\}/g), 2, "two places hand it on: the pre-join screen and the waiting lobby");
+    assert.match(room, /const startsLine = useStartsLine\(startsAt\);/);
+  });
+
+  await check("when a meeting starts, in plain words and the viewer's own zone: today is just the time, another day carries its date, and once the room opens there is nothing to say", () => {
+    const start = "2026-10-20T18:00:00.000Z"; // 2:00 PM in Montreal, 3:00 AM the next day in Tokyo
+    const said = (startsAt: string | null, now: string, zone: string, locale = "en-US") => startsLine(startsAt, Date.parse(now), { zone, locale })?.replace(NARROW_SPACES, " ") ?? null;
+    assert.equal(said(start, "2026-10-20T12:00:00.000Z", "America/Toronto"), "Your call starts at 2:00 PM.");
+    assert.equal(said(start, "2026-10-18T15:30:00.000Z", "America/Toronto"), "Your call starts on Tuesday, October 20 at 2:00 PM.");
+    assert.equal(said(start, "2026-10-20T12:00:00.000Z", "Asia/Tokyo"), "Your call starts on Wednesday, October 21 at 3:00 AM.", "the same moment is another day and hour for someone in Tokyo");
+    assert.equal(said(start, "2025-12-30T15:00:00.000Z", "America/Toronto"), "Your call starts on Tuesday, October 20, 2026 at 2:00 PM.", "the year too, when it is not this one");
+    assert.equal(said(start, "2026-10-20T12:00:00.000Z", "America/Toronto", "en-GB"), "Your call starts at 14:00.", "a 24-hour reader reads 24 hours");
+    // Midnight turns the date over: five hours before the call it is still today in Montreal, a day earlier it is not.
+    assert.equal(said(start, "2026-10-20T04:01:00.000Z", "America/Toronto"), "Your call starts at 2:00 PM.", "just after midnight in Montreal it is already today");
+    assert.equal(said(start, "2026-10-20T03:59:00.000Z", "America/Toronto"), "Your call starts on Tuesday, October 20 at 2:00 PM.", "just before it, it is not");
+    // The room opens EARLY_START_MIN minutes before the time; from then on, and after, there is nothing to say.
+    const opens = Date.parse(start) - EARLY_START_MIN * 60_000;
+    const at = (now: number) => startsLine(start, now, { zone: "America/Toronto", locale: "en-US" });
+    assert.notEqual(at(opens - 1), null, "a millisecond before the room opens");
+    assert.equal(at(opens), null, "when the room opens");
+    assert.equal(at(Date.parse(start)), null, "at the time");
+    assert.equal(at(Date.parse(start) + 3_600_000), null, "an hour past it");
+    assert.equal(startsLine(null, 0), null, "no time");
+    assert.equal(startsLine("not a time", 0), null, "a time that is not one");
+    assert.match(startsLine(start, Date.parse("2026-10-20T12:00:00.000Z"), { zone: "Not/AZone", locale: "en-US" }) ?? "", /^Your call starts (at|on) /, "a zone the browser does not know falls back to its own");
+    assert.match(startsLine(start, Date.parse("2026-10-20T12:00:00.000Z"), { zone: "America/Toronto", locale: "en_US" }) ?? "", /^Your call starts (at|on) /, "a language tag the browser does not know falls back to its own, and the page does not break");
+    assert.match(startsLine(start, Date.parse("2026-10-20T12:00:00.000Z"), { zone: "Not/AZone", locale: "not a locale" }) ?? "", /^Your call starts (at|on) /, "and both at once");
+    assert.equal(EARLY_START_MIN, MEET_EARLY_START_MIN, "the browser's early window is the server's");
+    assert.equal(englishLocaleOf(["fr-CA", "en-GB", "en-US"]), "en-GB", "the viewer's own English");
+    assert.equal(englishLocaleOf(["fr-CA"]), "en-US");
+    assert.equal(englishLocaleOf([]), "en-US");
+    assert.equal(englishLocaleOf(["english"]), "en-US", "not a language tag");
   });
 
   // ---- the browser is never asked while the gate is shut ---------------------------------------------------------------
@@ -790,24 +869,26 @@ async function main() {
     // the way the lines are broken cannot hide a missing one.
     const file = join(root, "components", "meet", "MeetRoom.tsx");
     const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-    const lobbies: Array<{ mode: string; onLeave: string }> = [];
+    const lobbies: Array<{ mode: string; onLeave: string; startsLine: string }> = [];
     const visit = (node: ts.Node): void => {
       if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(sf) === "Lobby") {
         const attribute = (name: string) => node.attributes.properties.find((p): p is ts.JsxAttribute => ts.isJsxAttribute(p) && p.name.getText(sf) === name)?.initializer;
+        const expression = (initializer: ReturnType<typeof attribute>) => (initializer && ts.isJsxExpression(initializer) && initializer.expression ? initializer.expression.getText(sf).replace(/\s+/g, " ") : "");
         const mode = attribute("mode");
-        const onLeave = attribute("onLeave");
-        lobbies.push({
-          mode: mode && ts.isStringLiteral(mode) ? mode.text : "?",
-          onLeave: onLeave && ts.isJsxExpression(onLeave) && onLeave.expression ? onLeave.expression.getText(sf).replace(/\s+/g, " ") : "",
-        });
+        lobbies.push({ mode: mode && ts.isStringLiteral(mode) ? mode.text : "?", onLeave: expression(attribute("onLeave")), startsLine: expression(attribute("startsLine")) });
       }
       ts.forEachChild(node, visit);
     };
     visit(sf);
     assert.deepEqual(
       lobbies.sort((a, b) => a.mode.localeCompare(b.mode)),
-      ["connecting", "joining", "waiting"].map((mode) => ({ mode, onLeave: "() => void controller.leave()" })),
-      "one Lobby per mode, each with the call that leaves",
+      // The waiting lobby is told when the meeting starts; the two that say "Joining..." are not.
+      [
+        { mode: "connecting", onLeave: "() => void controller.leave()", startsLine: "" },
+        { mode: "joining", onLeave: "() => void controller.leave()", startsLine: "" },
+        { mode: "waiting", onLeave: "() => void controller.leave()", startsLine: "startsLine" },
+      ],
+      "one Lobby per mode, each with the call that leaves, and only the waiting one with the time",
     );
   });
 
@@ -1265,9 +1346,11 @@ async function main() {
 
   // ---- delete a meeting ----------------------------------------------------------------------------------------------------------
 
-  await check("Delete is offered on the meetings the person made, and on no others", () => {
-    assert.equal(canDelete({ mine: true }), true);
-    assert.equal(canDelete({ mine: false }), false);
+  await check("Delete is offered on the meetings the person made, and on no others; a meeting a lead booked is the booking's, not theirs to delete", () => {
+    assert.equal(canDelete({ mine: true, leadId: null }), true);
+    assert.equal(canDelete({ mine: false, leadId: null }), false);
+    assert.equal(canDelete({ mine: true, leadId: "7f9c2a10-1b34-4e55-9d6a-0c1d2e3f4a5b" }), false, "the host's own booked meeting: cancel the booking instead");
+    assert.equal(canDelete({ mine: false, leadId: "7f9c2a10-1b34-4e55-9d6a-0c1d2e3f4a5b" }), false);
     const html = markup["panel.mixedAvailable"];
     const deletes = [...html.matchAll(/data-delete="([^"]+)"/g)].map((m) => m[1]);
     assert.deepEqual(deletes, ["m1", "m3", "m4"], "mine only: not the live one and the ended one that are someone else's");
@@ -1275,6 +1358,43 @@ async function main() {
     assert.ok(html.includes('aria-label="Delete Mine (not started)"'), "each one is named for its meeting");
     assert.deepEqual(markup["panel.empty"].match(/data-delete=/g) ?? [], []);
     assert.deepEqual([...markup["panel.mixedUnavailable"].matchAll(/data-delete="([^"]+)"/g)].map((m) => m[1]), ["m1", "m3", "m4"], "delete does not depend on recording");
+  });
+
+  await check("a meeting a lead booked has no Delete, even on the host's own: a plain link to the lead's page says where to cancel it", () => {
+    const html = markup["panel.booked"];
+    // Delete is on the meeting the host made themselves and on neither booked one.
+    assert.deepEqual([...html.matchAll(/data-delete="([^"]+)"/g)].map((m) => m[1]), ["b3"]);
+    // Each booked row says so in one link to that lead's page. It is a plain <a> (this file is shared with the room page,
+    // which has no app shell) that leaves in the same tab.
+    const links = [...html.matchAll(/<a href="(\/pipeline\/[^"]+)"([^>]*)>([^<]*)<\/a>/g)];
+    assert.deepEqual(
+      links.map((m) => [m[1], m[3]]),
+      [
+        ["/pipeline/7f9c2a10-1b34-4e55-9d6a-0c1d2e3f4a5b", BOOKED_BY_LEAD],
+        ["/pipeline/c0ffee00-1111-4222-8333-444455556666", BOOKED_BY_LEAD],
+      ],
+    );
+    for (const m of links) assert.ok(!/target=|rel=/.test(m[2]), "it opens in the same tab, as a plain link");
+    assert.equal(BOOKED_BY_LEAD, "Booked by a lead. Cancel it from their page.");
+    assert.equal(count(text(html), /Booked by a lead\./g), 2, "the words appear on the booked rows only");
+    // Meetings no lead booked are exactly as they were.
+    assert.ok(!markup["panel.mixedAvailable"].includes("/pipeline/") && !text(markup["panel.mixedAvailable"]).includes("Booked by a lead"));
+    // The lead's page, by the id encoded; the list's lead id is kept only if it is shaped like one.
+    assert.equal(leadPagePath("7f9c2a10-1b34-4e55-9d6a-0c1d2e3f4a5b"), "/pipeline/7f9c2a10-1b34-4e55-9d6a-0c1d2e3f4a5b");
+    assert.equal(leadPagePath("a b/c"), "/pipeline/a%20b%2Fc");
+    const withLead = (leadId: unknown) => parseRoomItem(roomJson({ leadId }))?.leadId;
+    assert.equal(withLead("7f9c2a10-1b34-4e55-9d6a-0c1d2e3f4a5b"), "7f9c2a10-1b34-4e55-9d6a-0c1d2e3f4a5b");
+    for (const bad of ["", "a b", "../x", "x/y", "a?b=1", "<b>", "x".repeat(101), 42, null, undefined]) assert.equal(withLead(bad), null, `not a lead id: ${String(bad)}`);
+    assert.equal(parseRoomItem(roomJson())?.leadId, null, "a meeting no lead booked");
+    // A stale panel pressed Delete for good on one: the server's refusal reads in the open question.
+    assert.equal(deleteErrorWords(409, "booked_meeting"), BOOKED_DELETE_REFUSED);
+    assert.equal(BOOKED_DELETE_REFUSED, "This meeting was booked by a lead. Cancel it from their page in the pipeline.");
+    assert.equal(deleteErrorWords(409, null), DELETE_FAILED, "any other refusal keeps the general words");
+    assert.ok(text(markup["panel.bookedDeleteRefused"]).includes(BOOKED_DELETE_REFUSED));
+    // The panel hands each row its lead, so the screen above can read it; and the list reads the key the server's list sends.
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.match(panel, /leadId: r\.leadId,/, "a row carries its lead");
+    assert.match(readFileSync(join(root, "lib", "meet", "handlers.ts"), "utf8"), /leadId: r\.leadId/, "the server's list sends `leadId`, the key the panel reads");
   });
 
   await check("Delete is two steps: the button only asks; the question, in plain words, holds Delete for good and Cancel", () => {
@@ -1533,7 +1653,7 @@ async function main() {
     const unreached = /const SCHEDULE_UNREACHED = "([a-z_]+)";/.exec(panelSource)?.[1];
     assert.ok(unreached, "the panel names the code for a Schedule that could not be reached");
     named.add(unreached);
-    for (const code of ["sign_in_required", "invalid_body", "cross_origin_refused", "meet_not_configured", "host_only", "room_not_found", "rate_limited", "schedule_unavailable"]) {
+    for (const code of ["sign_in_required", "invalid_body", "cross_origin_refused", "meet_not_configured", "host_only", "booked_meeting", "room_not_found", "rate_limited", "schedule_unavailable"]) {
       assert.ok(named.has(code), `${code} is one the panel words by name (found: ${[...named].join(", ")})`);
     }
     const server = ["handlers.ts", "access.ts", "http.ts"].map((f) => readFileSync(join(root, "lib", "meet", f), "utf8")).join("\n");
@@ -1556,9 +1676,28 @@ async function main() {
 
   const db = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "meet-ui-")), "test.db")}` });
   await db.executeMultiple(readFileSync(join(root, "database", "turso", "bravo__230_meet_rooms.sql"), "utf8"));
+  // What a booked room's page reads of its lead: the lead's own record in the room's workspace (an id, the workspace, the
+  // kind of record, and the form's fields as JSON text).
+  await db.execute("CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL)");
+  const record = (id: string, tenantId: string, entityType: string, data: object) =>
+    db.execute({ sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, ?, ?)", args: [id, tenantId, entityType, JSON.stringify(data)] });
+  await record("lead-secret-1", OASIS, "lead", { contact_name: "jane doe", business_name: "Doe Plumbing", email: "jane@doeplumbing.example" });
+  await record("lead-2", OASIS, "lead", { name: "Omar Haddad" });
+  await record("lead-nameless", OASIS, "lead", { business_name: "Acme Plumbing", email: "info@acme.example" });
+  await record("lead-company", OASIS, "lead", { name: "Acme Plumbing", business_name: "Acme Plumbing" });
+  await record("lead-elsewhere", OTHER, "lead", { name: "Priya Raman" });
+  await record("lead-not-a-lead", OASIS, "client", { name: "Sam Lee" });
   const recorded = await createMeetRoom(db, { tenantId: OASIS, hostUserId: CC, title: "Quarterly review", recordAudio: true });
   const plain = await createMeetRoom(db, { tenantId: OASIS, hostUserId: CC, title: "Standup", recordAudio: false, leadId: "lead-secret-1" });
   const finished = await createMeetRoom(db, { tenantId: OASIS, hostUserId: CC, title: "Finished" });
+  const bookedAt = "2026-10-20T18:00:00.000Z";
+  const booked = (leadId: string, title: string) => createMeetRoom(db, { tenantId: OASIS, hostUserId: CC, title, recordAudio: true, leadId, startsAt: bookedAt });
+  const bookedOmar = await booked("lead-2", "OASIS call with Omar");
+  const bookedNameless = await booked("lead-nameless", "OASIS call with a lead");
+  const bookedCompany = await booked("lead-company", "OASIS call with Acme");
+  const bookedElsewhere = await booked("lead-elsewhere", "OASIS call with Priya");
+  const bookedNotALead = await booked("lead-not-a-lead", "OASIS call with Sam");
+  const bookedMissing = await booked("lead-gone", "OASIS call (lead deleted)");
   await endMeetRoom(db, finished, "host_ended", new Date());
   type Session = Parameters<typeof loadMeetPage>[1]["session"];
   const load = (raw: string, session: Session = signedOut) => loadMeetPage(raw, { db: () => db, session });
@@ -1575,15 +1714,78 @@ async function main() {
     assert.equal((await load(dashed)).kind, "room");
   });
 
-  await check("the loader: the room's props are the six the screen needs, and never the workspace, the host or a lead", async () => {
+  await check("the loader: the room's props are the eight the screen needs, and never the workspace, the host or a lead's id", async () => {
     const data = await load(dashed);
     assert.ok(data.kind === "room");
-    assert.deepEqual(data.props, { code: dashed, title: "Quarterly review", status: "scheduled", recordAudio: true, viewer: "visitor", creator: false });
+    assert.deepEqual(data.props, { code: dashed, title: "Quarterly review", status: "scheduled", recordAudio: true, viewer: "visitor", creator: false, startsAt: null, guestName: null });
     const json = JSON.stringify(data);
     for (const secret of [OASIS, CC, "tenant", "hostUser", "leadId", "lead-secret-1"]) assert.ok(!json.includes(secret), `the props leak ${secret}`);
     const other = await load(displayMeetCode(plain.code));
     assert.ok(other.kind === "room" && other.props.recordAudio === false && other.props.title === "Standup");
     assert.ok(!JSON.stringify(other).includes("lead-secret-1"));
+  });
+
+  await check("the loader: a booked room hands its visitor the lead's first name and the time, and nothing else about the lead; no name to give leaves the field empty", async () => {
+    const props = async (room: { code: string }, session: Session = signedOut) => {
+      const data = await load(displayMeetCode(room.code), session);
+      assert.ok(data.kind === "room");
+      return data.props;
+    };
+    // The first name only, written the way the CRM's emails greet them (an all-lowercase name is capitalised).
+    const jane = await props(plain);
+    assert.deepEqual([jane.guestName, jane.startsAt], ["Jane", null], "no time was given for this one");
+    const omar = await props(bookedOmar);
+    assert.deepEqual([omar.guestName, omar.startsAt], ["Omar", bookedAt], "the room's own time is kept");
+    for (const [given, more] of [[omar, ["Haddad", "lead-2", "leadId", "lead_id"]], [jane, ["Doe", "Plumbing", "jane@", "lead-secret-1", "leadId"]]] as const) {
+      const json = JSON.stringify(given);
+      for (const leak of more) assert.ok(!json.includes(leak), `the props leak ${leak}`);
+    }
+    // Nothing to give: no name on the lead, a "name" that is really the company's, a lead of another workspace, a record that
+    // is not a lead, a lead that is gone, and a room no lead booked.
+    for (const [what, room] of [["no name on the lead", bookedNameless], ["the company's name", bookedCompany], ["a lead of another workspace", bookedElsewhere], ["a record that is not a lead", bookedNotALead], ["a lead that is gone", bookedMissing], ["a room no lead booked", recorded]] as const) {
+      assert.equal((await props(room)).guestName, null, what);
+    }
+  });
+
+  await check("the loader: only a visitor is offered the lead's name; the creator, a second host and a member use their own account", async () => {
+    const nameFor = async (session: Session) => {
+      const data = await load(displayMeetCode(bookedOmar.code), session);
+      assert.ok(data.kind === "room");
+      return data.props.guestName;
+    };
+    assert.equal(await nameFor(signedOut), "Omar");
+    assert.equal(await nameFor(as(REP, OTHER, true)), "Omar", "signed in to another workspace reads as a visitor");
+    for (const [who, session] of [["the creator", as(CC)], ["a second host", as(ADON, OASIS, true)], ["a member", as(REP)]] as const) {
+      assert.equal(await nameFor(session), null, who);
+    }
+    // A visitor only because the session lookup failed may be the host, whose join then finds their session: handed the
+    // lead's name, they would join, and be transcribed, as the lead.
+    const lookupFails = () => sessionOrVisitor(async () => { throw new Error("the session store is down"); }, () => undefined);
+    assert.equal(await nameFor(lookupFails), null, "a page that could not tell who this is never offers the lead's name");
+    const host = await load(displayMeetCode(bookedOmar.code), as(CC));
+    assert.ok(host.kind === "room" && host.props.startsAt === bookedAt, "a host's page still knows the time");
+  });
+
+  await check("the loader: a lead lookup that fails leaves the name empty and still opens the room, and says so in the log", async () => {
+    const failing = Object.create(db, {
+      execute: {
+        value: (statement: unknown) => {
+          const sql = typeof statement === "string" ? statement : (statement as { sql: string }).sql;
+          return sql.includes("tenant_records") ? Promise.reject(new Error("the records are down")) : db.execute(statement as never);
+        },
+      },
+    }) as typeof db;
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void logged.push(args);
+    try {
+      const data = await loadMeetPage(displayMeetCode(bookedOmar.code), { db: () => failing, session: signedOut });
+      assert.ok(data.kind === "room" && data.props.guestName === null && data.props.startsAt === bookedAt, "the room opens, without a name");
+    } finally {
+      console.error = original;
+    }
+    assert.equal(logged.length, 1, "one line in the log");
+    assert.match(String(logged[0][0]), /^\[meet\.guest_name\]/);
   });
 
   await check("the loader: who is looking is the host, a member or a visitor", async () => {
@@ -1663,6 +1865,20 @@ async function main() {
     }
   });
 
+  await check("the seam, for a booked room: the loader's own props, drawn by the real room, start a visitor's name field with the lead's first name and a member's empty", async () => {
+    const propsOf = async (session: Session) => {
+      const data = await load(displayMeetCode(bookedOmar.code), session);
+      assert.ok(data.kind === "room");
+      return data.props;
+    };
+    const drawn = renderMarkup({ visitor: await propsOf(signedOut), member: await propsOf(as(REP)), host: await propsOf(as(CC)) });
+    const field = (key: string) => tags(drawn[`loaded.${key}`], "input").find((t) => t.includes('id="meet-name"')) ?? "";
+    assert.match(field("visitor"), /\bvalue="Omar"/);
+    assert.match(field("member"), /\bvalue=""/);
+    assert.match(field("host"), /\bvalue=""/);
+    for (const key of ["visitor", "member", "host"]) assert.ok(!text(drawn[`loaded.${key}`]).includes("Haddad"), `${key}: only the first name reaches the page`);
+  });
+
   await check("the loader: an ended room is the plain ended page, whoever opens it", async () => {
     assert.deepEqual(await load(displayMeetCode(finished.code)), { kind: "ended", viewer: "visitor" });
     assert.deepEqual(await load(displayMeetCode(finished.code), as(CC)), { kind: "ended", viewer: "host" });
@@ -1681,7 +1897,7 @@ async function main() {
     const logged: Array<[string, unknown]> = [];
     const outage = new Error("profile resolution unavailable");
     const session = await sessionOrVisitor(async () => { throw outage; }, (m, e) => logged.push([m, e]));
-    assert.deepEqual(session, { ok: false });
+    assert.deepEqual(session, { ok: false, lookupFailed: true }, "signed out for the page, and known to be a failed lookup");
     assert.equal(logged.length, 1);
     assert.equal(logged[0][1], outage);
     assert.match(logged[0][0], /^\[meet\.page\]/);
