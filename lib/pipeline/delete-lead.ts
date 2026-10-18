@@ -389,6 +389,8 @@ async function planFor(db: SupabaseClient, tenantId: string, leadId: string): Pr
     remove[table] = await countLink(db, table, column, tenantId, leadId);
   }
   remove.agent_event_copies = await countLeadEventCopies(tenantId, leadId);
+  // The cancelled bookings the guarded delete removes with the lead: a dry run shows everything the delete destroys.
+  remove.call_appointments = await countStatus(db, "call_appointments", tenantId, leadId, ["cancelled"]);
   return { blockers: [], cancel, unlink, delete: remove };
 }
 
@@ -526,7 +528,7 @@ const DELETE_GUARDS: ReadonlyArray<readonly [table: string, where: string, live:
  * matches: SQLite runs one statement atomically, so nothing created between the
  * blocker check and the delete can be cascaded with it. True when the row went.
  */
-export async function guardedDeleteLead(tenantId: string, leadId: string): Promise<boolean> {
+export async function guardedDeleteLead(tenantId: string, leadId: string): Promise<number | null> {
   const raw = getTursoClient();
   const tx = await raw.transaction("write");
   try {
@@ -548,19 +550,27 @@ export async function guardedDeleteLead(tenantId: string, leadId: string): Promi
     // 2026-10-18: cancelled appointments are the only appointment rows the
     // guard allows. Remove them first in this write transaction; if any guard
     // refuses the parent delete, rollback restores them too.
-    await tx.execute({
+    const appointments = await tx.execute({
       sql: "DELETE FROM call_appointments WHERE tenant_id = ? AND lead_id = ? AND status = 'cancelled'",
       args: [tenantId, leadId],
     });
     const result = await tx.execute({ sql, args });
     if (result.rowsAffected !== 1) {
       await tx.rollback();
-      return false;
+      return null;
     }
     await tx.commit();
-    return true;
+    // Counted only once committed, for the plan and the audit (CodeRabbit on #702).
+    return appointments.rowsAffected;
   } catch (error) {
-    if (!tx.closed) await tx.rollback();
+    if (!tx.closed) {
+      try {
+        await tx.rollback();
+      } catch (rollbackError) {
+        // The original error is the diagnosis; a failed rollback must not replace it (CodeRabbit on #702).
+        console.error("[pipeline.delete-lead] rollback failed after an error", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
+      }
+    }
     throw error;
   } finally {
     tx.close();
@@ -628,7 +638,8 @@ export async function deletePipelineLead(
     // row a delete would cascade or orphan (guardedDeleteLead): a deal or receipt
     // created after the check above makes it delete nothing instead of taking
     // that history with it (Codex on #669, critical).
-    if (!(await guardedDeleteLead(input.tenantId, input.leadId))) {
+    const removedAppointments = await guardedDeleteLead(input.tenantId, input.leadId);
+    if (removedAppointments === null) {
       const still = await required<LeadRow | null>(
         db.from("tenant_records").select("id, data")
           .eq("tenant_id", input.tenantId).eq("id", input.leadId).eq("entity_type", "lead").maybeSingle(),
@@ -648,6 +659,7 @@ export async function deletePipelineLead(
     }
 
     const { unlink, removed } = await removeDependents(db, input.tenantId, input.leadId);
+    removed.call_appointments = removedAppointments;
     const plan: DeletePlan = { blockers: [], cancel, unlink, delete: removed };
     await logTenantAudit({
       tenantId: input.tenantId,

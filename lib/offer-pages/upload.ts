@@ -183,7 +183,10 @@ export function offerUploadStorage(): OfferUploadStorage | null {
       return { ok: true };
     },
     async remove(path) {
-      await bucket.remove([path]);
+      // The adapter answers { data, error } and never throws (CodeRabbit on #702): a failed delete must reach
+      // removeFailedCopy, which logs it, instead of passing for a removal.
+      const r = await bucket.remove([path]);
+      if (r.error) throw new Error(r.error.message || "remove failed");
     },
   };
 }

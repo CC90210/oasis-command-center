@@ -410,6 +410,8 @@ async function main(): Promise<void> {
   // A cancelled booking is not booking history: the lead goes.
   const cancelledCall = await remove(CANCELLED_CALL);
   assert.equal(cancelledCall.ok, true, JSON.stringify(cancelledCall));
+  // The plan and the audit say the cancelled booking went with the lead (CodeRabbit on #702).
+  if (cancelledCall.ok) assert.equal(cancelledCall.plan.delete.call_appointments, 1, JSON.stringify(cancelledCall.plan.delete));
   assert.equal(await count(seed, "tenant_records", "id = ?", [CANCELLED_CALL]), 0);
   assert.equal(await count(seed, "call_appointments", "tenant_id = ? AND lead_id = ?", [TENANT, CANCELLED_CALL]), 0, "the cancelled appointment was orphaned");
   assert.equal(await count(seed, "call_appointments", "tenant_id = ? AND lead_id = ?", [OTHER_TENANT, CANCELLED_CALL]), 1, "another tenant's appointment was deleted");
@@ -419,7 +421,7 @@ async function main(): Promise<void> {
   // nothing, whatever the earlier checks saw (a deal created in between).
   const { guardedDeleteLead } = await import("../lib/pipeline/delete-lead");
   await seed.execute({ sql: "INSERT INTO website_deals VALUES ('race-deal', ?, ?)", args: [TENANT, GUARDED] });
-  assert.equal(await guardedDeleteLead(TENANT, GUARDED), false, "the guarded delete removed a lead with a deal");
+  assert.equal(await guardedDeleteLead(TENANT, GUARDED), null, "the guarded delete removed a lead with a deal");
   assert.equal(await count(seed, "tenant_records", "id = ?", [GUARDED]), 1);
   assert.equal(await count(seed, "website_deals", "id = 'race-deal'", []), 1, "the deal was cascaded away");
   await seed.execute({ sql: "DELETE FROM website_deals WHERE id = 'race-deal'", args: [] });
@@ -427,10 +429,10 @@ async function main(): Promise<void> {
     { sql: "INSERT INTO lead_documents VALUES ('race-document', ?, ?, '{}')", args: [TENANT, GUARDED] },
     { sql: "INSERT INTO lead_documents VALUES ('foreign-race-document', ?, ?, '{}')", args: [OTHER_TENANT, GUARDED] },
   ], "write");
-  assert.equal(await guardedDeleteLead(TENANT, GUARDED), false, "the guarded delete removed a lead with an active document");
+  assert.equal(await guardedDeleteLead(TENANT, GUARDED), null, "the guarded delete removed a lead with an active document");
   assert.equal(await count(seed, "tenant_records", "id = ?", [GUARDED]), 1);
   await seed.execute({ sql: "UPDATE lead_documents SET metadata = ? WHERE id = 'race-document'", args: [JSON.stringify({ deleted_at: "2026-10-18T12:00:00.000Z" })] });
-  assert.equal(await guardedDeleteLead(TENANT, GUARDED), true, "a soft-deleted document still blocked the lead");
+  assert.equal(await guardedDeleteLead(TENANT, GUARDED), 0, "a soft-deleted document still blocked the lead");
   assert.equal(await count(seed, "lead_documents", "id = 'foreign-race-document'", []), 1, "another tenant's document was touched");
   pass("the parent delete atomically re-checks cascading rows and active documents");
 
