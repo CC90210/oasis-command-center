@@ -97,6 +97,7 @@ async function main() {
   const db = await setupToolsDatabase();
   await db.executeMultiple(migration("bravo__230_meet_rooms.sql"));
   await db.executeMultiple(migration("bravo__231_meet_recordings.sql"));
+  await db.executeMultiple(migration("bravo__233_meet_room_recorder.sql"));
   const { storage, objects } = relay();
   const deps = depsFor(db, storage);
 
@@ -114,7 +115,7 @@ async function main() {
     const room = (await readMeetRoomByCode(db, code.replace(/-/g, "")))!;
     const chunk = (seq: number) =>
       acceptChunk(db, storage, {
-        room, uploadedBy: CC, participantId: String(joined.participantId), displayName: String(joined.name),
+        room, uploadedBy: CC, uploader: String(joined.participantId), participantId: String(joined.participantId), displayName: String(joined.name),
         segmentId: "seg-1", seq, segmentStartedMs: clock, mimeType: "audio/webm", bytes: new Uint8Array([1, 2, 3]), now: new Date(clock),
       });
     assert.equal((await chunk(0)).ok, true);

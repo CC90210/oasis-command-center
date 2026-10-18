@@ -8,7 +8,9 @@
  *  - the participant cap is one statement; a guest's media waits for a host;
  *  - a pull names only what someone else in THIS room publishes now;
  *  - leave, remove and end cut media at the SFU (every track on the session, sent and received), not just tokens;
- *  - a live room whose host has gone for 10 minutes ends itself; nothing runs without its secrets.
+ *  - a live room whose host has gone for 10 minutes ends itself; nothing runs without its secrets;
+ *  - one browser records a recorded room, whichever host's (migration bravo__233): it takes over when the recorder
+ *    leaves or goes silent, never takes it back, and two hosts at once never both take it (e9's pins, 2026-10-18).
  *
  * Run: node --conditions=react-server --import tsx tests/meet-room.test.ts
  */
@@ -16,7 +18,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createClient } from "@libsql/client";
+import { createClient, type Client, type InStatement } from "@libsql/client";
 import { NextRequest } from "next/server";
 import { publicAppBaseUrl } from "../lib/api-helpers";
 import { MEET_COOKIE, MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } from "../lib/meet/access";
@@ -29,6 +31,7 @@ import {
   MEET_HOST_GRACE_MS,
   MEET_IDLE_MS,
   MEET_MAX_PARTICIPANTS,
+  MEET_PRESENCE_MS,
   MEET_STALE_MS,
   endAbandonedRooms,
   endMeetRoom,
@@ -161,10 +164,36 @@ function fakeSfu() {
   };
 }
 
+/**
+ * The database, with the first `n` takes of a room's recorder held until all `n` have arrived, then let go together:
+ * every racer has read the room before any take runs, so the race is certain, not left to timing.
+ */
+function racing(base: Client, n: number) {
+  const waiting: Array<() => void> = [];
+  const db = new Proxy(base, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop);
+      if (prop !== "execute") return typeof value === "function" ? value.bind(target) : value;
+      return async (stmt: InStatement) => {
+        const sql = typeof stmt === "string" ? stmt : stmt.sql;
+        if (/UPDATE meet_rooms SET recorder_/.test(sql) && waiting.length < n) {
+          await new Promise<void>((resolve) => {
+            waiting.push(resolve);
+            if (waiting.length === n) for (const go of waiting) go();
+          });
+        }
+        return target.execute(stmt);
+      };
+    },
+  });
+  return { db, held: () => waiting.length };
+}
+
 async function main() {
   console.log("meet room:");
   const db = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "meet-room-")), "test.db")}` });
   await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__230_meet_rooms.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__233_meet_room_recorder.sql"), "utf8"));
   process.env[MEET_TOKEN_SECRET_ENV] = "a-test-only-secret-that-is-long-enough-1234";
   const sfu = fakeSfu();
   const signedOut = async (): Promise<MeetSession> => ({ ok: false });
@@ -350,7 +379,7 @@ async function main() {
     );
     const admin = await json(await handleJoin(request(`/api/meet/${code}/join`, { body: { consent: true }, ip: freshIp() }), code, deps({ session: as(ADON, true) })));
     assert.equal(admin.role, "host");
-    assert.equal(admin.records, false, "a second host never starts a second recording");
+    assert.equal(admin.records, false, "the creator's browser already records: a second host's never starts a second recording");
     hostCookie = cookieOf(res)!;
     hostId = String(body.participantId);
     const member = await json(await handleJoin(request(`/api/meet/${code}/join`, { body: { name: "Rep", consent: true }, ip: freshIp() }), code, deps({ session: as(REP) })));
@@ -1011,12 +1040,31 @@ async function main() {
     await settle();
   });
 
-  await check("the room keeps saying it records while its creator's poll is a minute late: the recorder is still running", async () => {
-    const c = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: {} }), deps({ session: as(CC) })))).room as Json).code);
-    await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) }));
-    const admin = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: { consent: true }, ip: freshIp() }), c, deps({ session: as(ADON, true) })))!;
+  // One browser records a recorded room, whichever host's (CC, 2026-10-18: Adon records from his own account).
+  const newRoom = async (body: Json = {}) =>
+    String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body }), deps({ session: as(CC) })))).room as Json).code);
+  /** A join as CC (the creator: no tick), Adon (an admin, so a host: he ticks), or a guest (null). */
+  const joinAs = async (c: string, who: string | null, over: Partial<MeetDeps> = {}) => {
+    const body = who === CC ? {} : who ? { consent: true } : { name: "Jane", consent: true };
+    const res = await handleJoin(request(`/api/meet/${c}/join`, { body, ip: freshIp() }), c, deps({ ...(who ? { session: as(who, who === ADON) } : {}), ...over }));
+    const answer = await json(res);
+    assert.equal(res.status, 200, JSON.stringify(answer));
+    return { cookie: cookieOf(res)!, id: String(answer.participantId), records: answer.records };
+  };
+  const pollAs = async (c: string, cookie: string) => json(await handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie, ip: freshIp() }), c, deps()));
+  const recorderOf = async (c: string) =>
+    (await db.execute({ sql: "SELECT recorder_participant_id AS r FROM meet_rooms WHERE code = ?", args: [c.replace(/-/g, "")] })).rows[0]?.r ?? null;
+
+  await check("the room keeps saying it records while its recorder's poll is a minute late and no other host is there to take over", async () => {
+    const c = await newRoom();
+    await joinAs(c, CC);
+    const guest = await joinAs(c, null);
     clock += 60_000; // the creator's page has not polled for a minute (a slow network, a busy laptop)
-    assert.equal((await json(await handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie: admin, ip: freshIp() }), c, deps()))).recording, true);
+    const state = await pollAs(c, guest.cookie);
+    assert.deepEqual([state.recording, state.records], [true, false], "the recorder is still running: a late poll is not a stopped recording");
+    await passWhilePolling(MEET_STALE_MS, [() => handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie: guest.cookie, ip: freshIp() }), c, deps())]);
+    assert.equal((await pollAs(c, guest.cookie)).recording, false, "unheard for MEET_STALE_MS, the recorder has left the call: the room stops saying so");
+    await settle();
   });
 
   await check("calls connect only with the participant token's secret set too: without it the list says not ready and nothing is made", async () => {
@@ -1030,15 +1078,86 @@ async function main() {
     }
   });
 
-  await check("the room says it is being recorded only while its creator, whose browser records it, is in the call", async () => {
-    const c = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: {} }), deps({ session: as(CC) })))).room as Json).code);
-    const admin = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: { consent: true }, ip: freshIp() }), c, deps({ session: as(ADON, true) })))!;
-    const recording = async () => (await json(await handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie: admin, ip: freshIp() }), c, deps()))).recording;
-    assert.equal(await recording(), false, "a second host is in and the creator is not: nothing records");
-    const creator = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) })))!;
-    assert.equal(await recording(), true);
-    await handleLeave(request(`/api/meet/${c}/leave`, { cookie: creator, ip: freshIp() }), c, deps());
-    assert.equal(await recording(), false, "and stops saying so when the creator leaves");
+  await check("any host records: a second host alone in a recorded room records it from their own account, and the room says so", async () => {
+    const c = await newRoom();
+    const adon = await joinAs(c, ADON);
+    assert.equal(adon.records, true, "the creator is not in the call: Adon's browser records");
+    const state = await pollAs(c, adon.cookie);
+    assert.deepEqual([state.records, state.recording], [true, true]);
+    assert.equal(await recorderOf(c), adon.id, "the room names his browser (his participant row), not his account");
+  });
+
+  await check("a creator joining later never takes the recording from the host who has it; it passes on the moment that host leaves", async () => {
+    const c = await newRoom();
+    const adon = await joinAs(c, ADON);
+    const guest = await joinAs(c, null);
+    const cc = await joinAs(c, CC);
+    assert.equal(cc.records, false, "Adon's browser already records: the creator's does not start a second recording");
+    assert.equal((await pollAs(c, cc.cookie)).records, false, "nor on its polls while Adon is there");
+    assert.equal((await pollAs(c, adon.cookie)).records, true);
+    assert.equal((await pollAs(c, guest.cookie)).records, false, "a guest's browser never records");
+    await handleLeave(request(`/api/meet/${c}/leave`, { cookie: adon.cookie, ip: freshIp() }), c, deps());
+    const after = await pollAs(c, cc.cookie);
+    assert.deepEqual([after.records, after.recording], [true, true], "Adon left: the creator's next poll takes the recording over, with no wait");
+    assert.equal(await recorderOf(c), cc.id);
+    await handleLeave(request(`/api/meet/${c}/leave`, { cookie: cc.cookie, ip: freshIp() }), c, deps());
+    assert.equal((await pollAs(c, guest.cookie)).recording, false, "no host is left: nothing records, and the room stops saying so");
+    await settle();
+  });
+
+  await check("a recorder gone silent past MEET_PRESENCE_MS hands over to a host still polling; coming back, it never takes it back", async () => {
+    const c = await newRoom();
+    const cc = await joinAs(c, CC);
+    const adon = await joinAs(c, ADON);
+    assert.deepEqual([cc.records, adon.records], [true, false]);
+    clock += MEET_PRESENCE_MS - 1_000;
+    assert.equal((await pollAs(c, adon.cookie)).records, false, "CC's poll is late, but CC is still there: CC's browser keeps recording");
+    clock += 2_000;
+    const taken = await pollAs(c, adon.cookie);
+    assert.deepEqual([taken.records, taken.recording], [true, true], "CC unheard for MEET_PRESENCE_MS (a laptop asleep): Adon's browser records from here");
+    const back = await pollAs(c, cc.cookie);
+    assert.deepEqual([back.records, back.recording], [false, true], "CC's browser is back and stops: the recording stays Adon's");
+    assert.equal((await joinAs(c, CC)).records, false, "nor does the creator take it back by joining again on another device");
+    assert.equal((await pollAs(c, adon.cookie)).records, true, "Adon's browser keeps it");
+    await settle();
+  });
+
+  await check("two hosts joining at once: exactly one browser records, because the take is one conditional statement, not the read before it", async () => {
+    const c = await newRoom();
+    // Both takes are held until both joins have read the room with no recorder in it, then run together.
+    const raced = racing(db, 2);
+    const [cc, adon] = await Promise.all([joinAs(c, CC, { db: raced.db }), joinAs(c, ADON, { db: raced.db })]);
+    assert.equal(raced.held(), 2, "both joins reached the take having read that nobody records");
+    assert.equal([cc.records, adon.records].filter((r) => r === true).length, 1, JSON.stringify([cc.records, adon.records]));
+    assert.equal(await recorderOf(c), cc.records ? cc.id : adon.id, "the room names the one that records");
+  });
+
+  await check("the join and every poll say the room's own time: a recorder's segment times are taken from it", async () => {
+    const c = await newRoom();
+    const res = await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) }));
+    assert.equal((await json(res)).serverTime, clock);
+    clock += 1_234;
+    assert.equal((await pollAs(c, cookieOf(res)!)).serverTime, clock);
+  });
+
+  await check("one browser, not one person: the same host on two devices records on the first only", async () => {
+    const c = await newRoom();
+    const laptop = await joinAs(c, CC);
+    const phone = await joinAs(c, CC);
+    assert.notEqual(phone.id, laptop.id, "a second device is a second participant");
+    assert.deepEqual([laptop.records, phone.records], [true, false]);
+  });
+
+  await check("nothing takes the recording of a room that does not record, and a guest alone takes nothing", async () => {
+    const quiet = await newRoom({ recordAudio: false });
+    const host = await joinAs(quiet, CC);
+    const state = await pollAs(quiet, host.cookie);
+    assert.deepEqual([host.records, state.records, state.recording], [false, false, false]);
+    assert.equal(await recorderOf(quiet), null);
+    const c = await newRoom();
+    const guest = await joinAs(c, null);
+    assert.deepEqual([guest.records, (await pollAs(c, guest.cookie)).records], [false, false]);
+    assert.equal(await recorderOf(c), null, "a guest's browser never takes it");
   });
 
   await check("the backstop: a room nobody has been in for twelve hours ends (expired), but never one made for a time still ahead", async () => {

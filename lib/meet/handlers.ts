@@ -41,7 +41,7 @@ import type { RTCIceServerLike } from "./ice";
 import {
   MEET_MAX_PARTICIPANTS,
   MEET_MAX_TRACKS,
-  creatorInCall,
+  claimRecorder,
   deleteMeetRoomRows,
   endAbandonedRooms,
   endMeetRoom,
@@ -317,21 +317,35 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
 
 // The room
 /**
- * What a join answers. `records`: this browser runs the recording, which is only ever the room creator's (one
- * recording browser per room; the recording route refuses a second). If the creator is not in the call,
- * nothing records.
+ * This person's browser may record the room: a host's, in a room that records, in a workspace whose meetings are
+ * recorded. Which one of them does is the room's recorder (lib/meet/participants.ts claimRecorder).
  */
-function joined(participant: MeetPresence, room: MeetRoom, iceServers: RTCIceServerLike[], served: boolean) {
+const mayRecord = (participant: MeetPresence, room: MeetRoom, deps: Pick<MeetDeps, "recording">) =>
+  participant.role === "host" && room.recordAudio && deps.recording.served(room.tenantId);
+
+/**
+ * What a join answers. `records`: this browser runs the recording. One browser records a room, whichever host's
+ * takes it first; the chunk route refuses audio from any other browser still in the call. `serverTime`: the room's
+ * clock (ms since the epoch) as the answer goes, as on every poll: a recorder takes its segment times from it, so
+ * recordings made by two hosts' browsers line up whatever their own clocks say.
+ */
+function joined(participant: MeetPresence, room: MeetRoom, iceServers: RTCIceServerLike[], records: boolean, now: Date) {
   return meetJson({
     ok: true,
     participantId: participant.id,
     role: participant.role,
     name: participant.displayName,
-    records:
-      served && participant.role === "host" && room.recordAudio && participant.userId !== null && participant.userId === room.hostUserId,
+    records,
+    serverTime: now.getTime(),
     room: roomView(room),
     iceServers,
   });
+}
+
+/** This browser records the room after its join: it takes the recording if it may and nobody else has it. */
+async function recordsAfterJoin(deps: MeetDeps, participant: MeetPresence, room: MeetRoom, now: Date): Promise<boolean> {
+  const may = mayRecord(participant, room, deps);
+  return may && (await claimRecorder(deps.db, room, participant, now, may)).mine;
 }
 
 export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDeps): Promise<NextResponse> {
@@ -358,7 +372,8 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
       // The touch is the check that counts: a leave or the room's tidy-up landing since the read leaves nothing to
       // touch, and then this is a new join too.
       if (before && !before.leftAt && before.role === role && !isStale(before, now) && (await touchParticipant(deps.db, before, now))) {
-        return joined(before, room, await deps.ice(), deps.recording.served(room.tenantId));
+        const records = await recordsAfterJoin(deps, before, room, now);
+        return joined(before, room, await deps.ice(), records, deps.now());
       }
     }
 
@@ -382,7 +397,8 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
     if (!participant) return meetError(409, "room_full");
     const token = signMeetToken({ roomId: room.id, participantId: participant.id, role }, now.getTime());
     const current = (await readMeetRoomByCode(deps.db, code)) ?? room;
-    const res = joined(participant, current, await deps.ice(), deps.recording.served(room.tenantId));
+    const records = await recordsAfterJoin(deps, participant, current, now);
+    const res = joined(participant, current, await deps.ice(), records, deps.now());
     const cookie = meetCookie(code, token);
     res.cookies.set(cookie.name, cookie.value, cookie.options);
     return res;
@@ -408,15 +424,21 @@ export async function handleState(req: NextRequest, rawCode: string, deps: MeetD
     }
     await tidyRoomLater(deps, room, now);
     const present = await presentParticipants(deps.db, room, now);
+    // A host's poll takes the recording when nobody is recording (the recorder left or went silent): the browser
+    // starts its recorder from `records`, mid-call too, and stops it when another browser has the recording.
+    const recorder = await claimRecorder(deps.db, room, me, now, mayRecord(me, room, deps));
     return meetJson({
       ok: true,
       room: roomView(room),
       me: { id: me.id, role: me.role, name: me.displayName },
       hostPresent: present.some((p) => p.role === "host"),
-      // Recording now: the room records and the one browser that records it, its creator's, is in the call (within
-      // MEET_STALE_MS: a late poll does not stop a recorder). The page says "recorded" from this, never from a host
-      // being present (a second host records nothing).
-      recording: room.recordAudio && deps.recording.served(room.tenantId) && (await creatorInCall(deps.db, room, now)),
+      records: recorder.mine,
+      // Read as the answer goes, after the work above: the browser reckons the room's clock from its round trip's
+      // midpoint, and a reading from the start would be early by this request's work.
+      serverTime: deps.now().getTime(),
+      // Recording now: the room records and the browser that records it is in the call (within MEET_STALE_MS: a late
+      // poll does not stop a recorder). The page says "recorded" from this, never from a host being present.
+      recording: room.recordAudio && deps.recording.served(room.tenantId) && recorder.inCall,
       participants: present.map((p) => ({
         id: p.id,
         name: p.displayName,

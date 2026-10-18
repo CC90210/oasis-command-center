@@ -15,10 +15,13 @@
  * camera is off or a mic is silent, with nothing extra on the server.
  *
  * The host's recorder (lib/meet/recorder.ts, e9) plugs in through `recorder`: it is handed the host's own
- * microphone and every remote microphone as it arrives, and told when someone leaves. End asks the room to end
- * FIRST and stops the recorder only once it has: an End that fails leaves the meeting going and still recorded,
- * where stopping first would lose the rest of the call. The recorder's last chunks go up after the end (the
- * chunk route takes them for ten minutes), and then the PC is told the recording is whole.
+ * microphone and every remote microphone as it arrives, and told when someone leaves. It runs in the one browser
+ * the room names its recorder (`records`, on the join and on every poll), whichever host's that is: a host whose
+ * browser takes over mid-call (the recorder left or went silent) starts recording then, on new segments, and one
+ * whose recording another browser has taken stops. End asks the room to end FIRST and stops the recorder only once
+ * it has: an End that fails leaves the meeting going and still recorded, where stopping first would lose the rest
+ * of the call. The recorder's last chunks go up after the end (the chunk route takes them for ten minutes), and then
+ * the PC is told the recording is whole.
  */
 
 export type MeetRole = "host" | "guest";
@@ -65,11 +68,11 @@ export type MeetSnapshot = {
   micOn: boolean;
   camOn: boolean;
   sharing: boolean;
-  /** This browser's recorder is running (only ever the room creator's). */
+  /** This browser's recorder is running (only ever in the one browser the room names its recorder). */
   recording: boolean;
   /**
-   * The room's recording is running now: it records, and the browser that records it (its creator's) is in the
-   * call. What the page says "recorded" from, for everyone in the call; a host being present is not enough.
+   * The room's recording is running now: it records, and the browser that records it is in the call. What the
+   * page says "recorded" from, for everyone in the call; a host being present is not enough.
    */
   roomRecording: boolean;
   /** One plain sentence about something that went wrong but did not end the call. */
@@ -101,8 +104,11 @@ export type MeetRoomOptions = {
   code: string;
   fetchImpl?: typeof fetch;
   pollMs?: number;
-  /** Made for a host in a recorded room, once they are in. */
-  recorder?: () => RecorderPort;
+  /**
+   * Made for a host whose browser the room names its recorder, once they are in. `clock.now` is the room's clock (the
+   * server's, as this browser reckons it), for the recorder's segment times (lib/meet/recorder.ts `now`).
+   */
+  recorder?: (clock: { now: () => number }) => RecorderPort;
   media?: Pick<MediaDevices, "getUserMedia" | "getDisplayMedia">;
   makePeer?: (config: RTCConfiguration) => RTCPeerConnection;
   /** How long to wait for ICE candidates before sending a description (non-trickle), and for "connected". */
@@ -116,6 +122,8 @@ export type MeetRoomOptions = {
   deadline?: (ms: number) => Deadline;
   /** The wait before the first reconnect try, growing by this much each try (default 1 s). */
   reconnectMs?: number;
+  /** This browser's own clock (default Date.now), which the room's clock is reckoned against; tests drive it. */
+  now?: () => number;
 };
 
 /** `session` is a tag of their current SFU session (never the session itself): it changes when they reconnect. */
@@ -211,6 +219,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   const reconnectMs = options.reconnectMs ?? 1_000;
   const media = options.media ?? (typeof navigator !== "undefined" ? navigator.mediaDevices : undefined);
   const makePeer = options.makePeer ?? ((config: RTCConfiguration) => new RTCPeerConnection(config));
+  const localNow = options.now ?? (() => Date.now());
   const base = `/api/meet/${options.code}`;
 
   let phase: MeetPhase = { kind: "idle" };
@@ -239,8 +248,23 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   const byMid = new Map<string, string>();
   const inFlight = new Set<string>();
   let recorder: RecorderPort | null = null;
-  /** The join said this browser records (the room creator's, in a recorded room). */
+  /** The room names this browser its recorder: its join said so, then each poll (it can change mid-call). */
   let records = false;
+  /**
+   * The room's clock as this browser reckons it: the server's time on the join and poll answers, taken from the
+   * quickest answer so far (the least time in transit, so the closest reading). Segment times come from it, so when
+   * the recording passes to another host's browser, the two recordings line up whatever their own clocks say.
+   */
+  let clockOffset = 0;
+  let clockRtt = Number.POSITIVE_INFINITY;
+  const roomNow = () => localNow() + clockOffset;
+  function heardTime(serverTime: unknown, sent: number, received: number) {
+    if (typeof serverTime !== "number" || !Number.isFinite(serverTime)) return;
+    const rtt = received - sent;
+    if (rtt >= clockRtt) return;
+    clockRtt = rtt;
+    clockOffset = serverTime - (sent + received) / 2;
+  }
 
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let pollFailures = 0;
@@ -443,18 +467,30 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     // A poll that hangs is abandoned after POLL_TIMEOUT_MS and counted as a failed one: it must never stop the polls
     // after it, or a person still in the call goes silent to the room (lib/meet/participants.ts MEET_STALE_MS).
     try {
+      const sent = localNow();
       const state = await call<{
         room: MeetRoomInfo;
         hostPresent: boolean;
+        records?: boolean;
         recording?: boolean;
+        serverTime?: number;
         me: { id: string; role: MeetRole; name: string };
         participants: Array<{ id: string; name: string; role: MeetRole; me: boolean; session?: string | null; tracks: Participant["tracks"] }>;
       }>("/state", undefined, "GET", pollTimeoutMs);
+      heardTime(state.serverTime, sent, localNow());
       pollFailures = 0;
       room = state.room;
       me = state.me;
       hostPresent = state.hostPresent;
       roomRecording = state.recording === true;
+      // Who records can change mid-call. Taken over (the recorder left or went silent): record from now, once live
+      // (connect() starts it otherwise). Taken from this browser: stop, with no finalize, since the recording is
+      // another browser's now.
+      if (typeof state.records === "boolean" && state.records !== records) {
+        records = state.records;
+        if (!records) void finishRecording(false);
+        else if (phase.kind === "live") startRecorder();
+      }
       participants = state.participants.map((p) => ({ ...p, session: p.session ?? null, tracks: p.tracks ?? [] }));
       if (notice === "Reconnecting to the room...") notice = null;
       if (phase.kind === "waiting_for_host" && hostPresent) void connect();
@@ -575,10 +611,14 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     entry.track = event.track;
     for (const type of ["mute", "unmute", "ended"]) event.track.addEventListener(type, emit);
     if (entry.trackName === TRACK_MIC && recorder) {
-      const name = participants.find((p) => p.id === entry.participantId)?.name ?? "Guest";
-      recorder.addTrack({ participantId: entry.participantId, displayName: name, track: event.track });
+      recorder.addTrack({ participantId: entry.participantId, displayName: speakerName(entry.participantId), track: event.track });
     }
     emit();
+  }
+
+  /** The name a speaker's lines carry in the transcript: their name in the room as the last poll said. */
+  function speakerName(participantId: string): string {
+    return participants.find((p) => p.id === participantId)?.name ?? "Guest";
   }
 
   // Connecting: a session, then publish mic and camera on one offer, then wait for the line to come up.
@@ -657,8 +697,15 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
 
   function startRecorder() {
     if (recorder || !options.recorder || !records) return;
-    recorder = options.recorder();
+    recorder = options.recorder({ now: roomNow });
     if (local.mic && me) recorder.addTrack({ participantId: me.id, displayName: me.name, track: local.mic });
+    // Taking over mid-call: the voices already coming in are recorded from now on too (a new recorder starts new
+    // segments for each). At the start of a call there are none yet; onRemoteTrack hands each one over as it comes.
+    for (const p of pulled.values()) {
+      if (p.trackName === TRACK_MIC && p.track && p.track.readyState !== "ended") {
+        recorder.addTrack({ participantId: p.participantId, displayName: speakerName(p.participantId), track: p.track });
+      }
+    }
   }
 
   const controller: MeetRoomController = {
@@ -678,12 +725,16 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       micOn = !!mic;
       emit();
       try {
-        const asked = call<{ participantId: string; role: MeetRole; name: string; records?: boolean; room: MeetRoomInfo; iceServers: RTCIceServer[] }>("/join", {
+        const sent = localNow();
+        const asked = call<{
+          participantId: string; role: MeetRole; name: string; records?: boolean; serverTime?: number; room: MeetRoomInfo; iceServers: RTCIceServer[];
+        }>("/join", {
           ...(name ? { name } : {}),
           consent,
         });
         joinSettled = asked.catch(() => undefined);
         const res = await asked;
+        heardTime(res.serverTime, sent, localNow());
         // Left while the join was on its way: the call stays ended, and leave() tells the room now that it can.
         if (closed) return;
         me = { id: res.participantId, role: res.role, name: res.name };

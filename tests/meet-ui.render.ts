@@ -61,7 +61,7 @@ function snapshot(over: Partial<MeetSnapshot> = {}): MeetSnapshot {
     camOn: true,
     sharing: false,
     recording: false,
-    // The recording is running: the room records and its creator (whose browser records) is in the call.
+    // The recording is running: the room records and the browser recording it is in the call.
     roomRecording: true,
     notice: null,
     ...over,
@@ -196,7 +196,7 @@ async function main() {
   }
 
   // The call: a guest, a host, a shared screen, and the Recording indicator, which follows the room's own answer
-  // (`roomRecording`: the room records and its creator is in the call), never the room's setting alone.
+  // (`roomRecording`: the room records and the browser recording it is in the call), never the room's setting alone.
   const call = (snap: MeetSnapshot, over: { canShare?: boolean } = {}) =>
     h(CallScreen, { controller, snapshot: snap, code: "abc-defg-hjk", title: "Quarterly review", canShare: over.canShare ?? true });
   draw("call.guest", call(snapshot()));
@@ -204,15 +204,15 @@ async function main() {
   draw("call.host", call(snapshot({ me: { id: "p-host", role: "host", name: "CC" } })));
   draw("call.noHostYet", call(snapshot({ hostPresent: false, roomRecording: false })));
   draw("call.notRecorded", call(snapshot({ room: { code: "abc-defg-hjk", title: "Quarterly review", status: "live", recordAudio: false, startedAt: null }, roomRecording: false })));
-  // A recorded room whose creator is not in the call: a second host (an admin) is the host who is present, and nothing is recording.
-  draw(
-    "call.secondHostAlone",
-    call(snapshot({ me: { id: "p-adon", role: "host", name: "Adon" }, tiles: [tile({ participantId: "p-adon", name: "Adon", role: "host", me: true, video: track("video"), camOn: true })], roomRecording: false })),
-  );
-  draw(
-    "call.guestWithSecondHost",
-    call(snapshot({ tiles: [tile({ participantId: "p-adon", name: "Adon", role: "host" }), tile({ participantId: "p-me", name: "Jane Doe", me: true })], roomRecording: false })),
-  );
+  // A recorded room whose creator is not in the call: a second host (an admin) is the host who is present, and his
+  // browser records it (any host's does).
+  const adonAlone = { me: { id: "p-adon", role: "host" as const, name: "Adon" }, tiles: [tile({ participantId: "p-adon", name: "Adon", role: "host", me: true, video: track("video"), camOn: true })] };
+  const guestWithAdon = { tiles: [tile({ participantId: "p-adon", name: "Adon", role: "host" }), tile({ participantId: "p-me", name: "Jane Doe", me: true })] };
+  draw("call.secondHostAlone", call(snapshot({ ...adonAlone, roomRecording: true })));
+  draw("call.guestWithSecondHost", call(snapshot({ ...guestWithAdon, roomRecording: true })));
+  // The same calls while no browser records yet (the recorder has just left, and no other host's has taken over).
+  draw("call.hostNotRecording", call(snapshot({ ...adonAlone, roomRecording: false })));
+  draw("call.guestHostNotRecording", call(snapshot({ ...guestWithAdon, roomRecording: false })));
   draw("call.notice", call(snapshot({ notice: "Reconnecting..." })));
   draw(
     "call.sharing",

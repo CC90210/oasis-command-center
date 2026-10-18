@@ -10,8 +10,8 @@
  *
  * RECORDING: the indicator is a red dot WITH the word, shown to everyone while the recording is running (not by
  * colour alone, and not only to the host). "Running" is the room's own answer, snapshot.roomRecording: the room
- * records AND its creator, whose browser is the one that records, is in the call. A recorded room with only a
- * second host in it records nothing, so it shows nothing: the badge is never claimed from `recordAudio` alone.
+ * records AND the one browser recording it (any host's) is in the call. A recorded room whose hosts' browsers are
+ * not recording yet shows nothing: the badge is never claimed from `recordAudio` or a host being present.
  */
 
 import { useCallback, useEffect, useState } from "react";

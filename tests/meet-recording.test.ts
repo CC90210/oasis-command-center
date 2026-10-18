@@ -10,7 +10,9 @@
  *     participants, under its own workspace's path, named by the participant
  *     ROW (never the request); a retry is a 409 duplicate; every refusal is a
  *     status the recorder will not retry forever (lib/meet/recorder.ts);
- *   - one browser records a room; a room's caps hold inside the INSERT;
+ *   - one browser records a room (its recorder, migration bravo__233): another
+ *     browser still in the call is 423, one that left or was removed sends its
+ *     last chunks for LATE_CHUNK_MS; a room's caps hold inside the INSERT;
  *   - the hand-over is idempotent and waits for the meeting's end; the PC's
  *     claim hands over a meeting nobody finalized, 10 minutes after its end,
  *     and first ends a call whose every tab closed without End (never a
@@ -46,6 +48,7 @@ import {
   setupToolsDatabase,
   signedRequest,
 } from "./_tools-harness";
+import type { InStatement } from "@libsql/client";
 import type { MeetStorage } from "../lib/meet/recording";
 import type { SfuClient } from "../lib/meet/sfu";
 import type { RecordingView } from "../components/meet/recording-view";
@@ -120,7 +123,10 @@ async function main() {
   const migration231 = readFileSync(join(ROOT, "database", "turso", "bravo__231_meet_recordings.sql"), "utf8");
   await db.executeMultiple(migration230);
   await db.executeMultiple(migration231);
+  await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__233_meet_room_recorder.sql"), "utf8"));
   const { createMeetRoom, displayMeetCode } = await import("../lib/meet/rooms");
+  const { MEET_TOKEN_SECRET_ENV, signMeetToken } = await import("../lib/meet/access");
+  const { MEET_PRESENCE_MS, claimRecorder } = await import("../lib/meet/participants");
   const rec = await import("../lib/meet/recording");
   const routes = await import("../lib/meet/recording-routes");
   const h = await import("../lib/tools/runner-handlers");
@@ -154,12 +160,18 @@ async function main() {
   async function endRoom(roomId: string, at: Date) {
     await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [at.toISOString(), roomId] });
   }
-  async function participant(room: { id: string; tenantId: string }, name: string, userId: string | null = null, consented = true) {
+  async function participant(
+    room: { id: string; tenantId: string },
+    name: string,
+    userId: string | null = null,
+    consented = true,
+    role: "host" | "guest" = userId === CC ? "host" : "guest",
+  ) {
     const id = crypto.randomUUID();
     await db.execute({
       sql: `INSERT INTO meet_participants (id, tenant_id, room_id, role, user_id, display_name, consent_at, sfu_session_id, tracks, joined_at, last_seen_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '[]', ?, ?)`,
-      args: [id, room.tenantId, room.id, userId === CC ? "host" : "guest", userId, name, consented ? T0.toISOString() : null, T0.toISOString(), T0.toISOString()],
+      args: [id, room.tenantId, room.id, role, userId, name, consented ? T0.toISOString() : null, T0.toISOString(), T0.toISOString()],
     });
     return id;
   }
@@ -174,7 +186,7 @@ async function main() {
   const chunkReq = (
     code: string,
     f: { participant: string; segment: string; seq: number; startedAt?: number; type?: string; bytes?: number },
-    o: { origin?: string | null; name?: string } = {},
+    o: { origin?: string | null; name?: string; cookie?: string } = {},
   ) => {
     const headers: Record<string, string> = {
       "x-forwarded-host": "oasisai.work",
@@ -186,6 +198,8 @@ async function main() {
       "x-meet-segment-started-at": String(f.startedAt ?? T0.getTime()),
     };
     if (o.origin !== null) headers.origin = o.origin ?? ORIGIN;
+    // The browser's room cookie (lib/meet/access.ts MEET_COOKIE), among others the browser holds.
+    if (o.cookie) headers.cookie = `theme=dark; oasis_meet=${o.cookie}; other=1`;
     return new Request(`${ORIGIN}/api/meet/${code}/recording/chunk`, {
       method: "POST",
       headers,
@@ -237,7 +251,6 @@ async function main() {
   const pGuest = await participant(r1, "Jordan");
   const segA = crypto.randomUUID();
   const segB = crypto.randomUUID();
-  const segC = crypto.randomUUID();
 
   await check("a chunk is the host's only: signed out 401, another workspace 404, a member who is not the host 403, cross-site 403", async () => {
     const code = displayMeetCode(r1.code);
@@ -287,15 +300,143 @@ async function main() {
     }
   });
 
-  await check("one browser records a room: another host is 423 while the first is sending, and may take over after 2 minutes", async () => {
-    const adon = as(ADON, { admin: true });
-    const blocked = await upload(r1, { participant: pCc, segment: segC, seq: 0 }, later(T0, minutes(2)), adon);
-    assert.deepEqual([blocked.status, (await body(blocked)).error], [423, "another_recorder"]);
-    // CC's last chunk was at T0+1min; three minutes later Adon's browser may record.
-    const taken = await upload(r1, { participant: pCc, segment: segC, seq: 0 }, later(T0, minutes(4)), adon);
-    assert.equal(taken.status, 201);
-    await db.execute({ sql: "DELETE FROM meet_recording_chunks WHERE segment_id = ?", args: [segC] });
+  // ONE BROWSER RECORDS A ROOM (migration bravo__233; e9's pins). Who sends a chunk is the browser's room cookie (the
+  // participant row it joined as), never the speaker header. Each check has a room of its own, taken away after, and
+  // the recording changes hands through the real lib/meet/participants.ts claimRecorder.
+  const tokenSecret = process.env[MEET_TOKEN_SECRET_ENV];
+  process.env[MEET_TOKEN_SECRET_ENV] = "a-test-only-secret-that-is-long-enough-1234";
+  const ADMIN_ADON = as(ADON, { admin: true });
+  /** A browser's poll: it is heard from at `at`, which is what claimRecorder reads. */
+  const seenAt = (id: string, at: Date) => db.execute({ sql: "UPDATE meet_participants SET last_seen_at = ? WHERE id = ?", args: [at.toISOString(), id] });
+  const goneAt = (id: string, column: "left_at" | "removed_at", at: Date) =>
+    db.execute({ sql: `UPDATE meet_participants SET ${column} = ? WHERE id = ?`, args: [at.toISOString(), id] });
+  /** One chunk of the guest's voice, sent by a browser (its room cookie, or none) of the signed-in host `session`. */
+  const sendFrom = (room: { id: string; code: string }, speaker: string) => async (browser: string | null, session: Session, at: Date) => {
+    const code = displayMeetCode(room.code);
+    const cookie = browser ? signMeetToken({ roomId: room.id, participantId: browser, role: "host" }, at.getTime()) : undefined;
+    const res = await routes.handleMeetChunk(chunkReq(code, { participant: speaker, segment: crypto.randomUUID(), seq: 0 }, { cookie }), code, rdeps(at, session));
+    return res.status === 201 ? 201 : `${res.status} ${(await body(res)).error}`;
+  };
+  /** A check's own room, taken away again, so the sweeps further down this file never meet it. */
+  const dropRoom = async (room: { id: string }) => {
+    const paths = (await db.execute({ sql: "SELECT storage_path FROM meet_recording_chunks WHERE room_id = ?", args: [room.id] })).rows;
+    for (const p of paths) store.objects.delete(String(p.storage_path));
+    for (const sql of ["DELETE FROM meet_recording_chunks WHERE room_id = ?", "DELETE FROM meet_participants WHERE room_id = ?", "DELETE FROM meet_rooms WHERE id = ?"]) {
+      await db.execute({ sql, args: [room.id] });
+    }
+  };
+
+  await check("one browser records a room: its recorder's chunks are taken; another browser still in the call is 423, and so is a chunk naming no browser or someone else's row", async () => {
+    const room = await liveRoom();
+    try {
+      const send = sendFrom(room, await participant(room, "Jordan"));
+      const cc = await participant(room, "Conaugh", CC);
+      const adon = await participant(room, "Adon", ADON, true, "host");
+      const phone = await participant(room, "Conaugh", CC);
+      const at = later(T0, minutes(2));
+      for (const id of [cc, adon, phone]) await seenAt(id, at);
+      assert.equal((await claimRecorder(db, room, { id: cc }, at, true)).mine, true);
+      assert.equal((await claimRecorder(db, room, { id: adon }, at, true)).mine, false, "CC's browser is there: it keeps the recording");
+      assert.equal(await send(cc, as(CC), at), 201, "the room's recorder");
+      assert.equal(await send(adon, ADMIN_ADON, at), "423 another_recorder", "another host's browser, still in the call");
+      assert.equal(await send(phone, as(CC), at), "423 another_recorder", "the same host on a second device: one browser, not one person");
+      assert.equal(await send(null, as(CC), at), "423 another_recorder", "a chunk that names no browser, while one records");
+      assert.equal(await send(cc, ADMIN_ADON, at), "423 another_recorder", "a cookie naming someone else's row names no one");
+    } finally {
+      await dropRoom(room);
+    }
   });
+
+  await check("the recorder taken over sends its last chunks for LATE_CHUNK_MS, though it went silent rather than leave; then 423", async () => {
+    const room = await liveRoom();
+    try {
+      const send = sendFrom(room, await participant(room, "Jordan"));
+      const cc = await participant(room, "Conaugh", CC);
+      const adon = await participant(room, "Adon", ADON, true, "host");
+      const at = later(T0, minutes(2));
+      await seenAt(cc, at);
+      assert.equal((await claimRecorder(db, room, { id: cc }, at, true)).mine, true);
+      // CC's laptop goes quiet past MEET_PRESENCE_MS without leaving (a bad network), and Adon's poll takes over.
+      const taken = later(at, MEET_PRESENCE_MS + 1_000);
+      await seenAt(adon, taken);
+      assert.equal((await claimRecorder(db, room, { id: adon }, taken, true)).mine, true);
+      const row = (await db.execute({ sql: "SELECT recorder_previous_id AS p, recorder_changed_at AS c FROM meet_rooms WHERE id = ?", args: [room.id] })).rows[0];
+      assert.deepEqual([row.p, row.c], [cc, taken.toISOString()], "the room notes whose recording it took, and when");
+      assert.equal(await send(cc, as(CC), later(taken, 5_000)), 201, "CC's browser, back and stopping: its last chunks are kept");
+      assert.equal(await send(adon, ADMIN_ADON, later(taken, 5_000)), 201, "the new recorder's too");
+      assert.equal(await send(cc, as(CC), later(taken, rec.LATE_CHUNK_MS + 1_000)), "423 another_recorder", "but only for LATE_CHUNK_MS after the change");
+    } finally {
+      await dropRoom(room);
+    }
+  });
+
+  await check("a browser that left or was removed sends its last chunks for LATE_CHUNK_MS, even once the recording has passed on twice; then 423", async () => {
+    const room = await liveRoom();
+    try {
+      const send = sendFrom(room, await participant(room, "Jordan"));
+      const cc = await participant(room, "Conaugh", CC);
+      const adon = await participant(room, "Adon", ADON, true, "host");
+      const phone = await participant(room, "Conaugh", CC);
+      const tablet = await participant(room, "Conaugh", CC);
+      const at = later(T0, minutes(2));
+      for (const id of [cc, adon, phone, tablet]) await seenAt(id, at);
+      await claimRecorder(db, room, { id: cc }, at, true);
+      // CC leaves and Adon's browser takes over; Adon leaves and CC's phone takes over. CC's browser is no longer the
+      // one taken over: only having left keeps its last chunks.
+      await goneAt(cc, "left_at", at);
+      assert.equal((await claimRecorder(db, room, { id: adon }, at, true)).mine, true);
+      const next = later(at, 1_000);
+      await goneAt(adon, "left_at", next);
+      await seenAt(phone, next);
+      assert.equal((await claimRecorder(db, room, { id: phone }, next, true)).mine, true);
+      await goneAt(tablet, "removed_at", next);
+      assert.equal(await send(cc, as(CC), later(at, 30_000)), 201, "CC's browser left: its last chunks are kept");
+      assert.equal(await send(tablet, as(CC), later(at, 30_000)), 201, "a removed browser's last chunks too");
+      assert.equal(await send(cc, as(CC), later(at, rec.LATE_CHUNK_MS + 1_000)), "423 another_recorder", "but only for LATE_CHUNK_MS after it went");
+    } finally {
+      await dropRoom(room);
+    }
+  });
+
+  await check("the recording taken between the gate's read and the INSERT: the INSERT itself refuses it (423), keeps no row and deletes the stored copy", async () => {
+    // e9's G8: the pre-check reads that no browser records; another host's browser takes the recording (the real
+    // claimRecorder) before the INSERT runs. Only the gate inside the INSERT can refuse it now.
+    const room = await liveRoom();
+    try {
+      const guest = await participant(room, "Jordan");
+      const cc = await participant(room, "Conaugh", CC);
+      const adon = await participant(room, "Adon", ADON, true, "host");
+      const code = displayMeetCode(room.code);
+      const segment = crypto.randomUUID();
+      const at = later(T0, minutes(3));
+      let taken = false;
+      const racing = new Proxy(db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop);
+          if (prop !== "execute") return typeof value === "function" ? value.bind(target) : value;
+          return async (stmt: InStatement) => {
+            if (!taken && /INSERT INTO meet_recording_chunks/.test(typeof stmt === "string" ? stmt : stmt.sql)) {
+              taken = true;
+              assert.equal((await claimRecorder(target, room, { id: adon }, at, true)).mine, true, "Adon's browser takes the recording");
+            }
+            return target.execute(stmt);
+          };
+        },
+      });
+      const cookie = signMeetToken({ roomId: room.id, participantId: cc, role: "host" }, at.getTime());
+      const res = await routes.handleMeetChunk(chunkReq(code, { participant: guest, segment, seq: 0 }, { cookie }), code, {
+        db: racing, storage: store.storage, now: () => at, resolveSession: as(CC),
+      });
+      assert.ok(taken, "the recording changed hands between the gate's read and the INSERT");
+      assert.deepEqual([res.status, (await body(res)).error], [423, "another_recorder"]);
+      assert.equal(await count("SELECT COUNT(*) FROM meet_recording_chunks WHERE segment_id = ?", [segment]), 0, "no row");
+      assert.ok(!store.objects.has(`${OASIS}/${room.id}/${guest}/${segment}/0`), "and the stored copy nothing points at is deleted");
+    } finally {
+      await dropRoom(room);
+    }
+  });
+  if (tokenSecret === undefined) delete process.env[MEET_TOKEN_SECRET_ENV];
+  else process.env[MEET_TOKEN_SECRET_ENV] = tokenSecret;
 
   await check("R2 failing is a 502 the recorder retries, and no row points at nothing", async () => {
     const down = fakeMeetStorage({ putThrows: true });

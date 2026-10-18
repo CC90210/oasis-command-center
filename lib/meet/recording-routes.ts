@@ -23,7 +23,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { NextResponse } from "next/server";
 import { sameOrigin } from "@/lib/calendar/http";
-import { readMeetParticipant, requireMeetHost } from "./access";
+import { MEET_COOKIE, meetTokenConfigured, readMeetParticipant, requireMeetHost, verifyMeetToken } from "./access";
 import {
   LATE_CHUNK_MS,
   MAX_CHUNK_BYTES,
@@ -41,6 +41,7 @@ import {
   type MeetStorage,
   type RecorderReport,
 } from "./recording";
+import type { MeetRoom } from "./rooms";
 import type { SfuClient } from "./sfu";
 
 export type RecordingDeps = {
@@ -87,6 +88,33 @@ async function readBytesCapped(req: Request, max: number): Promise<Uint8Array | 
     at += p.byteLength;
   }
   return out;
+}
+
+/** One cookie's value from the request's Cookie header. */
+function cookieOf(req: Request, name: string): string | undefined {
+  for (const part of (req.headers.get("cookie") ?? "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0 || part.slice(0, eq).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The browser sending a chunk: the participant its room cookie names (the cookie's Path is the room's API, which
+ * this route is under), when that row is this signed-in host's own host row in this room. Null for anything else:
+ * no cookie, another room's, or another person's row. The chunk gate takes audio only from the room's recorder.
+ */
+async function sendingBrowser(db: Client, req: Request, room: MeetRoom, userId: string, now: Date): Promise<string | null> {
+  if (!meetTokenConfigured()) return null;
+  const claims = verifyMeetToken(cookieOf(req, MEET_COOKIE), now.getTime());
+  if (!claims || claims.roomId !== room.id) return null;
+  const row = await readMeetParticipant(db, { tenantId: room.tenantId, roomId: room.id, participantId: claims.participantId });
+  return row && row.role === "host" && row.userId === userId ? row.id : null;
 }
 
 async function host(req: Request, rawCode: string, deps: RecordingDeps, write: boolean) {
@@ -154,6 +182,7 @@ export async function handleMeetChunk(req: Request, rawCode: string, deps: Recor
   const out = await acceptChunk(deps.db, deps.storage, {
     room,
     uploadedBy: h.userId,
+    uploader: await sendingBrowser(deps.db, req, room, h.userId, now),
     participantId,
     displayName: participant.displayName,
     segmentId,
