@@ -239,7 +239,11 @@ export async function handleListRooms(deps: MeetDeps): Promise<NextResponse> {
     ]);
     return meetJson({
       ok: true,
-      rooms: rooms.map((r) => ({ id: r.id, ...roomView(r), link: meetRoomPath(r), url: meetRoomUrl(r), createdAt: r.createdAt, mine: r.hostUserId === session.userId })),
+      // `leadId`: a meeting a lead booked is the booking's to cancel (from the lead), not the panel's to delete. The list
+      // is a host's own view of their workspace; a guest's answers (roomView) never carry it.
+      rooms: rooms.map((r) => ({
+        id: r.id, ...roomView(r), link: meetRoomPath(r), url: meetRoomUrl(r), createdAt: r.createdAt, mine: r.hostUserId === session.userId, leadId: r.leadId,
+      })),
       // The panel offers "Record and transcribe", and shows a meeting's transcript, only when this is true.
       recordingAvailable,
       // Until the video service is set up the panel says so and offers no meeting to make: nobody sends a client a
@@ -595,6 +599,9 @@ export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDe
     }
 
     if (body.action === "delete") {
+      // A meeting a lead booked is the booking's: cancelling it from the lead deletes this room and the booking's own
+      // calendar entries and invite together. Deleting only the room would leave those holding a dead link.
+      if (room.leadId) return meetError(409, "booked_meeting");
       return meetJson({ ok: true, deleted: true, ...(await deleteMeetRoom(deps, room, auth.userId, now)) });
     }
 

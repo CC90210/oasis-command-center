@@ -22,6 +22,7 @@ import { publicAppBaseUrl } from "../lib/api-helpers";
 import { MEET_COOKIE, MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } from "../lib/meet/access";
 import { parseHost, parseSfu } from "../lib/meet/bodies";
 import { deleteMeetRoom, handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, meetMediaReady, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
+import { meetGuestFirstName } from "../lib/meet/guest-name";
 import { meetRoomUrl } from "../lib/meet/links";
 import {
   MEET_CUT_RETRY_MS,
@@ -594,6 +595,12 @@ async function main() {
     assert.equal(await rescheduleMeetRoom(db, room, later), true);
     assert.equal((await readMeetRoomByCode(db, room.code))?.startsAt, later, "moved, the code unchanged");
     assert.equal(await rescheduleMeetRoom(db, room, "not a time"), false);
+    // The host sees it is a booking, and Delete in the panel refuses it: the booking's cancel removes it with its invite.
+    const listed = ((await json(await handleListRooms(deps({ session: as(CC) })))).rooms as Json[]).find((r) => r.code === displayMeetCode(room.code));
+    assert.equal(listed?.leadId, LEAD, "the host's list says which lead booked it");
+    const refused = await handleHost(request(`/api/meet/${displayMeetCode(room.code)}/host`, { body: { action: "delete" }, ip: freshIp() }), displayMeetCode(room.code), deps({ session: as(CC) }));
+    assert.deepEqual([refused.status, (await json(refused)).error], [409, "booked_meeting"]);
+    assert.ok(await readMeetRoomByCode(db, room.code), "and the room is kept");
     // The lead opens it early and waits; the booking is then cancelled, with no host signed in anywhere.
     const c = displayMeetCode(room.code);
     const lead = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: { name: "Jane", consent: true }, ip: freshIp() }), c, deps()))!;
@@ -607,6 +614,33 @@ async function main() {
     const held = await createMeetRoom(db, { tenantId: OASIS, hostUserId: CC, startsAt, leadId: LEAD });
     await endMeetRoom(db, held, "host_ended", new Date(clock));
     assert.equal(await rescheduleMeetRoom(db, held, later), false, "a meeting that is over keeps its time");
+  });
+
+  await check("a booked meeting's room page greets its lead by first name, from their own record in the room's workspace only", async () => {
+    await db.execute("CREATE TABLE IF NOT EXISTS tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT)");
+    const lead = async (id: string, tenantId: string, data: unknown, entityType = "lead") =>
+      db.execute({ sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, ?, ?)", args: [id, tenantId, entityType, typeof data === "string" ? data : JSON.stringify(data)] });
+    await lead("lead-jane", OASIS, { contact_name: "jane doe", business_name: "Acme Roofing", email: "jane@example.com" });
+    await lead("lead-biz", OASIS, { name: "Acme Roofing", company: "Acme Roofing" });
+    await lead("lead-alias", OASIS, { owner_full_name: "Marc Tremblay" });
+    await lead("lead-elsewhere", OTHER, { contact_name: "Someone Else" });
+    await lead("lead-broken", OASIS, "{not json");
+    await lead("not-a-lead", OASIS, { contact_name: "Client Person" }, "client");
+    const greet = (leadId: string | null) => meetGuestFirstName(db, { tenantId: OASIS, leadId });
+    assert.equal(await greet("lead-jane"), "Jane", "the first name only, as the CRM's emails write it");
+    assert.equal(await greet("lead-alias"), "Marc", "by every name field the forms write");
+    assert.equal(await greet("lead-biz"), null, "a contact name that is really the company is not a name");
+    assert.equal(await greet("lead-elsewhere"), null, "another workspace's lead is never read");
+    assert.equal(await greet("not-a-lead"), null, "only a lead record");
+    assert.equal(await greet(null), null, "a room no lead booked");
+    assert.equal(await greet("nobody"), null);
+    const errors = console.error;
+    console.error = () => {}; // the unreadable record is logged on purpose
+    try {
+      assert.equal(await greet("lead-broken"), null, "an unreadable record leaves the field empty, never keeps anyone out");
+    } finally {
+      console.error = errors;
+    }
   });
 
   await check("a live room whose host has been gone ten minutes ends itself", async () => {

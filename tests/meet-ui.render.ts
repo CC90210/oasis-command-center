@@ -78,6 +78,7 @@ async function main() {
   const { MeetRoom } = await import("../components/meet/MeetRoom");
   const { MeetEnded } = await import("../components/meet/MeetEnded");
   const { PreJoin } = await import("../components/meet/PreJoin");
+  const { Lobby } = await import("../components/meet/Lobby");
   const { CallScreen } = await import("../components/meet/CallScreen");
   const { PeoplePanel } = await import("../components/meet/PeoplePanel");
   const { MeetPanelView } = await import("../components/meet/MeetPanel");
@@ -160,6 +161,14 @@ async function main() {
   draw("prejoin.switching", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: false, cam: true }, mic: track("audio"), cam: track("video") })));
   // The same wait with the notice un-ticked: the camera step, and so the way out, is not drawn behind a shut gate.
   draw("prejoin.waitingGateShut", preJoin(devicesWith({ asking: true, waiting: { mic: true, cam: true } }), { devicesOpen: false, consent: false }));
+
+  // The quiet screens between Join now and the call, each with the way to leave MeetRoom hands it. The same Lobby
+  // with none given draws no button: it offers Leave when told to, whatever its mode.
+  const leave = () => undefined;
+  for (const mode of ["joining", "connecting", "waiting"] as const) {
+    draw(`lobby.${mode}`, h(Lobby, { mode, title: "Quarterly review", preview: mode === "joining" ? null : track("video"), onLeave: leave }));
+    draw(`lobby.${mode}.bare`, h(Lobby, { mode, title: "Quarterly review", preview: null }));
+  }
 
   // The ending screens, every reason, for a guest and for a host.
   for (const reason of ["left", "dropped", "host_ended", "removed", "room_closed"] as MeetEndReason[]) {
