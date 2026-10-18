@@ -7,11 +7,13 @@
  *              never told a room exists: they read it exactly as a visitor does)
  *   redirect   the code is right but not written the way the participant cookie's path is, "abc-defg-hjk"
  *   ended      the meeting is over: one plain page, no title
- *   room       what the client component needs, and nothing more: never the workspace, the host or a lead
+ *   room       what the client component needs, and nothing more: never the workspace or the host, and of a lead only
+ *              a booked lead's first name, for the name field (anyone who holds the link sees this page)
  */
 import type { Client } from "@libsql/client";
 import type { MeetViewer } from "@/components/meet/notice";
 import { meetRoleFor, type MeetSession } from "@/lib/meet/access";
+import { meetGuestFirstName } from "@/lib/meet/guest-name";
 import { displayMeetCode, parseMeetCode, readMeetRoomByCode, type MeetRoom, type MeetRoomStatus } from "@/lib/meet/rooms";
 
 type SessionLike = MeetSession;
@@ -35,8 +37,20 @@ export async function sessionOrVisitor(
 /**
  * The props of components/meet/MeetRoom.tsx that come from the room. `viewer` decides the name field and the host
  * controls; `creator` decides the recording notice (Quebec Law 25), which is the room's creator's alone to skip.
+ * `startsAt` is when a meeting made for a time is for (the page says when it starts, in the viewer's own time zone).
+ * `guestName` is the first name of the lead who booked the room, for a visitor's name field to start with: a member
+ * or a host uses their account, and a room no lead booked has none.
  */
-export type MeetPageProps = { code: string; title: string; status: MeetRoomStatus; recordAudio: boolean; viewer: MeetViewer; creator: boolean };
+export type MeetPageProps = {
+  code: string;
+  title: string;
+  status: MeetRoomStatus;
+  recordAudio: boolean;
+  viewer: MeetViewer;
+  creator: boolean;
+  startsAt: string | null;
+  guestName: string | null;
+};
 
 export type MeetPageData =
   | { kind: "not_found" }
@@ -73,11 +87,17 @@ export async function loadMeetPage(
   const dashed = displayMeetCode(code);
   // The participant cookie's Path is the dashed API path, so the page lives at the dashed address only.
   if (rawCode !== dashed) return { kind: "redirect", to: `/meet/${dashed}` };
-  const room = await readMeetRoomByCode(deps.db(), code);
+  const db = deps.db();
+  const room = await readMeetRoomByCode(db, code);
   if (!room) return { kind: "not_found" };
   const session = await deps.session();
   const viewer = meetViewerFor(session, room);
   if (room.status === "ended") return { kind: "ended", viewer };
   const creator = meetCreatorFor(session, room);
-  return { kind: "room", props: { code: dashed, title: room.title, status: room.status, recordAudio: room.recordAudio, viewer, creator } };
+  // Only a visitor is the lead (or a stranger holding the link); anyone signed in to the workspace uses their account name.
+  const guestName = viewer === "visitor" ? await meetGuestFirstName(db, room) : null;
+  return {
+    kind: "room",
+    props: { code: dashed, title: room.title, status: room.status, recordAudio: room.recordAudio, viewer, creator, startsAt: room.startsAt, guestName },
+  };
 }

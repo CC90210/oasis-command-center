@@ -71,6 +71,8 @@ export type MeetRoomItem = {
   url?: string;
   createdAt: string;
   mine: boolean;
+  /** The lead who booked this meeting, when one did: it is theirs to cancel (from their page), not the host's to delete. */
+  leadId: string | null;
 };
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -78,6 +80,9 @@ const orNull = (v: unknown): string | null => (typeof v === "string" ? v : null)
 
 /** The whole link the server sends: a plain http(s) address, never anything a link could run. */
 const WHOLE_LINK = /^https?:\/\/[^\s"'<>]{1,300}$/i;
+
+/** A lead's id as the server sends it (a UUID): letters, digits, hyphen and underscore. Anything else is not drawn into a link. */
+const LEAD_ID = /^[A-Za-z0-9_-]{1,100}$/;
 
 /** A meeting from the API, or null when it is not shaped like one: the panel then says it could not load rather than draw junk. */
 export function parseRoomItem(v: unknown): MeetRoomItem | null {
@@ -93,6 +98,7 @@ export function parseRoomItem(v: unknown): MeetRoomItem | null {
     startedAt: orNull(v.startedAt),
     endedAt: orNull(v.endedAt),
     mine: v.mine === true,
+    leadId: typeof v.leadId === "string" && LEAD_ID.test(v.leadId) ? v.leadId : null,
   };
 }
 
@@ -193,9 +199,18 @@ export function transcriptBoxId(id: string): string {
 export const MADE_BOX_START = "meet-made-start";
 export const MADE_BOX_LATER = "meet-made-later";
 
-/** Delete is offered only on a meeting the person made (the list's `mine`). */
-export function canDelete(room: Pick<MeetRoomItem, "mine">): boolean {
-  return room.mine === true;
+/**
+ * Delete is offered only on a meeting the person made (the list's `mine`) that no lead booked: a booked meeting is the
+ * booking's, and cancelling the booking (from the lead's page) is what deletes it. The server refuses it too (409).
+ */
+export function canDelete(room: Pick<MeetRoomItem, "mine" | "leadId">): boolean {
+  return room.mine === true && !room.leadId;
+}
+
+/** What a meeting a lead booked says where Delete would be, and where it links: the lead's page in the pipeline. */
+export const BOOKED_BY_LEAD = "Booked by a lead. Cancel it from their page.";
+export function leadPagePath(leadId: string): string {
+  return `/pipeline/${encodeURIComponent(leadId)}`;
 }
 
 /**
@@ -235,6 +250,51 @@ export function whenText(room: MeetRoomItem, format: (iso: string) => string): s
   }
   if (room.startsAt) return format(room.startsAt);
   return `Link made ${format(room.createdAt)}`;
+}
+
+// When a meeting made for a time starts, for the person about to join it
+
+/**
+ * How early the room opens for a meeting made for a time. lib/meet/participants.ts (MEET_EARLY_START_MIN) is server-only,
+ * so the browser cannot import it; tests/meet-ui.test.ts holds the two equal. From then on the room is the call.
+ */
+export const EARLY_START_MIN = 10;
+
+/**
+ * The language the date and time are written in. The sentence around them is English, so they are too: the viewer's own
+ * English if they use one (en-GB writes 14:00, en-US 2:00 PM), else en-US. Their time zone is never touched.
+ */
+export function englishLocaleOf(languages: readonly string[]): string {
+  return languages.find((l) => /^en(-|$)/i.test(l)) ?? "en-US";
+}
+
+/**
+ * "Your call starts at 2:00 PM." for a meeting made for a time, "Your call starts on Tuesday, October 20 at 2:00 PM." when
+ * that is not today (the year too when it is not this one), in the viewer's time zone. Null when there is no time, and
+ * once the room is open (the time has passed, or is within EARLY_START_MIN): the page then says only what it always says.
+ * `now` comes from the caller, so this never reads the clock. It never throws either (it runs on a page anyone can open):
+ * a `zone` the browser does not know falls back to its own, and a `locale` it does not know to its own.
+ */
+export function startsLine(startsAt: string | null, now: number, options: { zone?: string; locale?: string } = {}): string | null {
+  if (!startsAt) return null;
+  const start = Date.parse(startsAt);
+  if (!Number.isFinite(start) || now >= start - EARLY_START_MIN * 60_000) return null;
+  const formatter = (shape: Intl.DateTimeFormatOptions) => {
+    for (const [locale, timeZone] of [[options.locale, options.zone], [options.locale, undefined]] as const) {
+      try {
+        return new Intl.DateTimeFormat(locale, { ...shape, timeZone });
+      } catch {
+        // the zone, then the language, is one this browser does not know: try without it
+      }
+    }
+    return new Intl.DateTimeFormat(undefined, shape);
+  };
+  const time = formatter({ hour: "numeric", minute: "2-digit" }).format(start);
+  const day = formatter({ year: "numeric", month: "numeric", day: "numeric" });
+  if (day.format(start) === day.format(now)) return `Your call starts at ${time}.`;
+  const year = formatter({ year: "numeric" });
+  const shape: Intl.DateTimeFormatOptions = { weekday: "long", month: "long", day: "numeric", ...(year.format(start) === year.format(now) ? {} : { year: "numeric" }) };
+  return `Your call starts on ${formatter(shape).format(start)} at ${time}.`;
 }
 
 /** The absolute link people are sent: the page's own origin plus the meeting's path. */
@@ -286,6 +346,8 @@ export function deleteConfirm(row: { recordAudio: boolean; status: MeetRoomStatu
 
 export const ALREADY_DELETED = "This meeting was already deleted.";
 export const DELETE_FAILED = "Couldn't delete the meeting. Try again.";
+/** A stale panel (opened before a lead booked) asked to delete a booked meeting and the server said no. */
+export const BOOKED_DELETE_REFUSED = "This meeting was booked by a lead. Cancel it from their page in the pipeline.";
 
 /**
  * The line shown once a meeting is gone. The server deletes the recording's audio a batch at a time and says how
@@ -301,6 +363,7 @@ export function deletedNote(relayRemaining: number): string {
 export function deleteErrorWords(status: number, code: string | null): string {
   if (status === 401 || code === "sign_in_required") return panelErrorWords(401, null);
   if (code === "host_only") return "Only the host can delete this meeting.";
+  if (code === "booked_meeting") return BOOKED_DELETE_REFUSED;
   if (code === "room_not_found") return ALREADY_DELETED;
   if (code === "cross_origin_refused") return panelErrorWords(403, code);
   if (status === 429 || code === "rate_limited") return meetErrorWords("rate_limited");

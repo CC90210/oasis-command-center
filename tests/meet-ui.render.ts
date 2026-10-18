@@ -68,7 +68,13 @@ function snapshot(over: Partial<MeetSnapshot> = {}): MeetSnapshot {
   };
 }
 
-const roomProps = { code: "abc-defg-hjk", title: "Quarterly review", status: "scheduled" as const };
+const roomProps = {
+  code: "abc-defg-hjk",
+  title: "Quarterly review",
+  status: "scheduled" as const,
+  startsAt: null as string | null,
+  guestName: null as string | null,
+};
 
 async function main() {
   const React = await import("react");
@@ -110,6 +116,14 @@ async function main() {
   draw("room.secondHostPlain", h(MeetRoom, { ...roomProps, recordAudio: false, viewer: "host", creator: false }));
   draw("room.endedProp", h(MeetRoom, { ...roomProps, status: "ended", recordAudio: true, viewer: "visitor", creator: false }));
 
+  // A room a lead booked: made for a time, with the lead's first name for the visitor's name field to start with. The
+  // server draws no time line (it cannot know the viewer's zone or clock); the browser adds it once the page is up.
+  const booked = { ...roomProps, title: "OASIS call with Jane", startsAt: "2026-10-20T18:00:00.000Z", recordAudio: true, creator: false };
+  draw("room.bookedVisitor", h(MeetRoom, { ...booked, viewer: "visitor", guestName: "Jane" }));
+  draw("room.bookedVisitorNoName", h(MeetRoom, { ...booked, viewer: "visitor", guestName: null }));
+  draw("room.bookedLongName", h(MeetRoom, { ...booked, viewer: "visitor", guestName: "J".repeat(90) }));
+  draw("room.bookedMember", h(MeetRoom, { ...booked, viewer: "member", guestName: null }));
+
   // The pre-join screen while the browser has not answered a request for the camera or microphone: the way out, by what
   // is waited for and what is already held. The hook is not run (a server render has no browser), so the devices are
   // handed in as the hook would hold them.
@@ -137,6 +151,7 @@ async function main() {
   const preJoin = (devices: JoinDevices, over: Partial<PreJoinProps> = {}) =>
     h(PreJoin, {
       title: "Quarterly review",
+      startsLine: null,
       recordAudio: true,
       needsNotice: true,
       nameRequired: true,
@@ -154,6 +169,8 @@ async function main() {
       ...over,
     });
   draw("prejoin.notWaiting", preJoin(devicesWith({})));
+  // A meeting made for a time says when it starts under its name; one with no time says nothing of the kind.
+  draw("prejoin.starts", preJoin(devicesWith({}), { startsLine: "Your call starts at 2:00 PM." }));
   draw("prejoin.waitingBoth", preJoin(devicesWith({ asking: true, waiting: { mic: true, cam: true } })));
   draw("prejoin.waitingCamera", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: false, cam: true }, mic: track("audio") })));
   draw("prejoin.waitingMicrophone", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: true, cam: false }, cam: track("video") })));
@@ -169,6 +186,8 @@ async function main() {
     draw(`lobby.${mode}`, h(Lobby, { mode, title: "Quarterly review", preview: mode === "joining" ? null : track("video"), onLeave: leave }));
     draw(`lobby.${mode}.bare`, h(Lobby, { mode, title: "Quarterly review", preview: null }));
   }
+  // The waiting lobby of a meeting made for a time says when it starts, under the waiting line.
+  draw("lobby.waiting.starts", h(Lobby, { mode: "waiting", title: "Quarterly review", preview: null, startsLine: "Your call starts on Tuesday, October 20 at 2:00 PM.", onLeave: leave }));
 
   // The ending screens, every reason, for a guest and for a host.
   for (const reason of ["left", "dropped", "host_ended", "removed", "room_closed"] as MeetEndReason[]) {
@@ -250,7 +269,7 @@ async function main() {
     transcriptOpen: null as string | null,
     onToggleTranscript: () => undefined,
   };
-  type Extra = { mine?: boolean; recordAudio?: boolean; url?: string };
+  type Extra = { mine?: boolean; recordAudio?: boolean; url?: string; leadId?: string };
   const row = (id: string, code: string, title: string, status: "scheduled" | "live" | "ended", statusWords: string, when: string, extra: Extra = {}) => ({
     id,
     code,
@@ -260,6 +279,7 @@ async function main() {
     when,
     link: `/meet/${code}`,
     mine: extra.mine ?? true,
+    leadId: extra.leadId ?? null,
     recordAudio: extra.recordAudio ?? true,
     ...(extra.url ? { url: extra.url } : {}),
   });
@@ -364,6 +384,20 @@ async function main() {
   draw("panel.transcriptOpenUnavailable", panel({ list: mixed, recordingAvailable: false, transcriptOpen: "m3" }, slot));
   draw("panel.transcriptOpenNoRenderer", panel({ list: mixed, transcriptOpen: "m3" }));
   draw("panel.transcriptOpenAndAsk", panel({ list: mixed, transcriptOpen: "m3", del: asking("m3") }, slot));
+
+  // Meetings a lead booked: no Delete, even on the host's own; a link to the lead's page says where to cancel it. A
+  // meeting the host made themselves, beside them, keeps its Delete. A stale panel's refusal reads in the open question.
+  const bookedLead = "7f9c2a10-1b34-4e55-9d6a-0c1d2e3f4a5b";
+  const bookedRows = {
+    status: "ready" as const,
+    rows: [
+      row("b1", "aaa-bbbb-ccc", "OASIS call with Jane", "scheduled", "Scheduled", "Tue, Oct 20, 2:00 PM", { mine: true, recordAudio: true, leadId: bookedLead }),
+      row("b2", "ddd-eeee-fff", "OASIS call with Omar", "scheduled", "Scheduled", "Wed, Oct 21, 10:30 AM", { mine: false, recordAudio: true, leadId: "c0ffee00-1111-4222-8333-444455556666" }),
+      row("b3", "ggg-hhhh-jjj", "Planning (made by me)", "scheduled", "Scheduled", "Thu, Oct 22, 9:00 AM", { mine: true, recordAudio: false }),
+    ],
+  };
+  draw("panel.booked", panel({ list: bookedRows }, slot));
+  draw("panel.bookedDeleteRefused", panel({ list: { status: "ready", rows: [row("s1", "aaa-bbbb-ccc", "Stale row", "scheduled", "Scheduled", "Tue, Oct 20, 2:00 PM")] }, del: { asking: "s1", busy: false, error: "This meeting was booked by a lead. Cancel it from their page in the pipeline." } }));
 
   process.stdout.write(JSON.stringify({ markup: out }));
 }
