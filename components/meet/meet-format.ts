@@ -13,6 +13,11 @@ import { meetErrorWords, type MeetTile } from "@/lib/meet/room-client";
 export const NAME_MAX_CHARS = 60;
 export const TITLE_MAX_CHARS = 120;
 
+/** A name cut to NAME_MAX_CHARS whole characters, as the server counts them: an emoji at the edge is never halved. */
+export function clampName(name: string): string {
+  return Array.from(name).slice(0, NAME_MAX_CHARS).join("");
+}
+
 /** "Jane Doe" is "JD", "Cher" is "C", nothing is "?". Counts whole characters, so an emoji is never cut in two. */
 export function initialsOf(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);

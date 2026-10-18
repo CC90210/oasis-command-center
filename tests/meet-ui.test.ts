@@ -44,6 +44,7 @@ import {
   STATUS_WORDS,
   TITLE_MAX_CHARS,
   canDelete,
+  clampName,
   deleteConfirm,
   deleteErrorWords,
   deletedNote,
@@ -307,7 +308,10 @@ async function main() {
     assert.match(hook, /useState<string \| null>\(null\)/, "null until the browser has worked it out");
     assert.doesNotMatch(hook.slice(0, hook.indexOf("useEffect(")), /Date\.now\(\)|new Date\(/, "the clock is read inside the effect only");
     const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
-    assert.match(room, /const \[name, setName\] = useState\(\(\) => \(guestName \?\? ""\)\.slice\(0, NAME_MAX_CHARS\)\);/, "the lead's name is where the field starts, and only that");
+    assert.match(room, /const \[name, setName\] = useState\(\(\) => clampName\(guestName \?\? ""\)\);/, "the lead's name is where the field starts, and only that");
+    const long = `${"a".repeat(NAME_MAX_CHARS - 1)}\u{1F600}b`;
+    assert.equal(clampName(long), `${"a".repeat(NAME_MAX_CHARS - 1)}\u{1F600}`, "cut by whole characters, as the server counts: the emoji at the edge is kept whole");
+    assert.equal(clampName("Jane"), "Jane");
   });
 
   await check("a meeting made for a time says when it starts: under its name on the pre-join screen and under the waiting line in the lobby, and nowhere else", () => {
@@ -1754,6 +1758,10 @@ async function main() {
     for (const [who, session] of [["the creator", as(CC)], ["a second host", as(ADON, OASIS, true)], ["a member", as(REP)]] as const) {
       assert.equal(await nameFor(session), null, who);
     }
+    // A visitor only because the session lookup failed may be the host, whose join then finds their session: handed the
+    // lead's name, they would join, and be transcribed, as the lead.
+    const lookupFails = () => sessionOrVisitor(async () => { throw new Error("the session store is down"); }, () => undefined);
+    assert.equal(await nameFor(lookupFails), null, "a page that could not tell who this is never offers the lead's name");
     const host = await load(displayMeetCode(bookedOmar.code), as(CC));
     assert.ok(host.kind === "room" && host.props.startsAt === bookedAt, "a host's page still knows the time");
   });
@@ -1889,7 +1897,7 @@ async function main() {
     const logged: Array<[string, unknown]> = [];
     const outage = new Error("profile resolution unavailable");
     const session = await sessionOrVisitor(async () => { throw outage; }, (m, e) => logged.push([m, e]));
-    assert.deepEqual(session, { ok: false });
+    assert.deepEqual(session, { ok: false, lookupFailed: true }, "signed out for the page, and known to be a failed lookup");
     assert.equal(logged.length, 1);
     assert.equal(logged[0][1], outage);
     assert.match(logged[0][0], /^\[meet\.page\]/);

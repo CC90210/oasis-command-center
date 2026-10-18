@@ -23,7 +23,7 @@ import { createMeetRoomController, type RecorderPort } from "@/lib/meet/room-cli
 import { CallScreen } from "./CallScreen";
 import { Lobby } from "./Lobby";
 import { MeetEnded } from "./MeetEnded";
-import { NAME_MAX_CHARS } from "./meet-format";
+import { clampName } from "./meet-format";
 import { mayAskForDevices, preJoinNeeds, type MeetViewer } from "./notice";
 import { PreJoin } from "./PreJoin";
 import { useJoinDevices } from "./useJoinDevices";
@@ -60,7 +60,7 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, st
 
   // A lead who booked this meeting finds their first name already there. It is only where the field starts: they can
   // change it, and everything the field is checked for is unchanged.
-  const [name, setName] = useState(() => (guestName ?? "").slice(0, NAME_MAX_CHARS));
+  const [name, setName] = useState(() => clampName(guestName ?? ""));
   const startsLine = useStartsLine(startsAt);
   const [consent, setConsent] = useState(false);
   const [tried, setTried] = useState(false);
