@@ -86,8 +86,13 @@ function fakeMeetStorage(o: { putThrows?: boolean; removeFailsAfter?: number } =
 /** An SFU that holds one active track per session until it is closed; `fail` refuses every close. */
 function fakeSfu(o: { fail?: boolean } = {}) {
   const closed: string[] = [];
+  const flight = { now: 0, max: 0 };
   const sfu = {
     async sessionTracks(sessionId: string) {
+      flight.now += 1;
+      flight.max = Math.max(flight.max, flight.now);
+      await new Promise((r) => setTimeout(r, 15));
+      flight.now -= 1;
       return closed.includes(sessionId) ? [] : [{ mid: "0", status: "active", location: "local", trackName: "mic" }];
     },
     async close(sessionId: string, mids: string[]) {
@@ -96,7 +101,7 @@ function fakeSfu(o: { fail?: boolean } = {}) {
       return { sessionDescription: null, tracks: mids.map((mid) => ({ mid })) };
     },
   };
-  return { sfu: sfu as unknown as SfuClient, closed };
+  return { sfu: sfu as unknown as SfuClient, closed, flight };
 }
 
 type Session = () => Promise<{ ok: true; tenantId: string; userId: string; isTrueAdmin: boolean } | { ok: false }>;
@@ -1149,11 +1154,31 @@ async function main() {
     const pcs = fakeSfu();
     await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(2)), pcs.sfu);
     assert.deepEqual(pcs.closed, [], "the PC's sweep reached another workspace's room");
+    // The SFU refuses: a failed run (the driver reports it), and the id is kept for the next one.
+    const down = fakeSfu({ fail: true });
+    const refused = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(3)), sfu: down.sfu });
+    const refusedBody = await body(refused);
+    assert.deepEqual([refused.status, refusedBody.error, refusedBody.mediaCutFailed], [503, "media_cut_failed", 1]);
+    assert.equal(await held(), `sess-${p}`);
     const cron = fakeSfu();
-    const res = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(3)), sfu: cron.sfu });
-    assert.equal(res.status, 200);
+    const res = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(4)), sfu: cron.sfu });
+    assert.deepEqual([res.status, (await body(res)).mediaCut], [200, 1]);
     assert.deepEqual(cron.closed, [`sess-${p}`], "the cron left another workspace's ended room holding its session");
     assert.equal(await held(), null);
+  });
+
+  await check("a run's cuts go at once, so one SFU that does not answer costs one wait, not one per room", async () => {
+    const start = later(T0, minutes(130_000));
+    const rooms = await Promise.all([1, 2, 3].map(() => liveRoom({ at: start })));
+    for (const r of rooms) {
+      const p = await participant(r, "Concurrent");
+      await db.execute({ sql: "UPDATE meet_participants SET sfu_session_id = 'sess-' || id WHERE id = ?", args: [p] });
+      await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [later(start, minutes(1)).toISOString(), r.id] });
+    }
+    const sfu = fakeSfu();
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(2)), sfu.sfu);
+    assert.equal(sfu.closed.length, 3);
+    assert.ok(sfu.flight.max >= 3, `the cuts ran one at a time (at most ${sfu.flight.max} in flight)`);
   });
 
   await check("the claim's sweep leaves tomorrow's meeting alone after two hosts try it out today", async () => {

@@ -1058,9 +1058,10 @@ export async function finalizeDueRooms(
   return handed;
 }
 
-/** How long after a room ends the claim's sweep keeps cutting the media sessions its rows still hold, and how many rooms a run. */
+/** How long after a room ends the sweeps keep cutting the media sessions its rows still hold; how many rooms and sessions a run. */
 export const ENDED_CUT_RETRY_MS = 60 * 60_000;
 const ENDED_CUT_BATCH = 10;
+const ENDED_CUT_SESSIONS = 20;
 let noSfuLogged = false;
 
 /** This Worker's SFU client, or null when no Realtime app is set (nothing could have been connected through it). */
@@ -1080,9 +1081,19 @@ export function meetSfuIfConfigured(): SfuClient | null {
  * (Codex on #688, P1). The same steps as lib/meet/handlers.ts cutHeld: forgetSession only after a cut went through,
  * so a cut that fails keeps its id for the next run: the PC's claim every minute (OASIS's workspaces), and the
  * relay cron every 5 minutes for every workspace (`tenantIds` null), with or without the PC.
+ *
+ * Every cut of a run goes at once (at most ENDED_CUT_SESSIONS): an SFU that does not answer costs one timeout per
+ * run, never one per room, so the relay work after it still runs (Codex on #688). Returns how many went through and
+ * how many failed, so the cron can say a run that left media open is a failed run.
  */
-async function cutEndedRoomSessions(db: Client, sfu: SfuClient | null, tenantIds: readonly string[] | null, now: Date): Promise<void> {
-  if (tenantIds && !tenantIds.length) return;
+async function cutEndedRoomSessions(
+  db: Client,
+  sfu: SfuClient | null,
+  tenantIds: readonly string[] | null,
+  now: Date,
+): Promise<{ cut: number; failed: number }> {
+  const none = { cut: 0, failed: 0 };
+  if (tenantIds && !tenantIds.length) return none;
   const scope = tenantIds ? `r.tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND ` : "";
   const rs = await db.execute({
     sql: `SELECT r.tenant_id, r.id FROM meet_rooms r
@@ -1091,19 +1102,23 @@ async function cutEndedRoomSessions(db: Client, sfu: SfuClient | null, tenantIds
            ORDER BY r.ended_at DESC LIMIT ?`,
     args: [...(tenantIds ?? []), new Date(now.getTime() - ENDED_CUT_RETRY_MS).toISOString(), ENDED_CUT_BATCH],
   });
-  if (!rs.rows.length) return;
+  if (!rs.rows.length) return none;
   if (!sfu) {
     if (!noSfuLogged) console.error("[meet.relay] no SFU app is set; sessions held by ended rooms cannot be cut");
     noSfuLogged = true;
-    return;
+    return none;
   }
-  for (const row of rs.rows) {
-    const room = { tenantId: String(row.tenant_id), id: String(row.id) };
-    const held = await roomSessions(db, room);
-    await Promise.allSettled(held.map(async (h) => {
-      if (await cutSession(sfu, h.sessionId, "relay.ended_room")) await forgetSession(db, room, h);
-    }));
-  }
+  const rooms = rs.rows.map((row) => ({ tenantId: String(row.tenant_id), id: String(row.id) }));
+  const held = (await Promise.all(rooms.map(async (room) => (await roomSessions(db, room)).map((h) => ({ room, h })))))
+    .flat()
+    .slice(0, ENDED_CUT_SESSIONS);
+  const results = await Promise.allSettled(held.map(async ({ room, h }) => {
+    if (!(await cutSession(sfu, h.sessionId, "relay.ended_room"))) return false;
+    await forgetSession(db, room, h);
+    return true;
+  }));
+  const cut = results.filter((r) => r.status === "fulfilled" && r.value).length;
+  return { cut, failed: results.length - cut };
 }
 
 /**
@@ -1143,9 +1158,10 @@ export async function meetRelayCron(
   storage: MeetStorage | null,
   now: Date,
   sfu: SfuClient | null = null,
-): Promise<{ tenants: number; expired: number; removed: number; deleteFailed: boolean }> {
+): Promise<{ tenants: number; expired: number; removed: number; deleteFailed: boolean; mediaCut: number; mediaCutFailed: number }> {
   const at = now.toISOString();
-  await cutEndedRoomSessions(db, sfu, null, now);
+  const media = await cutEndedRoomSessions(db, sfu, null, now);
+  const cuts = { mediaCut: media.cut, mediaCutFailed: media.failed };
   // First, give a row to every recording nobody handed over that is past its 30 days, so the reads below find it.
   const abandoned = await expireUnfinalized(db, null, now);
   const rs = await db.execute({
@@ -1156,10 +1172,10 @@ export async function meetRelayCron(
     args: [at],
   });
   const tenantIds = rs.rows.map((r) => String(r.tenant_id));
-  if (!tenantIds.length) return { tenants: 0, expired: abandoned, removed: 0, deleteFailed: false };
+  if (!tenantIds.length) return { tenants: 0, expired: abandoned, removed: 0, deleteFailed: false, ...cuts };
   const expired = abandoned + (await expireRelay(db, tenantIds, now));
   const cleanup = await removeRelayChunksReport(db, storage, { tenantIds }, RELAY_DELETE_BATCH, now);
-  return { tenants: tenantIds.length, expired, removed: cleanup.removed, deleteFailed: cleanup.failed };
+  return { tenants: tenantIds.length, expired, removed: cleanup.removed, deleteFailed: cleanup.failed, ...cuts };
 }
 
 // ---------------------------------------------------------------------------
