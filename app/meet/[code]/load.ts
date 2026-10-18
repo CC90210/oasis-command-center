@@ -101,8 +101,7 @@ export async function loadMeetPage(
   // Only a visitor is the lead (or a stranger holding the link); anyone signed in to the workspace uses their account
   // name. One who is a visitor only because the session lookup failed may be a host whose session the join then
   // finds: handed the lead's name, they would join, and be transcribed, as the lead.
-  const lookupFailed = "lookupFailed" in session && session.lookupFailed === true;
-  const guestName = viewer === "visitor" && !lookupFailed ? await meetGuestFirstName(db, room) : null;
+  const guestName = viewer === "visitor" && !("lookupFailed" in session) ? await meetGuestFirstName(db, room) : null;
   return {
     kind: "room",
     props: { code: dashed, title: room.title, status: room.status, recordAudio: room.recordAudio, viewer, creator, startsAt: room.startsAt, guestName },
