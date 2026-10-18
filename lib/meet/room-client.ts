@@ -246,6 +246,11 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   let pollFailures = 0;
   let closed = false;
   let reconnects = 0;
+  /**
+   * The latest /join, settled either way. A leave sent before it answers carries no participant cookie (that comes in
+   * its answer), so the room could not tell who left and would keep the place the join then makes. leave() waits on it.
+   */
+  let joinSettled: Promise<unknown> = Promise.resolve();
 
   const listeners = new Set<() => void>();
   let current: MeetSnapshot = build();
@@ -673,11 +678,13 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       micOn = !!mic;
       emit();
       try {
-        const res = await call<{ participantId: string; role: MeetRole; name: string; records?: boolean; room: MeetRoomInfo; iceServers: RTCIceServer[] }>("/join", {
+        const asked = call<{ participantId: string; role: MeetRole; name: string; records?: boolean; room: MeetRoomInfo; iceServers: RTCIceServer[] }>("/join", {
           ...(name ? { name } : {}),
           consent,
         });
-        // Left while the join was on its way: the call stays ended (the room drops a participant who never polls).
+        joinSettled = asked.catch(() => undefined);
+        const res = await asked;
+        // Left while the join was on its way: the call stays ended, and leave() tells the room now that it can.
         if (closed) return;
         me = { id: res.participantId, role: res.role, name: res.name };
         records = res.records === true;
@@ -840,6 +847,9 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       // Out at once: the camera and microphone stop now, whatever the network does (a dropped network is a common
       // reason to leave). The room is told after; if that never arrives, it drops anyone who stops polling.
       ended("left");
+      // A join still on its way makes this person's place when it answers, and only its answer carries the cookie a
+      // leave needs: wait for it (its own deadline bounds the wait), so the room hears who left and frees the place.
+      await joinSettled;
       const limit = deadline(requestTimeoutMs);
       try {
         await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true, signal: limit.signal });

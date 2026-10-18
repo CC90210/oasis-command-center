@@ -537,10 +537,14 @@ async function main() {
     slow.setHostPresent(true);
     const b = controller(slow);
     const joining = b.c.join({ name: "Jane", consent: true, mic: null, cam: null });
-    await b.c.leave();
+    const leaving = b.c.leave();
+    assert.deepEqual(b.c.snapshot().phase, { kind: "ended", reason: "left" }, "out at once, before the join answers");
+    await leaving;
     await joining;
     await new Promise((r) => setTimeout(r, 60));
     assert.deepEqual(b.c.snapshot().phase, { kind: "ended", reason: "left" }, "the join's answer arriving after Leave does not bring the call back");
+    // The place is made when the join answers, and only that answer carries the cookie a leave needs.
+    assert.deepEqual(slow.log.filter((l) => l === "join" || l === "leave"), ["join", "leave"], "the room is told once the join has answered, so it frees the place");
 
     const refused = fakeRoom({ role: "guest", joinDelayMs: 80, refuseJoins: { times: 1, status: 409, error: "room_full" } });
     const d = controller(refused);
