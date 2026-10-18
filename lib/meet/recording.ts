@@ -40,6 +40,9 @@
  * WHO. The host routes (lib/meet/recording-routes.ts) pass requireMeetHost; the
  * runner routes (lib/tools/runner-handlers.ts) pass the signed tools auth and
  * serve OASIS's own workspaces. Every statement names the room's tenant_id.
+ * One browser records a room, whichever host's it is: the room's recorder
+ * (meet_rooms.recorder_participant_id, lib/meet/participants.ts
+ * claimRecorder). A chunk from any other browser still in the call is refused.
  */
 import "server-only";
 import { randomUUID } from "node:crypto";
@@ -63,10 +66,11 @@ export const MAX_ROOM_CHUNKS = 15_000;
 export const MAX_ROOM_BYTES = 2048 * 1024 * 1024;
 /** The highest sequence number one segment's chunk may carry. */
 export const MAX_CHUNK_SEQ = 100_000;
-/** How long after End a chunk is still taken: a recorder's last uploads finish after the call ends. */
+/**
+ * How long after End a chunk is still taken: a recorder's last uploads finish after the call ends. The same window
+ * holds for a recording browser that left the call while others go on: its last chunks are still its own.
+ */
 export const LATE_CHUNK_MS = 10 * 60_000;
-/** One browser records a room: another host's chunks are refused while the first one sent a chunk this recently. */
-export const RECORDER_HANDOVER_MS = 2 * 60_000;
 /** How long the relay holds a recording for the PC, counted from the meeting's end. */
 export const RELAY_DAYS = 30;
 /** Relay objects one runner claim deletes (each delete is one call to R2, and the claim has other work). */
@@ -295,6 +299,13 @@ export type ChunkInput = {
   room: MeetRoom;
   /** The signed-in host whose browser sent it. */
   uploadedBy: string;
+  /**
+   * The browser that sent it: the participant row its room cookie names (a host row of `uploadedBy`), or null when it
+   * names none. One browser records a room (lib/meet/participants.ts claimRecorder), and no other browser still in
+   * the call is taken.
+   */
+  uploader: string | null;
+  /** The speaker: whose voice this is (one of the room's participant rows), never the browser that sent it. */
   participantId: string;
   /** The participant row's own name (never the request's). */
   displayName: string;
@@ -309,38 +320,52 @@ export type ChunkInput = {
 /**
  * 201 stored; 409 duplicate (the recorder counts it done: the same chunk is
  * already here); 410 recording_closed (the PC already took this recording, or
- * it was deleted); 413 room_full; 423 another_recorder (another host's browser
- * is recording this room); 502 storage_failed (retried by the recorder).
+ * it was deleted); 413 room_full; 423 another_recorder (another browser is
+ * recording this room); 502 storage_failed (retried by the recorder).
  */
 export type ChunkResult = { ok: true; status: 201 } | { ok: false; status: 409 | 410 | 413 | 423 | 502; error: string };
+
+/**
+ * The room's recorder is another browser, and the one sending is still in the call: two browsers would record the
+ * same voices. A browser that left or was removed sends its last chunks for LATE_CHUNK_MS after (its recorder
+ * stopped as it went, and the next host's took over from there); one that names no participant is refused whenever
+ * a browser records the room. While none does (a page opened before the room had a recorder), anyone's is taken.
+ */
+const ANOTHER_RECORDER = `SELECT 1 FROM meet_rooms r
+   WHERE r.tenant_id = ? AND r.id = ? AND r.recorder_participant_id IS NOT NULL AND r.recorder_participant_id IS NOT ?
+     AND NOT EXISTS (SELECT 1 FROM meet_participants u
+                      WHERE u.tenant_id = r.tenant_id AND u.room_id = r.id AND u.id = ? AND (u.left_at > ? OR u.removed_at > ?))`;
+
+function anotherRecorderArgs(c: ChunkInput): InValue[] {
+  const lastChunks = new Date(c.now.getTime() - LATE_CHUNK_MS).toISOString();
+  return [c.room.tenantId, c.room.id, c.uploader, c.uploader, lastChunks, lastChunks];
+}
 
 /** The conditions a chunk row is written under, checked again inside the INSERT itself. */
 function chunkGateSql(): string {
   return `(SELECT COUNT(*) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?) < ?
       AND (SELECT COALESCE(SUM(bytes), 0) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?) + ? <= ?
-      AND NOT EXISTS (SELECT 1 FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ? AND uploaded_by <> ? AND created_at > ?)
+      AND NOT EXISTS (${ANOTHER_RECORDER})
       AND NOT EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND status <> 'queued')`;
 }
 
 function chunkGateArgs(c: ChunkInput): InValue[] {
   const t = c.room.tenantId;
   const r = c.room.id;
-  const handover = new Date(c.now.getTime() - RECORDER_HANDOVER_MS).toISOString();
-  return [t, r, MAX_ROOM_CHUNKS, t, r, c.bytes.byteLength, MAX_ROOM_BYTES, t, r, c.uploadedBy, handover, t, r];
+  return [t, r, MAX_ROOM_CHUNKS, t, r, c.bytes.byteLength, MAX_ROOM_BYTES, ...anotherRecorderArgs(c), t, r];
 }
 
 /** Why the gate would refuse this chunk now, or null when it would pass. */
 async function chunkRefusal(db: Client, c: ChunkInput): Promise<ChunkResult | null> {
   const t = c.room.tenantId;
   const r = c.room.id;
-  const handover = new Date(c.now.getTime() - RECORDER_HANDOVER_MS).toISOString();
   const rs = await db.execute({
     sql: `SELECT
             (SELECT status FROM meet_transcripts WHERE tenant_id = ? AND room_id = ?) AS transcript,
             (SELECT COUNT(*) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?) AS n,
             (SELECT COALESCE(SUM(bytes), 0) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?) AS b,
-            (SELECT COUNT(*) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ? AND uploaded_by <> ? AND created_at > ?) AS others`,
-    args: [t, r, t, r, t, r, t, r, c.uploadedBy, handover],
+            EXISTS (${ANOTHER_RECORDER}) AS others`,
+    args: [t, r, t, r, t, r, ...anotherRecorderArgs(c)],
   });
   const row = rs.rows[0] ?? {};
   const transcript = str((row as Record<string, unknown>).transcript);

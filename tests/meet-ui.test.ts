@@ -922,17 +922,18 @@ async function main() {
 
   // ---- the call -----------------------------------------------------------------------------------------------------------
 
-  await check("the call: the Recording indicator is a dot WITH the word, for everyone, only while the recording is running: the room records and its creator is in the call", () => {
-    // The creator's own view and a guest's, with the creator in the call.
-    for (const id of ["call.guest", "call.host"]) {
+  await check("the call: the Recording indicator is a dot WITH the word, for everyone, only while the recording is running: the room records and the browser recording it is in the call", () => {
+    // The creator's own view and a guest's, with the creator's browser recording; and a second host's browser
+    // recording a call the creator is not in (any host's browser records), seen by him and by a guest.
+    for (const id of ["call.guest", "call.host", "call.secondHostAlone", "call.guestWithSecondHost"]) {
       assert.match(markup[id], /<span aria-hidden="true" class="h-2 w-2 rounded-full bg-status-hot"><\/span>Recording<\/p>/, `${id}: red dot and the word`);
     }
     assert.ok(!text(markup["call.noHostYet"]).includes("Recording"), "no host in the call yet: no indicator");
     assert.ok(!text(markup["call.notRecorded"]).includes("Recording"), "a room that does not record: no indicator");
-    // The bug: a recorded room with a host present who is not the creator. Nothing is recording, so nothing says it is.
-    for (const id of ["call.secondHostAlone", "call.guestWithSecondHost"]) {
-      assert.ok(markup[id].includes("Adon") && /Host/.test(text(markup[id])), `${id}: a second host is in the call`);
-      assert.ok(!text(markup[id]).includes("Recording"), `${id}: the creator is not here, so there is no indicator`);
+    // A recorded room with a host present whose browser does not record (yet). Nothing is recording, so nothing says it is.
+    for (const id of ["call.hostNotRecording", "call.guestHostNotRecording"]) {
+      assert.ok(markup[id].includes("Adon") && /Host/.test(text(markup[id])), `${id}: a host is in the call`);
+      assert.ok(!text(markup[id]).includes("Recording"), `${id}: no browser records, so there is no indicator`);
       assert.ok(!markup[id].includes("being recorded and transcribed"), `${id}: and no claim in its tooltip either`);
     }
     // Where the claim comes from: the room's own answer, and nothing else on the call or lobby screens says "recorded".

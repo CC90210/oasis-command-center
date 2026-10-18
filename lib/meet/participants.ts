@@ -14,6 +14,10 @@
  * A room is `scheduled` until its first host joins, then `live`. It ends when a
  * host ends it, or on its own once no host has been present for
  * MEET_HOST_GRACE_MS (the host's tab died and they did not come back).
+ *
+ * One browser records a recorded room, whichever host's it is: the first host's
+ * browser to find no recorder there takes it, and another takes over once that
+ * one leaves or goes silent (claimRecorder).
  */
 import "server-only";
 import type { Client } from "@libsql/client";
@@ -177,19 +181,67 @@ export async function touchParticipant(db: Client, p: Pick<MeetPresence, "tenant
   return rs.rowsAffected > 0;
 }
 
-/**
- * The room's creator, whose browser runs the recording, is in the call: not left or removed, and heard from within
- * MEET_STALE_MS. The longer window, not MEET_PRESENCE_MS: a creator whose poll is late for a minute is still
- * recording, and the room must not stop saying so while it records.
- */
-export async function creatorInCall(db: Client, room: Pick<MeetRoom, "tenantId" | "id" | "hostUserId">, now: Date): Promise<boolean> {
+/** Who records a room, as one browser's join or poll sees it. */
+export type RoomRecorder = {
+  /** This browser records the room: the room names its row as its recorder. */
+  mine: boolean;
+  /**
+   * The browser that records the room is in the call: not left or removed, and heard from within MEET_STALE_MS. The
+   * longer window, not MEET_PRESENCE_MS: a recorder whose poll is late for a minute is still recording, and the room
+   * must not stop saying so while it records.
+   */
+  inCall: boolean;
+};
+
+/** The room's recorder (a participant id, or null) and, while that row is not left or removed, when it was last heard from. */
+async function readRecorder(db: Client, room: Pick<MeetRoom, "tenantId" | "id">): Promise<{ holder: string | null; seen: string | null }> {
   const rs = await db.execute({
-    sql: `SELECT 1 FROM meet_participants
-           WHERE tenant_id = ? AND room_id = ? AND role = 'host' AND user_id = ? AND left_at IS NULL AND removed_at IS NULL
-             AND last_seen_at > ? LIMIT 1`,
-    args: [room.tenantId, room.id, room.hostUserId, heldSince(now)],
+    sql: `SELECT r.recorder_participant_id AS holder,
+                 (SELECT p.last_seen_at FROM meet_participants p
+                   WHERE p.tenant_id = r.tenant_id AND p.room_id = r.id AND p.id = r.recorder_participant_id
+                     AND p.left_at IS NULL AND p.removed_at IS NULL) AS seen
+            FROM meet_rooms r WHERE r.tenant_id = ? AND r.id = ? LIMIT 1`,
+    args: [room.tenantId, room.id],
   });
-  return rs.rows.length > 0;
+  const row = (rs.rows[0] ?? {}) as Record<string, unknown>;
+  return { holder: text(row.holder), seen: text(row.seen) };
+}
+
+/**
+ * Who records the room, after `me` takes the recording if it may (`mayRecord`: a host's browser in a room that
+ * records). One browser records a room at a time, whichever host's it is: a host's browser takes the recording when
+ * nobody holds it, or its holder has left, been removed or gone unheard for MEET_PRESENCE_MS (a laptop asleep, a tab
+ * closed), and keeps it while it is there, so a host coming back never takes it back from the one recording now. The
+ * take is one conditional UPDATE, so two hosts polling at once cannot both take it; a holder keeps it by polling,
+ * with no write. The chunk route takes audio only from the holder (lib/meet/recording.ts).
+ */
+export async function claimRecorder(
+  db: Client,
+  room: Pick<MeetRoom, "tenantId" | "id">,
+  me: Pick<MeetPresence, "id">,
+  now: Date,
+  mayRecord: boolean,
+): Promise<RoomRecorder> {
+  let held = await readRecorder(db, room);
+  const holderPresent = held.seen !== null && held.seen > presentSince(now);
+  if (mayRecord && held.holder !== me.id && !holderPresent) {
+    const rs = await db.execute({
+      sql: `UPDATE meet_rooms SET recorder_participant_id = ?
+             WHERE tenant_id = ? AND id = ? AND status = 'live' AND record_audio = 1
+               AND EXISTS (SELECT 1 FROM meet_participants m
+                            WHERE m.tenant_id = meet_rooms.tenant_id AND m.room_id = meet_rooms.id AND m.id = ?
+                              AND m.role = 'host' AND m.left_at IS NULL AND m.removed_at IS NULL)
+               AND (recorder_participant_id IS NULL OR NOT EXISTS (
+                     SELECT 1 FROM meet_participants p
+                      WHERE p.tenant_id = meet_rooms.tenant_id AND p.room_id = meet_rooms.id AND p.id = meet_rooms.recorder_participant_id
+                        AND p.left_at IS NULL AND p.removed_at IS NULL AND p.last_seen_at > ?))`,
+      args: [me.id, room.tenantId, room.id, me.id, presentSince(now)],
+    });
+    if (rs.rowsAffected > 0) return { mine: true, inCall: true };
+    // Another host took it first, or the room ended meanwhile: say what the room says now.
+    held = await readRecorder(db, room);
+  }
+  return { mine: mayRecord && held.holder === me.id, inCall: held.seen !== null && held.seen > heldSince(now) };
 }
 
 /** Their browser's SFU session. A reconnect replaces it, and what they published on the old one is gone with it. */
