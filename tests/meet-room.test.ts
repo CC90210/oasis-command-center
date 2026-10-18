@@ -263,6 +263,11 @@ async function main() {
       "name_required",
       "a signed-in visitor from another workspace types a name: their email never shows the room",
     );
+    assert.equal(
+      (await json(await handleJoin(request(path, { body: { name: "Same id" }, ip: freshIp() }), code, deps({ session: as(CC, false, OTHER) })))).error,
+      "consent_required",
+      "the creator's user id signed in to ANOTHER workspace is not the creator: they tick the notice like any guest",
+    );
     assert.equal(((await json(await handleJoin(request(path, { body: { name: "Jane" }, ip: freshIp() }), code, deps()))).error), "consent_required");
     assert.equal((await handleJoin(request(path, { body: { name: "Jane", consent: true }, origin: "https://evil.example" }), code, deps())).status, 403);
     assert.equal((await handleJoin(request("/api/meet/abc-defg-hjk/join", { body: { name: "Jane", consent: true }, ip: freshIp() }), "abc-defg-hjk", deps())).status, 404);
