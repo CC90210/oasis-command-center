@@ -1058,8 +1058,12 @@ export async function finalizeDueRooms(
   return handed;
 }
 
-/** How long after a room ends the sweeps keep cutting the media sessions its rows still hold; how many rooms and sessions a run. */
-export const ENDED_CUT_RETRY_MS = 60 * 60_000;
+/**
+ * How long after a room ends the sweeps keep cutting the media sessions its rows still hold; how many rooms and
+ * sessions a run. A day, oldest first: after an SFU outage a backlog drains in order, so nothing deferred ages out
+ * before its turn (Codex on #688, third pass).
+ */
+export const ENDED_CUT_RETRY_MS = 24 * 60 * 60_000;
 const ENDED_CUT_BATCH = 10;
 const ENDED_CUT_SESSIONS = 20;
 let noSfuLogged = false;
@@ -1075,7 +1079,8 @@ export function meetSfuIfConfigured(): SfuClient | null {
 }
 
 /**
- * Cut the media sessions still held by the rows of rooms that ended within ENDED_CUT_RETRY_MS, whatever ended them:
+ * Cut the media sessions still held by the rows of rooms that ended within ENDED_CUT_RETRY_MS (oldest first),
+ * whatever ended them:
  * a room this sweep just ended (nobody polls it, so no request ever cuts it), or one whose own cut failed. A browser
  * that stopped polling but kept its WebRTC connection must not go on sending or hearing media in an ended room
  * (Codex on #688, P1). The same steps as lib/meet/handlers.ts cutHeld: forgetSession only after a cut went through,
@@ -1099,14 +1104,16 @@ async function cutEndedRoomSessions(
     sql: `SELECT r.tenant_id, r.id FROM meet_rooms r
            WHERE ${scope}r.status = 'ended' AND r.ended_at > ?
              AND EXISTS (SELECT 1 FROM meet_participants p WHERE p.tenant_id = r.tenant_id AND p.room_id = r.id AND p.sfu_session_id IS NOT NULL)
-           ORDER BY r.ended_at DESC LIMIT ?`,
+           ORDER BY r.ended_at ASC LIMIT ?`,
     args: [...(tenantIds ?? []), new Date(now.getTime() - ENDED_CUT_RETRY_MS).toISOString(), ENDED_CUT_BATCH],
   });
   if (!rs.rows.length) return none;
   if (!sfu) {
+    // Sessions were opened, so an SFU app was set then: its secret is gone now (a rotation, a lost push). Nothing
+    // can be cut until it is back, and the run says so, never "healthy" (Codex on #688, third pass).
     if (!noSfuLogged) console.error("[meet.relay] no SFU app is set; sessions held by ended rooms cannot be cut");
     noSfuLogged = true;
-    return none;
+    return { cut: 0, failed: rs.rows.length };
   }
   const rooms = rs.rows.map((row) => ({ tenantId: String(row.tenant_id), id: String(row.id) }));
   const held = (await Promise.all(rooms.map(async (room) => (await roomSessions(db, room)).map((h) => ({ room, h })))))
