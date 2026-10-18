@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Client } from "@libsql/client";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { meetGuestFirstName } from "@/lib/meet/guest-name";
 import { deleteMeetRoom, meetMediaReady } from "@/lib/meet/handlers";
 import { meetRoomUrl } from "@/lib/meet/links";
@@ -31,6 +32,14 @@ export type BookingMeetRooms = {
 /** No cut here: createMeetRoom keeps a title by characters (meetTitle), and a cut by UTF-16 units could split one. */
 export function bookingMeetRoomTitle(firstName: string | null, fallback: string): string {
   return firstName ? `OASIS call with ${firstName}` : fallback;
+}
+
+/**
+ * The founder-meeting service's room dependency for a route: the live port when Turso is configured, nothing
+ * otherwise. Without the port a booking takes the Google Meet path, which needs no Turso (Codex on the booking PR).
+ */
+export function bookingMeetRoomDeps(): { meetRooms?: BookingMeetRooms } {
+  return tursoConfigured() ? { meetRooms: liveBookingMeetRooms(getTursoClient()) } : {};
 }
 
 export function liveBookingMeetRooms(db: Client): BookingMeetRooms {

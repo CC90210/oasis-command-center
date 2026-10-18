@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { liveBookingMeetRooms } from "@/lib/booking/meet-room";
-import { getTursoClient } from "@/lib/turso";
+import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { mayHostAuditCall, mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isUniqueViolationError } from "@/lib/api-helpers";
@@ -359,7 +358,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
               clientAgreedToTime:true,
               handoffComplete:true,
             },
-          }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+          }, bookingMeetRoomDeps());
           await activateVerifiedFounderMeeting(session.tenantId, existingMeeting.appointmentId);
         } catch (error) {
           const detail = error instanceof Error ? error.message : "booking_request_mismatch";
@@ -439,7 +438,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
               leadId,
               appointmentId,
               requestId,
-            }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+            }, bookingMeetRoomDeps());
             return NextResponse.json({
               ok:true,
               idempotent:true,
@@ -662,7 +661,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           clientAgreedToTime:true,
           handoffComplete:true,
         },
-      }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+      }, bookingMeetRoomDeps());
     } catch (error) {
       const detail = error instanceof Error ? error.message : "calendar_create_failed";
       const code = detail.split(":",1)[0];
@@ -794,7 +793,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             leadId,
             appointmentId,
             requestId,
-          }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+          }, bookingMeetRoomDeps());
           cancellationDisposition = reservation.disposition;
           if (reservation.disposition === "pending") {
             cancellationAfterTransition = { appointmentId, requestId };
@@ -845,7 +844,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             requestId,
             meetingAt:nextActionAt,
             openerAttendee,
-          }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+          }, bookingMeetRoomDeps());
         } catch (error) {
           const detail = error instanceof Error ? error.message : "calendar_update_failed";
           const code = detail.split(":",1)[0];
@@ -1689,7 +1688,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         leadId,
         appointmentId:cancellationAfterTransition.appointmentId,
         requestId:cancellationAfterTransition.requestId,
-      }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+      }, bookingMeetRoomDeps());
       cancellationDisposition = cancellation.disposition;
     } catch (error) {
       return NextResponse.json({

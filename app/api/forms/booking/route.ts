@@ -1,6 +1,6 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
-import { liveBookingMeetRooms } from "@/lib/booking/meet-room";
+import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { sameOrigin } from "@/lib/calendar/http";
 import { AI_AUDIT_ALERT_SOURCE, ensureAiAuditSalesEvent } from "@/lib/forms/ai-audit-notify";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
@@ -151,7 +151,7 @@ async function compensatePublicBooking(input: {
       leadId,
       appointmentId,
       requestId,
-    }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+    }, bookingMeetRoomDeps());
     providerCompensated = true;
   } catch (error) {
     console.error("[public-booking.compensate.calendar]", error);
@@ -351,7 +351,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         clientAgreedToTime: true,
         handoffComplete: true,
       },
-    }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+    }, bookingMeetRoomDeps());
     await mirrorPublicBookingToSchedules({
       db,
       tenantId: context.tenantId,

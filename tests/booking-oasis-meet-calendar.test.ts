@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { bookingMeetRoomTitle, liveBookingMeetRooms } from "../lib/booking/meet-room";
+import { bookingMeetRoomDeps, bookingMeetRoomTitle, liveBookingMeetRooms } from "../lib/booking/meet-room";
 import {
   createGoogleFounderMeeting,
   founderMeetingEventId,
@@ -128,10 +128,24 @@ function testLivePortUsesTheLeadTitleRule(): void {
   assert.equal(bookingMeetRoomTitle(null, "OASIS call with Fallback"), "OASIS call with Fallback");
 }
 
+function testNoTursoMeansNoRoomPort() {
+  // Codex on the booking PR: building the port called getTursoClient(), which throws without Turso, so a Google-only
+  // deployment could not book at all. Without Turso the routes get no port and take the Google Meet path.
+  const keys = ["TURSO_DB_PATH", "TURSO_DATABASE_URL", "TURSO_DB_URL"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
+  try {
+    assert.deepEqual(bookingMeetRoomDeps(), {});
+  } finally {
+    for (const k of keys) if (saved[k] !== undefined) process.env[k] = saved[k];
+  }
+}
+
 async function main() {
   await testCreateUsesOasisRoomWithoutGoogleConference();
   await testRescheduleKeepsOasisRoomWithoutConference();
   testLivePortUsesTheLeadTitleRule();
+  testNoTursoMeansNoRoomPort();
   console.log("booking-oasis-meet-calendar: OK");
 }
 

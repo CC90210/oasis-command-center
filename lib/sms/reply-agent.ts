@@ -21,7 +21,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding } from "@/lib/team";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 import { getTursoClient } from "@/lib/turso";
-import { liveBookingMeetRooms } from "@/lib/booking/meet-room";
+import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import {
   activateVerifiedFounderMeeting,
   cancelVerifiedFounderMeeting,
@@ -1435,7 +1435,7 @@ async function executeCancel(
     leadId: appointment.lead_id,
     appointmentId: appointment.id,
     requestId,
-  }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+  }, bookingMeetRoomDeps());
   if (prepared.disposition === "preserved" || prepared.disposition === "cancelled") return prepared.disposition;
   const nowIso = new Date().toISOString();
   await transitionLead(db, job, appointment, expectedLead, {
@@ -1450,7 +1450,7 @@ async function executeCancel(
     leadId: appointment.lead_id,
     appointmentId: appointment.id,
     requestId,
-  }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+  }, bookingMeetRoomDeps());
   return cancelled.disposition;
 }
 
@@ -1469,7 +1469,7 @@ async function executeReschedule(
     requestId: `sms:${job.provider_message_id}`,
     meetingAt,
     openerAttendee,
-  }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+  }, bookingMeetRoomDeps());
   await transitionLead(db, job, appointment, expectedLead, {
     stage: "founder_meeting_booked",
     deal_outcome: "reschedule",

@@ -345,7 +345,8 @@ async function createAndStoreMeetRoom(
   }
 }
 
-async function meetRoomForBooking(
+/** The room a booking uses: its stored one when still scheduled or live, else a new one. Exported for the tests. */
+export async function meetRoomForBooking(
   appointment: AppointmentRow,
   deps: FounderMeetingServiceDependencies,
   input: { hostUserId: string; startsAt: string; clientName: string },
@@ -353,7 +354,20 @@ async function meetRoomForBooking(
   if (!deps.meetRooms?.ready()) return null;
   if (appointment.meet_room_id) {
     const existing = await deps.meetRooms.find(appointment.tenant_id, appointment.meet_room_id);
-    if (existing) return { appointment, room: existing };
+    // Only a scheduled or live room is reused. An ended one (an earlier cleanup ended it, then failed) would answer
+    // room_ended to the guest, so it is cleared away and replaced (Codex on the booking PR).
+    if (existing && existing.status !== "ended") return { appointment, room: existing };
+    if (existing) {
+      try {
+        await deps.meetRooms.remove(appointment.tenant_id, existing.id, input.hostUserId);
+      } catch (error) {
+        console.error("[founder-meeting] ended Oasis room removal failed before its replacement", {
+          appointmentId: appointment.id,
+          roomId: existing.id,
+          code: errorCode(error, "meet_room_remove_failed"),
+        });
+      }
+    }
   }
   try {
     return await createAndStoreMeetRoom(appointment, deps, input);
@@ -378,6 +392,7 @@ async function meetRoomForReschedule(
   appointment: AppointmentRow,
   deps: FounderMeetingServiceDependencies,
   startsAt: string,
+  options: { refuseUnmovableRoom?: boolean } = {},
 ): Promise<RescheduledMeetRoom> {
   const fallback = isGoogleMeetingLink(appointment.google_meet_link)
     ? undefined
@@ -405,6 +420,12 @@ async function meetRoomForReschedule(
           code: errorCode(error, "meet_room_reschedule_failed"),
         });
       }
+    }
+    // With media down no new room can be made, and a room that did not move (ended or gone) is a dead link: refuse
+    // the move rather than confirm a meeting nobody can join (Codex on the booking PR). Moving a meeting BACK (the
+    // reconciler's compensation) never refuses: the old time keeps the old link either way.
+    if (previousRoomId && !moved && options.refuseUnmovableRoom) {
+      throw new Error("meet_room_unavailable");
     }
     return {
       appointment,
@@ -2011,7 +2032,7 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   let receipt: GoogleCalendarReceipt;
   let roomChange: RescheduledMeetRoom | null = null;
   try {
-    roomChange = await meetRoomForReschedule(appointment, deps, meetingAt);
+    roomChange = await meetRoomForReschedule(appointment, deps, meetingAt, { refuseUnmovableRoom: true });
     appointment = roomChange.appointment;
     const calendarInput = {
       tenantId: input.tenantId,
@@ -2849,7 +2870,41 @@ async function reconcileTenantFounderMeetingSagas(
       result.errors.push(errorCode(error, "meeting_saga_reconcile_failed"));
     }
   }
+  await retryCancelledRoomCleanup(tenantId, limit, deps, result);
   return result;
+}
+
+/**
+ * A cancelled meeting whose room's delete failed keeps meet_room_id (removeMeetRoomForAppointment clears it only once
+ * the room is gone). Its workflow is already terminal, so the pending-transition scan above never sees it again: this
+ * retries the delete each run until it goes through (Codex on the booking PR). A failure stays counted and kept.
+ */
+async function retryCancelledRoomCleanup(
+  tenantId: string,
+  limit: number,
+  deps: FounderMeetingServiceDependencies,
+  result: FounderMeetingReconciliationResult,
+): Promise<void> {
+  if (!deps.meetRooms) return;
+  const held = await deps.db.from("call_appointments")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .eq("status", "cancelled")
+    .not("meet_room_id", "is", null)
+    .order("updated_at", { ascending: true })
+    .limit(limit);
+  if (held.error) {
+    result.failed += 1;
+    result.errors.push("meeting_room_cleanup_scan_failed");
+    return;
+  }
+  for (const row of (held.data || []) as AppointmentRow[]) {
+    const after = await removeMeetRoomForAppointment(row, deps, row.assigned_to);
+    if (after.meet_room_id) {
+      result.failed += 1;
+      result.errors.push("meeting_room_cleanup_failed");
+    }
+  }
 }
 
 /**

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
-import { liveBookingMeetRooms } from "@/lib/booking/meet-room";
+import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sendSmsDirectTwilio, tenantHasDirectTwilio } from "@/lib/sms-direct-twilio";
@@ -586,7 +586,7 @@ async function handle(req: NextRequest) {
   const stale = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
   let reconciliation: FounderMeetingReconciliationResult;
   try {
-    reconciliation = await reconcileFounderMeetingSagas({ now: new Date(now), limit: BATCH_LIMIT }, { meetRooms: liveBookingMeetRooms(getTursoClient()) });
+    reconciliation = await reconcileFounderMeetingSagas({ now: new Date(now), limit: BATCH_LIMIT }, bookingMeetRoomDeps());
   } catch (error) {
     const detail = error instanceof Error ? error.message : "meeting_saga_reconciliation_failed";
     console.error("[founder-meeting-reminders] saga reconciliation degraded", detail);

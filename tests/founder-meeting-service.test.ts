@@ -12,6 +12,7 @@ import {
   founderMeetingSmsConsentErrorResponse,
   founderMeetingBackfillChunkStart,
   grantFounderMeetingSmsConsent,
+  meetRoomForBooking,
   prepareVerifiedFounderMeetingCancellation,
   reconcileFounderMeetingSagas,
   rescheduleVerifiedFounderMeeting,
@@ -211,6 +212,7 @@ type FakeMeetRooms = BookingMeetRooms & {
   createErrors: Error[];
   removeErrors: Error[];
   seed(roomId: string, url?: string): void;
+  end(roomId: string): void;
 };
 
 function fakeMeetRooms(isReady = true): FakeMeetRooms {
@@ -232,6 +234,10 @@ function fakeMeetRooms(isReady = true): FakeMeetRooms {
     removeErrors,
     seed: (roomId, url = "https://oasisai.work/meet/aaa-bbbb-ccc") => {
       rooms.set(roomId, { id: roomId, url, status: "scheduled" });
+    },
+    end: (roomId) => {
+      const room = rooms.get(roomId);
+      if (room) room.status = "ended";
     },
     ready: () => isReady,
     create: async (input) => {
@@ -744,6 +750,83 @@ async function testOasisMeetRoomMovesWhenMediaIsUnavailable() {
   assert.equal(moved.receipt.meetLink, booked.receipt.meetLink);
   assert.equal((await appointment(raw, booked.appointmentId)).meet_room_id, "room-1");
   await raw.close();
+}
+
+async function testOasisMeetRoomFourthReviewFixes() {
+  // (a) Media down and the room cannot move (gone or ended): the move is refused before Google, never confirmed
+  //     with a dead link.
+  const refused = await fixture();
+  const bookingRooms = fakeMeetRooms();
+  const booked = await createVerifiedFounderMeeting(bookingInput("oasis-room-unmovable"), { ...refused.deps, meetRooms: bookingRooms });
+  await activateVerifiedFounderMeeting(TENANT, booked.appointmentId, { ...refused.deps, meetRooms: bookingRooms });
+  const before = await appointment(refused.raw, booked.appointmentId);
+  const updatesBefore = refused.calls.updatedMeetingLinks.length;
+  const downRooms = fakeMeetRooms(false); // knows no room-1: it cannot move it
+  const originalConsoleError = console.error;
+  console.error = () => undefined;
+  try {
+    await assert.rejects(
+      rescheduleVerifiedFounderMeeting({
+        tenantId: TENANT,
+        leadId: LEAD,
+        appointmentId: booked.appointmentId,
+        requestId: "oasis-room-unmovable-move",
+        meetingAt: LATER,
+      }, { ...refused.deps, meetRooms: downRooms }),
+      /meet_room_unavailable/,
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(refused.calls.updatedMeetingLinks.length, updatesBefore, "Google was asked to move a meeting with a dead link");
+  const after = await appointment(refused.raw, booked.appointmentId);
+  assert.equal(after.scheduled_for, before.scheduled_for);
+  assert.equal(after.meet_room_id, "room-1");
+  await refused.raw.close();
+
+  // (b) A booking's stored room that has ended is never reused: it is removed and replaced.
+  const reuse = await fixture();
+  const reuseRooms = fakeMeetRooms();
+  const reused = await createVerifiedFounderMeeting(bookingInput("oasis-room-ended-reuse"), { ...reuse.deps, meetRooms: reuseRooms });
+  reuseRooms.end("room-1");
+  const row = await appointment(reuse.raw, reused.appointmentId);
+  const chosen = await meetRoomForBooking(row as never, { ...reuse.deps, meetRooms: reuseRooms } as never, {
+    hostUserId: String(row.assigned_to),
+    startsAt: String(row.scheduled_for),
+    clientName: "Taylor Client",
+  });
+  assert.equal(chosen?.room.id, "room-2", "an ended room was reused");
+  assert.deepEqual(reuseRooms.calls.removed, ["room-1"]);
+  assert.equal((await appointment(reuse.raw, reused.appointmentId)).meet_room_id, "room-2");
+  await reuse.raw.close();
+
+  // (c) A cancelled meeting whose room delete failed is retried by the reconciler until it goes through.
+  const retry = await fixture();
+  const retryRooms = fakeMeetRooms();
+  const retryDeps = { ...retry.deps, meetRooms: retryRooms };
+  const meeting = await createVerifiedFounderMeeting(bookingInput("oasis-room-cleanup-retry"), retryDeps);
+  await activateVerifiedFounderMeeting(TENANT, meeting.appointmentId, retryDeps);
+  retryRooms.removeErrors.push(new Error("room_delete_failed"));
+  console.error = () => undefined;
+  try {
+    await cancelVerifiedFounderMeeting({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: meeting.appointmentId,
+      requestId: "oasis-room-cleanup-retry-cancel",
+    }, retryDeps);
+    assert.equal((await appointment(retry.raw, meeting.appointmentId)).meet_room_id, "room-1");
+    retryRooms.removeErrors.push(new Error("room_delete_failed"));
+    const stillFailing = await reconcileFounderMeetingSagas({ tenantId: TENANT }, retryDeps);
+    assert.ok(stillFailing.errors.includes("meeting_room_cleanup_failed"));
+    assert.equal((await appointment(retry.raw, meeting.appointmentId)).meet_room_id, "room-1");
+  } finally {
+    console.error = originalConsoleError;
+  }
+  await reconcileFounderMeetingSagas({ tenantId: TENANT }, retryDeps);
+  assert.equal((await appointment(retry.raw, meeting.appointmentId)).meet_room_id, null, "the reconciler never retried the room delete");
+  assert.deepEqual(retryRooms.calls.removed, ["room-1", "room-1", "room-1"]);
+  await retry.raw.close();
 }
 
 async function testGoogleOnlyRoomWritesAreOmitted() {
@@ -1874,6 +1957,7 @@ async function main() {
   await testOasisMeetRoomCreationFailuresFallBack();
   await testOasisMeetRoomRescheduleRollback();
   await testOasisMeetRoomMovesWhenMediaIsUnavailable();
+  await testOasisMeetRoomFourthReviewFixes();
   await testGoogleOnlyRoomWritesAreOmitted();
   await testCreatePreservesCustomDuration();
   await testReceiptWriteCompensationInvalidatesTheRequestId();
