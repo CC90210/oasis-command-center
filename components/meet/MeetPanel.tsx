@@ -17,12 +17,23 @@
  * recorded, every meeting is asked for with recordAudio false, and no Transcript button is drawn. A meeting that
  * was just made says what the server did with it ("Recorded and transcribed" / "Not recorded").
  *
+ * VIDEO CALLS MAY NOT BE SWITCHED ON YET. The list also says `mediaReady`; once it says false (the video service is
+ * not connected: a one-time step for an owner) the panel puts one plain line at the top and switches off Start a
+ * meeting now and Create link: disabled, not hidden, and pointing at the line that says why. Recent meetings, Delete
+ * included, work as before. Before the list answers the buttons stay on and the server decides: if it refuses
+ * (503 meet_not_configured) the same line shows where the person pressed (meet-format.ts panelErrorWords).
+ *
  * TRANSCRIPTS ARE OPENED ON PURPOSE. A transcript is a whole section with a list up to 28rem tall that reads the
  * recording when it mounts, so it is not drawn for every finished meeting when the panel opens: that would turn
  * a 26rem popover into a long scroll and fire a read per meeting. Each finished recorded meeting (showsTranscript,
  * the one gate) has a Transcript button; pressing it mounts `renderEnded` below the row, in a box the button
  * points at, and the button says Hide transcript. One is open at a time, and closing the panel or deleting the
- * meeting closes it. On a phone the box can open below what is on screen, so the panel scrolls it into view.
+ * meeting closes it.
+ *
+ * A BOX THAT OPENS BELOW ITS BUTTON IS BROUGHT INTO VIEW (bringIntoView): an opened transcript, the link Create link
+ * just made, and Start now's link when its tab was blocked. A phone shows about 480 px of the panel, so such a box
+ * can open entirely below it and the button seems to do nothing. The least scrolling that does it, none of the
+ * animation under reduced motion, and a link made once is brought into view once.
  *
  * DELETE is two steps on the spot, like End and Remove in the call (never a browser dialog): Delete opens the
  * confirmation (focus on Cancel, Escape cancels it before it closes the panel), Delete for good asks the server.
@@ -52,6 +63,9 @@ import { FOCUS } from "./meet-classes";
 import {
   ALREADY_DELETED,
   LENGTH_CHOICES,
+  MADE_BOX_LATER,
+  MADE_BOX_START,
+  MEDIA_NOT_READY,
   STATUS_WORDS,
   TITLE_MAX_CHARS,
   canDelete,
@@ -106,6 +120,11 @@ export type MeetPanelViewProps = {
   list: PanelList;
   /** This workspace records and its recording is installed. False until the list says true. */
   recordingAvailable: boolean;
+  /**
+   * The list said video calls cannot connect yet (the video service is not connected). False until it says so: before
+   * the list answers, or when it failed, the buttons stay on and the server decides (a refusal shows the same line).
+   */
+  mediaNotReady: boolean;
   start: { busy: boolean; error: string | null; made: MadeMeeting | null };
   later: {
     title: string;
@@ -145,21 +164,27 @@ export type MeetPanelViewProps = {
   renderEnded?: (code: string) => ReactNode;
 };
 
+/** The id of the line that says video calls are not switched on yet: the two buttons it switches off point at it. */
+const MEDIA_NOTE = "meet-media-note";
+
 const TAP = "min-h-11 sm:min-h-9";
-const SECONDARY = `btn-secondary inline-flex ${TAP} items-center justify-center gap-1.5 text-[13px]`;
+// .btn-secondary has no disabled look of its own (.btn-primary does), and a switched-off Create link must look switched off.
+const SECONDARY = `btn-secondary inline-flex ${TAP} items-center justify-center gap-1.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-50`;
 const LINK_ACTION = `inline-flex ${TAP} items-center justify-center gap-1.5 rounded-md border border-hairline px-3 text-[13px] font-medium text-fg hover:bg-active-hover ${FOCUS}`;
 const DANGER = `inline-flex ${TAP} items-center justify-center gap-1.5 rounded-md border border-transparent bg-unread px-3 text-[13px] font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS}`;
 
-function Made({ made, headline, copyKey, copied, onCopy }: {
+function Made({ made, headline, boxId, copyKey, copied, onCopy }: {
   made: MadeMeeting;
   headline: string;
+  /** The id the panel scrolls to when this box is new (MADE_BOX_START, MADE_BOX_LATER). */
+  boxId: string;
   copyKey: string;
   copied: MeetPanelViewProps["copied"];
   onCopy: MeetPanelViewProps["onCopy"];
 }) {
   const done = copied?.key === copyKey && copied.ok;
   return (
-    <div className="rounded-lg border border-hairline bg-bg-panel p-3">
+    <div id={boxId} className="scroll-mb-4 rounded-lg border border-hairline bg-bg-panel p-3">
       <p className="text-xs text-fg-muted">{headline}</p>
       <p className="mt-1 break-all font-mono text-xs text-fg">{made.url.replace(/^https?:\/\//, "")}</p>
       <div className="mt-2 flex flex-wrap gap-2">
@@ -187,15 +212,28 @@ function Made({ made, headline, copyKey, copied, onCopy }: {
 }
 
 export function MeetPanelView(props: MeetPanelViewProps) {
-  const { list, start, later, copied, del, recordingAvailable, renderEnded } = props;
+  const { list, start, later, copied, del, recordingAvailable, mediaNotReady, renderEnded } = props;
   return (
     <div className="space-y-4 text-[13px]">
+      {mediaNotReady ? (
+        <p
+          id={MEDIA_NOTE}
+          data-media-note
+          role="status"
+          tabIndex={-1}
+          className="rounded-lg border border-hairline bg-bg-panel px-3 py-2.5 text-xs leading-5 text-fg"
+        >
+          {MEDIA_NOT_READY}
+        </p>
+      ) : null}
+
       <section aria-label="Start a meeting now" className="space-y-2">
         <button
           type="button"
-          data-autofocus
+          {...(mediaNotReady ? {} : { "data-autofocus": true })}
           onClick={props.onStart}
-          disabled={start.busy}
+          disabled={start.busy || mediaNotReady}
+          aria-describedby={mediaNotReady ? MEDIA_NOTE : undefined}
           className={`btn-primary inline-flex ${TAP} w-full items-center justify-center gap-2`}
         >
           <Video className="h-4 w-4 shrink-0" aria-hidden />
@@ -215,6 +253,7 @@ export function MeetPanelView(props: MeetPanelViewProps) {
           <Made
             made={start.made}
             headline={start.made.opened ? "Your meeting is open in a new tab. Send this link so people can join." : "Your browser blocked the new tab. Open the meeting here, and send this link so people can join."}
+            boxId={MADE_BOX_START}
             copyKey="start"
             copied={copied}
             onCopy={props.onCopy}
@@ -294,7 +333,7 @@ export function MeetPanelView(props: MeetPanelViewProps) {
               {later.error}
             </p>
           ) : null}
-          <button type="submit" disabled={later.busy} className={`${SECONDARY} w-full`}>
+          <button type="submit" disabled={later.busy || mediaNotReady} aria-describedby={mediaNotReady ? MEDIA_NOTE : undefined} className={`${SECONDARY} w-full`}>
             {later.busy ? "Creating..." : "Create link"}
           </button>
         </form>
@@ -302,6 +341,7 @@ export function MeetPanelView(props: MeetPanelViewProps) {
           <Made
             made={later.made}
             headline="Link ready. Send it to the people you want in the meeting."
+            boxId={MADE_BOX_LATER}
             copyKey="later"
             copied={copied}
             onCopy={props.onCopy}
@@ -434,7 +474,7 @@ export function MeetPanelView(props: MeetPanelViewProps) {
 type Load =
   | { status: "loading" }
   | { status: "error"; words: string }
-  | { status: "ready"; rooms: MeetRoomItem[]; recordingAvailable: boolean };
+  | { status: "ready"; rooms: MeetRoomItem[]; recordingAvailable: boolean; mediaReady: boolean };
 
 /** Where focus goes once the next render has put it on the screen. */
 type FocusTarget = { kind: "cancel" } | { kind: "delete"; id: string } | { kind: "row"; id: string } | { kind: "heading" };
@@ -446,6 +486,17 @@ function browserTimeZone(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Bring a box that just opened below the person's button into view: the least scrolling that does it, a box
+ * already in view is left where it is, and a person who asked for less motion gets none of the animation. A phone
+ * shows about 480 px of the panel, so without this the box can open entirely below it and the button seems to do
+ * nothing. A box's own scroll-mb class says how much room to leave below it.
+ */
+function bringIntoView(id: string): void {
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  document.getElementById(id)?.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
 }
 
 export function MeetPanel({
@@ -499,6 +550,9 @@ export function MeetPanel({
   // and what is sent leaves the choice to the server (startBody, laterBody).
   const availability: RecordingAvailability = load.status !== "ready" ? "unknown" : load.recordingAvailable ? "available" : "unavailable";
   const recordingAvailable = availability === "available";
+  // Video calls are switched off only once the list has said so; until then (loading, or the list failed) the buttons
+  // stay on and the server decides, answering with the same line if it refuses (panelErrorWords).
+  const mediaNotReady = load.status === "ready" && !load.mediaReady;
 
   // Which row is asking "Delete for good?". The ref is what Escape and the delete call read right now and the state
   // is what draws, so they change together, here and nowhere else.
@@ -555,14 +609,31 @@ export function MeetPanel({
     target?.focus();
   });
 
-  // A transcript opens below its meeting, which on a phone can be off the bottom of what is on screen: the button
-  // would seem to do nothing. Bring its box into view with the least scrolling that does it. The box starts as one
-  // line and grows once the recording loads, so its scroll-mb class leaves it room to grow into view.
+  // What a button opens below itself is brought into view (bringIntoView). A transcript box starts as one line and
+  // grows once the recording loads, so its scroll-mb class leaves it room to grow into view.
   useEffect(() => {
-    if (transcriptOpen === null) return;
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    document.getElementById(transcriptBoxId(transcriptOpen))?.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
+    if (transcriptOpen !== null) bringIntoView(transcriptBoxId(transcriptOpen));
   }, [transcriptOpen]);
+
+  // A link just made: once per new link, because `created` is a new object each time one is made and is not touched
+  // by anything else (a copy, a keystroke, closing and opening the panel leave it alone).
+  useEffect(() => {
+    if (created) bringIntoView(MADE_BOX_LATER);
+  }, [created]);
+
+  // Start now's box only when its tab was blocked: then the person has to open the meeting from here and send the
+  // link. When the tab opened they are in it, and the panel is left as it was.
+  useEffect(() => {
+    if (started && !started.opened) bringIntoView(MADE_BOX_START);
+  }, [started]);
+
+  // The list can say "not switched on" after the panel opened, which disables the Start button the dialog had just
+  // focused. A disabled button drops focus to the page, where Escape no longer reaches the panel: take it to the
+  // line that says why instead. Only when focus was lost (a reopen starts with focus on the Meet button).
+  useEffect(() => {
+    if (!open || !mediaNotReady || document.activeElement !== document.body) return;
+    panelRef.current?.querySelector<HTMLElement>("[data-media-note]")?.focus();
+  }, [open, mediaNotReady]);
 
   const refresh = useCallback(async () => {
     const mine = ++latest.current;
@@ -572,7 +643,7 @@ export function MeetPanel({
     if (mine !== latest.current) return;
     if (res.ok) {
       loaded.current = true;
-      setLoad({ status: "ready", rooms: res.value.rooms, recordingAvailable: res.value.recordingAvailable });
+      setLoad({ status: "ready", rooms: res.value.rooms, recordingAvailable: res.value.recordingAvailable, mediaReady: res.value.mediaReady });
     } else if (!quiet) {
       setLoad({ status: "error", words: res.words });
     }
@@ -593,7 +664,7 @@ export function MeetPanel({
   };
 
   const startNow = async () => {
-    if (startBusy) return;
+    if (startBusy || mediaNotReady) return;
     // The window is opened here, inside the click and before any await, or a popup blocker refuses it.
     const win = window.open("about:blank", "_blank");
     if (win) {
@@ -623,7 +694,7 @@ export function MeetPanel({
   };
 
   const createLater = async () => {
-    if (laterBusy) return;
+    if (laterBusy || mediaNotReady) return;
     let when: string | undefined;
     if (startsAt) {
       const at = new Date(startsAt);
@@ -768,6 +839,7 @@ export function MeetPanel({
             <MeetPanelView
               list={list}
               recordingAvailable={recordingAvailable}
+              mediaNotReady={mediaNotReady}
               start={{ busy: startBusy, error: startError, made: started }}
               later={{ title, startsAt, minutes, record, busy: laterBusy, error: laterError, made: created }}
               del={{ asking, busy: deleteBusy, error: deleteError }}

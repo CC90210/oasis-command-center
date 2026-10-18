@@ -131,11 +131,12 @@ export function scheduleLine(note: ScheduleNote, wordsFor: (reason: string) => s
 }
 
 /**
- * GET /api/calendar/meet: the workspace's meetings, and whether this workspace records at all. `recordingAvailable`
- * is true only when the server says so; a missing or odd value is false, so the panel never offers recording the
- * server cannot do.
+ * GET /api/calendar/meet: the workspace's meetings, whether this workspace records at all, and whether video calls
+ * can connect yet. Both flags are true only when the server says so; a missing or odd value is false, so the panel
+ * never offers recording the server cannot do, and says so when the video service is not connected (`mediaReady`
+ * false: the panel offers no new meeting until it is).
  */
-export type MeetRoomList = { rooms: MeetRoomItem[]; recordingAvailable: boolean };
+export type MeetRoomList = { rooms: MeetRoomItem[]; recordingAvailable: boolean; mediaReady: boolean };
 
 export function parseRoomList(v: unknown): MeetRoomList | null {
   if (!isRecord(v) || !Array.isArray(v.rooms)) return null;
@@ -145,7 +146,7 @@ export function parseRoomList(v: unknown): MeetRoomList | null {
     if (!room) return null;
     rooms.push(room);
   }
-  return { rooms, recordingAvailable: v.recordingAvailable === true };
+  return { rooms, recordingAvailable: v.recordingAvailable === true, mediaReady: v.mediaReady === true };
 }
 
 /**
@@ -170,6 +171,13 @@ export function toggledTranscript(open: string | null, id: string): string | nul
 export function transcriptBoxId(id: string): string {
   return `meet-transcript-${id}`;
 }
+
+/**
+ * The ids of the two boxes that open below a button when a link is made: Start now's and Create link's. The panel
+ * scrolls each into view when a new link is made, so the button does not seem to do nothing on a small phone.
+ */
+export const MADE_BOX_START = "meet-made-start";
+export const MADE_BOX_LATER = "meet-made-later";
 
 /** Delete is offered only on a meeting the person made (the list's `mine`). */
 export function canDelete(room: Pick<MeetRoomItem, "mine">): boolean {
@@ -229,11 +237,19 @@ export function linkToSend(origin: string, room: Pick<MeetRoomItem, "link" | "ur
   return room.url ?? meetingUrl(origin, room.link);
 }
 
+/**
+ * What the Schedule panel says when video calls cannot connect yet: the list said so (`mediaReady` false), or making a
+ * meeting was refused with meet_not_configured. Said to the person who can fix it, so it names the step; the room
+ * page says something shorter to a guest (lib/meet/room-client.ts meetErrorWords).
+ */
+export const MEDIA_NOT_READY = "Video calls are not switched on yet. They start working once the video service is connected, a one-time step for an owner.";
+
 /** Plain words for what the Schedule panel's calls answered. Server text never reaches the screen. */
 export function panelErrorWords(status: number, code: string | null): string {
   if (status === 401 || code === "sign_in_required") return "Sign in again, then try once more.";
   if (code === "invalid_body") return "That title or time was not accepted. Check it and try again.";
   if (code === "cross_origin_refused") return "This page could not reach the meeting service. Reload it and try again.";
+  if (code === "meet_not_configured") return MEDIA_NOT_READY;
   return meetErrorWords(code ?? "unknown");
 }
 

@@ -82,13 +82,27 @@ async function main() {
     out[id] = renderToStaticMarkup(el);
   };
 
-  // The pre-join screen, as the server draws it for each kind of person and room.
-  draw("room.visitorRecorded", h(MeetRoom, { ...roomProps, recordAudio: true, viewer: "visitor" }));
-  draw("room.memberRecorded", h(MeetRoom, { ...roomProps, recordAudio: true, viewer: "member" }));
-  draw("room.hostRecorded", h(MeetRoom, { ...roomProps, recordAudio: true, viewer: "host" }));
-  draw("room.visitorPlain", h(MeetRoom, { ...roomProps, recordAudio: false, viewer: "visitor" }));
-  draw("room.memberPlain", h(MeetRoom, { ...roomProps, recordAudio: false, viewer: "member" }));
-  draw("room.endedProp", h(MeetRoom, { ...roomProps, status: "ended", recordAudio: true, viewer: "visitor" }));
+  // Rooms drawn from the props the page's own loader made for a real session and room row (tests/meet-ui.test.ts hands
+  // them in): nothing is set by hand between who is looking and what the screen shows. Only these are drawn.
+  const loaded = process.env.MEET_RENDER_LOADED_ROOMS;
+  if (loaded) {
+    for (const [name, props] of Object.entries(JSON.parse(loaded) as Record<string, object>)) draw(`loaded.${name}`, h(MeetRoom, props as never));
+    process.stdout.write(JSON.stringify({ markup: out }));
+    return;
+  }
+
+  // The pre-join screen, as the server draws it for each kind of person and room. `viewer` is how the page sees
+  // them (the name field, the host controls); `creator` is whether they made the room, which alone decides the
+  // recording notice: a second host is a "host" viewer who did not make it.
+  draw("room.visitorRecorded", h(MeetRoom, { ...roomProps, recordAudio: true, viewer: "visitor", creator: false }));
+  draw("room.memberRecorded", h(MeetRoom, { ...roomProps, recordAudio: true, viewer: "member", creator: false }));
+  draw("room.creatorRecorded", h(MeetRoom, { ...roomProps, recordAudio: true, viewer: "host", creator: true }));
+  draw("room.secondHostRecorded", h(MeetRoom, { ...roomProps, recordAudio: true, viewer: "host", creator: false }));
+  draw("room.visitorPlain", h(MeetRoom, { ...roomProps, recordAudio: false, viewer: "visitor", creator: false }));
+  draw("room.memberPlain", h(MeetRoom, { ...roomProps, recordAudio: false, viewer: "member", creator: false }));
+  draw("room.creatorPlain", h(MeetRoom, { ...roomProps, recordAudio: false, viewer: "host", creator: true }));
+  draw("room.secondHostPlain", h(MeetRoom, { ...roomProps, recordAudio: false, viewer: "host", creator: false }));
+  draw("room.endedProp", h(MeetRoom, { ...roomProps, status: "ended", recordAudio: true, viewer: "visitor", creator: false }));
 
   // The ending screens, every reason, for a guest and for a host.
   for (const reason of ["left", "host_ended", "removed", "room_closed"] as MeetEndReason[]) {
@@ -140,6 +154,7 @@ async function main() {
   const base = {
     list: { status: "loading" as const },
     recordingAvailable: true,
+    mediaNotReady: false,
     start: none,
     later: { title: "", startsAt: "", minutes: "", record: true, ...none },
     del: noDelete,
@@ -230,6 +245,10 @@ async function main() {
   };
   draw("panel.mixedAvailable", panel({ list: mixed, recordingAvailable: true }, slot));
   draw("panel.mixedUnavailable", panel({ list: mixed, recordingAvailable: false }, slot));
+  // Video calls cannot connect yet (the list said mediaReady false): the line at the top, Start now and Create link
+  // switched off, the meetings as they were.
+  draw("panel.mediaNotReady", panel({ list: mixed, mediaNotReady: true }, slot));
+  draw("panel.mediaNotReadyEmpty", panel({ list: { status: "ready", rows: [] }, mediaNotReady: true }));
   draw("panel.noRecording", panel({ recordingAvailable: false }));
   draw("panel.noRecordingMadeStart", panel({ recordingAvailable: false, start: { busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: true, recorded: false } } }));
   draw("panel.madeRecorded", panel({ later: { title: "", startsAt: "", minutes: "", record: true, busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: false, recorded: true } } }));

@@ -30,14 +30,20 @@ export type MeetRoomProps = {
   title: string;
   status: "scheduled" | "live" | "ended";
   recordAudio: boolean;
+  /** Decides the name field and the host controls. */
   viewer: MeetViewer;
+  /**
+   * This person made the room: the only one who does not tick the recording notice (a second host does). Decided by
+   * the page from the session and the room (app/meet/[code]/load.ts meetCreatorFor), never from `viewer`.
+   */
+  creator: boolean;
   /** Made for the host in a recorded room once they are in the call. */
   recorder?: () => RecorderPort;
 };
 
 const IN_CALL = new Set(["joining", "waiting_for_host", "connecting", "live"]);
 
-export function MeetRoom({ code, title, status, recordAudio, viewer, recorder }: MeetRoomProps) {
+export function MeetRoom({ code, title, status, recordAudio, viewer, creator, recorder }: MeetRoomProps) {
   // One controller for the life of the page. `recorder` is read once, when the room is made.
   const [controller] = useState(() => createMeetRoomController({ code, recorder }));
   const snapshot = useSyncExternalStore(controller.subscribe, controller.snapshot, controller.snapshot);
@@ -51,7 +57,7 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, recorder }:
   const consentRef = useRef<HTMLInputElement>(null);
 
   const failure = phase.kind === "failed" ? phase.error : null;
-  const needs = preJoinNeeds({ viewer, recordAudio, failedCode: phase.kind === "failed" ? (phase.code ?? null) : null });
+  const needs = preJoinNeeds({ viewer, creator, recordAudio, failedCode: phase.kind === "failed" ? (phase.code ?? null) : null });
   const needsNotice = needs.notice;
   const nameRequired = needs.name;
   const devicesOpen = mayAskForDevices({ needsNotice, ticked: consent });

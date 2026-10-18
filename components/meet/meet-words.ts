@@ -13,8 +13,8 @@ export const MEET_BRAND = "Oasis Meet";
  */
 export const RECORDING_NOTICE = "This meeting is recorded and transcribed so the host has notes of it.";
 export const CONSENT_LABEL = "I agree to this meeting being recorded.";
-/** What a host reads where a guest would read the notice: they do not tick it, they run the recording. */
-export const HOST_RECORDING_LINE = "This meeting is recorded and transcribed. Guests agree to this before they join.";
+/** What the room's creator reads where everyone else reads the notice: they do not tick it, they run the recording. */
+export const CREATOR_RECORDING_LINE = "This meeting is recorded and transcribed. Guests agree to this before they join.";
 
 export const TICK_FIRST = "Tick the box above to set up your camera and microphone.";
 export const DEVICES_BUTTON = "Turn on camera and microphone";

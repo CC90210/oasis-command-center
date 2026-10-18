@@ -14,9 +14,10 @@ import { loadMeetPage, sessionOrVisitor } from "./load";
  * records; everything after the first screen comes from /api/meet/<code>/*, which checks a participant token
  * or the host's session on every call (lib/meet/handlers.ts). It draws without the app shell (lib/os/full-bleed.ts).
  *
- * Who is looking decides one thing: a host and a member of the room's workspace may leave their name empty (the
- * server uses their account), a visitor must give one, and in a recorded room everyone but the host ticks the
- * recording notice before the camera step appears (components/meet/notice.ts).
+ * Who is looking decides two things: a host and a member of the room's workspace may leave their name empty (the
+ * server uses their account) and a visitor must give one; and whether they made the room decides the recording
+ * notice: in a recorded room everyone but its creator, a second host too, ticks it before the camera step appears
+ * (components/meet/notice.ts).
  */
 
 export const dynamic = "force-dynamic";

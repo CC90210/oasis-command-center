@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { createClient } from "@libsql/client";
 import ts from "typescript";
-import { loadMeetPage, meetViewerFor, sessionOrVisitor } from "../app/meet/[code]/load";
+import { loadMeetPage, meetCreatorFor, meetViewerFor, sessionOrVisitor } from "../app/meet/[code]/load";
 import { deviceWords, listInputs, openDevices, problemOf } from "../components/meet/devices";
 import { messageFor } from "../components/calendar/useCalendarData";
 import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody } from "../components/meet/meet-api";
@@ -33,6 +33,9 @@ import {
   ALREADY_DELETED,
   DELETE_FAILED,
   LENGTH_CHOICES,
+  MADE_BOX_LATER,
+  MADE_BOX_START,
+  MEDIA_NOT_READY,
   NAME_MAX_CHARS,
   NO_CONNECTION,
   STATUS_WORDS,
@@ -83,12 +86,16 @@ async function check(name: string, fn: () => Promise<void> | void) {
   }
 }
 
-function renderMarkup(): Record<string, string> {
+/**
+ * The server-rendered screens (tests/meet-ui.render.ts). With `loaded` (room props the page's own loader made), draws
+ * only those rooms, under `loaded.<name>`: the loader's answer and the real room, with nothing set by hand between.
+ */
+function renderMarkup(loaded?: Record<string, object>): Record<string, string> {
   const r = spawnSync(process.execPath, ["--import", "tsx", "tests/meet-ui.render.ts"], {
     cwd: root,
     encoding: "utf8",
     // CI sets NODE_OPTIONS=--conditions=react-server for the whole step; react-dom/server refuses to load under it.
-    env: { ...process.env, NODE_OPTIONS: "" },
+    env: { ...process.env, NODE_OPTIONS: "", ...(loaded ? { MEET_RENDER_LOADED_ROOMS: JSON.stringify(loaded) } : {}) },
     maxBuffer: 32 * 1024 * 1024,
   });
   assert.equal(r.status, 0, `render failed: ${r.stderr}`);
@@ -163,12 +170,12 @@ async function main() {
 
   // ---- the gate --------------------------------------------------------------------------------------------------
 
-  await check("the recording notice rule: everyone but the host, in a recorded room; the camera step waits for the tick", () => {
-    for (const viewer of ["visitor", "member"] as const) {
-      assert.equal(needsRecordingNotice({ viewer, recordAudio: true }), true, viewer);
-      assert.equal(needsRecordingNotice({ viewer, recordAudio: false }), false, `${viewer}, not recorded`);
+  await check("the recording notice rule: everyone but the room's creator, in a recorded room; the camera step waits for the tick", () => {
+    assert.equal(needsRecordingNotice({ creator: true, recordAudio: true }), false, "the creator chose to record: they are told, they do not tick it");
+    assert.equal(needsRecordingNotice({ creator: false, recordAudio: true }), true, "anyone else, a second host included");
+    for (const creator of [true, false]) {
+      assert.equal(needsRecordingNotice({ creator, recordAudio: false }), false, `a room that does not record has no notice (creator ${creator})`);
     }
-    assert.equal(needsRecordingNotice({ viewer: "host", recordAudio: true }), false, "a host runs the recording, they do not tick it");
     assert.equal(mayAskForDevices({ needsNotice: true, ticked: false }), false, "notice shown, not ticked: no camera");
     assert.equal(mayAskForDevices({ needsNotice: true, ticked: true }), true);
     assert.equal(mayAskForDevices({ needsNotice: false, ticked: false }), true, "no notice to tick: the camera step is open");
@@ -183,18 +190,20 @@ async function main() {
   });
 
   await check("a refused join shows the field the server asked for, read from its code, not its words", () => {
-    assert.deepEqual(preJoinNeeds({ viewer: "host", recordAudio: true, failedCode: null }), { notice: false, name: false });
-    assert.deepEqual(preJoinNeeds({ viewer: "visitor", recordAudio: true, failedCode: null }), { notice: true, name: true });
-    // A host whose session ran out is refused as a guest: the tick and the name come back.
-    assert.deepEqual(preJoinNeeds({ viewer: "host", recordAudio: true, failedCode: "consent_required" }), { notice: true, name: false });
-    assert.deepEqual(preJoinNeeds({ viewer: "host", recordAudio: false, failedCode: "name_required" }), { notice: false, name: true });
-    assert.deepEqual(preJoinNeeds({ viewer: "member", recordAudio: false, failedCode: "room_full" }), { notice: false, name: false }, "any other failure asks for nothing more");
+    assert.deepEqual(preJoinNeeds({ viewer: "host", creator: true, recordAudio: true, failedCode: null }), { notice: false, name: false }, "the creator");
+    assert.deepEqual(preJoinNeeds({ viewer: "host", creator: false, recordAudio: true, failedCode: null }), { notice: true, name: false }, "a second host: the notice, but their account name will do");
+    assert.deepEqual(preJoinNeeds({ viewer: "visitor", creator: false, recordAudio: true, failedCode: null }), { notice: true, name: true });
+    // The creator whose session ran out is refused as a guest: the tick and the name come back.
+    assert.deepEqual(preJoinNeeds({ viewer: "host", creator: true, recordAudio: true, failedCode: "consent_required" }), { notice: true, name: false });
+    assert.deepEqual(preJoinNeeds({ viewer: "host", creator: true, recordAudio: false, failedCode: "name_required" }), { notice: false, name: true });
+    assert.deepEqual(preJoinNeeds({ viewer: "member", creator: false, recordAudio: false, failedCode: "room_full" }), { notice: false, name: false }, "any other failure asks for nothing more");
     const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
     assert.doesNotMatch(room, /=== meetErrorWords\(/, "no decision is made by comparing words");
+    assert.match(room, /preJoinNeeds\(\{ viewer, creator, recordAudio, failedCode:/, "the notice is decided by whether they made the room, handed down from the page");
   });
 
-  await check("(a) a visitor or member in a recorded room: the notice and a required unticked box come first; nothing asks for the camera", () => {
-    for (const id of ["room.visitorRecorded", "room.memberRecorded"]) {
+  await check("(a) a visitor, a member or a second host in a recorded room: the notice and a required unticked box come first; nothing asks for the camera", () => {
+    for (const id of ["room.visitorRecorded", "room.memberRecorded", "room.secondHostRecorded"]) {
       const html = markup[id];
       const words = text(html);
       assert.ok(words.includes("This meeting is recorded and transcribed so the host has notes of it."), `${id}: the notice, word for word`);
@@ -225,7 +234,7 @@ async function main() {
     }
   });
 
-  await check("(a) a visitor must give a name; a member may leave it empty (the server uses their account)", () => {
+  await check("(a) a visitor must give a name; a member or a second host may leave it empty (the server uses their account)", () => {
     const visitorName = tags(markup["room.visitorRecorded"], "input").find((t) => t.includes('id="meet-name"')) ?? "";
     assert.match(visitorName, /\brequired=""/);
     assert.ok(text(markup["room.visitorRecorded"]).includes("Your name"));
@@ -235,10 +244,13 @@ async function main() {
     assert.ok(text(markup["room.memberRecorded"]).includes("Your name (optional)"));
     assert.ok(text(markup["room.memberRecorded"]).includes("Leave it empty to use your account name."));
     assert.match(memberName, new RegExp(`maxLength="${NAME_MAX_CHARS}"`), "the box stops at the length the server keeps");
+    const hostName = tags(markup["room.secondHostRecorded"], "input").find((t) => t.includes('id="meet-name"')) ?? "";
+    assert.doesNotMatch(hostName, /\brequired=""/, "a second host's account name will do, though they still tick the notice");
+    assert.ok(text(markup["room.secondHostRecorded"]).includes("Your name (optional)"));
   });
 
-  await check("(b) a host sees no tick, no gate, and is told the meeting records", () => {
-    const html = markup["room.hostRecorded"];
+  await check("(b) the room's creator sees no tick, no gate, and is told the meeting records", () => {
+    const html = markup["room.creatorRecorded"];
     const words = text(html);
     assert.ok(!/type="checkbox"/.test(html), "no checkbox");
     assert.ok(!words.includes("I agree"), "nothing to agree to");
@@ -250,7 +262,7 @@ async function main() {
   });
 
   await check("a room that does not record has no notice for anyone, and the camera step is open", () => {
-    for (const id of ["room.visitorPlain", "room.memberPlain"]) {
+    for (const id of ["room.visitorPlain", "room.memberPlain", "room.creatorPlain", "room.secondHostPlain"]) {
       const html = markup[id];
       assert.ok(!/type="checkbox"/.test(html), `${id}: no tick`);
       assert.ok(!text(html).includes("recorded"), `${id}: nothing says it records`);
@@ -261,7 +273,7 @@ async function main() {
   });
 
   await check("the camera step is a button: the page never asks the browser on its own (no autostart in the markup)", () => {
-    for (const html of [markup["room.hostRecorded"], markup["room.visitorPlain"]]) {
+    for (const html of [markup["room.creatorRecorded"], markup["room.visitorPlain"]]) {
       assert.equal(count(html, /<video\b/g), 0, "no preview until the person turns the camera on");
       assert.ok(buttonNames(html).includes(DEVICES_BUTTON));
     }
@@ -297,6 +309,25 @@ async function main() {
     assert.equal(got.mic, aTrack);
     assert.equal(got.cam, vTrack);
     assert.deepEqual(got.problems, {});
+  });
+
+  await check("a second host in a recorded room is held at the gate like a guest: the notice, no camera step, and getUserMedia is not called until the tick; the creator is asked for none of it", async () => {
+    // The real chain: who they are -> the rule -> the gate -> what openDevices does with the browser (counted at getUserMedia).
+    const asked = async (creator: boolean, ticked: boolean) => {
+      const needsNotice = preJoinNeeds({ viewer: "host", creator, recordAudio: true, failedCode: null }).notice;
+      const allowed = mayAskForDevices({ needsNotice, ticked });
+      const browser = standIn(() => streamOf(true, true));
+      await openDevices({ allowed, media: browser.media, want: { mic: true, cam: true } });
+      return { needsNotice, allowed, getUserMediaCalls: browser.calls.length };
+    };
+    assert.deepEqual(await asked(false, false), { needsNotice: true, allowed: false, getUserMediaCalls: 0 }, "a second host before the tick: the browser is not asked");
+    assert.deepEqual(await asked(false, true), { needsNotice: true, allowed: true, getUserMediaCalls: 1 }, "after it, once");
+    assert.deepEqual(await asked(true, false), { needsNotice: false, allowed: true, getUserMediaCalls: 1 }, "the creator has nothing to tick");
+    // The screens say the same: the second host reads the notice and waits for the tick; the creator is told and may go on.
+    const second = text(markup["room.secondHostRecorded"]);
+    assert.ok(second.includes(RECORDING_NOTICE) && second.includes(CONSENT_LABEL) && second.includes(TICK_FIRST) && !second.includes(DEVICES_BUTTON), "second host: notice, tick, no camera step");
+    const creator = text(markup["room.creatorRecorded"]);
+    assert.ok(!creator.includes(RECORDING_NOTICE) && !creator.includes(CONSENT_LABEL) && !creator.includes(TICK_FIRST) && creator.includes(DEVICES_BUTTON), "creator: no notice, no tick, the camera step open");
   });
 
   await check("openDevices asks for only what was wanted, and for the device the person picked", async () => {
@@ -646,6 +677,53 @@ async function main() {
     assert.match(panel, /laterBody\(\{[^}]*\bavailability\b[^}]*\}\)/);
   });
 
+  // ---- video calls may not be switched on yet ------------------------------------------------------------------------------------
+
+  /** The attributes of the button whose words are `label`, as the server draws it. */
+  const buttonAttrs = (html: string, label: string) => [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].find((m) => text(m[2]) === label)?.[1] ?? "";
+
+  await check("video calls not switched on yet: one plain line at the top, Start now and Create link switched off (not hidden) and pointing at it; the meetings, Delete included, stay as they are", () => {
+    const LINE = "Video calls are not switched on yet. They start working once the video service is connected, a one-time step for an owner.";
+    assert.equal(MEDIA_NOT_READY, LINE, "the words are exactly these");
+    const off = markup["panel.mediaNotReady"];
+    // The line: once, a status, at the very top of the panel.
+    assert.equal(count(off, /data-media-note/g), 1);
+    assert.ok(text(off).startsWith(LINE), "the first thing on the panel");
+    assert.match(tags(off, "p").find((t) => t.includes("data-media-note")) ?? "", /role="status"/);
+    // Switched off, not hidden, and each says why by pointing at the line.
+    for (const label of ["Start a meeting now", "Create link"]) {
+      const attrs = buttonAttrs(off, label);
+      assert.match(attrs, /\bdisabled=""/, `${label}: switched off`);
+      assert.ok(attrs.includes('aria-describedby="meet-media-note"'), `${label}: pointing at the line that says why`);
+      const on = buttonAttrs(markup["panel.mixedAvailable"], label);
+      assert.ok(on.length > 0 && !/\bdisabled=""/.test(on) && !on.includes("aria-describedby"), `${label}: on, and pointing at nothing, when the list has not said false`);
+    }
+    // Create link has no switched-off look of its own in the stylesheet (.btn-primary has one), so the panel gives it one.
+    assert.ok(buttonAttrs(off, "Create link").includes("disabled:opacity-50") && buttonAttrs(off, "Create link").includes("disabled:cursor-not-allowed"), "and it looks switched off");
+    // The dialog's first focus goes to Start now only while it is on: a disabled button cannot take it.
+    assert.doesNotMatch(buttonAttrs(off, "Start a meeting now"), /data-autofocus/);
+    assert.match(buttonAttrs(markup["panel.mixedAvailable"], "Start a meeting now"), /data-autofocus/);
+    // The rest of the panel is as it was: every meeting, its links, and Delete on the ones that are the person's.
+    assert.equal(count(off, /<li\b/g), 5);
+    assert.equal(count(off, />Copy link</g), 5);
+    assert.deepEqual([...off.matchAll(/data-delete="([^"]+)"/g)].map((m) => m[1]), ["m1", "m3", "m4"]);
+    assert.ok(!/<button\b[^>]*data-delete="[^"]*"[^>]*\bdisabled=""/.test(off) && !/<button\b[^>]*data-first="[^"]*"[^>]*\bdisabled=""/.test(off), "no meeting's button is switched off");
+    assert.ok(text(markup["panel.mediaNotReadyEmpty"]).includes("No meetings yet. Start one above."), "the empty list still reads as it did");
+    // No other screen carries the line.
+    for (const id of ["panel.loading", "panel.error", "panel.empty", "panel.mixedAvailable", "panel.mixedUnavailable", "panel.startMade"]) {
+      assert.ok(!markup[id].includes("meet-media-note") && !text(markup[id]).includes("not switched on"), `${id}: no line`);
+    }
+    // The list's flag decides it, and nothing else: before the list answers, or when it failed, the buttons stay on
+    // and the server decides (its refusal shows the same line: panelErrorWords).
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.match(panel, /const mediaNotReady = load\.status === "ready" && !load\.mediaReady;/, "off only once the list has said false");
+    assert.match(panel, /mediaReady: res\.value\.mediaReady/, "read from the list");
+    assert.match(panel, /if \(startBusy \|\| mediaNotReady\) return;/, "Start now does nothing while off, not even open a tab");
+    assert.match(panel, /if \(laterBusy \|\| mediaNotReady\) return;/, "and neither does a form submitted with Enter");
+    // When the list says so after the panel opened, the Start button it focused goes off and focus must not leave the panel.
+    assert.match(panel, /querySelector<HTMLElement>\("\[data-media-note\]"\)\?\.focus\(\)/, "focus goes to the line, not out of the panel");
+  });
+
   // ---- transcripts are opened on purpose, one at a time --------------------------------------------------------------------------
 
   /** The meetings (by id) whose Transcript button a screen draws, and the dashed codes its transcript boxes were asked for. */
@@ -739,10 +817,29 @@ async function main() {
     // The only place a transcript is asked for is the open row's box.
     assert.equal(count(panel, /renderEnded\?\.\(/g), 1, "one call, inside that box");
     assert.equal(count(panel, /renderEnded\(/g), 0, "and no other");
-    // The box can open below what a phone shows, so the panel scrolls it into view (less motion if asked for), by the same id.
-    assert.match(panel, /getElementById\(transcriptBoxId\(transcriptOpen\)\)\?\.scrollIntoView\(\{ block: "nearest"/, "scroll to the open box, by the least amount");
-    assert.match(panel, /prefers-reduced-motion: reduce/, "and without the animation for a person who asked for less motion");
+    // The box can open below what a phone shows, so it is brought into view (the next check), by the same id.
+    assert.match(panel, /if \(transcriptOpen !== null\) bringIntoView\(transcriptBoxId\(transcriptOpen\)\);/, "an opened transcript is brought into view");
     assert.equal(count(panel, /transcriptBoxId\(/g), 2, "one call names a row's box (its id and its button's aria-controls), one names the box to scroll to");
+  });
+
+  await check("a box that opens below its button is brought into view by the least scrolling, once per new link: the transcript, Create link's link, and Start now's link when its tab was blocked", () => {
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    // One mechanism: one place scrolls, by the least amount, and without the animation for a person who asked for less motion.
+    assert.equal(count(panel, /scrollIntoView\(/g), 1, "one place scrolls");
+    assert.match(panel, /getElementById\(id\)\?\.scrollIntoView\(\{ block: "nearest"/, "by the least amount, and a box already in view stays where it is");
+    assert.match(panel, /prefers-reduced-motion: reduce/, "with none of the animation for a person who asked for less motion");
+    // Who asks for it, and what it hangs on.
+    assert.match(panel, /if \(transcriptOpen !== null\) bringIntoView\(transcriptBoxId\(transcriptOpen\)\);\s*\}, \[transcriptOpen\]\);/, "an opened transcript, when one opens");
+    assert.match(panel, /if \(created\) bringIntoView\(MADE_BOX_LATER\);\s*\}, \[created\]\);/, "Create link's link, once per new link: it hangs on the made object, which only a new link replaces");
+    assert.match(panel, /if \(started && !started\.opened\) bringIntoView\(MADE_BOX_START\);\s*\}, \[started\]\);/, "Start now's link, only when its tab was blocked (otherwise the person is in the new tab)");
+    // The boxes carry the ids it scrolls to, with the room to leave below them, and they do not exist before a link is made.
+    assert.equal(MADE_BOX_START, "meet-made-start");
+    assert.equal(MADE_BOX_LATER, "meet-made-later");
+    for (const [screen, box] of [["panel.startMade", MADE_BOX_START], ["panel.startBlocked", MADE_BOX_START], ["panel.laterAdded", MADE_BOX_LATER], ["panel.laterNoLine", MADE_BOX_LATER]] as const) {
+      assert.equal(count(markup[screen], new RegExp(`id="${box}"`, "g")), 1, `${screen}: one box with its id`);
+      assert.match(markup[screen], new RegExp(`<div id="${box}" class="scroll-mb-4 rounded-lg`), `${screen}: and room left below it`);
+    }
+    for (const screen of ["panel.loading", "panel.rows", "panel.mixedAvailable", "panel.empty"]) assert.ok(!markup[screen].includes("meet-made-"), `${screen}: no box before a link is made`);
   });
 
   await check("a meeting just made says what the server did about recording; the list parser reads the whole link only if it is one", () => {
@@ -1059,10 +1156,10 @@ async function main() {
     assert.equal((await load(dashed)).kind, "room");
   });
 
-  await check("the loader: the room's props are the five the screen needs, and never the workspace, the host or a lead", async () => {
+  await check("the loader: the room's props are the six the screen needs, and never the workspace, the host or a lead", async () => {
     const data = await load(dashed);
     assert.ok(data.kind === "room");
-    assert.deepEqual(data.props, { code: dashed, title: "Quarterly review", status: "scheduled", recordAudio: true, viewer: "visitor" });
+    assert.deepEqual(data.props, { code: dashed, title: "Quarterly review", status: "scheduled", recordAudio: true, viewer: "visitor", creator: false });
     const json = JSON.stringify(data);
     for (const secret of [OASIS, CC, "tenant", "hostUser", "leadId", "lead-secret-1"]) assert.ok(!json.includes(secret), `the props leak ${secret}`);
     const other = await load(displayMeetCode(plain.code));
@@ -1082,6 +1179,69 @@ async function main() {
     assert.equal(await viewerOf(as(REP, OTHER, true)), "visitor", "signed in to ANOTHER workspace is a visitor, admin or not");
     assert.equal(await viewerOf(signedOut), "visitor");
     assert.equal(meetViewerFor({ ok: false }, { tenantId: OASIS, hostUserId: CC }), "visitor");
+  });
+
+  await check("the loader: `creator` is the person who made the room, signed in to its own workspace, and nobody else", async () => {
+    const read = async (session: Session) => {
+      const data = await load(dashed, session);
+      assert.ok(data.kind === "room");
+      return { creator: data.props.creator, viewer: data.props.viewer };
+    };
+    assert.deepEqual(await read(as(CC)), { creator: true, viewer: "host" }, "the room's creator");
+    assert.deepEqual(await read(as(CC, OASIS, true)), { creator: true, viewer: "host" }, "the creator who is also an admin");
+    assert.deepEqual(await read(as(ADON, OASIS, true)), { creator: false, viewer: "host" }, "a second host: another owner or admin of the workspace is a host, but not the creator");
+    assert.deepEqual(await read(as(REP)), { creator: false, viewer: "member" }, "a member");
+    // The same user id signed in to ANOTHER workspace is not the creator, whatever their role there: a user id alone is never enough.
+    assert.deepEqual(await read(as(CC, OTHER)), { creator: false, viewer: "visitor" }, "the creator's user id in another workspace");
+    assert.deepEqual(await read(as(CC, OTHER, true)), { creator: false, viewer: "visitor" }, "...even as an admin there");
+    assert.deepEqual(await read(signedOut), { creator: false, viewer: "visitor" }, "signed out");
+    // The helper alone, against the same row shape.
+    const row = { tenantId: OASIS, hostUserId: CC };
+    assert.equal(meetCreatorFor({ ok: true, tenantId: OASIS, userId: CC, isTrueAdmin: false }, row), true);
+    assert.equal(meetCreatorFor({ ok: true, tenantId: OTHER, userId: CC, isTrueAdmin: true }, row), false, "the tenant is part of the rule");
+    assert.equal(meetCreatorFor({ ok: true, tenantId: OASIS, userId: ADON, isTrueAdmin: true }, row), false);
+    assert.equal(meetCreatorFor({ ok: false }, row), false);
+    // The unrecorded room reads the same: who made it does not depend on whether it records.
+    const plainData = await load(displayMeetCode(plain.code), as(CC));
+    assert.ok(plainData.kind === "room" && plainData.props.creator === true && plainData.props.recordAudio === false);
+    // It is one yes or no: even the creator's props carry no user or workspace id for the client to compare.
+    const mine = JSON.stringify(await load(dashed, as(CC)));
+    assert.ok(!mine.includes(CC) && !mine.includes(OASIS), "no ids in the creator's props");
+  });
+
+  await check("the seam: what the page's own loader makes of a real session and room, drawn by the real room: a second host reads the notice and waits for the tick, the creator does not", async () => {
+    // Every kind of person, on a recorded room and on one that does not record. The props are exactly what the loader
+    // answered; nothing is set by hand between who is looking and what the screen shows (the bug lived in this seam).
+    const who: Record<string, Session> = { creator: as(CC), secondHost: as(ADON, OASIS, true), member: as(REP), creatorIdElsewhere: as(CC, OTHER), visitor: signedOut };
+    const props: Record<string, object> = {};
+    for (const [name, session] of Object.entries(who)) {
+      for (const [room, code] of [["recorded", dashed], ["plain", displayMeetCode(plain.code)]] as const) {
+        const data = await load(code, session);
+        assert.ok(data.kind === "room", `${name} / ${room}`);
+        props[`${room}.${name}`] = data.props;
+      }
+    }
+    const drawn = renderMarkup(props);
+    const screen = (key: string) => {
+      const html = drawn[`loaded.${key}`];
+      assert.ok(html, `${key} was drawn`);
+      const words = text(html);
+      return {
+        notice: words.includes(RECORDING_NOTICE),
+        tick: tags(html, "input").some((t) => t.includes('id="meet-consent"')),
+        cameraStep: words.includes(DEVICES_BUTTON),
+        waitsForTick: words.includes(TICK_FIRST),
+      };
+    };
+    // A recorded room: only its creator is told and may go on. Everyone else, a second host included, reads the notice, and the camera waits.
+    assert.deepEqual(screen("recorded.creator"), { notice: false, tick: false, cameraStep: true, waitsForTick: false }, "the creator");
+    for (const name of ["secondHost", "member", "creatorIdElsewhere", "visitor"]) {
+      assert.deepEqual(screen(`recorded.${name}`), { notice: true, tick: true, cameraStep: false, waitsForTick: true }, `${name}: the notice, and no camera step until the tick`);
+    }
+    // A room that does not record has no notice for anyone.
+    for (const name of Object.keys(who)) {
+      assert.deepEqual(screen(`plain.${name}`), { notice: false, tick: false, cameraStep: true, waitsForTick: false }, `plain.${name}`);
+    }
   });
 
   await check("the loader: an ended room is the plain ended page, whoever opens it", async () => {
@@ -1171,7 +1331,12 @@ async function main() {
     assert.equal(page.words, "Something went wrong. Try again.", "a page of server text never reaches the screen");
     assert.equal(await words(0, null, true), "No connection. Check it and try again.");
     assert.equal(await words(201, { ok: true, room: { id: 1 } }), "Something went wrong. Try again.", "201 with a body that is not a meeting");
-    assert.equal(panelErrorWords(503, "meet_not_configured"), meetErrorWords("meet_not_configured"));
+    // Video not connected yet: the panel says what to do about it, in the same words as its own line; the room page
+    // keeps its own, shorter words for a guest, who can do nothing about it.
+    assert.equal(await words(503, { ok: false, error: "meet_not_configured" }), "Video calls are not switched on yet. They start working once the video service is connected, a one-time step for an owner.");
+    assert.equal(panelErrorWords(503, "meet_not_configured"), MEDIA_NOT_READY);
+    assert.equal(meetErrorWords("meet_not_configured"), "Meetings are not set up yet. Ask the host to finish the setup.", "the room page's own words for a guest");
+    assert.notEqual(MEDIA_NOT_READY, meetErrorWords("meet_not_configured"));
   });
 
   await check("listMeetings reads whether recording runs, and says false unless the server says true", async () => {
@@ -1187,9 +1352,26 @@ async function main() {
     for (const odd of ["true", 1, "yes", null, {}, []]) assert.equal(await read({ recordingAvailable: odd }), false, `${JSON.stringify(odd)} is not true`);
     const both = await listMeetings(fakeFetch({ status: 200, json: { ok: true, rooms, recordingAvailable: true } }).fetch);
     assert.ok(both.ok && both.value.rooms.length === 2, "the meetings come with it");
-    assert.deepEqual(parseRoomList({ rooms: [], recordingAvailable: true }), { rooms: [], recordingAvailable: true });
-    assert.deepEqual(parseRoomList({ rooms: [] }), { rooms: [], recordingAvailable: false });
+    assert.deepEqual(parseRoomList({ rooms: [], recordingAvailable: true }), { rooms: [], recordingAvailable: true, mediaReady: false });
+    assert.deepEqual(parseRoomList({ rooms: [] }), { rooms: [], recordingAvailable: false, mediaReady: false });
     assert.equal(parseRoomList({ recordingAvailable: true }), null, "no rooms list is not a list");
+  });
+
+  await check("listMeetings reads whether video calls can connect, and says false unless the server says true", async () => {
+    const rooms = [roomJson()];
+    const read = async (extra: Record<string, unknown>) => {
+      const res = await listMeetings(fakeFetch({ status: 200, json: { ok: true, rooms, ...extra } }).fetch);
+      assert.ok(res.ok);
+      return res.value.mediaReady;
+    };
+    assert.equal(await read({ mediaReady: true }), true);
+    assert.equal(await read({ mediaReady: false }), false);
+    assert.equal(await read({}), false, "a missing field is false, the same as recordingAvailable");
+    for (const odd of ["true", 1, "yes", null, {}, []]) assert.equal(await read({ mediaReady: odd }), false, `${JSON.stringify(odd)} is not true`);
+    // The two flags are read on their own.
+    const mixed = await listMeetings(fakeFetch({ status: 200, json: { ok: true, rooms, recordingAvailable: true, mediaReady: false } }).fetch);
+    assert.ok(mixed.ok && mixed.value.recordingAvailable === true && mixed.value.mediaReady === false);
+    assert.deepEqual(parseRoomList({ rooms: [], mediaReady: true }), { rooms: [], recordingAvailable: false, mediaReady: true });
   });
 
   await check("the recent list: the API's meetings, or plain words when it cannot", async () => {

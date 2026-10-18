@@ -32,8 +32,11 @@ export async function sessionOrVisitor(
   }
 }
 
-/** The props of components/meet/MeetRoom.tsx that come from the room. */
-export type MeetPageProps = { code: string; title: string; status: MeetRoomStatus; recordAudio: boolean; viewer: MeetViewer };
+/**
+ * The props of components/meet/MeetRoom.tsx that come from the room. `viewer` decides the name field and the host
+ * controls; `creator` decides the recording notice (Quebec Law 25), which is the room's creator's alone to skip.
+ */
+export type MeetPageProps = { code: string; title: string; status: MeetRoomStatus; recordAudio: boolean; viewer: MeetViewer; creator: boolean };
 
 export type MeetPageData =
   | { kind: "not_found" }
@@ -51,6 +54,16 @@ export function meetViewerFor(session: SessionLike, room: Pick<MeetRoom, "tenant
   return role === "host" ? "host" : role === "guest" ? "member" : "visitor";
 }
 
+/**
+ * Did this person make the room? Signed in to the room's own workspace, with the user id that created it. Only
+ * they run the recording and skip the recording notice; a second host (another owner or admin) is a host for the
+ * controls but ticks the notice like everyone else. The same rule as the server's join (lib/meet/handlers.ts
+ * handleJoin), and a user id alone is never enough: the same id signed in to ANOTHER workspace is not the creator.
+ */
+export function meetCreatorFor(session: SessionLike, room: Pick<MeetRoom, "tenantId" | "hostUserId">): boolean {
+  return session.ok && session.tenantId === room.tenantId && session.userId === room.hostUserId;
+}
+
 export async function loadMeetPage(
   rawCode: string,
   deps: { db: () => Client; session: () => Promise<SessionLike> },
@@ -62,7 +75,9 @@ export async function loadMeetPage(
   if (rawCode !== dashed) return { kind: "redirect", to: `/meet/${dashed}` };
   const room = await readMeetRoomByCode(deps.db(), code);
   if (!room) return { kind: "not_found" };
-  const viewer = meetViewerFor(await deps.session(), room);
+  const session = await deps.session();
+  const viewer = meetViewerFor(session, room);
   if (room.status === "ended") return { kind: "ended", viewer };
-  return { kind: "room", props: { code: dashed, title: room.title, status: room.status, recordAudio: room.recordAudio, viewer } };
+  const creator = meetCreatorFor(session, room);
+  return { kind: "room", props: { code: dashed, title: room.title, status: room.status, recordAudio: room.recordAudio, viewer, creator } };
 }

@@ -6,7 +6,8 @@
  *
  * THE ORDER IS THE RULE. The notice and its tick come first in the markup and the camera step is not drawn at
  * all until `devicesOpen` is true (components/meet/notice.ts mayAskForDevices), so nothing on this screen asks
- * for the camera or microphone before a guest has been told the meeting is recorded and has agreed.
+ * for the camera or microphone before anyone but the room's creator (a second host included) has been told the
+ * meeting is recorded and has agreed.
  *
  * Presentational: MeetRoom owns the state, so a join that fails comes back to this screen with the name, the
  * tick and the camera preview as they were. Validation is ours (noValidate), so the words match the server's.
@@ -17,7 +18,7 @@ import { Mic, MicOff, Video, VideoOff } from "lucide-react";
 import { meetErrorWords } from "@/lib/meet/room-client";
 import { FOCUS } from "./meet-classes";
 import { NAME_MAX_CHARS } from "./meet-format";
-import { CONSENT_LABEL, DEVICES_BUTTON, DEVICES_OPTIONAL, HOST_RECORDING_LINE, MEET_BRAND, RECORDING_NOTICE, TICK_FIRST } from "./meet-words";
+import { CONSENT_LABEL, CREATOR_RECORDING_LINE, DEVICES_BUTTON, DEVICES_OPTIONAL, MEET_BRAND, RECORDING_NOTICE, TICK_FIRST } from "./meet-words";
 import { TrackVideo } from "./TrackVideo";
 import type { JoinDevices } from "./useJoinDevices";
 
@@ -121,7 +122,7 @@ export function PreJoin(props: PreJoinProps) {
               ) : null}
             </fieldset>
           ) : props.recordAudio ? (
-            <p className="rounded-lg border border-hairline bg-bg-panel px-4 py-3 text-sm leading-relaxed text-fg-muted">{HOST_RECORDING_LINE}</p>
+            <p className="rounded-lg border border-hairline bg-bg-panel px-4 py-3 text-sm leading-relaxed text-fg-muted">{CREATOR_RECORDING_LINE}</p>
           ) : null}
 
           <div>
