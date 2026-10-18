@@ -114,7 +114,7 @@ function guard(req: NextRequest, rawCode: string, kind: Parameters<typeof meetRa
 }
 
 /** The SFU client, or null when meetings are not set up: cutting media then has nothing to cut. */
-function sfuIfConfigured(deps: MeetDeps): SfuClient | null {
+function sfuIfConfigured(deps: Pick<MeetDeps, "sfu">): SfuClient | null {
   try {
     return deps.sfu();
   } catch (err) {
@@ -125,9 +125,10 @@ function sfuIfConfigured(deps: MeetDeps): SfuClient | null {
 
 /**
  * A call can connect: the video service (the Cloudflare Realtime app) is set up, and so is the participant token's
- * secret, without which nobody can join. A meeting is only made, and only offered, where both are.
+ * secret, without which nobody can join. A meeting is only made, and only offered, where both are. A booking asks it
+ * too (`meetMediaReady(liveMeetDeps())`) and gives the lead a Google Meet link instead when it is false.
  */
-const mediaReady = (deps: MeetDeps) => meetTokenConfigured() && sfuIfConfigured(deps) !== null;
+export const meetMediaReady = (deps: Pick<MeetDeps, "sfu">): boolean => meetTokenConfigured() && sfuIfConfigured(deps) !== null;
 
 let noSfuLogged = false;
 
@@ -243,7 +244,7 @@ export async function handleListRooms(deps: MeetDeps): Promise<NextResponse> {
       recordingAvailable,
       // Until the video service is set up the panel says so and offers no meeting to make: nobody sends a client a
       // link that fails when they open it.
-      mediaReady: mediaReady(deps),
+      mediaReady: meetMediaReady(deps),
     });
   } catch (err) {
     return meetFailure(err, "rooms.list");
@@ -256,7 +257,7 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
     const session = await deps.session();
     if (!session.ok) return meetError(401, "sign_in_required");
     // A meeting whose call cannot connect is never made: no link goes out that fails when it is opened.
-    if (!mediaReady(deps)) return meetError(503, "meet_not_configured");
+    if (!meetMediaReady(deps)) return meetError(503, "meet_not_configured");
     const body = parseCreateRoom(await readCappedJson(req, 4_000));
     if (!body) return meetError(400, "invalid_body");
     // A room records only where recording really happens (an OASIS workspace with recording installed): guests

@@ -21,7 +21,7 @@ import { NextRequest } from "next/server";
 import { publicAppBaseUrl } from "../lib/api-helpers";
 import { MEET_COOKIE, MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } from "../lib/meet/access";
 import { parseHost, parseSfu } from "../lib/meet/bodies";
-import { deleteMeetRoom, handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
+import { deleteMeetRoom, handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, meetMediaReady, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
 import { meetRoomUrl } from "../lib/meet/links";
 import {
   MEET_CUT_RETRY_MS,
@@ -587,6 +587,8 @@ async function main() {
     const room = await createMeetRoom(db, { tenantId: OASIS, hostUserId: CC, title: "OASIS call with Jane", startsAt, leadId: LEAD });
     assert.deepEqual([room.status, room.leadId, room.startsAt, room.calendarEventId], ["scheduled", LEAD, startsAt, null], "its calendar entries belong to the booking");
     assert.equal(meetRoomUrl(room, "https://oasisai.work/"), `https://oasisai.work/meet/${displayMeetCode(room.code)}`, "the one link the invite, email and calendar file carry");
+    assert.equal(meetMediaReady(deps()), true, "a booking asks the same question the panel does before it hands out a link");
+    assert.equal(meetMediaReady({ sfu: () => { throw new MeetNotConfiguredError("no app"); } }), false, "and gives the lead a Google Meet link when calls cannot connect");
     // Moved: the same link, the new time.
     const later = new Date(Date.parse(startsAt) + 2 * 60 * 60_000).toISOString();
     assert.equal(await rescheduleMeetRoom(db, room, later), true);
