@@ -1160,9 +1160,10 @@ export async function meetRelaySweeps(
  * needs, in every workspace that has any, WITHOUT the PC. A recording the host
  * deleted, or one the PC never came back for, must not wait for the PC to
  * leave the relay (Codex on #685, P1). Handing a recording over stays the PC's
- * claim (finalizeDueRooms): it only means something where a PC takes it. The
- * media sessions ended rooms still hold are cut here too, for every workspace:
- * cutting them must not wait for the PC either.
+ * claim (finalizeDueRooms): it only means something where a PC takes it. A
+ * call every tab left without End is ended here too (endAbandonedRooms), and
+ * the media sessions ended rooms still hold are cut, for every workspace:
+ * neither may wait for the PC.
  */
 export async function meetRelayCron(
   db: Client,

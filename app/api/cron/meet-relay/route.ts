@@ -3,8 +3,9 @@
  * (lib/meet/recording.ts meetRelayCron): a recording the PC never took within
  * its 30 days is expired, and relay audio nobody needs any more (transcribed,
  * expired, deleted by its host, or never handed over and quiet for 30 days) is
- * deleted from R2, up to RELAY_DELETE_BATCH objects per run. The media
- * sessions ended rooms still hold are cut, in every workspace.
+ * deleted from R2, up to RELAY_DELETE_BATCH objects per run. A call every tab
+ * left without End is ended, and the media sessions ended rooms still hold are
+ * cut, in every workspace.
  *
  * Why it exists (Codex on #685, P1): the PC's own claim also does this, but a
  * host's Delete must finish, and a 30-day limit must hold, while that PC is off.
