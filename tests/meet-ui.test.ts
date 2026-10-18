@@ -26,7 +26,7 @@ import { join, relative, sep } from "node:path";
 import { createClient } from "@libsql/client";
 import ts from "typescript";
 import { loadMeetPage, meetCreatorFor, meetViewerFor, sessionOrVisitor } from "../app/meet/[code]/load";
-import { createDeviceRequests, deviceWords, listInputs, openDevices, problemOf } from "../components/meet/devices";
+import { createDeviceRequests, deviceWords, listInputs, openDevices, problemOf, type DeviceAnswer } from "../components/meet/devices";
 import { messageFor } from "../components/calendar/useCalendarData";
 import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody } from "../components/meet/meet-api";
 import {
@@ -358,21 +358,25 @@ async function main() {
     };
   }
   type Browser = ReturnType<typeof lateBrowser>;
-  /** What the hook does at the start of an ask: take a ticket, then wait on the browser. */
-  const requestDevices = (requests: ReturnType<typeof createDeviceRequests>, browser: Browser, want: { mic: boolean; cam: boolean }) => ({
-    ticket: requests.begin(want),
-    answer: openDevices({ allowed: true, media: browser.media, want }),
-  });
+  type Requests = ReturnType<typeof createDeviceRequests>;
+  /** One request as the hook makes it: ask the browser through openDevices, and settle what comes back (devices.ts run). */
+  const requestDevices = (
+    requests: Requests,
+    browser: Browser,
+    want: { mic: boolean; cam: boolean },
+    options: { allowed?: () => boolean; onError?: (err: unknown) => void } = {},
+  ): Promise<DeviceAnswer> =>
+    requests.run(want, () => openDevices({ allowed: true, media: browser.media, want }), options.allowed ?? (() => true), options.onError ?? (() => undefined));
 
   await check("a late answer for the same device is stopped, not held: the newer request wins, whichever answers first", async () => {
     for (const order of [[1, 0], [0, 1]]) {
       const requests = createDeviceRequests();
       const browser = lateBrowser();
       const asks = [requestDevices(requests, browser, { mic: false, cam: true }), requestDevices(requests, browser, { mic: false, cam: true })];
-      const settled: Array<ReturnType<typeof requests.settle>> = [];
+      const settled: DeviceAnswer[] = [];
       for (const answer of order) {
         browser.answer(answer);
-        settled[answer] = requests.settle(asks[answer].ticket, await asks[answer].answer, true);
+        settled[answer] = await asks[answer];
       }
       const label = `answers ${order.join(" then ")}`;
       assert.equal(settled[1].cam?.kind, "video", `${label}: the newer camera is kept`);
@@ -383,20 +387,20 @@ async function main() {
     }
   });
 
-  await check("a late answer after the devices were released, a join, the screen going away or consent withdrawn is stopped; a request made afterwards is wanted again", async () => {
-    // cancel() is what all four do (useJoinDevices.ts).
+  await check("a late answer after the devices were released, the screen going away or consent withdrawn is stopped; a request made afterwards is wanted again", async () => {
+    // cancel() is what all three do (useJoinDevices.ts); a join is not one of them (the next check).
     const requests = createDeviceRequests();
     const browser = lateBrowser();
     const open = requestDevices(requests, browser, { mic: true, cam: true });
     requests.cancel();
     browser.answer(0);
-    const late = requests.settle(open.ticket, await open.answer, true);
+    const late = await open;
     assert.deepEqual([late.mic, late.cam, late.current, late.pending], [null, null, false, false]);
     assert.deepEqual(browser.stops(0), [1, 1], "both of its tracks were stopped");
 
     const again = requestDevices(requests, browser, { mic: true, cam: true });
     browser.answer(1);
-    const fresh = requests.settle(again.ticket, await again.answer, true);
+    const fresh = await again;
     assert.ok(fresh.mic && fresh.cam && fresh.current, "after a cancel the next request counts again");
     assert.deepEqual(browser.stops(1), [0, 0]);
 
@@ -404,14 +408,34 @@ async function main() {
     const withdrawn = requestDevices(requests, browser, { mic: false, cam: true });
     requests.cancel();
     browser.answer(2);
-    assert.equal(requests.settle(withdrawn.ticket, await withdrawn.answer, true).cam, null, "ticked again by the time it arrives, and still not wanted");
+    assert.equal((await withdrawn).cam, null, "ticked again by the time it arrives, and still not wanted");
     assert.deepEqual(browser.stops(2), [1]);
 
     // The gate shut by the time it arrived, with nothing cancelled: not wanted either.
-    const shut = requestDevices(requests, browser, { mic: true, cam: false });
+    const shut = requestDevices(requests, browser, { mic: true, cam: false }, { allowed: () => false });
     browser.answer(3);
-    assert.equal(requests.settle(shut.ticket, await shut.answer, false).mic, null);
+    assert.equal((await shut).mic, null);
     assert.deepEqual(browser.stops(3), [1]);
+  });
+
+  await check("a join that fails keeps a camera answered after it; a join that works still stops it, because release() follows it", async () => {
+    // What MeetRoom.join does, in order: takeForJoin() (copies for the room, nothing cancelled), then controller.join(),
+    // then, only if the join did not fail, release(). The hook itself stays mounted through the call, so it is
+    // release(), not the screen going away, that stops a late answer after a join that worked.
+    const answeredAfterJoin = async (joinWorks: boolean) => {
+      const requests = createDeviceRequests();
+      const browser = lateBrowser();
+      const open = requestDevices(requests, browser, { mic: false, cam: true });
+      if (joinWorks) requests.cancel();
+      browser.answer(0);
+      return { answer: await open, stops: browser.stops(0) };
+    };
+    const failed = await answeredAfterJoin(false);
+    assert.deepEqual([failed.answer.cam?.kind, failed.answer.current], ["video", true], "the join failed: the lobby keeps the camera that was opening");
+    assert.deepEqual(failed.stops, [0], "and it is still running");
+    const worked = await answeredAfterJoin(true);
+    assert.deepEqual([worked.answer.cam, worked.answer.current], [null, false], "the join worked and release() ran: the late camera is not handed back");
+    assert.deepEqual(worked.stops, [1], "it was stopped");
   });
 
   await check("asking for the microphone while the camera is still opening costs neither: the numbers are per device", async () => {
@@ -420,9 +444,9 @@ async function main() {
     const cam = requestDevices(requests, browser, { mic: false, cam: true });
     const mic = requestDevices(requests, browser, { mic: true, cam: false });
     browser.answer(1);
-    const gotMic = requests.settle(mic.ticket, await mic.answer, true);
+    const gotMic = await mic;
     browser.answer(0);
-    const gotCam = requests.settle(cam.ticket, await cam.answer, true);
+    const gotCam = await cam;
     assert.deepEqual([gotMic.mic?.kind, gotCam.cam?.kind], ["audio", "video"]);
     assert.deepEqual([browser.stops(0), browser.stops(1)], [[0], [0]], "nothing was stopped");
     // One request for both, then a newer one for the camera alone: the first loses only its camera.
@@ -430,27 +454,62 @@ async function main() {
     const camAgain = requestDevices(requests, browser, { mic: false, cam: true });
     browser.answer(2);
     browser.answer(3);
-    const first = requests.settle(both.ticket, await both.answer, true);
-    const second = requests.settle(camAgain.ticket, await camAgain.answer, true);
+    const first = await both;
+    const second = await camAgain;
     assert.deepEqual([first.mic?.kind, first.cam, first.current], ["audio", null, true], "its microphone is still wanted, its camera is not");
     assert.deepEqual(browser.stops(2), [0, 1], "audio kept, video stopped");
     assert.equal(second.cam?.kind, "video");
   });
 
-  await check("the hook numbers every request and cancels at release, a join, the screen going away and consent withdrawn", () => {
+  await check("a request whose ask throws still settles: nothing in hand, what it asked for reads \"unknown\", the error is handed on, and the count of open requests goes down", async () => {
+    // openDevices answers with problems instead of throwing, so a throw is a bug or a browser object that misbehaves.
+    // Before this, a request whose ask threw left `pending` up, and the screen waiting on it spun with nothing to wait for.
+    const boom = new Error("the browser object misbehaved");
+    const errors: unknown[] = [];
+    const onError = (err: unknown) => void errors.push(err);
+    const requests = createDeviceRequests();
+    const rejected = await requests.run({ mic: false, cam: true }, async () => { throw boom; }, () => true, onError);
+    assert.deepEqual([rejected.mic, rejected.cam, rejected.current, rejected.pending], [null, null, true, false], "still wanted, nothing held, nothing left open");
+    assert.deepEqual(rejected.problems, { cam: "unknown" }, "only the device it asked for");
+    assert.equal(deviceWords(rejected.problems), "The camera did not start. You can still join without it.", "the person is told, and can try again");
+    // A throw before any await, such as the policy object being read to build the request.
+    const thrown = await requests.run({ mic: true, cam: true }, () => { throw boom; }, () => true, onError);
+    assert.deepEqual([thrown.pending, thrown.current, thrown.problems], [false, true, { mic: "unknown", cam: "unknown" }]);
+    assert.deepEqual(errors, [boom, boom], "both were handed on");
+    // Beside a request that is still open: pending stays up for that one and comes down with it.
+    const browser = lateBrowser();
+    const open = requestDevices(requests, browser, { mic: true, cam: false });
+    const beside = await requests.run({ mic: false, cam: true }, async () => { throw boom; }, () => true, onError);
+    assert.equal(beside.pending, true, "the microphone request is still open");
+    browser.answer(0);
+    const mic = await open;
+    assert.deepEqual([mic.mic?.kind, mic.pending], ["audio", false]);
+    // A report that fails must not leave the count up either: the next request still ends with nothing open.
+    await assert.rejects(requests.run({ mic: true, cam: false }, async () => { throw boom; }, () => true, () => { throw new Error("report failed"); }), /report failed/);
+    const calm = standIn(() => streamOf(true, false));
+    const after = await requests.run({ mic: true, cam: false }, () => openDevices({ allowed: true, media: calm.media, want: { mic: true, cam: false } }), () => true, onError);
+    assert.deepEqual([after.mic?.kind, after.pending], ["audio", false], "nothing is stuck open");
+  });
+
+  await check("the hook opens every request through run and cancels at release, the screen going away and consent withdrawn, never at a join", () => {
     const hook = readFileSync(join(root, "components", "meet", "useJoinDevices.ts"), "utf8");
     assert.match(hook, /const \[requests\] = useState\(createDeviceRequests\);/, "one set of numbers for the life of the screen");
-    assert.match(hook, /const ticket = requests\.begin\(want\);/);
-    assert.match(hook, /const settled = requests\.settle\(ticket, opened, live\.current\.allowed\);/, "what came back is settled against the gate as it is now");
-    assert.match(hook, /setAsking\(settled\.pending\);/, "asking ends with the last open request, not the first");
-    assert.match(hook, /if \(settled\.mic\) hold\("mic", settled\.mic\);/, "only what is wanted is held");
-    assert.match(hook, /if \(settled\.cam\) hold\("cam", settled\.cam\);/);
-    assert.equal(count(hook, /requests\.cancel\(\)/g), 4, "four places cancel");
+    assert.match(hook, /const answer = await requests\.run\(/, "a request is opened only through run, which settles it when the browser answers or throws");
+    assert.doesNotMatch(hook, /requests\.(begin|settle)\(/, "there is no other way to open or close one");
+    assert.match(hook, /\(err\) => reportClientError\("rejection", err\),/, "a request that throws is reported, as the call screen reports its own");
+    assert.match(hook, /\(\) => live\.current\.allowed,/, "the gate is read when the answer arrives");
+    assert.match(hook, /setAsking\(answer\.pending\);/, "asking ends with the last open request, not the first");
+    assert.match(hook, /if \(answer\.mic\) hold\("mic", answer\.mic\);/, "only what is wanted is held");
+    assert.match(hook, /if \(answer\.cam\) hold\("cam", answer\.cam\);/);
+    assert.equal(count(hook, /requests\.cancel\(\)/g), 3, "three places cancel");
     assert.match(hook, /if \(allowed\) return;\s*requests\.cancel\(\);/, "consent withdrawn");
     assert.match(hook, /return \(\) => \{\s*requests\.cancel\(\);\s*store\.mic\?\.stop\(\);/, "the screen going away");
     assert.match(hook, /const release = useCallback\(\(\) => \{\s*requests\.cancel\(\);/, "release");
-    assert.match(hook, /takeForJoin: \(\) => \{\s*requests\.cancel\(\);/, "a join");
-    assert.doesNotMatch(hook, /if \(!live\.current\.allowed\) \{/, "no second, partial check of the gate: settle owns it");
+    assert.match(hook, /takeForJoin: \(\) => \(\{ mic: live\.current\.mic\?\.clone\(\) \?\? null, cam: live\.current\.cam\?\.clone\(\) \?\? null \}\),/, "a join takes copies and cancels nothing");
+    assert.doesNotMatch(hook, /if \(!live\.current\.allowed\) \{/, "no second, partial check of the gate: run owns it");
+    // A join that works is followed by release(), and only a join that works: that is what stops a late answer then.
+    const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
+    assert.match(room, /const held = devices\.takeForJoin\(\);\s*await controller\.join\([^\n]*\);\s*(?:\/\/[^\n]*\s*)*if \(controller\.snapshot\(\)\.phase\.kind !== "failed"\) releaseDevices\(\);/, "release() follows a join that did not fail");
   });
 
   await check("openDevices asks for only what was wanted, and for the device the person picked", async () => {

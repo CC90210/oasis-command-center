@@ -129,52 +129,83 @@ export async function openDevices(input: OpenInput): Promise<OpenedDevices> {
 
 type DeviceKind = "mic" | "cam";
 
-/** What a request for devices was given when it began: a number for each device it asked for, null for one it did not. */
-export type DeviceTicket = { mic: number | null; cam: number | null };
+/** What a finished request hands back. */
+export type DeviceAnswer = {
+  /** The tracks that are still wanted; a track that is not has been stopped. */
+  mic: MediaStreamTrack | null;
+  cam: MediaStreamTrack | null;
+  /** Some device this request asked for is still wanted (not asked for again, not cancelled, the gate still open). */
+  current: boolean;
+  /** Another request is still open. */
+  pending: boolean;
+  /** Why a wanted device did not come back, per device (see OpenedDevices). */
+  problems: OpenedDevices["problems"];
+};
 
 /**
  * Which request for the camera and microphone still counts. A request is an await on the browser (it can sit behind
- * the browser's own prompt), and the person can move on while it is open: ask again, un-tick the notice, Join, leave
- * the page. An answer that arrives after that must not be held, or its camera light stays on with nobody looking at it.
+ * the browser's own prompt), and the person can move on while it is open: ask again, un-tick the notice, leave the
+ * page. An answer that arrives after that must not be held, or its camera light stays on with nobody looking at it.
  *
- * Each request takes a number for each device it asks for. Asking for that device again, or cancel(), makes the
- * number stale, and settle() stops the tracks of a stale answer instead of handing them back. The numbers are per
- * device, so asking for the microphone while the camera is still opening does not cost the person the camera.
+ * A request is opened only through run(), which settles it when the browser answers or throws, so a request that
+ * fails cannot leave the count of open requests up. (A browser that never answers, because the person ignores its
+ * prompt, leaves its request open, which is true: getUserMedia may neither resolve nor reject.) Each request takes a
+ * number for each device it asks for. Asking for that device again, or cancel(), makes the number stale, and the
+ * tracks of a stale answer are stopped instead of handed back. The numbers are per device, so asking for the
+ * microphone while the camera is still opening does not cost the person the camera.
  */
 export type DeviceRequests = {
-  /** A request starts: the ticket it must be settled with. */
-  begin(want: { mic: boolean; cam: boolean }): DeviceTicket;
-  /** Nothing open is wanted any more: devices released, a join took its copies, the screen went away, consent was withdrawn. */
-  cancel(): void;
   /**
-   * An answer came back. The tracks that are still wanted are returned and the others are stopped here. `allowed` is
-   * the recording-notice gate as it is now: if it has closed since the request began, nothing is wanted. `current`
-   * says whether any of the request is still wanted; `pending` whether another request is still open.
+   * One whole request: take the numbers, ask (`ask` is what talks to the browser), settle the answer when it comes.
+   * `allowed` is the recording-notice gate, read when the answer arrives: if it has closed, nothing is wanted.
+   *
+   * It settles when `ask` answers or throws. openDevices answers with problems rather than throwing, so an `ask` that
+   * throws is a bug or a browser object that misbehaves; the error goes to `onError`, nothing is in hand, and every
+   * device asked for reads "unknown" (the person is told it did not start and can try again). The count goes down
+   * either way, so a throw cannot leave `pending` up. An `ask` the browser never answers does not settle, and
+   * `pending` is then rightly true for as long as its prompt is open.
    */
-  settle(
-    ticket: DeviceTicket,
-    opened: OpenedDevices,
-    allowed: boolean,
-  ): { mic: MediaStreamTrack | null; cam: MediaStreamTrack | null; current: boolean; pending: boolean };
+  run(
+    want: { mic: boolean; cam: boolean },
+    ask: () => Promise<OpenedDevices>,
+    allowed: () => boolean,
+    onError: (err: unknown) => void,
+  ): Promise<DeviceAnswer>;
+  /**
+   * Nothing open is wanted any more: the devices were released, the screen went away, or consent was withdrawn.
+   * A join is not one of these: if it fails the person stays on this screen, which is where a late answer belongs.
+   */
+  cancel(): void;
 };
 
 export function createDeviceRequests(): DeviceRequests {
   const latest: Record<DeviceKind, number> = { mic: 0, cam: 0 };
   let open = 0;
   return {
-    begin(want) {
-      open += 1;
-      if (want.mic) latest.mic += 1;
-      if (want.cam) latest.cam += 1;
-      return { mic: want.mic ? latest.mic : null, cam: want.cam ? latest.cam : null };
-    },
     cancel() {
       latest.mic += 1;
       latest.cam += 1;
     },
-    settle(ticket, opened, allowed) {
-      open -= 1;
-      const wanted = (kind: DeviceKind) => allowed && ticket[kind] !== null && ticket[kind] === latest[kind];
+    async run(want, ask, allowed, onError) {
+      open += 1;
+      if (want.mic) latest.mic += 1;
+      if (want.cam) latest.cam += 1;
+      const ticket: Record<DeviceKind, number | null> = { mic: want.mic ? latest.mic : null, cam: want.cam ? latest.cam : null };
+      // Not started, unless the browser says otherwise.
+      let opened: OpenedDevices = {
+        mic: null,
+        cam: null,
+        problems: { ...(want.mic ? { mic: "unknown" as const } : {}), ...(want.cam ? { cam: "unknown" as const } : {}) },
+      };
+      try {
+        opened = await ask();
+      } catch (err) {
+        onError(err);
+      } finally {
+        open -= 1;
+      }
+      const gate = allowed();
+      const wanted = (kind: DeviceKind) => gate && ticket[kind] !== null && ticket[kind] === latest[kind];
       const keep = (kind: DeviceKind): MediaStreamTrack | null => {
         const track = opened[kind];
         if (!track) return null;
@@ -182,7 +213,7 @@ export function createDeviceRequests(): DeviceRequests {
         track.stop();
         return null;
       };
-      return { mic: keep("mic"), cam: keep("cam"), current: wanted("mic") || wanted("cam"), pending: open > 0 };
+      return { mic: keep("mic"), cam: keep("cam"), current: wanted("mic") || wanted("cam"), pending: open > 0, problems: opened.problems };
     },
   };
 }
