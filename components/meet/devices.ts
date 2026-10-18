@@ -8,7 +8,8 @@
  * collection). One device that is missing or busy does not cost the person the other.
  *
  * createDeviceRequests is the other half: an answer from the browser can arrive after the person has moved on
- * (asked again, withdrawn consent, joined, left), and it must then be stopped, not held.
+ * (asked again, withdrawn consent, joined, left), and it must then be stopped, not held. The call does the same for
+ * one device at a time, and for a shared screen (lib/meet/room-client.ts `asks`).
  */
 
 export type DeviceProblem = "not_yet" | "blocked" | "policy" | "none" | "busy" | "unsupported" | "unknown";

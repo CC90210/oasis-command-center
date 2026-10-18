@@ -186,7 +186,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
    * Each ask for the microphone, the camera or a screen takes a number. Asking again, turning it off, or the call
    * ending makes an earlier number stale, and an answer that comes back on a stale number is stopped, never kept:
    * the browser's prompt can sit open, and a light left on by an answer nobody wants any more is a camera running
-   * unseen. The same numbering as the Schedule panel's stale list answers (components/meet/MeetPanel.tsx).
+   * unseen. The same numbering as the Schedule panel's stale list answers (components/meet/MeetPanel.tsx), and
+   * the pre-join screen's twin for its two devices at once (components/meet/devices.ts createDeviceRequests).
    */
   const asks = { mic: 0, cam: 0, screen: 0 };
   const stale = (kind: keyof typeof asks, mine: number) => closed || asks[kind] !== mine;
