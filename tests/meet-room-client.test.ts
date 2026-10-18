@@ -14,7 +14,7 @@
  * Run: node --conditions=react-server --import tsx tests/meet-room-client.test.ts
  */
 import assert from "node:assert/strict";
-import { createMeetRoomController, type MeetRoomController, type RecorderPort } from "../lib/meet/room-client";
+import { createMeetRoomController, type MeetRoomController, type MeetRoomOptions, type RecorderPort } from "../lib/meet/room-client";
 
 let failures = 0;
 async function check(name: string, fn: () => Promise<void>) {
@@ -261,7 +261,28 @@ async function waitFor(what: string, test: () => boolean, ms = 2_000) {
   }
 }
 
-function controller(room: ReturnType<typeof fakeRoom>, extra: { recorder?: () => RecorderPort; gatherMs?: number } = {}) {
+/** A browser whose camera, microphone and screen answers are released by hand, so a test can make one come late. */
+function heldMedia() {
+  const waiting: Array<{ release: () => FakeTrack }> = [];
+  const answer = (kind: "audio" | "video", label: string, wrap: (t: FakeTrack) => unknown) =>
+    new Promise((resolve) => {
+      waiting.push({
+        release: () => {
+          const track = new FakeTrack(kind, label);
+          resolve(wrap(track));
+          return track;
+        },
+      });
+    });
+  const media = {
+    getUserMedia: (c: MediaStreamConstraints) =>
+      answer(c.audio ? "audio" : "video", c.audio ? "mic" : "cam", (t) => ({ getAudioTracks: () => (c.audio ? [t] : []), getVideoTracks: () => (c.video ? [t] : []) })),
+    getDisplayMedia: () => answer("video", "screen", (t) => ({ getVideoTracks: () => [t] })),
+  } as unknown as MeetRoomOptions["media"];
+  return { media, waiting };
+}
+
+function controller(room: ReturnType<typeof fakeRoom>, extra: { recorder?: () => RecorderPort; gatherMs?: number; media?: MeetRoomOptions["media"] } = {}) {
   const peers: FakePeer[] = [];
   const c = createMeetRoomController({
     code: "abc-defg-hjk",
@@ -585,6 +606,45 @@ async function main() {
     assert.equal(room.log.filter((l) => l === "recorder:stop").length, 1, "the recorder is stopped once");
     assert.equal(room.log.filter((l) => l.startsWith("finalize:")).length, 1, "and the PC is told once");
     assert.equal(c.snapshot().phase.kind, "ended");
+  });
+
+  await check("a camera, microphone or screen answered after it stopped being wanted is stopped, never held: no light left on", async () => {
+    // Camera tapped twice: only the second answer is kept.
+    {
+      const room = fakeRoom({ role: "host" });
+      const held = heldMedia();
+      const { c } = controller(room, { media: held.media });
+      await c.join({ consent: true, mic: null, cam: null });
+      await waitFor("live", () => c.snapshot().phase.kind === "live");
+      const first = c.setCam(true);
+      const second = c.setCam(true);
+      await waitFor("two asks", () => held.waiting.length === 2);
+      const a = held.waiting[0].release();
+      const b = held.waiting[1].release();
+      await Promise.all([first, second]);
+      assert.equal(a.readyState, "ended", "the first answer is stopped");
+      assert.equal(b.readyState, "live");
+      assert.equal(c.snapshot().camOn, true);
+      await leaveQuietly(c);
+      assert.equal(b.readyState, "ended");
+    }
+    // Answered after Leave, or after it was turned off again: camera, microphone and screen alike.
+    for (const [ask, then] of [["cam", "leave"], ["mic", "leave"], ["screen", "leave"], ["cam", "off"], ["mic", "off"], ["screen", "off"]] as const) {
+      const room = fakeRoom({ role: "host" });
+      const held = heldMedia();
+      const { c } = controller(room, { media: held.media });
+      await c.join({ consent: true, mic: null, cam: null });
+      await waitFor("live", () => c.snapshot().phase.kind === "live");
+      const asking = ask === "cam" ? c.setCam(true) : ask === "mic" ? c.setMic(true) : c.shareScreen(true);
+      await waitFor("asked", () => held.waiting.length === 1);
+      if (then === "leave") await c.leave();
+      else await (ask === "cam" ? c.setCam(false) : ask === "mic" ? c.setMic(false) : c.shareScreen(false));
+      const late = held.waiting[0].release();
+      await asking;
+      assert.equal(late.readyState, "ended", `${ask} answered after ${then} is stopped`);
+      assert.equal(c.snapshot()[ask === "cam" ? "camOn" : ask === "mic" ? "micOn" : "sharing"], false, `${ask} after ${then}: not on`);
+      if (then === "off") await leaveQuietly(c);
+    }
   });
 
   await check("a recorder that cannot stop cleanly never keeps the call from ending", async () => {

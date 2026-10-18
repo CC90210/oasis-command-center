@@ -182,6 +182,14 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   const local: { mic: MediaStreamTrack | null; cam: MediaStreamTrack | null; screen: MediaStreamTrack | null } = { mic: null, cam: null, screen: null };
   const tx: { mic?: RTCRtpTransceiver; cam?: RTCRtpTransceiver; screen?: RTCRtpTransceiver } = {};
   let micOn = false;
+  /**
+   * Each ask for the microphone, the camera or a screen takes a number. Asking again, turning it off, or the call
+   * ending makes an earlier number stale, and an answer that comes back on a stale number is stopped, never kept:
+   * the browser's prompt can sit open, and a light left on by an answer nobody wants any more is a camera running
+   * unseen. The same numbering as the Schedule panel's stale list answers (components/meet/MeetPanel.tsx).
+   */
+  const asks = { mic: 0, cam: 0, screen: 0 };
+  const stale = (kind: keyof typeof asks, mine: number) => closed || asks[kind] !== mine;
   const pulled = new Map<string, Pulled>();
   const byMid = new Map<string, string>();
   const inFlight = new Set<string>();
@@ -305,6 +313,11 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
 
   function teardown() {
     closed = true;
+    // Any camera, microphone or screen still being asked for is no longer wanted. stale() reads `closed` too; the
+    // numbers also cover a join tried again after a failure, which opens the controller again.
+    asks.mic += 1;
+    asks.cam += 1;
+    asks.screen += 1;
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = null;
     pc?.close();
@@ -609,13 +622,19 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     },
 
     async setMic(on) {
+      if (!on) asks.mic += 1; // a microphone still being asked for is no longer wanted
       if (on && !local.mic) {
+        const mine = ++asks.mic;
+        let got: MediaStreamTrack | null;
         try {
-          local.mic = (await media!.getUserMedia({ audio: true })).getAudioTracks()[0] ?? null;
+          got = (await media!.getUserMedia({ audio: true })).getAudioTracks()[0] ?? null;
         } catch {
+          if (stale("mic", mine)) return;
           notice = "Your microphone is blocked. Allow it in the browser's address bar.";
           return emit();
         }
+        if (stale("mic", mine)) return void got?.stop();
+        local.mic = got;
         if (recorder && local.mic && me) recorder.addTrack({ participantId: me.id, displayName: me.name, track: local.mic });
       }
       if (local.mic) local.mic.enabled = on;
@@ -627,15 +646,21 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     async setCam(on) {
       if (on) {
         if (!local.cam) {
+          const mine = ++asks.cam;
+          let got: MediaStreamTrack | null;
           try {
-            local.cam = (await media!.getUserMedia({ video: true })).getVideoTracks()[0] ?? null;
+            got = (await media!.getUserMedia({ video: true })).getVideoTracks()[0] ?? null;
           } catch {
+            if (stale("cam", mine)) return;
             notice = "Your camera is blocked. Allow it in the browser's address bar.";
             return emit();
           }
+          if (stale("cam", mine)) return void got?.stop();
+          local.cam = got;
         }
         if (tx.cam) await tx.cam.sender.replaceTrack(local.cam);
       } else {
+        asks.cam += 1; // a camera still being asked for is no longer wanted
         if (tx.cam) await tx.cam.sender.replaceTrack(null);
         local.cam?.stop();
         local.cam = null;
@@ -646,18 +671,22 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     async shareScreen(on) {
       if (!pc || phase.kind !== "live") return;
       if (!on) {
+        asks.screen += 1; // a screen still being picked is no longer wanted
         if (tx.screen) await tx.screen.sender.replaceTrack(null);
         local.screen?.stop();
         local.screen = null;
         return emit();
       }
+      const mine = ++asks.screen;
       let track: MediaStreamTrack | null = null;
       try {
         track = (await media!.getDisplayMedia({ video: true, audio: false })).getVideoTracks()[0] ?? null;
       } catch {
         return; // the person closed the picker
       }
+      if (stale("screen", mine) || phase.kind !== "live") return void track?.stop();
       if (!track) return;
+      local.screen?.stop(); // a share already running is replaced, never left running unseen
       local.screen = track;
       // The browser's own "Stop sharing" button ends the track: the room hears about it the same way.
       track.addEventListener("ended", () => {
