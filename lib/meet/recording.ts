@@ -47,6 +47,7 @@ import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant } from "@/lib/storage-helpers";
 import { toolErrorLine } from "@/lib/tools/errors";
 import { LEASE_GUARD, inputHashOf, liveRunnerForTool, sqlPlaceholders } from "@/lib/tools/store";
+import { endAbandonedRooms } from "./participants";
 import { readMeetRoom, type MeetRoom } from "./rooms";
 
 /** The logical bucket the relay copies live in: private (never in PUBLIC_BUCKET_PREFIXES), signed URLs only. */
@@ -1053,8 +1054,14 @@ export async function finalizeDueRooms(
   return handed;
 }
 
-/** The three sweeps, in the order they feed each other. The runner's claim runs them while it serves meetings. */
+/**
+ * The sweeps, in the order they feed each other. The runner's claim runs them while it serves meetings. A call
+ * left with no host and nobody polling (every tab closed without End) is ended first (lib/meet/participants.ts
+ * endAbandonedRooms), so finalizeDueRooms hands its recording over 10 minutes later. Without it such a room stayed
+ * live, was never handed over, and its audio expired untranscribed after 30 days (#687 review, Codex P1).
+ */
 export async function meetRelaySweeps(db: Client, storage: MeetStorage | null, tenantIds: readonly string[], now: Date): Promise<void> {
+  await endAbandonedRooms(db, tenantIds, now);
   await expireUnfinalized(db, tenantIds, now);
   await expireRelay(db, tenantIds, now);
   await finalizeDueRooms(db, tenantIds, now);

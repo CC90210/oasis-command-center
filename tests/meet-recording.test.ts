@@ -1065,6 +1065,32 @@ async function main() {
     assert.equal((await upload(sched, { participant: q, segment: crypto.randomUUID(), seq: 0, startedAt: later(T0, minutes(80_000)).getTime() }, later(T0, minutes(80_001)))).status, 425);
   });
 
+  await check("the PC's claim ends a recorded call whose every tab closed without End, and hands it over 10 minutes later", async () => {
+    // #687 review, Codex P1: such a room stayed live for good, so finalizeDueRooms never saw it and its
+    // audio expired untranscribed after 30 days.
+    const start = later(T0, minutes(90_000));
+    const r = await liveRoom({ at: start });
+    await participant(r, "Conaugh", CC);
+    const guest = await participant(r, "Jordan");
+    // A call happened (the guest was in while the host was), then every tab died two minutes in.
+    await db.execute({
+      sql: "UPDATE meet_participants SET joined_at = ?, last_seen_at = ? WHERE room_id = ?",
+      args: [start.toISOString(), later(start, minutes(2)).toISOString(), r.id],
+    });
+    assert.equal((await upload(r, { participant: guest, segment: crypto.randomUUID(), seq: 0, startedAt: start.getTime() }, later(start, minutes(1)))).status, 201);
+    const room = async () => (await db.execute({ sql: "SELECT status, ended_reason FROM meet_rooms WHERE id = ?", args: [r.id] })).rows[0];
+    // Inside the host's 10-minute grace it is left alone ...
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(8)));
+    assert.equal(String((await room()).status), "live", "a call still inside the host's grace was ended");
+    // ... past it, the sweep ends it ...
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(13)));
+    assert.deepEqual([String((await room()).status), String((await room()).ended_reason)], ["ended", "host_left"]);
+    assert.equal(await rec.readTranscript(db, OASIS, r.id), null, "handed over before the late-chunk window closed");
+    // ... and a sweep 10 minutes after that hands its recording to the PC.
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(24)));
+    assert.equal((await rec.readTranscript(db, OASIS, r.id))?.status, "queued", "the abandoned call's recording was never handed over");
+  });
+
   finish("meet recording");
 }
 
