@@ -24,7 +24,7 @@ import {
   type MeetRoomController,
   type MeetRoomOptions,
 } from "../lib/meet/room-client";
-import { TAB_HANDOVER_MS, browserTabs } from "../lib/meet/tabs";
+import { TAB_ASK_FRESH_MS, TAB_HANDOVER_MS, browserTabs } from "../lib/meet/tabs";
 
 let failures = 0;
 let finished = false;
@@ -867,9 +867,27 @@ async function main() {
     await leaveQuietly(b.c);
   });
 
-  await check("Join here instead waits longer than a join's own deadline, so the tab it asks is never left with no one in the call", () => {
-    assert.ok(TAB_HANDOVER_MS > REQUEST_TIMEOUT_MS, `${TAB_HANDOVER_MS} > ${REQUEST_TIMEOUT_MS}`);
+  await check("Join here instead waits longer than a fresh ask plus a join's own deadline, so the tab it asks is never left with no one in the call", () => {
+    assert.ok(TAB_HANDOVER_MS > TAB_ASK_FRESH_MS + REQUEST_TIMEOUT_MS, `${TAB_HANDOVER_MS} > ${TAB_ASK_FRESH_MS} + ${REQUEST_TIMEOUT_MS}`);
     return Promise.resolve();
+  });
+
+  await check("a hand-over asked for long ago (it reached a tab frozen meanwhile) is ignored: the call goes on, since nobody is waiting to take it", async () => {
+    const code = "tabs-stale-ask";
+    const a = controller(fakeRoom({ role: "host" }), { code });
+    await a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => a.c.snapshot().phase.kind === "live");
+    const asker = new BroadcastChannel(`oasis-meet:${code}`);
+    try {
+      asker.postMessage({ type: "hand-over", at: Date.now() - TAB_ASK_FRESH_MS - 1_000 });
+      await new Promise((r) => setTimeout(r, 60));
+      assert.equal(a.c.snapshot().phase.kind, "live", "a stale ask ends nothing");
+      asker.postMessage({ type: "hand-over", at: Date.now() });
+      await waitFor("a fresh ask is answered", () => a.c.snapshot().phase.kind === "ended");
+      assert.deepEqual(a.c.snapshot().phase, { kind: "ended", reason: "moved" });
+    } finally {
+      asker.close();
+    }
   });
 
   await check("Leave lets go of the room only once the room has heard it, so a tab joining next is never ended by it; every other ending lets go at once", async () => {

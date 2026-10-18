@@ -23,13 +23,20 @@ export type MeetTabs = {
 };
 
 /**
- * How long "Join here instead" waits for the other tab to hand the room over. Longer than a join's own deadline
- * (lib/meet/room-client.ts REQUEST_TIMEOUT_MS): a tab asked while its join is on its way hands over once that join
- * has answered, and this side must still be waiting then, or neither tab would be in the call.
+ * A request this old or more is stale: the tab it reached was frozen meanwhile (a phone's background tab), and the
+ * one that asked has given up. It is ignored, so a call is never ended for a hand-over nobody is waiting for.
+ */
+export const TAB_ASK_FRESH_MS = 3_000;
+
+/**
+ * How long "Join here instead" waits for the other tab to hand the room over: past TAB_ASK_FRESH_MS plus a join's
+ * own deadline (lib/meet/room-client.ts REQUEST_TIMEOUT_MS). A tab asked while its join is on its way hands over once
+ * that join has answered, and this side must still be waiting then, or neither tab would be in the call.
  */
 export const TAB_HANDOVER_MS = 25_000;
 
 const HAND_OVER = "hand-over";
+type HandOverRequest = { type: typeof HAND_OVER; at: number };
 
 export function browserTabs(code: string, handoverMs: number = TAB_HANDOVER_MS): MeetTabs {
   const name = `oasis-meet:${code}`;
@@ -55,7 +62,9 @@ export function browserTabs(code: string, handoverMs: number = TAB_HANDOVER_MS):
       // Without a channel to ask on, the wait still counts: the other tab may be closed meanwhile.
       if (typeof BroadcastChannel !== "undefined") {
         const channel = new BroadcastChannel(name);
-        channel.postMessage(HAND_OVER);
+        // Both tabs are one browser, on one clock: the time it was asked says when the request has gone stale.
+        const ask: HandOverRequest = { type: HAND_OVER, at: Date.now() };
+        channel.postMessage(ask);
         channel.close();
       }
       const giveUp = new AbortController();
@@ -70,7 +79,8 @@ export function browserTabs(code: string, handoverMs: number = TAB_HANDOVER_MS):
       if (typeof BroadcastChannel === "undefined") return () => undefined;
       const channel = new BroadcastChannel(name);
       channel.onmessage = (event: MessageEvent) => {
-        if (event.data === HAND_OVER) listener();
+        const ask = event.data as Partial<HandOverRequest> | null;
+        if (ask?.type === HAND_OVER && typeof ask.at === "number" && Date.now() - ask.at <= TAB_ASK_FRESH_MS) listener();
       };
       return () => channel.close();
     },
