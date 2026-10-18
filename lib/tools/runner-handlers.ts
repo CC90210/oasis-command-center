@@ -65,6 +65,7 @@ import {
   removeRelayChunks,
   type MeetStorage,
 } from "@/lib/meet/recording";
+import type { SfuClient } from "@/lib/meet/sfu";
 import { isRunnerCodeShape, storedRunnerCode, toolErrorLine } from "@/lib/tools/errors";
 import {
   COMPLETE_BODY_MAX_BYTES,
@@ -114,6 +115,8 @@ export type RunnerDeps = {
   storage: ToolStorage | null;
   /** Oasis Meet's relay (lib/meet/recording.ts r2MeetStorage); absent or null: not configured. */
   meetStorage?: MeetStorage | null;
+  /** Oasis Meet's SFU (lib/meet/recording.ts meetSfuIfConfigured), to cut what ended rooms still hold; absent or null: none set. */
+  meetSfu?: SfuClient | null;
 };
 
 /** The workspaces each producer's runner serves. OASIS's own, for now. */
@@ -215,7 +218,7 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
   // answer: a sweep that fails must not stop the claim (it runs again next minute).
   if (tools.some(isSystemRunnerTool)) {
     try {
-      if (await meetRecordingTablesInstalled(deps.db)) await meetRelaySweeps(deps.db, deps.meetStorage ?? null, ident.tenantIds, deps.now);
+      if (await meetRecordingTablesInstalled(deps.db)) await meetRelaySweeps(deps.db, deps.meetStorage ?? null, ident.tenantIds, deps.now, deps.meetSfu ?? null);
     } catch (err) {
       console.error("[tools.claim] the meeting relay sweeps failed", err instanceof Error ? (err.stack ?? err.message) : String(err));
     }

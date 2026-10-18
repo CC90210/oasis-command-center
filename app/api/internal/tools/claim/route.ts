@@ -6,7 +6,7 @@
  * /api/internal/tools/* through and the handler authenticates first. The work
  * is lib/tools/runner-handlers.ts handleToolsClaim.
  */
-import { r2MeetStorage } from "@/lib/meet/recording";
+import { meetSfuIfConfigured, r2MeetStorage } from "@/lib/meet/recording";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { handleToolsClaim, r2ToolStorage } from "@/lib/tools/runner-handlers";
 
@@ -24,6 +24,7 @@ export async function POST(req: Request): Promise<Response> {
       now: new Date(),
       storage: await r2ToolStorage(),
       meetStorage: r2MeetStorage(),
+      meetSfu: meetSfuIfConfigured(),
     });
   } catch (err) {
     console.error("[tools.claim] failed", err instanceof Error ? err.stack : err);
