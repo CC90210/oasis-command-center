@@ -448,6 +448,22 @@ async function testOasisMeetRoomReplacementAndFallback() {
   assert.equal((await appointment(fallback.raw, fallbackMeeting.appointmentId)).meet_room_id, null);
   assert.deepEqual(fallback.calls.createdMeetingLinks, [undefined]);
   assert.equal(fallbackMeeting.receipt.meetLink, "https://meet.google.com/abc-defg-hij");
+  // Moved after Oasis Meet came up: it keeps its Google Meet. A room now would put a second link in an invite that
+  // already carries one.
+  const readyRooms = fakeMeetRooms();
+  const readyDeps = { ...fallback.deps, meetRooms: readyRooms };
+  await activateVerifiedFounderMeeting(TENANT, fallbackMeeting.appointmentId, readyDeps);
+  const kept = await rescheduleVerifiedFounderMeeting({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: fallbackMeeting.appointmentId,
+    requestId: "oasis-room-not-ready-move",
+    meetingAt: LATER,
+  }, readyDeps);
+  assert.equal(readyRooms.calls.created.length, 0, "a Google Meet booking got a room on reschedule");
+  assert.equal(fallback.calls.updatedMeetingLinks.at(-1), undefined);
+  assert.equal(kept.receipt.meetLink, "https://meet.google.com/abc-defg-hij");
+  assert.equal((await appointment(fallback.raw, fallbackMeeting.appointmentId)).meet_room_id, null);
   await fallback.raw.close();
 }
 

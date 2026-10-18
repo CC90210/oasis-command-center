@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Client } from "@libsql/client";
+import { meetGuestFirstName } from "@/lib/meet/guest-name";
 import { deleteMeetRoom, meetMediaReady } from "@/lib/meet/handlers";
 import { meetRoomUrl } from "@/lib/meet/links";
 import { liveMeetDeps } from "@/lib/meet/live-deps";
@@ -32,12 +33,15 @@ export function liveBookingMeetRooms(db: Client): BookingMeetRooms {
   return {
     ready: () => meetMediaReady(meetDeps),
     create: async (input) => {
+      // The title names the lead as the room page's prefill does (one rule, so they never disagree); the booking's
+      // own title is the fallback for a lead record with no name.
+      const firstName = input.leadId ? await meetGuestFirstName(db, { tenantId: input.tenantId, leadId: input.leadId }) : null;
       const room = await createMeetRoom(db, {
         tenantId: input.tenantId,
         hostUserId: input.hostUserId,
         leadId: input.leadId,
         startsAt: input.startsAt,
-        title: input.title,
+        title: firstName ? `OASIS call with ${firstName}`.slice(0, 120) : input.title,
         calendarEventId: null,
         recordAudio: await meetDeps.recording.available(input.tenantId),
       });

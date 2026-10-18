@@ -3,6 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import type { BookingMeetRooms } from "@/lib/booking/meet-room";
+import { firstNameOf } from "@/lib/leads/quick-email-draft";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
@@ -241,9 +242,13 @@ function isGoogleMeetingLink(value: string | null): boolean {
   return /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i.test(value || "");
 }
 
+/**
+ * The room's title when its lead record carries no name (the live port prefers the lead record, through the same
+ * rule as the room page's prefill, lib/meet/guest-name.ts). Only a first name: anyone who holds the link sees it.
+ */
 function bookingMeetRoomTitle(clientName: string): string {
-  const firstName = clientName.trim().split(/\s+/, 1)[0] || "";
-  return (firstName ? `OASIS call with ${firstName}` : "OASIS call").slice(0, 120);
+  const firstName = firstNameOf(clientName, "");
+  return (firstName === "there" ? "OASIS call" : `OASIS call with ${firstName}`).slice(0, 120);
 }
 
 async function storeMeetRoomId(
@@ -363,6 +368,11 @@ async function meetRoomForReschedule(
     return { appointment, meetingLink: fallback, moved: false, created: false, previousRoomId: appointment.meet_room_id };
   }
   const previousRoomId = appointment.meet_room_id;
+  // A meeting booked on Google Meet (before Oasis Meet, or while its media was down) keeps its Google Meet when it
+  // moves: a room now would put a second link in an invite that already carries one.
+  if (!previousRoomId && isGoogleMeetingLink(appointment.google_meet_link)) {
+    return { appointment, moved: false, created: false, previousRoomId: null };
+  }
   if (previousRoomId) {
     const existing = await deps.meetRooms.find(appointment.tenant_id, previousRoomId);
     if (existing && await deps.meetRooms.reschedule(appointment.tenant_id, previousRoomId, startsAt)) {
