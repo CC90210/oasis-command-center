@@ -9,7 +9,7 @@
 # review_harvest.py now reports it as a HIGH finding instead).
 #
 # WHAT. Each PR is reviewed once, when it opens. A later push is reviewed only on request: comment
-# "@coderabbitai review" when the fixes are in and another pass is wanted. Lockfiles stay out of every review.
+# "@coderabbitai review" when the fixes are in and another pass is wanted. package-lock.json stays out of every review.
 reviews:
   auto_review:
     enabled: true
