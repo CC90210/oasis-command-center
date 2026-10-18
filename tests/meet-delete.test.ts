@@ -1,7 +1,7 @@
 /**
  * Delete meeting on e9's real recording code: the wiring the live routes use (lib/meet/recording-deps.ts over
  * lib/meet/recording.ts), on throwaway libSQL files with migrations 206 (tool jobs), 230 and 231, a stand-in R2
- * relay, and no SFU app (so there is no media to cut). tests/meet-room.test.ts holds the routes to their order with
+ * relay, and a stand-in SFU nobody connects to (so there is no media to cut). tests/meet-room.test.ts holds the routes to their order with
  * a stand-in recording; this proves the real one keeps it:
  *  - before migration 231, recording is unavailable: the panel is told so, a room never records, and a delete has
  *    nothing to remove;
@@ -19,6 +19,7 @@ import { NextRequest } from "next/server";
 import { OASIS, USERS, check, emptyDatabase, finish, scalar, setupToolsDatabase } from "./_tools-harness";
 import type { MeetDeps, MeetSession } from "../lib/meet/handlers";
 import type { MeetStorage } from "../lib/meet/recording";
+import type { SfuClient } from "../lib/meet/sfu";
 
 const ROOT = join(__dirname, "..");
 const ORIGIN = "https://oasisai.work";
@@ -54,7 +55,7 @@ function relay() {
 
 async function main() {
   console.log("meet delete (real recording):");
-  const { MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } = await import("../lib/meet/access");
+  const { MEET_TOKEN_SECRET_ENV } = await import("../lib/meet/access");
   const { handleCreateRoom, handleHost, handleJoin, handleListRooms } = await import("../lib/meet/handlers");
   const { meetRecordingDeps } = await import("../lib/meet/recording-deps");
   const { acceptChunk, ensureTranscriptJob } = await import("../lib/meet/recording");
@@ -65,9 +66,8 @@ async function main() {
   const as = (userId: string, tenantId = OASIS) => async (): Promise<MeetSession> => ({ ok: true, tenantId, userId, isTrueAdmin: false, email: "cc@oasisai.work" });
   const depsFor = (db: Client, storage: MeetStorage) => (session: () => Promise<MeetSession>): MeetDeps => ({
     db,
-    sfu: () => {
-      throw new MeetNotConfiguredError("no SFU app in this test");
-    },
+    // Set up (a meeting is only made where its call can connect), but never asked: nobody here opens a session.
+    sfu: () => ({}) as SfuClient,
     session,
     ice: async () => [],
     schedule: async () => ({ ok: false, reason: "no_calendar" }),

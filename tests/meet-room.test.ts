@@ -201,6 +201,12 @@ async function main() {
     assert.equal(list.find((r) => r.code === code)?.url, room.url, "the list carries the same whole link");
     const reps = (await json(await handleListRooms(deps({ session: as(REP) })))).rooms as Json[];
     assert.deepEqual(reps.map((r) => r.title), ["Rep's own"], "a member who is not an admin sees only the meetings they made");
+    assert.equal((await json(await handleListRooms(deps({ session: as(CC) })))).mediaReady, true, "the video service is set up");
+    const noApp = deps({ session: as(CC), sfu: () => { throw new MeetNotConfiguredError("no app"); } });
+    assert.equal((await json(await handleListRooms(noApp))).mediaReady, false, "until it is, the panel says so and offers no meeting to make");
+    const refused = await handleCreateRoom(request("/api/calendar/meet", { body: { title: "Too soon" } }), noApp);
+    assert.equal(refused.status, 503);
+    assert.equal((await json(refused)).error, "meet_not_configured", "and the server makes none: no link goes out that fails when it is opened");
   });
 
   await check("the room page may use the camera and microphone; every other page still may not", async () => {
