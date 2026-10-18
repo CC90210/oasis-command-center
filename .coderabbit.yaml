@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit review settings (2026-10-18, CC: stop hitting the review limit, so the work is actually checked).
+#
+# WHY. CodeRabbit's review allowance is per developer, and every agent here pushes as one GitHub user. In the week to
+# 2026-10-18 this repo merged 118 PRs; CodeRabbit's fair-usage policy cut the allowance to 1 review an hour, and every
+# push to an open PR spent one (its default re-reviews each push). 78 of the 118 were never reviewed and 29 more had a
+# later push skipped. A skipped review leaves no threads, so it looked like a clean pass (Business-Empire-Agent
+# review_harvest.py now reports it as a HIGH finding instead).
+#
+# WHAT. Each PR is reviewed once, when it opens. A later push is reviewed only on request: comment
+# "@coderabbitai review" when the fixes are in and another pass is wanted. package-lock.json stays out of every review.
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: false
+  path_filters:
+    - "!**/package-lock.json"
