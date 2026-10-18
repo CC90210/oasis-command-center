@@ -2,8 +2,9 @@
 
 /**
  * components/meet/MeetEnded.tsx - the screen for a meeting that is over, in plain words by why (ENDED_WORDS):
- * the person left or was disconnected (both with Rejoin, which reloads the page: a rejoin ticks the recording
- * notice again, so nothing rejoins anyone by itself), the host ended it, the host removed them, or the room
+ * the person left, was disconnected, or moved the meeting to another tab (all with Rejoin, which reloads the page:
+ * a rejoin ticks the recording notice again, so nothing rejoins anyone by itself, and a tab that moved the meeting
+ * on can take it back from there with "Join here instead"), the host ended it, the host removed them, or the room
  * was already closed when the link was opened. A host also gets the way back to the Schedule.
  *
  * The way back is a plain <a>, not a <Link>: /meet is a page without the app shell, and a soft navigation from
@@ -15,7 +16,7 @@ import { ENDED_WORDS, MEET_BRAND } from "./meet-words";
 
 export function MeetEnded({ reason, isHost, title }: { reason: MeetEndReason; isHost: boolean; title?: string }) {
   // Out of a meeting that may still be going: back in through a fresh join. The other endings are the room's own.
-  const canRejoin = reason === "left" || reason === "dropped";
+  const canRejoin = reason === "left" || reason === "dropped" || reason === "moved";
   return (
     <main className="flex min-h-screen min-h-dvh items-start justify-center bg-bg px-4 py-10 sm:items-center">
       <section className="w-full max-w-md rounded-xl border border-hairline bg-bg-panel p-6">

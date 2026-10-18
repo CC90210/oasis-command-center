@@ -26,7 +26,11 @@ export const ENDED_WORDS: Record<MeetEndReason, string> = {
   dropped: "You were disconnected from the meeting.",
   host_ended: "The host ended the meeting.",
   removed: "The host removed you from this meeting.",
+  moved: "You moved this meeting to another tab.",
   room_closed: "This meeting has ended.",
 };
+
+/** The way past "open in another tab of this browser": the meeting moves to this tab (lib/meet/room-client.ts MeetTabs). */
+export const JOIN_HERE = "Join here instead";
 
 export const WAITING_FOR_HOST = "Waiting for the host to start the meeting.";

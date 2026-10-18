@@ -25,7 +25,7 @@ import { meetErrorWords } from "@/lib/meet/room-client";
 import { waitingWords } from "./devices";
 import { FOCUS } from "./meet-classes";
 import { NAME_MAX_CHARS } from "./meet-format";
-import { CONSENT_LABEL, CREATOR_RECORDING_LINE, DEVICES_BUTTON, DEVICES_OPTIONAL, MEET_BRAND, RECORDING_NOTICE, TICK_FIRST } from "./meet-words";
+import { CONSENT_LABEL, CREATOR_RECORDING_LINE, DEVICES_BUTTON, DEVICES_OPTIONAL, JOIN_HERE, MEET_BRAND, RECORDING_NOTICE, TICK_FIRST } from "./meet-words";
 import { TrackVideo } from "./TrackVideo";
 import type { JoinDevices } from "./useJoinDevices";
 
@@ -53,6 +53,11 @@ export type PreJoinProps = {
   onJoin: () => void;
   /** The way out of waiting on the browser: join now with what is already held, through the same gates as onJoin. */
   onJoinWithout: () => void;
+  /**
+   * Set when the join was refused because this browser has the meeting open in another tab: move it here, through
+   * the same gates as onJoin (lib/meet/room-client.ts MeetTabs).
+   */
+  onJoinHere?: () => void;
 };
 
 const SECONDARY = `inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-hairline bg-bg-raised px-4 text-sm font-medium text-fg hover:bg-bg-elev disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS}`;
@@ -100,6 +105,12 @@ export function PreJoin(props: PreJoinProps) {
           <p role="alert" className="mt-4 rounded-lg border border-status-hot/40 bg-status-hot/10 px-3 py-2 text-sm text-fg">
             {props.error}
           </p>
+        ) : null}
+        {/* Off while the browser's own camera prompt is open, like Join now: the join it starts waits for that answer. */}
+        {props.onJoinHere ? (
+          <button type="button" onClick={props.onJoinHere} disabled={devices.asking} className={`${SECONDARY} mt-2`}>
+            {JOIN_HERE}
+          </button>
         ) : null}
 
         <form

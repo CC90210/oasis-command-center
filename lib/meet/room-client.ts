@@ -22,7 +22,14 @@
  * it has: an End that fails leaves the meeting going and still recorded, where stopping first would lose the rest
  * of the call. The recorder's last chunks go up after the end (the chunk route takes them for ten minutes), and then
  * the PC is told the recording is whole.
+ *
+ * One tab per browser (lib/meet/tabs.ts): a join first holds the room for this tab, and only the tab in the room
+ * tells it this person left.
  */
+
+import { browserTabs, type MeetTabs } from "./tabs";
+
+export type { MeetTabs };
 
 export type MeetRole = "host" | "guest";
 
@@ -43,9 +50,10 @@ export type MeetTile = {
 /**
  * Why the person is out of the call. `dropped`: the room no longer knows them, most often a browser silent past
  * lib/meet/participants.ts MEET_STALE_MS (a laptop asleep); coming back is a new join (Rejoin), whose recording notice
- * the person ticks again, so nothing rejoins them by itself.
+ * the person ticks again, so nothing rejoins them by itself. `moved`: they took the call over in another tab of this
+ * browser ("Join here instead"), which carries on as the same person.
  */
-export type MeetEndReason = "host_ended" | "removed" | "left" | "dropped" | "room_closed";
+export type MeetEndReason = "host_ended" | "removed" | "left" | "dropped" | "moved" | "room_closed";
 
 export type MeetPhase =
   | { kind: "idle" }
@@ -89,8 +97,16 @@ export type RecorderPort = {
 export type MeetRoomController = {
   subscribe(listener: () => void): () => void;
   snapshot(): MeetSnapshot;
-  /** Enter the room with the tracks the pre-join screen already has (either may be null: joined muted or camera off). */
-  join(input: { name?: string; consent: boolean; mic: MediaStreamTrack | null; cam: MediaStreamTrack | null }): Promise<void>;
+  /**
+   * Enter the room with the tracks the pre-join screen already has (either may be null: joined muted or camera off).
+   * `here`: the room is open in another tab of this browser, and the person chose to join here instead (MeetTabs).
+   */
+  join(input: { name?: string; consent: boolean; mic: MediaStreamTrack | null; cam: MediaStreamTrack | null; here?: boolean }): Promise<void>;
+  /**
+   * This tab holds a place in the room: it got in, and has not left or let go. Only then may it tell the room it left
+   * (the page's pagehide beacon): another tab of this browser shares its cookie, and that tab's place must not end.
+   */
+  inRoom(): boolean;
   setMic(on: boolean): Promise<void>;
   setCam(on: boolean): Promise<void>;
   shareScreen(on: boolean): Promise<void>;
@@ -124,6 +140,8 @@ export type MeetRoomOptions = {
   reconnectMs?: number;
   /** This browser's own clock (default Date.now), which the room's clock is reckoned against; tests drive it. */
   now?: () => number;
+  /** One tab per browser in the room (default lib/meet/tabs.ts browserTabs). */
+  tabs?: MeetTabs;
 };
 
 /** `session` is a tag of their current SFU session (never the session itself): it changes when they reconnect. */
@@ -203,6 +221,9 @@ export function meetErrorWords(code: string): string {
       return "Too many tries. Wait a moment and try again.";
     case "sfu_failed":
       return "The video service did not answer. Try again in a moment.";
+    // Not the server's: this browser has the meeting open in another tab (MeetTabs).
+    case "open_in_another_tab":
+      return "This meeting is already open in another tab of this browser.";
     default:
       return "Something went wrong. Try again.";
   }
@@ -220,6 +241,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   const media = options.media ?? (typeof navigator !== "undefined" ? navigator.mediaDevices : undefined);
   const makePeer = options.makePeer ?? ((config: RTCConfiguration) => new RTCPeerConnection(config));
   const localNow = options.now ?? (() => Date.now());
+  const tabs = options.tabs ?? browserTabs(options.code);
   const base = `/api/meet/${options.code}`;
 
   let phase: MeetPhase = { kind: "idle" };
@@ -247,6 +269,30 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   const pulled = new Map<string, Pulled>();
   const byMid = new Map<string, string>();
   const inFlight = new Set<string>();
+  /** This tab's hold on the room while it is in it (MeetTabs), and what stops it listening for a hand-over. */
+  let tabHold: { release(): void } | null = null;
+  let stopListening: (() => void) | null = null;
+  function letTabGo() {
+    stopListening?.();
+    stopListening = null;
+    tabHold?.release();
+    tabHold = null;
+  }
+  /** The Leave on its way: a call is left once, and only that Leave lets go of the room (controller.leave). */
+  let leaving: Promise<void> | null = null;
+  /** This tab's /join is on its way, and another tab asked for the room meanwhile (it is handed over once it answers). */
+  let joinInFlight = false;
+  let handOverAsked = false;
+  /**
+   * Another tab of this browser took the room ("Join here instead"): out of the call, telling the room nothing, and
+   * letting go only once no SFU step of this tab's is still on its way. That tab is now this very participant, and a
+   * session or publish of this one's landing after would act on its session and tracks.
+   */
+  function moved() {
+    if (closed) return;
+    ended("moved");
+    void chain.then(() => letTabGo());
+  }
   let recorder: RecorderPort | null = null;
   /** The room names this browser its recorder: its join said so, then each poll (it can change mid-call). */
   let records = false;
@@ -414,6 +460,10 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     // A room that is over for everyone (a host ended it, or it closed) has its recording finished and handed over;
     // leaving or being removed only stops it (the room's end hands it over later).
     void finishRecording(phase.kind === "ended" && (phase.reason === "host_ended" || phase.reason === "room_closed"));
+    // Another tab of this browser may have the room now. Not yet on Leave: leave() lets go once the room has heard,
+    // since a tab joining in its place before then would come back as the very participant the leave then ends. Nor
+    // on a move: moved() lets go once this tab's SFU steps have answered.
+    if (!(phase.kind === "ended" && (phase.reason === "left" || phase.reason === "moved"))) letTabGo();
   }
 
   /**
@@ -629,7 +679,12 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     emit();
     try {
       await serial(async () => {
+        // Ended while this step waited its turn: no session is asked for at all.
+        if (closed) return;
         await sfu({ action: "session" });
+        // Ended while connecting (left, removed, moved to another tab): nothing more is set up. The room cuts the
+        // session it just made (on the leave, or when the tab that took the meeting over connects in its place).
+        if (closed) return;
         pc?.close();
         pulled.clear();
         byMid.clear();
@@ -648,6 +703,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         if (!micOn) await tx.mic.sender.replaceTrack(null);
         await peer.setLocalDescription(await peer.createOffer());
         await gathered(peer);
+        if (moot(peer)) return;
         const res = await sfu<{ sessionDescription: RTCSessionDescriptionInit | null }>({
           action: "publish",
           offer: { type: "offer", sdp: peer.localDescription?.sdp ?? "" },
@@ -657,10 +713,13 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
             ...(tx.screen ? [{ mid: tx.screen.mid, trackName: TRACK_SCREEN, kind: "video" }] : []),
           ],
         });
+        if (moot(peer)) return;
         if (!res.sessionDescription) throw new Error("no_answer");
         await peer.setRemoteDescription(res.sessionDescription);
         await connected(peer);
       });
+      // A call that ended while it was connecting stays over: it is never brought back to live.
+      if (closed) return;
       reconnects = 0;
       phase = { kind: "live" };
       startRecorder();
@@ -715,7 +774,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     },
     snapshot: () => current,
 
-    async join({ name, consent, mic, cam }) {
+    async join({ name, consent, mic, cam, here }) {
       if (phase.kind !== "idle" && phase.kind !== "failed") return;
       closed = false;
       phase = { kind: "joining" };
@@ -724,8 +783,24 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       local.cam = cam;
       micOn = !!mic;
       emit();
+      // One tab per browser (MeetTabs): another tab of this browser is the same participant, so it would cut this
+      // one's media and record the room twice. It is told so; "Join here instead" (`here`) takes the room over, and the
+      // tab that had it ends as `moved`, telling the room nothing: this one carries on as that participant.
+      const held = here ? await tabs.take() : await tabs.hold();
+      if (closed) return void held?.release();
+      if (!held) return failed(meetErrorWords("open_in_another_tab"), "open_in_another_tab");
+      tabHold = held;
+      // Asked for the room while this join is on its way: hand it over only once the join has answered, and before
+      // setting up any media. Its answer sets the cookie the other tab joins with, so that tab comes in as the
+      // participant this one made (two joins with no cookie would make two), and no SFU step is left to drain.
+      handOverAsked = false;
+      stopListening = tabs.onAskedFor(() => {
+        if (joinInFlight) handOverAsked = true;
+        else moved();
+      });
       try {
         const sent = localNow();
+        joinInFlight = true;
         const asked = call<{
           participantId: string; role: MeetRole; name: string; records?: boolean; serverTime?: number; room: MeetRoomInfo; iceServers: RTCIceServer[];
         }>("/join", {
@@ -733,10 +808,13 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
           consent,
         });
         joinSettled = asked.catch(() => undefined);
-        const res = await asked;
+        const res = await asked.finally(() => {
+          joinInFlight = false;
+        });
         heardTime(res.serverTime, sent, localNow());
         // Left while the join was on its way: the call stays ended, and leave() tells the room now that it can.
         if (closed) return;
+        if (handOverAsked) return moved();
         me = { id: res.participantId, role: res.role, name: res.name };
         records = res.records === true;
         room = res.room;
@@ -894,22 +972,37 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       ended("host_ended");
     },
 
-    async leave() {
-      // Out at once: the camera and microphone stop now, whatever the network does (a dropped network is a common
-      // reason to leave). The room is told after; if that never arrives, it drops anyone who stops polling.
-      ended("left");
-      // A join still on its way makes this person's place when it answers, and only its answer carries the cookie a
-      // leave needs: wait for it (its own deadline bounds the wait), so the room hears who left and frees the place.
-      await joinSettled;
-      const limit = deadline(requestTimeoutMs);
-      try {
-        await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true, signal: limit.signal });
-      } catch {
-        // already out of the call; see above
-      } finally {
-        limit.done();
-      }
+    leave() {
+      // One Leave a call: a second (a double click) waits on the first, which alone lets go of the room once the room
+      // has heard it. Letting go sooner would let another tab of this browser join as this participant first.
+      leaving ??= leaveOnce();
+      return leaving;
     },
+
+    inRoom: () => tabHold !== null && !closed,
   };
+
+  async function leaveOnce(): Promise<void> {
+    // Only a tab in the room tells it so: another tab of this browser shares its cookie, and a leave from a tab that
+    // never got in (or already let go) would end THAT tab's place.
+    const inRoom = controller.inRoom();
+    // Out at once: the camera and microphone stop now, whatever the network does (a dropped network is a common
+    // reason to leave). The room is told after; if that never arrives, it drops anyone who stops polling.
+    ended("left");
+    if (!inRoom) return letTabGo();
+    // A join still on its way makes this person's place when it answers, and only its answer carries the cookie a
+    // leave needs: wait for it (its own deadline bounds the wait), so the room hears who left and frees the place.
+    await joinSettled;
+    const limit = deadline(requestTimeoutMs);
+    try {
+      await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true, signal: limit.signal });
+    } catch {
+      // already out of the call; see above
+    } finally {
+      limit.done();
+      letTabGo();
+    }
+  }
+
   return controller;
 }

@@ -16,7 +16,15 @@
  * Run: node --conditions=react-server --import tsx tests/meet-room-client.test.ts
  */
 import assert from "node:assert/strict";
-import { POLL_TIMEOUT_MS, REQUEST_TIMEOUT_MS, createMeetRoomController, type MeetRoomController, type MeetRoomOptions } from "../lib/meet/room-client";
+import {
+  POLL_TIMEOUT_MS,
+  REQUEST_TIMEOUT_MS,
+  createMeetRoomController,
+  meetErrorWords,
+  type MeetRoomController,
+  type MeetRoomOptions,
+} from "../lib/meet/room-client";
+import { TAB_ASK_FRESH_MS, TAB_HANDOVER_MS, browserTabs } from "../lib/meet/tabs";
 
 let failures = 0;
 let finished = false;
@@ -388,13 +396,63 @@ function heldMedia() {
   return { media, waiting };
 }
 
+/**
+ * Node has Web Locks from 24 only (CI runs 22): there, a stand-in with the same rules is installed for the whole
+ * process, so lib/meet/tabs.ts browserTabs runs unchanged on either. One holder per name; ifAvailable gets null
+ * while it is held; a waiter is handed the lock straight from its holder (nobody can take it in between) and can
+ * give up through its signal (an AbortError, as the browser's).
+ */
+function installLocksWhereMissing() {
+  // MEET_TEST_STAND_IN_LOCKS=1 runs the stand-in on a Node that has its own, to check what CI runs.
+  if (process.env.MEET_TEST_STAND_IN_LOCKS !== "1" && typeof navigator !== "undefined" && navigator.locks) return;
+  const held = new Set<string>();
+  const waiting = new Map<string, Array<() => void>>();
+  const locks = {
+    async request(name: string, options: LockOptions, callback: (lock: Lock | null) => unknown) {
+      if (held.has(name)) {
+        if (options.ifAvailable) return callback(null);
+        await new Promise<void>((resolve, reject) => {
+          const queue = waiting.get(name) ?? [];
+          waiting.set(name, queue);
+          queue.push(resolve);
+          options.signal?.addEventListener("abort", () => {
+            const at = queue.indexOf(resolve);
+            if (at < 0) return;
+            queue.splice(at, 1);
+            reject(new DOMException("The request was aborted.", "AbortError"));
+          });
+        });
+      } else {
+        held.add(name);
+      }
+      try {
+        return await callback({ name, mode: "exclusive" } as Lock);
+      } finally {
+        const next = waiting.get(name)?.shift();
+        if (next) next();
+        else held.delete(name);
+      }
+    },
+    query: async () => ({ held: [], pending: [] }),
+  };
+  Object.defineProperty(navigator, "locks", { value: locks, configurable: true });
+}
+installLocksWhereMissing();
+
+let codes = 0;
+/**
+ * A room code of its own for each controller: the real browserTabs holds a Web Lock per code (Node has them), so each
+ * check's tab holds its own room. The checks about two tabs of one browser pass the same `code` to both.
+ */
+const nextCode = () => `room-${String.fromCharCode(97 + (codes % 26))}${String.fromCharCode(97 + (Math.floor(codes++ / 26) % 26))}`;
+
 function controller(
   room: ReturnType<typeof fakeRoom>,
-  extra: Pick<MeetRoomOptions, "recorder" | "gatherMs" | "media" | "pollTimeoutMs" | "requestTimeoutMs" | "reconnectMs" | "deadline" | "now"> = {},
+  extra: Pick<MeetRoomOptions, "code" | "tabs" | "recorder" | "gatherMs" | "media" | "pollTimeoutMs" | "requestTimeoutMs" | "reconnectMs" | "deadline" | "now"> = {},
 ) {
   const peers: FakePeer[] = [];
   const c = createMeetRoomController({
-    code: "abc-defg-hjk",
+    code: nextCode(),
     fetchImpl: room.fetchImpl,
     pollMs: 10,
     gatherMs: 5,
@@ -553,6 +611,8 @@ async function main() {
     slow.setHostPresent(true);
     const b = controller(slow);
     const joining = b.c.join({ name: "Jane", consent: true, mic: null, cam: null });
+    // The join goes out once this tab holds the room (MeetTabs); Leave comes while it is on its way.
+    await waitFor("the join is on its way", () => slow.signalOf("/join") !== undefined);
     const leaving = b.c.leave();
     assert.deepEqual(b.c.snapshot().phase, { kind: "ended", reason: "left" }, "out at once, before the join answers");
     await leaving;
@@ -565,9 +625,22 @@ async function main() {
     const refused = fakeRoom({ role: "guest", joinDelayMs: 80, refuseJoins: { times: 1, status: 409, error: "room_full" } });
     const d = controller(refused);
     const refusing = d.c.join({ name: "Jane", consent: true, mic: null, cam: null });
+    await waitFor("the join is on its way", () => refused.signalOf("/join") !== undefined);
     await d.c.leave();
     await refusing;
     assert.deepEqual(d.c.snapshot().phase, { kind: "ended", reason: "left" }, "nor does a refusal arriving after Leave turn it into a failed join");
+
+    // Leave before the join went out at all (this tab was still taking hold of the room): nothing is sent, so no
+    // place is made, and no leave either.
+    const early = fakeRoom({ role: "guest" });
+    early.setHostPresent(true);
+    const e = controller(early);
+    const notYet = e.c.join({ name: "Jane", consent: true, mic: null, cam: null });
+    await e.c.leave();
+    await notYet;
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(early.log.filter((l) => l === "join" || l === "leave"), [], "a Leave before the join went out sends nothing");
+    assert.deepEqual(e.c.snapshot().phase, { kind: "ended", reason: "left" });
   });
 
   const REPORT = 'finalize:{"sent":3,"failed":0,"segments":2,"errored":0}';
@@ -721,6 +794,213 @@ async function main() {
     assert.equal(ahead(), HOUR + 600, "a quicker one does");
     assert.equal(clocks.length, 1, "one recorder, which reads the clock each time");
     await leaveQuietly(c);
+  });
+
+  // ONE TAB PER BROWSER (MeetTabs, on Node's own Web Locks and BroadcastChannel): two tabs of one browser share the
+  // room's cookie, so they are one participant, and would cut each other's media and record the room twice.
+  const mic = () => new FakeTrack("audio");
+  const phaseCode = (c: MeetRoomController) => {
+    const p = c.snapshot().phase;
+    return p.kind === "failed" ? p.code : p.kind;
+  };
+
+  await check("a second tab of this browser is told the meeting is open in another tab: it asks the room for nothing, lets go of its microphone, and its Leave says nothing", async () => {
+    const code = "tabs-told";
+    const a = controller(fakeRoom({ role: "host" }), { code });
+    await a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => a.c.snapshot().phase.kind === "live");
+    assert.equal(a.c.inRoom(), true);
+    const roomB = fakeRoom({ role: "host" });
+    const b = controller(roomB, { code });
+    const handed = mic();
+    await b.c.join({ consent: true, mic: handed as unknown as MediaStreamTrack, cam: null });
+    assert.equal(phaseCode(b.c), "open_in_another_tab");
+    assert.equal((b.c.snapshot().phase as { error?: string }).error, meetErrorWords("open_in_another_tab"));
+    assert.ok(!roomB.log.includes("join"), "it asks the room for nothing");
+    assert.equal(handed.readyState, "ended", "and lets go of the microphone it was handed");
+    assert.equal(b.c.inRoom(), false);
+    await b.c.leave();
+    assert.ok(!roomB.log.includes("leave"), "a Leave from a tab that never got in says nothing: it would end the other tab's place");
+    assert.equal(a.c.snapshot().phase.kind, "live", "the first tab is untouched");
+    await leaveQuietly(a.c);
+  });
+
+  await check("Join here instead moves the meeting: the tab that had it ends as moved, tells the room nothing, and its recorder stops without handing over; this tab carries on and records", async () => {
+    const code = "tabs-moved";
+    const events: string[] = [];
+    const roomA = fakeRoom({ role: "host", records: true });
+    const a = controller(roomA, { code, recorder: recorderInto(roomA.log, events) });
+    await a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("recording", () => a.c.snapshot().recording);
+    const roomB = fakeRoom({ role: "host", records: true });
+    const b = controller(roomB, { code, recorder: recorderInto(roomB.log) });
+    await b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    assert.equal(phaseCode(b.c), "open_in_another_tab");
+    await b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null, here: true });
+    await waitFor("this tab is in the call", () => b.c.snapshot().phase.kind === "live");
+    assert.deepEqual(a.c.snapshot().phase, { kind: "ended", reason: "moved" });
+    assert.ok(!roomA.log.includes("leave"), "the tab that had it tells the room nothing: this one carries on as the same participant");
+    assert.ok(events.includes("stop"), "its recorder stopped");
+    assert.ok(!roomA.log.some((l) => l.startsWith("finalize:")), "with nothing handed over: the meeting goes on");
+    assert.equal(b.c.snapshot().recording, true, "and this tab records the room now");
+    assert.deepEqual([a.c.inRoom(), b.c.inRoom()], [false, true]);
+    await leaveQuietly(b.c);
+  });
+
+  await check("Join here instead asked for while the other tab's join is on its way waits for that join: this tab comes in as the participant it made, never as a second", async () => {
+    const code = "tabs-join-on-its-way";
+    const roomA = fakeRoom({ role: "host", joinDelayMs: 80 });
+    const a = controller(roomA, { code });
+    const joiningA = a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("A's join is on its way", () => roomA.signalOf("/join") !== undefined);
+    const roomB = fakeRoom({ role: "host" });
+    const b = controller(roomB, { code });
+    await b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    assert.equal(phaseCode(b.c), "open_in_another_tab");
+    const takingOver = b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null, here: true });
+    await waitFor("this tab asks the room", () => roomB.signalOf("/join") !== undefined, 3_000);
+    assert.ok(roomA.log.includes("join"), "the other tab's join had answered first (its cookie is the one this join carries)");
+    await takingOver;
+    await joiningA;
+    await waitFor("this tab is in the call", () => b.c.snapshot().phase.kind === "live");
+    assert.deepEqual(a.c.snapshot().phase, { kind: "ended", reason: "moved" });
+    assert.ok(!roomA.log.some((l) => l.startsWith("sfu:")), "the tab handing over set up no media it would only hand on");
+    await leaveQuietly(b.c);
+  });
+
+  await check("a hand-over while an SFU step of the other tab is on its way lets go only once that step has answered: a late one would act on this tab's session", async () => {
+    const code = "tabs-sfu-in-flight";
+    const roomA = fakeRoom({ role: "host", delays: { pull: 300 } });
+    const a = controller(roomA, { code });
+    await a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => a.c.snapshot().phase.kind === "live");
+    roomA.others.push({ id: "g1", name: "Guest", role: "guest", tracks: [{ trackName: "mic", kind: "audio" }] });
+    await waitFor("a pull is on its way", () => roomA.busyWith() === "pull");
+    const roomB = fakeRoom({ role: "host" });
+    const b = controller(roomB, { code });
+    await b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    assert.equal(phaseCode(b.c), "open_in_another_tab");
+    const takingOver = b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null, here: true });
+    await waitFor("the other tab has moved on", () => a.c.snapshot().phase.kind === "ended", 3_000);
+    await waitFor("this tab asks the room", () => roomB.signalOf("/join") !== undefined, 3_000);
+    assert.ok(roomA.log.includes("sfu:pull"), "the other tab's pull had answered before this tab asked for anything");
+    assert.ok(!roomA.log.includes("sfu:renegotiate"), "and nothing more of that tab's went to the room after it moved");
+    await takingOver;
+    await waitFor("this tab is in the call", () => b.c.snapshot().phase.kind === "live");
+    await leaveQuietly(b.c);
+  });
+
+  await check("a call ended while it is connecting (Leave on the Connecting screen) stays ended: the connect on its way never brings it back to live", async () => {
+    const room = fakeRoom({ role: "host", delays: { publish: 120 } });
+    const { c } = controller(room);
+    void c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("the publish is on its way", () => room.busyWith() === "publish");
+    await c.leave();
+    await waitFor("the publish has answered", () => room.log.some((l) => l.startsWith("publish:")));
+    await new Promise((r) => setTimeout(r, 40));
+    assert.deepEqual(c.snapshot().phase, { kind: "ended", reason: "left" });
+  });
+
+  await check("Join here instead waits longer than a fresh ask plus a join's own deadline, so the tab it asks is never left with no one in the call", () => {
+    assert.ok(TAB_HANDOVER_MS > TAB_ASK_FRESH_MS + REQUEST_TIMEOUT_MS, `${TAB_HANDOVER_MS} > ${TAB_ASK_FRESH_MS} + ${REQUEST_TIMEOUT_MS}`);
+    return Promise.resolve();
+  });
+
+  await check("a hand-over asked for long ago (it reached a tab frozen meanwhile) is ignored: the call goes on, since nobody is waiting to take it", async () => {
+    const code = "tabs-stale-ask";
+    const a = controller(fakeRoom({ role: "host" }), { code });
+    await a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => a.c.snapshot().phase.kind === "live");
+    const asker = new BroadcastChannel(`oasis-meet:${code}`);
+    try {
+      asker.postMessage({ type: "hand-over", at: Date.now() - TAB_ASK_FRESH_MS - 1_000 });
+      await new Promise((r) => setTimeout(r, 60));
+      assert.equal(a.c.snapshot().phase.kind, "live", "a stale ask ends nothing");
+      asker.postMessage({ type: "hand-over", at: Date.now() });
+      await waitFor("a fresh ask is answered", () => a.c.snapshot().phase.kind === "ended");
+      assert.deepEqual(a.c.snapshot().phase, { kind: "ended", reason: "moved" });
+    } finally {
+      asker.close();
+    }
+  });
+
+  await check("Leave lets go of the room only once the room has heard it, so a tab joining next is never ended by it; every other ending lets go at once", async () => {
+    const code = "tabs-leave";
+    const roomA = fakeRoom({ role: "host", hangLeave: true });
+    const a = controller(roomA, { code, requestTimeoutMs: 150 });
+    await a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => a.c.snapshot().phase.kind === "live");
+    const leaving = a.c.leave();
+    await waitFor("the leave is on its way", () => roomA.log.includes("leave"));
+    assert.equal(a.c.leave(), leaving, "a second Leave (a double click) is the same Leave");
+    assert.equal(await browserTabs(code).hold(), null, "the room has not heard yet: still this tab's, whatever the second Leave");
+    assert.equal(roomA.log.filter((l) => l === "leave").length, 1, "and the room is told once");
+    await leaving; // the leave's own deadline
+    const free = await browserTabs(code).hold();
+    assert.ok(free, "then another tab may have it");
+    free!.release();
+
+    const removedCode = "tabs-removed";
+    const roomR = fakeRoom({ role: "host" });
+    const r = controller(roomR, { code: removedCode });
+    await r.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => r.c.snapshot().phase.kind === "live");
+    roomR.failState(403, "removed");
+    await waitFor("removed", () => r.c.snapshot().phase.kind === "ended");
+    const after = await browserTabs(removedCode).hold();
+    assert.ok(after, "removed: free for another tab at once");
+    after!.release();
+  });
+
+  await check("Join here instead gives up when the other tab never lets go, and says the meeting is still open there", async () => {
+    const code = "tabs-stuck";
+    const stuck = await browserTabs(code).hold(); // a tab that holds the room and never answers
+    assert.ok(stuck);
+    const roomB = fakeRoom({ role: "host" });
+    const b = controller(roomB, { code, tabs: browserTabs(code, 60) });
+    await b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null, here: true });
+    assert.equal(phaseCode(b.c), "open_in_another_tab");
+    assert.ok(!roomB.log.includes("join"));
+    stuck!.release();
+  });
+
+  await check("a browser without Web Locks keeps today's behaviour: no tab is kept out", async () => {
+    const own = Object.getOwnPropertyDescriptor(navigator, "locks");
+    Object.defineProperty(navigator, "locks", { value: undefined, configurable: true });
+    try {
+      const tabs = browserTabs("tabs-no-locks");
+      assert.ok((await tabs.hold()) && (await tabs.hold()), "nothing to hold the room with, so nobody is kept out");
+      assert.ok(await tabs.take());
+    } finally {
+      if (own) Object.defineProperty(navigator, "locks", own);
+      else delete (navigator as { locks?: unknown }).locks;
+    }
+    assert.ok(navigator.locks, "and the browser's own locks are back for the checks after");
+  });
+
+  await check("without a BroadcastChannel to ask on, Join here instead still waits for the room: it gets it once the other tab closes", async () => {
+    const code = "tabs-no-channel";
+    const other = await browserTabs(code).hold();
+    assert.ok(other);
+    const channel = globalThis.BroadcastChannel;
+    (globalThis as { BroadcastChannel?: unknown }).BroadcastChannel = undefined;
+    try {
+      let settled = false;
+      const taking = browserTabs(code, 500)
+        .take()
+        .then((held) => {
+          settled = true;
+          return held;
+        });
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(settled, false, "it waits while the other tab holds the room: it never joins beside it");
+      other!.release(); // the other tab closes
+      const held = await taking;
+      assert.ok(held, "and gets the room as soon as it is free");
+      held!.release();
+    } finally {
+      globalThis.BroadcastChannel = channel;
+    }
   });
 
   await check("an End that fails keeps the call going and recorded, and the room's poll going; the next End finishes it", async () => {
