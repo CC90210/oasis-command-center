@@ -409,6 +409,9 @@ export async function handleAgentBook(req: Request, deps: AgentBookingDeps): Pro
   } catch (error) {
     const code = errorCode(error);
     if (!meeting && CONTACT_ERRORS.has(code)) return bookingAgentRefuse(422, code, { field: "contact" });
+    // This request_id already holds a booking intent with other details (or another host): no retry of it can ever
+    // succeed, so it is a conflict, never a 503 the caller would retry forever (Codex on the booking agent PR).
+    if (!meeting && code === "booking_request_mismatch") return bookingAgentRefuse(409, "booking_request_mismatch");
     console.error("[booking-agent.book] meeting failed", error instanceof Error ? error.message : String(error));
     const compensated = meeting
       ? await deps.compensate({ tenantId, leadId: lead.id, requestId: request.requestId, appointmentId: meeting.appointmentId })

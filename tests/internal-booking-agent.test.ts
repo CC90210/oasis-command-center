@@ -328,6 +328,12 @@ async function testBookFailuresCompensate() {
   assert.deepEqual(transition.calls.compensated, ["appt-1"]);
   assert.deepEqual(transition.calls.activated, [], "an undone booking is never activated");
 
+  // A request_id whose intent holds other details can never book: a permanent 409, not a 503 retried forever.
+  const mismatch = fakeDeps({ createMeeting: async () => { throw new Error("booking_request_mismatch"); } });
+  res = await handleAgentBook(signed("/api/internal/booking/book", BOOK), mismatch.deps);
+  assert.equal(res.status, 409);
+  assert.equal((await json(res)).error, "booking_request_mismatch");
+
   // The slot was taken between the read and the write (the database's overlap guard).
   const raced = fakeDeps({ createMeeting: async () => { throw new Error("meeting_intent_insert_failed: founder_slot_overlap"); } });
   res = await handleAgentBook(signed("/api/internal/booking/book", BOOK), raced.deps);

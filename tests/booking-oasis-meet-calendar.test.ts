@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bookingMeetRoomDeps, bookingMeetRoomTitle, liveBookingMeetRooms } from "../lib/booking/meet-room";
+import { createClient } from "@libsql/client";
+import { bookingMeetRoomDeps, bookingMeetRoomTitle, liveBookingMeetRooms, meetLinkRecords } from "../lib/booking/meet-room";
 import { MEET_RECORDING_NOTICE } from "../lib/meet/recording-notice";
 import {
   createGoogleFounderMeeting,
@@ -194,6 +195,19 @@ function testLivePortUsesTheLeadTitleRule(): void {
   assert.equal(bookingMeetRoomTitle(null, "OASIS call with Fallback"), "OASIS call with Fallback");
 }
 
+async function testCallRecordedReadsOnlyThisWorkspacesRoom(): Promise<void> {
+  // The confirmation's recording notice is read from the room itself, with the workspace in the query.
+  const db = createClient({ url: ":memory:" });
+  await db.execute("CREATE TABLE meet_rooms (tenant_id TEXT NOT NULL, code TEXT NOT NULL, record_audio INTEGER NOT NULL)");
+  await db.execute({ sql: "INSERT INTO meet_rooms VALUES (?, ?, ?), (?, ?, ?)", args: ["t1", "abcdefghjk", 1, "t2", "quietroomz", 0] });
+  assert.equal(await meetLinkRecords(db, "t1", "https://oasisai.work/meet/abc-defg-hjk"), true);
+  assert.equal(await meetLinkRecords(db, "t2", "https://oasisai.work/meet/abc-defg-hjk"), false, "another workspace's room");
+  assert.equal(await meetLinkRecords(db, "t2", "https://oasisai.work/meet/qui-etro-omz"), false, "a room that does not record");
+  assert.equal(await meetLinkRecords(db, "t1", "https://meet.google.com/abc-defg-hjk"), false, "a Google Meet link");
+  assert.equal(await meetLinkRecords(db, "t1", "not a url"), false);
+  await db.close();
+}
+
 function testNoTursoMeansNoRoomPort() {
   // Codex on the booking PR: building the port called getTursoClient(), which throws without Turso, so a Google-only
   // deployment could not book at all. Without Turso the routes get no port and take the Google Meet path.
@@ -223,6 +237,7 @@ async function main() {
   await testRecordedRoomInviteCarriesTheNotice();
   testLivePortUsesTheLeadTitleRule();
   testNoTursoMeansNoRoomPort();
+  await testCallRecordedReadsOnlyThisWorkspacesRoom();
   console.log("booking-oasis-meet-calendar: OK");
 }
 

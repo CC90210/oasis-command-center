@@ -10,7 +10,6 @@ import {
   createMeetRoom,
   parseMeetCode,
   readMeetRoom,
-  readMeetRoomByCode,
   rescheduleMeetRoom,
 } from "@/lib/meet/rooms";
 
@@ -57,6 +56,14 @@ export function bookingMeetRoomDeps(): { meetRooms?: BookingMeetRooms } {
  */
 export async function bookingCallRecorded(tenantId: string, meetUrl: string | null | undefined): Promise<boolean> {
   if (!bookingMeetRoomDeps().meetRooms) return false;
+  return meetLinkRecords(getTursoClient(), tenantId, meetUrl);
+}
+
+/**
+ * The read behind bookingCallRecorded, on a given client. The workspace is in the query itself (every Turso query
+ * names its tenant), so another workspace's room is never read at all (Codex on the booking agent PR).
+ */
+export async function meetLinkRecords(db: Client, tenantId: string, meetUrl: string | null | undefined): Promise<boolean> {
   let code: string | null = null;
   try {
     const parts = new URL(String(meetUrl || "")).pathname.split("/").filter(Boolean);
@@ -66,8 +73,11 @@ export async function bookingCallRecorded(tenantId: string, meetUrl: string | nu
   }
   if (!code) return false;
   try {
-    const room = await readMeetRoomByCode(getTursoClient(), code);
-    return Boolean(room && room.tenantId === tenantId && room.recordAudio);
+    const rs = await db.execute({
+      sql: "SELECT record_audio FROM meet_rooms WHERE tenant_id = ? AND code = ? LIMIT 1",
+      args: [tenantId, code],
+    });
+    return Number(rs.rows[0]?.record_audio) === 1;
   } catch (error) {
     console.error("[booking.call-recorded] room read failed", error instanceof Error ? error.message : String(error));
     return false;
