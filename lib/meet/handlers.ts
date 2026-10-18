@@ -42,11 +42,13 @@ import type { RTCIceServerLike } from "./ice";
 import {
   MEET_MAX_PARTICIPANTS,
   MEET_MAX_TRACKS,
+  creatorInCall,
   deleteMeetRoomRows,
   endAbandonedRooms,
   endMeetRoom,
   expireIfHostGone,
   forgetSession,
+  holdSession,
   isStale,
   joinMeetRoom,
   leaveMeet,
@@ -202,7 +204,11 @@ async function goneMeanwhile(deps: MeetDeps, room: MeetRoom, me: MeetPresence, s
         : !row || row.leftAt
           ? meetError(401, "not_in_room")
           : null;
-  if (why) await cutSession(sfu, sessionId, "sfu.gone_meanwhile");
+  // A re-cut that fails gives the row the id back (the leave, removal or end that came first may have forgotten
+  // it), so the room's tidy-up and its end can still cut what this call added.
+  if (why && !(await cutSession(sfu, sessionId, "sfu.gone_meanwhile")) && nowRoom) {
+    await holdSession(deps.db, room, { participantId: me.id, sessionId });
+  }
   return why;
 }
 
@@ -347,8 +353,9 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
     if (earlier && earlier.roomId === room.id) {
       const before = await readPresence(deps.db, { tenantId: room.tenantId, roomId: room.id, participantId: earlier.participantId });
       if (before?.removedAt) return meetError(403, "removed");
-      if (before && !before.leftAt && before.role === role && !isStale(before, now)) {
-        await touchParticipant(deps.db, before, now);
+      // The touch is the check that counts: a leave or the room's tidy-up landing since the read leaves nothing to
+      // touch, and then this is a new join too.
+      if (before && !before.leftAt && before.role === role && !isStale(before, now) && (await touchParticipant(deps.db, before, now))) {
         return joined(before, room, await deps.ice(), deps.recording.served(room.tenantId));
       }
     }
@@ -404,10 +411,10 @@ export async function handleState(req: NextRequest, rawCode: string, deps: MeetD
       room: roomView(room),
       me: { id: me.id, role: me.role, name: me.displayName },
       hostPresent: present.some((p) => p.role === "host"),
-      // Recording now: the room records and the one browser that records it, its creator's, is in the call. The page
-      // says "recorded" from this, never from a host being present (a second host records nothing).
-      recording:
-        room.recordAudio && deps.recording.served(room.tenantId) && present.some((p) => p.role === "host" && p.userId !== null && p.userId === room.hostUserId),
+      // Recording now: the room records and the one browser that records it, its creator's, is in the call (within
+      // MEET_STALE_MS: a late poll does not stop a recorder). The page says "recorded" from this, never from a host
+      // being present (a second host records nothing).
+      recording: room.recordAudio && deps.recording.served(room.tenantId) && (await creatorInCall(deps.db, room, now)),
       participants: present.map((p) => ({
         id: p.id,
         name: p.displayName,

@@ -103,6 +103,10 @@ export type MeetRoomOptions = {
   /** How long to wait for ICE candidates before sending a description (non-trickle), and for "connected". */
   gatherMs?: number;
   connectMs?: number;
+  /** How long a poll may hang before it counts as failed (default POLL_TIMEOUT_MS). */
+  pollTimeoutMs?: number;
+  /** The wait before the first reconnect try, growing by this much each try (default 1 s). */
+  reconnectMs?: number;
 };
 
 /** `session` is a tag of their current SFU session (never the session itself): it changes when they reconnect. */
@@ -122,6 +126,12 @@ type Pulled = { participantId: string; trackName: string; mid: string | null; tr
  * old ones closed), instead of a track from a session that no longer exists standing in for them all call long.
  */
 const pullKey = (participantId: string, session: string | null, trackName: string) => `${participantId}:${session ?? "-"}:${trackName}`;
+
+/** How long the room's poll waits for an answer before it counts as failed and the next one is scheduled. */
+const POLL_TIMEOUT_MS = 10_000;
+/** Reconnect tries before the call gives up: more when the video service itself refused (it can be a passing blip). */
+const RECONNECT_TRIES = 3;
+const RECONNECT_TRIES_SFU = 6;
 
 const TRACK_MIC = "mic";
 const TRACK_CAM = "cam";
@@ -165,6 +175,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   const pollMs = options.pollMs ?? 2_000;
   const gatherMs = options.gatherMs ?? 3_000;
   const connectMs = options.connectMs ?? 15_000;
+  const pollTimeoutMs = options.pollTimeoutMs ?? POLL_TIMEOUT_MS;
+  const reconnectMs = options.reconnectMs ?? 1_000;
   const media = options.media ?? (typeof navigator !== "undefined" ? navigator.mediaDevices : undefined);
   const makePeer = options.makePeer ?? ((config: RTCConfiguration) => new RTCPeerConnection(config));
   const base = `/api/meet/${options.code}`;
@@ -186,7 +198,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
    * Each ask for the microphone, the camera or a screen takes a number. Asking again, turning it off, or the call
    * ending makes an earlier number stale, and an answer that comes back on a stale number is stopped, never kept:
    * the browser's prompt can sit open, and a light left on by an answer nobody wants any more is a camera running
-   * unseen. The same numbering as the Schedule panel's stale list answers (components/meet/MeetPanel.tsx).
+   * unseen. The same numbering as the Schedule panel's stale list answers (components/meet/MeetPanel.tsx), and
+   * the pre-join screen's twin for its two devices at once (components/meet/devices.ts createDeviceRequests).
    */
   const asks = { mic: 0, cam: 0, screen: 0 };
   const stale = (kind: keyof typeof asks, mine: number) => closed || asks[kind] !== mine;
@@ -234,13 +247,14 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     for (const l of listeners) l();
   }
 
-  async function call<T = Record<string, unknown>>(path: string, body?: unknown, method = "POST"): Promise<T> {
+  async function call<T = Record<string, unknown>>(path: string, body?: unknown, method = "POST", timeoutMs?: number): Promise<T> {
     const res = await fetchImpl(`${base}${path}`, {
       method,
       credentials: "same-origin",
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     let json: Record<string, unknown> = {};
     try {
@@ -380,6 +394,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
 
   async function poll() {
     if (closed) return;
+    // A poll that hangs is abandoned after POLL_TIMEOUT_MS and counted as a failed one: it must never stop the polls
+    // after it, or a person still in the call goes silent to the room (lib/meet/participants.ts MEET_STALE_MS).
     try {
       const state = await call<{
         room: MeetRoomInfo;
@@ -387,7 +403,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         recording?: boolean;
         me: { id: string; role: MeetRole; name: string };
         participants: Array<{ id: string; name: string; role: MeetRole; me: boolean; session?: string | null; tracks: Participant["tracks"] }>;
-      }>("/state", undefined, "GET");
+      }>("/state", undefined, "GET", pollTimeoutMs);
       pollFailures = 0;
       room = state.room;
       me = state.me;
@@ -420,11 +436,25 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     const toDrop = [...pulled.keys()].filter((key) => !wanted.has(key));
     if (toPull.length) {
       for (const [key] of toPull) inFlight.add(key);
-      await serial(() => pull(toPull.map(([, w]) => w))).finally(() => {
+      try {
+        await serial(() => pull(toPull.map(([, w]) => w)));
+      } catch (err) {
+        // The exchange did not finish (an answer the browser or the SFU refused), so no media comes for these:
+        // forget them, and the next poll pulls them again rather than leave the person silent all call long.
+        for (const [key] of toPull) {
+          const entry = pulled.get(key);
+          if (entry?.mid) byMid.delete(entry.mid);
+          pulled.delete(key);
+        }
+        console.error("[meet.room] a pull did not finish; the next poll tries again", err instanceof Error ? err.message : err);
+      } finally {
         for (const [key] of toPull) inFlight.delete(key);
-      });
+      }
     }
-    if (toDrop.length) await serial(() => drop(toDrop));
+    if (toDrop.length) {
+      // What is dropped is already forgotten here; a close the SFU refused only leaves tracks the room's end cuts.
+      await serial(() => drop(toDrop)).catch((err: unknown) => console.error("[meet.room] a close did not finish", err instanceof Error ? err.message : err));
+    }
   }
 
   /** The call ended, or reconnected onto a new connection, while a step was waiting: the step's answer is moot. */
@@ -525,7 +555,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         });
         tx.mic = peer.addTransceiver(local.mic ?? "audio", { direction: "sendonly" });
         tx.cam = peer.addTransceiver(local.cam ?? "video", { direction: "sendonly" });
-        tx.screen = undefined;
+        // A screen shared before a reconnect goes out on the new session too: the person is still told they share it.
+        tx.screen = local.screen ? peer.addTransceiver(local.screen, { direction: "sendonly" }) : undefined;
         if (!micOn) await tx.mic.sender.replaceTrack(null);
         await peer.setLocalDescription(await peer.createOffer());
         await gathered(peer);
@@ -535,6 +566,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
           tracks: [
             { mid: tx.mic.mid, trackName: TRACK_MIC, kind: "audio" },
             { mid: tx.cam.mid, trackName: TRACK_CAM, kind: "video" },
+            ...(tx.screen ? [{ mid: tx.screen.mid, trackName: TRACK_SCREEN, kind: "video" }] : []),
           ],
         });
         if (!res.sessionDescription) throw new Error("no_answer");
@@ -554,7 +586,9 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         return;
       }
       if (err instanceof RoomCallError && err.code === "meet_not_configured") return failed(meetErrorWords(err.code), err.code);
-      if (reconnects < 3) return void reconnect();
+      // A reconnect waits until the old session is cut (the server answers 502 sfu_failed until it is), so the
+      // video service's own refusals get a longer run of tries than anything else.
+      if (reconnects < (err instanceof RoomCallError && err.code === "sfu_failed" ? RECONNECT_TRIES_SFU : RECONNECT_TRIES)) return void reconnect();
       failed("Could not connect to the meeting. Check your connection and try again.");
     }
   }
@@ -565,7 +599,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     notice = "Reconnecting...";
     phase = { kind: "joining" };
     emit();
-    await new Promise((r) => setTimeout(r, 1_000 * reconnects));
+    await new Promise((r) => setTimeout(r, reconnectMs * reconnects));
     // Left (or removed) during the wait: the call stays ended.
     if (closed) return;
     phase = { kind: "waiting_for_host" };
@@ -614,10 +648,9 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       } catch (err) {
         const code = err instanceof RoomCallError ? err.code : "unknown";
         if (code === "removed") return ended("removed");
-        phase = { kind: "failed", error: meetErrorWords(code), code };
-        for (const t of [local.mic, local.cam]) t?.stop();
-        local.mic = local.cam = null;
-        emit();
+        // The same end as any other failure: the tracks handed in are stopped, and a camera or microphone asked for
+        // while the join was on its way is no longer wanted (its answer is stopped, even after a join tried again).
+        failed(meetErrorWords(code), code);
       }
     },
 
@@ -715,6 +748,11 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       } catch (err) {
         if (endedBy(err)) return;
         notice = "Could not share your screen. Try again.";
+        // The SFU never took this transceiver's track: take it back, so the next share publishes anew instead of
+        // feeding a sender nobody receives. (Set inside the publish step, which the type narrowing cannot see.)
+        const unpublished = tx.screen as RTCRtpTransceiver | undefined;
+        unpublished?.stop();
+        tx.screen = undefined;
         local.screen?.stop();
         local.screen = null;
         emit();

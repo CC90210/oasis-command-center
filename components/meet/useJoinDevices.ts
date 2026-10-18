@@ -11,12 +11,14 @@
  * again when turned back on. Joining hands the room COPIES of the held tracks (takeForJoin), so a join that
  * fails leaves the preview running for another try; release() stops the originals once a join has worked.
  *
- * An answer from the browser can arrive late: after a newer request for the same device, after release or a join,
- * after consent was withdrawn, after the screen is gone. devices.ts createDeviceRequests numbers every request and
- * stops the tracks of an answer that is no longer wanted, so a late camera never stays on.
+ * An answer from the browser can arrive late: after a newer request for the same device, after release, after
+ * consent was withdrawn, after the screen is gone. devices.ts createDeviceRequests numbers every request and stops
+ * the tracks of an answer that is no longer wanted, so a late camera never stays on. A join does not cancel: if it
+ * fails the person is still here and keeps what the request brings; if it works release() follows and stops it.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { reportClientError } from "@/lib/client-errors/report";
 import { createDeviceRequests, deviceWords, listInputs, openDevices, type DeviceChoice, type PolicyLike } from "./devices";
 
 export type JoinDevices = {
@@ -90,26 +92,32 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
 
   const ask = useCallback(
     async (want: { mic: boolean; cam: boolean }) => {
-      const ticket = requests.begin(want);
       setAsking(true);
-      const opened = await openDevices({
-        allowed: live.current.allowed,
-        media: currentMedia(),
+      // One request, start to finish (devices.ts run): what comes back is kept only if it is still wanted, not asked
+      // for again, not cancelled (released, left, consent withdrawn), the notice still ticked; the rest is stopped
+      // there. A request that throws still settles, so a throw cannot leave `asking` up; one the browser never answers
+      // (the person ignores its prompt) is still open, and `asking` rightly says so.
+      const answer = await requests.run(
         want,
-        micId: live.current.micId,
-        camId: live.current.camId,
-        policy: currentPolicy(),
-      });
-      // What came back is kept only if it is still wanted: not superseded by a newer request for the same device, not
-      // cancelled (released, joined, left, consent withdrawn), and the notice still ticked. The rest is stopped here.
-      const settled = requests.settle(ticket, opened, live.current.allowed);
-      setAsking(settled.pending);
-      if (!settled.current) return;
-      if (settled.mic) hold("mic", settled.mic);
-      if (settled.cam) hold("cam", settled.cam);
+        () =>
+          openDevices({
+            allowed: live.current.allowed,
+            media: currentMedia(),
+            want,
+            micId: live.current.micId,
+            camId: live.current.camId,
+            policy: currentPolicy(),
+          }),
+        () => live.current.allowed,
+        (err) => reportClientError("rejection", err),
+      );
+      setAsking(answer.pending);
+      if (!answer.current) return;
+      if (answer.mic) hold("mic", answer.mic);
+      if (answer.cam) hold("cam", answer.cam);
       setAsked(true);
-      setWords(deviceWords(opened.problems));
-      if (settled.mic || settled.cam) await refreshInputs();
+      setWords(deviceWords(answer.problems));
+      if (answer.mic || answer.cam) await refreshInputs();
     },
     [hold, refreshInputs, requests],
   );
@@ -186,11 +194,10 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
     toggleCam: () => toggle("cam"),
     pickMic: (id) => pick("mic", id),
     pickCam: (id) => pick("cam", id),
-    // The room takes its copies now: a request still open belongs to no one once they are made.
-    takeForJoin: () => {
-      requests.cancel();
-      return { mic: live.current.mic?.clone() ?? null, cam: live.current.cam?.clone() ?? null };
-    },
+    // The room takes copies; nothing is cancelled. A join that fails leaves the person on this screen, which is where
+    // a request still open belongs, so what it brings is kept. A join that works is followed by release(), which
+    // cancels, and a screen that goes away cancels too.
+    takeForJoin: () => ({ mic: live.current.mic?.clone() ?? null, cam: live.current.cam?.clone() ?? null }),
     release,
   };
 }

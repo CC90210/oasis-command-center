@@ -26,11 +26,14 @@ export const MEET_PRESENCE_MS = 30_000;
 /**
  * A participant not heard from for this long has left: their session is cut and their token stops, so a browser
  * that stopped polling but kept its connection is not left listening unseen, and coming back goes through the join
- * and its cap. Longer than MEET_PRESENCE_MS, so a short network drop is only a gap in the People list.
+ * and its cap. Well past MEET_PRESENCE_MS, so a laptop that slept a moment, a locked phone or a short outage is
+ * only a gap in the People list, not the end of the call.
  */
-export const MEET_STALE_MS = 2 * 60_000;
+export const MEET_STALE_MS = 5 * 60_000;
 /** A live room nobody has been in for this long, and whose start is this long past, has ended (`expired`). */
 export const MEET_IDLE_MS = 12 * 60 * 60_000;
+/** How early a meeting made for a time may start and still count as its call (HOSTS_GONE_AFTER_A_CALL). */
+export const MEET_EARLY_START_MIN = 10;
 /** A live room with no host present for this long ends itself. */
 export const MEET_HOST_GRACE_MS = 10 * 60_000;
 /** The most tracks one participant publishes: microphone, camera and a shared screen. */
@@ -94,8 +97,10 @@ function toPresence(row: Record<string, unknown>): MeetPresence {
 const presentSince = (now: Date) => new Date(now.getTime() - MEET_PRESENCE_MS).toISOString();
 
 /**
- * Add a person to a room, unless it already holds MEET_MAX_PARTICIPANTS present people: one statement, so the
- * last place cannot be taken twice. A host's join also opens a scheduled room. Null when the room is full.
+ * Add a person to a room, unless it is full: one statement, so the last place cannot be taken twice. Nobody joins
+ * a room that holds MEET_MAX_PARTICIPANTS present people, and guests can hold at most MEET_MAX_PARTICIPANTS - 1 of
+ * them, so a host can always get in: a leaked link filled with guests can never lock its host out of the room they
+ * need to be in to remove them. A host's join also opens a scheduled room. Null when the room is full.
  */
 export async function joinMeetRoom(
   db: Client,
@@ -109,10 +114,14 @@ export async function joinMeetRoom(
     sql: `INSERT INTO meet_participants (${PARTICIPANT_COLUMNS})
           SELECT ?, ?, ?, ?, ?, ?, ?, NULL, '[]', ?, ?, NULL, NULL
           WHERE (SELECT count(*) FROM meet_participants
-                 WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at > ?) < ?`,
+                 WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at > ?) < ?
+            AND (? = 'host' OR (SELECT count(*) FROM meet_participants
+                 WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at > ?
+                   AND role = 'guest') < ?)`,
     args: [
       id, room.tenantId, room.id, input.role, input.userId, input.displayName, input.consentAt, at, at,
       room.tenantId, room.id, presentSince(now), MEET_MAX_PARTICIPANTS,
+      input.role, room.tenantId, room.id, presentSince(now), MEET_MAX_PARTICIPANTS - 1,
     ],
   });
   if (rs.rowsAffected === 0) return null;
@@ -150,12 +159,28 @@ export async function readPresence(db: Client, where: { tenantId: string; roomId
 
 const scoped = (p: Pick<MeetPresence, "tenantId" | "roomId" | "id">) => [p.tenantId, p.roomId, p.id];
 
-/** They are still here (the room page's poll). */
-export async function touchParticipant(db: Client, p: Pick<MeetPresence, "tenantId" | "roomId" | "id">, now: Date = new Date()): Promise<void> {
-  await db.execute({
+/** They are still here (the room page's poll). False when they are not: they left, or were removed, meanwhile. */
+export async function touchParticipant(db: Client, p: Pick<MeetPresence, "tenantId" | "roomId" | "id">, now: Date = new Date()): Promise<boolean> {
+  const rs = await db.execute({
     sql: "UPDATE meet_participants SET last_seen_at = ? WHERE tenant_id = ? AND room_id = ? AND id = ? AND left_at IS NULL AND removed_at IS NULL",
     args: [now.toISOString(), ...scoped(p)],
   });
+  return rs.rowsAffected > 0;
+}
+
+/**
+ * The room's creator, whose browser runs the recording, is in the call: not left or removed, and heard from within
+ * MEET_STALE_MS. The longer window, not MEET_PRESENCE_MS: a creator whose poll is late for a minute is still
+ * recording, and the room must not stop saying so while it records.
+ */
+export async function creatorInCall(db: Client, room: Pick<MeetRoom, "tenantId" | "id" | "hostUserId">, now: Date): Promise<boolean> {
+  const rs = await db.execute({
+    sql: `SELECT 1 FROM meet_participants
+           WHERE tenant_id = ? AND room_id = ? AND role = 'host' AND user_id = ? AND left_at IS NULL AND removed_at IS NULL
+             AND last_seen_at > ? LIMIT 1`,
+    args: [room.tenantId, room.id, room.hostUserId, new Date(now.getTime() - MEET_STALE_MS).toISOString()],
+  });
+  return rs.rows.length > 0;
 }
 
 /** Their browser's SFU session. A reconnect replaces it, and what they published on the old one is gone with it. */
@@ -249,6 +274,18 @@ export function isStale(p: Pick<MeetPresence, "lastSeenAt">, now: Date): boolean
   return now.getTime() - Date.parse(p.lastSeenAt) > MEET_STALE_MS;
 }
 
+/**
+ * A cut that failed after the row had already let go of the session (a leave, removal or end that cut it first,
+ * while a slow call added to it): the row takes the id back, so pendingCuts and the room's end can still cut it.
+ * Only into an empty slot: a session the row holds now is never replaced.
+ */
+export async function holdSession(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, held: HeldSession): Promise<void> {
+  await db.execute({
+    sql: "UPDATE meet_participants SET sfu_session_id = ? WHERE tenant_id = ? AND room_id = ? AND id = ? AND sfu_session_id IS NULL",
+    args: [held.sessionId, room.tenantId, room.id, held.participantId],
+  });
+}
+
 /** A cut went through: the row lets go of that session and what it published there (unless a reconnect replaced it). */
 export async function forgetSession(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, held: HeldSession): Promise<void> {
   await db.execute({
@@ -280,8 +317,11 @@ export async function endMeetRoom(db: Client, room: Pick<MeetRoom, "tenantId" | 
  * happened in it: two different people were in the room at the same time, one of them a host. Two hosts count (CC
  * and Adon, both owners, are both hosts of every room); one signed-in person in two tabs does not. A host who
  * opened the room alone (to test their camera, or early) leaves it waiting for its meeting, so the first guest to
- * arrive is never shown "ended". `?` is the cutoff (now - MEET_HOST_GRACE_MS). A host's last sighting is their last
- * poll; with none, the start.
+ * arrive is never shown "ended". For a meeting made for a time, the call must reach that time (less
+ * MEET_EARLY_START_MIN, for a meeting that starts a little early): CC and Adon trying tomorrow's room out together
+ * today is not its call, and must never end the link its client was sent. A test that ended before the time falls
+ * to the backstop below. `?` is the cutoff (now - MEET_HOST_GRACE_MS). A host's last sighting is their last poll;
+ * with none, the start. Times compare as text: every one is written by toISOString, and strftime's format matches it.
  */
 const HOSTS_GONE_AFTER_A_CALL = `r.status = 'live'
   AND COALESCE(
@@ -293,7 +333,10 @@ const HOSTS_GONE_AFTER_A_CALL = `r.status = 'live'
           JOIN meet_participants h ON h.tenant_id = g.tenant_id AND h.room_id = g.room_id AND h.role = 'host'
          WHERE g.tenant_id = r.tenant_id AND g.room_id = r.id
            AND g.id <> h.id AND (g.user_id IS NULL OR h.user_id IS NULL OR g.user_id <> h.user_id)
-           AND g.joined_at <= h.last_seen_at AND h.joined_at <= g.last_seen_at)`;
+           AND g.joined_at <= h.last_seen_at AND h.joined_at <= g.last_seen_at
+           AND (r.starts_at IS NULL OR (
+                 g.last_seen_at >= strftime('%Y-%m-%dT%H:%M:%fZ', r.starts_at, '-${MEET_EARLY_START_MIN} minutes')
+             AND h.last_seen_at >= strftime('%Y-%m-%dT%H:%M:%fZ', r.starts_at, '-${MEET_EARLY_START_MIN} minutes'))))`;
 
 /**
  * The backstop for a live room no call ever ended: nobody has been in it for MEET_IDLE_MS and its start, if it has

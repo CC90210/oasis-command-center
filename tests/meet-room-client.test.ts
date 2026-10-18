@@ -121,6 +121,8 @@ class FakePeer extends EventTarget {
 
 /** `session` stands for the tag the server sends of their SFU session: it changes when they reconnect. */
 type Person = { id: string; name: string; role: "host" | "guest"; session?: string; tracks: Array<{ trackName: string; kind: "audio" | "video" }> };
+/** The room refuses something this many times with this answer, then takes it. */
+type Refusal = { times: number; status: number; error: string };
 
 /** A stand-in room API: what the handlers answer, plus a log and a check that SFU steps never overlap. */
 function fakeRoom(opts: {
@@ -133,7 +135,25 @@ function fakeRoom(opts: {
   delays?: Partial<Record<"session" | "publish" | "pull" | "renegotiate" | "close", number>>;
   /** How long a host action (end, remove) takes, in ms. */
   hostDelayMs?: number;
+  /** The SFU refuses this many answers to its pull offers, then takes them. */
+  failRenegotiate?: number;
+  /** The SFU refuses this many screen publishes, then takes them. */
+  failScreenPublish?: number;
+  /** The SFU refuses this many closes, then takes them. */
+  failClose?: number;
+  /** This many new sessions are refused with this answer (a reconnect waiting on its old session's cut), then made. */
+  refuseSessions?: Refusal;
+  /** This many joins are refused with this answer, then taken. */
+  refuseJoins?: Refusal;
 }) {
+  let renegotiateFailures = opts.failRenegotiate ?? 0;
+  let screenFailures = opts.failScreenPublish ?? 0;
+  let closeFailures = opts.failClose ?? 0;
+  let sessionRefusal = opts.refuseSessions ?? null;
+  let sessionRefusals = opts.refuseSessions?.times ?? 0;
+  let joinRefusals = opts.refuseJoins?.times ?? 0;
+  /** The next poll hangs until the browser gives up on it (its AbortSignal). */
+  let hangNextPoll = false;
   const delays = { pull: 40, ...opts.delays };
   const log: string[] = [];
   const me: Person = { id: "me", name: "Me", role: opts.role, tracks: [] };
@@ -154,11 +174,21 @@ function fakeRoom(opts: {
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
     if (path === "/join") {
       if (opts.joinDelayMs) await new Promise((r) => setTimeout(r, opts.joinDelayMs));
+      if (joinRefusals > 0 && opts.refuseJoins) {
+        joinRefusals -= 1;
+        log.push(`join:refused:${opts.refuseJoins.error}`);
+        return reply({ ok: false, error: opts.refuseJoins.error }, opts.refuseJoins.status);
+      }
       log.push("join");
       return reply({ ok: true, participantId: me.id, role: me.role, name: me.name, records: opts.records === true, room: { code: "abc-defg-hjk", title: "Call", status: "live", recordAudio: opts.recordAudio ?? true, startedAt: null }, iceServers: [] });
     }
     if (path === "/state") {
       statePolls += 1;
+      if (hangNextPoll) {
+        hangNextPoll = false;
+        log.push("state:hung");
+        await new Promise((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("timed out", "TimeoutError"))));
+      }
       if (stateError) return reply({ ok: false, error: stateError.error, ...(stateError.reason ? { reason: stateError.reason } : {}) }, stateError.status);
       return reply({
         ok: true,
@@ -178,7 +208,14 @@ function fakeRoom(opts: {
         await new Promise((r) => setTimeout(r, delays[body.action as keyof typeof delays] ?? 3));
         const action = String(body.action);
         log.push(`sfu:${action}`);
-        if (action === "session") return hostPresent ? reply({ ok: true }) : reply({ ok: false, error: "waiting_for_host" }, 409);
+        if (action === "session") {
+          if (sessionRefusals > 0 && sessionRefusal) {
+            sessionRefusals -= 1;
+            log.push(`session:refused:${sessionRefusal.error}`);
+            return reply({ ok: false, error: sessionRefusal.error }, sessionRefusal.status);
+          }
+          return hostPresent ? reply({ ok: true }) : reply({ ok: false, error: "waiting_for_host" }, 409);
+        }
         if (action === "publish") {
           if (publishFailures > 0) {
             publishFailures -= 1;
@@ -186,6 +223,11 @@ function fakeRoom(opts: {
             return reply({ ok: false, error: "sfu_failed" }, 502);
           }
           const tracks = body.tracks as Array<{ mid: string; trackName: string; kind: "audio" | "video" }>;
+          if (screenFailures > 0 && tracks.some((t) => t.trackName === "screen")) {
+            screenFailures -= 1;
+            log.push("publish:screen:failed");
+            return reply({ ok: false, error: "sfu_failed" }, 502);
+          }
           log.push(`publish:${tracks.map((t) => `${t.trackName}@${t.mid}`).join(",")}`);
           for (const t of tracks) me.tracks.push({ trackName: t.trackName, kind: t.kind });
           return reply({ ok: true, sessionDescription: { type: "answer", sdp: "answer" }, tracks: tracks.map((t) => ({ trackName: t.trackName, mid: t.mid, errorCode: null })) });
@@ -205,8 +247,20 @@ function fakeRoom(opts: {
             tracks: results.map(({ kind: _kind, ...r }) => r),
           });
         }
-        if (action === "renegotiate") return reply({ ok: true });
+        if (action === "renegotiate") {
+          if (renegotiateFailures > 0) {
+            renegotiateFailures -= 1;
+            log.push("renegotiate:failed");
+            return reply({ ok: false, error: "sfu_failed" }, 502);
+          }
+          return reply({ ok: true });
+        }
         if (action === "close") {
+          if (closeFailures > 0) {
+            closeFailures -= 1;
+            log.push("close:failed");
+            return reply({ ok: false, error: "sfu_failed" }, 502);
+          }
           log.push(`close:${(body.mids as string[]).join(",")}`);
           return reply({ ok: true, sessionDescription: { type: "answer", sdp: "answer" }, tracks: [] });
         }
@@ -248,6 +302,14 @@ function fakeRoom(opts: {
     setRecording: (v: boolean) => {
       recording = v;
     },
+    hangNextPoll: () => {
+      hangNextPoll = true;
+    },
+    /** From now on, refuse new sessions (a call that is already live, reconnecting). */
+    refuseSessions: (refusal: Refusal) => {
+      sessionRefusal = refusal;
+      sessionRefusals = refusal.times;
+    },
     overlapped: () => overlapped,
     busyWith: () => busyWith,
   };
@@ -282,7 +344,10 @@ function heldMedia() {
   return { media, waiting };
 }
 
-function controller(room: ReturnType<typeof fakeRoom>, extra: { recorder?: () => RecorderPort; gatherMs?: number; media?: MeetRoomOptions["media"] } = {}) {
+function controller(
+  room: ReturnType<typeof fakeRoom>,
+  extra: { recorder?: () => RecorderPort; gatherMs?: number; media?: MeetRoomOptions["media"]; pollTimeoutMs?: number; reconnectMs?: number } = {},
+) {
   const peers: FakePeer[] = [];
   const c = createMeetRoomController({
     code: "abc-defg-hjk",
@@ -645,6 +710,151 @@ async function main() {
       assert.equal(c.snapshot()[ask === "cam" ? "camOn" : ask === "mic" ? "micOn" : "sharing"], false, `${ask} after ${then}: not on`);
       if (then === "off") await leaveQuietly(c);
     }
+  });
+
+  await check("a pull whose answer the SFU refused is pulled again on the next poll, never left silent", async () => {
+    const room = fakeRoom({ role: "host", failRenegotiate: 1 });
+    const { c } = controller(room);
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    const errors = console.error;
+    console.error = () => {}; // the refused answer is logged on purpose
+    try {
+      room.others.push({ id: "g1", name: "Guest", role: "guest", tracks: [{ trackName: "mic", kind: "audio" }] });
+      await waitFor("refused once", () => room.log.includes("renegotiate:failed"));
+      await waitFor("pulled again and answered", () => room.log.filter((l) => l.startsWith("pull:g1.mic")).length >= 2 && room.log.includes("sfu:renegotiate"));
+      await waitFor("their voice arrives", () => c.snapshot().tiles.some((t) => t.participantId === "g1" && t.audio));
+    } finally {
+      console.error = errors;
+    }
+    await leaveQuietly(c);
+  });
+
+  await check("a screen share the SFU refused is published anew next time, never fed to a sender nobody receives", async () => {
+    const room = fakeRoom({ role: "host", failScreenPublish: 1 });
+    const { c } = controller(room);
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    await c.shareScreen(true);
+    assert.equal(c.snapshot().notice, "Could not share your screen. Try again.");
+    assert.equal(c.snapshot().sharing, false);
+    await c.shareScreen(true);
+    assert.ok(room.log.some((l) => /^publish:screen@/.test(l)), "the second try publishes the screen to the SFU");
+    assert.equal(c.snapshot().sharing, true);
+    await leaveQuietly(c);
+  });
+
+  await check("a poll that hangs is given up, and the polls after it go on", async () => {
+    const room = fakeRoom({ role: "host" });
+    const { c } = controller(room, { pollTimeoutMs: 50 });
+    await c.join({ consent: true, mic: null, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    room.hangNextPoll();
+    await waitFor("a poll hangs", () => room.log.includes("state:hung"));
+    const polls = room.polls();
+    await waitFor("polling again", () => room.polls() >= polls + 2, 3_000);
+    assert.equal(c.snapshot().phase.kind, "live", "still in the call");
+    await leaveQuietly(c);
+  });
+
+  await check("a reconnect the video service refuses keeps trying for longer than other failures, and others give up after three", async () => {
+    const refused = fakeRoom({ role: "host", refuseSessions: { times: 4, status: 502, error: "sfu_failed" } });
+    const a = controller(refused, { reconnectMs: 5 });
+    await a.c.join({ consent: true, mic: null, cam: null });
+    await waitFor("live after four refusals", () => a.c.snapshot().phase.kind === "live", 3_000);
+    assert.equal(refused.log.filter((l) => l === "session:refused:sfu_failed").length, 4);
+    await leaveQuietly(a.c);
+    const broken = fakeRoom({ role: "host", refuseSessions: { times: 4, status: 500, error: "internal" } });
+    const b = controller(broken, { reconnectMs: 5 });
+    await b.c.join({ consent: true, mic: null, cam: null });
+    await waitFor("given up", () => b.c.snapshot().phase.kind === "failed", 3_000);
+  });
+
+  await check("a camera or microphone asked for before the call failed is stopped when it answers, even after the join is tried again", async () => {
+    // Both ways a join fails: the video service refuses the call, or the room refuses the join itself.
+    for (const [how, refusal] of [
+      ["the video service refused", { refuseSessions: { times: 1, status: 503, error: "meet_not_configured" } }],
+      ["the join was refused", { refuseJoins: { times: 1, status: 409, error: "room_full" } }],
+    ] as const) {
+      const room = fakeRoom({ role: "host", ...refusal });
+      const held = heldMedia();
+      const { c } = controller(room, { media: held.media });
+      const joining = c.join({ consent: true, mic: null, cam: null });
+      const askingCam = c.setCam(true); // asked for while the join is on its way
+      const askingMic = c.setMic(true);
+      await joining;
+      await waitFor("failed", () => c.snapshot().phase.kind === "failed");
+      await c.join({ consent: true, mic: null, cam: null }); // tried again: the controller is open once more
+      await waitFor("live", () => c.snapshot().phase.kind === "live");
+      const cam = held.waiting[0].release();
+      const mic = held.waiting[1].release();
+      await Promise.all([askingCam, askingMic]);
+      assert.equal(cam.readyState, "ended", `${how}: the camera answer belongs to the call that failed`);
+      assert.equal(mic.readyState, "ended", `${how}: the microphone answer too`);
+      assert.equal(c.snapshot().camOn, false, how);
+      assert.equal(c.snapshot().micOn, false, how);
+      await leaveQuietly(c);
+    }
+  });
+
+  await check("a screen picked while the call failed is stopped when it is chosen, never shared into the call joined again", async () => {
+    const room = fakeRoom({ role: "host" });
+    const held = heldMedia();
+    const { c, peers } = controller(room, { media: held.media, reconnectMs: 5 });
+    await c.join({ consent: true, mic: null, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    const picking = c.shareScreen(true);
+    await waitFor("picking", () => held.waiting.length === 1);
+    room.refuseSessions({ times: 1, status: 503, error: "meet_not_configured" });
+    const line = peers[peers.length - 1];
+    line.connectionState = "failed";
+    line.dispatchEvent(new Event("connectionstatechange"));
+    await waitFor("failed", () => c.snapshot().phase.kind === "failed");
+    await c.join({ consent: true, mic: null, cam: null });
+    await waitFor("live again", () => c.snapshot().phase.kind === "live");
+    const screen = held.waiting[0].release();
+    await picking;
+    assert.equal(screen.readyState, "ended", "the screen was picked for the call that failed");
+    assert.equal(c.snapshot().sharing, false);
+    assert.ok(!room.log.some((l) => l.includes("screen@")), "nothing is shared into the new call");
+    await leaveQuietly(c);
+  });
+
+  await check("a screen being shared goes out again on the new session after a reconnect", async () => {
+    const room = fakeRoom({ role: "host" });
+    const { c, peers } = controller(room, { reconnectMs: 5 });
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    await c.shareScreen(true);
+    assert.ok(room.log.some((l) => /^publish:screen@/.test(l)), "shared");
+    const line = peers[peers.length - 1];
+    line.connectionState = "failed";
+    line.dispatchEvent(new Event("connectionstatechange"));
+    await waitFor("a new line", () => peers.length === 2 && c.snapshot().phase.kind === "live");
+    const publishes = room.log.filter((l) => l.startsWith("publish:"));
+    assert.match(publishes[publishes.length - 1], /^publish:mic@\d+,cam@\d+,screen@\d+$/, "the new session publishes the screen with the mic and camera");
+    assert.equal(c.snapshot().sharing, true);
+    await leaveQuietly(c);
+  });
+
+  await check("a close the SFU refuses is logged, and the call goes on", async () => {
+    const room = fakeRoom({ role: "host", failClose: 1 });
+    const { c } = controller(room);
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    room.others.push({ id: "g1", name: "Guest", role: "guest", tracks: [{ trackName: "mic", kind: "audio" }] });
+    await waitFor("pulled", () => c.snapshot().tiles.some((t) => t.participantId === "g1" && t.audio));
+    const errors = console.error;
+    console.error = () => {}; // the refused close is logged on purpose
+    try {
+      room.others.splice(0, 1);
+      await waitFor("refused", () => room.log.includes("close:failed"));
+      await new Promise((r) => setTimeout(r, 40));
+    } finally {
+      console.error = errors;
+    }
+    assert.equal(c.snapshot().phase.kind, "live");
+    await leaveQuietly(c);
   });
 
   await check("a recorder that cannot stop cleanly never keeps the call from ending", async () => {

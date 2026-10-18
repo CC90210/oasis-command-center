@@ -30,10 +30,12 @@ keeps the transcript. No meeting vendor bill: media runs on Cloudflare Realtime 
 
 ## Limits, on purpose
 
-- Eight people per room at most (one statement with the join, so it cannot be overshot).
+- Eight people per room at most (one statement with the join, so it cannot be overshot). Guests hold seven places at most, so a leaked link filled with guests never locks the host out of the room they need to be in to remove them.
 - A live room ends itself when no host has been seen for 10 minutes, but only after a call happened in it: two different people in the room at once, one of them a host (CC and Adon, both owners, are both hosts; one person in two tabs is not a call). A host who opens a meeting alone, to test or early, leaves it waiting for its guests. A call nobody polls any more (every tab closed) ends when a host opens the Meet panel, and in the recording relay's sweep, so its recording is handed over. Backstop: a room nobody has been in for 12 hours, whose start (if it has one) is 12 hours past, ends as `expired`.
-- Someone not heard from for 2 minutes has left (their session is cut; coming back is a new join, through the cap), so a browser that stops polling but keeps its connection is never left listening unseen. Up to 30 seconds is only a gap in the People list.
-- A reconnect replaces the SFU session only once the old one is cut. The others see each person's session as a tag that changes on a reconnect, and pull their tracks anew.
+- Someone not heard from for 5 minutes has left (their session is cut; coming back is a new join, through the cap), so a browser that stops polling but keeps its connection is never left listening unseen. Less than that (a laptop that slept a moment, a locked phone, a short outage) is only a gap in the People list. A poll that hangs is given up after 10 seconds, so it never stops the polls after it.
+- A meeting made for a time counts a call only if it reaches that time (less 10 minutes): hosts trying the room out early never end the link its guests were sent.
+- A reconnect replaces the SFU session only once the old one is cut, so the browser tries six times when the video service refuses it (three for anything else) before it gives up. The others see each person's session as a tag that changes on a reconnect, and pull their tracks anew; a screen being shared goes out again on the new session.
+- A camera, microphone or screen asked for and answered after it stopped being wanted (asked again, turned off, the call left or failed, even with the join then tried again) is stopped, never held: no light left on.
 - "Recorded" is shown in the call only while the room's creator, whose browser records, is in it.
 - End asks the room to end before the recorder stops: an End that fails keeps the meeting going and recorded.
 - Media is cut at the SFU on leave, remove, end and delete. A row keeps its session id until the cut goes through; a failed one is retried from the room's polls (after the answer, at most every 30 seconds per room) for an hour, and by Delete. Delete never waits on an SFU that does not answer.
