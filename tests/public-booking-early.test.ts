@@ -289,7 +289,7 @@ async function main() {
     assert.ok(result.bookedCall, "the alert is told the call's time");
     const { subject, body, event } = await delivered("booked-first");
     assert.equal(event?.booking_status, "booked");
-    assert.match(body, /Your call is booked, and the Google Calendar invite in your inbox has the time and the Meet link\./);
+    assert.match(body, /Your call is booked, and the Google Calendar invite in your inbox has the time and your video call link\./);
     assert.doesNotMatch(body, /\/f\/oasis-ai-cc\/ai-audit\//, "no link to book a second call");
     assert.doesNotMatch(body, /pick the time|go\/community/);
     assert.doesNotMatch(subject, /booking your AI audit call/, "the subject does not ask them to book");

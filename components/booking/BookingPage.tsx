@@ -32,7 +32,7 @@ import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import type { DetailsOnlyReason } from "@/lib/forms/public-booking-alert";
 import { fetchWithRetry } from "@/lib/retry";
 import { ZONE_CHOICES } from "@/lib/meeting-time";
-import { MEET_RECORDING_NOTICE } from "@/lib/meet/recording-notice";
+import { MEET_RECORDING_NOTICE, withRecordingNotice } from "@/lib/meet/recording-notice";
 
 export type BookingField = {
   name: string;
@@ -448,10 +448,11 @@ export function BookingPage(props: Props) {
           </div>
         </div>
         <p className="mt-6 text-[15px] leading-relaxed text-fg-muted">
-          {props.thanksMessage ||
-            "The calendar invite with the video call link is on its way to your inbox."}
           {/* One text run, never an extra element: the notice must not shift this tree's markup. */}
-          {booked.recorded ? ` ${MEET_RECORDING_NOTICE}` : ""}
+          {withRecordingNotice(
+            props.thanksMessage || "The calendar invite with the video call link is on its way to your inbox.",
+            booked.recorded,
+          )}
         </p>
       </main>
     );
