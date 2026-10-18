@@ -1167,6 +1167,10 @@ export async function meetRelayCron(
   sfu: SfuClient | null = null,
 ): Promise<{ tenants: number; expired: number; removed: number; deleteFailed: boolean; mediaCut: number; mediaCutFailed: number }> {
   const at = now.toISOString();
+  // A call every tab left without End is ended here too, in every workspace with a live room, so the cut below
+  // reaches its media with the PC off (Codex on #688, fourth pass). Handing its recording over stays the PC's claim.
+  const live = await db.execute({ sql: "SELECT DISTINCT tenant_id FROM meet_rooms WHERE status = 'live' LIMIT 50", args: [] });
+  if (live.rows.length) await endAbandonedRooms(db, live.rows.map((r) => String(r.tenant_id)), now);
   const media = await cutEndedRoomSessions(db, sfu, null, now);
   const cuts = { mediaCut: media.cut, mediaCutFailed: media.failed };
   // First, give a row to every recording nobody handed over that is past its 30 days, so the reads below find it.

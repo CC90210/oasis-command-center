@@ -1172,6 +1172,24 @@ async function main() {
     assert.equal(await held(), null);
   });
 
+  await check("with the PC off, the relay cron ends a call every tab left without End, in any workspace, and cuts its media", async () => {
+    // Codex on #688, fourth pass: the cron only cut ENDED rooms, so an abandoned one stayed live, media and all.
+    const start = later(T0, minutes(125_000));
+    const r = await liveRoom({ tenant: OTHER, at: start });
+    const host = await participant(r, "Host", CC);
+    const guest = await participant(r, "Guest");
+    await db.execute({
+      sql: "UPDATE meet_participants SET joined_at = ?, last_seen_at = ?, sfu_session_id = 'sess-' || id WHERE room_id = ?",
+      args: [start.toISOString(), later(start, minutes(2)).toISOString(), r.id],
+    });
+    const sfu = fakeSfu();
+    const res = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(15)), sfu: sfu.sfu });
+    assert.equal(res.status, 200);
+    const row = (await db.execute({ sql: "SELECT status, ended_reason FROM meet_rooms WHERE id = ?", args: [r.id] })).rows[0];
+    assert.deepEqual([String(row.status), String(row.ended_reason)], ["ended", "host_left"], "the cron left an abandoned call live");
+    assert.deepEqual([...sfu.closed].sort(), [`sess-${guest}`, `sess-${host}`].sort());
+  });
+
   await check("a run's cuts go at once, so one SFU that does not answer costs one wait, not one per room", async () => {
     const start = later(T0, minutes(130_000));
     const rooms = await Promise.all([1, 2, 3].map(() => liveRoom({ at: start })));
