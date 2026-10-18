@@ -27,6 +27,12 @@ assert.equal(withRecordingNotice("Thanks, talk soon", true), `Thanks, talk soon.
 assert.equal(withRecordingNotice("See you then!", true), `See you then! ${MEET_RECORDING_NOTICE}`);
 assert.equal(withRecordingNotice('We said "see you soon."', true), `We said "see you soon." ${MEET_RECORDING_NOTICE}`);
 assert.equal(withRecordingNotice("  ", true), MEET_RECORDING_NOTICE);
+// Typographic endings are finished sentences too: an ellipsis, a curly closing quote after a stop, guillemets.
+assert.equal(withRecordingNotice("See you soon\u2026", true), `See you soon\u2026 ${MEET_RECORDING_NOTICE}`);
+assert.equal(withRecordingNotice("We said \u201csee you soon.\u201d", true), `We said \u201csee you soon.\u201d ${MEET_RECORDING_NOTICE}`);
+assert.equal(withRecordingNotice("\u00e0 bient\u00f4t !\u00bb", true), `\u00e0 bient\u00f4t !\u00bb ${MEET_RECORDING_NOTICE}`);
+// ...but a closing quote with no stop before it is not.
+assert.equal(withRecordingNotice("We said \u201csee you soon\u201d", true), `We said \u201csee you soon\u201d. ${MEET_RECORDING_NOTICE}`);
 
 const route = readFileSync("app/api/forms/booking/route.ts", "utf8");
 assert.match(route, /Video call: \$\{meeting\.receipt\.meetLink\}/);

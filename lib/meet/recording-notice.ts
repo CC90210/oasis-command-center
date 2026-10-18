@@ -18,5 +18,13 @@ export function withRecordingNotice(line: string, recorded: boolean): string {
   if (!recorded) return line;
   const text = line.trim();
   if (!text) return MEET_RECORDING_NOTICE;
-  return `${/[.!?]["')\]]?$/.test(text) ? text : `${text}.`} ${MEET_RECORDING_NOTICE}`;
+  return `${SENTENCE_END.test(text) ? text : `${text}.`} ${MEET_RECORDING_NOTICE}`;
 }
+
+/**
+ * A line that already ends its sentence: . ! ? or an ellipsis (U+2026), interrobang (U+203D), or full-width stop,
+ * exclamation or question mark, then any closing quotes or brackets, straight or typographic (U+2019, U+201D, U+00BB).
+ * A custom thanks message is the workspace's own words, so "See you soon\u2026" or a closing curly quote is a finished
+ * sentence (Codex on the confirmation copy PR). Escapes keep this file ASCII.
+ */
+const SENTENCE_END = /[.!?\u2026\u203d\u3002\uff01\uff1f]["'\u2019\u201d\u00bb)\]]*$/;
