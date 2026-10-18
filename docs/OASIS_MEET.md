@@ -20,7 +20,9 @@ keeps the transcript. No meeting vendor bill: media runs on Cloudflare Realtime 
 
 ## Switching it on (one time)
 
-1. Cloudflare API token: **Calls / Realtime: Edit** on the OASIS account; then create the SFU app and a TURN key.
+1. Cloudflare API token: **Realtime > Realtime Admin** on the OASIS account (the API reference calls it `Calls Write`;
+   it is the only permission that creates an SFU app or a TURN key). Then BEA `scripts/integrations/cf_realtime_tool.py
+   create` makes both and stores their secrets without showing them.
 2. Worker secrets (names in BEA `config/cloudflare/manifests/oasis-command-center.json`; push with
    `wrangler_tool.py secrets-push --app oasis-command-center --only <KEY>`): `MEET_TOKEN_SECRET` (done 2026-10-17),
    `CF_REALTIME_APP_ID`, `CF_REALTIME_APP_SECRET`, `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN`. Without the SFU app every
@@ -30,12 +32,13 @@ keeps the transcript. No meeting vendor bill: media runs on Cloudflare Realtime 
 
 ## Limits, on purpose
 
-- Eight people per room at most (one statement with the join, so it cannot be overshot). Guests hold seven places at most, so a leaked link filled with guests never locks the host out of the room they need to be in to remove them.
+- Eight people per room at most (one statement with the join, so it cannot be overshot). Guests hold seven places at most, so a leaked link filled with guests never locks the host out of the room they need to be in to remove them. A place stays held until its person has been silent for 5 minutes, because until then they can come back to it: a newcomer never takes the place of someone whose laptop slept.
 - A live room ends itself when no host has been seen for 10 minutes, but only after a call happened in it: two different people in the room at once, one of them a host (CC and Adon, both owners, are both hosts; one person in two tabs is not a call). A host who opens a meeting alone, to test or early, leaves it waiting for its guests. A call nobody polls any more (every tab closed) ends when a host opens the Meet panel, and in the recording relay's sweep, so its recording is handed over. Backstop: a room nobody has been in for 12 hours, whose start (if it has one) is 12 hours past, ends as `expired`.
-- Someone not heard from for 5 minutes has left (their session is cut; coming back is a new join, through the cap), so a browser that stops polling but keeps its connection is never left listening unseen. Less than that (a laptop that slept a moment, a locked phone, a short outage) is only a gap in the People list. A poll that hangs is given up after 10 seconds, so it never stops the polls after it.
+- Someone not heard from for 5 minutes has left (their session is cut; coming back is a new join, through the cap), so a browser that stops polling but keeps its connection is never left listening unseen. Their page says "You were disconnected from the meeting." with Rejoin; nothing rejoins them by itself, because a new join in a recorded room needs the notice ticked again. Less than that (a laptop that slept a moment, a locked phone, a short outage) is only a gap in the People list. A poll that hangs is given up after 10 seconds, so it never stops the polls after it; every other call to the room (the join, each SFU step, a host action) after 20, so no screen waits on one for good. Safari before 16, which lacks `AbortSignal.timeout`, gets the same deadline from a timer. Leave ends the call at once, camera and all, and tells the room after.
 - A meeting made for a time counts a call only if it reaches that time (less 10 minutes): hosts trying the room out early never end the link its guests were sent.
-- A reconnect replaces the SFU session only once the old one is cut, so the browser tries six times when the video service refuses it (three for anything else) before it gives up. The others see each person's session as a tag that changes on a reconnect, and pull their tracks anew; a screen being shared goes out again on the new session.
+- A reconnect replaces the SFU session only once the old one is cut, so the browser tries six times when the video service refuses it (three for anything else) before it gives up. The others see each person's session as a tag that changes on a reconnect, and pull their tracks anew; a screen being shared goes out again on the new session, and one stopped during the reconnect (the browser's own "Stop sharing" works in every phase) does not.
 - A camera, microphone or screen asked for and answered after it stopped being wanted (asked again, turned off, the call left or failed, even with the join then tried again) is stopped, never held: no light left on.
+- A browser prompt nobody answers never locks the pre-join screen: "Join without your camera" (or microphone, or both) stops waiting and joins with what is already on; "Join now" stays off while the browser is still answering, so nobody joins without the camera they just allowed.
 - "Recorded" is shown in the call only while the room's creator, whose browser records, is in it.
 - End asks the room to end before the recorder stops: an End that fails keeps the meeting going and recorded.
 - Media is cut at the SFU on leave, remove, end and delete. A row keeps its session id until the cut goes through; a failed one is retried from the room's polls (after the answer, at most every 30 seconds per room) for an hour, and by Delete. Delete never waits on an SFU that does not answer.

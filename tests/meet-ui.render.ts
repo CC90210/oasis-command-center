@@ -6,6 +6,8 @@
  * server first draws them (the browser's first paint is the same markup). It asserts nothing itself.
  */
 
+import type { PreJoinProps } from "../components/meet/PreJoin";
+import type { JoinDevices } from "../components/meet/useJoinDevices";
 import type { MeetEndReason, MeetRoomController, MeetSnapshot, MeetTile } from "../lib/meet/room-client";
 
 // A module, not a global script, so its names cannot collide under tsc.
@@ -75,6 +77,7 @@ async function main() {
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { MeetRoom } = await import("../components/meet/MeetRoom");
   const { MeetEnded } = await import("../components/meet/MeetEnded");
+  const { PreJoin } = await import("../components/meet/PreJoin");
   const { CallScreen } = await import("../components/meet/CallScreen");
   const { PeoplePanel } = await import("../components/meet/PeoplePanel");
   const { MeetPanelView } = await import("../components/meet/MeetPanel");
@@ -106,8 +109,60 @@ async function main() {
   draw("room.secondHostPlain", h(MeetRoom, { ...roomProps, recordAudio: false, viewer: "host", creator: false }));
   draw("room.endedProp", h(MeetRoom, { ...roomProps, status: "ended", recordAudio: true, viewer: "visitor", creator: false }));
 
+  // The pre-join screen while the browser has not answered a request for the camera or microphone: the way out, by what
+  // is waited for and what is already held. The hook is not run (a server render has no browser), so the devices are
+  // handed in as the hook would hold them.
+  const devicesWith = (over: Partial<JoinDevices>): JoinDevices => ({
+    asked: false,
+    asking: false,
+    waiting: { mic: false, cam: false },
+    mic: null,
+    cam: null,
+    words: null,
+    mics: [],
+    cams: [],
+    micId: "",
+    camId: "",
+    turnOn: () => undefined,
+    toggleMic: () => undefined,
+    toggleCam: () => undefined,
+    pickMic: () => undefined,
+    pickCam: () => undefined,
+    takeForJoin: () => ({ mic: null, cam: null }),
+    stopWaiting: () => undefined,
+    release: () => undefined,
+    ...over,
+  });
+  const preJoin = (devices: JoinDevices, over: Partial<PreJoinProps> = {}) =>
+    h(PreJoin, {
+      title: "Quarterly review",
+      recordAudio: true,
+      needsNotice: true,
+      nameRequired: true,
+      name: "Jane Doe",
+      onName: () => undefined,
+      consent: true,
+      onConsent: () => undefined,
+      devicesOpen: true,
+      devices,
+      error: null,
+      nameMissing: false,
+      consentMissing: false,
+      onJoin: () => undefined,
+      onJoinWithout: () => undefined,
+      ...over,
+    });
+  draw("prejoin.notWaiting", preJoin(devicesWith({})));
+  draw("prejoin.waitingBoth", preJoin(devicesWith({ asking: true, waiting: { mic: true, cam: true } })));
+  draw("prejoin.waitingCamera", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: false, cam: true }, mic: track("audio") })));
+  draw("prejoin.waitingMicrophone", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: true, cam: false }, cam: track("video") })));
+  // A switch to another camera while the first one runs: nothing is missing, so the way out keeps the one they have.
+  draw("prejoin.switching", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: false, cam: true }, mic: track("audio"), cam: track("video") })));
+  // The same wait with the notice un-ticked: the camera step, and so the way out, is not drawn behind a shut gate.
+  draw("prejoin.waitingGateShut", preJoin(devicesWith({ asking: true, waiting: { mic: true, cam: true } }), { devicesOpen: false, consent: false }));
+
   // The ending screens, every reason, for a guest and for a host.
-  for (const reason of ["left", "host_ended", "removed", "room_closed"] as MeetEndReason[]) {
+  for (const reason of ["left", "dropped", "host_ended", "removed", "room_closed"] as MeetEndReason[]) {
     draw(`ended.${reason}.guest`, h(MeetEnded, { reason, isHost: false }));
     draw(`ended.${reason}.host`, h(MeetEnded, { reason, isHost: true }));
   }

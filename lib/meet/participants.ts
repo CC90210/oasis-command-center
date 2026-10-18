@@ -7,8 +7,9 @@
  * without saying so drops out on its own.
  *
  * The cap of MEET_MAX_PARTICIPANTS is taken in the same statement as the join
- * (INSERT ... SELECT ... WHERE present < cap), so two people joining at once
- * cannot both take the last place.
+ * (INSERT ... SELECT ... WHERE held < cap), so two people joining at once
+ * cannot both take the last place. A place is held by everyone who can still be
+ * in the call (heard from within MEET_STALE_MS), not only by the present.
  *
  * A room is `scheduled` until its first host joins, then `live`. It ends when a
  * host ends it, or on its own once no host has been present for
@@ -21,7 +22,10 @@ import { nullableText as text, type MeetEndedReason, type MeetRoom } from "./roo
 
 /** The most people in one room at once: a sales call is two or three; this is a ceiling against a leaked link. */
 export const MEET_MAX_PARTICIPANTS = 8;
-/** A participant not heard from for this long is gone (the room page polls every 2 seconds). */
+/**
+ * A participant not heard from for this long is off the People list and their tracks are no longer pulled (the room
+ * page polls every 2 seconds). Their place in the room stays theirs until MEET_STALE_MS.
+ */
 export const MEET_PRESENCE_MS = 30_000;
 /**
  * A participant not heard from for this long has left: their session is cut and their token stops, so a browser
@@ -95,12 +99,17 @@ function toPresence(row: Record<string, unknown>): MeetPresence {
 }
 
 const presentSince = (now: Date) => new Date(now.getTime() - MEET_PRESENCE_MS).toISOString();
+/** Heard from after this, and not left or removed: they can still be in the call (their token works, isStale is false). */
+const heldSince = (now: Date) => new Date(now.getTime() - MEET_STALE_MS).toISOString();
 
 /**
- * Add a person to a room, unless it is full: one statement, so the last place cannot be taken twice. Nobody joins
- * a room that holds MEET_MAX_PARTICIPANTS present people, and guests can hold at most MEET_MAX_PARTICIPANTS - 1 of
- * them, so a host can always get in: a leaked link filled with guests can never lock its host out of the room they
- * need to be in to remove them. A host's join also opens a scheduled room. Null when the room is full.
+ * Add a person to a room, unless it is full: one statement, so the last place cannot be taken twice. A place is
+ * held by everyone who can still be in the call, which is everyone not left or removed and heard from within
+ * MEET_STALE_MS, not only the 30 s People list: someone whose laptop slept for two minutes comes back to their own
+ * place, and a newcomer who took it meanwhile would make the room one over. Nobody joins a room whose places are
+ * all held, and guests can hold at most MEET_MAX_PARTICIPANTS - 1 of them, so a host can always get in: a leaked
+ * link filled with guests can never lock its host out of the room they need to be in to remove them. A host's join
+ * also opens a scheduled room. Null when the room is full.
  */
 export async function joinMeetRoom(
   db: Client,
@@ -120,8 +129,8 @@ export async function joinMeetRoom(
                    AND role = 'guest') < ?)`,
     args: [
       id, room.tenantId, room.id, input.role, input.userId, input.displayName, input.consentAt, at, at,
-      room.tenantId, room.id, presentSince(now), MEET_MAX_PARTICIPANTS,
-      input.role, room.tenantId, room.id, presentSince(now), MEET_MAX_PARTICIPANTS - 1,
+      room.tenantId, room.id, heldSince(now), MEET_MAX_PARTICIPANTS,
+      input.role, room.tenantId, room.id, heldSince(now), MEET_MAX_PARTICIPANTS - 1,
     ],
   });
   if (rs.rowsAffected === 0) return null;
@@ -178,7 +187,7 @@ export async function creatorInCall(db: Client, room: Pick<MeetRoom, "tenantId" 
     sql: `SELECT 1 FROM meet_participants
            WHERE tenant_id = ? AND room_id = ? AND role = 'host' AND user_id = ? AND left_at IS NULL AND removed_at IS NULL
              AND last_seen_at > ? LIMIT 1`,
-    args: [room.tenantId, room.id, room.hostUserId, new Date(now.getTime() - MEET_STALE_MS).toISOString()],
+    args: [room.tenantId, room.id, room.hostUserId, heldSince(now)],
   });
   return rs.rows.length > 0;
 }
@@ -264,14 +273,18 @@ export async function leaveStale(db: Client, room: Pick<MeetRoom, "tenantId" | "
   const rs = await db.execute({
     sql: `UPDATE meet_participants SET left_at = ?
            WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at <= ?`,
-    args: [now.toISOString(), room.tenantId, room.id, new Date(now.getTime() - MEET_STALE_MS).toISOString()],
+    args: [now.toISOString(), room.tenantId, room.id, heldSince(now)],
   });
   return rs.rowsAffected;
 }
 
-/** Not heard from for MEET_STALE_MS: they have left, whether or not leaveStale has stamped it yet. */
+/**
+ * Not heard from for MEET_STALE_MS: they have left, whether or not leaveStale has stamped it yet. The cap's and
+ * leaveStale's own cutoff (heldSince), compared as the database compares it (every time is written by toISOString),
+ * so a token never works for a place the cap no longer counts.
+ */
 export function isStale(p: Pick<MeetPresence, "lastSeenAt">, now: Date): boolean {
-  return now.getTime() - Date.parse(p.lastSeenAt) > MEET_STALE_MS;
+  return p.lastSeenAt <= heldSince(now);
 }
 
 /**

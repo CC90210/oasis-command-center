@@ -12,19 +12,26 @@
  * fails leaves the preview running for another try; release() stops the originals once a join has worked.
  *
  * An answer from the browser can arrive late: after a newer request for the same device, after release, after
- * consent was withdrawn, after the screen is gone. devices.ts createDeviceRequests numbers every request and stops
- * the tracks of an answer that is no longer wanted, so a late camera never stays on. A join does not cancel: if it
- * fails the person is still here and keeps what the request brings; if it works release() follows and stops it.
+ * consent was withdrawn, after the person stopped waiting, after the screen is gone. devices.ts createDeviceRequests
+ * numbers every request and stops the tracks of an answer that is no longer wanted, so a late camera never stays on.
+ * A join does not cancel: if it fails the person is still here and keeps what the request brings; if it works
+ * release() follows and stops it.
+ *
+ * A browser may never answer (the person ignores its prompt). `asking` then stays true, which keeps Join now off so
+ * nobody joins by mistake without the camera they just allowed; stopWaiting() is the person's way out of it.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { reportClientError } from "@/lib/client-errors/report";
-import { createDeviceRequests, deviceWords, listInputs, openDevices, type DeviceChoice, type PolicyLike } from "./devices";
+import { NOT_WAITING, createDeviceRequests, deviceWords, listInputs, openDevices, type DeviceChoice, type PolicyLike, type Waiting } from "./devices";
 
 export type JoinDevices = {
   /** The person has taken the camera and microphone step (even if nothing came back). */
   asked: boolean;
+  /** A request for the camera or microphone is still waiting on the browser. */
   asking: boolean;
+  /** Which devices that is (so the way out can name them); nothing when `asking` is false. */
+  waiting: Waiting;
   mic: MediaStreamTrack | null;
   cam: MediaStreamTrack | null;
   /** Plain words for what did not come back, else null. */
@@ -39,6 +46,11 @@ export type JoinDevices = {
   pickMic: (id: string) => void;
   pickCam: (id: string) => void;
   takeForJoin: () => { mic: MediaStreamTrack | null; cam: MediaStreamTrack | null };
+  /**
+   * The person would rather join than keep waiting: whatever is still open is let go (its answer is stopped when it
+   * comes) and `asking` comes down at once. What is already held stays, for the join to take.
+   */
+  stopWaiting: () => void;
   release: () => void;
 };
 
@@ -59,7 +71,8 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
   const [mic, setMic] = useState<MediaStreamTrack | null>(null);
   const [cam, setCam] = useState<MediaStreamTrack | null>(null);
   const [asked, setAsked] = useState(false);
-  const [asking, setAsking] = useState(false);
+  const [waiting, setWaiting] = useState<Waiting>(NOT_WAITING);
+  const asking = waiting.mic || waiting.cam;
   const [words, setWords] = useState<string | null>(null);
   const [inputs, setInputs] = useState<{ mics: DeviceChoice[]; cams: DeviceChoice[] }>({ mics: [], cams: [] });
   const [micId, setMicId] = useState("");
@@ -92,12 +105,12 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
 
   const ask = useCallback(
     async (want: { mic: boolean; cam: boolean }) => {
-      setAsking(true);
       // One request, start to finish (devices.ts run): what comes back is kept only if it is still wanted, not asked
-      // for again, not cancelled (released, left, consent withdrawn), the notice still ticked; the rest is stopped
-      // there. A request that throws still settles, so a throw cannot leave `asking` up; one the browser never answers
-      // (the person ignores its prompt) is still open, and `asking` rightly says so.
-      const answer = await requests.run(
+      // for again, not cancelled (released, left, consent withdrawn, stopped waiting), the notice still ticked; the
+      // rest is stopped there. A request that throws still settles, so a throw cannot leave `asking` up; one the
+      // browser never answers (the person ignores its prompt) is still open, and `asking` rightly says so until
+      // the person stops waiting.
+      const answered = requests.run(
         want,
         () =>
           openDevices({
@@ -111,7 +124,10 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
         () => live.current.allowed,
         (err) => reportClientError("rejection", err),
       );
-      setAsking(answer.pending);
+      // run has counted its request on the way in: say what is waited for now, not when the first one settles.
+      setWaiting(requests.waiting());
+      const answer = await answered;
+      setWaiting(answer.waiting);
       if (!answer.current) return;
       if (answer.mic) hold("mic", answer.mic);
       if (answer.cam) hold("cam", answer.cam);
@@ -122,16 +138,23 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
     [hold, refreshInputs, requests],
   );
 
+  // Whatever is still open is let go: nobody waits on it any more, and its answer is stopped when it comes. What is
+  // held is not touched here.
+  const abandon = useCallback(() => {
+    requests.cancel();
+    setWaiting(NOT_WAITING);
+  }, [requests]);
+
   // Consent withdrawn: let go of everything and go back to the step before the camera.
   useEffect(() => {
     if (allowed) return;
-    requests.cancel();
+    abandon();
     hold("mic", null);
     hold("cam", null);
     setAsked(false);
     setWords(null);
     setInputs({ mics: [], cams: [] });
-  }, [allowed, hold, requests]);
+  }, [allowed, abandon, hold]);
 
   // Leaving the screen for any other reason: the camera must not outlive it. (The room's copies are not touched.)
   // A request still open when it goes is cancelled, so its answer is stopped when it arrives.
@@ -153,10 +176,10 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
   }, [asked, refreshInputs]);
 
   const release = useCallback(() => {
-    requests.cancel();
+    abandon();
     hold("mic", null);
     hold("cam", null);
-  }, [hold, requests]);
+  }, [abandon, hold]);
 
   const toggle = useCallback(
     (kind: Kind) => {
@@ -182,6 +205,7 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
   return {
     asked,
     asking,
+    waiting,
     mic,
     cam,
     words,
@@ -198,6 +222,7 @@ export function useJoinDevices(allowed: boolean): JoinDevices {
     // a request still open belongs, so what it brings is kept. A join that works is followed by release(), which
     // cancels, and a screen that goes away cancels too.
     takeForJoin: () => ({ mic: live.current.mic?.clone() ?? null, cam: live.current.cam?.clone() ?? null }),
+    stopWaiting: abandon,
     release,
   };
 }

@@ -26,7 +26,7 @@ import { join, relative, sep } from "node:path";
 import { createClient } from "@libsql/client";
 import ts from "typescript";
 import { loadMeetPage, meetCreatorFor, meetViewerFor, sessionOrVisitor } from "../app/meet/[code]/load";
-import { createDeviceRequests, deviceWords, listInputs, openDevices, problemOf, type DeviceAnswer } from "../components/meet/devices";
+import { NOT_WAITING, createDeviceRequests, deviceWords, listInputs, openDevices, problemOf, waitingWords, type DeviceAnswer } from "../components/meet/devices";
 import { messageFor } from "../components/calendar/useCalendarData";
 import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody } from "../components/meet/meet-api";
 import {
@@ -491,20 +491,85 @@ async function main() {
     assert.deepEqual([after.mic?.kind, after.pending], ["audio", false], "nothing is stuck open");
   });
 
-  await check("the hook opens every request through run and cancels at release, the screen going away and consent withdrawn, never at a join", () => {
+  await check("cancel() stops counting the requests it abandons: waiting() and pending read empty at once, the late answer is stopped and hands back nothing, and it cannot disturb the count of a newer request", async () => {
+    const requests = createDeviceRequests();
+    const browser = lateBrowser();
+    // Two requests open, the browser answering neither: the camera, then the microphone.
+    const cam = requestDevices(requests, browser, { mic: false, cam: true });
+    const mic = requestDevices(requests, browser, { mic: true, cam: false });
+    assert.deepEqual(requests.waiting(), { mic: true, cam: true }, "both are waited for");
+    // The person stops waiting.
+    requests.cancel();
+    assert.equal(requests.waiting(), NOT_WAITING, "nobody waits on either any more, though the browser has not answered");
+    // A newer request begins while the abandoned ones are still open in the browser.
+    const again = requestDevices(requests, browser, { mic: false, cam: true });
+    assert.deepEqual(requests.waiting(), { mic: false, cam: true }, "only the new request is waited for");
+    // The abandoned camera answers late: stopped, nothing handed back, and the newer request is still counted.
+    browser.answer(0);
+    const lateCam = await cam;
+    assert.deepEqual([lateCam.cam, lateCam.mic, lateCam.current], [null, null, false], "the abandoned answer hands back nothing");
+    assert.deepEqual(browser.stops(0), [1], "and its camera was stopped");
+    assert.deepEqual([lateCam.pending, lateCam.waiting], [true, { mic: false, cam: true }], "the new request is still counted: the abandoned one took nothing from it");
+    browser.answer(1);
+    const lateMic = await mic;
+    assert.deepEqual([lateMic.mic, lateMic.current, lateMic.pending], [null, false, true], "the abandoned microphone too");
+    assert.deepEqual(browser.stops(1), [1]);
+    assert.deepEqual(requests.waiting(), { mic: false, cam: true }, "still only the new request");
+    // The new request answers: kept, and nothing is left open.
+    browser.answer(2);
+    const kept = await again;
+    assert.deepEqual([kept.cam?.kind, kept.current, kept.pending], ["video", true, false]);
+    assert.equal(requests.waiting(), NOT_WAITING);
+    // The count did not go below zero: two requests open together are two to wait for, so the first to settle leaves one.
+    const first = requestDevices(requests, browser, { mic: true, cam: false });
+    const second = requestDevices(requests, browser, { mic: false, cam: true });
+    browser.answer(3);
+    assert.equal((await first).pending, true, "the second is still open: the abandoned answers took no count away");
+    browser.answer(4);
+    assert.equal((await second).pending, false);
+  });
+
+  await check("waiting() names the devices the open requests wait for from the moment run counts them, and shrinks as they settle; a request that throws is not counted after it", async () => {
+    const requests = createDeviceRequests();
+    assert.equal(requests.waiting(), NOT_WAITING, "nothing open: one shared answer, so the screen is not drawn again for it");
+    const browser = lateBrowser();
+    const cam = requestDevices(requests, browser, { mic: false, cam: true });
+    assert.deepEqual(requests.waiting(), { mic: false, cam: true }, "counted before the browser has answered");
+    const both = requestDevices(requests, browser, { mic: true, cam: true });
+    assert.deepEqual(requests.waiting(), { mic: true, cam: true });
+    browser.answer(0);
+    const first = await cam;
+    assert.deepEqual([first.pending, first.waiting], [true, { mic: true, cam: true }], "the second request still waits for both");
+    browser.answer(1);
+    const second = await both;
+    assert.deepEqual([second.pending, second.waiting], [false, { mic: false, cam: false }]);
+    const open = requestDevices(requests, browser, { mic: true, cam: false });
+    await requests.run({ mic: false, cam: true }, async () => { throw new Error("the browser object misbehaved"); }, () => true, () => undefined);
+    assert.deepEqual(requests.waiting(), { mic: true, cam: false }, "the one that threw is gone; the one still open is not");
+    browser.answer(2);
+    await open;
+    assert.equal(requests.waiting(), NOT_WAITING);
+  });
+
+  await check("the hook opens every request through run and lets go of the open ones at release, consent withdrawn and the way out (abandon) and when the screen goes away, never at a join", () => {
     const hook = readFileSync(join(root, "components", "meet", "useJoinDevices.ts"), "utf8");
     assert.match(hook, /const \[requests\] = useState\(createDeviceRequests\);/, "one set of numbers for the life of the screen");
-    assert.match(hook, /const answer = await requests\.run\(/, "a request is opened only through run, which settles it when the browser answers or throws");
+    assert.match(hook, /const answered = requests\.run\(/, "a request is opened only through run, which settles it when the browser answers or throws");
     assert.doesNotMatch(hook, /requests\.(begin|settle)\(/, "there is no other way to open or close one");
     assert.match(hook, /\(err\) => reportClientError\("rejection", err\),/, "a request that throws is reported, as the call screen reports its own");
     assert.match(hook, /\(\) => live\.current\.allowed,/, "the gate is read when the answer arrives");
-    assert.match(hook, /setAsking\(answer\.pending\);/, "asking ends with the last open request, not the first");
+    // What is waited for is said as soon as run has counted the request, and again when any request settles.
+    assert.match(hook, /\);\s*(?:\/\/[^\n]*\s*)*setWaiting\(requests\.waiting\(\)\);\s*const answer = await answered;\s*setWaiting\(answer\.waiting\);/, "waiting follows the open requests: set on the way in, set from what is still open on the way out");
+    assert.match(hook, /const asking = waiting\.mic \|\| waiting\.cam;/, "asking is whether anything is waited for: one source, not two");
+    assert.doesNotMatch(hook, /setAsking/, "no second copy of asking to drift from the first");
     assert.match(hook, /if \(answer\.mic\) hold\("mic", answer\.mic\);/, "only what is wanted is held");
     assert.match(hook, /if \(answer\.cam\) hold\("cam", answer\.cam\);/);
-    assert.equal(count(hook, /requests\.cancel\(\)/g), 3, "three places cancel");
-    assert.match(hook, /if \(allowed\) return;\s*requests\.cancel\(\);/, "consent withdrawn");
+    assert.equal(count(hook, /requests\.cancel\(\)/g), 2, "two places cancel: abandon, and the screen going away");
+    assert.match(hook, /const abandon = useCallback\(\(\) => \{\s*requests\.cancel\(\);\s*setWaiting\(NOT_WAITING\);\s*\}, \[requests\]\);/, "abandon cancels AND stops waiting on it at once, or Join stays off for a request nobody wants");
+    assert.match(hook, /if \(allowed\) return;\s*abandon\(\);\s*hold\("mic", null\);\s*hold\("cam", null\);/, "consent withdrawn");
     assert.match(hook, /return \(\) => \{\s*requests\.cancel\(\);\s*store\.mic\?\.stop\(\);/, "the screen going away");
-    assert.match(hook, /const release = useCallback\(\(\) => \{\s*requests\.cancel\(\);/, "release");
+    assert.match(hook, /const release = useCallback\(\(\) => \{\s*abandon\(\);\s*hold\("mic", null\);\s*hold\("cam", null\);/, "release lets go of what is open and of what is held");
+    assert.match(hook, /stopWaiting: abandon,/, "the way out lets go of what is open and keeps what is held");
     assert.match(hook, /takeForJoin: \(\) => \(\{ mic: live\.current\.mic\?\.clone\(\) \?\? null, cam: live\.current\.cam\?\.clone\(\) \?\? null \}\),/, "a join takes copies and cancels nothing");
     assert.doesNotMatch(hook, /if \(!live\.current\.allowed\) \{/, "no second, partial check of the gate: run owns it");
     // A join that works is followed by release(), and only a join that works: that is what stops a late answer then.
@@ -613,16 +678,108 @@ async function main() {
     assert.match(room, /devicesOpen=\{devicesOpen\}/);
     const hook = readFileSync(join(root, "components", "meet", "useJoinDevices.ts"), "utf8");
     assert.match(hook, /allowed: live\.current\.allowed,/, "the hook passes the CURRENT gate to openDevices");
-    assert.match(hook, /if \(allowed\) return;\s*requests\.cancel\(\);\s*hold\("mic", null\);\s*hold\("cam", null\);/, "un-ticking the notice lets go of the devices, and of any request still open");
+    assert.match(hook, /if \(allowed\) return;\s*abandon\(\);\s*hold\("mic", null\);\s*hold\("cam", null\);/, "un-ticking the notice lets go of the devices, and of any request still open");
     const pre = readFileSync(join(root, "components", "meet", "PreJoin.tsx"), "utf8");
     assert.match(pre, /!props\.devicesOpen \?\s*\(\s*<p className="text-sm text-fg-muted">\{TICK_FIRST\}<\/p>/, "the camera step is behind the gate");
   });
 
+  // ---- the way out of waiting on the browser -----------------------------------------------------------------------------------
+
+  await check("the way out names exactly what is still waiting (camera, microphone or both), keeps the device a switch would replace, and says the same steps deviceWords says", () => {
+    const none = { mic: false, cam: false };
+    const cam = { mic: false, cam: true };
+    const mic = { mic: true, cam: false };
+    const both = { mic: true, cam: true };
+    assert.equal(waitingWords(none, none), null, "nothing waiting, no way out");
+    assert.equal(waitingWords(none, both), null, "holding devices is not waiting");
+    const steps = "click the camera or lock icon in the address bar, choose Allow";
+    const allow = (them: boolean) => `Or, to allow ${them ? "them" : "it"}, ${steps}.`;
+    // Waiting for a device they do not have: they would join without it.
+    assert.deepEqual(waitingWords(both, none), { button: "Join without your camera and microphone", hint: allow(true) });
+    assert.deepEqual(waitingWords(cam, none), { button: "Join without your camera", hint: allow(false) });
+    assert.deepEqual(waitingWords(mic, none), { button: "Join without your microphone", hint: allow(false) });
+    // Holding one while the other is waited for: only what they would join without is named.
+    assert.deepEqual(waitingWords(both, mic), { button: "Join without your camera", hint: allow(false) });
+    assert.deepEqual(waitingWords(both, cam), { button: "Join without your microphone", hint: allow(false) });
+    assert.deepEqual(waitingWords(cam, mic), { button: "Join without your camera", hint: allow(false) });
+    assert.deepEqual(waitingWords(mic, cam), { button: "Join without your microphone", hint: allow(false) });
+    // Waiting for a device they already hold is a switch to another one: they keep the one they have.
+    const switching = "Or wait: your browser is still opening the one you picked.";
+    assert.deepEqual(waitingWords(cam, cam), { button: "Join with your current camera", hint: switching });
+    assert.deepEqual(waitingWords(mic, mic), { button: "Join with your current microphone", hint: switching });
+    assert.deepEqual(waitingWords(both, both), { button: "Join with your current camera and microphone", hint: switching });
+    assert.deepEqual(waitingWords(cam, both), { button: "Join with your current camera", hint: switching });
+    // The steps are the ones deviceWords gives a blocked camera, word for word.
+    assert.ok((deviceWords({ cam: "blocked" }) ?? "").includes(`To allow it, ${steps}, then try again.`));
+    assert.ok((waitingWords(cam, none)?.hint ?? "").includes(`to allow it, ${steps}.`));
+    // Plain bytes and plain words, in every case.
+    for (const w of [cam, mic, both]) {
+      for (const h of [none, cam, mic, both]) {
+        const words = waitingWords(w, h);
+        assert.ok(words && /^[\x20-\x7e]+$/.test(words.button + words.hint), "ASCII only");
+        assert.ok(!/asking|pending|request|track|stream/i.test(`${words?.button} ${words?.hint}`), "no internal word");
+      }
+    }
+  });
+
+  await check("the way out of waiting on the browser: drawn only while something is waited for and behind the notice's gate, naming what is waiting, with Join now still off beside it", () => {
+    const outs = (html: string) => buttonNames(html).filter((n) => /^Join with(out)? /.test(n));
+    const tagOf = (html: string, name: string) => [...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)].find((m) => text(m[1]) === name)?.[0] ?? "";
+    const waitingScreens = ["prejoin.waitingBoth", "prejoin.waitingCamera", "prejoin.waitingMicrophone", "prejoin.switching"];
+    // Nothing waited for, or the gate shut: no way out and no hint, on any screen.
+    for (const [id, html] of Object.entries(markup)) {
+      if (waitingScreens.includes(id)) continue;
+      assert.deepEqual(outs(html), [], `${id}: no way out`);
+      assert.ok(!html.includes("meet-waiting-hint"), `${id}: no hint either`);
+    }
+    assert.ok(!/\bdisabled=""/.test(tagOf(markup["prejoin.notWaiting"], "Join now")), "nothing waiting: Join now is on");
+    assert.ok(text(markup["prejoin.waitingGateShut"]).includes(TICK_FIRST), "the shut gate draws the tick-first line where the camera step would be");
+    // Waiting: the words follow what is waited for and what is held.
+    const cases: Array<[string, string, string]> = [
+      ["prejoin.waitingBoth", "Join without your camera and microphone", "Or, to allow them, click the camera or lock icon in the address bar, choose Allow."],
+      ["prejoin.waitingCamera", "Join without your camera", "Or, to allow it, click the camera or lock icon in the address bar, choose Allow."],
+      ["prejoin.waitingMicrophone", "Join without your microphone", "Or, to allow it, click the camera or lock icon in the address bar, choose Allow."],
+      ["prejoin.switching", "Join with your current camera", "Or wait: your browser is still opening the one you picked."],
+    ];
+    for (const [id, button, hint] of cases) {
+      const html = markup[id];
+      assert.deepEqual(outs(html), [button], `${id}: one way out, naming exactly what is waiting`);
+      assert.ok(text(html).includes(hint), `${id}: the hint`);
+      const tag = tagOf(html, button);
+      assert.match(tag, /type="button"/, `${id}: a plain button, not a second submit`);
+      assert.ok(!/\bdisabled=""/.test(tag), `${id}: and it is on`);
+      assert.match(tag, /aria-describedby="meet-waiting-hint"/, `${id}: described by its hint`);
+      assert.match(html, /<p id="meet-waiting-hint"/, `${id}: the hint it points to`);
+      const joinNow = tagOf(html, "Join now");
+      assert.ok(/type="submit"/.test(joinNow) && /\bdisabled=""/.test(joinNow), `${id}: Join now stays off while the browser has not answered`);
+    }
+  });
+
+  await check("the way out joins through the same join: Join now still waits, the notice and the name are checked first, and the open request is let go only once they pass", () => {
+    const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
+    assert.match(room, /const join = async \(options: \{ stopWaiting\?: boolean \} = \{\}\) => \{\s*(?:\/\/[^\n]*\s*)*if \(devices\.asking && !options\.stopWaiting\) return;\s*setTried\(true\);/, "only the way out passes the wait");
+    assert.match(
+      room,
+      /if \(needsNotice && !consent\) \{\s*consentRef\.current\?\.focus\(\);\s*return;\s*\}\s*if \(nameRequired && !trimmed\) \{\s*nameRef\.current\?\.focus\(\);\s*return;\s*\}\s*(?:\/\/[^\n]*\s*)*if \(options\.stopWaiting\) devices\.stopWaiting\(\);\s*const held = devices\.takeForJoin\(\);/,
+      "the notice, then the name, then the open request is let go, then the copies are taken",
+    );
+    assert.equal(count(room, /devices\.stopWaiting\(\)/g), 1, "one place lets go of the wait");
+    assert.equal(count(room, /controller\.join\(/g), 1, "one call joins: the way out goes through it, not around it");
+    assert.match(room, /onJoin=\{\(\) => void join\(\)\}/);
+    assert.match(room, /onJoinWithout=\{\(\) => void join\(\{ stopWaiting: true \}\)\}/);
+    const pre = readFileSync(join(root, "components", "meet", "PreJoin.tsx"), "utf8");
+    assert.match(pre, /const way = props\.devicesOpen && devices\.asking \? waitingWords\(devices\.waiting, \{ mic: !!devices\.mic, cam: !!devices\.cam \}\) : null;/, "behind the same gate as the camera step, and only while waiting");
+    assert.match(pre, /<button type="submit" disabled=\{devices\.asking\}/, "Join now is off while the browser has not answered");
+    assert.match(pre, /<button type="button" onClick=\{props\.onJoinWithout\}/, "the way out is its own button");
+    assert.equal(count(pre, /props\.onJoinWithout/g), 1, "and nothing else calls it");
+  });
+
   // ---- the ending screens ------------------------------------------------------------------------------------------------
 
-  await check("(d) every ending says the right words; Rejoin only after leaving; the way back only for a host", () => {
+  await check("(d) every ending says the right words; Rejoin only after leaving or being disconnected; the way back only for a host", () => {
     const words = {
       left: "You left the meeting.",
+      dropped: "You were disconnected from the meeting.",
       host_ended: "The host ended the meeting.",
       removed: "The host removed you from this meeting.",
       room_closed: "This meeting has ended.",
@@ -632,8 +789,9 @@ async function main() {
       const guest = markup[`ended.${reason}.guest`];
       const host = markup[`ended.${reason}.host`];
       assert.match(guest, new RegExp(`<h1[^>]*>${sentence.replace(/\./g, "\\.")}</h1>`), `${reason}: the words`);
-      assert.equal(buttonNames(guest).includes("Rejoin"), reason === "left", `${reason}: Rejoin only after the person left`);
-      assert.equal(buttonNames(host).includes("Rejoin"), reason === "left", `${reason}: ... for a host too`);
+      const rejoin = reason === "left" || reason === "dropped";
+      assert.equal(buttonNames(guest).includes("Rejoin"), rejoin, `${reason}: Rejoin only after the person left or was disconnected`);
+      assert.equal(buttonNames(host).includes("Rejoin"), rejoin, `${reason}: ... for a host too`);
       assert.ok(!guest.includes("/schedule"), `${reason}: a guest is not sent to the Schedule`);
       assert.match(host, /<a href="\/schedule"[^>]*>Back to Schedule<\/a>/, `${reason}: a host gets the way back, as a plain link`);
     }

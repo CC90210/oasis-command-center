@@ -37,6 +37,14 @@ import { displayMeetCode, readMeetRoomByCode } from "../lib/meet/rooms";
 import { SfuError, type SfuClient } from "../lib/meet/sfu";
 
 let failures = 0;
+let finished = false;
+// A promise that never settles lets Node exit 0 mid-suite: that is a failure, never a pass (as tests/meet-recorder.test.ts).
+process.on("beforeExit", () => {
+  if (!finished) {
+    console.log("meet room: exited before every check finished");
+    process.exitCode = 1;
+  }
+});
 async function check(name: string, fn: () => Promise<void>) {
   try {
     await fn();
@@ -434,7 +442,7 @@ async function main() {
     assert.deepEqual(statuses, [...Array(MEET_MAX_PARTICIPANTS - 1).fill(200), 409], "guests hold seven places at most: a leaked link cannot fill the room");
     assert.equal((await handleJoin(request(`/api/meet/${full}/join`, { body: {}, ip: freshIp() }), full, deps({ session: as(CC) }))).status, 200, "so its host can always get in, and remove them");
     assert.equal((await handleJoin(request(`/api/meet/${full}/join`, { body: { consent: true }, ip: freshIp() }), full, deps({ session: as(ADON, true) }))).status, 409, "eight people in all");
-    clock += 31_000; // everyone stopped polling: they are gone, and their places are free again
+    clock += MEET_STALE_MS + 1_000; // everyone stopped polling five minutes ago: they have left, and their places are free again
     assert.equal((await handleJoin(request(`/api/meet/${full}/join`, { body: { name: "Late" }, ip: freshIp() }), full, deps())).status, 200);
 
     // Eight in all counts hosts too: with a host in, a seventh guest fills the room; with two hosts in, it is full.
@@ -446,6 +454,19 @@ async function main() {
     };
     assert.equal(await fill([as(CC)], 6), 200, "one host and six guests: a seventh guest takes the last place");
     assert.equal(await fill([as(CC), as(ADON, true)], 6), 409, "two hosts and six guests: the room is full, guests or not");
+  });
+
+  await check("a place stays held while its person can still come back to it (silent under five minutes), so the room never goes over", async () => {
+    const c = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false } }), deps({ session: as(CC) })))).room as Json).code);
+    const join = async (session: (() => Promise<MeetSession>) | null, name?: string) =>
+      (await handleJoin(request(`/api/meet/${c}/join`, { body: name ? { name } : {}, ip: freshIp() }), c, deps(session ? { session } : {}))).status;
+    for (let i = 0; i < MEET_MAX_PARTICIPANTS - 1; i += 1) assert.equal(await join(null, `G${i}`), 200);
+    clock += 2 * 60_000; // their laptops slept for two minutes: off the People list, still able to come back
+    assert.equal(await join(null, "Newcomer"), 409, "the seven guests' places are still theirs");
+    assert.equal(await join(as(CC)), 200, "the host still gets the eighth");
+    assert.equal(await join(as(ADON, true)), 409, "and nobody gets a ninth");
+    clock += MEET_STALE_MS; // the guests have now been silent for seven minutes: they have left
+    assert.equal(await join(null, "Newcomer"), 200, "a place its person left is free again");
   });
 
   await check("the host ends it: every session the room had is cut, and everyone gets 410", async () => {
@@ -974,6 +995,7 @@ async function main() {
     assert.equal(displayMeetCode("abcdefghjk"), "abc-defg-hjk");
   });
 
+  finished = true;
   if (failures) {
     console.error(`meet room: ${failures} check(s) failed`);
     process.exit(1);
