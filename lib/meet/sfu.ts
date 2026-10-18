@@ -97,7 +97,11 @@ export async function cutSession(sfu: SfuClient, sessionId: string | null, where
   } catch (err) {
     // 404: the SFU no longer has the session (its browser closed long ago), so no media flows through it. A wrong
     // app id would answer 404 as well, but then no session could have been opened with it, nor any call made.
-    if (err instanceof SfuError && err.status === 404) return true;
+    // 410: the session is there but its connection is gone ("session_error: Session appears to be disconnected",
+    // live 2026-10-18), and neither its tracks can be read nor closed. Every Leave meets this: the page closes its
+    // connection before it tells the room. No media flows through it either; a browser whose network only dropped
+    // and comes back is refused by the room on its next poll (left, removed or ended) and closes its own connection.
+    if (err instanceof SfuError && (err.status === 404 || err.status === 410)) return true;
     console.error(`[meet.${where}] could not close a session's tracks`, err instanceof SfuError ? `${err.code}: ${err.message}` : err);
     return false;
   }
