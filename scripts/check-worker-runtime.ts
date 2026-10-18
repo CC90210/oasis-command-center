@@ -12,7 +12,8 @@
  *
  * HOW, with no database and no secrets:
  *  - `wrangler dev` (local workerd, no Cloudflare account) per group, bundling
- *    the same .open-next/worker.js the deploy uploads.
+ *    the same entry the deploy uploads: wrangler.jsonc "main", worker-entry.ts,
+ *    which wraps .open-next/worker.js and expands the secret bundles.
  *  - Worker env EMPIRE_AUTH_BACKEND=turso and a throwaway AUTH_SESSION_SECRET,
  *    the production auth mode. A session cookie signed with that secret takes a
  *    signed-in request past middleware into the route, which then runs what a
