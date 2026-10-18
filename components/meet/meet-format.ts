@@ -149,12 +149,26 @@ export function parseRoomList(v: unknown): MeetRoomList | null {
 }
 
 /**
- * Does a meeting show its transcript? Only a finished one that recorded, in a workspace where recording runs:
+ * Does a meeting offer its transcript? Only a finished one that recorded, in a workspace where recording runs:
  * a meeting that never recorded has nothing to show, and where recording is not installed the transcript reads
- * would answer 503 for every meeting.
+ * would answer 503 for every meeting. This is the one gate: the Transcript button and the transcript itself both
+ * ask it.
  */
 export function showsTranscript(room: Pick<MeetRoomItem, "status" | "recordAudio">, recordingAvailable: boolean): boolean {
   return room.status === "ended" && room.recordAudio === true && recordingAvailable === true;
+}
+
+/**
+ * Which transcript is open once the Transcript button on a meeting (by id) is pressed: that meeting's, or none if
+ * it was the one already open. Only one is open at a time, so opening another closes the first.
+ */
+export function toggledTranscript(open: string | null, id: string): string | null {
+  return open === id ? null : id;
+}
+
+/** The id of the box a meeting's transcript opens in: its Transcript button points at it, and the panel scrolls to it. */
+export function transcriptBoxId(id: string): string {
+  return `meet-transcript-${id}`;
 }
 
 /** Delete is offered only on a meeting the person made (the list's `mine`). */
@@ -228,8 +242,18 @@ export const NO_CONNECTION = "No connection. Check it and try again.";
 
 // Deleting a meeting (POST /api/meet/<code>/host { action: "delete" })
 
-/** What the host reads before a meeting is deleted for good, said once and the same on every row. */
-export const DELETE_CONFIRM = "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone.";
+const DELETE_RECORDED = "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone.";
+const DELETE_UNRECORDED = "This deletes the meeting, and its link stops working. It cannot be undone.";
+const DELETE_LIVE = "The meeting is on now: this ends it for everyone in it. ";
+
+/**
+ * What the host reads before a meeting is deleted for good, said for the meeting in question: a recording and a
+ * transcript go with it only if it recorded, and a meeting that is on now is ended for everyone in it.
+ */
+export function deleteConfirm(row: { recordAudio: boolean; status: MeetRoomStatus }): string {
+  return (row.status === "live" ? DELETE_LIVE : "") + (row.recordAudio ? DELETE_RECORDED : DELETE_UNRECORDED);
+}
+
 export const ALREADY_DELETED = "This meeting was already deleted.";
 export const DELETE_FAILED = "Couldn't delete the meeting. Try again.";
 

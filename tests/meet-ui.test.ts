@@ -31,7 +31,6 @@ import { messageFor } from "../components/calendar/useCalendarData";
 import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody } from "../components/meet/meet-api";
 import {
   ALREADY_DELETED,
-  DELETE_CONFIRM,
   DELETE_FAILED,
   LENGTH_CHOICES,
   NAME_MAX_CHARS,
@@ -39,6 +38,7 @@ import {
   STATUS_WORDS,
   TITLE_MAX_CHARS,
   canDelete,
+  deleteConfirm,
   deleteErrorWords,
   deletedNote,
   gridClasses,
@@ -55,6 +55,8 @@ import {
   sharerOf,
   showsTranscript,
   timeFormatter,
+  toggledTranscript,
+  transcriptBoxId,
   whenText,
   withoutMeeting,
   type MeetRoomItem,
@@ -536,7 +538,7 @@ async function main() {
     assert.ok(!text(markup["panel.error"]).includes("No meetings yet"));
   });
 
-  await check("(c) a meeting is a title, a plain status, a time, Copy link, and Join unless it ended; the transcript goes in a named slot", () => {
+  await check("(c) a meeting is a title, a plain status, a time, Copy link, and Join unless it ended; a finished recorded one has a Transcript button, closed", () => {
     const html = markup["panel.rows"];
     assert.equal(count(html, /<li\b/g), 3);
     for (const [title, status] of [["Discovery call", "Scheduled"], ["Team sync", "Live now"], ["Old review", "Ended"]]) {
@@ -545,9 +547,9 @@ async function main() {
     assert.equal(count(html, />Copy link</g), 3, "every meeting can have its link copied");
     const joins = [...html.matchAll(/<a href="([^"]+)" target="_blank" rel="noopener noreferrer"[^>]*>(?:<svg[\s\S]*?<\/svg>)?Join<\/a>/g)].map((m) => m[1]);
     assert.deepEqual(joins, ["/meet/aaa-bbbb-ccc", "/meet/ddd-eeee-fff"], "Join for scheduled and live, not for ended");
-    assert.equal(count(html, /data-transcript-slot=/g), 1, "the slot renders only for the ended meeting");
-    assert.match(html, /Old review[\s\S]*data-transcript-slot="ggg-hhhh-jjj">Transcript for ggg-hhhh-jjj/, "...inside that meeting's row, with its code");
-    assert.ok(!markup["panel.empty"].includes("data-transcript-slot"));
+    assert.equal(count(html, /data-transcript-slot=/g), 0, "no transcript is mounted until one is opened");
+    assert.deepEqual([...html.matchAll(/data-transcript-toggle="([^"]+)"/g)].map((m) => m[1]), ["r3"], "the Transcript button is on the ended meeting only");
+    assert.ok(!markup["panel.empty"].includes("data-transcript"));
     assert.match(markup["panel.copyFailed"], /Copy this link: <span[^>]*>https:\/\/oasisai\.work\/meet\/aaa-bbbb-ccc<\/span>/, "a refused copy shows the link to copy by hand");
   });
 
@@ -644,7 +646,17 @@ async function main() {
     assert.match(panel, /laterBody\(\{[^}]*\bavailability\b[^}]*\}\)/);
   });
 
-  await check("the transcript slot draws only for a finished meeting that recorded, where recording runs", () => {
+  // ---- transcripts are opened on purpose, one at a time --------------------------------------------------------------------------
+
+  /** The meetings (by id) whose Transcript button a screen draws, and the dashed codes its transcript boxes were asked for. */
+  const toggles = (id: string) => [...markup[id].matchAll(/data-transcript-toggle="([^"]+)"/g)].map((m) => m[1]);
+  const slots = (id: string) => [...markup[id].matchAll(/data-transcript-slot="([^"]+)"/g)].map((m) => m[1]);
+  /** The opening tag of one meeting's Transcript button on a screen. */
+  const toggleTag = (id: string, meeting: string) => tags(markup[id], "button").find((t) => t.includes(`data-transcript-toggle="${meeting}"`)) ?? "";
+  /** One meeting's part of a screen: the text from its <li> to the next one. */
+  const rowOf = (id: string, title: string) => markup[id].split(/<li\b/).find((part) => part.includes(title)) ?? "";
+
+  await check("a Transcript button is offered only for a finished meeting that recorded, where recording runs; it starts closed and nothing is mounted", () => {
     for (const status of ["scheduled", "live", "ended"] as const) {
       for (const recordAudio of [true, false]) {
         for (const available of [true, false]) {
@@ -652,16 +664,85 @@ async function main() {
         }
       }
     }
-    const slots = (id: string) => [...markup[id].matchAll(/data-transcript-slot="([^"]+)"/g)].map((m) => m[1]);
-    assert.deepEqual(slots("panel.mixedAvailable"), ["ggg-hhhh-jjj", "pqr-stuv-wxy"], "ended and recorded: its own and someone else's");
-    assert.deepEqual(slots("panel.mixedUnavailable"), [], "not where recording does not run, whatever the meetings say");
-    assert.deepEqual(slots("panel.rows"), ["ggg-hhhh-jjj"], "the slot still hands over the meeting's dashed code");
+    assert.deepEqual(toggles("panel.mixedAvailable"), ["m3", "m5"], "ended and recorded: its own and someone else's");
+    assert.deepEqual(toggles("panel.mixedUnavailable"), [], "not where recording does not run, whatever the meetings say");
+    assert.deepEqual(toggles("panel.rows"), ["r3"]);
+    for (const id of ["panel.mixedAvailable", "panel.mixedUnavailable", "panel.rows", "panel.loading", "panel.empty", "panel.deleteAsk"]) {
+      assert.deepEqual(slots(id), [], `${id}: no transcript is mounted until one is opened, so nothing reads a recording`);
+    }
+    // Closed: the button says what it does, says it is collapsed, and points at the box the transcript will go in.
+    const closed = markup["panel.mixedAvailable"];
+    for (const meeting of ["m3", "m5"]) {
+      const tag = toggleTag("panel.mixedAvailable", meeting);
+      assert.match(tag, /aria-expanded="false"/, `${meeting}: collapsed`);
+      assert.ok(tag.includes(`aria-controls="meet-transcript-${meeting}"`), `${meeting}: points at its box`);
+      assert.ok(tag.includes("min-h-11"), `${meeting}: a 44 px target on a phone`);
+    }
+    assert.equal(count(closed, /Transcript<\/button>/g), 2);
+    assert.ok(!text(closed).includes("Hide transcript"));
+    assert.match(closed, /<button[^>]*data-transcript-toggle="m3"[^>]*><svg[^>]*lucide-file-text[\s\S]*?<\/svg>Transcript<\/button>/, "with the document icon, before the words");
+    // The gate is showsTranscript, asked of the row's own status and recording and of whether recording runs; nothing else decides.
     const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
     assert.match(panel, /showsTranscript\(\{ status: row\.status, recordAudio: row\.recordAudio \}, recordingAvailable\)/, "the panel asks showsTranscript, nothing else");
+    assert.match(panel, /\{hasTranscript \? \(\s*<button/, "and the button follows it");
     const app = readFileSync(join(root, "components", "calendar", "CalendarApp.tsx"), "utf8");
     assert.match(app, /import \{ MeetRecording \} from "@\/components\/meet\/MeetRecording";/);
-    assert.match(app, /renderEnded=\{\(code\) => <MeetRecording code=\{code\} \/>\}/, "the Schedule puts the recording panel in the slot");
+    assert.match(app, /renderEnded=\{\(code\) => <MeetRecording code=\{code\} \/>\}/, "the Schedule puts the recording panel in the box");
     assert.match(app, /onMeetingDeleted=\{\(\) => void data\.reload\(\)\}/, "and loads its events again when a meeting that had a time is deleted (its Schedule entry goes with it)");
+  });
+
+  await check("an opened transcript draws below its own meeting, in the box its button points at; the button says Hide transcript; no other meeting's opens", () => {
+    const mine = markup["panel.transcriptOpenMine"];
+    assert.deepEqual(slots("panel.transcriptOpenMine"), ["ggg-hhhh-jjj"], "only the opened meeting's transcript, asked for by its dashed code");
+    assert.deepEqual(slots("panel.transcriptOpenTheirs"), ["pqr-stuv-wxy"], "someone else's too: reading a transcript is not Delete");
+    assert.deepEqual(slots("panel.rowsOpen"), ["ggg-hhhh-jjj"], "and in the plain three-meeting list");
+    const row = rowOf("panel.transcriptOpenMine", "Mine (ended, audio)");
+    assert.match(row, /<div id="meet-transcript-m3" class="mt-2 scroll-mb-24"><div data-transcript-slot="ggg-hhhh-jjj">Transcript for ggg-hhhh-jjj<\/div><\/div>/, "in its box (with room to grow into view), in its own row");
+    assert.equal(transcriptBoxId("m3"), "meet-transcript-m3", "the box's id has one source");
+    assert.ok(!rowOf("panel.transcriptOpenMine", "Theirs (ended, audio)").includes("data-transcript-slot"), "none under the other finished meeting");
+    // The open one's button is expanded, says Hide transcript and points at the box that now exists; the other still says Transcript.
+    const open = toggleTag("panel.transcriptOpenMine", "m3");
+    assert.match(open, /aria-expanded="true"/);
+    assert.ok(open.includes('aria-controls="meet-transcript-m3"') && mine.includes('id="meet-transcript-m3"'), "the id it points at is on the page");
+    assert.match(row, /Hide transcript<\/button>/);
+    assert.match(toggleTag("panel.transcriptOpenMine", "m5"), /aria-expanded="false"/);
+    assert.equal(count(mine, /Hide transcript</g), 1);
+    assert.equal(count(mine, /Transcript<\/button>/g), 1, "the other finished meeting's still says Transcript");
+    assert.equal(count(mine, /id="meet-transcript-/g), 1, "one box on the page");
+    // Whatever id the state holds, showsTranscript decides: a meeting that is not finished and recorded opens nothing.
+    for (const id of ["m1", "m2", "m4"]) {
+      const screen = `panel.transcriptOpen.${id}`;
+      assert.deepEqual(slots(screen), [], `${id}: not a finished recorded meeting, so nothing opens`);
+      assert.deepEqual(toggles(screen), ["m3", "m5"], `${id}: the same buttons as when nothing is open`);
+      assert.equal(count(markup[screen], /aria-expanded="true"/g), 0, `${id}: and none of them says it is open`);
+    }
+    assert.deepEqual([slots("panel.transcriptOpenUnavailable"), toggles("panel.transcriptOpenUnavailable")], [[], []], "where recording does not run an id that was open draws nothing, and there is no button");
+    assert.deepEqual([slots("panel.transcriptOpenNoRenderer"), toggles("panel.transcriptOpenNoRenderer")], [[], []], "with nowhere to put it there is no button either");
+    // Open beside a Delete question on the same meeting: both show, the question first.
+    const both = markup["panel.transcriptOpenAndAsk"];
+    assert.ok(both.includes("data-transcript-slot") && buttonNames(both).includes("Delete for good"), "both are there");
+    assert.ok(both.indexOf("Delete for good") < both.indexOf("data-transcript-slot"), "the question sits above the transcript");
+  });
+
+  await check("one transcript is open at a time: pressing another meeting's button switches to it, pressing the open one closes it, and the panel wires it", () => {
+    assert.equal(toggledTranscript(null, "a"), "a", "nothing open: it opens");
+    assert.equal(toggledTranscript("a", "a"), null, "the open one: it closes");
+    assert.equal(toggledTranscript("a", "b"), "b", "another one open: that one closes and this one opens");
+    assert.equal(toggledTranscript(toggledTranscript("a", "b"), "a"), "a", "and back again");
+    // One id, not a list, so two cannot be open; closing the panel and deleting the meeting both put it away.
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.match(panel, /transcriptOpen: string \| null;/, "the view is handed one id");
+    assert.match(panel, /const \[transcriptOpen, setTranscriptOpen\] = useState<string \| null>\(null\);/, "and none is open to begin with");
+    assert.match(panel, /onToggleTranscript=\{\(id\) => setTranscriptOpen\(\(prev\) => toggledTranscript\(prev, id\)\)\}/, "a press goes through the one rule");
+    assert.match(panel, /const closePanel = useCallback\(\(\) => \{[^}]*setTranscriptOpen\(null\);/, "closing the panel closes it");
+    assert.match(panel, /setTranscriptOpen\(\(prev\) => \(prev === id \? null : prev\)\);/, "deleting the meeting that has it open closes it");
+    // The only place a transcript is asked for is the open row's box.
+    assert.equal(count(panel, /renderEnded\?\.\(/g), 1, "one call, inside that box");
+    assert.equal(count(panel, /renderEnded\(/g), 0, "and no other");
+    // The box can open below what a phone shows, so the panel scrolls it into view (less motion if asked for), by the same id.
+    assert.match(panel, /getElementById\(transcriptBoxId\(transcriptOpen\)\)\?\.scrollIntoView\(\{ block: "nearest"/, "scroll to the open box, by the least amount");
+    assert.match(panel, /prefers-reduced-motion: reduce/, "and without the animation for a person who asked for less motion");
+    assert.equal(count(panel, /transcriptBoxId\(/g), 2, "one call names a row's box (its id and its button's aria-controls), one names the box to scroll to");
   });
 
   await check("a meeting just made says what the server did about recording; the list parser reads the whole link only if it is one", () => {
@@ -701,9 +782,8 @@ async function main() {
     // Nothing is asked until Delete is pressed: no question, no Delete for good, anywhere.
     for (const id of ["panel.mixedAvailable", "panel.rows", "panel.mixedUnavailable"]) {
       assert.ok(!buttonNames(markup[id]).includes("Delete for good"), `${id}: no confirmation before Delete is pressed`);
-      assert.ok(!text(markup[id]).includes(DELETE_CONFIRM), `${id}: no question yet`);
+      assert.ok(!text(markup[id]).includes("This deletes the meeting"), `${id}: no question yet`);
     }
-    assert.equal(DELETE_CONFIRM, "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone.");
     const html = markup["panel.deleteAsk"];
     assert.ok(text(html).includes("This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."));
     assert.match(html, /<div role="group" aria-label="Delete Mine \(ended, audio\)"/, "a named group");
@@ -718,8 +798,37 @@ async function main() {
     assert.match(panel, /onClick=\{\(\) => props\.onDelete\(row\.id\)\}[^>]*>\s*\{del\.busy \? "Deleting\.\.\." : "Delete for good"\}/, "Delete for good deletes");
     assert.match(panel, /if \(!room \|\| !canDelete\(room\)\) return;/, "and the delete call itself refuses a meeting that is not the person's");
     // A question about a meeting that is not the person's is never drawn, whatever state it is handed.
-    assert.ok(!text(markup["panel.deleteAskNotMine"]).includes(DELETE_CONFIRM));
+    assert.ok(!text(markup["panel.deleteAskNotMine"]).includes("This deletes the meeting"));
     assert.ok(!buttonNames(markup["panel.deleteAskNotMine"]).includes("Delete for good"));
+  });
+
+  await check("the Delete question says what goes with that meeting: a recording only if it recorded, and a meeting that is on now is ended for everyone", () => {
+    const RECORDED = "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone.";
+    const UNRECORDED = "This deletes the meeting, and its link stops working. It cannot be undone.";
+    const LIVE = "The meeting is on now: this ends it for everyone in it. ";
+    // Every status and every recording choice, spelled out in full.
+    for (const [status, recordAudio, expected] of [
+      ["scheduled", true, "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."],
+      ["ended", true, "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."],
+      ["scheduled", false, "This deletes the meeting, and its link stops working. It cannot be undone."],
+      ["ended", false, "This deletes the meeting, and its link stops working. It cannot be undone."],
+      ["live", true, "The meeting is on now: this ends it for everyone in it. This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."],
+      ["live", false, "The meeting is on now: this ends it for everyone in it. This deletes the meeting, and its link stops working. It cannot be undone."],
+    ] as const) {
+      assert.equal(deleteConfirm({ status, recordAudio }), expected, `${status}, recordAudio ${recordAudio}`);
+    }
+    // And on the screen, in the question on that meeting's own row.
+    const question = (id: string) => decode(/<div role="group"[^>]*><p[^>]*>([^<]*)<\/p>/.exec(markup[id])?.[1] ?? "");
+    assert.equal(question("panel.deleteAsk"), RECORDED, "ended, recorded");
+    assert.equal(question("panel.deleteAskScheduled"), RECORDED, "scheduled, recorded");
+    assert.equal(question("panel.deleteAskUnrecorded"), UNRECORDED, "ended, never recorded");
+    assert.equal(question("panel.deleteAskLive"), LIVE + RECORDED, "on now and recorded");
+    assert.equal(question("panel.deleteAskLiveUnrecorded"), LIVE + UNRECORDED, "on now, never recorded");
+    assert.ok(!/recording|transcript/.test(question("panel.deleteAskUnrecorded")), "a meeting that never recorded does not promise to delete a recording");
+    // The words come from the meeting being asked about: there is no one sentence for every row any more.
+    const panel = readFileSync(join(root, "components", "meet", "MeetPanel.tsx"), "utf8");
+    assert.match(panel, /<p className="text-xs leading-5 text-fg">\{deleteConfirm\(row\)\}<\/p>/, "the question reads deleteConfirm of its own row");
+    for (const file of shippedFiles) assert.ok(!readFileSync(file, "utf8").includes("DELETE_CONFIRM"), `${rel(file)}: no constant that is the same on every row`);
   });
 
   await check("while a delete runs the question is busy and cannot be answered twice; a refusal shows inside it, in words", () => {

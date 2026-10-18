@@ -7,20 +7,29 @@
  *   2. Create a link for later - a title, an optional time, and (where recording runs) whether to record;
  *      shows the link to send,
  *   3. Recent meetings       - each with Copy link, Join unless it has ended, Delete on the ones the person
- *      made, and for a finished recorded one its transcript (`renderEnded`).
+ *      made, and for a finished recorded one a Transcript button that opens its transcript (`renderEnded`).
  *
  * CC (2026-10-17): "add it as a feature on the schedule page and put it on the top right... Then you send
  * people specific links, and they can join the meeting."
  *
  * RECORDING IS OFFERED ONLY WHERE IT RUNS. GET /api/calendar/meet says `recordingAvailable`; until it says true
  * (and while the list has not loaded) there is no "Record and transcribe" box, nothing says a meeting is
- * recorded, every meeting is asked for with recordAudio false, and no transcript slot is drawn. A meeting that
+ * recorded, every meeting is asked for with recordAudio false, and no Transcript button is drawn. A meeting that
  * was just made says what the server did with it ("Recorded and transcribed" / "Not recorded").
+ *
+ * TRANSCRIPTS ARE OPENED ON PURPOSE. A transcript is a whole section with a list up to 28rem tall that reads the
+ * recording when it mounts, so it is not drawn for every finished meeting when the panel opens: that would turn
+ * a 26rem popover into a long scroll and fire a read per meeting. Each finished recorded meeting (showsTranscript,
+ * the one gate) has a Transcript button; pressing it mounts `renderEnded` below the row, in a box the button
+ * points at, and the button says Hide transcript. One is open at a time, and closing the panel or deleting the
+ * meeting closes it. On a phone the box can open below what is on screen, so the panel scrolls it into view.
  *
  * DELETE is two steps on the spot, like End and Remove in the call (never a browser dialog): Delete opens the
  * confirmation (focus on Cancel, Escape cancels it before it closes the panel), Delete for good asks the server.
- * The row leaves the list when the meeting is gone (deleted now, or already: a 404), and focus moves to the next
- * row, or to the list's heading when none is left.
+ * The question says what goes with that meeting (deleteConfirm): a recording and a transcript only if it
+ * recorded, and that a meeting that is on now is ended for everyone in it. The row leaves the list when the
+ * meeting is gone (deleted now, or already: a 404), and focus moves to the next row, or to the list's heading
+ * when none is left.
  *
  * Start now opens its tab in the click itself (an empty window), then points it at the room once it exists:
  * a popup blocker lets a window opened by a click and refuses one opened after an await. If the browser blocks
@@ -34,7 +43,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { Check, Copy, ExternalLink, Trash2, Video, X } from "lucide-react";
+import { Check, Copy, ExternalLink, FileText, Trash2, Video, X } from "lucide-react";
 import { messageFor } from "@/components/calendar/useCalendarData";
 import { useDialogFocus, useOutsidePress } from "@/components/calendar/ui";
 import { copyToClipboard } from "./clipboard";
@@ -42,11 +51,11 @@ import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody, type 
 import { FOCUS } from "./meet-classes";
 import {
   ALREADY_DELETED,
-  DELETE_CONFIRM,
   LENGTH_CHOICES,
   STATUS_WORDS,
   TITLE_MAX_CHARS,
   canDelete,
+  deleteConfirm,
   deletedNote,
   lengthWords,
   linkToSend,
@@ -54,6 +63,8 @@ import {
   scheduleLine,
   showsTranscript,
   timeFormatter,
+  toggledTranscript,
+  transcriptBoxId,
   whenText,
   withoutMeeting,
   type MeetRoomItem,
@@ -79,7 +90,7 @@ export type PanelRow = {
   url?: string;
   /** The person made this meeting: Delete is theirs. */
   mine: boolean;
-  /** This meeting recorded: a finished one shows its transcript. */
+  /** This meeting recorded: a finished one offers its transcript, and Delete says a recording goes with it. */
   recordAudio: boolean;
 };
 
@@ -122,9 +133,14 @@ export type MeetPanelViewProps = {
   onCancelDelete: () => void;
   onDelete: (id: string) => void;
   onRetry: () => void;
+  /** The meeting (by id) whose transcript is open, or null. One at a time; nothing is mounted for the others. */
+  transcriptOpen: string | null;
+  /** The Transcript button on a meeting was pressed: open its transcript, or close it if it is the open one. */
+  onToggleTranscript: (id: string) => void;
   /**
-   * Where a finished recorded meeting's transcript goes. Called with the meeting's dashed code, and only for a
-   * meeting that is over, recorded, in a workspace where recording runs (showsTranscript).
+   * Where an opened transcript goes. Called with the meeting's dashed code, and only for the one meeting whose
+   * Transcript button was pressed: a meeting that is over, recorded, in a workspace where recording runs
+   * (showsTranscript). Nothing calls it until then, so opening the panel reads no recording.
    */
   renderEnded?: (code: string) => ReactNode;
 };
@@ -171,7 +187,7 @@ function Made({ made, headline, copyKey, copied, onCopy }: {
 }
 
 export function MeetPanelView(props: MeetPanelViewProps) {
-  const { list, start, later, copied, del, recordingAvailable } = props;
+  const { list, start, later, copied, del, recordingAvailable, renderEnded } = props;
   return (
     <div className="space-y-4 text-[13px]">
       <section aria-label="Start a meeting now" className="space-y-2">
@@ -323,6 +339,10 @@ export function MeetPanelView(props: MeetPanelViewProps) {
               const failedCopy = copied && copied.key === row.id && !copied.ok ? copied.url : null;
               const copiedNow = copied?.key === row.id && copied.ok;
               const asking = del.asking === row.id && canDelete(row);
+              // A finished recorded meeting offers its transcript on a button; nothing is mounted (or read) until it is pressed.
+              const hasTranscript = renderEnded !== undefined && showsTranscript({ status: row.status, recordAudio: row.recordAudio }, recordingAvailable);
+              const transcriptShown = hasTranscript && props.transcriptOpen === row.id;
+              const transcriptBox = transcriptBoxId(row.id);
               return (
                 <li key={row.id} className="py-3 first:pt-0">
                   <p className="break-words text-sm font-medium text-fg">{row.title}</p>
@@ -341,6 +361,19 @@ export function MeetPanelView(props: MeetPanelViewProps) {
                         Join
                       </a>
                     )}
+                    {hasTranscript ? (
+                      <button
+                        type="button"
+                        data-transcript-toggle={row.id}
+                        aria-expanded={transcriptShown}
+                        aria-controls={transcriptBox}
+                        onClick={() => props.onToggleTranscript(row.id)}
+                        className={LINK_ACTION}
+                      >
+                        <FileText className="h-3.5 w-3.5" aria-hidden />
+                        {transcriptShown ? "Hide transcript" : "Transcript"}
+                      </button>
+                    ) : null}
                     {canDelete(row) && !asking ? (
                       <button
                         type="button"
@@ -356,7 +389,7 @@ export function MeetPanelView(props: MeetPanelViewProps) {
                   </div>
                   {asking ? (
                     <div role="group" aria-label={`Delete ${row.title}`} className="mt-2 rounded-lg border border-status-hot/40 bg-status-hot/10 p-3">
-                      <p className="text-xs leading-5 text-fg">{DELETE_CONFIRM}</p>
+                      <p className="text-xs leading-5 text-fg">{deleteConfirm(row)}</p>
                       {del.error ? (
                         <p role="alert" className="mt-2 text-xs leading-5 text-fg">
                           {del.error}
@@ -383,8 +416,10 @@ export function MeetPanelView(props: MeetPanelViewProps) {
                       Copy this link: <span className="select-all font-mono text-fg">{failedCopy}</span>
                     </p>
                   ) : null}
-                  {props.renderEnded && showsTranscript({ status: row.status, recordAudio: row.recordAudio }, recordingAvailable) ? (
-                    <div className="mt-2">{props.renderEnded(row.code)}</div>
+                  {transcriptShown ? (
+                    <div id={transcriptBox} className="mt-2 scroll-mb-24">
+                      {renderEnded?.(row.code)}
+                    </div>
                   ) : null}
                 </li>
               );
@@ -447,6 +482,9 @@ export function MeetPanel({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // The one meeting (by id) whose transcript is open. Mounting a transcript reads its recording, so none is open
+  // until a Transcript button is pressed.
+  const [transcriptOpen, setTranscriptOpen] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const loaded = useRef(false);
@@ -474,6 +512,7 @@ export function MeetPanel({
     setNote(null);
     setDeleteError(null);
     setAskingId(null);
+    setTranscriptOpen(null);
   }, [setAskingId]);
 
   const cancelDelete = useCallback(() => {
@@ -515,6 +554,15 @@ export function MeetPanel({
             : find("[data-list-heading]");
     target?.focus();
   });
+
+  // A transcript opens below its meeting, which on a phone can be off the bottom of what is on screen: the button
+  // would seem to do nothing. Bring its box into view with the least scrolling that does it. The box starts as one
+  // line and grows once the recording loads, so its scroll-mb class leaves it room to grow into view.
+  useEffect(() => {
+    if (transcriptOpen === null) return;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    document.getElementById(transcriptBoxId(transcriptOpen))?.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
+  }, [transcriptOpen]);
 
   const refresh = useCallback(async () => {
     const mine = ++latest.current;
@@ -655,6 +703,7 @@ export function MeetPanel({
     setStarted((prev) => (prev?.link === room.link ? null : prev));
     setCreated((prev) => (prev?.link === room.link ? null : prev));
     setCopied((prev) => (prev?.key === id ? null : prev));
+    setTranscriptOpen((prev) => (prev === id ? null : prev));
     setAskingId(null);
     setNote(res.ok ? deletedNote(res.relayRemaining) : ALREADY_DELETED);
     if (room.startsAt) onMeetingDeleted?.();
@@ -735,6 +784,8 @@ export function MeetPanel({
               onCancelDelete={cancelDelete}
               onDelete={(id) => void deleteRow(id)}
               onRetry={() => void refresh()}
+              transcriptOpen={transcriptOpen}
+              onToggleTranscript={(id) => setTranscriptOpen((prev) => toggledTranscript(prev, id))}
               renderEnded={renderEnded}
             />
           </div>

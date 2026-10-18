@@ -156,6 +156,8 @@ async function main() {
     onCancelDelete: () => undefined,
     onDelete: () => undefined,
     onRetry: () => undefined,
+    transcriptOpen: null as string | null,
+    onToggleTranscript: () => undefined,
   };
   type Extra = { mine?: boolean; recordAudio?: boolean; url?: string };
   const row = (id: string, code: string, title: string, status: "scheduled" | "live" | "ended", statusWords: string, when: string, extra: Extra = {}) => ({
@@ -172,25 +174,21 @@ async function main() {
   });
   const panel = (over: object, renderEnded?: (code: string) => unknown) =>
     h(MeetPanelView, { ...base, ...over, renderEnded } as never);
+  // What the page puts in a transcript's box: a marker that says which meeting it was asked for.
+  const slot = (code: string) => h("div", { "data-transcript-slot": code }, `Transcript for ${code}`);
   draw("panel.loading", panel({}));
   draw("panel.error", panel({ list: { status: "error", words: "Your meetings could not load." } }));
   draw("panel.empty", panel({ list: { status: "ready", rows: [] } }));
-  draw(
-    "panel.rows",
-    panel(
-      {
-        list: {
-          status: "ready",
-          rows: [
-            row("r1", "aaa-bbbb-ccc", "Discovery call", "scheduled", "Scheduled", "Mon, Oct 19, 2:00 PM"),
-            row("r2", "ddd-eeee-fff", "Team sync", "live", "Live now", "Started Sat, Oct 17, 4:05 PM"),
-            row("r3", "ggg-hhhh-jjj", "Old review", "ended", "Ended", "Ended Fri, Oct 16, 3:00 PM"),
-          ],
-        },
-      },
-      (code) => h("div", { "data-transcript-slot": code }, `Transcript for ${code}`),
-    ),
-  );
+  const threeRows = {
+    status: "ready" as const,
+    rows: [
+      row("r1", "aaa-bbbb-ccc", "Discovery call", "scheduled", "Scheduled", "Mon, Oct 19, 2:00 PM"),
+      row("r2", "ddd-eeee-fff", "Team sync", "live", "Live now", "Started Sat, Oct 17, 4:05 PM"),
+      row("r3", "ggg-hhhh-jjj", "Old review", "ended", "Ended", "Ended Fri, Oct 16, 3:00 PM"),
+    ],
+  };
+  draw("panel.rows", panel({ list: threeRows }, slot));
+  draw("panel.rowsOpen", panel({ list: threeRows, transcriptOpen: "r3" }, slot));
   draw("panel.copyFailed", panel({ list: { status: "ready", rows: [row("r1", "aaa-bbbb-ccc", "Discovery call", "scheduled", "Scheduled", "Mon, Oct 19, 2:00 PM")] }, copied: { key: "r1", ok: false, url: "https://oasisai.work/meet/aaa-bbbb-ccc" } }));
   draw("panel.startMade", panel({ start: { busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: true } } }));
   draw("panel.startBlocked", panel({ start: { busy: false, error: null, made: { url: "https://oasisai.work/meet/aaa-bbbb-ccc", link: "/meet/aaa-bbbb-ccc", opened: false } } }));
@@ -219,8 +217,7 @@ async function main() {
   );
   draw("panel.laterUnticked", panel({ later: { title: "", startsAt: "", minutes: "", record: false, ...none } }));
 
-  // Where recording does not run: no box, no claim that a meeting records, no transcript slot.
-  const slot = (code: string) => h("div", { "data-transcript-slot": code }, `Transcript for ${code}`);
+  // Where recording does not run: no box, no claim that a meeting records, no Transcript button.
   const mixed = {
     status: "ready" as const,
     rows: [
@@ -244,6 +241,28 @@ async function main() {
   draw("panel.deleteError", panel({ list: mixed, del: { asking: "m3", busy: false, error: "Only the host can delete this meeting." } }, slot));
   draw("panel.deleteAskNotMine", panel({ list: mixed, del: { asking: "m2", busy: false, error: null } }, slot));
   draw("panel.deleteNote", panel({ list: { status: "ready", rows: [] }, note: "The meeting was deleted." }));
+
+  // The question says what goes with that meeting: a recording only if it recorded, and a live one is ended.
+  const asking = (id: string) => ({ asking: id, busy: false, error: null });
+  const liveMine = {
+    status: "ready" as const,
+    rows: [
+      row("l1", "aaa-bbbb-ccc", "Mine (live, audio)", "live", "Live now", "Started Sat, Oct 17, 4:05 PM", { mine: true, recordAudio: true }),
+      row("l2", "ddd-eeee-fff", "Mine (live, no audio)", "live", "Live now", "Started Sat, Oct 17, 4:05 PM", { mine: true, recordAudio: false }),
+    ],
+  };
+  draw("panel.deleteAskScheduled", panel({ list: mixed, del: asking("m1") }, slot));
+  draw("panel.deleteAskUnrecorded", panel({ list: mixed, del: asking("m4") }, slot));
+  draw("panel.deleteAskLive", panel({ list: liveMine, del: asking("l1") }, slot));
+  draw("panel.deleteAskLiveUnrecorded", panel({ list: liveMine, del: asking("l2") }, slot));
+
+  // Transcripts: a button on each finished recorded meeting, nothing mounted until one is pressed, one open at a time.
+  draw("panel.transcriptOpenMine", panel({ list: mixed, transcriptOpen: "m3" }, slot));
+  draw("panel.transcriptOpenTheirs", panel({ list: mixed, transcriptOpen: "m5" }, slot));
+  for (const id of ["m1", "m2", "m4"]) draw(`panel.transcriptOpen.${id}`, panel({ list: mixed, transcriptOpen: id }, slot));
+  draw("panel.transcriptOpenUnavailable", panel({ list: mixed, recordingAvailable: false, transcriptOpen: "m3" }, slot));
+  draw("panel.transcriptOpenNoRenderer", panel({ list: mixed, transcriptOpen: "m3" }));
+  draw("panel.transcriptOpenAndAsk", panel({ list: mixed, transcriptOpen: "m3", del: asking("m3") }, slot));
 
   process.stdout.write(JSON.stringify({ markup: out }));
 }
