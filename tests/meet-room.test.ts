@@ -8,6 +8,8 @@
  *  - the participant cap is one statement; a guest's media waits for a host;
  *  - a pull names only what someone else in THIS room publishes now;
  *  - leave, remove and end cut media at the SFU (every track on the session, sent and received), not just tokens;
+ *  - a session made while its person leaves or the room ends or goes is cut, and a join that lands as the room ends
+ *    or goes takes no place (e9's audit of the week's merges, Codex, 2026-10-18);
  *  - a live room whose host has gone for 10 minutes ends itself; nothing runs without its secrets;
  *  - one browser records a recorded room, whichever host's (migration bravo__233): it takes over when the recorder
  *    leaves or goes silent, never takes it back, and two hosts at once never both take it (e9's pins, 2026-10-18).
@@ -99,8 +101,8 @@ function fakeSfu() {
   const down = new Set<string>();
   const gone = new Set<string>();
   const disconnected = new Set<string>();
-  /** Run while a pull or publish is on its way: after the SFU has the request, before it adds the track. */
-  const hooks: { duringPull?: () => Promise<unknown>; duringPublish?: () => Promise<unknown> } = {};
+  /** Run while a call is on its way: after the SFU has the request, before it adds the track (or answers the new session). */
+  const hooks: { duringPull?: () => Promise<unknown>; duringPublish?: () => Promise<unknown>; duringNewSession?: () => Promise<unknown> } = {};
   let reading = 0;
   let widest = 0;
   let n = 0;
@@ -109,6 +111,7 @@ function fakeSfu() {
       const id = `sess-${(n += 1)}`;
       sessions.set(id, []);
       calls.push({ op: "new", sessionId: id });
+      if (hooks.duringNewSession) await hooks.duringNewSession();
       return id;
     },
     async publish(sessionId, _offer, tracks) {
@@ -1001,6 +1004,94 @@ async function main() {
     sfu.hooks.duringPull = undefined;
     assert.equal(res.status, 410);
     assert.ok(sfu.sessions.get(call.sessions[1])!.every((t) => t.status === "inactive"));
+  });
+
+  const reconnect = (c: string, cookie: string) =>
+    handleSfu(request(`/api/meet/${c}/sfu`, { body: { action: "session" }, cookie, ip: freshIp() }), c, deps());
+  const lastMade = () => sfu.calls.filter((x) => x.op === "new").at(-1)!.sessionId;
+  /** The database, with `before` run once just ahead of the first statement that starts with `prefix`. */
+  const landingBefore = (prefix: string, before: () => Promise<unknown>) => {
+    let landed = false;
+    const db2 = new Proxy(db, {
+      get(target, key) {
+        const value = Reflect.get(target, key);
+        if (key !== "execute") return typeof value === "function" ? value.bind(target) : value;
+        return async (stmt: Parameters<typeof db.execute>[0]) => {
+          const sql = typeof stmt === "string" ? stmt : stmt.sql;
+          if (!landed && sql.startsWith(prefix)) {
+            landed = true;
+            await before();
+          }
+          return target.execute(stmt);
+        };
+      },
+    });
+    return { db: db2, landed: () => landed };
+  };
+
+  await check("a leave that lands while the SFU makes a reconnect's session: that session is cut and the caller is told (e9's audit)", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    sfu.hooks.duringNewSession = () => handleLeave(request(`/api/meet/${call.c}/leave`, { cookie: guest.cookie, ip: freshIp() }), call.c, deps());
+    const res = await reconnect(call.c, guest.cookie);
+    sfu.hooks.duringNewSession = undefined;
+    assert.equal(res.status, 401, "left while the session was being made");
+    assert.equal(reads(lastMade()), 1, "the session made for nobody was cut, not left open on a row nobody reads again");
+  });
+
+  await check("an end or a delete that lands while the SFU makes a reconnect's session: that session is cut, and a deleted room leaves nothing", async () => {
+    for (const action of ["end", "delete"] as const) {
+      const call = await callWith(1);
+      const [guest] = call.guests;
+      sfu.hooks.duringNewSession = () => handleHost(request(`/api/meet/${call.c}/host`, { body: { action }, ip: freshIp() }), call.c, deps({ session: as(CC) }));
+      const res = await reconnect(call.c, guest.cookie);
+      sfu.hooks.duringNewSession = undefined;
+      assert.equal(res.status, action === "end" ? 410 : 404, action);
+      assert.equal(reads(lastMade()), 1, `${action}: the session made meanwhile was cut (after a delete, no row could ever have named it)`);
+      if (action === "delete") assert.equal(await roomRows(call.roomId), 0, "nothing of the deleted room is left");
+    }
+  });
+
+  await check("a leave that lands just before the reconnect stores its new session: the session is still cut (stored first, then checked)", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    // The leave lands after the SFU made the session and before the reconnect writes it to the row.
+    const storing = landingBefore("UPDATE meet_participants SET sfu_session_id = ?, tracks", () =>
+      handleLeave(request(`/api/meet/${call.c}/leave`, { cookie: guest.cookie, ip: freshIp() }), call.c, deps()),
+    );
+    const res = await handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "session" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps({ db: storing.db }));
+    assert.ok(storing.landed(), "the leave landed in the gap");
+    assert.equal(res.status, 401);
+    assert.equal(reads(lastMade()), 1, "checked after it was stored, so the leave that came first is seen and the session cut");
+  });
+
+  await check("a leave that read its row before a reconnect stored a new session still cuts that new session", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    let midway = 0;
+    // The reconnect runs whole between the leave's read of the row and its write: its own check still saw them in.
+    const leaving = landingBefore("UPDATE meet_participants SET left_at", async () => {
+      midway = (await reconnect(call.c, guest.cookie)).status;
+    });
+    await handleLeave(request(`/api/meet/${call.c}/leave`, { cookie: guest.cookie, ip: freshIp() }), call.c, deps({ db: leaving.db }));
+    assert.ok(leaving.landed() && midway === 200, "the reconnect landed in the gap and was let through");
+    assert.equal(reads(lastMade()), 1, "the leave cut the session the reconnect stored, not only the one it had read");
+    assert.equal(await heldSession(guest.id), null, "and the row keeps nothing");
+  });
+
+  await check("a join that lands as the host ends or deletes the room takes no place: it is told why, and no row is left (e9's audit)", async () => {
+    for (const action of ["end", "delete"] as const) {
+      const call = await callWith(0);
+      // The host's end or delete lands between the join's read of the room and its insert.
+      const joining = landingBefore("INSERT INTO meet_participants", () =>
+        handleHost(request(`/api/meet/${call.c}/host`, { body: { action }, ip: freshIp() }), call.c, deps({ session: as(CC) })),
+      );
+      const res = await handleJoin(request(`/api/meet/${call.c}/join`, { body: { name: "Late" }, ip: freshIp() }), call.c, deps({ db: joining.db }));
+      assert.ok(joining.landed(), `${action}: it landed in the gap`);
+      assert.equal(res.status, action === "end" ? 410 : 404, `${action}: the joiner is told the room ${action === "end" ? "ended" : "is gone"}, not that it is full`);
+      const late = await db.execute({ sql: "SELECT count(*) AS n FROM meet_participants WHERE room_id = ? AND display_name = 'Late'", args: [call.roomId] });
+      assert.equal(Number(late.rows[0].n), 0, `${action}: no place was taken, so no name outlives the room`);
+    }
   });
 
   await check("a meeting made for a time is not ended by its hosts trying it out early: only a call that reaches its time is its call", async () => {

@@ -394,7 +394,13 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
       consentAt: room.recordAudio ? now.toISOString() : null,
       now,
     });
-    if (!participant) return meetError(409, "room_full");
+    if (!participant) {
+      // No place taken: full, or ended or deleted since the room was read above (the insert checks that too).
+      const nowRoom = await readMeetRoomByCode(deps.db, code);
+      if (!nowRoom) return meetError(404, "room_not_found");
+      if (nowRoom.status === "ended") return meetError(410, "room_ended", { reason: nowRoom.endedReason });
+      return meetError(409, "room_full");
+    }
     const token = signMeetToken({ roomId: room.id, participantId: participant.id, role }, now.getTime());
     const current = (await readMeetRoomByCode(deps.db, code)) ?? room;
     const records = await recordsAfterJoin(deps, participant, current, now);
@@ -474,7 +480,13 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
       // A reconnect replaces the session only once the old one is cut: the row is the only record of it, and an id
       // overwritten uncut would be a session nobody could ever close. The browser tries again (room-client reconnect).
       if (me.sfuSessionId && !(await cutSession(sfu, me.sfuSessionId, "sfu.reconnect"))) return meetError(502, "sfu_failed");
-      await setParticipantSession(deps.db, me, await sfu.newSession());
+      const sessionId = await sfu.newSession();
+      // Stored first, then checked: a leave, removal, end or delete from here on finds it on the row and cuts it,
+      // and one that landed while the SFU made it is caught here and cut now. Unchecked, it lived on a row nobody
+      // reads again, or on none at all once the room was deleted.
+      await setParticipantSession(deps.db, me, sessionId);
+      const gone = await goneMeanwhile(deps, room, me, sfu, sessionId);
+      if (gone) return gone;
       return meetJson({ ok: true });
     }
 
@@ -555,7 +567,11 @@ export async function handleLeave(req: NextRequest, rawCode: string, deps: MeetD
     // Leaving a room that ended, or leaving twice, is already done.
     if (!auth.ok) return [401, 410].includes(auth.response.status) ? meetJson({ ok: true }) : auth.response;
     await leaveMeet(deps.db, auth.participant, now);
-    const { id, sfuSessionId } = auth.participant;
+    // The session to cut is the one the row holds now that the leave is written, not the one read before it: a
+    // reconnect may have stored a new session in between, its own check run before this leave (goneMeanwhile).
+    const { id } = auth.participant;
+    const after = await readPresence(deps.db, { tenantId: auth.room.tenantId, roomId: auth.room.id, participantId: id });
+    const sfuSessionId = after ? after.sfuSessionId : auth.participant.sfuSessionId;
     if (sfuSessionId) await cutHeld(deps, auth.room, { participantId: id, sessionId: sfuSessionId }, "leave");
     const res = meetJson({ ok: true });
     const cookie = meetCookie(code, "");
