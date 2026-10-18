@@ -47,7 +47,7 @@ export const OASIS_SEED: TenantManifest = {
     name: "OASIS AI",
     logo: "oasis",
     subtitle: "Agent Command Center",
-    footer_label: "OASIS AI · Agent Command Center · v1.0",
+    footer_label: "OASIS AI · Agent Command Center · v3.0",
     footer_tagline: '"Only good things from now on."',
   },
   // OASIS's AI team (W4a, 2026-10-01): one lead per department, the bindings

@@ -41,6 +41,7 @@ import {
   type MeetStorage,
   type RecorderReport,
 } from "./recording";
+import type { SfuClient } from "./sfu";
 
 export type RecordingDeps = {
   db: Client;
@@ -217,14 +218,23 @@ function recorderReportOf(raw: Uint8Array | null): RecorderReport {
  * driver reports (503), never a quiet 200 (Codex on #685, third pass). Expiry
  * still runs first, so recordings are marked even while storage is missing.
  */
-export async function handleMeetRelayCron(deps: { db: Client; storage: MeetStorage | null; now: () => Date }): Promise<Response> {
+export async function handleMeetRelayCron(deps: {
+  db: Client;
+  storage: MeetStorage | null;
+  now: () => Date;
+  /** The Worker's SFU (meetSfuIfConfigured), to cut what ended rooms still hold; absent or null: none set. */
+  sfu?: SfuClient | null;
+}): Promise<Response> {
   // Migration bravo__231 not applied yet: nothing to keep, and not a failure.
   if (!(await meetRecordingTablesInstalled(deps.db))) return json(200, { ok: true, skipped: "not_installed" });
-  const result = await meetRelayCron(deps.db, deps.storage, deps.now());
+  const result = await meetRelayCron(deps.db, deps.storage, deps.now(), deps.sfu ?? null);
   if (!deps.storage) return json(503, { ok: false, error: "storage_not_configured", ...result });
   // R2 refused a delete (credentials, permissions, an outage): audio past its time is still there. A failed
   // run, said as one, so the driver reports it rather than a healthy tick (Codex on #685, fourth pass).
   if (result.deleteFailed) return json(503, { ok: false, error: "relay_delete_failed", ...result });
+  // An ended room's media the SFU would not cut is still flowing: a failed run too, so the driver reports it while
+  // the next runs retry it (Codex on #688).
+  if (result.mediaCutFailed > 0) return json(503, { ok: false, error: "media_cut_failed", ...result });
   return json(200, { ok: true, ...result });
 }
 

@@ -11,6 +11,8 @@
  *
  * Presentational: MeetRoom owns the state, so a join that fails comes back to this screen with the name, the
  * tick and the camera preview as they were. Validation is ours (noValidate), so the words match the server's.
+ * A meeting made for a time says when it starts under its name (`startsLine`, worked out in the browser, in the
+ * viewer's own time zone: components/meet/useStartsLine.ts).
  *
  * Join now is off while the browser has not answered a request for the camera or microphone (the person just
  * allowed it; joining then would leave without it). A browser may never answer, so that wait always has a way out
@@ -29,6 +31,8 @@ import type { JoinDevices } from "./useJoinDevices";
 
 export type PreJoinProps = {
   title: string;
+  /** "Your call starts at 2:00 PM." for a meeting made for a time that is not open yet (useStartsLine), else null. */
+  startsLine: string | null;
   recordAudio: boolean;
   /** This person must read and tick the recording notice. */
   needsNotice: boolean;
@@ -90,6 +94,7 @@ export function PreJoin(props: PreJoinProps) {
       <div className="mx-auto w-full max-w-lg">
         <p className="text-xs text-fg-dim">{MEET_BRAND}</p>
         <h1 className="mt-1 break-words text-xl font-semibold text-fg sm:text-2xl">{props.title}</h1>
+        {props.startsLine ? <p className="mt-2 text-sm text-fg-muted">{props.startsLine}</p> : null}
 
         {props.error ? (
           <p role="alert" className="mt-4 rounded-lg border border-status-hot/40 bg-status-hot/10 px-3 py-2 text-sm text-fg">

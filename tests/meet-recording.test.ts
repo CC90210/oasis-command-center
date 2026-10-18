@@ -12,7 +12,9 @@
  *     status the recorder will not retry forever (lib/meet/recorder.ts);
  *   - one browser records a room; a room's caps hold inside the INSERT;
  *   - the hand-over is idempotent and waits for the meeting's end; the PC's
- *     claim hands over a meeting nobody finalized, 10 minutes after its end;
+ *     claim hands over a meeting nobody finalized, 10 minutes after its end,
+ *     and first ends a call whose every tab closed without End (never a
+ *     meeting made for later that two hosts only tried out early);
  *   - the claim fixes the segments (each one's unbroken run from chunk 0),
  *     download-urls signs exactly those, a meeting job reports its own stages
  *     for up to four hours, and complete stores the transcript and frees the
@@ -45,6 +47,7 @@ import {
   signedRequest,
 } from "./_tools-harness";
 import type { MeetStorage } from "../lib/meet/recording";
+import type { SfuClient } from "../lib/meet/sfu";
 import type { RecordingView } from "../components/meet/recording-view";
 
 const ROOT = join(__dirname, "..");
@@ -78,6 +81,27 @@ function fakeMeetStorage(o: { putThrows?: boolean; removeFailsAfter?: number } =
     },
   };
   return { storage, objects, removed, signed };
+}
+
+/** An SFU that holds one active track per session until it is closed; `fail` refuses every close. */
+function fakeSfu(o: { fail?: boolean } = {}) {
+  const closed: string[] = [];
+  const flight = { now: 0, max: 0 };
+  const sfu = {
+    async sessionTracks(sessionId: string) {
+      flight.now += 1;
+      flight.max = Math.max(flight.max, flight.now);
+      await new Promise((r) => setTimeout(r, 15));
+      flight.now -= 1;
+      return closed.includes(sessionId) ? [] : [{ mid: "0", status: "active", location: "local", trackName: "mic" }];
+    },
+    async close(sessionId: string, mids: string[]) {
+      if (o.fail) throw new Error("the SFU is down");
+      closed.push(sessionId);
+      return { sessionDescription: null, tracks: mids.map((mid) => ({ mid })) };
+    },
+  };
+  return { sfu: sfu as unknown as SfuClient, closed, flight };
 }
 
 type Session = () => Promise<{ ok: true; tenantId: string; userId: string; isTrueAdmin: boolean } | { ok: false }>;
@@ -1063,6 +1087,163 @@ async function main() {
     await db.execute({ sql: "UPDATE meet_rooms SET status = 'scheduled' WHERE id = ?", args: [sched.id] });
     const q = await participant(sched, "Early");
     assert.equal((await upload(sched, { participant: q, segment: crypto.randomUUID(), seq: 0, startedAt: later(T0, minutes(80_000)).getTime() }, later(T0, minutes(80_001)))).status, 425);
+  });
+
+  await check("the PC's claim ends a recorded call whose every tab closed without End, and hands it over 10 minutes later", async () => {
+    // #687 review, Codex P1: such a room stayed live for good, so finalizeDueRooms never saw it and its
+    // audio expired untranscribed after 30 days.
+    const start = later(T0, minutes(90_000));
+    const r = await liveRoom({ at: start });
+    const host = await participant(r, "Conaugh", CC);
+    const guest = await participant(r, "Jordan");
+    // A call happened (the guest was in while the host was), then every tab died two minutes in, each still
+    // holding its SFU session.
+    await db.execute({
+      sql: "UPDATE meet_participants SET joined_at = ?, last_seen_at = ?, sfu_session_id = 'sess-' || id WHERE room_id = ?",
+      args: [start.toISOString(), later(start, minutes(2)).toISOString(), r.id],
+    });
+    const sfu = fakeSfu();
+    assert.equal((await upload(r, { participant: guest, segment: crypto.randomUUID(), seq: 0, startedAt: start.getTime() }, later(start, minutes(1)))).status, 201);
+    const room = async () => (await db.execute({ sql: "SELECT status, ended_reason FROM meet_rooms WHERE id = ?", args: [r.id] })).rows[0];
+    // Inside the host's 10-minute grace it is left alone, media too ...
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(8)), sfu.sfu);
+    assert.equal(String((await room()).status), "live", "a call still inside the host's grace was ended");
+    assert.deepEqual(sfu.closed, [], "a live call's media was cut");
+    // ... past it, the sweep ends it and cuts what its rows still held (Codex on #688: no request ever would) ...
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(13)), sfu.sfu);
+    assert.deepEqual([String((await room()).status), String((await room()).ended_reason)], ["ended", "host_left"]);
+    assert.deepEqual([...sfu.closed].sort(), [`sess-${guest}`, `sess-${host}`].sort(), "an ended room's sessions were left open");
+    assert.equal(await count("SELECT COUNT(*) FROM meet_participants WHERE room_id = ? AND sfu_session_id IS NOT NULL", [r.id]), 0);
+    assert.equal(await rec.readTranscript(db, OASIS, r.id), null, "handed over before the late-chunk window closed");
+    // ... and a sweep 10 minutes after that hands its recording to the PC.
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(24)));
+    assert.equal((await rec.readTranscript(db, OASIS, r.id))?.status, "queued", "the abandoned call's recording was never handed over");
+  });
+
+  await check("an ended room's held session: kept with no SFU set or when the cut fails, cut on the next run, left alone after a day", async () => {
+    const start = later(T0, minutes(110_000));
+    const r = await liveRoom({ at: start });
+    const p = await participant(r, "Held");
+    const old = await liveRoom({ at: start });
+    const q = await participant(old, "Old");
+    await db.execute({ sql: "UPDATE meet_participants SET sfu_session_id = 'sess-' || id WHERE id IN (?, ?)", args: [p, q] });
+    await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [later(start, minutes(70)).toISOString(), r.id] });
+    await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [later(start, minutes(-25 * 60)).toISOString(), old.id] });
+    const held = async (id: string) => (await db.execute({ sql: "SELECT sfu_session_id FROM meet_participants WHERE id = ?", args: [id] })).rows[0].sfu_session_id;
+    const at = later(start, minutes(72));
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], at, null);
+    assert.equal(await held(p), `sess-${p}`, "with no SFU set the id was dropped uncut");
+    const down = fakeSfu({ fail: true });
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(at, minutes(1)), down.sfu);
+    assert.equal(await held(p), `sess-${p}`, "a cut that failed lost its id");
+    const up = fakeSfu();
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(at, minutes(2)), up.sfu);
+    assert.equal(await held(p), null, "the next run did not cut it");
+    assert.ok(up.closed.includes(`sess-${p}`));
+    assert.ok(!up.closed.includes(`sess-${q}`), "a room ended over a day ago was swept again");
+    assert.equal(await held(q), `sess-${q}`);
+  });
+
+  await check("the relay cron cuts an ended room's held session in any workspace, with the PC off; the PC's sweep stays in its own", async () => {
+    const start = later(T0, minutes(120_000));
+    const r = await liveRoom({ tenant: OTHER, at: start });
+    const p = await participant(r, "Elsewhere");
+    await db.execute({ sql: "UPDATE meet_participants SET sfu_session_id = 'sess-' || id WHERE id = ?", args: [p] });
+    await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [later(start, minutes(1)).toISOString(), r.id] });
+    const held = async () => (await db.execute({ sql: "SELECT sfu_session_id FROM meet_participants WHERE id = ?", args: [p] })).rows[0].sfu_session_id;
+    const pcs = fakeSfu();
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(2)), pcs.sfu);
+    assert.deepEqual(pcs.closed, [], "the PC's sweep reached another workspace's room");
+    // No SFU set any more (its secret rotated away): nothing can be cut, and the run says so, never "healthy".
+    const noSfu = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(3)), sfu: null });
+    const noSfuBody = await body(noSfu);
+    assert.deepEqual([noSfu.status, noSfuBody.error, noSfuBody.mediaCutFailed], [503, "media_cut_failed", 1]);
+    assert.equal(await held(), `sess-${p}`);
+    // The SFU refuses: a failed run (the driver reports it), and the id is kept for the next one.
+    const down = fakeSfu({ fail: true });
+    const refused = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(3)), sfu: down.sfu });
+    const refusedBody = await body(refused);
+    assert.deepEqual([refused.status, refusedBody.error, refusedBody.mediaCutFailed], [503, "media_cut_failed", 1]);
+    assert.equal(await held(), `sess-${p}`);
+    const cron = fakeSfu();
+    const res = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(4)), sfu: cron.sfu });
+    assert.deepEqual([res.status, (await body(res)).mediaCut], [200, 1]);
+    assert.deepEqual(cron.closed, [`sess-${p}`], "the cron left another workspace's ended room holding its session");
+    assert.equal(await held(), null);
+  });
+
+  await check("with the PC off, the relay cron ends a call every tab left without End, in any workspace, and cuts its media", async () => {
+    // Codex on #688, fourth pass: the cron only cut ENDED rooms, so an abandoned one stayed live, media and all.
+    const start = later(T0, minutes(125_000));
+    const r = await liveRoom({ tenant: OTHER, at: start });
+    const host = await participant(r, "Host", CC);
+    const guest = await participant(r, "Guest");
+    await db.execute({
+      sql: "UPDATE meet_participants SET joined_at = ?, last_seen_at = ?, sfu_session_id = 'sess-' || id WHERE room_id = ?",
+      args: [start.toISOString(), later(start, minutes(2)).toISOString(), r.id],
+    });
+    const sfu = fakeSfu();
+    const res = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(15)), sfu: sfu.sfu });
+    assert.equal(res.status, 200);
+    const row = (await db.execute({ sql: "SELECT status, ended_reason FROM meet_rooms WHERE id = ?", args: [r.id] })).rows[0];
+    assert.deepEqual([String(row.status), String(row.ended_reason)], ["ended", "host_left"], "the cron left an abandoned call live");
+    assert.deepEqual([...sfu.closed].sort(), [`sess-${guest}`, `sess-${host}`].sort());
+  });
+
+  await check("a run's cuts go at once, so one SFU that does not answer costs one wait, not one per room", async () => {
+    const start = later(T0, minutes(130_000));
+    const rooms = await Promise.all([1, 2, 3].map(() => liveRoom({ at: start })));
+    for (const r of rooms) {
+      const p = await participant(r, "Concurrent");
+      await db.execute({ sql: "UPDATE meet_participants SET sfu_session_id = 'sess-' || id WHERE id = ?", args: [p] });
+      await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [later(start, minutes(1)).toISOString(), r.id] });
+    }
+    const sfu = fakeSfu();
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(2)), sfu.sfu);
+    assert.equal(sfu.closed.length, 3);
+    assert.ok(sfu.flight.max >= 3, `the cuts ran one at a time (at most ${sfu.flight.max} in flight)`);
+  });
+
+  await check("a backlog drains oldest first, so a deferred room never ages out before its turn", async () => {
+    const start = later(T0, minutes(140_000));
+    const ids: string[] = [];
+    for (let i = 0; i < 11; i += 1) {
+      const r = await liveRoom({ at: start });
+      const p = await participant(r, `Backlog ${i}`);
+      await db.execute({ sql: "UPDATE meet_participants SET sfu_session_id = 'sess-' || id WHERE id = ?", args: [p] });
+      await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [later(start, minutes(i)).toISOString(), r.id] });
+      ids.push(p);
+    }
+    // One more, ended three hours before the run: still inside the day it is retried for.
+    const late = await liveRoom({ at: start });
+    const lateP = await participant(late, "Three hours ago");
+    await db.execute({ sql: "UPDATE meet_participants SET sfu_session_id = 'sess-' || id WHERE id = ?", args: [lateP] });
+    await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [later(start, minutes(30 - 180)).toISOString(), late.id] });
+    const sfu = fakeSfu();
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(30)), sfu.sfu);
+    assert.ok(sfu.closed.includes(`sess-${lateP}`), "a room ended three hours ago was no longer retried");
+    assert.ok(sfu.closed.includes(`sess-${ids[0]}`), "the oldest room of the backlog was skipped");
+    assert.ok(!sfu.closed.includes(`sess-${ids[10]}`), "the newest went before an older one");
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(31)), sfu.sfu);
+    assert.ok(sfu.closed.includes(`sess-${ids[10]}`), "the next run did not take the rest");
+  });
+
+  await check("the claim's sweep leaves tomorrow's meeting alone after two hosts try it out today", async () => {
+    // #687 third review, HIGH: CC and Adon are both hosts, so two of them in a room counts as a call. Without the
+    // start guard, a try-out today ended tomorrow's room and killed the link its guest already had.
+    const today = later(T0, minutes(100_000));
+    const r = await liveRoom({ at: today });
+    await db.execute({ sql: "UPDATE meet_rooms SET starts_at = ? WHERE id = ?", args: [later(today, minutes(24 * 60)).toISOString(), r.id] });
+    await participant(r, "Conaugh", CC);
+    const adon = await participant(r, "Adon", ADON);
+    await db.execute({ sql: "UPDATE meet_participants SET role = 'host' WHERE id = ?", args: [adon] });
+    await db.execute({
+      sql: "UPDATE meet_participants SET joined_at = ?, last_seen_at = ? WHERE room_id = ?",
+      args: [today.toISOString(), later(today, minutes(5)).toISOString(), r.id],
+    });
+    for (const m of [13, 24, 60]) await rec.meetRelaySweeps(db, store.storage, [OASIS], later(today, minutes(m)));
+    const row = (await db.execute({ sql: "SELECT status FROM meet_rooms WHERE id = ?", args: [r.id] })).rows[0];
+    assert.equal(String(row.status), "live", "a try-out ended tomorrow's meeting");
   });
 
   finish("meet recording");

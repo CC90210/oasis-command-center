@@ -13,7 +13,9 @@
  *   2 HAND OVER   once the meeting has ended (ensureTranscriptJob): the host's
  *                 browser right after End, or the PC's own claim 10 minutes
  *                 after the end if that browser never said so
- *                 (finalizeDueRooms). That makes the room's meet_transcripts row
+ *                 (finalizeDueRooms). A call whose every tab closed without End
+ *                 is ended by that same claim first (endAbandonedRooms, in
+ *                 meetRelaySweeps). That makes the room's meet_transcripts row
  *                 and a meet_transcribe job for the PC.
  *   3 TRANSCRIBE  OASIS's PC (BEA scripts/meet/runner.py) claims the job. The
  *                 claim fixes exactly which chunks it gets (segments_json,
@@ -47,7 +49,10 @@ import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant } from "@/lib/storage-helpers";
 import { toolErrorLine } from "@/lib/tools/errors";
 import { LEASE_GUARD, inputHashOf, liveRunnerForTool, sqlPlaceholders } from "@/lib/tools/store";
+import { MeetNotConfiguredError } from "./access";
+import { endAbandonedRooms, forgetSession, roomSessions } from "./participants";
 import { readMeetRoom, type MeetRoom } from "./rooms";
+import { cutSession, sfuClient, type SfuClient } from "./sfu";
 
 /** The logical bucket the relay copies live in: private (never in PUBLIC_BUCKET_PREFIXES), signed URLs only. */
 export const MEET_RELAY_BUCKET = "meet-relay";
@@ -1053,8 +1058,96 @@ export async function finalizeDueRooms(
   return handed;
 }
 
-/** The three sweeps, in the order they feed each other. The runner's claim runs them while it serves meetings. */
-export async function meetRelaySweeps(db: Client, storage: MeetStorage | null, tenantIds: readonly string[], now: Date): Promise<void> {
+/**
+ * How long after a room ends the sweeps keep cutting the media sessions its rows still hold; how many rooms and
+ * sessions a run. A day, oldest first: after an SFU outage a backlog drains in order, so nothing deferred ages out
+ * before its turn (Codex on #688, third pass).
+ */
+export const ENDED_CUT_RETRY_MS = 24 * 60 * 60_000;
+const ENDED_CUT_BATCH = 10;
+const ENDED_CUT_SESSIONS = 20;
+let noSfuLogged = false;
+
+/** This Worker's SFU client, or null when no Realtime app is set (nothing could have been connected through it). */
+export function meetSfuIfConfigured(): SfuClient | null {
+  try {
+    return sfuClient();
+  } catch (err) {
+    if (err instanceof MeetNotConfiguredError) return null;
+    throw err;
+  }
+}
+
+/**
+ * Cut the media sessions still held by the rows of rooms that ended within ENDED_CUT_RETRY_MS (oldest first),
+ * whatever ended them:
+ * a room this sweep just ended (nobody polls it, so no request ever cuts it), or one whose own cut failed. A browser
+ * that stopped polling but kept its WebRTC connection must not go on sending or hearing media in an ended room
+ * (Codex on #688, P1). The same steps as lib/meet/handlers.ts cutHeld: forgetSession only after a cut went through,
+ * so a cut that fails keeps its id for the next run: the PC's claim every minute (OASIS's workspaces), and the
+ * relay cron every 5 minutes for every workspace (`tenantIds` null), with or without the PC.
+ *
+ * Every cut of a run goes at once (at most ENDED_CUT_SESSIONS): an SFU that does not answer costs one timeout per
+ * run, never one per room, so the relay work after it still runs (Codex on #688). Returns how many went through and
+ * how many failed, so the cron can say a run that left media open is a failed run.
+ *
+ * Known limit, chosen: sessions the SFU refuses again and again (not an outage, which every run retries alike) stay
+ * at the front of the oldest-first batch, so with more than ENDED_CUT_SESSIONS of them later rooms wait. Every such
+ * run answers 503 media_cut_failed, so the driver reports it while it lasts (Codex on #688, fifth pass).
+ */
+async function cutEndedRoomSessions(
+  db: Client,
+  sfu: SfuClient | null,
+  tenantIds: readonly string[] | null,
+  now: Date,
+): Promise<{ cut: number; failed: number }> {
+  const none = { cut: 0, failed: 0 };
+  if (tenantIds && !tenantIds.length) return none;
+  const scope = tenantIds ? `r.tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND ` : "";
+  const rs = await db.execute({
+    sql: `SELECT r.tenant_id, r.id FROM meet_rooms r
+           WHERE ${scope}r.status = 'ended' AND r.ended_at > ?
+             AND EXISTS (SELECT 1 FROM meet_participants p WHERE p.tenant_id = r.tenant_id AND p.room_id = r.id AND p.sfu_session_id IS NOT NULL)
+           ORDER BY r.ended_at ASC LIMIT ?`,
+    args: [...(tenantIds ?? []), new Date(now.getTime() - ENDED_CUT_RETRY_MS).toISOString(), ENDED_CUT_BATCH],
+  });
+  if (!rs.rows.length) return none;
+  if (!sfu) {
+    // Sessions were opened, so an SFU app was set then: its secret is gone now (a rotation, a lost push). Nothing
+    // can be cut until it is back, and the run says so, never "healthy" (Codex on #688, third pass).
+    if (!noSfuLogged) console.error("[meet.relay] no SFU app is set; sessions held by ended rooms cannot be cut");
+    noSfuLogged = true;
+    return { cut: 0, failed: rs.rows.length };
+  }
+  const rooms = rs.rows.map((row) => ({ tenantId: String(row.tenant_id), id: String(row.id) }));
+  const held = (await Promise.all(rooms.map(async (room) => (await roomSessions(db, room)).map((h) => ({ room, h })))))
+    .flat()
+    .slice(0, ENDED_CUT_SESSIONS);
+  const results = await Promise.allSettled(held.map(async ({ room, h }) => {
+    if (!(await cutSession(sfu, h.sessionId, "relay.ended_room"))) return false;
+    await forgetSession(db, room, h);
+    return true;
+  }));
+  const cut = results.filter((r) => r.status === "fulfilled" && r.value).length;
+  return { cut, failed: results.length - cut };
+}
+
+/**
+ * The sweeps, in the order they feed each other. The runner's claim runs them while it serves meetings. A call
+ * left with no host and nobody polling (every tab closed without End) is ended first (lib/meet/participants.ts
+ * endAbandonedRooms), so finalizeDueRooms hands its recording over 10 minutes later. Without it such a room stayed
+ * live, was never handed over, and its audio expired untranscribed after 30 days (#687 review, Codex P1). The media
+ * sessions of ended rooms are cut next (cutEndedRoomSessions), since no request will.
+ */
+export async function meetRelaySweeps(
+  db: Client,
+  storage: MeetStorage | null,
+  tenantIds: readonly string[],
+  now: Date,
+  sfu: SfuClient | null = null,
+): Promise<void> {
+  await endAbandonedRooms(db, tenantIds, now);
+  await cutEndedRoomSessions(db, sfu, tenantIds, now);
   await expireUnfinalized(db, tenantIds, now);
   await expireRelay(db, tenantIds, now);
   await finalizeDueRooms(db, tenantIds, now);
@@ -1067,14 +1160,26 @@ export async function meetRelaySweeps(db: Client, storage: MeetStorage | null, t
  * needs, in every workspace that has any, WITHOUT the PC. A recording the host
  * deleted, or one the PC never came back for, must not wait for the PC to
  * leave the relay (Codex on #685, P1). Handing a recording over stays the PC's
- * claim (finalizeDueRooms): it only means something where a PC takes it.
+ * claim (finalizeDueRooms): it only means something where a PC takes it. A
+ * call every tab left without End is ended here too (endAbandonedRooms), and
+ * the media sessions ended rooms still hold are cut, for every workspace:
+ * neither may wait for the PC.
  */
 export async function meetRelayCron(
   db: Client,
   storage: MeetStorage | null,
   now: Date,
-): Promise<{ tenants: number; expired: number; removed: number; deleteFailed: boolean }> {
+  sfu: SfuClient | null = null,
+): Promise<{ tenants: number; expired: number; removed: number; deleteFailed: boolean; mediaCut: number; mediaCutFailed: number }> {
   const at = now.toISOString();
+  // A call every tab left without End is ended here too, in every workspace with a live room, so the cut below
+  // reaches its media with the PC off (Codex on #688, fourth pass). Handing its recording over stays the PC's claim.
+  // Every workspace with a live room, no cap: a capped, unordered list could return the same ones each run and never
+  // reach a later workspace's abandoned call (Codex on #688, fifth pass). The workspaces number in the tens.
+  const live = await db.execute({ sql: "SELECT DISTINCT tenant_id FROM meet_rooms WHERE status = 'live'", args: [] });
+  if (live.rows.length) await endAbandonedRooms(db, live.rows.map((r) => String(r.tenant_id)), now);
+  const media = await cutEndedRoomSessions(db, sfu, null, now);
+  const cuts = { mediaCut: media.cut, mediaCutFailed: media.failed };
   // First, give a row to every recording nobody handed over that is past its 30 days, so the reads below find it.
   const abandoned = await expireUnfinalized(db, null, now);
   const rs = await db.execute({
@@ -1085,10 +1190,10 @@ export async function meetRelayCron(
     args: [at],
   });
   const tenantIds = rs.rows.map((r) => String(r.tenant_id));
-  if (!tenantIds.length) return { tenants: 0, expired: abandoned, removed: 0, deleteFailed: false };
+  if (!tenantIds.length) return { tenants: 0, expired: abandoned, removed: 0, deleteFailed: false, ...cuts };
   const expired = abandoned + (await expireRelay(db, tenantIds, now));
   const cleanup = await removeRelayChunksReport(db, storage, { tenantIds }, RELAY_DELETE_BATCH, now);
-  return { tenants: tenantIds.length, expired, removed: cleanup.removed, deleteFailed: cleanup.failed };
+  return { tenants: tenantIds.length, expired, removed: cleanup.removed, deleteFailed: cleanup.failed, ...cuts };
 }
 
 // ---------------------------------------------------------------------------

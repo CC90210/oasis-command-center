@@ -86,14 +86,16 @@ function request(path: string, opts: { method?: string; body?: unknown; cookie?:
 
 /**
  * A stand-in SFU: sessions and their tracks in memory, every call recorded. `down` holds sessions it cannot be
- * asked about (a 500), `gone` the ones it no longer has (a 404); reading a session takes a moment, and `widest` is
- * the most reads that were in flight at once.
+ * asked about (a 500), `gone` the ones it no longer has (a 404), `disconnected` the ones whose browser has gone (a
+ * 410, as the live SFU answers it); reading a session takes a moment, and `widest` is the most reads that were in
+ * flight at once.
  */
 function fakeSfu() {
   const calls: Array<{ op: string; sessionId: string; mids?: string[]; tracks?: unknown }> = [];
   const sessions = new Map<string, Array<{ mid: string; location: string; trackName: string; status: string }>>();
   const down = new Set<string>();
   const gone = new Set<string>();
+  const disconnected = new Set<string>();
   /** Run while a pull or publish is on its way: after the SFU has the request, before it adds the track. */
   const hooks: { duringPull?: () => Promise<unknown>; duringPublish?: () => Promise<unknown> } = {};
   let reading = 0;
@@ -141,6 +143,9 @@ function fakeSfu() {
         await new Promise((r) => setTimeout(r, 5));
         if (down.has(sessionId)) throw new SfuError("sfu_http_500", "the SFU answered 500", 500);
         if (gone.has(sessionId)) throw new SfuError("session_not_found", "no such session", 404);
+        if (disconnected.has(sessionId)) {
+          throw new SfuError("session_error", "Session appears to be disconnected. Please check if the PeerConnection is connected.", 410);
+        }
         return (sessions.get(sessionId) ?? []).map((t) => ({ ...t }));
       } finally {
         reading -= 1;
@@ -148,7 +153,7 @@ function fakeSfu() {
     },
   };
   return {
-    client, calls, sessions, down, gone, hooks,
+    client, calls, sessions, down, gone, disconnected, hooks,
     widest: () => widest,
     resetWidest: () => {
       widest = 0;
@@ -831,6 +836,25 @@ async function main() {
     assert.equal((await reconnect()).status, 200);
     const next = await heldSession(guest.id);
     assert.ok(next && next !== call.sessions[1], "a new session, once the old one was cut");
+  });
+
+  await check("a session whose browser has gone (the SFU's 410) counts as cut: a reconnect after a dropped network goes through, and a Leave forgets it at once", async () => {
+    // Reconnect: the network dropped, so the SFU calls the old session disconnected; the cut must not block the new one.
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    sfu.disconnected.add(call.sessions[1]);
+    const res = await handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "session" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps());
+    assert.equal(res.status, 200, "a dropped network reconnects, never 502 six times over");
+    const next = await heldSession(guest.id);
+    assert.ok(next && next !== call.sessions[1], "on a new session");
+    // Leave: the page closed its connection before it told the room, so the room's cut meets a disconnected session.
+    const other = await callWith(1);
+    const [leaving] = other.guests;
+    sfu.disconnected.add(other.sessions[1]);
+    assert.equal((await handleLeave(request(`/api/meet/${other.c}/leave`, { cookie: leaving.cookie, ip: freshIp() }), other.c, deps())).status, 200);
+    assert.equal(await heldSession(leaving.id), null, "forgotten at once: nothing left for the tidy-up or the relay sweep to retry");
+    const room = (await readMeetRoomByCode(db, other.c.replace(/-/g, "")))!;
+    assert.deepEqual(await pendingCuts(db, room, new Date(clock)), [], "no cut is pending");
   });
 
   await check("each person's session reaches the others only as a tag, and the tag changes when they reconnect", async () => {
