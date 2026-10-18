@@ -1139,6 +1139,23 @@ async function main() {
     assert.equal(await held(q), `sess-${q}`);
   });
 
+  await check("the relay cron cuts an ended room's held session in any workspace, with the PC off; the PC's sweep stays in its own", async () => {
+    const start = later(T0, minutes(120_000));
+    const r = await liveRoom({ tenant: OTHER, at: start });
+    const p = await participant(r, "Elsewhere");
+    await db.execute({ sql: "UPDATE meet_participants SET sfu_session_id = 'sess-' || id WHERE id = ?", args: [p] });
+    await db.execute({ sql: "UPDATE meet_rooms SET status = 'ended', ended_at = ?, ended_reason = 'host_ended' WHERE id = ?", args: [later(start, minutes(1)).toISOString(), r.id] });
+    const held = async () => (await db.execute({ sql: "SELECT sfu_session_id FROM meet_participants WHERE id = ?", args: [p] })).rows[0].sfu_session_id;
+    const pcs = fakeSfu();
+    await rec.meetRelaySweeps(db, store.storage, [OASIS], later(start, minutes(2)), pcs.sfu);
+    assert.deepEqual(pcs.closed, [], "the PC's sweep reached another workspace's room");
+    const cron = fakeSfu();
+    const res = await routes.handleMeetRelayCron({ db, storage: store.storage, now: () => later(start, minutes(3)), sfu: cron.sfu });
+    assert.equal(res.status, 200);
+    assert.deepEqual(cron.closed, [`sess-${p}`], "the cron left another workspace's ended room holding its session");
+    assert.equal(await held(), null);
+  });
+
   await check("the claim's sweep leaves tomorrow's meeting alone after two hosts try it out today", async () => {
     // #687 third review, HIGH: CC and Adon are both hosts, so two of them in a room counts as a call. Without the
     // start guard, a try-out today ended tomorrow's room and killed the link its guest already had.

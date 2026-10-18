@@ -1078,16 +1078,18 @@ export function meetSfuIfConfigured(): SfuClient | null {
  * a room this sweep just ended (nobody polls it, so no request ever cuts it), or one whose own cut failed. A browser
  * that stopped polling but kept its WebRTC connection must not go on sending or hearing media in an ended room
  * (Codex on #688, P1). The same steps as lib/meet/handlers.ts cutHeld: forgetSession only after a cut went through,
- * so a cut that fails keeps its id for the next run, every minute while the PC is on.
+ * so a cut that fails keeps its id for the next run: the PC's claim every minute (OASIS's workspaces), and the
+ * relay cron every 5 minutes for every workspace (`tenantIds` null), with or without the PC.
  */
-async function cutEndedRoomSessions(db: Client, sfu: SfuClient | null, tenantIds: readonly string[], now: Date): Promise<void> {
-  if (!tenantIds.length) return;
+async function cutEndedRoomSessions(db: Client, sfu: SfuClient | null, tenantIds: readonly string[] | null, now: Date): Promise<void> {
+  if (tenantIds && !tenantIds.length) return;
+  const scope = tenantIds ? `r.tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND ` : "";
   const rs = await db.execute({
     sql: `SELECT r.tenant_id, r.id FROM meet_rooms r
-           WHERE r.tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND r.status = 'ended' AND r.ended_at > ?
+           WHERE ${scope}r.status = 'ended' AND r.ended_at > ?
              AND EXISTS (SELECT 1 FROM meet_participants p WHERE p.tenant_id = r.tenant_id AND p.room_id = r.id AND p.sfu_session_id IS NOT NULL)
            ORDER BY r.ended_at DESC LIMIT ?`,
-    args: [...tenantIds, new Date(now.getTime() - ENDED_CUT_RETRY_MS).toISOString(), ENDED_CUT_BATCH],
+    args: [...(tenantIds ?? []), new Date(now.getTime() - ENDED_CUT_RETRY_MS).toISOString(), ENDED_CUT_BATCH],
   });
   if (!rs.rows.length) return;
   if (!sfu) {
@@ -1132,14 +1134,18 @@ export async function meetRelaySweeps(
  * needs, in every workspace that has any, WITHOUT the PC. A recording the host
  * deleted, or one the PC never came back for, must not wait for the PC to
  * leave the relay (Codex on #685, P1). Handing a recording over stays the PC's
- * claim (finalizeDueRooms): it only means something where a PC takes it.
+ * claim (finalizeDueRooms): it only means something where a PC takes it. The
+ * media sessions ended rooms still hold are cut here too, for every workspace:
+ * cutting them must not wait for the PC either.
  */
 export async function meetRelayCron(
   db: Client,
   storage: MeetStorage | null,
   now: Date,
+  sfu: SfuClient | null = null,
 ): Promise<{ tenants: number; expired: number; removed: number; deleteFailed: boolean }> {
   const at = now.toISOString();
+  await cutEndedRoomSessions(db, sfu, null, now);
   // First, give a row to every recording nobody handed over that is past its 30 days, so the reads below find it.
   const abandoned = await expireUnfinalized(db, null, now);
   const rs = await db.execute({
