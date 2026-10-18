@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 
 const booking = readFileSync("components/booking/BookingPage.tsx", "utf8");
 assert.match(booking, /`LOCATION:\$\{booked\.meetUrl\}`/);
-assert.match(booking, /`DESCRIPTION:Join the call: \$\{booked\.meetUrl\}`/);
+// The .ics names the link, then Maven's recording notice when the room records (lib/meet/recording-notice.ts).
+assert.match(booking, /`DESCRIPTION:Join the call: \$\{booked\.meetUrl\}\$\{booked\.recorded \? `\\\\n\$\{MEET_RECORDING_NOTICE\}` : ""\}`/);
+assert.match(booking, /booked\.recorded \? ` \$\{MEET_RECORDING_NOTICE\}` : ""/, "the confirmation says so too, as text");
 assert.match(booking, /`URL:\$\{booked\.meetUrl\}`/);
 assert.match(booking, />\s*Join the call\s*</);
 assert.match(booking, /<dd className="text-fg">Video call<\/dd>/);

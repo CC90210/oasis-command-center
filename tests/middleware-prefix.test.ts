@@ -247,6 +247,21 @@ for (const notPublic of ["/api/internal/tools", "/api/internal/toolsx/claim", "/
   assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated: only /api/internal/tools/* is public`);
 }
 
+// The Instagram DM setter (BEA, on CC's PC) posts to three routes under
+// /api/internal/booking/, each HMAC-gated inside (lib/booking/agent-auth.ts).
+// Same rule again: the prefix with its slash is public, nothing near it, and the
+// public booking routes keep their own (same-origin) gate.
+for (const agent of [
+  "/api/internal/booking/slots",
+  "/api/internal/booking/offers",
+  "/api/internal/booking/book",
+]) {
+  assert.equal(isPublic(agent), true, `${agent} is HMAC-gated inside its route and MUST bypass session middleware`);
+}
+for (const notPublic of ["/api/internal/booking", "/api/internal/bookingx/book", "/api/internal/booking-admin"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated: only /api/internal/booking/* is public`);
+}
+
 // ...and nothing else under /api/internal is public. The prefix must not be a
 // wildcard: a future internal route stays session-gated until someone
 // deliberately adds it above with a reason.

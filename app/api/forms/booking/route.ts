@@ -1,6 +1,6 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
-import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
+import { bookingCallRecorded, bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { sameOrigin } from "@/lib/calendar/http";
 import { AI_AUDIT_ALERT_SOURCE, ensureAiAuditSalesEvent } from "@/lib/forms/ai-audit-notify";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
@@ -272,6 +272,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       meet_url: meetUrl,
       calendar_url: calendarUrl,
       time_zone: "America/Toronto",
+      call_recorded: await bookingCallRecorded(context.tenantId, meetUrl),
     });
   }
 
@@ -555,5 +556,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     meet_url: meeting.receipt.meetLink,
     calendar_url: meeting.receipt.htmlLink,
     time_zone: meeting.timezone,
+    // The confirmation's recording notice (lib/meet/recording-notice.ts), read from the room itself.
+    call_recorded: await bookingCallRecorded(context.tenantId, meeting.receipt.meetLink),
   });
 }
