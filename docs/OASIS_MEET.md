@@ -49,6 +49,7 @@ Center keeps the transcript. No meeting vendor bill: media runs on Cloudflare Re
   - "Join here instead" moves the meeting to the new tab. The first tab ends with "You moved this meeting to another tab." and tells the room nothing, so the new tab carries on as the same participant, with the same place, recording and notice tick.
   - A first tab still joining hands over only once its join has answered, so the new tab joins with the cookie that answer set and never makes a second participant. The new tab waits 25 s, longer than a join's own 20 s deadline.
   - An ask more than 3 s old is ignored. It reached a tab that was frozen meanwhile, such as a phone's background tab, and its asker has given up, so a call is never ended for a hand-over nobody is waiting to take.
+  - The tab handing over lets go only once its SFU steps (session, publish, pull) have answered, since a late one would act on the session and tracks of the participant the new tab now is. A tab asked while its join is on its way hands over before setting up any media, so at most one step is ever waited for: 3 s for the ask plus 20 s for that step fits inside the new tab's 25 s.
   - A call ended while it is connecting (moved, left, removed) is never brought back to live.
   - If the new tab's join then fails, nobody is in the call until "Try again", which comes back as the same participant. The two tabs share one participant, so they can never be in the call at once.
   - Only the tab in the room sends a Leave or the page's close beacon, so a second tab can never end the first one's place.

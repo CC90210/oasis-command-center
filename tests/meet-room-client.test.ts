@@ -864,7 +864,41 @@ async function main() {
     await joiningA;
     await waitFor("this tab is in the call", () => b.c.snapshot().phase.kind === "live");
     assert.deepEqual(a.c.snapshot().phase, { kind: "ended", reason: "moved" });
+    assert.ok(!roomA.log.some((l) => l.startsWith("sfu:")), "the tab handing over set up no media it would only hand on");
     await leaveQuietly(b.c);
+  });
+
+  await check("a hand-over while an SFU step of the other tab is on its way lets go only once that step has answered: a late one would act on this tab's session", async () => {
+    const code = "tabs-sfu-in-flight";
+    const roomA = fakeRoom({ role: "host", delays: { pull: 300 } });
+    const a = controller(roomA, { code });
+    await a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => a.c.snapshot().phase.kind === "live");
+    roomA.others.push({ id: "g1", name: "Guest", role: "guest", tracks: [{ trackName: "mic", kind: "audio" }] });
+    await waitFor("a pull is on its way", () => roomA.busyWith() === "pull");
+    const roomB = fakeRoom({ role: "host" });
+    const b = controller(roomB, { code });
+    await b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    assert.equal(phaseCode(b.c), "open_in_another_tab");
+    const takingOver = b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null, here: true });
+    await waitFor("the other tab has moved on", () => a.c.snapshot().phase.kind === "ended", 3_000);
+    await waitFor("this tab asks the room", () => roomB.signalOf("/join") !== undefined, 3_000);
+    assert.ok(roomA.log.includes("sfu:pull"), "the other tab's pull had answered before this tab asked for anything");
+    assert.ok(!roomA.log.includes("sfu:renegotiate"), "and nothing more of that tab's went to the room after it moved");
+    await takingOver;
+    await waitFor("this tab is in the call", () => b.c.snapshot().phase.kind === "live");
+    await leaveQuietly(b.c);
+  });
+
+  await check("a call ended while it is connecting (Leave on the Connecting screen) stays ended: the connect on its way never brings it back to live", async () => {
+    const room = fakeRoom({ role: "host", delays: { publish: 120 } });
+    const { c } = controller(room);
+    void c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("the publish is on its way", () => room.busyWith() === "publish");
+    await c.leave();
+    await waitFor("the publish has answered", () => room.log.some((l) => l.startsWith("publish:")));
+    await new Promise((r) => setTimeout(r, 40));
+    assert.deepEqual(c.snapshot().phase, { kind: "ended", reason: "left" });
   });
 
   await check("Join here instead waits longer than a fresh ask plus a join's own deadline, so the tab it asks is never left with no one in the call", () => {
