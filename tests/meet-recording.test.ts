@@ -13,7 +13,8 @@
  *   - one browser records a room; a room's caps hold inside the INSERT;
  *   - the hand-over is idempotent and waits for the meeting's end; the PC's
  *     claim hands over a meeting nobody finalized, 10 minutes after its end,
- *     and first ends a call whose every tab closed without End;
+ *     and first ends a call whose every tab closed without End (never a
+ *     meeting made for later that two hosts only tried out early);
  *   - the claim fixes the segments (each one's unbroken run from chunk 0),
  *     download-urls signs exactly those, a meeting job reports its own stages
  *     for up to four hours, and complete stores the transcript and frees the
