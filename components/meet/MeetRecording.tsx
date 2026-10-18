@@ -119,7 +119,7 @@ function MeetRecordingPanel({ code }: { code: string }) {
   }
 
   const button =
-    "inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-xs font-semibold text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40";
+    "inline-flex min-h-11 items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-xs font-semibold text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40 sm:min-h-0";
   const where = view.runner?.label ?? PC;
   const t = view.transcript;
   const zero = t ? (t.startedAtMs ?? t.lines[0]?.at_ms ?? 0) : 0;

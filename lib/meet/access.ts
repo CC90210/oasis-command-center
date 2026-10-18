@@ -24,8 +24,10 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Client } from "@libsql/client";
-import { NextResponse } from "next/server";
-import { displayMeetCode, parseMeetCode, readMeetRoomByCode, type MeetRoom } from "./rooms";
+import type { NextResponse } from "next/server";
+import { meetError } from "./answers";
+import { isStale, readPresence, type MeetPresence } from "./participants";
+import { displayMeetCode, parseMeetCode, readMeetRoomByCode, wellFormedText, type MeetRoom } from "./rooms";
 
 export type MeetRole = "host" | "guest";
 
@@ -37,9 +39,10 @@ export const MEET_TOKEN_TTL_S = 12 * 60 * 60;
 const MIN_SECRET_LENGTH = 32;
 const MAX_TOKEN_LENGTH = 1024;
 
+/** Meetings cannot run: a secret or the Realtime app is not set. Routes answer 503 meet_not_configured. */
 export class MeetNotConfiguredError extends Error {
-  constructor() {
-    super(`${MEET_TOKEN_SECRET_ENV} is missing or shorter than ${MIN_SECRET_LENGTH} characters`);
+  constructor(message = `${MEET_TOKEN_SECRET_ENV} is missing or shorter than ${MIN_SECRET_LENGTH} characters`) {
+    super(message);
     this.name = "MeetNotConfiguredError";
   }
 }
@@ -47,10 +50,15 @@ export class MeetNotConfiguredError extends Error {
 /** A participant token's claims. `role` is what they joined as; the participant row is what counts. */
 export type MeetTokenClaims = { roomId: string; participantId: string; role: MeetRole; exp: number };
 
-function secret(): string {
+/** The participant token's secret is set (long enough to sign with): without it nobody can join a room. */
+export function meetTokenConfigured(): boolean {
   const value = process.env[MEET_TOKEN_SECRET_ENV];
-  if (!value || value.length < MIN_SECRET_LENGTH) throw new MeetNotConfiguredError();
-  return value;
+  return !!value && value.length >= MIN_SECRET_LENGTH;
+}
+
+function secret(): string {
+  if (!meetTokenConfigured()) throw new MeetNotConfiguredError();
+  return process.env[MEET_TOKEN_SECRET_ENV]!;
 }
 
 /** The signature over a token's payload, domain-separated so it can never pass for another signer's. */
@@ -117,16 +125,24 @@ export function meetRoleFor(
 /** The longest name a participant shows: it heads their tile and labels their lines in the transcript. */
 export const MEET_NAME_MAX = 60;
 
-/** A participant's name as it is kept: control characters and runs of spaces as one space, trimmed, capped. Null when nothing is left. */
+/**
+ * A participant's name as it is kept: control characters and runs of spaces as one space, a broken half of an
+ * emoji as U+FFFD, trimmed and capped by characters (never cutting an emoji in two). Null when nothing is left.
+ */
 export function meetDisplayName(input: unknown): string | null {
   if (typeof input !== "string") return null;
-  const name = input.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, MEET_NAME_MAX).trim();
+  const plain = wellFormedText(input).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  const name = Array.from(plain).slice(0, MEET_NAME_MAX).join("").trim();
   return name || null;
 }
 
-const answer = (status: number, error: string) => ({ ok: false as const, response: NextResponse.json({ ok: false, error }, { status }) });
+const answer = (status: number, error: string, extra: Record<string, unknown> = {}) => ({
+  ok: false as const,
+  response: meetError(status, error, extra),
+});
 
-type SessionLike = { ok: true; tenantId: string; userId: string; isTrueAdmin: boolean } | { ok: false };
+/** The signed-in person as Meet needs them (lib/api-auth.ts resolveSessionContext, narrowed). */
+export type MeetSession = { ok: true; tenantId: string; userId: string; isTrueAdmin: boolean; email?: string | null } | { ok: false };
 
 export type MeetHostResult = { ok: true; tenantId: string; userId: string; room: MeetRoom } | { ok: false; response: NextResponse };
 
@@ -138,7 +154,7 @@ export type MeetHostResult = { ok: true; tenantId: string; userId: string; room:
 export async function requireMeetHost(
   db: Client,
   rawCode: string,
-  resolveSession: () => Promise<SessionLike> = async () => (await import("@/lib/api-auth")).resolveSessionContext(),
+  resolveSession: () => Promise<MeetSession> = async () => (await import("@/lib/api-auth")).resolveSessionContext(),
 ): Promise<MeetHostResult> {
   const session = await resolveSession();
   if (!session.ok) return answer(401, "sign_in_required");
@@ -150,69 +166,11 @@ export async function requireMeetHost(
   return { ok: true, tenantId: room.tenantId, userId: session.userId, room };
 }
 
-export type MeetParticipant = {
-  id: string;
-  tenantId: string;
-  roomId: string;
-  role: MeetRole;
-  userId: string | null;
-  displayName: string;
-  consentAt: string | null;
-  sfuSessionId: string | null;
-  /** What they publish, as the SFU knows it: [{ trackName, kind }]. */
-  tracks: Array<{ trackName: string; kind: string }>;
-  joinedAt: string;
-  lastSeenAt: string;
-  leftAt: string | null;
-  removedAt: string | null;
-};
+/** A participant as the room's API sees them: their row, with what they publish (lib/meet/participants.ts). */
+export type MeetParticipant = MeetPresence;
 
-const PARTICIPANT_COLUMNS =
-  "id, tenant_id, room_id, role, user_id, display_name, consent_at, sfu_session_id, tracks, joined_at, last_seen_at, left_at, removed_at";
-
-const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
-
-function parseTracks(raw: unknown): MeetParticipant["tracks"] {
-  try {
-    const list = JSON.parse(String(raw ?? "[]")) as unknown;
-    if (!Array.isArray(list)) return [];
-    return list
-      .filter((t): t is { trackName: string; kind: string } => !!t && typeof (t as { trackName?: unknown }).trackName === "string")
-      .map((t) => ({ trackName: t.trackName, kind: String(t.kind ?? "") }));
-  } catch {
-    return [];
-  }
-}
-
-function toParticipant(row: Record<string, unknown>): MeetParticipant {
-  return {
-    id: String(row.id),
-    tenantId: String(row.tenant_id),
-    roomId: String(row.room_id),
-    role: String(row.role) === "host" ? "host" : "guest",
-    userId: text(row.user_id),
-    displayName: String(row.display_name),
-    consentAt: text(row.consent_at),
-    sfuSessionId: text(row.sfu_session_id),
-    tracks: parseTracks(row.tracks),
-    joinedAt: String(row.joined_at),
-    lastSeenAt: String(row.last_seen_at),
-    leftAt: text(row.left_at),
-    removedAt: text(row.removed_at),
-  };
-}
-
-/** One participant of one room, read in the room's own workspace. */
-export async function readMeetParticipant(
-  db: Client,
-  where: { tenantId: string; roomId: string; participantId: string },
-): Promise<MeetParticipant | null> {
-  const rs = await db.execute({
-    sql: `SELECT ${PARTICIPANT_COLUMNS} FROM meet_participants WHERE tenant_id = ? AND room_id = ? AND id = ? LIMIT 1`,
-    args: [where.tenantId, where.roomId, where.participantId],
-  });
-  return rs.rows[0] ? toParticipant(rs.rows[0] as unknown as Record<string, unknown>) : null;
-}
+/** One participant of one room, read in the room's own workspace (the recording routes import it from here). */
+export { readPresence as readMeetParticipant };
 
 export type MeetParticipantResult =
   | { ok: true; room: MeetRoom; participant: MeetParticipant }
@@ -220,8 +178,8 @@ export type MeetParticipantResult =
 
 /**
  * The participant calling this room's API, from their cookie, re-read from their row. The answer otherwise:
- * 404 no such room, 401 no valid token for THIS room (or they left), 403 removed by the host, 410 the room ended.
- * MeetNotConfiguredError propagates: the route answers 503.
+ * 404 no such room, 401 no valid token for THIS room (or they left, or have not been heard from for MEET_STALE_MS),
+ * 403 removed by the host, 410 the room ended. MeetNotConfiguredError propagates: the route answers 503.
  */
 export async function requireMeetParticipant(
   db: Client,
@@ -234,9 +192,12 @@ export async function requireMeetParticipant(
   if (!room) return answer(404, "room_not_found");
   const claims = verifyMeetToken(req.cookies.get(MEET_COOKIE)?.value, nowMs);
   if (!claims || claims.roomId !== room.id) return answer(401, "not_in_room");
-  if (room.status === "ended") return answer(410, "room_ended");
-  const participant = await readMeetParticipant(db, { tenantId: room.tenantId, roomId: room.id, participantId: claims.participantId });
+  // Why it ended (host_ended, host_left, expired), so the page can say "the host ended it" only when one did.
+  if (room.status === "ended") return answer(410, "room_ended", { reason: room.endedReason });
+  const participant = await readPresence(db, { tenantId: room.tenantId, roomId: room.id, participantId: claims.participantId });
   if (!participant || participant.leftAt) return answer(401, "not_in_room");
   if (participant.removedAt) return answer(403, "removed");
+  // Silent that long, they have left (lib/meet/participants.ts leaveStale): back only through the join and its cap.
+  if (isStale(participant, new Date(nowMs))) return answer(401, "not_in_room");
   return { ok: true, room, participant };
 }

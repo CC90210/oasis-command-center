@@ -74,16 +74,32 @@ export function parseMeetCode(input: unknown): string | null {
   return code;
 }
 
-/** A title as it is kept: control characters as spaces, trimmed, capped; none at all is "Meeting". */
+/** U+FFFD, built from its code so this file stays ASCII (tests/worker-source-one-byte.test.ts). */
+const REPLACEMENT_CHARACTER = String.fromCharCode(0xfffd);
+
+/** Text with any lone UTF-16 surrogate (half an emoji) replaced by U+FFFD, so it encodes, stores and prints. */
+export function wellFormedText(text: string): string {
+  return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, REPLACEMENT_CHARACTER);
+}
+
+/** A title as it is kept: control characters as spaces, a broken half of an emoji as U+FFFD, trimmed, capped by characters; none at all is "Meeting". */
 export function meetTitle(input: unknown): string {
-  const text = typeof input === "string" ? input.replace(/[\u0000-\u001f\u007f]/g, " ").trim() : "";
-  return text.slice(0, MEET_TITLE_MAX).trim() || MEET_DEFAULT_TITLE;
+  const text =
+    typeof input === "string"
+      ? wellFormedText(input)
+
+          .replace(/[\u0000-\u001f\u007f]/g, " ")
+          .trim()
+      : "";
+  return Array.from(text).slice(0, MEET_TITLE_MAX).join("").trim() || MEET_DEFAULT_TITLE;
 }
 
 const ROOM_COLUMNS =
   "id, tenant_id, code, title, host_user_id, status, record_audio, starts_at, calendar_event_id, lead_id, created_at, started_at, ended_at, ended_reason";
 
-const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+/** A nullable column as text: null stays null, anything else (libSQL can hand back numbers) becomes a string. */
+export const nullableText = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+const text = nullableText;
 
 /** A row as a room. libSQL over HTTP can hand integers back as strings, so the flag is compared as a number. */
 function toRoom(row: Record<string, unknown>): MeetRoom {
@@ -174,12 +190,22 @@ export async function readMeetRoom(db: Client, where: { tenantId: string; roomId
   return rs.rows[0] ? toRoom(rs.rows[0] as unknown as Record<string, unknown>) : null;
 }
 
+/** The Schedule event a meeting made for later sits on (lib/meet/schedule.ts). */
+export async function setRoomCalendarEvent(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, eventId: string): Promise<void> {
+  await db.execute({
+    sql: "UPDATE meet_rooms SET calendar_event_id = ? WHERE tenant_id = ? AND id = ?",
+    args: [eventId, room.tenantId, room.id],
+  });
+}
+
 /** A workspace's rooms, newest first, for the Schedule's Meet panel. */
-export async function listMeetRooms(db: Client, where: { tenantId: string; limit?: number }): Promise<MeetRoom[]> {
+/** A workspace's newest rooms; with `hostUserId`, only the ones that person made. */
+export async function listMeetRooms(db: Client, where: { tenantId: string; hostUserId?: string; limit?: number }): Promise<MeetRoom[]> {
   const limit = Math.min(Math.max(1, Math.floor(where.limit ?? 20)), 100);
+  const byHost = where.hostUserId === undefined ? "" : " AND host_user_id = ?";
   const rs = await db.execute({
-    sql: `SELECT ${ROOM_COLUMNS} FROM meet_rooms WHERE tenant_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
-    args: [where.tenantId, limit],
+    sql: `SELECT ${ROOM_COLUMNS} FROM meet_rooms WHERE tenant_id = ?${byHost} ORDER BY created_at DESC, id DESC LIMIT ?`,
+    args: [where.tenantId, ...(where.hostUserId === undefined ? [] : [where.hostUserId]), limit],
   });
   return rs.rows.map((row) => toRoom(row as unknown as Record<string, unknown>));
 }

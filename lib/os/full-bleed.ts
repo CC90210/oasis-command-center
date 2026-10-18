@@ -51,6 +51,7 @@ export const FULL_BLEED_PREFIXES: readonly string[] = [
   "/f", // exactly /f: its public not-found page ("/f/" below does not match it)
   "/f/", // public form pages (anonymous + personalized)
   "/book", // the public booking link: a prospect with no account books a call
+  "/meet", // an Oasis Meet room (/meet/<code>): a guest with no account opens the host's link and joins the call
   "/invite/", // pre-signup invite landing
   "/sign/", // public e-signature page: the signer may never have an account
   "/unsubscribe", // email opt-out landing: the recipient may be another company's customer

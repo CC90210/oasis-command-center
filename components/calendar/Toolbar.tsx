@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Keyboard, Menu, Search, Settings2, X } from "lucide-react";
 import type { CalendarView } from "@/lib/calendar/types";
 
@@ -25,9 +25,11 @@ type Props = {
   onQuery: (q: string | null) => void;
   onSettings: () => void;
   onShortcuts: () => void;
+  /** The Meet button, at the far right of the toolbar (CC: "on the top right"). CalendarApp passes components/meet/MeetPanel. */
+  meet?: ReactNode;
 };
 
-export function Toolbar({ title, view, query, saving, onMenu, onToday, onStep, onView, onQuery, onSettings, onShortcuts }: Props) {
+export function Toolbar({ title, view, query, saving, onMenu, onToday, onStep, onView, onQuery, onSettings, onShortcuts, meet }: Props) {
   const searchRef = useRef<HTMLInputElement>(null);
   const searching = query !== null;
   useEffect(() => {
@@ -107,6 +109,7 @@ export function Toolbar({ title, view, query, saving, onMenu, onToday, onStep, o
             </button>
           ))}
         </div>
+        {meet ? <div className="ml-1">{meet}</div> : null}
       </div>
     </header>
   );
