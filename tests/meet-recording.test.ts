@@ -1092,6 +1092,24 @@ async function main() {
     assert.equal((await rec.readTranscript(db, OASIS, r.id))?.status, "queued", "the abandoned call's recording was never handed over");
   });
 
+  await check("the claim's sweep leaves tomorrow's meeting alone after two hosts try it out today", async () => {
+    // #687 third review, HIGH: CC and Adon are both hosts, so two of them in a room counts as a call. Without the
+    // start guard, a try-out today ended tomorrow's room and killed the link its guest already had.
+    const today = later(T0, minutes(100_000));
+    const r = await liveRoom({ at: today });
+    await db.execute({ sql: "UPDATE meet_rooms SET starts_at = ? WHERE id = ?", args: [later(today, minutes(24 * 60)).toISOString(), r.id] });
+    await participant(r, "Conaugh", CC);
+    const adon = await participant(r, "Adon", ADON);
+    await db.execute({ sql: "UPDATE meet_participants SET role = 'host' WHERE id = ?", args: [adon] });
+    await db.execute({
+      sql: "UPDATE meet_participants SET joined_at = ?, last_seen_at = ? WHERE room_id = ?",
+      args: [today.toISOString(), later(today, minutes(5)).toISOString(), r.id],
+    });
+    for (const m of [13, 24, 60]) await rec.meetRelaySweeps(db, store.storage, [OASIS], later(today, minutes(m)));
+    const row = (await db.execute({ sql: "SELECT status FROM meet_rooms WHERE id = ?", args: [r.id] })).rows[0];
+    assert.equal(String(row.status), "live", "a try-out ended tomorrow's meeting");
+  });
+
   finish("meet recording");
 }
 
