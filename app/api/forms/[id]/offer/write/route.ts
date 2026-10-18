@@ -103,7 +103,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const description = text(body.description);
   const audience = text(body.audience);
   if (description.length > RAW_INPUT_CAP || audience.length > RAW_INPUT_CAP) {
-    return json({ ok: false, error: "invalid_json" }, 400);
+    return json({ ok: false, error: "too_long", message: "That is too long to write a page from. Keep it to a few sentences." }, 400);
   }
   const problem = writePageInputProblem(description);
   if (problem) return json({ ok: false, error: "description_required", message: problem }, 400);
