@@ -23,6 +23,7 @@ export const DEVICES_OPTIONAL = "You can also join without them.";
 /** What the screen says when a meeting is over, by why the person is out (lib/meet/room-client.ts MeetEndReason). */
 export const ENDED_WORDS: Record<MeetEndReason, string> = {
   left: "You left the meeting.",
+  dropped: "You were disconnected from the meeting.",
   host_ended: "The host ended the meeting.",
   removed: "The host removed you from this meeting.",
   room_closed: "This meeting has ended.",

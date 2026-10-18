@@ -14,9 +14,18 @@
  * Run: node --conditions=react-server --import tsx tests/meet-room-client.test.ts
  */
 import assert from "node:assert/strict";
-import { createMeetRoomController, type MeetRoomController, type MeetRoomOptions, type RecorderPort } from "../lib/meet/room-client";
+import { POLL_TIMEOUT_MS, REQUEST_TIMEOUT_MS, createMeetRoomController, type MeetRoomController, type MeetRoomOptions } from "../lib/meet/room-client";
 
 let failures = 0;
+let finished = false;
+// A check left waiting on nothing but an unref'd timer (AbortSignal.timeout's) lets Node exit 0 mid-suite: that is a
+// failure, never a pass (the same guard as tests/meet-recorder.test.ts).
+process.on("beforeExit", () => {
+  if (!finished) {
+    console.log("meet room client: exited before every check finished");
+    process.exitCode = 1;
+  }
+});
 async function check(name: string, fn: () => Promise<void>) {
   try {
     await fn();
@@ -43,10 +52,12 @@ class FakeTransceiver {
   mid: string | null = null;
   stopped = false;
   sender: { track: FakeTrack | null; replaceTrack: (t: FakeTrack | null) => Promise<void> };
-  constructor(track: FakeTrack | null, readonly direction: string) {
+  /** `closed` reads its connection: a sender on a closed RTCPeerConnection refuses replaceTrack, as a browser's does. */
+  constructor(track: FakeTrack | null, readonly direction: string, closed: () => boolean) {
     this.sender = {
       track,
       replaceTrack: async (t) => {
+        if (closed()) throw new Error("InvalidStateError: the RTCPeerConnection is closed");
         this.sender.track = t;
       },
     };
@@ -68,7 +79,7 @@ class FakePeer extends EventTarget {
     super();
   }
   addTransceiver(trackOrKind: FakeTrack | string, init: { direction: string }) {
-    const t = new FakeTransceiver(typeof trackOrKind === "string" ? null : trackOrKind, init.direction);
+    const t = new FakeTransceiver(typeof trackOrKind === "string" ? null : trackOrKind, init.direction, () => this.closed);
     this.transceivers.push(t);
     return t;
   }
@@ -105,7 +116,7 @@ class FakePeer extends EventTarget {
       // The SFU's offer carries the pulled tracks: the browser makes a receiver per mid and fires "track".
       for (const item of d.sdp.slice(5).split(",")) {
         const [mid, kind] = item.split(":");
-        const t = new FakeTransceiver(null, "recvonly");
+        const t = new FakeTransceiver(null, "recvonly", () => this.closed);
         t.mid = mid;
         this.transceivers.push(t);
         const event = Object.assign(new Event("track"), { transceiver: t, track: new FakeTrack(kind as "audio" | "video", `remote-${mid}`) });
@@ -145,7 +156,16 @@ function fakeRoom(opts: {
   refuseSessions?: Refusal;
   /** This many joins are refused with this answer, then taken. */
   refuseJoins?: Refusal;
+  /** This many joins hang until the browser gives up on them (their AbortSignal), then they are taken. */
+  hangJoins?: number;
+  /** The room never answers a leave (a dropped network). */
+  hangLeave?: boolean;
 }) {
+  let joinHangs = opts.hangJoins ?? 0;
+  /** The deadline each kind of request was last sent with, by path. */
+  const signals = new Map<string, AbortSignal | undefined>();
+  const hang = (init: RequestInit | undefined) =>
+    new Promise<never>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("timed out", "TimeoutError"))));
   let renegotiateFailures = opts.failRenegotiate ?? 0;
   let screenFailures = opts.failScreenPublish ?? 0;
   let closeFailures = opts.failClose ?? 0;
@@ -172,7 +192,13 @@ function fakeRoom(opts: {
   const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input).replace(/^\/api\/meet\/[a-z-]+/, "");
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    signals.set(path, init?.signal ?? undefined);
     if (path === "/join") {
+      if (joinHangs > 0) {
+        joinHangs -= 1;
+        log.push("join:hung");
+        await hang(init);
+      }
       if (opts.joinDelayMs) await new Promise((r) => setTimeout(r, opts.joinDelayMs));
       if (joinRefusals > 0 && opts.refuseJoins) {
         joinRefusals -= 1;
@@ -187,7 +213,7 @@ function fakeRoom(opts: {
       if (hangNextPoll) {
         hangNextPoll = false;
         log.push("state:hung");
-        await new Promise((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("timed out", "TimeoutError"))));
+        await hang(init);
       }
       if (stateError) return reply({ ok: false, error: stateError.error, ...(stateError.reason ? { reason: stateError.reason } : {}) }, stateError.status);
       return reply({
@@ -281,6 +307,7 @@ function fakeRoom(opts: {
     }
     if (path === "/leave") {
       log.push("leave");
+      if (opts.hangLeave) await hang(init);
       return reply({ ok: true });
     }
     return reply({ ok: false, error: "not_found" }, 404);
@@ -299,6 +326,7 @@ function fakeRoom(opts: {
       hostError = failure;
     },
     polls: () => statePolls,
+    signalOf: (path: string) => signals.get(path),
     setRecording: (v: boolean) => {
       recording = v;
     },
@@ -346,7 +374,7 @@ function heldMedia() {
 
 function controller(
   room: ReturnType<typeof fakeRoom>,
-  extra: { recorder?: () => RecorderPort; gatherMs?: number; media?: MeetRoomOptions["media"]; pollTimeoutMs?: number; reconnectMs?: number } = {},
+  extra: Pick<MeetRoomOptions, "recorder" | "gatherMs" | "media" | "pollTimeoutMs" | "requestTimeoutMs" | "reconnectMs" | "deadline"> = {},
 ) {
   const peers: FakePeer[] = [];
   const c = createMeetRoomController({
@@ -372,6 +400,13 @@ function controller(
 const leaveQuietly = async (c: MeetRoomController) => {
   await c.leave();
 };
+
+/** The browser's connection to the SFU drops (its ICE failed, as on a network change): the controller reconnects. */
+function dropLine(peers: FakePeer[]) {
+  const line = peers[peers.length - 1];
+  line.connectionState = "failed";
+  line.dispatchEvent(new Event("connectionstatechange"));
+}
 
 async function main() {
   console.log("meet room client:");
@@ -506,6 +541,13 @@ async function main() {
     await joining;
     await new Promise((r) => setTimeout(r, 60));
     assert.deepEqual(b.c.snapshot().phase, { kind: "ended", reason: "left" }, "the join's answer arriving after Leave does not bring the call back");
+
+    const refused = fakeRoom({ role: "guest", joinDelayMs: 80, refuseJoins: { times: 1, status: 409, error: "room_full" } });
+    const d = controller(refused);
+    const refusing = d.c.join({ name: "Jane", consent: true, mic: null, cam: null });
+    await d.c.leave();
+    await refusing;
+    assert.deepEqual(d.c.snapshot().phase, { kind: "ended", reason: "left" }, "nor does a refusal arriving after Leave turn it into a failed join");
   });
 
   const REPORT = 'finalize:{"sent":3,"failed":0,"segments":2,"errored":0}';
@@ -744,6 +786,71 @@ async function main() {
     await leaveQuietly(c);
   });
 
+  await check("every call carries a deadline unless set: ten seconds for a poll, twenty for anything else", async () => {
+    assert.equal(POLL_TIMEOUT_MS, 10_000, "far longer than any answer takes, far shorter than the five minutes after which a silent person has left");
+    assert.equal(REQUEST_TIMEOUT_MS, 20_000, "the room's API answers in a second or two");
+    const room = fakeRoom({ role: "host" });
+    // What each call's deadline was made for, by the signal it was sent with.
+    const madeFor = new WeakMap<AbortSignal, number>();
+    const { c } = controller(room, {
+      deadline: (ms) => {
+        const signal = AbortSignal.timeout(ms);
+        madeFor.set(signal, ms);
+        return signal;
+      },
+    }); // no lengths set: the defaults
+    const length = (path: string) => {
+      const signal = room.signalOf(path);
+      return signal ? madeFor.get(signal) : undefined;
+    };
+    await c.join({ consent: true, mic: null, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    await waitFor("polled", () => room.polls() >= 2);
+    assert.equal(length("/state"), POLL_TIMEOUT_MS, "a poll gives up after ten seconds");
+    for (const path of ["/join", "/sfu"]) assert.equal(length(path), REQUEST_TIMEOUT_MS, `${path} gives up after twenty`);
+    await leaveQuietly(c);
+    assert.equal(length("/leave"), REQUEST_TIMEOUT_MS, "and so does the leave");
+  });
+
+  await check("a join that never answers gives up at its deadline, and the person can try again; Safari before 16 too", async () => {
+    const timeout = AbortSignal.timeout;
+    for (const browser of ["today's", "without AbortSignal.timeout"]) {
+      if (browser !== "today's") (AbortSignal as unknown as { timeout?: unknown }).timeout = undefined;
+      try {
+        const room = fakeRoom({ role: "host", hangJoins: 1 });
+        // Short deadlines for the polls too: the fallback's timers are not unref'd, and must not hold the run open.
+        const { c } = controller(room, { requestTimeoutMs: 50, pollTimeoutMs: 50 });
+        const joining = c.join({ consent: true, mic: null, cam: null });
+        // waitFor's own timer keeps the run going while the deadline (an unref'd timer in Node) is all that is left.
+        await waitFor(`${browser}: given up, not left on "Joining..."`, () => c.snapshot().phase.kind === "failed");
+        await joining;
+        assert.ok(room.log.includes("join:hung"), browser);
+        await c.join({ consent: true, mic: null, cam: null });
+        await waitFor("live", () => c.snapshot().phase.kind === "live");
+        await leaveQuietly(c);
+      } finally {
+        (AbortSignal as unknown as { timeout: typeof timeout }).timeout = timeout;
+      }
+    }
+  });
+
+  await check("Leave ends the call at once, camera and all, even when the room cannot be told", async () => {
+    const room = fakeRoom({ role: "host", hangLeave: true });
+    const cam = new FakeTrack("video");
+    const { c } = controller(room, { requestTimeoutMs: 50 });
+    await c.join({ consent: true, mic: null, cam: cam as unknown as MediaStreamTrack });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    let settled = false;
+    const leaving = c.leave().then(() => {
+      settled = true;
+    });
+    assert.deepEqual(c.snapshot().phase, { kind: "ended", reason: "left" }, "out before the room answers");
+    assert.equal(cam.readyState, "ended", "the camera is off now");
+    await waitFor("the unanswered leave gives up at its deadline", () => settled);
+    await leaving;
+    assert.ok(room.log.includes("leave"), "the room was still told");
+  });
+
   await check("a poll that hangs is given up, and the polls after it go on", async () => {
     const room = fakeRoom({ role: "host" });
     const { c } = controller(room, { pollTimeoutMs: 50 });
@@ -757,6 +864,18 @@ async function main() {
     await leaveQuietly(c);
   });
 
+  await check("a room that no longer knows this person (silent past the room's limit) ends the call as dropped, never as left, and lets the camera go", async () => {
+    const room = fakeRoom({ role: "host" });
+    const cam = new FakeTrack("video");
+    const { c } = controller(room);
+    await c.join({ consent: true, mic: null, cam: cam as unknown as MediaStreamTrack });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    room.failState(401, "not_in_room");
+    await waitFor("ended", () => c.snapshot().phase.kind === "ended");
+    assert.deepEqual(c.snapshot().phase, { kind: "ended", reason: "dropped" }, "they did not leave: the page says they were disconnected");
+    assert.equal(cam.readyState, "ended");
+  });
+
   await check("a reconnect the video service refuses keeps trying for longer than other failures, and others give up after three", async () => {
     const refused = fakeRoom({ role: "host", refuseSessions: { times: 4, status: 502, error: "sfu_failed" } });
     const a = controller(refused, { reconnectMs: 5 });
@@ -768,6 +887,21 @@ async function main() {
     const b = controller(broken, { reconnectMs: 5 });
     await b.c.join({ consent: true, mic: null, cam: null });
     await waitFor("given up", () => b.c.snapshot().phase.kind === "failed", 3_000);
+  });
+
+  await check("after the call fails, turning the microphone, camera or screen off never touches the closed connection", async () => {
+    const room = fakeRoom({ role: "host" });
+    const { c, peers } = controller(room, { reconnectMs: 5 });
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: new FakeTrack("video") as unknown as MediaStreamTrack });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    await c.shareScreen(true);
+    room.refuseSessions({ times: 1, status: 503, error: "meet_not_configured" });
+    dropLine(peers);
+    await waitFor("failed", () => c.snapshot().phase.kind === "failed");
+    await c.setMic(false);
+    await c.setCam(false);
+    await c.shareScreen(false);
+    assert.equal(c.snapshot().phase.kind, "failed");
   });
 
   await check("a camera or microphone asked for before the call failed is stopped when it answers, even after the join is tried again", async () => {
@@ -806,9 +940,7 @@ async function main() {
     const picking = c.shareScreen(true);
     await waitFor("picking", () => held.waiting.length === 1);
     room.refuseSessions({ times: 1, status: 503, error: "meet_not_configured" });
-    const line = peers[peers.length - 1];
-    line.connectionState = "failed";
-    line.dispatchEvent(new Event("connectionstatechange"));
+    dropLine(peers);
     await waitFor("failed", () => c.snapshot().phase.kind === "failed");
     await c.join({ consent: true, mic: null, cam: null });
     await waitFor("live again", () => c.snapshot().phase.kind === "live");
@@ -827,14 +959,63 @@ async function main() {
     await waitFor("live", () => c.snapshot().phase.kind === "live");
     await c.shareScreen(true);
     assert.ok(room.log.some((l) => /^publish:screen@/.test(l)), "shared");
-    const line = peers[peers.length - 1];
-    line.connectionState = "failed";
-    line.dispatchEvent(new Event("connectionstatechange"));
+    dropLine(peers);
     await waitFor("a new line", () => peers.length === 2 && c.snapshot().phase.kind === "live");
     const publishes = room.log.filter((l) => l.startsWith("publish:"));
     assert.match(publishes[publishes.length - 1], /^publish:mic@\d+,cam@\d+,screen@\d+$/, "the new session publishes the screen with the mic and camera");
     assert.equal(c.snapshot().sharing, true);
     await leaveQuietly(c);
+  });
+
+  await check("a share stopped from the browser's own bar during a reconnect stays stopped: the new session never sends it", async () => {
+    const room = fakeRoom({ role: "host" });
+    const { c, peers } = controller(room, { reconnectMs: 40 });
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    await c.shareScreen(true);
+    const screen = c.snapshot().tiles.find((t) => t.me)?.screen as unknown as FakeTrack;
+    dropLine(peers);
+    await waitFor("reconnecting", () => c.snapshot().notice === "Reconnecting...");
+    screen.readyState = "ended"; // the person clicked the browser's "Stop sharing" while the call reconnects
+    screen.dispatchEvent(new Event("ended"));
+    await waitFor("a new line", () => peers.length === 2 && c.snapshot().phase.kind === "live");
+    const publishes = room.log.filter((l) => l.startsWith("publish:"));
+    assert.match(publishes[publishes.length - 1], /^publish:mic@\d+,cam@\d+$/, "the new session publishes no screen");
+    assert.equal(c.snapshot().sharing, false);
+    await leaveQuietly(c);
+
+    // The same, with the browser's "ended" event still on its way when the new session is made.
+    const early = fakeRoom({ role: "host" });
+    const e = controller(early, { reconnectMs: 5 });
+    await e.c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => e.c.snapshot().phase.kind === "live");
+    await e.c.shareScreen(true);
+    const stopped = e.c.snapshot().tiles.find((t) => t.me)?.screen as unknown as FakeTrack;
+    stopped.readyState = "ended";
+    dropLine(e.peers);
+    await waitFor("a new line", () => e.peers.length === 2 && e.c.snapshot().phase.kind === "live");
+    const sent = early.log.filter((l) => l.startsWith("publish:"));
+    assert.match(sent[sent.length - 1], /^publish:mic@\d+,cam@\d+$/, "a screen the browser has stopped is never sent on the new session");
+    assert.equal(e.c.snapshot().sharing, false, "and the page stops saying it is shared");
+    stopped.dispatchEvent(new Event("ended")); // the handler, late, finds nothing left to stop
+    assert.equal(e.c.snapshot().sharing, false);
+    await leaveQuietly(e.c);
+
+    // And stopped through the call itself while it reconnects, the track still live: stopping works in every phase.
+    const own = fakeRoom({ role: "host" });
+    const o = controller(own, { reconnectMs: 40 });
+    await o.c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => o.c.snapshot().phase.kind === "live");
+    await o.c.shareScreen(true);
+    const shared = o.c.snapshot().tiles.find((t) => t.me)?.screen as unknown as FakeTrack;
+    dropLine(o.peers);
+    await waitFor("reconnecting", () => o.c.snapshot().notice === "Reconnecting...");
+    await o.c.shareScreen(false);
+    assert.equal(shared.readyState, "ended", "the share stops at once, mid-reconnect");
+    await waitFor("a new line", () => o.peers.length === 2 && o.c.snapshot().phase.kind === "live");
+    const out = own.log.filter((l) => l.startsWith("publish:"));
+    assert.match(out[out.length - 1], /^publish:mic@\d+,cam@\d+$/, "and nothing goes out on the new session");
+    await leaveQuietly(o.c);
   });
 
   await check("a close the SFU refuses is logged, and the call goes on", async () => {
@@ -898,6 +1079,7 @@ async function main() {
     assert.equal(cam.readyState, "ended", "the camera is released");
   });
 
+  finished = true;
   if (failures) {
     console.error(`meet room client: ${failures} check(s) failed`);
     process.exit(1);

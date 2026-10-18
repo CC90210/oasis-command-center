@@ -88,8 +88,11 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, re
     if (phase.kind === "ended") releaseDevices();
   }, [phase.kind, releaseDevices]);
 
-  const join = async () => {
-    if (devices.asking) return;
+  // `stopWaiting`: the person chose to join with what they have rather than wait for the browser to answer.
+  const join = async (options: { stopWaiting?: boolean } = {}) => {
+    // Not while the browser is still answering a request for the camera or microphone: joining then would leave without
+    // the camera the person just allowed. Choosing to stop waiting is the one way past this, and it passes only this.
+    if (devices.asking && !options.stopWaiting) return;
     setTried(true);
     const trimmed = name.trim();
     // The first thing still missing, in the order the screen asks for it: the notice, then the name.
@@ -101,6 +104,8 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, re
       nameRef.current?.focus();
       return;
     }
+    // Past the gates: what is still open is let go (its answer is stopped when it comes) and what is held goes in.
+    if (options.stopWaiting) devices.stopWaiting();
     const held = devices.takeForJoin();
     await controller.join({ name: trimmed || undefined, consent: needsNotice ? consent : false, mic: held.mic, cam: held.cam });
     // The room keeps its own copies of the tracks. If the join failed it stopped them, ours still run for another try.
@@ -156,6 +161,7 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, re
           nameRef={nameRef}
           consentRef={consentRef}
           onJoin={() => void join()}
+          onJoinWithout={() => void join({ stopWaiting: true })}
         />
       );
   }

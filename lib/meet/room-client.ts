@@ -37,7 +37,12 @@ export type MeetTile = {
   sharing: boolean;
 };
 
-export type MeetEndReason = "host_ended" | "removed" | "left" | "room_closed";
+/**
+ * Why the person is out of the call. `dropped`: the room no longer knows them, most often a browser silent past
+ * lib/meet/participants.ts MEET_STALE_MS (a laptop asleep); coming back is a new join (Rejoin), whose recording notice
+ * the person ticks again, so nothing rejoins them by itself.
+ */
+export type MeetEndReason = "host_ended" | "removed" | "left" | "dropped" | "room_closed";
 
 export type MeetPhase =
   | { kind: "idle" }
@@ -105,6 +110,10 @@ export type MeetRoomOptions = {
   connectMs?: number;
   /** How long a poll may hang before it counts as failed (default POLL_TIMEOUT_MS). */
   pollTimeoutMs?: number;
+  /** How long any other call to the room may hang before it counts as failed (default REQUEST_TIMEOUT_MS). */
+  requestTimeoutMs?: number;
+  /** Makes the signal that gives up on a call after `ms` (default `deadline` below); tests read what each call asked for. */
+  deadline?: (ms: number) => AbortSignal;
   /** The wait before the first reconnect try, growing by this much each try (default 1 s). */
   reconnectMs?: number;
 };
@@ -127,8 +136,27 @@ type Pulled = { participantId: string; trackName: string; mid: string | null; tr
  */
 const pullKey = (participantId: string, session: string | null, trackName: string) => `${participantId}:${session ?? "-"}:${trackName}`;
 
-/** How long the room's poll waits for an answer before it counts as failed and the next one is scheduled. */
-const POLL_TIMEOUT_MS = 10_000;
+/**
+ * How long the room's poll waits for an answer before it counts as failed and the next one is scheduled: far longer
+ * than any answer takes, far shorter than lib/meet/participants.ts MEET_STALE_MS, after which a silent person has left.
+ */
+export const POLL_TIMEOUT_MS = 10_000;
+/**
+ * How long a join, an SFU step or a host action waits before it counts as failed. The room's API answers in a second or
+ * two; a call that hangs past this is not coming, and without a deadline the page would sit on "Joining..." for good.
+ */
+export const REQUEST_TIMEOUT_MS = 20_000;
+
+/**
+ * A signal that aborts after `ms`: AbortSignal.timeout where the browser has it. Safari before 16 does not, and the
+ * room page is the one page any guest's browser opens, so there it is the same with a timer.
+ */
+function deadline(ms: number): AbortSignal {
+  if (typeof AbortSignal.timeout === "function") return AbortSignal.timeout(ms);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
 /** Reconnect tries before the call gives up: more when the video service itself refused (it can be a passing blip). */
 const RECONNECT_TRIES = 3;
 const RECONNECT_TRIES_SFU = 6;
@@ -176,6 +204,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   const gatherMs = options.gatherMs ?? 3_000;
   const connectMs = options.connectMs ?? 15_000;
   const pollTimeoutMs = options.pollTimeoutMs ?? POLL_TIMEOUT_MS;
+  const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const giveUpAfter = options.deadline ?? deadline;
   const reconnectMs = options.reconnectMs ?? 1_000;
   const media = options.media ?? (typeof navigator !== "undefined" ? navigator.mediaDevices : undefined);
   const makePeer = options.makePeer ?? ((config: RTCConfiguration) => new RTCPeerConnection(config));
@@ -247,14 +277,15 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     for (const l of listeners) l();
   }
 
-  async function call<T = Record<string, unknown>>(path: string, body?: unknown, method = "POST", timeoutMs?: number): Promise<T> {
+  // Every call has a deadline: one that hangs fails like any other, so no screen waits on it for good.
+  async function call<T = Record<string, unknown>>(path: string, body?: unknown, method = "POST", timeoutMs = requestTimeoutMs): Promise<T> {
     const res = await fetchImpl(`${base}${path}`, {
       method,
       credentials: "same-origin",
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
-      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+      signal: giveUpAfter(timeoutMs),
     });
     let json: Record<string, unknown> = {};
     try {
@@ -336,6 +367,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     pollTimer = null;
     pc?.close();
     pc = null;
+    // Its senders went with it: a device turned on or off after this never touches a closed connection.
+    tx.mic = tx.cam = tx.screen = undefined;
     for (const t of [local.mic, local.cam, local.screen]) t?.stop();
     local.mic = local.cam = local.screen = null;
     micOn = false;
@@ -379,7 +412,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     else if (err.status === 410) ended(err.reason === "host_ended" && me?.role !== "host" ? "host_ended" : "room_closed");
     // A meeting its host deleted is gone for everyone in it: not a connection to wait for.
     else if (err.status === 404 && err.code === "room_not_found") ended("room_closed");
-    else if (err.status === 401 && phase.kind !== "joining") ended("left");
+    else if (err.status === 401 && phase.kind !== "joining") ended("dropped");
     else return false;
     return true;
   }
@@ -556,6 +589,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         tx.mic = peer.addTransceiver(local.mic ?? "audio", { direction: "sendonly" });
         tx.cam = peer.addTransceiver(local.cam ?? "video", { direction: "sendonly" });
         // A screen shared before a reconnect goes out on the new session too: the person is still told they share it.
+        // One the browser has stopped meanwhile is let go here, whether or not its "ended" handler has run yet.
+        if (local.screen?.readyState === "ended") local.screen = null;
         tx.screen = local.screen ? peer.addTransceiver(local.screen, { direction: "sendonly" }) : undefined;
         if (!micOn) await tx.mic.sender.replaceTrack(null);
         await peer.setLocalDescription(await peer.createOffer());
@@ -646,6 +681,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         schedulePoll(0);
         if (res.role === "host") await connect();
       } catch (err) {
+        // Left while the join was on its way: the call stays left, whatever the join's answer.
+        if (closed) return;
         const code = err instanceof RoomCallError ? err.code : "unknown";
         if (code === "removed") return ended("removed");
         // The same end as any other failure: the tracks handed in are stopped, and a camera or microphone asked for
@@ -702,14 +739,16 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     },
 
     async shareScreen(on) {
-      if (!pc || phase.kind !== "live") return;
       if (!on) {
+        // Stopping works in every phase: the browser's own "Stop sharing" can come during a reconnect, and a share
+        // stopped then must not go out again on the new session.
         asks.screen += 1; // a screen still being picked is no longer wanted
         if (tx.screen) await tx.screen.sender.replaceTrack(null);
         local.screen?.stop();
         local.screen = null;
         return emit();
       }
+      if (!pc || phase.kind !== "live") return;
       const mine = ++asks.screen;
       let track: MediaStreamTrack | null = null;
       try {
@@ -790,12 +829,14 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     },
 
     async leave() {
-      try {
-        await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true });
-      } catch {
-        // leaving locally regardless: the room drops anyone who stops polling
-      }
+      // Out at once: the camera and microphone stop now, whatever the network does (a dropped network is a common
+      // reason to leave). The room is told after; if that never arrives, it drops anyone who stops polling.
       ended("left");
+      try {
+        await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true, signal: giveUpAfter(requestTimeoutMs) });
+      } catch {
+        // already out of the call; see above
+      }
     },
   };
   return controller;

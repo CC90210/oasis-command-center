@@ -11,11 +11,16 @@
  *
  * Presentational: MeetRoom owns the state, so a join that fails comes back to this screen with the name, the
  * tick and the camera preview as they were. Validation is ours (noValidate), so the words match the server's.
+ *
+ * Join now is off while the browser has not answered a request for the camera or microphone (the person just
+ * allowed it; joining then would leave without it). A browser may never answer, so that wait always has a way out
+ * beside it: a button that names what is still waiting and joins without it (devices.ts waitingWords).
  */
 
 import type { Ref } from "react";
 import { Mic, MicOff, Video, VideoOff } from "lucide-react";
 import { meetErrorWords } from "@/lib/meet/room-client";
+import { waitingWords } from "./devices";
 import { FOCUS } from "./meet-classes";
 import { NAME_MAX_CHARS } from "./meet-format";
 import { CONSENT_LABEL, CREATOR_RECORDING_LINE, DEVICES_BUTTON, DEVICES_OPTIONAL, MEET_BRAND, RECORDING_NOTICE, TICK_FIRST } from "./meet-words";
@@ -42,6 +47,8 @@ export type PreJoinProps = {
   nameRef?: Ref<HTMLInputElement>;
   consentRef?: Ref<HTMLInputElement>;
   onJoin: () => void;
+  /** The way out of waiting on the browser: join now with what is already held, through the same gates as onJoin. */
+  onJoinWithout: () => void;
 };
 
 const SECONDARY = `inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-hairline bg-bg-raised px-4 text-sm font-medium text-fg hover:bg-bg-elev disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS}`;
@@ -74,6 +81,9 @@ export function PreJoin(props: PreJoinProps) {
   const selectedMic = devices.mic?.getSettings?.().deviceId ?? devices.micId;
   const selectedCam = devices.cam?.getSettings?.().deviceId ?? devices.camId;
   const hasPickers = devices.mics.length > 0 || devices.cams.length > 0;
+  // While the browser has not answered, Join now is off. The way out says what is still waiting and joins without it;
+  // it exists only behind the same gate as the camera step, so it can never be drawn before the notice is ticked.
+  const way = props.devicesOpen && devices.asking ? waitingWords(devices.waiting, { mic: !!devices.mic, cam: !!devices.cam }) : null;
 
   return (
     <main className="min-h-screen min-h-dvh bg-bg px-4 py-6 sm:py-10">
@@ -225,9 +235,20 @@ export function PreJoin(props: PreJoinProps) {
                 ) : null}
               </>
             )}
+            {way ? (
+              <div>
+                <button type="button" onClick={props.onJoinWithout} aria-describedby="meet-waiting-hint" className={`${SECONDARY} w-full py-2 text-center`}>
+                  {way.button}
+                </button>
+                <p id="meet-waiting-hint" className="mt-2 text-xs leading-relaxed text-fg-muted">
+                  {way.hint}
+                </p>
+              </div>
+            ) : null}
           </section>
 
-          {/* Not while the browser's own camera prompt is open: the tracks it hands back would arrive after the join. */}
+          {/* Not while the browser's own camera prompt is open: joining then would leave without the camera the person
+              just allowed. The way out above is the choice to join without it. */}
           <button type="submit" disabled={devices.asking} className="btn-primary inline-flex min-h-11 w-full items-center justify-center">
             Join now
           </button>
