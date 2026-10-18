@@ -85,8 +85,9 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, st
   // Unmounting while in the call (not a page unload) leaves properly too, so no camera or poll is left running.
   useEffect(() => {
     const inCall = () => IN_CALL.has(controller.snapshot().phase.kind);
+    // Only a tab that holds the room says it left: another tab of this browser shares its cookie (MeetTabs).
     const onHide = () => {
-      if (inCall() && typeof navigator.sendBeacon === "function") navigator.sendBeacon(`/api/meet/${code}/leave`);
+      if (controller.inRoom() && typeof navigator.sendBeacon === "function") navigator.sendBeacon(`/api/meet/${code}/leave`);
     };
     window.addEventListener("pagehide", onHide);
     return () => {
@@ -100,8 +101,9 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, st
     if (phase.kind === "ended") releaseDevices();
   }, [phase.kind, releaseDevices]);
 
-  // `stopWaiting`: the person chose to join with what they have rather than wait for the browser to answer.
-  const join = async (options: { stopWaiting?: boolean } = {}) => {
+  // `stopWaiting`: the person chose to join with what they have rather than wait for the browser to answer. `here`: the
+  // meeting is open in another tab of this browser, and they chose to move it to this one.
+  const join = async (options: { stopWaiting?: boolean; here?: boolean } = {}) => {
     // Not while the browser is still answering a request for the camera or microphone: joining then would leave without
     // the camera the person just allowed. Choosing to stop waiting is the one way past this, and it passes only this.
     if (devices.asking && !options.stopWaiting) return;
@@ -119,7 +121,7 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, st
     // Past the gates: what is still open is let go (its answer is stopped when it comes) and what is held goes in.
     if (options.stopWaiting) devices.stopWaiting();
     const held = devices.takeForJoin();
-    await controller.join({ name: trimmed || undefined, consent: needsNotice ? consent : false, mic: held.mic, cam: held.cam });
+    await controller.join({ name: trimmed || undefined, consent: needsNotice ? consent : false, mic: held.mic, cam: held.cam, here: options.here });
     // The room keeps its own copies of the tracks. If the join failed it stopped them, ours still run for another try.
     if (controller.snapshot().phase.kind !== "failed") releaseDevices();
   };
@@ -178,6 +180,7 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, st
           consentRef={consentRef}
           onJoin={() => void join()}
           onJoinWithout={() => void join({ stopWaiting: true })}
+          onJoinHere={phase.kind === "failed" && phase.code === "open_in_another_tab" ? () => void join({ here: true }) : undefined}
         />
       );
   }

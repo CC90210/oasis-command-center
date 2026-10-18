@@ -71,7 +71,7 @@ import {
   withoutMeeting,
   type MeetRoomItem,
 } from "../components/meet/meet-format";
-import { CONSENT_LABEL, DEVICES_BUTTON, ENDED_WORDS, RECORDING_NOTICE, TICK_FIRST, WAITING_FOR_HOST } from "../components/meet/meet-words";
+import { CONSENT_LABEL, DEVICES_BUTTON, ENDED_WORDS, JOIN_HERE, RECORDING_NOTICE, TICK_FIRST, WAITING_FOR_HOST } from "../components/meet/meet-words";
 import { mayAskForDevices, needsRecordingNotice, preJoinNeeds } from "../components/meet/notice";
 import { MEET_NAME_MAX } from "../lib/meet/access";
 import { MEET_EARLY_START_MIN, endMeetRoom } from "../lib/meet/participants";
@@ -839,7 +839,7 @@ async function main() {
 
   await check("the way out joins through the same join: Join now still waits, the notice and the name are checked first, and the open request is let go only once they pass", () => {
     const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
-    assert.match(room, /const join = async \(options: \{ stopWaiting\?: boolean \} = \{\}\) => \{\s*(?:\/\/[^\n]*\s*)*if \(devices\.asking && !options\.stopWaiting\) return;\s*setTried\(true\);/, "only the way out passes the wait");
+    assert.match(room, /const join = async \(options: \{ stopWaiting\?: boolean; here\?: boolean \} = \{\}\) => \{\s*(?:\/\/[^\n]*\s*)*if \(devices\.asking && !options\.stopWaiting\) return;\s*setTried\(true\);/, "only the way out passes the wait");
     assert.match(
       room,
       /if \(needsNotice && !consent\) \{\s*consentRef\.current\?\.focus\(\);\s*return;\s*\}\s*if \(nameRequired && !trimmed\) \{\s*nameRef\.current\?\.focus\(\);\s*return;\s*\}\s*(?:\/\/[^\n]*\s*)*if \(options\.stopWaiting\) devices\.stopWaiting\(\);\s*const held = devices\.takeForJoin\(\);/,
@@ -897,12 +897,13 @@ async function main() {
 
   // ---- the ending screens ------------------------------------------------------------------------------------------------
 
-  await check("(d) every ending says the right words; Rejoin only after leaving or being disconnected; the way back only for a host", () => {
+  await check("(d) every ending says the right words; Rejoin only after leaving, being disconnected or moving to another tab; the way back only for a host", () => {
     const words = {
       left: "You left the meeting.",
       dropped: "You were disconnected from the meeting.",
       host_ended: "The host ended the meeting.",
       removed: "The host removed you from this meeting.",
+      moved: "You moved this meeting to another tab.",
       room_closed: "This meeting has ended.",
     } as const;
     assert.deepEqual(ENDED_WORDS, words);
@@ -910,8 +911,10 @@ async function main() {
       const guest = markup[`ended.${reason}.guest`];
       const host = markup[`ended.${reason}.host`];
       assert.match(guest, new RegExp(`<h1[^>]*>${sentence.replace(/\./g, "\\.")}</h1>`), `${reason}: the words`);
-      const rejoin = reason === "left" || reason === "dropped";
-      assert.equal(buttonNames(guest).includes("Rejoin"), rejoin, `${reason}: Rejoin only after the person left or was disconnected`);
+      // A meeting still going, that this person is out of: back in through a fresh join (from a tab that moved it on,
+      // that join finds the other tab and offers to take the meeting back).
+      const rejoin = reason === "left" || reason === "dropped" || reason === "moved";
+      assert.equal(buttonNames(guest).includes("Rejoin"), rejoin, `${reason}: Rejoin only after the person left, was disconnected or moved tabs`);
       assert.equal(buttonNames(host).includes("Rejoin"), rejoin, `${reason}: ... for a host too`);
       assert.ok(!guest.includes("/schedule"), `${reason}: a guest is not sent to the Schedule`);
       assert.match(host, /<a href="\/schedule"[^>]*>Back to Schedule<\/a>/, `${reason}: a host gets the way back, as a plain link`);
@@ -1636,11 +1639,29 @@ async function main() {
     assert.deepEqual(bad, []);
   });
 
-  await check("the room's page leaves the call when it closes: pagehide sends the beacon to this room's leave route", () => {
+  await check("the room's page leaves the call when it closes: pagehide sends the beacon to this room's leave route, from the tab in the room only", () => {
     const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
     assert.match(room, /addEventListener\("pagehide", onHide\)/);
     assert.match(room, /navigator\.sendBeacon\(`\/api\/meet\/\$\{code\}\/leave`\)/);
+    assert.match(
+      room,
+      /if \(controller\.inRoom\(\) && typeof navigator\.sendBeacon === "function"\) navigator\.sendBeacon/,
+      "only from the tab that holds the room: another tab of this browser shares its cookie, and its place must not end",
+    );
     assert.match(room, /if \(inCall\(\)\) void controller\.leave\(\);/, "and unmounting in a call leaves properly");
+  });
+
+  await check("a meeting already open in another tab of this browser: the words, and Join here instead, offered for that failure only", () => {
+    const html = markup["prejoin.openElsewhere"];
+    assert.ok(text(html).includes(meetErrorWords("open_in_another_tab")), "the words");
+    assert.ok(buttonNames(html).includes(JOIN_HERE), "and the way to move the meeting to this tab");
+    assert.ok(!buttonNames(markup["prejoin.notWaiting"]).includes(JOIN_HERE), "never on a plain pre-join screen");
+    const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
+    assert.match(
+      room,
+      /onJoinHere=\{phase\.kind === "failed" && phase\.code === "open_in_another_tab" \? \(\) => void join\(\{ here: true \}\) : undefined\}/,
+      "the room offers it only for that failure, and it joins through the same gates as Join now",
+    );
   });
 
   // ---- the page's data: link, redirect, ended, who is looking --------------------------------------------------------------

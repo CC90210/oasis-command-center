@@ -28,6 +28,7 @@ const controller: MeetRoomController = {
   remove: noop,
   end: noop,
   leave: noop,
+  inRoom: () => false,
 };
 
 const track = (kind: string) => ({ kind }) as unknown as MediaStreamTrack;
@@ -171,6 +172,11 @@ async function main() {
   draw("prejoin.notWaiting", preJoin(devicesWith({})));
   // A meeting made for a time says when it starts under its name; one with no time says nothing of the kind.
   draw("prejoin.starts", preJoin(devicesWith({}), { startsLine: "Your call starts at 2:00 PM." }));
+  // This browser has the meeting open in another tab: the words, and the way to move it here.
+  draw(
+    "prejoin.openElsewhere",
+    preJoin(devicesWith({}), { error: "This meeting is already open in another tab of this browser.", onJoinHere: () => undefined }),
+  );
   draw("prejoin.waitingBoth", preJoin(devicesWith({ asking: true, waiting: { mic: true, cam: true } })));
   draw("prejoin.waitingCamera", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: false, cam: true }, mic: track("audio") })));
   draw("prejoin.waitingMicrophone", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: true, cam: false }, cam: track("video") })));
@@ -190,7 +196,7 @@ async function main() {
   draw("lobby.waiting.starts", h(Lobby, { mode: "waiting", title: "Quarterly review", preview: null, startsLine: "Your call starts on Tuesday, October 20 at 2:00 PM.", onLeave: leave }));
 
   // The ending screens, every reason, for a guest and for a host.
-  for (const reason of ["left", "dropped", "host_ended", "removed", "room_closed"] as MeetEndReason[]) {
+  for (const reason of ["left", "dropped", "host_ended", "removed", "moved", "room_closed"] as MeetEndReason[]) {
     draw(`ended.${reason}.guest`, h(MeetEnded, { reason, isHost: false }));
     draw(`ended.${reason}.host`, h(MeetEnded, { reason, isHost: true }));
   }
