@@ -47,6 +47,9 @@ Center keeps the transcript. No meeting vendor bill: media runs on Cloudflare Re
 - One tab per browser in a room (`MeetTabs`: a Web Lock per room, which the browser also releases when a tab closes or crashes, and a BroadcastChannel). Two tabs of one browser share the room's cookie, so they are one participant, and would cut each other's media and record the room twice.
   - A second tab is told "This meeting is already open in another tab of this browser." It sends the room nothing.
   - "Join here instead" moves the meeting to the new tab. The first tab ends with "You moved this meeting to another tab." and tells the room nothing, so the new tab carries on as the same participant, with the same place, recording and notice tick.
+  - A first tab still joining hands over only once its join has answered, so the new tab joins with the cookie that answer set and never makes a second participant. The new tab waits 25 s, longer than a join's own 20 s deadline.
+  - A call ended while it is connecting (moved, left, removed) is never brought back to live.
+  - If the new tab's join then fails, nobody is in the call until "Try again", which comes back as the same participant. The two tabs share one participant, so they can never be in the call at once.
   - Only the tab in the room sends a Leave or the page's close beacon, so a second tab can never end the first one's place.
   - Leave lets go of the room only once the room has heard it.
   - A browser without Web Locks keeps tabs apart as before, which is not at all.

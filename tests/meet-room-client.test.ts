@@ -24,7 +24,7 @@ import {
   type MeetRoomController,
   type MeetRoomOptions,
 } from "../lib/meet/room-client";
-import { browserTabs } from "../lib/meet/tabs";
+import { TAB_HANDOVER_MS, browserTabs } from "../lib/meet/tabs";
 
 let failures = 0;
 let finished = false;
@@ -395,6 +395,49 @@ function heldMedia() {
   } as unknown as MeetRoomOptions["media"];
   return { media, waiting };
 }
+
+/**
+ * Node has Web Locks from 24 only (CI runs 22): there, a stand-in with the same rules is installed for the whole
+ * process, so lib/meet/tabs.ts browserTabs runs unchanged on either. One holder per name; ifAvailable gets null
+ * while it is held; a waiter is handed the lock straight from its holder (nobody can take it in between) and can
+ * give up through its signal (an AbortError, as the browser's).
+ */
+function installLocksWhereMissing() {
+  // MEET_TEST_STAND_IN_LOCKS=1 runs the stand-in on a Node that has its own, to check what CI runs.
+  if (process.env.MEET_TEST_STAND_IN_LOCKS !== "1" && typeof navigator !== "undefined" && navigator.locks) return;
+  const held = new Set<string>();
+  const waiting = new Map<string, Array<() => void>>();
+  const locks = {
+    async request(name: string, options: LockOptions, callback: (lock: Lock | null) => unknown) {
+      if (held.has(name)) {
+        if (options.ifAvailable) return callback(null);
+        await new Promise<void>((resolve, reject) => {
+          const queue = waiting.get(name) ?? [];
+          waiting.set(name, queue);
+          queue.push(resolve);
+          options.signal?.addEventListener("abort", () => {
+            const at = queue.indexOf(resolve);
+            if (at < 0) return;
+            queue.splice(at, 1);
+            reject(new DOMException("The request was aborted.", "AbortError"));
+          });
+        });
+      } else {
+        held.add(name);
+      }
+      try {
+        return await callback({ name, mode: "exclusive" } as Lock);
+      } finally {
+        const next = waiting.get(name)?.shift();
+        if (next) next();
+        else held.delete(name);
+      }
+    },
+    query: async () => ({ held: [], pending: [] }),
+  };
+  Object.defineProperty(navigator, "locks", { value: locks, configurable: true });
+}
+installLocksWhereMissing();
 
 let codes = 0;
 /**
@@ -802,6 +845,31 @@ async function main() {
     assert.equal(b.c.snapshot().recording, true, "and this tab records the room now");
     assert.deepEqual([a.c.inRoom(), b.c.inRoom()], [false, true]);
     await leaveQuietly(b.c);
+  });
+
+  await check("Join here instead asked for while the other tab's join is on its way waits for that join: this tab comes in as the participant it made, never as a second", async () => {
+    const code = "tabs-join-on-its-way";
+    const roomA = fakeRoom({ role: "host", joinDelayMs: 80 });
+    const a = controller(roomA, { code });
+    const joiningA = a.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    await waitFor("A's join is on its way", () => roomA.signalOf("/join") !== undefined);
+    const roomB = fakeRoom({ role: "host" });
+    const b = controller(roomB, { code });
+    await b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null });
+    assert.equal(phaseCode(b.c), "open_in_another_tab");
+    const takingOver = b.c.join({ consent: true, mic: mic() as unknown as MediaStreamTrack, cam: null, here: true });
+    await waitFor("this tab asks the room", () => roomB.signalOf("/join") !== undefined, 3_000);
+    assert.ok(roomA.log.includes("join"), "the other tab's join had answered first (its cookie is the one this join carries)");
+    await takingOver;
+    await joiningA;
+    await waitFor("this tab is in the call", () => b.c.snapshot().phase.kind === "live");
+    assert.deepEqual(a.c.snapshot().phase, { kind: "ended", reason: "moved" });
+    await leaveQuietly(b.c);
+  });
+
+  await check("Join here instead waits longer than a join's own deadline, so the tab it asks is never left with no one in the call", () => {
+    assert.ok(TAB_HANDOVER_MS > REQUEST_TIMEOUT_MS, `${TAB_HANDOVER_MS} > ${REQUEST_TIMEOUT_MS}`);
+    return Promise.resolve();
   });
 
   await check("Leave lets go of the room only once the room has heard it, so a tab joining next is never ended by it; every other ending lets go at once", async () => {

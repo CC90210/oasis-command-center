@@ -22,8 +22,12 @@ export type MeetTabs = {
   onAskedFor(listener: () => void): () => void;
 };
 
-/** How long "Join here instead" waits for the other tab to hand the room over. */
-export const TAB_HANDOVER_MS = 10_000;
+/**
+ * How long "Join here instead" waits for the other tab to hand the room over. Longer than a join's own deadline
+ * (lib/meet/room-client.ts REQUEST_TIMEOUT_MS): a tab asked while its join is on its way hands over once that join
+ * has answered, and this side must still be waiting then, or neither tab would be in the call.
+ */
+export const TAB_HANDOVER_MS = 25_000;
 
 const HAND_OVER = "hand-over";
 

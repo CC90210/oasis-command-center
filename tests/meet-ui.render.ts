@@ -177,6 +177,14 @@ async function main() {
     "prejoin.openElsewhere",
     preJoin(devicesWith({}), { error: "This meeting is already open in another tab of this browser.", onJoinHere: () => undefined }),
   );
+  // ...while the browser is still answering for the camera: the way is off, like Join now.
+  draw(
+    "prejoin.openElsewhereAsking",
+    preJoin(devicesWith({ asking: true, waiting: { mic: false, cam: true } }), {
+      error: "This meeting is already open in another tab of this browser.",
+      onJoinHere: () => undefined,
+    }),
+  );
   draw("prejoin.waitingBoth", preJoin(devicesWith({ asking: true, waiting: { mic: true, cam: true } })));
   draw("prejoin.waitingCamera", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: false, cam: true }, mic: track("audio") })));
   draw("prejoin.waitingMicrophone", preJoin(devicesWith({ asked: true, asking: true, waiting: { mic: true, cam: false }, cam: track("video") })));

@@ -106,8 +106,9 @@ export function PreJoin(props: PreJoinProps) {
             {props.error}
           </p>
         ) : null}
+        {/* Off while the browser's own camera prompt is open, like Join now: the join it starts waits for that answer. */}
         {props.onJoinHere ? (
-          <button type="button" onClick={props.onJoinHere} className={`${SECONDARY} mt-2`}>
+          <button type="button" onClick={props.onJoinHere} disabled={devices.asking} className={`${SECONDARY} mt-2`}>
             {JOIN_HERE}
           </button>
         ) : null}

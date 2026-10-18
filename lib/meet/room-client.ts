@@ -664,6 +664,9 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     try {
       await serial(async () => {
         await sfu({ action: "session" });
+        // Ended while connecting (left, removed, moved to another tab): nothing more is set up. The room cuts the
+        // session it just made (on the leave, or when the tab that took the meeting over connects in its place).
+        if (closed) return;
         pc?.close();
         pulled.clear();
         byMid.clear();
@@ -682,6 +685,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
         if (!micOn) await tx.mic.sender.replaceTrack(null);
         await peer.setLocalDescription(await peer.createOffer());
         await gathered(peer);
+        if (moot(peer)) return;
         const res = await sfu<{ sessionDescription: RTCSessionDescriptionInit | null }>({
           action: "publish",
           offer: { type: "offer", sdp: peer.localDescription?.sdp ?? "" },
@@ -691,10 +695,13 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
             ...(tx.screen ? [{ mid: tx.screen.mid, trackName: TRACK_SCREEN, kind: "video" }] : []),
           ],
         });
+        if (moot(peer)) return;
         if (!res.sessionDescription) throw new Error("no_answer");
         await peer.setRemoteDescription(res.sessionDescription);
         await connected(peer);
       });
+      // A call that ended while it was connecting stays over: it is never brought back to live.
+      if (closed) return;
       reconnects = 0;
       phase = { kind: "live" };
       startRecorder();
@@ -765,7 +772,14 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       if (closed) return void held?.release();
       if (!held) return failed(meetErrorWords("open_in_another_tab"), "open_in_another_tab");
       tabHold = held;
-      stopListening = tabs.onAskedFor(() => ended("moved"));
+      // Asked for the room while this join is on its way: hand it over only once the join has answered. Its answer
+      // sets the cookie the other tab joins with, so that tab comes in as the participant this one made; otherwise
+      // two joins with no cookie make two. A join that failed meanwhile has let go already (tabHold is null).
+      stopListening = tabs.onAskedFor(() => {
+        void joinSettled.then(() => {
+          if (tabHold) ended("moved");
+        });
+      });
       try {
         const sent = localNow();
         const asked = call<{

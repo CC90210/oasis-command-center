@@ -807,7 +807,7 @@ async function main() {
   await check("the way out of waiting on the browser: drawn only while something is waited for and behind the notice's gate, naming what is waiting, with Join now still off beside it", () => {
     const outs = (html: string) => buttonNames(html).filter((n) => /^Join with(out)? /.test(n));
     const tagOf = (html: string, name: string) => [...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)].find((m) => text(m[1]) === name)?.[0] ?? "";
-    const waitingScreens = ["prejoin.waitingBoth", "prejoin.waitingCamera", "prejoin.waitingMicrophone", "prejoin.switching"];
+    const waitingScreens = ["prejoin.waitingBoth", "prejoin.waitingCamera", "prejoin.waitingMicrophone", "prejoin.switching", "prejoin.openElsewhereAsking"];
     // Nothing waited for, or the gate shut: no way out and no hint, on any screen.
     for (const [id, html] of Object.entries(markup)) {
       if (waitingScreens.includes(id)) continue;
@@ -822,6 +822,8 @@ async function main() {
       ["prejoin.waitingCamera", "Join without your camera", "Or, to allow it, click the camera or lock icon in the address bar, choose Allow."],
       ["prejoin.waitingMicrophone", "Join without your microphone", "Or, to allow it, click the camera or lock icon in the address bar, choose Allow."],
       ["prejoin.switching", "Join with your current camera", "Or wait: your browser is still opening the one you picked."],
+      // Open in another tab, and the camera still being answered for: the same way out (Join here instead waits).
+      ["prejoin.openElsewhereAsking", "Join without your camera", "Or, to allow it, click the camera or lock icon in the address bar, choose Allow."],
     ];
     for (const [id, button, hint] of cases) {
       const html = markup[id];
@@ -1655,6 +1657,10 @@ async function main() {
     const html = markup["prejoin.openElsewhere"];
     assert.ok(text(html).includes(meetErrorWords("open_in_another_tab")), "the words");
     assert.ok(buttonNames(html).includes(JOIN_HERE), "and the way to move the meeting to this tab");
+    const way = (id: string) => [...markup[id].matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/g)].map((m) => m[0]).find((b) => text(b) === JOIN_HERE) ?? "";
+    assert.ok(way("prejoin.openElsewhere") && way("prejoin.openElsewhereAsking"), "both screens draw it");
+    assert.doesNotMatch(way("prejoin.openElsewhere"), /\bdisabled=""/, "on while the browser is not answering anything");
+    assert.match(way("prejoin.openElsewhereAsking"), /\bdisabled=""/, "off while the browser's camera prompt is open, like Join now: the join it starts waits for it");
     assert.ok(!buttonNames(markup["prejoin.notWaiting"]).includes(JOIN_HERE), "never on a plain pre-join screen");
     const room = readFileSync(join(root, "components", "meet", "MeetRoom.tsx"), "utf8");
     assert.match(
