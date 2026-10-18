@@ -52,6 +52,7 @@ Center keeps the transcript. No meeting vendor bill: media runs on Cloudflare Re
   - The tab handing over lets go only once its SFU steps (session, publish, pull) have answered, since a late one would act on the session and tracks of the participant the new tab now is. A tab asked while its join is on its way hands over before setting up any media, so at most one step is ever waited for: 3 s for the ask plus 20 s for that step fits inside the new tab's 25 s.
   - A call ended while it is connecting (moved, left, removed) is never brought back to live.
   - If the new tab's join then fails, nobody is in the call until "Try again", which comes back as the same participant. The two tabs share one participant, so they can never be in the call at once.
+  - Known limit: closing the tab in the call while another is waiting to take over races the closing tab's leave beacon against the new tab's join, since the browser lets go of the lock at once. A leave landing after the join reads "You were disconnected" in the new tab, and Rejoin brings it back. A per-tab id on the participant row would make the late leave harmless, as a follow-up if it shows up in practice.
   - Only the tab in the room sends a Leave or the page's close beacon, so a second tab can never end the first one's place.
   - Leave lets go of the room only once the room has heard it.
   - A browser without Web Locks keeps tabs apart as before, which is not at all.
