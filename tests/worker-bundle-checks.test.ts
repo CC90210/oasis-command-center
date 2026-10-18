@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { checkOneByteSource, checkWorkerSize } from "../scripts/check-worker-bundle";
+import { checkOneByteSource, checkWorkerSize, uploadedEntryName } from "../scripts/check-worker-bundle";
 import { checkServerTree, requestedChunks, scanRuntime, selfTest, type ServerTree } from "../scripts/check-worker-chunks";
 import { CHUNK_FAILURE, REACHED_DATABASE, afterReady, chunkFailureLines, mintSession, removeChunkCase } from "../scripts/check-worker-runtime";
 import { verifySessionEdge } from "../lib/turso-auth-edge";
@@ -71,7 +71,8 @@ const coloured = "Total Upload: \u001b[31m59014.13 KiB / gzip: 10271.20 KiB\u001
     const log = path.join(scratch, "dry-run.log");
     const outdir = path.join(scratch, "dry-run-out");
     mkdirSync(outdir);
-    const workerJs = path.join(outdir, "worker.js");
+    // The dry run names its output after wrangler.jsonc "main" (worker-entry.ts gives worker-entry.js).
+    const workerJs = path.join(outdir, uploadedEntryName(readFileSync(path.join(root, "wrangler.jsonc"), "utf8")));
     writeFileSync(log, coloured);
     writeFileSync(workerJs, 'export default { fetch() { return new Response("ok"); } };');
     const run = (budget: string | undefined, file = log, dir: string | null = outdir) => {
@@ -83,7 +84,7 @@ const coloured = "Total Upload: \u001b[31m59014.13 KiB / gzip: 10271.20 KiB\u001
     };
     const within = run("64512");
     assert.equal(within.status, 0, within.stderr);
-    assert.match(within.stdout, /59014\.13 KiB uncompressed, within the 64512 KiB budget.*worker\.js is one-byte/);
+    assert.match(within.stdout, /59014\.13 KiB uncompressed, within the 64512 KiB budget.*worker-entry\.js is one-byte/);
     const over = run("50000");
     assert.equal(over.status, 1, "over budget exits 1");
     assert.match(over.stderr, /9014\.13 KiB over the 50000 KiB budget/);

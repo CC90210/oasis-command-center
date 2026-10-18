@@ -87,6 +87,16 @@ export function checkOneByteSource(source: string): OneByteVerdict {
   };
 }
 
+/**
+ * The file the dry run writes for the Worker's entry: wrangler names it after wrangler.jsonc "main" with a .js
+ * extension (worker-entry.ts gives worker-entry.js; it was worker.js while "main" was OpenNext's own worker.js).
+ */
+export function uploadedEntryName(config: string = readFileSync(path.join(process.cwd(), "wrangler.jsonc"), "utf8")): string {
+  const main = /"main"\s*:\s*"([^"]+)"/.exec(config)?.[1];
+  if (!main) throw new Error('wrangler.jsonc has no "main"');
+  return `${path.basename(main).replace(/\.(?:[cm]?[jt]s|tsx?)$/, "")}.js`;
+}
+
 function main(): number {
   const [logPath, outdir] = process.argv.slice(2);
   if (!logPath || !outdir) {
@@ -96,7 +106,7 @@ function main(): number {
   const raw = process.env.WORKER_UPLOAD_BUDGET_KIB;
   const budget = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
   const size = checkWorkerSize(readFileSync(logPath, "utf8"), budget);
-  const workerJs = path.join(outdir, "worker.js");
+  const workerJs = path.join(outdir, uploadedEntryName());
   let oneByte: OneByteVerdict;
   try {
     oneByte = checkOneByteSource(readFileSync(workerJs, "utf8"));
@@ -108,7 +118,7 @@ function main(): number {
   if (!size.ok || !oneByte.ok) return 1;
   console.log(
     `check-worker-bundle: ${size.uploadKib.toFixed(2)} KiB uncompressed, within the ${size.budgetKib} KiB ` +
-      `budget (${(size.budgetKib - size.uploadKib).toFixed(2)} KiB left); worker.js is one-byte (${oneByte.chars} chars)`,
+      `budget (${(size.budgetKib - size.uploadKib).toFixed(2)} KiB left); ${path.basename(workerJs)} is one-byte (${oneByte.chars} chars)`,
   );
   return 0;
 }
