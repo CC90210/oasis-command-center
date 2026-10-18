@@ -54,10 +54,36 @@ function bundleEntries(raw: unknown): Array<[string, string]> | null {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const entries = Object.entries(parsed as Record<string, unknown>);
-  if (!entries.every(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) && typeof value === "string")) {
+  if (!entries.every(([key, value]) => isSecretName(key) && typeof value === "string")) {
     return null;
   }
   return entries as Array<[string, string]>;
+}
+
+/**
+ * An env-style key a bundle may carry. "__proto__" (and the other names an ordinary object treats specially) fits the
+ * pattern but is never a secret, and assigning it would set a prototype instead of a value (CodeRabbit on #699).
+ */
+export function isSecretName(key: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) && !RESERVED_NAMES.has(key);
+}
+const RESERVED_NAMES = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
+ * Remove the raw bundle secrets from process.env. With nodejs_compat (this compatibility date populates process.env
+ * from the Worker's bindings at isolate start), each bundle's JSON is copied there before worker-entry.ts runs, and
+ * OpenNext only adds keys, never removes them (CodeRabbit on #699). The values are the same ones the app reads
+ * individually; this keeps the rule that a bundle's JSON never sits in process.env. Returns how many it removed.
+ */
+export function scrubBundlesFromProcessEnv(processEnv: Record<string, string | undefined>): number {
+  let removed = 0;
+  for (const name of Object.keys(processEnv)) {
+    if (SECRET_BUNDLE_KEY.test(name)) {
+      delete processEnv[name];
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 /**
@@ -66,8 +92,9 @@ function bundleEntries(raw: unknown): Array<[string, string]> | null {
  */
 export function expandSecretBundles<E extends Record<string, unknown>>(env: E): { env: E; report: SecretBundleReport } {
   const report: SecretBundleReport = { bundles: [], added: 0, shadowed: [], invalid: [] };
-  const fromBundles: Record<string, string> = {};
-  const digests: Record<string, string> = {};
+  // Null-prototype records: a key is always an own property (isSecretName already refuses the special names).
+  const fromBundles: Record<string, string> = Object.create(null);
+  const digests: Record<string, string> = Object.create(null);
   const passThrough: Record<string, unknown> = {};
   for (const name of Object.keys(env).sort()) {
     if (!SECRET_BUNDLE_KEY.test(name)) {

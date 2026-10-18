@@ -9,6 +9,8 @@ import { readFileSync } from "node:fs";
 import {
   SECRET_BUNDLE_DIGESTS_KEY,
   expandSecretBundles,
+  isSecretName,
+  scrubBundlesFromProcessEnv,
   secretDigest,
 } from "../lib/runtime/secret-bundles";
 import { handleSecretDigests } from "../lib/runtime/secret-digests";
@@ -49,7 +51,9 @@ function testExpansion() {
 }
 
 function testInvalidBundlesAreSkippedWhole() {
-  for (const bad of ["not json", "[1,2]", JSON.stringify({ OK_KEY: "fine", BAD: 5 }), JSON.stringify({ "bad key": "x" }), "null"]) {
+  for (const bad of ["not json", "[1,2]", JSON.stringify({ OK_KEY: "fine", BAD: 5 }), JSON.stringify({ "bad key": "x" }), "null",
+    // "__proto__" fits the name pattern but would set a prototype, not a value (CodeRabbit on #699).
+    '{"OK_KEY":"fine","__proto__":"x"}', JSON.stringify({ OK_KEY: "fine", constructor: "x" })]) {
     const { env: out, report } = expandSecretBundles({ OCC_SECRET_BUNDLE_3: bad, KEEP: "k" } as Record<string, unknown>);
     assert.deepEqual(report.invalid, ["OCC_SECRET_BUNDLE_3"], bad);
     assert.equal("OK_KEY" in out, false, "a half-valid bundle sets none of its keys");
@@ -63,6 +67,21 @@ function testInvalidBundlesAreSkippedWhole() {
   // A stray digests key from outside is not trusted: it is rebuilt from the bundles or dropped.
   const { env: stray } = expandSecretBundles({ [SECRET_BUNDLE_DIGESTS_KEY]: "{\"A\":\"forged\"}" } as Record<string, unknown>);
   assert.equal(SECRET_BUNDLE_DIGESTS_KEY in stray, false);
+}
+
+function testRawBundlesLeaveProcessEnv() {
+  // nodejs_compat copies every binding into process.env at isolate start, raw bundles included (CodeRabbit on #699).
+  const processEnv: Record<string, string | undefined> = {
+    OCC_SECRET_BUNDLE_1: "{\"A\":\"1\"}",
+    OCC_SECRET_BUNDLE_12: "{}",
+    OCC_SECRET_BUNDLE_DIGESTS: "{\"A\":\"abc\"}",
+    RESEND_API_KEY: "re_1",
+  };
+  assert.equal(scrubBundlesFromProcessEnv(processEnv), 2);
+  assert.deepEqual(processEnv, { OCC_SECRET_BUNDLE_DIGESTS: "{\"A\":\"abc\"}", RESEND_API_KEY: "re_1" },
+    "only the raw bundles go; the digests record and every secret stay");
+  assert.equal(isSecretName("__proto__"), false);
+  assert.equal(isSecretName("RESEND_API_KEY"), true);
 }
 
 const SECRET = "t".repeat(40);
@@ -101,6 +120,7 @@ async function testDigestCheck() {
   assert.equal((await handleSecretDigests(signed({ names: ["X"] }, "w".repeat(40)), deps)).status, 401, "a wrong signature");
   assert.equal((await handleSecretDigests(signed({ names: ["X"] }), { env: {}, now: NOW })).status, 503, "no secret: not installed");
   for (const body of [{ names: [] }, { names: ["OCC_SECRET_BUNDLE_1"] }, { names: [SECRET_BUNDLE_DIGESTS_KEY] }, { names: ["bad name"] },
+    { names: ["__proto__"] },
     { names: Array.from({ length: 201 }, (_, i) => `K${i}`) }, { names: ["A"], extra: 1 }]) {
     assert.equal((await handleSecretDigests(signed(body), deps)).status, 422, JSON.stringify(body).slice(0, 60));
   }
@@ -115,11 +135,14 @@ function testEntryWiring() {
   assert.match(entry, /fetch\(request: Request, env: Env, ctx: Ctx\): Promise<Response> \{\s*return handler\.fetch\(request, withSecretBundles\(env\), ctx\);/);
   assert.match(entry, /const full = withSecretBundles\(env\);\s*await consumeSlackJobs\(batch, full, \(request\) => handler\.fetch\(request, full, ctx\)\);/);
   assert.doesNotMatch(wrangler, /"queues"/, "the Slack queue bindings are still held for CC");
+  assert.match(entry, /scrubBundlesFromProcessEnv\(process\.env\);\s*expanded\.set\(env, merged\);/,
+    "the entry removes the raw bundles nodejs_compat copied into process.env");
 }
 
 async function main() {
   testExpansion();
   testInvalidBundlesAreSkippedWhole();
+  testRawBundlesLeaveProcessEnv();
   await testDigestCheck();
   testEntryWiring();
   console.log("secret-bundles: OK");

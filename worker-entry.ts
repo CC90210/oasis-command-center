@@ -20,7 +20,7 @@
  * Until then queue() below is never called. The consumer logic is lib/slack/queue-consumer.ts (tested without a Worker).
  */
 import handler from "./.open-next/worker.js";
-import { expandSecretBundles } from "./lib/runtime/secret-bundles";
+import { expandSecretBundles, scrubBundlesFromProcessEnv } from "./lib/runtime/secret-bundles";
 import { consumeSlackJobs, type QueueBatch } from "./lib/slack/queue-consumer";
 
 type Env = { SLACK_SIGNING_SECRET?: string; PUBLIC_APP_URL?: string } & Record<string, unknown>;
@@ -36,6 +36,8 @@ function withSecretBundles(env: Env): Env {
   if (report.invalid.length) {
     console.error("[secret-bundles] unreadable bundle(s), their keys are unset:", report.invalid.join(", "));
   }
+  // nodejs_compat copied the raw bundles into process.env at isolate start; OpenNext never removes keys.
+  scrubBundlesFromProcessEnv(process.env);
   expanded.set(env, merged);
   return merged;
 }
