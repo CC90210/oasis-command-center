@@ -21,6 +21,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding } from "@/lib/team";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 import { getTursoClient } from "@/lib/turso";
+import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import {
   activateVerifiedFounderMeeting,
   cancelVerifiedFounderMeeting,
@@ -1109,7 +1110,7 @@ async function notifyRep(input: {
   });
   if (!input.appointment.assigned_to || !input.appointment.organizer_email_snapshot) return null;
   // The rep copy leaves FROM the host's own Gmail. A host who is no longer an
-  // active teammate gets nothing sent as them — the operator alert above is
+  // active teammate gets nothing sent as them -- the operator alert above is
   // the notice. A failed read skips it too, but reports it: the host may be
   // active and simply missed their copy.
   let host: Awaited<ReturnType<typeof memberStanding>>;
@@ -1142,7 +1143,7 @@ async function notifyRep(input: {
     "---",
   ].filter((line): line is string => line !== null).join("\n");
   // Internal: this goes to the rep about their own appointment, not to a
-  // client. It still carries a legal footer, so it still needs a brand —
+  // client. It still carries a legal footer, so it still needs a brand --
   // derived from the tenant rather than defaulted, which is how every caller of
   // this helper used to end up appending SunBiz's. An unmapped tenant reports
   // the same failure as any other undeliverable alert.
@@ -1434,7 +1435,7 @@ async function executeCancel(
     leadId: appointment.lead_id,
     appointmentId: appointment.id,
     requestId,
-  });
+  }, bookingMeetRoomDeps());
   if (prepared.disposition === "preserved" || prepared.disposition === "cancelled") return prepared.disposition;
   const nowIso = new Date().toISOString();
   await transitionLead(db, job, appointment, expectedLead, {
@@ -1449,7 +1450,7 @@ async function executeCancel(
     leadId: appointment.lead_id,
     appointmentId: appointment.id,
     requestId,
-  });
+  }, bookingMeetRoomDeps());
   return cancelled.disposition;
 }
 
@@ -1468,7 +1469,7 @@ async function executeReschedule(
     requestId: `sms:${job.provider_message_id}`,
     meetingAt,
     openerAttendee,
-  });
+  }, bookingMeetRoomDeps());
   await transitionLead(db, job, appointment, expectedLead, {
     stage: "founder_meeting_booked",
     deal_outcome: "reschedule",
@@ -1938,7 +1939,7 @@ async function processClaimedJob(
     } catch (error) {
       // The host was deactivated since booking, or their standing could not be
       // read: the service refused before touching the calendar, the lead or a
-      // reminder row. A human rebooks it — never a crashed client conversation.
+      // reminder row. A human rebooks it -- never a crashed client conversation.
       const code = smsAgentSafeErrorCode(error);
       if (code !== "meeting_host_deactivated" && code !== "meeting_host_check_failed") throw error;
       await pageAndEscalate(db, job, appointment, intent, code, "human_reschedule_required");
@@ -1955,7 +1956,7 @@ async function processClaimedJob(
       job,
       appointment,
       conversation,
-      `Your meeting is moved to ${formatMeetingTime(meeting.meetingAt, timeZone)}. Join: ${meeting.receipt.meetLink}`,
+      `Your meeting is moved to ${formatMeetingTime(meeting.meetingAt, timeZone)}. Video call: ${meeting.receipt.meetLink}`,
       false,
       voice.prefix,
     );

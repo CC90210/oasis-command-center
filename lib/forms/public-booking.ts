@@ -578,6 +578,16 @@ export async function publicBookingHostsById(
   return [fallback];
 }
 
+export function publicBookingScheduleMeetingFields(input: {
+  leadId: string;
+  meetUrl: string;
+}): { description: string; location: string } {
+  return {
+    description: `Lead ${input.leadId}\n${input.meetUrl}`,
+    location: input.meetUrl,
+  };
+}
+
 /**
  * Copy a booked call onto each host's Schedule, on the calendar their booking
  * settings name (CC's "Meetings"), else their default calendar. Before
@@ -618,8 +628,7 @@ export async function mirrorPublicBookingToSchedules(input: {
       user_id: host.userId,
       calendar_id: calendar.id,
       title: `${input.formName} - ${input.company || input.prospectName || "Prospect"}`,
-      description: `Lead ${input.leadId}\n${input.meetUrl}`,
-      location: input.meetUrl,
+      ...publicBookingScheduleMeetingFields(input),
       all_day: 0,
       start_at: input.startsAt,
       end_at: input.endsAt,

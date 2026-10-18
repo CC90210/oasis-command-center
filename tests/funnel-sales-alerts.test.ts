@@ -134,6 +134,18 @@ async function main(): Promise<void> {
   assert.ok(!/x{301}/.test(alert), "a long bottleneck is capped");
   assert.match(alert, /Call: .*2:30.*EDT/, "shown in Toronto time, not UTC");
   assert.match(alert, /href="https:\/\/meet\.google\.com\/abc-defg-hij"/);
+  const oasisAlert = buildBookedLeadAlert({
+    offerName: "OASIS audit",
+    name: "Dana Lead",
+    company: "Dana Co",
+    revenue: "$10-50K/mo",
+    bottleneck: "Leads wait days",
+    startsAt: "2026-10-16T18:30:00.000Z",
+    meetUrl: "https://oasisai.work/meet/abc-defg-hjk",
+    leadUrl: "https://oasisai.work/pipeline/L1",
+  });
+  assert.match(oasisAlert, /href="https:\/\/oasisai\.work\/meet\/abc-defg-hjk"/);
+  assert.match(oasisAlert, /Open video call/);
   assert.match(alert, /href="https:\/\/oasisai\.work\/pipeline\/L1"/);
   assert.match(formatBookedTime("2026-12-16T19:30:00.000Z"), /EST/, "winter time is EST");
 
@@ -192,11 +204,11 @@ async function main(): Promise<void> {
 
     // A lead row's own keys are read as well as the form's (the started alert passes the lead).
     assert.deepEqual(alertLeadFactLines({ revenue_band: "50k_250k", primary_bottleneck: "Leads wait days" }), [
-      "📊 Revenue: $50-250K/mo",
-      "🚧 Bottleneck: Leads wait days",
+      "\ud83d\udcca Revenue: $50-250K/mo",
+      "\ud83d\udea7 Bottleneck: Leads wait days",
     ]);
     assert.deepEqual(alertLeadFactLines({ revenue_band: "  ", primary_bottleneck: "" }), [], "blank is missing");
-    assert.deepEqual(alertLeadFactLines({ monthly_revenue: "under_10k" }), ["📊 Revenue: &lt;$10K/mo"], "one without the other");
+    assert.deepEqual(alertLeadFactLines({ monthly_revenue: "under_10k" }), ["\ud83d\udcca Revenue: &lt;$10K/mo"], "one without the other");
     const long = alertLeadFactLines({ primary_bottleneck: "y".repeat(900) })[0];
     assert.ok(long.length < 330 && !/y{301}/.test(long), "a long bottleneck is capped at 300");
     // The booked-call alert reads the same two facts the same way.
@@ -223,7 +235,7 @@ async function main(): Promise<void> {
   const liveTile = inboundTiles({ ok: true, value: { total: 1234, untouched: 20, booked: 7 } })[0];
   assert.equal(liveTile.status, "live");
   assert.equal(liveTile.value, "1,234");
-  assert.equal(liveTile.hint, "20 untouched · 7 booked");
+  assert.equal(liveTile.hint, "20 untouched \u00b7 7 booked");
   assert.equal(liveTile.action?.href, INBOUND_QUEUE_HREF);
   assert.equal(INBOUND_QUEUE_HREF, "/pipeline?motion=inbound");
   console.log("  ok - the Sales inbound tile is honest when empty, failed and live");
@@ -249,33 +261,33 @@ async function main(): Promise<void> {
   assert.equal(waiting.truncated, true, "12 researched exist, the window held 9: the total is a floor");
   assert.equal(
     inboundLeadLine(rows[0].data),
-    "Ada Lovelace · Acme · $10-50K/mo · Leads wait days · audit done, unbooked - needs follow-up",
+    "Ada Lovelace \u00b7 Acme \u00b7 $10-50K/mo \u00b7 Leads wait days \u00b7 audit done, unbooked - needs follow-up",
     "words, not option keys, and what the lead did",
   );
-  assert.equal(inboundLeadLine(rows[1].data), "Bo Chen · Bo Co · started the form, did not finish");
+  assert.equal(inboundLeadLine(rows[1].data), "Bo Chen \u00b7 Bo Co \u00b7 started the form, did not finish");
   // Review of #655: the finished stage is shared by every booking form, so the
   // line names the form; a PROTOCOL buyer or a community joiner is never an "audit".
   assert.equal(
     inboundLeadLine({ name: "Pat Buyer", funnel_stage: "audit_requested", funnel_form: "protocol" }),
-    "Pat Buyer · finished the PROTOCOL form, unbooked - needs follow-up",
+    "Pat Buyer \u00b7 finished the PROTOCOL form, unbooked - needs follow-up",
   );
   assert.equal(
     inboundLeadLine({ name: "Cam Joiner", funnel_stage: "audit_requested", funnel_form: "community" }),
-    "Cam Joiner · finished the community form, unbooked - needs follow-up",
+    "Cam Joiner \u00b7 finished the community form, unbooked - needs follow-up",
   );
   assert.equal(
     inboundLeadLine({ name: "Old Lead", funnel_stage: "audit_requested" }),
-    "Old Lead · finished the form, unbooked - needs follow-up",
+    "Old Lead \u00b7 finished the form, unbooked - needs follow-up",
     "a lead finished before the form was stamped is not guessed to be an audit",
   );
   assert.equal(
     inboundLeadLine({ name: "Old Audit", funnel_stage: "audit_requested", ai_audit_scored_at: "2026-10-15T12:00:00.000Z" }),
-    "Old Audit · audit done, unbooked - needs follow-up",
+    "Old Audit \u00b7 audit done, unbooked - needs follow-up",
     "an unstamped lead the AI audit scored proves it came through the audit",
   );
   assert.equal(
     inboundLeadLine({ name: "Later Buyer", funnel_stage: "audit_requested", funnel_form: "protocol", ai_audit_scored_at: "2026-10-15T12:00:00.000Z" }),
-    "Later Buyer · finished the PROTOCOL form, unbooked - needs follow-up",
+    "Later Buyer \u00b7 finished the PROTOCOL form, unbooked - needs follow-up",
     "the stamp of the form finished last wins over an older audit score",
   );
   for (const form of ["protocol", "community", "command", "fleet", "book", undefined]) {
@@ -408,13 +420,13 @@ async function main(): Promise<void> {
     const text = strings(rendered).join("");
     assert.match(text, /Eve Fresh/);
     assert.match(text, /Audit requested/);
-    assert.match(text, /Eve Inc · \$10-50K\/mo · Unbooked/);
-    assert.match(text, /Dana Co · \$50-250K\/mo · T\(2026-10-22/);
+    assert.match(text, /Eve Inc \u00b7 \$10-50K\/mo \u00b7 Unbooked/);
+    assert.match(text, /Dana Co \u00b7 \$50-250K\/mo \u00b7 T\(2026-10-22/);
     assert.ok(!/undefined|null/.test(text), "no empty fact prints as a word");
     assert.deepEqual(hrefs(rendered), ["/pipeline/fresh", "/pipeline/bare", "/pipeline/booked"]);
     const more = strings(NewInboundLeads({ read: { ok: true, value: capped } })).join("");
     assert.match(more, /3 more in Warm inbound/);
-    assert.match(strings(NewInboundLeads({ read: { ok: false } })).join(""), /Couldn’t load new inbound leads/, "a failed read is not an empty list");
+    assert.match(strings(NewInboundLeads({ read: { ok: false } })).join(""), /Couldn\u2019t load new inbound leads/, "a failed read is not an empty list");
     assert.match(strings(NewInboundLeads({ read: { ok: true, value: inboundRecent([], NOW, [], stamp) } })).join(""), /No new inbound leads in the last 14 days/);
 
     const base = { attention: [], approvals: { ok: true as const, value: { items: [], total: 0 } }, feedHref: null, tiles: [], routines: { ok: true as const, value: [] }, connections: [], canManageConnections: true, asks: [] };

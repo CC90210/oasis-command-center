@@ -221,7 +221,7 @@ export function PublicBookingCalendar({
             className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold"
             style={{ backgroundColor: primary, color: "#111" }}
           >
-            <Video className="h-4 w-4" /> Join Google Meet
+            <Video className="h-4 w-4" /> Join the call
           </a>
           <a
             href={receipt.calendar_url}
@@ -241,22 +241,22 @@ export function PublicBookingCalendar({
         <div className="space-y-2 text-center">
           <h2 className="text-xl font-bold text-fg">Book your call now. The questions can wait.</h2>
           <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
-            These are the live times our team has open. The call is {availability?.duration_minutes || 15} minutes and the Google Meet invite arrives instantly.
+            These are the live times our team has open. The call is {availability?.duration_minutes || 15} minutes and the video call invite arrives instantly.
           </p>
         </div>
       ) : optional ? (
         <div className="space-y-2 text-center">
           <h3 className="text-lg font-bold text-fg">Want to talk it through first?</h3>
           <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
-            Optional: pick a {availability?.duration_minutes || 15}-minute call with our team. These are the live times we have open, and the Google Meet invite arrives instantly.
+            Optional: pick a {availability?.duration_minutes || 15}-minute call with our team. These are the live times we have open, and the video call invite arrives instantly.
           </p>
         </div>
       ) : (
         <div className="space-y-2 text-center">
           <CheckCircle2 className="mx-auto h-10 w-10" style={{ color: primary }} />
-          <h2 className="text-xl font-bold text-fg">Your details are in. Pick a time while you’re here.</h2>
+          <h2 className="text-xl font-bold text-fg">Your details are in. Pick a time while you&apos;re here.</h2>
           <p className="mx-auto max-w-md text-sm leading-relaxed text-fg-muted">
-            These are the live times our team has open. The call is {availability?.duration_minutes || 15} minutes and the Google Meet invite arrives instantly.
+            These are the live times our team has open. The call is {availability?.duration_minutes || 15} minutes and the video call invite arrives instantly.
           </p>
         </div>
       )}
@@ -305,7 +305,7 @@ export function PublicBookingCalendar({
       {preview && previewPicked && (
         <p className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-center text-sm text-status-warm" role="status">
           Preview: on the live page this books {dayFormat.format(new Date(previewPicked))} at {timeFormat.format(new Date(previewPicked))},
-          sends the visitor the Google Meet invite and puts the call on your Schedule. Nothing was booked.
+          sends the visitor the video call invite and puts the call on your Schedule. Nothing was booked.
         </p>
       )}
       {selected && !loading && (
@@ -317,7 +317,7 @@ export function PublicBookingCalendar({
           style={{ backgroundColor: primary, color: "#111" }}
         >
           {booking && <Loader2 className="h-4 w-4 animate-spin" />}
-          {booking ? "Booking…" : `Book ${timeFormat.format(new Date(selected))}`}
+          {booking ? "Booking..." : `Book ${timeFormat.format(new Date(selected))}`}
         </button>
       )}
 
@@ -376,11 +376,11 @@ export function CommunityJoinLink({
   const className = "mt-2 inline-block text-sm font-semibold underline underline-offset-4";
   const link = preview ? (
     <span className={className} style={{ color: primary }}>
-      Join the free OASIS Telegram community →
+      Join the free OASIS Telegram community &rarr;
     </span>
   ) : (
     <a href={href} className={className} style={{ color: primary }}>
-      Join the free OASIS Telegram community →
+      Join the free OASIS Telegram community &rarr;
     </a>
   );
   return lead ? (

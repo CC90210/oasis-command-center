@@ -28,15 +28,15 @@ import { BOOK_FORM_SLUG } from "./public-booking-config";
 
 export const BOOK_FORM_NAME = "Book a call";
 export const BOOK_FORM_DESCRIPTION =
-  "The OASIS booking link: pick a time, leave your details, get a Google Meet invite.";
+  "The OASIS booking link: pick a time, leave your details, get a video call invite.";
 export const BOOK_FORM_ON_COMPLETE_STAGE = "researched";
 
 export const BOOK_FORM_BRANDING: FormBranding = {
   primary_color: "#00D4FF",
   accent_color: "#faf9f5",
   headline: "Book a call with OASIS AI",
-  subheadline: "30 minutes on Google Meet with OASIS AI. Pick a time that suits you.",
-  thanks_message: "You're booked. The Google Calendar invite with the Meet link is on its way to your inbox.",
+  subheadline: "30 minutes on a video call with OASIS AI. Pick a time that suits you.",
+  thanks_message: "You're booked. The calendar invite with the video call link is on its way to your inbox.",
 };
 
 export const BOOK_FORM_STEPS: FormStep[] = [

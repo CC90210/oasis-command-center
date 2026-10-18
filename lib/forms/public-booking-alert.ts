@@ -8,6 +8,7 @@
  */
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { PUBLIC_BOOKING_TIME_ZONE } from "@/lib/forms/public-booking";
+import { isMeetingLink } from "@/lib/website-sales-meeting";
 
 const when = new Intl.DateTimeFormat("en-CA", {
   timeZone: PUBLIC_BOOKING_TIME_ZONE,
@@ -25,10 +26,12 @@ export function formatBookedTime(startsAtIso: string): string {
   return Number.isNaN(d.getTime()) ? startsAtIso : when.format(d);
 }
 
-/** Google Meet links only: anything else is shown as text, never as a link. */
+/** Known video-call links only: anything else is shown as text, never as a link. */
 function isMeetUrl(url: string): boolean {
-  return /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i.test(url);
+  return isMeetingLink(url);
 }
+
+const CALENDAR_EMOJI = String.fromCodePoint(0x1f4c5);
 
 export function buildBookedLeadAlert(input: {
   offerName: string;
@@ -43,14 +46,14 @@ export function buildBookedLeadAlert(input: {
   const e = escapeTelegramHtml;
   const cap = (s: string, n: number) => e(s.trim().slice(0, n));
   const lines = [
-    `📅 <b>${cap(input.offerName, 120)} booked</b>`,
+    `${CALENDAR_EMOJI} <b>${cap(input.offerName, 120)} booked</b>`,
     `<b>${cap(input.name || "New lead", 120)}</b>${input.company ? ` - ${cap(input.company, 120)}` : ""}`,
     input.revenue ? `Revenue: ${cap(input.revenue, 120)}` : "Revenue: not provided",
     input.bottleneck ? `Bottleneck: ${cap(input.bottleneck, 300)}` : "Bottleneck: not provided",
     `Call: ${e(formatBookedTime(input.startsAt))}`,
     isMeetUrl(input.meetUrl)
-      ? `<a href="${input.meetUrl}">Open Google Meet</a>`
-      : `Meet: ${cap(input.meetUrl, 200)}`,
+      ? `<a href="${input.meetUrl}">Open video call</a>`
+      : `Video call: ${cap(input.meetUrl, 200)}`,
     `<a href="${input.leadUrl}">Open the lead in Command Center</a>`,
   ];
   return lines.join("\n");

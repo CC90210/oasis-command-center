@@ -1,8 +1,10 @@
 import { countSegments } from "./sms-segments";
 import { isOasisInternalTenant } from "./ai/tools/client-safe-registry";
+import { teamInviteOrigin } from "./team-invite-email";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const GOOGLE_MEET_RE = /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i;
+const GOOGLE_MEET_RE = /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}$/;
+const OASIS_MEET_PATH_RE = /^\/meet\/[abcdefghijkmnopqrstuvwxyz]{3}-[abcdefghijkmnopqrstuvwxyz]{4}-[abcdefghijkmnopqrstuvwxyz]{3}$/;
 
 export const FOUNDER_MEETING_TIMEZONE = "America/Toronto";
 export const FOUNDER_MEETING_DURATION_MINUTES = 15;
@@ -100,9 +102,27 @@ export function normalizeFounderMeetingContact(input: Record<string, unknown>): 
   };
 }
 
-export function validateGoogleMeetLink(value: unknown): string {
+export function isMeetingLink(value: unknown): boolean {
   const link = optionalText(value, 500) || "";
-  if (!GOOGLE_MEET_RE.test(link)) throw new Error("google_meet_link_missing");
+  if (GOOGLE_MEET_RE.test(link)) return true;
+  try {
+    const url = new URL(link);
+    const app = new URL(teamInviteOrigin());
+    return url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      url.host === app.host &&
+      OASIS_MEET_PATH_RE.test(url.pathname) &&
+      !url.search &&
+      !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+export function validateMeetingLink(value: unknown): string {
+  const link = optionalText(value, 500) || "";
+  if (!isMeetingLink(link)) throw new Error("google_meet_link_missing");
   return link;
 }
 
@@ -191,7 +211,9 @@ export function clampSmsBody(body: string, maxSegments = 2, prefix: string = SMS
     .trim();
   if (countSegments(withoutAgenda) <= maxSegments) return withoutAgenda;
 
-  const meetLink = original.match(/https:\/\/meet\.google\.com\/[a-z0-9-]+/i)?.[0] ?? null;
+  const meetLink = (original.match(/https:\/\/[^\s]+/gi) || [])
+    .map((candidate) => candidate.replace(/[),.;!?]+$/u, ""))
+    .find((candidate) => isMeetingLink(candidate)) ?? null;
   const hasFooter = original.includes(SMS_STOP_FOOTER);
   const protectedMessage = [
     `${prefix} Meeting reminder.`,
@@ -268,7 +290,7 @@ export function buildFounderMeetingMessages(input: {
   offerLabel?: string | null;
   reminderMinutesBefore?: number;
 }) {
-  const meetLink = validateGoogleMeetLink(input.meetLink);
+  const meetLink = validateMeetingLink(input.meetLink);
   const when = displayMeetingTime(input.meetingAt, input.timezone);
   const label = input.company || input.contactName || "your business";
   const greeting = input.contactName ? `Hi ${input.contactName},` : "Hello,";
@@ -286,11 +308,11 @@ export function buildFounderMeetingMessages(input: {
     greeting,
     "",
     `Your ${durationMinutes}-minute OASIS ${offerLabel} for ${label} starts in ${reminderWindow} (${when}).`,
-    `Join Google Meet: ${meetLink}`,
+    `Join the call: ${meetLink}`,
     "",
     `We will cover: ${input.clientAgenda}`,
   ].join("\n");
-  const confirmationSms = `${SMS_BRAND_PREFIX} Your ${durationMinutes}-minute ${offerLabel} is booked for ${when}. Google Meet: ${meetLink}`;
+  const confirmationSms = `${SMS_BRAND_PREFIX} Your ${durationMinutes}-minute ${offerLabel} is booked for ${when}. Video call: ${meetLink}`;
   const reminderSms = `${SMS_BRAND_PREFIX} Reminder: your ${offerLabel} starts in ${reminderWindow}. Join: ${meetLink}`;
   return {
     confirmationSms,

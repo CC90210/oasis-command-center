@@ -2,6 +2,9 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { publicBookingScheduleMeetingFields } from "@/lib/forms/public-booking";
+import type { BookingMeetRooms } from "@/lib/booking/meet-room";
+import { firstNameOf } from "@/lib/leads/quick-email-draft";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
@@ -69,6 +72,7 @@ type AppointmentRow = {
   google_event_id: string | null;
   google_event_html_link: string | null;
   google_meet_link: string | null;
+  meet_room_id: string | null;
   google_ical_uid: string | null;
   calendar_status: string;
   calendar_error: string | null;
@@ -163,6 +167,7 @@ export type FounderMeetingServiceDependencies = {
   updateCalendar: typeof updateGoogleFounderMeeting;
   cancelCalendar: typeof cancelGoogleFounderMeeting;
   memberStanding: typeof memberStanding;
+  meetRooms?: BookingMeetRooms;
 };
 
 function dependencies(
@@ -175,6 +180,7 @@ function dependencies(
     updateCalendar: overrides.updateCalendar ?? updateGoogleFounderMeeting,
     cancelCalendar: overrides.cancelCalendar ?? cancelGoogleFounderMeeting,
     memberStanding: overrides.memberStanding ?? memberStanding,
+    meetRooms: overrides.meetRooms,
   };
 }
 
@@ -213,6 +219,13 @@ function errorCode(error: unknown, fallback: string): string {
   return raw.split(":", 1)[0].slice(0, 120) || fallback;
 }
 
+function meetRoomIdPatch(
+  roomIdBeforeRemoval: string | null,
+  appointment: AppointmentRow,
+): { meet_room_id?: string | null } {
+  return roomIdBeforeRemoval ? { meet_room_id: appointment.meet_room_id } : {};
+}
+
 function asReceipt(row: AppointmentRow): GoogleCalendarReceipt | null {
   if (
     row.calendar_status !== "verified" ||
@@ -233,13 +246,243 @@ function asReceipt(row: AppointmentRow): GoogleCalendarReceipt | null {
   };
 }
 
+function isGoogleMeetingLink(value: string | null): boolean {
+  return /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i.test(value || "");
+}
+
+/**
+ * The room's title when its lead record carries no name (the live port prefers the lead record, through the same
+ * rule as the room page's prefill, lib/meet/guest-name.ts). Only a first name: anyone who holds the link sees it.
+ */
+function fallbackMeetRoomTitle(clientName: string): string {
+  const firstName = firstNameOf(clientName, "");
+  // Not cut here: createMeetRoom keeps a title by characters, and a cut by UTF-16 units could split one.
+  return firstName === "there" ? "OASIS call" : `OASIS call with ${firstName}`;
+}
+
+async function storeMeetRoomId(
+  db: Db,
+  appointment: AppointmentRow,
+  roomId: string | null,
+): Promise<AppointmentRow> {
+  let query = db.from("call_appointments").update({
+    meet_room_id: roomId,
+    updated_at: new Date().toISOString(),
+  }).eq("tenant_id", appointment.tenant_id)
+    .eq("id", appointment.id)
+    .eq("lead_id", appointment.lead_id)
+    .eq("revision", Number(appointment.revision));
+  query = appointment.meet_room_id
+    ? query.eq("meet_room_id", appointment.meet_room_id)
+    : query.is("meet_room_id", null);
+  const saved = await query.select("*").maybeSingle();
+  if (saved.error || !saved.data) {
+    throw new Error(`meet_room_write_failed:${saved.error?.message || "row_changed"}`);
+  }
+  return saved.data as AppointmentRow;
+}
+
+async function removeMeetRoomForAppointment(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  actorUserId: string | null = null,
+): Promise<AppointmentRow> {
+  const roomId = appointment.meet_room_id;
+  if (!roomId || !deps.meetRooms) return appointment;
+  try {
+    await deps.meetRooms.remove(
+      appointment.tenant_id,
+      roomId,
+      actorUserId || appointment.assigned_to || appointment.created_by,
+    );
+  } catch (error) {
+    console.error("[founder-meeting] Oasis room removal failed", {
+      appointmentId: appointment.id,
+      roomId,
+      code: errorCode(error, "meet_room_remove_failed"),
+    });
+    return appointment;
+  }
+  try {
+    return await storeMeetRoomId(deps.db, appointment, null);
+  } catch (error) {
+    console.error("[founder-meeting] Oasis room reference clear failed", {
+      appointmentId: appointment.id,
+      roomId,
+      code: errorCode(error, "meet_room_clear_failed"),
+    });
+    return appointment;
+  }
+}
+
+async function createAndStoreMeetRoom(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  input: { hostUserId: string; startsAt: string; clientName: string },
+): Promise<{ appointment: AppointmentRow; room: { id: string; url: string } }> {
+  if (!deps.meetRooms) throw new Error("meet_room_port_missing");
+  const room = await deps.meetRooms.create({
+    tenantId: appointment.tenant_id,
+    hostUserId: input.hostUserId,
+    leadId: appointment.lead_id || null,
+    startsAt: input.startsAt,
+    title: fallbackMeetRoomTitle(input.clientName),
+  });
+  try {
+    const saved = await storeMeetRoomId(deps.db, appointment, room.id);
+    return { appointment: saved, room };
+  } catch (error) {
+    try {
+      await deps.meetRooms.remove(appointment.tenant_id, room.id, input.hostUserId);
+    } catch (cleanupError) {
+      // Known limit (Codex on the booking PR): when both the save and this delete fail, no row points at the room,
+      // so no retry finds it. It stays a scheduled room nobody was sent the link to: it holds no call, no media and
+      // no recording, and the error below names it for a manual delete.
+      console.error("[founder-meeting] unpersisted Oasis room cleanup failed", {
+        appointmentId: appointment.id,
+        roomId: room.id,
+        code: errorCode(cleanupError, "meet_room_remove_failed"),
+      });
+    }
+    throw error;
+  }
+}
+
+/**
+ * The room a booking uses: its stored one when still scheduled or live, else a new one; `room` is null for the
+ * Google Meet path. The appointment returned is the row as it now stands, room reference included, so the caller
+ * never writes back a reference this cleared. Exported for the tests.
+ */
+export async function meetRoomForBooking(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  input: { hostUserId: string; startsAt: string; clientName: string },
+): Promise<{ appointment: AppointmentRow; room: { id: string; url: string } | null }> {
+  if (!deps.meetRooms) return { appointment, room: null };
+  // An earlier attempt reached Google with no room, so it booked Google Meet and its event may exist. The retry's
+  // insert finds that event by its fixed id and checks it matches, so the retry keeps Google Meet (Codex on the
+  // booking PR).
+  if (appointment.google_event_id && !appointment.meet_room_id) return { appointment, room: null };
+  let current = appointment;
+  if (current.meet_room_id) {
+    const existing = await deps.meetRooms.find(current.tenant_id, current.meet_room_id);
+    // Only a scheduled or live room is reused, also while media is down (a reschedule keeps its room then too). An
+    // ended one (an earlier cleanup ended it, then failed) would answer room_ended to the guest, so it is cleared
+    // away and replaced (Codex on the booking PR).
+    if (existing && existing.status !== "ended") return { appointment: current, room: existing };
+    if (existing) {
+      try {
+        await deps.meetRooms.remove(current.tenant_id, existing.id, input.hostUserId);
+      } catch (error) {
+        console.error("[founder-meeting] ended Oasis room removal failed before its replacement", {
+          appointmentId: current.id,
+          roomId: existing.id,
+          code: errorCode(error, "meet_room_remove_failed"),
+        });
+      }
+    }
+    // The reference is dead either way. It goes before anything else, so a fall back to Google never carries it
+    // (a later reschedule would read it as an Oasis booking). If it cannot be cleared, the booking fails here.
+    current = await storeMeetRoomId(deps.db, current, null);
+  }
+  if (!deps.meetRooms.ready()) return { appointment: current, room: null };
+  try {
+    return await createAndStoreMeetRoom(current, deps, input);
+  } catch (error) {
+    console.error("[founder-meeting] Oasis room creation failed; using Google Meet", {
+      appointmentId: current.id,
+      code: errorCode(error, "meet_room_create_failed"),
+    });
+    return { appointment: current, room: null };
+  }
+}
+
+type RescheduledMeetRoom = {
+  appointment: AppointmentRow;
+  meetingLink?: string;
+  moved: boolean;
+  created: boolean;
+  previousRoomId: string | null;
+};
+
+async function meetRoomForReschedule(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  startsAt: string,
+  options: { refuseUnmovableRoom?: boolean } = {},
+): Promise<RescheduledMeetRoom> {
+  const fallback = isGoogleMeetingLink(appointment.google_meet_link)
+    ? undefined
+    : appointment.google_meet_link || undefined;
+  const previousRoomId = appointment.meet_room_id;
+  if (!deps.meetRooms) {
+    return { appointment, meetingLink: fallback, moved: false, created: false, previousRoomId };
+  }
+  if (!deps.meetRooms.ready()) {
+    let moved = false;
+    if (previousRoomId) {
+      try {
+        moved = await deps.meetRooms.reschedule(appointment.tenant_id, previousRoomId, startsAt);
+        if (!moved) {
+          console.error("[founder-meeting] Oasis room reschedule failed while media is unavailable", {
+            appointmentId: appointment.id,
+            roomId: previousRoomId,
+            code: "meet_room_reschedule_failed",
+          });
+        }
+      } catch (error) {
+        console.error("[founder-meeting] Oasis room reschedule failed while media is unavailable", {
+          appointmentId: appointment.id,
+          roomId: previousRoomId,
+          code: errorCode(error, "meet_room_reschedule_failed"),
+        });
+      }
+    }
+    // With media down no new room can be made, and a room that did not move (ended or gone) is a dead link: refuse
+    // the move rather than confirm a meeting nobody can join (Codex on the booking PR). Moving a meeting BACK (the
+    // reconciler's compensation) never refuses: the old time keeps the old link either way.
+    if (previousRoomId && !moved && options.refuseUnmovableRoom) {
+      throw new Error("meet_room_unavailable");
+    }
+    return {
+      appointment,
+      meetingLink: previousRoomId ? appointment.google_meet_link || undefined : fallback,
+      moved,
+      created: false,
+      previousRoomId,
+    };
+  }
+  // A meeting booked on Google Meet (before Oasis Meet, or while its media was down) keeps its Google Meet when it
+  // moves: a room now would put a second link in an invite that already carries one.
+  if (!previousRoomId && isGoogleMeetingLink(appointment.google_meet_link)) {
+    return { appointment, moved: false, created: false, previousRoomId: null };
+  }
+  if (previousRoomId) {
+    const existing = await deps.meetRooms.find(appointment.tenant_id, previousRoomId);
+    if (existing && await deps.meetRooms.reschedule(appointment.tenant_id, previousRoomId, startsAt)) {
+      return { appointment, meetingLink: existing.url, moved: true, created: false, previousRoomId };
+    }
+  }
+  const created = await createAndStoreMeetRoom(appointment, deps, {
+    hostUserId: appointment.assigned_to || appointment.created_by,
+    startsAt,
+    clientName: appointment.client_name_snapshot || "",
+  });
+  return {
+    appointment: created.appointment,
+    meetingLink: created.room.url,
+    moved: false,
+    created: true,
+    previousRoomId,
+  };
+}
 function assertOrganizer(receipt: GoogleCalendarReceipt, expectedOrganizerEmail: string): void {
   const organizer = receipt.organizerEmail.trim().toLowerCase();
   if (organizer === expectedOrganizerEmail) return;
   // Workspace fallback (2026-08-25): when the booking ran on the workspace
   // identity because the host has no personal work connection, Google reports
   // the workspace address as organizer. That is the sanctioned shape, not a
-  // mismatch — reject only an unexpected third identity.
+  // mismatch -- reject only an unexpected third identity.
   const systemAddress = systemOrganizerEmail();
   if (systemAddress && organizer === systemAddress) return;
   throw new Error("calendar_organizer_mismatch");
@@ -1104,11 +1347,15 @@ async function markPendingError(
  * design: the call itself is already durable, so a failure here is logged for
  * the next sync to repair and never fails or rolls back the meeting change.
  */
-async function syncScheduleMirrors(db: Db, tenantId: string, appointmentId: string): Promise<void> {
+async function syncScheduleMirrors(
+  db: Db,
+  tenantId: string,
+  appointmentId: string,
+): Promise<void> {
   try {
     const row = await db
       .from("call_appointments")
-      .select("scheduled_for,duration_minutes,status,workflow_status,calendar_status")
+      .select("scheduled_for,duration_minutes,status,workflow_status,calendar_status,lead_id,google_meet_link")
       .eq("tenant_id", tenantId)
       .eq("id", appointmentId)
       .maybeSingle();
@@ -1119,6 +1366,8 @@ async function syncScheduleMirrors(db: Db, tenantId: string, appointmentId: stri
       status: string;
       workflow_status: string;
       calendar_status: string;
+      lead_id: string;
+      google_meet_link: string | null;
     };
     if (call.status === "cancelled" || call.workflow_status === "cancelled" || call.calendar_status === "cancelled") {
       const removed = await db.from("calendar_events").delete().eq("tenant_id", tenantId).eq("appointment_id", appointmentId);
@@ -1127,11 +1376,17 @@ async function syncScheduleMirrors(db: Db, tenantId: string, appointmentId: stri
     }
     const start = Date.parse(call.scheduled_for);
     if (!Number.isFinite(start)) return;
+    // The link follows the row too, every time: a run that only rewrote it when this call changed the room left a
+    // copy on a dead room after a retry or a compensation (Codex on the booking PR). Rewriting the same link is a no-op.
+    const meetingFields = call.google_meet_link
+      ? publicBookingScheduleMeetingFields({ leadId: call.lead_id, meetUrl: call.google_meet_link })
+      : {};
     const updated = await db
       .from("calendar_events")
       .update({
         start_at: new Date(start).toISOString(),
         end_at: new Date(start + (Number(call.duration_minutes) || 15) * 60_000).toISOString(),
+        ...meetingFields,
         updated_at: new Date().toISOString(),
       })
       .eq("tenant_id", tenantId)
@@ -1329,6 +1584,12 @@ export async function createVerifiedFounderMeeting(input: {
     if (!leaseToken) throw new Error("meeting_transition_pending");
     let providerReceipt: GoogleCalendarReceipt | null = null;
     try {
+      const roomResult = await meetRoomForBooking(appointment, deps, {
+        hostUserId: input.hostUserId,
+        startsAt: meetingAt,
+        clientName: contact.name || "",
+      });
+      appointment = roomResult.appointment;
       const calendarInput = {
         tenantId: input.tenantId,
         hostUserId: input.hostUserId,
@@ -1344,6 +1605,7 @@ export async function createVerifiedFounderMeeting(input: {
         website: contact.website || undefined,
         clientAgenda,
         expectedOrganizerEmail,
+        ...(roomResult.room ? { meetingLink: roomResult.room.url } : {}),
       };
       providerReceipt = await deps.createCalendar(calendarInput);
       assertOrganizer(providerReceipt, expectedOrganizerEmail);
@@ -1393,6 +1655,11 @@ export async function createVerifiedFounderMeeting(input: {
           });
         }
       }
+      const roomIdBeforeRemoval = appointment.meet_room_id;
+      if (!eventId || compensated) {
+        appointment = await removeMeetRoomForAppointment(appointment, deps, input.hostUserId);
+      }
+      const roomPatch = meetRoomIdPatch(roomIdBeforeRemoval, appointment);
       const reason = errorCode(error, "calendar_create_failed");
       const failurePatch = compensated
         ? {
@@ -1400,12 +1667,14 @@ export async function createVerifiedFounderMeeting(input: {
             workflow_status: "cancelled",
             calendar_status: "cancelled",
             google_event_id: eventId,
+            ...roomPatch,
             ...clearPendingFields(nowIso),
           }
         : {
             calendar_status: "failed",
             calendar_error: reason.slice(0, 500),
             ...(eventId ? { google_event_id: eventId } : {}),
+            ...roomPatch,
             updated_at: nowIso,
           };
       const failure = await db.from("call_appointments").update(failurePatch)
@@ -1453,11 +1722,14 @@ export async function createVerifiedFounderMeeting(input: {
         expectedOrganizerEmail,
       };
       await deps.cancelCalendar(cancelInput);
+      const roomIdBeforeRemoval = appointment.meet_room_id;
+      appointment = await removeMeetRoomForAppointment(appointment, deps, input.hostUserId);
       await cancelOutstandingNotifications(db, appointment, "booking_compensated", nowIso);
       await db.from("call_appointments").update({
         status: "cancelled",
         workflow_status: "cancelled",
         calendar_status: "cancelled",
+        ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
         ...clearPendingFields(nowIso),
       }).eq("tenant_id", input.tenantId).eq("id", appointment.id);
     } catch (compensationError) {
@@ -1635,8 +1907,11 @@ export async function compensatePendingFounderMeetingBooking(input: {
     await markPendingError(deps.db, appointment, leaseToken, code, nowIso);
     throw new Error(code, { cause: error });
   }
+  const roomIdBeforeRemoval = appointment.meet_room_id;
+  appointment = await removeMeetRoomForAppointment(appointment, deps, hostUserId);
   const providerApplied = await deps.db.from("call_appointments").update({
     pending_compensation_applied_at: nowIso,
+    ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
     updated_at: nowIso,
   }).eq("tenant_id", input.tenantId)
     .eq("id", appointment.id)
@@ -1744,7 +2019,7 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   // A reschedule is LIVE work for the host: Google re-sends the invite from
   // their calendar and every new reminder row goes out as them. A host
   // deactivated since booking must not get either, so refuse before anything
-  // is reserved, patched or queued. A failed read refuses too (retryable) —
+  // is reserved, patched or queued. A failed read refuses too (retryable) --
   // an unknown standing must not send as the person.
   let hostStanding: MemberStanding;
   try {
@@ -1770,9 +2045,13 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   const clientAgenda = boundedRequired(appointment.client_agenda, 500, "client_agenda_required");
   const currentRevision = Number(appointment.revision || 1);
   const nowIso = new Date(deps.now()).toISOString();
+  const previousStartsAt = appointment.previous_scheduled_for;
 
   let receipt: GoogleCalendarReceipt;
+  let roomChange: RescheduledMeetRoom | null = null;
   try {
+    roomChange = await meetRoomForReschedule(appointment, deps, meetingAt, { refuseUnmovableRoom: true });
+    appointment = roomChange.appointment;
     const calendarInput = {
       tenantId: input.tenantId,
       hostUserId,
@@ -1788,10 +2067,35 @@ export async function rescheduleVerifiedFounderMeeting(input: {
       website: contact.website || undefined,
       clientAgenda,
       expectedOrganizerEmail,
+      ...(roomChange.meetingLink ? { meetingLink: roomChange.meetingLink } : {}),
     };
     receipt = await deps.updateCalendar(calendarInput);
     assertOrganizer(receipt, expectedOrganizerEmail);
   } catch (error) {
+    if (roomChange?.created && appointment.meet_room_id) {
+      appointment = await removeMeetRoomForAppointment(appointment, deps, hostUserId);
+      if (roomChange.previousRoomId) {
+        try {
+          appointment = await storeMeetRoomId(db, appointment, roomChange.previousRoomId);
+        } catch (rollbackError) {
+          console.error("[founder-meeting] Oasis room reference rollback failed", {
+            appointmentId: appointment.id,
+            roomId: roomChange.previousRoomId,
+            code: errorCode(rollbackError, "meet_room_rollback_failed"),
+          });
+        }
+      }
+    } else if (roomChange?.moved && roomChange.previousRoomId && previousStartsAt && deps.meetRooms) {
+      try {
+        await deps.meetRooms.reschedule(input.tenantId, roomChange.previousRoomId, previousStartsAt);
+      } catch (rollbackError) {
+        console.error("[founder-meeting] Oasis room reschedule rollback failed", {
+          appointmentId: appointment.id,
+          roomId: roomChange.previousRoomId,
+          code: errorCode(rollbackError, "meet_room_reschedule_rollback_failed"),
+        });
+      }
+    }
     const reason = errorCode(error, "calendar_update_failed");
     await markPendingError(db, appointment, leaseToken, reason, nowIso);
     throw new Error(reason, { cause: error });
@@ -1844,7 +2148,7 @@ export async function rescheduleVerifiedFounderMeeting(input: {
     clientAgenda,
     deps.now(),
   );
-  // The Schedule copies follow the new time (best-effort; see syncScheduleMirrors).
+  // The Schedule copies follow the new time and, for a replacement room, its new link.
   await syncScheduleMirrors(db, input.tenantId, appointment.id);
   return meeting;
 }
@@ -1905,6 +2209,7 @@ export async function cancelVerifiedFounderMeeting(input: {
     appointment.calendar_status === "cancelled" &&
     appointment.workflow_status === "cancelled"
   ) {
+    appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
     return { disposition: "cancelled", appointmentId: appointment.id, requestId: input.requestId };
   }
   if (cancellationPreservesHistory(appointment, deps.now())) {
@@ -1945,8 +2250,11 @@ export async function cancelVerifiedFounderMeeting(input: {
       expectedOrganizerEmail: appointment.organizer_email_snapshot!,
     };
     await deps.cancelCalendar(cancelInput);
+    const roomIdBeforeRemoval = appointment.meet_room_id;
+    appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
     const providerMark = await db.from("call_appointments").update({
       pending_provider_applied_at: nowIso,
+      ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
       updated_at: nowIso,
     }).eq("tenant_id", input.tenantId)
       .eq("id", appointment.id)
@@ -2269,17 +2577,22 @@ async function compensateReschedule(
     !appointment.pending_request_id ||
     !appointment.pending_lease_token
   ) return false;
-  const contact = contactFromAppointment(appointment);
-  const clientAgenda = boundedRequired(appointment.client_agenda, 500, "client_agenda_required");
+  const previousStartsAt = appointment.previous_scheduled_for;
+  const hostUserId = appointment.assigned_to;
+  let working = appointment;
+  const roomChange = await meetRoomForReschedule(working, deps, previousStartsAt);
+  working = roomChange.appointment;
+  const contact = contactFromAppointment(working);
+  const clientAgenda = boundedRequired(working.client_agenda, 500, "client_agenda_required");
   const expectedOrganizerEmail = normalizedEmail(
     appointment.organizer_email_snapshot,
     "calendar_organizer_mismatch",
   );
   const calendarInput = {
     tenantId: appointment.tenant_id,
-    hostUserId: appointment.assigned_to,
+    hostUserId,
     eventId: appointment.google_event_id,
-    meetingAt: appointment.previous_scheduled_for,
+    meetingAt: previousStartsAt,
     timezone: FOUNDER_MEETING_TIMEZONE,
     durationMinutes: normalizedMeetingDuration(appointment.duration_minutes),
     offerLabel: normalizedOfferLabel(appointment.offer_label, normalizedMeetingDuration(appointment.duration_minutes)),
@@ -2289,16 +2602,16 @@ async function compensateReschedule(
     website: contact.website || undefined,
     clientAgenda,
     expectedOrganizerEmail,
+    ...(roomChange.meetingLink ? { meetingLink: roomChange.meetingLink } : {}),
   };
   const nowIso = new Date(nowMs).toISOString();
-  let working = appointment;
   let receipt = asReceipt(working);
   if (!working.pending_compensation_applied_at) {
     receipt = await deps.updateCalendar(calendarInput);
     assertOrganizer(receipt, expectedOrganizerEmail);
     const phaseRevision = Number(working.revision) + 1;
     const phase = await deps.db.from("call_appointments").update({
-      scheduled_for: working.previous_scheduled_for,
+      scheduled_for: previousStartsAt,
       status: working.previous_status || "scheduled",
       workflow_status: "pending_transition",
       google_calendar_id: receipt.calendarId,
@@ -2374,7 +2687,7 @@ async function compensateReschedule(
     .select("*")
     .maybeSingle();
   if (restored.error || !restored.data) return false;
-  // The call is back on its old time, so the Schedule copies go back with it.
+  // The call is back on its old time, so the Schedule copies go back with it, link included.
   await syncScheduleMirrors(deps.db, working.tenant_id, working.id);
   return true;
 }
@@ -2452,8 +2765,11 @@ async function reconcileTenantFounderMeetingSagas(
           };
           await deps.cancelCalendar(cancelInput);
         }
+        const roomIdBeforeRemoval = appointment.meet_room_id;
+        appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
         const providerApplied = await deps.db.from("call_appointments").update({
           pending_compensation_applied_at: nowIso,
+          ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
           updated_at: nowIso,
         }).eq("tenant_id", tenantId)
           .eq("id", appointment.id)
@@ -2529,8 +2845,11 @@ async function reconcileTenantFounderMeetingSagas(
           eventId: appointment.google_event_id,
           expectedOrganizerEmail,
         });
+        const roomIdBeforeRemoval = appointment.meet_room_id;
+        appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
         const providerMark = await deps.db.from("call_appointments").update({
           pending_provider_applied_at: nowIso,
+          ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
           updated_at: nowIso,
         }).eq("tenant_id", tenantId)
           .eq("id", appointment.id)
@@ -2565,7 +2884,41 @@ async function reconcileTenantFounderMeetingSagas(
       result.errors.push(errorCode(error, "meeting_saga_reconcile_failed"));
     }
   }
+  await retryCancelledRoomCleanup(tenantId, limit, deps, result);
   return result;
+}
+
+/**
+ * A cancelled meeting whose room's delete failed keeps meet_room_id (removeMeetRoomForAppointment clears it only once
+ * the room is gone). Its workflow is already terminal, so the pending-transition scan above never sees it again: this
+ * retries the delete each run until it goes through (Codex on the booking PR). A failure stays counted and kept.
+ */
+async function retryCancelledRoomCleanup(
+  tenantId: string,
+  limit: number,
+  deps: FounderMeetingServiceDependencies,
+  result: FounderMeetingReconciliationResult,
+): Promise<void> {
+  if (!deps.meetRooms) return;
+  const held = await deps.db.from("call_appointments")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .eq("status", "cancelled")
+    .not("meet_room_id", "is", null)
+    .order("updated_at", { ascending: true })
+    .limit(limit);
+  if (held.error) {
+    result.failed += 1;
+    result.errors.push("meeting_room_cleanup_scan_failed");
+    return;
+  }
+  for (const row of (held.data || []) as AppointmentRow[]) {
+    const after = await removeMeetRoomForAppointment(row, deps, row.assigned_to);
+    if (after.meet_room_id) {
+      result.failed += 1;
+      result.errors.push("meeting_room_cleanup_failed");
+    }
+  }
 }
 
 /**

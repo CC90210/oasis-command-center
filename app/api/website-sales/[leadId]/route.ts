@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { mayHostAuditCall, mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isUniqueViolationError } from "@/lib/api-helpers";
@@ -232,7 +233,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   const db = getServiceSupabase();
   const lead = await db.from("tenant_records").select("id,data").eq("tenant_id", session.tenantId).eq("id",leadId).eq("entity_type","lead").maybeSingle();
   if (!lead.data) return NextResponse.json({ok:false,error:"lead_not_found"},{status:404});
-  // The lead's fields live in the row's `data` JSON column — the row object
+  // The lead's fields live in the row's `data` JSON column -- the row object
   // itself only has {id, data}. Reading sales_program/assigned_to off the row
   // (the pre-v2 shape of this line) made every request 404 as
   // not_website_sales_lead before any action could run.
@@ -357,7 +358,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
               clientAgreedToTime:true,
               handoffComplete:true,
             },
-          });
+          }, bookingMeetRoomDeps());
           await activateVerifiedFounderMeeting(session.tenantId, existingMeeting.appointmentId);
         } catch (error) {
           const detail = error instanceof Error ? error.message : "booking_request_mismatch";
@@ -437,7 +438,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
               leadId,
               appointmentId,
               requestId,
-            });
+            }, bookingMeetRoomDeps());
             return NextResponse.json({
               ok:true,
               idempotent:true,
@@ -660,7 +661,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           clientAgreedToTime:true,
           handoffComplete:true,
         },
-      });
+      }, bookingMeetRoomDeps());
     } catch (error) {
       const detail = error instanceof Error ? error.message : "calendar_create_failed";
       const code = detail.split(":",1)[0];
@@ -792,7 +793,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             leadId,
             appointmentId,
             requestId,
-          });
+          }, bookingMeetRoomDeps());
           cancellationDisposition = reservation.disposition;
           if (reservation.disposition === "pending") {
             cancellationAfterTransition = { appointmentId, requestId };
@@ -843,7 +844,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             requestId,
             meetingAt:nextActionAt,
             openerAttendee,
-          });
+          }, bookingMeetRoomDeps());
         } catch (error) {
           const detail = error instanceof Error ? error.message : "calendar_update_failed";
           const code = detail.split(":",1)[0];
@@ -929,7 +930,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     const packageId = body.packageId as WebsitePackageId;
     const automationIds = Array.isArray(body.automationIds) ? body.automationIds.filter((value): value is string => typeof value === "string") : [];
     // Retired add-ons stay resolvable for historical deals but can never be
-    // attached to a NEW quote — isSellableAutomation is the only gate.
+    // attached to a NEW quote -- isSellableAutomation is the only gate.
     if (!WEBSITE_PACKAGES[packageId] || !automationIds.every(isSellableAutomation)) return NextResponse.json({ok:false,error:"invalid_offer"},{status:400});
     const setupAmount = Number(body.setupAmount);
     const monthlyAmount = Number(body.monthlyAmount);
@@ -1554,7 +1555,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   // timestamp in the same Turso record patch and normalize legacy OASIS rows
   // onto the program marker once they are actively worked.
   if (trackedAction) patch.last_contacted_at = occurredAt;
-  // A CALL note is a per-touch fact and belongs in the interaction ledger — it
+  // A CALL note is a per-touch fact and belongs in the interaction ledger -- it
   // is appended to contentParts below and shows in "Activity and files".
   // last_handoff_note is the FOUNDER handoff note: single-valued, rendered under
   // the label "Founder handoff note", and used to pre-fill the handoff composer
@@ -1687,7 +1688,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         leadId,
         appointmentId:cancellationAfterTransition.appointmentId,
         requestId:cancellationAfterTransition.requestId,
-      });
+      }, bookingMeetRoomDeps());
       cancellationDisposition = cancellation.disposition;
     } catch (error) {
       return NextResponse.json({
@@ -1702,7 +1703,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   // This route patches the record directly instead of going through
   // updateRecord(), so nothing here fires the portal stage hooks on its own.
   // That silence is why the qualified -> booking-link email never sent from a
-  // rep's own Qualify button — the one path that matters most. Run the hooks
+  // rep's own Qualify button -- the one path that matters most. Run the hooks
   // explicitly for a real stage change. runStageTransitionHooks swallows every
   // hook error internally, so a reaction can still never fail the write.
   if (nextStage && nextStage !== priorStage) {

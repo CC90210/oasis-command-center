@@ -331,7 +331,7 @@ export function LeadLifecycleActions({
   // Connected gets its OWN follow-up pair, both empty, and does not borrow the
   // shared nextActionDate above. That one is pre-filled with today, so on a
   // shared field "the rep did not ask for a callback" and "the rep left the
-  // default" are the same value — and a follow-up nobody asked for is as wrong
+  // default" are the same value -- and a follow-up nobody asked for is as wrong
   // as a promise silently dropped. Empty here means empty.
   const [connectedFollowUpDate, setConnectedFollowUpDate] = useState("");
   const [connectedFollowUpTime, setConnectedFollowUpTime] = useState("");
@@ -465,9 +465,9 @@ export function LeadLifecycleActions({
   /**
    * TWO DIFFERENT QUESTIONS, AND CONFLATING THEM BROKE BOOKING TWICE IN A DAY.
    *
-   *   ...Connected — is THIS HOST's own Google connection alive? Drives the
+   *   ...Connected -- is THIS HOST's own Google connection alive? Drives the
    *                  BANNER, which must stay honest about the host.
-   *   ...CanBook   — can a booking be created AT ALL? Drives the BUTTON, and is
+   *   ...CanBook   -- can a booking be created AT ALL? Drives the BUTTON, and is
    *                  true when the host is connected OR the shared OASIS
    *                  workspace calendar is configured to carry it.
    *
@@ -767,7 +767,7 @@ export function LeadLifecycleActions({
           callOutcome === "attempted" || callOutcome === "voicemail"
             ? nextActionAt
             : // Connected may carry one, and the server has always accepted it
-              // — only this client withheld it. "We connected but they asked us
+              // -- only this client withheld it. "We connected but they asked us
               // to call back Thursday" had nowhere to go.
               callOutcome === "connected"
               ? connectedFollowUpAt || undefined
@@ -801,14 +801,14 @@ export function LeadLifecycleActions({
   const connectedFollowUpAt = founderMeetingIso(connectedFollowUpDate, connectedFollowUpTime);
   // Half a callback is not a callback. founderMeetingIso needs BOTH a date and
   // a time, so a rep who picks "Thursday" and no time would otherwise sail
-  // through Save having recorded nothing — the promise silently dropped, which
+  // through Save having recorded nothing -- the promise silently dropped, which
   // is the failure this whole field exists to prevent. Blank is fine; half is
   // not, and the button says so rather than the save lying.
   const connectedFollowUpPartial =
     Boolean(connectedFollowUpDate) !== Boolean(connectedFollowUpTime);
   // ...and half is not the only way to get nothing. founderMeetingIso returns
   // null when the wall-clock time does not EXIST on that date in the founder
-  // timezone — the spring-forward gap — so both fields can be filled, the
+  // timezone -- the spring-forward gap -- so both fields can be filled, the
   // partial check passes, and the send still carries undefined. Same silent
   // dropped promise by a different route. (Caught by CodeRabbit on #388; the
   // premise was verified against founderMeetingIso's own verification block,
@@ -950,9 +950,9 @@ export function LeadLifecycleActions({
         <LifecycleProgress activeIndex={activeMilestone} />
         <div className="space-y-4 p-4 sm:p-5">
           <div role="note" className="rounded-xl border border-sky-400/30 bg-sky-400/5 px-4 py-3">
-            <div className="text-sm font-semibold text-sky-100">Manager coaching view · read only</div>
+            <div className="text-sm font-semibold text-sky-100">Manager coaching view - read only</div>
             <p className="mt-1 text-xs leading-5 text-fg-muted">
-              You are reviewing {assignedRepName ? `${assignedRepName}’s` : "another rep’s"} lead. Use the activity and context below to coach performance; only the assigned owner can record actions.
+              You are reviewing {assignedRepName ? `${assignedRepName}\u2019s` : "another rep\u2019s"} lead. Use the activity and context below to coach performance; only the assigned owner can record actions.
             </p>
           </div>
           <div className="rounded-xl border border-bg-border bg-bg-elev/25 p-4">
@@ -1047,7 +1047,7 @@ export function LeadLifecycleActions({
         {showCallOutcomes && (
           <div className="space-y-5 rounded-xl border border-accent/25 bg-accent/[0.025] p-4">
             <div>
-              <div className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">1 · Place the call</div>
+              <div className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">1 - Place the call</div>
               <LeadActionToolbar
                 displayName={displayLeadName}
                 phone={leadPhone}
@@ -1076,7 +1076,7 @@ export function LeadLifecycleActions({
               ) : null}
             </div>
             <fieldset disabled={!callAccepted || disabled} className="space-y-4 disabled:opacity-50">
-              <legend className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">2 · Choose one outcome</legend>
+              <legend className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">2 - Choose one outcome</legend>
               {!callAccepted ? <p className="text-xs text-fg-muted">Outcome choices unlock after you open the dialer or confirm the call already happened.</p> : null}
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                 {[["attempted", "No answer"], ["voicemail", "Voicemail left"], ["connected", "Connected"], ["lost", "Close as lost"]].map(([value, label]) => (
@@ -1112,7 +1112,7 @@ export function LeadLifecycleActions({
                     />
                     <p className="mt-1.5 text-[11px] text-fg-dim">
                       {connectedFollowUpPartial
-                        ? "Set both the date and the time, or clear both — half a callback is not saved."
+                        ? "Set both the date and the time, or clear both -- half a callback is not saved."
                         : !connectedFollowUpUsable
                           ? "That time does not exist on that date where the clocks change. Pick another time."
                           : "Leave blank if nothing was promised. Setting it schedules the callback without moving the stage."}
@@ -1175,13 +1175,13 @@ export function LeadLifecycleActions({
         {mayScheduleFounderAudit && (
           <fieldset id="founder-audit-handoff" className="scroll-mt-24 space-y-4 rounded-xl border border-bg-border p-4">
             <legend className="px-2 text-xs font-bold uppercase tracking-wider text-fg-muted">
-              Create Google Meet invite
+              Create video call invite
             </legend>
             <div className="flex items-start gap-2 text-xs leading-5 text-fg-muted">
               <Clock3 className="h-4 w-4 text-accent" aria-hidden />
               <span>
                 Confirm the client, host, date, and handoff once. The server creates the Google Calendar
-                event and Meet link, sends the client invite, records the touch, and then moves the lead.
+                event and video call link, sends the client invite, records the touch, and then moves the lead.
               </span>
             </div>
             <ol className="grid grid-cols-2 gap-2 sm:grid-cols-5" aria-label="Booking steps">
@@ -1236,7 +1236,7 @@ export function LeadLifecycleActions({
                   </select>
                 </label>
                 {founderRosterState === "loading" ? (
-                  <div role="status" className="mt-2 text-xs text-fg-muted">Loading eligible hosts…</div>
+                  <div role="status" className="mt-2 text-xs text-fg-muted">Loading eligible hosts...</div>
                 ) : founderRosterState === "unavailable" ? (
                   <div role="alert" className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/5 px-2.5 py-2 text-xs text-amber-200">
                     The host list could not be loaded. Refresh before continuing; no booking has been attempted.
@@ -1289,7 +1289,7 @@ export function LeadLifecycleActions({
                           // tenant; the organiser identity is still stated,
                           // because a rep should never be surprised by whose name
                           // the client sees on the invite.
-                          "Ready to book from the OASIS AI calendar. The client gets the Calendar invite and Meet link, and the OASIS AI account appears as the organiser."
+                          "Ready to book from the OASIS AI calendar. The client gets the Calendar invite and video call link, and the OASIS AI account appears as the organiser."
                         : selectedFounder?.calendar_identity_mismatch
                           ? `This host connected ${selectedFounder.connected_google_address || "a different Google account"}. They must reconnect with ${selectedFounder.email || "their OASIS work email"} before client invitations can be sent.`
                           : "This host needs to reconnect Google Calendar before a booking can be created."}
@@ -1513,7 +1513,7 @@ export function LeadLifecycleActions({
             {bookingStep === 4 ? (
               <div className="space-y-4">
                 <dl className="grid gap-3 sm:grid-cols-2">
-                  <SummaryItem label="Client" value={`${bookingContact.name || bookingContact.company} · ${bookingContact.email}`} />
+                  <SummaryItem label="Client" value={`${bookingContact.name || bookingContact.company} - ${bookingContact.email}`} />
                   <SummaryItem label="Phone" value={bookingContact.phone} />
                   <SummaryItem label="Host" value={selectedFounder?.display_name || selectedFounder?.full_name || "Not selected"} />
                   <SummaryItem label="Meeting" value={founderMeetingLabel || "Not selected"} />
@@ -1525,7 +1525,7 @@ export function LeadLifecycleActions({
                     {bookingBlockedReason ? (
                       <span className="text-amber-200">Required to book: {bookingBlockedReason}</span>
                     ) : (
-                      <span className="text-emerald-300">All details explicitly confirmed — ready to book.</span>
+                      <span className="text-emerald-300">All details explicitly confirmed -- ready to book.</span>
                     )}
                   </div>
                   <button
@@ -1535,7 +1535,7 @@ export function LeadLifecycleActions({
                     className="btn-primary inline-flex items-center gap-2 !px-4 !py-2 text-sm"
                   >
                     <CheckCircle2 className="h-4 w-4" aria-hidden />
-                    Create Google Meet & send invite
+                    Create video call & send invite
                   </button>
                 </div>
               </div>
@@ -1682,8 +1682,8 @@ export function LeadLifecycleActions({
             ) : null}
             {dealOutcome === "reschedule" ? (
               <div className="rounded-lg border border-accent/25 bg-accent/5 px-3 py-2 text-xs leading-5 text-fg-muted">
-                Rescheduling updates the existing Google invite, preserves its Meet link, and replaces the old
-                reminder time after Google verifies the change.
+                Rescheduling updates the existing Calendar invite and its video call details, then replaces the old
+                reminder time after the provider verifies the change.
               </div>
             ) : null}
             <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
@@ -1775,10 +1775,10 @@ export function LeadLifecycleActions({
           <div className="space-y-4 rounded-xl border border-emerald-400/25 bg-emerald-400/[0.035] p-4">
             <div>
               <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
-                Proposal frozen — waiting for collected payment
+                Proposal frozen -- waiting for collected payment
               </div>
               <div className="mt-2 text-sm font-semibold text-fg">
-                {WEBSITE_PACKAGES[packageId].name} · {currency} {Number(setupAmount).toLocaleString()} setup
+                {WEBSITE_PACKAGES[packageId].name} - {currency} {Number(setupAmount).toLocaleString()} setup
                 {Number(monthlyAmount) > 0 ? ` + ${Number(monthlyAmount).toLocaleString()}/month` : ""}
               </div>
               <div className="mt-1 text-sm font-semibold text-emerald-200">
@@ -1816,8 +1816,8 @@ export function LeadLifecycleActions({
                   onChange={(event) => setPaymentProvider(event.target.value === "manual" ? "manual" : "stripe")}
                   className={`${INPUT} mt-1.5 sm:max-w-xs`}
                 >
-                  <option value="stripe">Stripe — verify with provider</option>
-                  <option value="manual">Interac / wire — founder verification</option>
+                  <option value="stripe">Stripe -- verify with provider</option>
+                  <option value="manual">Interac / wire -- founder verification</option>
                 </select>
               </label>
             ) : (
@@ -2140,7 +2140,7 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-bg-border/70 bg-bg-elev/25 p-3">
       <dt className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">{label}</dt>
-      <dd className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-fg-muted">{value || "—"}</dd>
+      <dd className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-fg-muted">{value || "--"}</dd>
     </div>
   );
 }
@@ -2274,7 +2274,7 @@ function readableError(code: string): string {
     invalid_request:
       "Google rejected the booking details. Check the meeting time, the client email, and the host, then retry.",
     calendar_organizer_mismatch: "The selected host connected a different Google account. Reconnect with their OASIS work email before booking.",
-    google_meet_link_missing: "Google created the event but has not returned its Meet link yet. Retry this booking; it will reconcile the same event.",
+    google_meet_link_missing: "Google created the event but has not returned its video call link yet. Retry this booking; it will reconcile the same event.",
     calendar_create_failed: "Google Calendar could not verify this booking. Nothing moved; retry after checking the host connection.",
     // The public booking page reads both founders' calendars for open times
     // (lib/integrations/google-calendar.ts listGoogleCalendarBusy). A rep never

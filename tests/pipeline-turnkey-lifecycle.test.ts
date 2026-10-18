@@ -72,7 +72,7 @@ assert(
 );
 assert(
   lifecycle.includes("Host & time") &&
-    lifecycle.includes("Create Google Meet & send invite") &&
+    lifecycle.includes("Create video call & send invite") &&
     actionToolbar.includes("Open dialer") &&
     actionToolbar.includes("tel:${dialTarget}") &&
     !actionToolbar.includes("/api/leads/${leadId}/call") &&
@@ -176,7 +176,7 @@ assert(
   "two-person closes preserve opener attribution while paying the assigned closer",
 );
 assert(
-  lifecycle.includes("Create Google Meet & send invite") &&
+  lifecycle.includes("Create video call & send invite") &&
     lifecycle.includes("founderMeetingIso") &&
     lifecycle.includes("founderBookingRequestId") &&
     lifecycle.includes("contactConfirmed") &&
