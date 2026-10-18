@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bookingMeetRoomDeps, bookingMeetRoomTitle, liveBookingMeetRooms } from "../lib/booking/meet-room";
+import { MEET_RECORDING_NOTICE } from "../lib/meet/recording-notice";
 import {
   createGoogleFounderMeeting,
   founderMeetingEventId,
@@ -124,6 +125,40 @@ async function testRescheduleKeepsOasisRoomWithoutConference(): Promise<void> {
   assert.equal(receipt.meetLink, ROOM_URL);
 }
 
+async function testRecordedRoomInviteCarriesTheNotice(): Promise<void> {
+  // Maven's line, directly under the link, when the room records; on the create and the move alike.
+  const eventId = founderMeetingEventId(TENANT, HOST, REQUEST);
+  const payloads: Array<Record<string, unknown>> = [];
+  const capture = dependencies(async (_input, init) => {
+    const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    payloads.push(payload);
+    return response(providerEvent(eventId, payload));
+  });
+  const base = {
+    tenantId: TENANT,
+    hostUserId: HOST,
+    expectedOrganizerEmail: ORGANIZER,
+    timezone: "America/Toronto",
+    durationMinutes: 30,
+    offerLabel: "discovery call",
+    clientEmail: "client@example.com",
+    clientAgenda: "A 30-minute discovery call with OASIS AI Solutions.",
+    meetingLink: ROOM_URL,
+  };
+  await createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: true }, capture);
+  await updateGoogleFounderMeeting({ ...base, eventId, meetingAt: "2026-10-20T17:00:00.000Z", meetingRecorded: true }, capture);
+  for (const payload of payloads) {
+    assert.ok(
+      String(payload.description).endsWith(`\n\nJoin the video call: ${ROOM_URL}\n${MEET_RECORDING_NOTICE}`),
+      `the notice sits directly under the link: ${JSON.stringify(payload.description)}`,
+    );
+  }
+  // A room that does not record, or a Google Meet invite, never says so.
+  payloads.length = 0;
+  await createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: false }, capture);
+  assert.equal(String(payloads[0].description).includes(MEET_RECORDING_NOTICE), false);
+}
+
 function testLivePortUsesTheLeadTitleRule(): void {
   assert.equal(typeof liveBookingMeetRooms, "function");
   assert.equal(bookingMeetRoomTitle("Taylor", "OASIS call with Fallback"), "OASIS call with Taylor");
@@ -156,6 +191,7 @@ function testNoTursoMeansNoRoomPort() {
 async function main() {
   await testCreateUsesOasisRoomWithoutGoogleConference();
   await testRescheduleKeepsOasisRoomWithoutConference();
+  await testRecordedRoomInviteCarriesTheNotice();
   testLivePortUsesTheLeadTitleRule();
   testNoTursoMeansNoRoomPort();
   console.log("booking-oasis-meet-calendar: OK");

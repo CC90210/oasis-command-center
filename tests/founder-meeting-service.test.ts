@@ -78,8 +78,10 @@ type CalendarCalls = {
   createdDurations: number[];
   createdOfferLabels: string[];
   createdMeetingLinks: Array<string | undefined>;
+  createdMeetingRecorded: Array<boolean | undefined>;
   updated: string[];
   updatedMeetingLinks: Array<string | undefined>;
+  updatedMeetingRecorded: Array<boolean | undefined>;
   cancelled: string[];
 };
 
@@ -160,18 +162,21 @@ async function fixture() {
     createdDurations: [],
     createdOfferLabels: [],
     createdMeetingLinks: [],
+    createdMeetingRecorded: [],
     updated: [],
     updatedMeetingLinks: [],
+    updatedMeetingRecorded: [],
     cancelled: [],
   };
   const deps = {
     db: db as never,
     now: () => NOW,
-    createCalendar: async (input: { durationMinutes: number; offerLabel?: string; meetingLink?: string }) => {
+    createCalendar: async (input: { durationMinutes: number; offerLabel?: string; meetingLink?: string; meetingRecorded?: boolean }) => {
       calls.created += 1;
       calls.createdDurations.push(input.durationMinutes);
       calls.createdOfferLabels.push(input.offerLabel || "");
       calls.createdMeetingLinks.push(input.meetingLink);
+      calls.createdMeetingRecorded.push(input.meetingRecorded);
       return {
         calendarId: "primary",
         eventId: "event12345",
@@ -181,9 +186,10 @@ async function fixture() {
         organizerEmail: ORGANIZER,
       };
     },
-    updateCalendar: async (input: { meetingAt: string; meetingLink?: string }) => {
+    updateCalendar: async (input: { meetingAt: string; meetingLink?: string; meetingRecorded?: boolean }) => {
       calls.updated.push(input.meetingAt);
       calls.updatedMeetingLinks.push(input.meetingLink);
+      calls.updatedMeetingRecorded.push(input.meetingRecorded);
       return {
         calendarId: "primary",
         eventId: "event12345",
@@ -215,8 +221,8 @@ type FakeMeetRooms = BookingMeetRooms & {
   end(roomId: string): void;
 };
 
-function fakeMeetRooms(isReady = true): FakeMeetRooms {
-  const rooms = new Map<string, { id: string; url: string; status: string }>();
+function fakeMeetRooms(isReady = true, records = true): FakeMeetRooms {
+  const rooms = new Map<string, { id: string; url: string; status: string; recorded: boolean }>();
   const calls: FakeMeetRooms["calls"] = {
     created: [],
     found: [],
@@ -233,7 +239,7 @@ function fakeMeetRooms(isReady = true): FakeMeetRooms {
     createErrors,
     removeErrors,
     seed: (roomId, url = "https://oasisai.work/meet/aaa-bbbb-ccc") => {
-      rooms.set(roomId, { id: roomId, url, status: "scheduled" });
+      rooms.set(roomId, { id: roomId, url, status: "scheduled", recorded: records });
     },
     end: (roomId) => {
       const room = rooms.get(roomId);
@@ -246,8 +252,8 @@ function fakeMeetRooms(isReady = true): FakeMeetRooms {
       const id = `room-${calls.created.length + 1}`;
       const url = `https://oasisai.work/meet/${codes[calls.created.length] || "mmm-nnnn-ooo"}`;
       calls.created.push({ id, title: input.title, startsAt: input.startsAt });
-      rooms.set(id, { id, url, status: "scheduled" });
-      return { id, url };
+      rooms.set(id, { id, url, status: "scheduled", recorded: records });
+      return { id, url, recorded: records };
     },
     find: async (_tenantId, roomId) => {
       calls.found.push(roomId);
@@ -827,6 +833,39 @@ async function testOasisMeetRoomFourthReviewFixes() {
   assert.equal((await appointment(retry.raw, meeting.appointmentId)).meet_room_id, null, "the reconciler never retried the room delete");
   assert.deepEqual(retryRooms.calls.removed, ["room-1", "room-1", "room-1"]);
   await retry.raw.close();
+}
+
+async function testRecordingNoticeFollowsTheRoom() {
+  // Maven's recording notice goes on the invite only when the call's room records (CC, 2026-10-18), on the booking
+  // and on every rewrite of the invite: a move, a move while media is down, and the reconciler's move back.
+  const recorded = await fixture();
+  const rooms = fakeMeetRooms();
+  const deps = { ...recorded.deps, meetRooms: rooms };
+  const meeting = await createVerifiedFounderMeeting(bookingInput("notice-records"), deps);
+  assert.deepEqual(recorded.calls.createdMeetingRecorded, [true], "the booking invite carries the notice");
+  await activateVerifiedFounderMeeting(TENANT, meeting.appointmentId, deps);
+  await rescheduleVerifiedFounderMeeting({
+    tenantId: TENANT, leadId: LEAD, appointmentId: meeting.appointmentId, requestId: "notice-move", meetingAt: LATER,
+  }, deps);
+  assert.equal(recorded.calls.updatedMeetingRecorded.at(-1), true, "a moved room keeps the notice");
+  await activateVerifiedFounderMeeting(TENANT, meeting.appointmentId, deps);
+  const down = fakeMeetRooms(false);
+  down.seed("room-1");
+  await rescheduleVerifiedFounderMeeting({
+    tenantId: TENANT, leadId: LEAD, appointmentId: meeting.appointmentId, requestId: "notice-move-down", meetingAt: FUTURE,
+  }, { ...recorded.deps, meetRooms: down });
+  assert.equal(recorded.calls.updatedMeetingRecorded.at(-1), true, "a move while media is down keeps the notice");
+  await recorded.raw.close();
+
+  // A room that does not record never carries it, and neither does a Google Meet booking.
+  const quiet = await fixture();
+  await createVerifiedFounderMeeting(bookingInput("notice-quiet"), { ...quiet.deps, meetRooms: fakeMeetRooms(true, false) });
+  assert.deepEqual(quiet.calls.createdMeetingRecorded, [false]);
+  await quiet.raw.close();
+  const google = await fixture();
+  await createVerifiedFounderMeeting(bookingInput("notice-google"), { ...google.deps, meetRooms: fakeMeetRooms(false) });
+  assert.deepEqual(google.calls.createdMeetingRecorded, [undefined], "a Google Meet invite has no room and no notice");
+  await google.raw.close();
 }
 
 async function testOasisMeetRoomFinalReviewFixes() {
@@ -2103,6 +2142,7 @@ async function main() {
   await testOasisMeetRoomMovesWhenMediaIsUnavailable();
   await testOasisMeetRoomFourthReviewFixes();
   await testOasisMeetRoomFinalReviewFixes();
+  await testRecordingNoticeFollowsTheRoom();
   await testGoogleOnlyRoomWritesAreOmitted();
   await testCreatePreservesCustomDuration();
   await testReceiptWriteCompensationInvalidatesTheRequestId();

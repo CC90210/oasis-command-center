@@ -319,7 +319,7 @@ async function createAndStoreMeetRoom(
   appointment: AppointmentRow,
   deps: FounderMeetingServiceDependencies,
   input: { hostUserId: string; startsAt: string; clientName: string },
-): Promise<{ appointment: AppointmentRow; room: { id: string; url: string } }> {
+): Promise<{ appointment: AppointmentRow; room: { id: string; url: string; recorded: boolean } }> {
   if (!deps.meetRooms) throw new Error("meet_room_port_missing");
   const room = await deps.meetRooms.create({
     tenantId: appointment.tenant_id,
@@ -357,7 +357,7 @@ export async function meetRoomForBooking(
   appointment: AppointmentRow,
   deps: FounderMeetingServiceDependencies,
   input: { hostUserId: string; startsAt: string; clientName: string },
-): Promise<{ appointment: AppointmentRow; room: { id: string; url: string } | null }> {
+): Promise<{ appointment: AppointmentRow; room: { id: string; url: string; recorded: boolean } | null }> {
   if (!deps.meetRooms) return { appointment, room: null };
   // An earlier attempt reached Google with no room, so it booked Google Meet and its event may exist. The retry's
   // insert finds that event by its fixed id and checks it matches, so the retry keeps Google Meet (Codex on the
@@ -400,10 +400,30 @@ export async function meetRoomForBooking(
 type RescheduledMeetRoom = {
   appointment: AppointmentRow;
   meetingLink?: string;
+  /** The link's room records the call, so the rewritten invite keeps its recording notice. */
+  recorded: boolean;
   moved: boolean;
   created: boolean;
   previousRoomId: string | null;
 };
+
+/** Whether a stored room records, for a path that did not read it. A failed read leaves the notice off, never the move. */
+async function storedRoomRecords(
+  appointment: AppointmentRow,
+  deps: FounderMeetingServiceDependencies,
+  roomId: string,
+): Promise<boolean> {
+  try {
+    return Boolean((await deps.meetRooms?.find(appointment.tenant_id, roomId))?.recorded);
+  } catch (error) {
+    console.error("[founder-meeting] Oasis room read failed; the invite goes without its recording notice", {
+      appointmentId: appointment.id,
+      roomId,
+      code: errorCode(error, "meet_room_read_failed"),
+    });
+    return false;
+  }
+}
 
 async function meetRoomForReschedule(
   appointment: AppointmentRow,
@@ -416,7 +436,7 @@ async function meetRoomForReschedule(
     : appointment.google_meet_link || undefined;
   const previousRoomId = appointment.meet_room_id;
   if (!deps.meetRooms) {
-    return { appointment, meetingLink: fallback, moved: false, created: false, previousRoomId };
+    return { appointment, meetingLink: fallback, recorded: false, moved: false, created: false, previousRoomId };
   }
   if (!deps.meetRooms.ready()) {
     let moved = false;
@@ -447,6 +467,7 @@ async function meetRoomForReschedule(
     return {
       appointment,
       meetingLink: previousRoomId ? appointment.google_meet_link || undefined : fallback,
+      recorded: previousRoomId && moved ? await storedRoomRecords(appointment, deps, previousRoomId) : false,
       moved,
       created: false,
       previousRoomId,
@@ -455,12 +476,19 @@ async function meetRoomForReschedule(
   // A meeting booked on Google Meet (before Oasis Meet, or while its media was down) keeps its Google Meet when it
   // moves: a room now would put a second link in an invite that already carries one.
   if (!previousRoomId && isGoogleMeetingLink(appointment.google_meet_link)) {
-    return { appointment, moved: false, created: false, previousRoomId: null };
+    return { appointment, recorded: false, moved: false, created: false, previousRoomId: null };
   }
   if (previousRoomId) {
     const existing = await deps.meetRooms.find(appointment.tenant_id, previousRoomId);
     if (existing && await deps.meetRooms.reschedule(appointment.tenant_id, previousRoomId, startsAt)) {
-      return { appointment, meetingLink: existing.url, moved: true, created: false, previousRoomId };
+      return {
+        appointment,
+        meetingLink: existing.url,
+        recorded: existing.recorded,
+        moved: true,
+        created: false,
+        previousRoomId,
+      };
     }
   }
   const created = await createAndStoreMeetRoom(appointment, deps, {
@@ -471,6 +499,7 @@ async function meetRoomForReschedule(
   return {
     appointment: created.appointment,
     meetingLink: created.room.url,
+    recorded: created.room.recorded,
     moved: false,
     created: true,
     previousRoomId,
@@ -1605,7 +1634,7 @@ export async function createVerifiedFounderMeeting(input: {
         website: contact.website || undefined,
         clientAgenda,
         expectedOrganizerEmail,
-        ...(roomResult.room ? { meetingLink: roomResult.room.url } : {}),
+        ...(roomResult.room ? { meetingLink: roomResult.room.url, meetingRecorded: roomResult.room.recorded } : {}),
       };
       providerReceipt = await deps.createCalendar(calendarInput);
       assertOrganizer(providerReceipt, expectedOrganizerEmail);
@@ -2067,7 +2096,7 @@ export async function rescheduleVerifiedFounderMeeting(input: {
       website: contact.website || undefined,
       clientAgenda,
       expectedOrganizerEmail,
-      ...(roomChange.meetingLink ? { meetingLink: roomChange.meetingLink } : {}),
+      ...(roomChange.meetingLink ? { meetingLink: roomChange.meetingLink, meetingRecorded: roomChange.recorded } : {}),
     };
     receipt = await deps.updateCalendar(calendarInput);
     assertOrganizer(receipt, expectedOrganizerEmail);
@@ -2602,7 +2631,7 @@ async function compensateReschedule(
     website: contact.website || undefined,
     clientAgenda,
     expectedOrganizerEmail,
-    ...(roomChange.meetingLink ? { meetingLink: roomChange.meetingLink } : {}),
+    ...(roomChange.meetingLink ? { meetingLink: roomChange.meetingLink, meetingRecorded: roomChange.recorded } : {}),
   };
   const nowIso = new Date(nowMs).toISOString();
   let receipt = asReceipt(working);

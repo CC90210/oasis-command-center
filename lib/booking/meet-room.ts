@@ -8,23 +8,26 @@ import { meetRoomUrl } from "@/lib/meet/links";
 import { liveMeetDeps } from "@/lib/meet/live-deps";
 import {
   createMeetRoom,
+  parseMeetCode,
   readMeetRoom,
+  readMeetRoomByCode,
   rescheduleMeetRoom,
 } from "@/lib/meet/rooms";
 
 export type BookingMeetRooms = {
   ready(): boolean;
+  /** `recorded`: the room records the call (meet_rooms.record_audio), so the invite carries the recording notice. */
   create(input: {
     tenantId: string;
     hostUserId: string;
     leadId: string | null;
     startsAt: string;
     title: string;
-  }): Promise<{ id: string; url: string }>;
+  }): Promise<{ id: string; url: string; recorded: boolean }>;
   find(
     tenantId: string,
     roomId: string,
-  ): Promise<{ id: string; url: string; status: string } | null>;
+  ): Promise<{ id: string; url: string; status: string; recorded: boolean } | null>;
   reschedule(tenantId: string, roomId: string, startsAt: string): Promise<boolean>;
   remove(tenantId: string, roomId: string, actorUserId: string | null): Promise<void>;
 };
@@ -46,6 +49,31 @@ export function bookingMeetRoomDeps(): { meetRooms?: BookingMeetRooms } {
     : {};
 }
 
+/**
+ * Does this booked call's link open an Oasis Meet room of this workspace that records? Read from the room itself
+ * (meet_rooms.record_audio), so a confirmation shows the recording notice (lib/meet/recording-notice.ts) exactly when
+ * the room page will ask for consent. False for a Google Meet link, another workspace's room, no room port (off the
+ * Turso data plane), or a read that fails: the notice is left off rather than promised.
+ */
+export async function bookingCallRecorded(tenantId: string, meetUrl: string | null | undefined): Promise<boolean> {
+  if (!bookingMeetRoomDeps().meetRooms) return false;
+  let code: string | null = null;
+  try {
+    const parts = new URL(String(meetUrl || "")).pathname.split("/").filter(Boolean);
+    if (parts.length === 2 && parts[0] === "meet") code = parseMeetCode(parts[1]);
+  } catch {
+    return false;
+  }
+  if (!code) return false;
+  try {
+    const room = await readMeetRoomByCode(getTursoClient(), code);
+    return Boolean(room && room.tenantId === tenantId && room.recordAudio);
+  } catch (error) {
+    console.error("[booking.call-recorded] room read failed", error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
 export function liveBookingMeetRooms(db: Client): BookingMeetRooms {
   const meetDeps = liveMeetDeps();
   return {
@@ -63,11 +91,11 @@ export function liveBookingMeetRooms(db: Client): BookingMeetRooms {
         calendarEventId: null,
         recordAudio: await meetDeps.recording.available(input.tenantId),
       });
-      return { id: room.id, url: meetRoomUrl(room) };
+      return { id: room.id, url: meetRoomUrl(room), recorded: room.recordAudio };
     },
     find: async (tenantId, roomId) => {
       const room = await readMeetRoom(db, { tenantId, roomId });
-      return room ? { id: room.id, url: meetRoomUrl(room), status: room.status } : null;
+      return room ? { id: room.id, url: meetRoomUrl(room), status: room.status, recorded: room.recordAudio } : null;
     },
     reschedule: (tenantId, roomId, startsAt) =>
       rescheduleMeetRoom(db, { tenantId, id: roomId }, startsAt),

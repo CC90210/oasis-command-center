@@ -16,6 +16,7 @@ import {
   type UserIntegrationSetResult,
 } from "@/lib/user-integration-store";
 import { FOUNDER_MEETING_DURATION_MINUTES, founderMeetingOfferLabel } from "@/lib/website-sales-meeting";
+import { MEET_RECORDING_NOTICE } from "@/lib/meet/recording-notice";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
@@ -91,6 +92,8 @@ export type FounderMeetingCalendarRequest = {
   website?: string;
   clientAgenda?: string;
   meetingLink?: string;
+  /** The meeting link's room records the call: the invite says so under the link (MEET_RECORDING_NOTICE). */
+  meetingRecorded?: boolean;
   durationMinutes?: number;
   offerLabel?: string;
 };
@@ -245,6 +248,7 @@ export type CreateGoogleFounderMeetingInput = {
   /** Client-visible agenda only. Internal qualification/handoff notes are forbidden. */
   clientAgenda: string;
   meetingLink?: string;
+  meetingRecorded?: boolean;
 };
 
 export type UpdateGoogleFounderMeetingInput = {
@@ -266,6 +270,7 @@ export type UpdateGoogleFounderMeetingInput = {
   /** Client-visible agenda only. Internal qualification/handoff notes are forbidden. */
   clientAgenda: string;
   meetingLink?: string;
+  meetingRecorded?: boolean;
 };
 
 export type CancelGoogleFounderMeetingInput = {
@@ -769,12 +774,21 @@ function eventTitle(durationMinutes: number, offerLabel: string, businessName?: 
     : `OASIS ${durationMinutes}-minute ${offerLabel}`;
 }
 
-function publicEventDescription(durationMinutes: number, offerLabel: string, clientAgenda?: string, website?: string, meetingLink?: string): string {
+function publicEventDescription(
+  durationMinutes: number,
+  offerLabel: string,
+  clientAgenda?: string,
+  website?: string,
+  meetingLink?: string,
+  meetingRecorded?: boolean,
+): string {
   const agenda = clientAgenda?.trim();
   const sections = [`A ${durationMinutes}-minute ${offerLabel} with OASIS AI Solutions.`];
   if (agenda) sections.push(`Agenda:\n${agenda}`);
   if (website) sections.push(`Website: ${website}`);
-  if (meetingLink) sections.push(`Join the video call: ${meetingLink}`);
+  // The notice is a fixed sentence, never caller text (this adapter takes no free-form description), and only under a
+  // link whose room records: a Google Meet fallback has no consent step, so the sentence would be false there.
+  if (meetingLink) sections.push(`Join the video call: ${meetingLink}${meetingRecorded ? `\n${MEET_RECORDING_NOTICE}` : ""}`);
   return sections.join("\n\n");
 }
 
@@ -1150,7 +1164,9 @@ export async function createFounderMeetingCalendarEvent(
     attendeeEmails: attendees.map((attendee) => attendee.email),
     organizerEmail: bundle.gmail_address || undefined,
     summary: eventTitle(normalized.durationMinutes, normalized.offerLabel, args.businessName),
-    description: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, args.clientAgenda, normalized.website, meetingLink),
+    description: publicEventDescription(
+      normalized.durationMinutes, normalized.offerLabel, args.clientAgenda, normalized.website, meetingLink, args.meetingRecorded === true,
+    ),
   };
   const eventPayload = {
     id: eventId,
@@ -1373,6 +1389,7 @@ export async function createGoogleFounderMeeting(
       website: input.website,
       clientAgenda: input.clientAgenda,
       meetingLink: input.meetingLink,
+      meetingRecorded: input.meetingRecorded,
     },
     dependencyOverrides,
   );
@@ -1470,7 +1487,9 @@ export async function updateGoogleFounderMeeting(
     attendeeEmails: attendees.map((attendee) => attendee.email),
     organizerEmail: bundle.gmail_address || undefined,
     summary: eventTitle(normalized.durationMinutes, normalized.offerLabel, input.company),
-    description: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, input.clientAgenda, normalized.website, meetingLink),
+    description: publicEventDescription(
+      normalized.durationMinutes, normalized.offerLabel, input.clientAgenda, normalized.website, meetingLink, input.meetingRecorded === true,
+    ),
   };
   const response = await authorizedFetch(
     patchUrl.toString(),

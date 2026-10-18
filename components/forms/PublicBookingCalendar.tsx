@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CalendarDays, CheckCircle2, Loader2, Video } from "lucide-react";
 import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
+import { MEET_RECORDING_NOTICE } from "@/lib/meet/recording-notice";
 
 type Availability = {
   ok: boolean;
@@ -19,6 +20,8 @@ type Receipt = {
   meet_url: string;
   calendar_url: string;
   time_zone: string;
+  /** The call's Oasis Meet room records it: the confirmation says so (MEET_RECORDING_NOTICE). */
+  call_recorded?: boolean;
 };
 
 const dayFormat = new Intl.DateTimeFormat("en-CA", {
@@ -213,6 +216,8 @@ export function PublicBookingCalendar({
           </p>
           <p className="text-xs leading-relaxed text-fg-dim">
             Google sent the invitation and calendar file to your email. It includes your private Meet link.
+            {/* One text run, never an extra element: the notice must not shift this tree's markup. */}
+            {receipt.call_recorded ? ` ${MEET_RECORDING_NOTICE}` : ""}
           </p>
         </div>
         <div className="mx-auto flex max-w-sm flex-col gap-2 sm:flex-row">
