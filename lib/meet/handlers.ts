@@ -186,9 +186,10 @@ async function tidyRoomLater(deps: MeetDeps, room: MeetRoom, now: Date): Promise
 
 /**
  * Re-read after a slow SFU call: a leave, a removal or the room's end may have landed meanwhile, and cut and forgotten
- * the session this call just added to. Then what it added is cut too, and the answer is the one the caller gets now.
+ * the session this call just added to (or, for a reconnect, the session it replaced). Then what it added is cut too,
+ * and the answer is the one the caller gets now.
  */
-async function goneMeanwhile(deps: MeetDeps, room: MeetRoom, me: MeetPresence, sfu: SfuClient, sessionId: string): Promise<NextResponse | null> {
+async function goneMeanwhile(deps: MeetDeps, room: MeetRoom, me: MeetPresence, sessionId: string): Promise<NextResponse | null> {
   const [nowRoom, row] = await Promise.all([
     readMeetRoomByCode(deps.db, room.code),
     readPresence(deps.db, { tenantId: room.tenantId, roomId: room.id, participantId: me.id }),
@@ -202,10 +203,13 @@ async function goneMeanwhile(deps: MeetDeps, room: MeetRoom, me: MeetPresence, s
         : !row || row.leftAt
           ? meetError(401, "not_in_room")
           : null;
-  // A re-cut that fails gives the row the id back (the leave, removal or end that came first may have forgotten
-  // it), so the room's tidy-up and its end can still cut what this call added.
-  if (why && !(await cutSession(sfu, sessionId, "sfu.gone_meanwhile")) && nowRoom) {
-    await holdSession(deps.db, room, { participantId: me.id, sessionId });
+  // Cut, and once cut the row lets it go, as every cut of a held session does: a reconnect stored this session after
+  // the leave or end had let the old one go, so the row would otherwise keep a dead id for the tidy-up to chase (Codex
+  // on #701). A re-cut that fails gives the row the id back (the leave, removal or end that came first may have
+  // forgotten it), so the room's tidy-up and its end can still cut what this call added.
+  const held = { participantId: me.id, sessionId };
+  if (why && !(await cutHeld(deps, room, held, "sfu.gone_meanwhile")) && nowRoom) {
+    await holdSession(deps.db, room, held);
   }
   return why;
 }
@@ -485,7 +489,7 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
       // and one that landed while the SFU made it is caught here and cut now. Unchecked, it lived on a row nobody
       // reads again, or on none at all once the room was deleted.
       await setParticipantSession(deps.db, me, sessionId);
-      const gone = await goneMeanwhile(deps, room, me, sfu, sessionId);
+      const gone = await goneMeanwhile(deps, room, me, sessionId);
       if (gone) return gone;
       return meetJson({ ok: true });
     }
@@ -496,7 +500,7 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
       const kept = me.tracks.filter((t) => !body.tracks.some((n) => n.trackName === t.trackName));
       if (kept.length + body.tracks.length > MEET_MAX_TRACKS) return meetError(400, "too_many_tracks");
       const result = await sfu.publish(me.sfuSessionId, body.offer, body.tracks.map(({ mid, trackName }) => ({ mid, trackName })));
-      const gone = await goneMeanwhile(deps, room, me, sfu, me.sfuSessionId);
+      const gone = await goneMeanwhile(deps, room, me, me.sfuSessionId);
       if (gone) return gone;
       const published = body.tracks.flatMap((t) => {
         const r = result.tracks.find((x) => x.trackName === t.trackName);
@@ -521,7 +525,7 @@ export async function handleSfu(req: NextRequest, rawCode: string, deps: MeetDep
         wanted.push({ sessionId: owner.sfuSessionId, trackName: track.trackName, participantId: owner.id });
       }
       const result = await sfu.pull(me.sfuSessionId, wanted.map(({ sessionId, trackName }) => ({ sessionId, trackName })));
-      const gone = await goneMeanwhile(deps, room, me, sfu, me.sfuSessionId);
+      const gone = await goneMeanwhile(deps, room, me, me.sfuSessionId);
       if (gone) return gone;
       const owners = new Map(wanted.map((w) => [`${w.sessionId}\n${w.trackName}`, w.participantId]));
       return meetJson({

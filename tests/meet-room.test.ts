@@ -1037,6 +1037,7 @@ async function main() {
     sfu.hooks.duringNewSession = undefined;
     assert.equal(res.status, 401, "left while the session was being made");
     assert.equal(reads(lastMade()), 1, "the session made for nobody was cut, not left open on a row nobody reads again");
+    assert.equal(await heldSession(guest.id), null, "and once cut the row lets it go, so nothing chases a dead id (Codex on #701)");
   });
 
   await check("an end or a delete that lands while the SFU makes a reconnect's session: that session is cut, and a deleted room leaves nothing", async () => {
@@ -1048,6 +1049,7 @@ async function main() {
       sfu.hooks.duringNewSession = undefined;
       assert.equal(res.status, action === "end" ? 410 : 404, action);
       assert.equal(reads(lastMade()), 1, `${action}: the session made meanwhile was cut (after a delete, no row could ever have named it)`);
+      if (action === "end") assert.equal(await heldSession(guest.id), null, "the ended room's row does not keep the dead id");
       if (action === "delete") assert.equal(await roomRows(call.roomId), 0, "nothing of the deleted room is left");
     }
   });
@@ -1063,6 +1065,7 @@ async function main() {
     assert.ok(storing.landed(), "the leave landed in the gap");
     assert.equal(res.status, 401);
     assert.equal(reads(lastMade()), 1, "checked after it was stored, so the leave that came first is seen and the session cut");
+    assert.equal(await heldSession(guest.id), null, "and the row lets it go");
   });
 
   await check("a leave that read its row before a reconnect stored a new session still cuts that new session", async () => {
