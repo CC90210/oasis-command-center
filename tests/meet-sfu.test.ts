@@ -150,6 +150,11 @@ async function main() {
       console.error = errors;
     }
     assert.equal(await cutSession(failing(new SfuError("session_not_found", "gone", 404)), "S1", "test"), true, "a session the SFU no longer has carries no media");
+    assert.equal(
+      await cutSession(failing(new SfuError("session_error", "Session appears to be disconnected. Please check if the PeerConnection is connected.", 410)), "S1", "test"),
+      true,
+      "nor does one whose connection is gone (every Leave: the page closes its connection first), which can never be read or closed",
+    );
     const closing = (tracks: Array<{ mid?: string; errorCode?: string }>) =>
       ({ ...fake, close: async () => ({ sessionDescription: null, tracks }) }) as unknown as Parameters<typeof cutSession>[0];
     const closeFails = { ...fake, close: async () => { throw new SfuError("sfu_http_502", "bad gateway", 502); } } as unknown as Parameters<typeof cutSession>[0];
@@ -162,6 +167,15 @@ async function main() {
       console.error = errors;
     }
     assert.deepEqual([...settledMids({ tracks: [{ mid: "0" }, { mid: "1", errorCode: "close_track_error" }, { mid: "2", errorCode: "internal_error" }, { errorCode: "x" }] })], ["0", "1"]);
+  });
+
+  await check("a session whose browser has gone counts as cut, through the real client: the SFU's 410 exactly as it answers it live", async () => {
+    // Recorded 2026-10-18 from the live app, for the E2E guest's session after they left.
+    const { impl, sent } = recorder([
+      { status: 410, body: { errorCode: "session_error", errorDescription: "Session appears to be disconnected. Please check if the PeerConnection is connected." } },
+    ]);
+    assert.equal(await cutSession(sfuClient(ENV, impl), "S1", "test"), true);
+    assert.deepEqual(sent.map((s) => `${s.method} ${s.url}`), [`GET ${SFU_BASE}/apps/app123/sessions/S1`], "asked once, and nothing to close");
   });
 
   await check("TURN: credentials minted from the key per join, port 53 dropped; unset or down falls back to STUN", async () => {
