@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { bookingMeetRoomTitle, liveBookingMeetRooms } from "../lib/booking/meet-room";
 import {
   createGoogleFounderMeeting,
   founderMeetingEventId,
@@ -121,9 +122,16 @@ async function testRescheduleKeepsOasisRoomWithoutConference(): Promise<void> {
   assert.equal(receipt.meetLink, ROOM_URL);
 }
 
+function testLivePortUsesTheLeadTitleRule(): void {
+  assert.equal(typeof liveBookingMeetRooms, "function");
+  assert.equal(bookingMeetRoomTitle("Taylor", "OASIS call with Fallback"), "OASIS call with Taylor");
+  assert.equal(bookingMeetRoomTitle(null, "OASIS call with Fallback"), "OASIS call with Fallback");
+}
+
 async function main() {
   await testCreateUsesOasisRoomWithoutGoogleConference();
   await testRescheduleKeepsOasisRoomWithoutConference();
+  testLivePortUsesTheLeadTitleRule();
   console.log("booking-oasis-meet-calendar: OK");
 }
 

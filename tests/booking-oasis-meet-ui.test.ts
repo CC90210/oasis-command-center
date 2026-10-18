@@ -16,4 +16,24 @@ const route = readFileSync("app/api/forms/booking/route.ts", "utf8");
 assert.match(route, /Video call: \$\{meeting\.receipt\.meetLink\}/);
 assert.doesNotMatch(route, /Google Meet: \$\{meeting\.receipt\.meetLink\}/);
 
+
+const founderPanel = readFileSync("components/web-leads/BookMeetPanel.tsx", "utf8");
+assert.match(founderPanel, />Video call<\/dt>/);
+assert.doesNotMatch(founderPanel, />Google Meet<\/dt>/);
+
+const bookingCopy = readFileSync("lib/website-sales-booking.ts", "utf8");
+assert.match(bookingCopy, /short video call with one of our founders/);
+assert.doesNotMatch(bookingCopy, /short Google Meet call/);
+
+const lifecycle = readFileSync("app/pipeline/[id]/LeadLifecycleActions.tsx", "utf8");
+assert.match(lifecycle, /updates the existing Calendar invite and its video call details/);
+assert.doesNotMatch(lifecycle, /preserves its video call link/);
+
+const lifecycleRoute = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
+assert.match(
+  lifecycleRoute,
+  /google_meet_link:verifiedMeeting\?\.receipt\.meetLink/,
+  "a replacement room's verified link is written into the lead record",
+);
+
 console.log("booking-oasis-meet-ui: OK");

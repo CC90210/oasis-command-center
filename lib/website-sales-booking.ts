@@ -154,7 +154,7 @@ export function buildBookingEmail(input: {
     body:
       `Hey ${firstName},\n\n` +
       `You just spoke with our team, and ${company} is exactly the kind of business we do our best work for. ` +
-      `The next step is a short Google Meet call with one of our founders. ` +
+      `The next step is a short video call with one of our founders. ` +
       `We'll walk through exactly what we'd build for ${company} and what it would change for you.\n\n` +
       `${ask}\n\n` +
       `Talk soon,`,

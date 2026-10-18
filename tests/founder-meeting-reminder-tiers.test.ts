@@ -40,8 +40,22 @@ assert.doesNotMatch(
 const oasisMeetingLink = `${teamInviteOrigin()}/meet/abc-defg-hjk`;
 assert.equal(validateMeetingLink("https://meet.google.com/abc-defg-hij"), "https://meet.google.com/abc-defg-hij");
 assert.equal(validateMeetingLink(oasisMeetingLink), oasisMeetingLink);
-assert.throws(() => validateMeetingLink("https://evil.example/meet/abc-defg-hjk"), /google_meet_link_missing/);
-assert.throws(() => validateMeetingLink(`${teamInviteOrigin()}/meet/abc-defg-hil`), /google_meet_link_missing/);
+const canonicalOasisUrl = new URL(oasisMeetingLink);
+const invalidMeetingLinks = [
+  `http://${canonicalOasisUrl.host}${canonicalOasisUrl.pathname}`,
+  `https://person@${canonicalOasisUrl.host}${canonicalOasisUrl.pathname}`,
+  `https://${canonicalOasisUrl.hostname}:444${canonicalOasisUrl.pathname}`,
+  `${oasisMeetingLink}?join=1`,
+  `${oasisMeetingLink}#join`,
+  `${oasisMeetingLink}/extra`,
+  `${teamInviteOrigin()}/meet/ABC-DEFG-HJK`,
+  `https://evil.example${canonicalOasisUrl.pathname}`,
+  `${teamInviteOrigin()}/meet/ab-defg-hjk`,
+  `${teamInviteOrigin()}/meet/abc-defg-hil`,
+];
+for (const link of invalidMeetingLinks) {
+  assert.throws(() => validateMeetingLink(link), /google_meet_link_missing/, link);
+}
 assert.deepEqual(FOUNDER_REMINDER_TIERS, [60, 30, 10]);
 assert.equal(reminderKindFor(60), "reminder_60");
 assert.equal(reminderKindFor(30), "reminder_30");
@@ -145,7 +159,9 @@ const clamped = clampSmsBody(
 assert(countSegments(clamped) <= 2, "outbound reminder stays within two SMS segments");
 assert.match(clamped, /meet\.google\.com\/abc-defg-hij/);
 assert(clamped.endsWith(SMS_STOP_FOOTER), "segment clamping never drops the STOP footer");
-assert.doesNotMatch(clamped, /detailed discovery item/, "agenda is dropped before protected content");const oasisClamped = clampSmsBody(
+assert.doesNotMatch(clamped, /detailed discovery item/, "agenda is dropped before protected content");
+
+const oasisClamped = clampSmsBody(
   `${SMS_STOP_FOOTER}\n${"Long agenda text ".repeat(50)}\nJoin: ${oasisMeetingLink}`,
   2,
 );

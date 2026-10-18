@@ -3,7 +3,7 @@ import { isOasisInternalTenant } from "./ai/tools/client-safe-registry";
 import { teamInviteOrigin } from "./team-invite-email";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const GOOGLE_MEET_RE = /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i;
+const GOOGLE_MEET_RE = /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}$/;
 const OASIS_MEET_PATH_RE = /^\/meet\/[abcdefghijkmnopqrstuvwxyz]{3}-[abcdefghijkmnopqrstuvwxyz]{4}-[abcdefghijkmnopqrstuvwxyz]{3}$/;
 
 export const FOUNDER_MEETING_TIMEZONE = "America/Toronto";

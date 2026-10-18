@@ -1682,7 +1682,7 @@ export function LeadLifecycleActions({
             ) : null}
             {dealOutcome === "reschedule" ? (
               <div className="rounded-lg border border-accent/25 bg-accent/5 px-3 py-2 text-xs leading-5 text-fg-muted">
-                Rescheduling updates the existing Calendar invite, preserves its video call link, and replaces the old
+                Rescheduling updates the existing Calendar invite and its video call details, then replaces the old
                 reminder time after the provider verifies the change.
               </div>
             ) : null}

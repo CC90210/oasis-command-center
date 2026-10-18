@@ -28,6 +28,11 @@ export type BookingMeetRooms = {
   remove(tenantId: string, roomId: string, actorUserId: string | null): Promise<void>;
 };
 
+/** No cut here: createMeetRoom keeps a title by characters (meetTitle), and a cut by UTF-16 units could split one. */
+export function bookingMeetRoomTitle(firstName: string | null, fallback: string): string {
+  return firstName ? `OASIS call with ${firstName}` : fallback;
+}
+
 export function liveBookingMeetRooms(db: Client): BookingMeetRooms {
   const meetDeps = liveMeetDeps();
   return {
@@ -41,7 +46,7 @@ export function liveBookingMeetRooms(db: Client): BookingMeetRooms {
         hostUserId: input.hostUserId,
         leadId: input.leadId,
         startsAt: input.startsAt,
-        title: firstName ? `OASIS call with ${firstName}`.slice(0, 120) : input.title,
+        title: bookingMeetRoomTitle(firstName, input.title),
         calendarEventId: null,
         recordAudio: await meetDeps.recording.available(input.tenantId),
       });

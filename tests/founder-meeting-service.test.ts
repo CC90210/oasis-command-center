@@ -66,6 +66,8 @@ const BASE_SCHEMA = `
     appointment_id TEXT,
     start_at TEXT,
     end_at TEXT,
+    description TEXT,
+    location TEXT,
     updated_at TEXT
   );
 `;
@@ -82,7 +84,7 @@ type CalendarCalls = {
 
 type InstrumentationHooks = {
   onSelect?: (table: string, columns: string) => void;
-  onUpdate?: (table: string) => void;
+  onUpdate?: (table: string, values: Record<string, unknown>) => void;
   beforeMaybeSingle?: (table: string, columns: string | null) => Promise<unknown> | null;
   beforeExecute?: (table: string, columns: string | null) => Promise<unknown> | null;
 };
@@ -116,7 +118,7 @@ function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
         };
         const originalUpdate = builder.update.bind(builder);
         builder.update = (values: Record<string, unknown>, options?: unknown) => {
-          hooks.onUpdate?.(table);
+          hooks.onUpdate?.(table, values);
           return originalUpdate(values, options);
         };
         const originalMaybeSingle = builder.maybeSingle.bind(builder);
@@ -206,6 +208,9 @@ type FakeMeetRooms = BookingMeetRooms & {
     removed: string[];
   };
   rescheduleOutcomes: boolean[];
+  createErrors: Error[];
+  removeErrors: Error[];
+  seed(roomId: string, url?: string): void;
 };
 
 function fakeMeetRooms(isReady = true): FakeMeetRooms {
@@ -217,12 +222,21 @@ function fakeMeetRooms(isReady = true): FakeMeetRooms {
     removed: [],
   };
   const rescheduleOutcomes: boolean[] = [];
+  const createErrors: Error[] = [];
+  const removeErrors: Error[] = [];
   const codes = ["aaa-bbbb-ccc", "ddd-eeee-fff", "ggg-hhhh-jjj"];
   return {
     calls,
     rescheduleOutcomes,
+    createErrors,
+    removeErrors,
+    seed: (roomId, url = "https://oasisai.work/meet/aaa-bbbb-ccc") => {
+      rooms.set(roomId, { id: roomId, url, status: "scheduled" });
+    },
     ready: () => isReady,
     create: async (input) => {
+      const createError = createErrors.shift();
+      if (createError) throw createError;
       const id = `room-${calls.created.length + 1}`;
       const url = `https://oasisai.work/meet/${codes[calls.created.length] || "mmm-nnnn-ooo"}`;
       calls.created.push({ id, title: input.title, startsAt: input.startsAt });
@@ -240,6 +254,8 @@ function fakeMeetRooms(isReady = true): FakeMeetRooms {
     },
     remove: async (_tenantId, roomId) => {
       calls.removed.push(roomId);
+      const removeError = removeErrors.shift();
+      if (removeError) throw removeError;
       rooms.delete(roomId);
     },
   };
@@ -291,6 +307,8 @@ async function insertVerifiedAppointment(raw: Client, values: {
   pendingStartedAt?: string | null;
   pendingLeaseToken?: string | null;
   previousScheduledFor?: string | null;
+  meetRoomId?: string | null;
+  googleMeetLink?: string | null;
 }) {
   const eventId = `event-${values.id}`;
   await raw.execute({
@@ -299,18 +317,19 @@ async function insertVerifiedAppointment(raw: Client, values: {
       created_by, meeting_kind, duration_minutes, timezone, client_name_snapshot,
       company_snapshot, client_email_snapshot, client_phone_snapshot, website_snapshot,
       client_agenda, handoff_note, google_calendar_id, google_event_id,
-      google_event_html_link, google_meet_link, google_ical_uid, calendar_status,
+      google_event_html_link, google_meet_link, meet_room_id, google_ical_uid, calendar_status,
       organizer_email_snapshot, booking_request_id, revision, workflow_status,
       sms_consent, pending_request_id, pending_operation, pending_meeting_at,
       pending_started_at, pending_lease_token, previous_scheduled_for
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     args: [
       values.id, values.tenantId ?? TENANT, values.leadId ?? LEAD, "lead", values.scheduledFor ?? FUTURE, HOST,
       values.status ?? "scheduled", ACTOR, "founder_audit", 15, "America/Toronto",
       "Taylor Smith", "North Star Dental", "taylor@example.com", "+14165550101",
       "https://northstardental.ca/", "Review the site.", "Qualified handoff.",
       "primary", eventId, "https://calendar.google.com/calendar/event?eid=test",
-      "https://meet.google.com/abc-defg-hij", "ical-1", "verified", ORGANIZER,
+      values.googleMeetLink ?? "https://meet.google.com/abc-defg-hij", values.meetRoomId ?? null,
+      "ical-1", "verified", ORGANIZER,
       `booking-${values.id}`, values.revision ?? 1, values.workflowStatus ?? "active", 1,
       values.pendingRequestId ?? null, values.pendingOperation ?? null,
       values.pendingMeetingAt ?? null, values.pendingStartedAt ?? null,
@@ -393,6 +412,16 @@ async function testOasisMeetRoomLifecycle() {
   assert.equal(meetRooms.calls.created.length, 1, "a replay never creates a second room");
 
   await activateVerifiedFounderMeeting(TENANT, meeting.appointmentId, liveDeps);
+  await raw.execute({
+    sql: "INSERT INTO calendar_events (id, tenant_id, appointment_id, description, location) VALUES (?, ?, ?, ?, ?)",
+    args: [
+      "moved-room-mirror",
+      TENANT,
+      meeting.appointmentId,
+      "Lead lead-a\nhttps://oasisai.work/meet/aaa-bbbb-ccc",
+      "https://oasisai.work/meet/aaa-bbbb-ccc",
+    ],
+  });
   const moved = await rescheduleVerifiedFounderMeeting({
     tenantId: TENANT,
     leadId: LEAD,
@@ -404,6 +433,14 @@ async function testOasisMeetRoomLifecycle() {
   assert.equal(meetRooms.calls.rescheduled.at(-1)?.startsAt, LATER);
   assert.equal(calls.updatedMeetingLinks.at(-1), "https://oasisai.work/meet/aaa-bbbb-ccc");
   assert.equal(moved.receipt.meetLink, "https://oasisai.work/meet/aaa-bbbb-ccc");
+  const movedMirror = await raw.execute({
+    sql: "SELECT description, location FROM calendar_events WHERE id = ?",
+    args: ["moved-room-mirror"],
+  });
+  assert.deepEqual({ ...movedMirror.rows[0] }, {
+    description: "Lead lead-a\nhttps://oasisai.work/meet/aaa-bbbb-ccc",
+    location: "https://oasisai.work/meet/aaa-bbbb-ccc",
+  });
 
   await activateVerifiedFounderMeeting(TENANT, meeting.appointmentId, liveDeps);
   const cancelled = await cancelVerifiedFounderMeeting({
@@ -424,6 +461,16 @@ async function testOasisMeetRoomReplacementAndFallback() {
   const replacementDeps = { ...replacement.deps, meetRooms: replacementRooms };
   const booked = await createVerifiedFounderMeeting(bookingInput("oasis-room-replace"), replacementDeps);
   await activateVerifiedFounderMeeting(TENANT, booked.appointmentId, replacementDeps);
+  await replacement.raw.execute({
+    sql: "INSERT INTO calendar_events (id, tenant_id, appointment_id, description, location) VALUES (?, ?, ?, ?, ?)",
+    args: [
+      "replacement-mirror",
+      TENANT,
+      booked.appointmentId,
+      "Lead lead-a\nhttps://oasisai.work/meet/aaa-bbbb-ccc",
+      "https://oasisai.work/meet/aaa-bbbb-ccc",
+    ],
+  });
   replacementRooms.rescheduleOutcomes.push(false);
   const moved = await rescheduleVerifiedFounderMeeting({
     tenantId: TENANT,
@@ -436,6 +483,14 @@ async function testOasisMeetRoomReplacementAndFallback() {
   assert.equal((await appointment(replacement.raw, booked.appointmentId)).meet_room_id, "room-2");
   assert.equal(moved.receipt.meetLink, "https://oasisai.work/meet/ddd-eeee-fff");
   assert.equal(replacement.calls.updatedMeetingLinks.at(-1), "https://oasisai.work/meet/ddd-eeee-fff");
+  const replacementMirror = await replacement.raw.execute({
+    sql: "SELECT description, location FROM calendar_events WHERE id = ?",
+    args: ["replacement-mirror"],
+  });
+  assert.deepEqual({ ...replacementMirror.rows[0] }, {
+    description: "Lead lead-a\nhttps://oasisai.work/meet/ddd-eeee-fff",
+    location: "https://oasisai.work/meet/ddd-eeee-fff",
+  });
   await replacement.raw.close();
 
   const fallback = await fixture();
@@ -488,6 +543,249 @@ async function testOasisMeetRoomCalendarFailureCompensates() {
   assert.deepEqual(meetRooms.calls.removed, ["room-1"]);
   await raw.close();
 }
+async function testOasisMeetRoomRemovalRetriesAfterFailure() {
+  const { raw, deps } = await fixture();
+  const meetRooms = fakeMeetRooms();
+  const liveDeps = { ...deps, meetRooms };
+  const meeting = await createVerifiedFounderMeeting(bookingInput("oasis-room-remove-retry"), liveDeps);
+  await activateVerifiedFounderMeeting(TENANT, meeting.appointmentId, liveDeps);
+  meetRooms.removeErrors.push(new Error("room_delete_failed"));
+
+  const logs: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => { logs.push(args); };
+  try {
+    const cancelled = await cancelVerifiedFounderMeeting({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: meeting.appointmentId,
+      requestId: "oasis-room-remove-retry-cancel",
+    }, liveDeps);
+    assert.equal(cancelled.disposition, "cancelled");
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal((await appointment(raw, meeting.appointmentId)).meet_room_id, "room-1");
+  assert.match(JSON.stringify(logs), /Oasis room removal failed/);
+  await cancelVerifiedFounderMeeting({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: meeting.appointmentId,
+    requestId: "oasis-room-remove-retry-cancel",
+  }, liveDeps);
+  assert.deepEqual(meetRooms.calls.removed, ["room-1", "room-1"]);
+  assert.equal((await appointment(raw, meeting.appointmentId)).meet_room_id, null);
+  await raw.close();
+}
+
+async function testOasisMeetRoomSurvivesLiveCalendarCompensation() {
+  const { raw, deps } = await fixture();
+  const meetRooms = fakeMeetRooms();
+  await raw.execute(
+    "CREATE TRIGGER reject_oasis_receipt_once BEFORE UPDATE ON call_appointments " +
+    "WHEN OLD.booking_request_id = 'oasis-room-live-event' AND OLD.calendar_status = 'creating' " +
+    "AND NEW.calendar_status = 'verified' BEGIN SELECT RAISE(ABORT, 'receipt-write-failure'); END",
+  );
+  let cancelAttempts = 0;
+  const liveDeps = {
+    ...deps,
+    meetRooms,
+    cancelCalendar: async (input: { eventId: string }) => {
+      cancelAttempts += 1;
+      if (cancelAttempts === 1) throw new Error("calendar_cancel_failed");
+      return deps.cancelCalendar(input);
+    },
+  };
+
+  const originalConsoleError = console.error;
+  console.error = () => undefined;
+  try {
+    await assert.rejects(
+      createVerifiedFounderMeeting(bookingInput("oasis-room-live-event"), liveDeps),
+      /meeting_receipt_write_failed/,
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  const failed = await raw.execute({
+    sql: "SELECT id, meet_room_id FROM call_appointments WHERE booking_request_id = ?",
+    args: ["oasis-room-live-event"],
+  });
+  const appointmentId = String(failed.rows[0].id);
+  assert.equal(failed.rows[0].meet_room_id, "room-1");
+  assert.deepEqual(meetRooms.calls.removed, [], "the room stays while its Google event may still be live");
+
+  const reconciled = await reconcileFounderMeetingSagas({
+    tenantId: TENANT,
+    now: new Date("2026-09-01T14:20:00.000Z"),
+    staleAfterMs: 60_000,
+  }, liveDeps);
+  assert.equal(reconciled.cancelled, 1);
+  assert.equal(cancelAttempts, 2);
+  assert.deepEqual(meetRooms.calls.removed, ["room-1"]);
+  assert.equal((await appointment(raw, appointmentId)).meet_room_id, null);
+  await raw.close();
+}
+
+async function testOasisMeetRoomCreationFailuresFallBack() {
+  const createFailure = await fixture();
+  const createRooms = fakeMeetRooms();
+  createRooms.createErrors.push(new Error("room_create_failed"));
+  const originalConsoleError = console.error;
+  console.error = () => undefined;
+  let created: Awaited<ReturnType<typeof createVerifiedFounderMeeting>>;
+  try {
+    created = await createVerifiedFounderMeeting(
+      bookingInput("oasis-room-create-fallback"),
+      { ...createFailure.deps, meetRooms: createRooms },
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(created.receipt.meetLink, "https://meet.google.com/abc-defg-hij");
+  assert.deepEqual(createFailure.calls.createdMeetingLinks, [undefined]);
+  assert.equal((await appointment(createFailure.raw, created.appointmentId)).meet_room_id, null);
+  await createFailure.raw.close();
+
+  const storeFailure = await fixture();
+  const storeRooms = fakeMeetRooms();
+  await storeFailure.raw.execute(
+    "CREATE TRIGGER reject_oasis_room_store BEFORE UPDATE ON call_appointments " +
+    "WHEN OLD.booking_request_id = 'oasis-room-store-fallback' AND NEW.meet_room_id IS NOT NULL " +
+    "BEGIN SELECT RAISE(ABORT, 'room-store-failure'); END",
+  );
+  console.error = () => undefined;
+  let stored: Awaited<ReturnType<typeof createVerifiedFounderMeeting>>;
+  try {
+    stored = await createVerifiedFounderMeeting(
+      bookingInput("oasis-room-store-fallback"),
+      { ...storeFailure.deps, meetRooms: storeRooms },
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(stored.receipt.meetLink, "https://meet.google.com/abc-defg-hij");
+  assert.deepEqual(storeRooms.calls.removed, ["room-1"], "an unpersisted room is removed before Google fallback");
+  assert.equal((await appointment(storeFailure.raw, stored.appointmentId)).meet_room_id, null);
+  await storeFailure.raw.close();
+}
+
+async function testOasisMeetRoomRescheduleRollback() {
+  const movedFixture = await fixture();
+  const movedRooms = fakeMeetRooms();
+  const movedDeps = { ...movedFixture.deps, meetRooms: movedRooms };
+  const movedMeeting = await createVerifiedFounderMeeting(bookingInput("oasis-room-move-rollback"), movedDeps);
+  await activateVerifiedFounderMeeting(TENANT, movedMeeting.appointmentId, movedDeps);
+  await assert.rejects(
+    rescheduleVerifiedFounderMeeting({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: movedMeeting.appointmentId,
+      requestId: "oasis-room-move-rollback-request",
+      meetingAt: LATER,
+    }, {
+      ...movedDeps,
+      updateCalendar: async () => { throw new Error("calendar_update_failed"); },
+    }),
+    /calendar_update_failed/,
+  );
+  assert.deepEqual(movedRooms.calls.rescheduled, [
+    { id: "room-1", startsAt: LATER },
+    { id: "room-1", startsAt: FUTURE },
+  ]);
+  assert.equal((await appointment(movedFixture.raw, movedMeeting.appointmentId)).meet_room_id, "room-1");
+  await movedFixture.raw.close();
+
+  const replacedFixture = await fixture();
+  const replacedRooms = fakeMeetRooms();
+  const replacedDeps = { ...replacedFixture.deps, meetRooms: replacedRooms };
+  const replacedMeeting = await createVerifiedFounderMeeting(bookingInput("oasis-room-replace-rollback"), replacedDeps);
+  await activateVerifiedFounderMeeting(TENANT, replacedMeeting.appointmentId, replacedDeps);
+  replacedRooms.rescheduleOutcomes.push(false);
+  await assert.rejects(
+    rescheduleVerifiedFounderMeeting({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: replacedMeeting.appointmentId,
+      requestId: "oasis-room-replace-rollback-request",
+      meetingAt: LATER,
+    }, {
+      ...replacedDeps,
+      updateCalendar: async () => { throw new Error("calendar_update_failed"); },
+    }),
+    /calendar_update_failed/,
+  );
+  assert.deepEqual(replacedRooms.calls.removed, ["room-2"]);
+  assert.equal((await appointment(replacedFixture.raw, replacedMeeting.appointmentId)).meet_room_id, "room-1");
+  await replacedFixture.raw.close();
+}
+
+async function testOasisMeetRoomMovesWhenMediaIsUnavailable() {
+  const { raw, deps, calls } = await fixture();
+  const bookingRooms = fakeMeetRooms();
+  const booked = await createVerifiedFounderMeeting(
+    bookingInput("oasis-room-media-down"),
+    { ...deps, meetRooms: bookingRooms },
+  );
+  await activateVerifiedFounderMeeting(TENANT, booked.appointmentId, { ...deps, meetRooms: bookingRooms });
+
+  const unavailableRooms = fakeMeetRooms(false);
+  unavailableRooms.seed("room-1", booked.receipt.meetLink);
+  const moved = await rescheduleVerifiedFounderMeeting({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: booked.appointmentId,
+    requestId: "oasis-room-media-down-move",
+    meetingAt: LATER,
+  }, { ...deps, meetRooms: unavailableRooms });
+  assert.deepEqual(unavailableRooms.calls.rescheduled, [{ id: "room-1", startsAt: LATER }]);
+  assert.equal(calls.updatedMeetingLinks.at(-1), booked.receipt.meetLink);
+  assert.equal(moved.receipt.meetLink, booked.receipt.meetLink);
+  assert.equal((await appointment(raw, booked.appointmentId)).meet_room_id, "room-1");
+  await raw.close();
+}
+
+async function testGoogleOnlyRoomWritesAreOmitted() {
+  const first = await fixture();
+  const guardedUpdates: Record<string, unknown>[] = [];
+  const guardedDb = instrumentDb(first.db, {
+    onUpdate: (table, values) => {
+      if (table !== "call_appointments") return;
+      guardedUpdates.push(values);
+      if (Object.hasOwn(values, "meet_room_id")) throw new Error("meet_room_id_column_was_named");
+    },
+  });
+  const guardedDeps = { ...first.deps, db: guardedDb as never };
+  await insertVerifiedAppointment(first.raw, { id: "google-only-cancel" });
+  const cancelled = await cancelVerifiedFounderMeeting({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: "google-only-cancel",
+    requestId: "google-only-cancel-request",
+  }, guardedDeps);
+  assert.equal(cancelled.disposition, "cancelled");
+
+  await insertVerifiedAppointment(first.raw, {
+    id: "google-only-compensation",
+    pendingRequestId: "google-only-book",
+    pendingOperation: "book",
+    pendingMeetingAt: FUTURE,
+    pendingStartedAt: "2026-09-01T13:59:00.000Z",
+    pendingLeaseToken: "google-only-worker",
+    workflowStatus: "pending_transition",
+  });
+  await compensatePendingFounderMeetingBooking({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: "google-only-compensation",
+    requestId: "google-only-book",
+  }, guardedDeps);
+  assert(guardedUpdates.length > 0);
+  assert(guardedUpdates.every((patch) => !Object.hasOwn(patch, "meet_room_id")));
+  await first.raw.close();
+}
+
 async function testCreatePreservesCustomDuration() {
   const { raw, deps, calls } = await fixture();
   const meeting = await createVerifiedFounderMeeting({
@@ -537,8 +835,12 @@ async function testReceiptWriteCompensationInvalidatesTheRequestId() {
 
 async function testPendingBookingCompensationCancelsProviderAndMirror() {
   const { raw, deps, calls } = await fixture();
+  const meetRooms = fakeMeetRooms();
+  meetRooms.seed("room-pending-compensation");
   await insertVerifiedAppointment(raw, {
     id: "meeting-pending-compensation",
+    meetRoomId: "room-pending-compensation",
+    googleMeetLink: "https://oasisai.work/meet/aaa-bbbb-ccc",
     pendingRequestId: "book-pending-compensation",
     pendingOperation: "book",
     pendingMeetingAt: FUTURE,
@@ -555,9 +857,11 @@ async function testPendingBookingCompensationCancelsProviderAndMirror() {
     leadId: LEAD,
     appointmentId: "meeting-pending-compensation",
     requestId: "book-pending-compensation",
-  }, deps);
+  }, { ...deps, meetRooms });
   assert(calls.cancelled.includes("event-meeting-pending-compensation"));
+  assert.deepEqual(meetRooms.calls.removed, ["room-pending-compensation"]);
   assert.equal((await appointment(raw, "meeting-pending-compensation")).workflow_status, "cancelled");
+  assert.equal((await appointment(raw, "meeting-pending-compensation")).meet_room_id, null);
   const mirrors = await raw.execute({
     sql: "SELECT COUNT(*) AS n FROM calendar_events WHERE appointment_id = ?",
     args: ["meeting-pending-compensation"],
@@ -1348,6 +1652,59 @@ async function testSagaReconciliation() {
   await raw.close();
 }
 
+async function testSagaRoomCompensation() {
+  const { raw, deps } = await fixture();
+  const meetRooms = fakeMeetRooms();
+  meetRooms.seed("room-book-saga", "https://oasisai.work/meet/aaa-bbbb-ccc");
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-book-room-saga",
+    pendingRequestId: "book-room-saga",
+    pendingOperation: "book",
+    pendingMeetingAt: FUTURE,
+    pendingStartedAt: "2026-09-01T13:30:00.000Z",
+    pendingLeaseToken: "book-room-worker",
+    workflowStatus: "pending_transition",
+    meetRoomId: "room-book-saga",
+    googleMeetLink: "https://oasisai.work/meet/aaa-bbbb-ccc",
+  });
+  const cancelled = await reconcileFounderMeetingSagas({
+    tenantId: TENANT,
+    now: new Date("2026-09-01T14:20:00.000Z"),
+    staleAfterMs: 60_000,
+  }, { ...deps, meetRooms });
+  assert.equal(cancelled.cancelled, 1);
+  assert.deepEqual(meetRooms.calls.removed, ["room-book-saga"]);
+  assert.equal((await appointment(raw, "meeting-book-room-saga")).meet_room_id, null);
+
+  meetRooms.seed("room-reschedule-saga", "https://oasisai.work/meet/ddd-eeee-fff");
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-reschedule-room-saga",
+    scheduledFor: LATER,
+    revision: 2,
+    pendingRequestId: "reschedule-room-saga",
+    pendingOperation: "reschedule",
+    pendingMeetingAt: LATER,
+    pendingStartedAt: "2026-09-01T13:30:00.000Z",
+    pendingLeaseToken: "reschedule-room-worker",
+    previousScheduledFor: FUTURE,
+    workflowStatus: "pending_transition",
+    meetRoomId: "room-reschedule-saga",
+    googleMeetLink: "https://oasisai.work/meet/ddd-eeee-fff",
+  });
+  const restored = await reconcileFounderMeetingSagas({
+    tenantId: TENANT,
+    now: new Date("2026-09-01T14:20:00.000Z"),
+    staleAfterMs: 60_000,
+  }, { ...deps, meetRooms });
+  assert.equal(restored.compensated, 1);
+  assert.deepEqual(meetRooms.calls.rescheduled.at(-1), {
+    id: "room-reschedule-saga",
+    startsAt: FUTURE,
+  });
+  assert.equal((await appointment(raw, "meeting-reschedule-room-saga")).scheduled_for, FUTURE);
+  await raw.close();
+}
+
 async function testNoShowCompensationRestoresTerminalHistory() {
   const { raw, deps } = await fixture();
   await insertVerifiedAppointment(raw, {
@@ -1512,6 +1869,12 @@ async function main() {
   await testOasisMeetRoomLifecycle();
   await testOasisMeetRoomReplacementAndFallback();
   await testOasisMeetRoomCalendarFailureCompensates();
+  await testOasisMeetRoomRemovalRetriesAfterFailure();
+  await testOasisMeetRoomSurvivesLiveCalendarCompensation();
+  await testOasisMeetRoomCreationFailuresFallBack();
+  await testOasisMeetRoomRescheduleRollback();
+  await testOasisMeetRoomMovesWhenMediaIsUnavailable();
+  await testGoogleOnlyRoomWritesAreOmitted();
   await testCreatePreservesCustomDuration();
   await testReceiptWriteCompensationInvalidatesTheRequestId();
   await testPendingBookingCompensationCancelsProviderAndMirror();
@@ -1534,6 +1897,7 @@ async function main() {
   await testCancellationPreservesHistory();
   await testCancellationReservationPrecedesProviderMutation();
   await testSagaReconciliation();
+  await testSagaRoomCompensation();
   await testNoShowCompensationRestoresTerminalHistory();
   await testReconcilerClaimsBeforeProviderMutation();
   await testRescheduleReconciliationUsesPendingTarget();

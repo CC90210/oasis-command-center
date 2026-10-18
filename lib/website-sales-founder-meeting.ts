@@ -2,6 +2,7 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { publicBookingScheduleMeetingFields } from "@/lib/forms/public-booking";
 import type { BookingMeetRooms } from "@/lib/booking/meet-room";
 import { firstNameOf } from "@/lib/leads/quick-email-draft";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -218,6 +219,13 @@ function errorCode(error: unknown, fallback: string): string {
   return raw.split(":", 1)[0].slice(0, 120) || fallback;
 }
 
+function meetRoomIdPatch(
+  roomIdBeforeRemoval: string | null,
+  appointment: AppointmentRow,
+): { meet_room_id?: string | null } {
+  return roomIdBeforeRemoval ? { meet_room_id: appointment.meet_room_id } : {};
+}
+
 function asReceipt(row: AppointmentRow): GoogleCalendarReceipt | null {
   if (
     row.calendar_status !== "verified" ||
@@ -248,7 +256,8 @@ function isGoogleMeetingLink(value: string | null): boolean {
  */
 function bookingMeetRoomTitle(clientName: string): string {
   const firstName = firstNameOf(clientName, "");
-  return (firstName === "there" ? "OASIS call" : `OASIS call with ${firstName}`).slice(0, 120);
+  // Not cut here: createMeetRoom keeps a title by characters, and a cut by UTF-16 units could split one.
+  return firstName === "there" ? "OASIS call" : `OASIS call with ${firstName}`;
 }
 
 async function storeMeetRoomId(
@@ -292,6 +301,7 @@ async function removeMeetRoomForAppointment(
       roomId,
       code: errorCode(error, "meet_room_remove_failed"),
     });
+    return appointment;
   }
   try {
     return await storeMeetRoomId(deps.db, appointment, null);
@@ -345,7 +355,15 @@ async function meetRoomForBooking(
     const existing = await deps.meetRooms.find(appointment.tenant_id, appointment.meet_room_id);
     if (existing) return { appointment, room: existing };
   }
-  return createAndStoreMeetRoom(appointment, deps, input);
+  try {
+    return await createAndStoreMeetRoom(appointment, deps, input);
+  } catch (error) {
+    console.error("[founder-meeting] Oasis room creation failed; using Google Meet", {
+      appointmentId: appointment.id,
+      code: errorCode(error, "meet_room_create_failed"),
+    });
+    return null;
+  }
 }
 
 type RescheduledMeetRoom = {
@@ -364,10 +382,38 @@ async function meetRoomForReschedule(
   const fallback = isGoogleMeetingLink(appointment.google_meet_link)
     ? undefined
     : appointment.google_meet_link || undefined;
-  if (!deps.meetRooms?.ready()) {
-    return { appointment, meetingLink: fallback, moved: false, created: false, previousRoomId: appointment.meet_room_id };
-  }
   const previousRoomId = appointment.meet_room_id;
+  if (!deps.meetRooms) {
+    return { appointment, meetingLink: fallback, moved: false, created: false, previousRoomId };
+  }
+  if (!deps.meetRooms.ready()) {
+    let moved = false;
+    if (previousRoomId) {
+      try {
+        moved = await deps.meetRooms.reschedule(appointment.tenant_id, previousRoomId, startsAt);
+        if (!moved) {
+          console.error("[founder-meeting] Oasis room reschedule failed while media is unavailable", {
+            appointmentId: appointment.id,
+            roomId: previousRoomId,
+            code: "meet_room_reschedule_failed",
+          });
+        }
+      } catch (error) {
+        console.error("[founder-meeting] Oasis room reschedule failed while media is unavailable", {
+          appointmentId: appointment.id,
+          roomId: previousRoomId,
+          code: errorCode(error, "meet_room_reschedule_failed"),
+        });
+      }
+    }
+    return {
+      appointment,
+      meetingLink: previousRoomId ? appointment.google_meet_link || undefined : fallback,
+      moved,
+      created: false,
+      previousRoomId,
+    };
+  }
   // A meeting booked on Google Meet (before Oasis Meet, or while its media was down) keeps its Google Meet when it
   // moves: a room now would put a second link in an invite that already carries one.
   if (!previousRoomId && isGoogleMeetingLink(appointment.google_meet_link)) {
@@ -1263,11 +1309,16 @@ async function markPendingError(
  * design: the call itself is already durable, so a failure here is logged for
  * the next sync to repair and never fails or rolls back the meeting change.
  */
-async function syncScheduleMirrors(db: Db, tenantId: string, appointmentId: string): Promise<void> {
+async function syncScheduleMirrors(
+  db: Db,
+  tenantId: string,
+  appointmentId: string,
+  options: { meetingLinkChanged?: boolean } = {},
+): Promise<void> {
   try {
     const row = await db
       .from("call_appointments")
-      .select("scheduled_for,duration_minutes,status,workflow_status,calendar_status")
+      .select("scheduled_for,duration_minutes,status,workflow_status,calendar_status,lead_id,google_meet_link")
       .eq("tenant_id", tenantId)
       .eq("id", appointmentId)
       .maybeSingle();
@@ -1278,6 +1329,8 @@ async function syncScheduleMirrors(db: Db, tenantId: string, appointmentId: stri
       status: string;
       workflow_status: string;
       calendar_status: string;
+      lead_id: string;
+      google_meet_link: string | null;
     };
     if (call.status === "cancelled" || call.workflow_status === "cancelled" || call.calendar_status === "cancelled") {
       const removed = await db.from("calendar_events").delete().eq("tenant_id", tenantId).eq("appointment_id", appointmentId);
@@ -1286,11 +1339,15 @@ async function syncScheduleMirrors(db: Db, tenantId: string, appointmentId: stri
     }
     const start = Date.parse(call.scheduled_for);
     if (!Number.isFinite(start)) return;
+    const meetingFields = options.meetingLinkChanged && call.google_meet_link
+      ? publicBookingScheduleMeetingFields({ leadId: call.lead_id, meetUrl: call.google_meet_link })
+      : {};
     const updated = await db
       .from("calendar_events")
       .update({
         start_at: new Date(start).toISOString(),
         end_at: new Date(start + (Number(call.duration_minutes) || 15) * 60_000).toISOString(),
+        ...meetingFields,
         updated_at: new Date().toISOString(),
       })
       .eq("tenant_id", tenantId)
@@ -1559,7 +1616,11 @@ export async function createVerifiedFounderMeeting(input: {
           });
         }
       }
-      appointment = await removeMeetRoomForAppointment(appointment, deps, input.hostUserId);
+      const roomIdBeforeRemoval = appointment.meet_room_id;
+      if (!eventId || compensated) {
+        appointment = await removeMeetRoomForAppointment(appointment, deps, input.hostUserId);
+      }
+      const roomPatch = meetRoomIdPatch(roomIdBeforeRemoval, appointment);
       const reason = errorCode(error, "calendar_create_failed");
       const failurePatch = compensated
         ? {
@@ -1567,14 +1628,14 @@ export async function createVerifiedFounderMeeting(input: {
             workflow_status: "cancelled",
             calendar_status: "cancelled",
             google_event_id: eventId,
-            meet_room_id: null,
+            ...roomPatch,
             ...clearPendingFields(nowIso),
           }
         : {
             calendar_status: "failed",
             calendar_error: reason.slice(0, 500),
             ...(eventId ? { google_event_id: eventId } : {}),
-            meet_room_id: null,
+            ...roomPatch,
             updated_at: nowIso,
           };
       const failure = await db.from("call_appointments").update(failurePatch)
@@ -1622,13 +1683,14 @@ export async function createVerifiedFounderMeeting(input: {
         expectedOrganizerEmail,
       };
       await deps.cancelCalendar(cancelInput);
+      const roomIdBeforeRemoval = appointment.meet_room_id;
       appointment = await removeMeetRoomForAppointment(appointment, deps, input.hostUserId);
       await cancelOutstandingNotifications(db, appointment, "booking_compensated", nowIso);
       await db.from("call_appointments").update({
         status: "cancelled",
         workflow_status: "cancelled",
         calendar_status: "cancelled",
-        meet_room_id: null,
+        ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
         ...clearPendingFields(nowIso),
       }).eq("tenant_id", input.tenantId).eq("id", appointment.id);
     } catch (compensationError) {
@@ -1806,10 +1868,11 @@ export async function compensatePendingFounderMeetingBooking(input: {
     await markPendingError(deps.db, appointment, leaseToken, code, nowIso);
     throw new Error(code, { cause: error });
   }
+  const roomIdBeforeRemoval = appointment.meet_room_id;
   appointment = await removeMeetRoomForAppointment(appointment, deps, hostUserId);
   const providerApplied = await deps.db.from("call_appointments").update({
     pending_compensation_applied_at: nowIso,
-    meet_room_id: null,
+    ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
     updated_at: nowIso,
   }).eq("tenant_id", input.tenantId)
     .eq("id", appointment.id)
@@ -1828,7 +1891,6 @@ export async function compensatePendingFounderMeetingBooking(input: {
     status: "cancelled",
     workflow_status: "cancelled",
     calendar_status: "cancelled",
-    meet_room_id: null,
     last_compensated_request_id: input.requestId,
     cancelled_at: nowIso,
     ...clearPendingFields(nowIso),
@@ -2047,8 +2109,10 @@ export async function rescheduleVerifiedFounderMeeting(input: {
     clientAgenda,
     deps.now(),
   );
-  // The Schedule copies follow the new time (best-effort; see syncScheduleMirrors).
-  await syncScheduleMirrors(db, input.tenantId, appointment.id);
+  // The Schedule copies follow the new time and, for a replacement room, its new link.
+  await syncScheduleMirrors(db, input.tenantId, appointment.id, {
+    meetingLinkChanged: roomChange.created,
+  });
   return meeting;
 }
 
@@ -2076,7 +2140,6 @@ async function finalizeCancellation(
     status: "cancelled",
     workflow_status: "cancelled",
     calendar_status: "cancelled",
-    meet_room_id: null,
     last_cancel_request_id: requestId,
     cancelled_at: nowIso,
     ...clearPendingFields(nowIso),
@@ -2109,6 +2172,7 @@ export async function cancelVerifiedFounderMeeting(input: {
     appointment.calendar_status === "cancelled" &&
     appointment.workflow_status === "cancelled"
   ) {
+    appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
     return { disposition: "cancelled", appointmentId: appointment.id, requestId: input.requestId };
   }
   if (cancellationPreservesHistory(appointment, deps.now())) {
@@ -2149,10 +2213,11 @@ export async function cancelVerifiedFounderMeeting(input: {
       expectedOrganizerEmail: appointment.organizer_email_snapshot!,
     };
     await deps.cancelCalendar(cancelInput);
+    const roomIdBeforeRemoval = appointment.meet_room_id;
     appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
     const providerMark = await db.from("call_appointments").update({
       pending_provider_applied_at: nowIso,
-      meet_room_id: null,
+      ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
       updated_at: nowIso,
     }).eq("tenant_id", input.tenantId)
       .eq("id", appointment.id)
@@ -2586,7 +2651,9 @@ async function compensateReschedule(
     .maybeSingle();
   if (restored.error || !restored.data) return false;
   // The call is back on its old time, so the Schedule copies go back with it.
-  await syncScheduleMirrors(deps.db, working.tenant_id, working.id);
+  await syncScheduleMirrors(deps.db, working.tenant_id, working.id, {
+    meetingLinkChanged: roomChange.created,
+  });
   return true;
 }
 
@@ -2663,10 +2730,11 @@ async function reconcileTenantFounderMeetingSagas(
           };
           await deps.cancelCalendar(cancelInput);
         }
+        const roomIdBeforeRemoval = appointment.meet_room_id;
         appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
         const providerApplied = await deps.db.from("call_appointments").update({
           pending_compensation_applied_at: nowIso,
-          meet_room_id: null,
+          ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
           updated_at: nowIso,
         }).eq("tenant_id", tenantId)
           .eq("id", appointment.id)
@@ -2685,7 +2753,6 @@ async function reconcileTenantFounderMeetingSagas(
           status: "cancelled",
           workflow_status: "cancelled",
           calendar_status: "cancelled",
-          meet_room_id: null,
           last_compensated_request_id: appointment.pending_request_id,
           cancelled_at: nowIso,
           ...clearPendingFields(nowIso),
@@ -2743,10 +2810,11 @@ async function reconcileTenantFounderMeetingSagas(
           eventId: appointment.google_event_id,
           expectedOrganizerEmail,
         });
+        const roomIdBeforeRemoval = appointment.meet_room_id;
         appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
         const providerMark = await deps.db.from("call_appointments").update({
           pending_provider_applied_at: nowIso,
-          meet_room_id: null,
+          ...meetRoomIdPatch(roomIdBeforeRemoval, appointment),
           updated_at: nowIso,
         }).eq("tenant_id", tenantId)
           .eq("id", appointment.id)

@@ -456,7 +456,7 @@ function Receipt({ meeting, zone }: { meeting: BookedMeeting; zone: string }) {
       </div>
       {meeting.meetLink ? (
         <div className="sm:col-span-2">
-          <dt className="text-xs font-semibold text-fg-muted">Google Meet</dt>
+          <dt className="text-xs font-semibold text-fg-muted">Video call</dt>
           <dd><a href={meeting.meetLink} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center break-all text-accent underline">{meeting.meetLink}</a></dd>
         </div>
       ) : null}
