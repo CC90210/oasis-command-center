@@ -112,8 +112,8 @@ export type MeetRoomOptions = {
   pollTimeoutMs?: number;
   /** How long any other call to the room may hang before it counts as failed (default REQUEST_TIMEOUT_MS). */
   requestTimeoutMs?: number;
-  /** Makes the signal that gives up on a call after `ms` (default `deadline` below); tests read what each call asked for. */
-  deadline?: (ms: number) => AbortSignal;
+  /** Makes what gives up on a call after `ms` (default timeoutAfter); tests read what each call asked for. */
+  deadline?: (ms: number) => Deadline;
   /** The wait before the first reconnect try, growing by this much each try (default 1 s). */
   reconnectMs?: number;
 };
@@ -147,15 +147,17 @@ export const POLL_TIMEOUT_MS = 10_000;
  */
 export const REQUEST_TIMEOUT_MS = 20_000;
 
+/** What gives up on one call: `signal` aborts once the deadline passes, `done` stops its timer when the call is over. */
+export type Deadline = { signal: AbortSignal; done: () => void };
+
 /**
- * A signal that aborts after `ms`: AbortSignal.timeout where the browser has it. Safari before 16 does not, and the
- * room page is the one page any guest's browser opens, so there it is the same with a timer.
+ * A deadline of `ms`, made the way lib/meet/recorder.ts gives up on an upload: an AbortController and a timer, which
+ * every browser a guest may bring has (AbortSignal.timeout is missing in Safari before 16).
  */
-function deadline(ms: number): AbortSignal {
-  if (typeof AbortSignal.timeout === "function") return AbortSignal.timeout(ms);
+function timeoutAfter(ms: number): Deadline {
   const controller = new AbortController();
-  setTimeout(() => controller.abort(), ms);
-  return controller.signal;
+  const timer = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, done: () => clearTimeout(timer) };
 }
 /** Reconnect tries before the call gives up: more when the video service itself refused (it can be a passing blip). */
 const RECONNECT_TRIES = 3;
@@ -205,7 +207,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
   const connectMs = options.connectMs ?? 15_000;
   const pollTimeoutMs = options.pollTimeoutMs ?? POLL_TIMEOUT_MS;
   const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
-  const giveUpAfter = options.deadline ?? deadline;
+  const deadline = options.deadline ?? timeoutAfter;
   const reconnectMs = options.reconnectMs ?? 1_000;
   const media = options.media ?? (typeof navigator !== "undefined" ? navigator.mediaDevices : undefined);
   const makePeer = options.makePeer ?? ((config: RTCConfiguration) => new RTCPeerConnection(config));
@@ -279,24 +281,30 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
 
   // Every call has a deadline: one that hangs fails like any other, so no screen waits on it for good.
   async function call<T = Record<string, unknown>>(path: string, body?: unknown, method = "POST", timeoutMs = requestTimeoutMs): Promise<T> {
-    const res = await fetchImpl(`${base}${path}`, {
-      method,
-      credentials: "same-origin",
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store",
-      signal: giveUpAfter(timeoutMs),
-    });
-    let json: Record<string, unknown> = {};
+    // The deadline covers the answer's body too: a reply whose body stalls is given up like one that never came.
+    const limit = deadline(timeoutMs);
     try {
-      json = (await res.json()) as Record<string, unknown>;
-    } catch {
-      // the status below says what happened
+      const res = await fetchImpl(`${base}${path}`, {
+        method,
+        credentials: "same-origin",
+        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        cache: "no-store",
+        signal: limit.signal,
+      });
+      let json: Record<string, unknown> = {};
+      try {
+        json = (await res.json()) as Record<string, unknown>;
+      } catch {
+        // the status below says what happened
+      }
+      if (!res.ok || json.ok === false) {
+        throw new RoomCallError(res.status, String(json.error ?? `http_${res.status}`), typeof json.reason === "string" ? json.reason : null);
+      }
+      return json as T;
+    } finally {
+      limit.done();
     }
-    if (!res.ok || json.ok === false) {
-      throw new RoomCallError(res.status, String(json.error ?? `http_${res.status}`), typeof json.reason === "string" ? json.reason : null);
-    }
-    return json as T;
   }
 
   const sfu = <T = Record<string, unknown>>(body: unknown) => call<T>("/sfu", body);
@@ -832,10 +840,13 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       // Out at once: the camera and microphone stop now, whatever the network does (a dropped network is a common
       // reason to leave). The room is told after; if that never arrives, it drops anyone who stops polling.
       ended("left");
+      const limit = deadline(requestTimeoutMs);
       try {
-        await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true, signal: giveUpAfter(requestTimeoutMs) });
+        await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true, signal: limit.signal });
       } catch {
         // already out of the call; see above
+      } finally {
+        limit.done();
       }
     },
   };

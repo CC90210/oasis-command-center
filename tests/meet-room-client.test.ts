@@ -794,9 +794,9 @@ async function main() {
     const madeFor = new WeakMap<AbortSignal, number>();
     const { c } = controller(room, {
       deadline: (ms) => {
-        const signal = AbortSignal.timeout(ms);
+        const signal = new AbortController().signal; // never fires: only the length asked for is read here
         madeFor.set(signal, ms);
-        return signal;
+        return { signal, done: () => undefined };
       },
     }); // no lengths set: the defaults
     const length = (path: string) => {
@@ -812,16 +812,14 @@ async function main() {
     assert.equal(length("/leave"), REQUEST_TIMEOUT_MS, "and so does the leave");
   });
 
-  await check("a join that never answers gives up at its deadline, and the person can try again; Safari before 16 too", async () => {
+  await check("a join that never answers gives up at its deadline, and the person can try again, in a browser without AbortSignal.timeout too", async () => {
     const timeout = AbortSignal.timeout;
-    for (const browser of ["today's", "without AbortSignal.timeout"]) {
+    for (const browser of ["today's", "without AbortSignal.timeout (Safari before 16)"]) {
       if (browser !== "today's") (AbortSignal as unknown as { timeout?: unknown }).timeout = undefined;
       try {
         const room = fakeRoom({ role: "host", hangJoins: 1 });
-        // Short deadlines for the polls too: the fallback's timers are not unref'd, and must not hold the run open.
-        const { c } = controller(room, { requestTimeoutMs: 50, pollTimeoutMs: 50 });
+        const { c } = controller(room, { requestTimeoutMs: 50 });
         const joining = c.join({ consent: true, mic: null, cam: null });
-        // waitFor's own timer keeps the run going while the deadline (an unref'd timer in Node) is all that is left.
         await waitFor(`${browser}: given up, not left on "Joining..."`, () => c.snapshot().phase.kind === "failed");
         await joining;
         assert.ok(room.log.includes("join:hung"), browser);

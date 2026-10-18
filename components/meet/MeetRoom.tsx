@@ -123,7 +123,9 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, re
     case "live":
       return <CallScreen controller={controller} snapshot={snapshot} code={code} title={title} canShare={canShare} />;
     case "joining":
-      return <Lobby mode="joining" title={heading} preview={null} />;
+      // The first /join on its way, or a dropped line's wait. Leave works in both: the engine ends the call at once
+      // and keeps it ended whatever the join's answer, so this screen always offers a way out.
+      return <Lobby mode="joining" title={heading} preview={null} onLeave={() => void controller.leave()} />;
     case "connecting":
       return (
         <Lobby
