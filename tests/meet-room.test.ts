@@ -583,7 +583,7 @@ async function main() {
   };
   const reads = (sessionId: string) => sfu.calls.filter((x) => x.op === "tracks" && x.sessionId === sessionId).length;
 
-  await check("a removed guest whose cut failed is cut again from the host's next polls, at most every 30 seconds; a session the SFU no longer has counts as cut", async () => {
+  await check("a removed guest whose cut failed is cut again from the room's next polls, at most every 30 seconds; a session the SFU no longer has counts as cut", async () => {
     const call = await callWith(2);
     const [guest, other] = call.guests;
     const session = call.sessions[1];

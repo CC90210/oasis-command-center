@@ -36,7 +36,7 @@ keeps the transcript. No meeting vendor bill: media runs on Cloudflare Realtime 
 - A reconnect replaces the SFU session only once the old one is cut. The others see each person's session as a tag that changes on a reconnect, and pull their tracks anew.
 - "Recorded" is shown in the call only while the room's creator, whose browser records, is in it.
 - End asks the room to end before the recorder stops: an End that fails keeps the meeting going and recorded.
-- Media is cut at the SFU on leave, remove, end and delete. A row keeps its session id until the cut goes through; a failed one is retried from the host's polls (after the answer, at most every 30 seconds per room) for an hour, and by Delete. Delete never waits on an SFU that does not answer.
+- Media is cut at the SFU on leave, remove, end and delete. A row keeps its session id until the cut goes through; a failed one is retried from the room's polls (after the answer, at most every 30 seconds per room) for an hour, and by Delete. Delete never waits on an SFU that does not answer.
 - Only the room creator's browser records; if the creator is not in the call, nothing records.
 - Remove is not a ban: the person can come back with the link from a new browser window (there is no account to ban).
 - Rate limits are per Worker isolate (a slowdown for guessing links); the participant cap is the hard ceiling. Up to eight people behind one office address fit the poll limit.

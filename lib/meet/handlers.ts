@@ -553,7 +553,7 @@ export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDe
       if (target && target.userId && target.userId === auth.userId) return meetError(400, "cannot_remove_self");
       const removed = await removeParticipant(deps.db, room, body.participantId, now);
       if (!removed) return meetError(404, "participant_not_found");
-      // A cut that fails keeps the session id: the host's next polls try again (retryCutsLater).
+      // A cut that fails keeps the session id: the room's next polls try again (tidyRoomLater).
       const mediaCut = removed.sfuSessionId
         ? await cutHeld(deps, room, { participantId: removed.id, sessionId: removed.sfuSessionId }, "host.remove")
         : true;
