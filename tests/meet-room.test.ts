@@ -30,6 +30,7 @@ import {
   MEET_STALE_MS,
   endAbandonedRooms,
   forgetSession,
+  holdSession,
   pendingCuts,
 } from "../lib/meet/participants";
 import { displayMeetCode, readMeetRoomByCode } from "../lib/meet/rooms";
@@ -82,8 +83,8 @@ function fakeSfu() {
   const sessions = new Map<string, Array<{ mid: string; location: string; trackName: string; status: string }>>();
   const down = new Set<string>();
   const gone = new Set<string>();
-  /** Run while a pull is on its way: after the SFU has the request, before it adds the pulled track. */
-  const hooks: { duringPull?: () => Promise<unknown> } = {};
+  /** Run while a pull or publish is on its way: after the SFU has the request, before it adds the track. */
+  const hooks: { duringPull?: () => Promise<unknown>; duringPublish?: () => Promise<unknown> } = {};
   let reading = 0;
   let widest = 0;
   let n = 0;
@@ -96,6 +97,7 @@ function fakeSfu() {
     },
     async publish(sessionId, _offer, tracks) {
       calls.push({ op: "publish", sessionId, tracks });
+      if (hooks.duringPublish) await hooks.duringPublish();
       const list = sessions.get(sessionId)!;
       for (const t of tracks) list.push({ mid: t.mid, location: "local", trackName: t.trackName, status: "active" });
       return {
@@ -434,6 +436,16 @@ async function main() {
     assert.equal((await handleJoin(request(`/api/meet/${full}/join`, { body: { consent: true }, ip: freshIp() }), full, deps({ session: as(ADON, true) }))).status, 409, "eight people in all");
     clock += 31_000; // everyone stopped polling: they are gone, and their places are free again
     assert.equal((await handleJoin(request(`/api/meet/${full}/join`, { body: { name: "Late" }, ip: freshIp() }), full, deps())).status, 200);
+
+    // Eight in all counts hosts too: with a host in, a seventh guest fills the room; with two hosts in, it is full.
+    const fill = async (hosts: Array<() => Promise<MeetSession>>, guests: number) => {
+      const c = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false } }), deps({ session: as(CC) })))).room as Json).code);
+      for (const host of hosts) assert.equal((await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: host }))).status, 200);
+      for (let i = 0; i < guests; i += 1) assert.equal((await handleJoin(request(`/api/meet/${c}/join`, { body: { name: `G${i}` }, ip: freshIp() }), c, deps())).status, 200);
+      return (await handleJoin(request(`/api/meet/${c}/join`, { body: { name: "One more" }, ip: freshIp() }), c, deps())).status;
+    };
+    assert.equal(await fill([as(CC)], 6), 200, "one host and six guests: a seventh guest takes the last place");
+    assert.equal(await fill([as(CC), as(ADON, true)], 6), 409, "two hosts and six guests: the room is full, guests or not");
   });
 
   await check("the host ends it: every session the room had is cut, and everyone gets 410", async () => {
@@ -752,9 +764,11 @@ async function main() {
     const room = (await readMeetRoomByCode(db, call.c.replace(/-/g, "")))!;
     await forgetSession(db, room, { participantId: call.guests[0].id, sessionId: "an-older-session" });
     assert.equal(await heldSession(call.guests[0].id), call.sessions[1]);
+    await holdSession(db, room, { participantId: call.guests[0].id, sessionId: "an-older-session" });
+    assert.equal(await heldSession(call.guests[0].id), call.sessions[1], "nor does giving a failed cut's session back");
   });
 
-  await check("silent for two minutes, a participant's own calls are refused and their old token makes a new place, before anything has tidied the room", async () => {
+  await check("silent for five minutes, a participant's own calls are refused and their old token makes a new place, before anything has tidied the room", async () => {
     const call = await callWith(1);
     const [guest] = call.guests;
     clock += MEET_STALE_MS + 1_000; // nobody polled: the room has not been tidied
@@ -763,7 +777,7 @@ async function main() {
     assert.ok(back.participantId && back.participantId !== guest.id, "not revived by the old token: a new join, through the cap");
   });
 
-  await check("someone silent for two minutes has left: their calls are refused, their session is cut, and coming back goes through the cap", async () => {
+  await check("someone silent for five minutes has left: their calls are refused, their session is cut, and coming back goes through the cap", async () => {
     const call = await callWith(1);
     const [guest] = call.guests;
     const hostPolls = () => handleState(request(`/api/meet/${call.c}/state`, { method: "GET", cookie: call.host.cookie, ip: freshIp() }), call.c, deps());
@@ -776,6 +790,38 @@ async function main() {
     assert.ok(back.participantId && back.participantId !== guest.id, "a new place in the room, taken through the cap");
   });
 
+  await check("a short silence is only a gap: someone not heard from for four minutes (a laptop asleep, a locked phone) is still in the call", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    clock += 4 * 60_000;
+    assert.equal((await handleState(request(`/api/meet/${call.c}/state`, { method: "GET", cookie: guest.cookie, ip: freshIp() }), call.c, deps())).status, 200);
+    await settle();
+    assert.equal(await heldSession(guest.id), call.sessions[1], "nothing of theirs was cut");
+  });
+
+  await check("a page that opens the room again as its person leaves gets a new place: the old one counts only if it is still there to refresh", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    let raced = false;
+    const racing = new Proxy(db, {
+      get(target, key) {
+        const value = Reflect.get(target, key);
+        if (key !== "execute") return typeof value === "function" ? value.bind(target) : value;
+        return async (stmt: Parameters<typeof db.execute>[0]) => {
+          const sql = typeof stmt === "string" ? stmt : stmt.sql;
+          if (!raced && sql.startsWith("UPDATE meet_participants SET last_seen_at")) {
+            raced = true; // their leave lands between the join's read of their place and its refresh
+            await handleLeave(request(`/api/meet/${call.c}/leave`, { cookie: guest.cookie, ip: freshIp() }), call.c, deps());
+          }
+          return target.execute(stmt);
+        };
+      },
+    });
+    const back = await json(await handleJoin(request(`/api/meet/${call.c}/join`, { body: { name: "G0" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps({ db: racing })));
+    assert.ok(raced, "the leave landed in the gap");
+    assert.ok(back.participantId && back.participantId !== guest.id, "a new place, not the one that had just left");
+  });
+
   await check("a removal that lands while a pull is on its way: what the pull added is cut too, and the puller is told", async () => {
     const call = await callWith(2);
     const [puller, publisher] = call.guests;
@@ -785,6 +831,83 @@ async function main() {
     sfu.hooks.duringPull = undefined;
     assert.equal(res.status, 403, "removed while the pull was on its way");
     assert.ok(sfu.sessions.get(call.sessions[1])!.every((t) => t.status === "inactive"), "the track the pull added after the removal's cut is closed as well");
+  });
+
+  await check("a removal that lands while a publish is on its way: what it published is cut too; a re-cut that fails gives the row its session back", async () => {
+    const call = await callWith(1);
+    const [guest] = call.guests;
+    sfu.hooks.duringPublish = async () => {
+      await handleHost(request(`/api/meet/${call.c}/host`, { body: { action: "remove", participantId: guest.id }, ip: freshIp() }), call.c, deps({ session: as(CC) }));
+      sfu.down.add(call.sessions[1]); // the removal's cut went through; the SFU stops answering for the next one
+    };
+    const res = await quietly(() =>
+      handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "publish", offer, tracks: [{ mid: "0", trackName: "mic", kind: "audio" }] }, cookie: guest.cookie, ip: freshIp() }), call.c, deps()),
+    );
+    sfu.hooks.duringPublish = undefined;
+    assert.equal(res.status, 403);
+    assert.equal(await heldSession(guest.id), call.sessions[1], "the row holds the session again, so it can still be cut");
+    sfu.down.delete(call.sessions[1]);
+    clock += 31_000;
+    await handleState(request(`/api/meet/${call.c}/state`, { method: "GET", cookie: call.host.cookie, ip: freshIp() }), call.c, deps());
+    await settle();
+    assert.equal(await heldSession(guest.id), null, "and the room's next tidy-up cut it");
+    assert.ok(sfu.sessions.get(call.sessions[1])!.every((t) => t.status === "inactive"), "what the publish added is closed");
+  });
+
+  await check("an end that lands while a pull is on its way: the puller is told the room ended, and what the pull added is cut", async () => {
+    const call = await callWith(2);
+    const [puller, publisher] = call.guests;
+    await handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "publish", offer, tracks: [{ mid: "0", trackName: "mic", kind: "audio" }] }, cookie: publisher.cookie, ip: freshIp() }), call.c, deps());
+    sfu.hooks.duringPull = () => handleHost(request(`/api/meet/${call.c}/host`, { body: { action: "end" }, ip: freshIp() }), call.c, deps({ session: as(CC) }));
+    const res = await handleSfu(request(`/api/meet/${call.c}/sfu`, { body: { action: "pull", tracks: [{ participantId: publisher.id, trackName: "mic" }] }, cookie: puller.cookie, ip: freshIp() }), call.c, deps());
+    sfu.hooks.duringPull = undefined;
+    assert.equal(res.status, 410);
+    assert.ok(sfu.sessions.get(call.sessions[1])!.every((t) => t.status === "inactive"));
+  });
+
+  await check("a meeting made for a time is not ended by its hosts trying it out early: only a call that reaches its time is its call", async () => {
+    const startsAt = new Date(clock + 24 * 60 * 60_000).toISOString(); // tomorrow
+    const c = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false, startsAt, timeZone: "America/Toronto" } }), deps({ session: as(CC) })))).room as Json).code);
+    const together = async () => {
+      await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) }));
+      await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(ADON, true) }));
+    };
+    const status = async () => (await readMeetRoomByCode(db, c.replace(/-/g, "")))?.status;
+    await together(); // CC and Adon, both hosts, try tomorrow's room today
+    clock += MEET_HOST_GRACE_MS + 60_000;
+    await handleListRooms(deps({ session: as(CC) }));
+    assert.equal(await status(), "live", "the link sent to tomorrow's client still works");
+    clock = Date.parse(startsAt) - 5 * 60_000; // the meeting itself, starting five minutes early
+    await together();
+    clock += MEET_HOST_GRACE_MS + 60_000;
+    await handleListRooms(deps({ session: as(CC) }));
+    assert.equal(await status(), "ended", "a call at its time, once its hosts are gone, ends");
+    await settle();
+  });
+
+  await check("a try-out that only one of its two hosts stays in until the meeting's time is still not its call", async () => {
+    const startsAt = new Date(clock + 30 * 60_000).toISOString(); // in half an hour
+    const c = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false, startsAt, timeZone: "America/Toronto" } }), deps({ session: as(CC) })))).room as Json).code);
+    const cc = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) })))!;
+    const adon = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(ADON, true) })))!;
+    const polls = (cookie: string) => () => handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie, ip: freshIp() }), c, deps());
+    await passWhilePolling(5 * 60_000, [polls(cc), polls(adon)]); // trying it out together
+    await handleLeave(request(`/api/meet/${c}/leave`, { cookie: cc, ip: freshIp() }), c, deps()); // CC leaves, 25 minutes early
+    await passWhilePolling(20 * 60_000, [polls(adon)]); // Adon stays on until five minutes before, then steps away
+    assert.equal((await polls(adon)()).status, 200, "Adon was in the room all along");
+    await handleLeave(request(`/api/meet/${c}/leave`, { cookie: adon, ip: freshIp() }), c, deps());
+    clock += MEET_HOST_GRACE_MS + 60_000;
+    await handleListRooms(deps({ session: as(CC) }));
+    assert.equal((await readMeetRoomByCode(db, c.replace(/-/g, "")))?.status, "live", "its guests, due now, still find it waiting for them");
+    await settle();
+  });
+
+  await check("the room keeps saying it records while its creator's poll is a minute late: the recorder is still running", async () => {
+    const c = String(((await json(await handleCreateRoom(request("/api/calendar/meet", { body: {} }), deps({ session: as(CC) })))).room as Json).code);
+    await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) }));
+    const admin = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: { consent: true }, ip: freshIp() }), c, deps({ session: as(ADON, true) })))!;
+    clock += 60_000; // the creator's page has not polled for a minute (a slow network, a busy laptop)
+    assert.equal((await json(await handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie: admin, ip: freshIp() }), c, deps()))).recording, true);
   });
 
   await check("calls connect only with the participant token's secret set too: without it the list says not ready and nothing is made", async () => {
