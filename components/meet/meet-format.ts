@@ -295,11 +295,13 @@ export function startsLine(startsAt: string | null, now: number, options: { zone
     return new Intl.DateTimeFormat(undefined, shape);
   };
   const time = formatter({ hour: "numeric", minute: "2-digit" }).format(start);
+  // A time that ends in its own period (en-CA writes "8:30 p.m.") closes the sentence: never "p.m..".
+  const sentence = (text: string) => (text.endsWith(".") ? text : `${text}.`);
   const day = formatter({ year: "numeric", month: "numeric", day: "numeric" });
-  if (day.format(start) === day.format(now)) return `Your call starts at ${time}.`;
+  if (day.format(start) === day.format(now)) return sentence(`Your call starts at ${time}`);
   const year = formatter({ year: "numeric" });
   const shape: Intl.DateTimeFormatOptions = { weekday: "long", month: "long", day: "numeric", ...(year.format(start) === year.format(now) ? {} : { year: "numeric" }) };
-  return `Your call starts on ${formatter(shape).format(start)} at ${time}.`;
+  return sentence(`Your call starts on ${formatter(shape).format(start)} at ${time}`);
 }
 
 /** The absolute link people are sent: the page's own origin plus the meeting's path. */

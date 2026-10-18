@@ -336,6 +336,9 @@ async function main() {
     assert.equal(said(start, "2026-10-20T12:00:00.000Z", "Asia/Tokyo"), "Your call starts on Wednesday, October 21 at 3:00 AM.", "the same moment is another day and hour for someone in Tokyo");
     assert.equal(said(start, "2025-12-30T15:00:00.000Z", "America/Toronto"), "Your call starts on Tuesday, October 20, 2026 at 2:00 PM.", "the year too, when it is not this one");
     assert.equal(said(start, "2026-10-20T12:00:00.000Z", "America/Toronto", "en-GB"), "Your call starts at 14:00.", "a 24-hour reader reads 24 hours");
+    // en-CA writes "2:00 p.m.", whose own period closes the sentence: never "p.m.." (found live on the first booked room).
+    assert.equal(said(start, "2026-10-20T12:00:00.000Z", "America/Toronto", "en-CA"), "Your call starts at 2:00 p.m.", "one period, today");
+    assert.equal(said(start, "2026-10-18T15:30:00.000Z", "America/Toronto", "en-CA"), "Your call starts on Tuesday, October 20 at 2:00 p.m.", "and another day");
     // Midnight turns the date over: five hours before the call it is still today in Montreal, a day earlier it is not.
     assert.equal(said(start, "2026-10-20T04:01:00.000Z", "America/Toronto"), "Your call starts at 2:00 PM.", "just after midnight in Montreal it is already today");
     assert.equal(said(start, "2026-10-20T03:59:00.000Z", "America/Toronto"), "Your call starts on Tuesday, October 20 at 2:00 PM.", "just before it, it is not");
