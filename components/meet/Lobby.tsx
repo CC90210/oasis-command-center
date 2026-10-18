@@ -2,9 +2,11 @@
 
 /**
  * components/meet/Lobby.tsx - the quiet screens between Join now and the call: "Joining..." while the room
- * answers and the line comes up, and "Waiting for the host to start the meeting." for a guest who is early.
- * A person who joined with a camera keeps seeing it. Leave is offered once the room has accepted them (not
- * while the join itself is in flight, which cannot be taken back half way).
+ * answers and the line comes up (the first join, or a dropped line being brought back), and "Waiting for the host
+ * to start the meeting." for a guest who is early. A person who joined with a camera keeps seeing it. Leave is
+ * offered on every one of them, the join still in flight included: the engine ends the call at once and keeps it
+ * ended whatever the join's answer (lib/meet/room-client.ts leave). Which screen offers it is MeetRoom's choice:
+ * this one draws the button whenever it is given a way to leave.
  */
 
 import { MEET_BRAND, WAITING_FOR_HOST } from "./meet-words";
