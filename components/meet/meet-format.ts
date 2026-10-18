@@ -125,9 +125,23 @@ export function lengthWords(minutes: number): string {
   return `${hours} hour${hours === 1 ? "" : "s"}${rest ? ` ${rest} minutes` : ""}`;
 }
 
-/** The quiet line under a link made for later. `wordsFor` is the Schedule's messageFor. */
+/**
+ * The reason the server gives when the Schedule itself could not be reached (lib/meet/handlers.ts). By then the
+ * meeting is made and its link works, so the Schedule's usual "try again" would make a second meeting.
+ */
+const SCHEDULE_UNREACHED = "schedule_unavailable";
+
+/**
+ * The quiet line under a link made for later. `wordsFor` is the Schedule's messageFor, used for every reason but one:
+ * when the Schedule could not be reached the person is told to add the meeting there by hand, not to try again.
+ */
 export function scheduleLine(note: ScheduleNote, wordsFor: (reason: string) => string): string {
-  return note.added ? "Added to your Schedule." : `The link works, but it is not on your Schedule. ${wordsFor(note.reason)}`;
+  if (note.added) return "Added to your Schedule.";
+  const lead = "The link works, but it is not on your Schedule.";
+  if (note.reason === SCHEDULE_UNREACHED) {
+    return `${lead} The Schedule could not be reached. The meeting is already made, so add it to your Schedule yourself instead of making another.`;
+  }
+  return `${lead} ${wordsFor(note.reason)}`;
 }
 
 /**

@@ -116,7 +116,7 @@ export function MeetRoom({ code, title, status, recordAudio, viewer, creator, re
     case "ended":
       return <MeetEnded reason={phase.reason} isHost={isHost} title={heading} />;
     case "live":
-      return <CallScreen controller={controller} snapshot={snapshot} code={code} title={title} recordAudio={recordAudio} canShare={canShare} />;
+      return <CallScreen controller={controller} snapshot={snapshot} code={code} title={title} canShare={canShare} />;
     case "joining":
       return <Lobby mode="joining" title={heading} preview={null} />;
     case "connecting":

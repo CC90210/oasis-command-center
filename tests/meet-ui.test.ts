@@ -26,7 +26,7 @@ import { join, relative, sep } from "node:path";
 import { createClient } from "@libsql/client";
 import ts from "typescript";
 import { loadMeetPage, meetCreatorFor, meetViewerFor, sessionOrVisitor } from "../app/meet/[code]/load";
-import { deviceWords, listInputs, openDevices, problemOf } from "../components/meet/devices";
+import { createDeviceRequests, deviceWords, listInputs, openDevices, problemOf } from "../components/meet/devices";
 import { messageFor } from "../components/calendar/useCalendarData";
 import { createMeeting, deleteMeeting, laterBody, listMeetings, startBody } from "../components/meet/meet-api";
 import {
@@ -330,6 +330,129 @@ async function main() {
     assert.ok(!creator.includes(RECORDING_NOTICE) && !creator.includes(CONSENT_LABEL) && !creator.includes(TICK_FIRST) && creator.includes(DEVICES_BUTTON), "creator: no notice, no tick, the camera step open");
   });
 
+  // ---- an answer from the browser that comes too late -------------------------------------------------------------------------
+
+  /** A browser whose answers arrive when the test says so, with tracks that count their stops and say which answer they came in. */
+  function lateBrowser() {
+    type Counted = { kind: string; answer: number; stopped: number; stop: () => void };
+    const arrivals: Array<() => void> = [];
+    const made: Counted[] = [];
+    const counted = (kind: string, answer: number): Counted => {
+      const t: Counted = { kind, answer, stopped: 0, stop: () => void (t.stopped += 1) };
+      made.push(t);
+      return t;
+    };
+    const media = {
+      getUserMedia: (c: MediaStreamConstraints) =>
+        new Promise((resolve) => {
+          const answer = arrivals.length;
+          arrivals.push(() => resolve({ getAudioTracks: () => (c.audio ? [counted("audio", answer)] : []), getVideoTracks: () => (c.video ? [counted("video", answer)] : []) }));
+        }),
+    } as unknown as Pick<MediaDevices, "getUserMedia">;
+    return {
+      media,
+      /** The browser answers the request it was asked `answer`th (counting from 0). */
+      answer: (answer: number) => arrivals[answer](),
+      /** How many times each track that came with that answer has been stopped. */
+      stops: (answer: number) => made.filter((t) => t.answer === answer).map((t) => t.stopped),
+    };
+  }
+  type Browser = ReturnType<typeof lateBrowser>;
+  /** What the hook does at the start of an ask: take a ticket, then wait on the browser. */
+  const requestDevices = (requests: ReturnType<typeof createDeviceRequests>, browser: Browser, want: { mic: boolean; cam: boolean }) => ({
+    ticket: requests.begin(want),
+    answer: openDevices({ allowed: true, media: browser.media, want }),
+  });
+
+  await check("a late answer for the same device is stopped, not held: the newer request wins, whichever answers first", async () => {
+    for (const order of [[1, 0], [0, 1]]) {
+      const requests = createDeviceRequests();
+      const browser = lateBrowser();
+      const asks = [requestDevices(requests, browser, { mic: false, cam: true }), requestDevices(requests, browser, { mic: false, cam: true })];
+      const settled: Array<ReturnType<typeof requests.settle>> = [];
+      for (const answer of order) {
+        browser.answer(answer);
+        settled[answer] = requests.settle(asks[answer].ticket, await asks[answer].answer, true);
+      }
+      const label = `answers ${order.join(" then ")}`;
+      assert.equal(settled[1].cam?.kind, "video", `${label}: the newer camera is kept`);
+      assert.deepEqual([settled[0].cam, settled[0].current], [null, false], `${label}: the older one is not handed back`);
+      assert.deepEqual(browser.stops(0), [1], `${label}: its track was stopped`);
+      assert.deepEqual(browser.stops(1), [0], `${label}: the kept one is still running`);
+      assert.deepEqual(order.map((a) => settled[a].pending), [true, false], `${label}: asking ends with the last open request, not the first`);
+    }
+  });
+
+  await check("a late answer after the devices were released, a join, the screen going away or consent withdrawn is stopped; a request made afterwards is wanted again", async () => {
+    // cancel() is what all four do (useJoinDevices.ts).
+    const requests = createDeviceRequests();
+    const browser = lateBrowser();
+    const open = requestDevices(requests, browser, { mic: true, cam: true });
+    requests.cancel();
+    browser.answer(0);
+    const late = requests.settle(open.ticket, await open.answer, true);
+    assert.deepEqual([late.mic, late.cam, late.current, late.pending], [null, null, false, false]);
+    assert.deepEqual(browser.stops(0), [1, 1], "both of its tracks were stopped");
+
+    const again = requestDevices(requests, browser, { mic: true, cam: true });
+    browser.answer(1);
+    const fresh = requests.settle(again.ticket, await again.answer, true);
+    assert.ok(fresh.mic && fresh.cam && fresh.current, "after a cancel the next request counts again");
+    assert.deepEqual(browser.stops(1), [0, 0]);
+
+    // The notice un-ticked and ticked again while a request was open: it began under the agreement that was withdrawn.
+    const withdrawn = requestDevices(requests, browser, { mic: false, cam: true });
+    requests.cancel();
+    browser.answer(2);
+    assert.equal(requests.settle(withdrawn.ticket, await withdrawn.answer, true).cam, null, "ticked again by the time it arrives, and still not wanted");
+    assert.deepEqual(browser.stops(2), [1]);
+
+    // The gate shut by the time it arrived, with nothing cancelled: not wanted either.
+    const shut = requestDevices(requests, browser, { mic: true, cam: false });
+    browser.answer(3);
+    assert.equal(requests.settle(shut.ticket, await shut.answer, false).mic, null);
+    assert.deepEqual(browser.stops(3), [1]);
+  });
+
+  await check("asking for the microphone while the camera is still opening costs neither: the numbers are per device", async () => {
+    const requests = createDeviceRequests();
+    const browser = lateBrowser();
+    const cam = requestDevices(requests, browser, { mic: false, cam: true });
+    const mic = requestDevices(requests, browser, { mic: true, cam: false });
+    browser.answer(1);
+    const gotMic = requests.settle(mic.ticket, await mic.answer, true);
+    browser.answer(0);
+    const gotCam = requests.settle(cam.ticket, await cam.answer, true);
+    assert.deepEqual([gotMic.mic?.kind, gotCam.cam?.kind], ["audio", "video"]);
+    assert.deepEqual([browser.stops(0), browser.stops(1)], [[0], [0]], "nothing was stopped");
+    // One request for both, then a newer one for the camera alone: the first loses only its camera.
+    const both = requestDevices(requests, browser, { mic: true, cam: true });
+    const camAgain = requestDevices(requests, browser, { mic: false, cam: true });
+    browser.answer(2);
+    browser.answer(3);
+    const first = requests.settle(both.ticket, await both.answer, true);
+    const second = requests.settle(camAgain.ticket, await camAgain.answer, true);
+    assert.deepEqual([first.mic?.kind, first.cam, first.current], ["audio", null, true], "its microphone is still wanted, its camera is not");
+    assert.deepEqual(browser.stops(2), [0, 1], "audio kept, video stopped");
+    assert.equal(second.cam?.kind, "video");
+  });
+
+  await check("the hook numbers every request and cancels at release, a join, the screen going away and consent withdrawn", () => {
+    const hook = readFileSync(join(root, "components", "meet", "useJoinDevices.ts"), "utf8");
+    assert.match(hook, /const \[requests\] = useState\(createDeviceRequests\);/, "one set of numbers for the life of the screen");
+    assert.match(hook, /const ticket = requests\.begin\(want\);/);
+    assert.match(hook, /const settled = requests\.settle\(ticket, opened, live\.current\.allowed\);/, "what came back is settled against the gate as it is now");
+    assert.match(hook, /setAsking\(settled\.pending\);/, "asking ends with the last open request, not the first");
+    assert.match(hook, /if \(settled\.mic\) hold\("mic", settled\.mic\);/, "only what is wanted is held");
+    assert.match(hook, /if \(settled\.cam\) hold\("cam", settled\.cam\);/);
+    assert.equal(count(hook, /requests\.cancel\(\)/g), 4, "four places cancel");
+    assert.match(hook, /if \(allowed\) return;\s*requests\.cancel\(\);/, "consent withdrawn");
+    assert.match(hook, /return \(\) => \{\s*requests\.cancel\(\);\s*store\.mic\?\.stop\(\);/, "the screen going away");
+    assert.match(hook, /const release = useCallback\(\(\) => \{\s*requests\.cancel\(\);/, "release");
+    assert.match(hook, /takeForJoin: \(\) => \{\s*requests\.cancel\(\);/, "a join");
+    assert.doesNotMatch(hook, /if \(!live\.current\.allowed\) \{/, "no second, partial check of the gate: settle owns it");
+  });
+
   await check("openDevices asks for only what was wanted, and for the device the person picked", async () => {
     const mic = standIn(() => streamOf(true, false));
     await openDevices({ allowed: true, media: mic.media, want: { mic: true, cam: false } });
@@ -431,7 +554,7 @@ async function main() {
     assert.match(room, /devicesOpen=\{devicesOpen\}/);
     const hook = readFileSync(join(root, "components", "meet", "useJoinDevices.ts"), "utf8");
     assert.match(hook, /allowed: live\.current\.allowed,/, "the hook passes the CURRENT gate to openDevices");
-    assert.match(hook, /if \(allowed\) return;\s*hold\("mic", null\);\s*hold\("cam", null\);/, "un-ticking the notice lets go of the devices");
+    assert.match(hook, /if \(allowed\) return;\s*requests\.cancel\(\);\s*hold\("mic", null\);\s*hold\("cam", null\);/, "un-ticking the notice lets go of the devices, and of any request still open");
     const pre = readFileSync(join(root, "components", "meet", "PreJoin.tsx"), "utf8");
     assert.match(pre, /!props\.devicesOpen \?\s*\(\s*<p className="text-sm text-fg-muted">\{TICK_FIRST\}<\/p>/, "the camera step is behind the gate");
   });
@@ -461,12 +584,26 @@ async function main() {
 
   // ---- the call -----------------------------------------------------------------------------------------------------------
 
-  await check("the call: the Recording indicator is a dot WITH the word, for everyone, while the room records and its host is in it", () => {
+  await check("the call: the Recording indicator is a dot WITH the word, for everyone, only while the recording is running: the room records and its creator is in the call", () => {
+    // The creator's own view and a guest's, with the creator in the call.
     for (const id of ["call.guest", "call.host"]) {
       assert.match(markup[id], /<span aria-hidden="true" class="h-2 w-2 rounded-full bg-status-hot"><\/span>Recording<\/p>/, `${id}: red dot and the word`);
     }
     assert.ok(!text(markup["call.noHostYet"]).includes("Recording"), "no host in the call yet: no indicator");
     assert.ok(!text(markup["call.notRecorded"]).includes("Recording"), "a room that does not record: no indicator");
+    // The bug: a recorded room with a host present who is not the creator. Nothing is recording, so nothing says it is.
+    for (const id of ["call.secondHostAlone", "call.guestWithSecondHost"]) {
+      assert.ok(markup[id].includes("Adon") && /Host/.test(text(markup[id])), `${id}: a second host is in the call`);
+      assert.ok(!text(markup[id]).includes("Recording"), `${id}: the creator is not here, so there is no indicator`);
+      assert.ok(!markup[id].includes("being recorded and transcribed"), `${id}: and no claim in its tooltip either`);
+    }
+    // Where the claim comes from: the room's own answer, and nothing else on the call or lobby screens says "recorded".
+    const codeOf = (file: string) => readFileSync(join(root, "components", "meet", file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const screen = codeOf("CallScreen.tsx");
+    assert.match(screen, /const recording = snapshot\.roomRecording;/, "the badge is the room's answer");
+    assert.doesNotMatch(screen, /recordAudio|hostPresent/, "not worked out from the room's setting or from who is present");
+    assert.doesNotMatch(codeOf("Lobby.tsx"), /record/i, "the lobby claims nothing about recording");
+    assert.doesNotMatch(codeOf("MeetRoom.tsx").match(/<CallScreen[^>]*>/)?.[0] ?? "", /recordAudio/, "and the room does not hand the call screen the room's setting");
   });
 
   await check("the call: faces, names, Host tag, mic-off, a mirrored own tile, muted videos and one hidden audio per remote microphone", () => {
@@ -606,6 +743,17 @@ async function main() {
     assert.ok(!text(markup["panel.laterNotAdded"]).includes("Added to your Schedule."));
     assert.ok(text(markup["panel.laterNotAddedOther"]).includes(`The link works, but it is not on your Schedule. ${messageFor("time_zone_invalid")}`), "any other code gets the Schedule's words for it too");
     assert.ok(!text(markup["panel.laterNoLine"]).includes("Schedule."), "no time, no line");
+    // One reason is said in the panel's own words: the Schedule could not be reached. The meeting is made, so the
+    // Schedule's "try again" would make a second one; the person is told to add it there by hand.
+    const unreached = "The link works, but it is not on your Schedule. The Schedule could not be reached. The meeting is already made, so add it to your Schedule yourself instead of making another.";
+    assert.ok(text(markup["panel.laterScheduleUnreached"]).includes(unreached), "the screen says it");
+    assert.equal(scheduleLine({ added: false, reason: "schedule_unavailable" }, messageFor), unreached);
+    assert.equal(messageFor("schedule_unavailable"), "That change could not be saved. Nothing was lost; try again.", "the default for this code is exactly the advice that would make a second meeting");
+    assert.ok(!unreached.includes("try again") && !text(markup["panel.laterScheduleUnreached"]).includes("try again"), "so it is not used here");
+    for (const reason of ["shabbat_protected", "time_zone_invalid", "calendar_storage_missing", "unauthorized", "some_future_code"]) {
+      assert.equal(scheduleLine({ added: false, reason }, messageFor), `The link works, but it is not on your Schedule. ${messageFor(reason)}`, `${reason} keeps the Schedule's words`);
+    }
+    assert.equal(scheduleLine({ added: false, reason: "schedule_unavailable_again" }, messageFor), `The link works, but it is not on your Schedule. ${messageFor("schedule_unavailable_again")}`, "only that exact code");
     assert.ok(text(markup["panel.laterAdded"]).includes("Link ready. Send it to the people you want in the meeting."));
     assert.ok(text(markup["panel.laterAdded"]).includes("Copy link") && text(markup["panel.laterAdded"]).includes("Open meeting"));
   });
@@ -1122,6 +1270,23 @@ async function main() {
   await check("the limits the screens use equal the server's", () => {
     assert.equal(NAME_MAX_CHARS, MEET_NAME_MAX);
     assert.equal(TITLE_MAX_CHARS, MEET_TITLE_MAX);
+  });
+
+  await check("every server code the panel words by name is one the server sends: a rename on either side fails here, not in front of a person", () => {
+    // The codes are read out of the panel's own code, so a code added there is checked without anyone remembering to list it.
+    const panelSource = ["meet-format.ts", "meet-api.ts"].map((f) => readFileSync(join(root, "components", "meet", f), "utf8")).join("\n");
+    const named = new Set([...panelSource.matchAll(/(?:code|found) === "([a-z][a-z_]+)"/g)].map((m) => m[1]));
+    const unreached = /const SCHEDULE_UNREACHED = "([a-z_]+)";/.exec(panelSource)?.[1];
+    assert.ok(unreached, "the panel names the code for a Schedule that could not be reached");
+    named.add(unreached);
+    for (const code of ["sign_in_required", "invalid_body", "cross_origin_refused", "meet_not_configured", "host_only", "room_not_found", "rate_limited", "schedule_unavailable"]) {
+      assert.ok(named.has(code), `${code} is one the panel words by name (found: ${[...named].join(", ")})`);
+    }
+    const server = ["handlers.ts", "access.ts", "http.ts"].map((f) => readFileSync(join(root, "lib", "meet", f), "utf8")).join("\n");
+    for (const code of named) assert.ok(server.includes(`"${code}"`), `the panel words "${code}", but the server never sends it`);
+    // The one whose wrong words would be harmful: a made meeting told to "try again" makes a second one.
+    assert.match(server, /const SCHEDULE_UNAVAILABLE = "schedule_unavailable";/, "the server's code for a Schedule it could not reach");
+    assert.ok(scheduleLine({ added: false, reason: "schedule_unavailable" }, messageFor).includes("could not be reached"), "is the one the panel says the special words for");
   });
 
   await check("/meet is public and drawn without the app shell, exactly like /book; the host's panel API stays signed in", () => {

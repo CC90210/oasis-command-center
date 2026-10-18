@@ -6,6 +6,9 @@
  * openDevices never touches getUserMedia unless `allowed` is true. `allowed` is components/meet/notice.ts
  * mayAskForDevices: the recording notice is ticked, or there is none to tick (Quebec Law 25, notice before
  * collection). One device that is missing or busy does not cost the person the other.
+ *
+ * createDeviceRequests is the other half: an answer from the browser can arrive after the person has moved on
+ * (asked again, withdrawn consent, joined, left), and it must then be stopped, not held.
  */
 
 export type DeviceProblem = "not_yet" | "blocked" | "policy" | "none" | "busy" | "unsupported" | "unknown";
@@ -121,6 +124,66 @@ export async function openDevices(input: OpenInput): Promise<OpenedDevices> {
       problems: { ...(mic.problem ? { mic: mic.problem } : {}), ...(cam.problem ? { cam: cam.problem } : {}) },
     };
   }
+}
+
+type DeviceKind = "mic" | "cam";
+
+/** What a request for devices was given when it began: a number for each device it asked for, null for one it did not. */
+export type DeviceTicket = { mic: number | null; cam: number | null };
+
+/**
+ * Which request for the camera and microphone still counts. A request is an await on the browser (it can sit behind
+ * the browser's own prompt), and the person can move on while it is open: ask again, un-tick the notice, Join, leave
+ * the page. An answer that arrives after that must not be held, or its camera light stays on with nobody looking at it.
+ *
+ * Each request takes a number for each device it asks for. Asking for that device again, or cancel(), makes the
+ * number stale, and settle() stops the tracks of a stale answer instead of handing them back. The numbers are per
+ * device, so asking for the microphone while the camera is still opening does not cost the person the camera.
+ */
+export type DeviceRequests = {
+  /** A request starts: the ticket it must be settled with. */
+  begin(want: { mic: boolean; cam: boolean }): DeviceTicket;
+  /** Nothing open is wanted any more: devices released, a join took its copies, the screen went away, consent was withdrawn. */
+  cancel(): void;
+  /**
+   * An answer came back. The tracks that are still wanted are returned and the others are stopped here. `allowed` is
+   * the recording-notice gate as it is now: if it has closed since the request began, nothing is wanted. `current`
+   * says whether any of the request is still wanted; `pending` whether another request is still open.
+   */
+  settle(
+    ticket: DeviceTicket,
+    opened: OpenedDevices,
+    allowed: boolean,
+  ): { mic: MediaStreamTrack | null; cam: MediaStreamTrack | null; current: boolean; pending: boolean };
+};
+
+export function createDeviceRequests(): DeviceRequests {
+  const latest: Record<DeviceKind, number> = { mic: 0, cam: 0 };
+  let open = 0;
+  return {
+    begin(want) {
+      open += 1;
+      if (want.mic) latest.mic += 1;
+      if (want.cam) latest.cam += 1;
+      return { mic: want.mic ? latest.mic : null, cam: want.cam ? latest.cam : null };
+    },
+    cancel() {
+      latest.mic += 1;
+      latest.cam += 1;
+    },
+    settle(ticket, opened, allowed) {
+      open -= 1;
+      const wanted = (kind: DeviceKind) => allowed && ticket[kind] !== null && ticket[kind] === latest[kind];
+      const keep = (kind: DeviceKind): MediaStreamTrack | null => {
+        const track = opened[kind];
+        if (!track) return null;
+        if (wanted(kind)) return track;
+        track.stop();
+        return null;
+      };
+      return { mic: keep("mic"), cam: keep("cam"), current: wanted("mic") || wanted("cam"), pending: open > 0 };
+    },
+  };
 }
 
 type Thing = "camera" | "microphone";
