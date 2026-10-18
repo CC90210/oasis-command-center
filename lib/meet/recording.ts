@@ -1090,6 +1090,10 @@ export function meetSfuIfConfigured(): SfuClient | null {
  * Every cut of a run goes at once (at most ENDED_CUT_SESSIONS): an SFU that does not answer costs one timeout per
  * run, never one per room, so the relay work after it still runs (Codex on #688). Returns how many went through and
  * how many failed, so the cron can say a run that left media open is a failed run.
+ *
+ * Known limit, chosen: sessions the SFU refuses again and again (not an outage, which every run retries alike) stay
+ * at the front of the oldest-first batch, so with more than ENDED_CUT_SESSIONS of them later rooms wait. Every such
+ * run answers 503 media_cut_failed, so the driver reports it while it lasts (Codex on #688, fifth pass).
  */
 async function cutEndedRoomSessions(
   db: Client,
@@ -1169,7 +1173,9 @@ export async function meetRelayCron(
   const at = now.toISOString();
   // A call every tab left without End is ended here too, in every workspace with a live room, so the cut below
   // reaches its media with the PC off (Codex on #688, fourth pass). Handing its recording over stays the PC's claim.
-  const live = await db.execute({ sql: "SELECT DISTINCT tenant_id FROM meet_rooms WHERE status = 'live' LIMIT 50", args: [] });
+  // Every workspace with a live room, no cap: a capped, unordered list could return the same ones each run and never
+  // reach a later workspace's abandoned call (Codex on #688, fifth pass). The workspaces number in the tens.
+  const live = await db.execute({ sql: "SELECT DISTINCT tenant_id FROM meet_rooms WHERE status = 'live'", args: [] });
   if (live.rows.length) await endAbandonedRooms(db, live.rows.map((r) => String(r.tenant_id)), now);
   const media = await cutEndedRoomSessions(db, sfu, null, now);
   const cuts = { mediaCut: media.cut, mediaCutFailed: media.failed };
