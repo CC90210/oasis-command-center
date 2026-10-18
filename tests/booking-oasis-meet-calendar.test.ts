@@ -157,6 +157,35 @@ async function testRecordedRoomInviteCarriesTheNotice(): Promise<void> {
   payloads.length = 0;
   await createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: false }, capture);
   assert.equal(String(payloads[0].description).includes(MEET_RECORDING_NOTICE), false);
+
+  // Rollout (Codex on the booking agent PR): an earlier build created this request's event without the notice and
+  // died before saving the receipt. The retry meets Google's 409 on the fixed id and must read that event as this
+  // booking, never as a mismatch whose compensation would cancel the client's live invite.
+  let legacyPayload: Record<string, unknown> | null = null;
+  const legacy = dependencies(async (_input, init) => {
+    if ((init?.method || "GET").toUpperCase() === "POST") {
+      legacyPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ error: { code: 409 } }), { status: 409, headers: { "content-type": "application/json" } });
+    }
+    assert(legacyPayload);
+    const description = String(legacyPayload.description).replace(`\n${MEET_RECORDING_NOTICE}`, "");
+    return response(providerEvent(eventId, { ...legacyPayload, description }));
+  });
+  const replayed = await createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: true }, legacy);
+  assert.equal(replayed.meetLink, ROOM_URL);
+  // ...but an event with no description, or another one, is still a mismatch.
+  const blank = dependencies(async (_input, init) => {
+    if ((init?.method || "GET").toUpperCase() === "POST") {
+      legacyPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ error: { code: 409 } }), { status: 409, headers: { "content-type": "application/json" } });
+    }
+    const { description: _dropped, ...rest } = legacyPayload as Record<string, unknown>;
+    return response(providerEvent(eventId, rest));
+  });
+  await assert.rejects(
+    createGoogleFounderMeeting({ ...base, requestId: REQUEST, meetingAt: START, meetingRecorded: true }, blank),
+    (error: unknown) => String((error as { detail?: unknown }).detail ?? "").includes("identity mismatch: description"),
+  );
 }
 
 function testLivePortUsesTheLeadTitleRule(): void {

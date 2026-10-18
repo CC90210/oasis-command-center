@@ -725,6 +725,8 @@ type ExpectedFounderMeetingEvent = {
   organizerEmail?: string;
   summary: string;
   description: string;
+  /** The same booking's description as a build before the recording notice wrote it; accepted on a read-back. */
+  legacyDescription?: string;
 };
 
 function assertFounderMeetingEventIdentity(
@@ -764,7 +766,8 @@ function assertFounderMeetingEventIdentity(
     fail("client_attendee");
   }
   if (event.summary !== expected.summary) fail("summary");
-  if (event.description !== expected.description) fail("description");
+  const legacy = expected.legacyDescription !== undefined && event.description === expected.legacyDescription;
+  if (event.description !== expected.description && !legacy) fail("description");
 }
 
 function eventTitle(durationMinutes: number, offerLabel: string, businessName?: string): string {
@@ -1167,6 +1170,12 @@ export async function createFounderMeetingCalendarEvent(
     description: publicEventDescription(
       normalized.durationMinutes, normalized.offerLabel, args.clientAgenda, normalized.website, meetingLink, args.meetingRecorded === true,
     ),
+    // An event an earlier build created for this same request carries the description without the recording notice.
+    // A retry that meets it (Google's 409 on the fixed id) must read it as this booking, not cancel a live invite
+    // (Codex on the booking agent PR).
+    ...(args.meetingRecorded === true && meetingLink
+      ? { legacyDescription: publicEventDescription(normalized.durationMinutes, normalized.offerLabel, args.clientAgenda, normalized.website, meetingLink, false) }
+      : {}),
   };
   const eventPayload = {
     id: eventId,

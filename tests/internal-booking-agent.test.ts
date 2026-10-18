@@ -168,6 +168,10 @@ async function testSlotsAndOffers() {
   assert.equal(res.status, 422, "a smuggled tenant is refused, never ignored");
   res = await handleAgentSlots(signed("/api/internal/booking/slots", { days: 30 }), deps);
   assert.equal(res.status, 422);
+  // Only the length a booking here books (30): a time offered for another length could be refused or booked short.
+  res = await handleAgentSlots(signed("/api/internal/booking/slots", { duration_minutes: 15 }), deps);
+  assert.equal(res.status, 422);
+  assert.equal((await json(res)).field, "duration_minutes");
   res = await handleAgentSlots(signed("/api/internal/booking/slots", {}), { ...deps, availability: async () => { throw new Error("calendar_read_failed"); } });
   assert.equal(res.status, 503);
 
@@ -243,9 +247,17 @@ async function testBookNamedOrMatchedLead() {
   assert.equal((named.calls.rpc[0].p_patch as Record<string, unknown>).assigned_to, "adon", "the lead's owner keeps the deal");
 
   const matched = fakeDeps({ matched: { id: "form-lead", data: { stage: "researched" } } });
+  let matchedWith: Record<string, unknown> | null = null;
+  const findLead = matched.deps.findLead;
+  matched.deps.findLead = async (tenantId, match) => {
+    matchedWith = match;
+    return findLead(tenantId, match);
+  };
   res = await handleAgentBook(signed("/api/internal/booking/book", BOOK), matched.deps);
   assert.equal((await json(res)).lead_id, "form-lead", "a prospect who filled a form is not split in two");
   assert.equal(matched.calls.createLead.length, 0);
+  // The company goes in too: it refuses a phone match to another business's lead.
+  assert.deepEqual(matchedWith, { email: "taylor@example.com", phone: "+1 514 555 0101", business: "North Star" });
 }
 
 async function testBookRefusals() {
@@ -297,7 +309,14 @@ async function testBookFailuresCompensate() {
   const mirror = fakeDeps({ mirror: async () => { throw new Error("public_booking_schedule_write_failed"); } });
   let res = await handleAgentBook(signed("/api/internal/booking/book", BOOK), mirror.deps);
   assert.equal(res.status, 503);
+  assert.equal((await json(res)).error, "retry_required", "an undone request can never book again: book with a new id");
   assert.deepEqual(mirror.calls.compensated, ["appt-1"]);
+  // The same request after it was undone is told the same, never booking_create_failed forever.
+  for (const code of ["booking_request_cancelled", "booking_compensated:calendar_create_failed"]) {
+    const undone = fakeDeps({ createMeeting: async () => { throw new Error(code); } });
+    res = await handleAgentBook(signed("/api/internal/booking/book", BOOK), undone.deps);
+    assert.equal((await json(res)).error, "retry_required", code);
+  }
   assert.equal(mirror.calls.rpc.length, 0, "the lead never moves for a booking that was undone");
 
   // The pipeline move fails: the meeting is undone and the setter is told to try a new request.

@@ -72,7 +72,11 @@ export type AgentBookingDeps = {
   hostsById: (tenantId: string, ids: string[]) => Promise<PublicBookingHost[]>;
   liveOffers: (tenantId: string) => Promise<Array<{ slug: string; name: string }>>;
   readLead: (tenantId: string, leadId: string) => Promise<AgentLead | null>;
-  findLead: (tenantId: string, match: { email: string; phone: string }) => Promise<AgentLead | null>;
+  /**
+   * A lead by email or phone. `business` is the company they named: never a match key, but a phone match to a lead
+   * of a DIFFERENT business is refused (an owner's cell is shared by every business they own).
+   */
+  findLead: (tenantId: string, match: { email: string; phone: string; business: string }) => Promise<AgentLead | null>;
   createLead: (tenantId: string, data: Record<string, unknown>) => Promise<{ id: string }>;
   createMeeting: (input: Parameters<typeof createVerifiedFounderMeeting>[0]) => Promise<VerifiedFounderMeeting>;
   /** Undo a booking that cannot complete: the Google event, the room and the Schedule copies. True when it went. */
@@ -121,14 +125,18 @@ function ownKeys(body: Record<string, unknown>, allowed: readonly string[]): str
   return Object.keys(body).find((key) => !allowed.includes(key)) ?? null;
 }
 
-/** POST /api/internal/booking/slots: {duration_minutes?: 15..120, days?: 1..14}. */
+/**
+ * POST /api/internal/booking/slots: {duration_minutes?: 30, days?: 1..14}. Only the length /book's general call has,
+ * the one handleAgentBook books: a time offered for any other length could be refused, or booked short (Codex on the
+ * booking agent PR).
+ */
 export async function handleAgentSlots(req: Request, deps: AgentBookingDeps): Promise<Response> {
   const auth = await authenticateBookingAgentRequest(req, deps.env, deps.now());
   if (!auth.ok) return auth.response;
   const extra = ownKeys(auth.body, ["duration_minutes", "days"]);
   if (extra) return bookingAgentRefuse(422, "unknown_field", { field: extra });
   const duration = auth.body.duration_minutes ?? AGENT_BOOKING_DEFAULT_DURATION_MINUTES;
-  if (!Number.isInteger(duration) || (duration as number) < 15 || (duration as number) > 120) {
+  if (duration !== AGENT_BOOKING_DEFAULT_DURATION_MINUTES) {
     return bookingAgentRefuse(422, "invalid_field", { field: "duration_minutes" });
   }
   const days = auth.body.days ?? AGENT_BOOKING_MAX_DAYS;
@@ -239,7 +247,11 @@ async function resolveLead(tenantId: string, request: BookRequest, deps: AgentBo
     const named = await deps.readLead(tenantId, request.leadId);
     if (named) return named;
   }
-  return deps.findLead(tenantId, { email: request.contact.email, phone: request.contact.phone });
+  return deps.findLead(tenantId, {
+    email: request.contact.email,
+    phone: request.contact.phone,
+    business: request.contact.company,
+  });
 }
 
 function sourceLabel(source: AgentBookingSource): string {
@@ -398,11 +410,16 @@ export async function handleAgentBook(req: Request, deps: AgentBookingDeps): Pro
     const code = errorCode(error);
     if (!meeting && CONTACT_ERRORS.has(code)) return bookingAgentRefuse(422, code, { field: "contact" });
     console.error("[booking-agent.book] meeting failed", error instanceof Error ? error.message : String(error));
-    if (meeting) {
-      await deps.compensate({ tenantId, leadId: lead.id, requestId: request.requestId, appointmentId: meeting.appointmentId });
-    }
+    const compensated = meeting
+      ? await deps.compensate({ tenantId, leadId: lead.id, requestId: request.requestId, appointmentId: meeting.appointmentId })
+      : false;
     if (error instanceof Error && /meeting_intent_insert_failed:.*(?:unique|constraint|founder_slot_overlap)/iu.test(error.message)) {
       return bookingAgentRefuse(409, "slot_unavailable");
+    }
+    // An undone booking cancels its request for good: the same request_id can never book again, so the caller is told
+    // to book with a new one rather than retry this one forever (the form route's rule; Codex on the booking agent PR).
+    if (compensated || code === "booking_compensated" || code === "booking_request_cancelled") {
+      return bookingAgentRefuse(503, "retry_required");
     }
     return bookingAgentRefuse(503, "booking_create_failed");
   }

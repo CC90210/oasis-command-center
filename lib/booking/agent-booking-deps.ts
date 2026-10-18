@@ -78,7 +78,8 @@ export function liveAgentBookingDeps(): AgentBookingDeps {
       const row = result.data as { id?: string; data?: unknown } | null;
       return row?.id ? { id: row.id, data: record(row.data) } : null;
     },
-    // An address or a phone the person typed, never a company name (the public intake's rule).
+    // An address or a phone the person typed, never a company name (the public intake's rule). The company still goes
+    // in: it is what refuses a phone match to another business's lead (Codex on the booking agent PR).
     findLead: (tenantId, match) => findExistingLead(tenantId, match, { matchOnBusinessName: false }),
     createLead: async (tenantId, data) => createRecord({ tenant_id: tenantId, entity: "lead", data }),
     createMeeting: (input) => createVerifiedFounderMeeting(input, rooms),
