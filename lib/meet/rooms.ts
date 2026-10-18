@@ -199,11 +199,13 @@ export async function setRoomCalendarEvent(db: Client, room: Pick<MeetRoom, "ten
 }
 
 /** A workspace's rooms, newest first, for the Schedule's Meet panel. */
-export async function listMeetRooms(db: Client, where: { tenantId: string; limit?: number }): Promise<MeetRoom[]> {
+/** A workspace's newest rooms; with `hostUserId`, only the ones that person made. */
+export async function listMeetRooms(db: Client, where: { tenantId: string; hostUserId?: string; limit?: number }): Promise<MeetRoom[]> {
   const limit = Math.min(Math.max(1, Math.floor(where.limit ?? 20)), 100);
+  const byHost = where.hostUserId === undefined ? "" : " AND host_user_id = ?";
   const rs = await db.execute({
-    sql: `SELECT ${ROOM_COLUMNS} FROM meet_rooms WHERE tenant_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
-    args: [where.tenantId, limit],
+    sql: `SELECT ${ROOM_COLUMNS} FROM meet_rooms WHERE tenant_id = ?${byHost} ORDER BY created_at DESC, id DESC LIMIT ?`,
+    args: [where.tenantId, ...(where.hostUserId === undefined ? [] : [where.hostUserId]), limit],
   });
   return rs.rows.map((row) => toRoom(row as unknown as Record<string, unknown>));
 }

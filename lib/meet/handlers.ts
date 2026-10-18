@@ -40,10 +40,13 @@ import type { RTCIceServerLike } from "./ice";
 import {
   MEET_MAX_TRACKS,
   deleteMeetRoomRows,
+  endAbandonedRooms,
   endMeetRoom,
   expireIfHostGone,
+  forgetSession,
   joinMeetRoom,
   leaveMeet,
+  pendingCuts,
   presentParticipants,
   readPresence,
   removeParticipant,
@@ -51,6 +54,7 @@ import {
   setParticipantSession,
   setParticipantTracks,
   touchParticipant,
+  type HeldSession,
   type MeetPresence,
 } from "./participants";
 import { createMeetRoom, displayMeetCode, listMeetRooms, parseMeetCode, readMeetRoomByCode, setRoomCalendarEvent, type MeetRoom } from "./rooms";
@@ -78,6 +82,8 @@ export type MeetDeps = {
     /** Delete a meeting's recording here and on the PC; null when recording is not installed (nothing to delete). */
     remove: (room: MeetRoom, userId: string, now: Date) => Promise<{ relayRemaining: number } | null>;
   };
+  /** Work that runs after the answer has gone (live: ctx.waitUntil, lib/os/runs/keepalive.ts), never on a poll's path. */
+  later: (label: string, work: () => Promise<unknown>) => void;
   now: () => Date;
 };
 
@@ -109,20 +115,68 @@ function sfuIfConfigured(deps: MeetDeps): SfuClient | null {
   }
 }
 
-/** Cut every session the room has had, so ending it stops media even in a browser that ignores the answer. */
-async function cutRoom(deps: MeetDeps, room: MeetRoom): Promise<void> {
+let noSfuLogged = false;
+
+/**
+ * Cut one session a row holds and, once it is cut, let the row forget it. True when nothing is left to cut. With
+ * no SFU app set (a secret missing or rotated) nothing can be reached to cut: that counts as done, logged once, so
+ * a meeting can never be kept undeletable by a session id nobody can close.
+ */
+async function cutHeld(deps: MeetDeps, room: Pick<MeetRoom, "tenantId" | "id">, held: HeldSession, where: string): Promise<boolean> {
   const sfu = sfuIfConfigured(deps);
-  if (!sfu) return;
-  for (const sessionId of await roomSessions(deps.db, room)) await cutSession(sfu, sessionId, "room.end");
+  if (!sfu) {
+    if (!noSfuLogged) console.error(`[meet.${where}] no SFU app is set; a held session cannot be cut`);
+    noSfuLogged = true;
+    return true;
+  }
+  if (!(await cutSession(sfu, held.sessionId, where))) return false;
+  await forgetSession(deps.db, room, held);
+  return true;
 }
+
+/**
+ * Cut every session the room's rows still hold, all at once (each is two SFU calls), so ending it stops media even
+ * in a browser that ignores the answer. True when every one is cut; a failed one keeps its id for the next try.
+ */
+async function cutRoom(deps: MeetDeps, room: Pick<MeetRoom, "tenantId" | "id">, where: string): Promise<boolean> {
+  const held = await roomSessions(deps.db, room);
+  const results = await Promise.allSettled(held.map((h) => cutHeld(deps, room, h, where)));
+  return results.every((r) => r.status === "fulfilled" && r.value);
+}
+
+/** How often one room retries the cuts that failed (per Worker isolate): an SFU that is down costs a retry per half minute, not one per poll. */
+const RETRY_CUTS_EVERY_MS = 30_000;
+const lastRetry = new Map<string, number>();
+
+/** After a host's poll has been answered: try again to cut the sessions of people who left or were removed. */
+function retryCutsLater(deps: MeetDeps, room: MeetRoom, now: Date) {
+  const at = now.getTime();
+  if (at - (lastRetry.get(room.id) ?? Number.NEGATIVE_INFINITY) < RETRY_CUTS_EVERY_MS) return;
+  if (lastRetry.size > 500) lastRetry.clear();
+  lastRetry.set(room.id, at);
+  deps.later("state.retry_cuts", async () => {
+    const held = await pendingCuts(deps.db, room, now);
+    await Promise.allSettled(held.map((h) => cutHeld(deps, room, h, "state.retry_cuts")));
+  });
+}
+
+/** The reason a meeting made for later says it is not on the Schedule when the Schedule itself could not be reached. */
+const SCHEDULE_UNAVAILABLE = "schedule_unavailable";
 
 // Host management (Schedule's Meet panel)
 export async function handleListRooms(deps: MeetDeps): Promise<NextResponse> {
   try {
     const session = await deps.session();
     if (!session.ok) return meetError(401, "sign_in_required");
+    // A call left without its host that nobody polls any more ends here (and in the recording relay's sweep), so
+    // the list never shows it live and its recording is handed over.
+    for (const room of await endAbandonedRooms(deps.db, [session.tenantId], deps.now())) {
+      deps.later("rooms.abandoned", () => cutRoom(deps, room, "room.abandoned"));
+    }
     const [rooms, recordingAvailable] = await Promise.all([
-      listMeetRooms(deps.db, { tenantId: session.tenantId, limit: 20 }),
+      // A person sees the meetings they made; an owner or admin by base role, who hosts every meeting in the
+      // workspace (lib/meet/access.ts meetRoleFor), sees them all.
+      listMeetRooms(deps.db, { tenantId: session.tenantId, limit: 20, ...(session.isTrueAdmin ? {} : { hostUserId: session.userId }) }),
       deps.recording.available(session.tenantId),
     ]);
     return meetJson({
@@ -156,15 +210,31 @@ export async function handleCreateRoom(req: NextRequest, deps: MeetDeps): Promis
     });
     // A meeting made for later also goes on the host's Schedule. The link works whether or not it could; a
     // refusal comes back as the Schedule's own code (shabbat_protected...), worded by the Schedule's messageFor.
+    // The room exists from here on: nothing about the Schedule turns this answer into a failure (a retry would make
+    // a second room).
     let schedule: { added: true } | { added: false; reason: string } | undefined;
     if (room.startsAt) {
-      const outcome = body.timeZone
-        ? await deps.schedule({ tenantId: session.tenantId, userId: session.userId }, room, { timeZone: body.timeZone, minutes: body.minutes })
-        : ({ ok: false, reason: "time_zone_invalid" } as const);
+      const owner = { tenantId: session.tenantId, userId: session.userId };
+      let outcome: ScheduleOutcome = { ok: false, reason: "time_zone_invalid" };
+      if (body.timeZone) {
+        try {
+          outcome = await deps.schedule(owner, room, { timeZone: body.timeZone, minutes: body.minutes });
+        } catch (err) {
+          console.error("[meet.rooms.create] the Schedule could not be reached", err instanceof Error ? err.message : err);
+          outcome = { ok: false, reason: SCHEDULE_UNAVAILABLE };
+        }
+      }
       if (outcome.ok) {
-        await setRoomCalendarEvent(deps.db, room, outcome.eventId);
-        room.calendarEventId = outcome.eventId;
-        schedule = { added: true };
+        try {
+          await setRoomCalendarEvent(deps.db, room, outcome.eventId);
+          room.calendarEventId = outcome.eventId;
+          schedule = { added: true };
+        } catch (err) {
+          // A room that cannot remember its entry could never take it off again: take it back now.
+          console.error("[meet.rooms.create] could not link the Schedule entry", err instanceof Error ? err.message : err);
+          await deps.unschedule(owner, outcome.eventId);
+          schedule = { added: false, reason: SCHEDULE_UNAVAILABLE };
+        }
       } else {
         schedule = { added: false, reason: outcome.reason };
       }
@@ -223,10 +293,15 @@ export async function handleJoin(req: NextRequest, rawCode: string, deps: MeetDe
       }
     }
 
-    const name = meetDisplayName(body.name) ?? (session.ok ? meetDisplayName(session.email?.split("@")[0]) : null);
+    // Only a member of the room's own workspace joins under their account's name; anyone else types one, so a
+    // signed-in visitor from another workspace never shows the room their email.
+    const member = session.ok && session.tenantId === room.tenantId;
+    const name = meetDisplayName(body.name) ?? (member ? meetDisplayName(session.email?.split("@")[0]) : null);
     if (!name) return meetError(400, "name_required");
-    // The recording notice is ticked before a guest's camera or microphone is touched (the page asks first).
-    if (room.recordAudio && role === "guest" && body.consent !== true) return meetError(400, "consent_required");
+    // Quebec Law 25, notice before collection: everyone but the person who chose to record ticks the notice first,
+    // a second host too. The page asks for it before it touches a camera or microphone (components/meet/notice.ts).
+    const creator = member && session.userId === room.hostUserId;
+    if (room.recordAudio && !creator && body.consent !== true) return meetError(400, "consent_required");
     const participant = await joinMeetRoom(deps.db, {
       room,
       role,
@@ -259,9 +334,10 @@ export async function handleState(req: NextRequest, rawCode: string, deps: MeetD
     const { room, participant: me } = auth;
     await touchParticipant(deps.db, me, now);
     if (await expireIfHostGone(deps.db, room, now)) {
-      await cutRoom(deps, room);
+      deps.later("room.expire", () => cutRoom(deps, room, "room.expire"));
       return meetError(410, "room_ended", { reason: "host_left" });
     }
+    if (me.role === "host") retryCutsLater(deps, room, now);
     const present = await presentParticipants(deps.db, room, now);
     return meetJson({
       ok: true,
@@ -378,8 +454,8 @@ export async function handleLeave(req: NextRequest, rawCode: string, deps: MeetD
     // Leaving a room that ended, or leaving twice, is already done.
     if (!auth.ok) return [401, 410].includes(auth.response.status) ? meetJson({ ok: true }) : auth.response;
     await leaveMeet(deps.db, auth.participant, now);
-    const sfu = sfuIfConfigured(deps);
-    if (sfu) await cutSession(sfu, auth.participant.sfuSessionId, "leave");
+    const { id, sfuSessionId } = auth.participant;
+    if (sfuSessionId) await cutHeld(deps, auth.room, { participantId: id, sessionId: sfuSessionId }, "leave");
     const res = meetJson({ ok: true });
     const cookie = meetCookie(code, "");
     res.cookies.set(cookie.name, "", { ...cookie.options, maxAge: 0 });
@@ -407,18 +483,21 @@ export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDe
       if (target && target.userId && target.userId === auth.userId) return meetError(400, "cannot_remove_self");
       const removed = await removeParticipant(deps.db, room, body.participantId, now);
       if (!removed) return meetError(404, "participant_not_found");
-      const sfu = sfuIfConfigured(deps);
-      if (sfu) await cutSession(sfu, removed.sfuSessionId, "host.remove");
-      return meetJson({ ok: true, removed: removed.id });
+      // A cut that fails keeps the session id: the host's next polls try again (retryCutsLater).
+      const mediaCut = removed.sfuSessionId
+        ? await cutHeld(deps, room, { participantId: removed.id, sessionId: removed.sfuSessionId }, "host.remove")
+        : true;
+      return meetJson({ ok: true, removed: removed.id, mediaCut });
     }
 
     if (body.action === "delete") {
       // A meeting still going is ended first, so nobody keeps talking into a room that no longer exists.
-      if (room.status !== "ended") {
-        await endMeetRoom(deps.db, room, "host_ended", now);
-        await cutRoom(deps, room);
-      }
-      // The recording goes first (e9's deleteMeetRecording: the transcript, the relay and the PC's copy). If it
+      if (room.status !== "ended") await endMeetRoom(deps.db, room, "host_ended", now);
+      // Every session the rows still hold is cut, whatever the status: an end whose cut failed left its ids here,
+      // and deleting the rows loses them for good. One that still fails is logged and the delete goes on: an SFU
+      // that does not answer must never keep a meeting, and its recording, from being deleted.
+      const mediaCut = await cutRoom(deps, room, "room.delete");
+      // The recording goes next (e9's deleteMeetRecording: the transcript, the relay and the PC's copy). If it
       // fails, the meeting is kept, so the recording can never be orphaned by a half-done delete.
       const recording = await deps.recording.remove(room, auth.userId, now);
       // The creator's own Schedule entry carries the dead link; another host's delete never touches someone
@@ -427,12 +506,12 @@ export async function handleHost(req: NextRequest, rawCode: string, deps: MeetDe
         await deps.unschedule({ tenantId: room.tenantId, userId: room.hostUserId }, room.calendarEventId);
       }
       await deleteMeetRoomRows(deps.db, room);
-      return meetJson({ ok: true, deleted: true, relayRemaining: recording?.relayRemaining ?? 0 });
+      return meetJson({ ok: true, deleted: true, relayRemaining: recording?.relayRemaining ?? 0, mediaCut });
     }
 
     const endedNow = await endMeetRoom(deps.db, room, "host_ended", now);
-    await cutRoom(deps, room);
-    return meetJson({ ok: true, ended: true, alreadyEnded: !endedNow });
+    const mediaCut = await cutRoom(deps, room, "room.end");
+    return meetJson({ ok: true, ended: true, alreadyEnded: !endedNow, mediaCut });
   } catch (err) {
     return meetFailure(err, "host");
   }

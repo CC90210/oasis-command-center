@@ -189,13 +189,46 @@ export async function removeParticipant(
   return before;
 }
 
-/** Every SFU session anyone in the room has had, present or not: what ending the room must cut. */
-export async function roomSessions(db: Client, room: Pick<MeetRoom, "tenantId" | "id">): Promise<string[]> {
+/** A participant's SFU session that has not been cut yet: a row keeps its session id until a cut goes through. */
+export type HeldSession = { participantId: string; sessionId: string };
+
+const heldSessions = (rows: Array<Record<string, unknown>>): HeldSession[] =>
+  rows.map((row) => ({ participantId: String(row.id), sessionId: String(row.sfu_session_id) }));
+
+/** Every SFU session the room's rows still hold, present or not: what ending or deleting the room must cut. */
+export async function roomSessions(db: Client, room: Pick<MeetRoom, "tenantId" | "id">): Promise<HeldSession[]> {
   const rs = await db.execute({
-    sql: "SELECT DISTINCT sfu_session_id AS s FROM meet_participants WHERE tenant_id = ? AND room_id = ? AND sfu_session_id IS NOT NULL",
+    sql: "SELECT id, sfu_session_id FROM meet_participants WHERE tenant_id = ? AND room_id = ? AND sfu_session_id IS NOT NULL",
     args: [room.tenantId, room.id],
   });
-  return rs.rows.map((row) => String(row.s));
+  return heldSessions(rs.rows as unknown as Array<Record<string, unknown>>);
+}
+
+/** How long after someone left or was removed a cut of their session that failed is still tried again. */
+export const MEET_CUT_RETRY_MS = 60 * 60_000;
+
+/**
+ * Sessions of people who left or were removed whose cut has not gone through (the SFU did not answer): newest
+ * first, at most `limit`, and only within MEET_CUT_RETRY_MS. A removed guest whose cut failed would otherwise
+ * keep receiving the room, with no row left on the host's screen to try again from.
+ */
+export async function pendingCuts(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, now: Date, limit = 3): Promise<HeldSession[]> {
+  const rs = await db.execute({
+    sql: `SELECT id, sfu_session_id FROM meet_participants
+          WHERE tenant_id = ? AND room_id = ? AND sfu_session_id IS NOT NULL AND (removed_at IS NOT NULL OR left_at IS NOT NULL)
+            AND COALESCE(removed_at, left_at) > ?
+          ORDER BY COALESCE(removed_at, left_at) DESC LIMIT ?`,
+    args: [room.tenantId, room.id, new Date(now.getTime() - MEET_CUT_RETRY_MS).toISOString(), limit],
+  });
+  return heldSessions(rs.rows as unknown as Array<Record<string, unknown>>);
+}
+
+/** A cut went through: the row lets go of that session and what it published there (unless a reconnect replaced it). */
+export async function forgetSession(db: Client, room: Pick<MeetRoom, "tenantId" | "id">, held: HeldSession): Promise<void> {
+  await db.execute({
+    sql: "UPDATE meet_participants SET sfu_session_id = NULL, tracks = '[]' WHERE tenant_id = ? AND room_id = ? AND id = ? AND sfu_session_id = ?",
+    args: [room.tenantId, room.id, held.participantId, held.sessionId],
+  });
 }
 
 /**
@@ -217,17 +250,48 @@ export async function endMeetRoom(db: Client, room: Pick<MeetRoom, "tenantId" | 
 }
 
 /**
- * A live room whose hosts have all been gone for MEET_HOST_GRACE_MS ends itself (ended_reason host_left). Read
- * on each state poll, so it needs no scheduler. True when this call ended it.
+ * A live room ends on its own (host_left) once its hosts have all been gone for MEET_HOST_GRACE_MS AND a call
+ * happened in it: some guest was in the room while a host was. A host who opened the room alone (to test their
+ * camera, or early) leaves it waiting for its meeting, so the first guest to arrive is never shown "ended".
+ * `?` is the cutoff (now - MEET_HOST_GRACE_MS). A host's last sighting is their last poll; with none, the start.
  */
+const HOSTS_GONE_AFTER_A_CALL = `r.status = 'live'
+  AND COALESCE(
+        (SELECT max(h.last_seen_at) FROM meet_participants h
+          WHERE h.tenant_id = r.tenant_id AND h.room_id = r.id AND h.role = 'host' AND h.removed_at IS NULL),
+        r.started_at, r.created_at) <= ?
+  AND EXISTS (
+        SELECT 1 FROM meet_participants g
+          JOIN meet_participants h ON h.tenant_id = g.tenant_id AND h.room_id = g.room_id AND h.role = 'host'
+         WHERE g.tenant_id = r.tenant_id AND g.room_id = r.id AND g.role = 'guest'
+           AND g.joined_at <= h.last_seen_at AND h.joined_at <= g.last_seen_at)`;
+
+const graceCutoff = (now: Date) => new Date(now.getTime() - MEET_HOST_GRACE_MS).toISOString();
+
+/** The state poll's check: end this room if its call has been left without a host. True when this call ended it. */
 export async function expireIfHostGone(db: Client, room: MeetRoom, now: Date = new Date()): Promise<boolean> {
   if (room.status !== "live") return false;
   const rs = await db.execute({
-    sql: "SELECT max(last_seen_at) AS seen FROM meet_participants WHERE tenant_id = ? AND room_id = ? AND role = 'host' AND removed_at IS NULL",
-    args: [room.tenantId, room.id],
+    sql: `UPDATE meet_rooms AS r SET status = 'ended', ended_at = ?, ended_reason = 'host_left'
+           WHERE r.tenant_id = ? AND r.id = ? AND ${HOSTS_GONE_AFTER_A_CALL}`,
+    args: [now.toISOString(), room.tenantId, room.id, graceCutoff(now)],
   });
-  const seen = rs.rows[0]?.seen ? Date.parse(String(rs.rows[0].seen)) : NaN;
-  const since = Number.isFinite(seen) ? seen : Date.parse(room.startedAt ?? room.createdAt);
-  if (now.getTime() - since < MEET_HOST_GRACE_MS) return false;
-  return endMeetRoom(db, room, "host_left", now);
+  return rs.rowsAffected > 0;
+}
+
+/**
+ * The same rule for rooms nobody polls any more: a call whose host's tab died after everyone else left would stay
+ * live forever, and its recording would never be handed over (lib/meet/recording.ts finalizeDueRooms takes ended
+ * rooms only). Run when a host opens the Schedule's meetings and by the recording relay's sweep. Returns the rooms
+ * it ended, for the caller to cut their media.
+ */
+export async function endAbandonedRooms(db: Client, tenantIds: readonly string[], now: Date = new Date()): Promise<Array<Pick<MeetRoom, "tenantId" | "id">>> {
+  if (!tenantIds.length) return [];
+  const rs = await db.execute({
+    sql: `UPDATE meet_rooms AS r SET status = 'ended', ended_at = ?, ended_reason = 'host_left'
+           WHERE r.tenant_id IN (${tenantIds.map(() => "?").join(", ")}) AND ${HOSTS_GONE_AFTER_A_CALL}
+       RETURNING tenant_id, id`,
+    args: [now.toISOString(), ...tenantIds, graceCutoff(now)],
+  });
+  return rs.rows.map((row) => ({ tenantId: String(row.tenant_id), id: String(row.id) }));
 }

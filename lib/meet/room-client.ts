@@ -15,7 +15,10 @@
  * camera is off or a mic is silent, with nothing extra on the server.
  *
  * The host's recorder (lib/meet/recorder.ts, e9) plugs in through `recorder`: it is handed the host's own
- * microphone and every remote microphone as it arrives, told when someone leaves, and stopped before End.
+ * microphone and every remote microphone as it arrives, and told when someone leaves. End asks the room to end
+ * FIRST and stops the recorder only once it has: an End that fails leaves the meeting going and still recorded,
+ * where stopping first would lose the rest of the call. The recorder's last chunks go up after the end (the
+ * chunk route takes them for ten minutes), and then the PC is told the recording is whole.
  */
 
 export type MeetRole = "host" | "guest";
@@ -291,8 +294,25 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     micOn = false;
     pulled.clear();
     byMid.clear();
-    if (recorder) void recorder.stop();
+    // A room that is over for everyone (a host ended it, or it closed) has its recording finished and handed over;
+    // leaving or being removed only stops it (the room's end hands it over later).
+    void finishRecording(phase.kind === "ended" && (phase.reason === "host_ended" || phase.reason === "room_closed"));
+  }
+
+  /**
+   * Stop the recording, if this browser runs one. When the room is over (`whole`), tell the PC the recording is
+   * complete, with the recorder's counts; without that word the server hands it over ten minutes after the end.
+   */
+  async function finishRecording(whole: boolean): Promise<void> {
+    const running = recorder;
     recorder = null;
+    if (!running) return;
+    const report = await running.stop();
+    if ((report as { errored?: number } | null)?.errored) {
+      notice = "Part of the audio may be missing from the recording.";
+      emit();
+    }
+    if (whole && report) await call("/recording/finalize", report).catch(() => undefined);
   }
 
   // Answers that mean this person is no longer in the room.
@@ -302,6 +322,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     // "The host ended the meeting" only when a host did; a room that closed itself (its host gone ten minutes)
     // or any other end is "This meeting has ended."
     else if (err.status === 410) ended(err.reason === "host_ended" && me?.role !== "host" ? "host_ended" : "room_closed");
+    // A meeting its host deleted is gone for everyone in it: not a connection to wait for.
+    else if (err.status === 404 && err.code === "room_not_found") ended("room_closed");
     else if (err.status === 401 && phase.kind !== "joining") ended("left");
     else return false;
     return true;
@@ -362,8 +384,12 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     if (toDrop.length) await serial(() => drop(toDrop));
   }
 
+  /** The call ended, or reconnected onto a new connection, while a step was waiting: the step's answer is moot. */
+  const moot = (peer: RTCPeerConnection) => closed || pc !== peer;
+
   async function pull(list: Array<{ participantId: string; trackName: string }>) {
-    if (!pc || closed) return;
+    const peer = pc;
+    if (!peer || closed) return;
     let res: {
       requiresImmediateRenegotiation: boolean;
       sessionDescription: RTCSessionDescriptionInit | null;
@@ -377,6 +403,7 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       if (err instanceof RoomCallError && err.code === "track_not_found") return;
       throw err;
     }
+    if (moot(peer)) return;
     for (const t of res.tracks) {
       if (!t.participantId || !t.trackName || t.errorCode || !t.mid) continue;
       const key = `${t.participantId}:${t.trackName}`;
@@ -384,15 +411,17 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       byMid.set(t.mid, key);
     }
     if (res.requiresImmediateRenegotiation && res.sessionDescription) {
-      await pc.setRemoteDescription(res.sessionDescription);
-      await pc.setLocalDescription(await pc.createAnswer());
-      await gathered(pc);
-      await sfu({ action: "renegotiate", answer: { type: "answer", sdp: pc.localDescription?.sdp ?? "" } });
+      await peer.setRemoteDescription(res.sessionDescription);
+      await peer.setLocalDescription(await peer.createAnswer());
+      await gathered(peer);
+      if (moot(peer)) return;
+      await sfu({ action: "renegotiate", answer: { type: "answer", sdp: peer.localDescription?.sdp ?? "" } });
     }
   }
 
   async function drop(keys: string[]) {
-    if (!pc || closed) return;
+    const peer = pc;
+    if (!peer || closed) return;
     const mids: string[] = [];
     for (const key of keys) {
       const p = pulled.get(key);
@@ -402,20 +431,21 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       if (p.mid) {
         mids.push(p.mid);
         byMid.delete(p.mid);
-        pc.getTransceivers().find((t) => t.mid === p.mid)?.stop();
+        peer.getTransceivers().find((t) => t.mid === p.mid)?.stop();
       }
       pulled.delete(key);
     }
     emit();
     if (!mids.length) return;
-    await pc.setLocalDescription(await pc.createOffer());
-    await gathered(pc);
+    await peer.setLocalDescription(await peer.createOffer());
+    await gathered(peer);
+    if (moot(peer)) return;
     const res = await sfu<{ sessionDescription: RTCSessionDescriptionInit | null }>({
       action: "close",
       mids,
-      offer: { type: "offer", sdp: pc.localDescription?.sdp ?? "" },
+      offer: { type: "offer", sdp: peer.localDescription?.sdp ?? "" },
     });
-    if (res.sessionDescription) await pc.setRemoteDescription(res.sessionDescription);
+    if (res.sessionDescription && !moot(peer)) await peer.setRemoteDescription(res.sessionDescription);
   }
 
   function onRemoteTrack(event: RTCTrackEvent) {
@@ -644,24 +674,19 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     },
 
     async end() {
-      // The recording's last chunks go up before the room is ended, then the PC is told the recording is whole.
-      let report: unknown = null;
-      if (recorder) {
-        report = await recorder.stop();
-        recorder = null;
-        if ((report as { errored?: number } | null)?.errored) notice = "Part of the audio may be missing from the recording.";
-      }
+      if (closed) return;
+      // The room is asked first; the recorder runs on until it has ended (see the top of this file). A poll that
+      // sees the end first finishes the recording the same way: whichever comes first takes the recorder.
       try {
         await call("/host", { action: "end" });
       } catch (err) {
         if (endedBy(err)) return;
+        // Still in the meeting, and still recorded.
         notice = "Could not end the meeting. Try again.";
         return emit();
       }
-      if (report) {
-        // Best effort: if this never arrives, the PC takes the recording ten minutes after the end anyway.
-        await call("/recording/finalize", report).catch(() => undefined);
-      }
+      // Best effort: if the PC is never told, it takes the recording ten minutes after the end anyway.
+      await finishRecording(true);
       ended("host_ended");
     },
 

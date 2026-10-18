@@ -22,9 +22,9 @@ import { publicAppBaseUrl } from "../lib/api-helpers";
 import { MEET_COOKIE, MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } from "../lib/meet/access";
 import { parseHost, parseSfu } from "../lib/meet/bodies";
 import { handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
-import { MEET_HOST_GRACE_MS, MEET_MAX_PARTICIPANTS } from "../lib/meet/participants";
+import { MEET_CUT_RETRY_MS, MEET_HOST_GRACE_MS, MEET_MAX_PARTICIPANTS, endAbandonedRooms, pendingCuts } from "../lib/meet/participants";
 import { displayMeetCode, readMeetRoomByCode } from "../lib/meet/rooms";
-import type { SfuClient } from "../lib/meet/sfu";
+import { SfuError, type SfuClient } from "../lib/meet/sfu";
 
 let failures = 0;
 async function check(name: string, fn: () => Promise<void>) {
@@ -63,10 +63,18 @@ function request(path: string, opts: { method?: string; body?: unknown; cookie?:
   });
 }
 
-/** A stand-in SFU: sessions and their tracks in memory, every call recorded. */
+/**
+ * A stand-in SFU: sessions and their tracks in memory, every call recorded. `down` holds sessions it cannot be
+ * asked about (a 500), `gone` the ones it no longer has (a 404); reading a session takes a moment, and `widest` is
+ * the most reads that were in flight at once.
+ */
 function fakeSfu() {
   const calls: Array<{ op: string; sessionId: string; mids?: string[]; tracks?: unknown }> = [];
   const sessions = new Map<string, Array<{ mid: string; location: string; trackName: string; status: string }>>();
+  const down = new Set<string>();
+  const gone = new Set<string>();
+  let reading = 0;
+  let widest = 0;
   let n = 0;
   const client: SfuClient = {
     async newSession() {
@@ -102,10 +110,25 @@ function fakeSfu() {
     },
     async sessionTracks(sessionId) {
       calls.push({ op: "tracks", sessionId });
-      return (sessions.get(sessionId) ?? []).map((t) => ({ ...t }));
+      reading += 1;
+      widest = Math.max(widest, reading);
+      try {
+        await new Promise((r) => setTimeout(r, 5));
+        if (down.has(sessionId)) throw new SfuError("sfu_http_500", "the SFU answered 500", 500);
+        if (gone.has(sessionId)) throw new SfuError("session_not_found", "no such session", 404);
+        return (sessions.get(sessionId) ?? []).map((t) => ({ ...t }));
+      } finally {
+        reading -= 1;
+      }
     },
   };
-  return { client, calls, sessions };
+  return {
+    client, calls, sessions, down, gone,
+    widest: () => widest,
+    resetWidest: () => {
+      widest = 0;
+    },
+  };
 }
 
 async function main() {
@@ -137,9 +160,17 @@ async function main() {
       unscheduled.push({ owner, eventId });
     },
     recording,
+    later: (_label, work) => void background.push(work()),
     now: () => new Date(clock),
     ...over,
   });
+  // What the routes leave to run after their answer (deps.later), awaited by the checks that read its effect.
+  const background: Array<Promise<unknown>> = [];
+  const settle = async () => {
+    while (background.length) await Promise.allSettled(background.splice(0));
+  };
+  const heldSession = async (participantId: string) =>
+    (await db.execute({ sql: "SELECT sfu_session_id AS s FROM meet_participants WHERE id = ?", args: [participantId] })).rows[0]?.s ?? null;
   const json = async (res: Response) => (await res.json()) as Json;
   const cookieOf = (res: Response) => (res as unknown as { cookies: { get(n: string): { value: string } | undefined } }).cookies.get(MEET_COOKIE)?.value;
 
@@ -160,10 +191,16 @@ async function main() {
     assert.ok(!("tenantId" in room) && !("hostUserId" in room), "the room view never carries its workspace or host id");
     code = String(room.code);
     await handleCreateRoom(request("/api/calendar/meet", { body: { title: "Theirs" } }), deps({ session: as(REP, false, OTHER) }));
-    const list = (await json(await handleListRooms(deps({ session: as(ADON) })))).rooms as Json[];
-    assert.ok(list.some((r) => r.code === code) && !list.some((r) => r.title === "Theirs"), "the list is the workspace's own rooms");
+    await handleCreateRoom(request("/api/calendar/meet", { body: { title: "Rep's own" } }), deps({ session: as(REP) }));
+    const list = (await json(await handleListRooms(deps({ session: as(ADON, true) })))).rooms as Json[];
+    assert.ok(
+      list.some((r) => r.code === code) && list.some((r) => r.title === "Rep's own") && !list.some((r) => r.title === "Theirs"),
+      "an owner or admin, who hosts every meeting in the workspace, sees them all, and only the workspace's own",
+    );
     assert.equal(list.find((r) => r.code === code)?.mine, false, "Adon sees CC's room as not his own");
     assert.equal(list.find((r) => r.code === code)?.url, room.url, "the list carries the same whole link");
+    const reps = (await json(await handleListRooms(deps({ session: as(REP) })))).rooms as Json[];
+    assert.deepEqual(reps.map((r) => r.title), ["Rep's own"], "a member who is not an admin sees only the meetings they made");
   });
 
   await check("the room page may use the camera and microphone; every other page still may not", async () => {
@@ -194,6 +231,13 @@ async function main() {
     assert.ok((shabbat.room as Json).link, "the link is made either way");
     const noZone = await make({ startsAt: "2026-10-21T18:00:00Z" });
     assert.deepEqual(noZone.schedule, { added: false, reason: "time_zone_invalid" });
+    const errors = console.error;
+    console.error = () => {}; // the fault this causes on purpose is logged
+    const unreachable = await make({ startsAt: "2026-10-22T18:00:00Z", timeZone: "America/Toronto" }, { schedule: async () => { throw new TypeError("network down"); } }).finally(() => {
+      console.error = errors;
+    });
+    assert.deepEqual(unreachable.schedule, { added: false, reason: "schedule_unavailable" }, "a Schedule that cannot be reached never turns a made meeting into a failure (a retry would make a second one)");
+    assert.ok((unreachable.room as Json).link);
     const now = await make({});
     assert.equal(now.schedule, undefined, "Start now has no time, so nothing goes on the Schedule");
     assert.equal(scheduled.length, before + 1, "the Schedule was asked once: for the meeting with a time and a zone");
@@ -208,6 +252,11 @@ async function main() {
   await check("a guest gives a name and, in a recorded room, ticks the notice; the cookie is HttpOnly and scoped to the room's API", async () => {
     const path = `/api/meet/${code}/join`;
     assert.equal((await handleJoin(request(path, { body: { consent: true }, ip: freshIp() }), code, deps())).status, 400, "no name");
+    assert.equal(
+      (await json(await handleJoin(request(path, { body: { consent: true }, ip: freshIp() }), code, deps({ session: as(REP, false, OTHER) })))).error,
+      "name_required",
+      "a signed-in visitor from another workspace types a name: their email never shows the room",
+    );
     assert.equal(((await json(await handleJoin(request(path, { body: { name: "Jane" }, ip: freshIp() }), code, deps()))).error), "consent_required");
     assert.equal((await handleJoin(request(path, { body: { name: "Jane", consent: true }, origin: "https://evil.example" }), code, deps())).status, 403);
     assert.equal((await handleJoin(request("/api/meet/abc-defg-hjk/join", { body: { name: "Jane", consent: true }, ip: freshIp() }), "abc-defg-hjk", deps())).status, 404);
@@ -244,7 +293,12 @@ async function main() {
     assert.equal(body.role, "host", "the creator is host, and needs no tick or typed name");
     assert.equal(body.records, true, "the creator's browser records a recorded room");
     assert.equal((body.room as Json).status, "live");
-    const admin = await json(await handleJoin(request(`/api/meet/${code}/join`, { body: {}, ip: freshIp() }), code, deps({ session: as(ADON, true) })));
+    assert.equal(
+      (await json(await handleJoin(request(`/api/meet/${code}/join`, { body: {}, ip: freshIp() }), code, deps({ session: as(ADON, true) })))).error,
+      "consent_required",
+      "a second host did not choose to record: they read and tick the notice like anyone else (Law 25)",
+    );
+    const admin = await json(await handleJoin(request(`/api/meet/${code}/join`, { body: { consent: true }, ip: freshIp() }), code, deps({ session: as(ADON, true) })));
     assert.equal(admin.role, "host");
     assert.equal(admin.records, false, "a second host never starts a second recording");
     hostCookie = cookieOf(res)!;
@@ -315,6 +369,8 @@ async function main() {
     assert.equal((await handleHost(request(`/api/meet/${code}/host`, { body: { action: "remove", participantId: hostId }, ip: freshIp() }), code, deps({ session: as(CC) }))).status, 400, "not yourself");
     const res = await handleHost(request(`/api/meet/${code}/host`, { body: { action: "remove", participantId: guestId }, ip: freshIp() }), code, deps({ session: as(CC) }));
     assert.equal(res.status, 200);
+    assert.equal((await json(res)).mediaCut, true);
+    assert.equal(await heldSession(guestId), null, "a cut that went through is forgotten");
     const cut = sfu.calls.slice(before).find((c) => c.op === "force-close" && c.sessionId === guestSession);
     assert.deepEqual(cut?.mids, ["r0"], "what the guest was receiving is closed too, by force");
     assert.ok(sfu.sessions.get(guestSession)!.every((t) => t.status === "inactive"));
@@ -356,10 +412,13 @@ async function main() {
     await call(cookieOf(host)!, { action: "publish", offer, tracks: [{ mid: "0", trackName: "mic", kind: "audio" }] });
     await call(cookieOf(guest)!, { action: "session" });
     const before = sfu.calls.length;
+    sfu.resetWidest();
     const res = await handleHost(request(`/api/meet/${c2}/host`, { body: { action: "end" }, ip: freshIp() }), c2, deps({ session: as(ADON, true) }));
     assert.equal(res.status, 200, "an owner or admin by base role may end it");
+    assert.equal((await json(res)).mediaCut, true);
     const cuts = sfu.calls.slice(before).filter((c) => c.op === "tracks").map((c) => c.sessionId);
     assert.equal(new Set(cuts).size, 2, "both sessions were read and cut");
+    assert.equal(sfu.widest(), 2, "at once, not one after the other");
     assert.equal((await handleState(request(`/api/meet/${c2}/state`, { method: "GET", cookie: cookieOf(guest)!, ip: freshIp() }), c2, deps())).status, 410);
     assert.equal((await handleJoin(request(`/api/meet/${c2}/join`, { body: { name: "Late" }, ip: freshIp() }), c2, deps())).status, 410);
     assert.equal((await json(await handleHost(request(`/api/meet/${c2}/host`, { body: { action: "end" }, ip: freshIp() }), c2, deps({ session: as(CC) })))).alreadyEnded, true, "ending twice is fine");
@@ -398,20 +457,31 @@ async function main() {
     const guest = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: { name: "G", consent: true }, ip: freshIp() }), c, deps()))!;
     for (const cookie of [host, guest]) await handleSfu(request(`/api/meet/${c}/sfu`, { body: { action: "session" }, cookie, ip: freshIp() }), c, deps());
     const seen: Json[] = [];
+    // A cut reads the session's tracks first (these two published nothing, so there is nothing more to close).
+    const cutsSoFar = () => sfu.calls.slice(before).filter((x) => x.op === "tracks").length;
     const removing: MeetDeps["recording"] = {
       ...recording,
       remove: async (room, userId) => {
-        seen.push({ userId, status: (await readMeetRoomByCode(db, room.code))?.status ?? null, rows: await roomRows(room.id) });
+        seen.push({ userId, status: (await readMeetRoomByCode(db, room.code))?.status ?? null, rows: await roomRows(room.id), cuts: cutsSoFar() });
         return { relayRemaining: 3 };
       },
     };
+    const rowsAtUnschedule: number[] = [];
+    const unscheduling: MeetDeps["unschedule"] = async (owner, id) => {
+      rowsAtUnschedule.push(await roomRows(roomId));
+      unscheduled.push({ owner, eventId: id });
+    };
     const before = sfu.calls.length;
     const unscheduledBefore = unscheduled.length;
-    const res = await deleteMeeting(c, as(CC), { recording: removing });
+    const res = await deleteMeeting(c, as(CC), { recording: removing, unschedule: unscheduling });
     assert.equal(res.status, 200);
-    assert.deepEqual(await json(res), { ok: true, deleted: true, relayRemaining: 3 }, "what is still on the relay, so the panel can say so");
-    assert.deepEqual(seen, [{ userId: CC, status: "ended", rows: 3 }], "the recording was removed while the room and its people's rows were all still there, the room already ended");
-    assert.equal(new Set(sfu.calls.slice(before).filter((x) => x.op === "tracks").map((x) => x.sessionId)).size, 2, "both sessions were cut");
+    assert.deepEqual(await json(res), { ok: true, deleted: true, relayRemaining: 3, mediaCut: true }, "what is still on the relay, so the panel can say so");
+    assert.deepEqual(
+      seen,
+      [{ userId: CC, status: "ended", rows: 3, cuts: 2 }],
+      "the recording was removed after both sessions were cut, while the room and its people's rows were all still there, the room already ended",
+    );
+    assert.deepEqual(rowsAtUnschedule, [3], "the Schedule entry comes off before the rows go");
     assert.deepEqual(unscheduled.slice(unscheduledBefore), [{ owner: { tenantId: OASIS, userId: CC }, eventId }], "its entry comes off the creator's Schedule");
     assert.equal(await roomRows(roomId), 0, "the room and everyone's row in it are gone");
     assert.equal((await handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie: guest, ip: freshIp() }), c, deps())).status, 404, "the link is dead");
@@ -436,7 +506,7 @@ async function main() {
     assert.equal(unscheduled.length, unscheduledBefore, "and so is its Schedule entry");
     const removedBy: string[] = [];
     const nothingInstalled: MeetDeps["recording"] = { ...recording, remove: async (_room, userId) => { removedBy.push(userId); return null; } };
-    assert.deepEqual(await json(await deleteMeeting(c, as(ADON, true), { recording: nothingInstalled })), { ok: true, deleted: true, relayRemaining: 0 });
+    assert.deepEqual(await json(await deleteMeeting(c, as(ADON, true), { recording: nothingInstalled })), { ok: true, deleted: true, relayRemaining: 0, mediaCut: true });
     assert.deepEqual(removedBy, [ADON], "an owner or admin by base role may delete it");
     assert.equal(unscheduled.length, unscheduledBefore, "the creator's calendar is theirs: another host's delete never writes to it");
     assert.equal(await roomRows(roomId), 0);
@@ -454,6 +524,143 @@ async function main() {
     assert.equal((await poll()).status, 410);
     const room = await readMeetRoomByCode(db, c3.replace(/-/g, ""));
     assert.equal(room?.endedReason, "host_left");
+  });
+
+  // Media is cut at the SFU, and a cut that fails is never lost.
+  const quietly = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const errors = console.error;
+    console.error = () => {}; // the SFU faults these checks cause on purpose are logged
+    try {
+      return await fn();
+    } finally {
+      console.error = errors;
+    }
+  };
+  /** A room with its creator in it and `guests` guests, each with an SFU session. */
+  const callWith = async (guests: number, body: Record<string, unknown> = { recordAudio: false }) => {
+    const made = await json(await handleCreateRoom(request("/api/calendar/meet", { body }), deps({ session: as(CC) })));
+    const c = String((made.room as Json).code);
+    const enter = async (join: Response) => ({ cookie: cookieOf(join)!, id: String((await json(join)).participantId) });
+    const people = [await enter(await handleJoin(request(`/api/meet/${c}/join`, { body: {}, ip: freshIp() }), c, deps({ session: as(CC) })))];
+    for (let i = 0; i < guests; i += 1) {
+      people.push(await enter(await handleJoin(request(`/api/meet/${c}/join`, { body: { name: `G${i}`, consent: true }, ip: freshIp() }), c, deps())));
+    }
+    for (const p of people) await handleSfu(request(`/api/meet/${c}/sfu`, { body: { action: "session" }, cookie: p.cookie, ip: freshIp() }), c, deps());
+    const sessions = await Promise.all(people.map(async (p) => String(await heldSession(p.id))));
+    return { c, roomId: String((made.room as Json).id), host: people[0], guests: people.slice(1), sessions };
+  };
+  const reads = (sessionId: string) => sfu.calls.filter((x) => x.op === "tracks" && x.sessionId === sessionId).length;
+
+  await check("a removed guest whose cut failed is cut again from the host's next polls, at most every 30 seconds; a session the SFU no longer has counts as cut", async () => {
+    const call = await callWith(2);
+    const [guest, other] = call.guests;
+    const session = call.sessions[1];
+    sfu.down.add(session);
+    const removed = await quietly(async () =>
+      json(await handleHost(request(`/api/meet/${call.c}/host`, { body: { action: "remove", participantId: guest.id }, ip: freshIp() }), call.c, deps({ session: as(CC) }))),
+    );
+    assert.equal(removed.mediaCut, false, "the host is told the cut did not go through");
+    assert.equal(await heldSession(guest.id), session, "the row keeps the session until a cut does");
+    const poll = () => handleState(request(`/api/meet/${call.c}/state`, { method: "GET", cookie: call.host.cookie, ip: freshIp() }), call.c, deps());
+    const tried = reads(session);
+    await quietly(async () => {
+      assert.equal((await poll()).status, 200);
+      await settle();
+    });
+    assert.equal(reads(session), tried + 1, "the host's poll tried again, after its answer");
+    await poll();
+    await settle();
+    assert.equal(reads(session), tried + 1, "and not again within 30 seconds, so an SFU that is down costs one try per half minute");
+    sfu.down.delete(session);
+    clock += 31_000;
+    await poll();
+    await settle();
+    assert.equal(await heldSession(guest.id), null, "cut at last, and forgotten");
+    sfu.gone.add(call.sessions[2]);
+    await handleLeave(request(`/api/meet/${call.c}/leave`, { cookie: other.cookie, ip: freshIp() }), call.c, deps());
+    assert.equal(await heldSession(other.id), null, "a session the SFU no longer has carries no media: done at once");
+  });
+
+  await check("a cut that failed is tried again for an hour after the person was removed, then let go", async () => {
+    const call = await callWith(1);
+    sfu.down.add(call.sessions[1]);
+    await quietly(() => handleHost(request(`/api/meet/${call.c}/host`, { body: { action: "remove", participantId: call.guests[0].id }, ip: freshIp() }), call.c, deps({ session: as(CC) })));
+    const room = (await readMeetRoomByCode(db, call.c.replace(/-/g, "")))!;
+    const minutes = (n: number) => new Date(clock + n * 60_000);
+    assert.deepEqual((await pendingCuts(db, room, minutes(59))).map((h) => h.participantId), [call.guests[0].id], "within the hour it is tried again");
+    assert.deepEqual(await pendingCuts(db, room, minutes(61)), [], "an hour on, its session is let go");
+    assert.equal(MEET_CUT_RETRY_MS, 60 * 60_000);
+    sfu.down.delete(call.sessions[1]);
+  });
+
+  await check("an end whose cut failed leaves the session for Delete, which cuts it whatever the status; an SFU that stays down never keeps a meeting from being deleted", async () => {
+    const call = await callWith(1);
+    sfu.down.add(call.sessions[1]);
+    const ended = await quietly(async () => json(await handleHost(request(`/api/meet/${call.c}/host`, { body: { action: "end" }, ip: freshIp() }), call.c, deps({ session: as(CC) }))));
+    assert.equal(ended.mediaCut, false);
+    assert.equal(await heldSession(call.host.id), null, "the session that was cut is forgotten");
+    assert.equal(await heldSession(call.guests[0].id), call.sessions[1], "the one that was not is kept");
+    sfu.down.delete(call.sessions[1]);
+    const tried = reads(call.sessions[1]);
+    assert.deepEqual(await json(await deleteMeeting(call.c, as(CC))), { ok: true, deleted: true, relayRemaining: 0, mediaCut: true });
+    assert.equal(reads(call.sessions[1]), tried + 1, "the delete cut what the end could not, although the room had ended");
+
+    const stuck = await callWith(1);
+    for (const s of stuck.sessions) sfu.down.add(s);
+    assert.deepEqual(await quietly(async () => json(await deleteMeeting(stuck.c, as(CC)))), { ok: true, deleted: true, relayRemaining: 0, mediaCut: false });
+    assert.equal(await roomRows(stuck.roomId), 0, "deleted all the same");
+
+    const unset = await callWith(1);
+    const noApp = { sfu: () => { throw new MeetNotConfiguredError("no app"); } };
+    assert.deepEqual(await quietly(async () => json(await deleteMeeting(unset.c, as(CC), noApp))), { ok: true, deleted: true, relayRemaining: 0, mediaCut: true }, "no SFU app: nothing can be cut, and the meeting is deleted");
+  });
+
+  await check("a host who opens a meeting alone and leaves leaves it waiting: the first guest is never shown ended; a call its host then leaves ends ten minutes on", async () => {
+    const made = await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false } }), deps({ session: as(CC) })));
+    const c = String((made.room as Json).code);
+    const joinAs = async (session?: () => Promise<MeetSession>, body: Record<string, unknown> = {}) => {
+      const res = await handleJoin(request(`/api/meet/${c}/join`, { body, ip: freshIp() }), c, deps(session ? { session } : {}));
+      return { cookie: cookieOf(res)!, id: String((await json(res)).participantId) };
+    };
+    const poll = (cookie: string) => handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie, ip: freshIp() }), c, deps());
+    const tested = await joinAs(as(CC));
+    await handleLeave(request(`/api/meet/${c}/leave`, { cookie: tested.cookie, ip: freshIp() }), c, deps());
+    clock += 30 * 60_000;
+    const guest = await joinAs(undefined, { name: "Early" });
+    const waiting = await poll(guest.cookie);
+    assert.equal(waiting.status, 200, "half an hour after the host's test, the first guest waits for the host");
+    assert.equal((await json(waiting)).hostPresent, false);
+    const host = await joinAs(as(CC));
+    await poll(host.cookie);
+    for (const p of [host, guest]) await handleSfu(request(`/api/meet/${c}/sfu`, { body: { action: "session" }, cookie: p.cookie, ip: freshIp() }), c, deps());
+    await poll(guest.cookie);
+    clock += MEET_HOST_GRACE_MS - 60_000; // the host's tab died
+    assert.equal((await poll(guest.cookie)).status, 200, "nine minutes on, still waiting for the host");
+    clock += 120_000;
+    assert.equal((await poll(guest.cookie)).status, 410);
+    assert.equal((await readMeetRoomByCode(db, c.replace(/-/g, "")))?.endedReason, "host_left");
+    await settle();
+    assert.deepEqual([await heldSession(host.id), await heldSession(guest.id)], [null, null], "and its media is cut, after the answer");
+  });
+
+  await check("a call left without its host that nobody polls ends when the list is read (or by the relay's sweep), and its media is cut; a room only its host has opened stays waiting", async () => {
+    const lone = await callWith(0);
+    await handleLeave(request(`/api/meet/${lone.c}/leave`, { cookie: lone.host.cookie, ip: freshIp() }), lone.c, deps());
+    const abandoned = await callWith(1);
+    const elsewhere = await json(await handleCreateRoom(request("/api/calendar/meet", { body: { recordAudio: false } }), deps({ session: as(REP, false, OTHER) })));
+    const e = String((elsewhere.room as Json).code);
+    await handleJoin(request(`/api/meet/${e}/join`, { body: {}, ip: freshIp() }), e, deps({ session: as(REP, false, OTHER) }));
+    await handleJoin(request(`/api/meet/${e}/join`, { body: { name: "Their guest" }, ip: freshIp() }), e, deps());
+    clock += MEET_HOST_GRACE_MS + 60_000; // everyone's tab closed without a word
+    const list = (await json(await handleListRooms(deps({ session: as(CC) })))).rooms as Json[];
+    await settle();
+    assert.equal(list.find((r) => r.code === abandoned.c)?.status, "ended", "the list never shows it live");
+    assert.equal((await readMeetRoomByCode(db, abandoned.c.replace(/-/g, "")))?.endedReason, "host_left");
+    assert.equal(await heldSession(abandoned.guests[0].id), null, "its media was cut, after the answer");
+    assert.equal(list.find((r) => r.code === lone.c)?.status, "live", "nobody has used it yet: it waits for its meeting");
+    assert.equal((await readMeetRoomByCode(db, e.replace(/-/g, "")))?.status, "live", "another workspace's rooms are its own list's business");
+    const swept = await endAbandonedRooms(db, [OTHER, OASIS], new Date(clock));
+    assert.deepEqual(swept.map((r) => r.tenantId), [OTHER], "the relay's sweep ends them for every workspace it is given");
   });
 
   await check("nothing runs without its secrets: no token secret is 503 before any row is written; no SFU app is 503", async () => {

@@ -10,7 +10,7 @@ keeps the transcript. No meeting vendor bill: media runs on Cloudflare Realtime 
 | Piece | Where | What it does |
 |---|---|---|
 | Rooms and people | `lib/meet/rooms.ts`, `lib/meet/participants.ts`, migration `bravo__230` | `meet_rooms` (the link code, title, host, scheduled/live/ended, record on/off, Schedule event, lead) and `meet_participants` (one row per person per join: role, name, consent, SFU session, published tracks, left/removed). Every query names the room's tenant; the code lookup is the one read not by workspace, because the code is what a guest holds. |
-| Who may do what | `lib/meet/access.ts` | Host: the room's creator, or an owner/admin of its workspace by base role. Guest: anyone with the link. A guest's join sets an HMAC participant token (`MEET_TOKEN_SECRET`) in an HttpOnly, Secure, SameSite=Lax cookie scoped to `/api/meet/<code>`; every call re-reads the participant row, so leaving, removal and an ended room apply at once. |
+| Who may do what | `lib/meet/access.ts` | Host: the room's creator, or an owner/admin of its workspace by base role. Guest: anyone with the link. A guest's join sets an HMAC participant token (`MEET_TOKEN_SECRET`) in an HttpOnly, Secure, SameSite=Lax cookie scoped to `/api/meet/<code>`; every call re-reads the participant row, so leaving, removal and an ended room apply at once. In a recorded room everyone but its creator, a second host too, ticks the recording notice. A member's meeting list shows the meetings they made; an owner/admin's shows all of the workspace's. |
 | The room API | `lib/meet/handlers.ts`, `app/api/meet/[code]/*` | `join`, `state` (polled every 2 s), `sfu` (session, publish, pull, renegotiate, close), `leave`, `host` (remove, end, delete). Public at the middleware; each route checks same origin, the code, a rate limit, then the token or the host's session. |
 | Host management | `app/api/calendar/meet` | List and make rooms (signed in). A meeting with a time also goes on the host's Schedule through the Schedule's own write path (`lib/meet/schedule.ts`, Shabbat lock included). The list says `recordingAvailable`; where it is false a room never records, so no guest is asked to agree to a recording nobody makes. |
 | Deleting a meeting | `host` action `delete` | A host only. In this order: a meeting still going is ended and its media cut; the recording is deleted (`deleteMeetRecording`: the transcript, the relay, the PC's copy); the creator's Schedule entry is removed (never another person's calendar); then the room's rows. If the recording cannot be deleted, the meeting is kept, so nothing is orphaned. |
@@ -31,9 +31,12 @@ keeps the transcript. No meeting vendor bill: media runs on Cloudflare Realtime 
 ## Limits, on purpose
 
 - Eight people per room at most (one statement with the join, so it cannot be overshot).
-- A live room ends itself when no host has been seen for 10 minutes.
+- A live room ends itself when no host has been seen for 10 minutes, but only after a call happened in it (a guest was there while a host was). A host who opens a meeting alone, to test or early, leaves it waiting for its guests. A call nobody polls any more (every tab closed) ends when a host opens the Meet panel, and in the recording relay's sweep, so its recording is handed over.
+- End asks the room to end before the recorder stops: an End that fails keeps the meeting going and recorded.
+- Media is cut at the SFU on leave, remove, end and delete. A row keeps its session id until the cut goes through; a failed one is retried from the host's polls (after the answer, at most every 30 seconds per room) for an hour, and by Delete. Delete never waits on an SFU that does not answer.
 - Only the room creator's browser records; if the creator is not in the call, nothing records.
-- Rate limits are per Worker isolate (a slowdown for guessing links); the participant cap is the hard ceiling.
+- Remove is not a ban: the person can come back with the link from a new browser window (there is no account to ban).
+- Rate limits are per Worker isolate (a slowdown for guessing links); the participant cap is the hard ceiling. Up to eight people behind one office address fit the poll limit.
 
 ## Tests
 

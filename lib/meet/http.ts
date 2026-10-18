@@ -20,11 +20,12 @@ type Limit = { capacity: number; refillPerSec: number };
 
 /**
  * Per address, then per room. join is what a guessed link would call; state is polled every 2 s by each
- * of up to 8 people; sfu is a handful of negotiations per person; action is a host's remove or end.
+ * of up to 8 people, who may all sit behind one office address (8 x 0.5/s, with headroom); sfu is a handful of
+ * negotiations per person; action is a host's remove, end or delete.
  */
 const LIMITS: Record<"join" | "state" | "sfu" | "leave" | "action", { ip: Limit; room: Limit }> = {
   join: { ip: { capacity: 10, refillPerSec: 10 / 60 }, room: { capacity: 30, refillPerSec: 30 / 60 } },
-  state: { ip: { capacity: 90, refillPerSec: 1.5 }, room: { capacity: 600, refillPerSec: 8 } },
+  state: { ip: { capacity: 180, refillPerSec: 6 }, room: { capacity: 600, refillPerSec: 8 } },
   sfu: { ip: { capacity: 60, refillPerSec: 1 }, room: { capacity: 400, refillPerSec: 6 } },
   leave: { ip: { capacity: 20, refillPerSec: 20 / 60 }, room: { capacity: 60, refillPerSec: 1 } },
   action: { ip: { capacity: 30, refillPerSec: 30 / 60 }, room: { capacity: 60, refillPerSec: 1 } },
@@ -33,11 +34,14 @@ const LIMITS: Record<"join" | "state" | "sfu" | "leave" | "action", { ip: Limit;
 /** A 429 when this address or this room is over its limit for this kind of call, else null. */
 export function meetRateLimited(req: NextRequest, code: string, kind: keyof typeof LIMITS): NextResponse | null {
   const limit = LIMITS[kind];
+  const refused = (resetIn: number) =>
+    NextResponse.json({ ok: false, error: "rate_limited" }, { status: 429, headers: { "retry-after": String(Math.max(resetIn, 1)), "cache-control": "no-store" } });
   const byAddress = rateLimit({ key: `meet:${kind}:ip:${getClientIp(req) || "unknown"}`, ...limit.ip });
+  // An address over its limit is refused before a bucket is made for the room it named: the limiter keeps every
+  // bucket it makes, so a script guessing links must not grow it by one per guess (lib/rate-limit.ts).
+  if (!byAddress.allowed) return refused(byAddress.resetIn);
   const byRoom = rateLimit({ key: `meet:${kind}:room:${code}`, ...limit.room });
-  if (byAddress.allowed && byRoom.allowed) return null;
-  const retryAfter = Math.max(byAddress.resetIn, byRoom.resetIn, 1);
-  return NextResponse.json({ ok: false, error: "rate_limited" }, { status: 429, headers: { "retry-after": String(retryAfter), "cache-control": "no-store" } });
+  return byRoom.allowed ? null : refused(byRoom.resetIn);
 }
 
 /** What the people in a room see of it. Never its workspace, host id, lead or calendar links. */

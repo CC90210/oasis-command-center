@@ -6,8 +6,10 @@
  *    (Cloudflare needs each SDP exchange finished before the next);
  *  - what others publish is pulled (and the SFU's offer answered), and closed when they leave;
  *  - mic off stops sending AND disables the track (so a recording hears nothing);
- *  - removal and an ended room end the call and release the camera;
- *  - only a browser the join named as the recorder records, and End stops it before ending, then finalizes.
+ *  - removal, an ended room and a deleted one end the call and release the camera;
+ *  - only a browser the join named as the recorder records; End asks the room to end first and stops the
+ *    recorder only once it has (an End that fails keeps the call recorded), then finalizes; a room that ends
+ *    some other way finalizes too, and leaving only stops it.
  *
  * Run: node --conditions=react-server --import tsx tests/meet-room-client.test.ts
  */
@@ -57,6 +59,8 @@ class FakeTransceiver {
 class FakePeer extends EventTarget {
   connectionState = "new";
   iceGatheringState = "complete";
+  /** Answering the SFU's offer leaves ICE gathering, the step that can take seconds, unfinished. */
+  slowAnswers = false;
   localDescription: { type: string; sdp: string } | null = null;
   transceivers: FakeTransceiver[] = [];
   closed = false;
@@ -71,19 +75,28 @@ class FakePeer extends EventTarget {
   getTransceivers() {
     return this.transceivers;
   }
+  /** A closed RTCPeerConnection refuses every further step (InvalidStateError), as a browser's does. */
+  private open() {
+    if (this.closed) throw new Error("InvalidStateError: the RTCPeerConnection is closed");
+  }
   async createOffer() {
+    this.open();
     this.transceivers.forEach((t, i) => {
       if (t.mid === null) t.mid = String(i);
     });
     return { type: "offer", sdp: `offer ${this.transceivers.filter((t) => !t.stopped).map((t) => t.mid).join(",")}` };
   }
   async createAnswer() {
+    this.open();
     return { type: "answer", sdp: "answer" };
   }
   async setLocalDescription(d: { type: string; sdp: string }) {
+    this.open();
     this.localDescription = d;
+    if (d.type === "answer" && this.slowAnswers) this.iceGatheringState = "gathering";
   }
   async setRemoteDescription(d: { type: string; sdp: string }) {
+    this.open();
     if (d.type === "answer" && this.connectionState !== "connected") {
       this.connectionState = "connected";
       this.dispatchEvent(new Event("connectionstatechange"));
@@ -115,6 +128,8 @@ function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio
   const others: Person[] = [];
   let hostPresent = opts.role === "host";
   let stateError: { status: number; error: string; reason?: string } | null = null;
+  let hostError: { status: number; error: string } | null = null;
+  let statePolls = 0;
   let publishFailures = opts.failPublishOnce ? 1 : 0;
   let sfuInFlight = 0;
   let overlapped = false;
@@ -130,6 +145,7 @@ function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio
       return reply({ ok: true, participantId: me.id, role: me.role, name: me.name, records: opts.records === true, room: { code: "abc-defg-hjk", title: "Call", status: "live", recordAudio: opts.recordAudio ?? true, startedAt: null }, iceServers: [] });
     }
     if (path === "/state") {
+      statePolls += 1;
       if (stateError) return reply({ ok: false, error: stateError.error, ...(stateError.reason ? { reason: stateError.reason } : {}) }, stateError.status);
       return reply({
         ok: true,
@@ -187,8 +203,8 @@ function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio
       }
     }
     if (path === "/host") {
-      log.push(`host:${String(body.action)}`);
-      return reply({ ok: true });
+      log.push(`host:${String(body.action)}${hostError ? `:${hostError.status}` : ""}`);
+      return hostError ? reply({ ok: false, error: hostError.error }, hostError.status) : reply({ ok: true });
     }
     if (path === "/recording/finalize") {
       log.push(`finalize:${JSON.stringify(body)}`);
@@ -210,6 +226,10 @@ function fakeRoom(opts: { role: "host" | "guest"; records?: boolean; recordAudio
     failState: (status: number, error: string, reason?: string) => {
       stateError = { status, error, reason };
     },
+    failHost: (failure: { status: number; error: string } | null) => {
+      hostError = failure;
+    },
+    polls: () => statePolls,
     overlapped: () => overlapped,
     busyWith: () => busyWith,
   };
@@ -223,7 +243,7 @@ async function waitFor(what: string, test: () => boolean, ms = 2_000) {
   }
 }
 
-function controller(room: ReturnType<typeof fakeRoom>, extra: { recorder?: () => RecorderPort } = {}) {
+function controller(room: ReturnType<typeof fakeRoom>, extra: { recorder?: () => RecorderPort; gatherMs?: number } = {}) {
   const peers: FakePeer[] = [];
   const c = createMeetRoomController({
     code: "abc-defg-hjk",
@@ -337,12 +357,14 @@ async function main() {
     await leaveQuietly(c);
   });
 
-  await check("removed or ended: the call ends, says who ended it only when a host did, and releases the camera", async () => {
+  await check("removed, ended or deleted: the call ends, says who ended it only when a host did, and releases the camera", async () => {
     const cases = [
       [403, "removed", undefined, "removed"],
       [410, "room_ended", "host_ended", "host_ended"],
       [410, "room_ended", "host_left", "room_closed"],
       [410, "room_ended", undefined, "room_closed"],
+      // Its host deleted the meeting mid-call: gone for good, never "Reconnecting to the room...".
+      [404, "room_not_found", undefined, "room_closed"],
     ] as const;
     for (const [status, error, why, reason] of cases) {
       const room = fakeRoom({ role: "guest" });
@@ -382,16 +404,31 @@ async function main() {
     assert.deepEqual(b.c.snapshot().phase, { kind: "ended", reason: "left" }, "the join's answer arriving after Leave does not bring the call back");
   });
 
-  await check("only the browser the join names records; End stops the recorder, then ends, then finalizes", async () => {
+  const REPORT = 'finalize:{"sent":3,"failed":0,"segments":2,"errored":0}';
+  /** A stand-in recorder that writes what it is told into the room's own log, so the order is one timeline. */
+  const recorderInto = (log: string[], events: string[] = []) => () => ({
+    addTrack: ({ participantId }: { participantId: string }) => events.push(`add:${participantId}`),
+    removeTrack: (participantId: string) => events.push(`remove:${participantId}`),
+    stop: async () => {
+      events.push("stop");
+      log.push("recorder:stop");
+      return { sent: 3, failed: 0, segments: 2, errored: 0 };
+    },
+  });
+  const recordingHost = async () => {
+    const room = fakeRoom({ role: "host", records: true });
+    const { c } = controller(room, { recorder: recorderInto(room.log) });
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    assert.equal(c.snapshot().recording, true);
+    return { room, c };
+  };
+  const after = (log: string[], from: string) => log.slice(log.indexOf(from));
+
+  await check("only the browser the join names records; End asks the room first, then stops the recorder, then finalizes", async () => {
     const events: string[] = [];
-    const recorderFor = () => ({
-      addTrack: ({ participantId }: { participantId: string }) => events.push(`add:${participantId}`),
-      removeTrack: (participantId: string) => events.push(`remove:${participantId}`),
-      stop: async () => {
-        events.push("stop");
-        return { sent: 3, failed: 0, segments: 2, errored: 0 };
-      },
-    });
+    const room = fakeRoom({ role: "host", records: true });
+    const recorderFor = recorderInto(room.log, events);
     const notRecording = fakeRoom({ role: "host", records: false });
     const a = controller(notRecording, { recorder: recorderFor });
     await a.c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
@@ -400,7 +437,6 @@ async function main() {
     assert.equal(a.c.snapshot().recording, false);
     await leaveQuietly(a.c);
 
-    const room = fakeRoom({ role: "host", records: true });
     const { c } = controller(room, { recorder: recorderFor });
     await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
     await waitFor("live", () => c.snapshot().phase.kind === "live");
@@ -411,10 +447,77 @@ async function main() {
     room.others.splice(0, 1);
     await waitFor("their recording segment ends", () => events.includes("remove:g1"));
     await c.end();
-    const order = room.log.filter((l) => l === "host:end" || l.startsWith("finalize:"));
-    assert.ok(events.indexOf("stop") >= 0, "the recorder was stopped");
-    assert.deepEqual(order, ["host:end", 'finalize:{"sent":3,"failed":0,"segments":2,"errored":0}'], "end, then finalize with the recorder's report");
+    const order = room.log.filter((l) => l.startsWith("host:") || l === "recorder:stop" || l.startsWith("finalize:"));
+    assert.deepEqual(order, ["host:end", "recorder:stop", REPORT], "the room ends first; the recorder stops once it has; then the PC is told, with the report");
     assert.deepEqual(c.snapshot().phase, { kind: "ended", reason: "host_ended" });
+  });
+
+  await check("an End that fails keeps the call going and recorded, and the room's poll going; the next End finishes it", async () => {
+    const { room, c } = await recordingHost();
+    room.failHost({ status: 502, error: "sfu_failed" });
+    await c.end();
+    assert.equal(c.snapshot().phase.kind, "live");
+    assert.equal(c.snapshot().recording, true, "still recording");
+    assert.equal(c.snapshot().notice, "Could not end the meeting. Try again.");
+    assert.ok(!room.log.includes("recorder:stop"), "the recorder was never stopped");
+    const polls = room.polls();
+    await waitFor("the room's poll goes on", () => room.polls() >= polls + 3);
+    room.failHost(null);
+    await c.end();
+    const order = room.log.filter((l) => l.startsWith("host:") || l === "recorder:stop" || l.startsWith("finalize:"));
+    assert.deepEqual(order, ["host:end:502", "host:end", "recorder:stop", REPORT], "nothing was lost between the two");
+    assert.deepEqual(c.snapshot().phase, { kind: "ended", reason: "host_ended" });
+  });
+
+  await check("a room that ends some other way (another host, its host gone) still finishes the recording; leaving only stops it", async () => {
+    const ended = await recordingHost();
+    ended.room.failState(410, "room_ended", "host_ended");
+    await waitFor("ended", () => ended.c.snapshot().phase.kind === "ended");
+    await waitFor("the PC is told", () => ended.room.log.includes(REPORT));
+    assert.deepEqual(after(ended.room.log, "recorder:stop").filter((l) => l === "recorder:stop" || l.startsWith("finalize:")), ["recorder:stop", REPORT]);
+
+    const left = await recordingHost();
+    await left.c.leave();
+    await waitFor("stopped", () => left.room.log.includes("recorder:stop"));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.ok(!left.room.log.some((l) => l.startsWith("finalize:")), "a creator who leaves may come back: the room's end hands the recording over");
+  });
+
+  await check("a pull or a close still on its way when the call ends is dropped quietly, never answered on a closed connection", async () => {
+    const room = fakeRoom({ role: "host" });
+    const { c } = controller(room);
+    await c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => c.snapshot().phase.kind === "live");
+    room.others.push({ id: "g1", name: "Guest", role: "guest", tracks: [{ trackName: "mic", kind: "audio" }] });
+    await waitFor("a pull on its way", () => room.busyWith() === "pull");
+    await c.leave(); // the pull's answer arrives after the connection has closed
+    await new Promise((r) => setTimeout(r, 80));
+    assert.deepEqual(c.snapshot().phase, { kind: "ended", reason: "left" });
+    assert.ok(!room.log.includes("sfu:renegotiate"), "the SFU's offer from that pull was never answered");
+
+    // Leaving while the browser is still gathering ICE for its answer (that can take seconds): never sent.
+    const gathering = fakeRoom({ role: "host" });
+    const slow = controller(gathering, { gatherMs: 120 });
+    await slow.c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => slow.c.snapshot().phase.kind === "live");
+    slow.peers[0].slowAnswers = true;
+    gathering.others.push({ id: "g1", name: "Guest", role: "guest", tracks: [{ trackName: "mic", kind: "audio" }] });
+    await waitFor("gathering for the answer", () => slow.peers[0].iceGatheringState === "gathering");
+    await slow.c.leave();
+    await new Promise((r) => setTimeout(r, 200));
+    assert.ok(!gathering.log.includes("sfu:renegotiate"), "an answer for a call that has ended is never sent");
+
+    const closing = fakeRoom({ role: "host" });
+    const second = controller(closing);
+    await second.c.join({ consent: true, mic: new FakeTrack("audio") as unknown as MediaStreamTrack, cam: null });
+    await waitFor("live", () => second.c.snapshot().phase.kind === "live");
+    closing.others.push({ id: "g1", name: "Guest", role: "guest", tracks: [{ trackName: "mic", kind: "audio" }] });
+    await waitFor("pulled", () => second.c.snapshot().tiles.some((t) => t.participantId === "g1" && t.audio));
+    closing.others.splice(0, 1);
+    await waitFor("a close on its way", () => closing.busyWith() === "close");
+    await second.c.leave();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.deepEqual(second.c.snapshot().phase, { kind: "ended", reason: "left" });
   });
 
   await check("a join the room refuses is said in plain words, and nothing is held", async () => {

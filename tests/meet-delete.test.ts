@@ -73,6 +73,7 @@ async function main() {
     schedule: async () => ({ ok: false, reason: "no_calendar" }),
     unschedule: async () => {},
     recording: meetRecordingDeps(db, () => storage),
+    later: (_label, work) => void work().catch((err: unknown) => console.error("[test.later]", err)),
     now: () => new Date(clock),
   });
   const json = async (res: Response) => (await res.json()) as Record<string, unknown>;
@@ -87,7 +88,7 @@ async function main() {
     const room = await make(deps(as(CC)), { recordAudio: true });
     assert.equal(room.recordAudio, false);
     const code = String(room.code);
-    assert.deepEqual(await json(await host(code, "delete", deps(as(CC)))), { ok: true, deleted: true, relayRemaining: 0 });
+    assert.deepEqual(await json(await host(code, "delete", deps(as(CC)))), { ok: true, deleted: true, relayRemaining: 0, mediaCut: true });
     assert.equal(await readMeetRoomByCode(bare, code.replace(/-/g, "")), null);
   });
 
@@ -121,7 +122,7 @@ async function main() {
     clock += 60_000;
     assert.equal((await host(code, "end", deps(as(CC)))).status, 200);
     assert.equal((await ensureTranscriptJob(db, (await readMeetRoomByCode(db, room.code))!, CC, new Date(clock))).state, "queued");
-    assert.deepEqual(await json(await host(code, "delete", deps(as(CC)))), { ok: true, deleted: true, relayRemaining: 0 });
+    assert.deepEqual(await json(await host(code, "delete", deps(as(CC)))), { ok: true, deleted: true, relayRemaining: 0, mediaCut: true });
     assert.equal(objects.size, 0, "none of its audio is left on the relay");
     assert.equal(Number(await scalar(db, "SELECT count(*) FROM meet_recording_chunks WHERE tenant_id = ? AND room_id = ?", [OASIS, room.id])), 0);
     assert.equal(await scalar(db, "SELECT status FROM meet_transcripts WHERE tenant_id = ? AND room_id = ?", [OASIS, room.id]), "deleted", "e9's tombstone stays");

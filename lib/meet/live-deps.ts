@@ -6,6 +6,7 @@
  */
 import "server-only";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { keepAlive } from "@/lib/os/runs/keepalive";
 import { getTursoClient } from "@/lib/turso";
 import type { MeetDeps } from "./handlers";
 import { meetIceServers } from "./ice";
@@ -27,6 +28,7 @@ export function liveMeetDeps(): MeetDeps {
     schedule: (owner, room, opts) => addMeetingToSchedule(owner, room, opts),
     unschedule: (owner, eventId) => removeMeetingFromSchedule(owner, eventId),
     recording: meetRecordingDeps(db, r2MeetStorage),
+    later: (label, work) => void keepAlive(work(), `meet.${label}`),
     now: () => new Date(),
   };
 }

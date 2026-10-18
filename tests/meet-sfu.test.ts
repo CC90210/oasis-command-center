@@ -125,7 +125,7 @@ async function main() {
     assert.equal(await code(sfu.newSession()), "sfu_unreachable:-");
   });
 
-  await check("cutting a session closes every active track by force, and a failure is logged, never thrown", async () => {
+  await check("cutting a session closes every active track by force; it says whether anything is left to cut, and a failure is logged, never thrown", async () => {
     const calls: string[] = [];
     const fake = {
       sessionTracks: async () => [
@@ -136,11 +136,26 @@ async function main() {
         return { sessionDescription: null, tracks: [] };
       },
     } as unknown as Parameters<typeof cutSession>[0];
-    assert.equal(await cutSession(fake, "S1", "test"), 2);
+    assert.equal(await cutSession(fake, "S1", "test"), true);
     assert.deepEqual(calls, ["0,r2|forced"], "sent and received tracks alike; already closed ones skipped");
-    assert.equal(await cutSession(fake, null, "test"), 0, "no session, nothing to cut");
-    const broken = { sessionTracks: async () => { throw new SfuError("sfu_unreachable", "down"); } } as unknown as Parameters<typeof cutSession>[0];
-    assert.equal(await cutSession(broken, "S1", "test"), 0);
+    assert.equal(await cutSession(fake, null, "test"), true, "no session, nothing to cut");
+    const failing = (err: Error) => ({ sessionTracks: async () => { throw err; } }) as unknown as Parameters<typeof cutSession>[0];
+    const errors = console.error;
+    console.error = () => {}; // the failures below are logged on purpose
+    try {
+      assert.equal(await cutSession(failing(new SfuError("sfu_unreachable", "down")), "S1", "test"), false, "the SFU did not answer: the caller keeps the session to try again");
+      assert.equal(await cutSession(failing(new SfuError("sfu_http_500", "the SFU answered 500", 500)), "S1", "test"), false);
+    } finally {
+      console.error = errors;
+    }
+    assert.equal(await cutSession(failing(new SfuError("session_not_found", "gone", 404)), "S1", "test"), true, "a session the SFU no longer has carries no media");
+    const closeFails = { ...fake, close: async () => { throw new SfuError("sfu_http_502", "bad gateway", 502); } } as unknown as Parameters<typeof cutSession>[0];
+    console.error = () => {};
+    try {
+      assert.equal(await cutSession(closeFails, "S1", "test"), false, "tracks it could not close are still to cut");
+    } finally {
+      console.error = errors;
+    }
   });
 
   await check("TURN: credentials minted from the key per join, port 53 dropped; unset or down falls back to STUN", async () => {
