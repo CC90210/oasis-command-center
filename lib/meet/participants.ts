@@ -112,8 +112,11 @@ const heldSince = (now: Date) => new Date(now.getTime() - MEET_STALE_MS).toISOSt
  * MEET_STALE_MS, not only the 30 s People list: someone whose laptop slept for two minutes comes back to their own
  * place, and a newcomer who took it meanwhile would make the room one over. Nobody joins a room whose places are
  * all held, and guests can hold at most MEET_MAX_PARTICIPANTS - 1 of them, so a host can always get in: a leaked
- * link filled with guests can never lock its host out of the room they need to be in to remove them. A host's join
- * also opens a scheduled room. Null when the room is full.
+ * link filled with guests can never lock its host out of the room they need to be in to remove them. The same
+ * statement takes a place only in a room still there and not ended: one the host ends or deletes after the join read
+ * it gets nobody (a delete ends the room before it removes the rows), so no presence lands in an ended room and no
+ * guest's name outlives a deleted one. A host's join also opens a scheduled room. Null when the room is full, ended
+ * or gone.
  */
 export async function joinMeetRoom(
   db: Client,
@@ -130,11 +133,13 @@ export async function joinMeetRoom(
                  WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at > ?) < ?
             AND (? = 'host' OR (SELECT count(*) FROM meet_participants
                  WHERE tenant_id = ? AND room_id = ? AND left_at IS NULL AND removed_at IS NULL AND last_seen_at > ?
-                   AND role = 'guest') < ?)`,
+                   AND role = 'guest') < ?)
+            AND EXISTS (SELECT 1 FROM meet_rooms WHERE tenant_id = ? AND id = ? AND status != 'ended')`,
     args: [
       id, room.tenantId, room.id, input.role, input.userId, input.displayName, input.consentAt, at, at,
       room.tenantId, room.id, heldSince(now), MEET_MAX_PARTICIPANTS,
       input.role, room.tenantId, room.id, heldSince(now), MEET_MAX_PARTICIPANTS - 1,
+      room.tenantId, room.id,
     ],
   });
   if (rs.rowsAffected === 0) return null;
