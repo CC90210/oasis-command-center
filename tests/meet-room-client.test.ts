@@ -932,7 +932,9 @@ async function main() {
     await waitFor("live", () => a.c.snapshot().phase.kind === "live");
     const leaving = a.c.leave();
     await waitFor("the leave is on its way", () => roomA.log.includes("leave"));
-    assert.equal(await browserTabs(code).hold(), null, "the room has not heard yet: still this tab's");
+    assert.equal(a.c.leave(), leaving, "a second Leave (a double click) is the same Leave");
+    assert.equal(await browserTabs(code).hold(), null, "the room has not heard yet: still this tab's, whatever the second Leave");
+    assert.equal(roomA.log.filter((l) => l === "leave").length, 1, "and the room is told once");
     await leaving; // the leave's own deadline
     const free = await browserTabs(code).hold();
     assert.ok(free, "then another tab may have it");

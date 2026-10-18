@@ -278,6 +278,8 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
     tabHold?.release();
     tabHold = null;
   }
+  /** The Leave on its way: a call is left once, and only that Leave lets go of the room (controller.leave). */
+  let leaving: Promise<void> | null = null;
   /** This tab's /join is on its way, and another tab asked for the room meanwhile (it is handed over once it answers). */
   let joinInFlight = false;
   let handOverAsked = false;
@@ -970,29 +972,37 @@ export function createMeetRoomController(options: MeetRoomOptions): MeetRoomCont
       ended("host_ended");
     },
 
-    async leave() {
-      // Only a tab in the room tells it so: another tab of this browser shares its cookie, and a leave from a tab that
-      // never got in (or already let go) would end THAT tab's place.
-      const inRoom = controller.inRoom();
-      // Out at once: the camera and microphone stop now, whatever the network does (a dropped network is a common
-      // reason to leave). The room is told after; if that never arrives, it drops anyone who stops polling.
-      ended("left");
-      if (!inRoom) return letTabGo();
-      // A join still on its way makes this person's place when it answers, and only its answer carries the cookie a
-      // leave needs: wait for it (its own deadline bounds the wait), so the room hears who left and frees the place.
-      await joinSettled;
-      const limit = deadline(requestTimeoutMs);
-      try {
-        await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true, signal: limit.signal });
-      } catch {
-        // already out of the call; see above
-      } finally {
-        limit.done();
-        letTabGo();
-      }
+    leave() {
+      // One Leave a call: a second (a double click) waits on the first, which alone lets go of the room once the room
+      // has heard it. Letting go sooner would let another tab of this browser join as this participant first.
+      leaving ??= leaveOnce();
+      return leaving;
     },
 
     inRoom: () => tabHold !== null && !closed,
   };
+
+  async function leaveOnce(): Promise<void> {
+    // Only a tab in the room tells it so: another tab of this browser shares its cookie, and a leave from a tab that
+    // never got in (or already let go) would end THAT tab's place.
+    const inRoom = controller.inRoom();
+    // Out at once: the camera and microphone stop now, whatever the network does (a dropped network is a common
+    // reason to leave). The room is told after; if that never arrives, it drops anyone who stops polling.
+    ended("left");
+    if (!inRoom) return letTabGo();
+    // A join still on its way makes this person's place when it answers, and only its answer carries the cookie a
+    // leave needs: wait for it (its own deadline bounds the wait), so the room hears who left and frees the place.
+    await joinSettled;
+    const limit = deadline(requestTimeoutMs);
+    try {
+      await fetchImpl(`${base}/leave`, { method: "POST", credentials: "same-origin", keepalive: true, signal: limit.signal });
+    } catch {
+      // already out of the call; see above
+    } finally {
+      limit.done();
+      letTabGo();
+    }
+  }
+
   return controller;
 }
