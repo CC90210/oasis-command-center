@@ -21,7 +21,8 @@ import { NextRequest } from "next/server";
 import { publicAppBaseUrl } from "../lib/api-helpers";
 import { MEET_COOKIE, MEET_TOKEN_SECRET_ENV, MeetNotConfiguredError } from "../lib/meet/access";
 import { parseHost, parseSfu } from "../lib/meet/bodies";
-import { handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
+import { deleteMeetRoom, handleCreateRoom, handleHost, handleJoin, handleLeave, handleListRooms, handleSfu, handleState, type MeetDeps, type MeetSession } from "../lib/meet/handlers";
+import { meetRoomUrl } from "../lib/meet/links";
 import {
   MEET_CUT_RETRY_MS,
   MEET_HOST_GRACE_MS,
@@ -29,11 +30,12 @@ import {
   MEET_MAX_PARTICIPANTS,
   MEET_STALE_MS,
   endAbandonedRooms,
+  endMeetRoom,
   forgetSession,
   holdSession,
   pendingCuts,
 } from "../lib/meet/participants";
-import { displayMeetCode, readMeetRoomByCode } from "../lib/meet/rooms";
+import { createMeetRoom, displayMeetCode, readMeetRoomByCode, rescheduleMeetRoom } from "../lib/meet/rooms";
 import { SfuError, type SfuClient } from "../lib/meet/sfu";
 
 let failures = 0;
@@ -577,6 +579,32 @@ async function main() {
     assert.deepEqual(removedBy, [ADON], "an owner or admin by base role may delete it");
     assert.equal(unscheduled.length, unscheduledBefore, "the creator's calendar is theirs: another host's delete never writes to it");
     assert.equal(await roomRows(roomId), 0);
+  });
+
+  await check("a booking's room: made for the lead and the slot, moved with it, and deleted server-side when the booking is cancelled", async () => {
+    const LEAD = "lead-0001";
+    const startsAt = new Date(clock + 3 * 24 * 60 * 60_000).toISOString();
+    const room = await createMeetRoom(db, { tenantId: OASIS, hostUserId: CC, title: "OASIS call with Jane", startsAt, leadId: LEAD });
+    assert.deepEqual([room.status, room.leadId, room.startsAt, room.calendarEventId], ["scheduled", LEAD, startsAt, null], "its calendar entries belong to the booking");
+    assert.equal(meetRoomUrl(room, "https://oasisai.work/"), `https://oasisai.work/meet/${displayMeetCode(room.code)}`, "the one link the invite, email and calendar file carry");
+    // Moved: the same link, the new time.
+    const later = new Date(Date.parse(startsAt) + 2 * 60 * 60_000).toISOString();
+    assert.equal(await rescheduleMeetRoom(db, room, later), true);
+    assert.equal((await readMeetRoomByCode(db, room.code))?.startsAt, later, "moved, the code unchanged");
+    assert.equal(await rescheduleMeetRoom(db, room, "not a time"), false);
+    // The lead opens it early and waits; the booking is then cancelled, with no host signed in anywhere.
+    const c = displayMeetCode(room.code);
+    const lead = cookieOf(await handleJoin(request(`/api/meet/${c}/join`, { body: { name: "Jane", consent: true }, ip: freshIp() }), c, deps()))!;
+    const unscheduledBefore = unscheduled.length;
+    const out = await deleteMeetRoom(deps(), (await readMeetRoomByCode(db, room.code))!, CC, new Date(clock));
+    assert.deepEqual(out, { relayRemaining: 0, mediaCut: true });
+    assert.equal(unscheduled.length, unscheduledBefore, "no Schedule entry of Meet's to take off: the booking removes its own");
+    assert.equal(await roomRows(room.id), 0, "the room and the lead's row are gone");
+    assert.equal((await handleState(request(`/api/meet/${c}/state`, { method: "GET", cookie: lead, ip: freshIp() }), c, deps())).status, 404, "the link is dead");
+    // An ended room is not moved: the booking makes a new one.
+    const held = await createMeetRoom(db, { tenantId: OASIS, hostUserId: CC, startsAt, leadId: LEAD });
+    await endMeetRoom(db, held, "host_ended", new Date(clock));
+    assert.equal(await rescheduleMeetRoom(db, held, later), false, "a meeting that is over keeps its time");
   });
 
   await check("a live room whose host has been gone ten minutes ends itself", async () => {

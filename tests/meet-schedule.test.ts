@@ -68,6 +68,13 @@ async function main() {
     assert.equal(op.event.allDay, false);
   });
 
+  await check("the link is the one canonical link, whatever the app's address ends with", async () => {
+    const { store, ops } = fakeStore();
+    await addMeetingToSchedule(OWNER, room, { timeZone: "America/Toronto" }, { ...store, origin: () => "https://oasisai.work/" });
+    const op = ops[0].ops[0] as Extract<EventOp, { op: "create" }>;
+    assert.equal(op.event.location, "https://oasisai.work/meet/abc-defg-hjk", "never //meet");
+  });
+
   await check("a length the host chose wins over the default", async () => {
     const { store, ops } = fakeStore();
     await addMeetingToSchedule(OWNER, room, { timeZone: "America/Toronto", minutes: 60 }, store);
