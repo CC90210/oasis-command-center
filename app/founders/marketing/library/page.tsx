@@ -195,7 +195,7 @@ export default async function MarketingLibraryPage({
     safe("marketing.library.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
     safe("marketing.library.meta", getMetaFacets(founder.tenantId, { group, lifecycle, status }), DEGRADED_META_FACETS),
     safe("marketing.library.lifecycle", getLifecycleCounts(founder.tenantId, group), {
-      counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
+      counts: { needs_review: 0, approved: 0, scheduled: 0, live: 0, archived: 0 },
       degraded: true,
     }),
     safe("marketing.library.tabs", getBrandTabCounts(founder.tenantId), {

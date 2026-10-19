@@ -657,7 +657,11 @@ export function distributionOf(asset: { published_at?: string | null }): Distrib
  * look at it. A destructive-looking action with no inverse is a bug even when the
  * data survives.
  */
-export const LIFECYCLE = ["needs_review", "approved", "live", "archived"] as const;
+// `scheduled` (2026-10-19): booked in Zernio, slot not reached. It used to fall into
+// "Needs review" on the tile while matching no SQL bucket, so every card the posting cron
+// had already booked read NEEDS REVIEW. CMO-Agent library_tracking.py keeps status in line
+// with Zernio, so this bucket is the booked queue, and Posted is what went out.
+export const LIFECYCLE = ["needs_review", "approved", "scheduled", "live", "archived"] as const;
 export type Lifecycle = (typeof LIFECYCLE)[number];
 
 export function isLifecycle(v: unknown): v is Lifecycle {
@@ -667,6 +671,7 @@ export function isLifecycle(v: unknown): v is Lifecycle {
 const LIFECYCLE_LABEL: Record<Lifecycle, string> = {
   needs_review: "Needs review",
   approved: "Approved",
+  scheduled: "Scheduled",
   live: "Posted",
   archived: "Archived",
 };
@@ -674,6 +679,7 @@ const LIFECYCLE_LABEL: Record<Lifecycle, string> = {
 const LIFECYCLE_HINT: Record<Lifecycle, string> = {
   needs_review: "produced, no verdict yet",
   approved: "cleared to post, not sent",
+  scheduled: "booked, waiting for its slot",
   live: "confirmed out on a platform",
   archived: "shelved — restorable",
 };
@@ -697,6 +703,7 @@ export function lifecycleOf(asset: {
   if (asset.status === "archived" || asset.status === "rejected") return "archived";
   if (distributionOf(asset) === "live") return "live";
   if (asset.status === "approved") return "approved";
+  if (asset.status === "scheduled") return "scheduled";
   return "needs_review";
 }
 

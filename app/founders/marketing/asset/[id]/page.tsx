@@ -22,7 +22,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
-import { Card, PageHeader } from "@/components/Card";
+import { Card, PageHeader, Tag } from "@/components/Card";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
   getLatestPublishIntent,
@@ -58,6 +58,7 @@ import { DownloadLink } from "@/components/founders/DownloadLink";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
 import { EXTRACTED_BRAND_SLUG, EXTRACTED_LABEL, EXTRACTED_ROOT, extractedHref } from "@/lib/founders/extracted-videos";
 import { ExtractedVideoActions } from "@/components/founders/ExtractedVideoActions";
+import { postTrackingOf } from "@/lib/founders/post-tracking";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Asset · OASIS" };
@@ -371,6 +372,47 @@ export default async function AssetDetailPage({
             <AssetActions id={asset.id} status={asset.status} title={asset.title} />
           </Card>
           )}
+
+          {/* WHERE IT WENT (CC, 2026-10-18: every post through Zernio "tracked and
+              accounted for on the command center"). From meta.zernio, which CMO-Agent's
+              library_tracking.py stamps after every posting run: each network's own
+              outcome and live link, read from Zernio, never inferred. */}
+          {(() => {
+            const tracking = postTrackingOf((asset as { meta?: unknown }).meta);
+            if (!tracking) return null;
+            const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : null);
+            return (
+              <Card title="Where it went" subtitle={tracking.summary}>
+                {tracking.networks.length > 0 ? (
+                  <ul className="space-y-2" data-testid="where-it-went">
+                    {tracking.networks.map((n) => (
+                      <li key={n.platform} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                        <span className="font-medium text-fg">{n.name}</span>
+                        <span className="flex flex-wrap items-center gap-2">
+                          <Tag tone={n.tone}>{n.label}</Tag>
+                          {n.url ? (
+                            <a href={n.url} target="_blank" rel="noopener noreferrer" className="text-xs text-accent hover:underline">
+                              Open the post
+                            </a>
+                          ) : null}
+                        </span>
+                        {n.error ? <p className="w-full text-xs text-status-hot">{n.error}</p> : null}
+                        {n.publishedAt ? <p className="w-full text-[11px] text-fg-dim">Posted {when(n.publishedAt)}</p> : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <p className="mt-3 text-[11px] text-fg-dim">
+                  {[
+                    tracking.scheduledFor ? `Slot ${when(tracking.scheduledFor)}` : null,
+                    tracking.checkedAt ? `checked ${when(tracking.checkedAt)}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" \u00B7 ")}
+                </p>
+              </Card>
+            );
+          })()}
 
           {isRenderableCarousel(asset.asset_type, slideUrls) && (
             <Card title="Slide order" subtitle="What the audience reads, and what publishes">

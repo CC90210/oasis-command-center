@@ -37,12 +37,13 @@ import { MediaFailed, useSignedVideos } from "@/components/founders/SignedMedia"
 import { fmtDuration, lifecycleLabel, type Lifecycle } from "@/lib/founders-marketing-core";
 import { hookStyleLabel, type HookVariantCard } from "@/lib/founders/library-meta";
 
-type Tone = "neutral" | "accent" | "warm" | "engaged";
+type Tone = "neutral" | "accent" | "warm" | "engaged" | "info";
 
 /** The same bucket colours as the Library tiles (StatusTag in marketing-shared.tsx). */
 const LIFECYCLE_TONE: Record<Lifecycle, Tone> = {
   needs_review: "warm",
   approved: "accent",
+  scheduled: "info",
   live: "engaged",
   archived: "neutral",
 };
