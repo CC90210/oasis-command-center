@@ -66,11 +66,25 @@ export function HookCompare({
   const videos = useRef(new Map<string, HTMLVideoElement>());
   // Every clip's and cover's signed link, renewed once on an error (components/founders/SignedMedia.tsx). One hook
   // for all the cards (hooks cannot run per card in a loop). A renewed clip carries on from where it failed, and plays
-  // on if it was playing, so a sequence is not left waiting on it.
-  const media = useSignedVideos((url) => {
-    const owner = cards.find((c) => c.playbackUrl === url);
-    return owner ? (videos.current.get(owner.id) ?? null) : null;
-  });
+  // on if it was playing. A clip with no working link left is done for the run: the sequence moves to the next
+  // card, "all together" stops waiting for it; one whose renewed play is refused leaves "all together" the same way,
+  // and in a sequence stays put with its own play button, as any refused clip does (Codex on #706).
+  const media = useSignedVideos(
+    (url) => {
+      const owner = cards.find((c) => c.playbackUrl === url);
+      return owner ? (videos.current.get(owner.id) ?? null) : null;
+    },
+    (url) => {
+      const owner = cards.find((c) => c.playbackUrl === url);
+      if (owner && current.current !== owner.id) finish(owner.id);
+    },
+    (url) => {
+      const at = cards.findIndex((c) => c.playbackUrl === url);
+      if (at < 0) return;
+      if (current.current === cards[at].id) inOrder(at + 1);
+      else finish(cards[at].id);
+    },
+  );
   // The variant the sequence is on. A ref as well as state: a video's `ended`
   // handler must read the CURRENT one, not the value from the render it was made in.
   const current = useRef<string | null>(null);
@@ -117,7 +131,11 @@ export function HookCompare({
       v.pause();
       v.currentTime = 0;
       v.muted = true;
-      v.play().catch(() => finish(card.id));
+      // A refusal is one fewer to wait for, unless the clip's LINK failed: its renewal plays it, or gives up on it
+      // and says so (useSignedVideos above), so finishing it here would end the run while it plays (Codex on #706).
+      v.play().catch(() => {
+        if (!v.error) finish(card.id);
+      });
     }
     setWaiting(ids);
     setMode(ids.length ? "together" : "idle");

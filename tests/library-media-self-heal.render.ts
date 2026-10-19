@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 
-import { MEDIA_FAILED_TEXT, useSignedSrc, useSignedVideo } from "../components/founders/SignedMedia";
+import { MEDIA_FAILED_TEXT, useSignedSrc, useSignedVideo, useSignedVideos } from "../components/founders/SignedMedia";
 
 function driver<T>(hook: () => T) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's hooks read
@@ -184,6 +184,37 @@ async function main() {
   b = broken.render();
   broken.effects();
   assert.equal(failing.plays, 1, "a pause caused by the failure keeps the wish to play");
+
+  // A player waiting on a clip is told, once, when its link has no working version left (Codex on #706)...
+  const gaveUp: string[] = [];
+  answer = async () => new Response("no", { status: 404 });
+  const lost = driver(() => useSignedVideos(() => null, undefined, (url) => gaveUp.push(url)));
+  lost.render().onError("https://lost");
+  await settle();
+  lost.render().onError("https://lost");
+  assert.deepEqual(gaveUp, ["https://lost"], "the route had nothing fresher: given up, and said once");
+  answer = async (url) => Response.json({ ok: true, url: `${url}-fresh` });
+  const second = driver(() => useSignedVideos(() => null, undefined, (url) => gaveUp.push(url)));
+  second.render().onError("https://twice");
+  await settle();
+  second.render().onError("https://twice");
+  assert.deepEqual(gaveUp, ["https://lost", "https://twice"], "the renewed link failed too: given up");
+  // ...and a renewed play refused with sound is tried muted before the caller hears "refused".
+  const quiet = { currentTime: 0, muted: false, tries: [] as boolean[], play() {
+    this.tries.push(this.muted);
+    return this.muted ? Promise.resolve() : Promise.reject(new Error("sound not allowed"));
+  } };
+  let refusals = 0;
+  const muted = driver(() => useSignedVideos(() => quiet as unknown as HTMLVideoElement, () => (refusals += 1)));
+  const m = muted.render();
+  muted.effects();
+  m.onPlay("https://loud");
+  m.onError("https://loud");
+  await settle();
+  muted.render();
+  muted.effects();
+  await settle();
+  assert.deepEqual([quiet.tries, refusals], [[false, true], 0], "refused with sound, played muted");
 
   assert.equal(MEDIA_FAILED_TEXT, "Couldn't load this. Reload the page.");
   console.log("library-media-self-heal.render: all passed");

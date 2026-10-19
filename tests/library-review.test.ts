@@ -1448,6 +1448,24 @@ async function main() {
     assert.equal(h.togetherEmpty.stop, false);
   });
 
+  await check("a clip whose link fails mid-run: renewed, it stays in the run; with no working link left, the run moves on (Codex on #706)", () => {
+    const h = renderChild().hook;
+    const together = "Playing all together, muted. Unmute one to hear it.";
+    // A sequence: v1's link cannot be renewed, so v2 plays, never "Playing Variant 1" forever.
+    assert.equal(h.linkGoneSeq.status, "Playing Variant 2 (2 of 3).");
+    assert.ok(h.linkGoneSeq.log.includes("play v2"), `the next clip starts: ${h.linkGoneSeq.log}`);
+    assert.ok(!h.linkGoneSeq.videos.includes("v1"), "v1 shows the plain line instead of a player");
+    // All together: v2's first play failed on its link; renewed, it plays and the run waits for it.
+    assert.ok(h.renewedTogetherStart.log.includes("play v2 muted"), `the renewed clip plays: ${h.renewedTogetherStart.log}`);
+    assert.equal(h.renewedTogetherOneLeft.status, together, "v1 ended; the renewed v2 is still playing and still waited for");
+    assert.equal(h.renewedTogetherOneLeft.stop, true);
+    assert.equal(h.renewedTogetherEnd.status, "");
+    assert.equal(h.renewedTogetherEnd.stop, false);
+    // All together: v2's link has no working version left, so v1 ending ends the run.
+    assert.equal(h.goneTogetherEnd.status, "");
+    assert.equal(h.goneTogetherEnd.stop, false);
+  });
+
   await check("wiring: no confirm(), no button reaches a publish or schedule endpoint, no video loads on arrival, nothing non-ASCII was added", () => {
     const read = (f: string) => readFileSync(join(ROOT, f), "utf8");
     const code = (f: string) => read(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");

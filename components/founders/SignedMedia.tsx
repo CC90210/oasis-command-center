@@ -62,7 +62,7 @@ export function resignMediaUrl(url: string): Promise<string | null> {
  * an error of A's old link while A's renewal was still on its way read as the
  * fresh link failing (CodeRabbit and Codex on #706).
  */
-export function useSignedLinks(): {
+export function useSignedLinks(onGaveUp?: (url: string) => void): {
   src: (url: Link) => Link;
   failed: (url: Link) => boolean;
   onError: (url: Link) => void;
@@ -73,6 +73,17 @@ export function useSignedLinks(): {
   const [failed, setFailed] = useState<Record<string, true>>({});
   // Per link: its renewal is on its way, or has been answered (the one retry is spent).
   const asked = useRef<Map<string, "pending" | "answered">>(new Map());
+  // The caller's latest "no working link left for this one" handler, told once per link: a player waiting on that
+  // link to end (a pack comparison's run) must move on instead of waiting forever (Codex on #706).
+  const gaveUp = useRef(onGaveUp);
+  gaveUp.current = onGaveUp;
+  const toldGaveUp = useRef<Set<string>>(new Set());
+  const giveUp = (url: string) => {
+    setFailed((prev) => ({ ...prev, [url]: true }));
+    if (toldGaveUp.current.has(url)) return;
+    toldGaveUp.current.add(url);
+    gaveUp.current?.(url);
+  };
 
   const onError = (url: Link) => {
     if (!url) return;
@@ -81,7 +92,7 @@ export function useSignedLinks(): {
     if (state === "pending") return;
     // The renewed link failed as well: stop, and say so.
     if (state === "answered") {
-      setFailed((prev) => ({ ...prev, [url]: true }));
+      giveUp(url);
       return;
     }
     asked.current.set(url, "pending");
@@ -89,7 +100,7 @@ export function useSignedLinks(): {
       asked.current.set(url, "answered");
       // The same link back means the object, not the signature, is the problem: a retry would fail the same way.
       if (next && next !== url) setRenewed((prev) => ({ ...prev, [url]: next }));
-      else setFailed((prev) => ({ ...prev, [url]: true }));
+      else giveUp(url);
     });
   };
 
@@ -113,11 +124,13 @@ export function useSignedSrc(src: Link): { src: Link; failed: boolean; onError: 
  * the viewer had pressed play, plays (CodeRabbit on #706: they had to press play
  * twice, and a pack comparison playing in sequence would wait on that clip
  * forever). `element` returns the <video> showing a link; `onRefused` runs when
- * the browser refuses that play().
+ * the browser refuses that play(), muted as well as with sound; `onGaveUp` when a
+ * link has no working version left (see useSignedLinks).
  */
 export function useSignedVideos(
   element: (url: string) => HTMLVideoElement | null,
   onRefused?: (url: string) => void,
+  onGaveUp?: (url: string) => void,
 ): {
   src: (url: Link) => Link;
   failed: (url: Link) => boolean;
@@ -125,7 +138,7 @@ export function useSignedVideos(
   onPlay: (url: Link) => void;
   onPause: (url: Link, e?: PauseEvent) => void;
 } {
-  const links = useSignedLinks();
+  const links = useSignedLinks(onGaveUp);
   const wantsPlay = useRef<Set<string>>(new Set());
   const resumeAt = useRef<Map<string, number>>(new Map());
   const resumed = useRef<Set<string>>(new Set());
@@ -138,7 +151,15 @@ export function useSignedVideos(
       if (!v) continue;
       const at = resumeAt.current.get(url) ?? 0;
       if (at > 0) v.currentTime = at;
-      if (wantsPlay.current.has(url)) v.play().catch(() => onRefused?.(url));
+      // No longer inside the viewer's click, a browser may refuse sound: then muted, as the players' own first play does.
+      if (wantsPlay.current.has(url)) {
+        v.play()
+          .catch(() => {
+            v.muted = true;
+            return v.play();
+          })
+          .catch(() => onRefused?.(url));
+      }
     }
     // `element` and `onRefused` are read when a renewal lands; a new function each render must not re-run this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
