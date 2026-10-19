@@ -689,6 +689,17 @@ async function main() {
     assert.deepEqual(connectors.connectionsHealth(relayed, Date.now()), { setUp: 3, attention: 0, connected: 3, unknown: 0 });
     // A client workspace's agent-check cards read nothing at all: they are unavailable there.
     assert.deepEqual((await loadConnectorFacts({ tenantId: CLIENT_A, userId: USERS.clientA.id })).agentChecks, []);
+    // More newer rows of other kinds than any cap still never push the real check out of the read (Codex on #703).
+    const flood = Array.from({ length: 520 }, (_, i) => ({
+      sql: "INSERT INTO integrations_health (tenant_id, profile_id, service, status, last_ping_at, metadata) VALUES (?, ?, 'wise', 'healthy', ?, ?)",
+      args: [OASIS, `p-flood-${i}`, new Date(Date.now() + 2_000 + i).toISOString(), JSON.stringify({ via: "env_key_present" })],
+    }));
+    await db.batch(flood, "write");
+    const flooded = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
+    assert.deepEqual(connectors.connectionsHealth(flooded, Date.now()), { setUp: 3, attention: 0, connected: 3, unknown: 0 });
+    // And a failed read of the checks is "Couldn't check" on Today, never an all-clear (Codex on #703).
+    const { loadConnectionAlerts: alertsFor } = await import("../components/os/today/loaders");
+    assert.deepEqual(await alertsFor(OASIS, Date.now(), Promise.resolve({ ...flooded, agentChecks: null })), { ok: false });
 
     // Only a real Gmail sign-in is a check of the mailbox; a key name never is.
     const t = at(60_000);

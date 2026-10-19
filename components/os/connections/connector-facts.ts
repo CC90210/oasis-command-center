@@ -37,7 +37,7 @@ import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tena
 import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
 import { listServerChecks } from "@/lib/integrations/server-checks";
 import { listActiveConnections } from "@/lib/connections/store";
-import { heartbeatMetadata, isBridgeReport } from "@/lib/integrations/presence-heartbeat";
+import { BRIDGE_REPORT_KEY, BRIDGE_REPORT_VALUE, heartbeatMetadata, isBridgeReport } from "@/lib/integrations/presence-heartbeat";
 import { PROVIDERS, missingProviderEnv, providerAvailability } from "@/lib/connections/registry";
 import {
   CONNECTOR_CATALOG,
@@ -106,15 +106,24 @@ async function loadServerChecks(tenantId: string): Promise<ServerCheckFact[] | n
  * (metadata.source "service_check", Business-Empire-Agent scripts/integrations/service_checks.py), never a row a paired
  * computer relayed through /api/bridge/ping (metadata._reported_by "paired_bridge"). The newest row of ANY kind could
  * be a laptop's key-name scan or report, showing a false Connected or hiding a failed check (CodeRabbit on #703).
+ *
+ * The filter and the newest-per-service pick are both in SQL: filtering after a row cap let newer rows of other kinds
+ * push the real check out of the read (Codex on #703). CASE guards json_extract from a row whose metadata is not JSON.
+ * The same filter runs again below on the parsed metadata, so both readings must agree for a row to count.
  */
 async function loadAgentChecks(tenantId: string): Promise<AgentCheckFact[] | null> {
   try {
     const services = AGENT_CHECK_SERVICES;
     const rs = await getTursoClient().execute({
-      sql: `SELECT service, status, last_ping_at, metadata FROM integrations_health
-            WHERE tenant_id = ? AND service IN (${services.map(() => "?").join(", ")})
-            ORDER BY last_ping_at DESC LIMIT 500`,
-      args: [tenantId, ...services],
+      sql: `SELECT service, status, last_ping_at, metadata FROM (
+              SELECT service, status, last_ping_at, metadata,
+                     ROW_NUMBER() OVER (PARTITION BY service ORDER BY last_ping_at DESC) AS newest
+              FROM integrations_health
+              WHERE tenant_id = ? AND service IN (${services.map(() => "?").join(", ")})
+                AND (CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.source') END) = ?
+                AND COALESCE(CASE WHEN json_valid(metadata) THEN json_extract(metadata, ?) END, '') <> ?
+            ) WHERE newest = 1`,
+      args: [tenantId, ...services, AGENT_CHECK_SOURCE, `$.${BRIDGE_REPORT_KEY}`, BRIDGE_REPORT_VALUE],
     });
     const newest = new Map<string, AgentCheckFact>();
     for (const row of rs.rows) {
