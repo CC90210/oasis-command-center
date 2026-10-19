@@ -59,7 +59,7 @@ function AuditPage() {
   const consentIdentity = resolveConsentIdentity({ tenantSlug: AUDIT_FUNNEL.tenantSlug }).identity;
   return (
     <>
-      <section className="m-edge relative overflow-hidden">
+      <section className="m-edge m-hero relative overflow-hidden">
         <div className="mx-auto grid w-full max-w-6xl gap-12 px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
           <Reveal>
             <div>
@@ -110,7 +110,7 @@ function CommandCenterPage() {
   const demoHref = BOOKING_URL || "/contact";
   return (
     <>
-      <section className="m-edge relative overflow-hidden">
+      <section className="m-edge m-hero relative overflow-hidden">
         <div className="mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-24 sm:pt-28">
           <Reveal><Eyebrow>OASIS Command Center</Eyebrow></Reveal>
           <Reveal delay={80}>
@@ -161,7 +161,7 @@ function CommandCenterPage() {
 function PricingPage() {
   return (
     <>
-      <section className="m-edge relative overflow-hidden">
+      <section className="m-edge m-hero relative overflow-hidden">
         <div className="mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal><Eyebrow>Transparent build tiers</Eyebrow></Reveal>
           <Reveal delay={90}>
@@ -217,7 +217,7 @@ async function OnboardingPage() {
 
   return (
     <>
-      <section className="m-edge relative overflow-hidden">
+      <section className="m-edge m-hero relative overflow-hidden">
         <div className="mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal><Eyebrow>7-day turnkey onboarding</Eyebrow></Reveal>
           <Reveal delay={80}>
@@ -278,7 +278,7 @@ async function CheckoutSuccessPage({ searchParams }: { searchParams: SearchParam
       console.error("[public-checkout.success] Google Ads purchase conversion destination is not configured");
     }
     return (
-      <section className="relative overflow-hidden px-5 py-24 sm:px-8 sm:py-32">
+      <section className="m-hero relative overflow-hidden px-5 py-24 sm:px-8 sm:py-32">
         <Reveal>
           <div className="mx-auto max-w-2xl border border-status-engaged/40 bg-ops-panel/90 p-7 text-center backdrop-blur sm:p-12">
             <span className="mx-auto block h-10 w-10 rounded-full border-2 border-status-engaged" aria-hidden="true" />

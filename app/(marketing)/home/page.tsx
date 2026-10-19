@@ -69,7 +69,7 @@ export default function MarketingHome() {
   return (
     <>
       {/* ── Hero ─────────────────────────────────────────────────────── */}
-      <section className="m-edge relative overflow-hidden">
+      <section className="m-edge m-hero relative overflow-hidden">
 
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-24 pt-24 sm:px-8 sm:pb-32 sm:pt-32">
           {/* The name, spelling itself out. This replaced a plain
