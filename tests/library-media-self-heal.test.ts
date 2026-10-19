@@ -205,6 +205,16 @@ async function main() {
       cwd: ROOT,
       encoding: "utf8",
       timeout: 120_000,
+      // CI exports --conditions=react-server in NODE_OPTIONS, which the child would inherit and load React's server
+      // build with no client hooks (it passed locally and failed in CI, CodeRabbit on #706). Same filter as
+      // tests/library-review.test.ts: drop only the condition, keep any other option.
+      env: {
+        ...process.env,
+        NODE_OPTIONS: (process.env.NODE_OPTIONS || "")
+          .split(/\s+/)
+          .filter((t) => t && !/^(--conditions|-C)(=|$)/.test(t) && t !== "react-server")
+          .join(" "),
+      },
     });
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`.trim().slice(-1500));
     assert.match(r.stdout, /library-media-self-heal\.render: all passed/);
