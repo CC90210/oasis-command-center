@@ -42,6 +42,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { Play, Volume2, VolumeX } from "lucide-react";
 
 import { enlargeSlotContext } from "@/components/founders/PhoneEnlarge";
+import { MediaFailed, useSignedSrc, useSignedVideo } from "@/components/founders/SignedMedia";
 
 export function TileVideo({
   src,
@@ -73,6 +74,11 @@ export function TileVideo({
   const [progress, setProgress] = useState(0);
   const ref = useRef<HTMLVideoElement | null>(null);
   const phone = variant === "phone";
+  // Both links are signed and short-lived: an expired one is retried once with a fresh link, then reported in
+  // plain words (components/founders/SignedMedia.tsx). The cover and the player share the poster's. A renewed
+  // video link carries on from where it failed, playing if the viewer had pressed play.
+  const video = useSignedVideo(src, () => ref.current, () => setPaused(true));
+  const poster = useSignedSrc(posterUrl);
 
   useEffect(() => {
     const v = ref.current;
@@ -101,21 +107,31 @@ export function TileVideo({
   };
 
   if (open) {
+    if (video.failed) {
+      return <MediaFailed className="flex h-full w-full items-center justify-center bg-black px-3 text-center text-[11px] text-white/60" />;
+    }
     return (
       <div className="relative h-full w-full">
         <video
           className="h-full w-full bg-black object-contain"
           ref={ref}
-          src={src}
-          poster={posterUrl || undefined}
+          src={video.src ?? undefined}
+          poster={(!poster.failed && poster.src) || undefined}
+          onError={video.onError}
           // A tile's player loads nothing until play. The asset page's loads its
           // first frame, which stands in for the poster most videos lack.
           preload={initialOpen ? "metadata" : "none"}
           controls={!phone}
           loop={phone}
           playsInline
-          onPlay={() => setPaused(false)}
-          onPause={() => setPaused(true)}
+          onPlay={() => {
+            setPaused(false);
+            video.onPlay();
+          }}
+          onPause={(e) => {
+            setPaused(true);
+            video.onPause(e);
+          }}
           onVolumeChange={(e) => setMuted(e.currentTarget.muted)}
           onTimeUpdate={(e) => {
             const v = e.currentTarget;
@@ -176,16 +192,21 @@ export function TileVideo({
       aria-haspopup={enlargesOnPlay ? "dialog" : undefined}
       className="group/play relative flex h-full w-full items-center justify-center bg-black"
     >
-      {posterUrl ? (
+      {posterUrl && poster.failed ? (
+        <span className="absolute left-0 right-0 top-[60%] px-3 text-center text-[10px] text-white/50">
+          <MediaFailed className="inline" />
+        </span>
+      ) : posterUrl ? (
         // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, deliberately short-lived; see the note in marketing-shared
         <img
-          src={posterUrl}
+          src={poster.src ?? undefined}
           alt=""
           loading="lazy"
           decoding="async"
           width={width ?? undefined}
           height={height ?? undefined}
           className="h-full w-full object-contain"
+          onError={poster.onError}
         />
       ) : (
         // Below the play button rather than at the foot of the box: in a phone

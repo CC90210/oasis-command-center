@@ -30,6 +30,7 @@ import { useContext, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { enlargeSlotContext } from "@/components/founders/PhoneEnlarge";
+import { SignedImg } from "@/components/founders/SignedMedia";
 import { TileVideo } from "@/components/founders/TileVideo";
 import { slideKind } from "@/lib/founders-marketing-core";
 
@@ -99,14 +100,13 @@ export function CarouselFrame({
           />
         </Slot.Provider>
       ) : (
-        // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, deliberately short-lived; see the note in marketing-shared
-        <img
+        // A signed R2 URL, deliberately short-lived (see the note in marketing-shared); an expired one is retried
+        // once with a fresh link (components/founders/SignedMedia.tsx).
+        <SignedImg
           src={slides[at]}
           alt={slideTitle}
-          loading="lazy"
-          decoding="async"
-          width={width ?? undefined}
-          height={height ?? undefined}
+          width={width}
+          height={height}
           className="h-full w-full object-contain"
         />
       )}

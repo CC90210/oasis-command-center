@@ -11,6 +11,7 @@ import Link from "next/link";
 import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { CarouselFrame } from "@/components/founders/CarouselFrame";
+import { SignedImg } from "@/components/founders/SignedMedia";
 import { DownloadLink } from "@/components/founders/DownloadLink";
 import { MetaBadges } from "@/components/founders/MetaBadges";
 import { EnlargeButton, PhoneEnlarge } from "@/components/founders/PhoneEnlarge";
@@ -230,14 +231,12 @@ function TileMedia({
       // object (the signature is in the query string), but its cached
       // derivative outlives the signature, so a re-optimize after expiry
       // fails while the tile still looks cached. Not worth it for a poster.
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
+      // SignedImg retries an expired link once with a fresh one (components/founders/SignedMedia.tsx).
+      <SignedImg
         src={posterUrl}
         alt=""
-        loading="lazy"
-        decoding="async"
-        width={mediaW ?? undefined}
-        height={mediaH ?? undefined}
+        width={mediaW}
+        height={mediaH}
         className="h-full w-full object-contain"
       />
     );

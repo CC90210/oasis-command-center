@@ -33,6 +33,7 @@ import { Play, Square } from "lucide-react";
 import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { MetaBadges } from "@/components/founders/MetaBadges";
+import { MediaFailed, useSignedVideos } from "@/components/founders/SignedMedia";
 import { fmtDuration, lifecycleLabel, type Lifecycle } from "@/lib/founders-marketing-core";
 import { hookStyleLabel, type HookVariantCard } from "@/lib/founders/library-meta";
 
@@ -64,6 +65,27 @@ export function HookCompare({
   // `cards` while a clip may be playing, and a stored position would then point
   // at the wrong card or past the end (Codex on #679).
   const videos = useRef(new Map<string, HTMLVideoElement>());
+  // Every clip's and cover's signed link, renewed once on an error (components/founders/SignedMedia.tsx). One hook
+  // for all the cards (hooks cannot run per card in a loop). A renewed clip carries on from where it failed, and plays
+  // on if it was playing. A clip with no working link left is done for the run: the sequence moves to the next
+  // card, "all together" stops waiting for it; one whose renewed play is refused leaves "all together" the same way,
+  // and in a sequence stays put with its own play button, as any refused clip does (Codex on #706).
+  const media = useSignedVideos(
+    (url) => {
+      const owner = cards.find((c) => c.playbackUrl === url);
+      return owner ? (videos.current.get(owner.id) ?? null) : null;
+    },
+    (url) => {
+      const owner = cards.find((c) => c.playbackUrl === url);
+      if (owner && current.current !== owner.id) finish(owner.id);
+    },
+    (url) => {
+      const at = cards.findIndex((c) => c.playbackUrl === url);
+      if (at < 0) return;
+      if (current.current === cards[at].id) inOrder(at + 1);
+      else finish(cards[at].id);
+    },
+  );
   // The variant the sequence is on. A ref as well as state: a video's `ended`
   // handler must read the CURRENT one, not the value from the render it was made in.
   const current = useRef<string | null>(null);
@@ -110,7 +132,11 @@ export function HookCompare({
       v.pause();
       v.currentTime = 0;
       v.muted = true;
-      v.play().catch(() => finish(card.id));
+      // A refusal is one fewer to wait for, unless the clip's LINK failed: its renewal plays it, or gives up on it
+      // and says so (useSignedVideos above), so finishing it here would end the run while it plays (Codex on #706).
+      v.play().catch(() => {
+        if (!v.error) finish(card.id);
+      });
     }
     setWaiting(ids);
     setMode(ids.length ? "together" : "idle");
@@ -228,18 +254,23 @@ export function HookCompare({
             </div>
 
             <div className="relative aspect-video overflow-hidden rounded-lg bg-black">
-              {card.playbackUrl ? (
+              {(card.playbackUrl ? media.failed(card.playbackUrl) : card.posterUrl && media.failed(card.posterUrl)) ? (
+                <MediaFailed className="flex h-full items-center justify-center px-4 text-center text-xs text-white/50" />
+              ) : card.playbackUrl ? (
                 <video
                   ref={(el) => {
                     if (el) videos.current.set(card.id, el);
                     else videos.current.delete(card.id);
                   }}
-                  src={card.playbackUrl}
-                  poster={card.posterUrl ?? undefined}
+                  src={media.src(card.playbackUrl) ?? undefined}
+                  poster={(!media.failed(card.posterUrl) && media.src(card.posterUrl)) || undefined}
                   preload="none"
                   controls
                   playsInline
                   aria-label={`${card.variantLabel}: ${card.title}`}
+                  onError={() => media.onError(card.playbackUrl)}
+                  onPlay={() => media.onPlay(card.playbackUrl)}
+                  onPause={(e) => media.onPause(card.playbackUrl, e)}
                   onEnded={() => {
                     // In a sequence the clip that ends hands over to the next card
                     // (looked up by id, then by this render's position); in "all
@@ -252,7 +283,14 @@ export function HookCompare({
               ) : card.posterUrl ? (
                 // A signed, short-lived Storage URL: a plain <img> on purpose (see TileMedia in marketing-shared.tsx).
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={card.posterUrl} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" />
+                <img
+                  src={media.src(card.posterUrl) ?? undefined}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  className="h-full w-full object-contain"
+                  onError={() => media.onError(card.posterUrl)}
+                />
               ) : (
                 <div className="flex h-full items-center justify-center px-4 text-center text-xs text-white/50">
                   No render on file yet

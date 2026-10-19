@@ -31,13 +31,18 @@ type El = ReactElement<Record<string, unknown>>;
 
 /**
  * One component driven through frames with its own hooks kept between them.
- * Knows useState, useRef, useId and useTransition (the work runs at once);
+ * Knows useState, useRef, useId, useTransition (the work runs at once) and
+ * useEffect (queued with its deps compared as React compares them; effects()
+ * runs them as the commit would, as in tests/library-phone-preview.render.ts -
+ * HookCompare's media renewal uses one, components/founders/SignedMedia.tsx);
  * anything else fails loudly here instead of being faked.
  */
 function driver<P>(component: (props: P) => unknown) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's hooks read
   const internals = (require("react") as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
   const slots: unknown[] = [];
+  const effectDeps: Array<unknown[] | undefined> = [];
+  let queued: Array<() => unknown> = [];
   let cursor = 0;
   const dispatcher = {
     useState(initial: unknown) {
@@ -61,6 +66,13 @@ function driver<P>(component: (props: P) => unknown) {
       cursor++;
       return [false, (work: () => unknown) => work()];
     },
+    useEffect(effect: () => unknown, deps?: unknown[]) {
+      const at = cursor++;
+      const prev = effectDeps[at];
+      const changed = !(at in effectDeps) || !deps || !prev || deps.length !== prev.length || deps.some((d, i) => !Object.is(d, prev[i]));
+      effectDeps[at] = deps;
+      if (changed) queued.push(effect);
+    },
   };
   return {
     render(props: P): El {
@@ -72,6 +84,11 @@ function driver<P>(component: (props: P) => unknown) {
       } finally {
         internals.H = previous;
       }
+    },
+    effects() {
+      const run = queued;
+      queued = [];
+      for (const effect of run) effect();
     },
   };
 }
@@ -315,6 +332,7 @@ async function main() {
           mounted.delete(id);
         }
       }
+      d.effects(); // the commit after the frame
       return tree;
     }
     show();
@@ -346,9 +364,22 @@ async function main() {
         log: log.splice(0),
       };
     };
-    return { show, press, ended, snap };
+    const video = (id: string) => {
+      const v = videoEls().find((e) => idOf(e) === id);
+      if (!v) throw new Error(`no video ${id}`);
+      return v;
+    };
+    return { show, press, ended, snap, video, clip: (id: string) => clips.get(id)! };
   }
   const hook: Record<string, unknown> = {};
+  /** The re-sign route, stood in: `fresh` answers a link with its renewed one, or null for "no fresher link". */
+  const resignAnswers = (fresh: (url: string) => string | null) => {
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const next = fresh((JSON.parse(String(init?.body)) as { url: string }).url);
+      return next ? Response.json({ ok: true, url: next }) : new Response("no", { status: 404 });
+    }) as typeof fetch;
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   // A sequence, and a card that is NOT the playing one leaves (Delete, Archive): the position follows the card.
   {
@@ -459,6 +490,56 @@ async function main() {
       threw = (e as Error).message;
     }
     hook.togetherEmpty = { threw, ...r.snap() };
+  }
+
+  // A clip's link fails mid-run (an expired signature in a tab left open, components/founders/SignedMedia.tsx).
+  // In a sequence, a clip with no working link left is done: the next one plays (Codex on #706).
+  {
+    resignAnswers(() => null);
+    const r = rig(cardsOf(["v1", "v2", "v3"]));
+    r.press("Play one after another");
+    r.snap();
+    (r.video("v1").props.onError as () => void)();
+    await settle();
+    r.show();
+    hook.linkGoneSeq = r.snap();
+  }
+  // "All together": a clip whose first play failed on its LINK is still waited for while its renewal plays it.
+  {
+    resignAnswers((url) => url.replace(/\/([^/]+)\.mp4$/, "/renewed/$1.mp4"));
+    const r = rig(cardsOf(["v1", "v2"]));
+    const c = r.clip("v2") as ReturnType<typeof fakeClip> & { error?: unknown };
+    const realPlay = c.play.bind(c);
+    c.error = { code: 4 };
+    c.play = () => (c.error ? Promise.reject(new Error("source failed")) : realPlay());
+    r.press("Play all together");
+    (r.video("v2").props.onPlay as () => void)(); // the browser's play event, before the source fails
+    await settle();
+    (r.video("v2").props.onError as () => void)();
+    await settle();
+    c.error = null; // the renewed link loads
+    r.show();
+    await settle();
+    hook.renewedTogetherStart = r.snap();
+    r.ended("v1");
+    hook.renewedTogetherOneLeft = r.snap();
+    r.ended("v2");
+    hook.renewedTogetherEnd = r.snap();
+  }
+  // ...and one whose link has no working version left is not waited for.
+  {
+    resignAnswers(() => null);
+    const r = rig(cardsOf(["v1", "v2"]));
+    const c = r.clip("v2") as ReturnType<typeof fakeClip> & { error?: unknown };
+    c.error = { code: 4 };
+    c.play = () => Promise.reject(new Error("source failed"));
+    r.press("Play all together");
+    await settle();
+    (r.video("v2").props.onError as () => void)();
+    await settle();
+    r.show();
+    r.ended("v1");
+    hook.goneTogetherEnd = r.snap();
   }
 
   const out = {
