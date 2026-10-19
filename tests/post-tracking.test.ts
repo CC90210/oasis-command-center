@@ -74,6 +74,11 @@ async function main() {
     }
     const t = postTrackingOf({ zernio: { outcome: "published", platforms: { instagram: { status: "published", url: "data:text/html,x" } } } })!;
     assert.equal(t.networks[0].url, null);
+    // A hostile key never reaches React as an object, and the list is capped.
+    const proto = postTrackingOf(JSON.parse('{"zernio":{"platforms":{"__proto__":{"status":"published"},"constructor":{"status":"failed"}}}}'))!;
+    for (const n of proto.networks) assert.equal(typeof n.name, "string", n.platform);
+    const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`net${i}`, { status: "pending" }]));
+    assert.equal(postTrackingOf({ zernio: { platforms: many } })!.networks.length, 12);
     assert.equal(postTrackingOf({ zernio: { outcome: "missing" } })!.summary,
       "Zernio no longer has this post; it was removed or rebooked.");
   });

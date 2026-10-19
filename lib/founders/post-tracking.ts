@@ -56,6 +56,9 @@ const NETWORK_NAMES: Record<string, string> = {
 
 const ORDER = ["instagram", "linkedin", "threads", "twitter", "x", "facebook", "tiktok", "youtube"];
 
+/** More networks than any post is booked to; a longer list is not Zernio's. */
+const MAX_NETWORKS = 12;
+
 function obj(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
@@ -124,12 +127,15 @@ export function postTrackingOf(rawMeta: unknown): PostTracking | null {
       const ib = ORDER.indexOf(b);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
     })
+    .slice(0, MAX_NETWORKS)
     .map((platform) => {
       const n = obj(nets[platform]);
       const status = text(n.status, 40) ?? "";
       return {
         platform,
-        name: NETWORK_NAMES[platform] ?? platform,
+        // hasOwn, not `??`: a "__proto__" key would otherwise name the network
+        // Object.prototype, which React cannot render (e9's review of #705).
+        name: Object.prototype.hasOwnProperty.call(NETWORK_NAMES, platform) ? NETWORK_NAMES[platform] : platform,
         status,
         ...networkLabel(status),
         publishedAt: text(n.published_at, 40),
