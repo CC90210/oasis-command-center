@@ -187,7 +187,7 @@ export function OfferPage({
               rule is the eyebrow device (.m-eyebrow in marketing.css): with an
               eyebrow it is the eyebrow's own rule; without one it is drawn
               bare, so every hero opens on the same mark and never on two. */}
-          <section className="m-edge relative overflow-hidden">
+          <section className="m-edge m-hero relative overflow-hidden">
             <div className="mx-auto w-full max-w-6xl px-5 pb-16 pt-14 sm:px-8 sm:pb-24 sm:pt-20">
               {/* No Reveal in the hero, in any layout: it is the first paint
                   (LCP), so it never waits for JavaScript to fade it in.

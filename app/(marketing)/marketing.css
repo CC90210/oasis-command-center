@@ -77,6 +77,17 @@ html[data-ad-choice] .m-consent {
   transform: none;
 }
 
+/* The hero never waits. Its reveals are shown from the first frame: hiding
+   the headline until the page's JavaScript runs left it invisible until
+   ~3.0 s on a mid-range phone that had painted the page at ~1.6 s
+   (2026-10-18). Each page marks its first section `m-hero`; pinned by
+   tests/hero-visible-first-frame.test.ts. */
+.js .m-hero .m-reveal {
+  opacity: 1;
+  transform: none;
+  transition: none;
+}
+
 /* ── Hairline section rule ─────────────────────────────────────────────
    The eyebrow device: a mono label preceded by a short rule that fades
    out. Reads as a console section header rather than a decorative divider.
