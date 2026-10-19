@@ -1,7 +1,7 @@
 /**
  * The facts the Connections hub computes statuses from, read once per render.
  *
- * Four reads, each failing on its own: a failed read becomes `null`, which
+ * Five reads, each failing on its own: a failed read becomes `null`, which
  * lib/os/connectors.ts turns into "Status unavailable" for exactly the cards
  * that depend on it. None of them is ever turned into "not connected", and no
  * credential VALUE leaves this file — listTenantIntegrationStatus returns
@@ -22,11 +22,12 @@
  *                      values OASIS sets on its server, which have no saved
  *                      row (lib/integrations/server-checks.ts — the latest Test
  *                      of each app, and the mailbox's last send).
+ *   agentChecks        newest tenant-scoped service check reported by the
+ *                      agents' service checker (loadAgentChecks; OASIS's own workspaces only).
  *
- * A heartbeat that only says a key NAME is in an env file on OASIS's computer
- * is never read as a check (2026-10-08): it proved nothing and showed
- * "Connected, verified just now". The one heartbeat read is OASIS's own email
- * sender's report of a real Gmail sign-in, through server-checks.ts.
+ * Agent checks are read only for cards whose source is agent_check
+ * (2026-10-18). They never prove a tenant key-store card is connected; those
+ * cards still require their own provider test or server check.
  */
 
 import "server-only";
@@ -36,11 +37,13 @@ import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tena
 import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
 import { listServerChecks } from "@/lib/integrations/server-checks";
 import { listActiveConnections } from "@/lib/connections/store";
+import { BRIDGE_REPORT_KEY, BRIDGE_REPORT_VALUE, heartbeatMetadata, isBridgeReport } from "@/lib/integrations/presence-heartbeat";
 import { PROVIDERS, missingProviderEnv, providerAvailability } from "@/lib/connections/registry";
 import {
   CONNECTOR_CATALOG,
   connectorBySlug,
   resolveConnectorStatus,
+  type AgentCheckFact,
   type ConnectionFact,
   type ConnectorFacts,
   type ConnectorStatus,
@@ -48,6 +51,12 @@ import {
   type PersonalGoogleFact,
   type ServerCheckFact,
 } from "@/lib/os/connectors";
+
+/** The services whose cards are agent checks (lib/os/connectors.ts), and the source their checker writes. */
+const AGENT_CHECK_SERVICES: readonly string[] = CONNECTOR_CATALOG.flatMap((def) =>
+  def.live?.source.kind === "agent_check" ? [def.live.source.service] : [],
+);
+const AGENT_CHECK_SOURCE = "service_check";
 
 async function loadKeyRows(tenantId: string): Promise<KeyRowFact[] | null> {
   try {
@@ -92,6 +101,50 @@ async function loadServerChecks(tenantId: string): Promise<ServerCheckFact[] | n
   }
 }
 
+/**
+ * The newest REAL check per agent-managed service: rows OASIS's agents wrote from their service checker
+ * (metadata.source "service_check", Business-Empire-Agent scripts/integrations/service_checks.py), never a row a paired
+ * computer relayed through /api/bridge/ping (metadata._reported_by "paired_bridge"). The newest row of ANY kind could
+ * be a laptop's key-name scan or report, showing a false Connected or hiding a failed check (CodeRabbit on #703).
+ *
+ * The filter and the newest-per-service pick are both in SQL: filtering after a row cap let newer rows of other kinds
+ * push the real check out of the read (Codex on #703). CASE guards json_extract from a row whose metadata is not JSON.
+ * The same filter runs again below on the parsed metadata, so both readings must agree for a row to count.
+ */
+async function loadAgentChecks(tenantId: string): Promise<AgentCheckFact[] | null> {
+  try {
+    const services = AGENT_CHECK_SERVICES;
+    const rs = await getTursoClient().execute({
+      sql: `SELECT service, status, last_ping_at, metadata FROM (
+              SELECT service, status, last_ping_at, metadata,
+                     ROW_NUMBER() OVER (PARTITION BY service ORDER BY last_ping_at DESC) AS newest
+              FROM integrations_health
+              WHERE tenant_id = ? AND service IN (${services.map(() => "?").join(", ")})
+                AND (CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.source') END) = ?
+                AND COALESCE(CASE WHEN json_valid(metadata) THEN json_extract(metadata, ?) END, '') <> ?
+            ) WHERE newest = 1`,
+      args: [tenantId, ...services, AGENT_CHECK_SOURCE, `$.${BRIDGE_REPORT_KEY}`, BRIDGE_REPORT_VALUE],
+    });
+    const newest = new Map<string, AgentCheckFact>();
+    for (const row of rs.rows) {
+      const service = String(row.service);
+      if (newest.has(service)) continue;
+      const metadata = heartbeatMetadata(row.metadata);
+      if (metadata?.source !== AGENT_CHECK_SOURCE || isBridgeReport(metadata)) continue;
+      newest.set(service, {
+        service,
+        status: String(row.status) as AgentCheckFact["status"],
+        last_ping_at: row.last_ping_at == null ? null : String(row.last_ping_at),
+        metadata,
+      });
+    }
+    return [...newest.values()];
+  } catch (error) {
+    console.error("[connections.facts.agent_checks]", error);
+    return null;
+  }
+}
+
 async function loadConnections(tenantId: string): Promise<ConnectionFact[] | null> {
   try {
     const rows = await listActiveConnections(getTursoClient(), tenantId);
@@ -132,15 +185,17 @@ export async function loadConnectorFacts(input: {
    */
   viewerIsOperator?: boolean;
 }): Promise<ConnectorFacts> {
-  const [keyRows, personalGoogle, connections, serverChecks] = await Promise.all([
+  const [keyRows, personalGoogle, connections, serverChecks, agentChecks] = await Promise.all([
     loadKeyRows(input.tenantId),
     input.personal === false ? Promise.resolve(undefined) : loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
     loadServerChecks(input.tenantId),
+    tenantMayUseEnvFallback(input.tenantId) ? loadAgentChecks(input.tenantId) : Promise.resolve([] as AgentCheckFact[]),
   ]);
   return {
     keyRows,
     serverChecks,
+    agentChecks,
     ...(personalGoogle === undefined ? {} : { personalGoogle }),
     connections,
     appNotConfigured: appNotConfiguredProviders(),
@@ -180,10 +235,12 @@ export async function loadWorkspaceConnectorStatus(
   const def = connectorBySlug(slug);
   if (!def) return null;
   const framework = def.live?.source.kind === "tenant_connection";
-  const [keyRows, connections, serverChecks] = await Promise.all([
-    framework ? Promise.resolve([] as KeyRowFact[]) : loadKeyRows(tenantId),
+  const agent = def.live?.source.kind === "agent_check";
+  const [keyRows, connections, serverChecks, agentChecks] = await Promise.all([
+    framework || agent ? Promise.resolve([] as KeyRowFact[]) : loadKeyRows(tenantId),
     framework ? loadConnections(tenantId) : Promise.resolve([] as ConnectionFact[]),
-    framework ? Promise.resolve([] as ServerCheckFact[]) : loadServerChecks(tenantId),
+    framework || agent ? Promise.resolve([] as ServerCheckFact[]) : loadServerChecks(tenantId),
+    agent && tenantMayUseEnvFallback(tenantId) ? loadAgentChecks(tenantId) : Promise.resolve([] as AgentCheckFact[]),
   ]);
   return resolveConnectorStatus(
     def,
@@ -191,6 +248,7 @@ export async function loadWorkspaceConnectorStatus(
       // No personal read: no workspace card's state depends on the viewer.
       keyRows,
       serverChecks,
+      agentChecks,
       connections,
       appNotConfigured: appNotConfiguredProviders(),
       oasisWorkspace: tenantMayUseEnvFallback(tenantId),

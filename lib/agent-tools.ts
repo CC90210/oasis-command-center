@@ -17,6 +17,7 @@ import { tenantSlugFor } from "./team";
 import { isOasisSurfaceTenant } from "./role-surfaces";
 import { loadOasisMoney } from "./goals/oasis-money";
 import { stripeSyncLine } from "./founders-finances/stripe-sync-status";
+import { integrationsHealth } from "./queries";
 
 export type ToolDeclaration = {
   name: string;
@@ -81,7 +82,7 @@ export const TOOL_DECLARATIONS: ToolDeclaration[] = [
   {
     name: "integrations_status",
     description:
-      "Which integrations are connected vs offline (FFmpeg, Whisper, Gmail, Stripe, etc). Use when something needs to happen and the operator might lack a connected tool.",
+      "The latest checks for services in Settings > Connections. Use when an OASIS-managed service might be unavailable.",
     parameters: { type: "object", properties: {} },
   },
 ];
@@ -237,18 +238,14 @@ const HANDLERS: Record<string, ToolHandler> = {
   },
 
   async integrations_status(_args, ctx) {
-    const db = getServiceSupabase();
-    const { data } = await db
-      .from("integrations_health")
-      .select("service, status, last_ping_at, last_error")
-      .eq("tenant_id", ctx.tenantId);
+    const rows = await integrationsHealth(ctx.tenantId);
     const groups: Record<string, string[]> = {
       healthy: [],
       degraded: [],
       down: [],
       unconfigured: [],
     };
-    for (const r of (data || []) as Array<{ service: string; status: string }>) {
+    for (const r of rows) {
       (groups[r.status] || groups.unconfigured).push(r.service);
     }
     return {

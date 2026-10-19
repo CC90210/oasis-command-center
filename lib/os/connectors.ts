@@ -24,10 +24,9 @@
  * ONE ANSWER PER INTEGRATION (2026-10-08). Every screen that says whether an
  * app is connected reads it from here: the hub, Chat apps, Notifications, AI
  * brain, the setup wizard, the department tabs, the AI Team roster and the
- * rail. A heartbeat from OASIS's own computer only says a key NAME is in its
- * env file, so it never proves anything here (it used to turn Telegram and
- * Google "Connected, verified just now" while nothing had checked them). The
- * per-person connections (your own Google account, your own Telegram bot) have
+ * rail. An agent check from OASIS's computer is used only by the cards
+ * whose source explicitly says agent_check (2026-10-18); a fresh healthy
+ * check is green for at most one day. The per-person connections (your own Google account, your own Telegram bot) have
  * their own resolvers below, so a screen about you and a screen about the
  * workspace say which one they mean.
  *
@@ -43,6 +42,7 @@
 import type { DepartmentKey } from "@/lib/os/types";
 import { isVerifiedHealthy } from "@/lib/connections/rules";
 import { timeAgo } from "@/lib/devices/presence";
+import { isPresenceOnlyHeartbeat } from "@/lib/integrations/presence-heartbeat";
 import { SLACK_APPROVAL_RULE } from "@/lib/slack/copy";
 import { TWILIO_FAILURE_STATES } from "@/lib/twilio/shared";
 
@@ -56,6 +56,7 @@ export type ConnectorCategoryKey =
   | "meetings"
   | "messaging"
   | "ads_social"
+  | "website_hosting"
   | "crm_import"
   | "ai_models";
 
@@ -68,6 +69,7 @@ export const CONNECTOR_CATEGORIES: readonly { key: ConnectorCategoryKey; label: 
   { key: "meetings", label: "Meetings" },
   { key: "messaging", label: "Messaging & chat" },
   { key: "ads_social", label: "Ads & social" },
+  { key: "website_hosting", label: "Website & hosting" },
   { key: "crm_import", label: "CRM import" },
   { key: "ai_models", label: "AI models" },
 ];
@@ -95,9 +97,12 @@ export type ConnectorIcon =
  *                        lib/connections/*): green only while its last LIVE
  *                        probe passed and is under a day old
  *                        (lib/connections/rules.ts isVerifiedHealthy).
+ *   agent_check          the newest tenant-scoped check the agents reported
+ *                        from OASIS's computer: green for one day only.
  */
 export type ConnectorStatusSource =
   | { kind: "tenant_connection"; provider: string }
+  | { kind: "agent_check"; service: string }
   | {
       kind: "tenant_keys";
       service: string;
@@ -120,6 +125,8 @@ export type ConnectorStatusSource =
 /** What clicking a live card does: open the flow that already exists. */
 export type ConnectorConnect =
   | { kind: "link"; href: string; label: string }
+  /** No setup form: the drawer explains where OASIS manages the key. */
+  | { kind: "managed"; label: string }
   /** An OAuth start route opened in a popup that postMessages `{ source }` back. */
   | { kind: "popup"; href: string; label: string; messageSource: string }
   /**
@@ -501,6 +508,32 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       },
       connect: { kind: "keys", label: "Connect Plaid", service: "plaid" },
     },
+  },
+
+  {
+    slug: "wise",
+    name: "Wise",
+    summary: "Multi-currency business account",
+    category: "banking",
+    departments: ["finance"],
+    brandColor: "#9FE870",
+    icon: { kind: "svg", file: "wise.svg" },
+    reads: ["Balances, bank statements and incoming transfers from OASIS's Wise business profile"],
+    does: [
+      "Checks possible invoice matches in a scheduled dry run",
+      "Previews bank-feed imports in dry run while Finance writes are off",
+      "Never creates a transfer or moves money",
+    ],
+    keywords: ["money", "bank", "banking", "cash", "multi-currency", "statements"],
+    live: {
+      source: { kind: "agent_check", service: "wise" },
+      connect: {
+        kind: "managed",
+        label: "The API token and profile ID are managed in the Command Center Worker. OASIS's agents report the last check from OASIS's computer.",
+      },
+    },
+    clientsUnavailable: true,
+    docs: { href: "https://docs.wise.com/api-docs/guides/authentication-and-security", label: "Wise's API token guide" },
   },
 
   // Calendar & email
@@ -963,6 +996,82 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     clientsUnavailable: true,
   },
 
+  // Website & hosting
+  {
+    slug: "cloudflare",
+    name: "Cloudflare",
+    summary: "Domains, DNS and the Workers that host the Command Center",
+    category: "website_hosting",
+    departments: ["operations"],
+    brandColor: "#F38020",
+    icon: { kind: "svg", file: "cloudflare.svg" },
+    reads: ["The Cloudflare account details its agents need for domains, DNS and Workers"],
+    does: ["Uses the account for DNS and Command Center hosting work"],
+    keywords: ["domain", "dns", "worker", "hosting", "infrastructure"],
+    live: {
+      source: { kind: "agent_check", service: "cloudflare" },
+      connect: { kind: "managed", label: "The keys are managed on OASIS's computer. OASIS's agents check them there." },
+    },
+    clientsUnavailable: true,
+    docs: { href: "https://developers.cloudflare.com/fundamentals/api/get-started/create-token/", label: "Cloudflare's API token guide" },
+  },
+  {
+    slug: "hostinger",
+    name: "Hostinger",
+    summary: "The VPS and GPU server",
+    category: "website_hosting",
+    departments: ["operations"],
+    brandColor: "#673DE6",
+    icon: { kind: "svg", file: "hostinger.svg" },
+    reads: ["The VPS and GPU server details its agents need"],
+    does: ["Uses the servers for OASIS workloads"],
+    keywords: ["vps", "gpu", "server", "hosting", "infrastructure"],
+    live: {
+      source: { kind: "agent_check", service: "hostinger" },
+      connect: { kind: "managed", label: "The keys are managed on OASIS's computer. OASIS's agents check them there." },
+    },
+    clientsUnavailable: true,
+    docs: { href: "https://developers.hostinger.com/", label: "Hostinger's API guide" },
+  },
+  {
+    slug: "github",
+    name: "GitHub",
+    summary: "Source code; a merge to main deploys the Command Center",
+    category: "website_hosting",
+    departments: ["operations"],
+    brandColor: "#181717",
+    icon: { kind: "svg", file: "github.svg" },
+    reads: ["The source repositories its agents work in"],
+    does: ["Uses merges to main to deploy the Command Center"],
+    keywords: ["source", "code", "repository", "deploy", "infrastructure"],
+    live: {
+      source: { kind: "agent_check", service: "github" },
+      connect: { kind: "managed", label: "The keys are managed on OASIS's computer. OASIS's agents check them there." },
+    },
+    clientsUnavailable: true,
+    docs: { href: "https://docs.github.com/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens", label: "GitHub's access token guide" },
+  },
+  {
+    slug: "firecrawl",
+    name: "Firecrawl",
+    summary: "Reads web pages for research",
+    // Research has no catalog category; this keeps OASIS-owned web services
+    // together in the closest functional group (2026-10-18).
+    category: "website_hosting",
+    departments: ["marketing", "chief_of_staff"],
+    brandColor: null,
+    icon: { kind: "monogram", letters: "Fi", reason: "Not in Simple Icons 16.33.0" },
+    reads: ["Web pages its agents are researching"],
+    does: ["Turns pages into text and structured research material"],
+    keywords: ["web", "research", "crawl", "scrape", "pages"],
+    live: {
+      source: { kind: "agent_check", service: "firecrawl" },
+      connect: { kind: "managed", label: "The keys are managed on OASIS's computer. OASIS's agents check them there." },
+    },
+    clientsUnavailable: true,
+    docs: { href: "https://docs.firecrawl.dev/api-reference/introduction", label: "Firecrawl's API guide" },
+  },
+
   // CRM import
   {
     slug: "gohighlevel",
@@ -1111,6 +1220,14 @@ export type PersonalGoogleFact = {
   workEmail: string | null;
 };
 
+/** The newest tenant-scoped row the agents reported for one service. */
+export type AgentCheckFact = {
+  service: string;
+  status: "healthy" | "degraded" | "down" | "unconfigured";
+  last_ping_at: string | null;
+  metadata?: unknown;
+};
+
 /**
  * A real check of the details OASIS sets on its own server, which have no saved
  * key row for a Test result to land on (lib/integrations/server-checks.ts):
@@ -1148,6 +1265,8 @@ export type PersonalTelegramFact = {
  */
 export type ConnectorFacts = {
   keyRows: readonly KeyRowFact[] | null;
+  /** Tenant-scoped newest agent checks; null when that read failed. */
+  agentChecks?: readonly AgentCheckFact[] | null;
   /**
    * The real checks of the values OASIS sets on its own server (ServerCheckFact),
    * read for OASIS's own workspaces only. Null when that read failed: a card
@@ -1199,12 +1318,57 @@ function formatCheckDate(iso: string): string {
  * at most one Test a week. Past it the card says when it was last checked.
  */
 export const KEY_CHECK_FRESH_MS = 7 * 24 * 60 * 60 * 1000;
+export const AGENT_CHECK_FRESH_MS = 24 * 60 * 60 * 1000;
 
 const UNKNOWN: ConnectorStatus = {
   kind: "unknown",
   label: "Status unavailable",
   detail: "OASIS could not check this right now. That does not mean it is disconnected.",
 };
+
+function agentCheckStatus(
+  service: string,
+  checks: readonly AgentCheckFact[],
+  nowMs: number,
+): ConnectorStatus {
+  const check = checks.find((row) => row.service === service);
+  const checkedMs = check?.last_ping_at ? Date.parse(check.last_ping_at) : NaN;
+  if (!check || check.status === "unconfigured" || !Number.isFinite(checkedMs)) {
+    return {
+      kind: "not_connected",
+      label: "Not connected",
+      detail: "OASIS's agents have not reported a check from OASIS's computer.",
+    };
+  }
+  if (isPresenceOnlyHeartbeat(check.metadata)) {
+    return {
+      kind: "configured",
+      label: "Check not reported",
+      detail: "OASIS's agents found the key on OASIS's computer but did not report a service check.",
+    };
+  }
+  if (nowMs - checkedMs > AGENT_CHECK_FRESH_MS) {
+    const day = formatCheckDate(check.last_ping_at!);
+    return {
+      kind: "configured",
+      label: "Last check is stale",
+      detail: `OASIS's agents last checked this from OASIS's computer on ${day}, more than a day ago.`,
+    };
+  }
+  const ago = timeAgo(check.last_ping_at!, { now: nowMs });
+  if (check.status === "healthy") {
+    return {
+      kind: "connected",
+      label: `Connected - checked ${ago}`,
+      detail: `OASIS's agents checked this from OASIS's computer ${ago}.`,
+    };
+  }
+  return {
+    kind: "attention",
+    label: "Needs attention",
+    detail: `OASIS's agents checked this from OASIS's computer ${ago}; the check reported ${check.status}.`,
+  };
+}
 
 function latestIso(values: readonly (string | null)[]): string | null {
   let best: string | null = null;
@@ -1591,6 +1755,11 @@ export function resolveConnectorStatus(
   }
 
   const source = def.live.source;
+  if (source.kind === "agent_check") {
+    if (def.clientsUnavailable && facts.oasisWorkspace === false) return unavailableStatus(def);
+    if (!facts.agentChecks) return UNKNOWN;
+    return agentCheckStatus(source.service, facts.agentChecks, nowMs);
+  }
   if (source.kind === "tenant_connection") {
     // The ways THIS workspace connects (Slack: OASIS's own workspace uses the
     // OASIS app, a client its own app), each with its state here.

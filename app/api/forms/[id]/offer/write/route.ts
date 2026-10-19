@@ -36,6 +36,7 @@ import { sameOrigin } from "@/lib/calendar/http";
 import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { formsSession } from "@/lib/forms/access";
 import { editableForm, saveDraftLikeBuilder } from "@/lib/offer-pages/operator";
+import { readCappedJson } from "@/lib/offer-pages/public-http";
 import { offerPagesDb, readOfferRow, type OfferRow } from "@/lib/offer-pages/store";
 import { OfferPageError, type OfferPageDoc } from "@/lib/offer-pages/types";
 import {
@@ -63,6 +64,8 @@ const UNAVAILABLE = { ok: false, error: "offer_pages_unavailable", message: "Off
 
 /** A bound on what is read from the body, well above every prompt limit (write-page.ts WRITE_PAGE_LIMITS). */
 const RAW_INPUT_CAP = 10_000;
+/** Two maximum-length fields, including worst-case JSON escaping, plus ordinary request overhead. */
+const MAX_BODY_BYTES = 128 * 1024;
 
 /** HTTP status for a model-call refusal: the caller can fix some, wait out others. */
 function statusFor(code: string): number {
@@ -75,8 +78,8 @@ function statusFor(code: string): number {
   return 502;
 }
 
-function text(value: unknown, max: number): string {
-  return typeof value === "string" ? value.trim().slice(0, max) : "";
+function text(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
@@ -93,19 +96,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return json({ ok: false, error: "rate_limited", message: "Too many pages written in a row. Wait a minute and try again." }, 429);
   }
 
-  let body: Record<string, unknown>;
-  try {
-    body = (await req.json()) as Record<string, unknown>;
-  } catch {
-    return json({ ok: false, error: "invalid_json" }, 400);
+  const body = await readCappedJson(req, MAX_BODY_BYTES);
+  if (!body) return json({ ok: false, error: "invalid_json" }, 400);
+  // 2026-10-18: reject a full oversized field. Truncating before redaction can
+  // split a secret at the cutoff, leaving a fragment the redactor cannot see.
+  const description = text(body.description);
+  const audience = text(body.audience);
+  if (description.length > RAW_INPUT_CAP || audience.length > RAW_INPUT_CAP) {
+    return json({ ok: false, error: "too_long", message: "That is too long to write a page from. Keep it to a few sentences." }, 400);
   }
-  if (!body || typeof body !== "object" || Array.isArray(body)) return json({ ok: false, error: "invalid_json" }, 400);
-  // Read whole (bounded), redacted below, and only then shortened for the
-  // prompt (writePageUserPrompt): cutting first could split a secret, and
-  // redaction cannot recognise a fragment of one. The saved brief keeps the
-  // owner's longer audience (withBrief).
-  const description = text(body.description, RAW_INPUT_CAP);
-  const audience = text(body.audience, RAW_INPUT_CAP);
   const problem = writePageInputProblem(description);
   if (problem) return json({ ok: false, error: "description_required", message: problem }, 400);
   const save = body.save !== false;

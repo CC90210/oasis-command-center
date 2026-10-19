@@ -55,6 +55,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getClientIp } from "@/lib/api-helpers";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
+import { readCappedJson } from "@/lib/offer-pages/public-http";
 import { rateLimit } from "@/lib/rate-limit";
 import {
   offerPagesDb,
@@ -88,22 +89,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // gets the same empty 204 — never an uncaught 500. Same rule
   // /api/forms/submit's own top-level catch documents.
   try {
-    let raw: string;
-    try {
-      raw = await req.text();
-    } catch {
-      return EMPTY_204();
-    }
-    // Byte cap BEFORE JSON.parse — a huge string must never reach the parser.
-    if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) return EMPTY_204();
-
-    let body: Body;
-    try {
-      body = JSON.parse(raw) as Body;
-    } catch {
-      return EMPTY_204();
-    }
-    if (!body || typeof body !== "object") return EMPTY_204();
+    // 2026-10-18: cap the stream itself. req.text() buffered a chunked public
+    // request in full before the old post-read size check could reject it.
+    const body = await readCappedJson(req, MAX_BODY_BYTES) as Body | null;
+    if (!body) return EMPTY_204();
 
     const tenantSlug = typeof body.tenant === "string" ? body.tenant : "";
     const formSlug = typeof body.form === "string" ? body.form : "";

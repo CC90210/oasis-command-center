@@ -12,9 +12,9 @@
  *   - signup_url + api_key_url for the kinds that need them
  *   - setup_complexity: trivial | simple | moderate | advanced
  *
- * The dashboard renders state per-row from integrations_health (live pings)
- * + agent_model_config (key on file). Adding a new integration: add the row
- * here, ensure the right ping path exists, done.
+ * The agents' bridge reads this list from /api/integrations/registry and writes
+ * tenant-scoped integrations_health checks. Connections is the only UI that
+ * presents those checks (2026-10-18); this registry is not a second catalog.
  */
 
 export type IntegrationCategory =
@@ -47,13 +47,6 @@ export type IntegrationDef = {
   setup_complexity: SetupComplexity;
   /** Which agent(s) actually use this integration. */
   used_by?: ("bravo" | "atlas" | "maven" | "aura" | "hermes" | "solara" | "helios")[];
-  /**
-   * Platform-infra integrations (Supabase, Vercel, Cloudflare, Hostinger,
-   * GitHub) are developer tools for the OASIS operator, not client
-   * tenants. Hidden from non-operator tenants regardless of agent
-   * enablement. Settings + /integrations both honor this flag.
-   */
-  developer_only?: boolean;
   /** For api_key kind: which env var the key-paste modal writes to in
    *  .env.agents. If omitted, modal won't appear and the user falls back
    *  to the manual signup_url + api_key_url affordance. */
@@ -63,32 +56,6 @@ export type IntegrationDef = {
 export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
   // ── Core infra ─────────────────────────────────────────────────
   {
-    service: "supabase",
-    label: "Supabase",
-    category: "core",
-    description: "Postgres + auth + RLS for your tenant data",
-    connection_kind: "api_key",
-    signup_url: "https://supabase.com/dashboard/sign-up",
-    api_key_url: "https://supabase.com/dashboard/account/tokens",
-    setup_doc_url: "https://supabase.com/docs/guides/getting-started",
-    setup_complexity: "moderate",
-    used_by: ["bravo"],
-    developer_only: true,
-    env_key: "SUPABASE_ACCESS_TOKEN",
-  },
-  {
-    service: "vercel",
-    label: "Vercel",
-    category: "core",
-    description: "Dashboard hosting",
-    connection_kind: "api_key",
-    signup_url: "https://vercel.com/signup",
-    api_key_url: "https://vercel.com/account/tokens",
-    setup_complexity: "trivial",
-    developer_only: true,
-    env_key: "VERCEL_TOKEN",
-  },
-  {
     service: "cloudflare",
     label: "Cloudflare",
     category: "core",
@@ -97,7 +64,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     signup_url: "https://dash.cloudflare.com/sign-up",
     api_key_url: "https://dash.cloudflare.com/profile/api-tokens",
     setup_complexity: "moderate",
-    developer_only: true,
     env_key: "CLOUDFLARE_API_TOKEN",
   },
   {
@@ -109,7 +75,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     signup_url: "https://www.hostinger.com/",
     api_key_url: "https://hpanel.hostinger.com/profile/api",
     setup_complexity: "moderate",
-    developer_only: true,
     env_key: "HOSTINGER_API_KEY",
   },
   {
@@ -122,7 +87,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     api_key_url: "https://github.com/settings/tokens",
     setup_complexity: "simple",
     used_by: ["bravo"],
-    developer_only: true,
     env_key: "GITHUB_TOKEN",
   },
 
@@ -163,24 +127,10 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     env_key: "TELEGRAM_BOT_TOKEN",
   },
   {
-    service: "text_torrent",
-    label: "TextTorrent",
-    category: "comms",
-    description:
-      "Direct TT API for SMS blasts, list analytics, and local-area-code presence dialing. Phase 5.1 of SunBiz CRM build — separate from Twilio (the prior Twilio-relabel approach lost TT's analytics + area-code features).",
-    connection_kind: "api_key",
-    signup_url: "https://texttorrent.com/",
-    api_key_url: "https://texttorrent.com/settings/api",
-    setup_complexity: "simple",
-    used_by: ["helios", "solara"],
-    env_key: "TEXTTORRENT_API_KEY",
-  },
-  {
     service: "twilio",
     label: "Twilio",
     category: "comms",
-    description:
-      "Personalized 1:1 SMS with deeper number-pool management. Used alongside TextTorrent — operators route blasts to TT, individual personalized sends to Twilio.",
+    description: "Personalized 1:1 SMS from the workspace's Twilio account",
     connection_kind: "api_key",
     signup_url: "https://www.twilio.com/try-twilio",
     api_key_url: "https://console.twilio.com/",
@@ -188,19 +138,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     setup_complexity: "simple",
     used_by: ["helios", "solara"],
     env_key: "TWILIO_ACCOUNT_SID",
-  },
-  {
-    service: "kixie",
-    label: "Kixie",
-    category: "comms",
-    description:
-      "Outbound dialer + live call transfers. Click-to-call links generated server-side; webhook fires on call.answered / call.transferred for /feed visibility.",
-    connection_kind: "api_key",
-    signup_url: "https://www.kixie.com/",
-    api_key_url: "https://app.kixie.com/settings/api",
-    setup_complexity: "moderate",
-    used_by: ["helios"],
-    env_key: "KIXIE_API_KEY",
   },
 
   // ── Finance ────────────────────────────────────────────────────
@@ -348,26 +285,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     env_key: "LATE_API_KEY",
   },
   {
-    service: "remotion",
-    label: "Remotion",
-    category: "content",
-    description: "Programmatic video rendering — bundled in Maven",
-    connection_kind: "built_in",
-    setup_complexity: "trivial",
-    used_by: ["maven"],
-  },
-  {
-    service: "ffmpeg",
-    label: "FFmpeg",
-    category: "content",
-    description: "Video / audio processing — local install",
-    connection_kind: "local_install",
-    signup_url: "https://ffmpeg.org/download.html",
-    setup_doc_url: "https://ffmpeg.org/download.html",
-    setup_complexity: "simple",
-    used_by: ["maven"],
-  },
-  {
     service: "elevenlabs",
     label: "ElevenLabs",
     category: "content",
@@ -378,17 +295,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     setup_complexity: "trivial",
     used_by: ["maven"],
     env_key: "ELEVENLABS_API_KEY",
-  },
-  {
-    service: "whisper",
-    label: "Whisper",
-    category: "content",
-    description: "Audio → caption transcription (local CLI)",
-    connection_kind: "local_install",
-    signup_url: "https://github.com/openai/whisper#setup",
-    setup_doc_url: "https://github.com/openai/whisper",
-    setup_complexity: "moderate",
-    used_by: ["maven"],
   },
 
   // (Per-platform social rows — LinkedIn, Instagram, TikTok, YouTube,
@@ -405,8 +311,7 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     // Renamed from "Local Brain" 2026-05-15 — the prior label was internal
     // jargon. Turso is the per-tenant database, provisioned by Bravo when
     // the tenant is created; SunBiz / SUGA / future-client operators don't
-    // configure it themselves. Marked developer_only so end-user tenants
-    // never see it in their /settings panel.
+    // configure it themselves.
     label: "Tenant Database (Turso)",
     category: "data",
     description: "Per-tenant SQLite-compatible database. Provisioned by Bravo.",
@@ -414,36 +319,7 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     signup_url: "https://app.turso.tech/",
     api_key_url: "https://app.turso.tech/account/tokens",
     setup_complexity: "simple",
-    developer_only: true,
     env_key: "TURSO_AUTH_TOKEN",
-  },
-  {
-    service: "notion",
-    label: "Notion",
-    category: "data",
-    description: "Knowledge base + project tracking",
-    connection_kind: "api_key",
-    signup_url: "https://www.notion.so/signup",
-    api_key_url: "https://www.notion.so/profile/integrations",
-    setup_complexity: "simple",
-    // CC's personal knowledge base — not a tenant-facing integration. Was
-    // rendering on SunBiz's /settings panel because it had no used_by filter
-    // (default-shown rule applies to AI providers and a few utility tools).
-    // Marked developer_only so non-operator tenants stop seeing it.
-    developer_only: true,
-    env_key: "NOTION_API_KEY",
-  },
-  {
-    service: "obsidian",
-    label: "Obsidian",
-    category: "data",
-    description: "Local-first vault — graph + backlinks for brain/ files",
-    connection_kind: "api_key",
-    signup_url: "https://obsidian.md/",
-    api_key_url: "https://github.com/coddingtonbear/obsidian-local-rest-api",
-    setup_complexity: "moderate",
-    used_by: ["bravo"],
-    env_key: "OBSIDIAN_API_KEY",
   },
   {
     service: "firecrawl",
@@ -456,27 +332,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     setup_complexity: "trivial",
     used_by: ["bravo", "maven"],
     env_key: "FIRECRAWL_API_KEY",
-  },
-  {
-    service: "playwright",
-    label: "Playwright",
-    category: "data",
-    description: "Browser automation — bundled skill",
-    connection_kind: "built_in",
-    setup_complexity: "trivial",
-    used_by: ["bravo", "maven"],
-    developer_only: true,
-  },
-  {
-    service: "browser_harness",
-    label: "Browser Harness",
-    category: "data",
-    description: "Logged-in Chrome via CDP (your installed browser)",
-    connection_kind: "local_install",
-    signup_url: "https://www.google.com/chrome/",
-    setup_complexity: "moderate",
-    used_by: ["bravo"],
-    developer_only: true,
   },
 
   // ── AI providers ───────────────────────────────────────────────
@@ -507,20 +362,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     used_by: ["bravo"],
   },
   {
-    service: "openai_codex",
-    label: "OpenAI Codex",
-    category: "ai",
-    description: "Codex executor for backend tasks — used by Bravo for delegation",
-    connection_kind: "api_key",
-    signup_url: "https://platform.openai.com/signup",
-    api_key_url: "https://platform.openai.com/api-keys",
-    setup_doc_url: "https://platform.openai.com/docs/quickstart",
-    setup_complexity: "trivial",
-    used_by: ["bravo"],
-    developer_only: true,
-    env_key: "OPENAI_API_KEY",
-  },
-  {
     service: "google_ai",
     label: "Google Gemini",
     category: "ai",
@@ -540,60 +381,3 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
   // Password via scripts/google_tool.py — there's no per-service auth.
   // Collapsed into the single `gws` entry under "Comms" above.)
 ];
-
-export const INTEGRATION_CATEGORIES: { key: IntegrationCategory; label: string }[] = [
-  { key: "ai", label: "AI Providers" },
-  { key: "core", label: "Core" },
-  { key: "comms", label: "Comms" },
-  { key: "finance", label: "Finance" },
-  { key: "content", label: "Content" },
-  { key: "social", label: "Social" },
-  { key: "data", label: "Data + Automation" },
-  { key: "infra", label: "Infra" },
-];
-
-export const CONNECTION_KIND_LABEL: Record<ConnectionKind, string> = {
-  api_key: "API key",
-  oauth: "OAuth",
-  local_install: "Local install",
-  built_in: "Built-in",
-  account_only: "Account",
-};
-
-export function categorize(integration: { service: string }): IntegrationDef | null {
-  return KNOWN_INTEGRATIONS.find((i) => i.service === integration.service) || null;
-}
-
-export function getIntegration(service: string): IntegrationDef | null {
-  return KNOWN_INTEGRATIONS.find((i) => i.service === service) || null;
-}
-
-/**
- * Filter the integration catalog for what THIS tenant should actually see.
- *
- * Rules (in order):
- *   1. `developer_only: true` integrations are platform infra — hidden from
- *      non-operator tenants regardless of their enabled agents. Vercel,
- *      Cloudflare, Hostinger, GitHub, Supabase, Playwright,
- *      Browser Harness, OpenAI Codex.
- *   2. If the integration has a `used_by` list, at least one of those
- *      agents must be in the tenant's `enabledAgents`. Stripe is only
- *      shown when Atlas is enabled; Twilio (text_torrent) only when
- *      Helios is. This way clients see exactly what's relevant — and the
- *      grid re-grows naturally when they enable a new agent.
- *   3. If the integration has no `used_by` (e.g. AI providers like
- *      OpenRouter / Anthropic / Google Gemini), it's shown to everyone.
- *
- * The operator (CC, ADMIN_EMAILS) bypasses rule 1 — they see everything.
- */
-export function visibleIntegrationsForTenant(
-  enabledAgents: string[],
-  opts: { isOperator: boolean }
-): IntegrationDef[] {
-  const enabledSet = new Set(enabledAgents.map((a) => a.toLowerCase()));
-  return KNOWN_INTEGRATIONS.filter((def) => {
-    if (def.developer_only && !opts.isOperator) return false;
-    if (!def.used_by || def.used_by.length === 0) return true;
-    return def.used_by.some((agent) => enabledSet.has(agent));
-  });
-}

@@ -2,9 +2,9 @@
  * lib/connections/registry.ts — the providers a CLIENT tenant can connect
  * through the Connections framework (docs/os-revamp/03 §a.3).
  *
- * Operator-only integrations (kraken, oanda, obsidian, …) stay in
- * lib/integrations-registry.ts and never appear here. The hub's card copy and
- * logos live in lib/os/connectors.ts, keyed by the same slug: a ProviderDef's
+ * The bridge-check catalog in lib/integrations-registry.ts is separate from
+ * this client OAuth registry. The hub's card copy and logos live in
+ * lib/os/connectors.ts, keyed by the same slug: a ProviderDef's
  * `id` IS its catalog slug and its /api/connections/[provider] segment, and
  * tests/os-connections.test.ts holds the two lists together.
  *

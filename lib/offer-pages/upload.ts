@@ -147,6 +147,18 @@ async function deleteClaim(db: Client, nonce: string): Promise<void> {
   }
 }
 
+/** 2026-10-18: a copy that fails its final verification is unreachable garbage. Remove it before freeing the claim; a storage delete outage is logged but never replaces the verification refusal. */
+async function removeFailedCopy(storage: OfferUploadStorage, path: string): Promise<void> {
+  try {
+    await storage.remove(path);
+  } catch (err) {
+    console.error("[offer-pages.upload] removing a failed copied object failed (non-fatal)", {
+      path,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 /** The real adapter: null when R2 is not configured (every caller treats that as "unavailable", never a silent pass). */
 export function offerUploadStorage(): OfferUploadStorage | null {
   if (!r2Configured()) return null;
@@ -171,7 +183,10 @@ export function offerUploadStorage(): OfferUploadStorage | null {
       return { ok: true };
     },
     async remove(path) {
-      await bucket.remove([path]);
+      // The adapter answers { data, error } and never throws (CodeRabbit on #702): a failed delete must reach
+      // removeFailedCopy, which logs it, instead of passing for a removal.
+      const r = await bucket.remove([path]);
+      if (r.error) throw new Error(r.error.message || "remove failed");
     },
   };
 }
@@ -442,15 +457,18 @@ export async function confirmOfferUpload(input: {
   try {
     finalHead = await input.storage.info(candidateFinalPath);
   } catch {
+    await removeFailedCopy(input.storage, candidateFinalPath);
     await deleteClaim(input.db, nonce);
     return { ok: false, error: "storage_unavailable" };
   }
   if (!finalHead || finalHead.size !== head.size) {
+    await removeFailedCopy(input.storage, candidateFinalPath);
     await deleteClaim(input.db, nonce);
     return { ok: false, error: "swapped" };
   }
   const finalMime = normalizedMime(finalHead.contentType);
   if (finalMime && finalMime !== "application/octet-stream" && !isAllowedUploadMime(kind, finalMime)) {
+    await removeFailedCopy(input.storage, candidateFinalPath);
     await deleteClaim(input.db, nonce);
     return { ok: false, error: "wrong_type" };
   }

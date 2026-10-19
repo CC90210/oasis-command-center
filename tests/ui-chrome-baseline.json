@@ -24,7 +24,6 @@
     "app/health/page.tsx",
     "app/import/page.tsx",
     "app/inbox/page.tsx",
-    "app/integrations/page.tsx",
     "app/interactions/[id]/page.tsx",
     "app/objections/page.tsx",
     "app/objections/practice/page.tsx",

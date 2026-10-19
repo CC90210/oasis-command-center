@@ -188,9 +188,9 @@ test("every connector:<slug> in source is a real catalog connector", () => {
 
 /**
  * A CTA hardcodes a Settings destination when a string literal in these files
- * IS one: "/settings", "/settings/ai", "/settings#devices", "/settings/connections?app=x",
- * "/integrations". Files below own their own section or are the navigation
- * itself; each says why.
+ * IS one: "/settings", "/settings/ai", "/settings#devices",
+ * "/settings/connections?app=x", or the legacy "/integrations" redirect. Files
+ * below own their own section or are the navigation itself; each says why.
  */
 const SETTINGS_HREF = /["'`]\/(settings|connections|integrations)(?=[/?#"'`])[^"'`]*["'`]/;
 

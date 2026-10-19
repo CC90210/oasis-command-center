@@ -188,10 +188,11 @@ export function ConnectorDrawer({
   const keyForm = live?.connect.kind === "key_form" ? live.connect : null;
   const keyConfig = keyForm ? providerById(keyForm.provider)?.restrictedKey ?? null : null;
   const savedKeys = live?.connect.kind === "keys" ? live.connect : null;
+  const managed = live?.connect.kind === "managed" ? live.connect : null;
   // Signed in at the vendor's own page: Test again and Disconnect sit in the
   // body once connected; the footer button connects or reconnects.
   const signIn = live?.connect.kind === "oauth" ? live.connect : null;
-  const setUpHere = !!keyForm || !!savedKeys;
+  const setUpHere = !!keyForm || !!savedKeys || !!managed;
   const elsewhere = embedded && live?.connect.kind === "link";
   // Bumped by every saved or removed key, so the Twilio panel re-reads the
   // sender it is about to configure. The status label is no such signal: saving
@@ -264,6 +265,13 @@ export function ConnectorDrawer({
                   on the OASIS team&apos;s desk.
                 </p>
               )}
+            </section>
+          )}
+
+          {managed && (
+            <section>
+              <h3 className="mb-1.5 text-xs font-medium text-fg-dim">How it is managed</h3>
+              <p className="text-[13px] leading-5 text-fg-muted">{managed.label}</p>
             </section>
           )}
 

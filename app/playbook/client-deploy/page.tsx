@@ -163,12 +163,12 @@ const PHASES: Phase[] = [
     duration: "15 min — bring their stack online",
     icon: "zap",
     body:
-      "Each api_key integration in the registry has a Connect button that opens a paste-modal. The bridge writes the key to their local secrets file (never touches our servers). Walk through every integration they care about.",
+      "Settings > Connections is the one place to see and set up the services a workspace uses. Walk through the business connections they need and use each card's real setup path.",
     steps: [
       {
-        title: "Walk the integration registry",
+        title: "Walk the Connections page",
         detail:
-          "Open /integrations on the client's dashboard. For each api_key tile (Stripe, OpenRouter, Anthropic, Late, Firecrawl, ElevenLabs, etc.), ask if they have a key. If yes, paste via the modal. If no, decide together whether to grab one now or skip. The wire-integrations prompt drives the same walk from chat, reading lib/integrations-registry.ts so nothing gets skipped.",
+          "Open /settings/connections on the client's dashboard. Connect the shared business accounts they use. A card only offers a setup action that works for that workspace; OASIS-managed infrastructure is unavailable to client workspaces.",
         promptId: "client-wire-integrations",
         cta: { label: "Open Connections", href: setupHref("connections") },
       },
@@ -179,9 +179,9 @@ const PHASES: Phase[] = [
         promptId: "client-discover-existing-stack",
       },
       {
-        title: "Verify each integration flips green",
+        title: "Verify each connection truthfully",
         detail:
-          "Each ping fires only on actual tool use, so prompt the agent to make a real call against each newly-connected service. The /integrations page should show a green dot within 30 seconds.",
+          "Use a connection's Test action when it offers one. Agent-managed cards use the agents' last real check from OASIS's computer; a missing or day-old check is not shown as connected.",
       },
       {
         title: "Connect MCP servers (optional)",
@@ -408,7 +408,7 @@ export default async function ClientDeployPage() {
             <strong className="text-fg">The warm process pool</strong> — keeps a hot Claude Code subprocess per chat tab. Max 8 processes, idle reaper at 15min. Skips the 5-30s cold-start on turn 2+. Live state visible at <code className="text-accent">/operations</code> &gt; Warm Process Pool, or <code className="text-accent">curl localhost:9100/warm-status</code>.
           </div>
           <div>
-            <strong className="text-fg">The heartbeat</strong> — fires every 60s from the chat-server. Probes ffmpeg / whisper / playwright on the client&apos;s machine, posts the results to <code className="text-accent">/api/bridge/ping</code>. The dashboard&apos;s /integrations page reflects what&apos;s actually installed locally. All probes pass <code className="text-accent">creationflags=CREATE_NO_WINDOW + STARTUPINFO/SW_HIDE</code> — zero terminal popups even though <code className="text-accent">playwright.cmd</code> requires cmd.exe (commit 59d773c).
+            <strong className="text-fg">The heartbeat</strong> - fires every 60s from the chat-server and posts to <code className="text-accent">/api/bridge/ping</code> so the Command Center knows whether the paired computer is available. The agents&apos; real service checks appear only in Settings &gt; Connections.
           </div>
           <div>
             <strong className="text-fg">The pair token</strong> — minted on first <code className="text-accent">oasis bridge serve</code> through the installed launcher. Stored at <code className="text-accent">~/.oasis/bridge_token</code> (chmod 600 on Unix). SHA-256 hashed in the <code className="text-accent">bridge_pairings</code> table. Idempotent by <code className="text-accent">(tenant_id, machine_fingerprint)</code> via partial unique index — re-pairing rotates the token instead of creating duplicates.

@@ -79,7 +79,7 @@ const ENGAGEMENTS = [
 export default function WorkPage() {
   return (
     <>
-      <section className="m-edge relative overflow-hidden">
+      <section className="m-edge m-hero relative overflow-hidden">
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 pt-20 sm:px-8 sm:pb-20 sm:pt-28">
           <Reveal>
             <Eyebrow>What we build</Eyebrow>

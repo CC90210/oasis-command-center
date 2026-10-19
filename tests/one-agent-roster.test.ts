@@ -755,8 +755,9 @@ async function main() {
     const house = await reassign("client-existing-job", "aura");
     assert.equal(house.status, 403, "a client reassigns a job to an OASIS house agent");
     assert.equal(house.body.error, "agent_key_not_allowed_for_tenant:aura");
-    // Reassigning a job (PATCH), /operations and /health read the same list.
-    for (const page of ["app/api/cron-jobs/[id]/route.ts", "app/operations/page.tsx", "app/health/page.tsx"]) {
+    // Reassigning a job (PATCH) and /operations read the same list. /health read it only to filter its integration
+    // heartbeats, which moved to Settings > Connections (2026-10-18), so it no longer lists agents.
+    for (const page of ["app/api/cron-jobs/[id]/route.ts", "app/operations/page.tsx"]) {
       assert.match(readFileSync(join(ROOT, page), "utf8"), /oasisOperatorAgents\(/, `${page} lists OASIS's business roster`);
     }
   });
