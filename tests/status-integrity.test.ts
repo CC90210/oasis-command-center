@@ -665,11 +665,12 @@ async function main() {
     assert.equal(JSON.parse(String((await ccRow("gws")).metadata)).source, "send_gateway.smtp_send");
     assert.equal(kl(await google(sentMs + 60_000)), "connected | Connected · last send worked 1 min ago");
 
-    // The rail: Telegram and Google are proven. Wise's only row is the scan's key name, so its card (an agent check,
-    // 2026-10-18) is set up but not proven, and the dot is not green until a real check lands (W2).
+    // The rail: Telegram and Google are proven. Wise's only row is the scan's key name, which is never its agent check
+    // (only the service checker's rows are, CodeRabbit on #703), so its card is not connected and the rail is green on
+    // the two apps that are set up (W2).
     const facts = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
-    assert.deepEqual(connectors.connectionsHealth(facts, Date.now()), { setUp: 3, attention: 0, connected: 2, unknown: 0 });
-    assert.equal(connectors.connectionsDot(connectors.connectionsHealth(facts, Date.now())), null);
+    assert.deepEqual(connectors.connectionsHealth(facts, Date.now()), { setUp: 2, attention: 0, connected: 2, unknown: 0 });
+    assert.equal(connectors.connectionsDot(connectors.connectionsHealth(facts, Date.now())), "ok");
     // A real check from OASIS's agents (no key-name marker) proves it, and every app set up is proven: green.
     await db.execute({
       sql: "UPDATE integrations_health SET status = 'healthy', metadata = ?, last_ping_at = ? WHERE profile_id = ? AND service = 'wise'",
@@ -678,6 +679,16 @@ async function main() {
     const proven = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
     assert.deepEqual(connectors.connectionsHealth(proven, Date.now()), { setUp: 3, attention: 0, connected: 3, unknown: 0 });
     assert.equal(connectors.connectionsDot(connectors.connectionsHealth(proven, Date.now())), "ok");
+    // A paired computer's NEWER row, even one claiming the checker's source, is never the check: it neither hides
+    // the real result nor fakes one (CodeRabbit on #703).
+    await db.execute({
+      sql: "INSERT INTO integrations_health (tenant_id, profile_id, service, status, last_ping_at, metadata) VALUES (?, 'p-laptop', 'wise', 'down', ?, ?)",
+      args: [OASIS, new Date(Date.now() + 1_000).toISOString(), JSON.stringify({ source: "service_check", _reported_by: "paired_bridge" })],
+    });
+    const relayed = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
+    assert.deepEqual(connectors.connectionsHealth(relayed, Date.now()), { setUp: 3, attention: 0, connected: 3, unknown: 0 });
+    // A client workspace's agent-check cards read nothing at all: they are unavailable there.
+    assert.deepEqual((await loadConnectorFacts({ tenantId: CLIENT_A, userId: USERS.clientA.id })).agentChecks, []);
 
     // Only a real Gmail sign-in is a check of the mailbox; a key name never is.
     const t = at(60_000);
@@ -1017,7 +1028,7 @@ async function main() {
       }
     }
     // Only cards explicitly backed by an agent check read integrations_health.
-    assert.match(read("components/os/connections/connector-facts.ts"), /integrationsHealth\(tenantId\)/);
+    assert.match(read("components/os/connections/connector-facts.ts"), /loadAgentChecks\(tenantId\)/);
     // The setup check's line for a paired computer says the one online rule's
     // cutoff, never a number of its own (PR #558 review, CodeRabbit).
     const readiness = read("lib/setup-readiness.ts");

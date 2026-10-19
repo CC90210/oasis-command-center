@@ -210,7 +210,7 @@ for (const def of CONNECTOR_CATALOG) {
   const src = def.live.source;
   if (src.kind === "agent_check") {
     assert.ok(KNOWN_INTEGRATIONS.some((entry) => entry.service === src.service), `${def.slug}: bridge does not check ${src.service}`);
-    assert.match(factsSource, /integrationsHealth\(tenantId\)/, `${def.slug}: agent checks are never loaded`);
+    assert.match(factsSource, /loadAgentChecks\(tenantId\)/, `${def.slug}: agent checks are never loaded`);
     continue;
   }
   if (src.kind === "tenant_connection") {
@@ -246,7 +246,9 @@ assert.ok(
   CONNECTOR_CATALOG.every((d) => !d.live || ["agent_check", "tenant_connection", "tenant_keys", "oauth_tokens"].includes(d.live.source.kind)),
   "every card reads a declared check or connection source",
 );
-assert.match(factsSource, /integrationsHealth\(tenantId\)/, "agent checks use the tenant-scoped reader");
+// Tenant-scoped, and only the service checker's own rows: a paired computer's row is never the check (#703 review).
+assert.match(factsSource, /FROM integrations_health\s+WHERE tenant_id = \? AND service IN/, "agent checks use the tenant-scoped reader");
+assert.match(factsSource, /metadata\?\.source !== AGENT_CHECK_SOURCE \|\| isBridgeReport\(metadata\)/, "only the checker's rows count");
 
 // Hostile facts: every service anyone could name, every field present, every
 // test passing a minute ago, every heartbeat healthy a minute ago.

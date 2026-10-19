@@ -23,7 +23,7 @@
  *                      row (lib/integrations/server-checks.ts — the latest Test
  *                      of each app, and the mailbox's last send).
  *   agentChecks        newest tenant-scoped service check reported by the
- *                      agents on OASIS's computer (integrationsHealth).
+ *                      agents' service checker (loadAgentChecks; OASIS's own workspaces only).
  *
  * Agent checks are read only for cards whose source is agent_check
  * (2026-10-18). They never prove a tenant key-store card is connected; those
@@ -37,7 +37,7 @@ import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tena
 import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
 import { listServerChecks } from "@/lib/integrations/server-checks";
 import { listActiveConnections } from "@/lib/connections/store";
-import { integrationsHealth } from "@/lib/queries";
+import { heartbeatMetadata, isBridgeReport } from "@/lib/integrations/presence-heartbeat";
 import { PROVIDERS, missingProviderEnv, providerAvailability } from "@/lib/connections/registry";
 import {
   CONNECTOR_CATALOG,
@@ -51,6 +51,12 @@ import {
   type PersonalGoogleFact,
   type ServerCheckFact,
 } from "@/lib/os/connectors";
+
+/** The services whose cards are agent checks (lib/os/connectors.ts), and the source their checker writes. */
+const AGENT_CHECK_SERVICES: readonly string[] = CONNECTOR_CATALOG.flatMap((def) =>
+  def.live?.source.kind === "agent_check" ? [def.live.source.service] : [],
+);
+const AGENT_CHECK_SOURCE = "service_check";
 
 async function loadKeyRows(tenantId: string): Promise<KeyRowFact[] | null> {
   try {
@@ -95,15 +101,35 @@ async function loadServerChecks(tenantId: string): Promise<ServerCheckFact[] | n
   }
 }
 
+/**
+ * The newest REAL check per agent-managed service: rows OASIS's agents wrote from their service checker
+ * (metadata.source "service_check", Business-Empire-Agent scripts/integrations/service_checks.py), never a row a paired
+ * computer relayed through /api/bridge/ping (metadata._reported_by "paired_bridge"). The newest row of ANY kind could
+ * be a laptop's key-name scan or report, showing a false Connected or hiding a failed check (CodeRabbit on #703).
+ */
 async function loadAgentChecks(tenantId: string): Promise<AgentCheckFact[] | null> {
   try {
-    const rows = await integrationsHealth(tenantId);
-    return rows.map((row) => ({
-      service: row.service,
-      status: row.status,
-      last_ping_at: row.last_ping_at,
-      metadata: row.metadata,
-    }));
+    const services = AGENT_CHECK_SERVICES;
+    const rs = await getTursoClient().execute({
+      sql: `SELECT service, status, last_ping_at, metadata FROM integrations_health
+            WHERE tenant_id = ? AND service IN (${services.map(() => "?").join(", ")})
+            ORDER BY last_ping_at DESC LIMIT 500`,
+      args: [tenantId, ...services],
+    });
+    const newest = new Map<string, AgentCheckFact>();
+    for (const row of rs.rows) {
+      const service = String(row.service);
+      if (newest.has(service)) continue;
+      const metadata = heartbeatMetadata(row.metadata);
+      if (metadata?.source !== AGENT_CHECK_SOURCE || isBridgeReport(metadata)) continue;
+      newest.set(service, {
+        service,
+        status: String(row.status) as AgentCheckFact["status"],
+        last_ping_at: row.last_ping_at == null ? null : String(row.last_ping_at),
+        metadata,
+      });
+    }
+    return [...newest.values()];
   } catch (error) {
     console.error("[connections.facts.agent_checks]", error);
     return null;
@@ -155,7 +181,7 @@ export async function loadConnectorFacts(input: {
     input.personal === false ? Promise.resolve(undefined) : loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
     loadServerChecks(input.tenantId),
-    loadAgentChecks(input.tenantId),
+    tenantMayUseEnvFallback(input.tenantId) ? loadAgentChecks(input.tenantId) : Promise.resolve([] as AgentCheckFact[]),
   ]);
   return {
     keyRows,
@@ -205,7 +231,7 @@ export async function loadWorkspaceConnectorStatus(
     framework || agent ? Promise.resolve([] as KeyRowFact[]) : loadKeyRows(tenantId),
     framework ? loadConnections(tenantId) : Promise.resolve([] as ConnectionFact[]),
     framework || agent ? Promise.resolve([] as ServerCheckFact[]) : loadServerChecks(tenantId),
-    agent ? loadAgentChecks(tenantId) : Promise.resolve([] as AgentCheckFact[]),
+    agent && tenantMayUseEnvFallback(tenantId) ? loadAgentChecks(tenantId) : Promise.resolve([] as AgentCheckFact[]),
   ]);
   return resolveConnectorStatus(
     def,
