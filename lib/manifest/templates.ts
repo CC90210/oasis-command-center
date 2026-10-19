@@ -45,7 +45,7 @@ export const REAL_ESTATE_TEMPLATE: TenantManifest = {
     { href: "/contacts", label: "Contacts", icon: "BookUser", group: "Pipeline" },
     { href: "/sms", label: "SMS", icon: "MessageSquare", group: "Outreach" },
     { href: "/email-blast", label: "Email", icon: "Mail", group: "Outreach" },
-    { href: "/integrations", label: "Integrations", icon: "Plug", group: "System" },
+    { href: "/settings/connections", label: "Connections", icon: "Plug", group: "System" },
     { href: "/settings", label: "Settings", icon: "Settings", group: "System" },
   ],
   data_model: [
@@ -129,7 +129,7 @@ export const ECOMMERCE_TEMPLATE: TenantManifest = {
     { href: "/customers", label: "Customers", icon: "Users", group: "Commerce" },
     { href: "/email-blast", label: "Email", icon: "Mail", group: "Outreach" },
     { href: "/sms", label: "SMS", icon: "MessageSquare", group: "Outreach" },
-    { href: "/integrations", label: "Integrations", icon: "Plug", group: "System" },
+    { href: "/settings/connections", label: "Connections", icon: "Plug", group: "System" },
     { href: "/settings", label: "Settings", icon: "Settings", group: "System" },
   ],
   data_model: [
@@ -203,7 +203,7 @@ export const AGENCY_TEMPLATE: TenantManifest = {
     { href: "/projects", label: "Projects", icon: "GitBranch", group: "Pipeline" },
     { href: "/retainers", label: "Retainers", icon: "RefreshCcw", group: "Pipeline" },
     { href: "/invoices", label: "Invoices", icon: "BadgeDollarSign", group: "Money" },
-    { href: "/integrations", label: "Integrations", icon: "Plug", group: "System" },
+    { href: "/settings/connections", label: "Connections", icon: "Plug", group: "System" },
     { href: "/settings", label: "Settings", icon: "Settings", group: "System" },
   ],
   data_model: [

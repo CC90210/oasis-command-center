@@ -804,16 +804,9 @@ export async function recentActions(
 // Integrations health (tenant-scoped)
 // ============================================================================
 
-/**
- * Providers OASIS no longer runs on: Supabase (Turso replaced it 2026-08-09),
- * Vercel (Cloudflare Workers) and n8n (deprecated; two client webhooks remain,
- * which no heartbeat here describes). Their registry entries stay for the
- * settings history, but no heartbeat card is drawn for them: a stale green or
- * red dot for a host we left is a claim about nothing.
- */
-export const RETIRED_INTEGRATION_SERVICES: ReadonlySet<string> = new Set(["supabase", "vercel", "n8n_inbound"]);
-
-const LIVE_INTEGRATIONS = KNOWN_INTEGRATIONS.filter((i) => !RETIRED_INTEGRATION_SERVICES.has(i.service));
+// The registry now contains only checks the bridge still runs (2026-10-18).
+// Unknown and retired rows in integrations_health are ignored below.
+const LIVE_INTEGRATIONS = KNOWN_INTEGRATIONS;
 
 export async function integrationsHealth(
   tenantId: string | null
@@ -893,13 +886,11 @@ export async function integrationsHealth(
 // ============================================================================
 
 /**
- * Which AI provider service is this workspace's AI account on?
+ * Which AI provider account is this workspace using?
  *
- * Returns a Set of integration-registry service slugs (anthropic, openai_codex,
- * google_ai, openrouter) holding the WORKSPACE'S AI ACCOUNT's provider when
- * that account is on and has a key (lib/ai/workspace-account.ts), the one key
- * every department chat and Slack mention answers on. Settings, the setup
- * checklist, /health and /integrations mark that provider "Connected".
+ * Returns the AI account's provider service ID when that account is on and has
+ * a usable key. This is separate from the bridge check registry and feeds the
+ * AI settings and setup checklist only (2026-10-18).
  *
  * It used to count any keyed row (2026-10-02, AIP-02): another agent's row, or
  * the viewer's own personal key, read "Connected" while every department chat
@@ -941,19 +932,6 @@ export async function personalAiServicesWithKey(tenantId: string | null): Promis
   const user = await getSessionUser().catch(() => null);
   if (!user?.id) return new Set<string>();
   return readPersonalAiServices(tenantId, user.id);
-}
-
-const AI_KEY_SERVICES: ReadonlySet<string> = new Set(Object.values(PROVIDER_TO_SERVICE));
-
-/**
- * What an integration card may say about a key, given aiServicesWithKey's
- * answer (null = that read failed). The read only answers for the AI provider
- * slugs, so its failure makes only those cards "Couldn't check"; Stripe,
- * Gmail and the rest never depended on it and keep the `false` they always get.
- */
-export function aiKeyOnFile(keyedAi: Set<string> | null, service: string): boolean | null {
-  if (keyedAi) return keyedAi.has(service);
-  return AI_KEY_SERVICES.has(service) ? null : false;
 }
 
 // ============================================================================

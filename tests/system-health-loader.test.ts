@@ -20,23 +20,19 @@
  *     untenanted), inside 24 h, with 'warning' read as 'warn';
  *   - cold leads is COUNT(*), not a 50-row list's length;
  *   - a failed read is null ("Couldn't check"), never 0;
- *   - the rendered /health page names no retired host or engine (docker,
- *     Vercel, state-api, Supabase) and no "unauthorized", and draws no card
- *     for a retired provider. The integration cards themselves are drawn in
- *     full React by tests/system-health.render.ts.
+ *   - the rendered /health page names no retired host or engine and has no
+ *     integration-heartbeat card; connections live under Settings.
  *
  * Run: node --conditions=react-server --import tsx tests/system-health-loader.test.ts
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
 import { isValidElement } from "react";
 import { createClient } from "@libsql/client";
 
-const ROOT = join(__dirname, "..");
 const scratch = mkdtempSync(join(tmpdir(), "system-health-loader-"));
 const dbFile = join(scratch, "test.db");
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
@@ -538,7 +534,7 @@ async function main() {
   const text = out.join(" ").replace(/\s+/g, " ");
   await check("/health: the verdict, the sections and the COUNT tile render", () => {
     assert.match(text, /Everything is protected\. CCPC \(Windows\) checked in just now\./);
-    for (const section of ["Your computer", "Safety guards", "Background work", "Automation signals", "Integration heartbeats"]) {
+    for (const section of ["Your computer", "Safety guards", "Background work", "Automation signals"]) {
       assert.ok(text.includes(section), `missing section: ${section}`);
     }
     assert.match(text, /Cold leads 60 /, "the tile is the count, not the list length");
@@ -547,44 +543,11 @@ async function main() {
     assert.match(text, /Errors today 2 /, "a critical event is in the errors tile");
     assert.match(text, /Critical .{0,40}BRAVO|Critical .{0,80}classifier/i, "the critical event is listed and labelled Critical");
     assert.ok(!text.includes("CLIENT-PC-DO-NOT-LIST") && !text.includes("CLIENT-CRON-DO-NOT-COUNT") && !text.includes("CLIENT-EVENT-DO-NOT-COUNT"));
+    assert.ok(!text.includes("Integration heartbeats"), "connections no longer render on System health");
   });
   await check("/health: no docker, Vercel, state-api, Supabase or 'unauthorized' anywhere on the page", () => {
     assert.doesNotMatch(text, /docker|vercel|state-api|supabase|unauthorized/i);
   });
-  const dots = client.filter((c) => c.name === "IntegrationDot");
-  await check("/health: no card for a retired provider, even one with a fresh ping", () => {
-    const services = dots.map((d) => (d.props.health as { service: string }).service);
-    assert.ok(services.includes("cloudflare"), `the live card is drawn (saw ${services.join(", ")})`);
-    for (const retired of ["supabase", "vercel", "n8n_inbound"]) assert.ok(!services.includes(retired), `${retired} card drawn`);
-  });
-  await check("the integration cards, drawn in full React, say Stale / Key on file and name no retired host (tests/system-health.render.ts)", () => {
-    const propsFile = join(scratch, "dots.json");
-    writeFileSync(propsFile, JSON.stringify(dots.map((d) => d.props)));
-    const env = { ...process.env };
-    delete env.NODE_OPTIONS;
-    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/system-health.render.ts", propsFile], {
-      cwd: ROOT,
-      env,
-      encoding: "utf8",
-      timeout: 120_000,
-    });
-    assert.equal(r.status, 0, `render process failed:\n${r.stderr}\n${r.stdout}`);
-    const html = JSON.parse(r.stdout) as { page: string[]; staleHealthy: string; keyOnly: string; healthyNoPing: string; freshHealthy: string; unknownKey: string };
-    const plain = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, " ");
-    assert.match(plain(html.healthyNoPing), /Key on file/);
-    assert.doesNotMatch(plain(html.healthyNoPing), /Connected/, "a stored 'healthy' with no check-in is not Connected");
-    for (const card of html.page) assert.doesNotMatch(plain(card), /vercel|supabase|docker|state-api/i);
-    const cloudflare = html.page.map(plain).find((c) => c.includes("Cloudflare"));
-    assert.match(cloudflare ?? "", /Stale/, "a 36-hour-old healthy ping is Stale");
-    assert.doesNotMatch(cloudflare ?? "", /Connected/);
-    assert.match(plain(html.staleHealthy), /Stale/);
-    assert.doesNotMatch(plain(html.staleHealthy), /Connected/);
-    assert.match(plain(html.keyOnly), /Key on file/);
-    assert.doesNotMatch(plain(html.keyOnly), /Connected/, "a stored key is never Connected");
-    assert.match(plain(html.freshHealthy), /Connected/, "a healthy ping inside the day is Connected");
-    assert.match(plain(html.unknownKey), /Couldn't check/);
-  });
-
   if (failures > 0) {
     console.error(`system-health-loader: ${failures} failed`);
     process.exit(1);

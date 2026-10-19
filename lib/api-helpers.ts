@@ -67,7 +67,7 @@ export function sha256(input: string): string {
 /**
  * Promise-with-fallback. Wrap any reader so a single thrown query can't
  * 500 a server-rendered page. Used in /today, /pipeline, /analytics,
- * /reasoning, /integrations, /settings — every dynamic page that does a
+ * /reasoning, /settings/connections, /settings - every dynamic page that does a
  * Promise.all over Supabase readers.
  *
  * The `label` is required: it surfaces in Vercel function logs as

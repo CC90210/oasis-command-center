@@ -223,7 +223,6 @@ const MIGRATED: Array<[string, RegExp]> = [
   // read-only mode. It must never infer readiness from an operator platform key
   // or mutate a legacy engine binding while rendering the page.
   ["components/os/department/channel.ts", /resolveRunSession\(\{[\s\S]*inspectOnly: true,[\s\S]*engineUserId: authUserId/],
-  ["app/integrations/page.tsx", /const isOperator = await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\);/],
   // Settings was split into sections by the OASIS OS shell: every section reads
   // one cached verified verdict (settings-viewer.ts -> isPlatformOperator()).
   ["components/settings/SettingsContent.tsx", /\n\s*isVerifiedOperator\(\),/],

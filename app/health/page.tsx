@@ -19,8 +19,7 @@
  *      the last 24 hours with a one-line what-to-do.
  *   5. Automation signals: the buckets that might need you (errors, warnings,
  *      failed automations, workers down, cold leads by COUNT), the founder-
- *      booking check, the event list, the cold-lead list and the integration
- *      heartbeats.
+ *      booking check, the event list and the cold-lead list.
  *
  * Every number comes from lib/admin/system-health.ts, which reads in-process
  * (no HTTP self-fetch; that fetch carried no session and got the middleware's
@@ -34,13 +33,10 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { safe } from "@/lib/api-helpers";
 import { requireOperator } from "@/lib/role-surfaces-session";
-import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { aiKeyOnFile, aiServicesWithKey, getActiveProfile, getTenant, integrationsHealth } from "@/lib/queries";
+import { getActiveProfile, getTenant } from "@/lib/queries";
 import { isAgentsOwner } from "@/lib/agents-owner";
 import type { AttentionViewer } from "@/lib/admin/attention";
-import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
-import { IntegrationDot } from "@/components/IntegrationDot";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { COLD_LEAD_MS, ATTENTION_LIST_LIMIT, loadWorkspaceOutcome, needsYouCount, type WorkerHealth } from "@/lib/admin/attention";
@@ -95,26 +91,14 @@ export default async function HealthPage() {
     isAgentsOwner: viewerAuthId ? await safe("health.agents_owner", isAgentsOwner(tenantId, viewerAuthId), false) : false,
   };
 
-  const [system, enabledAgents, tenant] = await Promise.all([
+  const [system, tenant] = await Promise.all([
     loadSystemHealth(tenantId, { now, viewer }),
-    // OASIS's own workspace: the agents its bridge runs (W4a review R4).
-    oasisOperatorAgents(tenantId) ?? safe("health.enabled_agents", getTenantEnabledAgents(tenantId), [] as string[]),
     safe("health.tenant", getTenant(tenantId), null),
   ]);
   const profileSlug = tenant ? resolveClientProfileSlug(tenant) : null;
   const isOasisTenant = tenantId === WEBDEV_TENANT_ID;
 
-  const [heartbeats, keyedAi, coldLeadRows] = await Promise.all([
-    // null = the read failed, which is "unknown", never "no integrations".
-    safe("health.integrations_health", integrationsHealth(tenantId), null),
-    // null = the key read failed: each AI provider card says "Couldn't check",
-    // never "Not connected" for a key that may well be on file (aiKeyOnFile).
-    safe("health.ai_keys", aiServicesWithKey(tenantId), null),
-    safe("health.cold_lead_list", loadColdLeadList(tenantId, now), null),
-  ]);
-  // requireOperator passed, so this viewer sees the platform integrations too.
-  const heartbeatServices = new Set(visibleIntegrationsForTenant(enabledAgents, { isOperator: true }).map((d) => d.service));
-  const visibleHeartbeats = heartbeats?.filter((h) => heartbeatServices.has(h.service)) ?? null;
+  const coldLeadRows = await safe("health.cold_lead_list", loadColdLeadList(tenantId, now), null);
 
   // The outcome checks (OASIS: the founder-booking check), loaded once for the
   // card below and the header count, so the two cannot disagree.
@@ -260,22 +244,6 @@ export default async function HealthPage() {
         )}
       </Card>
 
-      <Card
-        title="Integration heartbeats"
-        subtitle="The last check-in from each service your agents use. A check-in older than a day reads Stale; a key on file is not the same as a service that answered."
-      >
-        {visibleHeartbeats === null ? (
-          <div className="text-sm text-fg-muted">The heartbeats could not be read just now, so none is shown as down. Refresh to try again.</div>
-        ) : visibleHeartbeats.length === 0 ? (
-          <div className="text-sm text-fg-muted">No integrations are in use by this workspace&apos;s agents.</div>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {visibleHeartbeats.map((h) => (
-              <IntegrationDot key={h.service} health={h} connection={{ hasCredentials: aiKeyOnFile(keyedAi, h.service) }} />
-            ))}
-          </div>
-        )}
-      </Card>
     </div>
   );
 }

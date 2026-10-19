@@ -115,14 +115,14 @@ const CUSTOM_KEYS = {
 };
 
 /**
- * What clicking a card does. Keys (and an app that is not built) open the
- * drawer, where the app is set up or requested; only an OAuth popup or a page
+ * What clicking a card does. Keys, agent-managed apps (and an app that is not
+ * built) open the drawer, where the app is explained, set up or requested; only an OAuth popup or a page
  * link leaves it. Inside the workspace setup (`embedded`) a Settings page is
  * not reachable yet, so a page link opens the drawer, which says where.
  */
 export function connectorClickAction(def: ConnectorDef, embedded: boolean): "drawer" | "popup" | "navigate" {
   const action = def.live?.connect;
-  if (!action || action.kind === "key_form" || action.kind === "keys") return "drawer";
+  if (!action || action.kind === "key_form" || action.kind === "keys" || action.kind === "managed") return "drawer";
   if (action.kind === "link") return embedded ? "drawer" : "navigate";
   return "popup";
 }

@@ -16,7 +16,7 @@
  * clear" or "0 bridges online" under a "Couldn't check" card contradicts it.
  *
  * Client components cannot run under react-server; the walker records the
- * props a page hands them instead (IntegrationDot, ProviderAccountsCard,
+ * props a page hands them instead (ProviderAccountsCard,
  * AgentConfigEditor, AgentEnginePanel), and tests/queries-fail-loud.render.ts
  * draws those components with that null in a separate, full-React process.
  *
@@ -254,7 +254,6 @@ async function main() {
   const SequencesPage = (await import("../app/sequences/page")).default;
   const { AutomationsContent } = await import("../components/automations/AutomationsContent");
   const { SettingsContent } = await import("../components/settings/SettingsContent");
-  const IntegrationsPage = (await import("../app/integrations/page")).default;
   const shellStatus = await import("../app/api/shell/status/route");
 
   console.log("queries-fail-loud-callers:");
@@ -299,30 +298,16 @@ async function main() {
     assert.match(text, /Couldn't check the pipeline/);
     assert.doesNotMatch(text, /Won 0|Lost 0|0 won \/ 0 total|No source data yet/);
   });
-  await check("/integrations: a failed heartbeat read is Couldn't check, not a wall of 'Not connected' cards", async () => {
-    const { text, client } = await render(await IntegrationsPage());
-    assert.match(text, /The integration heartbeats could not be read/);
-    assert.equal(client.filter((c) => c.name === "IntegrationDot").length, 0, "no card may claim a state");
-  });
-  // The key read answers only for the AI provider slugs, so its failure makes
-  // only those cards unknown. Stripe, Gmail and the rest never depended on it
-  // and keep the `false` they had before the read could fail.
-  const AI_SLUGS = new Set(["anthropic", "openai_codex", "google_ai", "openrouter"]);
-  await check("/health and /integrations: a failed key read hands the AI provider cards hasCredentials: null, the rest false", async () => {
+  await check("/health does not render connection heartbeats", async () => {
+    // integrations_health still feeds the worker heartbeats (lib/admin/attention.ts loadWorkerRows); the control
+    // checks below read it, so it is created here as the removed heartbeat check used to.
     await db.execute(
       `CREATE TABLE integrations_health (id TEXT PRIMARY KEY, profile_id TEXT, tenant_id TEXT, service TEXT, status TEXT,
          last_ping_at TEXT, last_error TEXT, metadata TEXT, updated_at TEXT)`,
     );
-    for (const page of [HealthPage, IntegrationsPage]) {
-      const { client } = await render(await page());
-      const dots = client.filter((c) => c.name === "IntegrationDot");
-      const service = (d: Recorded) => (d.props.health as { service: string }).service;
-      const ai = dots.filter((d) => AI_SLUGS.has(service(d)));
-      const other = dots.filter((d) => !AI_SLUGS.has(service(d)));
-      assert.ok(ai.length > 0 && other.length > 0, `need AI and non-AI cards, saw: ${dots.map(service).join(", ")}`);
-      for (const d of ai) assert.deepEqual(d.props.connection, { hasCredentials: null }, `${service(d)}: ${JSON.stringify(d.props.connection)}`);
-      for (const d of other) assert.deepEqual(d.props.connection, { hasCredentials: false }, `${service(d)}: ${JSON.stringify(d.props.connection)}`);
-    }
+    const { text, client } = await render(await HealthPage());
+    assert.doesNotMatch(text, /Integration heartbeats/);
+    assert.equal(client.filter((c) => c.name === "IntegrationDot").length, 0);
   });
   await check("/api/shell/status: an unreadable bridge answers bridgeOnline null, not false", async () => {
     const res = await shellStatus.GET();
@@ -450,11 +435,7 @@ async function main() {
     assert.doesNotMatch(analytics, /Couldn't check the pipeline/);
     assert.match((await render(await AutomationsContent({}))).text, /Computer not connected yet/);
     assert.match((await render(await SequencesPage())).text, /Computer not connected yet/);
-    const health = await render(await HealthPage());
-    const dots = health.client.filter((c) => c.name === "IntegrationDot");
-    assert.ok(dots.every((d) => typeof (d.props.connection as { hasCredentials: unknown }).hasCredentials === "boolean"));
-    const anthropicDot = dots.find((d) => (d.props.health as { service: string }).service === "anthropic");
-    assert.deepEqual(anthropicDot?.props.connection, { hasCredentials: true }, "the key on file reads as on file");
+    assert.doesNotMatch((await render(await HealthPage())).text, /Integration heartbeats/);
     const settings = await render(await SettingsContent({ section: "ai" }));
     assert.equal(one(settings.client, "ProviderAccountsCard").bridgeOnline, false);
     assert.ok(one(settings.client, "ProviderAccountsCard").connectedServices instanceof Set);
@@ -505,11 +486,6 @@ async function main() {
     assert.equal(r.status, 0, `render process failed:\n${r.stderr}\n${r.stdout}`);
     const html = JSON.parse(r.stdout) as Record<string, string>;
     const plain = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, " ");
-
-    const dot = plain(html.dotUnknown);
-    assert.match(dot, /Couldn't check/);
-    assert.doesNotMatch(dot, /Not connected/);
-    assert.match(plain(html.dotKnownMissing), /Not connected/, "a KNOWN missing key still says Not connected");
 
     const accounts = plain(html.accountsUnknown);
     assert.match(accounts, /Couldn't check/);

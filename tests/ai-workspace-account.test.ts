@@ -695,10 +695,9 @@ async function main() {
     // Signed in as the key's owner: the old "Connected" counted the VIEWER's
     // own personal rows, so this is the session that read green.
     await login(USERS.solo);
-    // The card's provider set, the integrations page's dots and Health's dots.
+    // The workspace account provider set.
     const workspaceSet = await q.aiServicesWithKey(SOLO);
     assert.equal(workspaceSet.size, 0, `a personal key read Connected: ${[...workspaceSet].join(",")}`);
-    assert.equal(q.aiKeyOnFile(workspaceSet, "anthropic"), false);
     // The department channels.
     const viewer = await viewerFor(USERS.solo);
     const state = await resolveChannelState(dept("sales"), viewer);

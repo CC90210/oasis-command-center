@@ -325,7 +325,8 @@ export function loadConnectionAlerts(
 ): Promise<Read<ConnectionAttention[]>> {
   return read("connections", async () => {
     const facts = await (factsRead ?? loadWorkspaceConnectionFacts(tenantId));
-    if (facts.keyRows === null || facts.connections === null || facts.serverChecks === null) {
+    // agentChecks too: a failed read of OASIS's service checks is "Couldn't check", never an all-clear (Codex on #703).
+    if (facts.keyRows === null || facts.connections === null || facts.serverChecks === null || facts.agentChecks === null) {
       throw new Error("a connection facts read failed (logged by connector-facts)");
     }
     const live = facts.connections;
