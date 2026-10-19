@@ -146,7 +146,7 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
     // The Library's lifecycle pills for the OASIS tab: the SAME call, the same
     // COUNT, that draws "Needs review N" on the page the line below links to.
     safe("marketing.lifecycle", getLifecycleCounts(founder.tenantId, DEFAULT_BRAND_GROUP), {
-      counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
+      counts: { needs_review: 0, approved: 0, scheduled: 0, live: 0, archived: 0 },
       degraded: true,
     }),
   ]);
