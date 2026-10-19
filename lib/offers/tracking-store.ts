@@ -293,19 +293,19 @@ export async function countFunnelEventMetrics(
 
 /**
  * The 13-month retention purge (migration comment). Deletes every event AND
- * every persistent visit->lead mapping row created before `cutoffIso`,
- * returning the combined row count removed. No cron wiring yet -- this is
- * the helper a later scheduled job calls.
+ * every persistent visit->lead mapping row created before `cutoffIso` for one
+ * tenant, returning the combined row count removed. No cron wiring yet -- this
+ * is the helper a later scheduled job calls.
  */
-export async function purgeFunnelEventsOlderThan(db: Client, cutoffIso: string): Promise<number> {
+export async function purgeFunnelEventsOlderThan(db: Client, tenantId: string, cutoffIso: string): Promise<number> {
   try {
     const events = await db.execute({
-      sql: `DELETE FROM offer_funnel_events WHERE created_at < ?`,
-      args: [cutoffIso],
+      sql: `DELETE FROM offer_funnel_events WHERE tenant_id = ? AND created_at < ?`,
+      args: [tenantId, cutoffIso],
     });
     const mappings = await db.execute({
-      sql: `DELETE FROM offer_funnel_visit_leads WHERE created_at < ?`,
-      args: [cutoffIso],
+      sql: `DELETE FROM offer_funnel_visit_leads WHERE tenant_id = ? AND created_at < ?`,
+      args: [tenantId, cutoffIso],
     });
     return events.rowsAffected + mappings.rowsAffected;
   } catch (err) {

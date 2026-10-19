@@ -96,11 +96,11 @@ check("the parent delete is one guarded statement, and in-flight sends block (Co
     assert.match(lib, new RegExp(`\\["${table}", "[^"]+", true\\]`), `${table} is not a live guard of the parent delete`);
   }
   assert.match(lib, /"DELETE FROM tenant_records WHERE tenant_id = \? AND id = \? AND entity_type = 'lead'" \+\s*used\.map\(/);
-  assert.match(lib, /if \(!\(await guardedDeleteLead\(input\.tenantId, input\.leadId\)\)\)/, "the parent row is deleted without the guard");
+  assert.match(lib, /const removedAppointments = await guardedDeleteLead\(input\.tenantId, input\.leadId\);\s*if \(removedAppointments === null\)/, "the parent row is deleted without the guard");
   assert.match(lib, /countStatus\(db, "drip_runs", tenantId, leadId, \["sending"\]\)/, "a drip in flight does not block");
   // Dependents go only after the lead row did (no data loss when the guard refuses).
   const body = lib.slice(lib.indexOf("export async function deletePipelineLead("));
-  assert.ok(body.indexOf("guardedDeleteLead(input.tenantId") < body.indexOf("await removeDependents(db, input.tenantId, input.leadId);\n    const plan"),
+  assert.ok(body.indexOf("guardedDeleteLead(input.tenantId") < body.indexOf("await removeDependents(db, input.tenantId, input.leadId);\n    removed.call_appointments"),
     "form data is removed before the guarded delete");
 });
 

@@ -16,8 +16,8 @@
  *     on-duty attendee invited, and its saga compensates a failure;
  *   - the Schedule copies (mirrorPublicBookingToSchedules), the pipeline move to founder_meeting_booked
  *     (transition_pipeline_lead) and the sales-desk alert are the website booking's own.
- * The lead is the setter's CRM lead when it names one, else a lead matched by email or phone (findExistingLead, so a
- * prospect who already filled a form is not split in two), else a new lead. The form route
+ * The lead is the setter's CRM lead when it names one (or the request is refused), else a lead matched by email or
+ * phone (findExistingLead, so a prospect who already filled a form is not split in two), else a new lead. The form route
  * (app/api/forms/booking/route.ts) is left as it is: its tests pin its source, and only the orchestration differs.
  */
 import "server-only";
@@ -244,8 +244,7 @@ function parseBook(body: Record<string, unknown>): { ok: true; value: BookReques
 
 async function resolveLead(tenantId: string, request: BookRequest, deps: AgentBookingDeps): Promise<AgentLead | null> {
   if (request.leadId) {
-    const named = await deps.readLead(tenantId, request.leadId);
-    if (named) return named;
+    return deps.readLead(tenantId, request.leadId);
   }
   return deps.findLead(tenantId, {
     email: request.contact.email,
@@ -277,6 +276,7 @@ export async function handleAgentBook(req: Request, deps: AgentBookingDeps): Pro
     console.error("[booking-agent.book] lead read failed", error instanceof Error ? error.message : String(error));
     return bookingAgentRefuse(503, "lead_unavailable");
   }
+  if (request.leadId && !lead) return bookingAgentRefuse(422, "lead_not_found", { field: "lead_id" });
 
   // A replay of this request answers what the first one booked (and repairs its Schedule copies, as /book does).
   // Any other booking already on the lead refuses a second one.

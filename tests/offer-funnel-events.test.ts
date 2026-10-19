@@ -205,6 +205,29 @@ async function main() {
   });
 
   // -- 2. unknown / disabled form: 204, nothing written ---------------------
+  await check("a chunked body is cancelled as soon as it crosses the byte cap", async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls <= 2) {
+          controller.enqueue(new Uint8Array(pulls === 1 ? 2048 : 1));
+          return;
+        }
+        controller.error(new Error("the route read beyond its body cap"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }, { highWaterMark: 0 });
+    const req = { body: stream, headers: new Headers() } as unknown as InstanceType<typeof NextRequest>;
+    const res = await eventsRoute.POST(req);
+    assert.equal(res.status, 204);
+    assert.equal(cancelled, true, "the oversized stream was buffered instead of cancelled");
+    assert.equal(pulls, 2, "the route read chunks after it already knew the body was oversized");
+  });
+
   await check("an event for an unknown form is dropped with 204 and writes nothing", async () => {
     const before = await allEventsCount();
     const res = await postEvent({ tenant: "client-a", form: "no-such-form", visit_id: randomVisitId(), event: "page_view" });
@@ -514,6 +537,7 @@ async function main() {
     const { purgeFunnelEventsOlderThan, retentionCutoff } = await import("../lib/offers/tracking-store");
     const dbClient = (await import("../lib/offer-pages/store")).offerPagesDb()!;
     const oldVisit = randomVisitId();
+    const oldOtherVisit = randomVisitId();
     const freshVisit = randomVisitId();
     await db.batch(
       [
@@ -522,18 +546,36 @@ async function main() {
           args: [CLIENT_A, FORM_A, oldVisit],
         },
         {
+          sql: "INSERT INTO offer_funnel_events (id, tenant_id, form_id, visit_id, event, created_at) VALUES (lower(hex(randomblob(16))), ?, ?, ?, 'page_view', '2024-01-01T00:00:00.000Z')",
+          args: [CLIENT_B, FORM_B, oldOtherVisit],
+        },
+        {
           sql: "INSERT INTO offer_funnel_events (id, tenant_id, form_id, visit_id, event, created_at) VALUES (lower(hex(randomblob(16))), ?, ?, ?, 'page_view', ?)",
           args: [CLIENT_A, FORM_A, freshVisit, new Date().toISOString()],
+        },
+        {
+          sql: "INSERT INTO offer_funnel_visit_leads (tenant_id, visit_id, lead_id, created_at) VALUES (?, ?, 'lead-a-retention', '2024-01-01T00:00:00.000Z')",
+          args: [CLIENT_A, oldVisit],
+        },
+        {
+          sql: "INSERT INTO offer_funnel_visit_leads (tenant_id, visit_id, lead_id, created_at) VALUES (?, ?, 'lead-b-retention', '2024-01-01T00:00:00.000Z')",
+          args: [CLIENT_B, oldOtherVisit],
         },
       ],
       "write",
     );
     const cutoff = retentionCutoff(new Date());
     assert.ok(cutoff < new Date().toISOString(), "the cutoff must be in the past relative to now");
-    const deleted = await purgeFunnelEventsOlderThan(dbClient, cutoff);
-    assert.ok(deleted >= 1, "at least the 2024 row must be purged");
+    const deleted = await purgeFunnelEventsOlderThan(dbClient, CLIENT_A, cutoff);
+    assert.ok(deleted >= 2, "tenant A's old event and mapping must be purged");
     const remainingOld = (await db.execute({ sql: "SELECT 1 FROM offer_funnel_events WHERE visit_id = ?", args: [oldVisit] })).rows.length;
     assert.equal(remainingOld, 0, "the row older than 13 months must be gone");
+    const remainingOldMapping = (await db.execute({ sql: "SELECT 1 FROM offer_funnel_visit_leads WHERE visit_id = ?", args: [oldVisit] })).rows.length;
+    assert.equal(remainingOldMapping, 0, "tenant A's old visit mapping must be gone");
+    const remainingOther = (await db.execute({ sql: "SELECT 1 FROM offer_funnel_events WHERE visit_id = ?", args: [oldOtherVisit] })).rows.length;
+    assert.equal(remainingOther, 1, "tenant B's old event was deleted by tenant A's purge");
+    const remainingOtherMapping = (await db.execute({ sql: "SELECT 1 FROM offer_funnel_visit_leads WHERE visit_id = ?", args: [oldOtherVisit] })).rows.length;
+    assert.equal(remainingOtherMapping, 1, "tenant B's old mapping was deleted by tenant A's purge");
     const remainingFresh = (await db.execute({ sql: "SELECT 1 FROM offer_funnel_events WHERE visit_id = ?", args: [freshVisit] })).rows.length;
     assert.equal(remainingFresh, 1, "a fresh row must survive the purge");
   });

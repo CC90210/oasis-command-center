@@ -368,8 +368,15 @@ check("a vault value typed into any field is redacted before the prompt is built
   );
   assert.ok(!writePageUserPrompt(straddling).includes(value.slice(0, 10)), "a fragment of a secret reaches the model");
   const route = readFileSync("app/api/forms/[id]/offer/write/route.ts", "utf8");
-  assert.match(route, /const audience = text\(body\.audience, RAW_INPUT_CAP\)/, "the route cuts the audience before redacting it");
-  assert.match(route, /const description = text\(body\.description, RAW_INPUT_CAP\)/, "the route cuts the description before redacting it");
+  assert.match(route, /readCappedJson\(req, MAX_BODY_BYTES\)/, "the route buffers JSON before applying a byte cap");
+  assert.doesNotMatch(route, /req\.json\(\)/, "the route parses an unbounded request body");
+  assert.match(route, /description\.length > RAW_INPUT_CAP \|\| audience\.length > RAW_INPUT_CAP/, "oversized fields are truncated before redaction");
+  assert.match(route, /const description = text\(body\.description\)/);
+  assert.match(route, /const audience = text\(body\.audience\)/);
+  assert.ok(
+    route.indexOf("description.length > RAW_INPUT_CAP") < route.indexOf("scrubWriteInput("),
+    "an oversized field reaches redaction after being cut",
+  );
 });
 
 check("the editor offers Write the empty parts exactly while a write would fill something", () => {
