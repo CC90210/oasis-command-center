@@ -325,10 +325,10 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
     agent: "bravo",
     title: "Wire integrations",
     description:
-      "Walk through every integration in the registry. For each, ask the client what they have a key for and paste it via the bridge.",
+      "Walk the client through Settings > Connections: connect each app their business uses on its own card. A key never passes through chat.",
     tags: ["onboarding", "keys"],
     prompt:
-      "Walk this client through wiring every integration in their stack. Read lib/integrations-registry.ts, then for each api_key integration ask which they have available right now. For ones they have, prompt them to paste the key (we save via the local bridge to the operator secrets file). For ones they don't, tell them which to prioritize and why. Skip OAuth ones for now.",
+      "Walk this client through connecting their business apps in the Command Center, on Settings > Connections. For each card, ask whether they use that app. For one they use, have them open its card and connect it there: the app's own sign-in where it has one, otherwise its key form, which saves the key to their workspace only. Never ask them to paste a key into this chat. Never ask for keys to OASIS's own infrastructure (hosting, domains, code, the agents' tools): OASIS manages those, and a client workspace shows them as unavailable. For apps they do not use yet, say which to set up first and why. Finish when every app they use reads Connected on its card.",
   },
   {
     id: "client-discover-existing-stack",
