@@ -31,13 +31,18 @@ type El = ReactElement<Record<string, unknown>>;
 
 /**
  * One component driven through frames with its own hooks kept between them.
- * Knows useState, useRef, useId and useTransition (the work runs at once);
+ * Knows useState, useRef, useId, useTransition (the work runs at once) and
+ * useEffect (queued with its deps compared as React compares them; effects()
+ * runs them as the commit would, as in tests/library-phone-preview.render.ts -
+ * HookCompare's media renewal uses one, components/founders/SignedMedia.tsx);
  * anything else fails loudly here instead of being faked.
  */
 function driver<P>(component: (props: P) => unknown) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's hooks read
   const internals = (require("react") as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
   const slots: unknown[] = [];
+  const effectDeps: Array<unknown[] | undefined> = [];
+  let queued: Array<() => unknown> = [];
   let cursor = 0;
   const dispatcher = {
     useState(initial: unknown) {
@@ -61,6 +66,13 @@ function driver<P>(component: (props: P) => unknown) {
       cursor++;
       return [false, (work: () => unknown) => work()];
     },
+    useEffect(effect: () => unknown, deps?: unknown[]) {
+      const at = cursor++;
+      const prev = effectDeps[at];
+      const changed = !(at in effectDeps) || !deps || !prev || deps.length !== prev.length || deps.some((d, i) => !Object.is(d, prev[i]));
+      effectDeps[at] = deps;
+      if (changed) queued.push(effect);
+    },
   };
   return {
     render(props: P): El {
@@ -72,6 +84,11 @@ function driver<P>(component: (props: P) => unknown) {
       } finally {
         internals.H = previous;
       }
+    },
+    effects() {
+      const run = queued;
+      queued = [];
+      for (const effect of run) effect();
     },
   };
 }

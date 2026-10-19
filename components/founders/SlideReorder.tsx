@@ -21,6 +21,7 @@ import { useMemo, useState, useTransition } from "react";
 import { ArrowLeft, ArrowRight, Play, RotateCcw } from "lucide-react";
 
 import { slideKind } from "@/lib/founders-marketing-core";
+import { SignedImg } from "@/components/founders/SignedMedia";
 
 export function SlideReorder({
   assetId,
@@ -103,13 +104,12 @@ export function SlideReorder({
                 <span className="text-[9px] font-bold uppercase tracking-wider">Video</span>
               </div>
             ) : (
-              // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, short-lived by design
-              <img
+              // A signed R2 URL, short-lived by design: renewed once if it has expired (components/founders/SignedMedia.tsx).
+              <SignedImg
                 src={slideUrls[slideIdx]}
                 alt={`Slide ${pos + 1}`}
-                loading="lazy"
-                decoding="async"
                 className="h-[92px] w-full object-cover"
+                failedClassName="flex h-[92px] w-full items-center justify-center px-1 text-center text-[9px] text-fg-dim"
               />
             )}
             <span className="absolute left-1 top-1 rounded bg-bg-deep/85 px-1 text-[9px] font-bold tabular-nums text-fg-muted">

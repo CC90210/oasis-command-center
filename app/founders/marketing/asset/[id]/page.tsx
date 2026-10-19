@@ -51,6 +51,7 @@ import { CarouselFrame } from "@/components/founders/CarouselFrame";
 import { EnlargeButton, PhoneEnlarge } from "@/components/founders/PhoneEnlarge";
 import { PhoneFrame, PhoneTextCard, type PhoneFrameShape } from "@/components/founders/PhoneFrame";
 import { TileVideo } from "@/components/founders/TileVideo";
+import { SignedImg } from "@/components/founders/SignedMedia";
 import { SlideReorder } from "@/components/founders/SlideReorder";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { DownloadLink } from "@/components/founders/DownloadLink";
@@ -196,8 +197,8 @@ export default async function AssetDetailPage({
   ) : videoUrl ? (
     <TileVideo src={videoUrl} posterUrl={posterUrl} width={w} height={h} title={asset.title} variant="phone" initialOpen />
   ) : imageUrl ? (
-    // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, not a static asset
-    <img src={imageUrl} alt={asset.title} decoding="async" width={w ?? undefined} height={h ?? undefined} className="h-full w-full object-contain" />
+    // A signed R2 URL, not a static asset: renewed once if it has expired (components/founders/SignedMedia.tsx).
+    <SignedImg src={imageUrl} alt={asset.title} loading="eager" width={w} height={h} className="h-full w-full object-contain" />
   ) : null;
   // What the phone's screen shows, in place and in the big phone: the media,
   // or the asset's own copy when it has none.

@@ -42,7 +42,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { Play, Volume2, VolumeX } from "lucide-react";
 
 import { enlargeSlotContext } from "@/components/founders/PhoneEnlarge";
-import { MediaFailed, useSignedSrc } from "@/components/founders/SignedMedia";
+import { MediaFailed, useSignedSrc, useSignedVideo } from "@/components/founders/SignedMedia";
 
 export function TileVideo({
   src,
@@ -75,8 +75,9 @@ export function TileVideo({
   const ref = useRef<HTMLVideoElement | null>(null);
   const phone = variant === "phone";
   // Both links are signed and short-lived: an expired one is retried once with a fresh link, then reported in
-  // plain words (components/founders/SignedMedia.tsx). The cover and the player share the poster's.
-  const video = useSignedSrc(src);
+  // plain words (components/founders/SignedMedia.tsx). The cover and the player share the poster's. A renewed
+  // video link carries on from where it failed, playing if the viewer had pressed play.
+  const video = useSignedVideo(src, () => ref.current, () => setPaused(true));
   const poster = useSignedSrc(posterUrl);
 
   useEffect(() => {
@@ -123,8 +124,14 @@ export function TileVideo({
           controls={!phone}
           loop={phone}
           playsInline
-          onPlay={() => setPaused(false)}
-          onPause={() => setPaused(true)}
+          onPlay={() => {
+            setPaused(false);
+            video.onPlay();
+          }}
+          onPause={(e) => {
+            setPaused(true);
+            video.onPause(e);
+          }}
           onVolumeChange={(e) => setMuted(e.currentTarget.muted)}
           onTimeUpdate={(e) => {
             const v = e.currentTarget;

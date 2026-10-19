@@ -75,10 +75,12 @@ export async function isTenantLibraryMedia(db: Pick<Client, "execute">, tenantId
   if (media.rows.length) return true;
   if (ref.bucket !== SLIDE_BUCKET) return false;
   // instr narrows the read; the exact match on the parsed list decides, so a path
-  // that is only a substring of a listed one never counts.
+  // that is only a substring of a listed one never counts. No row cap: a cap
+  // applied before the exact match could leave out the one asset that lists the
+  // path exactly (CodeRabbit on #706); one workspace's assets are a few hundred rows.
   const slides = await db.execute({
     sql: `SELECT media_urls FROM marketing_asset
-          WHERE tenant_id = ? AND instr(media_urls, ?) > 0 LIMIT 20`,
+          WHERE tenant_id = ? AND instr(media_urls, ?) > 0`,
     args: [tenantId, ref.path],
   });
   return slides.rows.some((row) => parseSlideUrls(row.media_urls).includes(ref.path));

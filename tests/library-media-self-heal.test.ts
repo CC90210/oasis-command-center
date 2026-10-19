@@ -102,6 +102,22 @@ async function main() {
     assert.equal(await own("marketing-media", POSTER, ""), false, "no workspace");
   });
 
+  await check("however many assets list the path only as a substring, the one that lists it exactly is found", async () => {
+    // CodeRabbit on #706: a row cap before the exact match could leave that asset out of the read.
+    const exact = `${OASIS}/a7/1_deck.png`;
+    await db.batch(
+      [
+        ...Array.from({ length: 25 }, (_, i) => ({
+          sql: "INSERT INTO marketing_asset (id, tenant_id, title, format, media_urls) VALUES (?, ?, 'Near', 'image', ?)",
+          args: [`near-${i}`, OASIS, JSON.stringify([`${exact}.v${i}.png`])],
+        })),
+        { sql: "INSERT INTO marketing_asset (id, tenant_id, title, format, media_urls) VALUES ('a7', ?, 'Deck', 'image', ?)", args: [OASIS, JSON.stringify([exact])] },
+      ],
+      "write",
+    );
+    assert.equal(await isTenantLibraryMedia(db, OASIS, { bucket: "marketing-media", path: exact }), true);
+  });
+
   // -- 3. the route -------------------------------------------------------------------------------------------------
   const route = await import("../app/api/founders/marketing/media/resign/route");
   const post = (body: unknown) =>
@@ -197,18 +213,36 @@ async function main() {
   // -- 5. the wiring -------------------------------------------------------------------------------------------------
   await check("every Library image and video element retries through the one hook", () => {
     const src = (p: string) => readFileSync(join(ROOT, p), "utf8");
+    // Every surface that draws a signed Library link (Codex on #706 found three the first cut missed: the pack
+    // comparison, the asset page's image and the slide-order thumbnails).
+    const SURFACES = [
+      "components/founders/marketing-shared.tsx",
+      "components/founders/CarouselFrame.tsx",
+      "components/founders/TileVideo.tsx",
+      "components/founders/HookCompare.tsx",
+      "components/founders/SlideReorder.tsx",
+      "app/founders/marketing/asset/[id]/page.tsx",
+      "components/founders/SignedMedia.tsx",
+    ];
+    for (const p of SURFACES) {
+      // A JSX <img> or <video> element (comment lines start with * or //, so they never match).
+      const elements = [...src(p).matchAll(/^\s*<(img|video)\b[\s\S]*?\/>/gm)].map((m) => m[0]);
+      for (const el of elements) assert.match(el, /onError=\{/, `${p}: a <${el.trim().slice(1, 6)}...> with no retry`);
+    }
     const shared = src("components/founders/marketing-shared.tsx");
-    const carousel = src("components/founders/CarouselFrame.tsx");
     const video = src("components/founders/TileVideo.tsx");
     assert.match(shared, /<SignedImg\s+src=\{posterUrl\}/, "the tile's poster");
-    assert.match(carousel, /<SignedImg\s+src=\{slides\[at\]\}/, "a carousel's image slide");
-    assert.match(video, /const video = useSignedSrc\(src\);/);
+    assert.match(src("components/founders/CarouselFrame.tsx"), /<SignedImg\s+src=\{slides\[at\]\}/, "a carousel's image slide");
+    assert.match(src("components/founders/SlideReorder.tsx"), /<SignedImg\s+src=\{slideUrls\[slideIdx\]\}/, "a slide-order thumbnail");
+    assert.match(src("app/founders/marketing/asset/[id]/page.tsx"), /<SignedImg src=\{imageUrl\}/, "the asset page's image");
+    const compare = src("components/founders/HookCompare.tsx");
+    assert.match(compare, /const media = useSignedVideos\(/, "one hook for every compared card");
+    assert.match(compare, /src=\{media\.src\(card\.playbackUrl\) \?\? undefined\}[\s\S]*onError=\{\(\) => media\.onError\(card\.playbackUrl\)\}/, "a compared clip");
+    assert.match(compare, /src=\{media\.src\(card\.posterUrl\) \?\? undefined\}[\s\S]*onError=\{\(\) => media\.onError\(card\.posterUrl\)\}/, "a compared cover");
+    assert.match(video, /const video = useSignedVideo\(src, \(\) => ref\.current, \(\) => setPaused\(true\)\);/);
     assert.match(video, /const poster = useSignedSrc\(posterUrl\);/);
     assert.match(video, /src=\{video\.src \?\? undefined\}[\s\S]*onError=\{video\.onError\}/, "the player");
     assert.match(video, /src=\{poster\.src \?\? undefined\}[\s\S]*onError=\{poster\.onError\}/, "the cover");
-    for (const [name, text] of [["marketing-shared", shared], ["CarouselFrame", carousel], ["TileVideo", video]] as const) {
-      assert.doesNotMatch(text, /<img[^>]*src=\{(posterUrl|slides\[at\])\}/, `${name}: no bare <img> of a signed link is left`);
-    }
     for (const p of ["components/founders/SignedMedia.tsx", "lib/founders/media-resign.ts", "app/api/founders/marketing/media/resign/route.ts", "tests/library-media-self-heal.test.ts", "tests/library-media-self-heal.render.ts"]) {
       assert.ok(![...src(p)].some((c) => c.charCodeAt(0) > 127), `${p} is ASCII`);
     }
