@@ -118,6 +118,8 @@ function scopeToLifecycle<T>(q: T, lifecycle: Lifecycle): T {
       return hideArchived(f).not("published_at", "is", null) as unknown as T;
     case "approved":
       return f.eq("status", "approved").is("published_at", null) as unknown as T;
+    case "scheduled":
+      return f.eq("status", "scheduled").is("published_at", null) as unknown as T;
     case "needs_review":
       return f.in("status", ["draft", "in_review"]).is("published_at", null) as unknown as T;
   }
@@ -1076,7 +1078,7 @@ export async function getLifecycleCounts(
   db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
 ): Promise<{ counts: Record<Lifecycle, number>; degraded: boolean }> {
   const empty: Record<Lifecycle, number> = {
-    needs_review: 0, approved: 0, live: 0, archived: 0,
+    needs_review: 0, approved: 0, scheduled: 0, live: 0, archived: 0,
   };
   if (!tenantId) return { counts: empty, degraded: false };
   try {

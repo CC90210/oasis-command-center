@@ -46,6 +46,7 @@ type Tone = "neutral" | "accent" | "hot" | "warm" | "engaged" | "info";
 const LIFECYCLE_TONE: Record<Lifecycle, Tone> = {
   needs_review: "warm",   // wants something from you
   approved: "accent",     // cleared, not sent
+  scheduled: "info",      // booked, waiting for its slot
   live: "engaged",        // out in the world
   archived: "neutral",    // shelved, and restorable
 };

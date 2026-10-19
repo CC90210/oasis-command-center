@@ -375,7 +375,7 @@ async function main() {
     }
   });
 
-  await check("Needs review is draft or in review, not yet posted: scheduled assets keep their own place", async () => {
+  await check("Needs review is draft or in review, not yet posted: scheduled assets have their own Scheduled pill", async () => {
     const oasisRows = rows.filter((r) => (r.tenant ?? T) === T && (r.brand ?? "oasis-ai") === "oasis-ai");
     const scheduled = oasisRows.filter((r) => r.status === "scheduled" && !r.published).map((r) => r.id);
     assert.ok(scheduled.length >= 5, `the seed holds scheduled, unposted assets (${scheduled.length})`);
@@ -392,16 +392,19 @@ async function main() {
     for (const id of scheduled) assert.ok(inAll.has(id), `${id} is in the All view`);
     const stage = await getMarketingAssets(T, { status: "scheduled", pageSize: 200 }, db);
     for (const id of scheduled) assert.ok(stage.assets.some((a) => a.id === id), `${id} is on the Scheduled stage`);
-    // "All N" is the tab's own COUNT: every asset its grid shows, the scheduled
-    // ones included (they sit in none of the four pills, so summing the pills
-    // would drop them) and the archived and rejected ones left out (the All grid
-    // hides them behind the Archived pill; counting them made the OASIS tab read
-    // 103 over a grid of 100, CodeRabbit on #523).
+    // "All N" is the tab's own COUNT: every asset its grid shows, the archived and
+    // rejected ones left out (the All grid hides them behind the Archived pill;
+    // counting them made the OASIS tab read 103 over a grid of 100, CodeRabbit on
+    // #523). Since 2026-10-19 the scheduled ones have their own pill (they used to
+    // sit in none, while their tiles read "Needs review"), so the pills now sum to it.
     const lc = await getLifecycleCounts(T, "oasis-ai", db);
     const tabs = await getBrandTabCounts(T, db);
     const pills = LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
     assert.ok(lc.counts.archived > 0, `the seed holds archived or rejected assets (${lc.counts.archived}), so leaving them out is exercised`);
-    assert.equal(tabs.counts["oasis-ai"], pills - lc.counts.archived + scheduled.length, "the tab holds the working buckets and the scheduled ones, not the archived");
+    assert.equal(lc.counts.scheduled, scheduled.length, "the Scheduled pill counts exactly the booked, unposted assets");
+    const sched = await getMarketingAssets(T, { lifecycle: "scheduled", pageSize: 200 }, db);
+    assert.deepEqual(sched.assets.map((a) => a.id).sort(), [...scheduled].sort(), "and its grid shows exactly them");
+    assert.equal(tabs.counts["oasis-ai"], pills - lc.counts.archived, "the tab holds every working bucket, Scheduled included, not the archived");
     const allGrid = await getMarketingAssets(T, {}, db);
     assert.equal(tabs.counts["oasis-ai"], allGrid.total, "the tab, its All pill and its grid read one number");
     const library = readFileSync(join(ROOT, "app/founders/marketing/library/page.tsx"), "utf8");
@@ -435,9 +438,11 @@ async function main() {
         placed.set(a.id, l);
       }
     }
-    // Exactly the undated scheduled / published rows sit outside every bucket.
+    // Exactly the undated published row sits outside every bucket (a publish every
+    // network refused: reconcile clears published_at). Undated scheduled rows have
+    // their own bucket since 2026-10-19.
     const unplaced = pairs.filter((p) => !placed.has(p.id)).map((p) => p.id).sort();
-    assert.deepEqual(unplaced, ["published-n", "scheduled-n"]);
+    assert.deepEqual(unplaced, ["published-n"]);
     const lc = await getLifecycleCounts(T, "oasis-ai", d2);
     const sum = LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
     assert.equal(sum, pairs.length - unplaced.length, "the pills count exactly the bucketed rows, once each");
