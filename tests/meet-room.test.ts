@@ -235,6 +235,28 @@ async function main() {
   };
   const heldSession = async (participantId: string) =>
     (await db.execute({ sql: "SELECT sfu_session_id AS s FROM meet_participants WHERE id = ?", args: [participantId] })).rows[0]?.s ?? null;
+  /**
+   * The database, with `before` run once just ahead of the first statement that starts with `prefix`: a leave, end or
+   * delete landed in the exact gap a race needs (one racer; `racing` holds several at a barrier).
+   */
+  const landingBefore = (prefix: string, before: () => Promise<unknown>) => {
+    let landed = false;
+    const landing = new Proxy(db, {
+      get(target, key) {
+        const value = Reflect.get(target, key);
+        if (key !== "execute") return typeof value === "function" ? value.bind(target) : value;
+        return async (stmt: Parameters<typeof db.execute>[0]) => {
+          const sql = typeof stmt === "string" ? stmt : stmt.sql;
+          if (!landed && sql.startsWith(prefix)) {
+            landed = true;
+            await before();
+          }
+          return target.execute(stmt);
+        };
+      },
+    });
+    return { db: landing, landed: () => landed };
+  };
   /** Let time pass while these people keep polling, once a minute (inside MEET_STALE_MS, so they stay in the room). */
   const passWhilePolling = async (ms: number, polls: Array<() => Promise<Response>>) => {
     for (let left = ms; left > 0; left -= 60_000) {
@@ -943,23 +965,12 @@ async function main() {
   await check("a page that opens the room again as its person leaves gets a new place: the old one counts only if it is still there to refresh", async () => {
     const call = await callWith(1);
     const [guest] = call.guests;
-    let raced = false;
-    const racing = new Proxy(db, {
-      get(target, key) {
-        const value = Reflect.get(target, key);
-        if (key !== "execute") return typeof value === "function" ? value.bind(target) : value;
-        return async (stmt: Parameters<typeof db.execute>[0]) => {
-          const sql = typeof stmt === "string" ? stmt : stmt.sql;
-          if (!raced && sql.startsWith("UPDATE meet_participants SET last_seen_at")) {
-            raced = true; // their leave lands between the join's read of their place and its refresh
-            await handleLeave(request(`/api/meet/${call.c}/leave`, { cookie: guest.cookie, ip: freshIp() }), call.c, deps());
-          }
-          return target.execute(stmt);
-        };
-      },
-    });
-    const back = await json(await handleJoin(request(`/api/meet/${call.c}/join`, { body: { name: "G0" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps({ db: racing })));
-    assert.ok(raced, "the leave landed in the gap");
+    // Their leave lands between the join's read of their place and its refresh.
+    const refreshing = landingBefore("UPDATE meet_participants SET last_seen_at", () =>
+      handleLeave(request(`/api/meet/${call.c}/leave`, { cookie: guest.cookie, ip: freshIp() }), call.c, deps()),
+    );
+    const back = await json(await handleJoin(request(`/api/meet/${call.c}/join`, { body: { name: "G0" }, cookie: guest.cookie, ip: freshIp() }), call.c, deps({ db: refreshing.db })));
+    assert.ok(refreshing.landed(), "the leave landed in the gap");
     assert.ok(back.participantId && back.participantId !== guest.id, "a new place, not the one that had just left");
   });
 
@@ -1009,25 +1020,6 @@ async function main() {
   const reconnect = (c: string, cookie: string) =>
     handleSfu(request(`/api/meet/${c}/sfu`, { body: { action: "session" }, cookie, ip: freshIp() }), c, deps());
   const lastMade = () => sfu.calls.filter((x) => x.op === "new").at(-1)!.sessionId;
-  /** The database, with `before` run once just ahead of the first statement that starts with `prefix`. */
-  const landingBefore = (prefix: string, before: () => Promise<unknown>) => {
-    let landed = false;
-    const db2 = new Proxy(db, {
-      get(target, key) {
-        const value = Reflect.get(target, key);
-        if (key !== "execute") return typeof value === "function" ? value.bind(target) : value;
-        return async (stmt: Parameters<typeof db.execute>[0]) => {
-          const sql = typeof stmt === "string" ? stmt : stmt.sql;
-          if (!landed && sql.startsWith(prefix)) {
-            landed = true;
-            await before();
-          }
-          return target.execute(stmt);
-        };
-      },
-    });
-    return { db: db2, landed: () => landed };
-  };
 
   await check("a leave that lands while the SFU makes a reconnect's session: that session is cut and the caller is told (e9's audit)", async () => {
     const call = await callWith(1);
