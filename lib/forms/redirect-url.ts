@@ -14,8 +14,7 @@
  * lib/web-leads/url-safety.ts safeExternalUrl does: as typed, the browser would
  * read it as a path under the form page itself.
  */
-
-const SAME_SITE = "https://same-site.invalid";
+import { isSafeInternalPath } from "@/lib/offers/preserve-query";
 
 export function safeFormRedirect(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -23,15 +22,14 @@ export function safeFormRedirect(raw: unknown): string | null {
   if (!value) return null;
 
   if (value.startsWith("/") || value.startsWith("\\")) {
-    // A path on this site, as the URL parser reads it: it drops tabs and
-    // newlines and turns "\" into "/", so "/\t/evil.example" and
-    // "/\evil.example" are another host ("//evil.example") and are refused.
-    try {
-      const u = new URL(value, SAME_SITE);
-      return u.origin === SAME_SITE ? `${u.pathname}${u.search}${u.hash}` : null;
-    } catch {
-      return null;
-    }
+    // A path on this site: the same check the offer routers use. It refuses
+    // "//", any backslash and any tab, newline or other control character,
+    // which the URL parser would drop or turn into "/" to reach another host.
+    // The value is kept exactly as typed. Rewriting it to the parser's
+    // pathname is what made "/.//evil.example/x" into "//evil.example/x", a
+    // link to another site (independent review of #710); as typed, the
+    // browser resolves it on this site.
+    return isSafeInternalPath(value) ? value : null;
   }
 
   const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(value) ? value : `https://${value}`;

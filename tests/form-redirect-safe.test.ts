@@ -55,6 +55,37 @@ check("a path that is really another host is refused", () => {
   }
 });
 
+check("a path is kept as typed, and the browser resolves it on this site", () => {
+  // Rewriting a path to the URL parser's pathname turned "/.//evil.example/x"
+  // into "//evil.example/x", a link to another site (independent review of
+  // #710). Each candidate is either refused or kept exactly, and whatever is
+  // kept stays on this host when the browser follows it from a form page.
+  const formPage = "https://oasisai.work/f/oasis-ai-cc/ai-audit";
+  for (const candidate of [
+    "/.//evil.example/x",
+    "/..//evil.example",
+    "/a/../..//evil.example",
+    "/./evil.example",
+    "/%2F%2Fevil.example",
+    "/%09/evil.example",
+    "/#//evil.example",
+    "/f/oasis-ai-cc/vsl?next=//evil.example",
+    "/./\\evil.example",
+    "/\u0000/evil.example",
+    "/\r/evil.example",
+    "/javascript:alert(1)",
+  ]) {
+    const kept = safeFormRedirect(candidate);
+    if (kept === null) continue;
+    assert.equal(kept, candidate, `${JSON.stringify(candidate)} is not rewritten`);
+    assert.equal(new URL(kept, formPage).origin, "https://oasisai.work", JSON.stringify(candidate));
+  }
+  assert.equal(safeFormRedirect("/.//evil.example/x"), "/.//evil.example/x");
+  for (const bad of ["/./\\evil.example", "/\u0000/evil.example", "/\r/evil.example"]) {
+    assert.equal(safeFormRedirect(bad), null, JSON.stringify(bad));
+  }
+});
+
 check("web addresses pass through", () => {
   assert.equal(safeFormRedirect("https://example.com/thanks?x=1#top"), "https://example.com/thanks?x=1#top");
   assert.equal(safeFormRedirect("http://example.com"), "http://example.com/");
