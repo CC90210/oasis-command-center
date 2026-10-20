@@ -185,8 +185,8 @@ function authorised(req: NextRequest): Credential | null {
 
 /**
  * One line per call in the Worker's logs: which credential, which table or RPC,
- * the response status, and whether the call named a tenant (null for an RPC,
- * whose arguments are in a body this never reads).
+ * the response status, and whether the call named a tenant (null for a POST, an
+ * RPC or an insert, whose tenant is in a body this never reads).
  *
  * Every table except the denylist is reachable with either bearer and nothing
  * forces a tenant filter (2026-10-19 audit, P0-2). The fix is a per-credential
@@ -335,9 +335,10 @@ async function serve(req: NextRequest, segments: string[], method: "GET" | "POST
       method,
       target,
       status,
-      // Unknown for an RPC: its arguments are in its body, which is not read
-      // here, and "false" would read as unscoped when allowlists are drawn.
-      tenantFilter: isRpc ? null : req.nextUrl.searchParams.has("tenant_id"),
+      // Unknown for a POST, an RPC or an insert alike: either carries its
+      // tenant in the body, which is not read here, and "false" would read as
+      // unscoped when allowlists are drawn (CodeRabbit on #723).
+      tenantFilter: isRpc || method === "POST" ? null : req.nextUrl.searchParams.has("tenant_id"),
     });
   }
 }

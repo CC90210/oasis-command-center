@@ -142,6 +142,16 @@ async function main() {
     assert.deepEqual(leaks(lines), []);
   });
 
+  await check("an insert, which names its tenant in the body, is logged with the tenant unknown, not as unscoped", async () => {
+    const { res, usage, lines } = await recorded(() =>
+      route.POST(request("demo_rows", { method: "POST", token: APEX, body: { id: "r2", tenant_id: "t1", email: PRIVATE_EMAIL } }), params(["demo_rows"])),
+    );
+    assert.equal(res?.status, 201);
+    assert.equal(usage.length, 1);
+    assert.deepEqual(usage[0], { event: "pg_bridge_usage", credential: "apex", method: "POST", target: "demo_rows", status: 201, tenantFilter: null });
+    assert.deepEqual(leaks(lines), [], "no token or body value in the log");
+  });
+
   await check("a call that throws is still logged, as 500, and the error still reaches the caller", async () => {
     // patch_tenant_record_data raises on a missing p_patch, as its Postgres original did.
     const { error, usage } = await recorded(() =>
