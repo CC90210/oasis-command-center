@@ -63,6 +63,11 @@ process.env.ADMIN_EMAILS = [
 // port 9 refuses at once rather than waiting out the 2 s timeout.
 process.env.STATE_API_URL = "http://127.0.0.1:9";
 delete process.env.OPERATOR_EMAIL_FALLBACK_ENABLED;
+// /api/notify/telegram-identity reads the alert lanes from these. Fake values:
+// calls to api.telegram.org are answered by a stand-in in that section, so
+// nothing leaves the machine.
+process.env.OASIS_TELEGRAM_BOT_TOKEN = "test-bot-token";
+process.env.OASIS_TELEGRAM_CHAT_ID = "-1009999000111";
 
 // tsconfig.json sets jsx:"preserve", so tsx compiles page JSX with the classic
 // runtime, which expects a global React (same as tests/delivery-pages.test.ts).
@@ -305,6 +310,7 @@ async function main() {
   }
   const stateHealth = await import("../app/api/state-health/route");
   const quests = await import("../app/api/quests/route");
+  const telegramIdentity = await import("../app/api/notify/telegram-identity/route");
   const { NextRequest } = await import("next/server");
   const questsGet = () => quests.GET(new NextRequest("http://localhost/api/quests"));
 
@@ -481,6 +487,50 @@ async function main() {
     const body = (await res.json()) as { ok: boolean; rows: Array<{ title: string }> };
     assert.deepEqual(body.rows.map((r) => r.title), [SECRET_QUEST]);
   });
+
+  // ── /api/notify/telegram-identity (2026-10-19 audit) ──
+  // The alert lanes are OASIS's own bots and private chats. The route used to
+  // admit any role of any client workspace (canAccessSharedTenantResource).
+  const SECRET_CHAT = "OASIS-ALERT-CHAT-DO-NOT-LEAK";
+  const realFetch = globalThis.fetch;
+  let telegramCalls = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (!url.startsWith("https://api.telegram.org/")) return realFetch(input, init);
+    telegramCalls += 1;
+    const result = url.endsWith("/getMe")
+      ? { id: 1, username: "oasis_alerts_bot", first_name: "OASIS alerts" }
+      : { id: -1009999000111, type: "supergroup", title: SECRET_CHAT };
+    return new Response(JSON.stringify({ ok: true, result }), { headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    for (const key of ["squatter", "unlinked", "rep", "client"] as const) {
+      await check(`${key}: /api/notify/telegram-identity is a 404 naming no OASIS bot or chat`, async () => {
+        await login(USERS[key]);
+        telegramCalls = 0;
+        const res = await telegramIdentity.GET();
+        assert.equal(res.status, 404);
+        const text = await res.text();
+        for (const secret of [SECRET_CHAT, "-1009999000111", "oasis_alerts_bot"]) {
+          assert.ok(!text.includes(secret), `OASIS alert identity leaked: ${secret}`);
+        }
+        assert.equal(telegramCalls, 0, "Telegram must not even be asked");
+      });
+    }
+    await check("signed out: /api/notify/telegram-identity is a 401", async () => {
+      await login(null);
+      assert.equal((await telegramIdentity.GET()).status, 401);
+    });
+    await check("the operator still sees which bot and chat each lane uses", async () => {
+      await login(USERS.cc);
+      const res = await telegramIdentity.GET();
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes(SECRET_CHAT) && text.includes("oasis_alerts_bot"));
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 
   // ── fail closed ──────────────────────────────────────────────────────
   await check("a failed membership lookup is NOT an operator (fails closed, loudly)", async () => {

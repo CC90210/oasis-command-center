@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { formsSession } from "@/lib/forms/access";
+import { safeFormRedirect } from "@/lib/forms/redirect-url";
 import { isMissingTableError, isUniqueViolationError, missingTablePayload } from "@/lib/api-helpers";
 import {
   parseFormSteps,
@@ -108,6 +109,17 @@ export async function POST(req: NextRequest) {
     throw err;
   }
 
+  let redirectUrl: string | null = null;
+  if (body.redirect_url) {
+    redirectUrl = safeFormRedirect(String(body.redirect_url).slice(0, 2000));
+    if (!redirectUrl) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_redirect_url", reason: "Use a web address (https://...) or a path on this site." },
+        { status: 400 },
+      );
+    }
+  }
+
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("forms")
@@ -121,7 +133,7 @@ export async function POST(req: NextRequest) {
       on_complete_stage: body.on_complete_stage ? String(body.on_complete_stage) : null,
       step_outcomes: stepOutcomes,
       enabled: body.enabled !== false,
-      redirect_url: body.redirect_url ? String(body.redirect_url).slice(0, 2000) : null,
+      redirect_url: redirectUrl,
       created_by: userId,
     })
     .select()
