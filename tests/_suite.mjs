@@ -323,6 +323,7 @@ const TESTS = [
   "tests/shopout-sender-locality.test.ts",
   "tests/sequence-volume.test.ts",
   "tests/pg-bridge-operators.test.ts",
+  "tests/middleware-public-files.test.ts",
   "tests/or-filter-dotted-values.test.ts",
   "tests/form-submit-failure-capture.test.ts",
   "tests/deploy-serves-main.test.ts",
