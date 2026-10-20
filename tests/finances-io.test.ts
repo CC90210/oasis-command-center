@@ -58,8 +58,15 @@ globalThis.Date = FrozenDate as unknown as DateConstructor;
 const STRIPE_KEY = "rk_live_finances_io_test_only";
 /** Every network call but a Stripe read made with that key. */
 let networkCalls = 0;
-globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+/** Telegram messages, kept only while a check that expects them turns this on. */
+let telegramSent: Array<{ chat: string; text: string }> | null = null;
+globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
   const url = new URL(String(input));
+  if (telegramSent && url.host === "api.telegram.org" && url.pathname.endsWith("/sendMessage")) {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { chat_id?: unknown; text?: unknown };
+    telegramSent.push({ chat: String(body.chat_id), text: String(body.text) });
+    return new Response(JSON.stringify({ ok: true, result: { message_id: telegramSent.length } }), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (url.host === "api.stripe.com" && process.env.STRIPE_SECRET_KEY === STRIPE_KEY && (init?.method || "GET").toUpperCase() === "GET") {
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     if (url.pathname === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
@@ -519,6 +526,68 @@ async function main() {
     assert.equal(real.mode, "sent");
     assert.equal(real.reminders[0].action, "failed", "no mailbox configured -> reported as failed, not as sent");
     assert.match(real.reminders[0].reason, /No OASIS mailbox is configured/);
+  });
+
+  await check("a purchase on the public checkout tells the sales desk once, in escaped words; any other payment tells no one", async () => {
+    // 2026-10-19 audit: a buyer could pay on oasisai.work/pricing and the team
+    // was never told (lib/checkout/paid-alert.ts).
+    const { cad: formatCad } = await import("../lib/checkout/catalog");
+    process.env.OASIS_SALES_TELEGRAM_BOT_TOKEN = "123456:sales-test-token";
+    process.env.OASIS_SALES_TELEGRAM_CHAT_ID = "-100777";
+    telegramSent = [];
+    try {
+      const sale = {
+        id: "pi_sale_1",
+        object: "payment_intent",
+        amount_received: 750000,
+        currency: "cad",
+        created: epoch("2026-09-22T15:00:00Z"),
+        livemode: true,
+        latest_charge: charge({ id: "ch_sale_1", amount: 750000, pi: "pi_sale_1", name: "Ann <Smith> & Co", email: "ann@buyer.test" }),
+        metadata: { oasis_checkout: "public_funnel_v1", oasis_offer_id: "enterprise-fleet", oasis_option_id: "foundation", oasis_order_id: "ord_sale_1" },
+      };
+      const first = await deliver("payment_intent.succeeded", sale, { id: "evt_sale_1" });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(telegramSent.length, 1, "one message to the sales desk");
+      const msg = telegramSent[0];
+      assert.equal(msg.chat, "-100777", "the sales group, not another lane");
+      assert.match(msg.text, /^New purchase on oasisai\.work\/pricing\n/);
+      assert.ok(msg.text.includes(`${formatCad(750000)} paid`), msg.text);
+      assert.ok(msg.text.includes("Ann &lt;Smith&gt; &amp; Co &lt;ann@buyer.test&gt;"), `the buyer, escaped: ${msg.text}`);
+      assert.ok(msg.text.includes("Order ord_sale_1"));
+      assert.ok(msg.text.includes("Next: reach out to book the kickoff."));
+
+      const again = await deliver("payment_intent.succeeded", sale, { id: "evt_sale_1" });
+      assert.equal(again.status, 200);
+      assert.equal(telegramSent.length, 1, "Stripe's redelivery of the same event tells no one again");
+
+      await deliver("payment_intent.succeeded", { ...sale, id: "pi_plain_1", latest_charge: charge({ id: "ch_plain_1", amount: 1000, pi: "pi_plain_1" }), metadata: {} });
+      assert.equal(telegramSent.length, 1, "a payment the public checkout did not start tells no one");
+    } finally {
+      telegramSent = null;
+      delete process.env.OASIS_SALES_TELEGRAM_BOT_TOKEN;
+      delete process.env.OASIS_SALES_TELEGRAM_CHAT_ID;
+    }
+  });
+
+  await check("the purchase alert's words: a test-mode sale says so, an unknown offer says so, and a failed send never throws", async () => {
+    const { paidAlertText, alertPublicCheckoutPaid, publicCheckoutSale } = await import("../lib/checkout/paid-alert");
+    assert.equal(publicCheckoutSale({ metadata: { oasis_checkout: "something_else" } }), null);
+    assert.equal(publicCheckoutSale(null), null);
+    const base = { sale: { orderId: "o1", offerId: "nope", optionId: "x" }, amountCents: 12345, currency: "usd", customerName: "", customerEmail: "", livemode: false };
+    const text = paidAlertText(base);
+    assert.match(text, /^Test purchase on oasisai\.work\/pricing \(Stripe test mode\)/);
+    assert.ok(text.includes("nope / x (not in the catalog)"));
+    assert.ok(text.includes("123.45 USD paid"));
+    assert.ok(text.includes("Buyer: no name or email on the payment; see Stripe"));
+    const errors = console.error;
+    console.error = () => undefined;
+    try {
+      assert.equal(await alertPublicCheckoutPaid(base, async () => ({ delivered: false, outcome: "Not sent" })), false);
+      assert.equal(await alertPublicCheckoutPaid(base, async () => { throw new Error("telegram down"); }), false);
+    } finally {
+      console.error = errors;
+    }
   });
 
   await check("books still balance after everything", async () => {

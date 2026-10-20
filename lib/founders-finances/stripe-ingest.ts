@@ -103,6 +103,7 @@ import { rateLookupFor, usdCadRate } from "./fx-io";
 import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement } from "./invoice-store";
 import { financeTenantId, getStripeClient, listAll, pinnedStripeAccount, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
 import { recordStripePayout, retryUnbookedPayouts, unbookedPayouts } from "./stripe-payouts-io";
+import { alertPublicCheckoutPaid, publicCheckoutSale } from "@/lib/checkout/paid-alert";
 
 const ACTOR = "stripe";
 const E = BUSINESS_ENTITY_ID;
@@ -1382,6 +1383,21 @@ async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promis
       charge.paymentIntentId = charge.paymentIntentId || pi.paymentIntentId;
       if (!charge.metadata.finInvoiceId && pi.metadata.finInvoiceId) charge.metadata = pi.metadata;
       const r = await recordStripeCharge(charge, { fetchFees: true });
+      // A purchase on the public checkout (/pricing) tells the sales desk, once:
+      // this event is claimed once (claimEvent), and only the intent carries the
+      // checkout's marker. After the booking, so a retried event never alerts
+      // twice; the alert itself never throws (lib/checkout/paid-alert.ts).
+      const sale = publicCheckoutSale(env.object);
+      if (sale) {
+        await alertPublicCheckoutPaid({
+          sale,
+          amountCents: pi.amountReceivedCents,
+          currency: pi.currency,
+          customerName: charge.customerName,
+          customerEmail: charge.customerEmail,
+          livemode: pi.livemode,
+        });
+      }
       return r.paymentId ? `payment ${r.created ? "recorded" : "matched"} ${r.paymentId}` : `ignored: ${r.reason}`;
     }
     case "charge.refunded": {
