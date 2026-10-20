@@ -485,9 +485,9 @@ async function main() {
   await check("an estate-wide health check pages OASIS when global web opt-outs pass the hourly ceiling", async () => {
     // The cap bounds one address bucket; a /48 holds 65,536 of them. An alarm,
     // never a refusal (reviewer of #711, item 25).
-    const { OPTOUT_CHECKS, GLOBAL_WEB_OPTOUTS_PER_HOUR_CEILING } = await import("../lib/health/optout-checks");
+    const { FORM_CHECKS, GLOBAL_WEB_OPTOUTS_PER_HOUR_CEILING } = await import("../lib/health/form-checks");
     const { ESTATE_WIDE_CHECKS } = await import("../lib/health/runner");
-    const surge = OPTOUT_CHECKS[0];
+    const surge = FORM_CHECKS.find((c) => c.id === "optouts.global_web_filings_hourly")!;
     assert.ok(ESTATE_WIDE_CHECKS.some((c) => c.id === surge.id), "it runs in the estate-wide pass");
     assert.deepEqual(surge.rule, { kind: "must_be_below", ceiling: GLOBAL_WEB_OPTOUTS_PER_HOUR_CEILING });
     assert.equal(surge.lane, "operator");
@@ -514,7 +514,7 @@ async function main() {
     const known: Record<string, "reader" | "writer"> = {
       "lib/email/suppression-scope.ts": "reader", // the lookup every sender calls
       "lib/metrics/index.ts": "reader", // counts a workspace's opt-outs for its dashboard; never decides a send
-      "lib/health/optout-checks.ts": "reader", // counts global web filings for the surge alarm; never decides a send
+      "lib/health/form-checks.ts": "reader", // counts global web filings for the surge alarm; never decides a send
       "app/api/unsubscribe/route.ts": "writer",
       "app/api/cron/collect-cc-metrics/route.ts": "writer", // Constant Contact opt-outs
       "app/api/integrations/smartlead/webhook/route.ts": "writer",
