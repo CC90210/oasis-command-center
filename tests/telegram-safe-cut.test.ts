@@ -122,6 +122,32 @@ async function main(): Promise<void> {
     assertParses(left, "details-only");
   });
 
+  await check("no Telegram builder cuts a value by code units before escaping it", async () => {
+    // Every value goes through clipAndEscape (whole characters). A guard, not
+    // a style rule: a cut by code units can leave half an emoji, which
+    // Telegram refuses, losing the alert.
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const root = join(__dirname, "..");
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
+        const rel = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) walk(rel);
+        else if (/\.(ts|tsx)$/.test(entry.name)) {
+          const src = readFileSync(join(root, rel), "utf8");
+          if (!src.includes("escapeTelegramHtml")) continue;
+          src.split("\n").forEach((line, i) => {
+            if (/\be\([^\n]*\.slice\(0,\s*\d+\)|escapeTelegramHtml\([^\n]*\.slice\(0,\s*\d+\)/.test(line)) offenders.push(`${rel}:${i + 1}`);
+          });
+        }
+      }
+    };
+    walk("app");
+    walk("lib");
+    assert.deepEqual(offenders, [], "use clipAndEscape(value, max)");
+  });
+
   await check("the sender cuts through the safe cut: a long escaped alert reaches Telegram parseable", async () => {
     process.env.OASIS_TELEGRAM_BOT_TOKEN = "test-token";
     process.env.OASIS_TELEGRAM_CHAT_ID = "555000";

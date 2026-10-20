@@ -67,7 +67,7 @@ import type { Client, InStatement, ResultSet } from "@libsql/client";
 import { emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
 import { canonicalJson } from "@/lib/os/approvals/rules";
 import { isRetiredTenant } from "@/lib/tenant/retired";
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { clipAndEscape, escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import {
   OASIS_SUPPRESSION_BRAND,
   OASIS_SUPPRESSION_TENANT_ID,
@@ -1331,7 +1331,7 @@ function afterIngest(deps: IngestDeps, desk: SupportDesk, body: IngestBody, resu
       const r = await n.telegram(
         [
           `<b>Client replied by email on ${e(t.ticket_number)}</b>${result.reopened ? " (ticket reopened)" : ""}`,
-          e(body.message.bodyText.trim().slice(0, 600) || "(no text)"),
+          clipAndEscape(body.message.bodyText, 600) || "(no text)",
           e(ticketUrl(n, t.id)),
         ].join("\n"),
       );
@@ -1350,7 +1350,7 @@ function afterIngest(deps: IngestDeps, desk: SupportDesk, body: IngestBody, resu
         [
           "<b>[HOT-LEAD] A sales enquiry reached support@</b>",
           `From ${e(body.message.from.address)}`,
-          e(body.classification.summary.slice(0, 300)),
+          clipAndEscape(body.classification.summary, 300),
           "It is not a ticket. It is in support@, unread.",
         ].join("\n"),
       );

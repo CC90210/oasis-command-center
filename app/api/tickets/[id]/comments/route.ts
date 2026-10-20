@@ -18,7 +18,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mayPerform } from "@/lib/delivery/access";
 import { DELIVERY_TENANT_ID, validateCommentCreate } from "@/lib/delivery/rules";
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { clipAndEscape, escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import {
   deliveryError,
   getDeliveryDb,
@@ -102,7 +102,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         const r = await deps.telegram(
           [
             `<b>Client replied on ${e(ticket.ticket_number)}</b>${result.reopened ? " (ticket reopened)" : ""}`,
-            e(result.comment.body.slice(0, 600)),
+            clipAndEscape(result.comment.body, 600),
             e(ticketUrl(deps, id)),
           ].join("\n"),
         );
