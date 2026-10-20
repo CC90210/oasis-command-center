@@ -15,6 +15,7 @@
  */
 import "server-only";
 import { inferForTenant } from "@/lib/ai/infer";
+import { suppressionScope } from "@/lib/email/suppression-scope";
 import nodemailer from "nodemailer";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -257,10 +258,17 @@ export async function deliverWelcomeEmail(args: {
   // Suppression — a public form must never re-email someone who opted out.
   // Match literally (escape LIKE wildcards); FAIL CLOSED on lookup error.
   const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
+  // The workspace's own opt-outs and the global ones (lib/email/suppression-scope.ts).
+  let suppScope: string;
+  try {
+    suppScope = suppressionScope(tenantId);
+  } catch {
+    return { sent: false, reason: "suppression_check_failed" };
+  }
   const supp = await db
     .from("email_suppressions")
     .select("email")
-    .eq("tenant_id", tenantId)
+    .or(suppScope)
     .ilike("email", suppPattern)
     .limit(1);
   if (supp.error) {

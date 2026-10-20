@@ -54,6 +54,7 @@ import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import type { BrandKey } from "@/lib/email/brands";
 import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
 import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
+import { suppressionScope } from "@/lib/email/suppression-scope";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -536,10 +537,17 @@ async function loadHandoffContext(
   // send. (Codex audit 2026-06-17 [high]: public relay must not fail open.)
   // Escape LIKE wildcards — `_`/`%` are valid in an email local-part.
   const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
+  // The workspace's own opt-outs and the global ones (lib/email/suppression-scope.ts).
+  let suppScope: string;
+  try {
+    suppScope = suppressionScope(form.tenant_id);
+  } catch {
+    return null;
+  }
   const supp = await db
     .from("email_suppressions")
     .select("email")
-    .eq("tenant_id", form.tenant_id)
+    .or(suppScope)
     .ilike("email", suppPattern)
     .limit(1);
   if (supp.error) {

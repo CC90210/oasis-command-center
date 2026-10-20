@@ -13,6 +13,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "./supabase-server";
+import { suppressionScope } from "./email/suppression-scope";
 import {
   groupRowsIntoThreads,
   distinctLeadIds,
@@ -133,7 +134,7 @@ export async function checkEmailSuppressed(
     const r = await getServiceSupabase()
       .from("email_suppressions")
       .select("email")
-      .eq("tenant_id", tenantId)
+      .or(suppressionScope(tenantId))
       .ilike("email", pattern)
       .limit(1);
     if (r.error) {

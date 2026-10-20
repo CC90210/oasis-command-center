@@ -15,6 +15,12 @@
  *      truncated to 16 hex chars. Without the secret, opt-out is
  *      email-only (matches the URL format casl_compliance.py emits today;
  *      tokens become enforced once email_template.py starts signing them).
+ *      Unsigned links stay accepted on purpose: every email already sent
+ *      carries one, and an opt-out link has to keep working after the send
+ *      (CASL: at least 60 days), so refusing them would stop real people
+ *      unsubscribing. The worst an unsigned link allows is unsubscribing
+ *      someone else, which over-suppresses (the safe direction), bounded by
+ *      the IP rate limit below.
  *   3. Brand → tenant resolution: we lookup the tenant by brand string
  *      from `tenants.custom_fields.brand` so suppressions are properly
  *      tenant-scoped per CASL s. 6 (per-sender rule). OASIS's support-mail
@@ -65,25 +71,33 @@ function verifyToken(email: string, brand: string, token: string): boolean {
 }
 
 /**
- * Resolve a tenant_id by brand string. Looks at tenants.custom_fields.brand
- * first, falling back to tenants.name. Returns null when no tenant matches
- * (we still record the suppression with tenant_id=NULL — a "global"
- * suppression — so the recipient is at minimum protected even if our brand
- * mapping is incomplete).
+ * Resolve a tenant_id by brand string: a workspace whose name, or whose
+ * custom_fields.brand, equals the brand (case-insensitive). Returns null when
+ * no workspace, or more than one, matches. The opt-out is then recorded with
+ * tenant_id=NULL, a "global" suppression that every sender also honours
+ * (lib/email/suppression-scope.ts), so the recipient is protected even when the
+ * brand cannot be tied to one sender.
+ *
+ * The brand comes from the opt-out link, so it is matched as a value, never
+ * pasted into a filter expression. Before (2026-10-19 audit) it was spliced
+ * into `.or("name.ilike.<brand>,...")`: a comma ("Acme, Inc.") broke the
+ * expression and the opt-out failed with a 500, recording nothing; "_" and
+ * "%" matched other workspaces' names; and `.limit(1)` filed a name several
+ * workspaces share under whichever came first.
  */
 async function resolveTenantId(brand: string): Promise<string | null> {
   if (!brand) return null;
   const pinned = pinnedSuppressionTenant(brand);
   if (pinned) return pinned;
   const db = getServiceSupabase();
-  // Use Supabase's PostgREST ilike for case-insensitive matching.
-  const { data, error } = await db
-    .from("tenants")
-    .select("id, name, custom_fields")
-    .or(`name.ilike.${brand},custom_fields->>brand.ilike.${brand}`)
-    .limit(1);
-  if (error || !data || data.length === 0) return null;
-  return (data[0] as { id: string }).id || null;
+  const exact = brand.toLowerCase().replace(/[%_\\]/g, "\\$&");
+  const ids = new Set<string>();
+  for (const column of ["name", "custom_fields->>brand"]) {
+    const { data, error } = await db.from("tenants").select("id").ilike(column, exact).limit(5);
+    if (error) throw new Error(`brand lookup failed: ${error.message}`);
+    for (const row of data ?? []) ids.add(String((row as { id: string }).id));
+  }
+  return ids.size === 1 ? [...ids][0] : null;
 }
 
 export async function POST(req: NextRequest) {
@@ -139,8 +153,18 @@ export async function POST(req: NextRequest) {
     return bad(401, "invalid_token");
   }
 
-  // ---- Resolve brand → tenant_id (null when unknown brand) ----
-  const tenantId = await resolveTenantId(rawBrand);
+  // ---- Resolve brand → tenant_id (null when unknown or shared) ----
+  // A failed lookup must not lose the opt-out: record it globally instead,
+  // which every sender honours. Over-suppressing is the safe direction.
+  let tenantId: string | null;
+  try {
+    tenantId = await resolveTenantId(rawBrand);
+  } catch (err) {
+    console.error("[unsubscribe] brand lookup failed; recording the opt-out globally", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    tenantId = null;
+  }
 
   // ---- UPSERT into email_suppressions ----
   const db = getServiceSupabase();
