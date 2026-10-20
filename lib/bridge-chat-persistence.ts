@@ -26,6 +26,13 @@
  * survives a client disconnect that skips TransformStream.flush()), with flush
  * as an idempotent fallback for the normal-close path.
  *
+ * THE REPLY WRITE MUST BE HELD ALIVE (bridge chat saved no replies; 2026-10-20
+ * audit): production held 3 bridge user turns and ZERO assistant turns, so the
+ * "Previous chats" drawer showed questions with no answers. The user message
+ * survived because it is written up front, while the request is still
+ * streaming; the reply is written as the response ends, and that write was
+ * abandoned. persistAssistant() below says why, and how it is kept alive now.
+ *
  * Failure isolation: every DB op soft-fails (logs, never throws) — a
  * persistence hiccup must never break the live chat relay, and the byte stream
  * is passed through UNCHANGED (we only observe a decoded copy).
@@ -37,6 +44,7 @@ import {
   persistAssistantTurn,
   fetchTenantVaultSecretsForRedaction,
 } from "./chat-persistence";
+import { keepAlive } from "./os/runs/keepalive";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -56,6 +64,38 @@ export type BridgePersistCtx = {
 };
 
 /**
+ * The longest flush() waits for the reply write before the response ends anyway.
+ * It stops the wait, not the write: persistAssistant() handed the write to
+ * keepAlive, so past the cap it carries on under ctx.waitUntil. Without a cap, a
+ * database that never answers would hold a finished reply's stream open until the
+ * widget's own inactivity timeout (10 minutes, SSE_INACTIVITY_TIMEOUT_MS in
+ * components/ChatWidget.tsx). A normal write is a few database round trips.
+ */
+export const REPLY_WRITE_CAP_MS = 8_000;
+
+export type BridgePersistOptions = {
+  /** How long flush() waits for the reply write: REPLY_WRITE_CAP_MS unless a test shortens it. */
+  replyWriteCapMs?: number;
+};
+
+/**
+ * "written" once `write` settles, or "capped" once `ms` have passed first. The
+ * write is not cancelled, only the wait ends. The timer never outlives the race,
+ * so no handle keeps a request alive past its response.
+ */
+async function waitForWrite(write: Promise<void>, ms: number): Promise<"written" | "capped"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const capped = new Promise<"capped">((resolve) => {
+    timer = setTimeout(() => resolve("capped"), ms);
+  });
+  try {
+    return await Promise.race([write.then(() => "written" as const), capped]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Wrap the upstream SSE body so bytes pass through to the client UNCHANGED
  * while we observe a decoded copy and persist the turn. Returns the stream to
  * hand straight to the Response.
@@ -63,12 +103,15 @@ export type BridgePersistCtx = {
 export function teeBridgeChatPersistence(
   upstreamBody: ReadableStream<Uint8Array>,
   ctx: BridgePersistCtx,
+  options: BridgePersistOptions = {},
 ): ReadableStream<Uint8Array> {
+  const replyWriteCapMs = options.replyWriteCapMs ?? REPLY_WRITE_CAP_MS;
   const decoder = new TextDecoder();
   let buf = "";
   let assistant = "";
   let errorMsg: string | null = null;
-  let persisted = false;
+  // The assistant write, once started: the thing every later call gets back.
+  let persistence: Promise<void> | null = null;
   const valid = UUID_RE.test(ctx.conversationId);
 
   // Create the session row + write this turn's user message UP FRONT — we
@@ -111,13 +154,9 @@ export function teeBridgeChatPersistence(
     }
   }
 
-  // Persist the assistant turn exactly once. Called on the terminal `done`/
-  // `error` frame (so it runs even when a client disconnect skips flush()) and
-  // again from flush() (normal close) — the `persisted` latch makes it
-  // idempotent so there's no double-write.
-  async function persistAssistant(): Promise<void> {
-    if (persisted || !valid) return;
-    persisted = true;
+  // The assistant write itself. Soft-fails like every other DB op here (logs,
+  // never throws), so the promise it returns always resolves.
+  async function writeAssistantTurn(): Promise<void> {
     try {
       await ensurePromise;
       const vaultSecrets = await fetchTenantVaultSecretsForRedaction(
@@ -145,6 +184,28 @@ export function teeBridgeChatPersistence(
     }
   }
 
+  // Persist the assistant turn exactly once, and keep that write alive.
+  //
+  // Called on the terminal `done`/`error` frame (so it runs even when a client
+  // disconnect skips flush()) and again from flush() (normal close). The FIRST
+  // call starts the write and keeps its promise; every later call gets that same
+  // promise back, so there is no double-write and flush() has something to wait
+  // for. A boolean latch made later calls return at once: flush() then ended the
+  // response while the write was still in flight, and on Cloudflare Workers a
+  // promise nobody awaits and nobody gave to ctx.waitUntil is cancelled when the
+  // response ends, so no reply was ever saved (bridge chat saved no replies;
+  // 2026-10-20 audit).
+  //
+  // keepAlive hands the promise to ctx.waitUntil (after() as the fallback). It
+  // never throws, and the write already logs its own failures.
+  function persistAssistant(): Promise<void> {
+    if (!valid) return Promise.resolve();
+    if (persistence) return persistence;
+    persistence = writeAssistantTurn();
+    void keepAlive(persistence, "bridge-chat-persistence.persist");
+    return persistence;
+  }
+
   function handleFrame(block: string): void {
     let event = "message";
     let data = "";
@@ -154,7 +215,8 @@ export function teeBridgeChatPersistence(
     }
     // Terminal frame — persist now (the full assistant text has already
     // streamed) so the turn survives even if the client disconnects before
-    // flush() would run.
+    // flush() would run. persistAssistant() also hands the write to the
+    // platform, which is what keeps it alive once the response is gone.
     if (event === "done") {
       void persistAssistant();
       return;
@@ -195,8 +257,16 @@ export function teeBridgeChatPersistence(
       }
     },
     async flush() {
-      // Normal-close fallback (idempotent with the terminal-frame persist).
-      await persistAssistant();
+      // Normal close: wait for the write the terminal frame started (the SAME
+      // promise, never a second write), so the response ends only once the reply
+      // has landed, for at most replyWriteCapMs. With no terminal frame, this is
+      // what starts the write.
+      if ((await waitForWrite(persistAssistant(), replyWriteCapMs)) === "capped") {
+        console.error(
+          "[bridge-chat-persistence.flush-cap]",
+          `the reply write was still running after ${replyWriteCapMs} ms; the response ends without waiting for it (conversation ${ctx.conversationId})`,
+        );
+      }
     },
   });
 
