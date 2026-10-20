@@ -11,7 +11,9 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { clipAndEscape, fitTelegramHtml, TELEGRAM_TEXT_MAX } from "../lib/notify/telegram-format";
+import { repoRelative, sourceTree } from "./_tree";
 
 let failures = 0;
 async function check(name: string, fn: () => void | Promise<void>): Promise<void> {
@@ -126,25 +128,14 @@ async function main(): Promise<void> {
     // Every value goes through clipAndEscape (whole characters). A guard, not
     // a style rule: a cut by code units can leave half an emoji, which
     // Telegram refuses, losing the alert.
-    const { readdirSync, readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const root = join(__dirname, "..");
     const offenders: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
-        const rel = `${dir}/${entry.name}`;
-        if (entry.isDirectory()) walk(rel);
-        else if (/\.(ts|tsx)$/.test(entry.name)) {
-          const src = readFileSync(join(root, rel), "utf8");
-          if (!src.includes("escapeTelegramHtml")) continue;
-          src.split("\n").forEach((line, i) => {
-            if (/\be\([^\n]*\.slice\(0,\s*\d+\)|escapeTelegramHtml\([^\n]*\.slice\(0,\s*\d+\)/.test(line)) offenders.push(`${rel}:${i + 1}`);
-          });
-        }
-      }
-    };
-    walk("app");
-    walk("lib");
+    for (const file of sourceTree("app", "lib")) {
+      const src = readFileSync(file, "utf8");
+      if (!src.includes("escapeTelegramHtml")) continue;
+      src.split("\n").forEach((line, i) => {
+        if (/\be\([^\n]*\.slice\(0,\s*\d+\)|escapeTelegramHtml\([^\n]*\.slice\(0,\s*\d+\)/.test(line)) offenders.push(`${repoRelative(file)}:${i + 1}`);
+      });
+    }
     assert.deepEqual(offenders, [], "use clipAndEscape(value, max)");
   });
 
