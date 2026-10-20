@@ -21,13 +21,14 @@
  * HMAC: click targets are signed with OASIS_UNSUBSCRIBE_HMAC_SECRET (reused —
  * same secret the /api/unsubscribe token uses). A validly-signed target is
  * trusted for redirect; unsigned/foreign targets fall back to a host allowlist
- * in the click route (fail-closed). Unsubscribe tokens match the exact scheme
- * /api/unsubscribe/route.ts verifies: HMAC-SHA256(email|brand) sliced to 16 hex.
+ * in the click route (fail-closed). Unsubscribe tokens come from the one
+ * function /api/unsubscribe/route.ts verifies with (./unsubscribe-signing.ts).
  */
 
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { resolveTrackingBase } from "./tracking-base";
+import { unsubscribeToken } from "./unsubscribe-signing";
 import { unsubscribeMailto } from "./sending-identity";
 import { brandFooter } from "./brand-shell";
 import type { BrandKey } from "./brands";
@@ -182,10 +183,7 @@ function unsubQuery(email: string, brand: string): string {
   const lower = email.trim().toLowerCase();
   const secret = process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET;
   const qs = new URLSearchParams({ email: lower, brand });
-  if (secret) {
-    const token = createHmac("sha256", secret).update(`${lower}|${brand}`).digest("hex").slice(0, 16);
-    qs.set("token", token);
-  }
+  if (secret) qs.set("token", unsubscribeToken(lower, brand, secret));
   return qs.toString();
 }
 

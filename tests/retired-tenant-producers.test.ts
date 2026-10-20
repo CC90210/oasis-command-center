@@ -302,7 +302,7 @@ async function main() {
     assert.match(route, /runHealthChecks\(WEBDEV_TENANT_ID, \{\s*notify,\s*checks: ESTATE_WIDE_CHECKS,/);
     assert.deepEqual(
       ESTATE_WIDE_CHECKS.map((c) => c.id).sort(),
-      ["alerting.delivery_failures", "deploy.prod_serves_main", "forms.submit_failures_open"],
+      ["alerting.delivery_failures", "deploy.prod_serves_main", "forms.submit_failures_open", "optouts.global_web_filings_hourly"],
       "estate-wide checks must be exactly the ones that ignore the tenant they run under",
     );
   });

@@ -17,8 +17,8 @@
  * checkSuppression (lib/email/suppression-scope.ts): the workspace's own rows
  * plus the global ones, the address matched literally, failing closed. An
  * unsigned link can opt out anyone and a global row stops every sender, so
- * unsigned filings are capped per IP per hour; a token that does not match is
- * refused.
+ * unsigned filings are capped per address bucket per hour; a token that does
+ * not match is filed as unsigned, never refused.
  *
  * Runs the REAL route, checkEmailSuppressed and checkSuppression against a
  * local libSQL file through the real Turso adapter, with the production
@@ -131,6 +131,26 @@ async function main() {
       console.error = error;
     }
   };
+  /** Run `fn`, keeping what it logged as warnings and errors. */
+  const logged = async <T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> => {
+    const lines: string[] = [];
+    const [warn, error] = [console.warn, console.error];
+    console.warn = (...args: unknown[]) => void lines.push(JSON.stringify(args));
+    console.error = (...args: unknown[]) => void lines.push(JSON.stringify(args));
+    try {
+      return { result: await fn(), lines };
+    } finally {
+      console.warn = warn;
+      console.error = error;
+    }
+  };
+  /** Every .ts/.tsx file under `dir`. */
+  const walk = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) return walk(path);
+      return /\.tsx?$/.test(name) ? [path] : [];
+    });
 
   console.log("unsubscribe-records-every-opt-out:");
 
@@ -252,10 +272,83 @@ async function main() {
   });
 
   const SECRET = "unsubscribe-test-secret-0123456789";
+  // The scheme, written out once here independently of the code, so a change
+  // to the shared function cannot pass unnoticed.
   const sign = (email: string, brand: string) => createHmac("sha256", SECRET).update(`${email}|${brand}`).digest("hex").slice(0, 16);
   /** Filings capped under an address bucket: the cap's own rows in pair_attempts. */
   const capRows = async (bucket: string) =>
     Number((await db.execute({ sql: "SELECT count(*) AS n FROM pair_attempts WHERE profile_id = ?", args: [`unsubscribe-unsigned:${bucket}`] })).rows[0].n);
+
+  await check("the link builder and the route sign with one function: a link we build is accepted as signed", async () => {
+    const { unsubscribeToken } = await import("../lib/email/unsubscribe-signing");
+    const { unsubscribeUrl } = await import("../lib/email/tracked-html");
+    assert.equal(unsubscribeToken("Round.Trip@Example.com ", "SunBiz", SECRET), sign("round.trip@example.com", "SunBiz"), "HMAC-SHA256(lowercased email|brand), 16 hex");
+    process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET = SECRET;
+    try {
+      const link = new URL(unsubscribeUrl("Round.Trip@Example.com", "Nobody We Know", "https://oasisai.work"));
+      const token = link.searchParams.get("token") ?? "";
+      assert.equal(token.length, 16, "the link carries a token");
+      const r = await quietly(() => optOut(link.searchParams.get("email") ?? "", link.searchParams.get("brand") ?? "", { ip: "198.51.100.9", token }));
+      assert.equal(r.status, 200);
+      assert.equal(await capRows("198.51.100.9"), 0, "accepted as signed: no place taken in the cap");
+    } finally {
+      delete process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET;
+    }
+    for (const rel of ["lib/email/tracked-html.ts", "app/api/unsubscribe/route.ts"]) {
+      assert.ok(!/createHmac\([^)]*\)\s*\.update\(`\$\{[^}]+\}\|\$\{/.test(readFileSync(join(__dirname, "..", rel), "utf8")), `${rel} signs through unsubscribeToken, not its own copy`);
+    }
+  });
+
+  await check("a brand or a token of any length is accepted: a long brand is cut for storage, a long token is simply unsigned", async () => {
+    const longBrand = "B".repeat(200);
+    const brandRun = await quietly(() => optOut("long-brand@example.com", longBrand));
+    assert.equal(brandRun.status, 200, "a 200-character brand is not a refused opt-out");
+    assert.deepEqual(brandRun.rows, [{ tenant_id: null, brand: longBrand.slice(0, 120) }]);
+    const tokenRun = await quietly(() => optOut("long-token@example.com", "Nobody We Know", { ip: "198.51.100.10", token: "f".repeat(100) }));
+    assert.equal(tokenRun.status, 200, "a 100-character token is not a refused opt-out");
+    assert.equal(tokenRun.rows.length, 1);
+    assert.equal(await capRows("198.51.100.10"), 1, "filed as unsigned");
+    assert.equal((await quietly(() => optOut("not-an-address", "Nobody We Know"))).status, 400, "an address still has to be one");
+  });
+
+  await check("a write that fails answers db_error and keeps the database's words in the log", async () => {
+    await db.execute(`CREATE TRIGGER refuse_optout BEFORE INSERT ON email_suppressions BEGIN SELECT RAISE(ABORT, 'es_internal_words_xyz'); END`);
+    let status = 0;
+    let body = "";
+    let lines: string[] = [];
+    try {
+      const run = await logged(async () => {
+        const res = await POST(
+          new NextRequest("https://oasisai.work/api/unsubscribe", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-forwarded-for": randomIp() },
+            body: JSON.stringify({ email: "write-fails@example.com", brand: "Nobody We Know" }),
+          }),
+        );
+        return { status: res.status, body: await res.text() };
+      });
+      ({ status, body } = run.result);
+      lines = run.lines;
+    } finally {
+      await db.execute("DROP TRIGGER refuse_optout");
+    }
+    assert.equal(status, 500);
+    assert.deepEqual(JSON.parse(body), { ok: false, error: "db_error" });
+    assert.ok(lines.some((l) => l.includes("opt-out write failed") && l.includes("es_internal_words_xyz")), "the log has the database's words");
+  });
+
+  await check("the limiter fails open: with its table gone a filing is still recorded, and the failure is logged", async () => {
+    await db.execute("ALTER TABLE pair_attempts RENAME TO pair_attempts_offline");
+    let run: { result: Awaited<ReturnType<typeof optOut>>; lines: string[] };
+    try {
+      run = await logged(() => optOut("limiter-down@example.com", "Nobody We Know"));
+    } finally {
+      await db.execute("ALTER TABLE pair_attempts_offline RENAME TO pair_attempts");
+    }
+    assert.equal(run.result.status, 200, "a broken limiter must not refuse a real opt-out");
+    assert.equal(run.result.rows.length, 1);
+    assert.ok(run.lines.some((l) => l.includes("[pair-rate-limit]")), "a limiter that cannot count is visible");
+  });
 
   await check("with the signing secret set: no token and a wrong token are both filed as unsigned (counted against the cap); only the right one is signed", async () => {
     process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET = SECRET;
@@ -289,7 +382,7 @@ async function main() {
 
   await check("unsigned filings are capped at 30 per address per hour, even in a parallel burst; another address, and a signed link, still get through", async () => {
     const ip = "203.0.113.7";
-    await quietly(async () => {
+    const { lines } = await logged(async () => {
       const burst = await Promise.all(
         Array.from({ length: 45 }, (_, i) => optOut(`flood${i}@example.com`, "Nobody We Know", { ip })),
       );
@@ -298,6 +391,12 @@ async function main() {
       assert.equal(statuses.filter((s) => s === 429).length, 15);
       const filed = await db.execute({ sql: "SELECT count(*) AS n FROM email_suppressions WHERE email LIKE 'flood%@example.com'", args: [] });
       assert.equal(Number(filed.rows[0].n), 30, "a capped filing records nothing");
+      // One row per attempt, the cap's own: a trip writes no second row, and
+      // the route keeps no separate failure counter (reviewer of #711, items
+      // 24 and 33).
+      assert.equal(await capRows(ip), 45);
+      const extra = await db.execute("SELECT count(*) AS n FROM pair_attempts WHERE profile_id LIKE 'unsubscribe:%'");
+      assert.equal(Number(extra.rows[0].n), 0);
       assert.equal((await optOut("other-ip@example.com", "Nobody We Know", { ip: "203.0.113.8" })).status, 200);
       process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET = SECRET;
       try {
@@ -308,6 +407,7 @@ async function main() {
         delete process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET;
       }
     });
+    assert.ok(lines.some((l) => l.includes("unsigned opt-out cap reached")), "a trip is logged");
   });
 
   await check("an IPv6 client is capped by its /64, so rotating addresses inside it does not get around the cap", async () => {
@@ -359,6 +459,28 @@ async function main() {
     assert.match(notify, /deps\.email\(\{ to, cc, subject, body, idempotencyKey: key, internalAlert: true \}\)/, "the desk's founder alerts set it");
   });
 
+  await check("an estate-wide health check pages OASIS when global web opt-outs pass the hourly ceiling", async () => {
+    // The cap bounds one address bucket; a /48 holds 65,536 of them. An alarm,
+    // never a refusal (reviewer of #711, item 25).
+    const { OPTOUT_CHECKS, GLOBAL_WEB_OPTOUTS_PER_HOUR_CEILING } = await import("../lib/health/optout-checks");
+    const { ESTATE_WIDE_CHECKS } = await import("../lib/health/runner");
+    const surge = OPTOUT_CHECKS[0];
+    assert.ok(ESTATE_WIDE_CHECKS.some((c) => c.id === surge.id), "it runs in the estate-wide pass");
+    assert.deepEqual(surge.rule, { kind: "must_be_below", ceiling: GLOBAL_WEB_OPTOUTS_PER_HOUR_CEILING });
+    assert.equal(surge.lane, "operator");
+    const filed = Number((await db.execute("SELECT count(*) AS n FROM email_suppressions WHERE tenant_id IS NULL AND source = 'web_form'")).rows[0].n);
+    assert.ok(filed > GLOBAL_WEB_OPTOUTS_PER_HOUR_CEILING, `this test's own burst is past the ceiling (${filed})`);
+    const service = getServiceSupabase();
+    assert.equal(await surge.observe(service, "any workspace", Date.now() + 1000), filed, "every global web filing of the last hour, whichever workspace the run is under");
+    assert.equal(await surge.observe(service, "any workspace", Date.now() + 2 * 3_600_000), 0, "two hours on, the window has moved past them");
+    await db.execute("ALTER TABLE email_suppressions RENAME TO email_suppressions_offline");
+    try {
+      assert.equal(await surge.observe(service, "any workspace", Date.now()), null, "a failed read is check_broken, never zero");
+    } finally {
+      await db.execute("ALTER TABLE email_suppressions_offline RENAME TO email_suppressions");
+    }
+  });
+
   await check("every file that touches the opt-out table is a known reader or writer, and every sender reads through checkSuppression", async () => {
     const root = join(__dirname, "..");
     // Every file under lib/ and app/ whose CODE touches the table, in the
@@ -369,24 +491,22 @@ async function main() {
     const known: Record<string, "reader" | "writer"> = {
       "lib/email/suppression-scope.ts": "reader", // the lookup every sender calls
       "lib/metrics/index.ts": "reader", // counts a workspace's opt-outs for its dashboard; never decides a send
+      "lib/health/optout-checks.ts": "reader", // counts global web filings for the surge alarm; never decides a send
       "app/api/unsubscribe/route.ts": "writer",
       "app/api/cron/collect-cc-metrics/route.ts": "writer", // Constant Contact opt-outs
       "app/api/integrations/smartlead/webhook/route.ts": "writer",
       "lib/delivery/email-intake.ts": "writer", // an inbound STOP; its SELECT only dedupes the insert
     };
-    const walk = (dir: string): string[] =>
-      readdirSync(dir).flatMap((name) => {
-        const path = join(dir, name);
-        if (statSync(path).isDirectory()) return walk(path);
-        return /\.tsx?$/.test(name) ? [path] : [];
-      });
     const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
     const touches: string[] = [];
     const builderReaders: string[] = [];
     for (const path of [...walk(join(root, "lib")), ...walk(join(root, "app"))]) {
       const code = stripComments(readFileSync(path, "utf8"));
       const rel = relative(root, path).replace(/\\/g, "/");
-      if (/\.from\(\s*["'`]email_suppressions["'`]\s*\)|\b(?:from|into|update|join)\s+["'`]?email_suppressions\b/i.test(code)) touches.push(rel);
+      // The table's name as a string anywhere in the code, too: a name held in
+      // a constant and passed to .from() later was not seen (reviewer of #711,
+      // item 27).
+      if (/\.from\(\s*["'`]email_suppressions["'`]\s*\)|\b(?:from|into|update|join)\s+["'`]?email_suppressions\b|["'`]email_suppressions["'`]/i.test(code)) touches.push(rel);
       for (const m of code.matchAll(/\.from\(\s*["'`]email_suppressions["'`]\s*\)/g)) {
         const statement = code.slice(m.index, code.indexOf(";", m.index));
         if (/\.select\(/.test(statement)) builderReaders.push(rel);
@@ -412,14 +532,12 @@ async function main() {
       "OASIS_SUPPRESSION_BRAND", // pinned to OASIS's own workspace
       "SUNBIZ_BRAND", // SunBiz is retired: its opt-outs file globally
       '"SunBiz"',
-      "brand", // tracked-html's own wrappers passing their parameter through
+      '""', // no brand, knowingly global: the templates gallery (app/api/templates/send)
     ]);
-    const walk = (dir: string): string[] =>
-      readdirSync(dir).flatMap((name) => {
-        const path = join(dir, name);
-        if (statSync(path).isDirectory()) return walk(path);
-        return /\.tsx?$/.test(name) ? [path] : [];
-      });
+    // tracked-html's own wrappers pass their `brand` parameter through. Only
+    // there: anywhere else, an identifier that happens to be named `brand`
+    // would wave through a brand nobody decided (reviewer of #711, item 27).
+    const isPassthrough = (rel: string, brand: string) => brand === "brand" && rel === "lib/email/tracked-html.ts";
     const seen: string[] = [];
     const undecided: string[] = [];
     for (const path of [...walk(join(root, "lib")), ...walk(join(root, "app"))]) {
@@ -433,11 +551,30 @@ async function main() {
         if (/function\s+$/.test(code.slice(Math.max(0, (m.index ?? 0) - 12), m.index))) continue; // a definition, not a call
         const brand = m[1].trim();
         seen.push(`${rel}: ${brand}`);
-        if (!decided.has(brand)) undecided.push(`${rel}: ${brand}`);
+        if (!decided.has(brand) && !isPassthrough(rel, brand)) undecided.push(`${rel}: ${brand}`);
       }
     }
     assert.ok(seen.length >= 6, `the scan found the senders' links (${seen.length}): ${seen.join("; ")}`);
     assert.deepEqual(undecided, [], "decide where these brands' opt-outs file: pin the brand, or add it here as knowingly global");
+  });
+
+  await check("no link a person clicks points at the API: a click is a GET, and /api/unsubscribe answers only POST", async () => {
+    // The templates gallery's {{unsubscribe_url}} was /api/unsubscribe?email=...:
+    // every click answered 405 and opted nobody out (2026-10-20). The page
+    // (unsubscribeUrl) confirms and posts; the API URL is only the RFC 8058
+    // one-click target, which mail clients POST (unsubscribeApiUrl).
+    const root = join(__dirname, "..");
+    const route = await import("../app/api/unsubscribe/route");
+    assert.equal(typeof (route as Record<string, unknown>).GET, "undefined", "if the API ever answers GET, revisit this check");
+    const builders: string[] = [];
+    for (const path of [...walk(join(root, "lib")), ...walk(join(root, "app"))]) {
+      const rel = relative(root, path).replace(/\\/g, "/");
+      if (rel === "lib/email/tracked-html.ts") continue; // unsubscribeApiUrl, the one-click POST target
+      const code = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+      if (/\/api\/unsubscribe\?/.test(code)) builders.push(rel);
+    }
+    assert.deepEqual(builders, [], "build a clickable opt-out link with unsubscribeUrl (lib/email/tracked-html.ts)");
+    assert.match(readFileSync(join(root, "app/api/templates/send/route.ts"), "utf8"), /const realUnsubscribe = unsubscribeUrl\(toEmail, "", new URL\(req\.url\)\.origin\);/);
   });
 
   if (failures > 0) {

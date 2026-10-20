@@ -9,7 +9,9 @@
  * conflicts as success).
  *
  * Defense layers:
- *   1. JSON shape validation (email format, length caps).
+ *   1. The email's shape. A brand or a token of any length is accepted: a
+ *      long brand is cut for storage, and a token of the wrong length simply
+ *      does not match (layer 2). Refusing either lost a real opt-out.
  *   2. The link's token. When OASIS_UNSUBSCRIBE_HMAC_SECRET is set, links are
  *      signed with HMAC-SHA256(email|brand), 16 hex chars
  *      (lib/email/tracked-html.ts). Only a matching token makes a filing
@@ -29,15 +31,19 @@
  *      can take any name, so a name match could file a real opt-out where its
  *      sender never looks (2026-10-19 audit). SunBiz, the only other brand a
  *      live link has carried, is retired, so its opt-outs file globally too.
- *   4. Rate limits by IP. Failures count toward the pair-code limiter
- *      (anti-enumeration). An unsigned link can opt out anyone, and a
- *      global row stops every sender, so unsigned filings are also capped at
+ *   4. A cap by address. An unsigned link can opt out anyone, and a global
+ *      row stops every sender, so unsigned filings are capped at
  *      UNSIGNED_FILINGS_PER_IP_PER_HOUR per address bucket (an IPv6 /64,
  *      lib/pair-rate-limit.ts ipRateBucket). Each filing takes its place in
  *      line before it counts (claimCappedSlot), so a parallel burst cannot
  *      all slip under. Real volume is a handful of web opt-outs a month, and
  *      mail providers send one-click opt-outs from shared addresses; a signed
  *      link is never capped. A trip and each global filing are logged.
+ *      The failure limiter this route used to share with pair-code redemption
+ *      is gone (reviewer of #711, items 24 and 33). It guarded against
+ *      guessing tokens, and a wrong token now answers exactly like none; what
+ *      it still counted was a malformed request (which writes nothing) and
+ *      our own write errors, and each trip of the cap wrote a second row.
  *
  * Returns 200 on success (or already-suppressed). Never reveals whether
  * an email exists in our CRM — same response shape for any input that
@@ -46,18 +52,21 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createHmac, timingSafeEqual } from "crypto";
+import { timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp } from "@/lib/api-helpers";
-import { claimCappedSlot, ipRateBucket, isRateLimited, recordPairAttempt } from "@/lib/pair-rate-limit";
+import { claimCappedSlot, ipRateBucket } from "@/lib/pair-rate-limit";
 import { pinnedSuppressionTenant } from "@/lib/email/support-mailbox";
+import { unsubscribeToken } from "@/lib/email/unsubscribe-signing";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_EMAIL_LEN = 254;
-const MAX_BRAND_LEN = 80;
-const MAX_TOKEN_LEN = 64;
+/** A brand is stored up to this length: a workspace's name can be 120
+ *  characters (lib/provisioning/workspace-name.ts). A longer one is cut for
+ *  storage, never refused (reviewer of #711, item 26). */
+const MAX_STORED_BRAND_LEN = 120;
 // Standard email regex — lightweight; we don't enforce deliverability
 // here, only shape sanity. The CRM has already verified the address
 // itself when the email was sent.
@@ -76,10 +85,8 @@ const UNSIGNED_FILINGS_PER_IP_PER_HOUR = 30;
 function tokenStatus(email: string, brand: string, token: string): "signed" | "unsigned" | "invalid" {
   const secret = process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET;
   if (!secret || !token) return "unsigned";
-  const expected = createHmac("sha256", secret)
-    .update(`${email}|${brand}`)
-    .digest("hex")
-    .slice(0, 16);
+  // The same function the link builder signs with (lib/email/unsubscribe-signing.ts).
+  const expected = unsubscribeToken(email, brand, secret);
   // timingSafeEqual requires equal-length buffers; bail early on length mismatch.
   if (token.length !== expected.length) return "invalid";
   try {
@@ -90,13 +97,7 @@ function tokenStatus(email: string, brand: string, token: string): "signed" | "u
 }
 
 export async function POST(req: NextRequest) {
-  // ---- Rate-limit by IP (reuses the pair-code limiter for consistency) ----
   const ip = getClientIp(req);
-  const rateKey = `unsubscribe:${ip || "unknown"}`;
-  if (await isRateLimited(rateKey)) {
-    await recordPairAttempt(rateKey, "rate_limited", ip);
-    return bad(429, "rate_limited: too many opt-out attempts; back off and retry");
-  }
 
   // ---- Read the identity from EITHER the query string (RFC 8058 one-click:
   // the mail client POSTs to the List-Unsubscribe URL with email/brand/token in
@@ -121,17 +122,12 @@ export async function POST(req: NextRequest) {
   const rawToken = String(src.token ?? "").trim();
 
   if (!rawEmail || rawEmail.length > MAX_EMAIL_LEN || !EMAIL_RE.test(rawEmail)) {
-    await recordPairAttempt(rateKey, "code_invalid_shape", ip);
     return bad(400, "invalid_email");
   }
-  if (rawBrand.length > MAX_BRAND_LEN) {
-    await recordPairAttempt(rateKey, "code_invalid_shape", ip);
-    return bad(400, "invalid_brand");
-  }
-  if (rawToken.length > MAX_TOKEN_LEN) {
-    await recordPairAttempt(rateKey, "code_invalid_shape", ip);
-    return bad(400, "invalid_token");
-  }
+  // A brand or token of any length is accepted (reviewer of #711, item 26): a
+  // refused opt-out is a lost one, for the same reason a token that does not
+  // match is accepted below. A token of the wrong length simply does not
+  // match; a long brand is cut for storage.
 
   // ---- The link's signature (layer 2) ----
   // A token that does not match counts as no token: capped and logged, never
@@ -148,7 +144,6 @@ export async function POST(req: NextRequest) {
   const bucket = ipRateBucket(ip);
   if (!signed && !(await claimCappedSlot(`unsubscribe-unsigned:${bucket}`, ip, 3600, UNSIGNED_FILINGS_PER_IP_PER_HOUR))) {
     console.warn("[unsubscribe] unsigned opt-out cap reached", { bucket, cap: UNSIGNED_FILINGS_PER_IP_PER_HOUR });
-    await recordPairAttempt(rateKey, "rate_limited", ip);
     return bad(429, "rate_limited: too many opt-out attempts; back off and retry");
   }
 
@@ -159,7 +154,7 @@ export async function POST(req: NextRequest) {
       {
         email: rawEmail,
         tenant_id: filedUnder,
-        brand: rawBrand || null,
+        brand: rawBrand ? rawBrand.slice(0, MAX_STORED_BRAND_LEN) : null,
         reason: "unsubscribe",
         source: "web_form",
         user_agent: req.headers.get("user-agent")?.slice(0, 500) ?? null,
@@ -178,15 +173,11 @@ export async function POST(req: NextRequest) {
   }
 
   if (error) {
-    // Map DB errors to the limiter's "code_redeem_failed" bucket — closest
-    // existing outcome for "we couldn't finish the write." The database's
-    // words stay in the log; an anonymous caller gets the code.
+    // The database's words stay in the log; an anonymous caller gets the code.
     console.error("[unsubscribe] opt-out write failed", { error: error.message });
-    await recordPairAttempt(rateKey, "code_redeem_failed", ip);
     return bad(500, "db_error");
   }
 
-  await recordPairAttempt(rateKey, "ok", ip);
   if (!filedUnder) {
     // A global row stops every sender, so each one is logged. Never the address.
     console.warn("[unsubscribe] opt-out filed for every sender", { brand: rawBrand || null, signed });

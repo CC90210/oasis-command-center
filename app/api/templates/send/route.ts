@@ -25,6 +25,7 @@ import { resolveSignerForOperator } from "@/lib/config/agents";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { COLD_OUTREACH_TEMPLATES } from "@/lib/cold-outreach/templates.generated";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
+import { unsubscribeUrl } from "@/lib/email/tracked-html";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -85,7 +86,12 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const realUnsubscribe = `${new URL(req.url).origin}/api/unsubscribe?email=${encodeURIComponent(toEmail)}`;
+  // The opt-out PAGE, not the API. A link in an email is opened with GET, and
+  // /api/unsubscribe answers only POST, so this link answered 405 and opted
+  // nobody out (2026-10-20, found while closing #711's follow-ups). The page
+  // confirms and posts. No brand: it files for every sender
+  // (lib/email/suppression-scope.ts), and the link is signed when signing is on.
+  const realUnsubscribe = unsubscribeUrl(toEmail, "", new URL(req.url).origin);
   const currentYear = String(new Date().getFullYear());
   const fill = (s: string) =>
     s.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, token) => {

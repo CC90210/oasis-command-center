@@ -213,6 +213,9 @@ export async function claimCappedSlot(
       console.error("[pair-rate-limit] could not record an attempt; allowing it", { rateKey, error: mine.error?.message });
       return true;
     }
+    // The same occasional prune recordPairAttempt runs: a caller that only
+    // claims slots (the opt-out route) would otherwise grow the table forever.
+    void _maybeRunGc(db);
     const myId = Number((mine.data as { id: unknown }).id);
     const since = new Date(Date.now() - windowSeconds * 1000).toISOString();
     const r = await db

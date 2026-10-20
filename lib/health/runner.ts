@@ -23,6 +23,7 @@ import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
 import { DRIP_CHECKS, runCheck, type DripCheck } from "./drip-checks";
 import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
+import { OPTOUT_CHECKS } from "./optout-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
 import { WORKER_REPORTER_CHECKS } from "./worker-reporter-checks";
@@ -74,6 +75,8 @@ const ESTATE_WIDE_FORM_CHECK_IDS: ReadonlySet<string> = new Set(["forms.submit_f
 export const ESTATE_WIDE_CHECKS: DripCheck[] = [
   ...DEPLOY_CHECKS,
   ...FORM_CHECKS.filter((c) => ESTATE_WIDE_FORM_CHECK_IDS.has(c.id)),
+  // A global opt-out has no workspace (lib/health/optout-checks.ts).
+  ...OPTOUT_CHECKS,
 ];
 
 

@@ -157,10 +157,10 @@ function mintCode(code: string, authUserId: string, tenantId: string = TENANT): 
   });
 }
 
-function redeemRequest(code: string, fingerprint: string): NextRequest {
+function redeemRequest(code: string, fingerprint: string, ip?: string): NextRequest {
   return new NextRequest("https://oasisai.work/api/auth/pair-code/redeem", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(ip ? { "x-forwarded-for": ip } : {}) },
     body: JSON.stringify({ code, machine: { label: "Test box", fingerprint } }),
   });
 }
@@ -299,6 +299,21 @@ async function main() {
     const c = await codeRow("AAA-AAA-005");
     assert.equal(c?.consumed_at, null, "the code was never marked used");
     assert.equal(c?.consumed_by_pairing_id, null);
+  });
+
+  await check("redemptions are capped at 10 a minute per address bucket, even in a parallel burst, and an IPv6 /64 is one bucket", async () => {
+    // Checked first and recorded after, 50 parallel guesses were all
+    // evaluated before the first failure landed (reviewer of OCC #711, item
+    // 32). Each one now takes its place in line first; the addresses rotate
+    // inside one /64, which used to make each a bucket of its own.
+    const burst = await Promise.all(
+      Array.from({ length: 15 }, (_, i) => POST(redeemRequest(`ZZZ-ZZZ-${String(i).padStart(3, "0")}`, `fp-burst-${i}`, `2001:db8:77:1::${(i + 1).toString(16)}`))),
+    );
+    const statuses = burst.map((r) => r.status);
+    assert.equal(statuses.filter((s) => s === 404).length, 10, `exactly 10 guesses are evaluated: ${statuses.join(",")}`);
+    assert.equal(statuses.filter((s) => s === 429).length, 5);
+    const other = await POST(redeemRequest("ZZZ-ZZZ-999", "fp-burst-other", "2001:db8:77:2::1"));
+    assert.equal(other.status, 404, "another /64 is evaluated");
   });
 
   if (failures) {
