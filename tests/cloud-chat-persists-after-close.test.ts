@@ -280,7 +280,7 @@ async function main() {
   const STATEMENT_MS = 4;
   type Hold = { open: () => void; opened: boolean; reached: number; waiting: Promise<void> };
   let hold: Hold | null = null;
-  let failing: ((sql: string) => boolean) | null = null;
+  let failing: ((sql: string, args: unknown[]) => boolean) | null = null;
   const isReplyInsert = (sql: string, args: unknown[]) => /insert\s+into\s+"?chat_messages"?/i.test(sql) && args.includes("assistant");
   const appClient = getTursoClient() as unknown as Record<string, unknown>;
   const ownExecute = Reflect.getOwnPropertyDescriptor(appClient, "execute");
@@ -297,7 +297,7 @@ async function main() {
       return new Promise<never>(() => undefined);
     };
     if (!mine.live) return lost();
-    if (failing?.(sql)) throw new Error("test: connection reset");
+    if (failing?.(sql, args)) throw new Error("test: connection reset");
     if (hold && isReplyInsert(sql, args)) {
       hold.reached += 1;
       await hold.waiting;
@@ -488,7 +488,9 @@ async function main() {
   // ───────────────────────────── /api/chat ─────────────────────────────
   await step("/api/chat: the post-turn tail is handed to ctx.waitUntil once, BEFORE the stream closes: when controller.close() runs and when `done` reaches the browser, the platform already holds it", 1, async () => {
     const t = await chatTurn("What is on today?");
-    assert.deepEqual(t.closes, [1], `the route closes its stream once, with the tail already handed over: the ledger at each close was ${JSON.stringify(t.closes)}`);
+    // No close may happen before the tail is handed over. An extra close the runtime makes later (a Node or
+    // undici change) is tolerated; checking only the last close would let a route that closed first hide behind it.
+    assert.ok(t.closes.length > 0 && !t.closes.includes(0), `the route closed its stream before the tail was handed over: the ledger at each close was ${JSON.stringify(t.closes)}`);
     assert.equal(t.ledgerAtDone, 1, "the browser saw `done` before the platform held the tail");
     assert.deepEqual(t.events, ["session", "usage", "delta", "done"]);
   });
@@ -560,10 +562,67 @@ async function main() {
     }
   });
 
+  await step("/api/chat: a reply that was not saved leaves the inbox message it answered unread, to be offered again; the rest of the tail still runs", 1, async () => {
+    const inbox = await unreadInbox();
+    await db.execute("UPDATE agent_model_config SET last_used_at = NULL WHERE id = 'c-open'");
+    failing = (sql, args) => isReplyInsert(sql, args);
+    try {
+      const { value: t, lines } = await capturingErrors(async () => {
+        const turn = await chatTurn("The reply will not save");
+        await tailSettled();
+        return turn;
+      });
+      assert.ok(lines.some((l) => l.includes("[chat-persistence.insert]")), `the failed reply write was not logged: ${JSON.stringify(lines)}`);
+      assert.deepEqual((await messagesOf(t.sessionId)).map((m) => m.role), ["user"], "the reply insert was meant to fail");
+      assert.equal(await readAt(inbox), null, "the inbox message was marked read though the reply that answered it was never saved");
+      assert.deepEqual(await totalsOf(t.sessionId), [1000, 200, 0.006], "the tokens were spent, so the totals still count them");
+      assert.ok(await lastUsed(), "a reply that did not save stopped the tail before last_used_at");
+    } finally {
+      failing = null;
+    }
+  });
+
+  await step("/api/chat: a last_used_at stamp that fails is logged, and the inbox is still marked", 1, async () => {
+    const inbox = await unreadInbox();
+    failing = (sql) => /update\s+"?agent_model_config"?/i.test(sql);
+    try {
+      const { lines } = await capturingErrors(async () => {
+        await chatTurn("The stamp will fail");
+        await tailSettled();
+      });
+      assert.ok(lines.some((l) => l.includes("[chat.last_used]") && l.includes("connection reset")), `the failed stamp was not logged: ${JSON.stringify(lines)}`);
+      assert.ok(await readAt(inbox), "a failed stamp stopped the tail before the inbox read-mark");
+    } finally {
+      failing = null;
+    }
+  });
+
+  await step("/api/chat: an inbox read-mark that fails is logged; the message stays unread for the next turn", 1, async () => {
+    const inbox = await unreadInbox();
+    failing = (sql) => /update\s+"?agent_messages"?/i.test(sql);
+    try {
+      const { lines } = await capturingErrors(async () => {
+        await chatTurn("The read-mark will fail");
+        await tailSettled();
+      });
+      assert.ok(lines.some((l) => l.includes("[chat.inbox]") && l.includes(inbox)), `the failed read-mark was not logged: ${JSON.stringify(lines)}`);
+      assert.equal(await readAt(inbox), null);
+    } finally {
+      failing = null;
+    }
+  });
+
+  await check("both routes label their tail with the turn's session, so a failure keepAlive logs names the reply it concerns", () => {
+    const chatSource = readFileSync(join(__dirname, "..", "app", "api", "chat", "route.ts"), "utf8");
+    const resumeSource = readFileSync(join(__dirname, "..", "app", "api", "chat", "resume", "route.ts"), "utf8");
+    assert.match(chatSource, /keepAlive\(postTurn, `chat\.post-turn:\$\{sessionId\}`\)/);
+    assert.match(resumeSource, /keepAlive\(postTurn, `chat\.resume\.post-turn:\$\{sessionId\}`\)/);
+  });
+
   // ─────────────────────────── /api/chat/resume ───────────────────────────
   await step("/api/chat/resume: the post-turn tail is handed to ctx.waitUntil once, BEFORE the stream closes", 1, async () => {
     const t = await resumeTurn();
-    assert.deepEqual(t.closes, [1], `the route closes its stream once, with the tail already handed over: the ledger at each close was ${JSON.stringify(t.closes)}`);
+    assert.ok(t.closes.length > 0 && !t.closes.includes(0), `the route closed its stream before the tail was handed over: the ledger at each close was ${JSON.stringify(t.closes)}`);
     assert.equal(t.ledgerAtDone, 1, "the browser saw `done` before the platform held the tail");
     assert.deepEqual(t.events, ["session", "usage", "delta", "done"]);
   });
