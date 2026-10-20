@@ -21,7 +21,9 @@ for (const key of SEPARATED_TENANT_BINDINGS) {
 }
 
 assert.match(workflow, /--var DEPLOY_ENV:production/);
-assert.match(workflow, /--var DEPLOY_GIT_REF:\$\{\{ github\.ref_name \}\}/);
-assert.match(workflow, /--var DEPLOY_GIT_SHA:\$\{\{ github\.sha \}\}/);
+// The commit CI tested: a deploy started by CI's completion (workflow_run)
+// sees github.sha as main's newest commit, which may not be the one deployed.
+assert.match(workflow, /--var DEPLOY_GIT_REF:\$\{\{ github\.event\.workflow_run\.head_branch \|\| github\.ref_name \}\}/);
+assert.match(workflow, /--var DEPLOY_GIT_SHA:\$\{\{ github\.event\.workflow_run\.head_sha \|\| github\.sha \}\}/);
 
 console.log("OASIS Worker secret boundary ok");
