@@ -200,12 +200,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
   const existingLeadId = existingLead?.id ?? null;
   if (existingLeadId) {
-    await db
+    const dedup = await db
       .from("scrub_candidates")
       .update({ status: "approved", created_lead_id: existingLeadId, updated_at: new Date().toISOString() })
       .eq("id", id)
       .eq("tenant_id", tenantId);
     const summary = await promoteAndSummarize(tenantId, existingLeadId);
+    if (dedup.error) {
+      // As the finalize below: the lead exists, but the candidate stays in
+      // 'approving' (out of the queue, so no second lead). Said in the log and
+      // in the answer, not hidden behind a plain "approved" (review of #714).
+      console.error("[scrub-candidates] dedup finalize update error:", { candidate_id: id, error: dedup.error.message });
+      return NextResponse.json({ ok: true, action: "approved", candidate_id: id, lead_id: existingLeadId, deduped: true, warning: "candidate_status_update_failed", ...summary });
+    }
     return NextResponse.json({ ok: true, action: "approved", candidate_id: id, lead_id: existingLeadId, deduped: true, ...summary });
   }
 

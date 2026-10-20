@@ -28,6 +28,19 @@ export const BEACON_ERRORS: ReadonlySet<string> = new Set([
   "consent_record_unavailable",
 ]);
 
+/**
+ * Whether a refused submit was our fault, not the visitor's: no JSON answer
+ * (a platform error page, a 413), any 5xx, or one of BEACON_ERRORS. One rule
+ * for every page that posts to /api/forms/submit, each of which answers such a
+ * failure with "please try again" and a beacon. A 4xx the route explains is
+ * the form working. Counting only BEACON_ERRORS, /book told a visitor whose
+ * details were saved to "check them", and paged nobody, for every 5xx the list
+ * did not name (independent review of #714, round 3).
+ */
+export function isSubmitFault(status: number, data: { error?: string } | null): boolean {
+  return !data || status >= 500 || (data.error !== undefined && BEACON_ERRORS.has(data.error));
+}
+
 export function sendSubmitFailureBeacon(input: {
   tenantSlug?: string | null;
   formSlug?: string | null;
@@ -36,6 +49,13 @@ export function sendSubmitFailureBeacon(input: {
   payload: Record<string, unknown>;
   /** A router's answer, which stored nothing: its row is filed already recovered. */
   nothingToRecover?: boolean;
+  /**
+   * The consent boxes the failed step showed, and whether each was ticked. A
+   * decline the route could not record (consent_record_unavailable) leaves an
+   * earlier tick standing: whoever follows up must know, or they market to
+   * someone who just said no (independent review of #714, round 3).
+   */
+  consentLedger?: { email?: boolean; sms?: boolean } | null;
 }): void {
   try {
     const safe: Record<string, unknown> = {};
@@ -59,6 +79,7 @@ export function sendSubmitFailureBeacon(input: {
         error: input.error.slice(0, 400),
         payload: safe,
         ...(input.nothingToRecover ? { nothing_to_recover: true } : {}),
+        ...(input.consentLedger ? { consent_ledger: input.consentLedger } : {}),
       }),
       keepalive: true,
     }).catch(() => undefined);

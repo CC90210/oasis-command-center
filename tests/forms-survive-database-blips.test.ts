@@ -187,6 +187,23 @@ const FREE_ACCEPT_STEPS = [
     fields: [field("email", "email", "Email"), field("proof", "file_upload", "Proof of address", false, { accept: ["pdf"] })],
   },
 ];
+// The file rules one step has to hold (independent review of #714, round 3):
+// a field name used twice (the last is the field, as in the upload loop), a
+// multi-file field that takes one file, and five file fields whose sizes add
+// up past the request's limit.
+const FILE_RULE_STEPS = [
+  {
+    key: "files",
+    title: "Files",
+    fields: [
+      field("email", "email", "Email"),
+      field("doc", "text", "Document note", false),
+      field("doc", "file_upload", "Document", false, { accept: ["application/pdf"] }),
+      field("one", "file_upload_multi", "One statement", false, { accept: ["application/pdf"], max_files: 1 }),
+      ...[1, 2, 3, 4, 5].map((n) => field(`f${n}`, "file_upload", `File ${n}`, false, { accept: ["application/pdf"] })),
+    ],
+  },
+];
 
 const read = (rel: string) => readFileSync(join(__dirname, "..", rel), "utf8");
 
@@ -212,6 +229,15 @@ async function main() {
     CREATE TABLE lead_documents (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT, lead_id TEXT,
       filename TEXT, mime_type TEXT, size_bytes INTEGER, doc_type TEXT, storage_path TEXT, uploaded_by TEXT,
       uploaded_at TEXT, metadata TEXT);
+    -- The alert card and the paging ladder, as production has them (tests/workspace-alerts.test.ts).
+    CREATE TABLE agent_alerts (
+      id TEXT NOT NULL PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT NOT NULL, alert_type TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'info', subject_type TEXT, subject_id TEXT, title TEXT NOT NULL, body TEXT,
+      payload TEXT NOT NULL DEFAULT '{}', dedup_key TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), resolved_at TEXT, resolved_by TEXT
+    );
+    CREATE TABLE health_alert_state (alert_key TEXT PRIMARY KEY, tenant_id TEXT, last_signature TEXT,
+      last_alerted_at TEXT, repeat_n INTEGER NOT NULL DEFAULT 0, first_failed_at TEXT, updated_at TEXT);
   `);
   await seed.executeMultiple(read("database/turso/bravo__214_consent_events.sql"));
   await seed.batch(
@@ -224,6 +250,7 @@ async function main() {
         args: [OASIS, JSON.stringify(ROUTER_STEPS), JSON.stringify([{ go: "two-step", when_any: [{ path: ["audit"] }] }])],
       },
       { sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('form-free', ?, 'free-accept', 'Free', ?)", args: [OASIS, JSON.stringify(FREE_ACCEPT_STEPS)] },
+      { sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('form-rules', ?, 'file-rules', 'Rules', ?)", args: [OASIS, JSON.stringify(FILE_RULE_STEPS)] },
     ],
     "write",
   );
@@ -549,8 +576,26 @@ async function main() {
     assert.equal(outside.status, 422, JSON.stringify(outside.json));
     assert.equal(outside.json.message, "Bank statements: that file didn't finish uploading. Please choose it again.");
     assert.equal(await consents(), consentsBefore, "refused before the step's consent decision was written");
+    // A type the field does not take, in the lead's own folder: refused by the
+    // check that runs before anything is written, not only by the upload loop
+    // after the consent decision (independent review of #714, round 3).
+    const exe = await quiet(() =>
+      post({
+        token,
+        step_index: 1,
+        consent_ledger: { email: true },
+        payload: {
+          statements_email: "multi@example.com",
+          statements: [{ ...desc(`${OASIS}/${leadId}/1_setup.exe`), filename: "setup.exe", mime_type: "application/x-msdownload" }],
+        },
+      }),
+    );
+    assert.equal(exe.status, 422, JSON.stringify(exe.json));
+    assert.equal(exe.json.message, "Bank statements (setup.exe): that type of file isn't accepted here. Please choose a PDF file.");
+    assert.equal(await consents(), consentsBefore, "a wrong type is refused before the consent decision is written");
     const missing = await quiet(() => post({ token, step_index: 1, payload: { statements: [{ filename: "s.pdf", mime_type: "application/pdf" }] } }));
     assert.equal(missing.status, 422, JSON.stringify(missing.json));
+    assert.equal(missing.json.message, "Bank statements (s.pdf): that file didn't finish uploading. Please choose it again.", "the visitor is told which file");
     const notOne = await quiet(() => post({ token, step_index: 1, payload: { statements: ["s.pdf"] } }));
     assert.equal(notOne.status, 422, "a descriptor that is not one is refused, not dropped");
     const many = await quiet(() =>
@@ -590,6 +635,31 @@ async function main() {
     const r = await post({ step_index: 0, anonymous_init: anon("upload-form"), payload: { email: "no-file@example.com" } });
     assert.equal(r.status, 200, JSON.stringify(r.json));
     assert.equal(await steps("form-upload"), before + 1);
+  });
+
+  await check("one step's file rules hold before anything is written: a repeated name is its last field, a one-file field says 'file', and files past the request's limit are a 413", async () => {
+    // Independent review of #714, round 3: each of these refusals also had a
+    // copy in the upload loop, which runs after the lead is written, so only
+    // "no lead" tells the early check is there.
+    const leadsBefore = await leads();
+    const doubled = await quiet(() =>
+      post({ step_index: 0, anonymous_init: anon("file-rules"), payload: { email: "rules-doc@example.com", doc: inlineFile("MZ", "setup.exe", "application/x-msdownload") } }),
+    );
+    assert.equal(doubled.status, 422, JSON.stringify(doubled.json));
+    assert.equal(doubled.json.message, "Document: that type of file isn't accepted here. Please choose a PDF file.");
+    const two = await quiet(() =>
+      post({ step_index: 0, anonymous_init: anon("file-rules"), payload: { email: "rules-one@example.com", one: [{ storage_path: "x/1_a.pdf" }, { storage_path: "x/2_b.pdf" }] } }),
+    );
+    assert.equal(two.status, 422, JSON.stringify(two.json));
+    assert.equal(two.json.message, "One statement: that's more than 1 file. Please remove some and try again.");
+    // Five files of 12.5 MB: each under the 15 MB one may be, 62.5 MB together.
+    const part = inlineFile(Buffer.alloc(12.5 * 1024 * 1024, 0x25), "part.pdf", "application/pdf");
+    const total = await quiet(() =>
+      post({ step_index: 0, anonymous_init: anon("file-rules"), payload: { email: "rules-total@example.com", f1: part, f2: part, f3: part, f4: part, f5: part } }),
+    );
+    assert.equal(total.status, 413, JSON.stringify(total.json).slice(0, 300));
+    assert.equal(total.json.error, "request_payload_too_large");
+    assert.equal(await leads(), leadsBefore, "no lead for any of them");
   });
 
   await check("a failed lead lookup throws instead of answering 'no such lead'", async () => {
@@ -743,11 +813,17 @@ async function main() {
     try {
       for (let i = 0; i < 120; i += 1) R2_STORE.set(`lead-documents/${OASIS}/${leadId}/17000000${String(i).padStart(5, "0")}_old.pdf`, 10);
       const fresh = `${OASIS}/${leadId}/1800000000000_new.pdf`;
-      R2_STORE.set(`lead-documents/${fresh}`, 10);
+      // Storage holds 4,321 bytes; the browser's descriptor claims 10.
+      R2_STORE.set(`lead-documents/${fresh}`, 4321);
       const desc = (path: string, filename = "new.pdf") => ({ storage_path: path, filename, mime_type: "application/pdf", size_bytes: 10 });
       const found = await quiet(() => post({ token, step_index: 1, payload: { statements: [desc(fresh)] } }));
       assert.equal(found.status, 200, JSON.stringify(found.json));
       assert.equal(await count("SELECT count(*) AS n FROM lead_documents WHERE lead_id = ?", [leadId]), 1, "the document was registered");
+      assert.equal(
+        await count("SELECT size_bytes AS n FROM lead_documents WHERE lead_id = ?", [leadId]),
+        4321,
+        "registered at the size storage reports, never the size the browser claimed",
+      );
 
       const missing = await quiet(() =>
         post({ token, step_index: 1, payload: { statements: [desc(`${OASIS}/${leadId}/1800000000001_gone.pdf`, "gone.pdf")] } }),
@@ -781,6 +857,11 @@ async function main() {
   await check("an accept list typed as extensions ('pdf') takes those types, in the route, the file picker and the dropzone", async () => {
     assert.deepEqual(normalizedAccept(["pdf", ".JPG", "image", "application/PDF", "docx", " "]), ["application/pdf", "image/jpeg", "image/*"]);
     assert.deepEqual(normalizedAccept(["docx"]), [], "only unknown words: the caller's own default applies");
+    // Misspelled types no browser sends, and "anything", refused every file
+    // (independent review of #714, round 3).
+    assert.deepEqual(normalizedAccept(["image/jpg", "application/x-pdf"]), ["image/jpeg", "application/pdf"]);
+    assert.deepEqual(normalizedAccept(["*/*"]), [], "'anything' is the caller's inert default, never every type");
+    assert.deepEqual(normalizedAccept(["*", "pdf"]), ["application/pdf"]);
     r2Down = false;
     try {
       const pdf = await quiet(() =>
@@ -809,15 +890,17 @@ async function main() {
     assert.equal(r.status, 200, JSON.stringify(r.json));
   });
 
+  let beaconIp = 0;
+  const beacon = (body: Json) =>
+    submitFailure.POST(
+      new NextRequest("http://localhost/api/forms/submit-failure", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": `10.77.0.${++beaconIp}` },
+        body: JSON.stringify(body),
+      }),
+    );
+
   await check("a router's beacon is filed already recovered: it pages, but holds no row open for a hand to close", async () => {
-    const beacon = (body: Json) =>
-      submitFailure.POST(
-        new NextRequest("http://localhost/api/forms/submit-failure", {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-forwarded-for": "10.77.0.1" },
-          body: JSON.stringify(body),
-        }),
-      );
     await quiet(() => beacon({ tenant_slug: "oasis-ai-cc", form_slug: "router", step_index: 0, error: "form_unavailable", payload: { path: "audit" }, nothing_to_recover: true }));
     await quiet(() => beacon({ tenant_slug: "oasis-ai-cc", form_slug: "two-step", step_index: 0, error: "server_error", payload: { email: "lost@example.com" } }));
     const rows = await seed.execute("SELECT form_slug, recovered_at FROM form_submit_failures ORDER BY form_slug");
@@ -825,7 +908,95 @@ async function main() {
     assert.ok(byForm.router, "the router's row is filed already recovered");
     assert.equal(byForm["two-step"], null, "a merchant's lost answers stay open until someone recovers them");
     const client = read("components/forms/FormPublicClient.tsx");
-    assert.match(client, /routeFailures\.current \+= 1;[\s\S]{0,200}beacon: routeFailures\.current >= 2,\s*nothingToRecover: true,/, "the router beacons on the visitor's second failure in a row");
+    assert.match(
+      client,
+      /if \(isSubmitFault\(res\.status, data\)\) routeFailures\.current \+= 1;\s*showSubmitFailure\(res, data, lastPayload, currentStep, \{\s*beacon: routeFailures\.current >= 2,\s*nothingToRecover: true,/,
+      "the router beacons on the visitor's second fault in a row, and their own mistakes do not count",
+    );
+  });
+
+  await check("a router's failure has its own card and paging, never a real loss's; a 'nothing to recover' beacon that carries a contact is a real loss", async () => {
+    // Independent review of #714, round 3: the router's card shared the real
+    // loss's type and subject, so a router beacon (or a forged one) rewrote
+    // the card that held the reference to a prospect's saved answers, and the
+    // two shared one paging ladder.
+    const card = async (type: string) =>
+      (
+        await seed.execute({
+          sql: "SELECT title, body, payload FROM agent_alerts WHERE tenant_id = ? AND alert_type = ? AND subject_id = 'form-router' AND resolved_at IS NULL",
+          args: [OASIS, type],
+        })
+      ).rows;
+    await quiet(() => beacon({ tenant_slug: "oasis-ai-cc", form_slug: "router", step_index: 0, error: "server_error", payload: { path: "audit", email: "real-loss@example.com" } }));
+    const real = await card("form_submit_blocked");
+    assert.equal(real.length, 1, "the real loss has its card");
+    const deadLetter = JSON.parse(String(real[0].payload)).dead_letter_id as string;
+    assert.ok(deadLetter, "and its reference");
+    await quiet(() => beacon({ tenant_slug: "oasis-ai-cc", form_slug: "router", step_index: 0, error: "route_network_error", payload: { path: "audit" }, nothing_to_recover: true }));
+    const after = await card("form_submit_blocked");
+    assert.equal(String(after[0].title), "Form submission blocked: a merchant could not submit", "the real loss's card is untouched");
+    assert.equal(JSON.parse(String(after[0].payload)).dead_letter_id, deadLetter, "and still holds the reference to the saved answers");
+    const router = await card("form_router_failed");
+    assert.equal(router.length, 1, "the router's failure has a card of its own");
+    assert.equal(String(router[0].title), "A form's router could not answer a visitor, twice");
+    const keys = (await seed.execute("SELECT alert_key FROM health_alert_state WHERE alert_key LIKE '%oasis-ai-cc/router/%' ORDER BY alert_key")).rows.map((r) => String(r.alert_key));
+    assert.deepEqual(keys, ["routerfail:oasis-ai-cc/router/client_beacon", "submitfail:oasis-ai-cc/router/client_beacon"], "each on its own paging ladder");
+
+    // "Nothing to recover" is the browser's word; answers that hold a way to
+    // reach the visitor say otherwise, under any field name.
+    await quiet(() =>
+      beacon({ tenant_slug: "oasis-ai-cc", form_slug: "router", step_index: 0, error: "server_error", payload: { path: "audit", work_email: "forged@example.com" }, nothing_to_recover: true }),
+    );
+    const forged = (
+      await seed.execute("SELECT recovered_at FROM form_submit_failures WHERE payload LIKE '%forged@example.com%'")
+    ).rows;
+    assert.equal(forged.length, 1);
+    assert.equal(forged[0].recovered_at, null, "filed open: there is someone to recover");
+  });
+
+  await check("a beacon whose form cannot be read is logged as an error beside the outage, not a quiet warning", async () => {
+    // Independent review of #714, round 3 (N-8): in an outage there is no
+    // workspace to page, but the loss must show in the logs as an error.
+    const lines: string[] = [];
+    await offline("forms", async () => {
+      const errors = console.error;
+      console.error = (...a: unknown[]) => void lines.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+      try {
+        await beacon({ tenant_slug: "oasis-ai-cc", form_slug: "two-step", step_index: 0, error: "server_error", payload: { email: "outage@example.com" } });
+      } finally {
+        console.error = errors;
+      }
+    });
+    assert.ok(lines.some((l) => l.includes("the form could not be read; nobody was paged")), lines.join("\n"));
+    const kept = (await seed.execute("SELECT recovered_at FROM form_submit_failures WHERE payload LIKE '%outage@example.com%'")).rows;
+    assert.equal(kept.length, 1, "the answers are still kept");
+  });
+
+  await check("a declined consent box travels with the beacon, is kept with the answers, and is on the card", async () => {
+    // Independent review of #714, round 3: consent_record_unavailable means a
+    // decline could not be recorded and an earlier tick still stands; the card
+    // told someone to contact a visitor who had just said no.
+    await quiet(() =>
+      beacon({
+        tenant_slug: "oasis-ai-cc",
+        form_slug: "two-step",
+        step_index: 0,
+        error: "consent_record_unavailable",
+        payload: { email: "said-no@example.com" },
+        consent_ledger: { email: false, sms: true, extra: "dropped" },
+      }),
+    );
+    const row = (await seed.execute("SELECT payload FROM form_submit_failures WHERE payload LIKE '%said-no@example.com%'")).rows[0];
+    assert.deepEqual(JSON.parse(String(row.payload)).consent_ledger, { email: false, sms: true }, "kept beside the answers, booleans only");
+    const body = String(
+      (
+        await seed.execute({
+          sql: "SELECT body FROM agent_alerts WHERE tenant_id = ? AND alert_type = 'form_submit_blocked' AND subject_id = 'form-two' AND resolved_at IS NULL",
+          args: [OASIS],
+        })
+      ).rows[0].body,
+    );
+    assert.match(body, /They declined email marketing on that step, and it may not have been recorded: follow up on this request only\./);
   });
 
   await check("a blip on a form's page names it in the tab as 'try again', never as a dead link", async () => {
@@ -838,20 +1009,23 @@ async function main() {
     );
   });
 
-  await check("/book and the homepage audit form beacon a fault on our side, and /book stops telling a visitor to check details we failed to save", () => {
+  await check("/book and the homepage audit form beacon a fault on our side, any 5xx included, and a connection that dies; /book stops telling a visitor to check details we failed to save", () => {
     // Text checks: these pages need a browser to click through. Each pins the
     // fault test and the beacon call together, so neither can drift alone.
-    assert.match(
-      read("components/booking/BookingPage.tsx"),
-      /const fault = !data \|\| \(data\.error !== undefined && BEACON_ERRORS\.has\(data\.error\)\);\s*if \(fault\) \{\s*sendSubmitFailureBeacon\(\{/,
-      "/book beacons a fault the shared way",
-    );
-    assert.match(
-      read("components/marketing/AuditForm.tsx"),
-      /if \(!data \|\| \(data\.error !== undefined && BEACON_ERRORS\.has\(data\.error\)\)\) \{\s*sendSubmitFailureBeacon\(\{/,
-      "the audit form beacons a fault the shared way",
-    );
-    assert.match(read("components/booking/BookingPage.tsx"), /We couldn't save your details just now\. They're still here, so please try again in a moment\./);
+    const book = read("components/booking/BookingPage.tsx");
+    const audit = read("components/marketing/AuditForm.tsx");
+    assert.match(book, /const fault = isSubmitFault\(res\.status, data\);\s*if \(fault\) \{\s*sendSubmitFailureBeacon\(\{/, "/book beacons a fault the shared way");
+    assert.match(audit, /if \(isSubmitFault\(res\.status, data\)\) \{\s*sendSubmitFailureBeacon\(\{/, "the audit form beacons a fault the shared way");
+    assert.match(book, /We couldn't save your details just now\. They're still here, so please try again in a moment\./);
+    assert.match(book, /fault\s*\?\s*"We couldn't save your details just now/, "a fault gets the try-again sentence, never 'check them'");
+    // A connection that dies before the details were saved (round 3, N-2).
+    assert.match(book, /\} catch \{\s*if \(unsaved\) \{\s*sendSubmitFailureBeacon\(\{[\s\S]{0,200}error: "network_error",\s*payload: unsaved,/);
+    assert.match(book, /tokenRef\.current = token;\s*unsaved = null;/, "once saved, a dropped booking request is not a lost lead");
+    // Only comments between the catch and the beacon: nothing can return first.
+    assert.match(audit, /\} catch \{\s*(?:\/\/[^\n]*\n\s*)*sendSubmitFailureBeacon\(\{[\s\S]{0,200}error: "network_error",\s*payload: body\.payload,/);
+    // The consent decision rides with each page's beacons (round 3, N-6).
+    assert.equal((book.match(/consentLedger,\s*\}\);/g) ?? []).length, 2, "/book: both beacons carry the consent boxes");
+    assert.equal((audit.match(/consentLedger: body\.consent_ledger,/g) ?? []).length, 2, "the audit form: both beacons carry them");
   });
 
   await check("a file the browser reports no type for is named by its extension, and only for the types a form takes", () => {
@@ -861,24 +1035,127 @@ async function main() {
     assert.equal(chosenFileType({ name: "notes.docx", type: "" }), "application/octet-stream");
     assert.equal(chosenFileType({ name: "no-extension", type: "" }), "application/octet-stream");
     assert.equal(chosenFileType({ name: "statement.pdf", type: "text/html" }), "text/html", "a type the browser reported is never overridden");
+    // Some browsers say octet-stream outright rather than nothing (review of #714, round 3).
+    assert.equal(chosenFileType({ name: "statement.pdf", type: "application/octet-stream" }), "application/pdf");
+    assert.equal(chosenFileType({ name: "setup.exe", type: "application/octet-stream" }), "application/octet-stream");
     for (const rel of ["components/forms/FormPublicClient.tsx", "components/forms/MultiFileDropzone.tsx"]) {
       assert.ok(!read(rel).includes('.type || "application/octet-stream"'), `${rel} uses chosenFileType`);
     }
+  });
+
+  await check("the beacon module sends what it is handed (nothing to recover, the consent boxes, no file bytes), and the form client hands both through", async () => {
+    // Independent review of #714, round 3 (N-3): any of these hand-offs could
+    // drop the flag and every test still passed, filing each router failure
+    // as an open real loss.
+    const { sendSubmitFailureBeacon } = await import("../lib/forms/submit-failure-beacon");
+    const sent: Array<{ url: string; init: RequestInit }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({ url: String(input), init: init ?? {} });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      sendSubmitFailureBeacon({
+        tenantSlug: "oasis-ai-cc",
+        formSlug: "router",
+        stepIndex: 1,
+        error: "route_network_error",
+        payload: { path: "audit", deck: inlineFile("%PDF-1.4 x", "deck.pdf", "application/pdf") },
+        nothingToRecover: true,
+        consentLedger: { email: false },
+      });
+      sendSubmitFailureBeacon({ tenantSlug: "oasis-ai-cc", formSlug: "two-step", stepIndex: 0, error: "server_error", payload: { email: "a@example.com" } });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0].url, "/api/forms/submit-failure");
+    assert.equal(sent[0].init.keepalive, true);
+    const first = JSON.parse(String(sent[0].init.body)) as Json;
+    assert.equal(first.nothing_to_recover, true);
+    assert.deepEqual(first.consent_ledger, { email: false });
+    assert.deepEqual((first.payload as Json).deck, { skipped_file: "deck.pdf", size_bytes: 10 }, "no file bytes");
+    const second = JSON.parse(String(sent[1].init.body)) as Json;
+    assert.equal("nothing_to_recover" in second, false, "an ordinary failure is not marked");
+    assert.equal("consent_ledger" in second, false);
+
+    const client = read("components/forms/FormPublicClient.tsx");
+    assert.match(client, /reportSubmitFailure\(data \? data\.error \?\? "server_error" : `non_json_http_\$\{res\.status\}`, payload, stepIndex, \{\s*nothingToRecover,\s*consentLedger,\s*\}\);/);
+    assert.match(client, /reportSubmitFailure\(`unmapped_submit_error:\$\{data\.error\}`, payload, stepIndex, \{ nothingToRecover, consentLedger \}\);/);
+    assert.match(client, /payload: payload \?\? values,\s*nothingToRecover,\s*consentLedger,\s*\}\);/, "reportSubmitFailure forwards both to the beacon");
+    assert.match(client, /showSubmitFailure\(res, data, built\.payload, currentStep, \{ consentLedger: ledger \}\);/, "a step's consent boxes go with its failure");
+    assert.match(client, /showSubmitFailure\(res, data, \{ \.\.\.payload, \.\.\.\(contact \?\? \{\}\) \}, i, \{ consentLedger: ledger \}\);/, "and a held step's");
+    // The router: a dead connection counts, and is never filed as a real loss;
+    // an answer that works starts the count again (N-7).
+    assert.match(
+      client,
+      /\} catch \{\s*\/\/[^\n]*\n\s*routeFailures\.current \+= 1;\s*if \(routeFailures\.current >= 2\) \{\s*reportSubmitFailure\("route_network_error", lastPayload, currentStep, \{ nothingToRecover: true \}\);/,
+    );
+    assert.match(client, /routeFailures\.current = 0;\s*if \(tenantSlug && formSlug\) \{/, "a router answer that works resets the count");
+    // Remove empties the file input AND the answer, so the file is not sent (R6).
+    assert.match(read("components/forms/FormRenderer.tsx"), /if \(input\) input\.value = "";\s*onChange\(null\);/);
+  });
+
+  await check("a missing object reads as missing on either storage, and a dedup approval whose own update fails says so", async () => {
+    // Independent review of #714, round 3 (N-4): Supabase Storage, the
+    // rollback backend, answers a missing object with HTTP 400 and "404" in
+    // the body, so every unfinished upload read as a storage fault.
+    const { storageObjectMissing } = await import("../lib/lead-documents");
+    assert.equal(storageObjectMissing({ status: 404, message: "Not Found" }), true, "R2");
+    assert.equal(storageObjectMissing({ status: 400, statusCode: "404", message: "Object not found" }), true, "Supabase Storage");
+    assert.equal(storageObjectMissing({ status: 400, statusCode: "400", message: "Bad request" }), false);
+    assert.equal(storageObjectMissing({ status: 500, message: "storage down" }), false);
+    assert.equal(storageObjectMissing(null), false);
+    assert.match(read("lib/lead-documents.ts"), /return storageObjectMissing\(head\.error\)\s*\?\s*\{ ok: false, error: "uploaded_object_not_found" \}/);
+
+    // scrub-candidates: the lead already exists and the candidate's own update
+    // fails. The answer and the log say so, never a plain "approved".
+    const id = "33333333-3333-4333-8333-333333333333";
+    await firstStep("two-step", "dedup-target@example.com");
+    await seed.execute({
+      sql: "INSERT INTO scrub_candidates (id, tenant_id, status, lead_data) VALUES (?, ?, 'pending_review', ?)",
+      args: [id, OASIS, JSON.stringify({ email: "dedup-target@example.com", business_name: "Dedup Co" })],
+    });
+    await login(USERS.cc);
+    await seed.execute("CREATE TRIGGER refuse_approved BEFORE UPDATE ON scrub_candidates WHEN NEW.status = 'approved' BEGIN SELECT RAISE(ABORT, 'no writes now'); END");
+    const lines: string[] = [];
+    const errors = console.error;
+    console.error = (...a: unknown[]) => void lines.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+    let res: Response;
+    try {
+      res = await approve(id);
+    } finally {
+      console.error = errors;
+      await seed.execute("DROP TRIGGER refuse_approved");
+    }
+    const body = (await res.json()) as Json;
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.deduped, true);
+    assert.equal(body.warning, "candidate_status_update_failed");
+    assert.ok(lines.some((l) => l.includes("dedup finalize update error") && l.includes(id)), "logged with the candidate's id");
   });
 
   await check("the visitor is told to try again, the beacon fires and carries no file bytes, and the pages raise instead of drawing a dead end", async () => {
     assert.ok(SUBMIT_ERROR_COPY.form_unavailable && !/no longer valid/i.test(SUBMIT_ERROR_COPY.form_unavailable));
     assert.ok(SUBMIT_ERROR_COPY.upload_failed, "a fallback sentence for upload_failed");
     assert.ok(SUBMIT_ERROR_COPY.upload_unavailable, "a fallback sentence for upload_unavailable");
-    const { BEACON_ERRORS } = await import("../lib/forms/submit-failure-beacon");
+    const { BEACON_ERRORS, isSubmitFault } = await import("../lib/forms/submit-failure-beacon");
     for (const code of ["server_error", "form_unavailable", "upload_unavailable", "consent_record_unavailable"]) {
       assert.ok(BEACON_ERRORS.has(code), `${code} sends the beacon`);
+      assert.ok(isSubmitFault(400, { error: code }), `${code} is a fault whatever its status`);
     }
     for (const code of ["rate_limited", "upload_failed", "missing_required_field", "contact_required"]) {
       assert.ok(!BEACON_ERRORS.has(code), `${code} is the form working, not a lost visitor`);
+      assert.ok(!isSubmitFault(code === "rate_limited" ? 429 : 400, { error: code }), `${code} is not a fault`);
     }
+    // Any 5xx, named or not, and an answer that is not JSON (round 3, N-2).
+    for (const [status, error] of [[500, "form_definition_corrupt"], [503, "form_links_misconfigured"], [503, "token_server_misconfigured"], [503, "funnel_stage_write_unavailable"]] as const) {
+      assert.ok(isSubmitFault(status, { error }), `${status} ${error} is a fault`);
+    }
+    assert.ok(isSubmitFault(200, null), "no JSON answer is a fault");
     const client = read("components/forms/FormPublicClient.tsx");
-    assert.match(client, /if \(beacon && \(!data \|\| \(data\.error !== undefined && BEACON_ERRORS\.has\(data\.error\)\)\)\) \{/);
+    assert.match(client, /if \(beacon && isSubmitFault\(res\.status, data\)\) \{/);
+    assert.match(client, /\} else if \(beacon && data\?\.error && !\(data\.error in SUBMIT_ERROR_COPY\)\) \{/, "one beacon per failure, never both");
     assert.match(
       read("lib/forms/submit-failure-beacon.ts"),
       /typeof \(v as \{ inline_base64\?: unknown \}\)\.inline_base64 === "string"/,

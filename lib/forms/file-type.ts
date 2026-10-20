@@ -2,13 +2,13 @@
  * The type a public form sends for a file the visitor chose.
  *
  * Some browsers report no type at all for a real PDF or photo (a Windows PC
- * with no app registered for the extension, some Android pickers). Sent as
- * application/octet-stream, that file was refused by every field's list,
- * every time, and nothing the visitor could do changed it (independent review
- * of #714). The extension decides only for the inert types a form takes;
- * anything else stays octet-stream and is refused as before. The server's
- * per-field list is still the gate: the browser's type was never proof of
- * anything, so naming one from the extension trusts nothing new.
+ * with no app registered for the extension, some Android pickers), and some
+ * report application/octet-stream outright. Either way the file was refused by
+ * every field's list, every time, and nothing the visitor could do changed it
+ * (independent review of #714). The extension decides only for the inert types
+ * a form takes; anything else stays octet-stream and is refused as before. The
+ * server's per-field list is still the gate: the browser's type was never proof
+ * of anything, so naming one from the extension trusts nothing new.
  */
 
 const BY_EXTENSION: Record<string, string> = {
@@ -22,7 +22,7 @@ const BY_EXTENSION: Record<string, string> = {
 };
 
 export function chosenFileType(file: { name: string; type: string }): string {
-  if (file.type) return file.type;
+  if (file.type && file.type !== "application/octet-stream") return file.type;
   const dot = file.name.lastIndexOf(".");
   const ext = dot >= 0 ? file.name.slice(dot + 1).toLowerCase() : "";
   return BY_EXTENSION[ext] ?? "application/octet-stream";
@@ -36,17 +36,26 @@ export function chosenFileType(file: { name: string; type: string }): string {
  * accepted nothing: every visitor's file was refused, forever, and the
  * browser's picker ignored them too (independent review of #714). An
  * extension this knows becomes its MIME type and "image" or "images" becomes
- * image/*. A MIME type is kept as written, lowercased. Anything else is
- * dropped, so a list of only unknown words reads as empty and the caller's
- * own default applies.
+ * image/*. A MIME type is kept as written, lowercased, except the misspellings
+ * no browser sends (image/jpg, application/x-pdf), which become the type they
+ * mean: kept, they refused every real JPEG or PDF. "Anything" (a bare star,
+ * or star-slash-star) is dropped, as is every other unknown word: matched
+ * literally it refused every file. So a list of only those reads as
+ * empty and the caller's own default applies: a form never takes more than
+ * the inert default by accident.
  */
+const MIME_ALIASES: Record<string, string> = {
+  "image/jpg": "image/jpeg",
+  "application/x-pdf": "application/pdf",
+};
+
 export function normalizedAccept(rules: readonly string[] | null | undefined): string[] {
   const out: string[] = [];
   for (const raw of rules ?? []) {
     const rule = String(raw).trim().toLowerCase();
-    if (!rule) continue;
+    if (!rule || rule === "*" || rule === "*/*") continue;
     if (rule.includes("/")) {
-      out.push(rule);
+      out.push(MIME_ALIASES[rule] ?? rule);
       continue;
     }
     const word = rule.replace(/^\*?\./, "");

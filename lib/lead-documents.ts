@@ -171,6 +171,18 @@ export function storagePathInLeadScope(tenantId: string, leadId: string, storage
 }
 
 /**
+ * Whether a storage error says the object is not there, not that storage
+ * failed. R2 answers 404. Supabase Storage, the rollback backend, answers HTTP
+ * 400 with "404" in the body's statusCode, which storage-js's own exists()
+ * reads as not found too; read by status alone, every unfinished upload was a
+ * fault, a 503 on every retry (independent review of #714, round 3).
+ */
+export function storageObjectMissing(error: unknown): boolean {
+  const e = error as { status?: number; statusCode?: string | number } | null;
+  return e?.status === 404 || String(e?.statusCode ?? "") === "404";
+}
+
+/**
  * Register a lead-document whose bytes are ALREADY in Storage — used by the
  * direct-to-Storage form upload path (browser PUTs to a server-minted signed
  * upload URL, then the submit route registers the object here). This is the
@@ -225,10 +237,9 @@ export async function registerLeadDocument(input: {
   // (independent review of #714).
   const head = await db.storage.from(LEAD_DOC_BUCKET).info(input.storagePath);
   if (head.error || !head.data) {
-    const status = (head.error as { status?: number } | null)?.status;
-    // A 404 is an upload that never finished: the visitor can choose the file
-    // again. Anything else is a storage fault.
-    return status === 404
+    // A missing object is an upload that never finished: the visitor can
+    // choose the file again. Anything else is a storage fault.
+    return storageObjectMissing(head.error)
       ? { ok: false, error: "uploaded_object_not_found" }
       : { ok: false, error: `storage_info_failed: ${head.error?.message ?? "no metadata"}` };
   }

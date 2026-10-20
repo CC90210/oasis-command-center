@@ -30,6 +30,16 @@ export const dynamic = "force-dynamic";
  *  anything bigger is not a failure report. */
 const BODY_CAP_BYTES = 64_000;
 
+/** The consent decision a beacon carries: true or false per channel, nothing else. */
+function consentLedgerFrom(raw: unknown): { email?: boolean; sms?: boolean } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const out: { email?: boolean; sms?: boolean } = {};
+  if (typeof r.email === "boolean") out.email = r.email;
+  if (typeof r.sms === "boolean") out.sms = r.sms;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const ip = getClientIp(req) || "unknown";
@@ -61,6 +71,7 @@ export async function POST(req: NextRequest) {
       userAgent: req.headers.get("user-agent"),
       // A router's answer, which stored nothing (lib/forms/submit-failure-capture.ts).
       nothingToRecover: body.nothing_to_recover === true,
+      consentLedger: consentLedgerFrom(body.consent_ledger),
     });
     return NextResponse.json({ ok: true });
   } catch {

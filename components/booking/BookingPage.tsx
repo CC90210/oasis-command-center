@@ -29,7 +29,7 @@ import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-discl
 import { ConsentChoice } from "@/components/forms/ConsentChoice";
 import { HoneypotField } from "@/components/forms/HoneypotField";
 import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
-import { BEACON_ERRORS, sendSubmitFailureBeacon } from "@/lib/forms/submit-failure-beacon";
+import { isSubmitFault, sendSubmitFailureBeacon } from "@/lib/forms/submit-failure-beacon";
 import type { DetailsOnlyReason } from "@/lib/forms/public-booking-alert";
 import { fetchWithRetry } from "@/lib/retry";
 import { ZONE_CHOICES } from "@/lib/meeting-time";
@@ -313,12 +313,17 @@ export function BookingPage(props: Props) {
     if (!validate()) return;
     setBusy(true);
     setError(null);
+    // The details while they are not yet saved: a connection that dies on the
+    // way beacons them, as a fault does (independent review of #714, round 3).
+    let unsaved: Record<string, string> | null = null;
+    const consentLedger = { email: ticked.email, sms: ticked.sms };
     try {
       let token = tokenRef.current;
       if (!token) {
         const payload = Object.fromEntries(
           fields.map((f) => [f.name, (values[f.name] ?? "").trim()]).filter(([, v]) => v !== ""),
         );
+        unsaved = payload;
         const { rep, source, ...utm } = props.attribution;
         const res = await fetch("/api/forms/submit", {
           method: "POST",
@@ -328,7 +333,7 @@ export function BookingPage(props: Props) {
             step_index: 0,
             payload,
             submission_path: `${window.location.pathname}${window.location.search}`,
-            consent_ledger: { email: ticked.email, sms: ticked.sms },
+            consent_ledger: consentLedger,
             ...utm,
           }),
         });
@@ -339,7 +344,8 @@ export function BookingPage(props: Props) {
           // A fault on our side is not the visitor's to check, and a person who
           // gives up here is a lead nobody hears about: it beacons, so the
           // answers are kept and someone is paged (independent review of #714).
-          const fault = !data || (data.error !== undefined && BEACON_ERRORS.has(data.error));
+          // Any 5xx counts, as on every form (isSubmitFault).
+          const fault = isSubmitFault(res.status, data);
           if (fault) {
             sendSubmitFailureBeacon({
               tenantSlug: props.tenantSlug,
@@ -347,6 +353,7 @@ export function BookingPage(props: Props) {
               stepIndex: 0,
               error: data?.error ?? `non_json_http_${res.status}`,
               payload,
+              consentLedger,
             });
           }
           setError(
@@ -360,6 +367,7 @@ export function BookingPage(props: Props) {
         }
         token = data.minted_token;
         tokenRef.current = token;
+        unsaved = null;
       }
       if (detailsOnly || !slot) {
         // They asked for a call and could not pick a time: the sales desk hears
@@ -410,6 +418,16 @@ export function BookingPage(props: Props) {
       if (code === "retry_required") requestIdRef.current = null;
       setError(bookingMessage(code));
     } catch {
+      if (unsaved) {
+        sendSubmitFailureBeacon({
+          tenantSlug: props.tenantSlug,
+          formSlug: props.formSlug,
+          stepIndex: 0,
+          error: "network_error",
+          payload: unsaved,
+          consentLedger,
+        });
+      }
       setError("Your connection dropped before we heard back. Please try again.");
     } finally {
       setBusy(false);

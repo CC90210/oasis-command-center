@@ -37,6 +37,9 @@ function checkTrigger(req: NextRequest): NextResponse | null {
   return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
 }
 
+/** How many of the newest messages after the cursor one read lists, per mailbox. */
+const READ_WINDOW = 40;
+
 async function runAgent(agent: AgentEmailSettings, write: boolean) {
   const dryRun = !write; // writes are held off the schedule until verified
   const results: Record<string, IngestResult & { diag: string }> = {};
@@ -54,7 +57,7 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
     // (scope_missing_readonly / token_refresh_failed / list_http_* / ok_N).
     const read = await readMailbox(agent.tenantId, agent.userId, mailbox, {
       query: `${since} -in:chats`,
-      max: 40,
+      max: READ_WINDOW,
     });
     const ing = await ingestMessages(
       { tenantId: agent.tenantId, userId: agent.userId, mailbox, dryRun },
@@ -117,9 +120,9 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
       console.warn(
         `[operator-email] ${deferred} message(s) held (classification still running, or the lead lookup failed) — cursor held at ${upTo} (not frozen)`,
       );
-      if (Object.values(results).some((r) => (r?.scanned ?? 0) >= 40)) {
+      if (Object.values(results).some((r) => (r?.scanned ?? 0) >= READ_WINDOW)) {
         console.error(
-          "[operator-email] a message is held while a mailbox's read window is full (40): older held mail may never be read again",
+          `[operator-email] a message is held while a mailbox's read window is full (${READ_WINDOW}): older held mail may never be read again`,
           { tenant_id: agent.tenantId },
         );
       }

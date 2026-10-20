@@ -435,7 +435,8 @@ async function main() {
     assert.match(held, /for \(let i = heldStepsSent\.current; i < currentStep; i \+= 1\)/, "a retry must resume after the last held step that went through");
     // Codex review of #668 (pass 3): before a lead exists, the failure report is
     // the only copy of the contact, and it must name the held step that failed.
-    assert.match(held, /showSubmitFailure\(res, data, \{ \.\.\.payload, \.\.\.\(contact \?\? \{\}\) \}, i\);/);
+    // Its consent boxes go with it (independent review of #714, round 3).
+    assert.match(held, /showSubmitFailure\(res, data, \{ \.\.\.payload, \.\.\.\(contact \?\? \{\}\) \}, i, \{ consentLedger: ledger \}\);/);
     // The beacon itself moved to lib/forms/submit-failure-beacon.ts (#714): the
     // client hands it the step it was given, and the module stamps that one.
     assert.match(

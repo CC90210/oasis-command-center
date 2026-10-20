@@ -39,7 +39,7 @@ import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalenda
 import { contactGateAction, contactHandoff, hasReachableContact, typedContact } from "@/lib/forms/contact-gate";
 import { HONEYPOT_BODY_KEY, reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import { chosenFileType } from "@/lib/forms/file-type";
-import { BEACON_ERRORS, sendSubmitFailureBeacon } from "@/lib/forms/submit-failure-beacon";
+import { isSubmitFault, sendSubmitFailureBeacon } from "@/lib/forms/submit-failure-beacon";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -805,8 +805,15 @@ export function FormPublicClient({
     error: string,
     payload?: Record<string, unknown>,
     stepIndex = currentStep,
-    /** A router's answer, which stored nothing: its row is filed already recovered. */
-    nothingToRecover = false,
+    {
+      nothingToRecover = false,
+      consentLedger,
+    }: {
+      /** A router's answer, which stored nothing: its row is filed already recovered. */
+      nothingToRecover?: boolean;
+      /** The failed step's consent boxes, so a decline reaches whoever follows up. */
+      consentLedger?: { email?: boolean; sms?: boolean };
+    } = {},
   ) {
     sendSubmitFailureBeacon({
       tenantSlug: anonymousInit?.tenant_slug,
@@ -815,6 +822,7 @@ export function FormPublicClient({
       error,
       payload: payload ?? values,
       nothingToRecover,
+      consentLedger,
     });
   }
 
@@ -854,14 +862,14 @@ export function FormPublicClient({
 
   /**
    * Show a refused submission as a plain sentence. Beacon only the failures
-   * nobody else can see or that mean a crash: a non-JSON response (platform
-   * error page, 413), an explicit server_error, form_unavailable (the form
-   * could not be read) or upload_unavailable (storage failed under a file),
-   * plus an error code with no copy, which means the route grew a rejection
-   * nobody wrote a sentence for.
+   * nobody else can see or that mean a crash: our fault by isSubmitFault (no
+   * JSON answer, any 5xx, or a BEACON_ERRORS code), or else an error code with
+   * no copy, which means the route grew a rejection nobody wrote a sentence
+   * for. One beacon per failure, never both.
    * Validation and rate-limit responses are the system working, not a
    * merchant being lost. `beacon: false` holds the beacon back (the router's
-   * first failure); `nothingToRecover` marks an answer that stored nothing.
+   * first failure); `nothingToRecover` marks an answer that stored nothing;
+   * `consentLedger` is the failed step's consent boxes.
    */
   function showSubmitFailure(
     res: Response,
@@ -869,13 +877,19 @@ export function FormPublicClient({
     payload: Record<string, unknown>,
     /** The step the failed request was for, when not the one on screen (a held step). */
     stepIndex = currentStep,
-    { beacon = true, nothingToRecover = false }: { beacon?: boolean; nothingToRecover?: boolean } = {},
+    {
+      beacon = true,
+      nothingToRecover = false,
+      consentLedger,
+    }: { beacon?: boolean; nothingToRecover?: boolean; consentLedger?: { email?: boolean; sms?: boolean } } = {},
   ) {
-    if (beacon && (!data || (data.error !== undefined && BEACON_ERRORS.has(data.error)))) {
-      reportSubmitFailure(data ? data.error ?? "server_error" : `non_json_http_${res.status}`, payload, stepIndex, nothingToRecover);
-    }
-    if (beacon && data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
-      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex, nothingToRecover);
+    if (beacon && isSubmitFault(res.status, data)) {
+      reportSubmitFailure(data ? data.error ?? "server_error" : `non_json_http_${res.status}`, payload, stepIndex, {
+        nothingToRecover,
+        consentLedger,
+      });
+    } else if (beacon && data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
+      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex, { nothingToRecover, consentLedger });
     }
     // The route writes a specific sentence for the rejections that can name
     // their own problem (which field, what is missing). Prefer it; fall back to
@@ -978,7 +992,7 @@ export function FormPublicClient({
       if (!data || !data.ok) {
         // The recovery record names the held step that failed and keeps the
         // contact: before a lead exists, it is the only copy (Codex review of #668).
-        showSubmitFailure(res, data, { ...payload, ...(contact ?? {}) }, i);
+        showSubmitFailure(res, data, { ...payload, ...(contact ?? {}) }, i, { consentLedger: ledger });
         return false;
       }
       if (!tokenRef.current && data.minted_token) {
@@ -997,26 +1011,39 @@ export function FormPublicClient({
    * goes next, and stores nothing.
    */
   async function routeWithoutLead(lastPayload: Record<string, unknown>) {
-    const res = await fetch("/api/forms/submit", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        step_index: currentStep,
-        anonymous_init: anonymousInit,
-        route_only: true,
-        steps_payload: steps.map((_, i) => (i === currentStep ? lastPayload : heldSteps.current[i] ?? {})),
-        ...submitMeta(),
-      }),
-    });
+    // The router stored nothing, so there is nothing to recover, and one
+    // failure is usually a blip the visitor's retry gets past. The same
+    // visitor failing again is the router being down while ads send people
+    // to it: that beacons, so someone is paged, marked as nothing to recover
+    // so its row does not wait for a hand to close it (independent review of
+    // #714). Only our faults count (isSubmitFault, or the connection dying);
+    // the visitor's own mistakes are the form working. The answers stay on
+    // screen for the retry.
+    let res: Response;
+    try {
+      res = await fetch("/api/forms/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          step_index: currentStep,
+          anonymous_init: anonymousInit,
+          route_only: true,
+          steps_payload: steps.map((_, i) => (i === currentStep ? lastPayload : heldSteps.current[i] ?? {})),
+          ...submitMeta(),
+        }),
+      });
+    } catch {
+      // Not the submit's catch, which files a real loss at once: nothing was stored.
+      routeFailures.current += 1;
+      if (routeFailures.current >= 2) {
+        reportSubmitFailure("route_network_error", lastPayload, currentStep, { nothingToRecover: true });
+      }
+      setServerError("We couldn't submit the form. Please check your connection and try again.");
+      return;
+    }
     const data = (await res.json().catch(() => null)) as SubmitResponse | null;
     if (!data || !data.ok) {
-      // The router stored nothing, so there is nothing to recover, and one
-      // failure is usually a blip the visitor's retry gets past. The same
-      // visitor failing again is the router being down while ads send people
-      // to it: that beacons, so someone is paged, marked as nothing to recover
-      // so its row does not wait for a hand to close it (independent review of
-      // #714). The answers stay on screen for the retry.
-      routeFailures.current += 1;
+      if (isSubmitFault(res.status, data)) routeFailures.current += 1;
       showSubmitFailure(res, data, lastPayload, currentStep, {
         beacon: routeFailures.current >= 2,
         nothingToRecover: true,
@@ -1286,7 +1313,7 @@ export function FormPublicClient({
       // the merchant gets a plain sentence and a retry that can succeed.
       const data = (await res.json().catch(() => null)) as SubmitResponse | null;
       if (!data || !data.ok) {
-        showSubmitFailure(res, data, built.payload);
+        showSubmitFailure(res, data, built.payload, currentStep, { consentLedger: ledger });
         return;
       }
       // Capture the freshly-signed token from an anonymous step 0 so

@@ -25,6 +25,8 @@ import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { alertAudienceFor } from "@/lib/notify/alert-route";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
+import { hasReachableContact } from "@/lib/forms/contact-gate";
+import { normalizeConsentSubject } from "@/lib/consent/ledger-disclosure";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
 /** Slugs reach the alert text and the DB; merchants type neither, but the
@@ -52,10 +54,43 @@ export type SubmitFailureInput = {
    * on the ladder, because a router that keeps failing is down, but its row is
    * filed already recovered: there is no merchant to contact, and an open row
    * would hold forms.submit_failures_open red until someone closed it by hand
-   * (independent review of #714).
+   * (independent review of #714). The browser's word on a public endpoint, so
+   * it is ignored when the answers carry a way to reach the visitor
+   * (captureSubmitFailure).
    */
   nothingToRecover?: boolean;
+  /** The consent boxes the failed step showed, and whether each was ticked. */
+  consentLedger?: { email?: boolean; sms?: boolean } | null;
 };
+
+/**
+ * Do these answers hold a way to reach the visitor? An email or a phone under
+ * a lead's standard names, or an email under any name: a renamed field
+ * (`work_email`) still holds one, and an email cannot be mistaken for another
+ * answer, as a long number could for a phone.
+ */
+function carriesContact(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const answers = payload as Record<string, unknown>;
+  return hasReachableContact(answers) ||
+    Object.values(answers).some((v) => normalizeConsentSubject("email", v) !== null);
+}
+
+/** What the person who follows up must not do, when the visitor declined a channel on the failed step. */
+function declinedLine(ledger: SubmitFailureInput["consentLedger"]): string {
+  const declined = [ledger?.email === false ? "email" : null, ledger?.sms === false ? "text" : null].filter(Boolean);
+  if (declined.length === 0) return "";
+  return ` They declined ${declined.join(" and ")} marketing on that step, and it may not have been recorded: follow up on this request only.`;
+}
+
+/** The answers as kept, with the consent decision beside them. */
+function keptPayload(input: SubmitFailureInput): unknown {
+  if (!input.consentLedger) return input.payload;
+  const base = input.payload && typeof input.payload === "object" && !Array.isArray(input.payload)
+    ? (input.payload as Record<string, unknown>)
+    : { answers: input.payload ?? null };
+  return { ...base, consent_ledger: input.consentLedger };
+}
 
 /** Replace inline file bytes with metadata so the snapshot stays small and the
  *  dead-letter table never becomes a shadow document store. */
@@ -140,7 +175,15 @@ async function verifiedForm(named: { tenantSlug: string; formSlug: string } | nu
       named.tenantSlug,
       named.formSlug,
     );
-    if (!found.ok) return null;
+    if (!found.ok) {
+      // A read that failed is not "no such form", but in an outage there is no
+      // workspace to page either: said as an error, so the loss is in the logs
+      // beside the outage, not a quiet warning (independent review of #714).
+      if (found.reason === "unavailable") {
+        console.error("[submit-failure-capture] the form could not be read; nobody was paged:", { ...named, error: found.error });
+      }
+      return null;
+    }
     return {
       tenantId: found.form.tenant_id,
       tenantSlug: found.tenant_slug,
@@ -165,8 +208,9 @@ function failureCard(
   input: SubmitFailureInput,
   dead: { id: string; inserted: boolean },
   windowH: number,
+  nothingToRecover: boolean,
 ): { title: string; body: string } {
-  if (input.nothingToRecover) {
+  if (nothingToRecover) {
     // A router that could not place a visitor, twice: nothing was stored.
     return alertAudienceFor(form.tenantId) === "oasis_operator"
       ? {
@@ -190,6 +234,7 @@ function failureCard(
         (dead.inserted
           ? `Merchant data captured: dead-letter ${dead.id}; recover it and set recovered_at.`
           : "The dead-letter insert ALSO failed: only this alert records the loss.") +
+        declinedLine(input.consentLedger) +
         ` Re-alerts in ${windowH}h if it keeps happening; forms.submit_failures_open stays red until recovered.`,
     };
   }
@@ -199,7 +244,8 @@ function failureCard(
       `A visitor's submission of "${form.formName}" did not go through. ` +
       (dead.inserted
         ? `Their answers were kept: contact OASIS support with reference ${dead.id} to get them.`
-        : "Their answers could not be kept. Contact OASIS support if this keeps happening."),
+        : "Their answers could not be kept. Contact OASIS support if this keeps happening.") +
+      declinedLine(input.consentLedger),
   };
 }
 
@@ -230,6 +276,12 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
   const tenantSlug = named?.tenantSlug ?? null;
   const formSlug = named?.formSlug ?? null;
   let inserted = false;
+  // "Nothing to recover" is the browser's word on a public endpoint. Answers
+  // that carry a way to reach the visitor are a real loss whatever it says:
+  // filed open, on the real-loss card and ladder. A router's failure has its
+  // own card and ladder, so it can never rewrite a real loss's open card or
+  // spend its page (independent review of #714, round 3).
+  const nothingToRecover = input.nothingToRecover === true && !carriesContact(input.payload);
 
   try {
     const db = getServiceSupabase();
@@ -241,10 +293,10 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
       step_index: Number.isFinite(input.stepIndex as number) ? input.stepIndex : null,
       error_message: String(input.error).slice(0, 1000),
       error_stack: input.errorStack ? String(input.errorStack).slice(0, 4000) : null,
-      payload: cappedJson(input.payload),
+      payload: cappedJson(keptPayload(input)),
       user_agent: input.userAgent ? String(input.userAgent).slice(0, 300) : null,
       created_at: new Date().toISOString(),
-      ...(input.nothingToRecover ? { recovered_at: new Date().toISOString() } : {}),
+      ...(nothingToRecover ? { recovered_at: new Date().toISOString() } : {}),
     });
     inserted = !r.error;
   } catch {
@@ -267,7 +319,9 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
       return { id: inserted ? id : null };
     }
     const db = getServiceSupabase();
-    const key = `submitfail:${form.tenantSlug}/${form.formSlug}/${input.source}`;
+    const key = nothingToRecover
+      ? `routerfail:${form.tenantSlug}/${form.formSlug}/${input.source}`
+      : `submitfail:${form.tenantSlug}/${form.formSlug}/${input.source}`;
     const stateRow = await db
       .from("health_alert_state")
       .select("*")
@@ -302,11 +356,11 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
     // the workspace sees the latest one; the ladder decides whether it pages.
     await writeAgentAlert({
       tenantId: form.tenantId,
-      alertType: "form_submit_blocked",
+      alertType: nothingToRecover ? "form_router_failed" : "form_submit_blocked",
       severity: "urgent",
       subjectType: "form",
       subjectId: form.formId,
-      ...failureCard(form, input, { id, inserted }, decision.windowH),
+      ...failureCard(form, input, { id, inserted }, decision.windowH, nothingToRecover),
       payload: {
         form_slug: form.formSlug,
         source: input.source,
