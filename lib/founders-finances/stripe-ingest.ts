@@ -104,6 +104,7 @@ import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement } fr
 import { financeTenantId, getStripeClient, listAll, pinnedStripeAccount, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
 import { recordStripePayout, retryUnbookedPayouts, unbookedPayouts } from "./stripe-payouts-io";
 import { alertPublicCheckoutPaid, publicCheckoutSale } from "@/lib/checkout/paid-alert";
+import { keepAlive } from "@/lib/os/runs/keepalive";
 
 const ACTOR = "stripe";
 const E = BUSINESS_ENTITY_ID;
@@ -1264,9 +1265,15 @@ export async function handleStripeEvent(raw: unknown): Promise<EventOutcome> {
       return { status: "ignored", detail: `ignored: ${origin.reason} — never enters the OASIS books` };
     }
     const ledger: InStatement[] = [];
-    const detail = await dispatch(env, ledger);
+    const afterMark: Array<() => Promise<unknown>> = [];
+    const detail = await dispatch(env, ledger, afterMark);
     const ignored = detail.startsWith("ignored");
     await finishEvent(env.id, ignored ? "ignored" : "processed", ignored ? detail : null, ledger);
+    // The event is marked, so a retry of it is now a duplicate (claimEvent):
+    // work that must not run twice starts here, kept alive past the answer to
+    // Stripe. Each job is an async function and keepAlive never throws, so
+    // nothing here reaches the catch below and marks a booked event failed.
+    for (const job of afterMark) await keepAlive(job(), `stripe-finance.${env.type}:${env.id}`);
     return { status: ignored ? "ignored" : "processed", detail };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -1286,8 +1293,12 @@ function subscriptionInterval(f: SubscriptionFacts): "day" | "week" | "month" | 
  * handleStripeEvent commits them with the processed mark. Facts that belong
  * to a write (a payment, a refund, a subscription, an invoice's payment) are
  * emitted with that write instead.
+ *
+ * `afterMark` collects work that must wait until the event is marked done (the
+ * purchase alert). handleStripeEvent starts it once the mark is written, kept
+ * alive past the answer to Stripe (review of #718).
  */
-async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promise<string> {
+async function dispatch(env: StripeEventEnvelope, ledger: InStatement[], afterMark: Array<() => Promise<unknown>>): Promise<string> {
   switch (env.type) {
     case "charge.failed": {
       const c = chargeFacts(env.object);
@@ -1385,20 +1396,24 @@ async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promis
       const r = await recordStripeCharge(charge, { fetchFees: true });
       // A purchase on the public checkout (/pricing) tells the sales desk. Only
       // the intent carries the checkout's marker. Not gated on r.created:
-      // charge.succeeded may have booked the payment first. A redelivery of
-      // this event is a duplicate (claimEvent) and tells no one; a retry after
-      // the processed mark failed can repeat the alert, deliberately (a second
-      // ping costs less than a missed sale). It never throws
+      // charge.succeeded may have booked the payment first. The alert waits for
+      // the processed mark (afterMark): sent here it held the webhook for 16
+      // seconds when Telegram did not answer, and an event whose mark failed
+      // would alert again on every retry (review of #718). A redelivery of a
+      // marked event is a duplicate (claimEvent) and tells no one. The alert
+      // never throws, and leaves a card when it cannot be sent
       // (lib/checkout/paid-alert.ts).
       const sale = publicCheckoutSale(env.object);
       if (sale) {
-        await alertPublicCheckoutPaid({
+        const purchase = {
           sale,
+          paymentIntentId: pi.paymentIntentId,
           amountCents: pi.amountReceivedCents,
           currency: pi.currency,
           customerName: charge.customerName,
           customerEmail: charge.customerEmail,
-        });
+        };
+        afterMark.push(() => alertPublicCheckoutPaid(purchase));
       }
       return r.paymentId ? `payment ${r.created ? "recorded" : "matched"} ${r.paymentId}` : `ignored: ${r.reason}`;
     }
