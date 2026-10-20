@@ -22,7 +22,8 @@
  * Run: node --conditions=react-server --import tsx tests/os-approvals.test.ts
  */
 import assert from "node:assert/strict";
-import { createHash, createHmac } from "node:crypto";
+import { createHash } from "node:crypto";
+import { unsubscribeToken } from "../lib/email/unsubscribe-signing";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1764,13 +1765,15 @@ async function main() {
         Object.defineProperty(r, "nextUrl", { value: new URL(url) });
         return r as never;
       };
-      // The link is signed: its token is the HMAC of this address and brand.
+      // The link is signed: its token is the HMAC of this address and brand,
+      // through the one function the route checks with (its scheme is pinned
+      // in tests/unsubscribe-records-every-opt-out.test.ts).
       // (A token that does not match is filed as unsigned, capped and logged,
       // never refused: tests/unsubscribe-records-every-opt-out.test.ts.)
       const linkParams = new URL(oneClick[1]).searchParams;
       assert.equal(
         linkParams.get("token"),
-        createHmac("sha256", "os-approvals-unsubscribe-secret").update(`${CLIENT_CONTACT}|OASIS AI`).digest("hex").slice(0, 16),
+        unsubscribeToken(CLIENT_CONTACT, "OASIS AI", "os-approvals-unsubscribe-secret"),
         "the link is signed for this address and brand",
       );
       const done = await unsubscribe.POST(oneClickPost(oneClick[1]));

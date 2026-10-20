@@ -21,22 +21,37 @@
  * HMAC: click targets are signed with OASIS_UNSUBSCRIBE_HMAC_SECRET (reused —
  * same secret the /api/unsubscribe token uses). A validly-signed target is
  * trusted for redirect; unsigned/foreign targets fall back to a host allowlist
- * in the click route (fail-closed). Unsubscribe tokens match the exact scheme
- * /api/unsubscribe/route.ts verifies: HMAC-SHA256(email|brand) sliced to 16 hex.
+ * in the click route (fail-closed). Unsubscribe tokens come from the one
+ * function /api/unsubscribe/route.ts verifies with (./unsubscribe-signing.ts).
  */
 
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { resolveTrackingBase } from "./tracking-base";
+import { unsubscribeToken } from "./unsubscribe-signing";
 import { unsubscribeMailto } from "./sending-identity";
 import { brandFooter } from "./brand-shell";
 import type { BrandKey } from "./brands";
+import type { OASIS_SUPPRESSION_BRAND } from "./support-mailbox";
 
 // The brand on SunBiz mail's opt-out links. SunBiz is retired
 // (lib/tenant/retired.ts), and /api/unsubscribe files a brand that is not
 // pinned to a workspace globally, where every sender honours it
 // (lib/email/suppression-scope.ts).
 export const SUNBIZ_BRAND = "SunBiz";
+
+/**
+ * The brands an opt-out link may carry. Each is a DECISION about where its
+ * opt-outs file: /api/unsubscribe files a brand pinned to a workspace there
+ * (OASIS's support mail) and every other brand for every sender
+ * (lib/email/support-mailbox.ts). That may be right for a new sender, but it
+ * has to be a choice. So every brand parameter below is this closed union
+ * (unsubscribeUrl also takes "", no brand), and tsc refuses any other string at
+ * the call (review of #715). A new brand is added here on purpose, and to the
+ * decided list in tests/unsubscribe-records-every-opt-out.test.ts, which pins
+ * this type.
+ */
+export type OptOutBrand = typeof SUNBIZ_BRAND | typeof OASIS_SUPPRESSION_BRAND;
 
 /**
  * SENDING-DOMAIN ALIGNMENT (2026-07-29).
@@ -178,22 +193,21 @@ export function clickUrl(
 /** Signed query string (email|brand|token) shared by the page + API unsub URLs.
  *  Email is lowercased in BOTH the token and the param because the route
  *  lowercases before it verifies HMAC(email|brand). */
-function unsubQuery(email: string, brand: string): string {
+function unsubQuery(email: string, brand: OptOutBrand | ""): string {
   const lower = email.trim().toLowerCase();
   const secret = process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET;
   const qs = new URLSearchParams({ email: lower, brand });
-  if (secret) {
-    const token = createHmac("sha256", secret).update(`${lower}|${brand}`).digest("hex").slice(0, 16);
-    qs.set("token", token);
-  }
+  if (secret) qs.set("token", unsubscribeToken(lower, brand, secret));
   return qs.toString();
 }
 
 /** Human-facing unsubscribe PAGE (renders a confirmation) — used by the visible
- *  in-body footer link on commercial mail. */
+ *  in-body footer link on commercial mail. `""` is no brand at all, for the
+ *  templates gallery alone (app/api/templates/send/route.ts), pinned by
+ *  tests/unsubscribe-records-every-opt-out.test.ts. */
 export function unsubscribeUrl(
   email: string,
-  brand: string = SUNBIZ_BRAND,
+  brand: OptOutBrand | "" = SUNBIZ_BRAND,
   base: string = platformTrackingBase(),
 ): string {
   return `${base}/unsubscribe?${unsubQuery(email, brand)}`;
@@ -204,7 +218,7 @@ export function unsubscribeUrl(
  *  mail client's one-click actually suppresses instead of 405-ing on the page. */
 export function unsubscribeApiUrl(
   email: string,
-  brand: string = SUNBIZ_BRAND,
+  brand: OptOutBrand = SUNBIZ_BRAND,
   base: string = platformTrackingBase(),
 ): string {
   return `${base}/api/unsubscribe?${unsubQuery(email, brand)}`;
@@ -213,7 +227,7 @@ export function unsubscribeApiUrl(
 /** RFC 8058 List-Unsubscribe header value (one-click HTTPS URL + mailto fallback). */
 export function listUnsubscribeHeader(
   email: string,
-  brand: string = SUNBIZ_BRAND,
+  brand: OptOutBrand = SUNBIZ_BRAND,
   base: string = platformTrackingBase(),
 ): string {
   // The mailto is derived from the configured From address, never hardcoded: a
@@ -237,7 +251,7 @@ export function buildTrackedHtml(
     email: string;
     /** SUPPRESSION brand: the label an opt-out from this link is recorded with
      *  (filed under a workspace only when pinned to one, else globally). */
-    brand?: string;
+    brand?: OptOutBrand;
     /**
      * SENDING brand — whose legal entity and postal address appear in the
      * footer. A DIFFERENT axis from `brand` above: both brands share one tenant
@@ -286,6 +300,6 @@ export function buildTrackedHtml(
 }
 
 /** Back-compat alias for the drip executor's original call shape. */
-export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: string; sendingBrand?: BrandKey; unsub?: UnsubMode; trackingBase?: string }): string {
+export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: OptOutBrand; sendingBrand?: BrandKey; unsub?: UnsubMode; trackingBase?: string }): string {
   return buildTrackedHtml(plain, opts);
 }

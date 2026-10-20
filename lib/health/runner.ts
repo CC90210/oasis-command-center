@@ -70,7 +70,8 @@ export function tenantOutcomeChecks(): DripCheck[] {
  * platform check, and a platform check must never keep writing rows for a
  * client that is gone.
  */
-const ESTATE_WIDE_FORM_CHECK_IDS: ReadonlySet<string> = new Set(["forms.submit_failures_open"]);
+// A global opt-out has no workspace either (optouts.global_web_filings_hourly).
+const ESTATE_WIDE_FORM_CHECK_IDS: ReadonlySet<string> = new Set(["forms.submit_failures_open", "optouts.global_web_filings_hourly"]);
 export const ESTATE_WIDE_CHECKS: DripCheck[] = [
   ...DEPLOY_CHECKS,
   ...FORM_CHECKS.filter((c) => ESTATE_WIDE_FORM_CHECK_IDS.has(c.id)),

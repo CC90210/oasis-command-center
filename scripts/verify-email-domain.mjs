@@ -20,12 +20,11 @@
  * SIDE EFFECTS, stated precisely rather than as a blanket "read-only" claim:
  *   - No email is sent. No suppression is ever recorded. No secrets printed.
  *   - The unsubscribe probe deliberately takes the `invalid_json` branch, which
- *     returns before any write.
- *   - ONE residual: if the source IP is ALREADY rate-limited, /api/unsubscribe
- *     records a single `rate_limited` attempt before it parses the body. That
- *     needs the IP to be over the limit already, so it cannot happen from a
- *     normal preflight; it is documented rather than engineered around because
- *     the alternative is a dedicated health endpoint for one probe.
+ *     returns before anything is written. The route keeps no failure limiter
+ *     any more (the one it shared with pair-code redemption is gone, review of
+ *     #715), and its only counter, the cap on unsigned filings, takes its place
+ *     after the body is parsed and its address checked. So the probe leaves
+ *     nothing behind.
  *   Safe to run any time. Do not run it in a tight loop.
  *
  * Usage:
@@ -180,10 +179,12 @@ if (!TRACKING) {
       // POST is the unsubscribe route's only method, and the BODY MATTERS for
       // keeping this script's read-only promise honest (Codex review P2).
       //
-      // A well-formed `{}` reaches the invalid_email branch, which calls
-      // recordPairAttempt — inserting a pair_attempts row and counting against
-      // the IP rate limiter, so repeated preflights could 429 a real merchant's
-      // unsubscribe. A deliberately MALFORMED body short-circuits earlier, at
+      // A body that parsed and named an address would FILE a real opt-out for
+      // it, and take a place in the route's cap on unsigned filings from this
+      // IP, so repeated preflights could use the cap up and 429 a real
+      // merchant's unsubscribe. (A well-formed `{}` stops at invalid_email and
+      // writes nothing today, but only because it names no address.) A
+      // deliberately MALFORMED body short-circuits earlier, at
       // `catch { return bad(400, "invalid_json") }`, which writes nothing at all.
       //
       // Same fingerprint ({ok:false} JSON that only this app produces), zero
