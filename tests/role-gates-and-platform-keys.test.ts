@@ -79,14 +79,28 @@ stub("imapflow", {
   },
 });
 // The network: Kixie's API answers from here; anything else is refused.
-let kixieAnswer: "accept" | "reject" = "reject";
+// "ambiguous" is a 200 that neither confirms nor says success:false.
+let kixieAnswer: "accept" | "reject" | "ambiguous" = "reject";
 const kixieCalls: Array<Record<string, unknown>> = [];
+// Runs once, before the next Kixie call is answered: what another request
+// does while this one's registrations are in flight.
+let beforeNextKixieCall: (() => Promise<void>) | null = null;
 const strayFetches: string[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = input instanceof Request ? input.url : String(input);
   if (url.startsWith("https://apig.kixie.com/")) {
+    if (beforeNextKixieCall) {
+      const hook = beforeNextKixieCall;
+      beforeNextKixieCall = null;
+      await hook();
+    }
     kixieCalls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-    const answer = kixieAnswer === "accept" ? { success: true, webhookid: kixieCalls.length } : { success: false, error: "apiKey is invalid" };
+    const answer =
+      kixieAnswer === "accept"
+        ? { success: true, webhookid: kixieCalls.length }
+        : kixieAnswer === "ambiguous"
+          ? { error: "apiKey is invalid" }
+          : { success: false, error: "apiKey is invalid" };
     return new Response(JSON.stringify(answer), { status: 200, headers: { "content-type": "application/json" } });
   }
   strayFetches.push(url);
@@ -206,6 +220,8 @@ async function main() {
       sends_today INTEGER NOT NULL DEFAULT 0, sends_date TEXT, last_send_at TEXT,
       warmup_status TEXT NOT NULL DEFAULT 'warming', active INTEGER NOT NULL DEFAULT 1, notes TEXT,
       created_at TEXT DEFAULT ${NOW_SQL}, updated_at TEXT DEFAULT ${NOW_SQL}, UNIQUE (tenant_id, address));
+    CREATE TABLE cc_email_templates (id TEXT PRIMARY KEY DEFAULT ${UUID_SQL}, tenant_id TEXT NOT NULL, name TEXT,
+      category TEXT, subject TEXT, preheader TEXT, html TEXT, created_by TEXT, updated_at TEXT DEFAULT ${NOW_SQL});
   `);
   // The drip caps' real migration.
   for (const stmt of splitSql(readFileSync(join(__dirname, "..", "database", "turso", "144_drip_channel_limits.turso.sql"), "utf8"))) {
@@ -319,6 +335,7 @@ async function main() {
   const connectImap = await import("../app/api/agents/operator-email/connect-imap/route");
   const kixieSync = await import("../app/api/integrations/kixie/sync-webhooks/route");
   const operatorCron = await import("../app/api/cron/operator-email-agent/route");
+  const dripTemplates = await import("../app/api/drip-templates/route");
 
   // ── 1. sessionMayWriteCrm ────────────────────────────────────────────────
   const mayWrite = async (user: Seat | null, tenantId: string) => {
@@ -413,6 +430,39 @@ async function main() {
     assert.equal(reminded.status, 200, JSON.stringify(reminded.body));
     assert.equal((reminded.body.results as unknown[]).length, 1, "the signer was attempted");
   });
+  await check("e-sign: an admin by the admin_access grant gets through, though its role is read_only", async () => {
+    // Review of #716: dropping `isAdmin` from these gates locked out an admin
+    // by grant, and nothing else noticed.
+    await login(SEATS.toggled);
+    const created = await call(esignEnvelopes.POST, request("/api/esign/envelopes", "POST", envelopeBody));
+    assert.equal(created.status, 400, JSON.stringify(created.body));
+    assert.equal(created.body.error, "invalid_pdf", "past the role gate, stopped at PDF validation");
+    const reminded = await call(esignRemind.POST, request(`/api/esign/envelopes/${ENVELOPE_SENT}/remind`, "POST"), { id: ENVELOPE_SENT });
+    assert.equal(reminded.status, 200, JSON.stringify(reminded.body));
+  });
+
+  // ── drip email templates (a sibling write the review of #716 found) ───────
+  const templatesIn = (tenantId: string) => n("SELECT COUNT(*) AS n FROM cc_email_templates WHERE tenant_id = ?", [tenantId]);
+  const templateBody = { name: "Follow-up", subject: "Checking in", preheader: "A short plain body" };
+  await check("drip templates: a read_only seat and an unknown role cannot create one (403); nothing is stored", async () => {
+    const before = await templatesIn(CLIENT_A);
+    for (const who of [SEATS.viewer, SEATS.odd]) {
+      await login(who);
+      assertRefused(await call(dripTemplates.POST, request("/api/drip-templates", "POST", templateBody)), "forbidden_role", who.email);
+    }
+    assert.equal(await templatesIn(CLIENT_A), before);
+  });
+  await check("drip templates: a CRM writer and an admin by grant still create one; a read_only seat still lists them", async () => {
+    const before = await templatesIn(CLIENT_A);
+    for (const who of [SEATS.writer, SEATS.toggled]) {
+      await login(who);
+      const r = await call(dripTemplates.POST, request("/api/drip-templates", "POST", templateBody));
+      assert.equal(r.status, 200, `${who.email}: ${JSON.stringify(r.body)}`);
+    }
+    assert.equal(await templatesIn(CLIENT_A), before + 2);
+    await login(SEATS.viewer);
+    assert.equal((await call(dripTemplates.GET, request("/api/drip-templates", "GET"))).status, 200);
+  });
 
   // ── drip sending caps ────────────────────────────────────────────────────
   const capsRow = () => n("SELECT COUNT(*) AS n FROM drip_channel_limits WHERE tenant_id = ?", [CLIENT_A]);
@@ -436,6 +486,12 @@ async function main() {
     assert.equal(admin.status, 200, JSON.stringify(admin.body));
     assert.equal(await value("SELECT sms_daily AS v FROM drip_channel_limits WHERE tenant_id = ?", [CLIENT_A]), 450);
     assert.equal(await value("SELECT sms_hourly AS v FROM drip_channel_limits WHERE tenant_id = ?", [CLIENT_A]), 20);
+  });
+  await check("drip caps: an admin by the admin_access grant changes them too", async () => {
+    await login(SEATS.toggled);
+    const r = await call(dripLimits.PATCH, request("/api/drips/limits", "PATCH", { smsHourly: 25 }));
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(await value("SELECT sms_hourly AS v FROM drip_channel_limits WHERE tenant_id = ?", [CLIENT_A]), 25);
   });
 
   // ── manifest writes, one check per route ─────────────────────────────────
@@ -647,6 +703,16 @@ async function main() {
     assert.equal(own.status, 200, JSON.stringify(own.body));
     assert.equal(await loginsStoredFor(CLIENT_A, USERS.clientA.id), 2);
   });
+  await check("scan key, operator-email/connect-imap: refused (403) in OASIS for a person who is not an active member there; nothing stored", async () => {
+    // Review of #716: the key named any user id, so a login was stored under
+    // OASIS for Client A's owner.
+    await login(null);
+    imapLogins.length = 0;
+    const r = await call(connectImap.POST, request("/api/agents/operator-email/connect-imap", "POST", imapBody(OASIS, USERS.clientA.id), scanKey));
+    assertRefused(r, "user_not_in_workspace", "Client A's owner in OASIS");
+    assert.equal(await loginsStoredFor(OASIS, USERS.clientA.id), 0);
+    assert.deepEqual(imapLogins, [], "no IMAP connection was made");
+  });
 
   // ── 3. Kixie business ids ────────────────────────────────────────────────
   const setKixieKey = async (businessId: string) => {
@@ -701,6 +767,80 @@ async function main() {
     assert.equal(await stampOf(CLIENT_A), "7002");
     const holders = await db.execute({ sql: "SELECT id FROM tenants WHERE json_extract(custom_fields, '$.kixie_business_id') = ?", args: ["7002"] });
     assert.deepEqual(holders.rows.map((row) => row.id), [CLIENT_A]);
+  });
+  // Review of #716: the next five were promises of the route that no check held.
+  const setCustomFields = (tenantId: string, cf: string) => db.execute({ sql: "UPDATE tenants SET custom_fields = ? WHERE id = ?", args: [cf, tenantId] });
+  const holdersOf = async (businessId: string) =>
+    (await db.execute({ sql: "SELECT id FROM tenants WHERE json_extract(custom_fields, '$.kixie_business_id') = ?", args: [businessId] })).rows.map((row) => row.id);
+  await check("Kixie: the workspace that already holds its id re-syncs and stays linked; its own id is never 'held by another'", async () => {
+    // The settings card tells people to run this again whenever the URL changes.
+    await setKixieKey("7002");
+    kixieCalls.length = 0;
+    kixieAnswer = "accept";
+    await login(USERS.clientA);
+    const r = await call(kixieSync.POST, request("/api/integrations/kixie/sync-webhooks", "POST"));
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.business_id_linked, true);
+    assert.deepEqual(await holdersOf("7002"), [CLIENT_A]);
+  });
+  await check("Kixie: a 200 that neither confirms nor refuses does not link the workspace", async () => {
+    await setKixieKey("7005");
+    await setCustomFields(CLIENT_A, "{}");
+    kixieCalls.length = 0;
+    kixieAnswer = "ambiguous";
+    await login(USERS.clientA);
+    const r = await call(kixieSync.POST, request("/api/integrations/kixie/sync-webhooks", "POST"));
+    kixieAnswer = "accept";
+    assert.equal(r.body.business_id_linked, false, JSON.stringify(r.body));
+    assert.equal(await stampOf(CLIENT_A), null, "linked on an answer that proves nothing");
+  });
+  await check("Kixie: a holder lookup that fails answers 503; Kixie is never called and nothing is stamped", async () => {
+    await setKixieKey("7003");
+    await setCustomFields(CLIENT_A, "{}");
+    const clientB = String(await value("SELECT custom_fields AS v FROM tenants WHERE id = ?", [CLIENT_B]));
+    await setCustomFields(CLIENT_B, "not json"); // json_extract fails on this row, as on any malformed one
+    kixieCalls.length = 0;
+    await login(USERS.clientA);
+    let r: Res;
+    try {
+      r = await call(kixieSync.POST, request("/api/integrations/kixie/sync-webhooks", "POST"));
+    } finally {
+      await setCustomFields(CLIENT_B, clientB);
+    }
+    assert.equal(r.status, 503, JSON.stringify(r.body));
+    assert.equal(r.body.error, "business_id_check_failed");
+    assertSentence(r.body.message, "a failed holder lookup");
+    assert.equal(kixieCalls.length, 0, "Kixie was called");
+    assert.equal(await stampOf(CLIENT_A), null, "stamped after a failed lookup");
+  });
+  await check("Kixie: another workspace takes the id while the registrations run; this one answers 409 and is not stamped", async () => {
+    await setKixieKey("7004");
+    await setCustomFields(CLIENT_A, "{}");
+    kixieCalls.length = 0;
+    kixieAnswer = "accept";
+    beforeNextKixieCall = () => setCustomFields(CLIENT_B, JSON.stringify({ kixie_business_id: "7004" })).then(() => undefined);
+    await login(USERS.clientA);
+    const r = await call(kixieSync.POST, request("/api/integrations/kixie/sync-webhooks", "POST"));
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "business_id_in_use");
+    assert.deepEqual(await holdersOf("7004"), [CLIENT_B], "two workspaces hold one id");
+  });
+  await check("Kixie: OASIS never borrows the Worker's env Kixie account (the retired client's); with no key of its own it is told to add one", async () => {
+    process.env.KIXIE_API_KEY = "env-kixie-key";
+    process.env.KIXIE_BUSINESS_ID = "9009";
+    kixieCalls.length = 0;
+    await login(USERS.cc);
+    let r: Res;
+    try {
+      r = await call(kixieSync.POST, request("/api/integrations/kixie/sync-webhooks", "POST"));
+    } finally {
+      delete process.env.KIXIE_API_KEY;
+      delete process.env.KIXIE_BUSINESS_ID;
+    }
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+    assert.equal(r.body.error, "missing_credentials");
+    assert.equal(kixieCalls.length, 0, "the env account was used");
+    assert.deepEqual(await holdersOf("9009"), []);
   });
 
   // ── 4. the operator-email cron ───────────────────────────────────────────

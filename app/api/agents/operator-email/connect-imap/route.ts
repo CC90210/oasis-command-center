@@ -18,6 +18,7 @@ import { timingSafeEqual } from "crypto";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { setUserIntegrationBundle } from "@/lib/user-integration-store";
 import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
+import { memberStanding } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,6 +94,22 @@ export async function POST(req: NextRequest) {
     if (!tenantMayUseEnvFallback(body.tenantId)) {
       return NextResponse.json(
         { ok: false, error: "key_not_allowed_for_workspace", message: "The automation key only works in OASIS's own workspaces. Connect the mailbox signed in instead." },
+        { status: 403 },
+      );
+    }
+    // And only for a person who is an active member of that workspace: the
+    // key named any user id, so a login was stored under someone outside it
+    // (review of #716). A failed read refuses; nothing is stored.
+    let standing: Awaited<ReturnType<typeof memberStanding>>["standing"];
+    try {
+      ({ standing } = await memberStanding(body.tenantId, body.userId));
+    } catch (e) {
+      console.error("[connect-imap] membership check failed", e instanceof Error ? e.message : e);
+      return NextResponse.json({ ok: false, error: "membership_check_failed" }, { status: 503 });
+    }
+    if (standing !== "active") {
+      return NextResponse.json(
+        { ok: false, error: "user_not_in_workspace", message: "That person is not an active member of this workspace." },
         { status: 403 },
       );
     }

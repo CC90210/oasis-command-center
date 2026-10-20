@@ -93,9 +93,13 @@ export async function POST() {
     );
   }
 
+  // The workspace's OWN stored key only. With the env fallback, OASIS's
+  // workspaces borrowed the Worker's env Kixie account, which is the retired
+  // client's: once nobody held that business id, OASIS would have registered
+  // under it and received that business's call and SMS events (review of #716).
   let creds;
   try {
-    creds = await getKixieCredentials(tenantId);
+    creds = await getKixieCredentials(tenantId, { allowEnvFallback: false });
   } catch (err) {
     return NextResponse.json(
       {
@@ -148,13 +152,15 @@ export async function POST() {
 
   const results = await registerAllWebhooks(creds, webhookUrl, { headersJson });
   const successCount = results.filter((r) => r.ok).length;
+  const confirmedCount = results.filter((r) => r.ok && r.confirmed).length;
 
-  // Stamp the id only once Kixie accepted a registration for it with this key,
-  // which shows the key controls that business, and only if no other
-  // workspace took the id while the registrations ran. Merge (don't clobber)
-  // the rest of custom_fields; a failed stamp is surfaced, not fatal.
+  // Stamp the id only once Kixie positively accepted a registration for it
+  // with this key (kixieConfirmed: success true, or a webhook id), which shows
+  // the key controls that business, and only if no other workspace took the
+  // id while the registrations ran. Merge (don't clobber) the rest of
+  // custom_fields; a failed stamp is surfaced, not fatal.
   let businessIdLinked = false;
-  if (successCount > 0) {
+  if (confirmedCount > 0) {
     const holderNow = await businessIdHolder(db, tenantId, creds.businessId);
     if (holderNow !== "none") return businessIdRefusal(holderNow);
     try {

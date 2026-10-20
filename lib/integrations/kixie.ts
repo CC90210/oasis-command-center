@@ -283,6 +283,19 @@ export const KIXIE_WEBHOOK_EVENTS = [
 
 export type KixieWebhookEvent = typeof KIXIE_WEBHOOK_EVENTS[number];
 
+/**
+ * Kixie positively accepted the call: `success: true`, or a webhook id came
+ * back. A 200 that says neither is not refused (assertKixieSuccess only
+ * refuses success:false), but it is no proof the key controls the business
+ * either, so it never links a workspace to a business id (2026-10-19 audit,
+ * review of #716).
+ */
+export function kixieConfirmed(parsed: unknown): boolean {
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const p = parsed as { success?: unknown; webhookid?: unknown; data?: { webhookid?: unknown } | null };
+  return p.success === true || p.webhookid != null || p.data?.webhookid != null;
+}
+
 /** Kixie replies HTTP 200 with {success:false, error|msg} on failures — surface it. */
 function assertKixieSuccess(parsed: unknown, context: string): unknown {
   if (
@@ -354,16 +367,16 @@ export async function registerAllWebhooks(
   creds: KixieCredentials,
   location: string,
   opts?: { headersJson?: string },
-): Promise<Array<{ event: KixieWebhookEvent; ok: boolean; error?: string }>> {
-  const results: Array<{ event: KixieWebhookEvent; ok: boolean; error?: string }> = [];
+): Promise<Array<{ event: KixieWebhookEvent; ok: boolean; confirmed?: boolean; error?: string }>> {
+  const results: Array<{ event: KixieWebhookEvent; ok: boolean; confirmed?: boolean; error?: string }> = [];
   for (const event of KIXIE_WEBHOOK_EVENTS) {
     try {
-      await registerWebhook(creds, {
+      const answer = await registerWebhook(creds, {
         eventName: event,
         location,
         headersJson: opts?.headersJson,
       });
-      results.push({ event, ok: true });
+      results.push({ event, ok: true, confirmed: kixieConfirmed(answer) });
     } catch (err) {
       results.push({
         event,
