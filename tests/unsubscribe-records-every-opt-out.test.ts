@@ -460,6 +460,26 @@ async function main() {
     assert.ok(lines.some((l) => l.includes("unsigned opt-out cap reached")), "a trip is logged");
   });
 
+  await check("a place in the unsigned cap lasts an hour: 30 places from 90 minutes ago do not count, 30 from 30 minutes ago do", async () => {
+    // The cap's window had no test either way: a window of days, or of five
+    // seconds, passed the burst check above (the same gap review of #715 found
+    // in the pair-code cap).
+    const fill = (bucket: string, minutesAgo: number) =>
+      db.batch(
+        Array.from({ length: 30 }, () => ({
+          sql: "INSERT INTO pair_attempts (profile_id, outcome, ip, attempted_at) VALUES (?, 'ok', ?, ?)",
+          args: [`unsubscribe-unsigned:${bucket}`, bucket, new Date(Date.now() - minutesAgo * 60_000).toISOString()],
+        })),
+        "write",
+      );
+    await fill("198.51.100.30", 90);
+    const old = await quietly(() => optOut("cap-window-old@example.com", "Nobody We Know", { ip: "198.51.100.30" }));
+    assert.equal(old.status, 200, "places older than an hour are not counted");
+    await fill("198.51.100.31", 30);
+    const recent = await quietly(() => optOut("cap-window-recent@example.com", "Nobody We Know", { ip: "198.51.100.31" }));
+    assert.equal(recent.status, 429, "30 places inside the hour fill the cap");
+  });
+
   await check("claiming a slot, like recording an attempt, hands the occasional prune of day-old limiter rows to the platform, and a prune that fails is logged", async () => {
     // The opt-out route only claims slots now, and the prune used to run only
     // from recordPairAttempt: the table would have grown forever. And on
