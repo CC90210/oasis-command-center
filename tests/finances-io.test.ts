@@ -231,6 +231,15 @@ async function main() {
       metadata,
     };
   };
+  /** What the alert is handed for such a purchase, for a check that calls it directly. */
+  const purchase = (n: string) => ({
+    sale: { orderId: `ord_${n}`, offerId: "enterprise-fleet", optionId: "foundation" },
+    paymentIntentId: `pi_${n}`,
+    amountCents: 750000,
+    currency: "cad",
+    customerName: "Bo Direct",
+    customerEmail: "bo@buyer.test",
+  });
   const SALES_ENV = ["OASIS_SALES_TELEGRAM_BOT_TOKEN", "OASIS_SALES_TELEGRAM_CHAT_ID", "OASIS_TELEGRAM_BOT_TOKEN", "OASIS_TELEGRAM_CHAT_ID"];
   /**
    * The sales group (-100777, its own bot), CC's chat (4242, his bot) and a
@@ -778,14 +787,6 @@ async function main() {
     const cardsFor = async (order: string) =>
       (await raw.execute({ sql: `SELECT * FROM agent_alerts WHERE alert_type = 'checkout_purchase_alert_failed' AND subject_id = ? AND resolved_at IS NULL`, args: [order] })).rows;
     const telegramOutcome = (card: { payload: unknown }) => (JSON.parse(String(card.payload)) as { telegram?: string }).telegram;
-    const purchase = (n: string) => ({
-      sale: { orderId: `ord_${n}`, offerId: "enterprise-fleet", optionId: "foundation" },
-      paymentIntentId: `pi_${n}`,
-      amountCents: 750000,
-      currency: "cad",
-      customerName: "Bo Direct",
-      customerEmail: "bo@buyer.test",
-    });
     await withTelegram(async (sent) => {
       // The sales bot is refused in every chat; CC's own bot still works.
       telegramRefuses = ({ token }) => (token.startsWith("123456:") ? "Forbidden: bot was kicked from the supergroup chat" : null);
@@ -847,19 +848,42 @@ async function main() {
       } finally {
         await raw.execute(`ALTER TABLE agent_alerts_offline RENAME TO agent_alerts`);
       }
+
+      // Input that breaks the words themselves: still nothing throws, and the log names the sale.
+      const broken = await logged(() => alertPublicCheckoutPaid({ ...purchase("fail_5"), currency: undefined as unknown as string }, async () => ({ delivered: true, outcome: "Sent to Telegram" })));
+      assert.equal(broken.result, false);
+      assert.ok(broken.errors.some((line) => line.includes("could not leave a card") && line.includes("ord_fail_5") && line.includes("pi_fail_5")), broken.errors.join(" | "));
     });
   });
 
-  await check("a buyer's 1,000-character name reaches the sales desk whole", async () => {
+  await check("a buyer's 1,000-character name reaches the sales desk whole, and so does the page about a refused alert", async () => {
     // A message is cut at 4,096 characters, and 1,000 "&" escape to 5,000: the
     // cut fell inside "&amp;" and Telegram refused the alert (review of #718).
+    const { alertPublicCheckoutPaid } = await import("../lib/checkout/paid-alert");
+    const name = "&".repeat(1000);
     await withTelegram(async (sent) => {
-      const name = "&".repeat(1000);
       await deliver("payment_intent.succeeded", checkoutSale("noisy_1", { name, email: `${name}@buyer.test` }), { id: "evt_noisy_1" });
       await settled();
       assert.equal(sent.length, 1);
       assert.ok(wholeTelegramHtml(sent[0].text), `${sent[0].text.length} characters, ending ${sent[0].text.slice(-60)}`);
       assert.ok(sent[0].text.includes("Next: reach out to book the kickoff."), "nothing after the buyer was cut off");
+    });
+    // When the alert is refused, the card pages CC with the same buyer text, and
+    // with the reason the send failed: both are cut too.
+    await withTelegram(async (sent) => {
+      telegramRefuses = ({ token }) => (token.startsWith("123456:") ? "Forbidden: bot was kicked from the supergroup chat" : null);
+      await logged(async () => {
+        await deliver("payment_intent.succeeded", checkoutSale("noisy_2", { name, email: `${name}@buyer.test` }), { id: "evt_noisy_2" });
+        await settled();
+        await alertPublicCheckoutPaid(purchase("noisy_3"), async () => {
+          throw new Error(name);
+        });
+      });
+      assert.equal(sent.length, 2, "CC's chat took both pages");
+      for (const page of sent) {
+        assert.ok(wholeTelegramHtml(page.text), `${page.text.length} characters, ending ${page.text.slice(-60)}`);
+        assert.ok(page.text.includes("resolve this card."), "nothing after the cut text was lost");
+      }
     });
   });
 
@@ -888,14 +912,11 @@ async function main() {
     const emoji = paidAlertText({ ...base, customerName: `a${grin.repeat(200)}` });
     assert.ok(emoji.includes(`Buyer: a${grin.repeat(119)}...`), "cut on a whole character");
     assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(emoji), "no half of an emoji");
-    const errors = console.error;
-    console.error = () => undefined;
-    try {
+    const failed = await logged(async () => {
       assert.equal(await alertPublicCheckoutPaid(base, async () => ({ delivered: false, outcome: "Not sent" })), false);
       assert.equal(await alertPublicCheckoutPaid(base, async () => { throw new Error("telegram down"); }), false);
-    } finally {
-      console.error = errors;
-    }
+    });
+    assert.equal(failed.errors.filter((line) => line.includes("the sales desk was not told of a purchase")).length, 2, "each failed send is logged");
   });
 
   await check("books still balance after everything", async () => {

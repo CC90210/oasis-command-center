@@ -1188,6 +1188,9 @@ export async function upsertSubscription(facts: SubscriptionFacts, sourceCreated
 
 export type EventOutcome = { status: "processed" | "ignored" | "duplicate" | "in_flight"; detail: string };
 
+/** Work an event's branch leaves for after its processed mark (the purchase alert): dispatch collects it, handleStripeEvent starts it. */
+type AfterMark = Array<() => Promise<unknown>>;
+
 async function claimEvent(env: StripeEventEnvelope): Promise<"claimed" | "duplicate" | "in_flight"> {
   const ins = await finDb().execute({
     sql: `INSERT OR IGNORE INTO fin_stripe_events (event_id, type, livemode, event_created, status) VALUES (?, ?, ?, ?, 'processing')`,
@@ -1265,7 +1268,7 @@ export async function handleStripeEvent(raw: unknown): Promise<EventOutcome> {
       return { status: "ignored", detail: `ignored: ${origin.reason} — never enters the OASIS books` };
     }
     const ledger: InStatement[] = [];
-    const afterMark: Array<() => Promise<unknown>> = [];
+    const afterMark: AfterMark = [];
     const detail = await dispatch(env, ledger, afterMark);
     const ignored = detail.startsWith("ignored");
     await finishEvent(env.id, ignored ? "ignored" : "processed", ignored ? detail : null, ledger);
@@ -1298,7 +1301,7 @@ function subscriptionInterval(f: SubscriptionFacts): "day" | "week" | "month" | 
  * purchase alert). handleStripeEvent starts it once the mark is written, kept
  * alive past the answer to Stripe (review of #718).
  */
-async function dispatch(env: StripeEventEnvelope, ledger: InStatement[], afterMark: Array<() => Promise<unknown>>): Promise<string> {
+async function dispatch(env: StripeEventEnvelope, ledger: InStatement[], afterMark: AfterMark): Promise<string> {
   switch (env.type) {
     case "charge.failed": {
       const c = chargeFacts(env.object);

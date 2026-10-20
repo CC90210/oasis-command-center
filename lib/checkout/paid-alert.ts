@@ -72,7 +72,12 @@ const NAME_MAX = 120;
 const EMAIL_MAX = 254; // the longest an email address can be
 const ID_MAX = 64; // an order id is 36 characters
 
-/** `s` cut to `max` whole characters (never half an emoji), with "..." when it was cut. */
+/**
+ * `s` cut to `max` whole characters, with "..." when it was cut. The cut-then-
+ * escape the sibling sales alerts make (lib/forms/public-booking-alert.ts), by
+ * characters rather than UTF-16 units: slice() and lib/fmt.ts truncate can
+ * leave half an emoji, which is not valid text.
+ */
 function clip(s: string, max: number): string {
   const chars = Array.from(s);
   return chars.length > max ? `${chars.slice(0, max).join("")}...` : s;
