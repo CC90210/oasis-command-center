@@ -29,7 +29,7 @@ import {
 } from "@/lib/agents/persistence";
 import { resolveAgentKey } from "@/lib/agents";
 import { changeAgentLineup } from "@/lib/manifest/agent-bindings";
-import { isPlatformOperator } from "@/lib/role-surfaces-session";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -71,6 +71,10 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
+  // `null` and arrays are valid JSON too; reading fields off them threw (500).
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
 
   const service = getServiceSupabase();
   const profileRes = await service
@@ -102,31 +106,31 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Publishing puts the agent in EVERY workspace's library (the loader reads
-  // public rows for all tenants), so it is OASIS's call, not a workspace
-  // admin's (2026-10-19 audit).
-  if (body.is_public === true && !(await isPlatformOperator())) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden", reason: "Only OASIS can publish an agent to every workspace." },
-      { status: 403 },
-    );
-  }
+  // Publishing puts the agent in EVERY workspace's library, so it is OASIS's
+  // call (2026-10-19 audit). The writer decides (lib/agents/persistence.ts
+  // checkedPublish: a boolean only, true only when mayPublish); the route only
+  // reports whether this session is a platform operator.
+  const mayPublish = body.is_public === true && (await isPlatformOperatorForAuthUser(user.id, user.email));
 
   try {
-    const created = await createCustomAgent({
-      slug: body.slug as string,
-      name: body.name as string,
-      category: body.category as CreateAgentInput["category"],
-      short_description: body.short_description as string,
-      description: body.description,
-      base_prompt: body.base_prompt as string,
-      required_tools: body.required_tools,
-      suggested_model: body.suggested_model,
-      pricing: body.pricing,
-      is_public: body.is_public === true,
-      created_by: user.id,
-      tenant_id: profile.tenant_id,
-    });
+    const created = await createCustomAgent(
+      {
+        slug: body.slug as string,
+        name: body.name as string,
+        category: body.category as CreateAgentInput["category"],
+        short_description: body.short_description as string,
+        description: body.description,
+        base_prompt: body.base_prompt as string,
+        required_tools: body.required_tools,
+        suggested_model: body.suggested_model,
+        pricing: body.pricing,
+        // As sent: the writer refuses anything but a boolean (422).
+        is_public: body.is_public,
+        created_by: user.id,
+        tenant_id: profile.tenant_id,
+      },
+      { mayPublish },
+    );
     const bound = await changeAgentLineup({
       tenantId: profile.tenant_id,
       action: "add",
@@ -146,7 +150,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, agent: created, bound: true });
   } catch (err) {
     if (err instanceof AgentPersistenceError) {
-      const status = err.code === "duplicate_slug" ? 409 : err.code === "validation" ? 422 : 500;
+      const status =
+        err.code === "duplicate_slug" ? 409 :
+        err.code === "validation" ? 422 :
+        err.code === "forbidden" ? 403 :
+        500;
       return NextResponse.json({ ok: false, error: err.code, message: err.message }, { status });
     }
     throw err;

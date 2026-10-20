@@ -34,7 +34,7 @@ import { AI_TEAM_HREF, aiTeamServes } from "@/components/os/aiteam/access";
 import { workspaceChatSlug } from "@/components/os/department/channel";
 import { resolveOsViewer } from "@/components/os/department/viewer";
 import { getAgentBySlug } from "@/lib/agents/loader";
-import { requireSystemSurface } from "@/lib/role-surfaces-session";
+import { isPlatformOperator, requireSystemSurface } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
@@ -112,6 +112,7 @@ export default async function NewTeammatePage({
       <CustomAgentBuilder
         tenantSlug={slug}
         home="ai-team"
+        canPublish={await isPlatformOperator()}
         editing={
           editing
             ? {

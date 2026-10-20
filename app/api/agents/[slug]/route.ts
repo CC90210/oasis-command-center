@@ -11,7 +11,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getAgentBySlug } from "@/lib/agents/loader";
-import { isPlatformOperator } from "@/lib/role-surfaces-session";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import {
   AgentPersistenceError,
   deleteCustomAgent,
@@ -78,21 +78,24 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
-  // Same rule as creating: publishing to every workspace is OASIS's call.
-  // Unpublishing your own agent stays open.
-  if (body.is_public === true && !(await isPlatformOperator())) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden", reason: "Only OASIS can publish an agent to every workspace." },
-      { status: 403 },
-    );
+  // `null` and arrays are valid JSON too; reading fields off them threw (500).
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
+  // Same rule as creating, decided by the writer (lib/agents/persistence.ts
+  // checkedPublish): publishing to every workspace is OASIS's call, a
+  // non-boolean is refused, and unpublishing your own agent stays open.
+  const mayPublish = body.is_public === true && (await isPlatformOperatorForAuthUser(user.id, user.email));
 
   try {
-    const updated = await updateCustomAgent({
-      ...body,
-      slug,
-      tenant_id: profile.tenant_id,
-    });
+    const updated = await updateCustomAgent(
+      {
+        ...body,
+        slug,
+        tenant_id: profile.tenant_id,
+      },
+      { mayPublish },
+    );
     return NextResponse.json({ ok: true, agent: updated });
   } catch (err) {
     if (err instanceof AgentPersistenceError) {

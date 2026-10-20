@@ -10,6 +10,7 @@ import { manifestExists } from "@/lib/manifest/loader";
 import { withQuery } from "@/lib/os/redirects";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireOwnedTenantSlug } from "@/lib/tenant-access";
+import { isPlatformOperator } from "@/lib/role-surfaces-session";
 import { dbBool } from "@/lib/db-bool";
 
 export const dynamic = "force-dynamic";
@@ -95,6 +96,7 @@ export default async function MarketplaceBuildPage({
       ) : (
         <CustomAgentBuilder
           tenantSlug={normalised}
+          canPublish={await isPlatformOperator()}
           editing={
             editing
               ? {

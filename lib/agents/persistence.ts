@@ -54,6 +54,32 @@ export function isReservedAgentSlug(slug: string): boolean {
   return RESERVED_AGENT_SLUGS.has(key) || isHouseAgentSlug(key) || getSeedAgent(key) !== null;
 }
 
+/**
+ * Who is writing. Publishing puts an agent in EVERY workspace's library (the
+ * loader serves public rows to all of them), so it is OASIS's call: a route
+ * passes `mayPublish: true` only for a session it verified as a platform
+ * operator. The default publishes nothing.
+ */
+export type AgentWriter = { mayPublish: boolean };
+const NOT_A_PUBLISHER: AgentWriter = { mayPublish: false };
+
+export const PUBLISH_REFUSED = "Only OASIS can publish an agent to every workspace.";
+
+/**
+ * The is_public a write may store. Absent stays absent; anything but a boolean
+ * is refused; true needs a writer who may publish. Decided here, in the one
+ * module that writes agents, because the routes used to check
+ * `body.is_public === true` and then write the raw value, so a PATCH with
+ * `is_public: 1` published (independent review of #713: SQLite stores 1, which
+ * the loader's public filter matches).
+ */
+function checkedPublish(raw: unknown, writer: AgentWriter): boolean | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "boolean") throw new AgentPersistenceError("validation", "is_public must be true or false");
+  if (raw && !writer.mayPublish) throw new AgentPersistenceError("forbidden", PUBLISH_REFUSED);
+  return raw;
+}
+
 const ALLOWED_CATEGORIES = new Set<AgentCategory>([
   "ceo", "cfo", "cmo", "coo", "operations", "sales", "support",
   "research", "content", "engineering", "finance", "legal",
@@ -104,8 +130,13 @@ function validateAgentInput(input: CreateAgentInput): void {
   }
 }
 
-export async function createCustomAgent(input: CreateAgentInput): Promise<AgentLibraryEntry> {
+export async function createCustomAgent(
+  input: CreateAgentInput,
+  writer: AgentWriter = NOT_A_PUBLISHER,
+): Promise<AgentLibraryEntry> {
   validateAgentInput(input);
+  // Always written: the production column defaults to public.
+  const isPublic = checkedPublish(input.is_public, writer) ?? false;
   const slug = input.slug.trim().toLowerCase();
   const db = getServiceSupabase();
 
@@ -123,7 +154,7 @@ export async function createCustomAgent(input: CreateAgentInput): Promise<AgentL
     required_tools: input.required_tools || [],
     suggested_model: input.suggested_model || null,
     pricing: (input.pricing || { tier: "free" }) as unknown as Record<string, unknown>,
-    is_public: input.is_public ?? false,
+    is_public: isPublic,
     is_oasis_managed: false,
     created_by: input.created_by,
     tenant_id: input.tenant_id,
@@ -138,7 +169,11 @@ export type UpdateAgentInput = Partial<Omit<CreateAgentInput, "slug" | "tenant_i
   tenant_id: string;
 };
 
-export async function updateCustomAgent(input: UpdateAgentInput): Promise<AgentLibraryEntry> {
+export async function updateCustomAgent(
+  input: UpdateAgentInput,
+  writer: AgentWriter = NOT_A_PUBLISHER,
+): Promise<AgentLibraryEntry> {
+  const isPublic = checkedPublish(input.is_public, writer);
   const slug = input.slug.trim().toLowerCase();
   const db = getServiceSupabase();
   const existing = await db
@@ -180,7 +215,7 @@ export async function updateCustomAgent(input: UpdateAgentInput): Promise<AgentL
   }
   if (input.suggested_model !== undefined) patch.suggested_model = input.suggested_model || null;
   if (input.pricing !== undefined) patch.pricing = input.pricing as unknown as Record<string, unknown>;
-  if (input.is_public !== undefined) patch.is_public = input.is_public;
+  if (isPublic !== undefined) patch.is_public = isPublic;
 
   if (Object.keys(patch).length === 0) {
     return (await db.from("agents").select("*").eq("id", row.id).single()).data as AgentLibraryEntry;

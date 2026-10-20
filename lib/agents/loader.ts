@@ -13,6 +13,8 @@
 
 import { cache } from "react";
 import { safe } from "@/lib/api-helpers";
+import { dbBool } from "@/lib/db-bool";
+import { OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
   SEED_AGENTS,
@@ -50,10 +52,36 @@ async function fetchAgentRows(filter: AgentListFilter): Promise<AgentRow[]> {
         q = q.eq("is_public", true);
       }
       const res = await q;
-      return (res.data || []) as AgentRow[];
+      return ((res.data || []) as AgentRow[]).filter((r) => {
+        if (servedTo(r, filter.tenant_id)) return true;
+        logDrop(r, "another workspace's public row");
+        return false;
+      });
     })(),
     [] as AgentRow[]
   );
+}
+
+/**
+ * A row this workspace may load: its own, or one OASIS stands behind (managed,
+ * or published from OASIS's own workspace). Only a platform operator can
+ * publish now (lib/agents/persistence.ts), so a client workspace's public row
+ * is one written before that rule, or around it: it stays in its own
+ * workspace and never reaches another one's library, chat or department turns
+ * (independent review of #713).
+ */
+function servedTo(row: AgentRow, tenantId: string | null | undefined): boolean {
+  if (tenantId && row.tenant_id === tenantId) return true;
+  return isOasisManaged(row) || row.tenant_id === OASIS_OPERATOR_TENANT_ID;
+}
+
+/** Each workspace row that a built-in slug or the visibility rule drops is logged once per process. */
+const loggedDrops = new Set<string>();
+function logDrop(row: AgentRow, why: string): void {
+  const key = `${row.slug}|${why}`;
+  if (loggedDrops.has(key)) return;
+  loggedDrops.add(key);
+  console.warn("[agents.loader] a workspace's agent row is not served", { slug: row.slug, tenant_id: row.tenant_id, why });
 }
 
 export const listAgents = cache(async (filter: AgentListFilter = {}): Promise<AgentLibraryEntry[]> => {
@@ -67,7 +95,11 @@ export const listAgents = cache(async (filter: AgentListFilter = {}): Promise<Ag
   // (the Phase 3.1 promotion path); a workspace's row under a built-in slug is
   // dropped, the same rule as getAgentBySlug (2026-10-19 audit).
   const seedSlugs = new Set(SEED_AGENTS.map((a) => a.slug));
-  const rows = dbRows.filter((r) => !seedSlugs.has(r.slug) || isOasisManaged(r));
+  const rows = dbRows.filter((r) => {
+    if (!seedSlugs.has(r.slug) || isOasisManaged(r)) return true;
+    logDrop(r, "a built-in agent's slug");
+    return false;
+  });
   const dbSlugs = new Set(rows.map((r) => r.slug));
   const merged: AgentLibraryEntry[] = [
     ...rows,
@@ -103,7 +135,12 @@ export const getAgentBySlug = cache(async (slug: string, tenantId?: string | nul
         q = q.eq("is_public", true);
       }
       const res = await q.maybeSingle();
-      return (res.data || null) as AgentRow | null;
+      const row = (res.data || null) as AgentRow | null;
+      if (row && !servedTo(row, tenantId)) {
+        logDrop(row, "another workspace's public row");
+        return null;
+      }
+      return row;
     })(),
     null as AgentRow | null
   );
@@ -114,12 +151,13 @@ export const getAgentBySlug = cache(async (slug: string, tenantId?: string | nul
   // The persistence layer now refuses such slugs; this holds for any row
   // written before it did, or written around it.
   if (fromDb && (!seed || isOasisManaged(fromDb))) return fromDb;
+  if (fromDb) logDrop(fromDb, "a built-in agent's slug");
   return seed;
 });
 
+/** The flag as every other reader takes it (lib/db-bool.ts): true, 1 or "1". */
 function isOasisManaged(row: AgentRow): boolean {
-  const v = (row as { is_oasis_managed?: unknown }).is_oasis_managed;
-  return v === true || v === 1 || v === "1" || v === "true";
+  return dbBool((row as { is_oasis_managed?: unknown }).is_oasis_managed);
 }
 
 /** Cheap existence check — used by routes that need to 404 unknown slugs. */
