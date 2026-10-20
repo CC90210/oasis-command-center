@@ -252,7 +252,10 @@ export const SEED_AGENT_MAP: Record<string, AgentLibraryEntry> = Object.fromEntr
 );
 
 export function getSeedAgent(slug: string): AgentLibraryEntry | null {
-  return SEED_AGENT_MAP[slug.toLowerCase()] || null;
+  // Own keys only: on a plain object, "constructor" or "toString" would
+  // otherwise answer with Object's own function (independent review of #713).
+  const key = slug.toLowerCase();
+  return Object.prototype.hasOwnProperty.call(SEED_AGENT_MAP, key) ? SEED_AGENT_MAP[key] : null;
 }
 
 export const CATEGORY_LABELS: Record<AgentCategory, string> = {

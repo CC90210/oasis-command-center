@@ -11,6 +11,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getAgentBySlug } from "@/lib/agents/loader";
+import { dbBool } from "@/lib/db-bool";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import {
   AgentPersistenceError,
   deleteCustomAgent,
@@ -29,21 +31,23 @@ async function resolveProfile(authUserId: string) {
     .eq("auth_user_id", authUserId)
     .maybeSingle();
   return res.data as
-    | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
+    | { tenant_id: string | null; team_role: string; is_owner: unknown; admin_access: unknown }
     | null;
 }
 
 // Creating/editing/deleting AI agents is a full-admin capability — honors the
 // admin_access toggle grant (Adon's named pain point). Admin-toggle 2026-07-07.
+// The flags are read with dbBool: Turso stores them as 0/1, and
+// `admin_access === true` refused a grant stored as 1.
 function requireAdmin(
-  profile: { team_role: string; is_owner: boolean; admin_access?: boolean | null } | null,
+  profile: { team_role: string; is_owner: unknown; admin_access?: unknown } | null,
 ): boolean {
   return (
     !!profile &&
-    (profile.is_owner ||
+    (dbBool(profile.is_owner) ||
       profile.team_role === "admin" ||
       profile.team_role === "owner" ||
-      profile.admin_access === true)
+      dbBool(profile.admin_access))
   );
 }
 
@@ -77,13 +81,25 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
+  // `null` and arrays are valid JSON too; reading fields off them threw (500).
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
+  // Decided by the writer (lib/agents/persistence.ts): publishing to every
+  // workspace, and changing an agent that is already published, are OASIS's
+  // call; a non-boolean is refused; unpublishing your own agent stays open.
+  // Asked on every edit, since the writer alone knows whether the row is public.
+  const mayPublish = await isPlatformOperatorForAuthUser(user.id, user.email);
 
   try {
-    const updated = await updateCustomAgent({
-      ...body,
-      slug,
-      tenant_id: profile.tenant_id,
-    });
+    const updated = await updateCustomAgent(
+      {
+        ...body,
+        slug,
+        tenant_id: profile.tenant_id,
+      },
+      { mayPublish },
+    );
     return NextResponse.json({ ok: true, agent: updated });
   } catch (err) {
     if (err instanceof AgentPersistenceError) {
@@ -110,7 +126,8 @@ export async function DELETE(
 
   const { slug } = await ctx.params;
   try {
-    await deleteCustomAgent(slug, profile.tenant_id);
+    // Deleting a published agent takes it out of every workspace: OASIS's call.
+    await deleteCustomAgent(slug, profile.tenant_id, { mayPublish: await isPlatformOperatorForAuthUser(user.id, user.email) });
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof AgentPersistenceError) {

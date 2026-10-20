@@ -36,6 +36,12 @@ type Props = {
    * /agents/new passes "ai-team".
    */
   home?: BuilderHome;
+  /**
+   * Whether this viewer may publish to every workspace: a platform operator
+   * only (lib/agents/persistence.ts). Everyone else never sees the Public box,
+   * except to unpublish an agent of theirs that is already public.
+   */
+  canPublish?: boolean;
 };
 
 function slugifyClient(name: string): string {
@@ -47,7 +53,7 @@ function slugifyClient(name: string): string {
     .slice(0, 62) || "agent";
 }
 
-export function CustomAgentBuilder({ tenantSlug, editing, home }: Props) {
+export function CustomAgentBuilder({ tenantSlug, editing, home, canPublish = false }: Props) {
   const paths = builderPaths(tenantSlug, home);
   const router = useRouter();
   const isEdit = !!editing;
@@ -142,7 +148,9 @@ export function CustomAgentBuilder({ tenantSlug, editing, home }: Props) {
         base_prompt: basePrompt.trim(),
         required_tools: tools,
         suggested_model: suggestedModel.trim() || undefined,
-        is_public: isPublic,
+        // Sent when it may change: an operator always; anyone else only to
+        // unpublish. Re-sending an unchanged `true` would refuse the whole edit.
+        ...(canPublish || isPublic !== (editing?.is_public ?? false) ? { is_public: isPublic } : {}),
       };
       const res = await fetch(isEdit ? `/api/agents/${slug}` : "/api/agents", {
         method: isEdit ? "PATCH" : "POST",
@@ -306,14 +314,16 @@ export function CustomAgentBuilder({ tenantSlug, editing, home }: Props) {
           />
         </Field>
 
-        <label className="flex items-center gap-2 text-sm text-fg">
-          <input
-            type="checkbox"
-            checked={isPublic}
-            onChange={(e) => setIsPublic(e.target.checked)}
-          />
-          Public — share with other tenants in the marketplace
-        </label>
+        {(canPublish || editing?.is_public) && (
+          <label className="flex items-center gap-2 text-sm text-fg">
+            <input
+              type="checkbox"
+              checked={isPublic}
+              onChange={(e) => setIsPublic(e.target.checked)}
+            />
+            Public — share with other tenants in the marketplace
+          </label>
+        )}
 
         {flash && (
           <div className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-100 inline-flex items-start gap-2">
