@@ -25,6 +25,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+/** How many of the newest messages after the cursor one read lists, per mailbox. */
+const READ_WINDOW = 40;
+
 async function runAgent(agent: AgentEmailSettings, write: boolean) {
   const dryRun = !write; // writes are held off the schedule until verified
   const results: Record<string, IngestResult & { diag: string }> = {};
@@ -42,7 +45,7 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
     // (scope_missing_readonly / token_refresh_failed / list_http_* / ok_N).
     const read = await readMailbox(agent.tenantId, agent.userId, mailbox, {
       query: `${since} -in:chats`,
-      max: 40,
+      max: READ_WINDOW,
     });
     const ing = await ingestMessages(
       { tenantId: agent.tenantId, userId: agent.userId, mailbox, dryRun },
@@ -61,9 +64,17 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
    * at again. Holding costs one re-read of a small window; advancing costs the
    * email. Codex review 2026-08-04.
    *
-   * This cannot wedge: queueInfer reports a STALLED queue as a terminal failure
-   * (timedOut false), which classifies as the plain fallback rather than
-   * deferring, so a dead daemon lets the cursor move on.
+   * A stalled classifier cannot wedge it: queueInfer reports a STALLED queue as
+   * a terminal failure (timedOut false), which classifies as the plain fallback
+   * rather than deferring, so a dead daemon lets the cursor move on.
+   *
+   * A lead lookup that fails also holds a message (ingest.ts, since #714), for
+   * as long as the database is down. And the read lists only the 40 NEWEST
+   * messages after the cursor: if more than 40 arrive while one is held, the
+   * held one falls out of the window and the cursor waits on a message it no
+   * longer reads. That is logged as an error below. No workspace runs this
+   * agent today (agent_email_settings was empty on 2026-10-20); reading oldest
+   * first is the fix if one ever does.
    */
   const deferred = Object.values(results).reduce((n, r) => n + (r?.deferred || 0), 0);
   // Oldest deferred message across both mailboxes; the cursor stops just short
@@ -95,8 +106,14 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
       // future, but the cursor must never jump forward on a bad value either.
       const upTo = new Date(Math.min(Date.parse(oldestDeferred) - 1000, Date.now())).toISOString();
       console.warn(
-        `[operator-email] ${deferred} message(s) awaiting classification — cursor held at ${upTo} (not frozen)`,
+        `[operator-email] ${deferred} message(s) held (classification still running, or the lead lookup failed) — cursor held at ${upTo} (not frozen)`,
       );
+      if (Object.values(results).some((r) => (r?.scanned ?? 0) >= READ_WINDOW)) {
+        console.error(
+          `[operator-email] a message is held while a mailbox's read window is full (${READ_WINDOW}): older held mail may never be read again`,
+          { tenant_id: agent.tenantId },
+        );
+      }
       await markProcessed(agent.tenantId, agent.userId, upTo);
     } else {
       await markProcessed(agent.tenantId, agent.userId);

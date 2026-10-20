@@ -152,6 +152,35 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ ok: true, action: "declined", candidate_id: id });
   }
 
+  const raw = (cand.lead_data || {}) as Record<string, unknown>;
+  const email = String(raw.email || "").trim().toLowerCase();
+  const phone = String(raw.phone || "").trim();
+
+  // Cross-sheet dedup: link to an existing merchant lead instead of duplicating.
+  // The shared matcher the forms and quick-add use: values are bound, so an
+  // all-digit phone matches (it never did through the .or() string), and the
+  // sheet's business name only refuses a phone shared by a different
+  // business; it never matches on its own.
+  //
+  // BEFORE THE CLAIM (independent review of #714). The lookup throws when it
+  // cannot read (lib/forms/agent-routing.ts): a failed read is not "no such
+  // lead". Asked after the claim, a failure had to put the candidate back,
+  // and when that write failed in the same outage the candidate was stranded
+  // in 'approving' while the operator read that it was back in the queue.
+  // Asked first, a failure has changed nothing. Two operators approving at
+  // once both look, and the claim below still lets only one through.
+  let existingLead: Awaited<ReturnType<typeof findExistingLead>>;
+  try {
+    existingLead = await findExistingLead(
+      tenantId,
+      { email, phone, business: String(raw.business_name || "") },
+      { matchOnBusinessName: false },
+    );
+  } catch (e) {
+    console.error("[scrub-candidates] lead lookup failed:", e instanceof Error ? e.message : e);
+    return err(503, "lookup_unavailable", "Could not check for an existing lead just now. Nothing was changed; try again.");
+  }
+
   // ── approve → ATOMIC CLAIM (pending_review → approving) so a double-click
   //    or two operators can't both createRecord and produce duplicate leads ──
   const claim = await db
@@ -169,28 +198,21 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return err(409, "already_decided", "candidate is no longer pending");
   }
 
-  const raw = (cand.lead_data || {}) as Record<string, unknown>;
-  const email = String(raw.email || "").trim().toLowerCase();
-  const phone = String(raw.phone || "").trim();
-
-  // Cross-sheet dedup: link to an existing merchant lead instead of duplicating.
-  // The shared matcher the forms and quick-add use: values are bound, so an
-  // all-digit phone matches (it never did through the .or() string), and the
-  // sheet's business name only refuses a phone shared by a different
-  // business; it never matches on its own.
-  const existingLead = await findExistingLead(
-    tenantId,
-    { email, phone, business: String(raw.business_name || "") },
-    { matchOnBusinessName: false },
-  );
   const existingLeadId = existingLead?.id ?? null;
   if (existingLeadId) {
-    await db
+    const dedup = await db
       .from("scrub_candidates")
       .update({ status: "approved", created_lead_id: existingLeadId, updated_at: new Date().toISOString() })
       .eq("id", id)
       .eq("tenant_id", tenantId);
     const summary = await promoteAndSummarize(tenantId, existingLeadId);
+    if (dedup.error) {
+      // As the finalize below: the lead exists, but the candidate stays in
+      // 'approving' (out of the queue, so no second lead). Said in the log and
+      // in the answer, not hidden behind a plain "approved" (review of #714).
+      console.error("[scrub-candidates] dedup finalize update error:", { candidate_id: id, error: dedup.error.message });
+      return NextResponse.json({ ok: true, action: "approved", candidate_id: id, lead_id: existingLeadId, deduped: true, warning: "candidate_status_update_failed", ...summary });
+    }
     return NextResponse.json({ ok: true, action: "approved", candidate_id: id, lead_id: existingLeadId, deduped: true, ...summary });
   }
 
@@ -199,8 +221,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     const record = await createRecord({ tenant_id: tenantId, entity: "lead", data: sanitizeLeadData(raw) });
     leadId = record.id;
   } catch (e) {
-    // Roll the claim back so the candidate returns to the queue for retry.
-    await db
+    // Roll the claim back so the candidate returns to the queue for retry. A
+    // rollback that fails leaves it in 'approving', where nothing moves it
+    // again: said in the log with its id, so someone can put it back.
+    const back = await db
       .from("scrub_candidates")
       .update({ status: "pending_review", updated_at: new Date().toISOString() })
       .eq("id", id)
@@ -208,6 +232,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       .eq("status", "approving");
     const code = e instanceof RecordsError ? e.code : "create_failed";
     console.error("[scrub-candidates] createRecord error:", e instanceof Error ? e.message : e);
+    if (back.error) {
+      console.error("[scrub-candidates] the claim could not be rolled back; the candidate is stuck in 'approving'", {
+        candidate_id: id,
+        error: back.error.message,
+      });
+    }
     return err(code === "validation" ? 400 : 500, code);
   }
 

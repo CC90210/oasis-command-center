@@ -48,7 +48,7 @@
 import "server-only";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { pushWorkspaceAlert, type AlertPush } from "@/lib/notify/alert-route";
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { clipText, escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
 import { cad, resolveCheckoutOffer } from "./catalog";
 
@@ -103,15 +103,11 @@ const EMAIL_MAX = 254; // the longest an email address can be
 const ID_MAX = 64; // an order id is 36 characters
 
 /**
- * `s` cut to `max` whole characters, with "..." when it was cut. The cut-then-
- * escape the sibling sales alerts make (lib/forms/public-booking-alert.ts), by
- * characters rather than UTF-16 units: slice() and lib/fmt.ts truncate can
- * leave half an emoji, which is not valid text.
+ * `s` cut to `max` whole characters, with "..." when it was cut: the shared
+ * clipText (lib/notify/telegram-format.ts). The lines are escaped after they
+ * are composed, so the cut can never land inside an escape.
  */
-function clip(s: string, max: number): string {
-  const chars = Array.from(s);
-  return chars.length > max ? `${chars.slice(0, max).join("")}...` : s;
-}
+const clip = (s: string, max: number): string => clipText(s, max, "...");
 
 /** The purchase in plain words, each part short enough that the message stays whole once escaped. */
 function purchaseFacts(input: PaidAlertInput): { what: string; amount: string; buyer: string; order: string } {

@@ -1006,10 +1006,12 @@ async function main() {
     for (const prefix of PROSPECT_FACING_PREFIXES) {
       assert.ok(middleware.includes(`"${prefix}",`), `${prefix} is not a public path in middleware.ts`);
     }
-    for (const p of ["/fleet", "/signup", "/unsubscribe-x", "/settings/ai", "/", "/forms"]) {
+    for (const p of ["/fleet", "/signup", "/unsubscribe-x", "/settings/ai", "/", "/forms", "/booking", "/book-admin"]) {
       assert.equal(isProspectFacingPath(p), false, `${p} is an OASIS page`);
     }
-    for (const p of ["/f/client-co/intake", "/sign/abc", "/unsubscribe", "/unsubscribe?email=a%40b.co"]) {
+    // /book (a prospect picking a time) raises into the boundary when its form
+    // cannot be read (#714), so it gets the prospect's error page too.
+    for (const p of ["/f/client-co/intake", "/sign/abc", "/unsubscribe", "/unsubscribe?email=a%40b.co", "/book", "/book?rep=cc"]) {
       assert.equal(isProspectFacingPath(p), true, p);
     }
   });

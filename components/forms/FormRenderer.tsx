@@ -27,6 +27,7 @@ import { AddressAutocompleteField } from "./AddressAutocompleteField";
 import { ComboboxField } from "./ComboboxField";
 import { MultiFileDropzone, type UploadedDescriptor } from "./MultiFileDropzone";
 import { HoneypotField } from "./HoneypotField";
+import { normalizedAccept } from "@/lib/forms/file-type";
 
 type Props = {
   step: FormStep;
@@ -510,21 +511,44 @@ function renderInput(
     }
 
     case "file_upload": {
+      // The file is held in component state; the public form page's
+      // submit handler base64-encodes small files or uploads to Supabase
+      // Storage for larger ones. File metadata is what lands in
+      // form_submissions.file_attachments[].
+      //
+      // An optional field can be cleared. Cancelling the file picker clears
+      // it in Chrome but keeps the old file in Firefox and Safari, so a
+      // visitor whose file was refused had no way to go on without one
+      // (independent review of #714).
+      const chosen = typeof File !== "undefined" && value instanceof File ? value : null;
       return (
-        <input
-          id={inputId}
-          type="file"
-          accept={field.accept?.join(",")}
-          onChange={(e) => {
-            const f = e.target.files?.[0] || null;
-            onChange(f);
-          }}
-          className="block w-full text-sm text-fg file:mr-3 file:rounded-md file:border-0 file:bg-accent/15 file:px-3 file:py-2 file:text-xs file:font-bold file:text-accent file:cursor-pointer hover:file:bg-accent/25"
-        />
-        // The file is held in component state; the public form page's
-        // submit handler base64-encodes small files or uploads to Supabase
-        // Storage for larger ones. File metadata is what lands in
-        // form_submissions.file_attachments[].
+        <div className="space-y-1.5">
+          <input
+            id={inputId}
+            type="file"
+            // As MIME types: the builder's box is free text ("pdf, jpg"), which
+            // the browser's picker ignores (lib/forms/file-type.ts).
+            accept={normalizedAccept(field.accept).join(",") || undefined}
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null;
+              onChange(f);
+            }}
+            className="block w-full text-sm text-fg file:mr-3 file:rounded-md file:border-0 file:bg-accent/15 file:px-3 file:py-2 file:text-xs file:font-bold file:text-accent file:cursor-pointer hover:file:bg-accent/25"
+          />
+          {chosen && !field.required ? (
+            <button
+              type="button"
+              onClick={() => {
+                const input = document.getElementById(inputId) as HTMLInputElement | null;
+                if (input) input.value = "";
+                onChange(null);
+              }}
+              className="text-xs text-fg-muted underline-offset-2 hover:text-fg hover:underline"
+            >
+              Remove {chosen.name}
+            </button>
+          ) : null}
+        </div>
       );
     }
 

@@ -15,6 +15,7 @@ import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-discl
 import { ConsentChoice } from "@/components/forms/ConsentChoice";
 import { HoneypotField } from "@/components/forms/HoneypotField";
 import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
+import { isSubmitFault, sendSubmitFailureBeacon } from "@/lib/forms/submit-failure-beacon";
 import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
 /**
@@ -135,6 +136,20 @@ export function AuditForm({
         | null;
 
       if (!res.ok || !data?.ok) {
+        // A fault on our side means a prospect who may give up here: beacon,
+        // so the answers are kept and someone is paged (independent review of
+        // #714). Any 5xx counts, as on every form (isSubmitFault). The
+        // visitor's own mistakes are the form working.
+        if (isSubmitFault(res.status, data)) {
+          sendSubmitFailureBeacon({
+            tenantSlug: body.anonymous_init.tenant_slug,
+            formSlug: body.anonymous_init.form_slug,
+            stepIndex: 0,
+            error: data?.error ?? `non_json_http_${res.status}`,
+            payload: body.payload,
+            consentLedger: body.consent_ledger,
+          });
+        }
         // Surface something the visitor can act on. The rate-limit case is
         // the only one they can actually resolve themselves, so it gets its
         // own message instead of the generic one.
@@ -160,6 +175,17 @@ export function AuditForm({
         : AUDIT_FUNNEL.path;
       window.location.href = auditFormContinuationPath(nextPath, context);
     } catch {
+      // The connection died before an answer: the details may never have
+      // arrived, so they are kept and someone is paged, as for a fault
+      // (independent review of #714, round 3).
+      sendSubmitFailureBeacon({
+        tenantSlug: body.anonymous_init.tenant_slug,
+        formSlug: body.anonymous_init.form_slug,
+        stepIndex: 0,
+        error: "network_error",
+        payload: body.payload,
+        consentLedger: body.consent_ledger,
+      });
       setError("Couldn't reach the server. Check your connection and try again.");
       setStatus("error");
       inFlight.current = false;

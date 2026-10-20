@@ -38,6 +38,8 @@ import { safeFormRedirect } from "@/lib/forms/redirect-url";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
 import { contactGateAction, contactHandoff, hasReachableContact, typedContact } from "@/lib/forms/contact-gate";
 import { HONEYPOT_BODY_KEY, reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
+import { chosenFileType } from "@/lib/forms/file-type";
+import { isSubmitFault, sendSubmitFailureBeacon } from "@/lib/forms/submit-failure-beacon";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -285,6 +287,14 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
 
   // Nothing the merchant did. Say so, and do not make them re-type anything.
   server_error: "Something went wrong on our end. Please try submitting again.",
+  // The form could not be read just now (a database blip). The link is fine:
+  // this used to come back as "no longer valid" and visitors gave up.
+  form_unavailable: "We couldn't reach this form just now. Your answers are still here, so please try again in a moment.",
+  // The route names the file and why in its own sentence; this is the fallback.
+  upload_failed: "One of your files couldn't be saved. Please choose it again and resubmit.",
+  // Storage or the database failed while saving a file: nothing the visitor
+  // chose is wrong. The route's own sentence names the file.
+  upload_unavailable: "We couldn't save one of your files just now. Your answers are still here, so please try again in a moment.",
   consent_record_unavailable:
     "We couldn't save your contact preferences just now. Please try submitting again.",
   // The last step of an audit that opens the calendar. Your answers are already
@@ -439,6 +449,8 @@ export function FormPublicClient({
   const heldSteps = useRef<Array<Record<string, unknown> | undefined>>([]);
   const heldLedgers = useRef<Array<{ email?: boolean; sms?: boolean } | undefined>>([]);
   const heldStepsSent = useRef(0);
+  // The router's failures in a row for this visitor (routeWithoutLead).
+  const routeFailures = useRef(0);
   // The honeypot box (FormRenderer trapRef) and what a script typed into it.
   const trapRef = useRef<HTMLInputElement | null>(null);
   const trapLatch = useRef("");
@@ -763,16 +775,17 @@ export function FormPublicClient({
         // form_submissions.payload. Phase 6 (lender shop-out) replaces
         // this with Supabase Storage handoff for proper bank-statement
         // workflows.
+        const mimeType = chosenFileType(v);
         payload[field.name] = {
           inline_base64: base64,
           filename: v.name,
-          mime_type: v.type || "application/octet-stream",
+          mime_type: mimeType,
           size_bytes: v.size,
         };
         file_attachments.push({
           field_name: field.name,
           storage_path: `inline:${field.name}`,
-          mime_type: v.type || "application/octet-stream",
+          mime_type: mimeType,
           size_bytes: v.size,
         });
       } else if (v !== undefined && v !== null && v !== "") {
@@ -784,38 +797,36 @@ export function FormPublicClient({
   }
 
   /**
-   * Fire-and-forget failure beacon. A submit that dies at the platform edge
-   * (413, error page, network) never reaches our server code, so without this
-   * the merchant's loss is invisible AND unrecoverable. Sends the current
-   * answers minus File objects — contact fields are what recovery needs; file
-   * bytes are what made the request too big in the first place.
+   * Fire-and-forget failure beacon (lib/forms/submit-failure-beacon.ts, which
+   * drops file bytes so the keepalive request stays under 64 KiB). Sends the
+   * built payload when there is one, else the answers on screen.
    */
-  function reportSubmitFailure(error: string, payload?: Record<string, unknown>, stepIndex = currentStep) {
-    try {
-      const source = payload ?? values;
-      const safe: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(source)) {
-        if (v instanceof File) {
-          safe[k] = { skipped_file: v.name, size_bytes: v.size };
-        } else {
-          safe[k] = v;
-        }
-      }
-      void fetch("/api/forms/submit-failure", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenant_slug: anonymousInit?.tenant_slug,
-          form_slug: anonymousInit?.form_slug,
-          step_index: stepIndex,
-          error: error.slice(0, 400),
-          payload: safe,
-        }),
-        keepalive: true,
-      }).catch(() => undefined);
-    } catch {
-      // The beacon must never add a second failure on top of the first.
-    }
+  function reportSubmitFailure(
+    error: string,
+    payload?: Record<string, unknown>,
+    stepIndex = currentStep,
+    {
+      nothingToRecover = false,
+      consentLedger,
+    }: {
+      /** A router's answer, which stored nothing: its row is filed already recovered. */
+      nothingToRecover?: boolean;
+      /** The failed step's consent boxes, so a decline reaches whoever follows up. */
+      consentLedger?: { email?: boolean; sms?: boolean };
+    } = {},
+  ) {
+    sendSubmitFailureBeacon({
+      // A signed link's page has no anonymousInit, only these props. Without
+      // them the beacon named no form, so its loss paged nobody (CodeRabbit
+      // on #714).
+      tenantSlug: anonymousInit?.tenant_slug ?? tenantSlug,
+      formSlug: anonymousInit?.form_slug ?? formSlug,
+      stepIndex,
+      error,
+      payload: payload ?? values,
+      nothingToRecover,
+      consentLedger,
+    });
   }
 
   /**
@@ -854,11 +865,14 @@ export function FormPublicClient({
 
   /**
    * Show a refused submission as a plain sentence. Beacon only the failures
-   * nobody else can see or that mean a crash: a non-JSON response (platform
-   * error page, 413) or an explicit server_error, plus an error code with no
-   * copy, which means the route grew a rejection nobody wrote a sentence for.
+   * nobody else can see or that mean a crash: our fault by isSubmitFault (no
+   * JSON answer, any 5xx, or a BEACON_ERRORS code), or else an error code with
+   * no copy, which means the route grew a rejection nobody wrote a sentence
+   * for. One beacon per failure, never both.
    * Validation and rate-limit responses are the system working, not a
-   * merchant being lost.
+   * merchant being lost. `beacon: false` holds the beacon back (the router's
+   * first failure); `nothingToRecover` marks an answer that stored nothing;
+   * `consentLedger` is the failed step's consent boxes.
    */
   function showSubmitFailure(
     res: Response,
@@ -866,12 +880,19 @@ export function FormPublicClient({
     payload: Record<string, unknown>,
     /** The step the failed request was for, when not the one on screen (a held step). */
     stepIndex = currentStep,
+    {
+      beacon = true,
+      nothingToRecover = false,
+      consentLedger,
+    }: { beacon?: boolean; nothingToRecover?: boolean; consentLedger?: { email?: boolean; sms?: boolean } } = {},
   ) {
-    if (!data || data.error === "server_error") {
-      reportSubmitFailure(data ? "server_error" : `non_json_http_${res.status}`, payload, stepIndex);
-    }
-    if (data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
-      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex);
+    if (beacon && isSubmitFault(res.status, data)) {
+      reportSubmitFailure(data ? data.error ?? "server_error" : `non_json_http_${res.status}`, payload, stepIndex, {
+        nothingToRecover,
+        consentLedger,
+      });
+    } else if (beacon && data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
+      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex, { nothingToRecover, consentLedger });
     }
     // The route writes a specific sentence for the rejections that can name
     // their own problem (which field, what is missing). Prefer it; fall back to
@@ -974,7 +995,7 @@ export function FormPublicClient({
       if (!data || !data.ok) {
         // The recovery record names the held step that failed and keeps the
         // contact: before a lead exists, it is the only copy (Codex review of #668).
-        showSubmitFailure(res, data, { ...payload, ...(contact ?? {}) }, i);
+        showSubmitFailure(res, data, { ...payload, ...(contact ?? {}) }, i, { consentLedger: ledger });
         return false;
       }
       if (!tokenRef.current && data.minted_token) {
@@ -993,22 +1014,46 @@ export function FormPublicClient({
    * goes next, and stores nothing.
    */
   async function routeWithoutLead(lastPayload: Record<string, unknown>) {
-    const res = await fetch("/api/forms/submit", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        step_index: currentStep,
-        anonymous_init: anonymousInit,
-        route_only: true,
-        steps_payload: steps.map((_, i) => (i === currentStep ? lastPayload : heldSteps.current[i] ?? {})),
-        ...submitMeta(),
-      }),
-    });
-    const data = (await res.json().catch(() => null)) as SubmitResponse | null;
-    if (!data || !data.ok) {
-      showSubmitFailure(res, data, lastPayload);
+    // The router stored nothing, so there is nothing to recover, and one
+    // failure is usually a blip the visitor's retry gets past. The same
+    // visitor failing again is the router being down while ads send people
+    // to it: that beacons, so someone is paged, marked as nothing to recover
+    // so its row does not wait for a hand to close it (independent review of
+    // #714). Only our faults count (isSubmitFault, or the connection dying);
+    // the visitor's own mistakes are the form working. The answers stay on
+    // screen for the retry.
+    let res: Response;
+    try {
+      res = await fetch("/api/forms/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          step_index: currentStep,
+          anonymous_init: anonymousInit,
+          route_only: true,
+          steps_payload: steps.map((_, i) => (i === currentStep ? lastPayload : heldSteps.current[i] ?? {})),
+          ...submitMeta(),
+        }),
+      });
+    } catch {
+      // Not the submit's catch, which files a real loss at once: nothing was stored.
+      routeFailures.current += 1;
+      if (routeFailures.current >= 2) {
+        reportSubmitFailure("route_network_error", lastPayload, currentStep, { nothingToRecover: true });
+      }
+      setServerError("We couldn't submit the form. Please check your connection and try again.");
       return;
     }
+    const data = (await res.json().catch(() => null)) as SubmitResponse | null;
+    if (!data || !data.ok) {
+      if (isSubmitFault(res.status, data)) routeFailures.current += 1;
+      showSubmitFailure(res, data, lastPayload, currentStep, {
+        beacon: routeFailures.current >= 2,
+        nothingToRecover: true,
+      });
+      return;
+    }
+    routeFailures.current = 0;
     if (tenantSlug && formSlug) {
       trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
     }
@@ -1271,7 +1316,7 @@ export function FormPublicClient({
       // the merchant gets a plain sentence and a retry that can succeed.
       const data = (await res.json().catch(() => null)) as SubmitResponse | null;
       if (!data || !data.ok) {
-        showSubmitFailure(res, data, built.payload);
+        showSubmitFailure(res, data, built.payload, currentStep, { consentLedger: ledger });
         return;
       }
       // Capture the freshly-signed token from an anonymous step 0 so

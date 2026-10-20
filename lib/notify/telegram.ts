@@ -60,6 +60,7 @@
  * a lane.
  */
 import "server-only";
+import { fitTelegramHtml } from "./telegram-format";
 
 // Pure formatting helper lives in a server-only-free module so message builders
 // stay unit-testable. Re-exported here for callers that already import this.
@@ -271,7 +272,10 @@ async function postMessage(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
-        text: text.slice(0, 4096), // Telegram hard caps messages at 4096 chars
+        // Telegram caps a message at 4096 characters. A plain slice could end
+        // inside an escape or a tag, and Telegram then refused the whole
+        // message, losing the alert (lib/notify/telegram-format.ts).
+        text: fitTelegramHtml(text),
         parse_mode: "HTML",
       }),
       // Callers run inside `after()` on a function with a hard maxDuration.
