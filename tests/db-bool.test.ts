@@ -91,8 +91,6 @@ const FLAGS = new Set(["is_owner", "admin_access"]);
  * fixed in the sweep after that PR merges; until then its count may not grow.
  */
 const DEFERRED: Record<string, { max: number; reason: string }> = {
-  "app/api/agents/route.ts": { max: 2, reason: "owned by open PR #535 (AI account)" },
-  "app/api/agents/[slug]/route.ts": { max: 2, reason: "owned by open PR #535 (AI account)" },
   "app/api/agents/generate/route.ts": { max: 2, reason: "owned by open PR #535 (AI account)" },
   "app/api/manifest/chat/route.ts": { max: 2, reason: "owned by open PR #535 (AI account)" },
   "app/api/chat/route.ts": { max: 2, reason: "owned by open PR #535 (AI account)" },
