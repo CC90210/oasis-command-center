@@ -16,8 +16,10 @@
  *
  * Now the first call keeps the write's PROMISE and hands it to the platform
  * (lib/os/runs/keepalive.ts -> ctx.waitUntil), and every later call returns that
- * same promise, so flush() holds the stream open until the reply has landed. The
- * route hands its disconnect cancel to keepAlive too.
+ * same promise, so flush() holds the stream open until the reply has landed, for
+ * at most REPLY_WRITE_CAP_MS (a database that never answers must not hold a
+ * finished reply's stream open). The route hands its disconnect cancel to
+ * keepAlive too.
  *
  * Real teeBridgeChatPersistence, chat-persistence writer, keepAlive and POST
  * /api/bridge/chat, real SQL through the Turso adapter on a local libSQL file
@@ -114,6 +116,20 @@ async function quietly<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Run `fn` with console.error captured instead of printed; the lines it logged come back with its result. */
+async function capturingErrors<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    return { value: await fn(), lines };
+  } finally {
+    console.error = original;
+  }
+}
+
 async function main() {
   const db = await setupDatabase();
   // chat_sessions / chat_messages as the live schema has them (the shapes the
@@ -131,7 +147,7 @@ async function main() {
       service TEXT, field_key TEXT, encrypted_value TEXT, created_at TEXT, updated_at TEXT);
   `);
 
-  const { teeBridgeChatPersistence } = await import("../lib/bridge-chat-persistence");
+  const { teeBridgeChatPersistence, REPLY_WRITE_CAP_MS } = await import("../lib/bridge-chat-persistence");
   const { getTursoClient } = await import("../lib/turso");
 
   // Fault injection on the app's own database client (the harness client is a
@@ -253,6 +269,80 @@ async function main() {
       assert.equal(h.reached, 1, "the reply write reached the database once");
       assert.deepEqual(await rolesOf(turn.conversationId), ["user", "assistant"], "the reply is in chat_messages the moment the response ends");
     });
+    await Promise.all(handedToPlatform);
+  });
+
+  await check("a database that never answers costs the response at most the cap: the stream ends on time, the cap is logged, and the write is still the one handed to the platform", async () => {
+    handedToPlatform.length = 0;
+    const turn = turnOf();
+    const CAP = 300;
+    const GIVE_UP = CAP * 10 + 2_000;
+    await holdingReplyWrites(async (h) => {
+      const started = Date.now();
+      // The write is held at the database's door and never released inside this check: only the cap can end the stream.
+      const { value: outcome, lines } = await capturingErrors(() =>
+        Promise.race([
+          drain(teeBridgeChatPersistence(upstreamOf(replyFrames()).stream, turn, { replyWriteCapMs: CAP })).then(() => "ended" as const),
+          sleep(GIVE_UP).then(() => "still open" as const),
+        ]),
+      );
+      const took = Date.now() - started;
+      assert.equal(outcome, "ended", `the stream was still open ${GIVE_UP} ms after a write that never answers: flush() waits for the write with no cap`);
+      assert.ok(took >= CAP - 50, `the stream ended after ${took} ms, before the ${CAP} ms cap`);
+      await until(() => h.reached === 1, "the reply write to reach the database");
+      assert.equal(h.opened, false, "the write was released before the stream ended, so the cap proved nothing");
+      assert.deepEqual(await rolesOf(turn.conversationId), ["user"], "no reply is saved while the database does not answer");
+      const capped = lines.filter((l) => l.includes("[bridge-chat-persistence.flush-cap]"));
+      assert.equal(capped.length, 1, `the cap is logged once: ${JSON.stringify(lines)}`);
+      assert.ok(capped[0].includes(`${CAP} ms`) && capped[0].includes(turn.conversationId), `the log line names the cap and the conversation: ${capped[0]}`);
+      // The response is gone; the write is not. It is the promise the platform holds, and the cap did not settle it.
+      await handedExactly(1, "the reply write");
+      const platformPromise = handedToPlatform[0];
+      const state = await Promise.race([platformPromise.then(() => "settled" as const), sleep(60).then(() => "pending" as const)]);
+      assert.equal(state, "pending", "the promise handed to ctx.waitUntil settled with the cap: it must be the write itself");
+      h.open();
+      await platformPromise;
+      assert.equal(replyWritesFinished.has(turn.conversationId), true, "the promise handed to ctx.waitUntil settled before the reply write finished");
+      assert.deepEqual(await messagesOf(turn.conversationId), [
+        { role: "user", content: turn.userMessage, error: null },
+        { role: "assistant", content: REPLY.join(""), error: null },
+      ]);
+      assert.equal(replyWritesFor(turn.conversationId), 1, "the cap did not start a second write");
+    });
+  });
+
+  await check("the cap is REPLY_WRITE_CAP_MS unless overridden, armed for the length of the wait only, and silent when the write wins", async () => {
+    assert.ok(
+      REPLY_WRITE_CAP_MS >= 1_000 && REPLY_WRITE_CAP_MS <= 30_000,
+      `REPLY_WRITE_CAP_MS (${REPLY_WRITE_CAP_MS}) must be a cap: far under the widget's 10-minute inactivity timeout, inside the ~30 s waitUntil grace`,
+    );
+    const armed: unknown[] = [];
+    const cleared = new Set<unknown>();
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = ((handler: (...args: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+      const handle = realSetTimeout(handler, ms, ...rest);
+      if (ms === REPLY_WRITE_CAP_MS) armed.push(handle);
+      return handle;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((handle?: Parameters<typeof clearTimeout>[0]) => {
+      cleared.add(handle);
+      realClearTimeout(handle);
+    }) as unknown as typeof clearTimeout;
+    try {
+      // No option passed, as the route calls it: the production default.
+      const { lines } = await capturingErrors(() => drain(teeBridgeChatPersistence(upstreamOf(replyFrames()).stream, turnOf())));
+      assert.ok(armed.length >= 1, "flush() never armed a timer of REPLY_WRITE_CAP_MS: the cap the route gets is not the constant");
+      assert.ok(armed.every((handle) => cleared.has(handle)), "a cap timer outlived the wait: it would hold a request open past its response");
+      assert.deepEqual(
+        lines.filter((l) => l.includes("flush-cap")),
+        [],
+        "the cap was logged although the write won the race",
+      );
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
     await Promise.all(handedToPlatform);
   });
 

@@ -64,6 +64,38 @@ export type BridgePersistCtx = {
 };
 
 /**
+ * The longest flush() waits for the reply write before the response ends anyway.
+ * It stops the wait, not the write: persistAssistant() handed the write to
+ * keepAlive, so past the cap it carries on under ctx.waitUntil. Without a cap, a
+ * database that never answers would hold a finished reply's stream open until the
+ * widget's own inactivity timeout (10 minutes, SSE_INACTIVITY_TIMEOUT_MS in
+ * components/ChatWidget.tsx). A normal write is a few database round trips.
+ */
+export const REPLY_WRITE_CAP_MS = 8_000;
+
+export type BridgePersistOptions = {
+  /** How long flush() waits for the reply write: REPLY_WRITE_CAP_MS unless a test shortens it. */
+  replyWriteCapMs?: number;
+};
+
+/**
+ * "written" once `write` settles, or "capped" once `ms` have passed first. The
+ * write is not cancelled, only the wait ends. The timer never outlives the race,
+ * so no handle keeps a request alive past its response.
+ */
+async function waitForWrite(write: Promise<void>, ms: number): Promise<"written" | "capped"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const capped = new Promise<"capped">((resolve) => {
+    timer = setTimeout(() => resolve("capped"), ms);
+  });
+  try {
+    return await Promise.race([write.then(() => "written" as const), capped]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Wrap the upstream SSE body so bytes pass through to the client UNCHANGED
  * while we observe a decoded copy and persist the turn. Returns the stream to
  * hand straight to the Response.
@@ -71,7 +103,9 @@ export type BridgePersistCtx = {
 export function teeBridgeChatPersistence(
   upstreamBody: ReadableStream<Uint8Array>,
   ctx: BridgePersistCtx,
+  options: BridgePersistOptions = {},
 ): ReadableStream<Uint8Array> {
+  const replyWriteCapMs = options.replyWriteCapMs ?? REPLY_WRITE_CAP_MS;
   const decoder = new TextDecoder();
   let buf = "";
   let assistant = "";
@@ -225,8 +259,14 @@ export function teeBridgeChatPersistence(
     async flush() {
       // Normal close: wait for the write the terminal frame started (the SAME
       // promise, never a second write), so the response ends only once the reply
-      // has landed. With no terminal frame, this is what starts the write.
-      await persistAssistant();
+      // has landed, for at most replyWriteCapMs. With no terminal frame, this is
+      // what starts the write.
+      if ((await waitForWrite(persistAssistant(), replyWriteCapMs)) === "capped") {
+        console.error(
+          "[bridge-chat-persistence.flush-cap]",
+          `the reply write was still running after ${replyWriteCapMs} ms; the response ends without waiting for it (conversation ${ctx.conversationId})`,
+        );
+      }
     },
   });
 

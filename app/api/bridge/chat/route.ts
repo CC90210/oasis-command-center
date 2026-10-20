@@ -467,7 +467,9 @@ export async function POST(req: NextRequest) {
   // hands the cancel to the platform and never throws. It finds the platform
   // only while this callback still runs inside the request's context (OpenNext
   // keeps it in an AsyncLocalStorage); where the runtime calls the listener
-  // without it, keepAlive falls back and the cancel runs as it did before.
+  // without it, keepAlive falls back and the cancel runs as it did before. Making
+  // it reliable (a waitUntil hold registered at request time and released on
+  // normal completion) is a separate follow-up, not part of this change.
   const cancelForDisconnect = () => {
     const cancelled = cancelHarnessJob({ tenantId: auth.tenantId, userId: auth.userId, jobId: queued.job.id }).catch((error) => {
       console.error("[bridge.chat.disconnect-cancel]", error instanceof Error ? error.message : String(error));
