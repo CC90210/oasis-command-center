@@ -27,6 +27,7 @@ import { AddressAutocompleteField } from "./AddressAutocompleteField";
 import { ComboboxField } from "./ComboboxField";
 import { MultiFileDropzone, type UploadedDescriptor } from "./MultiFileDropzone";
 import { HoneypotField } from "./HoneypotField";
+import { normalizedAccept } from "@/lib/forms/file-type";
 
 type Props = {
   step: FormStep;
@@ -525,7 +526,9 @@ function renderInput(
           <input
             id={inputId}
             type="file"
-            accept={field.accept?.join(",")}
+            // As MIME types: the builder's box is free text ("pdf, jpg"), which
+            // the browser's picker ignores (lib/forms/file-type.ts).
+            accept={normalizedAccept(field.accept).join(",") || undefined}
             onChange={(e) => {
               const f = e.target.files?.[0] || null;
               onChange(f);

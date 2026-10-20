@@ -436,7 +436,18 @@ async function main() {
     // Codex review of #668 (pass 3): before a lead exists, the failure report is
     // the only copy of the contact, and it must name the held step that failed.
     assert.match(held, /showSubmitFailure\(res, data, \{ \.\.\.payload, \.\.\.\(contact \?\? \{\}\) \}, i\);/);
-    assert.match(client, /step_index: stepIndex,/, "the failure report stamps the step on screen, not the one that failed");
+    // The beacon itself moved to lib/forms/submit-failure-beacon.ts (#714): the
+    // client hands it the step it was given, and the module stamps that one.
+    assert.match(
+      client.slice(client.indexOf("function reportSubmitFailure"), client.indexOf("function advanceFrom")),
+      /sendSubmitFailureBeacon\(\{[\s\S]*?\bstepIndex,/,
+      "the failure report is not handed the step that failed",
+    );
+    assert.match(
+      readFileSync(join(__dirname, "..", "lib", "forms", "submit-failure-beacon.ts"), "utf8"),
+      /step_index: input\.stepIndex,/,
+      "the failure report stamps the step on screen, not the one that failed",
+    );
     // A held step's consent boxes (an optional phone left blank, an email not
     // yet valid) travel with it: the server binds each to that step's own field.
     assert.match(client, /heldLedgers\.current\[currentStep\] = consentLedgerFor\(stepAtStart\);/);

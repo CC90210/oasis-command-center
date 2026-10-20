@@ -39,6 +39,7 @@ import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalenda
 import { contactGateAction, contactHandoff, hasReachableContact, typedContact } from "@/lib/forms/contact-gate";
 import { HONEYPOT_BODY_KEY, reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
 import { chosenFileType } from "@/lib/forms/file-type";
+import { BEACON_ERRORS, sendSubmitFailureBeacon } from "@/lib/forms/submit-failure-beacon";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -448,6 +449,8 @@ export function FormPublicClient({
   const heldSteps = useRef<Array<Record<string, unknown> | undefined>>([]);
   const heldLedgers = useRef<Array<{ email?: boolean; sms?: boolean } | undefined>>([]);
   const heldStepsSent = useRef(0);
+  // The router's failures in a row for this visitor (routeWithoutLead).
+  const routeFailures = useRef(0);
   // The honeypot box (FormRenderer trapRef) and what a script typed into it.
   const trapRef = useRef<HTMLInputElement | null>(null);
   const trapLatch = useRef("");
@@ -794,44 +797,25 @@ export function FormPublicClient({
   }
 
   /**
-   * Fire-and-forget failure beacon. A submit that dies at the platform edge
-   * (413, error page, network) never reaches our server code, so without this
-   * the merchant's loss is invisible AND unrecoverable. Sends the current
-   * answers minus file bytes — contact fields are what recovery needs; file
-   * bytes are what made the request too big in the first place. That means a
-   * File in the on-screen answers AND the base64 a built payload carries: a
-   * keepalive request over 64 KiB is refused by the browser, so one attached
-   * file used to lose the whole beacon (independent review of #714).
+   * Fire-and-forget failure beacon (lib/forms/submit-failure-beacon.ts, which
+   * drops file bytes so the keepalive request stays under 64 KiB). Sends the
+   * built payload when there is one, else the answers on screen.
    */
-  function reportSubmitFailure(error: string, payload?: Record<string, unknown>, stepIndex = currentStep) {
-    try {
-      const source = payload ?? values;
-      const safe: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(source)) {
-        if (v instanceof File) {
-          safe[k] = { skipped_file: v.name, size_bytes: v.size };
-        } else if (v && typeof v === "object" && typeof (v as { inline_base64?: unknown }).inline_base64 === "string") {
-          const f = v as { filename?: unknown; size_bytes?: unknown };
-          safe[k] = { skipped_file: f.filename ?? null, size_bytes: f.size_bytes ?? null };
-        } else {
-          safe[k] = v;
-        }
-      }
-      void fetch("/api/forms/submit-failure", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenant_slug: anonymousInit?.tenant_slug,
-          form_slug: anonymousInit?.form_slug,
-          step_index: stepIndex,
-          error: error.slice(0, 400),
-          payload: safe,
-        }),
-        keepalive: true,
-      }).catch(() => undefined);
-    } catch {
-      // The beacon must never add a second failure on top of the first.
-    }
+  function reportSubmitFailure(
+    error: string,
+    payload?: Record<string, unknown>,
+    stepIndex = currentStep,
+    /** A router's answer, which stored nothing: its row is filed already recovered. */
+    nothingToRecover = false,
+  ) {
+    sendSubmitFailureBeacon({
+      tenantSlug: anonymousInit?.tenant_slug,
+      formSlug: anonymousInit?.form_slug,
+      stepIndex,
+      error,
+      payload: payload ?? values,
+      nothingToRecover,
+    });
   }
 
   /**
@@ -876,8 +860,8 @@ export function FormPublicClient({
    * plus an error code with no copy, which means the route grew a rejection
    * nobody wrote a sentence for.
    * Validation and rate-limit responses are the system working, not a
-   * merchant being lost. `beacon: false` is for an answer that stored
-   * nothing and has nothing to recover: the router's.
+   * merchant being lost. `beacon: false` holds the beacon back (the router's
+   * first failure); `nothingToRecover` marks an answer that stored nothing.
    */
   function showSubmitFailure(
     res: Response,
@@ -885,16 +869,13 @@ export function FormPublicClient({
     payload: Record<string, unknown>,
     /** The step the failed request was for, when not the one on screen (a held step). */
     stepIndex = currentStep,
-    { beacon = true }: { beacon?: boolean } = {},
+    { beacon = true, nothingToRecover = false }: { beacon?: boolean; nothingToRecover?: boolean } = {},
   ) {
-    if (
-      beacon &&
-      (!data || data.error === "server_error" || data.error === "form_unavailable" || data.error === "upload_unavailable")
-    ) {
-      reportSubmitFailure(data ? data.error ?? "server_error" : `non_json_http_${res.status}`, payload, stepIndex);
+    if (beacon && (!data || (data.error !== undefined && BEACON_ERRORS.has(data.error)))) {
+      reportSubmitFailure(data ? data.error ?? "server_error" : `non_json_http_${res.status}`, payload, stepIndex, nothingToRecover);
     }
     if (beacon && data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
-      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex);
+      reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex, nothingToRecover);
     }
     // The route writes a specific sentence for the rejections that can name
     // their own problem (which field, what is missing). Prefer it; fall back to
@@ -1029,13 +1010,20 @@ export function FormPublicClient({
     });
     const data = (await res.json().catch(() => null)) as SubmitResponse | null;
     if (!data || !data.ok) {
-      // No beacon: the router stored nothing, so a dead-letter row would hold
-      // nothing to recover and only keep the health check red until someone
-      // closed it by hand (independent review of #714). The answers stay on
-      // screen for the retry.
-      showSubmitFailure(res, data, lastPayload, currentStep, { beacon: false });
+      // The router stored nothing, so there is nothing to recover, and one
+      // failure is usually a blip the visitor's retry gets past. The same
+      // visitor failing again is the router being down while ads send people
+      // to it: that beacons, so someone is paged, marked as nothing to recover
+      // so its row does not wait for a hand to close it (independent review of
+      // #714). The answers stay on screen for the retry.
+      routeFailures.current += 1;
+      showSubmitFailure(res, data, lastPayload, currentStep, {
+        beacon: routeFailures.current >= 2,
+        nothingToRecover: true,
+      });
       return;
     }
+    routeFailures.current = 0;
     if (tenantSlug && formSlug) {
       trackEvent({ tenant: tenantSlug, form: formSlug, event: "step_submitted", stepIndex: currentStep });
     }

@@ -15,6 +15,7 @@ import type { ConsentChannel, ConsentIdentity } from "@/lib/consent/ledger-discl
 import { ConsentChoice } from "@/components/forms/ConsentChoice";
 import { HoneypotField } from "@/components/forms/HoneypotField";
 import { reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
+import { BEACON_ERRORS, sendSubmitFailureBeacon } from "@/lib/forms/submit-failure-beacon";
 import { getOrCreateVisitId } from "@/lib/offers/tracking-client";
 
 /**
@@ -135,6 +136,18 @@ export function AuditForm({
         | null;
 
       if (!res.ok || !data?.ok) {
+        // A fault on our side means a prospect who may give up here: beacon,
+        // so the answers are kept and someone is paged (independent review of
+        // #714). The visitor's own mistakes are the form working.
+        if (!data || (data.error !== undefined && BEACON_ERRORS.has(data.error))) {
+          sendSubmitFailureBeacon({
+            tenantSlug: body.anonymous_init.tenant_slug,
+            formSlug: body.anonymous_init.form_slug,
+            stepIndex: 0,
+            error: data?.error ?? `non_json_http_${res.status}`,
+            payload: body.payload,
+          });
+        }
         // Surface something the visitor can act on. The rate-limit case is
         // the only one they can actually resolve themselves, so it gets its
         // own message instead of the generic one.

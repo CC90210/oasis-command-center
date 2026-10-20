@@ -151,7 +151,10 @@ assert.ok(/BODY_CAP_BYTES/.test(BEACON), "beacon must cap its body");
 
 // The client beacons real losses only — never validation or rate-limit
 // responses, which are the system working.
-assert.ok(/data\.error === "server_error"/.test(CLIENT), "beacon on server_error");
+// Which answers beacon lives in one list the public pages share
+// (lib/forms/submit-failure-beacon.ts).
+assert.ok(/BEACON_ERRORS\.has\(data\.error\)/.test(CLIENT), "the client beacons on the shared list");
+assert.ok(/"server_error",/.test(readFileSync("lib/forms/submit-failure-beacon.ts", "utf8")), "beacon on server_error");
 assert.ok(/non_json_http_/.test(CLIENT), "beacon on a non-JSON (platform) response");
 assert.ok(!/rate_limited[\s\S]{0,200}reportSubmitFailure/.test(CLIENT), "no beacon on rate-limit");
 

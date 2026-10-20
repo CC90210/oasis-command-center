@@ -121,6 +121,7 @@ import {
   LEAD_PHONE_KEYS,
 } from "@/lib/forms/contact-gate";
 import { resolveRouterDestination, RouterDestinationUnavailable } from "@/lib/forms/routing-destination";
+import { normalizedAccept } from "@/lib/forms/file-type";
 import { isHoneypotFilled } from "@/lib/forms/honeypot";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
@@ -268,7 +269,9 @@ const DEFAULT_INLINE_MIME = ["application/pdf", "image/png", "image/jpeg", "imag
 const DEFAULT_MULTI_MIME = ["application/pdf", "image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"];
 
 function acceptedTypes(field: { accept?: string[] }, fallback: readonly string[]): readonly string[] {
-  return field.accept && field.accept.length > 0 ? field.accept : fallback;
+  // As MIME types: the builder's box is free text ("pdf, jpg"; lib/forms/file-type.ts).
+  const rules = normalizedAccept(field.accept);
+  return rules.length > 0 ? rules : fallback;
 }
 
 function fieldAccepts(field: { accept?: string[] }, fallback: readonly string[], mime: string): boolean {
@@ -298,7 +301,7 @@ function decodedOver(b64s: readonly string[], cap: number): boolean {
 /**
  * The reasons a file did not land that the visitor can fix by choosing again:
  * a 422 naming the file. Every other reason is a storage or database fault
- * (upload_failed: ..., metadata_insert_failed: ..., storage_list_failed: ...,
+ * (upload_failed: ..., metadata_insert_failed: ..., storage_info_failed: ...,
  * a thrown error): a 503 that pages, because no choice of file fixes it.
  */
 const VISITOR_FILE_REASONS = [
@@ -317,12 +320,22 @@ function visitorCanFixFile(reason: string): boolean {
 
 type FileField = { name: string; label?: string; type?: string; required?: boolean; accept?: string[]; max_files?: number };
 
-/** A step's file the visitor must fix: 422, with the field and a sentence naming it. */
-function refuseLostFile(field: FileField, reason: string): NextResponse {
+/**
+ * A step's file the visitor must fix: 422, with the field and a sentence
+ * naming it, and the file itself when the field holds several (one of forty
+ * statements is otherwise hard to find).
+ */
+function refuseLostFile(field: FileField, reason: string, filename?: string | null): NextResponse {
   return NextResponse.json(
-    { ok: false, error: "upload_failed", field: field.name, message: lostFileSentence(field, reason) },
+    { ok: false, error: "upload_failed", field: field.name, message: lostFileSentence(field, reason, filename) },
     { status: 422 },
   );
+}
+
+/** The descriptor's own filename, when it carries a usable one. */
+function descriptorName(d: unknown): string | null {
+  const name = d && typeof d === "object" ? (d as { filename?: unknown }).filename : null;
+  return typeof name === "string" && name.trim() ? name.trim().slice(0, 120) : null;
 }
 
 /**
@@ -343,6 +356,8 @@ function refuseInvalidStep(input: {
   payload: Record<string, unknown>;
   /** buildAnswerContext's server-built answers: show_if is judged on these. */
   answers: Record<string, unknown>;
+  /** False for a caller that stores no files (the router): its files are not checked. */
+  storesFiles: boolean;
   inlineFileNames: ReadonlySet<string>;
   inlineFileCount: number;
 }): NextResponse | null {
@@ -443,36 +458,43 @@ function refuseInvalidStep(input: {
   // total, and a multi-file field's descriptors. The upload loop in
   // handleSubmit applies the same rules again as defence in depth.
   //
-  // Inline files only where the caller stores them (inlineFileNames: the
-  // router stores none, so it names none). A file on a field this step does
-  // not declare was never the visitor's to send; the upload loop drops it
-  // quietly, so it is not refused here either.
-  const stored: string[] = [];
-  for (const [fieldName, value] of Object.entries(payload)) {
-    if (!isInlineFile(value) || !input.inlineFileNames.has(fieldName)) continue;
-    const field = input.step.fields.find((f) => f.name === fieldName);
-    if (!field || field.type !== "file_upload") continue;
-    if (!fieldAccepts(field, DEFAULT_INLINE_MIME, value.mime_type)) return refuseLostFile(field, "mime_not_allowed");
-    if (decodedOver([value.inline_base64], PER_FILE_DECODED_CAP_BYTES)) return refuseLostFile(field, "file_too_large");
-    stored.push(value.inline_base64);
-  }
-  if (decodedOver(stored, PER_REQUEST_DECODED_CAP_BYTES)) {
-    return NextResponse.json({ ok: false, error: "request_payload_too_large" }, { status: 413 });
-  }
-  for (const field of input.step.fields) {
-    if (field.type !== "file_upload_multi") continue;
-    const raw = payload[field.name];
-    if (!Array.isArray(raw)) continue;
-    // More than the field takes, or a descriptor that is not one, never comes
-    // from the form's own uploader (it stops at max_files): refused, where the
-    // upload loop used to drop it and record the step without the file.
-    if (raw.length > multiFileLimit(field)) return refuseLostFile(field, "too_many_files");
-    for (const d of raw) {
-      if (!d || typeof d !== "object") return refuseLostFile(field, "missing_storage_path");
-      const desc = d as { storage_path?: unknown; mime_type?: unknown };
-      if (typeof desc.storage_path !== "string" || !desc.storage_path) return refuseLostFile(field, "missing_storage_path");
-      if (!fieldAccepts(field, DEFAULT_MULTI_MIME, typeof desc.mime_type === "string" ? desc.mime_type : "")) {
-        return refuseLostFile(field, "mime_not_allowed");
+  // Only where the caller stores files: the router stores none, so it refuses
+  // none (storesFiles false). A file on a field this step does not declare was
+  // never the visitor's to send; the upload loop drops it quietly, so it is not
+  // refused here either. Fields by name with the LAST of a repeated name
+  // winning, as in the upload loop's map, so the two can never disagree about
+  // which field a file belongs to.
+  if (input.storesFiles) {
+    const fieldsByName = new Map(input.step.fields.map((f) => [f.name, f]));
+    const stored: string[] = [];
+    for (const [fieldName, value] of Object.entries(payload)) {
+      if (!isInlineFile(value) || !input.inlineFileNames.has(fieldName)) continue;
+      const field = fieldsByName.get(fieldName);
+      if (!field || field.type !== "file_upload") continue;
+      if (!fieldAccepts(field, DEFAULT_INLINE_MIME, value.mime_type)) return refuseLostFile(field, "mime_not_allowed");
+      if (decodedOver([value.inline_base64], PER_FILE_DECODED_CAP_BYTES)) return refuseLostFile(field, "file_too_large");
+      stored.push(value.inline_base64);
+    }
+    if (decodedOver(stored, PER_REQUEST_DECODED_CAP_BYTES)) {
+      return NextResponse.json({ ok: false, error: "request_payload_too_large" }, { status: 413 });
+    }
+    for (const field of fieldsByName.values()) {
+      if (field.type !== "file_upload_multi") continue;
+      const raw = payload[field.name];
+      if (!Array.isArray(raw)) continue;
+      // More than the field takes, or a descriptor that is not one, never comes
+      // from the form's own uploader (it stops at max_files): refused, where the
+      // upload loop used to drop it and record the step without the file.
+      if (raw.length > multiFileLimit(field)) return refuseLostFile(field, "too_many_files");
+      for (const d of raw) {
+        if (!d || typeof d !== "object") return refuseLostFile(field, "missing_storage_path");
+        const desc = d as { storage_path?: unknown; mime_type?: unknown };
+        if (typeof desc.storage_path !== "string" || !desc.storage_path) {
+          return refuseLostFile(field, "missing_storage_path", descriptorName(d));
+        }
+        if (!fieldAccepts(field, DEFAULT_MULTI_MIME, typeof desc.mime_type === "string" ? desc.mime_type : "")) {
+          return refuseLostFile(field, "mime_not_allowed", descriptorName(d));
+        }
       }
     }
   }
@@ -543,14 +565,17 @@ function acceptedFilesPhrase(rules: readonly string[]): string | null {
 }
 
 /** What the visitor is told about a file that was not saved: which one, and what to do. */
-function lostFileSentence(field: FileField, reason: string): string {
-  const label = field.label?.trim() || "your file";
+function lostFileSentence(field: FileField, reason: string, filename?: string | null): string {
+  const label = `${field.label?.trim() || "your file"}${filename ? ` (${filename})` : ""}`;
   if (reason.startsWith("mime_not_allowed")) {
     const fallback = field.type === "file_upload_multi" ? DEFAULT_MULTI_MIME : DEFAULT_INLINE_MIME;
     return `${label}: that type of file isn't accepted here. Please choose ${acceptedFilesPhrase(acceptedTypes(field, fallback)) ?? "another file"}.`;
   }
   if (reason.startsWith("file_too_large")) return `${label}: that file is larger than 15 MB. Please choose a smaller one.`;
-  if (reason === "too_many_files") return `${label}: that's more than ${multiFileLimit(field)} files. Please remove some and try again.`;
+  if (reason === "too_many_files") {
+    const max = multiFileLimit(field);
+    return `${label}: that's more than ${max} ${max === 1 ? "file" : "files"}. Please remove some and try again.`;
+  }
   if (visitorCanFixFile(reason)) return `${label}: that file didn't finish uploading. Please choose it again.`;
   // A storage or database fault: nothing the visitor chose is wrong.
   return (
@@ -565,10 +590,15 @@ function lostFileSentence(field: FileField, reason: string): string {
  * see it. Until the independent review of #714 it was a 422, a "visitor
  * error" nobody was paged for, while every visitor with a file was stuck.
  */
-function fileUnavailable(field: FileField, reason: string, context: Record<string, unknown>): NextResponse {
+function fileUnavailable(
+  field: FileField,
+  reason: string,
+  context: Record<string, unknown>,
+  filename?: string | null,
+): NextResponse {
   console.error("[forms.submit] a file could not be stored", { ...context, field: field.name, reason: reason.slice(0, 300) });
   return NextResponse.json(
-    { ok: false, error: "upload_unavailable", field: field.name, message: lostFileSentence(field, reason) },
+    { ok: false, error: "upload_unavailable", field: field.name, message: lostFileSentence(field, reason, filename) },
     { status: 503 },
   );
 }
@@ -620,6 +650,7 @@ async function refuseInvalidAnonymousFirstStep(input: {
     step: steps[0],
     payload,
     answers: buildAnswerContext(steps, [], 0, payload),
+    storesFiles: true,
     inlineFileNames: new Set(inlineFieldNames),
     inlineFileCount: inlineFieldNames.length,
   });
@@ -703,6 +734,7 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
       step: steps[i],
       payload: stepPayload,
       answers: buildAnswerContext(steps, rows, i, stepPayload),
+      storesFiles: false,
       inlineFileNames: new Set(),
       inlineFileCount: Object.values(stepPayload).filter(isInlineFile).length,
     });
@@ -1123,6 +1155,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     step: currentStep,
     payload,
     answers: mergedAnswers,
+    storesFiles: true,
     inlineFileNames,
     inlineFileCount: inlineFiles.length,
   });
@@ -1222,7 +1255,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     size_bytes: number;
     doc_type: string;
   }> = [];
-  const uploadWarnings: Array<{ field_name: string; reason: string }> = [];
+  const uploadWarnings: Array<{ field_name: string; reason: string; filename?: string }> = [];
 
   // Schema-driven file validation. Without this an attacker could embed
   // arbitrary {inline_base64, ...} blobs against any payload key (even
@@ -1370,11 +1403,11 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       const fn = typeof desc.filename === "string" && desc.filename ? desc.filename : "upload";
       const mt = typeof desc.mime_type === "string" ? desc.mime_type : "";
       if (!sp) {
-        uploadWarnings.push({ field_name: field.name, reason: "missing_storage_path" });
+        uploadWarnings.push({ field_name: field.name, reason: "missing_storage_path", filename: descriptorName(d) ?? undefined });
         continue;
       }
       if (!fieldAccepts(field, DEFAULT_MULTI_MIME, mt)) {
-        uploadWarnings.push({ field_name: field.name, reason: `mime_not_allowed: ${mt.slice(0, 100)}` });
+        uploadWarnings.push({ field_name: field.name, reason: `mime_not_allowed: ${mt.slice(0, 100)}`, filename: descriptorName(d) ?? undefined });
         continue;
       }
       // Per-file classification: license/void/ID files dropped into the shared
@@ -1400,11 +1433,11 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         // as one that answers with an error, as in the inline loop above: it
         // used to escape as a 500 (found by the independent review of #714's
         // multi-file test).
-        uploadWarnings.push({ field_name: field.name, reason: err instanceof Error ? err.message : "unknown" });
+        uploadWarnings.push({ field_name: field.name, reason: err instanceof Error ? err.message : "unknown", filename: descriptorName(d) ?? undefined });
         continue;
       }
       if (!reg.ok) {
-        uploadWarnings.push({ field_name: field.name, reason: reg.error });
+        uploadWarnings.push({ field_name: field.name, reason: reg.error, filename: descriptorName(d) ?? undefined });
         continue;
       }
       uploadedDocs.push({
@@ -1444,16 +1477,18 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // step's inline files were stored, so the visitor's retry stores them again
   // as second copies on the lead. The type, size and path checks that make up
   // nearly every refusal now run before anything is written; what remains is a
-  // direct upload that never finished, or a storage or database fault.
+  // direct upload that never finished, or a storage or database fault. The
+  // consent decision recorded for the step is recorded again on the retry, as
+  // the visitor's own second answer.
   const lostFiles = uploadWarnings.filter((w) => w.reason !== "field_not_file_upload");
   if (lostFiles.length > 0) {
     const context = { form_id: form.id, lead_id: link.lead_id, step_index: stepIndex, files: lostFiles };
     const fault = lostFiles.find((w) => !visitorCanFixFile(w.reason));
     const first = fault ?? lostFiles[0];
     const field = currentStepFields.get(first.field_name) ?? { name: first.field_name };
-    if (fault) return fileUnavailable(field, fault.reason, context);
+    if (fault) return fileUnavailable(field, fault.reason, context, fault.filename);
     console.warn("[forms.submit] files not saved", context);
-    return refuseLostFile(field, first.reason);
+    return refuseLostFile(field, first.reason, first.filename);
   }
 
   // After all uploads for this step, evaluate stage progression once.

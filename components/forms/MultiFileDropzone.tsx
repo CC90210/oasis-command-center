@@ -17,9 +17,9 @@
  * AddressAutocompleteField) — the renderer is otherwise stateless.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { UploadCloud, FileText, X, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
-import { chosenFileType } from "@/lib/forms/file-type";
+import { chosenFileType, normalizedAccept } from "@/lib/forms/file-type";
 
 export type UploadedDescriptor = {
   storage_path: string;
@@ -103,7 +103,11 @@ export function MultiFileDropzone({
   uploadToken: string | null;
   ensureUploadToken?: () => Promise<string | null>;
 }) {
-  const acceptList = accept && accept.length > 0 ? accept : DEFAULT_ACCEPT;
+  // As MIME types: the builder's box is free text ("pdf, jpg"; lib/forms/file-type.ts).
+  const acceptList = useMemo(() => {
+    const normalized = normalizedAccept(accept);
+    return normalized.length > 0 ? normalized : DEFAULT_ACCEPT;
+  }, [accept]);
   const maxBytes = maxFileMb * 1024 * 1024;
 
   // Seed from any descriptors the parent already holds (returning to the step).

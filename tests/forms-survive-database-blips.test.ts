@@ -35,6 +35,17 @@
  *   - Operator-email ingest and dropped applications no longer read a failed
  *     lookup as "no lead".
  *
+ * ITS SECOND ROUND, with a fake R2 and fault injection on the app's own
+ * database client (both from its probes):
+ *   - scrub-candidates looks the lead up before the claim, so a failure has
+ *     nothing to roll back; a rollback that fails after a failed create is
+ *     logged with the candidate's id.
+ *   - A direct upload is found by asking for it, not by a 100-key listing; a
+ *     filename whose letters are stripped never becomes a path holding "..";
+ *     an accept list typed as extensions takes those types.
+ *   - The router refuses no files and, failing twice for one visitor, pages,
+ *     filed as nothing to recover. /book and the audit form beacon too.
+ *
  * Real route, real SQL (tests/_delivery-harness.ts).
  *
  * Run: node --conditions=react-server --import tsx tests/forms-survive-database-blips.test.ts
@@ -42,6 +53,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createElement, type ReactNode } from "react";
 import { check, finish, login, OASIS, setupDatabase, USERS } from "./_delivery-harness";
 import { SUBMIT_ERROR_COPY } from "../components/forms/FormPublicClient";
 
@@ -59,6 +71,69 @@ require.cache[serverPath] = {
   paths: [],
   exports: { ...realServer, after: () => undefined },
 } as unknown as NodeModule;
+
+// The form page (its tab title is checked below) pulls modules a bundler would
+// handle: stubbed as tests/_offer-pages-harness.ts does.
+const stubPath = (p: string, exports: Record<string, unknown>) => {
+  require.cache[p] = { id: p, filename: p, path: dirname(p), loaded: true, children: [], paths: [], exports } as unknown as NodeModule;
+};
+stubPath(require.resolve("next/link"), {
+  __esModule: true,
+  default: ({ href, children, ...rest }: { href: string; children?: ReactNode }) => createElement("a", { href, ...rest }, children),
+});
+stubPath(require.resolve("next/font/local"), {
+  __esModule: true,
+  default: (opts: { variable?: string }) => ({
+    className: "font-stub",
+    variable: `font-var-${String(opts.variable || "x").replace(/[^a-z]/gi, "")}`,
+    style: { fontFamily: "stub" },
+  }),
+});
+stubPath(join(__dirname, "..", "app", "(marketing)", "marketing.css"), {});
+
+// A fake R2 behind a fetch stub (no network), from the independent review of
+// #714: ListObjectsV2 with prefix and max-keys in key order, PUT, HEAD, DELETE.
+// DOWN by default, so a check that needs storage to fail gets a fault, and the
+// checks that need a working storage turn it on.
+const R2_STORE = new Map<string, number>(); // object key -> size
+let r2Down = true;
+process.env.R2_ACCOUNT_ID = "testacct";
+process.env.R2_ACCESS_KEY_ID = "AKIATEST";
+process.env.R2_SECRET_ACCESS_KEY = "testsecret";
+process.env.R2_BUCKET = "test-bucket";
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+  if (url.hostname !== "testacct.r2.cloudflarestorage.com") throw new Error(`test: network blocked (${url.hostname})`);
+  if (r2Down) return new Response("storage down", { status: 500 });
+  const method = (init?.method || "GET").toUpperCase();
+  const path = decodeURIComponent(url.pathname);
+  if (path === "/test-bucket" && url.searchParams.get("list-type") === "2") {
+    const prefix = url.searchParams.get("prefix") || "";
+    const max = Number(url.searchParams.get("max-keys") || "1000");
+    const keys = [...R2_STORE.keys()].filter((k) => k.startsWith(prefix)).sort().slice(0, max);
+    const body =
+      `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>test-bucket</Name><Prefix>${prefix}</Prefix>` +
+      `<MaxKeys>${max}</MaxKeys><IsTruncated>${keys.length === max}</IsTruncated>` +
+      keys.map((k) => `<Contents><Key>${k}</Key><Size>${R2_STORE.get(k)}</Size></Contents>`).join("") +
+      `</ListBucketResult>`;
+    return new Response(body, { status: 200, headers: { "content-type": "application/xml" } });
+  }
+  const key = path.replace(/^\/test-bucket\//, "");
+  if (method === "PUT") {
+    R2_STORE.set(key, 10);
+    return new Response(null, { status: 200 });
+  }
+  if (method === "DELETE") {
+    R2_STORE.delete(key);
+    return new Response(null, { status: 204 });
+  }
+  if (method === "HEAD" || method === "GET") {
+    return R2_STORE.has(key)
+      ? new Response(null, { status: 200, headers: { "content-length": String(R2_STORE.get(key)) } })
+      : new Response(null, { status: 404 });
+  }
+  return new Response(null, { status: 400 });
+}) as typeof fetch;
 
 type Json = Record<string, unknown>;
 const field = (name: string, type: string, label: string, required = true, extra: Json = {}) => ({ name, type, label, required, ...extra });
@@ -97,7 +172,19 @@ const ROUTER_STEPS = [
   {
     key: "path",
     title: "Which is you?",
-    fields: [select("path", ["community", "audit"]), field("deck", "file_upload", "Deck", false, { accept: ["application/pdf"] })],
+    fields: [
+      select("path", ["community", "audit"]),
+      field("deck", "file_upload", "Deck", false, { accept: ["application/pdf"] }),
+      field("decks", "file_upload_multi", "Decks", false, { accept: ["application/pdf"], max_files: 1 }),
+    ],
+  },
+];
+// The builder's "Accepted file types" box is free text: an operator typed "pdf".
+const FREE_ACCEPT_STEPS = [
+  {
+    key: "docs",
+    title: "Proof",
+    fields: [field("email", "email", "Email"), field("proof", "file_upload", "Proof of address", false, { accept: ["pdf"] })],
   },
 ];
 
@@ -136,9 +223,11 @@ async function main() {
         sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, redirect_url, routing) VALUES ('form-router', ?, 'router', 'Start here', ?, 'https://oasisai.work/thanks', ?)",
         args: [OASIS, JSON.stringify(ROUTER_STEPS), JSON.stringify([{ go: "two-step", when_any: [{ path: ["audit"] }] }])],
       },
+      { sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('form-free', ?, 'free-accept', 'Free', ?)", args: [OASIS, JSON.stringify(FREE_ACCEPT_STEPS)] },
     ],
     "write",
   );
+  await seed.executeMultiple(read("database/turso/146_form_submit_failures.turso.sql"));
 
   const { NextRequest } = await import("next/server");
   const { resolvePublicForm } = await import("../lib/forms/public-resolver");
@@ -152,6 +241,37 @@ async function main() {
   const route = await import("../app/api/forms/submit/route");
   const community = await import("../app/go/community/route");
   const scrub = await import("../app/api/scrub-candidates/[id]/route");
+  const submitFailure = await import("../app/api/forms/submit-failure/route");
+  const formPage = await import("../app/f/[tenant_slug]/[form_slug]/page");
+  const { sanitizeStorageFilename } = await import("../lib/storage-helpers");
+  const { normalizedAccept } = await import("../lib/forms/file-type");
+  const { getTursoClient } = await import("../lib/turso");
+
+  // Fault injection on the app's own database client (the seed client is a
+  // separate connection), from the independent review of #714: a query the
+  // test names fails as in an outage, and everything else runs.
+  const appClient = getTursoClient() as unknown as Record<string, unknown>;
+  const ownExecute = Reflect.getOwnPropertyDescriptor(appClient, "execute");
+  const realExecute = (ownExecute?.value ?? (Object.getPrototypeOf(appClient) as Record<string, unknown>).execute) as (
+    this: unknown,
+    stmt: unknown,
+  ) => Promise<unknown>;
+  let failWhen: ((sql: string, args: unknown[]) => boolean) | null = null;
+  appClient.execute = function (this: unknown, stmt: unknown) {
+    const sql = typeof stmt === "string" ? stmt : String((stmt as { sql: string }).sql);
+    const args = typeof stmt === "string" ? [] : (((stmt as { args?: unknown[] }).args ?? []) as unknown[]);
+    if (failWhen && failWhen(sql, args)) return Promise.reject(new Error("test: connection reset"));
+    return realExecute.call(this, stmt);
+  };
+  /** Fail the queries `when` names for the length of `fn`. */
+  const failing = async <T>(when: (sql: string, args: unknown[]) => boolean, fn: () => Promise<T>): Promise<T> => {
+    failWhen = when;
+    try {
+      return await quiet(fn);
+    } finally {
+      failWhen = null;
+    }
+  };
 
   const count = async (sql: string, args: unknown[] = []) => Number((await seed.execute({ sql, args: args as never })).rows[0].n);
   const leads = () => count("SELECT count(*) AS n FROM tenant_records WHERE tenant_id = ? AND entity_type = 'lead'", [OASIS]);
@@ -479,27 +599,59 @@ async function main() {
     assert.equal(await findExistingLead(OASIS, { email: "nobody-at-all@example.com" }), null, "a lookup that works and finds nothing is still null");
   });
 
-  await check("scrub-candidates: a lookup that fails puts the candidate back in the queue with a 503", async () => {
+  const approve = (id: string) =>
+    scrub.POST(
+      new NextRequest(`http://localhost/api/scrub-candidates/${id}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "approve" }),
+      }),
+      { params: Promise.resolve({ id }) },
+    );
+  const candidate = async (id: string) =>
+    (await seed.execute({ sql: "SELECT status, reviewed_by FROM scrub_candidates WHERE id = ?", args: [id] })).rows[0];
+
+  await check("scrub-candidates: a lookup that fails changes nothing, so the candidate stays in the queue, with a 503", async () => {
     const id = "11111111-1111-4111-8111-111111111111";
     await seed.execute({
       sql: "INSERT INTO scrub_candidates (id, tenant_id, status, lead_data) VALUES (?, ?, 'pending_review', ?)",
       args: [id, OASIS, JSON.stringify({ email: "candidate@example.com", phone: "4165550100", business_name: "Acme" })],
     });
     await login(USERS.cc);
-    const res = await offline("tenant_records", () =>
-      scrub.POST(
-        new NextRequest(`http://localhost/api/scrub-candidates/${id}`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "approve" }),
-        }),
-        { params: Promise.resolve({ id }) },
-      ),
-    );
+    const res = await offline("tenant_records", () => approve(id));
     assert.equal(res.status, 503);
-    assert.equal(((await res.json()) as Json).error, "lookup_unavailable");
-    const status = String((await seed.execute({ sql: "SELECT status FROM scrub_candidates WHERE id = ?", args: [id] })).rows[0].status);
-    assert.equal(status, "pending_review", `the candidate was stranded in '${status}'`);
+    const body = (await res.json()) as Json;
+    assert.equal(body.error, "lookup_unavailable");
+    assert.match(String(body.message), /Nothing was changed/);
+    const row = await candidate(id);
+    assert.equal(String(row.status), "pending_review", `the candidate was stranded in '${String(row.status)}'`);
+    assert.equal(row.reviewed_by, null, "the lookup runs before the claim: it was never claimed");
+  });
+
+  await check("scrub-candidates: a lead create that fails, and then a rollback that fails, is logged with the candidate's id, never hidden", async () => {
+    const id = "22222222-2222-4222-8222-222222222222";
+    await seed.execute({
+      sql: "INSERT INTO scrub_candidates (id, tenant_id, status, lead_data) VALUES (?, ?, 'pending_review', ?)",
+      args: [id, OASIS, JSON.stringify({ email: "stuck@example.com", business_name: "Stuck Co" })],
+    });
+    await login(USERS.cc);
+    await seed.executeMultiple(`
+      CREATE TRIGGER refuse_lead BEFORE INSERT ON tenant_records BEGIN SELECT RAISE(ABORT, 'no leads now'); END;
+      CREATE TRIGGER refuse_rollback BEFORE UPDATE ON scrub_candidates WHEN NEW.status = 'pending_review' BEGIN SELECT RAISE(ABORT, 'no writes now'); END;
+    `);
+    const lines: string[] = [];
+    const errors = console.error;
+    console.error = (...a: unknown[]) => void lines.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+    let res: Response;
+    try {
+      res = await approve(id);
+    } finally {
+      console.error = errors;
+      await seed.executeMultiple("DROP TRIGGER refuse_lead; DROP TRIGGER refuse_rollback;");
+    }
+    assert.ok(res.status >= 400, `HTTP ${res.status}`);
+    assert.equal(String((await candidate(id)).status), "approving");
+    assert.ok(lines.some((l) => l.includes("stuck in 'approving'") && l.includes(id)), "the stuck candidate is named in the log");
   });
 
   await check("operator-email ingest holds a message whose lookup failed, never drops it", async () => {
@@ -553,6 +705,155 @@ async function main() {
     assert.ok(!JSON.stringify(lead.json).includes("lead_internal_words_xyz"), "the lead create's words stay in the log");
   });
 
+  await check("the router: a destination whose read fails answers 503 through the route, never the next rule or the default page", async () => {
+    const answer = () => post({ step_index: 0, anonymous_init: anon("router"), route_only: true, steps_payload: [{ path: "audit" }] });
+    const healthy = await answer();
+    assert.equal(healthy.json.route_to, "/f/oasis-ai-cc/two-step");
+    // Only the destination's own read fails: its slug is in that query's arguments.
+    const blip = await failing((sql, args) => /^\s*select/i.test(sql) && /forms/.test(sql) && args.includes("two-step"), answer);
+    assert.equal(blip.status, 503, JSON.stringify(blip.json));
+    assert.equal(blip.json.error, "form_unavailable");
+  });
+
+  await check("two forms of one workspace answering one slug is bad data, not an outage: not_found, and logged", async () => {
+    await seed.batch(
+      [
+        { sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('dup-form-1', ?, 'dup-form', 'One', '[]')", args: [OASIS] },
+        { sql: "INSERT INTO forms (id, tenant_id, slug, name, steps) VALUES ('dup-form-2', ?, 'dup-form', 'Two', '[]')", args: [OASIS] },
+      ],
+      "write",
+    );
+    const lines: unknown[][] = [];
+    const errors = console.error;
+    console.error = (...a: unknown[]) => void lines.push(a);
+    try {
+      assert.deepEqual(await resolvePublicForm(getServiceSupabase(), "oasis-ai-cc", "dup-form"), { ok: false, reason: "not_found" });
+    } finally {
+      console.error = errors;
+    }
+    assert.ok(lines.some((a) => /more than one form/.test(String(a[0]))));
+  });
+
+  await check("a multi-file upload is found in a folder already holding over 100 files; one that never landed is the visitor's to redo; a storage fault is a 503", async () => {
+    // R2 lists 100 keys in key order and these keys start with Date.now(), so a
+    // new upload sorted past a full listing and read as "not found", on every
+    // retry (independent review of #714). The object is now asked for itself.
+    const { token, leadId } = await firstStep("multi-form", "folder-100@example.com");
+    r2Down = false;
+    try {
+      for (let i = 0; i < 120; i += 1) R2_STORE.set(`lead-documents/${OASIS}/${leadId}/17000000${String(i).padStart(5, "0")}_old.pdf`, 10);
+      const fresh = `${OASIS}/${leadId}/1800000000000_new.pdf`;
+      R2_STORE.set(`lead-documents/${fresh}`, 10);
+      const desc = (path: string, filename = "new.pdf") => ({ storage_path: path, filename, mime_type: "application/pdf", size_bytes: 10 });
+      const found = await quiet(() => post({ token, step_index: 1, payload: { statements: [desc(fresh)] } }));
+      assert.equal(found.status, 200, JSON.stringify(found.json));
+      assert.equal(await count("SELECT count(*) AS n FROM lead_documents WHERE lead_id = ?", [leadId]), 1, "the document was registered");
+
+      const missing = await quiet(() =>
+        post({ token, step_index: 1, payload: { statements: [desc(`${OASIS}/${leadId}/1800000000001_gone.pdf`, "gone.pdf")] } }),
+      );
+      assert.equal(missing.status, 422, JSON.stringify(missing.json));
+      assert.equal(missing.json.message, "Bank statements (gone.pdf): that file didn't finish uploading. Please choose it again.");
+
+      const wrongType = await quiet(() =>
+        post({ token, step_index: 1, payload: { statements: [{ ...desc(fresh, "notes.docx"), mime_type: "application/msword" }] } }),
+      );
+      assert.equal(wrongType.status, 422, JSON.stringify(wrongType.json));
+      assert.match(String(wrongType.json.message), /^Bank statements \(notes\.docx\): that type of file isn't accepted here\. Please choose a PDF file\.$/);
+    } finally {
+      r2Down = true;
+    }
+    const fault = await quiet(() =>
+      post({ token, step_index: 1, payload: { statements: [{ storage_path: `${OASIS}/${leadId}/1800000000002_x.pdf`, filename: "x.pdf", mime_type: "application/pdf" }] } }),
+    );
+    assert.equal(fault.status, 503, "storage that cannot answer is a fault, not the visitor's");
+  });
+
+  await check("a filename whose letters are stripped never becomes a path holding '..'", async () => {
+    for (const name of ["выписка.банк.pdf", "Q1.&.Q2.pdf", "relevé.é.pdf"]) {
+      const clean = sanitizeStorageFilename(name);
+      assert.ok(!clean.includes(".."), `${name} -> ${clean}`);
+      assert.ok(clean.endsWith(".pdf"), `${name} keeps its extension: ${clean}`);
+    }
+    assert.equal(sanitizeStorageFilename("hook v3.mp4"), "hook_v3.mp4", "an ordinary name is unchanged");
+  });
+
+  await check("an accept list typed as extensions ('pdf') takes those types, in the route, the file picker and the dropzone", async () => {
+    assert.deepEqual(normalizedAccept(["pdf", ".JPG", "image", "application/PDF", "docx", " "]), ["application/pdf", "image/jpeg", "image/*"]);
+    assert.deepEqual(normalizedAccept(["docx"]), [], "only unknown words: the caller's own default applies");
+    r2Down = false;
+    try {
+      const pdf = await quiet(() =>
+        post({ step_index: 0, anonymous_init: anon("free-accept"), payload: { email: "free-pdf@example.com", proof: inlineFile("%PDF-1.4 x", "proof.pdf", "application/pdf") } }),
+      );
+      assert.equal(pdf.status, 200, JSON.stringify(pdf.json));
+    } finally {
+      r2Down = true;
+    }
+    const html = await quiet(() =>
+      post({ step_index: 0, anonymous_init: anon("free-accept"), payload: { email: "free-html@example.com", proof: inlineFile("<html>", "proof.html", "text/html") } }),
+    );
+    assert.equal(html.status, 422);
+    assert.equal(html.json.message, "Proof of address: that type of file isn't accepted here. Please choose a PDF file.");
+    assert.match(read("components/forms/FormRenderer.tsx"), /accept=\{normalizedAccept\(field\.accept\)\.join\(","\) \|\| undefined\}/);
+    assert.match(read("components/forms/MultiFileDropzone.tsx"), /const normalized = normalizedAccept\(accept\);/);
+  });
+
+  await check("the router stores no files, so it refuses none: a multi-file answer goes through as it always did", async () => {
+    const r = await post({
+      step_index: 0,
+      anonymous_init: anon("router"),
+      route_only: true,
+      steps_payload: [{ path: "audit", decks: [{ storage_path: "a/b/1_s.pdf" }, { storage_path: "a/b/2_s.pdf" }, "s.pdf"] }],
+    });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+  });
+
+  await check("a router's beacon is filed already recovered: it pages, but holds no row open for a hand to close", async () => {
+    const beacon = (body: Json) =>
+      submitFailure.POST(
+        new NextRequest("http://localhost/api/forms/submit-failure", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-for": "10.77.0.1" },
+          body: JSON.stringify(body),
+        }),
+      );
+    await quiet(() => beacon({ tenant_slug: "oasis-ai-cc", form_slug: "router", step_index: 0, error: "form_unavailable", payload: { path: "audit" }, nothing_to_recover: true }));
+    await quiet(() => beacon({ tenant_slug: "oasis-ai-cc", form_slug: "two-step", step_index: 0, error: "server_error", payload: { email: "lost@example.com" } }));
+    const rows = await seed.execute("SELECT form_slug, recovered_at FROM form_submit_failures ORDER BY form_slug");
+    const byForm = Object.fromEntries(rows.rows.map((r) => [String(r.form_slug), r.recovered_at]));
+    assert.ok(byForm.router, "the router's row is filed already recovered");
+    assert.equal(byForm["two-step"], null, "a merchant's lost answers stay open until someone recovers them");
+    const client = read("components/forms/FormPublicClient.tsx");
+    assert.match(client, /routeFailures\.current \+= 1;[\s\S]{0,200}beacon: routeFailures\.current >= 2,\s*nothingToRecover: true,/, "the router beacons on the visitor's second failure in a row");
+  });
+
+  await check("a blip on a form's page names it in the tab as 'try again', never as a dead link", async () => {
+    const meta = () =>
+      formPage.generateMetadata({ params: Promise.resolve({ tenant_slug: "oasis-ai-cc", form_slug: "two-step" }), searchParams: Promise.resolve({}) });
+    assert.equal((await offline("forms", meta)).title, "Please try again");
+    assert.equal(
+      (await formPage.generateMetadata({ params: Promise.resolve({ tenant_slug: "oasis-ai-cc", form_slug: "no-such-form" }), searchParams: Promise.resolve({}) })).title,
+      "Page not available",
+    );
+  });
+
+  await check("/book and the homepage audit form beacon a fault on our side, and /book stops telling a visitor to check details we failed to save", () => {
+    // Text checks: these pages need a browser to click through. Each pins the
+    // fault test and the beacon call together, so neither can drift alone.
+    assert.match(
+      read("components/booking/BookingPage.tsx"),
+      /const fault = !data \|\| \(data\.error !== undefined && BEACON_ERRORS\.has\(data\.error\)\);\s*if \(fault\) \{\s*sendSubmitFailureBeacon\(\{/,
+      "/book beacons a fault the shared way",
+    );
+    assert.match(
+      read("components/marketing/AuditForm.tsx"),
+      /if \(!data \|\| \(data\.error !== undefined && BEACON_ERRORS\.has\(data\.error\)\)\) \{\s*sendSubmitFailureBeacon\(\{/,
+      "the audit form beacons a fault the shared way",
+    );
+    assert.match(read("components/booking/BookingPage.tsx"), /We couldn't save your details just now\. They're still here, so please try again in a moment\./);
+  });
+
   await check("a file the browser reports no type for is named by its extension, and only for the types a form takes", () => {
     assert.equal(chosenFileType({ name: "statement.PDF", type: "" }), "application/pdf");
     assert.equal(chosenFileType({ name: "photo.jpg", type: "" }), "image/jpeg");
@@ -565,18 +866,24 @@ async function main() {
     }
   });
 
-  await check("the visitor is told to try again, the beacon fires and carries no file bytes, and the pages raise instead of drawing a dead end", () => {
+  await check("the visitor is told to try again, the beacon fires and carries no file bytes, and the pages raise instead of drawing a dead end", async () => {
     assert.ok(SUBMIT_ERROR_COPY.form_unavailable && !/no longer valid/i.test(SUBMIT_ERROR_COPY.form_unavailable));
     assert.ok(SUBMIT_ERROR_COPY.upload_failed, "a fallback sentence for upload_failed");
     assert.ok(SUBMIT_ERROR_COPY.upload_unavailable, "a fallback sentence for upload_unavailable");
+    const { BEACON_ERRORS } = await import("../lib/forms/submit-failure-beacon");
+    for (const code of ["server_error", "form_unavailable", "upload_unavailable", "consent_record_unavailable"]) {
+      assert.ok(BEACON_ERRORS.has(code), `${code} sends the beacon`);
+    }
+    for (const code of ["rate_limited", "upload_failed", "missing_required_field", "contact_required"]) {
+      assert.ok(!BEACON_ERRORS.has(code), `${code} is the form working, not a lost visitor`);
+    }
     const client = read("components/forms/FormPublicClient.tsx");
+    assert.match(client, /if \(beacon && \(!data \|\| \(data\.error !== undefined && BEACON_ERRORS\.has\(data\.error\)\)\)\) \{/);
     assert.match(
-      client,
-      /data\.error === "server_error" \|\| data\.error === "form_unavailable" \|\| data\.error === "upload_unavailable"/,
-      "form_unavailable and upload_unavailable send the beacon",
+      read("lib/forms/submit-failure-beacon.ts"),
+      /typeof \(v as \{ inline_base64\?: unknown \}\)\.inline_base64 === "string"/,
+      "the beacon drops a built payload's file bytes",
     );
-    assert.match(client, /typeof \(v as \{ inline_base64\?: unknown \}\)\.inline_base64 === "string"/, "the beacon drops a built payload's file bytes");
-    assert.match(client, /showSubmitFailure\(res, data, lastPayload, currentStep, \{ beacon: false \}\);/, "the router's answer, which stored nothing, sends none");
     assert.match(read("components/forms/FormRenderer.tsx"), /\{chosen && !field\.required \? \(/, "an optional file can be removed");
     assert.match(read("app/f/[tenant_slug]/[form_slug]/page.tsx"), /if \(resolved\.reason === "unavailable"\) throw new Error/);
     assert.match(read("app/book/page.tsx"), /resolved\.reason === "unavailable"\) throw new Error/);

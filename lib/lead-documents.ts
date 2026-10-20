@@ -217,20 +217,22 @@ export async function registerLeadDocument(input: {
     return { ok: true, document: dup.data as LeadDocumentUploadResult["document"] };
   }
 
-  // Confirm the object exists + read its real size (anti-spoof).
-  const slash = input.storagePath.lastIndexOf("/");
-  const dir = input.storagePath.slice(0, slash);
-  const base = input.storagePath.slice(slash + 1);
-  const listed = await db.storage.from(LEAD_DOC_BUCKET).list(dir, { search: base, limit: 100 });
-  if (listed.error) {
-    return { ok: false, error: `storage_list_failed: ${listed.error.message}` };
+  // Confirm the object exists + read its real size (anti-spoof). One HEAD on
+  // the object itself (as chat-attachments does), never a listing: R2 lists
+  // 100 keys in key order and only then filters by name, and these keys start
+  // with Date.now(), so in a folder already holding 100 files every new upload
+  // read as "not found" and the visitor was told to choose it again, forever
+  // (independent review of #714).
+  const head = await db.storage.from(LEAD_DOC_BUCKET).info(input.storagePath);
+  if (head.error || !head.data) {
+    const status = (head.error as { status?: number } | null)?.status;
+    // A 404 is an upload that never finished: the visitor can choose the file
+    // again. Anything else is a storage fault.
+    return status === 404
+      ? { ok: false, error: "uploaded_object_not_found" }
+      : { ok: false, error: `storage_info_failed: ${head.error?.message ?? "no metadata"}` };
   }
-  const obj = (listed.data || []).find((o) => o.name === base);
-  if (!obj) {
-    return { ok: false, error: "uploaded_object_not_found" };
-  }
-  const md = obj.metadata as { size?: number } | null;
-  const realSize = typeof md?.size === "number" ? md.size : 0;
+  const realSize = typeof head.data.size === "number" ? head.data.size : 0;
 
   const docType =
     !input.docType || input.docType === "unclassified"

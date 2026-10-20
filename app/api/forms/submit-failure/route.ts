@@ -59,6 +59,8 @@ export async function POST(req: NextRequest) {
       error: typeof body.error === "string" ? body.error.slice(0, 500) : "client reported failure",
       payload: body.payload,
       userAgent: req.headers.get("user-agent"),
+      // A router's answer, which stored nothing (lib/forms/submit-failure-capture.ts).
+      nothingToRecover: body.nothing_to_recover === true,
     });
     return NextResponse.json({ ok: true });
   } catch {

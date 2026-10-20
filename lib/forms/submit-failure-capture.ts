@@ -46,6 +46,15 @@ export type SubmitFailureInput = {
    *  stripFiles(); this is what makes the merchant recoverable. */
   payload?: unknown;
   userAgent?: string | null;
+  /**
+   * A failure that stored nothing a person could recover: a form's router
+   * (route_only) answering nothing, twice for the same visitor. It still pages
+   * on the ladder, because a router that keeps failing is down, but its row is
+   * filed already recovered: there is no merchant to contact, and an open row
+   * would hold forms.submit_failures_open red until someone closed it by hand
+   * (independent review of #714).
+   */
+  nothingToRecover?: boolean;
 };
 
 /** Replace inline file bytes with metadata so the snapshot stays small and the
@@ -157,6 +166,21 @@ function failureCard(
   dead: { id: string; inserted: boolean },
   windowH: number,
 ): { title: string; body: string } {
+  if (input.nothingToRecover) {
+    // A router that could not place a visitor, twice: nothing was stored.
+    return alertAudienceFor(form.tenantId) === "oasis_operator"
+      ? {
+          title: "A form's router could not answer a visitor, twice",
+          body:
+            `${form.tenantSlug}/${form.formSlug} (${input.source}). Error: ${redactForAlert(String(input.error).split("\n")[0].slice(0, 200))}. ` +
+            "Nothing was stored, so there is nothing to recover; if this repeats, the router is down and visitors are being turned away." +
+            ` Re-alerts in ${windowH}h if it keeps happening.`,
+        }
+      : {
+          title: "Visitors could not be sent on from one of your forms",
+          body: `A visitor to "${form.formName}" could not be sent to their next page, twice. Contact OASIS support if this keeps happening.`,
+        };
+  }
   if (alertAudienceFor(form.tenantId) === "oasis_operator") {
     const errLine = redactForAlert(String(input.error).split("\n")[0].slice(0, 200));
     return {
@@ -220,6 +244,7 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
       payload: cappedJson(input.payload),
       user_agent: input.userAgent ? String(input.userAgent).slice(0, 300) : null,
       created_at: new Date().toISOString(),
+      ...(input.nothingToRecover ? { recovered_at: new Date().toISOString() } : {}),
     });
     inserted = !r.error;
   } catch {

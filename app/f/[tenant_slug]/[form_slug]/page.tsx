@@ -103,8 +103,13 @@ export async function generateMetadata({
   }
   if (!lookup.ok) {
     // The same words as the public 404 this request draws (app/f/not-found.tsx),
-    // so the tab does not switch to "Form" once the page loads.
-    return { title: "Page not available", robots: { index: false, follow: false } };
+    // so the tab does not switch to "Form" once the page loads. A read that
+    // failed draws the error page's "try again" instead, so its tab says so
+    // rather than calling a working link unavailable (independent review of #714).
+    return {
+      title: lookup.reason === "unavailable" ? "Please try again" : "Page not available",
+      robots: { index: false, follow: false },
+    };
   }
   const offer = await offerState(lookup.form.tenant_id, lookup.form.id);
   let title = lookup.form.name || "Application";
