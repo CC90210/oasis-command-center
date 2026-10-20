@@ -184,9 +184,11 @@ export function EsignConsole({ tenantId }: { tenantSlug: string; tenantId: strin
     setActionBusy(true);
     try {
       const res = await fetch(`/api/esign/envelopes/${id}/remind`, { method: "POST" });
-      if (!res.ok) {
+      // The route answers 200 with ok:false when every email failed, so the
+      // body decides, not the status alone (CodeRabbit on #716).
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; message?: string; error?: string } | null;
+      if (!res.ok || !data?.ok) {
         // A refused or failed reminder used to look like a sent one.
-        const data = (await res.json().catch(() => null)) as { message?: string; error?: string } | null;
         window.alert(data?.message || data?.error || "Couldn't send the reminder.");
       }
       await openDetail(id);

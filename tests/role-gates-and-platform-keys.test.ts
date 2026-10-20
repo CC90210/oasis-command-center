@@ -79,8 +79,9 @@ stub("imapflow", {
   },
 });
 // The network: Kixie's API answers from here; anything else is refused.
-// "ambiguous" is a 200 that neither confirms nor says success:false.
-let kixieAnswer: "accept" | "reject" | "ambiguous" = "reject";
+// "ambiguous" is a 200 that neither confirms nor says success:false;
+// "emptyid" is a 200 whose webhook id is empty.
+let kixieAnswer: "accept" | "reject" | "ambiguous" | "emptyid" = "reject";
 const kixieCalls: Array<Record<string, unknown>> = [];
 // Runs once, before the next Kixie call is answered: what another request
 // does while this one's registrations are in flight.
@@ -100,7 +101,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         ? { success: true, webhookid: kixieCalls.length }
         : kixieAnswer === "ambiguous"
           ? { error: "apiKey is invalid" }
-          : { success: false, error: "apiKey is invalid" };
+          : kixieAnswer === "emptyid"
+            ? { webhookid: "" }
+            : { success: false, error: "apiKey is invalid" };
     return new Response(JSON.stringify(answer), { status: 200, headers: { "content-type": "application/json" } });
   }
   strayFetches.push(url);
@@ -440,6 +443,15 @@ async function main() {
     const reminded = await call(esignRemind.POST, request(`/api/esign/envelopes/${ENVELOPE_SENT}/remind`, "POST"), { id: ENVELOPE_SENT });
     assert.equal(reminded.status, 200, JSON.stringify(reminded.body));
   });
+  await check("e-sign console: a refused create shows the server's sentence, and so does a reminder that was refused or reached nobody", () => {
+    // A text check: the console needs a browser. The remind route answers 200
+    // with ok:false when every email failed (CodeRabbit on #716), so the
+    // body decides, not the status alone.
+    const src = readFileSync(join(__dirname, "..", "components", "esign", "EsignConsole.tsx"), "utf8");
+    assert.match(src, /setCreateError\(createData\?\.message \|\| createData\?\.error \|\| "Couldn't create the envelope\."\);/);
+    const remind = src.slice(src.indexOf("async function remind("), src.indexOf("async function voidEnvelope("));
+    assert.match(remind, /if \(!res\.ok \|\| !data\?\.ok\) \{\s*\/\/[^\n]*\n\s*window\.alert\(data\?\.message \|\| data\?\.error \|\| "Couldn't send the reminder\."\);/);
+  });
 
   // ── drip email templates (a sibling write the review of #716 found) ───────
   const templatesIn = (tenantId: string) => n("SELECT COUNT(*) AS n FROM cc_email_templates WHERE tenant_id = ?", [tenantId]);
@@ -725,6 +737,10 @@ async function main() {
     }
   };
   const stampOf = async (tenantId: string) => value("SELECT json_extract(custom_fields, '$.kixie_business_id') AS v FROM tenants WHERE id = ?", [tenantId]);
+  // Production's unique index on the stamp (review of #716).
+  for (const stmt of splitSql(readFileSync(join(__dirname, "..", "database", "turso", "bravo__234_tenants_kixie_business_id_unique.sql"), "utf8"))) {
+    await db.execute(stmt);
+  }
   await db.execute({ sql: "UPDATE tenants SET custom_fields = ? WHERE id = ?", args: [JSON.stringify({ kixie_business_id: "7001" }), CLIENT_B] });
 
   await check("Kixie: a business id another workspace holds is refused (409) with a sentence; nothing is stamped and Kixie is never called", async () => {
@@ -824,6 +840,84 @@ async function main() {
     assert.equal(r.status, 409, JSON.stringify(r.body));
     assert.equal(r.body.error, "business_id_in_use");
     assert.deepEqual(await holdersOf("7004"), [CLIENT_B], "two workspaces hold one id");
+  });
+  // CodeRabbit on #716: the next three.
+  await check("Kixie: an empty webhook id is no confirmation, and does not link the workspace", async () => {
+    const { kixieConfirmed } = await import("../lib/integrations/kixie");
+    assert.equal(kixieConfirmed({ webhookid: "" }), false);
+    assert.equal(kixieConfirmed({ webhookid: "  " }), false);
+    assert.equal(kixieConfirmed({ data: { webhookid: "" } }), false);
+    assert.equal(kixieConfirmed({ webhookid: 12 }), true);
+    assert.equal(kixieConfirmed({ data: { webhookid: "wh_1" } }), true);
+    assert.equal(kixieConfirmed({ success: true }), true);
+    await setKixieKey("7006");
+    await setCustomFields(CLIENT_A, "{}");
+    kixieAnswer = "emptyid";
+    await login(USERS.clientA);
+    const r = await call(kixieSync.POST, request("/api/integrations/kixie/sync-webhooks", "POST"));
+    kixieAnswer = "accept";
+    assert.equal(r.body.business_id_linked, false, JSON.stringify(r.body));
+    assert.equal(await stampOf(CLIENT_A), null, "linked on an empty id");
+  });
+  // The app's own database client (the seed connection above is a separate
+  // one): a statement the check names fails as in an outage, or runs a peer's
+  // write first.
+  const { getTursoClient } = await import("../lib/turso");
+  const appClient = getTursoClient() as unknown as Record<string, unknown>;
+  const ownExecute = Reflect.getOwnPropertyDescriptor(appClient, "execute");
+  const realExecute = (ownExecute?.value ?? (Object.getPrototypeOf(appClient) as Record<string, unknown>).execute) as (this: unknown, stmt: unknown) => Promise<unknown>;
+  let onStatement: ((sql: string) => Promise<"fail" | "run">) | null = null;
+  appClient.execute = async function (this: unknown, stmt: unknown) {
+    const sql = typeof stmt === "string" ? stmt : String((stmt as { sql: string }).sql);
+    if (onStatement && (await onStatement(sql)) === "fail") throw new Error("test: connection reset");
+    return realExecute.call(this, stmt);
+  };
+  const readsSettings = (sql: string) => /select\s+"?custom_fields"?\s+from\s+"?tenants"?/i.test(sql);
+  const writesSettings = (sql: string) => /update\s+"?tenants"?\s+set\s+"?custom_fields"?/i.test(sql);
+  await check("Kixie: a settings read that fails links nothing and wipes nothing", async () => {
+    // It used to merge into an empty object and write that back: the whole
+    // custom_fields became the one Kixie key.
+    await setKixieKey("7008");
+    await setCustomFields(CLIENT_A, JSON.stringify({ booking_label: "Keep me" }));
+    kixieAnswer = "accept";
+    await login(USERS.clientA);
+    onStatement = async (sql) => (readsSettings(sql) ? "fail" : "run");
+    const errors = console.error;
+    console.error = () => undefined;
+    let r: Res;
+    try {
+      r = await call(kixieSync.POST, request("/api/integrations/kixie/sync-webhooks", "POST"));
+    } finally {
+      onStatement = null;
+      console.error = errors;
+    }
+    assert.equal(r.body.business_id_linked, false, JSON.stringify(r.body));
+    assert.deepEqual(JSON.parse(String(await value("SELECT custom_fields AS v FROM tenants WHERE id = ?", [CLIENT_A]))), { booking_label: "Keep me" });
+  });
+  await check("Kixie: two workspaces linking one id at the same moment: the database refuses the second, which answers 409", async () => {
+    // Both pass both reads; Client B's link lands just before Client A's.
+    await setKixieKey("7007");
+    await setCustomFields(CLIENT_A, "{}");
+    await setCustomFields(CLIENT_B, "{}");
+    kixieAnswer = "accept";
+    await login(USERS.clientA);
+    onStatement = async (sql) => {
+      if (writesSettings(sql)) {
+        onStatement = null;
+        await setCustomFields(CLIENT_B, JSON.stringify({ kixie_business_id: "7007" }));
+      }
+      return "run";
+    };
+    let r: Res;
+    try {
+      r = await call(kixieSync.POST, request("/api/integrations/kixie/sync-webhooks", "POST"));
+    } finally {
+      onStatement = null;
+    }
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "business_id_in_use");
+    assert.deepEqual(await holdersOf("7007"), [CLIENT_B], "one workspace per id");
+    await setCustomFields(CLIENT_B, JSON.stringify({ kixie_business_id: "7001" }));
   });
   await check("Kixie: OASIS never borrows the Worker's env Kixie account (the retired client's); with no key of its own it is told to add one", async () => {
     process.env.KIXIE_API_KEY = "env-kixie-key";

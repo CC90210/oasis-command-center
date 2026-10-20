@@ -19,13 +19,15 @@
  *
  * A business id another workspace already holds is refused (409), and this
  * workspace is linked to its id only after Kixie accepted a registration for
- * it (2026-10-19 audit; see the stamp below).
+ * it (2026-10-19 audit; see the stamp below). The database also refuses a
+ * second holder (unique index, bravo__234).
  */
 
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getKixieCredentials, registerAllWebhooks } from "@/lib/integrations/kixie";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -155,27 +157,41 @@ export async function POST() {
   const confirmedCount = results.filter((r) => r.ok && r.confirmed).length;
 
   // Stamp the id only once Kixie positively accepted a registration for it
-  // with this key (kixieConfirmed: success true, or a webhook id), which shows
-  // the key controls that business, and only if no other workspace took the
-  // id while the registrations ran. Merge (don't clobber) the rest of
-  // custom_fields; a failed stamp is surfaced, not fatal.
+  // with this key (kixieConfirmed: success true, or a real webhook id), and
+  // only if no other workspace took the id while the registrations ran.
+  // Merge (don't clobber) the rest of custom_fields; a failed stamp is
+  // surfaced, not fatal.
   let businessIdLinked = false;
   if (confirmedCount > 0) {
     const holderNow = await businessIdHolder(db, tenantId, creds.businessId);
     if (holderNow !== "none") return businessIdRefusal(holderNow);
     try {
       const t = await db.from("tenants").select("custom_fields").eq("id", tenantId).maybeSingle();
-      const cf = ((t.data as { custom_fields?: Record<string, unknown> } | null)?.custom_fields) || {};
-      if (cf.kixie_business_id !== creds.businessId) {
-        const { error } = await db
-          .from("tenants")
-          .update({ custom_fields: { ...cf, kixie_business_id: creds.businessId } })
-          .eq("id", tenantId);
-        businessIdLinked = !error;
+      if (t.error || !t.data) {
+        // The merge needs the workspace's settings as they are: written from
+        // nothing, the update replaced the whole custom_fields with this one
+        // key and wiped every other setting (CodeRabbit on #716). Not linked;
+        // a later sync links it.
+        console.error("[kixie.sync-webhooks] could not read the workspace's settings; not linked", t.error?.message ?? "no row");
       } else {
-        businessIdLinked = true;
+        const cf = ((t.data as { custom_fields?: Record<string, unknown> | null }).custom_fields) || {};
+        if (cf.kixie_business_id !== creds.businessId) {
+          const { error } = await db
+            .from("tenants")
+            .update({ custom_fields: { ...cf, kixie_business_id: creds.businessId } })
+            .eq("id", tenantId);
+          // Two workspaces syncing one id at the same moment can both pass the
+          // reads above; the database's unique index refuses the second
+          // (bravo__234), and that is the same answer as a held id.
+          if (error && isUniqueViolationError(error)) return businessIdRefusal("other");
+          if (error) console.error("[kixie.sync-webhooks] link write failed", error.message);
+          businessIdLinked = !error;
+        } else {
+          businessIdLinked = true;
+        }
       }
-    } catch {
+    } catch (err) {
+      console.error("[kixie.sync-webhooks] link failed", err instanceof Error ? err.message : err);
       businessIdLinked = false;
     }
   }
