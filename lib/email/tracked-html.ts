@@ -66,10 +66,9 @@ export const SUNBIZ_BRAND = "SunBiz";
 /**
  * WHICH DOMAIN a message's tracked URLs are built on.
  *
- * This is NOT derivable from `brand`. Brand is a SUPPRESSION key: it must be
- * "SunBiz" for anything whose unsubscribe should record against the SunBiz
- * tenant, including cold outreach, or the suppression lands with a null tenant
- * and is never honored. Sending IDENTITY is a different axis, and conflating
+ * This is NOT derivable from `brand`. Brand is the SUPPRESSION label recorded
+ * on an opt-out (/api/unsubscribe files it under a workspace only when the
+ * brand is pinned to one, and globally otherwise). Sending IDENTITY is a different axis, and conflating
  * them is a real hazard: cold blasts deliberately send from isolated mailbox
  * domains precisely so their reputation cannot touch sunbizfunding.com, and
  * keying the tracking domain off brand would have moved their pixels and
@@ -236,13 +235,14 @@ export function buildTrackedHtml(
   opts: {
     sendId: string;
     email: string;
-    /** SUPPRESSION brand — resolves a tenant on the opt-out WRITE path. */
+    /** SUPPRESSION brand: the label an opt-out from this link is recorded with
+     *  (filed under a workspace only when pinned to one, else globally). */
     brand?: string;
     /**
      * SENDING brand — whose legal entity and postal address appear in the
      * footer. A DIFFERENT axis from `brand` above: both brands share one tenant
-     * so a single opt-out stops both, and passing a sending brand into the
-     * suppression slot would file opt-outs against a tenant that may not exist.
+     * so a single opt-out stops both, and changing who mail is from must not
+     * change how its opt-outs are labelled.
      */
     sendingBrand?: BrandKey;
     unsub?: UnsubMode;

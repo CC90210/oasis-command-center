@@ -157,25 +157,77 @@ export async function isRateLimited(rateKey: string): Promise<boolean> {
 }
 
 /**
- * How many attempts `rateKey` logged in the last `windowSeconds`, whatever
- * their outcome. isRateLimited counts failures only, which suits a
- * credential; this caps a write that succeeds, such as an unsigned opt-out
- * that stops every sender (/api/unsubscribe). Fails OPEN like isRateLimited:
- * 0 on a DB error.
+ * The bucket an address is rate-limited in. An IPv4 address is its own
+ * bucket. An IPv6 address is bucketed by its /64, the block one subscriber is
+ * given: every production address is IPv6, and keyed per address a client
+ * could rotate through its /64 past any cap (reviewer of OCC #711: 150
+ * filings from 150 addresses in one /64, all accepted). An IPv4-mapped IPv6
+ * address is its IPv4 address. Anything unparseable is its own bucket.
  */
-export async function attemptsWithin(rateKey: string, windowSeconds: number): Promise<number> {
-  if (!rateKey) return 0;
+export function ipRateBucket(ip: string | null | undefined): string {
+  const raw = (ip || "").trim().toLowerCase().split("%")[0];
+  if (!raw) return "unknown";
+  if (!raw.includes(":")) return raw;
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(raw);
+  if (mapped) return mapped[1];
+  const halves = raw.split("::");
+  if (halves.length > 2) return raw;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 2 && fill < 1) return raw;
+  const groups = halves.length === 2 ? [...head, ...Array(fill).fill("0"), ...tail] : head;
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return raw;
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
+
+/**
+ * Take one place in a capped allowance: true when this attempt is among the
+ * first `cap` that `rateKey` made in the last `windowSeconds`. isRateLimited
+ * counts failures only, which suits a credential; this caps a write that
+ * succeeds, such as an unsigned opt-out that stops every sender
+ * (/api/unsubscribe).
+ *
+ * The attempt is RECORDED FIRST, then only the attempts recorded before it are
+ * counted (pair_attempts.id only grows), so each attempt gets its own place in
+ * line. Counting first and recording after let a parallel burst all read
+ * "under the cap" before any of them was written (reviewer of OCC #711: 300
+ * parallel filings, 300 accepted). Fails OPEN like isRateLimited, but logs it:
+ * a limiter that cannot count must be visible, not silent.
+ */
+export async function claimCappedSlot(
+  rateKey: string,
+  ip: string | null,
+  windowSeconds: number,
+  cap: number,
+): Promise<boolean> {
+  if (!rateKey) return true;
   try {
     const db = getServiceSupabase();
+    const mine = await db
+      .from("pair_attempts")
+      .insert({ profile_id: rateKey, outcome: "ok", ip })
+      .select("id")
+      .single();
+    if (mine.error || !mine.data) {
+      console.error("[pair-rate-limit] could not record an attempt; allowing it", { rateKey, error: mine.error?.message });
+      return true;
+    }
+    const myId = Number((mine.data as { id: unknown }).id);
     const since = new Date(Date.now() - windowSeconds * 1000).toISOString();
     const r = await db
       .from("pair_attempts")
       .select("id", { count: "exact", head: true })
       .eq("profile_id", rateKey)
-      .gte("attempted_at", since);
-    if (r.error) return 0;
-    return r.count ?? 0;
-  } catch {
-    return 0;
+      .gte("attempted_at", since)
+      .lte("id", myId);
+    if (r.error) {
+      console.error("[pair-rate-limit] could not count attempts; allowing this one", { rateKey, error: r.error.message });
+      return true;
+    }
+    return (r.count ?? 0) <= cap;
+  } catch (err) {
+    console.error("[pair-rate-limit] limiter failed; allowing this attempt", { rateKey, error: err instanceof Error ? err.message : String(err) });
+    return true;
   }
 }
