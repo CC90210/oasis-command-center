@@ -1102,14 +1102,15 @@ export async function POST(req: NextRequest) {
         if (injectedInboxIds.length > 0 && !streamError && replySaved) {
           await Promise.all(
             injectedInboxIds.map(async (id) => {
-              try {
-                const marked = await markReadDb(tenantId, id);
-                if (!marked.ok) throw new Error(marked.error || "not marked");
-              } catch (err) {
+              const marked = await markReadDb(tenantId, id).catch((err: unknown) => ({
+                ok: false,
+                error: err instanceof Error ? err.message : String(err),
+              }));
+              if (!marked.ok) {
                 console.error("[chat.inbox] an answered inbox message was not marked read; it will be offered again", {
                   tenantId,
                   id,
-                  error: err instanceof Error ? err.message : String(err),
+                  error: marked.error,
                 });
               }
             }),
