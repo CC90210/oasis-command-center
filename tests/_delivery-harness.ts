@@ -12,11 +12,58 @@
  * module is loaded; tests load app modules with dynamic import() after it.
  */
 import { mkdtempSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClient, type Client } from "@libsql/client";
 
-export const dbFile = join(mkdtempSync(join(tmpdir(), "delivery-")), "test.db");
+const dbDir = mkdtempSync(join(tmpdir(), "delivery-"));
+export const dbFile = join(dbDir, "test.db");
+const openClients = new Set<Client>();
+
+function closeTestClients(): void {
+  for (const client of openClients) client.close();
+  openClients.clear();
+}
+
+// Windows will not unlink the SQLite file until every app-module client dies.
+// A detached helper waits for this test process to exit, then removes the now
+// unlocked directory. Starting it at harness load also covers crashes that
+// bypass finish().
+const cleanupHelper = spawn(
+  process.execPath,
+  [
+    "--eval",
+    `const { rmSync, writeFileSync } = require("node:fs");
+     const { join } = require("node:path");
+     const [dir, rawPid] = process.argv.slice(1);
+     const parentPid = Number(rawPid);
+     function removeAfterUnlock(attempt = 0) {
+       try {
+         rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+       } catch (error) {
+         if (attempt < 240) {
+           setTimeout(() => removeAfterUnlock(attempt + 1), 500);
+           return;
+         }
+         writeFileSync(join(dir, "cleanup-error.log"), String(error?.stack ?? error), "utf8");
+         process.exitCode = 1;
+       }
+     }
+     const timer = setInterval(() => {
+       let parentAlive = true;
+       try { process.kill(parentPid, 0); } catch { parentAlive = false; }
+       if (parentAlive) return;
+       clearInterval(timer);
+       removeAfterUnlock();
+     }, 50);`,
+    dbDir,
+    String(process.pid),
+  ],
+  { detached: true, stdio: "ignore", windowsHide: true },
+);
+cleanupHelper.unref();
+process.once("exit", closeTestClients);
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 process.env.TURSO_DB_PATH = dbFile;
 delete process.env.TURSO_DATABASE_URL;
@@ -129,6 +176,7 @@ const UUID_SQL =
 
 export async function setupDatabase(): Promise<Client> {
   const db = createClient({ url: `file:${dbFile}` });
+  openClients.add(db);
   await db.executeMultiple(`
     CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT NOT NULL,
       session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
@@ -240,6 +288,7 @@ export async function check(name: string, fn: () => Promise<void> | void): Promi
 }
 
 export function finish(label: string): void {
+  closeTestClients();
   if (failures) {
     console.log(`${label}: ${failures} failure(s)`);
     process.exit(1);

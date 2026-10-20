@@ -525,6 +525,9 @@ const TESTS = [
   // acknowledgement, reply drafts and their approval, and the reader's
   // heartbeat. Registered here, not in package.json's test:delivery, because
   // package.json was held by three other build tracks when this landed.
+  // The cleanup regression runs first: every harness consumer used to leave a
+  // multi-megabyte SQLite database in %TEMP% after its process exited.
+  "tests/delivery-harness-cleanup.test.ts",
   "tests/support-inbox-wire.test.ts",
   "tests/support-inbox-ingest.test.ts",
   "tests/support-inbox-drafts.test.ts",
