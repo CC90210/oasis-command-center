@@ -490,7 +490,8 @@ export async function POST(req: NextRequest) {
           });
         }
       })();
-      await keepAlive(postTurn, "chat.resume.post-turn");
+      // The session id names the turn whose reply a failed step concerns.
+      await keepAlive(postTurn, `chat.resume.post-turn:${sessionId}`);
 
       send("done", {});
       controller.close();
