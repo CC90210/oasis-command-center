@@ -14,11 +14,10 @@
  * (handleStripeEvent). Sent inline it held the webhook for 16 seconds when
  * Telegram did not answer (two 8-second attempts). So an event whose booking
  * or mark failed tells no one, and Stripe's retry of it tells the desk once; a
- * retry of a marked event is a duplicate (claimEvent) and tells no one. The one
- * gap: a Worker that dies between the mark and the send tells no one and
- * leaves no trace, and the daily reconcile cannot catch it up (nothing records
- * which payments the desk was told of). Test-mode events never get this far
- * (handleStripeEvent ignores them before dispatch).
+ * retry of a marked event is a duplicate (claimEvent) and tells no one. A Worker
+ * that dies between the mark and the send tells no one and leaves no trace.
+ * Test-mode events never get this far (handleStripeEvent ignores them before
+ * dispatch).
  *
  * WHEN THE SEND FAILS (review of #718). Telegram refusing the sales group and
  * the DM behind it (the bot removed from the group, say) used to leave two log
@@ -28,6 +27,19 @@
  * the sales group does not. The funnel's lead alerts leave their trace on the
  * lead's timeline (lib/forms/alert-failure.ts); a purchase has no lead, so the
  * card is its trace.
+ *
+ * WHEN THE WEBHOOK NEVER REPORTS IT (review of #718). The daily reconcile
+ * (stripe-ingest.ts reconcileStripe) books any payment Stripe lists that the
+ * books lack. When it books a public-checkout purchase itself, no webhook did,
+ * so it tells the desk LATE (`late` below) if the payment intent is more than 30
+ * minutes old (a webhook still in flight would have booked it first) and less
+ * than 48 hours old (the first run after a deploy must not announce history).
+ * Known duplicate, accepted: if a webhook failed, the reconcile booked and
+ * alerted, and Stripe then retries that webhook, the intent's event alerts a
+ * second time. A second ping costs less than a missed sale. Not covered: a
+ * payment that charge.succeeded booked while payment_intent.succeeded never
+ * arrived, and the Worker death above. Both leave the payment already booked,
+ * and nothing records which payments the desk was told of.
  *
  * Best-effort: a failed alert is logged and carded, never thrown, so it can
  * never make Stripe retry the booking of the payment. The buyer's own kickoff
@@ -51,6 +63,22 @@ export function publicCheckoutSale(rawPaymentIntent: unknown): PublicCheckoutSal
   return { orderId: text(md.oasis_order_id), offerId: text(md.oasis_offer_id), optionId: text(md.oasis_option_id) };
 }
 
+/**
+ * The reconcile's late-alert window (see the header): a purchase it booked is
+ * announced only when its payment intent is older than 30 minutes, so it never
+ * races a webhook still in flight, and younger than 48 hours, so the first run
+ * after a deploy does not announce history. `createdSec` is the intent's
+ * `created` (epoch seconds). Assumes a Checkout intent is created when the buyer
+ * confirms (Stripe API 2022-08-01 and later), so its age is the payment's.
+ */
+const LATE_ALERT_AFTER_MS = 30 * 60_000;
+const LATE_ALERT_UNTIL_MS = 48 * 3_600_000;
+
+export function inLateAlertWindow(createdSec: number, nowMs: number): boolean {
+  const age = nowMs - createdSec * 1000;
+  return age > LATE_ALERT_AFTER_MS && age < LATE_ALERT_UNTIL_MS;
+}
+
 export type PaidAlertInput = {
   sale: PublicCheckoutSale;
   /** The Stripe payment intent (pi_...): how the payment is found when the order id or the buyer is missing. */
@@ -59,6 +87,8 @@ export type PaidAlertInput = {
   currency: string;
   customerName: string;
   customerEmail: string;
+  /** The reconcile found this purchase, not the webhook: the alert says so. */
+  late?: boolean;
 };
 
 /**
@@ -105,13 +135,13 @@ function purchaseFacts(input: PaidAlertInput): { what: string; amount: string; b
 
 /**
  * The alert's words, as Telegram HTML: what was bought, for how much, by whom,
- * and what to do next. Everything that came from the buyer or Stripe is cut
- * short, then escaped.
+ * and what to do next. The reconcile's late alert says so in its first line.
+ * Everything that came from the buyer or Stripe is cut short, then escaped.
  */
 export function paidAlertText(input: PaidAlertInput): string {
   const f = purchaseFacts(input);
   return [
-    "New purchase on oasisai.work/pricing",
+    input.late ? "Late: a purchase on oasisai.work/pricing the webhook never reported" : "New purchase on oasisai.work/pricing",
     f.what,
     `${f.amount} paid`,
     `Buyer: ${f.buyer}`,

@@ -11,7 +11,9 @@
  * pinned account proves it is that account's (stripe-ingest.ts
  * stripeEventOrigin), so `deliver` holds such a key for the delivery. Stripe
  * then knows the event and no other object (every other read is a 404, the
- * same "Stripe could not say" branch).
+ * same "Stripe could not say" branch). The reconcile checks hold the key the
+ * same way (`reconcile`), and Stripe then also lists the charges the check
+ * gives it (and no refund, subscription or payout).
  *
  * Run: node --conditions=react-server --import tsx tests/finances-io.test.ts
  */
@@ -66,6 +68,8 @@ let telegramCalls = 0;
 let telegramRefuses: ((send: { token: string; chat: string }) => string | null) | null = null;
 /** While set, Telegram does not answer until it settles. */
 let telegramHold: Promise<void> | null = null;
+/** The charges Stripe lists while a reconcile runs; null at any other time, when Stripe knows no list. `reconcile` sets it for the one call. */
+let stripeCharges: unknown[] | null = null;
 globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
   const url = new URL(String(input));
   const sink = telegramSent;
@@ -82,6 +86,12 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: unkn
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     if (url.pathname === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
     if (url.pathname.startsWith("/v1/events/")) return json({ id: decodeURIComponent(url.pathname.slice("/v1/events/".length)), object: "event" });
+    // What a reconcile lists: the charges a check gave it, and no refund, subscription or payout.
+    // Only while one runs: the webhook checks rely on these reads being a 404.
+    if (stripeCharges) {
+      if (url.pathname === "/v1/charges") return json({ object: "list", data: stripeCharges, has_more: false });
+      if (["/v1/refunds", "/v1/subscriptions", "/v1/payouts"].includes(url.pathname)) return json({ object: "list", data: [], has_more: false });
+    }
     return json({ error: { type: "invalid_request_error", message: "No such object" } }, 404);
   }
   networkCalls += 1;
@@ -240,6 +250,35 @@ async function main() {
     customerName: "Bo Direct",
     customerEmail: "bo@buyer.test",
   });
+  /**
+   * A charge as the reconcile lists it, its payment intent created `ageSec`
+   * before the frozen now. `marked: false` is a payment the checkout did not
+   * start; `intent` "bare" leaves the intent as an unexpanded id, "unreadable"
+   * as an object that has the marker and nothing else.
+   */
+  const listedCharge = (n: string, p: { ageSec: number; marked?: boolean; intent?: "bare" | "unreadable" }) => {
+    const created = Math.floor(FROZEN_NOW / 1000) - p.ageSec;
+    const sale = checkoutSale(n, { name: "Lia Late", email: "lia@buyer.test" });
+    const intent =
+      p.intent === "bare"
+        ? `pi_${n}`
+        : p.intent === "unreadable"
+          ? { metadata: sale.metadata }
+          : { ...sale, created, latest_charge: `ch_${n}`, metadata: p.marked === false ? {} : sale.metadata };
+    return { ...charge({ id: `ch_${n}`, amount: 750000, pi: `pi_${n}`, created, name: "Lia Late", email: "lia@buyer.test" }), payment_intent: intent };
+  };
+  /** The daily reconcile over the charges Stripe lists, holding the pinned account's key as `deliver` does. */
+  async function reconcile(listed: unknown[]) {
+    const { reconcileStripe } = await import("../lib/founders-finances/stripe-ingest");
+    stripeCharges = listed;
+    process.env.STRIPE_SECRET_KEY = STRIPE_KEY;
+    try {
+      return await reconcileStripe({ days: 30 });
+    } finally {
+      delete process.env.STRIPE_SECRET_KEY;
+      stripeCharges = null;
+    }
+  }
   const SALES_ENV = ["OASIS_SALES_TELEGRAM_BOT_TOKEN", "OASIS_SALES_TELEGRAM_CHAT_ID", "OASIS_TELEGRAM_BOT_TOKEN", "OASIS_TELEGRAM_CHAT_ID"];
   /**
    * The sales group (-100777, its own bot), CC's chat (4242, his bot) and a
@@ -897,6 +936,10 @@ async function main() {
     assert.ok(text.includes("nope / x (not in the catalog)"));
     assert.ok(text.includes("123.45 USD paid"));
     assert.ok(text.includes("Buyer: no name or email on the payment; see Stripe"));
+    // The reconcile's late alert says so in its first line and is otherwise the same words.
+    const late = paidAlertText({ ...base, late: true });
+    assert.equal(late.split("\n")[0], "Late: a purchase on oasisai.work/pricing the webhook never reported");
+    assert.equal(late.split("\n").slice(1).join("\n"), text.split("\n").slice(1).join("\n"), "the rest is the same words");
     // The buyer types the name and the email, and a message is cut at 4,096
     // characters: 1,000 "&" escape to 5,000 and the cut fell inside "&amp;",
     // which Telegram refuses (review of #718). Free text is cut BEFORE it is
@@ -917,6 +960,97 @@ async function main() {
       assert.equal(await alertPublicCheckoutPaid(base, async () => { throw new Error("telegram down"); }), false);
     });
     assert.equal(failed.errors.filter((line) => line.includes("the sales desk was not told of a purchase")).length, 2, "each failed send is logged");
+  });
+
+  await check("the late-alert window opens after 30 minutes and closes before 48 hours, to the second", async () => {
+    const { inLateAlertWindow } = await import("../lib/checkout/paid-alert");
+    const now = Date.UTC(2026, 8, 24, 12, 0, 0);
+    const at = (ageSec: number) => inLateAlertWindow(Math.floor(now / 1000) - ageSec, now);
+    assert.deepEqual(
+      [29 * 60 + 59, 30 * 60, 30 * 60 + 1, 47 * 3600 + 59 * 60 + 59, 48 * 3600, 48 * 3600 + 1].map(at),
+      [false, false, true, true, false, false],
+      "more than 30 minutes and less than 48 hours, neither end included",
+    );
+    assert.equal(at(-60), false, "an intent from the future is not late");
+  });
+
+  await check("the reconcile tells the sales desk, late and once, of a checkout purchase it booked itself 30 minutes to 48 hours after the intent; any other payment tells no one", async () => {
+    // The webhook never reported these, so the reconcile books them (review of #718).
+    const { cad: formatCad } = await import("../lib/checkout/catalog");
+    const M = 60;
+    const H = 3600;
+    const cases: Array<{ n: string; ageSec: number; marked?: boolean; intent?: "bare" | "unreadable"; alert: boolean }> = [
+      { n: "late_2h", ageSec: 2 * H, alert: true },
+      { n: "late_just_over_30m", ageSec: 30 * M + 20, alert: true },
+      { n: "late_just_under_48h", ageSec: 48 * H - M, alert: true },
+      { n: "late_just_under_30m", ageSec: 29 * M + 40, alert: false },
+      { n: "late_10m", ageSec: 10 * M, alert: false },
+      { n: "late_just_over_48h", ageSec: 48 * H + M, alert: false },
+      { n: "late_history", ageSec: 10 * 24 * H, alert: false },
+      { n: "late_unmarked", ageSec: 2 * H, marked: false, alert: false },
+      { n: "late_bare_intent", ageSec: 2 * H, intent: "bare", alert: false },
+      { n: "late_unreadable_intent", ageSec: 2 * H, intent: "unreadable", alert: false },
+    ];
+    const toldAbout = cases.filter((c) => c.alert).map((c) => `ord_${c.n}`).sort();
+    await withTelegram(async (sent) => {
+      const run = await logged(() => reconcile(cases.map((c) => listedCharge(c.n, c))));
+      assert.equal(run.result.payments_recorded, cases.length, "the reconcile books every one of them, announced or not");
+      for (const c of cases) assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = ?`, [`ch_${c.n}`]), 1, `${c.n} is in the books`);
+      assert.deepEqual(sent.map((m) => /Order (ord_\w+)/.exec(m.text)?.[1]).sort(), toldAbout, "exactly the in-window checkout purchases are announced, once each");
+      assert.equal(telegramCalls, toldAbout.length, "and nothing else reached Telegram");
+      for (const m of sent) {
+        assert.equal(m.chat, "-100777", "the sales group");
+        assert.match(m.text, /^Late: a purchase on oasisai\.work\/pricing the webhook never reported\n/);
+        assert.ok(m.text.includes(`${formatCad(750000)} paid`), m.text);
+        assert.ok(m.text.includes("Buyer: Lia Late &lt;lia@buyer.test&gt;"), m.text);
+        assert.ok(m.text.includes("Next: reach out to book the kickoff."));
+      }
+      assert.ok(!run.errors.some((line) => line.includes("[checkout.paid-alert]")), `no alert failure: ${run.errors.join(" | ")}`);
+      assert.equal(keptAlive.length, 0, "the cron awaits the send: nothing is left to the platform");
+
+      // A second run finds every payment in the books: nothing is announced twice.
+      const again = await logged(() => reconcile(cases.map((c) => listedCharge(c.n, c))));
+      assert.equal(again.result.payments_recorded, 0);
+      assert.equal(sent.length, toldAbout.length, "a second reconcile tells no one again");
+    });
+    assert.equal(await count(`SELECT COUNT(*) FROM agent_alerts WHERE alert_type = 'checkout_purchase_alert_failed' AND subject_id LIKE 'ord_late_%'`), 0, "delivered, so no card");
+  });
+
+  await check("a checkout purchase the webhook already booked tells no one when the reconcile lists it", async () => {
+    // charge.succeeded books the payment and never alerts; the reconcile then
+    // finds it in the books (created: false).
+    await withTelegram(async (sent) => {
+      const listed = listedCharge("late_booked", { ageSec: 2 * 3600 });
+      const booked = await deliver("charge.succeeded", { ...listed, payment_intent: "pi_late_booked" }, { id: "evt_late_booked" });
+      assert.match(String((booked.body as { detail?: string }).detail), /^payment recorded /, JSON.stringify(booked.body));
+      await settled();
+      const run = await logged(() => reconcile([listed]));
+      assert.equal(run.result.payments_recorded, 0, "the books already had it");
+      assert.equal(sent.length, 0, "so no one is told");
+      assert.equal(telegramCalls, 0);
+    });
+  });
+
+  await check("a late alert Telegram refuses leaves the same card, and the reconcile still books the payment", async () => {
+    const { OASIS_OPERATOR_TENANT_ID } = await import("../lib/platform-operator");
+    await withTelegram(async (sent) => {
+      // The sales bot is refused in every chat; CC's own bot still works.
+      telegramRefuses = ({ token }) => (token.startsWith("123456:") ? "Forbidden: bot was kicked from the supergroup chat" : null);
+      const run = await logged(() => reconcile([listedCharge("late_refused", { ageSec: 2 * 3600 })]));
+      assert.equal(run.result.payments_recorded, 1, "the reconcile finished and booked the payment");
+      assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = 'ch_late_refused'`), 1);
+      assert.ok(run.errors.some((line) => line.includes("the sales desk was not told of a purchase") && line.includes("ord_late_refused")), run.errors.join(" | "));
+      const cards = (await raw.execute({ sql: `SELECT tenant_id, severity, title, body FROM agent_alerts WHERE alert_type = 'checkout_purchase_alert_failed' AND subject_id = 'ord_late_refused' AND resolved_at IS NULL` })).rows;
+      assert.equal(cards.length, 1, "one card for the order");
+      assert.equal(cards[0].tenant_id, OASIS_OPERATOR_TENANT_ID);
+      assert.equal(cards[0].severity, "urgent");
+      assert.match(String(cards[0].title), /the sales desk was not told/);
+      for (const part of ["Order ord_late_refused", "Stripe pi_late_refused", "Lia Late <lia@buyer.test>", "bot was kicked from the supergroup chat"]) {
+        assert.ok(String(cards[0].body).includes(part), `the card names ${part}: ${cards[0].body}`);
+      }
+      assert.equal(sent.length, 1, "only the card's page reached CC");
+      assert.ok(sent[0].text.includes("the sales desk was not told") && !sent[0].text.startsWith("Late:"), sent[0].text);
+    });
   });
 
   await check("books still balance after everything", async () => {

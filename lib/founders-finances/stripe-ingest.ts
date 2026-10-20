@@ -103,7 +103,7 @@ import { rateLookupFor, usdCadRate } from "./fx-io";
 import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement } from "./invoice-store";
 import { financeTenantId, getStripeClient, listAll, pinnedStripeAccount, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
 import { recordStripePayout, retryUnbookedPayouts, unbookedPayouts } from "./stripe-payouts-io";
-import { alertPublicCheckoutPaid, publicCheckoutSale } from "@/lib/checkout/paid-alert";
+import { alertPublicCheckoutPaid, inLateAlertWindow, publicCheckoutSale } from "@/lib/checkout/paid-alert";
 import { keepAlive } from "@/lib/os/runs/keepalive";
 
 const ACTOR = "stripe";
@@ -1536,6 +1536,35 @@ export type ReconcileSummary = {
 /** How far back every reconcile looks for payouts, whatever its `days` (the most the reconcile itself accepts). */
 const PAYOUT_LOOKBACK_DAYS = 400;
 
+/**
+ * A public-checkout purchase the reconcile itself booked reached the books by no
+ * webhook, so nobody was told: tell the sales desk LATE (review of #718). Only
+ * when the charge's payment intent (expanded on the charge list) carries the
+ * checkout's marker and is in the late-alert window (inLateAlertWindow: more
+ * than 30 minutes old, so no webhook is still in flight; less than 48 hours, so
+ * the first run after a deploy announces no history). Awaited: the reconcile is
+ * a cron. Best-effort: the alert never throws and leaves a card when it cannot
+ * be sent, and nothing here changes what the reconcile books.
+ *
+ * Known duplicate, accepted: if the webhook failed and Stripe retries it AFTER
+ * the reconcile booked and alerted, the intent's event alerts a second time (it
+ * does not gate on a new booking). A second ping costs less than a missed sale.
+ */
+async function announceLateCheckoutPurchase(rawIntent: unknown, charge: ChargeFacts): Promise<void> {
+  const sale = publicCheckoutSale(rawIntent);
+  const pi = sale ? paymentIntentFacts(rawIntent) : null;
+  if (!sale || !pi || !inLateAlertWindow(pi.created, Date.now())) return;
+  await alertPublicCheckoutPaid({
+    sale,
+    paymentIntentId: pi.paymentIntentId,
+    amountCents: pi.amountReceivedCents,
+    currency: pi.currency,
+    customerName: charge.customerName,
+    customerEmail: charge.customerEmail,
+    late: true,
+  });
+}
+
 /** Backfill the last N days from the Stripe API. Requires the pinned account. */
 export async function reconcileStripe(args: { days: number }): Promise<ReconcileSummary> {
   const days = Math.max(1, Math.min(400, Math.trunc(args.days || 30)));
@@ -1566,7 +1595,10 @@ export async function reconcileStripe(args: { days: number }): Promise<Reconcile
       if (piMeta.finInvoiceId) c.metadata = piMeta;
     }
     const r = await recordStripeCharge(c, { fetchFees: false });
-    if (r.created) summary.payments_recorded += 1;
+    if (r.created) {
+      summary.payments_recorded += 1;
+      await announceLateCheckoutPurchase(raw.payment_intent, c);
+    }
   }
 
   const refunds = await listAll(key, "/v1/refunds", { "created[gte]": since }, { expand: ["data.balance_transaction", "data.charge"] });
