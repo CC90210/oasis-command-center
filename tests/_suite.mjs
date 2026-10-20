@@ -556,6 +556,10 @@ const TESTS = [
   // the stream ends only after it has landed (bridge chat saved no replies; 2026-10-20 audit),
   // and the route's disconnect cancel is handed to the platform too. Real tee, real route.
   "tests/bridge-chat-persistence.test.ts",
+  // Cloud chat (/api/chat and /api/chat/resume) keeps its reply when the platform cancels what it was not
+  // handed: the post-turn tail is one job given to keepAlive BEFORE the stream closes (cloud chat tail;
+  // 2026-10-20 audit). Real handlers, and a platform that dies with the response as workerd does.
+  "tests/cloud-chat-persists-after-close.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
