@@ -473,6 +473,10 @@ const TESTS = [
   "tests/bridge-health-reasons.test.ts",
   "tests/bridge-target-resolution.test.ts",
   "tests/bridge-rpc-registry.test.ts",
+  // A closed tab cancels the coding task on Workers too (2026-10-20 audit; workerd
+  // probe): the cancel goes through a hold registered at request time, once, and a
+  // reply that ends by itself releases it. Real route, streams, hold and keepAlive.
+  "tests/harness-cancel-on-disconnect.test.ts",
   "tests/turso-rpc-texttorrent.test.mjs",
   "tests/turso-contains.test.ts",
   // Drips and SMS sending: which line a text leaves from, whether the

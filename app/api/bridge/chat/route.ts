@@ -43,6 +43,7 @@ import { readAgentsOwner } from "@/lib/agents-owner";
 import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 import {
   cancelHarnessJob,
+  createDisconnectHold,
   enqueueHarnessJob,
   HARNESS_PROTOCOL,
   harnessJobStream,
@@ -457,10 +458,15 @@ export async function POST(req: NextRequest) {
       ? workspaceFallbackResponse("computer_not_answering")
       : jsonError(409, queued.code);
   }
+  // One hold for every way the person can leave, made now while the request's
+  // context exists. Workers never fires req.signal on a closed tab and drops the
+  // context before a response stream's cancel() runs, so a cancel started there
+  // dies (2026-10-20 audit; workerd probe). The abort listener below, where a
+  // runtime does fire one, and both streams cancel through this hold: the job is
+  // cancelled once, and the hold is let go as soon as the reply ends by itself.
+  const disconnect = createDisconnectHold(`bridge.chat.disconnect-cancel:${queued.job.id}`);
   const cancelForDisconnect = () => {
-    void cancelHarnessJob({ tenantId: auth.tenantId, userId: auth.userId, jobId: queued.job.id }).catch((error) => {
-      console.error("[bridge.chat.disconnect-cancel]", error instanceof Error ? error.message : String(error));
-    });
+    void disconnect.run(() => cancelHarnessJob({ tenantId: auth.tenantId, userId: auth.userId, jobId: queued.job.id }));
   };
   if (req.signal.aborted) cancelForDisconnect();
   else req.signal.addEventListener("abort", cancelForDisconnect, { once: true });
@@ -481,7 +487,7 @@ export async function POST(req: NextRequest) {
   const deviceStream = () => {
     // Only the device branch owns bridge persistence. If a never-claimed job
     // falls back, /api/chat persists the turn and its usage exactly once.
-    const persistedBody = teeBridgeChatPersistence(harnessJobStream(queued.job), {
+    const persistedBody = teeBridgeChatPersistence(harnessJobStream(queued.job, { disconnect }), {
       tenantId: auth.tenantId,
       userId: auth.userId,
       agent,
@@ -508,6 +514,7 @@ export async function POST(req: NextRequest) {
     ? harnessJobStreamWithUnclaimedFallback(queued.job, {
         deviceStream,
         fallbackResponse: () => workspaceFallbackResponse("computer_not_answering"),
+        disconnect,
       })
     : deviceStream();
   return new Response(body, { status: 200, headers: sseHeaders });

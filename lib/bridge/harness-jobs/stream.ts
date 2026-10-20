@@ -1,6 +1,7 @@
 import "server-only";
 import type { HarnessJob } from "./types";
 import { cancelHarnessJob, readHarnessEvents, readHarnessJob } from "./store";
+import { createDisconnectHold, type DisconnectHold } from "./disconnect-hold";
 
 const enc = new TextEncoder();
 const POLL_MS = 300;
@@ -12,9 +13,16 @@ function frame(event: string, data: Record<string, unknown>): Uint8Array {
 
 /** Follow one exact-pairing harness job while preserving the ChatWidget's
  * existing SSE vocabulary. The database is the handoff between Vercel and a
- * laptop that only makes outbound requests; no inbound laptop URL exists. */
-export function harnessJobStream(job: HarnessJob): ReadableStream<Uint8Array> {
+ * laptop that only makes outbound requests; no inbound laptop URL exists.
+ *
+ * The person leaving cancels the job through `disconnect`, a hold the caller
+ * made at request time (lib/bridge/harness-jobs/disconnect-hold.ts): Workers
+ * drops the request context before a stream's cancel() runs, so work started
+ * there dies (2026-10-20 audit; workerd probe). With none passed the stream
+ * makes its own, which protects a caller that has no other trigger to share. */
+export function harnessJobStream(job: HarnessJob, options: { disconnect?: DisconnectHold } = {}): ReadableStream<Uint8Array> {
   let stopped = false;
+  const disconnect = options.disconnect ?? createDisconnectHold(`bridge.harness.stream:${job.id}`);
   return new ReadableStream<Uint8Array>({
     start(controller) {
       void (async () => {
@@ -81,16 +89,17 @@ export function harnessJobStream(job: HarnessJob): ReadableStream<Uint8Array> {
             controller.enqueue(frame("done", {}));
             controller.close();
           }
+        } finally {
+          // The reply ended by itself (closed above), or cancel() has already
+          // taken the hold. Either way nothing is left to cancel, and a hold
+          // left pending would keep the request alive for the whole grace period.
+          disconnect.release();
         }
       })();
     },
     async cancel() {
       stopped = true;
-      try {
-        await cancelHarnessJob({ tenantId: job.tenantId, userId: job.userId, jobId: job.id });
-      } catch (error) {
-        console.error("[bridge.harness.cancel]", error instanceof Error ? (error.stack ?? error.message) : String(error));
-      }
+      await disconnect.run(() => cancelHarnessJob({ tenantId: job.tenantId, userId: job.userId, jobId: job.id }));
     },
   });
 }
@@ -105,10 +114,13 @@ export function harnessJobStreamWithUnclaimedFallback(
   input: {
     deviceStream: () => ReadableStream<Uint8Array>;
     fallbackResponse: () => Promise<Response>;
+    /** The hold the device stream shares, so that the person leaving cancels the job once. */
+    disconnect?: DisconnectHold;
   },
 ): ReadableStream<Uint8Array> {
   let stopped = false;
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  const disconnect = input.disconnect ?? createDisconnectHold(`bridge.harness.fallback-stream:${job.id}`);
 
   async function relay(body: ReadableStream<Uint8Array>, controller: ReadableStreamDefaultController<Uint8Array>) {
     activeReader = body.getReader();
@@ -174,17 +186,20 @@ export function harnessJobStreamWithUnclaimedFallback(
             controller.enqueue(frame("done", {}));
             controller.close();
           }
+        } finally {
+          // As in harnessJobStream: the reply is over, so free the hold. When
+          // the device stream shares it, whichever ends first releases it.
+          disconnect.release();
         }
       })();
     },
     async cancel() {
       stopped = true;
+      // Start the job's cancel before anything is awaited: the reader's own
+      // cancel below can take a while, and the context is already gone.
+      const cancelled = disconnect.run(() => cancelHarnessJob({ tenantId: job.tenantId, userId: job.userId, jobId: job.id }));
       await activeReader?.cancel().catch(() => undefined);
-      try {
-        await cancelHarnessJob({ tenantId: job.tenantId, userId: job.userId, jobId: job.id });
-      } catch (error) {
-        console.error("[bridge.harness.fallback-cancel]", error instanceof Error ? error.message : String(error));
-      }
+      await cancelled;
     },
   });
 }
