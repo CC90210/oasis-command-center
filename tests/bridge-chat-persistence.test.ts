@@ -96,14 +96,29 @@ async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, marker
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Wait for `ready`: the platform learns of a write a few ticks after the frame that starts it. */
-async function until(ready: () => boolean, what: string, ms = 5_000): Promise<void> {
+/** Wait up to `ms` for `ready`; says whether it came true. */
+async function waitFor(ready: () => boolean, ms: number): Promise<boolean> {
   const started = Date.now();
   while (!ready()) {
-    if (Date.now() - started > ms) throw new Error(`timed out waiting for ${what}`);
+    if (Date.now() - started > ms) return false;
     await sleep(5);
   }
+  return true;
 }
+
+/** Wait for `ready`, and fail loudly, naming what never happened, if it does not come. */
+async function until(ready: () => boolean, what: string, ms = 5_000): Promise<void> {
+  if (!(await waitFor(ready, ms))) throw new Error(`timed out waiting for ${what}`);
+}
+
+/**
+ * How long a check waits for a registration to reach ctx.waitUntil. keepAlive
+ * registers only after an async `import("@opennextjs/cloudflare")` resolves: a few
+ * microtasks where that import is cached on a fast machine, but a round trip to the
+ * loader-hooks thread on Node 22 (CI), so the registration lands some time AFTER
+ * the stream, and often the whole write, is done.
+ */
+const HANDOFF_WAIT_MS = 3_000;
 
 /** Silence keepAlive's one-time "no Cloudflare context" warning for the length of `fn`. */
 async function quietly<T>(fn: () => Promise<T>): Promise<T> {
@@ -230,16 +245,44 @@ async function main() {
     );
   const rolesOf = async (conversationId: string) => (await messagesOf(conversationId)).map((m) => m.role);
   const replyFrames = () => [frame("delta", { text: REPLY[0] }), frame("delta", { text: REPLY[1] }), frame("done", {})];
-  /** The platform has been handed `n` writes, and no more arrive. */
+  /**
+   * The platform has received `n` registrations, and no more arrive. This WAITS for them (failing loudly,
+   * naming `what`, if they never come) rather than reading the ledger the moment the stream ends, because the
+   * registration lands some time after that; then it stays quiet for a moment to catch a second one.
+   */
   const handedExactly = async (n: number, what: string) => {
-    await until(() => handedToPlatform.length >= n, `${what} to reach ctx.waitUntil`);
+    await until(() => handedToPlatform.length >= n, `${what} to reach ctx.waitUntil`, HANDOFF_WAIT_MS);
     await sleep(40);
     assert.equal(handedToPlatform.length, n, `${what}: handed to ctx.waitUntil ${n} time(s), not ${handedToPlatform.length}`);
   };
 
+  /**
+   * A check, under the rule that keeps the shared ledger of registrations honest. A registration lands after an
+   * async import, so a check that ends first leaves it to land in the NEXT check's ledger, where it counts as
+   * that check's second handoff (the CI failure of the "exactly once" check, run 39397384946). So every check
+   * says how many registrations it causes, starts from an empty ledger, and does not end until exactly that
+   * many have landed and no more. Whatever a failed check started is waited for too, so one failure does not
+   * leak into the checks after it.
+   */
+  const step = (name: string, handoffs: number, body: () => Promise<void>) =>
+    check(name, async () => {
+      handedToPlatform.length = 0;
+      try {
+        await body();
+        await handedExactly(handoffs, `the ${handoffs} registration(s) this check caused`);
+      } finally {
+        // Cleanup only: the check's own outcome is already decided (a pass, or the error being thrown).
+        await waitFor(() => handedToPlatform.length >= handoffs, 1_500);
+      }
+    });
+
+  // keepAlive's first import of "@opennextjs/cloudflare" is a cold ESM load. Do it once here, so no check's
+  // wait for its registration has to cover it. Nothing depends on this: the checks wait for what they cause.
+  await import("@opennextjs/cloudflare");
+
   console.log("bridge-chat-persistence:");
 
-  await check("a streamed reply is saved: the question, then the reply as streamed, on the bridge session the drawer lists; the client's bytes are untouched", async () => {
+  await step("a streamed reply is saved: the question, then the reply as streamed, on the bridge session the drawer lists; the client's bytes are untouched", 1, async () => {
     const turn = turnOf();
     const sent = [frame("agent_status", { phase: "queued", agent: "bravo" }), ...replyFrames()];
     const got = await drain(teeBridgeChatPersistence(upstreamOf(sent).stream, turn));
@@ -255,10 +298,9 @@ async function main() {
       [s.tenant_id, s.user_id, s.agent_key, s.provider, s.model, s.title],
       [OASIS, USERS.cc.id, "bravo", "bridge", "bridge:claude", turn.userMessage.slice(0, 80)],
     );
-    await Promise.all(handedToPlatform);
   });
 
-  await check("the response does not end before the reply has landed: a slow write is waited for, not cut off with the response", async () => {
+  await step("the response does not end before the reply has landed: a slow write is waited for, not cut off with the response", 1, async () => {
     // On Workers whatever is still in flight, and not handed to waitUntil, dies
     // when the response ends. The old latch let flush() return at once.
     const turn = turnOf();
@@ -269,11 +311,9 @@ async function main() {
       assert.equal(h.reached, 1, "the reply write reached the database once");
       assert.deepEqual(await rolesOf(turn.conversationId), ["user", "assistant"], "the reply is in chat_messages the moment the response ends");
     });
-    await Promise.all(handedToPlatform);
   });
 
-  await check("a database that never answers costs the response at most the cap: the stream ends on time, the cap is logged, and the write is still the one handed to the platform", async () => {
-    handedToPlatform.length = 0;
+  await step("a database that never answers costs the response at most the cap: the stream ends on time, the cap is logged, and the write is still the one handed to the platform", 1, async () => {
     const turn = turnOf();
     const CAP = 300;
     const GIVE_UP = CAP * 10 + 2_000;
@@ -311,7 +351,7 @@ async function main() {
     });
   });
 
-  await check("the cap is REPLY_WRITE_CAP_MS unless overridden, armed for the length of the wait only, and silent when the write wins", async () => {
+  await step("the cap is REPLY_WRITE_CAP_MS unless overridden, armed for the length of the wait only, and silent when the write wins", 1, async () => {
     assert.ok(
       REPLY_WRITE_CAP_MS >= 1_000 && REPLY_WRITE_CAP_MS <= 30_000,
       `REPLY_WRITE_CAP_MS (${REPLY_WRITE_CAP_MS}) must be a cap: far under the widget's 10-minute inactivity timeout, inside the ~30 s waitUntil grace`,
@@ -343,11 +383,9 @@ async function main() {
       globalThis.setTimeout = realSetTimeout;
       globalThis.clearTimeout = realClearTimeout;
     }
-    await Promise.all(handedToPlatform);
   });
 
-  await check("the reply write is handed to ctx.waitUntil exactly once, and made once: the terminal frame starts it, flush() on a normal close adds nothing", async () => {
-    handedToPlatform.length = 0;
+  await step("the reply write is handed to ctx.waitUntil exactly once, and made once: the terminal frame starts it, flush() on a normal close adds nothing", 1, async () => {
     const turn = turnOf();
     await drain(teeBridgeChatPersistence(upstreamOf(replyFrames()).stream, turn));
     await handedExactly(1, "the reply write");
@@ -356,8 +394,7 @@ async function main() {
     assert.deepEqual(await rolesOf(turn.conversationId), ["user", "assistant"]);
   });
 
-  await check("a browser that disconnects before flush() still gets its reply saved: the write was handed to the platform, and the platform is what keeps it alive", async () => {
-    handedToPlatform.length = 0;
+  await step("a browser that disconnects before flush() still gets its reply saved: the write was handed to the platform, and the platform is what keeps it alive", 1, async () => {
     const turn = turnOf();
     const up = upstreamOf(replyFrames(), { stayOpen: true });
     await holdingReplyWrites(async (h) => {
@@ -382,13 +419,12 @@ async function main() {
   });
 
   for (const shape of [{ code: "harness_failed", message: FAILURE }, { error: FAILURE }]) {
-    await check(`an error frame saves the turn with its error (${Object.keys(shape).join("+")}), once: the done frame after it adds no second write`, async () => {
-      handedToPlatform.length = 0;
+    await step(`an error frame saves the turn with its error (${Object.keys(shape).join("+")}), once: the done frame after it adds no second write`, 1, async () => {
       const turn = turnOf();
       const sent = [frame("delta", { text: "Starting. " }), frame("error", shape), frame("done", {})];
       await drain(teeBridgeChatPersistence(upstreamOf(sent).stream, turn));
       await handedExactly(1, "the failed turn's write");
-      await Promise.all(handedToPlatform);
+      await handedToPlatform[0];
       assert.deepEqual(await messagesOf(turn.conversationId), [
         { role: "user", content: turn.userMessage, error: null },
         { role: "assistant", content: "Starting. ", error: FAILURE },
@@ -397,8 +433,7 @@ async function main() {
     });
   }
 
-  await check("an error frame with the browser already gone still saves the turn with its error", async () => {
-    handedToPlatform.length = 0;
+  await step("an error frame with the browser already gone still saves the turn with its error", 1, async () => {
     const turn = turnOf();
     const up = upstreamOf([frame("delta", { text: "Half an answer. " }), frame("error", { code: "harness_failed", message: FAILURE })], { stayOpen: true });
     const reader = teeBridgeChatPersistence(up.stream, turn).getReader();
@@ -413,8 +448,7 @@ async function main() {
     ]);
   });
 
-  await check("a reply the bridge ends without a done frame is still saved: flush() starts the write and waits for it", async () => {
-    handedToPlatform.length = 0;
+  await step("a reply the bridge ends without a done frame is still saved: flush() starts the write and waits for it", 1, async () => {
     const turn = turnOf();
     await holdingReplyWrites(async (h) => {
       setTimeout(() => h.open(), 150);
@@ -425,27 +459,36 @@ async function main() {
     await handedExactly(1, "the reply write");
   });
 
-  await check("with no platform context (a dev run) the reply is still saved before the response ends", async () => {
-    delete platformGlobals[CLOUDFLARE_CONTEXT];
-    handedToPlatform.length = 0;
+  await step("with no platform context (a dev run) the reply is still saved before the response ends", 0, async () => {
+    // No context at all: the global reads as missing, exactly as in `next dev`. keepAlive looks for it only after
+    // its async import, so the lookups are counted: the check must not hand the context back before keepAlive
+    // has looked, or the lookup would find it and register this write in the next check's ledger.
+    let lookups = 0;
+    Object.defineProperty(platformGlobals, CLOUDFLARE_CONTEXT, {
+      configurable: true,
+      get: () => {
+        lookups += 1;
+        return undefined;
+      },
+    });
     try {
       const turn = turnOf();
-      await quietly(() =>
-        holdingReplyWrites(async (h) => {
+      await quietly(async () => {
+        await holdingReplyWrites(async (h) => {
           setTimeout(() => h.open(), 150);
           await drain(teeBridgeChatPersistence(upstreamOf(replyFrames()).stream, turn));
           assert.equal(h.opened, true, "the response ended while the reply write was still waiting on the database");
           assert.deepEqual(await rolesOf(turn.conversationId), ["user", "assistant"]);
-        }),
-      );
+        });
+        await until(() => lookups >= 1, "keepAlive to look for the platform", HANDOFF_WAIT_MS);
+      });
       assert.equal(handedToPlatform.length, 0, "nothing reached a waitUntil that does not exist");
     } finally {
-      platformGlobals[CLOUDFLARE_CONTEXT] = platform;
+      Object.defineProperty(platformGlobals, CLOUDFLARE_CONTEXT, { value: platform, writable: true, configurable: true });
     }
   });
 
-  await check("a request with no valid tab_id writes nothing and hands nothing to the platform", async () => {
-    handedToPlatform.length = 0;
+  await step("a request with no valid tab_id writes nothing and hands nothing to the platform", 0, async () => {
     for (const conversationId of ["not-a-uuid", ""]) {
       const turn = turnOf({ conversationId });
       await drain(teeBridgeChatPersistence(upstreamOf(replyFrames()).stream, turn));
@@ -535,8 +578,7 @@ async function main() {
     return res;
   };
 
-  await check("a browser that disconnects mid-reply: the route hands the job's cancel to the platform, and what the platform holds is that cancel", async () => {
-    handedToPlatform.length = 0;
+  await step("a browser that disconnects mid-reply: the route hands the job's cancel to the platform, and what the platform holds is that cancel", 1, async () => {
     const abort = new AbortController();
     const res = await answered(await chat(abort.signal));
     const queued = await latestJob();
@@ -554,8 +596,7 @@ async function main() {
     await res.body?.cancel();
   });
 
-  await check("a request already disconnected when it reaches the queue cancels its job through the platform too", async () => {
-    handedToPlatform.length = 0;
+  await step("a request already disconnected when it reaches the queue cancels its job through the platform too", 1, async () => {
     await holdingJobCancels(async (h) => {
       const res = await answered(await chat(AbortSignal.abort()));
       try {
