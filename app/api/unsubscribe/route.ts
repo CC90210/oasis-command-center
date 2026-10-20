@@ -10,24 +10,28 @@
  *
  * Defense layers:
  *   1. JSON shape validation (email format, length caps).
- *   2. Optional HMAC token verification — when OASIS_UNSUBSCRIBE_HMAC_SECRET
- *      is set, the token in the URL must match HMAC-SHA256(email|brand)
- *      truncated to 16 hex chars. Without the secret, opt-out is
- *      email-only (matches the URL format casl_compliance.py emits today;
- *      tokens become enforced once email_template.py starts signing them).
- *      Unsigned links stay accepted on purpose: every email already sent
- *      carries one, and an opt-out link has to keep working after the send
- *      (CASL: at least 60 days), so refusing them would stop real people
- *      unsubscribing. The worst an unsigned link allows is unsubscribing
- *      someone else, which over-suppresses (the safe direction), bounded by
- *      the IP rate limit below.
- *   3. Brand → tenant resolution: we lookup the tenant by brand string
- *      from `tenants.custom_fields.brand` so suppressions are properly
- *      tenant-scoped per CASL s. 6 (per-sender rule). OASIS's support-mail
- *      brand is pinned to OASIS's own workspace first (pinnedSuppressionTenant,
- *      lib/email/support-mailbox.ts): its name is shared by dozens of other
- *      workspaces, so a name lookup would file the opt-out under a stranger's.
- *   4. Rate limit by IP — anti-enumeration. Reuses the pair-code limiter.
+ *   2. The link's token. When OASIS_UNSUBSCRIBE_HMAC_SECRET is set, links are
+ *      signed with HMAC-SHA256(email|brand), 16 hex chars
+ *      (lib/email/tracked-html.ts). A token that does not match is refused
+ *      (401). A link with NO token is accepted: every email sent before
+ *      signing carries one, and an opt-out link has to keep working after
+ *      the send (CASL: at least 60 days). The secret was not set when this
+ *      was written (2026-10-19), so every live link is unsigned.
+ *   3. Where the opt-out is filed. A brand pinned to one workspace files
+ *      there (pinnedSuppressionTenant, lib/email/support-mailbox.ts: OASIS's
+ *      support mail). Every other brand, or none, files globally
+ *      (tenant_id NULL), which every sender honours
+ *      (lib/email/suppression-scope.ts). The brand is never looked up by
+ *      workspace name: 43 workspaces are called "OASIS AI", and a self-signup
+ *      can take any name, so a name match could file a real opt-out where its
+ *      sender never looks (2026-10-19 audit). SunBiz, the only other brand a
+ *      live link has carried, is retired, so its opt-outs file globally too.
+ *   4. Rate limits by IP. Failures count toward the pair-code limiter
+ *      (anti-enumeration). An unsigned link can opt out anyone, and a
+ *      global row stops every sender, so unsigned filings are also capped at
+ *      UNSIGNED_FILINGS_PER_IP_PER_HOUR per IP. The cap is generous because
+ *      mail providers send one-click opt-outs from a few shared addresses;
+ *      a signed link is never capped. Each global filing is logged.
  *
  * Returns 200 on success (or already-suppressed). Never reveals whether
  * an email exists in our CRM — same response shape for any input that
@@ -39,7 +43,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp } from "@/lib/api-helpers";
-import { isRateLimited, recordPairAttempt } from "@/lib/pair-rate-limit";
+import { attemptsWithin, isRateLimited, recordPairAttempt } from "@/lib/pair-rate-limit";
 import { pinnedSuppressionTenant } from "@/lib/email/support-mailbox";
 
 export const runtime = "nodejs";
@@ -53,51 +57,29 @@ const MAX_TOKEN_LEN = 64;
 // itself when the email was sent.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function verifyToken(email: string, brand: string, token: string): boolean {
+/** Unsigned opt-outs one IP may file in an hour (defense layer 4). Not
+ *  exported: a route module may export only its handlers and config. */
+const UNSIGNED_FILINGS_PER_IP_PER_HOUR = 100;
+
+/**
+ * "signed": the secret is set and the token matches. "unsigned": no secret,
+ * or no token (a link from before signing). "invalid": a token that does not
+ * match, refused.
+ */
+function tokenStatus(email: string, brand: string, token: string): "signed" | "unsigned" | "invalid" {
   const secret = process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET;
-  if (!secret) return true; // no secret configured → token check disabled
-  if (!token) return false; // secret set but no token supplied
+  if (!secret || !token) return "unsigned";
   const expected = createHmac("sha256", secret)
     .update(`${email}|${brand}`)
     .digest("hex")
     .slice(0, 16);
   // timingSafeEqual requires equal-length buffers; bail early on length mismatch.
-  if (token.length !== expected.length) return false;
+  if (token.length !== expected.length) return "invalid";
   try {
-    return timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+    return timingSafeEqual(Buffer.from(token), Buffer.from(expected)) ? "signed" : "invalid";
   } catch {
-    return false;
+    return "invalid";
   }
-}
-
-/**
- * Resolve a tenant_id by brand string: a workspace whose name, or whose
- * custom_fields.brand, equals the brand (case-insensitive). Returns null when
- * no workspace, or more than one, matches. The opt-out is then recorded with
- * tenant_id=NULL, a "global" suppression that every sender also honours
- * (lib/email/suppression-scope.ts), so the recipient is protected even when the
- * brand cannot be tied to one sender.
- *
- * The brand comes from the opt-out link, so it is matched as a value, never
- * pasted into a filter expression. Before (2026-10-19 audit) it was spliced
- * into `.or("name.ilike.<brand>,...")`: a comma ("Acme, Inc.") broke the
- * expression and the opt-out failed with a 500, recording nothing; "_" and
- * "%" matched other workspaces' names; and `.limit(1)` filed a name several
- * workspaces share under whichever came first.
- */
-async function resolveTenantId(brand: string): Promise<string | null> {
-  if (!brand) return null;
-  const pinned = pinnedSuppressionTenant(brand);
-  if (pinned) return pinned;
-  const db = getServiceSupabase();
-  const exact = brand.toLowerCase().replace(/[%_\\]/g, "\\$&");
-  const ids = new Set<string>();
-  for (const column of ["name", "custom_fields->>brand"]) {
-    const { data, error } = await db.from("tenants").select("id").ilike(column, exact).limit(5);
-    if (error) throw new Error(`brand lookup failed: ${error.message}`);
-    for (const row of data ?? []) ids.add(String((row as { id: string }).id));
-  }
-  return ids.size === 1 ? [...ids][0] : null;
 }
 
 export async function POST(req: NextRequest) {
@@ -144,26 +126,24 @@ export async function POST(req: NextRequest) {
     return bad(400, "invalid_token");
   }
 
-  // ---- Token verification (no-op without OASIS_UNSUBSCRIBE_HMAC_SECRET) ----
+  // ---- Token verification (layer 2) ----
   // The rate-limit helper exposes outcomes scoped to the pair-code flow; map
   // this unsubscribe-specific "invalid_token" to its closest match
   // ("invalid_hmac") so the limiter's failure-counter still trips.
-  if (!verifyToken(rawEmail, rawBrand, rawToken)) {
+  const signature = tokenStatus(rawEmail, rawBrand, rawToken);
+  if (signature === "invalid") {
     await recordPairAttempt(rateKey, "invalid_hmac", ip);
     return bad(401, "invalid_token");
   }
 
-  // ---- Resolve brand → tenant_id (null when unknown or shared) ----
-  // A failed lookup must not lose the opt-out: record it globally instead,
-  // which every sender honours. Over-suppressing is the safe direction.
-  let tenantId: string | null;
-  try {
-    tenantId = await resolveTenantId(rawBrand);
-  } catch (err) {
-    console.error("[unsubscribe] brand lookup failed; recording the opt-out globally", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    tenantId = null;
+  // ---- Where it is filed (layer 3): a pinned workspace, or globally ----
+  const tenantId = rawBrand ? pinnedSuppressionTenant(rawBrand) : null;
+
+  // ---- The cap on unsigned filings (layer 4) ----
+  const unsignedKey = `unsubscribe-unsigned:${ip || "unknown"}`;
+  if (signature === "unsigned" && (await attemptsWithin(unsignedKey, 3600)) >= UNSIGNED_FILINGS_PER_IP_PER_HOUR) {
+    await recordPairAttempt(rateKey, "rate_limited", ip);
+    return bad(429, "rate_limited: too many opt-out attempts; back off and retry");
   }
 
   // ---- UPSERT into email_suppressions ----
@@ -192,5 +172,10 @@ export async function POST(req: NextRequest) {
   }
 
   await recordPairAttempt(rateKey, "ok", ip);
+  if (signature === "unsigned") await recordPairAttempt(unsignedKey, "ok", ip);
+  if (!tenantId) {
+    // A global row stops every sender, so each one is logged. Never the address.
+    console.warn("[unsubscribe] opt-out filed for every sender", { brand: rawBrand || null, signed: signature === "signed" });
+  }
   return NextResponse.json({ ok: true });
 }

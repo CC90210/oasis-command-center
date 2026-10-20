@@ -32,10 +32,10 @@ import { unsubscribeMailto } from "./sending-identity";
 import { brandFooter } from "./brand-shell";
 import type { BrandKey } from "./brands";
 
-// The brand string MUST resolve to the SunBiz tenant in /api/unsubscribe's
-// resolveTenantId (matches tenants.name ILIKE 'SunBiz') or the recorded
-// suppression carries tenant_id=NULL and checkEmailSuppressed (tenant-scoped)
-// never honors it. Verified: tenants.name='SunBiz'.
+// The brand on SunBiz mail's opt-out links. SunBiz is retired
+// (lib/tenant/retired.ts), and /api/unsubscribe files a brand that is not
+// pinned to a workspace globally, where every sender honours it
+// (lib/email/suppression-scope.ts).
 export const SUNBIZ_BRAND = "SunBiz";
 
 /**

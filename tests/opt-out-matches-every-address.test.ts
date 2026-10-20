@@ -3,9 +3,10 @@
  *
  * WHY. Every suppression check escapes LIKE wildcards the Postgres way and asks
  * the adapter for an ilike: "first_last@x.com" is sent as "first\_last@x.com"
- * so the underscore matches only itself (lib/lead-interactions-queries.ts
- * checkEmailSuppressed, plus the inline copies in lib/bulk-email/dispatch.ts,
- * lib/forms/oasis-funnel-email.ts and lib/forms/next-steps-email.ts). Postgres
+ * so the underscore matches only itself (lib/email/suppression-scope.ts
+ * checkSuppression, which lib/lead-interactions-queries.ts, lib/bulk-email/
+ * dispatch.ts, lib/forms/oasis-funnel-email.ts and lib/forms/next-steps-email.ts
+ * call; each carried its own copy until 2026-10-19). Postgres
  * reads a backslash as LIKE's escape character by default; SQLite has no
  * default, and lib/turso-postgrest.ts compiled `lower(col) LIKE ?` with no
  * ESCAPE clause. So on Turso the backslash was a literal character and an
@@ -23,7 +24,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { createTursoPostgrest } from "../lib/turso-postgrest";
 
-/** The escaping every suppression caller uses (lib/lead-interactions-queries.ts). */
+/** The escaping the shared lookup uses (lib/email/suppression-scope.ts checkSuppression). */
 const escapeLike = (addr: string) => addr.replace(/[%_\\]/g, "\\$&");
 
 async function main() {
@@ -79,10 +80,15 @@ async function main() {
     .not("email", "ilike", escapeLike("first_last@example.com"));
   assert.deepEqual(negated.data?.map((r) => r.id).sort(), ["s2", "s3", "s4"], ".not() ilike honours the escape");
 
-  // 5. Every suppression caller escapes with a backslash, which is the escape
-  //    character the adapter now declares. A caller that switched to another
-  //    convention would silently stop matching again.
+  // 5. The shared lookup every sender calls (lib/email/suppression-scope.ts
+  //    checkSuppression, since 2026-10-19) escapes with a backslash, the escape
+  //    character the adapter now declares, and the four senders that each
+  //    carried a copy of this lookup call it. A lookup that switched to another
+  //    convention would silently stop matching again. (The shared lookup is
+  //    exercised end to end in tests/unsubscribe-records-every-opt-out.test.ts.)
   const root = join(__dirname, "..");
+  assert.ok(readFileSync(join(root, "lib/email/suppression-scope.ts"), "utf8").includes('.replace(/[%_\\\\]/g, "\\\\$&")'),
+    "checkSuppression escapes LIKE wildcards with a backslash");
   for (const file of [
     "lib/lead-interactions-queries.ts",
     "lib/bulk-email/dispatch.ts",
@@ -90,8 +96,7 @@ async function main() {
     "lib/forms/next-steps-email.ts",
   ]) {
     const src = readFileSync(join(root, file), "utf8");
-    assert.ok(src.includes('.replace(/[%_\\\\]/g, "\\\\$&")'),
-      `${file} escapes LIKE wildcards with a backslash`);
+    assert.ok(/checkSuppression\(/.test(src), `${file} looks opt-outs up through checkSuppression`);
   }
 
   console.log("opt-out-matches-every-address: all passed");

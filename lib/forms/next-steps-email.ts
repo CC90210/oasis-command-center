@@ -54,7 +54,7 @@ import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import type { BrandKey } from "@/lib/email/brands";
 import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
 import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
-import { suppressionScope } from "@/lib/email/suppression-scope";
+import { checkSuppression } from "@/lib/email/suppression-scope";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -535,29 +535,16 @@ async function loadHandoffContext(
   // Honor unsubscribes even though this send is transactional (which bypasses
   // send_gateway's own suppression gate). FAIL CLOSED: any lookup error → do not
   // send. (Codex audit 2026-06-17 [high]: public relay must not fail open.)
-  // Escape LIKE wildcards — `_`/`%` are valid in an email local-part.
-  const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
   // The workspace's own opt-outs and the global ones (lib/email/suppression-scope.ts).
-  let suppScope: string;
-  try {
-    suppScope = suppressionScope(form.tenant_id);
-  } catch {
-    return null;
-  }
-  const supp = await db
-    .from("email_suppressions")
-    .select("email")
-    .or(suppScope)
-    .ilike("email", suppPattern)
-    .limit(1);
-  if (supp.error) {
+  const supp = await checkSuppression(db, form.tenant_id, toEmail);
+  if (supp.checkFailed) {
     console.error("[forms.handoff] suppression check errored — skipping (fail-closed)", {
       lead_id: link.lead_id,
-      error: supp.error.message,
+      error: supp.error,
     });
     return null;
   }
-  if ((supp.data?.length ?? 0) > 0) {
+  if (supp.suppressed) {
     console.log("[forms.handoff] recipient suppressed — skipping", { lead_id: link.lead_id });
     return null;
   }

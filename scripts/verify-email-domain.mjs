@@ -13,11 +13,9 @@
  *   3. Does the tracking host resolve, and does it serve the app? A tracking
  *      host that does not reach the app means a dead unsubscribe link, which is
  *      a compliance failure rather than a cosmetic one.
- *   4. Is the suppression brand safe? This script has NO database access by
- *      design (no dependencies, no secrets), so it does not claim to resolve the
- *      tenant. It fails closed on any value it cannot vouch for and requires
- *      --suppression-verified to accept a changed one. Get this wrong and new
- *      opt-outs record against a null tenant and are silently never honored.
+ *   4. The suppression brand, reported. Any value is safe since 2026-10-19: an
+ *      opt-out whose brand is not pinned to a workspace is filed for every
+ *      sender (section 4 below).
  *
  * SIDE EFFECTS, stated precisely rather than as a blanket "read-only" claim:
  *   - No email is sent. No suppression is ever recorded. No secrets printed.
@@ -249,34 +247,15 @@ if (!INTAKE) {
 }
 
 // ── 4. Suppression brand ────────────────────────────────────────────────────
-// This one cannot be checked from DNS. It is stated loudly instead, because it
-// is the failure that is both silent and legally serious.
-
-// This script has no database access by design (no deps, no secrets). So it does
-// not CLAIM to resolve the tenant — it fails closed on any value it cannot vouch
-// for, and requires a human to assert the lookup was done.
-//
-// "SunBiz" is the known-good value currently in production, so it passes. Any
-// other value is treated as unproven and FAILS until --suppression-verified is
-// passed, because the failure it guards is silent and legally serious: a brand
-// matching no tenant records opt-outs with tenant_id=NULL, and
-// checkEmailSuppressed filters on tenant_id, so those unsubscribes are never
-// honored (Codex review P1 — this used to warn and still exit 0).
-const KNOWN_GOOD_BRAND = "SunBiz";
-const brandVerified = argv.includes("--suppression-verified");
-if (BRAND === KNOWN_GOOD_BRAND) {
-  ok("Suppression brand", `"${BRAND}" is the known-good production value`);
-} else if (brandVerified) {
-  ok(
-    "Suppression brand",
-    `"${BRAND}" accepted on your explicit assertion that it matches a tenants.name row`,
-  );
-} else {
-  bad(
-    "Suppression brand",
-    `"${BRAND}" is not the known-good value and cannot be verified from here. Confirm it matches a row in tenants.name (ILIKE), then re-run with --suppression-verified. If it matches nothing, every NEW unsubscribe records against tenant_id=NULL and is silently ignored. Suppressions recorded BEFORE the change keep working, since enforcement keys on (tenant_id, email).`,
-  );
-}
+// Reported, no longer gated. Until 2026-10-19 /api/unsubscribe matched this
+// brand against tenants.name, and a value that matched nothing recorded
+// opt-outs no sender honoured, so this check failed closed on any value but
+// "SunBiz" unless --suppression-verified was passed. Now a brand that is not
+// pinned to a workspace (lib/email/support-mailbox.ts) is filed globally, and
+// every sender honours a global row (lib/email/suppression-scope.ts), so no
+// value can leave an opt-out unhonoured. --suppression-verified is accepted and
+// ignored.
+ok("Suppression brand", `"${BRAND}": opt-outs under it are honoured by every sender`);
 
 // ── Google / Yahoo bulk sender requirements ─────────────────────────────────
 //

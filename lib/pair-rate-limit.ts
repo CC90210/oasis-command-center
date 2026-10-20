@@ -155,3 +155,27 @@ export async function isRateLimited(rateKey: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * How many attempts `rateKey` logged in the last `windowSeconds`, whatever
+ * their outcome. isRateLimited counts failures only, which suits a
+ * credential; this caps a write that succeeds, such as an unsigned opt-out
+ * that stops every sender (/api/unsubscribe). Fails OPEN like isRateLimited:
+ * 0 on a DB error.
+ */
+export async function attemptsWithin(rateKey: string, windowSeconds: number): Promise<number> {
+  if (!rateKey) return 0;
+  try {
+    const db = getServiceSupabase();
+    const since = new Date(Date.now() - windowSeconds * 1000).toISOString();
+    const r = await db
+      .from("pair_attempts")
+      .select("id", { count: "exact", head: true })
+      .eq("profile_id", rateKey)
+      .gte("attempted_at", since);
+    if (r.error) return 0;
+    return r.count ?? 0;
+  } catch {
+    return 0;
+  }
+}

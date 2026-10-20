@@ -13,7 +13,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "./supabase-server";
-import { suppressionScope } from "./email/suppression-scope";
+import { checkSuppression } from "./email/suppression-scope";
 import {
   groupRowsIntoThreads,
   distinctLeadIds,
@@ -119,33 +119,24 @@ export async function checkPhoneOptOut(
 /**
  * Email opt-out re-check for dashboard DIRECT-SEND paths that bypass
  * send_gateway's own suppression (operator-Gmail, transactional relays).
- * FAIL CLOSED: send paths must block on `checkFailed`. Mirrors the inline
- * pattern in lib/forms/next-steps-email.ts. [[fail-closed-default]]
+ * FAIL CLOSED: send paths must block on `checkFailed`. The lookup itself is
+ * checkSuppression (lib/email/suppression-scope.ts), the one every OCC sender
+ * uses. [[fail-closed-default]]
  */
 export async function checkEmailSuppressed(
   tenantId: string,
   email: string | null | undefined,
 ): Promise<{ suppressed: boolean; checkFailed: boolean }> {
-  const addr = String(email ?? "").trim().toLowerCase();
-  if (!tenantId || !addr) return { suppressed: false, checkFailed: false };
-  // Escape LIKE wildcards — `_`/`%` are valid in an email local-part.
-  const pattern = addr.replace(/[%_\\]/g, "\\$&");
+  let db: ReturnType<typeof getServiceSupabase>;
   try {
-    const r = await getServiceSupabase()
-      .from("email_suppressions")
-      .select("email")
-      .or(suppressionScope(tenantId))
-      .ilike("email", pattern)
-      .limit(1);
-    if (r.error) {
-      console.error("[lead-interactions-queries] email suppression check errored", r.error.message);
-      return { suppressed: false, checkFailed: true };
-    }
-    return { suppressed: (r.data?.length ?? 0) > 0, checkFailed: false };
+    db = getServiceSupabase();
   } catch (err) {
     console.error("[lead-interactions-queries] email suppression check failed", err);
     return { suppressed: false, checkFailed: true };
   }
+  const r = await checkSuppression(db, tenantId, email);
+  if (r.checkFailed) console.error("[lead-interactions-queries] email suppression check failed", r.error);
+  return { suppressed: r.suppressed, checkFailed: r.checkFailed };
 }
 
 // Must match the columns migration 093 added so call rows render with
