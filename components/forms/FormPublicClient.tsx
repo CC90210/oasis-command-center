@@ -34,6 +34,7 @@ import {
 import { SafeLogo } from "@/components/brand/SafeLogo";
 import { trackEvent, getOrCreateVisitId } from "@/lib/offers/tracking-client";
 import { appendPreservedParams } from "@/lib/offers/preserve-query";
+import { safeFormRedirect } from "@/lib/forms/redirect-url";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
 import { contactGateAction, contactHandoff, hasReachableContact, typedContact } from "@/lib/forms/contact-gate";
 import { HONEYPOT_BODY_KEY, reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
@@ -906,8 +907,12 @@ export function FormPublicClient({
       typeof routeTo === "string" && routeTo
         ? appendPreservedParams(routeTo, { ...utmFromUrlRef.current, v: getOrCreateVisitId() ?? undefined })
         : data.redirect_url || redirectUrl;
-    if (target) {
-      window.location.href = target;
+    // The save routes now refuse anything but an http(s) address or a path on
+    // this site; this also covers a value stored before they did. A
+    // javascript: URL here would run in this origin for every visitor.
+    const safeTarget = safeFormRedirect(target);
+    if (safeTarget) {
+      window.location.href = safeTarget;
     } else {
       setDone(true);
     }

@@ -418,6 +418,44 @@ async function main() {
     for (const [what, run] of writes(FORM_A)) assert.equal((await call(run())).status, 401, what);
   });
 
+  // A form's redirect_url is opened with window.location.href on the public
+  // page, so both save routes store only the checked value and refuse the rest
+  // with the table unchanged (2026-10-19 audit; lib/forms/redirect-url.ts).
+  await check("A's owner: create and change store only a checked redirect, and refuse a script URL, another host or a non-string", async () => {
+    await login(OWNER_A.user);
+    const redirectOf = async (id: string) =>
+      (await db.execute({ sql: "SELECT redirect_url FROM forms WHERE id = ?", args: [id] })).rows[0]?.redirect_url ?? null;
+    const before = await formsTable();
+    for (const bad of ["javascript:alert(1)", "//evil.example/x", "/\\evil.example", false, ["example.com/thanks"]]) {
+      const refused = await call(listRoute.POST(req("POST", "/api/forms", { slug: "made-with-redirect", name: "Made", steps: VALID_STEPS, redirect_url: bad })));
+      assert.equal(refused.status, 400, `create with ${JSON.stringify(bad)}: HTTP ${refused.status}`);
+      assert.equal(refused.body.error, "invalid_redirect_url");
+    }
+    assert.equal(await formsTable(), before, "a refused create wrote a form");
+
+    const created = await call(
+      listRoute.POST(req("POST", "/api/forms", { slug: "made-with-redirect", name: "Made", steps: VALID_STEPS, redirect_url: "example.com/thanks" })),
+    );
+    assert.equal(created.status, 200, created.text);
+    const id = (created.body.form as { id: string }).id;
+    assert.equal(await redirectOf(id), "https://example.com/thanks", "a bare domain is stored as https");
+
+    const patch = (redirect_url: unknown) =>
+      call(formRoute.PATCH(req("PATCH", `/api/forms/${id}`, { redirect_url }), params({ id })));
+    const kept = await patch("/.//evil.example/x");
+    assert.equal(kept.status, 200, kept.text);
+    assert.equal(await redirectOf(id), "/.//evil.example/x", "a path is stored as typed, which the browser resolves on this site");
+    for (const bad of ["javascript:alert(1)", "/\t/evil.example", true, 42]) {
+      const refused = await patch(bad);
+      assert.equal(refused.status, 400, `change to ${JSON.stringify(bad)}: HTTP ${refused.status}`);
+      assert.equal(await redirectOf(id), "/.//evil.example/x", `a refused change to ${JSON.stringify(bad)} left the stored redirect alone`);
+    }
+    assert.equal((await patch("   ")).status, 200);
+    assert.equal(await redirectOf(id), null, "a blank redirect clears it");
+    assert.equal((await call(formRoute.DELETE(req("DELETE", `/api/forms/${id}`), params({ id })))).status, 200);
+    assert.equal(await formsTable(), before, "the round trip left a form behind");
+  });
+
   // ── 2. another workspace's form id is refused on every route ──────────────
   await check("B's owner, given A's form id: 404 on read, change, delete and mint-link; A's form unchanged", async () => {
     await login(USERS.clientB);
