@@ -70,6 +70,7 @@ import {
 } from "@/lib/ai/usage";
 import { sseErrorFrame } from "@/lib/ai/usage-codes";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
+import { keepAlive } from "@/lib/os/runs/keepalive";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import { readEffectiveAgentEngine } from "@/lib/ai/agent-engine-store";
 
@@ -424,63 +425,75 @@ export async function POST(req: NextRequest) {
         send("error", { message: resumeStreamError });
       }
 
+      // ---- The post-turn tail --------------------------------------------
+      // Persist the resumed reply and add the session's totals: ONE job, handed
+      // to keepAlive BEFORE the stream closes, while the request is still live.
+      // On Cloudflare Workers the request is cancelled once the response has
+      // ended, and work nobody gave to ctx.waitUntil dies with it, so a tail run
+      // after the close never saved the reply (same as /api/chat; 2026-10-20
+      // audit, confirmed in workerd). Registering is a few microtasks, never a
+      // database round trip, and `done` follows at once. The steps and their
+      // error handling are unchanged; keepAlive also logs a step that throws.
+      const postTurn = (async () => {
+        // ---- Phase G: persist the resumed assistant turn -------------------
+        // Writes a chat_messages row tied to the same session_id as the paused
+        // turn so the conversation reads back as one logical thread. Includes
+        // a short header noting which tool just resolved + how it terminated,
+        // so audit consumers can reconstruct the tool chain even without
+        // joining against a separate tool_execution_log table.
+        const headerLines: string[] = [
+          `[resume after tool: ${toolUseId.slice(0, 16)}${normalizedResult.is_error ? " — bridge_error" : ""}]`,
+        ];
+        if (toolCallsExecuted.length > 0) {
+          headerLines.push(
+            `tools_in_turn: ${toolCallsExecuted.map((t) => `${t.name}${t.ok ? "" : "(error)"}`).join(", ")}`,
+          );
+        }
+        const latencyMs = Date.now() - startedAt;
+        // Shared chat_messages writer (lib/chat-persistence). Reuses the
+        // same vaultSecretsForRedaction we fetched once before the
+        // stream opened — one DB round-trip per turn covers both the
+        // live SSE scrub and the persist-time scrub.
+        await persistAssistantTurn({
+          sessionId,
+          tenantId,
+          content: resumedText,
+          prefix: headerLines.join("\n"),
+          inputTokens: resumeUsageIn,
+          outputTokens: resumeUsageOut,
+          latencyMs,
+          error: resumeStreamError,
+          vaultSecrets: vaultSecretsForRedaction,
+        });
+        // chat_sessions running totals — ADDED through the same one-statement
+        // SQL increment /api/chat uses (lib/chat-persistence.ts), so two turns
+        // finishing together both land. As in /api/chat, tokens and cost move
+        // TOGETHER and only when the resumed calls' cost is known, so the row
+        // never pairs tokens with a cost that does not include them. The
+        // resumed loop counts on from the paused totals, which the paused
+        // request already added, so only the tokens after them are new.
+        try {
+          await addToSessionTotals({
+            sessionId,
+            tenantId,
+            delta: sessionTotalsDelta({
+              end: resumeTokens,
+              start: { inputTokens: resumeState.totalIn, outputTokens: resumeState.totalOut },
+              meter,
+            }),
+          });
+        } catch (sessErr) {
+          console.error("[chat/resume.session_totals] the session's running totals were not updated", {
+            tenantId,
+            sessionId,
+            error: sessErr instanceof Error ? sessErr.message : String(sessErr),
+          });
+        }
+      })();
+      await keepAlive(postTurn, "chat.resume.post-turn");
+
       send("done", {});
       controller.close();
-
-      // ---- Phase G: persist the resumed assistant turn -------------------
-      // Writes a chat_messages row tied to the same session_id as the paused
-      // turn so the conversation reads back as one logical thread. Includes
-      // a short header noting which tool just resolved + how it terminated,
-      // so audit consumers can reconstruct the tool chain even without
-      // joining against a separate tool_execution_log table.
-      const headerLines: string[] = [
-        `[resume after tool: ${toolUseId.slice(0, 16)}${normalizedResult.is_error ? " — bridge_error" : ""}]`,
-      ];
-      if (toolCallsExecuted.length > 0) {
-        headerLines.push(
-          `tools_in_turn: ${toolCallsExecuted.map((t) => `${t.name}${t.ok ? "" : "(error)"}`).join(", ")}`,
-        );
-      }
-      const latencyMs = Date.now() - startedAt;
-      // Shared chat_messages writer (lib/chat-persistence). Reuses the
-      // same vaultSecretsForRedaction we fetched once before the
-      // stream opened — one DB round-trip per turn covers both the
-      // live SSE scrub and the persist-time scrub.
-      await persistAssistantTurn({
-        sessionId,
-        tenantId,
-        content: resumedText,
-        prefix: headerLines.join("\n"),
-        inputTokens: resumeUsageIn,
-        outputTokens: resumeUsageOut,
-        latencyMs,
-        error: resumeStreamError,
-        vaultSecrets: vaultSecretsForRedaction,
-      });
-      // chat_sessions running totals — ADDED through the same one-statement
-      // SQL increment /api/chat uses (lib/chat-persistence.ts), so two turns
-      // finishing together both land. As in /api/chat, tokens and cost move
-      // TOGETHER and only when the resumed calls' cost is known, so the row
-      // never pairs tokens with a cost that does not include them. The
-      // resumed loop counts on from the paused totals, which the paused
-      // request already added, so only the tokens after them are new.
-      try {
-        await addToSessionTotals({
-          sessionId,
-          tenantId,
-          delta: sessionTotalsDelta({
-            end: resumeTokens,
-            start: { inputTokens: resumeState.totalIn, outputTokens: resumeState.totalOut },
-            meter,
-          }),
-        });
-      } catch (sessErr) {
-        console.error("[chat/resume.session_totals] the session's running totals were not updated", {
-          tenantId,
-          sessionId,
-          error: sessErr instanceof Error ? sessErr.message : String(sessErr),
-        });
-      }
     },
   });
 

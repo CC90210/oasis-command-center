@@ -552,6 +552,10 @@ const TESTS = [
   // Plan 3 Task 11: the page shell's toast keying (lib/skills/view.ts toastFor) - a C4 re-announce
   // of the same pending edit must not change its key. No I/O, no React import.
   "tests/skills-tab-shell.test.ts",
+  // Cloud chat (/api/chat and /api/chat/resume) keeps its reply when the platform cancels what it was not
+  // handed: the post-turn tail is one job given to keepAlive BEFORE the stream closes (cloud chat tail;
+  // 2026-10-20 audit). Real handlers, and a platform that dies with the response as workerd does.
+  "tests/cloud-chat-persists-after-close.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
