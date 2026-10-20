@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { formsSession } from "@/lib/forms/access";
+import { parseRedirectInput } from "@/lib/forms/redirect-url";
 import { deleteFormWithOfferPage, offerPagesDb } from "@/lib/offer-pages/store";
 import {
   parseFormSteps,
@@ -132,9 +133,14 @@ export async function PATCH(
     patch.enabled = Boolean(body.enabled);
   }
   if ("redirect_url" in body) {
-    patch.redirect_url = body.redirect_url
-      ? String(body.redirect_url).slice(0, 2000)
-      : null;
+    const redirect = parseRedirectInput(body.redirect_url);
+    if (!redirect.ok) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_redirect_url", reason: "Use a web address (https://...) or a path on this site." },
+        { status: 400 },
+      );
+    }
+    patch.redirect_url = redirect.value;
   }
 
   if (Object.keys(patch).length === 0) {

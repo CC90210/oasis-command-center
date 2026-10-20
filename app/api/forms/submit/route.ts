@@ -1645,6 +1645,15 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         .eq("id", link.lead_id)
         .eq("tenant_id", form.tenant_id)
         .maybeSingle();
+      // maybeSingle() resolves { data: null, error } on a database blip rather
+      // than throwing. Read as "no existing data", the write below would
+      // REPLACE the lead's whole data object with only the owner and identity
+      // fields: the name, stage, source and notes gone. The consent-receipt
+      // and OASIS-enrich blocks below already refuse this; this one did not
+      // (2026-10-19 audit). The catch logs it and the submission carries on.
+      if (cur.error) {
+        throw new Error(`owner map read failed: ${cur.error.message}`);
+      }
       const curData =
         (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
       const identityGaps: Record<string, unknown> = {};

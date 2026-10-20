@@ -23,9 +23,8 @@
  * diagnosing is worse than the bug.
  */
 import { NextResponse } from "next/server";
-import { resolveSessionContext } from "@/lib/api-auth";
 import { describeLanes, laneCredentials } from "@/lib/notify/telegram";
-import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,14 +46,17 @@ async function tg(token: string, method: string, body?: unknown): Promise<TgResu
 }
 
 export async function GET() {
-  // Same gate the other diagnostic routes use. This reveals which chat
-  // receives lead alerts, which is not public information.
-  const sess = await resolveSessionContext();
-  if (!sess.ok) {
-    return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
-  }
-  if (!(await canAccessSharedTenantResource(sess))) {
-    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  // Platform operators only. The lanes are OASIS's own alert bots and private
+  // chats, so they belong to no client workspace. The previous gate,
+  // canAccessSharedTenantResource, admits every role of every NON-OASIS
+  // workspace, so any client's user could read OASIS's bot names, chat ids and
+  // chat titles (2026-10-19 audit). Same answers as the other operator-only
+  // diagnostics (app/api/state-health): signed out 401, anyone else 404.
+  const op = await resolvePlatformOperator();
+  if (!op.operator) {
+    return op.reason === "no_session"
+      ? NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 })
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
   // Every lane, not just CC's. The first version of this route inspected only
