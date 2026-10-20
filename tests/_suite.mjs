@@ -551,6 +551,10 @@ const TESTS = [
   // Plan 3 Task 11: the page shell's toast keying (lib/skills/view.ts toastFor) - a C4 re-announce
   // of the same pending edit must not change its key. No I/O, no React import.
   "tests/skills-tab-shell.test.ts",
+  // Bridge/CLI chat saves the assistant's reply: the write is handed to ctx.waitUntil and
+  // the stream ends only after it has landed (bridge chat saved no replies; 2026-10-20 audit),
+  // and the route's disconnect cancel is handed to the platform too. Real tee, real route.
+  "tests/bridge-chat-persistence.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
