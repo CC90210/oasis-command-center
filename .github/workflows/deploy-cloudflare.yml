@@ -327,8 +327,27 @@ jobs:
           CF_TURN_KEY_API_TOKEN: ${{ secrets.CF_TURN_KEY_API_TOKEN }}
           BOOKING_AGENT_SECRET_BEA: ${{ secrets.BOOKING_AGENT_SECRET_BEA }}
 
+      # A re-run of an older CI run fires workflow_run again with that
+      # run's head_sha, and would put an older commit back on production.
+      # Only the commit still at the tip of its branch deploys, checked
+      # right before the deploy, so a newer push always wins.
+      - name: Still the newest commit?
+        id: fresh
+        if: github.event_name == 'workflow_run'
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          tip="$(git ls-remote origin "refs/heads/${HEAD_BRANCH}" | cut -f1)"
+          if [ "$tip" = "$HEAD_SHA" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${HEAD_SHA} is no longer the tip of ${HEAD_BRANCH} (now ${tip:-unknown}); the newer commit deploys instead."
+          fi
+
       - name: Deploy to Cloudflare Workers
-        if: steps.preflight.outputs.ready == 'true'
+        if: steps.preflight.outputs.ready == 'true' && steps.fresh.outputs.fresh != 'false'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
