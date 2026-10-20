@@ -20,12 +20,21 @@
  * failure on top of the first.
  */
 
-/** The route's answers that mean a fault the visitor cannot fix, worth a beacon. */
+/**
+ * The route's answers that mean a fault the visitor cannot fix, worth a beacon.
+ *
+ * request_payload_too_large is here though a visitor can fix it (send fewer
+ * files): they are told so in a sentence, but may give up instead of retrying,
+ * and the route refused the body without reading it, so the beacon is the only
+ * copy of their contact fields there will ever be (a platform 413 with no JSON
+ * answer is a fault by the first clause of isSubmitFault already).
+ */
 export const BEACON_ERRORS: ReadonlySet<string> = new Set([
   "server_error",
   "form_unavailable",
   "upload_unavailable",
   "consent_record_unavailable",
+  "request_payload_too_large",
 ]);
 
 /**

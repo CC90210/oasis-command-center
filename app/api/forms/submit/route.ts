@@ -125,6 +125,8 @@ import { normalizedAccept } from "@/lib/forms/file-type";
 import { isHoneypotFilled } from "@/lib/forms/honeypot";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
+import { bodyRefusal, readBoundedJson, SUBMIT_BODY_CAP_BYTES } from "@/lib/forms/bounded-body";
+import { answerTooLargeSentence, boundAnswers, type AnswerRefusal } from "@/lib/forms/answer-limits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -544,6 +546,49 @@ function formUnavailable(where: string, error: string): NextResponse {
   return NextResponse.json({ ok: false, error: "form_unavailable" }, { status: 503 });
 }
 
+/**
+ * The answer when a form's stored definition does not parse: the stable code
+ * only. Its path and reason (which can quote what an operator typed) go to the
+ * log, where whoever fixes the form reads them, and not to an anonymous caller.
+ */
+function formDefinitionCorrupt(where: string, formId: string, err: FormDefinitionError): NextResponse {
+  console.error("[forms.submit] form definition corrupt", { where, form_id: formId, path: err.path, reason: err.reason });
+  return NextResponse.json({ ok: false, error: "form_definition_corrupt" }, { status: 500 });
+}
+
+/** A step's answers that cannot go on, as the browser is told. */
+function refuseAnswers(refusal: AnswerRefusal): NextResponse {
+  if (refusal.kind === "invalid_answers") {
+    return NextResponse.json({ ok: false, error: "invalid_answers" }, { status: 400 });
+  }
+  return NextResponse.json(
+    { ok: false, error: "answer_too_large", field: refusal.field, message: answerTooLargeSentence(refusal) },
+    { status: 413 },
+  );
+}
+
+/**
+ * One step's answers against their limits (lib/forms/answer-limits.ts). An
+ * answer over its limit is cut in place, so the lead is kept, and logged by
+ * field and length, never by content; one that cannot be cut is refused and
+ * nothing is written. null when the step may go on.
+ */
+function boundStepAnswers(
+  where: string,
+  formId: string,
+  stepIndex: number,
+  payload: Record<string, unknown>,
+  fields: FormStep["fields"],
+): NextResponse | null {
+  const bounded = boundAnswers(payload, fields);
+  if (bounded.cuts.length > 0) {
+    console.warn("[forms.submit] answers cut to their limit", { where, form_id: formId, step_index: stepIndex, cuts: bounded.cuts });
+  }
+  if (!bounded.refusal) return null;
+  console.warn("[forms.submit] answers refused", { where, form_id: formId, step_index: stepIndex, refusal: bounded.refusal });
+  return refuseAnswers(bounded.refusal);
+}
+
 /** The file types a field can take, by the names a visitor knows them by. */
 const FILE_TYPE_NAMES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -623,12 +668,7 @@ async function refuseInvalidAnonymousFirstStep(input: {
     steps = parseFormSteps(resolved.form.steps);
   } catch (err) {
     if (err instanceof FormDefinitionError) {
-      return {
-        refusal: NextResponse.json(
-          { ok: false, error: "form_definition_corrupt", path: err.path, reason: err.reason },
-          { status: 500 },
-        ),
-      };
+      return { refusal: formDefinitionCorrupt("first_step", resolved.form.id, err) };
     }
     throw err;
   }
@@ -642,6 +682,11 @@ async function refuseInvalidAnonymousFirstStep(input: {
   }
   const payload =
     input.payload && typeof input.payload === "object" ? (input.payload as Record<string, unknown>) : {};
+  // The answers' limits, before a lead is created or merged: an answer over its
+  // limit is cut here, in the request's own payload, so the identity below and
+  // every write after it read the cut answer; one that cannot be cut is refused.
+  const tooBig = boundStepAnswers("first_step", resolved.form.id, 0, payload, steps[0].fields);
+  if (tooBig) return { refusal: tooBig };
   const inlineFieldNames = Object.entries(payload)
     .filter(([, value]) => isInlineFile(value))
     .map(([fieldName]) => fieldName);
@@ -709,12 +754,7 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   try {
     steps = parseFormSteps(form.steps);
   } catch (err) {
-    if (err instanceof FormDefinitionError) {
-      return NextResponse.json(
-        { ok: false, error: "form_definition_corrupt", path: err.path, reason: err.reason },
-        { status: 500 },
-      );
-    }
+    if (err instanceof FormDefinitionError) return formDefinitionCorrupt("router", form.id, err);
     throw err;
   }
   if (steps.length === 0) {
@@ -728,6 +768,9 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   for (let i = 0; i < steps.length; i += 1) {
     const raw = given[i];
     const stepPayload = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    // The same limits as any step's answers, before they are judged.
+    const tooBig = boundStepAnswers("router", form.id, i, stepPayload, steps[i].fields);
+    if (tooBig) return tooBig;
     // A router takes no files: an inline file is not an answer here.
     const invalid = refuseInvalidStep({
       formSlug: form.slug,
@@ -841,12 +884,18 @@ export async function POST(req: NextRequest) {
   // The body is read HERE, before the handler, so the catch still holds the
   // merchant's submission when the handler crashes: captureSubmitFailure
   // dead-letters it (recoverable) and pages sunbiz-ops on the decay ladder.
-  let rawBody: unknown;
-  try {
-    rawBody = await req.json();
-  } catch {
-    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
-  }
+  //
+  // Through a byte cap (lib/forms/bounded-body.ts): this route is open to
+  // anyone, and `await req.json()` held the whole body, tens of MB if the
+  // platform let it through, before any check ran. A body that declares more
+  // than the cap is refused unread; one that does not say, or says wrong, is
+  // cut off at it. The cap holds every file the route accepts (60 MiB decoded);
+  // the answers are held one by one (lib/forms/answer-limits.ts). The failure
+  // beacon on the form page reports a refusal, so the visitor's contact fields
+  // are kept (lib/forms/submit-failure-beacon.ts BEACON_ERRORS).
+  const read = await readBoundedJson(req, SUBMIT_BODY_CAP_BYTES);
+  if (!read.ok) return bodyRefusal("forms.submit", req, read, SUBMIT_BODY_CAP_BYTES);
+  const rawBody: unknown = read.body;
   const trapped = honeypotDrop(req, rawBody);
   if (trapped) return trapped;
   try {
@@ -976,6 +1025,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       });
       if ("refusal" in judged) return judged.refusal;
       identity = judged.identity;
+    } else {
+      // initialize_only records no step, but the contact it was sent still
+      // becomes the new lead's name, email and phone: held to the same limits,
+      // with no step's fields to look them up in (the form is read inside
+      // initAnonymousLead).
+      const tooBig = boundStepAnswers("initialize", `${tenantSlug}/${formSlug}`, 0, identity, []);
+      if (tooBig) return tooBig;
     }
     const anonResult = await initAnonymousLead({
       tenantSlug,
@@ -1094,12 +1150,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   try {
     steps = parseFormSteps(form.steps);
   } catch (err) {
-    if (err instanceof FormDefinitionError) {
-      return NextResponse.json(
-        { ok: false, error: "form_definition_corrupt", path: err.path, reason: err.reason },
-        { status: 500 },
-      );
-    }
+    if (err instanceof FormDefinitionError) return formDefinitionCorrupt("step", form.id, err);
     throw err;
   }
   if (stepIndex >= steps.length) {
@@ -1108,6 +1159,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       { status: 400 },
     );
   }
+
+  // This step's answers against their limits (lib/forms/answer-limits.ts), before
+  // anything reads them: an answer over its limit is cut in place, a payload
+  // that cannot be cut is refused with nothing written. A first anonymous step
+  // was held to them already, before its lead was made; this is a no-op then.
+  const tooBig = boundStepAnswers("step", form.id, stepIndex, payload, steps[stepIndex].fields);
+  if (tooBig) return tooBig;
 
   // Sequential-progress + required-field enforcement (Codex pass 4,
   // 2026-05-18). Without these checks an attacker with a valid token
@@ -1938,11 +1996,18 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         const have = curData[k];
         if (have === undefined || have === null || have === "") identityGaps[k] = v;
       }
-      await db
+      // The adapter answers { error } rather than throwing, so an unchecked
+      // update reported success while the lead silently kept a blank Owner tab
+      // and a card nobody could call (2026-10-19 audit). Best-effort still: the
+      // catch below logs it and the submission carries on.
+      const upd = await db
         .from("tenant_records")
         .update({ data: { ...curData, ...ownerFields, ...identityGaps } })
         .eq("id", link.lead_id)
         .eq("tenant_id", form.tenant_id);
+      if (upd.error) {
+        throw new Error(`owner map write failed: ${upd.error.message}`);
+      }
     }
   } catch (err) {
     console.error("[forms.submit.owner_map.failed]", {
@@ -2235,11 +2300,16 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         }
         const curData =
           (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
-        await db
+        // Checked, like the read above: an unchecked update left the lead
+        // blank in the pipeline with nothing recording that it had not landed.
+        const upd = await db
           .from("tenant_records")
           .update({ data: { ...curData, ...patch } })
           .eq("id", link.lead_id)
           .eq("tenant_id", form.tenant_id);
+        if (upd.error) {
+          throw new Error(`oasis enrich write failed: ${upd.error.message}`);
+        }
       }
     } catch (err) {
       console.error("[forms.submit.oasis_enrich.failed]", {
@@ -2822,17 +2892,23 @@ async function initAnonymousLead(input: {
       .update({ data: merged })
       .eq("id", existing.id)
       .eq("tenant_id", form.tenant_id);
+    // A merge that did not land is logged whatever the form (it used to be
+    // silent for every form but the calendar ones, 2026-10-19 audit): the
+    // visitor's answers are in the step row either way, and the lead keeps the
+    // contact details it had.
+    if (mergedWrite.error) {
+      console.error("[forms.submit.returning_lead_merge.failed]", {
+        lead_id: existing.id,
+        form_slug: form.slug,
+        error: mergedWrite.error.message,
+      });
+    }
     // AI audit, COMMAND and FLEET open the calendar right after this step,
     // and the booking reads the lead's contact. If the returning visitor's new
     // details did not land, the calendar would book against the old email or
     // phone, so the step is refused and retried (Codex review of #667). Every
     // other form keeps its old behaviour.
     if (mergedWrite.error && isBookableOasisIntake && isEarlyPublicBookingFormSlug(form.slug)) {
-      console.error("[forms.submit.returning_lead_merge.failed]", {
-        lead_id: existing.id,
-        form_slug: form.slug,
-        error: mergedWrite.error.message,
-      });
       return { ok: false, error: "funnel_stage_write_unavailable", status: 503 };
     }
     lead = { id: existing.id, data: merged };
@@ -2931,11 +3007,20 @@ async function initAnonymousLead(input: {
       repAssign?.name || (isFundingTenant(tenantSlug) ? "the SunBiz team" : "the OASIS AI team");
   }
   if (Object.keys(patch).length > 0) {
-    await db
+    const patched = await db
       .from("tenant_records")
       .update({ data: { ...lead.data, ...patch } })
       .eq("id", lead.id)
       .eq("tenant_id", form.tenant_id);
+    // Best-effort, as the comment above says, but not silent: a lead without
+    // its signer name sends a drip that renders blank, and nothing said so.
+    if (patched.error) {
+      console.error("[forms.submit.lead_patch.failed]", {
+        lead_id: lead.id,
+        form_slug: form.slug,
+        error: patched.error.message,
+      });
+    }
   }
 
   return {

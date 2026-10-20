@@ -26,6 +26,7 @@ import { verifyFormLink } from "@/lib/form-links";
 import { rateLimit } from "@/lib/rate-limit";
 import { LEAD_DOC_BUCKET, MAX_LEAD_DOC_BYTES } from "@/lib/lead-documents";
 import { sanitizeStorageFilename } from "@/lib/storage-helpers";
+import { bodyRefusal, readBoundedJson, SMALL_BODY_CAP_BYTES } from "@/lib/forms/bounded-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,13 +49,21 @@ type Body = {
   size_bytes?: number;
 };
 
+/** The browser's answer to a link that could not be signed. The storage client's own words go to the log. */
+function signFailed(formId: string, detail: string): NextResponse {
+  console.error("[forms.upload-url] could not sign an upload", { form_id: formId, error: detail });
+  return NextResponse.json({ ok: false, error: "sign_failed" }, { status: 500 });
+}
+
 export async function POST(req: NextRequest) {
-  let body: Body;
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
-  }
+  // The body is a signed link, a file name and a type (about 0.4 KB), read
+  // through a byte cap that refuses before reading and cuts off at the cap
+  // (lib/forms/bounded-body.ts).
+  const read = await readBoundedJson(req, SMALL_BODY_CAP_BYTES);
+  if (!read.ok) return bodyRefusal("forms.upload-url", req, read, SMALL_BODY_CAP_BYTES);
+  // A JSON value that is not an object (null, a list) has no token: the check
+  // below says so, where `null.token` used to throw unhandled.
+  const body = (read.body && typeof read.body === "object" ? read.body : {}) as Body;
 
   if (!body.token) {
     return NextResponse.json({ ok: false, error: "missing_token" }, { status: 400 });
@@ -130,12 +139,17 @@ export async function POST(req: NextRequest) {
   // so direct-to-Storage and inline uploads land identically.
   const storagePath = `${form.tenant_id}/${link.lead_id}/${Date.now()}_${sanitizeStorageFilename(filename)}`;
 
-  const signed = await db.storage.from(LEAD_DOC_BUCKET).createSignedUploadUrl(storagePath);
+  // `.storage` itself throws where storage is not set up, so the call sits in a
+  // try: the visitor's file field says "try again" either way, and no thrown
+  // error escapes as a bare 500.
+  let signed;
+  try {
+    signed = await db.storage.from(LEAD_DOC_BUCKET).createSignedUploadUrl(storagePath);
+  } catch (err) {
+    return signFailed(form.id, err instanceof Error ? err.message : String(err));
+  }
   if (signed.error || !signed.data) {
-    return NextResponse.json(
-      { ok: false, error: `sign_failed: ${signed.error?.message || "unknown"}` },
-      { status: 500 },
-    );
+    return signFailed(form.id, signed.error?.message || "unknown");
   }
 
   return NextResponse.json({

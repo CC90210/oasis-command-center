@@ -23,6 +23,7 @@ import { verifyFormLink, type FormLinkPayload } from "@/lib/form-links";
 import { rateLimit } from "@/lib/rate-limit";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { bodyRefusal, readBoundedJson, SMALL_BODY_CAP_BYTES } from "@/lib/forms/bounded-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,12 +34,13 @@ export const dynamic = "force-dynamic";
 // "Viewed" (in /api/forms/submit). The old POST_VIEWED_STAGES guard is gone.
 
 export async function POST(req: NextRequest) {
-  let body: { token?: string };
-  try {
-    body = (await req.json()) as { token?: string };
-  } catch {
-    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
-  }
+  // The body is a signed link (144 characters), read through a byte cap that
+  // refuses before reading and cuts off at the cap (lib/forms/bounded-body.ts).
+  const read = await readBoundedJson(req, SMALL_BODY_CAP_BYTES);
+  if (!read.ok) return bodyRefusal("forms.view", req, read, SMALL_BODY_CAP_BYTES);
+  // A JSON value that is not an object (null, a list) has no token: the token
+  // check below says so, where `null.token` used to throw unhandled.
+  const body = (read.body && typeof read.body === "object" ? read.body : {}) as { token?: string };
 
   const sigResult = verifyFormLink(body.token);
   if (!sigResult.ok) {
@@ -124,13 +126,24 @@ export async function POST(req: NextRequest) {
   const resolvedIp = getClientIp(req);
   const ipHeader = resolvedIp === "unknown" ? null : resolvedIp;
   const userAgent = req.headers.get("user-agent")?.slice(0, 500) || null;
-  await db.from("form_views").insert({
+  const viewRow = await db.from("form_views").insert({
     form_id: form.id,
     tenant_id: form.tenant_id,
     lead_id: link.lead_id,
     ip_address: ipHeader,
     user_agent: userAgent,
   });
+  // The adapter answers { error } rather than throwing, so this insert failed
+  // in silence (a deployment without the table recorded no views at all and
+  // nothing said so). It stays best-effort: a view that did not land must not
+  // stop the stage change below, so it is logged and the route goes on.
+  if (viewRow.error) {
+    console.error("[forms.view] the view row was not recorded", {
+      form_id: form.id,
+      lead_id: link.lead_id,
+      error: viewRow.error.message,
+    });
+  }
 
   // Now the stage transition. Read the lead first — only patch if the
   // lead is at `sent_application` (the natural pre-viewed stage).

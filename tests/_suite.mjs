@@ -136,6 +136,12 @@ const TESTS = [
   // A rejected first step of a public form created a lead, or rewrote a
   // returning merchant's, before the 400. Every rejection, new and existing.
   "tests/forms-submit-validate-first.test.ts",
+  // The public form routes take a bounded request (a body is refused before it is
+  // read or cut off at its cap, and an answer has a length limit), keep the
+  // database's and storage's words to themselves, and log the writes that fail
+  // (10-19 audit); the Meet room routes answer when their database client cannot
+  // be built. Real routes on libSQL, mutation-checked.
+  "tests/public-forms-bounded.test.ts",
   // The form builder was SunBiz-hardcoded for every tenant. Pins the tenant
   // boundary: sun keeps its presets, nobody else ever sees them, unknown
   // tenants get NO stage vocabulary (fail closed).

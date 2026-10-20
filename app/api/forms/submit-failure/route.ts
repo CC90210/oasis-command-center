@@ -22,13 +22,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { captureSubmitFailure } from "@/lib/forms/submit-failure-capture";
+import { readBoundedJson } from "@/lib/forms/bounded-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** A failure report is contact fields + an error string. 64KB is generous;
- *  anything bigger is not a failure report. */
-const BODY_CAP_BYTES = 64_000;
+/** A failure report is contact fields + an error string. 64 KiB is the most a
+ *  browser sends with keepalive, which is how the beacon sends (so every report
+ *  a browser can send fits); anything bigger is not a failure report. In bytes,
+ *  read through a cap that refuses before reading and cuts off at the cap: it
+ *  used to be 64,000 characters, measured after `req.text()` had held the whole
+ *  body (lib/forms/bounded-body.ts). */
+const BODY_CAP_BYTES = 64 * 1024;
 
 /** The consent decision a beacon carries: true or false per channel, nothing else. */
 function consentLedgerFrom(raw: unknown): { email?: boolean; sms?: boolean } | null {
@@ -50,16 +55,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "rate_limited" }, { status: 429 });
     }
 
-    const raw = await req.text();
-    if (raw.length > BODY_CAP_BYTES) {
-      return NextResponse.json({ ok: false, error: "too_large" }, { status: 413 });
+    const read = await readBoundedJson(req, BODY_CAP_BYTES);
+    if (!read.ok) {
+      return read.reason === "too_large"
+        ? NextResponse.json({ ok: false, error: "too_large" }, { status: 413 })
+        : NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
     }
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
-    }
+    const body = read.body as Record<string, unknown>;
 
     await captureSubmitFailure({
       source: "client_beacon",

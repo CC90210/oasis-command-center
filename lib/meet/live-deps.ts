@@ -5,10 +5,12 @@
  * the session machinery.
  */
 import "server-only";
+import type { NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { keepAlive } from "@/lib/os/runs/keepalive";
 import { getTursoClient } from "@/lib/turso";
 import type { MeetDeps } from "./handlers";
+import { meetFailure } from "./http";
 import { meetIceServers } from "./ice";
 import { r2MeetStorage } from "./recording";
 import { meetRecordingDeps } from "./recording-deps";
@@ -34,4 +36,25 @@ export function liveMeetDeps(): MeetDeps {
     },
     now: () => new Date(),
   };
+}
+
+/**
+ * Run a room route with the live dependencies. Building them can throw (the
+ * database client is made here, and getTursoClient throws where Turso is not
+ * configured), and out in the route file that was an unhandled 500 with no body
+ * and no log of its own, on a route a guest with no account hits. It is answered
+ * here as a handler answers any failure (meetFailure): logged under the route's
+ * name, one stable JSON answer.
+ */
+export async function withLiveMeetDeps(
+  where: string,
+  run: (deps: MeetDeps) => Promise<NextResponse>,
+): Promise<NextResponse> {
+  let deps: MeetDeps;
+  try {
+    deps = liveMeetDeps();
+  } catch (err) {
+    return meetFailure(err, where);
+  }
+  return run(deps);
 }

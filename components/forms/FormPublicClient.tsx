@@ -245,6 +245,11 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
   request_payload_too_large:
     "Those files are too large to send together. Try uploading them a few at a time.",
   invalid_json: "Something went wrong sending your answers. Please try again.",
+  // The answers the form sent are not ones it can take (more keys than the step
+  // has fields, a key too long): only a script sends these. A refresh is the fix.
+  invalid_answers: "Something went wrong sending your answers. Please refresh the page and try again.",
+  // The route names the answer in its own sentence; this is the fallback.
+  answer_too_large: "One of your answers is too large to send. Please shorten it and try again.",
 
   // Merchant can fix these by changing how they got here.
   prior_step_incomplete:
