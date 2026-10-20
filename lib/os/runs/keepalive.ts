@@ -24,6 +24,7 @@
  */
 import "server-only";
 import { after } from "next/server";
+import { deploymentPlatform } from "@/lib/health/runtime-environment";
 
 export type KeepAlive = "waitUntil" | "after" | "detached";
 
@@ -54,7 +55,15 @@ export async function keepAlive(work: Promise<unknown>, label: string): Promise<
     after(() => guarded);
     return "after";
   } catch {
-    // Not inside a request (a test, a script): the promise simply runs on.
+    // Not inside a request (a test, a script): the promise simply runs on. On
+    // Cloudflare nothing then holds the work, so it can be cancelled when the
+    // response ends, which is the very loss keepAlive exists to prevent. That
+    // happens when the request context is already gone, as inside a stream's
+    // cancel(). No caller reads the returned mode, so it is said here, every
+    // time and with the caller's label (2026-10-20 review of #721).
+    if (deploymentPlatform() === "cloudflare") {
+      console.error("[os.runs.keepalive] detached on Cloudflare: nothing holds this work, so it may be cancelled when the response ends", { label });
+    }
     return "detached";
   }
 }
