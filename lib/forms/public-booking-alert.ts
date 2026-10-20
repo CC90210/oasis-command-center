@@ -6,7 +6,7 @@
  * stranger typed is HTML-escaped and length-capped: the alert goes to a Telegram
  * group, where a long or hostile "bottleneck" is read by people AND by agents.
  */
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { clipAndEscape, escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { PUBLIC_BOOKING_TIME_ZONE } from "@/lib/forms/public-booking";
 import { isMeetingLink } from "@/lib/website-sales-meeting";
 
@@ -44,7 +44,7 @@ export function buildBookedLeadAlert(input: {
   leadUrl: string;
 }): string {
   const e = escapeTelegramHtml;
-  const cap = (s: string, n: number) => e(s.trim().slice(0, n));
+  const cap = clipAndEscape;
   const lines = [
     `${CALENDAR_EMOJI} <b>${cap(input.offerName, 120)} booked</b>`,
     `<b>${cap(input.name || "New lead", 120)}</b>${input.company ? ` - ${cap(input.company, 120)}` : ""}`,
@@ -78,9 +78,8 @@ export function buildDetailsOnlyLeadAlert(input: {
   reason: DetailsOnlyReason;
   leadUrl: string;
 }): string {
-  const e = escapeTelegramHtml;
-  const cap = (s: string, n: number) => e(s.trim().slice(0, n));
-  const why = input.reason === "no_times" ? "Every open time was taken" : "The calendar would not load";
+  const cap = clipAndEscape;
+  const why =input.reason === "no_times" ? "Every open time was taken" : "The calendar would not load";
   return [
     `<b>${cap(input.offerName, 120)}: details left, no time picked</b>`,
     `<b>${cap(input.name || "New lead", 120)}</b>${input.company ? ` - ${cap(input.company, 120)}` : ""}`,

@@ -14,7 +14,7 @@
  * a confirmation email that reads differently on every submission is a support
  * burden, not a personalization win.
  */
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { clipAndEscape, escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
 import type { PublicFunnelStage } from "@/lib/forms/public-booking";
 import { AI_AUDIT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
@@ -201,11 +201,10 @@ export function leadRevenueAndBottleneck(source: Record<string, unknown>): { rev
  * Escaped and capped: a stranger typed the bottleneck.
  */
 export function alertLeadFactLines(source: Record<string, unknown>): string[] {
-  const e = escapeTelegramHtml;
   const { revenue, bottleneck } = leadRevenueAndBottleneck(source);
   const lines: string[] = [];
-  if (revenue) lines.push(`📊 Revenue: ${e(revenue.slice(0, 120))}`);
-  if (bottleneck) lines.push(`🚧 Bottleneck: ${e(bottleneck.slice(0, 300))}`);
+  if (revenue) lines.push(`📊 Revenue: ${clipAndEscape(revenue, 120)}`);
+  if (bottleneck) lines.push(`🚧 Bottleneck: ${clipAndEscape(bottleneck, 300)}`);
   return lines;
 }
 
@@ -302,7 +301,7 @@ export function buildAiAuditAlert(
   const detail = str(a.bottleneck_detail).trim();
   const printedWhole = detail.length <= 300 && bottleneck === bottleneckLabel(detail);
   if (detail && !printedWhole) {
-    lines.push("", `<b>In their words:</b>`, `<i>${e(detail.slice(0, 600))}</i>`);
+    lines.push("", `<b>In their words:</b>`, `<i>${clipAndEscape(detail, 600)}</i>`);
   }
 
   if (str(a.wants_call) === "yes") {

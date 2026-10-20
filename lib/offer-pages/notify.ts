@@ -27,7 +27,7 @@ import type { Client } from "@libsql/client";
 import { alertAudienceFor, pushWorkspaceAlert, type AlertDesk, type AlertPush } from "@/lib/notify/alert-route";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { workspaceTelegramOutcome } from "@/lib/notify/workspace-telegram";
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { clipAndEscape } from "@/lib/notify/telegram-format";
 import { isFirstSubmissionForLead } from "@/lib/forms/first-submission";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
@@ -56,11 +56,10 @@ export function buildOfferLeadAlert(
   answers: Record<string, unknown>,
   leadUrl?: string,
 ): string {
-  const e = escapeTelegramHtml;
-  const pick = (...keys: string[]) => {
+  const pick =(...keys: string[]) => {
     for (const k of keys) {
       const v = answers[k];
-      if (typeof v === "string" && v.trim()) return e(v.trim().slice(0, 200));
+      if (typeof v === "string" && v.trim()) return clipAndEscape(v, 200);
     }
     return "";
   };
@@ -70,7 +69,7 @@ export function buildOfferLeadAlert(
   const phone = pick("phone", "mobile", "owner_cell");
   const website = pick("website");
   return [
-    `New lead from the offer page "${e(offerName.slice(0, 120))}"`,
+    `New lead from the offer page "${clipAndEscape(offerName, 120)}"`,
     "",
     `${name}${company ? ` - ${company}` : ""}`,
     email ? `Email: ${email}` : "",
