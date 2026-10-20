@@ -162,6 +162,7 @@ function makeHandoffDb(assignedTo: string, inserts: Array<{ table: string; row: 
     Object.assign(builder, {
       select: chain, eq: chain, neq: chain, ilike: chain, contains: chain, order: chain,
       limit: chain, in: chain, gte: chain, like: chain,
+      or: chain, // the opt-out lookup's own-or-global scope (lib/email/suppression-scope.ts)
       insert: (row: Record<string, unknown>) => {
         op = "insert";
         inserts.push({ table, row });

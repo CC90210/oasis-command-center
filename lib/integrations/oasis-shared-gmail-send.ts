@@ -49,6 +49,7 @@ import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-s
 import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
 import { mailboxBrandConflict } from "@/lib/email/brand-for-tenant";
 import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
+import { OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
 import {
   OASIS_SUPPORT_FROM_NAME,
   OASIS_SUPPRESSION_BRAND,
@@ -303,7 +304,30 @@ export type OasisSharedSendArgs = {
    * See isOwnTicketReply for how narrow this is.
    */
   ownTicketReply?: OwnTicketReply | null;
+  /**
+   * AN ALERT TO OASIS'S OWN TEAM: the desk telling the founders about a new
+   * ticket or a missed reply time. Internal operational mail, not a commercial
+   * message, so the opt-out list does not stop it. An unsigned opt-out anyone
+   * can file for a founder's address used to silence the desk's alerts
+   * (reviewer of OCC #711). Honoured only when every recipient, To and Cc, is
+   * on the team list (isInternalTeamAlert).
+   */
+  internalAlert?: boolean | null;
 };
+
+/**
+ * Is this an alert to OASIS's own team, which the opt-out list does not stop?
+ * The caller's flag AND every recipient on the team list
+ * (OASIS_PIPELINE_ASSIGNMENT_EMAILS), so the flag can never carry mail to
+ * anyone else past an opt-out.
+ */
+export function isInternalTeamAlert(args: Pick<OasisSharedSendArgs, "internalAlert" | "to" | "cc">): boolean {
+  if (args.internalAlert !== true) return false;
+  const team = new Set<string>(OASIS_PIPELINE_ASSIGNMENT_EMAILS.map((a) => a.toLowerCase()));
+  const cc = Array.isArray(args.cc) ? args.cc : args.cc ? args.cc.split(",") : [];
+  const recipients = [args.to, ...cc].map((a) => (a || "").trim().toLowerCase()).filter(Boolean);
+  return recipients.length > 0 && recipients.every((a) => team.has(a));
+}
 
 /**
  * Who a reply to an own ticket is for: the ticket and the address it records
@@ -334,10 +358,11 @@ export function isOwnTicketReply(args: Pick<OasisSharedSendArgs, "purpose" | "to
 }
 
 export async function sendOasisSharedGmail(args: OasisSharedSendArgs): Promise<OasisSharedSendResult> {
-  // THE ONE EXCEPTION TO THE OPT-OUT GATE: a reply to the recipient's own
-  // ticket (isOwnTicketReply). Everything else, the desk's acknowledgement
+  // THE TWO EXCEPTIONS TO THE OPT-OUT GATE: a reply to the recipient's own
+  // ticket (isOwnTicketReply), and an alert to OASIS's own team
+  // (isInternalTeamAlert). Everything else, the desk's acknowledgement
   // included, is checked below exactly as before.
-  if (isOwnTicketReply(args)) return sendAfterOptOutGate(args);
+  if (isOwnTicketReply(args) || isInternalTeamAlert(args)) return sendAfterOptOutGate(args);
   // OPT-OUT GATE FIRST, before any credential work or send. Fail closed: a
   // suppression lookup that errors must not be read as "not suppressed".
   // checkEmailSuppressed CATCHES ITS OWN ERRORS and returns

@@ -250,7 +250,7 @@ async function main() {
     // The opt-out files under OASIS's own workspace, never by the name shared with strangers' workspaces.
     assert.equal(pinnedSuppressionTenant("OASIS AI"), OASIS_TENANT);
     assert.equal(pinnedSuppressionTenant(" oasis ai "), OASIS_TENANT, "matched as /api/unsubscribe reads it: trimmed, any case");
-    assert.equal(pinnedSuppressionTenant("SunBiz"), null, "every other brand keeps its own lookup");
+    assert.equal(pinnedSuppressionTenant("SunBiz"), null, "every other brand is filed globally");
   });
 
   await check("until SUPPORT_* is set, support mail keeps the shared mailbox, says so in ONE line, and still answers to support@", async () => {

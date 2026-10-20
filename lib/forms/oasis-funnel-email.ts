@@ -15,6 +15,7 @@
  */
 import "server-only";
 import { inferForTenant } from "@/lib/ai/infer";
+import { checkSuppression } from "@/lib/email/suppression-scope";
 import nodemailer from "nodemailer";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -254,24 +255,19 @@ export async function deliverWelcomeEmail(args: {
     return { sent: false, reason: "already_sent" };
   }
 
-  // Suppression — a public form must never re-email someone who opted out.
-  // Match literally (escape LIKE wildcards); FAIL CLOSED on lookup error.
-  const suppPattern = toEmail.replace(/[%_\\]/g, "\\$&");
-  const supp = await db
-    .from("email_suppressions")
-    .select("email")
-    .eq("tenant_id", tenantId)
-    .ilike("email", suppPattern)
-    .limit(1);
-  if (supp.error) {
+  // Suppression — a public form must never re-email someone who opted out:
+  // the workspace's own opt-outs and the global ones, FAIL CLOSED on a lookup
+  // error (lib/email/suppression-scope.ts).
+  const supp = await checkSuppression(db, tenantId, toEmail);
+  if (supp.checkFailed) {
     console.error("[funnel.welcome] suppression check errored — skipping (fail-closed)", {
       lead_id: leadId,
       source,
-      error: supp.error.message,
+      error: supp.error,
     });
     return { sent: false, reason: "suppression_check_failed" };
   }
-  if ((supp.data?.length ?? 0) > 0) return { sent: false, reason: "suppressed" };
+  if (supp.suppressed) return { sent: false, reason: "suppressed" };
 
   const gmailUser = process.env.GMAIL_USER;
   const gmailPass = process.env.GMAIL_APP_PASSWORD;

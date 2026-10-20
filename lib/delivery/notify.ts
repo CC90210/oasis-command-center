@@ -76,6 +76,8 @@ export type DeskEmail = {
   references?: readonly string[] | null;
   autoSubmitted?: "auto-replied" | null;
   ownTicketReply?: OwnTicketReply | null;
+  /** An alert to OASIS's own team, which the opt-out list does not stop (isInternalTeamAlert). */
+  internalAlert?: boolean | null;
 };
 
 export type NotifyDeps = {
@@ -109,6 +111,7 @@ export function defaultNotifyDeps(): NotifyDeps {
         references: m.references ?? null,
         autoSubmitted: m.autoSubmitted ?? null,
         ownTicketReply: m.ownTicketReply ?? null,
+        internalAlert: m.internalAlert ?? null,
       });
       return r.ok ? { ok: true } : { ok: false, reason: `${r.reason}: ${r.error}` };
     },
@@ -180,7 +183,8 @@ function outcome(label: string, r: SendResult): string {
 async function emailFounders(deps: NotifyDeps, subject: string, body: string, key: string): Promise<SendResult> {
   const [to, ...cc] = deps.founderEmails;
   if (!to) return { ok: false, reason: "no founder email configured" };
-  return settle(deps.email({ to, cc, subject, body, idempotencyKey: key }));
+  // Internal: an opt-out filed for a founder's address must not silence the desk.
+  return settle(deps.email({ to, cc, subject, body, idempotencyKey: key, internalAlert: true }));
 }
 
 /** Telegram + email the desk's team about a new ticket. Returns the recorded outcome, or null if already claimed. */
