@@ -51,6 +51,7 @@ import {
 } from "@/lib/bridge/harness-jobs";
 import { readLatestRuntimeProbeReceipts, runtimeProbeReceiptKey } from "@/lib/bridge/runtime-jobs";
 import { liveSeat } from "@/lib/os/seat";
+import { keepAlive } from "@/lib/os/runs/keepalive";
 import { isWorkspaceApiFallbackReason, type WorkspaceApiFallbackReason } from "@/lib/os/runs/types";
 import { runtimeAvailability } from "@/lib/bridge/runtime-availability";
 import {
@@ -457,10 +458,23 @@ export async function POST(req: NextRequest) {
       ? workspaceFallbackResponse("computer_not_answering")
       : jsonError(409, queued.code);
   }
+  // A closed tab or a page left mid-reply aborts the request, and this cancel
+  // is what tells the connector to stop. On Cloudflare Workers the request is
+  // cancelled at exactly that moment, and a promise nobody gave to ctx.waitUntil
+  // is cancelled with it: a bare `void` could leave the job running with nobody
+  // watching. The same hazard, in lib/bridge-chat-persistence.ts, left every
+  // reply unsaved (bridge chat saved no replies; 2026-10-20 audit). keepAlive
+  // hands the cancel to the platform and never throws. It finds the platform
+  // only while this callback still runs inside the request's context (OpenNext
+  // keeps it in an AsyncLocalStorage); where the runtime calls the listener
+  // without it, keepAlive falls back and the cancel runs as it did before. Making
+  // it reliable (a waitUntil hold registered at request time and released on
+  // normal completion) is a separate follow-up, not part of this change.
   const cancelForDisconnect = () => {
-    void cancelHarnessJob({ tenantId: auth.tenantId, userId: auth.userId, jobId: queued.job.id }).catch((error) => {
+    const cancelled = cancelHarnessJob({ tenantId: auth.tenantId, userId: auth.userId, jobId: queued.job.id }).catch((error) => {
       console.error("[bridge.chat.disconnect-cancel]", error instanceof Error ? error.message : String(error));
     });
+    void keepAlive(cancelled, "bridge.chat.disconnect-cancel");
   };
   if (req.signal.aborted) cancelForDisconnect();
   else req.signal.addEventListener("abort", cancelForDisconnect, { once: true });
