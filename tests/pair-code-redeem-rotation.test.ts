@@ -92,8 +92,10 @@ const FORCE_FAIL_OLD_TOKEN_HASH = "force-fail-old-token-hash";
 async function createSchema() {
   await db.executeMultiple(`
     CREATE TABLE user_profiles (id TEXT NOT NULL PRIMARY KEY, auth_user_id TEXT, email TEXT);
+    -- As production (turso_tool schema pair_attempts): an INTEGER key that only
+    -- grows, which claimCappedSlot's place in line counts on.
     CREATE TABLE pair_attempts (
-      id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY,
+      id INTEGER PRIMARY KEY,
       profile_id TEXT NOT NULL, outcome TEXT NOT NULL, ip TEXT,
       attempted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE bridge_pairings (

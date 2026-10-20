@@ -410,6 +410,29 @@ async function main() {
     assert.ok(lines.some((l) => l.includes("unsigned opt-out cap reached")), "a trip is logged");
   });
 
+  await check("claiming a slot prunes day-old limiter rows now and then, as recording an attempt does", async () => {
+    // The opt-out route only claims slots now, and the prune used to run only
+    // from recordPairAttempt: the table would have grown forever.
+    const { claimCappedSlot } = await import("../lib/pair-rate-limit");
+    await db.execute({
+      sql: "INSERT INTO pair_attempts (profile_id, outcome, attempted_at) VALUES ('day-old-row', 'ok', ?)",
+      args: [new Date(Date.now() - 3 * 86_400_000).toISOString()],
+    });
+    const random = Math.random;
+    Math.random = () => 0; // the prune's dice: always this time
+    try {
+      assert.equal(await claimCappedSlot("prune-probe", null, 60, 10), true);
+    } finally {
+      Math.random = random;
+    }
+    let left = 1;
+    for (let i = 0; i < 20 && left > 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 25)); // fire-and-forget: give it a moment
+      left = Number((await db.execute("SELECT count(*) AS n FROM pair_attempts WHERE profile_id = 'day-old-row'")).rows[0].n);
+    }
+    assert.equal(left, 0, "the day-old row was pruned");
+  });
+
   await check("an IPv6 client is capped by its /64, so rotating addresses inside it does not get around the cap", async () => {
     const { ipRateBucket } = await import("../lib/pair-rate-limit");
     assert.equal(ipRateBucket("2001:db8:85a3:12::8a2e:370:7334"), "2001:db8:85a3:12::/64");
