@@ -13,6 +13,9 @@ import "server-only";
 import type { DripCheck } from "./drip-checks";
 
 const iso = (ms: number) => new Date(ms).toISOString();
+
+/** Global web opt-outs in an hour above which OASIS is paged (optouts.global_web_filings_hourly). */
+export const GLOBAL_WEB_OPTOUTS_PER_HOUR_CEILING = 25;
 const OPEN_WINDOW_MS = 48 * 3_600_000;
 /**
  * How long a job may sit in a non-terminal state before the consumer that owns
@@ -171,5 +174,57 @@ export const FORM_CHECKS: DripCheck[] = [
       `\`pm2 list\` and \`.venv/bin/python scripts/integrations/extraction_consumer.py doctor\` ` +
       `(the venv is .venv, not venv). Exactly one consumer may run fleet-wide. ` +
       `A row that is never going to be read should be marked failed, not left queued.`,
+  },
+  {
+    /**
+     * A surge of opt-outs filed for every sender (reviewer of OCC #711, item 25).
+     *
+     * /api/unsubscribe files an opt-out whose link brand is not pinned to a
+     * workspace GLOBALLY (tenant_id NULL), and every sender honours a global
+     * row. An unsigned link can opt out anyone. Each address bucket (an IPv6
+     * /64) may file 30 an hour, but a /48 holds 65,536 buckets, so the cap
+     * bounds one source, not a campaign. Real volume is a handful a month.
+     * An alarm, never a refusal: refusing would let an attacker block real
+     * opt-outs. Estate-wide like the dead-letter check above, so the tenant
+     * the runner passes is ignored.
+     *
+     * Cleaning up after abuse: every row carries ip_address and added_at, but
+     * a re-filing keeps the FIRST added_at and takes the LATEST filer's
+     * ip_address (the upsert in /api/unsubscribe). The IP is the most recent
+     * filer's, so an address an abuser filed over a real person's earlier
+     * opt-out carries the abuser's IP with the real person's date, and
+     * grouping or deleting by IP alone can sweep that opt-out in with the abuse
+     * (review of #715). Group the window's global web rows by ip_address
+     * first, bounded by added_at as here, e.g.
+     *   SELECT ip_address, count(*) FROM email_suppressions
+     *   WHERE tenant_id IS NULL AND source = 'web_form' AND added_at >= '<from>'
+     *   GROUP BY ip_address ORDER BY 2 DESC;
+     * then remove only the abusive prefix's rows from that same window, with
+     * CC's yes: until proven otherwise each row is somebody's opt-out.
+     */
+    id: "optouts.global_web_filings_hourly",
+    severity: "high",
+    lane: "operator",
+    rule: { kind: "must_be_below", ceiling: GLOBAL_WEB_OPTOUTS_PER_HOUR_CEILING },
+    observe: async (db, _tenantId, endMs) => {
+      try {
+        const r = await db
+          .from("email_suppressions")
+          .select("id", { count: "exact", head: true })
+          .is("tenant_id", null)
+          .eq("source", "web_form")
+          .gte("added_at", iso(endMs - 3_600_000))
+          .lt("added_at", iso(endMs));
+        if (r.error) return null;
+        return r.count ?? 0;
+      } catch {
+        return null;
+      }
+    },
+    describe: (r) =>
+      `${r.observed} opt-outs from web links were filed for every sender in the last hour; a handful a month is normal. ` +
+      `If it is abuse, group that hour's rows in email_suppressions (tenant_id NULL, source web_form) by ip_address, ` +
+      `and remove only the abusive prefix's rows from that hour, with CC's yes. A row's ip_address is its latest filer's, ` +
+      `so never remove by ip_address alone: it can be a real person's earlier opt-out the abuser filed over (lib/health/form-checks.ts).`,
   },
 ];

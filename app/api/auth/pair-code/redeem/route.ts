@@ -37,8 +37,12 @@ import { randomBytes } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, publicAppBaseUrl, sha256 } from "@/lib/api-helpers";
 import {
+  claimCappedSlot,
   clientIp,
+  ipRateBucket,
   isRateLimited,
+  PAIR_RATE_MAX_FAILURES,
+  PAIR_RATE_WINDOW_SECONDS,
   recordPairAttempt,
 } from "@/lib/pair-rate-limit";
 import { adminGetUser, mintSessionLinkToken } from "@/lib/turso-auth-admin";
@@ -64,12 +68,27 @@ export async function POST(req: NextRequest) {
   // rate-limiting an attacker could enumerate from one IP. With it: 10
   // failed redeems per minute per IP, then 429. See pair_attempts CHECK
   // constraint for the full outcome vocabulary.
+  //
+  // Two holes closed (reviewer of OCC #711, item 32). The key is the
+  // address's bucket, an IPv6 /64 (ipRateBucket): every production address is
+  // IPv6, and keyed per address a client could rotate through its /64. And
+  // every redemption takes its place in line before anything is checked
+  // (claimCappedSlot), at most 10 a minute per bucket: checked first and
+  // recorded after, 50 parallel guesses were all evaluated before the first
+  // failure landed. A redemption that pairs a computer gives its place back
+  // (slot.release below): the cap is on guesses, and a team setting up several
+  // computers behind one address is not guessing (review of #715).
   const ip = clientIp(req);
-  const rateKey = `redeem:${ip || "unknown"}`;
+  const bucket = ipRateBucket(ip);
+  const rateKey = `redeem:${bucket}`;
 
   if (await isRateLimited(rateKey)) {
     await recordPairAttempt(rateKey, "rate_limited", ip);
     return bad(429, "rate_limited: too many failed pair-code redemptions; back off and retry");
+  }
+  const slot = await claimCappedSlot(`redeem-attempts:${bucket}`, ip, PAIR_RATE_WINDOW_SECONDS, PAIR_RATE_MAX_FAILURES);
+  if (!slot.allowed) {
+    return bad(429, "rate_limited: too many pair-code redemptions; back off and retry");
   }
 
   let body: { code?: unknown; machine?: { label?: unknown; fingerprint?: unknown } };
@@ -158,6 +177,11 @@ export async function POST(req: NextRequest) {
     return bad(500, "redeem_returned_empty");
   }
   const isConnector = row.purpose === "connector";
+
+  // The code paired a computer: this was a person, not a guess, so its place in
+  // the cap goes back (review of #715). The pairing is already durable; a
+  // release that fails is logged by claimCappedSlot and never fails it.
+  await slot.release();
 
   const baseUrl = process.env.BRAVO_DASHBOARD_URL || publicAppBaseUrl();
 

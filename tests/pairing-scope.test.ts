@@ -95,6 +95,9 @@ async function createSchema() {
       purpose TEXT NOT NULL DEFAULT 'desktop', scope TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX idx_bridge_pair_codes_code ON bridge_pair_codes (code);
+    -- The redeem route's limiters (lib/pair-rate-limit.ts), as production has it.
+    CREATE TABLE pair_attempts (id INTEGER PRIMARY KEY, profile_id TEXT NOT NULL, outcome TEXT NOT NULL, ip TEXT,
+      attempted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE tenant_cron_jobs (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, agent_key TEXT NOT NULL DEFAULT 'bravo',
       name TEXT NOT NULL, description TEXT, schedule TEXT NOT NULL, action_type TEXT NOT NULL,
