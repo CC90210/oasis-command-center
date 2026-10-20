@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { holdHeight } from "./hold-height";
 
 /**
  * O·A·S·I·S — the name, spelling itself out.
@@ -39,12 +40,19 @@ const LETTERS = [
 /** Gap between each letter unfolding, in ms. */
 const STAGGER = 260;
 
+/** When the first letter starts unfolding, in ms after the mark is in view. */
+const UNFOLD_DELAY = 620;
+
+/** One letter's unfold: the `.m-acr-word` transition in marketing.css. */
+const UNFOLD_MS = 550;
+
 export function AcronymMark() {
   // Starts fully open so server HTML, no-JS, and the first client render
   // all agree. The collapse happens on mount, which is also the moment we
   // know JavaScript can undo it.
   const [open, setOpen] = useState<boolean[]>(() => LETTERS.map(() => true));
   const ref = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
   const played = useRef(false);
 
   useEffect(() => {
@@ -69,7 +77,14 @@ export function AcronymMark() {
     // `m-acr-instant` kills the transition for exactly one frame so the
     // collapse is a state change rather than an animation, and the unfold
     // is then the single deliberate movement the visitor sees.
+    //
+    // Hold the open height through the whole sequence. On a phone the full
+    // phrase wraps to more lines than "O A S I S", so the collapse pulled the
+    // hero paragraph up and the unfold pushed it back down: home CLS 0.55.
+    // Held, the row changes inside a box that stays the same size. The row,
+    // not the wrapper: the hint line under it must not move either.
     const node = ref.current;
+    const release = holdHeight(rowRef.current);
     node?.classList.add("m-acr-instant");
     setOpen(LETTERS.map(() => false));
     const unlock = requestAnimationFrame(() => {
@@ -98,9 +113,12 @@ export function AcronymMark() {
               // the block arrives first and then the word opens. Two
               // sequenced gestures read as intent; two overlapping ones
               // read as a glitch.
-              }, 620 + i * STAGGER),
+              }, UNFOLD_DELAY + i * STAGGER),
             );
           });
+          // Let go once the last letter has finished: the row is back to its
+          // open height, so nothing moves.
+          timers.push(setTimeout(release, UNFOLD_DELAY + LETTERS.length * STAGGER + UNFOLD_MS));
         }
       },
       { threshold: 0.4 },
@@ -111,6 +129,7 @@ export function AcronymMark() {
       io.disconnect();
       timers.forEach(clearTimeout);
       cancelAnimationFrame(unlock);
+      release();
     };
   }, []);
 
@@ -138,6 +157,7 @@ export function AcronymMark() {
   return (
     <div ref={ref}>
       <div
+        ref={rowRef}
         className="m-acr"
         role="group"
         aria-label="OASIS — Operational Agentic Systems Increasing Scalability"
