@@ -9,8 +9,9 @@
  *      Body: { slug, name, category, short_description, description?,
  *              base_prompt, required_tools?, suggested_model?, pricing?,
  *              is_public? }
- *      Auth: requires session + tenant_id. Custom agents start as
- *      private (is_public=false) unless explicitly opted public.
+ *      Auth: requires session + tenant_id. Custom agents are private
+ *      (is_public=false); only a platform operator, in OASIS's own workspace,
+ *      may create one public (lib/agents/persistence.ts checkedPublish).
  *      The new teammate joins the workspace's roster at once (W4a, audit
  *      S2-06): its manifest binding is added, switched on, by the same lineup
  *      write the AI Team's On/Off uses (lib/manifest/agent-bindings.ts). It used
@@ -28,7 +29,9 @@ import {
   type CreateAgentInput,
 } from "@/lib/agents/persistence";
 import { resolveAgentKey } from "@/lib/agents";
+import { dbBool } from "@/lib/db-bool";
 import { changeAgentLineup } from "@/lib/manifest/agent-bindings";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -70,6 +73,10 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
+  // `null` and arrays are valid JSON too; reading fields off them threw (500).
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
 
   const service = getServiceSupabase();
   const profileRes = await service
@@ -78,17 +85,19 @@ export async function POST(req: NextRequest) {
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const profile = profileRes.data as
-    | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
+    | { tenant_id: string | null; team_role: string; is_owner: unknown; admin_access: unknown }
     | null;
   if (!profile?.tenant_id) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 403 });
   }
   // Creating an agent is a full-admin capability — honors the admin_access grant.
+  // Flags read with dbBool: Turso stores them as 0/1, and `!== true` refused a
+  // grant stored as 1.
   if (
-    !profile.is_owner &&
+    !dbBool(profile.is_owner) &&
     profile.team_role !== "admin" &&
     profile.team_role !== "owner" &&
-    profile.admin_access !== true
+    !dbBool(profile.admin_access)
   ) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
@@ -101,21 +110,31 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Publishing puts the agent in EVERY workspace's library, so it is OASIS's
+  // call (2026-10-19 audit). The writer decides (lib/agents/persistence.ts
+  // checkedPublish: a boolean only, true only when mayPublish); the route only
+  // reports whether this session is a platform operator.
+  const mayPublish = body.is_public === true && (await isPlatformOperatorForAuthUser(user.id, user.email));
+
   try {
-    const created = await createCustomAgent({
-      slug: body.slug as string,
-      name: body.name as string,
-      category: body.category as CreateAgentInput["category"],
-      short_description: body.short_description as string,
-      description: body.description,
-      base_prompt: body.base_prompt as string,
-      required_tools: body.required_tools,
-      suggested_model: body.suggested_model,
-      pricing: body.pricing,
-      is_public: body.is_public ?? false,
-      created_by: user.id,
-      tenant_id: profile.tenant_id,
-    });
+    const created = await createCustomAgent(
+      {
+        slug: body.slug as string,
+        name: body.name as string,
+        category: body.category as CreateAgentInput["category"],
+        short_description: body.short_description as string,
+        description: body.description,
+        base_prompt: body.base_prompt as string,
+        required_tools: body.required_tools,
+        suggested_model: body.suggested_model,
+        pricing: body.pricing,
+        // As sent: the writer refuses anything but a boolean (422).
+        is_public: body.is_public,
+        created_by: user.id,
+        tenant_id: profile.tenant_id,
+      },
+      { mayPublish },
+    );
     const bound = await changeAgentLineup({
       tenantId: profile.tenant_id,
       action: "add",
@@ -135,7 +154,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, agent: created, bound: true });
   } catch (err) {
     if (err instanceof AgentPersistenceError) {
-      const status = err.code === "duplicate_slug" ? 409 : err.code === "validation" ? 422 : 500;
+      const status =
+        err.code === "duplicate_slug" ? 409 :
+        err.code === "validation" ? 422 :
+        err.code === "forbidden" ? 403 :
+        500;
       return NextResponse.json({ ok: false, error: err.code, message: err.message }, { status });
     }
     throw err;

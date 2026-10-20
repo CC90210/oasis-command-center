@@ -384,7 +384,9 @@ export const AGENT_KEY_ALIASES: Record<string, string> = {
 };
 
 export function resolveAgentKey(key: string): string {
-  return AGENT_KEY_ALIASES[key] || key;
+  // Own keys only: on a plain object, "constructor" or "toString" would
+  // answer with Object's own function (independent review of #713).
+  return Object.prototype.hasOwnProperty.call(AGENT_KEY_ALIASES, key) ? AGENT_KEY_ALIASES[key] : key;
 }
 
 /**
