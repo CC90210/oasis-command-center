@@ -18,6 +18,16 @@
  * cancel() cancel the job ONCE. A reply that ends by itself releases it at once,
  * so a request never sits on a pending waitUntil for the ~30 s grace period.
  *
+ * THE LEDGER RULE. keepAlive hands a hold to ctx.waitUntil only after an async
+ * `import("@opennextjs/cloudflare")` resolves: a few microtasks where that import is
+ * cached on a fast machine, a round trip to the loader-hooks thread on Node 22 (CI).
+ * So a hold LANDS some time after it is made, and a check that ends first leaves it to
+ * land in the NEXT check's ledger, where it counts as that check's second hold (CI run
+ * 39404188075: "timed out waiting for the stream's hold to reach ctx.waitUntil"). Every
+ * check therefore runs inside step(name, holds, body): it starts from an empty ledger
+ * and does not end until exactly `holds` have landed, and no more. No check makes two
+ * holds at once, because the order two holds land in is not fixed either.
+ *
  * Real: POST /api/bridge/chat, harnessJobStream, harnessJobStreamWithUnclaimedFallback,
  * createDisconnectHold, keepAlive + getCloudflareContext, and the job store, on a
  * local libSQL file (tests/_delivery-harness.ts). Two stand-ins, both at the edges:
@@ -39,41 +49,73 @@ import { check, finish, login, OASIS, setupDatabase, USERS } from "./_delivery-h
 const ROOT = join(__dirname, "..");
 const CLOUDFLARE_CONTEXT = Symbol.for("__cloudflare-context__");
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-/** Let what is already queued run: keepAlive learns of a hold a few ticks after it is made. */
+/** Let what is already queued run: the microtasks, then the callbacks the loop is holding. */
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 const dec = new TextDecoder();
 
 // ── The Worker's side: a request context that goes away, and ctx.waitUntil ──
 type Handed = { work: Promise<unknown>; settled: boolean };
+/** The ledger: one entry per promise the platform was handed, in the order they landed. Cleared only by step(). */
 const handed: Handed[] = [];
 let requestAlive = true; // false = Workers has dropped the request's context, as it has when a stream's cancel() runs
+// How often something looked for the context and found none. keepAlive looks once per hold, after its async import.
+let missedLookups = 0;
 Object.defineProperty(globalThis, CLOUDFLARE_CONTEXT, {
   configurable: true,
-  get: () =>
-    requestAlive
-      ? {
-          env: {},
-          cf: {},
-          ctx: {
-            waitUntil: (work: Promise<unknown>) => {
-              const entry: Handed = { work, settled: false };
-              const done = () => {
-                entry.settled = true;
-              };
-              void work.then(done, done);
-              handed.push(entry);
-            },
-          },
-        }
-      : undefined,
+  get: () => {
+    if (!requestAlive) {
+      missedLookups += 1;
+      return undefined;
+    }
+    return {
+      env: {},
+      cf: {},
+      ctx: {
+        waitUntil: (work: Promise<unknown>) => {
+          const entry: Handed = { work, settled: false };
+          const done = () => {
+            entry.settled = true;
+          };
+          void work.then(done, done);
+          handed.push(entry);
+        },
+      },
+    };
+  },
 });
 
-async function until(ready: () => boolean, what: string, ms = 5_000): Promise<void> {
+/** Wait up to `ms` for `ready`; says whether it came true. */
+async function waitFor(ready: () => boolean, ms: number): Promise<boolean> {
   const started = Date.now();
   while (!ready()) {
-    if (Date.now() - started > ms) throw new Error(`timed out waiting for ${what}`);
+    if (Date.now() - started > ms) return false;
     await sleep(5);
   }
+  return true;
+}
+
+/** Wait for `ready`, and fail loudly, naming what never happened, if it does not come. */
+async function until(ready: () => boolean, what: string, ms = 5_000): Promise<void> {
+  if (!(await waitFor(ready, ms))) throw new Error(`timed out waiting for ${what}`);
+}
+
+/**
+ * How long a check waits for a hold to land in ctx.waitUntil (see THE LEDGER RULE above). It is wall-clock time, so a
+ * slow loader or a loaded machine stretches it; a hold that never comes still fails the check within it.
+ */
+const HANDOFF_WAIT_MS = 3_000;
+
+/**
+ * The platform has received `n` holds, and no more arrive. This WAITS for them, failing loudly and naming what never
+ * came, rather than reading the ledger when a stream ends: the registration lands some time after that. Then it stays
+ * quiet for a moment to catch a second one.
+ */
+async function handedExactly(n: number, what: string): Promise<void> {
+  if (!(await waitFor(() => handed.length >= n, HANDOFF_WAIT_MS))) {
+    throw new Error(`timed out waiting for ${what} to reach ctx.waitUntil: ${handed.length} of ${n} landed within ${HANDOFF_WAIT_MS} ms`);
+  }
+  await sleep(40);
+  assert.equal(handed.length, n, `${what}: handed to ctx.waitUntil ${n} time(s), not ${handed.length}`);
 }
 
 /** Run `fn` with console.error captured instead of printed; the lines it logged come back with its result. */
@@ -123,7 +165,8 @@ async function main() {
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", file), "utf8"));
   }
 
-  // keepAlive imports this the first time it runs; loading it now keeps every later registration to a few ticks.
+  // keepAlive's first import of this is a cold ESM load. Do it once here, so no check's wait for a hold to land has
+  // to cover it. Nothing depends on this: every check waits for exactly what it causes.
   await import("@opennextjs/cloudflare");
   const harness = await import("../lib/bridge/harness-jobs");
   const { createDisconnectHold } = harness;
@@ -165,6 +208,11 @@ async function main() {
     });
     door = { gate, open, reached: 0 };
     return door;
+  }
+  /** Let anything parked at the door through, and shut the door. */
+  function openDoor() {
+    door?.open();
+    door = null;
   }
 
   const stamp = "2026-10-10T00:00:00Z";
@@ -225,37 +273,43 @@ async function main() {
     harness.cancelHarnessJob({ tenantId: job.tenantId, userId: job.userId, jobId: job.id });
 
   /**
-   * Start every check from the same place: nothing handed over, nothing cancelled, the request alive, the door
-   * shut. keepAlive learns of a hold a few ticks after it is made, so the last check's are let land first: one
-   * must never be counted as this check's.
+   * A check, under THE LEDGER RULE (see the top of this file). It says how many holds it makes, starts from an empty
+   * ledger (the one place the ledger is cleared; the last check ended only after its holds had landed), and does not
+   * end until exactly that many have landed and no more. Whatever a failed check started is waited for too, so one
+   * failure cannot leak into the checks after it.
    */
-  async function reset() {
-    await settle();
-    handed.length = 0;
-    cancelStatements.length = 0;
-    requestAlive = true;
-    door = null;
-    refuse = null;
-  }
+  const step = (name: string, holds: number, body: () => Promise<void>) =>
+    check(name, async () => {
+      handed.length = 0;
+      cancelStatements.length = 0;
+      requestAlive = true;
+      openDoor();
+      refuse = null;
+      try {
+        await body();
+        await handedExactly(holds, `the ${holds} hold(s) this check made`);
+      } finally {
+        // Cleanup only: the check's own outcome is already decided (a pass, or the error being thrown).
+        openDoor();
+        refuse = null;
+        await waitFor(() => handed.length >= holds, 1_500);
+      }
+    });
 
   // ═══ The hold on its own ═══
   console.log("harness-cancel-on-disconnect:");
 
-  await check("a hold is handed to the platform when it is made, before anything has gone wrong, and stays held", async () => {
-    await reset();
+  await step("a hold is handed to the platform when it is made, before anything has gone wrong, and stays held", 1, async () => {
     const hold = createDisconnectHold("unit:registered");
-    await until(() => handed.length === 1, "the hold to reach ctx.waitUntil");
-    await sleep(50);
-    assert.equal(handed.length, 1, "one hold, one handover");
+    await handedExactly(1, "the hold");
     assert.equal(handed[0].settled, false, "nothing has happened, so the platform is still being asked to wait");
     hold.release();
     await until(() => handed[0].settled, "the released hold to settle");
   });
 
-  await check("run() cancels once however many triggers fire, and every trigger waits for that one cancel", async () => {
-    await reset();
+  await step("run() cancels once however many triggers fire, and every trigger waits for that one cancel", 1, async () => {
     const hold = createDisconnectHold("unit:once");
-    await until(() => handed.length === 1, "the hold to reach ctx.waitUntil");
+    await handedExactly(1, "the hold");
     let calls = 0;
     let finishCancel!: () => void;
     const first = () => {
@@ -278,60 +332,63 @@ async function main() {
     await until(() => handed[0].settled, "the hold to settle once the cancel had");
   });
 
-  await check("a release before any trigger means nothing is ever cancelled; a release during a cancel does not free the hold early", async () => {
-    await reset();
-    const released = createDisconnectHold("unit:released-first");
-    released.release();
+  await step("a release before any trigger means nothing is ever cancelled", 1, async () => {
+    const hold = createDisconnectHold("unit:released-first");
+    hold.release();
     let ran = false;
-    await released.run(async () => {
+    await hold.run(async () => {
       ran = true;
     });
     assert.equal(ran, false, "the reply had already ended by itself: there is nothing to cancel");
+    await handedExactly(1, "the hold");
+    await until(() => handed[0].settled, "the released hold to settle");
+  });
 
-    const cancelling = createDisconnectHold("unit:release-during-cancel");
-    await until(() => handed.length === 2, "both holds to reach ctx.waitUntil");
+  await step("a release during a cancel does not free the hold early", 1, async () => {
+    const hold = createDisconnectHold("unit:release-during-cancel");
+    await handedExactly(1, "the hold");
     let finishCancel!: () => void;
-    const done = cancelling.run(
+    const done = hold.run(
       () =>
         new Promise<void>((resolve) => {
           finishCancel = resolve;
         }),
     );
     await settle();
-    cancelling.release(); // the reply stream's loop does this when it sees it was cancelled
+    hold.release(); // the reply stream's loop does this when it sees it was cancelled
     await sleep(50);
-    assert.equal(handed[1].settled, false, "release() must not free the platform's hold while the cancel is still in flight");
+    assert.equal(handed[0].settled, false, "release() must not free the platform's hold while the cancel is still in flight");
     finishCancel();
     await done;
-    await until(() => handed[1].settled, "the hold to settle once the cancel had");
+    await until(() => handed[0].settled, "the hold to settle once the cancel had");
   });
 
-  await check("run() never throws, whether the cancel rejects or throws on the spot, and a failure is logged with the hold's label", async () => {
-    await reset();
-    for (const [name, cancel] of [
-      ["rejects", () => Promise.reject(new Error("the database said no (rejected)"))],
-      [
-        "throws",
-        () => {
-          throw new Error("the database said no (thrown)");
-        },
-      ],
-    ] as const) {
+  for (const [name, cancel] of [
+    ["rejects", () => Promise.reject(new Error("the database said no (rejected)"))],
+    [
+      "throws on the spot",
+      () => {
+        throw new Error("the database said no (thrown)");
+      },
+    ],
+  ] as const) {
+    await step(`run() never throws when the cancel ${name}, and the failure is logged with the hold's label`, 1, async () => {
       const hold = createDisconnectHold(`unit:fails-${name}`);
       const { lines } = await capturingErrors(async () => {
         await hold.run(cancel as () => Promise<unknown>);
       });
       assert.ok(
         lines.some((line) => line.includes("[bridge.harness.disconnect-cancel]") && line.includes(`unit:fails-${name}`) && line.includes("the database said no")),
-        `${name}: the failure is logged with the label and the database's words: ${lines.join(" | ")}`,
+        `the failure is logged with the label and the database's words: ${lines.join(" | ")}`,
       );
-    }
-    await until(() => handed.length === 2 && handed.every((h) => h.settled), "both failed holds to settle");
-  });
+      await handedExactly(1, "the hold");
+      await until(() => handed[0].settled, "the failed hold to settle");
+    });
+  }
 
-  await check("with no Cloudflare context at all (a script, Node), a hold still cancels", async () => {
-    await reset();
+  await step("with no Cloudflare context at all (a script, Node), a hold still cancels", 0, async () => {
     requestAlive = false;
+    const looked = missedLookups;
     await quietly(async () => {
       const hold = createDisconnectHold("unit:no-context");
       let ran = false;
@@ -339,17 +396,18 @@ async function main() {
         ran = true;
       });
       assert.equal(ran, true);
-      await settle(); // keepAlive looks for the context now, while there still is none
+      // keepAlive looks for the context only after its async import. The next check brings the context back, and a look
+      // that came after that would hand this hold to the platform in the next check's ledger: wait for the look.
+      await until(() => missedLookups > looked, "keepAlive to look for the platform", HANDOFF_WAIT_MS);
     });
     assert.equal(handed.length, 0, "nothing could be handed to a platform that is not there");
   });
 
   // ═══ The reply stream ═══
-  await check("the stream's cancel() cancels the job once, through a hold the platform was given at request time, after the request is gone", async () => {
-    await reset();
+  await step("the stream's cancel() cancels the job once, through a hold the platform was given at request time, after the request is gone", 1, async () => {
     const job = await newJob();
     const stream = harness.harnessJobStream(job);
-    await until(() => handed.length === 1, "the stream's hold to reach ctx.waitUntil");
+    await handedExactly(1, "the stream's hold");
     const reader = stream.getReader();
     await reader.read(); // the first frame: the person is watching
     requestAlive = false; // the tab closes; Workers drops the request's context before it calls cancel()
@@ -373,8 +431,7 @@ async function main() {
     assert.deepEqual([row.status, row.error_code], ["cancelled", "browser_disconnected"]);
   });
 
-  await check("a reply that ends by itself releases the hold at once and cancels nothing", async () => {
-    await reset();
+  await step("a reply that ends by itself releases the hold at once and cancels nothing", 1, async () => {
     const job = await newJob();
     const stream = harness.harnessJobStream(job);
     await db.batch(
@@ -386,17 +443,16 @@ async function main() {
     );
     const text = await new Response(stream).text();
     assert.match(text, /event: done/);
-    await until(() => handed[0]?.settled === true, "the hold to be released when the reply ended", 2_000);
-    assert.equal(handed.length, 1);
+    await handedExactly(1, "the stream's hold");
+    await until(() => handed[0].settled, "the hold to be released when the reply ended", 2_000);
     assert.deepEqual(cancelStatements, [], "the reply finished; nothing was cancelled");
     assert.equal(await statusOf(job.id), "completed");
   });
 
-  await check("a stream nobody reads still releases its hold when the job ends", async () => {
-    await reset();
+  await step("a stream nobody reads still releases its hold when the job ends", 1, async () => {
     const job = await newJob();
     harness.harnessJobStream(job); // never read: the request that never streams
-    await until(() => handed.length === 1, "the stream's hold to reach ctx.waitUntil");
+    await handedExactly(1, "the stream's hold");
     await db.batch(
       [
         { sql: "INSERT INTO bridge_harness_job_events (tenant_id, job_id, seq, event_type, data_json, created_at) VALUES (?, ?, 1, 'done', '{}', ?)", args: [OASIS, job.id, stamp] },
@@ -408,11 +464,10 @@ async function main() {
     assert.deepEqual(cancelStatements, []);
   });
 
-  await check("a cancel the database refuses is logged with the job, and the hold is still released", async () => {
-    await reset();
+  await step("a cancel the database refuses is logged with the job, and the hold is still released", 1, async () => {
     const job = await newJob();
     const stream = harness.harnessJobStream(job);
-    await until(() => handed.length === 1, "the stream's hold to reach ctx.waitUntil");
+    await handedExactly(1, "the stream's hold");
     const reader = stream.getReader();
     await reader.read();
     requestAlive = false;
@@ -433,12 +488,11 @@ async function main() {
     await cancelJob(job); // free the computer for the next check
   });
 
-  await check("the route's abort and the stream's cancel() share one hold: the job is cancelled once, not twice", async () => {
-    await reset();
+  await step("the route's abort and the stream's cancel() share one hold: the job is cancelled once, not twice", 1, async () => {
     const job = await newJob();
     const hold = createDisconnectHold(`test:shared:${job.id}`);
     const stream = harness.harnessJobStream(job, { disconnect: hold });
-    await until(() => handed.length === 1, "the shared hold to reach ctx.waitUntil");
+    await handedExactly(1, "the shared hold");
     const reader = stream.getReader();
     await reader.read();
     requestAlive = false;
@@ -453,8 +507,7 @@ async function main() {
   });
 
   // ═══ The fallback wrapper and the device stream inside it ═══
-  await check("the fallback wrapper and its device stream cancel the job once between them", async () => {
-    await reset();
+  await step("the fallback wrapper and its device stream cancel the job once between them", 1, async () => {
     const job = await newJob("workspace_api");
     await claim(job.pairingId, `claim-${job.id}`); // the computer picked it up: the wrapper hands over to the device stream
     const disconnect = createDisconnectHold(`test:fallback:${job.id}`);
@@ -463,7 +516,7 @@ async function main() {
       fallbackResponse: async () => new Response(null, { status: 500 }),
       disconnect,
     });
-    await until(() => handed.length === 1, "the shared hold to reach ctx.waitUntil");
+    await handedExactly(1, "the shared hold");
     const reader = wrapper.getReader();
     let seen = "";
     while ((seen.match(/event: agent_status/g) ?? []).length < 2) {
@@ -481,8 +534,7 @@ async function main() {
     assert.equal(await statusOf(job.id), "cancelled");
   });
 
-  await check("a fallback wrapper whose job is still queued cancels it through its hold too", async () => {
-    await reset();
+  await step("a fallback wrapper whose job is still queued cancels it through its hold too", 1, async () => {
     const job = await newJob("workspace_api");
     const wrapper = harness.harnessJobStreamWithUnclaimedFallback(job, {
       deviceStream: () => {
@@ -490,7 +542,7 @@ async function main() {
       },
       fallbackResponse: async () => new Response(null, { status: 500 }),
     });
-    await until(() => handed.length === 1, "the wrapper's hold to reach ctx.waitUntil");
+    await handedExactly(1, "the wrapper's hold");
     const reader = wrapper.getReader();
     await reader.read();
     requestAlive = false;
@@ -500,8 +552,7 @@ async function main() {
     assert.equal(await statusOf(job.id), "cancelled");
   });
 
-  await check("a fallback that answers instead of the computer releases the hold and cancels nothing", async () => {
-    await reset();
+  await step("a fallback that answers instead of the computer releases the hold and cancels nothing", 1, async () => {
     const job = await newJob("workspace_api");
     await db.execute({
       sql: "UPDATE bridge_harness_jobs SET status = 'failed', error_code = 'computer_not_answering', finished_at = ?, updated_at = ? WHERE id = ?",
@@ -523,8 +574,8 @@ async function main() {
     ).text();
     assert.match(text, /workspace fallback/);
     assert.equal(devices, 0);
-    await until(() => handed[0]?.settled === true, "the hold to be released when the fallback reply ended", 2_000);
-    assert.equal(handed.length, 1);
+    await handedExactly(1, "the wrapper's hold");
+    await until(() => handed[0].settled, "the hold to be released when the fallback reply ended", 2_000);
     assert.deepEqual(cancelStatements, []);
   });
 
@@ -562,11 +613,10 @@ async function main() {
     await addPairing("pair-ccpc");
   }
 
-  await check("the route: a closed tab cancels the job once, through the hold made when the request arrived", async () => {
-    await reset();
+  await step("the route: a closed tab cancels the job once, through the hold made when the request arrived", 1, async () => {
     await freshComputer();
     const res = await answered(await chat());
-    await until(() => handed.length === 1, "the route's hold to reach ctx.waitUntil");
+    await handedExactly(1, "the route's hold");
     const queued = await latestJob();
     assert.equal(queued.status, "queued", "the computer has not picked the task up");
     requestAlive = false; // the tab closes: the context goes before the body's cancel() runs
@@ -586,12 +636,11 @@ async function main() {
     assert.deepEqual(await latestJob(), { id: queued.id, status: "cancelled", errorCode: "browser_disconnected" });
   });
 
-  await check("the route: the abort signal and the body's cancel together cancel the job once", async () => {
-    await reset();
+  await step("the route: the abort signal and the body's cancel together cancel the job once", 1, async () => {
     await freshComputer();
     const abort = new AbortController();
     const res = await answered(await chat(abort.signal));
-    await until(() => handed.length === 1, "the route's hold to reach ctx.waitUntil");
+    await handedExactly(1, "the route's hold");
     const queued = await latestJob();
     requestAlive = false;
     abort.abort(); // a runtime that does fire the signal (Node, Vercel)
@@ -603,11 +652,10 @@ async function main() {
     assert.deepEqual(await latestJob(), { id: queued.id, status: "cancelled", errorCode: "browser_disconnected" });
   });
 
-  await check("the route: a request that is already disconnected when it reaches the queue cancels its job through the hold", async () => {
-    await reset();
+  await step("the route: a request that is already disconnected when it reaches the queue cancels its job through the hold", 1, async () => {
     await freshComputer();
     const res = await answered(await chat(AbortSignal.abort()));
-    await until(() => handed.length === 1, "the route's hold to reach ctx.waitUntil");
+    await handedExactly(1, "the route's hold");
     await until(() => handed[0].settled, "the hold to settle");
     const job = await latestJob();
     assert.deepEqual([job.status, job.errorCode], ["cancelled", "browser_disconnected"]);
@@ -617,30 +665,28 @@ async function main() {
     assert.equal(handed.length, 1);
   });
 
-  await check("the route: a reply that finishes releases the hold at once and cancels nothing", async () => {
-    await reset();
+  await step("the route: a reply that finishes releases the hold at once and cancels nothing", 1, async () => {
     await freshComputer();
     const res = await answered(await chat());
-    await until(() => handed.length === 1, "the route's hold to reach ctx.waitUntil");
+    await handedExactly(1, "the route's hold");
     const claimed = await claim("pair-ccpc", "route-completes");
     const terminal = await harness.appendHarnessEvents({ tenantId: OASIS, jobId: claimed.id, events: [{ seq: 1, type: "done", data: {} }] }, db);
     assert.deepEqual(terminal, { ok: true, terminal: true });
     const text = await res.text();
     assert.match(text, /event: done/);
-    await until(() => handed[0]?.settled === true, "the hold to be released when the reply ended", 2_000);
+    await until(() => handed[0].settled, "the hold to be released when the reply ended", 2_000);
     assert.equal(handed.length, 1);
     assert.deepEqual(cancelStatements, []);
     assert.equal((await latestJob()).status, "completed");
   });
 
   for (const stage of ["queued", "running"] as const) {
-    await check(`the route with the workspace fallback on, task ${stage}: a closed tab cancels the job once`, async () => {
-      await reset();
+    await step(`the route with the workspace fallback on, task ${stage}: a closed tab cancels the job once`, 1, async () => {
       await freshComputer();
       await db.execute("UPDATE agent_model_config SET fallback_policy = 'workspace_api' WHERE id = 'engine-workspace'");
       try {
         const res = await answered(await chat(undefined, "workspace_api"));
-        await until(() => handed.length === 1, "the route's hold to reach ctx.waitUntil");
+        await handedExactly(1, "the route's hold");
         const queued = await latestJob();
         const reader = res.body!.getReader();
         let seen = "";
@@ -666,7 +712,7 @@ async function main() {
 
   // ═══ Source-level backstop ═══
   const read = (file: string) => readFileSync(join(ROOT, file), "utf8");
-  await check("source: nothing in the streams or the route cancels a job outside the disconnect hold", () => {
+  await step("source: nothing in the streams or the route cancels a job outside the disconnect hold", 0, async () => {
     for (const file of ["lib/bridge/harness-jobs/stream.ts", "app/api/bridge/chat/route.ts"]) {
       const calls = read(file)
         .replace(/\.run\(\(\) => cancelHarnessJob\(/g, ".run(() => HELD(")
@@ -675,7 +721,7 @@ async function main() {
       assert.deepEqual(calls, [], `${file}: a cancel that does not go through disconnect.run(...) would be lost on Workers`);
     }
   });
-  await check("source: the route makes the hold after the job is queued and hands it to both streams", () => {
+  await step("source: the route makes the hold after the job is queued and hands it to both streams", 0, async () => {
     const source = read("app/api/bridge/chat/route.ts");
     const made = source.indexOf("createDisconnectHold(");
     assert.ok(made > source.indexOf("const queued = await enqueueHarnessJob"), "the hold is made once there is a job to cancel");
