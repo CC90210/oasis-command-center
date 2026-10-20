@@ -174,26 +174,26 @@ is header injection.
 
 ---
 
-## The one genuinely dangerous setting
+## The suppression brand
 
 `DRIP_SUPPRESSION_BRAND` (default `SunBiz`).
 
-`/api/unsubscribe` resolves that string to a tenant (`tenants.name ILIKE`) when
-it RECORDS an opt-out. If it matches no tenant, the suppression row is written
-with `tenant_id = NULL`, and `checkEmailSuppressed` filters by `tenant_id`, so
-the opt-out is never honored. The unsubscribe appears to work and the merchant
-keeps receiving mail.
-
-Two mitigating facts, verified 2026-07-29:
+It is the brand recorded on an opt-out from drip mail. It is no longer a
+dangerous setting. Until 2026-10-19 `/api/unsubscribe` matched it against
+`tenants.name`, and a value that matched no tenant recorded opt-outs that no
+sender honoured. Now an opt-out files under a workspace only for a brand pinned
+in `lib/email/support-mailbox.ts` (`pinnedSuppressionTenant`), and globally for
+every other brand. Every sender honours a global row
+(`lib/email/suppression-scope.ts`).
 
 - Enforcement keys on `(tenant_id, email)` and does not consult the brand, so
-  **every suppression recorded before the rebrand keeps working.**
+  every suppression recorded before a rebrand keeps working.
 - The value deliberately does NOT follow `DRIP_FROM_ADDRESS`. Changing who mail
   is from cannot silently repoint where opt-outs are filed.
 
-**Decide explicitly before go-live:** if Bluerise sends as its own tenant, set
-this to that tenant's exact name. If it sends under the existing tenant, leave it
-alone. Confirm against the database either way.
+**If Bluerise ever sends as its own tenant** and its opt-outs should file there
+rather than globally, pin its brand to that tenant in
+`lib/email/support-mailbox.ts`.
 
 ---
 

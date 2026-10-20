@@ -56,6 +56,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
 import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
+import { checkSuppression } from "@/lib/email/suppression-scope";
 
 /** Shared with app/api/leads/bulk — the queue writer and this drain must agree. */
 export const BULK_EMAIL_SOURCE = "dashboard_bulk_email_v2";
@@ -219,21 +220,15 @@ async function requeueOrFail(
   return "requeued";
 }
 
-/** Fail-closed suppression re-check (same posture as lib/forms/next-steps-email). */
+/** Fail-closed suppression re-check (lib/email/suppression-scope.ts checkSuppression). */
 async function suppressionGate(
   db: SupabaseClient,
   tenantId: string,
   toEmail: string,
 ): Promise<"clear" | "suppressed" | "check_failed"> {
-  const pattern = toEmail.toLowerCase().replace(/[%_\\]/g, "\\$&");
-  const supp = await db
-    .from("email_suppressions")
-    .select("email")
-    .eq("tenant_id", tenantId)
-    .ilike("email", pattern)
-    .limit(1);
-  if (supp.error) return "check_failed";
-  return (supp.data?.length ?? 0) > 0 ? "suppressed" : "clear";
+  const supp = await checkSuppression(db, tenantId, toEmail);
+  if (supp.checkFailed) return "check_failed";
+  return supp.suppressed ? "suppressed" : "clear";
 }
 
 /**

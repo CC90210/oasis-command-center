@@ -141,24 +141,19 @@ export function trackingOrigin(brand?: BrandKey): string {
 }
 
 /**
- * THE SUPPRESSION BRAND, and the sharpest edge in this whole cutover.
+ * THE SUPPRESSION BRAND: the brand recorded on an opt-out from drip mail.
  *
- * This string is NOT cosmetic. /api/unsubscribe resolves it to a tenant
- * (tenants.name ILIKE <brand>) when RECORDING an opt-out. If it ever fails to
- * match a real tenant, the suppression row lands with tenant_id = NULL, and
- * checkEmailSuppressed — which filters by tenant_id — will never honor it. The
- * unsubscribe silently does nothing and the merchant keeps receiving mail.
+ * /api/unsubscribe files an opt-out under a workspace only for a brand pinned
+ * in lib/email/support-mailbox.ts, and globally for every other brand, this
+ * one included. Every sender honours a global row
+ * (lib/email/suppression-scope.ts), so no value here can leave an opt-out
+ * unhonoured. Until 2026-10-19 the brand was matched against tenants.name and
+ * a value that matched no workspace was silently never honoured.
  *
- * The good news, verified 2026-07-29: enforcement keys on (tenant_id, email) and
- * does NOT consult the brand, so previously recorded suppressions keep working
- * through a rebrand. The hazard is only on the WRITE path, and only for
- * suppressions recorded AFTER the brand changes.
- *
- * So this deliberately does NOT follow the From address. Changing who the mail
- * is from must not silently repoint where opt-outs are filed. If Bluerise sends
- * as its own tenant, set this to that tenant's exact name. If it sends under the
- * existing tenant, leave it alone. scripts/verify-email-domain.mjs checks that
- * whatever is set here actually resolves to a tenant before you go live.
+ * Enforcement keys on (tenant_id, email) and does NOT consult the brand, so
+ * recorded suppressions keep working through a rebrand. This still does NOT
+ * follow the From address: changing who the mail is from must not change
+ * where opt-outs are filed.
  */
 export function suppressionBrand(): string {
   return env("DRIP_SUPPRESSION_BRAND") || "SunBiz";

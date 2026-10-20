@@ -200,6 +200,7 @@ function makeHandoffDb(assignedTo: string, assignedAgentName?: string) {
     Object.assign(builder, {
       select: chain, eq: chain, neq: chain, ilike: chain, contains: chain, order: chain,
       limit: chain, in: chain, gte: chain, like: chain,
+      or: chain, // the opt-out lookup's own-or-global scope (lib/email/suppression-scope.ts)
       insert: () => { op = "insert"; return builder; },
       update: () => { op = "update"; return builder; },
       delete: () => { op = "delete"; return builder; },

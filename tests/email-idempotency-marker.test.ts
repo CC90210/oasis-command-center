@@ -60,6 +60,7 @@ function makeDb(opts: { interactionsSelectErrors: boolean; inserts: Insert[] }) 
       in: chain,
       gte: chain, // alreadySent's resend-window filter (2026-08-18)
       like: chain, // reservation deterministic-winner check (2026-08-18)
+      or: chain, // the opt-out lookup's own-or-global scope (lib/email/suppression-scope.ts)
       insert: (row: Record<string, unknown>) => {
         op = "insert";
         inserts.push({ table, row });
