@@ -1770,10 +1770,10 @@ async function processEmailStep(
     sentBrand = brand;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
-      // SUNBIZ_BRAND here is the SUPPRESSION brand (the tenant resolver on the
-      // opt-out write path), NOT the sending brand. It deliberately does not
-      // follow `brand`: both brands share one tenant so a single opt-out stops
-      // both, and a value matching no tenant would land tenant_id = NULL.
+      // SUNBIZ_BRAND here is the SUPPRESSION brand (the label an opt-out is
+      // recorded with; /api/unsubscribe files it globally), NOT the sending
+      // brand. It deliberately does not follow `brand`: both brands share one
+      // tenant so a single opt-out stops both.
       listUnsubscribe: listUnsubscribeHeader(email, SUNBIZ_BRAND, trackingBase),
       brand,
     });

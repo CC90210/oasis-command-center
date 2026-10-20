@@ -88,9 +88,11 @@ assert.doesNotMatch(
   /\.contains\(/,
   "object-containment filters are dead on the Turso adapter (json_each array semantics) — use metadata->>key",
 );
+// The lookup itself is checkSuppression (lib/email/suppression-scope.ts),
+// exercised end to end in tests/unsubscribe-records-every-opt-out.test.ts.
 assert.match(
   dispatch,
-  /suppressionGate[\s\S]*?ilike\("email", pattern\)/,
+  /async function suppressionGate[\s\S]*?checkSuppression\(db, tenantId, toEmail\)/,
   "every recipient must be re-checked against email_suppressions before SMTP",
 );
 assert.match(

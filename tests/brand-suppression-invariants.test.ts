@@ -29,21 +29,34 @@ const start = queries.indexOf("export async function checkEmailSuppressed");
 assert.ok(start >= 0, "checkEmailSuppressed must exist — it is the opt-out enforcement point");
 
 // Bound the slice to the function body so we do not read a neighbouring query.
-const bodyEnd = queries.indexOf("\nexport ", start + 10);
+// (Bounded at the next top-level "}" since 2026-10-19: bounded at the next
+// export, it ran on into later functions, and their `.eq("tenant_id"` passed
+// the tenant check below for a body that no longer had one.)
+const bodyEnd = queries.indexOf("\n}", start);
 const suppressBody = queries.slice(start, bodyEnd > start ? bodyEnd : start + 2000);
+assert.ok(
+  suppressBody.includes("checkSuppression("),
+  "checkEmailSuppressed must use checkSuppression (lib/email/suppression-scope.ts), the lookup every sender shares",
+);
+
+// The lookup itself, which every OCC sender calls.
+const scopeSrc = readFileSync("lib/email/suppression-scope.ts", "utf8");
+const checkStart = scopeSrc.indexOf("export async function checkSuppression");
+assert.ok(checkStart >= 0, "checkSuppression must exist: it is the opt-out lookup every sender makes");
+const checkBody = scopeSrc.slice(checkStart, scopeSrc.indexOf("\n}", checkStart));
 
 assert.ok(
-  suppressBody.includes('.eq("tenant_id"'),
-  "suppression must be tenant-scoped",
+  checkBody.includes("suppressionScope(tenantId)") && scopeSrc.includes("`tenant_id.eq."),
+  "suppression must be tenant-scoped: the workspace's own rows plus the global ones",
 );
 assert.ok(
-  !/\.eq\(\s*["'`]brand["'`]/.test(suppressBody) && !/\.eq\(\s*["'`]sending_brand["'`]/.test(suppressBody),
+  !/\.eq\(\s*["'`]brand["'`]/.test(checkBody) && !/\.eq\(\s*["'`]sending_brand["'`]/.test(checkBody),
   "SUPPRESSION MUST NOT FILTER BY BRAND. An opt-out to either company has to " +
     "stop both, or switching brands becomes a way to keep mailing someone who " +
     "asked to stop.",
 );
 assert.ok(
-  suppressBody.includes("checkFailed"),
+  checkBody.includes("checkFailed: true"),
   "suppression must report a failed check so the caller can fail closed rather than send",
 );
 
@@ -78,10 +91,11 @@ assert.ok(
 );
 
 // ---------------------------------------------------------------------------
-// 4. The suppression BRAND (the tenant resolver on the opt-out WRITE path) must
-//    not be derived from the sending brand. A value matching no tenant writes
-//    tenant_id = NULL, which the enforcement query above can never match. That
-//    exact failure already exists once in production.
+// 4. The suppression BRAND (recorded on the opt-out) must not be derived from
+//    the sending brand. Changing who mail is from must not change where an
+//    opt-out is filed. (Before 2026-10-19 /api/unsubscribe matched it against
+//    tenants.name and a miss was never honoured. Now a brand that is not
+//    pinned to a workspace files globally, which every sender honours.)
 // ---------------------------------------------------------------------------
 const identity = readFileSync("lib/email/sending-identity.ts", "utf8");
 const suppStart = identity.indexOf("export function suppressionBrand");
@@ -90,8 +104,8 @@ const suppEnd = identity.indexOf("\n}", suppStart);
 const suppFn = identity.slice(suppStart, suppEnd);
 assert.ok(
   !suppFn.includes("fromAddress") && !suppFn.includes("getBrand") && !suppFn.includes("brand)"),
-  "suppressionBrand must NOT follow the sending brand — it resolves a TENANT on " +
-    "the opt-out write path, and a value matching no tenant lands tenant_id = NULL",
+  "suppressionBrand must NOT follow the sending brand: changing who mail is " +
+    "from must not change where an opt-out is filed",
 );
 
 console.log("brand-suppression-invariants.test.ts — all assertions passed ✓");

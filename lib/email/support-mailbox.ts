@@ -67,12 +67,13 @@ export type OasisMailPurpose = "sales" | "support";
  * The suppression brand on support mail's opt-out links (the `brand` that
  * /api/unsubscribe files an opt-out under).
  *
- * PINNED, NOT LOOKED UP. /api/unsubscribe resolves an ordinary brand to a
- * workspace by NAME, and "OASIS AI" is also the default name of dozens of
- * self-signup workspaces (lib/provisioning/workspace-name.ts), so a name lookup
- * would file OASIS's opt-out under a stranger's workspace, where no OASIS
- * sender ever looks. pinnedSuppressionTenant sends it to OASIS's own workspace
- * instead, whose list every support send checks (sendOasisSharedGmail).
+ * PINNED, NOT LOOKED UP. /api/unsubscribe files an opt-out under a workspace
+ * only when its brand is pinned here, and globally otherwise. It never looks a
+ * brand up by workspace name: "OASIS AI" is also the default name of dozens of
+ * self-signup workspaces (lib/provisioning/workspace-name.ts), so a name
+ * lookup would file OASIS's opt-out under a stranger's workspace, where no
+ * OASIS sender ever looks. pinnedSuppressionTenant sends it to OASIS's own
+ * workspace, whose list every support send checks (sendOasisSharedGmail).
  */
 export const OASIS_SUPPRESSION_BRAND = "OASIS AI";
 
@@ -80,9 +81,9 @@ export const OASIS_SUPPRESSION_BRAND = "OASIS AI";
 export const OASIS_SUPPRESSION_TENANT_ID = DELIVERY_TENANT_ID;
 
 /**
- * The workspace an opt-out with this brand is filed under, for a brand that
- * must never be resolved by name; null for every other brand, which keeps the
- * name lookup.
+ * The workspace an opt-out with this brand is filed under; null for every
+ * other brand, which /api/unsubscribe files globally (every sender honours a
+ * global row, lib/email/suppression-scope.ts).
  */
 export function pinnedSuppressionTenant(brand: string): string | null {
   return brand.trim().toLowerCase() === OASIS_SUPPRESSION_BRAND.toLowerCase() ? OASIS_SUPPRESSION_TENANT_ID : null;
