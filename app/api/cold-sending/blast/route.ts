@@ -8,6 +8,9 @@
  * Auth: signed-in ADMIN, or Bearer SCAN_TRIGGER_SECRET + { tenantId } (automation),
  * the latter only for OASIS's own workspaces (2026-10-19 audit).
  *
+ * OFF for every workspace since 2026-10-20: it can only send as a retired client
+ * (COLD_SENDING_ENABLED in lib/integrations/cold-sending.ts), so it answers 410.
+ *
  * Fail-closed: if the cold pool is empty/exhausted, the whole blast is refused up
  * front with a clear message ("add a cold domain first") rather than leaking onto
  * the primary domain. Per-recipient suppression + never-mention-lenders still run
@@ -17,7 +20,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { pickColdMailbox, sendColdEmail } from "@/lib/integrations/cold-sending";
+import { COLD_SENDING_ENABLED, COLD_SENDING_OFF, pickColdMailbox, sendColdEmail } from "@/lib/integrations/cold-sending";
 import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 
 export const runtime = "nodejs";
@@ -62,6 +65,9 @@ export async function POST(req: NextRequest) {
     if (!s.isAdmin) return NextResponse.json({ ok: false, error: "admin_only" }, { status: 403 });
     tenantId = s.tenantId;
   }
+
+  // Off for every workspace: it can only send as a retired client (lib/integrations/cold-sending.ts).
+  if (!COLD_SENDING_ENABLED) return NextResponse.json({ ok: false, ...COLD_SENDING_OFF }, { status: 410 });
 
   const subject = (body.subject || "").trim();
   const text = (body.body || "").trim();
