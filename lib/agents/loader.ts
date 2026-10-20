@@ -1,9 +1,13 @@
 /**
  * Agent library loader — single entry point the marketplace + chat use.
  *
- * Lookup posture mirrors the manifest loader:
- *   1. Supabase `agents` first (so user customs + Phase 3.1 promoted
- *      platform agents win).
+ * Lookup posture:
+ *   1. The `agents` table (Turso) first, with two rules (2026-10-19 audit,
+ *      independent review of #713). A row reaches a workspace only when it is
+ *      that workspace's own or OASIS stands behind it (managed, or published
+ *      from OASIS's own workspace). A row under a built-in agent's slug stands
+ *      in for the built-in only when OASIS manages it (the Phase 3.1
+ *      promotion path); a workspace's own row never replaces one.
  *   2. In-code seeds (./library.ts) as the fallback so the marketplace is
  *      never empty even before the DB is seeded.
  *
@@ -68,7 +72,7 @@ async function fetchAgentRows(filter: AgentListFilter): Promise<AgentRow[]> {
  * on every edit and the writer refused it as not a boolean, and the library's
  * sort compared `1 !== true` (independent review of #713).
  */
-function withBooleanFlags(row: AgentRow): AgentRow {
+export function withBooleanFlags(row: AgentRow): AgentRow {
   return { ...row, is_public: dbBool(row.is_public), is_oasis_managed: dbBool(row.is_oasis_managed) };
 }
 
@@ -106,7 +110,7 @@ export const listAgents = cache(async (filter: AgentListFilter = {}): Promise<Ag
   // dropped, the same rule as getAgentBySlug (2026-10-19 audit).
   const seedSlugs = new Set(SEED_AGENTS.map((a) => a.slug));
   const rows = dbRows.filter((r) => {
-    if (!seedSlugs.has(r.slug) || isOasisManaged(r)) return true;
+    if (!seedSlugs.has(r.slug) || r.is_oasis_managed) return true;
     logDrop(r, "a built-in agent's slug");
     return false;
   });
@@ -160,15 +164,12 @@ export const getAgentBySlug = cache(async (slug: string, tenantId?: string | nul
   // "sdr" would replace the Sales agent in every workspace (2026-10-19 audit).
   // The persistence layer now refuses such slugs; this holds for any row
   // written before it did, or written around it.
-  if (fromDb && (!seed || isOasisManaged(fromDb))) return fromDb;
+  // Rows come back through withBooleanFlags, so the flag is already a boolean
+  // read the way every other reader takes it (lib/db-bool.ts).
+  if (fromDb && (!seed || fromDb.is_oasis_managed)) return fromDb;
   if (fromDb) logDrop(fromDb, "a built-in agent's slug");
   return seed;
 });
-
-/** The flag as every other reader takes it (lib/db-bool.ts): true, 1 or "1", never "true". */
-function isOasisManaged(row: AgentRow): boolean {
-  return dbBool((row as { is_oasis_managed?: unknown }).is_oasis_managed);
-}
 
 /** A row a platform operator owns in the public library: managed by OASIS, or published from OASIS's own workspace. */
 function isOasisPublished(row: { tenant_id?: string | null; is_oasis_managed?: unknown }): boolean {

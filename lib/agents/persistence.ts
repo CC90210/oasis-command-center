@@ -14,6 +14,7 @@ import { isHouseAgentSlug } from "@/lib/agents";
 import { dbBool } from "@/lib/db-bool";
 import { OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
 import { getSeedAgent } from "./library";
+import { withBooleanFlags } from "./loader";
 import type {
   AgentCategory,
   AgentLibraryEntry,
@@ -168,7 +169,9 @@ export async function createCustomAgent(
   };
   const inserted = await db.from("agents").insert(row).select("*").single();
   if (inserted.error) throw new AgentPersistenceError("db", inserted.error.message);
-  return inserted.data as AgentLibraryEntry;
+  // The flags as booleans, as GET hands them out: Turso returns 0/1, and the
+  // builder sends back what it was given (independent review of #713).
+  return withBooleanFlags(inserted.data as AgentLibraryEntry);
 }
 
 export type UpdateAgentInput = Partial<Omit<CreateAgentInput, "slug" | "tenant_id" | "created_by">> & {
@@ -225,22 +228,28 @@ export async function updateCustomAgent(
   if (isPublic !== undefined) patch.is_public = isPublic;
 
   // A published agent is in every workspace's library, so changing it is
-  // publishing again: OASIS's call. Its own workspace may still take it down
-  // (is_public false and nothing else). Only the flag used to be gated, so an
-  // OASIS admin who is not a platform operator could rewrite a published prompt
-  // (independent review of #713).
-  const unpublishOnly = Object.keys(patch).length === 1 && patch.is_public === false;
-  if (dbBool(row.is_public) && !writer.mayPublish && Object.keys(patch).length > 0 && !unpublishOnly) {
+  // publishing again: OASIS's call. Its own workspace may still take it down.
+  // Only the flag used to be gated, so an OASIS admin who is not a platform
+  // operator could rewrite a published prompt (independent review of #713).
+  //
+  // Taking it down may come with other edits: the builder sends the whole
+  // form. The row ends private in the same write, so none of those edits is
+  // ever published. Requiring is_public alone left the builder's own unpublish
+  // refused (independent review of #713, round 3).
+  const unpublishing = patch.is_public === false;
+  if (dbBool(row.is_public) && !writer.mayPublish && Object.keys(patch).length > 0 && !unpublishing) {
     throw new AgentPersistenceError("forbidden", PUBLISHED_CHANGE_REFUSED);
   }
 
   if (Object.keys(patch).length === 0) {
-    return (await db.from("agents").select("*").eq("id", row.id).single()).data as AgentLibraryEntry;
+    const current = await db.from("agents").select("*").eq("id", row.id).single();
+    if (current.error) throw new AgentPersistenceError("db", current.error.message);
+    return withBooleanFlags(current.data as AgentLibraryEntry);
   }
 
   const updated = await db.from("agents").update(patch).eq("id", row.id).select("*").single();
   if (updated.error) throw new AgentPersistenceError("db", updated.error.message);
-  return updated.data as AgentLibraryEntry;
+  return withBooleanFlags(updated.data as AgentLibraryEntry);
 }
 
 export async function deleteCustomAgent(

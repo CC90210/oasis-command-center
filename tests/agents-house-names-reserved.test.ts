@@ -55,6 +55,13 @@ async function main() {
     "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     PRIMARY KEY ("id"))`);
   await db.execute(`CREATE UNIQUE INDEX "agents_slug_key" ON "agents" (slug)`);
+  // The real operator list, empty: "not an operator" is then the ordinary
+  // answer for an unlisted account, not the fail-closed answer for a missing
+  // table (independent review of #713, round 3).
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const read = (rel: string) => readFileSync(join(__dirname, "..", rel), "utf8");
+  await db.executeMultiple(read("database/turso/bravo__208_platform_operators.sql"));
   const row = (slug: string, opts: { pub?: number; managed?: number; tenant?: string; prompt?: string }) =>
     db.execute({
       sql: `INSERT INTO agents (slug, name, category, short_description, base_prompt, is_public, is_oasis_managed, tenant_id)
@@ -75,7 +82,7 @@ async function main() {
   await row("research-analyst", { pub: 1, tenant: OASIS, prompt: "OASIS-UNMANAGED-UNDER-A-SEED" });
 
   const { SEED_AGENTS, getSeedAgent } = await import("../lib/agents/library");
-  const { isReservedAgentSlug, createCustomAgent, AgentPersistenceError, PUBLISH_FROM_OASIS, PUBLISHED_CHANGE_REFUSED } = await import("../lib/agents/persistence");
+  const { isReservedAgentSlug, createCustomAgent, updateCustomAgent, AgentPersistenceError, PUBLISH_FROM_OASIS, PUBLISHED_CHANGE_REFUSED } = await import("../lib/agents/persistence");
   const { getAgentBySlug, listAgents } = await import("../lib/agents/loader");
   const { resolveAgentKey } = await import("../lib/agents");
   // A managed flag stored as the TEXT "true", under another built-in slug: not managed (lib/db-bool.ts).
@@ -243,11 +250,9 @@ async function main() {
     // The builder starts from what the loader returns and sends it back. The
     // loader used to return Turso's 0/1, which the writer refused (422).
     await login(USERS.cc);
-    for (const slug of ["oasis-helper"]) {
-      const loaded = (await getAgentBySlug(slug, OASIS))!;
-      const r = await patch(slug, { name: "Renamed helper", is_public: loaded.is_public });
-      assert.equal(r.status, 200, JSON.stringify(r.body));
-    }
+    const loaded = (await getAgentBySlug("oasis-helper", OASIS))!;
+    const r = await patch("oasis-helper", { name: "Renamed helper", is_public: loaded.is_public });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal((await create("oasis-private-helper")).status, 200);
     const privateRow = (await getAgentBySlug("oasis-private-helper", OASIS))!;
     assert.equal((await patch("oasis-private-helper", { name: "Still private", is_public: privateRow.is_public })).status, 200);
@@ -278,12 +283,67 @@ async function main() {
       (e: unknown) => e instanceof AgentPersistenceError && e.code === "validation" && e.message === PUBLISH_FROM_OASIS,
     );
     assert.equal(await publicFlag("client-published"), null);
+    // The same rule on an edit: an operator's writer still cannot publish
+    // another workspace's agent (the route never lets one reach it; the
+    // writer holds on its own).
+    await assert.rejects(
+      () => updateCustomAgent({ slug: "client-closer", tenant_id: ATTACKER, is_public: true }, { mayPublish: true }),
+      (e: unknown) => e instanceof AgentPersistenceError && e.code === "validation" && e.message === PUBLISH_FROM_OASIS,
+    );
+    assert.equal(await publicFlag("client-closer"), 0);
+  });
+
+  await check("taking a published agent down from the builder, which sends the whole form, goes through; the edits land private", async () => {
+    // The builder's own payload for an unpublish (CustomAgentBuilder.tsx).
+    const form = (name: string) => ({
+      slug: "x",
+      name,
+      category: "sales",
+      short_description: "Books calls",
+      base_prompt: `${PROMPT} Edited while taking it down.`,
+      required_tools: [],
+      is_public: false,
+    });
+    await login(USERS.cc);
+    assert.equal((await create("oasis-takedown", { is_public: true })).status, 200);
+    await login(USERS.adon);
+    const editOnly = await patch("oasis-takedown", { ...form("Still public"), is_public: undefined });
+    assert.equal(editOnly.status, 403, "an edit that keeps it published is still OASIS's call");
+    const down = await patch("oasis-takedown", form("Taken down"));
+    assert.equal(down.status, 200, JSON.stringify(down.body));
+    assert.equal(await publicFlag("oasis-takedown"), 0);
+    assert.equal((await getAgentBySlug("oasis-takedown", OASIS))!.name, "Taken down");
+
+    // A client's owner on a public row written before only OASIS could publish.
+    await row("legacy-public", { pub: 1, tenant: ATTACKER, prompt: "LEGACY PUBLIC" });
+    await login(USERS.clientA);
+    const legacy = await patch("legacy-public", form("Legacy taken down"));
+    assert.equal(legacy.status, 200, JSON.stringify(legacy.body));
+    assert.equal(await publicFlag("legacy-public"), 0);
+  });
+
+  await check("every write answers with the flags as true/false, as a read does", async () => {
+    await login(USERS.clientA);
+    const made = await create("flags-reply");
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    const agent = made.body.agent as { is_public: unknown; is_oasis_managed: unknown };
+    assert.equal(agent.is_public, false);
+    assert.equal(agent.is_oasis_managed, false);
+    const edited = await patch("flags-reply", { name: "Flags reply" });
+    assert.equal((edited.body.agent as { is_public: unknown }).is_public, false);
+    const unchanged = await patch("flags-reply", {});
+    assert.equal((unchanged.body.agent as { is_public: unknown }).is_public, false, "an empty edit answers the same way");
+  });
+
+  await check("a platform operator may delete a published agent", async () => {
+    await login(USERS.cc);
+    assert.equal((await create("oasis-retired", { is_public: true })).status, 200);
+    const removed = await call(agentRoute.DELETE(req("DELETE", "/api/agents/oasis-retired", undefined), { params: Promise.resolve({ slug: "oasis-retired" }) }));
+    assert.equal(removed.status, 200, JSON.stringify(removed.body));
+    assert.equal(await publicFlag("oasis-retired"), null);
   });
 
   await check("the builder shows the Public box only to a platform operator, or to unpublish an agent that already is", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const read = (rel: string) => readFileSync(join(__dirname, "..", rel), "utf8");
     const builder = read("components/marketplace/CustomAgentBuilder.tsx");
     const box = builder.indexOf("Public — share with other tenants in the marketplace");
     assert.ok(box > 0 && builder.lastIndexOf("{(canPublish || editing?.is_public) && (", box) > 0, "the box renders behind the publish check");
