@@ -22,7 +22,7 @@
  * Run: node --conditions=react-server --import tsx tests/os-approvals.test.ts
  */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1764,8 +1764,15 @@ async function main() {
         Object.defineProperty(r, "nextUrl", { value: new URL(url) });
         return r as never;
       };
-      const forged = await unsubscribe.POST(oneClickPost(oneClick[1].replace("brand=OASIS+AI", "brand=SunBiz")));
-      assert.equal(forged.status, 401, "the link is signed: another brand under the same token is refused");
+      // The link is signed: its token is the HMAC of this address and brand.
+      // (A token that does not match is filed as unsigned, capped and logged,
+      // never refused: tests/unsubscribe-records-every-opt-out.test.ts.)
+      const linkParams = new URL(oneClick[1]).searchParams;
+      assert.equal(
+        linkParams.get("token"),
+        createHmac("sha256", "os-approvals-unsubscribe-secret").update(`${CLIENT_CONTACT}|OASIS AI`).digest("hex").slice(0, 16),
+        "the link is signed for this address and brand",
+      );
       const done = await unsubscribe.POST(oneClickPost(oneClick[1]));
       assert.equal(done.status, 200, await done.clone().text());
       const filed = (await raw.execute("SELECT email, tenant_id, brand FROM email_suppressions")).rows.map((r) => ({ email: r.email, tenant_id: r.tenant_id, brand: r.brand }));
