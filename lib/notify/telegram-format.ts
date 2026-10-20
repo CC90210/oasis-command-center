@@ -16,14 +16,23 @@ export function escapeTelegramHtml(s: string): string {
 export const TELEGRAM_TEXT_MAX = 4096;
 
 /**
+ * `s` cut to `max` whole characters, with `marker` after it when it was cut.
+ * Whole characters, not UTF-16 units: slice() and lib/fmt.ts truncate can
+ * leave half an emoji (a lone surrogate, which is not valid text, and Telegram
+ * refuses the message). Plain text: escape after, never before.
+ */
+export function clipText(s: string, max: number, marker = ""): string {
+  const chars = Array.from(s);
+  return chars.length > max ? `${chars.slice(0, max).join("")}${marker}` : s;
+}
+
+/**
  * A user-supplied value cut to at most `max` characters, then escaped: the cut
  * comes first, so it can never land inside an escape ("&am"), and it counts
- * whole characters, so it never leaves half an emoji (a lone surrogate, which
- * is not valid text). Trimmed first, as the alert builders always did.
+ * whole characters (clipText). Trimmed first, as the alert builders always did.
  */
 export function clipAndEscape(s: string, max: number): string {
-  const chars = Array.from(s.trim());
-  return escapeTelegramHtml(chars.length > max ? chars.slice(0, max).join("") : chars.join(""));
+  return escapeTelegramHtml(clipText(s.trim(), max));
 }
 
 /**
