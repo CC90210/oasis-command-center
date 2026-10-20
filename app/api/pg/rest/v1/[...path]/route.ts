@@ -135,6 +135,9 @@ const FORBIDDEN_TABLES = new Set([
   // to a direct connection.
 ]);
 
+/** Which accepted bridge secret a request presented: a label, never the value. */
+type Credential = "tt" | "apex";
+
 /**
  * Constant-time bearer check against any accepted bridge secret.
  *
@@ -147,20 +150,22 @@ const FORBIDDEN_TABLES = new Set([
  * revocable credential breaks nobody and lets each fleet be cut off on its own.
  *
  * Both are compared; the check still fails closed when neither is configured.
+ * Returns which credential matched, so the usage log can say which fleet made
+ * each call (null when none did).
  */
-function authorised(req: NextRequest): boolean {
-  const accepted = [
-    process.env.TT_PG_BRIDGE_TOKEN || "",
-    process.env.APEX_PG_BRIDGE_TOKEN || "",
-  ].filter(Boolean);
-  if (!accepted.length) return false; // fail closed when unconfigured
+function authorised(req: NextRequest): Credential | null {
+  const accepted = ([
+    ["tt", process.env.TT_PG_BRIDGE_TOKEN || ""],
+    ["apex", process.env.APEX_PG_BRIDGE_TOKEN || ""],
+  ] as const).filter(([, value]) => Boolean(value));
+  if (!accepted.length) return null; // fail closed when unconfigured
 
   const header = req.headers.get("authorization") || "";
   const apikey = req.headers.get("apikey") || "";
   const presented = header.toLowerCase().startsWith("bearer ")
     ? header.slice(7).trim()
     : apikey.trim();
-  if (!presented) return false;
+  if (!presented) return null;
 
   // Hash both sides so timingSafeEqual gets equal-length buffers regardless of
   // the presented value's length (it throws on a length mismatch, which would
@@ -170,12 +175,33 @@ function authorised(req: NextRequest): boolean {
   // depend on WHICH credential was presented — a short-circuit would leak, by
   // timing, which fleet a caller belongs to.
   const a = createHash("sha256").update(presented).digest();
-  let ok = false;
-  for (const candidate of accepted) {
+  let matched: Credential | null = null;
+  for (const [label, candidate] of accepted) {
     const b = createHash("sha256").update(candidate).digest();
-    if (timingSafeEqual(a, b)) ok = true;
+    if (timingSafeEqual(a, b)) matched = label;
   }
-  return ok;
+  return matched;
+}
+
+/**
+ * One line per call in the Worker's logs: which credential, which table or RPC,
+ * the response status, and whether the call named a tenant.
+ *
+ * Every table except the denylist is reachable with either bearer and nothing
+ * forces a tenant filter (2026-10-19 audit, P0-2). The fix is a per-credential
+ * table allowlist plus a forced tenant filter, and that needs what each fleet
+ * really reads and writes. TT_PG_BRIDGE_TOKEN belongs to the retired SunBiz SMS
+ * runtime, so this also shows whether anything still uses it before it is
+ * revoked. Names only: no filter values, no body, never a token.
+ */
+function logUsage(entry: {
+  credential: Credential | null;
+  method: string;
+  target: string;
+  status: number;
+  tenantFilter: boolean;
+}): void {
+  console.log({ event: "pg_bridge_usage", ...entry });
 }
 
 /**
@@ -291,8 +317,30 @@ function ready() {
   return null;
 }
 
+/** Authorise, run, and log the call once, whatever path it ends on (a throw logs 500). */
+async function serve(req: NextRequest, segments: string[], method: "GET" | "POST" | "PATCH") {
+  const credential = authorised(req);
+  const isRpc = segments[0] === "rpc";
+  // The path is the caller's to choose, so it is capped before it reaches the log.
+  const target = (isRpc ? `rpc:${segments[1] ?? ""}` : segments.join("/") || "(none)").slice(0, 80);
+  let status = 500;
+  try {
+    const res = credential ? await handle(req, segments, method) : bad(401, "invalid bridge credentials");
+    status = res.status;
+    return res;
+  } finally {
+    logUsage({
+      credential,
+      method,
+      target,
+      status,
+      // An RPC's arguments are in its body, which is not read here.
+      tenantFilter: isRpc ? false : req.nextUrl.searchParams.has("tenant_id"),
+    });
+  }
+}
+
 async function handle(req: NextRequest, segments: string[], method: "GET" | "POST" | "PATCH") {
-  if (!authorised(req)) return bad(401, "invalid bridge credentials");
   const notReady = ready();
   if (notReady) return notReady;
 
@@ -371,13 +419,13 @@ async function handle(req: NextRequest, segments: string[], method: "GET" | "POS
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   const { path } = await ctx.params;
-  return handle(req, path ?? [], "GET");
+  return serve(req, path ?? [], "GET");
 }
 export async function POST(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   const { path } = await ctx.params;
-  return handle(req, path ?? [], "POST");
+  return serve(req, path ?? [], "POST");
 }
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   const { path } = await ctx.params;
-  return handle(req, path ?? [], "PATCH");
+  return serve(req, path ?? [], "PATCH");
 }
