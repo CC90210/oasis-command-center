@@ -97,7 +97,9 @@ function conds(expr: string): Cond[] {
 }
 {
   const [c] = conds("name.like.*acme*");
-  assert.equal(c.sql, `("name" LIKE ?)`);
+  // ESCAPE '\': the escape Postgres LIKE assumes and every caller writes
+  // (tests/opt-out-matches-every-address.test.ts).
+  assert.equal(c.sql, `("name" LIKE ? ESCAPE '\\')`);
   assert.deepEqual(c.args, ["%acme%"]);
 }
 {
