@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { UploadCloud, FileText, X, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { chosenFileType } from "@/lib/forms/file-type";
 
 export type UploadedDescriptor = {
   storage_path: string;
@@ -71,7 +72,7 @@ function putWithProgress(
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url);
-    xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+    xhr.setRequestHeader("content-type", chosenFileType(file));
     xhr.setRequestHeader("x-upsert", "false");
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(e.loaded / e.total);
@@ -158,7 +159,7 @@ export function MultiFileDropzone({
           body: JSON.stringify({
             token: activeToken,
             filename: file.name,
-            mime_type: file.type || "application/octet-stream",
+            mime_type: chosenFileType(file),
             size_bytes: file.size,
           }),
         });
@@ -206,7 +207,7 @@ export function MultiFileDropzone({
         const accepted = incoming.slice(0, slotsLeft);
         const newRows: Row[] = [];
         for (const file of accepted) {
-          const mime = file.type || "application/octet-stream";
+          const mime = chosenFileType(file);
           if (!mimeAllowed(mime, acceptList)) {
             newRows.push({
               id: localId(),

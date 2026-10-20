@@ -41,7 +41,7 @@ export const TIMED_OUT_COPY = "A workspace read timed out before the page could 
  * Public pages a client's prospects and customers land on. Each is also a
  * public prefix in middleware.ts; tests/client-route-gating.test.ts pins both.
  */
-export const PROSPECT_FACING_PREFIXES = ["/f/", "/sign/", "/unsubscribe"] as const;
+export const PROSPECT_FACING_PREFIXES = ["/f/", "/sign/", "/unsubscribe", "/book"] as const;
 
 /** True for a page a client's prospect or customer may be looking at. */
 export function isProspectFacingPath(pathname: string | null | undefined): boolean {

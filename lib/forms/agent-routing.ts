@@ -146,10 +146,12 @@ export async function findExistingLead(
     // A failed read is not "no such lead". Answering null made a duplicate
     // lead, and on the Instagram setter a second booking for someone already
     // booked (2026-10-19 audit). Callers fail closed on the throw (the submit
-    // route's capture and retry, the booking agent's 503) or chose their own
-    // fallback (operator-email ingest, dropped applications).
+    // route's capture and retry, the booking agent's 503, scrub-candidates
+    // putting the candidate back in the queue) or chose their own fallback
+    // (operator-email ingest, dropped applications). A read that answers
+    // without a list of rows is the same unknown, never "no match".
     if (q.error) throw new Error(`lead lookup failed: ${q.error.message}`);
-    if (!Array.isArray(q.data)) continue;
+    if (!Array.isArray(q.data)) throw new Error("lead lookup failed: the read returned no rows");
     const rows = q.data as Array<{ id: string; data: Record<string, unknown> | null; created_at: string | null }>;
     const row = rows.find((r) => {
       if (field !== "phone" || !business) return true;

@@ -46,6 +46,31 @@ export interface IngestResult {
   deferredUntimed: number;
 }
 
+/**
+ * Hold a message for the next run: it is not written, and it is counted so
+ * the caller keeps its cursor behind it (see IngestResult.deferred).
+ *
+ * internalDate, NOT the Date header. The header is sender-controlled and
+ * Gmail passes it through verbatim: a forged future date would push the
+ * cursor past legitimate later mail, and a missing or unparseable one would
+ * leave this null. internalDate is Gmail's own receipt time. Codex review
+ * 2026-08-04.
+ *
+ * If it is absent we leave oldestDeferredAt null, and the caller HOLDS the
+ * cursor rather than advancing — a stale cursor costs a re-read, an advanced
+ * one costs the email.
+ */
+function deferMessage(res: IngestResult, msg: MonitoredMessage): void {
+  res.deferred += 1;
+  const ms = Number(msg.internalDate);
+  if (Number.isFinite(ms) && ms > 0) {
+    const at = new Date(ms).toISOString();
+    if (!res.oldestDeferredAt || at < res.oldestDeferredAt) res.oldestDeferredAt = at;
+  } else {
+    res.deferredUntimed += 1;
+  }
+}
+
 function emailFromHeader(h: string): string {
   const m = String(h || "").match(/<([^>]+)>/);
   return (m ? m[1] : String(h || "")).trim().toLowerCase();
@@ -155,11 +180,20 @@ export async function ingestMessages(
     if (!counterparty) { res.dropped += 1; continue; }
 
     // PRIVACY GATE — only deal/merchant email (matches a lead) is kept.
-    let lead: { id: string } | null = null;
+    // A lookup that could not read is not "no lead": on a personal mailbox it
+    // dropped deal mail for good (the cursor moved past it), and on a work
+    // mailbox it stored the message unlinked from its lead. Held for the next
+    // run instead, like a classification still in flight (independent review
+    // of #714).
+    let lead: { id: string } | null;
     try {
       lead = await findExistingLead(args.tenantId, { email: counterparty });
-    } catch {
-      lead = null;
+    } catch (err) {
+      console.error("[operator-email.ingest] lead lookup failed; holding the message", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      deferMessage(res, msg);
+      continue;
     }
     // Mirror every work-mailbox message. Personal mailboxes retain the
     // deal-only privacy gate so unrelated personal email is never shared.
@@ -218,25 +252,7 @@ export async function ingestMessages(
      * fallback rather than pending.
      */
     if (cls.pending) {
-      res.deferred += 1;
-      /*
-       * internalDate, NOT the Date header. The header is sender-controlled and
-       * Gmail passes it through verbatim: a forged future date would push the
-       * cursor past legitimate later mail, and a missing or unparseable one
-       * would leave this null. internalDate is Gmail's own receipt time.
-       * Codex review 2026-08-04.
-       *
-       * If it is absent we leave oldestDeferredAt null, and the caller HOLDS
-       * the cursor rather than advancing — a stale cursor costs a re-read, an
-       * advanced one costs the email.
-       */
-      const ms = Number(msg.internalDate);
-      if (Number.isFinite(ms) && ms > 0) {
-        const at = new Date(ms).toISOString();
-        if (!res.oldestDeferredAt || at < res.oldestDeferredAt) res.oldestDeferredAt = at;
-      } else {
-        res.deferredUntimed += 1;
-      }
+      deferMessage(res, msg);
       continue;
     }
 

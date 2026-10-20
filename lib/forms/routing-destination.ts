@@ -22,11 +22,26 @@
  * fatal: resolveRouterDestination keeps walking the rule list, then falls
  * back to the community route, then to null (the form's own ordinary
  * thank-you behavior — no routing at all).
+ *
+ * A DESTINATION THAT COULD NOT BE READ is not one that does not exist. It
+ * throws RouterDestinationUnavailable instead of being skipped: skipping sent
+ * a visitor the rules had placed to the next rule or to the free community
+ * because of a one-second database blip (independent review of #714). The
+ * caller decides: the route-only answer asks the visitor to try again, and
+ * an already-recorded last step falls back to the form's own redirect.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolvePublicForm } from "./public-resolver";
 import { communityUrlForTenant } from "@/lib/offers/community-link";
 import { COMMUNITY_LINK_GO, ruleMatches, type FormRoutingRule } from "./routing";
+
+/** A rule's destination form could not be read (see the header). */
+export class RouterDestinationUnavailable extends Error {
+  constructor(detail: string) {
+    super(`router destination unreadable: ${detail}`);
+    this.name = "RouterDestinationUnavailable";
+  }
+}
 
 function buildFormPath(tenantSlug: string, formSlug: string): string {
   return `/f/${encodeURIComponent(tenantSlug)}/${encodeURIComponent(formSlug)}`;
@@ -49,6 +64,7 @@ async function resolveGoDestination(
     return communityUrlForTenant(input.tenantId) ? buildCommunityPath(input.tenantSlug, input.routerFormSlug) : null;
   }
   const resolved = await resolvePublicForm(db, input.tenantSlug, input.go);
+  if (!resolved.ok && resolved.reason === "unavailable") throw new RouterDestinationUnavailable(resolved.error);
   if (!resolved.ok) return null;
   // Use the DB-resolved slug/tenant_slug, not the raw `go`/input value — closes
   // any gap between "what the rule asked for" and "what actually exists".

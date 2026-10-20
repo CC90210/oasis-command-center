@@ -38,6 +38,7 @@ import { safeFormRedirect } from "@/lib/forms/redirect-url";
 import { CommunityJoinLink, PublicBookingCalendar } from "./PublicBookingCalendar";
 import { contactGateAction, contactHandoff, hasReachableContact, typedContact } from "@/lib/forms/contact-gate";
 import { HONEYPOT_BODY_KEY, reportTrappedSubmission, trapValue } from "@/lib/forms/honeypot";
+import { chosenFileType } from "@/lib/forms/file-type";
 import {
   isEarlyPublicBookingFormSlug,
   isOptionalPublicBookingFormSlug,
@@ -290,6 +291,9 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
   form_unavailable: "We couldn't reach this form just now. Your answers are still here, so please try again in a moment.",
   // The route names the file and why in its own sentence; this is the fallback.
   upload_failed: "One of your files couldn't be saved. Please choose it again and resubmit.",
+  // Storage or the database failed while saving a file: nothing the visitor
+  // chose is wrong. The route's own sentence names the file.
+  upload_unavailable: "We couldn't save one of your files just now. Your answers are still here, so please try again in a moment.",
   consent_record_unavailable:
     "We couldn't save your contact preferences just now. Please try submitting again.",
   // The last step of an audit that opens the calendar. Your answers are already
@@ -768,16 +772,17 @@ export function FormPublicClient({
         // form_submissions.payload. Phase 6 (lender shop-out) replaces
         // this with Supabase Storage handoff for proper bank-statement
         // workflows.
+        const mimeType = chosenFileType(v);
         payload[field.name] = {
           inline_base64: base64,
           filename: v.name,
-          mime_type: v.type || "application/octet-stream",
+          mime_type: mimeType,
           size_bytes: v.size,
         };
         file_attachments.push({
           field_name: field.name,
           storage_path: `inline:${field.name}`,
-          mime_type: v.type || "application/octet-stream",
+          mime_type: mimeType,
           size_bytes: v.size,
         });
       } else if (v !== undefined && v !== null && v !== "") {
@@ -792,8 +797,11 @@ export function FormPublicClient({
    * Fire-and-forget failure beacon. A submit that dies at the platform edge
    * (413, error page, network) never reaches our server code, so without this
    * the merchant's loss is invisible AND unrecoverable. Sends the current
-   * answers minus File objects — contact fields are what recovery needs; file
-   * bytes are what made the request too big in the first place.
+   * answers minus file bytes — contact fields are what recovery needs; file
+   * bytes are what made the request too big in the first place. That means a
+   * File in the on-screen answers AND the base64 a built payload carries: a
+   * keepalive request over 64 KiB is refused by the browser, so one attached
+   * file used to lose the whole beacon (independent review of #714).
    */
   function reportSubmitFailure(error: string, payload?: Record<string, unknown>, stepIndex = currentStep) {
     try {
@@ -802,6 +810,9 @@ export function FormPublicClient({
       for (const [k, v] of Object.entries(source)) {
         if (v instanceof File) {
           safe[k] = { skipped_file: v.name, size_bytes: v.size };
+        } else if (v && typeof v === "object" && typeof (v as { inline_base64?: unknown }).inline_base64 === "string") {
+          const f = v as { filename?: unknown; size_bytes?: unknown };
+          safe[k] = { skipped_file: f.filename ?? null, size_bytes: f.size_bytes ?? null };
         } else {
           safe[k] = v;
         }
@@ -860,11 +871,13 @@ export function FormPublicClient({
   /**
    * Show a refused submission as a plain sentence. Beacon only the failures
    * nobody else can see or that mean a crash: a non-JSON response (platform
-   * error page, 413), an explicit server_error or form_unavailable (the form
-   * could not be read), plus an error code with no copy, which means the
-   * route grew a rejection nobody wrote a sentence for.
+   * error page, 413), an explicit server_error, form_unavailable (the form
+   * could not be read) or upload_unavailable (storage failed under a file),
+   * plus an error code with no copy, which means the route grew a rejection
+   * nobody wrote a sentence for.
    * Validation and rate-limit responses are the system working, not a
-   * merchant being lost.
+   * merchant being lost. `beacon: false` is for an answer that stored
+   * nothing and has nothing to recover: the router's.
    */
   function showSubmitFailure(
     res: Response,
@@ -872,11 +885,15 @@ export function FormPublicClient({
     payload: Record<string, unknown>,
     /** The step the failed request was for, when not the one on screen (a held step). */
     stepIndex = currentStep,
+    { beacon = true }: { beacon?: boolean } = {},
   ) {
-    if (!data || data.error === "server_error" || data.error === "form_unavailable") {
+    if (
+      beacon &&
+      (!data || data.error === "server_error" || data.error === "form_unavailable" || data.error === "upload_unavailable")
+    ) {
       reportSubmitFailure(data ? data.error ?? "server_error" : `non_json_http_${res.status}`, payload, stepIndex);
     }
-    if (data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
+    if (beacon && data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
       reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex);
     }
     // The route writes a specific sentence for the rejections that can name
@@ -1012,7 +1029,11 @@ export function FormPublicClient({
     });
     const data = (await res.json().catch(() => null)) as SubmitResponse | null;
     if (!data || !data.ok) {
-      showSubmitFailure(res, data, lastPayload);
+      // No beacon: the router stored nothing, so a dead-letter row would hold
+      // nothing to recover and only keep the health check red until someone
+      // closed it by hand (independent review of #714). The answers stay on
+      // screen for the retry.
+      showSubmitFailure(res, data, lastPayload, currentStep, { beacon: false });
       return;
     }
     if (tenantSlug && formSlug) {

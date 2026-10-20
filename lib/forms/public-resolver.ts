@@ -77,7 +77,16 @@ export async function resolvePublicForm(
       .eq("custom_fields->>command_center_profile_slug", tenantSlug)
       .maybeSingle();
   }
-  if (tenantQ.error) return { ok: false, reason: "unavailable", error: `tenant read: ${tenantQ.error.message}` };
+  if (tenantQ.error) {
+    // Two workspaces answering one slug (PostgREST's PGRST116, which the Turso
+    // adapter mirrors) is bad data, not an outage: retrying will not fix it,
+    // so it is the link nobody can open. Logged so someone untangles it.
+    if (tenantQ.error.code === "PGRST116") {
+      console.error("[forms.public-resolver] more than one workspace answers this slug", { slug: tenantSlug });
+      return { ok: false, reason: "not_found" };
+    }
+    return { ok: false, reason: "unavailable", error: `tenant read: ${tenantQ.error.message}` };
+  }
 
   const tenantRow = tenantQ.data as
     | { id: string; slug: string; logo_url: string | null; custom_fields?: Record<string, unknown> | null }
@@ -92,7 +101,13 @@ export async function resolvePublicForm(
     .eq("tenant_id", tenantRow.id)
     .eq("slug", formSlug)
     .maybeSingle();
-  if (formQ.error) return { ok: false, reason: "unavailable", error: `form read: ${formQ.error.message}` };
+  if (formQ.error) {
+    if (formQ.error.code === "PGRST116") {
+      console.error("[forms.public-resolver] more than one form answers this slug", { slug: tenantSlug, form: formSlug });
+      return { ok: false, reason: "not_found" };
+    }
+    return { ok: false, reason: "unavailable", error: `form read: ${formQ.error.message}` };
+  }
   const form = formQ.data as
     | {
         id: string;

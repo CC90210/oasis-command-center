@@ -93,11 +93,21 @@ export async function applyExtractedApplication(input: {
      */
     let autoMatchedLead = false;
     if (!leadId) {
-      const match = await findExistingLead(input.tenantId, {
-        email: typeof fields.email === "string" ? fields.email : null,
-        phone: typeof fields.phone === "string" ? fields.phone : null,
-        business: typeof fields.business_name === "string" ? fields.business_name : null,
-      }).catch(() => null);
+      // A lookup that could not read is not "no such merchant": treating it as
+      // one created the second copy this block exists to prevent. Nothing has
+      // been written yet, so stop and let the drop be retried (independent
+      // review of #714).
+      let match: Awaited<ReturnType<typeof findExistingLead>>;
+      try {
+        match = await findExistingLead(input.tenantId, {
+          email: typeof fields.email === "string" ? fields.email : null,
+          phone: typeof fields.phone === "string" ? fields.phone : null,
+          business: typeof fields.business_name === "string" ? fields.business_name : null,
+        });
+      } catch (err) {
+        console.error("[apply-extracted] lead lookup failed", { error: err instanceof Error ? err.message : String(err) });
+        return { ok: false, error: "lead_lookup_failed" };
+      }
       if (match?.id) {
         leadId = match.id;
         autoMatchedLead = true;

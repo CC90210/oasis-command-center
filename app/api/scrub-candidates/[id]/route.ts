@@ -178,11 +178,28 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // all-digit phone matches (it never did through the .or() string), and the
   // sheet's business name only refuses a phone shared by a different
   // business; it never matches on its own.
-  const existingLead = await findExistingLead(
-    tenantId,
-    { email, phone, business: String(raw.business_name || "") },
-    { matchOnBusinessName: false },
-  );
+  // The lookup throws when it cannot read (lib/forms/agent-routing.ts): a
+  // failed read is not "no such lead". The claim above already moved the
+  // candidate to 'approving', and nothing else moves it back, so put it back
+  // in the queue before answering, or it is stranded there for good
+  // (independent review of #714).
+  let existingLead: Awaited<ReturnType<typeof findExistingLead>>;
+  try {
+    existingLead = await findExistingLead(
+      tenantId,
+      { email, phone, business: String(raw.business_name || "") },
+      { matchOnBusinessName: false },
+    );
+  } catch (e) {
+    await db
+      .from("scrub_candidates")
+      .update({ status: "pending_review", updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .eq("status", "approving");
+    console.error("[scrub-candidates] lead lookup failed:", e instanceof Error ? e.message : e);
+    return err(503, "lookup_unavailable", "Could not check for an existing lead just now. The candidate is back in the queue; try again.");
+  }
   const existingLeadId = existingLead?.id ?? null;
   if (existingLeadId) {
     await db

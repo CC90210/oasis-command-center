@@ -160,6 +160,17 @@ export async function uploadLeadDocument(
 }
 
 /**
+ * SECURITY: a registered path MUST be inside this tenant+lead's prefix. The
+ * signed upload URL (/api/forms/upload-url) is minted ONLY for
+ * `${tenant}/${lead}/`, so a path outside that — or any traversal — means a
+ * forged descriptor. One rule for registerLeadDocument and for the submit
+ * route, which asks it before writing anything for the step.
+ */
+export function storagePathInLeadScope(tenantId: string, leadId: string, storagePath: string): boolean {
+  return storagePath.startsWith(`${tenantId}/${leadId}/`) && !storagePath.includes("..");
+}
+
+/**
  * Register a lead-document whose bytes are ALREADY in Storage — used by the
  * direct-to-Storage form upload path (browser PUTs to a server-minted signed
  * upload URL, then the submit route registers the object here). This is the
@@ -184,11 +195,7 @@ export async function registerLeadDocument(input: {
 }): Promise<LeadDocumentUploadResult | LeadDocumentUploadFailure> {
   const db = getServiceSupabase();
 
-  // SECURITY: the path MUST be inside this tenant+lead's prefix. The signed
-  // upload URL (/api/forms/upload-url) is minted ONLY for `${tenant}/${lead}/`,
-  // so a path outside that — or any traversal — means a forged descriptor.
-  const expectedPrefix = `${input.tenantId}/${input.leadId}/`;
-  if (!input.storagePath.startsWith(expectedPrefix) || input.storagePath.includes("..")) {
+  if (!storagePathInLeadScope(input.tenantId, input.leadId, input.storagePath)) {
     return { ok: false, error: "storage_path_outside_scope" };
   }
 
@@ -203,6 +210,9 @@ export async function registerLeadDocument(input: {
     .eq("tenant_id", input.tenantId)
     .eq("storage_path", input.storagePath)
     .maybeSingle();
+  // A check that could not read is not "not registered yet": going on would
+  // register the same file twice on a retried step (independent review of #714).
+  if (dup.error) return { ok: false, error: `metadata_read_failed: ${dup.error.message}` };
   if (dup.data) {
     return { ok: true, document: dup.data as LeadDocumentUploadResult["document"] };
   }
