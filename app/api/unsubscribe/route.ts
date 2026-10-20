@@ -65,7 +65,7 @@ export const dynamic = "force-dynamic";
 const MAX_EMAIL_LEN = 254;
 /** A brand is stored up to this length: a workspace's name can be 120
  *  characters (lib/provisioning/workspace-name.ts). A longer one is cut for
- *  storage, never refused (reviewer of #711, item 26). */
+ *  storage and for the log, never refused (reviewer of #711, item 26). */
 const MAX_STORED_BRAND_LEN = 120;
 // Standard email regex — lightweight; we don't enforce deliverability
 // here, only shape sanity. The CRM has already verified the address
@@ -120,6 +120,9 @@ export async function POST(req: NextRequest) {
   const rawEmail = String(src.email ?? "").trim().toLowerCase();
   const rawBrand = String(src.brand ?? "").trim();
   const rawToken = String(src.token ?? "").trim();
+  // What is stored, and what is logged: a brand of any length is cut to this,
+  // so neither the table nor the log takes the caller's whole string (review of #715).
+  const storedBrand = rawBrand ? rawBrand.slice(0, MAX_STORED_BRAND_LEN) : null;
 
   if (!rawEmail || rawEmail.length > MAX_EMAIL_LEN || !EMAIL_RE.test(rawEmail)) {
     return bad(400, "invalid_email");
@@ -142,7 +145,7 @@ export async function POST(req: NextRequest) {
 
   // ---- The cap on unsigned filings (layer 4) ----
   const bucket = ipRateBucket(ip);
-  if (!signed && !(await claimCappedSlot(`unsubscribe-unsigned:${bucket}`, ip, 3600, UNSIGNED_FILINGS_PER_IP_PER_HOUR))) {
+  if (!signed && !(await claimCappedSlot(`unsubscribe-unsigned:${bucket}`, ip, 3600, UNSIGNED_FILINGS_PER_IP_PER_HOUR)).allowed) {
     console.warn("[unsubscribe] unsigned opt-out cap reached", { bucket, cap: UNSIGNED_FILINGS_PER_IP_PER_HOUR });
     return bad(429, "rate_limited: too many opt-out attempts; back off and retry");
   }
@@ -154,7 +157,7 @@ export async function POST(req: NextRequest) {
       {
         email: rawEmail,
         tenant_id: filedUnder,
-        brand: rawBrand ? rawBrand.slice(0, MAX_STORED_BRAND_LEN) : null,
+        brand: storedBrand,
         reason: "unsubscribe",
         source: "web_form",
         user_agent: req.headers.get("user-agent")?.slice(0, 500) ?? null,
@@ -180,7 +183,7 @@ export async function POST(req: NextRequest) {
 
   if (!filedUnder) {
     // A global row stops every sender, so each one is logged. Never the address.
-    console.warn("[unsubscribe] opt-out filed for every sender", { brand: rawBrand || null, signed });
+    console.warn("[unsubscribe] opt-out filed for every sender", { brand: storedBrand, signed });
   }
   return NextResponse.json({ ok: true });
 }

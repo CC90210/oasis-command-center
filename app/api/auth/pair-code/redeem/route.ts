@@ -75,7 +75,9 @@ export async function POST(req: NextRequest) {
   // every redemption takes its place in line before anything is checked
   // (claimCappedSlot), at most 10 a minute per bucket: checked first and
   // recorded after, 50 parallel guesses were all evaluated before the first
-  // failure landed. A person redeems a code once.
+  // failure landed. A redemption that pairs a computer gives its place back
+  // (slot.release below): the cap is on guesses, and a team setting up several
+  // computers behind one address is not guessing (review of #715).
   const ip = clientIp(req);
   const bucket = ipRateBucket(ip);
   const rateKey = `redeem:${bucket}`;
@@ -84,7 +86,8 @@ export async function POST(req: NextRequest) {
     await recordPairAttempt(rateKey, "rate_limited", ip);
     return bad(429, "rate_limited: too many failed pair-code redemptions; back off and retry");
   }
-  if (!(await claimCappedSlot(`redeem-attempts:${bucket}`, ip, PAIR_RATE_WINDOW_SECONDS, PAIR_RATE_MAX_FAILURES))) {
+  const slot = await claimCappedSlot(`redeem-attempts:${bucket}`, ip, PAIR_RATE_WINDOW_SECONDS, PAIR_RATE_MAX_FAILURES);
+  if (!slot.allowed) {
     return bad(429, "rate_limited: too many pair-code redemptions; back off and retry");
   }
 
@@ -174,6 +177,11 @@ export async function POST(req: NextRequest) {
     return bad(500, "redeem_returned_empty");
   }
   const isConnector = row.purpose === "connector";
+
+  // The code paired a computer: this was a person, not a guess, so its place in
+  // the cap goes back (review of #715). The pairing is already durable; a
+  // release that fails is logged by claimCappedSlot and never fails it.
+  await slot.release();
 
   const baseUrl = process.env.BRAVO_DASHBOARD_URL || publicAppBaseUrl();
 

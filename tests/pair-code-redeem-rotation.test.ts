@@ -66,6 +66,16 @@ for (const k of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "TURSO_AUTH_TOKEN", "BRAV
   } as unknown as NodeModule;
 }
 
+// The limiter hands its occasional prune of old rows to the platform's
+// ctx.waitUntil (lib/pair-rate-limit.ts via lib/os/runs/keepalive.ts). Give it
+// one, as the Worker does, or the first prune of a run logs that there is no
+// Cloudflare context.
+(globalThis as unknown as Record<symbol, unknown>)[Symbol.for("__cloudflare-context__")] = {
+  env: {},
+  cf: {},
+  ctx: { waitUntil: () => undefined },
+};
+
 const LONG_AGO = "2026-01-05T12:00:00.000Z";
 const inMinutes = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
 const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
@@ -178,6 +188,12 @@ async function liveRow(fingerprint: string, tenantId: string = TENANT) {
 async function codeRow(code: string) {
   const r = await db.execute({ sql: "SELECT consumed_at, consumed_by_pairing_id FROM bridge_pair_codes WHERE code = ?", args: [code] });
   return r.rows[0] as unknown as { consumed_at: string | null; consumed_by_pairing_id: string | null } | undefined;
+}
+
+/** The places in line that redemptions from this address bucket hold now. */
+async function placesHeld(bucket: string): Promise<number> {
+  const r = await db.execute({ sql: "SELECT count(*) AS n FROM pair_attempts WHERE profile_id = ?", args: [`redeem-attempts:${bucket}`] });
+  return Number(r.rows[0].n);
 }
 
 let failures = 0;
@@ -314,8 +330,70 @@ async function main() {
     const statuses = burst.map((r) => r.status);
     assert.equal(statuses.filter((s) => s === 404).length, 10, `exactly 10 guesses are evaluated: ${statuses.join(",")}`);
     assert.equal(statuses.filter((s) => s === 429).length, 5);
+    // The same /64 written with a dotted-quad tail was a bucket of its own
+    // (CodeRabbit on #715).
+    const mixed = await POST(redeemRequest("ZZZ-ZZZ-998", "fp-burst-mixed", "2001:db8:77:1::192.0.2.1"));
+    assert.equal(mixed.status, 429, "an address of the full /64 written with an IPv4 tail is refused too");
     const other = await POST(redeemRequest("ZZZ-ZZZ-999", "fp-burst-other", "2001:db8:77:2::1"));
     assert.equal(other.status, 404, "another /64 is evaluated");
+  });
+
+  await check("a pairing is not a guess: eleven codes redeemed in a minute from one address all pair, and none keeps a place in the cap", async () => {
+    // Counted for good, the eleventh computer a team set up behind one address
+    // was refused with a 429 (review of #715): the cap is on guesses.
+    const ip = "198.51.100.40";
+    // Two wrong guesses first: their places must outlive the pairings.
+    for (const guess of ["GUE-SSE-001", "GUE-SSE-002"]) {
+      assert.equal((await POST(redeemRequest(guess, `fp-${guess}`, ip))).status, 404);
+    }
+    for (let i = 0; i < 11; i += 1) {
+      const code = `PAI-RED-${String(i).padStart(3, "0")}`;
+      await mintCode(code, AUTH_ME);
+      const res = await POST(redeemRequest(code, `fp-paired-${i}`, ip));
+      const body = await res.json();
+      assert.equal(res.status, 200, `redemption ${i + 1} of 11: ${JSON.stringify(body)}`);
+    }
+    assert.equal(await placesHeld(ip), 2, "a redemption that paired a computer gives back its own place, and only that one");
+    // A guess keeps its place, so a flood of them still fills the window.
+    assert.equal((await POST(redeemRequest("PAI-RED-ZZZ", "fp-guess", ip))).status, 404);
+    assert.equal(await placesHeld(ip), 3, "a guess keeps its place");
+  });
+
+  await check("a redemption's place in line lasts a minute: ten places from 90 seconds ago do not count, ten from 30 seconds ago do", async () => {
+    // Widening the window to an hour changed no test (review of #715).
+    const fill = (bucket: string, secondsAgo: number) =>
+      db.batch(
+        Array.from({ length: 10 }, () => ({
+          sql: "INSERT INTO pair_attempts (profile_id, outcome, ip, attempted_at) VALUES (?, 'ok', ?, ?)",
+          args: [`redeem-attempts:${bucket}`, bucket, new Date(Date.now() - secondsAgo * 1000).toISOString()],
+        })),
+        "write",
+      );
+    await fill("198.51.100.41", 90);
+    assert.equal((await POST(redeemRequest("OLD-OLD-001", "fp-old", "198.51.100.41"))).status, 404, "places older than a minute are not counted: this guess is evaluated");
+    await fill("198.51.100.42", 30);
+    assert.equal((await POST(redeemRequest("NEW-NEW-001", "fp-new", "198.51.100.42"))).status, 429, "ten places inside the minute fill the cap");
+  });
+
+  await check("a place that cannot be given back is logged and never fails the pairing; it stays counted until the minute passes", async () => {
+    await db.execute(`CREATE TRIGGER refuse_release BEFORE DELETE ON pair_attempts BEGIN SELECT RAISE(ABORT, 'release_refused_xyz'); END`);
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void logged.push(JSON.stringify(args));
+    let status = 0;
+    try {
+      await mintCode("REL-REF-001", AUTH_ME);
+      status = (await POST(redeemRequest("REL-REF-001", "fp-release-refused", "198.51.100.43"))).status;
+    } finally {
+      console.error = original;
+      await db.execute("DROP TRIGGER refuse_release");
+    }
+    assert.equal(status, 200, "the computer is paired");
+    assert.ok(
+      logged.some((line) => line.includes("could not give a place back") && line.includes("release_refused_xyz")),
+      `the failure is logged with the database's words: ${logged.join(" | ")}`,
+    );
+    assert.equal(await placesHeld("198.51.100.43"), 1, "the place stays counted");
   });
 
   if (failures) {

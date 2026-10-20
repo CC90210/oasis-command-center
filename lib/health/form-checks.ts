@@ -188,13 +188,19 @@ export const FORM_CHECKS: DripCheck[] = [
      * opt-outs. Estate-wide like the dead-letter check above, so the tenant
      * the runner passes is ignored.
      *
-     * Cleaning up after abuse: every row carries ip_address and added_at.
-     * Group the window's global web rows by ip_address first, e.g.
+     * Cleaning up after abuse: every row carries ip_address and added_at, but
+     * a re-filing keeps the FIRST added_at and takes the LATEST filer's
+     * ip_address (the upsert in /api/unsubscribe). The IP is the most recent
+     * filer's, so an address an abuser filed over a real person's earlier
+     * opt-out carries the abuser's IP with the real person's date, and
+     * grouping or deleting by IP alone can sweep that opt-out in with the abuse
+     * (review of #715). Group the window's global web rows by ip_address
+     * first, bounded by added_at as here, e.g.
      *   SELECT ip_address, count(*) FROM email_suppressions
      *   WHERE tenant_id IS NULL AND source = 'web_form' AND added_at >= '<from>'
      *   GROUP BY ip_address ORDER BY 2 DESC;
-     * then remove only the abusive prefix's rows, with CC's yes: until proven
-     * otherwise each row is somebody's opt-out.
+     * then remove only the abusive prefix's rows from that same window, with
+     * CC's yes: until proven otherwise each row is somebody's opt-out.
      */
     id: "optouts.global_web_filings_hourly",
     severity: "high",
@@ -218,6 +224,7 @@ export const FORM_CHECKS: DripCheck[] = [
     describe: (r) =>
       `${r.observed} opt-outs from web links were filed for every sender in the last hour; a handful a month is normal. ` +
       `If it is abuse, group that hour's rows in email_suppressions (tenant_id NULL, source web_form) by ip_address, ` +
-      `and remove only the abusive prefix's rows, with CC's yes (lib/health/form-checks.ts).`,
+      `and remove only the abusive prefix's rows from that hour, with CC's yes. A row's ip_address is its latest filer's, ` +
+      `so never remove by ip_address alone: it can be a real person's earlier opt-out the abuser filed over (lib/health/form-checks.ts).`,
   },
 ];
