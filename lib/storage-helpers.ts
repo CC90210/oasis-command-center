@@ -17,6 +17,10 @@ export function sanitizeStorageFilename(name: string): string {
       .replace(/\.\.+/g, "_")
       .replace(/\s+/g, "_")
       .replace(/[^a-zA-Z0-9._-]/g, "")
+      // Stripping can bring dots together ("выписка.банк.pdf" became "..pdf"),
+      // and a path holding ".." is refused as out of scope, so an honest
+      // filename was refused on every try (independent review of #714).
+      .replace(/\.{2,}/g, ".")
       .slice(0, 120) || `file_${Date.now()}`
   );
 }

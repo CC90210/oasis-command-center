@@ -17,8 +17,9 @@
  * AddressAutocompleteField) — the renderer is otherwise stateless.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { UploadCloud, FileText, X, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { chosenFileType, normalizedAccept } from "@/lib/forms/file-type";
 
 export type UploadedDescriptor = {
   storage_path: string;
@@ -71,7 +72,7 @@ function putWithProgress(
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url);
-    xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+    xhr.setRequestHeader("content-type", chosenFileType(file));
     xhr.setRequestHeader("x-upsert", "false");
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(e.loaded / e.total);
@@ -102,7 +103,11 @@ export function MultiFileDropzone({
   uploadToken: string | null;
   ensureUploadToken?: () => Promise<string | null>;
 }) {
-  const acceptList = accept && accept.length > 0 ? accept : DEFAULT_ACCEPT;
+  // As MIME types: the builder's box is free text ("pdf, jpg"; lib/forms/file-type.ts).
+  const acceptList = useMemo(() => {
+    const normalized = normalizedAccept(accept);
+    return normalized.length > 0 ? normalized : DEFAULT_ACCEPT;
+  }, [accept]);
   const maxBytes = maxFileMb * 1024 * 1024;
 
   // Seed from any descriptors the parent already holds (returning to the step).
@@ -158,7 +163,7 @@ export function MultiFileDropzone({
           body: JSON.stringify({
             token: activeToken,
             filename: file.name,
-            mime_type: file.type || "application/octet-stream",
+            mime_type: chosenFileType(file),
             size_bytes: file.size,
           }),
         });
@@ -206,7 +211,7 @@ export function MultiFileDropzone({
         const accepted = incoming.slice(0, slotsLeft);
         const newRows: Row[] = [];
         for (const file of accepted) {
-          const mime = file.type || "application/octet-stream";
+          const mime = chosenFileType(file);
           if (!mimeAllowed(mime, acceptList)) {
             newRows.push({
               id: localId(),

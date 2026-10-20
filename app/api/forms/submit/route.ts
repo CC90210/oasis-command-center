@@ -49,7 +49,7 @@ import { isFieldVisible, buildAnswerContext } from "@/lib/forms/visibility";
 import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 import { rateLimit } from "@/lib/rate-limit";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
-import { uploadLeadDocument, registerLeadDocument, classifyDocTypeByFilename } from "@/lib/lead-documents";
+import { uploadLeadDocument, registerLeadDocument, classifyDocTypeByFilename, storagePathInLeadScope } from "@/lib/lead-documents";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
@@ -120,7 +120,8 @@ import {
   LEAD_NAME_KEYS,
   LEAD_PHONE_KEYS,
 } from "@/lib/forms/contact-gate";
-import { resolveRouterDestination } from "@/lib/forms/routing-destination";
+import { resolveRouterDestination, RouterDestinationUnavailable } from "@/lib/forms/routing-destination";
+import { normalizedAccept } from "@/lib/forms/file-type";
 import { isHoneypotFilled } from "@/lib/forms/honeypot";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
@@ -256,6 +257,88 @@ function isInlineFile(v: unknown): v is InlineFile {
 const MAX_FILES_PER_STEP = 10;
 
 /**
+ * THE FILE RULES, one copy for both places that apply them: refuseInvalidStep,
+ * before anything is written, and the upload loop in handleSubmit, as defence
+ * in depth. An inline file field with no `accept` takes inert images and
+ * PDFs, never application/* freeform; a multi-file field also takes the
+ * phone formats (heic/heif).
+ */
+const PER_FILE_DECODED_CAP_BYTES = 15 * 1024 * 1024;
+const PER_REQUEST_DECODED_CAP_BYTES = 60 * 1024 * 1024;
+const DEFAULT_INLINE_MIME = ["application/pdf", "image/png", "image/jpeg", "image/webp"];
+const DEFAULT_MULTI_MIME = ["application/pdf", "image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"];
+
+function acceptedTypes(field: { accept?: string[] }, fallback: readonly string[]): readonly string[] {
+  // As MIME types: the builder's box is free text ("pdf, jpg"; lib/forms/file-type.ts).
+  const rules = normalizedAccept(field.accept);
+  return rules.length > 0 ? rules : fallback;
+}
+
+function fieldAccepts(field: { accept?: string[] }, fallback: readonly string[], mime: string): boolean {
+  return acceptedTypes(field, fallback).some((rule) =>
+    rule.endsWith("/*") ? mime.startsWith(rule.slice(0, -1)) : mime === rule,
+  );
+}
+
+/** A multi-file field takes at most its max_files, else 50. */
+function multiFileLimit(field: { max_files?: number }): number {
+  return typeof field.max_files === "number" && field.max_files > 0 ? field.max_files : 50;
+}
+
+/**
+ * Whether base64 strings decode to more than `cap` bytes in all. The
+ * estimate (Buffer.byteLength) reads only the strings' length: it never
+ * under-counts, but whitespace and characters the decoder skips make it
+ * over-count. So an estimate within the cap is within it, and only one over
+ * it is decoded to be sure, which keeps an ordinary file from being decoded
+ * twice.
+ */
+function decodedOver(b64s: readonly string[], cap: number): boolean {
+  if (b64s.reduce((n, s) => n + Buffer.byteLength(s, "base64"), 0) <= cap) return false;
+  return b64s.reduce((n, s) => n + Buffer.from(s, "base64").length, 0) > cap;
+}
+
+/**
+ * The reasons a file did not land that the visitor can fix by choosing again:
+ * a 422 naming the file. Every other reason is a storage or database fault
+ * (upload_failed: ..., metadata_insert_failed: ..., storage_info_failed: ...,
+ * a thrown error): a 503 that pages, because no choice of file fixes it.
+ */
+const VISITOR_FILE_REASONS = [
+  "mime_not_allowed",
+  "file_too_large",
+  "too_many_files",
+  "base64_invalid",
+  "missing_storage_path",
+  "storage_path_outside_scope",
+  "uploaded_object_not_found",
+];
+
+function visitorCanFixFile(reason: string): boolean {
+  return VISITOR_FILE_REASONS.some((r) => reason === r || reason.startsWith(`${r}:`));
+}
+
+type FileField = { name: string; label?: string; type?: string; required?: boolean; accept?: string[]; max_files?: number };
+
+/**
+ * A step's file the visitor must fix: 422, with the field and a sentence
+ * naming it, and the file itself when the field holds several (one of forty
+ * statements is otherwise hard to find).
+ */
+function refuseLostFile(field: FileField, reason: string, filename?: string | null): NextResponse {
+  return NextResponse.json(
+    { ok: false, error: "upload_failed", field: field.name, message: lostFileSentence(field, reason, filename) },
+    { status: 422 },
+  );
+}
+
+/** The descriptor's own filename, when it carries a usable one. */
+function descriptorName(d: unknown): string | null {
+  const name = d && typeof d === "object" ? (d as { filename?: unknown }).filename : null;
+  return typeof name === "string" && name.trim() ? name.trim().slice(0, 120) : null;
+}
+
+/**
  * One submitted step's fields against its payload: the authoritative copy of
  * the client validator. Address completeness first (a filled-in address must
  * be a real one, even an optional one), then every visible required field
@@ -273,6 +356,8 @@ function refuseInvalidStep(input: {
   payload: Record<string, unknown>;
   /** buildAnswerContext's server-built answers: show_if is judged on these. */
   answers: Record<string, unknown>;
+  /** False for a caller that stores no files (the router): its files are not checked. */
+  storesFiles: boolean;
   inlineFileNames: ReadonlySet<string>;
   inlineFileCount: number;
 }): NextResponse | null {
@@ -365,6 +450,54 @@ function refuseInvalidStep(input: {
       }
     }
   }
+  // THE FILES THE VISITOR CHOSE, checked here, before anything is written
+  // (independent review of #714). Checked after the lead was created or
+  // merged, the consent recorded and the other files stored, a refused file
+  // left all of that behind, and a retry wrote it again. Only the checks that
+  // need no storage: the type this field takes, the size and the request's
+  // total, and a multi-file field's descriptors. The upload loop in
+  // handleSubmit applies the same rules again as defence in depth.
+  //
+  // Only where the caller stores files: the router stores none, so it refuses
+  // none (storesFiles false). A file on a field this step does not declare was
+  // never the visitor's to send; the upload loop drops it quietly, so it is not
+  // refused here either. Fields by name with the LAST of a repeated name
+  // winning, as in the upload loop's map, so the two can never disagree about
+  // which field a file belongs to.
+  if (input.storesFiles) {
+    const fieldsByName = new Map(input.step.fields.map((f) => [f.name, f]));
+    const stored: string[] = [];
+    for (const [fieldName, value] of Object.entries(payload)) {
+      if (!isInlineFile(value) || !input.inlineFileNames.has(fieldName)) continue;
+      const field = fieldsByName.get(fieldName);
+      if (!field || field.type !== "file_upload") continue;
+      if (!fieldAccepts(field, DEFAULT_INLINE_MIME, value.mime_type)) return refuseLostFile(field, "mime_not_allowed");
+      if (decodedOver([value.inline_base64], PER_FILE_DECODED_CAP_BYTES)) return refuseLostFile(field, "file_too_large");
+      stored.push(value.inline_base64);
+    }
+    if (decodedOver(stored, PER_REQUEST_DECODED_CAP_BYTES)) {
+      return NextResponse.json({ ok: false, error: "request_payload_too_large" }, { status: 413 });
+    }
+    for (const field of fieldsByName.values()) {
+      if (field.type !== "file_upload_multi") continue;
+      const raw = payload[field.name];
+      if (!Array.isArray(raw)) continue;
+      // More than the field takes, or a descriptor that is not one, never comes
+      // from the form's own uploader (it stops at max_files): refused, where the
+      // upload loop used to drop it and record the step without the file.
+      if (raw.length > multiFileLimit(field)) return refuseLostFile(field, "too_many_files");
+      for (const d of raw) {
+        if (!d || typeof d !== "object") return refuseLostFile(field, "missing_storage_path");
+        const desc = d as { storage_path?: unknown; mime_type?: unknown };
+        if (typeof desc.storage_path !== "string" || !desc.storage_path) {
+          return refuseLostFile(field, "missing_storage_path", descriptorName(d));
+        }
+        if (!fieldAccepts(field, DEFAULT_MULTI_MIME, typeof desc.mime_type === "string" ? desc.mime_type : "")) {
+          return refuseLostFile(field, "mime_not_allowed", descriptorName(d));
+        }
+      }
+    }
+  }
   if (input.inlineFileCount > MAX_FILES_PER_STEP) {
     return NextResponse.json(
       { ok: false, error: "too_many_files", max: MAX_FILES_PER_STEP },
@@ -398,6 +531,78 @@ function refuseInvalidStep(input: {
  * initialize_only is not judged here: it mints the token an upload-first form
  * needs before its file can be chosen, and records no step.
  */
+/**
+ * The answer when a form or its submissions could not be READ (a database
+ * blip; lib/forms/public-resolver.ts 'unavailable'): 503, "try again", never
+ * "this link is no longer valid", which made visitors give up on a link that
+ * worked a moment later (2026-10-19 audit). The client keeps the answers on
+ * screen and sends its failure beacon. Logged here, since nothing else
+ * records it.
+ */
+function formUnavailable(where: string, error: string): NextResponse {
+  console.error("[forms.submit] form read failed", { where, error });
+  return NextResponse.json({ ok: false, error: "form_unavailable" }, { status: 503 });
+}
+
+/** The file types a field can take, by the names a visitor knows them by. */
+const FILE_TYPE_NAMES: Record<string, string> = {
+  "application/pdf": "PDF",
+  "image/png": "PNG",
+  "image/jpeg": "JPEG",
+  "image/webp": "WebP",
+  "image/heic": "HEIC",
+  "image/heif": "HEIF",
+  "image/*": "image",
+};
+
+/** "a PDF, PNG or JPEG file", or null when one of the types has no plain name. */
+function acceptedFilesPhrase(rules: readonly string[]): string | null {
+  const names = rules.map((r) => FILE_TYPE_NAMES[r]);
+  if (names.length === 0 || names.some((n) => !n)) return null;
+  const unique = [...new Set(names)];
+  const list = unique.length === 1 ? unique[0] : `${unique.slice(0, -1).join(", ")} or ${unique[unique.length - 1]}`;
+  return `${/^[aeiou]/i.test(list) ? "an" : "a"} ${list} file`;
+}
+
+/** What the visitor is told about a file that was not saved: which one, and what to do. */
+function lostFileSentence(field: FileField, reason: string, filename?: string | null): string {
+  const label = `${field.label?.trim() || "your file"}${filename ? ` (${filename})` : ""}`;
+  if (reason.startsWith("mime_not_allowed")) {
+    const fallback = field.type === "file_upload_multi" ? DEFAULT_MULTI_MIME : DEFAULT_INLINE_MIME;
+    return `${label}: that type of file isn't accepted here. Please choose ${acceptedFilesPhrase(acceptedTypes(field, fallback)) ?? "another file"}.`;
+  }
+  if (reason.startsWith("file_too_large")) return `${label}: that file is larger than 15 MB. Please choose a smaller one.`;
+  if (reason === "too_many_files") {
+    const max = multiFileLimit(field);
+    return `${label}: that's more than ${max} ${max === 1 ? "file" : "files"}. Please remove some and try again.`;
+  }
+  if (visitorCanFixFile(reason)) return `${label}: that file didn't finish uploading. Please choose it again.`;
+  // A storage or database fault: nothing the visitor chose is wrong.
+  return (
+    `${label}: we couldn't save that file just now. Your answers are still here, so please try again in a moment` +
+    (field.required ? "." : ", or remove the file to continue without it.")
+  );
+}
+
+/**
+ * A step's file that a storage or database fault kept from landing: 503 and a
+ * loud log, so the client's failure beacon and the error-rate monitors both
+ * see it. Until the independent review of #714 it was a 422, a "visitor
+ * error" nobody was paged for, while every visitor with a file was stuck.
+ */
+function fileUnavailable(
+  field: FileField,
+  reason: string,
+  context: Record<string, unknown>,
+  filename?: string | null,
+): NextResponse {
+  console.error("[forms.submit] a file could not be stored", { ...context, field: field.name, reason: reason.slice(0, 300) });
+  return NextResponse.json(
+    { ok: false, error: "upload_unavailable", field: field.name, message: lostFileSentence(field, reason, filename) },
+    { status: 503 },
+  );
+}
+
 async function refuseInvalidAnonymousFirstStep(input: {
   tenantSlug: string;
   formSlug: string;
@@ -406,7 +611,13 @@ async function refuseInvalidAnonymousFirstStep(input: {
 }): Promise<{ refusal: NextResponse } | { identity: Record<string, unknown> }> {
   const resolved = await resolvePublicForm(getServiceSupabase(), input.tenantSlug, input.formSlug);
   // The same answer initAnonymousLead gives for a form it cannot find.
-  if (!resolved.ok) return { refusal: NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }) };
+  if (!resolved.ok) {
+    return {
+      refusal: resolved.reason === "unavailable"
+        ? formUnavailable("first_step", resolved.error)
+        : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }),
+    };
+  }
   let steps: FormStep[];
   try {
     steps = parseFormSteps(resolved.form.steps);
@@ -439,6 +650,7 @@ async function refuseInvalidAnonymousFirstStep(input: {
     step: steps[0],
     payload,
     answers: buildAnswerContext(steps, [], 0, payload),
+    storesFiles: true,
     inlineFileNames: new Set(inlineFieldNames),
     inlineFileCount: inlineFieldNames.length,
   });
@@ -487,7 +699,11 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   }
   const db = getServiceSupabase();
   const resolved = await resolvePublicForm(db, tenantSlug, formSlug);
-  if (!resolved.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!resolved.ok) {
+    return resolved.reason === "unavailable"
+      ? formUnavailable("view", resolved.error)
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   const form = resolved.form;
   let steps: FormStep[];
   try {
@@ -518,6 +734,7 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
       step: steps[i],
       payload: stepPayload,
       answers: buildAnswerContext(steps, rows, i, stepPayload),
+      storesFiles: false,
       inlineFileNames: new Set(),
       inlineFileCount: Object.values(stepPayload).filter(isInlineFile).length,
     });
@@ -533,16 +750,24 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   if (steps.some((step) => step.fields.some((field) => isContactField(field) && isFieldVisible(field, answers)))) {
     return NextResponse.json({ ok: false, error: "contact_required" }, { status: 400 });
   }
+  // A READ THAT FAILED IS NOT "NO RULES" (independent review of #714). Read as
+  // one, a one-second blip sent the visitor the rules would have placed to the
+  // form's default page, with nothing stored and no retry. Nothing is written
+  // on this path, so a 503 is safe: the client keeps the answers and the
+  // visitor tries again. A malformed `routing` value is the form's own
+  // problem, not a blip, and still falls back below. Its own query, as in
+  // handleSubmit; forms.routing (bravo__220) is on production, so an error
+  // here is a failed read, never a missing column.
+  const routingRow = await db
+    .from("forms")
+    .select("routing")
+    .eq("tenant_id", form.tenant_id)
+    .eq("id", form.id)
+    .maybeSingle();
+  if (routingRow.error) return formUnavailable("route", routingRow.error.message);
   let routeTo: string | null = null;
   try {
-    // Its own query, as in handleSubmit: forms.routing is a later migration.
-    const routingRow = await db
-      .from("forms")
-      .select("routing")
-      .eq("tenant_id", form.tenant_id)
-      .eq("id", form.id)
-      .maybeSingle();
-    const rules = !routingRow.error && routingRow.data
+    const rules = routingRow.data
       ? parseFormRouting((routingRow.data as { routing?: unknown }).routing)
       : [];
     if (rules.length > 0) {
@@ -555,6 +780,7 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
       });
     }
   } catch (err) {
+    if (err instanceof RouterDestinationUnavailable) return formUnavailable("route", err.message);
     console.error("[forms.submit.route_only] destination unresolved; falling back to the form's own redirect", {
       form_id: form.id,
       error: err instanceof Error ? err.message : String(err),
@@ -838,7 +1064,8 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     )
     .eq("id", link.form_id)
     .maybeSingle();
-  if (formRow.error || !formRow.data) {
+  if (formRow.error) return formUnavailable("step", formRow.error.message);
+  if (!formRow.data) {
     return NextResponse.json({ ok: false, error: "form_not_found" }, { status: 404 });
   }
   const form = formRow.data as {
@@ -905,6 +1132,9 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       .select("step_index, payload")
       .eq("form_id", form.id)
       .eq("lead_id", link.lead_id);
+    // A failed read is not "no earlier steps": that told the visitor to go
+    // back and finish steps they had finished (2026-10-19 audit).
+    if (priorQ.error) return formUnavailable("prior_steps", priorQ.error.message);
     priorRows = (priorQ.data || []) as Array<{ step_index: number; payload: unknown }>;
     const completedSteps = new Set(priorRows.map((r) => Number(r.step_index)));
     for (let i = 0; i < stepIndex; i++) {
@@ -925,10 +1155,23 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     step: currentStep,
     payload,
     answers: mergedAnswers,
+    storesFiles: true,
     inlineFileNames,
     inlineFileCount: inlineFiles.length,
   });
   if (invalid) return invalid;
+  // An uploaded file's path must sit under this lead's own folder, the only
+  // one /api/forms/upload-url signs for. The same rule registerLeadDocument
+  // applies, asked here too because only here is the lead known and nothing
+  // written yet for the step (independent review of #714).
+  for (const field of currentStep.fields) {
+    if (field.type !== "file_upload_multi" || !Array.isArray(payload[field.name])) continue;
+    for (const d of payload[field.name] as Array<{ storage_path: string }>) {
+      if (!storagePathInLeadScope(form.tenant_id, link.lead_id, d.storage_path)) {
+        return refuseLostFile(field, "storage_path_outside_scope");
+      }
+    }
+  }
 
   // Insert the submission row. service-role write — RLS doesn't see this
   // path; HMAC token + tenant_id match is the auth boundary.
@@ -1012,7 +1255,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     size_bytes: number;
     doc_type: string;
   }> = [];
-  const uploadWarnings: Array<{ field_name: string; reason: string }> = [];
+  const uploadWarnings: Array<{ field_name: string; reason: string; filename?: string }> = [];
 
   // Schema-driven file validation. Without this an attacker could embed
   // arbitrary {inline_base64, ...} blobs against any payload key (even
@@ -1022,10 +1265,10 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // type=file_upload, (c) the file's mime_type must be in the field's
   // accept[] list, (d) decoded length must agree with the claimed
   // size, (e) total decoded bytes per request cap so a base64-bomb can
-  // never knock the runtime over.
+  // never knock the runtime over. refuseInvalidStep already refused a step
+  // that breaks (c)-(e), before anything was written; the same rules are
+  // applied again here, the way they always were.
   const currentStepFields = new Map(steps[stepIndex].fields.map((f) => [f.name, f]));
-  const PER_FILE_DECODED_CAP_BYTES = 15 * 1024 * 1024;
-  const PER_REQUEST_DECODED_CAP_BYTES = 60 * 1024 * 1024;
   let totalDecodedBytes = 0;
   for (const { fieldName, file } of inlineFiles) {
     const fieldDef = currentStepFields.get(fieldName);
@@ -1042,18 +1285,11 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // MIME allowlist from the form schema. When the operator left
     // accept empty we fall back to a conservative inert-image / PDF
     // set — never allow application/* freeform.
-    const allowedMime = (fieldDef.accept && fieldDef.accept.length > 0)
-      ? fieldDef.accept
-      : ["application/pdf", "image/png", "image/jpeg", "image/webp"];
-    const mimeAllowed = allowedMime.some((rule) =>
-      rule.endsWith("/*")
-        ? file.mime_type.startsWith(rule.slice(0, -1))
-        : file.mime_type === rule
-    );
-    if (!mimeAllowed) {
+    if (!fieldAccepts(fieldDef, DEFAULT_INLINE_MIME, file.mime_type)) {
       uploadWarnings.push({
         field_name: fieldName,
-        reason: `mime_not_allowed: ${file.mime_type}`,
+        // The type is the request's own text: capped before it reaches a log.
+        reason: `mime_not_allowed: ${file.mime_type.slice(0, 100)}`,
       });
       delete payload[fieldName];
       continue;
@@ -1144,7 +1380,6 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // AND that the object actually exists + reads its real size — so a forged or
   // foreign-tenant descriptor (the reason inline client attachments are ignored
   // above) is rejected here too. Caps + MIME allowlist mirror the inline path.
-  const DEFAULT_MULTI_MIME = ["application/pdf", "image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"];
   for (const field of currentStepFields.values()) {
     if (field.type !== "file_upload_multi") continue;
     const raw = payload[field.name];
@@ -1152,8 +1387,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       if (raw !== undefined) delete payload[field.name];
       continue;
     }
-    const maxFiles = typeof field.max_files === "number" && field.max_files > 0 ? field.max_files : 50;
-    const allowedMime = field.accept && field.accept.length > 0 ? field.accept : DEFAULT_MULTI_MIME;
+    const maxFiles = multiFileLimit(field);
     // 2026-06-20 (Ethan/Alex): the doc bucket is now ONE field for ALL document
     // types, so we classify EACH file by its own filename — license.pdf →
     // drivers_license, void.pdf → void_cheque, statement.pdf → bank_statements_3mo —
@@ -1169,14 +1403,11 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       const fn = typeof desc.filename === "string" && desc.filename ? desc.filename : "upload";
       const mt = typeof desc.mime_type === "string" ? desc.mime_type : "";
       if (!sp) {
-        uploadWarnings.push({ field_name: field.name, reason: "missing_storage_path" });
+        uploadWarnings.push({ field_name: field.name, reason: "missing_storage_path", filename: descriptorName(d) ?? undefined });
         continue;
       }
-      const mimeOk = allowedMime.some((rule) =>
-        rule.endsWith("/*") ? mt.startsWith(rule.slice(0, -1)) : mt === rule,
-      );
-      if (!mimeOk) {
-        uploadWarnings.push({ field_name: field.name, reason: `mime_not_allowed: ${mt}` });
+      if (!fieldAccepts(field, DEFAULT_MULTI_MIME, mt)) {
+        uploadWarnings.push({ field_name: field.name, reason: `mime_not_allowed: ${mt.slice(0, 100)}`, filename: descriptorName(d) ?? undefined });
         continue;
       }
       // Per-file classification: license/void/ID files dropped into the shared
@@ -1184,19 +1415,29 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       // field's default (bank_statements_3mo for the statements bucket).
       const perFileType = classifyDocTypeByFilename(fn);
       const docTypeForFile = perFileType !== "unclassified" ? perFileType : fieldDocType;
-      const reg = await registerLeadDocument({
-        tenantId: form.tenant_id,
-        leadId: link.lead_id,
-        storagePath: sp,
-        filename: fn,
-        mimeType: mt,
-        docType: docTypeForFile,
-        uploadedBy: "form_intake",
-        source: "form_intake",
-        extraMetadata: { form_id: form.id, field_name: field.name, step_index: stepIndex },
-      });
+      let reg: Awaited<ReturnType<typeof registerLeadDocument>>;
+      try {
+        reg = await registerLeadDocument({
+          tenantId: form.tenant_id,
+          leadId: link.lead_id,
+          storagePath: sp,
+          filename: fn,
+          mimeType: mt,
+          docType: docTypeForFile,
+          uploadedBy: "form_intake",
+          source: "form_intake",
+          extraMetadata: { form_id: form.id, field_name: field.name, step_index: stepIndex },
+        });
+      } catch (err) {
+        // A storage client that throws instead of answering is the same fault
+        // as one that answers with an error, as in the inline loop above: it
+        // used to escape as a 500 (found by the independent review of #714's
+        // multi-file test).
+        uploadWarnings.push({ field_name: field.name, reason: err instanceof Error ? err.message : "unknown", filename: descriptorName(d) ?? undefined });
+        continue;
+      }
       if (!reg.ok) {
-        uploadWarnings.push({ field_name: field.name, reason: reg.error });
+        uploadWarnings.push({ field_name: field.name, reason: reg.error, filename: descriptorName(d) ?? undefined });
         continue;
       }
       uploadedDocs.push({
@@ -1217,6 +1458,37 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // Persist the server-verified descriptors (drops anything that failed
     // validation) so form_submissions.payload reflects what actually registered.
     payload[field.name] = cleaned;
+  }
+
+  // A FILE THE VISITOR CHOSE THAT DID NOT LAND fails the step, naming the
+  // file and why, so they can choose it again. Until 2026-10-19 (audit) a
+  // wrong type, an oversize file, a storage failure or a failed registration
+  // went only into a `warnings` list no client reads: the step was recorded,
+  // the form said thank you, and the document was simply missing. Answered
+  // before the step is recorded. A file on a field this step does not declare
+  // was never the visitor's to send, so that one is still dropped quietly.
+  //
+  // WHOSE PROBLEM (independent review of #714). A file the visitor can fix by
+  // choosing again (visitorCanFixFile) is a 422 naming it. A storage or
+  // database fault is a 503 that is logged as an error and beaconed, and it is
+  // answered first when both happened: no choice of file gets past it.
+  //
+  // Known edge, documented rather than undone: a refusal here comes after this
+  // step's inline files were stored, so the visitor's retry stores them again
+  // as second copies on the lead. The type, size and path checks that make up
+  // nearly every refusal now run before anything is written; what remains is a
+  // direct upload that never finished, or a storage or database fault. The
+  // consent decision recorded for the step is recorded again on the retry, as
+  // the visitor's own second answer.
+  const lostFiles = uploadWarnings.filter((w) => w.reason !== "field_not_file_upload");
+  if (lostFiles.length > 0) {
+    const context = { form_id: form.id, lead_id: link.lead_id, step_index: stepIndex, files: lostFiles };
+    const fault = lostFiles.find((w) => !visitorCanFixFile(w.reason));
+    const first = fault ?? lostFiles[0];
+    const field = currentStepFields.get(first.field_name) ?? { name: first.field_name };
+    if (fault) return fileUnavailable(field, fault.reason, context, fault.filename);
+    console.warn("[forms.submit] files not saved", context);
+    return refuseLostFile(field, first.reason, first.filename);
   }
 
   // After all uploads for this step, evaluate stage progression once.
@@ -1288,8 +1560,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     .select("id")
     .single();
   if (insertRes.error) {
+    // The database's own words stay in the log: they name tables and
+    // constraints, and an anonymous visitor gets nothing from them
+    // (2026-10-19 audit). server_error shows the retry sentence and sends the
+    // client's failure beacon, which keeps a copy of the answers.
+    console.error("[forms.submit] step insert failed", { form_id: form.id, step_index: stepIndex, error: insertRes.error.message });
     return NextResponse.json(
-      { ok: false, error: insertRes.error.message },
+      { ok: false, error: "server_error" },
       { status: 500 },
     );
   }
@@ -2365,6 +2642,10 @@ async function initAnonymousLead(input: {
   const db = getServiceSupabase();
   const resolved = await resolvePublicForm(db, input.tenantSlug, input.formSlug);
   if (!resolved.ok) {
+    if (resolved.reason === "unavailable") {
+      console.error("[forms.submit] form read failed", { where: "anonymous_init", error: resolved.error });
+      return { ok: false, error: "form_unavailable", status: 503 };
+    }
     return { ok: false, error: "not_found", status: 404 };
   }
   const tenantSlug = resolved.tenant_slug;
@@ -2614,8 +2895,10 @@ async function initAnonymousLead(input: {
       });
       lead = { id: created.id, data: leadData };
     } catch (err) {
-      const detail = err instanceof Error ? err.message : "unknown";
-      return { ok: false, error: `lead_create_failed: ${detail}`, status: 500 };
+      // Logged, never sent: an anonymous visitor gets server_error (the retry
+      // sentence and the failure beacon), not the database's words.
+      console.error("[forms.submit] lead create failed", { form_id: form.id, error: err instanceof Error ? err.message : String(err) });
+      return { ok: false, error: "server_error", status: 500 };
     }
   }
 

@@ -160,6 +160,29 @@ export async function uploadLeadDocument(
 }
 
 /**
+ * SECURITY: a registered path MUST be inside this tenant+lead's prefix. The
+ * signed upload URL (/api/forms/upload-url) is minted ONLY for
+ * `${tenant}/${lead}/`, so a path outside that — or any traversal — means a
+ * forged descriptor. One rule for registerLeadDocument and for the submit
+ * route, which asks it before writing anything for the step.
+ */
+export function storagePathInLeadScope(tenantId: string, leadId: string, storagePath: string): boolean {
+  return storagePath.startsWith(`${tenantId}/${leadId}/`) && !storagePath.includes("..");
+}
+
+/**
+ * Whether a storage error says the object is not there, not that storage
+ * failed. R2 answers 404. Supabase Storage, the rollback backend, answers HTTP
+ * 400 with "404" in the body's statusCode, which storage-js's own exists()
+ * reads as not found too; read by status alone, every unfinished upload was a
+ * fault, a 503 on every retry (independent review of #714, round 3).
+ */
+export function storageObjectMissing(error: unknown): boolean {
+  const e = error as { status?: number; statusCode?: string | number } | null;
+  return e?.status === 404 || String(e?.statusCode ?? "") === "404";
+}
+
+/**
  * Register a lead-document whose bytes are ALREADY in Storage — used by the
  * direct-to-Storage form upload path (browser PUTs to a server-minted signed
  * upload URL, then the submit route registers the object here). This is the
@@ -184,11 +207,7 @@ export async function registerLeadDocument(input: {
 }): Promise<LeadDocumentUploadResult | LeadDocumentUploadFailure> {
   const db = getServiceSupabase();
 
-  // SECURITY: the path MUST be inside this tenant+lead's prefix. The signed
-  // upload URL (/api/forms/upload-url) is minted ONLY for `${tenant}/${lead}/`,
-  // so a path outside that — or any traversal — means a forged descriptor.
-  const expectedPrefix = `${input.tenantId}/${input.leadId}/`;
-  if (!input.storagePath.startsWith(expectedPrefix) || input.storagePath.includes("..")) {
+  if (!storagePathInLeadScope(input.tenantId, input.leadId, input.storagePath)) {
     return { ok: false, error: "storage_path_outside_scope" };
   }
 
@@ -203,24 +222,28 @@ export async function registerLeadDocument(input: {
     .eq("tenant_id", input.tenantId)
     .eq("storage_path", input.storagePath)
     .maybeSingle();
+  // A check that could not read is not "not registered yet": going on would
+  // register the same file twice on a retried step (independent review of #714).
+  if (dup.error) return { ok: false, error: `metadata_read_failed: ${dup.error.message}` };
   if (dup.data) {
     return { ok: true, document: dup.data as LeadDocumentUploadResult["document"] };
   }
 
-  // Confirm the object exists + read its real size (anti-spoof).
-  const slash = input.storagePath.lastIndexOf("/");
-  const dir = input.storagePath.slice(0, slash);
-  const base = input.storagePath.slice(slash + 1);
-  const listed = await db.storage.from(LEAD_DOC_BUCKET).list(dir, { search: base, limit: 100 });
-  if (listed.error) {
-    return { ok: false, error: `storage_list_failed: ${listed.error.message}` };
+  // Confirm the object exists + read its real size (anti-spoof). One HEAD on
+  // the object itself (as chat-attachments does), never a listing: R2 lists
+  // 100 keys in key order and only then filters by name, and these keys start
+  // with Date.now(), so in a folder already holding 100 files every new upload
+  // read as "not found" and the visitor was told to choose it again, forever
+  // (independent review of #714).
+  const head = await db.storage.from(LEAD_DOC_BUCKET).info(input.storagePath);
+  if (head.error || !head.data) {
+    // A missing object is an upload that never finished: the visitor can
+    // choose the file again. Anything else is a storage fault.
+    return storageObjectMissing(head.error)
+      ? { ok: false, error: "uploaded_object_not_found" }
+      : { ok: false, error: `storage_info_failed: ${head.error?.message ?? "no metadata"}` };
   }
-  const obj = (listed.data || []).find((o) => o.name === base);
-  if (!obj) {
-    return { ok: false, error: "uploaded_object_not_found" };
-  }
-  const md = obj.metadata as { size?: number } | null;
-  const realSize = typeof md?.size === "number" ? md.size : 0;
+  const realSize = typeof head.data.size === "number" ? head.data.size : 0;
 
   const docType =
     !input.docType || input.docType === "unclassified"

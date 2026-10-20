@@ -65,6 +65,9 @@ export default async function BookPage({
 }) {
   const sp = (await searchParams) ?? {};
   const resolved = await resolvePublicForm(getServiceSupabase(), AI_AUDIT_TENANT_SLUG, BOOK_FORM_SLUG);
+  // A read that failed is not "booking is closed": thrown, it draws the app's
+  // error page with a retry (app/error.tsx) and is reported (2026-10-19 audit).
+  if (!resolved.ok && resolved.reason === "unavailable") throw new Error(`booking form unavailable: ${resolved.error}`);
   const steps = resolved.ok ? parsedSteps(resolved.form.steps) : null;
   // The page draws step 0 itself; a field type it cannot draw would make a
   // required answer impossible to give, so it falls back instead of guessing.

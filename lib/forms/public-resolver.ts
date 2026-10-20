@@ -11,6 +11,13 @@
  *
  * Without this helper the two callers drifted: one returned form_disabled
  * vs tenant_mismatch vs not_found (Codex MEDIUM 3, 2026-05-18).
+ *
+ * A READ THAT FAILS is not a missing form. It answers 'unavailable', which
+ * every caller must treat as "try again", never as "this link is dead". Until
+ * 2026-10-19 a database blip came back as not_found: the visitor was told
+ * their link was no longer valid and gave up, and nothing recorded it. A
+ * failed read reveals nothing about which tenants or forms exist, so the
+ * enumeration rule above is unaffected.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -34,7 +41,9 @@ export type PublicFormLookup =
         enabled: boolean;
       };
     }
-  | { ok: false; reason: "not_found" };
+  | { ok: false; reason: "not_found" }
+  /** A read failed: retry, never tell the visitor the link is dead. */
+  | { ok: false; reason: "unavailable"; error: string };
 
 export async function resolvePublicForm(
   db: SupabaseClient,
@@ -68,6 +77,16 @@ export async function resolvePublicForm(
       .eq("custom_fields->>command_center_profile_slug", tenantSlug)
       .maybeSingle();
   }
+  if (tenantQ.error) {
+    // Two workspaces answering one slug (PostgREST's PGRST116, which the Turso
+    // adapter mirrors) is bad data, not an outage: retrying will not fix it,
+    // so it is the link nobody can open. Logged so someone untangles it.
+    if (tenantQ.error.code === "PGRST116") {
+      console.error("[forms.public-resolver] more than one workspace answers this slug", { slug: tenantSlug });
+      return { ok: false, reason: "not_found" };
+    }
+    return { ok: false, reason: "unavailable", error: `tenant read: ${tenantQ.error.message}` };
+  }
 
   const tenantRow = tenantQ.data as
     | { id: string; slug: string; logo_url: string | null; custom_fields?: Record<string, unknown> | null }
@@ -82,6 +101,13 @@ export async function resolvePublicForm(
     .eq("tenant_id", tenantRow.id)
     .eq("slug", formSlug)
     .maybeSingle();
+  if (formQ.error) {
+    if (formQ.error.code === "PGRST116") {
+      console.error("[forms.public-resolver] more than one form answers this slug", { slug: tenantSlug, form: formSlug });
+      return { ok: false, reason: "not_found" };
+    }
+    return { ok: false, reason: "unavailable", error: `form read: ${formQ.error.message}` };
+  }
   const form = formQ.data as
     | {
         id: string;
