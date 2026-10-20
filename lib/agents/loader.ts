@@ -52,7 +52,7 @@ async function fetchAgentRows(filter: AgentListFilter): Promise<AgentRow[]> {
         q = q.eq("is_public", true);
       }
       const res = await q;
-      return ((res.data || []) as AgentRow[]).filter((r) => {
+      return ((res.data || []) as AgentRow[]).map(withBooleanFlags).filter((r) => {
         if (servedTo(r, filter.tenant_id)) return true;
         logDrop(r, "another workspace's public row");
         return false;
@@ -60,6 +60,16 @@ async function fetchAgentRows(filter: AgentListFilter): Promise<AgentRow[]> {
     })(),
     [] as AgentRow[]
   );
+}
+
+/**
+ * A row with its two flags as the booleans AgentLibraryEntry declares, whatever
+ * the database returned. Turso hands back 0/1: the builder sent that 0/1 back
+ * on every edit and the writer refused it as not a boolean, and the library's
+ * sort compared `1 !== true` (independent review of #713).
+ */
+function withBooleanFlags(row: AgentRow): AgentRow {
+  return { ...row, is_public: dbBool(row.is_public), is_oasis_managed: dbBool(row.is_oasis_managed) };
 }
 
 /**
@@ -72,7 +82,7 @@ async function fetchAgentRows(filter: AgentListFilter): Promise<AgentRow[]> {
  */
 function servedTo(row: AgentRow, tenantId: string | null | undefined): boolean {
   if (tenantId && row.tenant_id === tenantId) return true;
-  return isOasisManaged(row) || row.tenant_id === OASIS_OPERATOR_TENANT_ID;
+  return isOasisPublished(row);
 }
 
 /** Each workspace row that a built-in slug or the visibility rule drops is logged once per process. */
@@ -135,7 +145,7 @@ export const getAgentBySlug = cache(async (slug: string, tenantId?: string | nul
         q = q.eq("is_public", true);
       }
       const res = await q.maybeSingle();
-      const row = (res.data || null) as AgentRow | null;
+      const row = res.data ? withBooleanFlags(res.data as AgentRow) : null;
       if (row && !servedTo(row, tenantId)) {
         logDrop(row, "another workspace's public row");
         return null;
@@ -155,9 +165,14 @@ export const getAgentBySlug = cache(async (slug: string, tenantId?: string | nul
   return seed;
 });
 
-/** The flag as every other reader takes it (lib/db-bool.ts): true, 1 or "1". */
+/** The flag as every other reader takes it (lib/db-bool.ts): true, 1 or "1", never "true". */
 function isOasisManaged(row: AgentRow): boolean {
   return dbBool((row as { is_oasis_managed?: unknown }).is_oasis_managed);
+}
+
+/** A row a platform operator owns in the public library: managed by OASIS, or published from OASIS's own workspace. */
+function isOasisPublished(row: { tenant_id?: string | null; is_oasis_managed?: unknown }): boolean {
+  return dbBool(row.is_oasis_managed) || row.tenant_id === OASIS_OPERATOR_TENANT_ID;
 }
 
 /** Cheap existence check — used by routes that need to 404 unknown slugs. */

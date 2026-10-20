@@ -11,6 +11,8 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isHouseAgentSlug } from "@/lib/agents";
+import { dbBool } from "@/lib/db-bool";
+import { OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
 import { getSeedAgent } from "./library";
 import type {
   AgentCategory,
@@ -64,19 +66,24 @@ export type AgentWriter = { mayPublish: boolean };
 const NOT_A_PUBLISHER: AgentWriter = { mayPublish: false };
 
 export const PUBLISH_REFUSED = "Only OASIS can publish an agent to every workspace.";
+export const PUBLISH_FROM_OASIS = "Publish an agent from OASIS's own workspace: it is the only one whose public agents every workspace sees.";
+export const PUBLISHED_CHANGE_REFUSED =
+  "This agent is published to every workspace, so only OASIS can change or delete it. You can still unpublish it.";
 
 /**
  * The is_public a write may store. Absent stays absent; anything but a boolean
- * is refused; true needs a writer who may publish. Decided here, in the one
- * module that writes agents, because the routes used to check
- * `body.is_public === true` and then write the raw value, so a PATCH with
- * `is_public: 1` published (independent review of #713: SQLite stores 1, which
- * the loader's public filter matches).
+ * is refused; true needs a writer who may publish, writing in OASIS's own
+ * workspace (the loader serves no other workspace's public rows to anyone
+ * else, lib/agents/loader.ts servedTo). Decided here, in the one module that
+ * writes agents, because the routes used to check `body.is_public === true`
+ * and then write the raw value, so a PATCH with `is_public: 1` published
+ * (independent review of #713: SQLite stores 1, which the public filter matches).
  */
-function checkedPublish(raw: unknown, writer: AgentWriter): boolean | undefined {
+function checkedPublish(raw: unknown, writer: AgentWriter, tenantId: string | null): boolean | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw !== "boolean") throw new AgentPersistenceError("validation", "is_public must be true or false");
   if (raw && !writer.mayPublish) throw new AgentPersistenceError("forbidden", PUBLISH_REFUSED);
+  if (raw && tenantId !== OASIS_OPERATOR_TENANT_ID) throw new AgentPersistenceError("validation", PUBLISH_FROM_OASIS);
   return raw;
 }
 
@@ -136,7 +143,7 @@ export async function createCustomAgent(
 ): Promise<AgentLibraryEntry> {
   validateAgentInput(input);
   // Always written: the production column defaults to public.
-  const isPublic = checkedPublish(input.is_public, writer) ?? false;
+  const isPublic = checkedPublish(input.is_public, writer, input.tenant_id) ?? false;
   const slug = input.slug.trim().toLowerCase();
   const db = getServiceSupabase();
 
@@ -173,23 +180,23 @@ export async function updateCustomAgent(
   input: UpdateAgentInput,
   writer: AgentWriter = NOT_A_PUBLISHER,
 ): Promise<AgentLibraryEntry> {
-  const isPublic = checkedPublish(input.is_public, writer);
   const slug = input.slug.trim().toLowerCase();
   const db = getServiceSupabase();
   const existing = await db
     .from("agents")
-    .select("id, tenant_id, is_oasis_managed")
+    .select("id, tenant_id, is_oasis_managed, is_public")
     .eq("slug", slug)
     .maybeSingle();
   if (existing.error) throw new AgentPersistenceError("db", existing.error.message);
   if (!existing.data) throw new AgentPersistenceError("not_found", `agent "${slug}" not found`);
-  const row = existing.data as { id: string; tenant_id: string | null; is_oasis_managed: boolean };
-  if (row.is_oasis_managed) {
+  const row = existing.data as { id: string; tenant_id: string | null; is_oasis_managed: unknown; is_public: unknown };
+  if (dbBool(row.is_oasis_managed)) {
     throw new AgentPersistenceError("forbidden", "platform-managed agents cannot be edited through this endpoint");
   }
   if (row.tenant_id !== input.tenant_id) {
     throw new AgentPersistenceError("forbidden", "this agent belongs to a different tenant");
   }
+  const isPublic = checkedPublish(input.is_public, writer, row.tenant_id);
 
   const patch: Record<string, unknown> = {};
   if (input.name !== undefined) patch.name = input.name.trim();
@@ -217,6 +224,16 @@ export async function updateCustomAgent(
   if (input.pricing !== undefined) patch.pricing = input.pricing as unknown as Record<string, unknown>;
   if (isPublic !== undefined) patch.is_public = isPublic;
 
+  // A published agent is in every workspace's library, so changing it is
+  // publishing again: OASIS's call. Its own workspace may still take it down
+  // (is_public false and nothing else). Only the flag used to be gated, so an
+  // OASIS admin who is not a platform operator could rewrite a published prompt
+  // (independent review of #713).
+  const unpublishOnly = Object.keys(patch).length === 1 && patch.is_public === false;
+  if (dbBool(row.is_public) && !writer.mayPublish && Object.keys(patch).length > 0 && !unpublishOnly) {
+    throw new AgentPersistenceError("forbidden", PUBLISHED_CHANGE_REFUSED);
+  }
+
   if (Object.keys(patch).length === 0) {
     return (await db.from("agents").select("*").eq("id", row.id).single()).data as AgentLibraryEntry;
   }
@@ -226,21 +243,29 @@ export async function updateCustomAgent(
   return updated.data as AgentLibraryEntry;
 }
 
-export async function deleteCustomAgent(slug: string, tenantId: string): Promise<void> {
+export async function deleteCustomAgent(
+  slug: string,
+  tenantId: string,
+  writer: AgentWriter = NOT_A_PUBLISHER,
+): Promise<void> {
   const db = getServiceSupabase();
   const existing = await db
     .from("agents")
-    .select("id, tenant_id, is_oasis_managed")
+    .select("id, tenant_id, is_oasis_managed, is_public")
     .eq("slug", slug)
     .maybeSingle();
   if (existing.error) throw new AgentPersistenceError("db", existing.error.message);
   if (!existing.data) throw new AgentPersistenceError("not_found", `agent "${slug}" not found`);
-  const row = existing.data as { id: string; tenant_id: string | null; is_oasis_managed: boolean };
-  if (row.is_oasis_managed) {
+  const row = existing.data as { id: string; tenant_id: string | null; is_oasis_managed: unknown; is_public: unknown };
+  if (dbBool(row.is_oasis_managed)) {
     throw new AgentPersistenceError("forbidden", "platform-managed agents cannot be deleted");
   }
   if (row.tenant_id !== tenantId) {
     throw new AgentPersistenceError("forbidden", "this agent belongs to a different tenant");
+  }
+  // Deleting a published agent takes it out of every workspace's library.
+  if (dbBool(row.is_public) && !writer.mayPublish) {
+    throw new AgentPersistenceError("forbidden", PUBLISHED_CHANGE_REFUSED);
   }
   const deleted = await db.from("agents").delete().eq("id", row.id);
   if (deleted.error) throw new AgentPersistenceError("db", deleted.error.message);

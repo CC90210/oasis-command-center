@@ -9,8 +9,9 @@
  *      Body: { slug, name, category, short_description, description?,
  *              base_prompt, required_tools?, suggested_model?, pricing?,
  *              is_public? }
- *      Auth: requires session + tenant_id. Custom agents start as
- *      private (is_public=false) unless explicitly opted public.
+ *      Auth: requires session + tenant_id. Custom agents are private
+ *      (is_public=false); only a platform operator, in OASIS's own workspace,
+ *      may create one public (lib/agents/persistence.ts checkedPublish).
  *      The new teammate joins the workspace's roster at once (W4a, audit
  *      S2-06): its manifest binding is added, switched on, by the same lineup
  *      write the AI Team's On/Off uses (lib/manifest/agent-bindings.ts). It used
@@ -28,6 +29,7 @@ import {
   type CreateAgentInput,
 } from "@/lib/agents/persistence";
 import { resolveAgentKey } from "@/lib/agents";
+import { dbBool } from "@/lib/db-bool";
 import { changeAgentLineup } from "@/lib/manifest/agent-bindings";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 
@@ -83,17 +85,19 @@ export async function POST(req: NextRequest) {
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const profile = profileRes.data as
-    | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
+    | { tenant_id: string | null; team_role: string; is_owner: unknown; admin_access: unknown }
     | null;
   if (!profile?.tenant_id) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 403 });
   }
   // Creating an agent is a full-admin capability — honors the admin_access grant.
+  // Flags read with dbBool: Turso stores them as 0/1, and `!== true` refused a
+  // grant stored as 1.
   if (
-    !profile.is_owner &&
+    !dbBool(profile.is_owner) &&
     profile.team_role !== "admin" &&
     profile.team_role !== "owner" &&
-    profile.admin_access !== true
+    !dbBool(profile.admin_access)
   ) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
