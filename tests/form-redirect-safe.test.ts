@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { safeFormRedirect } from "../lib/forms/redirect-url";
+import { parseRedirectInput, safeFormRedirect } from "../lib/forms/redirect-url";
 
 const root = join(__dirname, "..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
@@ -76,13 +76,30 @@ check("nothing, or not a string, is no redirect", () => {
   }
 });
 
-check("both save routes refuse what safeFormRedirect refuses", () => {
+check("a request body's redirect_url: strings are checked, empty clears, anything else is refused", () => {
+  assert.deepEqual(parseRedirectInput(undefined), { ok: true, value: null });
+  assert.deepEqual(parseRedirectInput(null), { ok: true, value: null });
+  assert.deepEqual(parseRedirectInput(""), { ok: true, value: null });
+  assert.deepEqual(parseRedirectInput("   "), { ok: true, value: null });
+  assert.deepEqual(parseRedirectInput("example.com/thanks"), { ok: true, value: "https://example.com/thanks" });
+  assert.deepEqual(parseRedirectInput("/f/oasis-ai-cc/vsl"), { ok: true, value: "/f/oasis-ai-cc/vsl" });
+  // String() would have turned the array into an accepted address, and `false`
+  // used to clear the redirect silently (CodeRabbit on #710).
+  for (const bad of [["example.com/thanks"], false, true, 0, 42, { url: "https://example.com" }, "javascript:alert(1)"]) {
+    assert.deepEqual(parseRedirectInput(bad), { ok: false }, JSON.stringify(bad));
+  }
+  // The 2000-character cap the routes always applied still holds.
+  const long = parseRedirectInput(`https://example.com/${"a".repeat(3000)}`);
+  assert.ok(long.ok && long.value !== null && long.value.length <= 2000);
+});
+
+check("both save routes refuse what parseRedirectInput refuses", () => {
   for (const rel of ["app/api/forms/route.ts", "app/api/forms/[id]/route.ts"]) {
     const src = read(rel);
-    assert.ok(src.includes('from "@/lib/forms/redirect-url"'), `${rel} imports safeFormRedirect`);
-    assert.ok(/safeFormRedirect\(String\(body\.redirect_url\)/.test(src), `${rel} checks the submitted redirect_url`);
+    assert.ok(src.includes('from "@/lib/forms/redirect-url"'), `${rel} imports the redirect check`);
+    assert.ok(/parseRedirectInput\(body\.redirect_url\)/.test(src), `${rel} checks the submitted redirect_url`);
     assert.ok(src.includes('"invalid_redirect_url"'), `${rel} answers a refused redirect with a 400`);
-    assert.ok(!/redirect_url\s*[:=][^;\n]*String\(body\.redirect_url\)\.slice/.test(src), `${rel} no longer stores the raw value`);
+    assert.ok(!/String\(body\.redirect_url\)/.test(src), `${rel} never coerces the raw value`);
   }
 });
 

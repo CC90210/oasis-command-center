@@ -42,3 +42,23 @@ export function safeFormRedirect(raw: unknown): string | null {
     return null;
   }
 }
+
+/** The longest redirect a form may store, as the save routes always capped it. */
+const MAX_REDIRECT_CHARS = 2000;
+
+/**
+ * A redirect_url as the save routes receive it in a request body.
+ *
+ * - Clear: null, undefined, or an empty or blank string.
+ * - A string: checked by safeFormRedirect.
+ * - Anything else is invalid. That covers `["example.com"]`, which String()
+ *   would have turned into an accepted address, and `false`, which used to
+ *   clear the redirect silently (CodeRabbit on #710).
+ */
+export function parseRedirectInput(raw: unknown): { ok: true; value: string | null } | { ok: false } {
+  if (raw === null || raw === undefined) return { ok: true, value: null };
+  if (typeof raw !== "string") return { ok: false };
+  if (!raw.trim()) return { ok: true, value: null };
+  const value = safeFormRedirect(raw.slice(0, MAX_REDIRECT_CHARS));
+  return value ? { ok: true, value } : { ok: false };
+}
