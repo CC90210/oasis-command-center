@@ -17,7 +17,7 @@ async function main(): Promise<void> {
       "tsx",
       "--input-type=module",
       "--eval",
-      'const harness = await import("./tests/_delivery-harness.ts"); harness.finish("delivery-harness-cleanup-probe");',
+      'const mod = await import("./tests/_delivery-harness.ts"); const finish = mod.finish ?? mod.default?.finish; if (typeof finish !== "function") throw new TypeError("delivery harness finish export missing"); finish("delivery-harness-cleanup-probe");',
     ],
     { cwd: process.cwd(), encoding: "utf8" },
   );
