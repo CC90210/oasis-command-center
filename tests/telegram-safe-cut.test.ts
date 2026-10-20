@@ -128,15 +128,23 @@ async function main(): Promise<void> {
     // Every value goes through clipAndEscape (whole characters). A guard, not
     // a style rule: a cut by code units can leave half an emoji, which
     // Telegram refuses, losing the alert.
+    // Files that escape for Telegram, by either helper. clipAndEscape's own
+    // input counts too: clipAndEscape(name.slice(0, 120), 120) splits an emoji
+    // before the helper sees it (CodeRabbit on #719). Any length, not only a
+    // number, and slice, substring or substr alike. The helper's own file is
+    // where the one sanctioned cut lives.
+    const cutBeforeEscape = /\b(?:e|escapeTelegramHtml|clipAndEscape)\([^\n]*\.(?:slice|substring|substr)\(\s*0\s*,/;
     const offenders: string[] = [];
     for (const file of sourceTree("app", "lib")) {
+      const rel = repoRelative(file);
+      if (rel === "lib/notify/telegram-format.ts") continue;
       const src = readFileSync(file, "utf8");
-      if (!src.includes("escapeTelegramHtml")) continue;
+      if (!src.includes("escapeTelegramHtml") && !src.includes("clipAndEscape")) continue;
       src.split("\n").forEach((line, i) => {
-        if (/\be\([^\n]*\.slice\(0,\s*\d+\)|escapeTelegramHtml\([^\n]*\.slice\(0,\s*\d+\)/.test(line)) offenders.push(`${repoRelative(file)}:${i + 1}`);
+        if (cutBeforeEscape.test(line)) offenders.push(`${rel}:${i + 1}`);
       });
     }
-    assert.deepEqual(offenders, [], "use clipAndEscape(value, max)");
+    assert.deepEqual(offenders, [], "use clipAndEscape(value, max) on the whole value");
   });
 
   await check("the sender cuts through the safe cut: a long escaped alert reaches Telegram parseable", async () => {
