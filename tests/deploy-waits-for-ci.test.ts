@@ -60,6 +60,9 @@ const freshStep = deploy.slice(freshAt, deployAt);
 assert.ok(freshStep.includes("        id: fresh\n        if: github.event_name == 'workflow_run'\n"), "only a CI-triggered run is checked");
 assert.ok(freshStep.includes("HEAD_SHA: ${{ github.event.workflow_run.head_sha }}") && freshStep.includes("HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}"));
 assert.ok(!freshStep.slice(freshStep.indexOf("        run: |")).includes("${{"), "the script reads env, never a pasted event value");
+// A named bash shell is what turns on pipefail; the unnamed default is `bash -e`,
+// where a failed ls-remote would skip the deploy on a green run (CodeRabbit on #712).
+assert.ok(freshStep.includes("        shell: bash\n"), "a failed ls-remote fails the step");
 assert.ok(freshStep.includes('git ls-remote origin "refs/heads/${HEAD_BRANCH}"') && freshStep.includes('[ "$tip" = "$HEAD_SHA" ]'));
 assert.ok(deploy.slice(deployAt).includes("        if: steps.preflight.outputs.ready == 'true' && steps.fresh.outputs.fresh != 'false'\n"),
   "the deploy is skipped when a newer commit holds the branch");
