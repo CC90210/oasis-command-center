@@ -398,6 +398,27 @@ function refuseInvalidStep(input: {
  * initialize_only is not judged here: it mints the token an upload-first form
  * needs before its file can be chosen, and records no step.
  */
+/**
+ * The answer when a form or its submissions could not be READ (a database
+ * blip; lib/forms/public-resolver.ts 'unavailable'): 503, "try again", never
+ * "this link is no longer valid", which made visitors give up on a link that
+ * worked a moment later (2026-10-19 audit). The client keeps the answers on
+ * screen and sends its failure beacon. Logged here, since nothing else
+ * records it.
+ */
+function formUnavailable(where: string, error: string): NextResponse {
+  console.error("[forms.submit] form read failed", { where, error });
+  return NextResponse.json({ ok: false, error: "form_unavailable" }, { status: 503 });
+}
+
+/** What the visitor is told about a file that was not saved: which one, and what to do. */
+function lostFileSentence(label: string, reason: string): string {
+  if (reason.startsWith("mime_not_allowed")) return `${label}: that type of file isn't accepted here. Please choose another file.`;
+  if (reason.startsWith("file_too_large")) return `${label}: that file is larger than 15 MB. Please choose a smaller one.`;
+  if (reason === "base64_invalid" || reason === "missing_storage_path") return `${label}: that file didn't finish uploading. Please choose it again.`;
+  return `${label}: we couldn't save that file just now. Please try again.`;
+}
+
 async function refuseInvalidAnonymousFirstStep(input: {
   tenantSlug: string;
   formSlug: string;
@@ -406,7 +427,13 @@ async function refuseInvalidAnonymousFirstStep(input: {
 }): Promise<{ refusal: NextResponse } | { identity: Record<string, unknown> }> {
   const resolved = await resolvePublicForm(getServiceSupabase(), input.tenantSlug, input.formSlug);
   // The same answer initAnonymousLead gives for a form it cannot find.
-  if (!resolved.ok) return { refusal: NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }) };
+  if (!resolved.ok) {
+    return {
+      refusal: resolved.reason === "unavailable"
+        ? formUnavailable("first_step", resolved.error)
+        : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }),
+    };
+  }
   let steps: FormStep[];
   try {
     steps = parseFormSteps(resolved.form.steps);
@@ -487,7 +514,11 @@ async function answerRouteOnly(req: NextRequest, body: SubmitBody): Promise<Next
   }
   const db = getServiceSupabase();
   const resolved = await resolvePublicForm(db, tenantSlug, formSlug);
-  if (!resolved.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  if (!resolved.ok) {
+    return resolved.reason === "unavailable"
+      ? formUnavailable("view", resolved.error)
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   const form = resolved.form;
   let steps: FormStep[];
   try {
@@ -838,7 +869,8 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     )
     .eq("id", link.form_id)
     .maybeSingle();
-  if (formRow.error || !formRow.data) {
+  if (formRow.error) return formUnavailable("step", formRow.error.message);
+  if (!formRow.data) {
     return NextResponse.json({ ok: false, error: "form_not_found" }, { status: 404 });
   }
   const form = formRow.data as {
@@ -905,6 +937,9 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       .select("step_index, payload")
       .eq("form_id", form.id)
       .eq("lead_id", link.lead_id);
+    // A failed read is not "no earlier steps": that told the visitor to go
+    // back and finish steps they had finished (2026-10-19 audit).
+    if (priorQ.error) return formUnavailable("prior_steps", priorQ.error.message);
     priorRows = (priorQ.data || []) as Array<{ step_index: number; payload: unknown }>;
     const completedSteps = new Set(priorRows.map((r) => Number(r.step_index)));
     for (let i = 0; i < stepIndex; i++) {
@@ -1219,6 +1254,29 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     payload[field.name] = cleaned;
   }
 
+  // A FILE THE VISITOR CHOSE THAT DID NOT LAND fails the step, naming the
+  // file and why, so they can choose it again. Until 2026-10-19 (audit) a
+  // wrong type, an oversize file, a storage failure or a failed registration
+  // went only into a `warnings` list no client reads: the step was recorded,
+  // the form said thank you, and the document was simply missing. Answered
+  // before the step is recorded. A file on a field this step does not declare
+  // was never the visitor's to send, so that one is still dropped quietly.
+  const lostFiles = uploadWarnings.filter((w) => w.reason !== "field_not_file_upload");
+  if (lostFiles.length > 0) {
+    console.warn("[forms.submit] files not saved", {
+      form_id: form.id,
+      lead_id: link.lead_id,
+      step_index: stepIndex,
+      files: lostFiles,
+    });
+    const first = lostFiles[0];
+    const label = currentStepFields.get(first.field_name)?.label?.trim() || "your file";
+    return NextResponse.json(
+      { ok: false, error: "upload_failed", field: first.field_name, message: lostFileSentence(label, first.reason) },
+      { status: 422 },
+    );
+  }
+
   // After all uploads for this step, evaluate stage progression once.
   // The engine checks "all required SunBiz docs present?" against the
   // canonical doc-type set; partial uploads stay in missing_info,
@@ -1288,8 +1346,13 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     .select("id")
     .single();
   if (insertRes.error) {
+    // The database's own words stay in the log: they name tables and
+    // constraints, and an anonymous visitor gets nothing from them
+    // (2026-10-19 audit). server_error shows the retry sentence and sends the
+    // client's failure beacon, which keeps a copy of the answers.
+    console.error("[forms.submit] step insert failed", { form_id: form.id, step_index: stepIndex, error: insertRes.error.message });
     return NextResponse.json(
-      { ok: false, error: insertRes.error.message },
+      { ok: false, error: "server_error" },
       { status: 500 },
     );
   }
@@ -2365,6 +2428,10 @@ async function initAnonymousLead(input: {
   const db = getServiceSupabase();
   const resolved = await resolvePublicForm(db, input.tenantSlug, input.formSlug);
   if (!resolved.ok) {
+    if (resolved.reason === "unavailable") {
+      console.error("[forms.submit] form read failed", { where: "anonymous_init", error: resolved.error });
+      return { ok: false, error: "form_unavailable", status: 503 };
+    }
     return { ok: false, error: "not_found", status: 404 };
   }
   const tenantSlug = resolved.tenant_slug;
@@ -2614,8 +2681,10 @@ async function initAnonymousLead(input: {
       });
       lead = { id: created.id, data: leadData };
     } catch (err) {
-      const detail = err instanceof Error ? err.message : "unknown";
-      return { ok: false, error: `lead_create_failed: ${detail}`, status: 500 };
+      // Logged, never sent: an anonymous visitor gets server_error (the retry
+      // sentence and the failure beacon), not the database's words.
+      console.error("[forms.submit] lead create failed", { form_id: form.id, error: err instanceof Error ? err.message : String(err) });
+      return { ok: false, error: "server_error", status: 500 };
     }
   }
 

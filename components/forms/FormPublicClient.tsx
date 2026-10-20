@@ -285,6 +285,11 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
 
   // Nothing the merchant did. Say so, and do not make them re-type anything.
   server_error: "Something went wrong on our end. Please try submitting again.",
+  // The form could not be read just now (a database blip). The link is fine:
+  // this used to come back as "no longer valid" and visitors gave up.
+  form_unavailable: "We couldn't reach this form just now. Your answers are still here, so please try again in a moment.",
+  // The route names the file and why in its own sentence; this is the fallback.
+  upload_failed: "One of your files couldn't be saved. Please choose it again and resubmit.",
   consent_record_unavailable:
     "We couldn't save your contact preferences just now. Please try submitting again.",
   // The last step of an audit that opens the calendar. Your answers are already
@@ -855,8 +860,9 @@ export function FormPublicClient({
   /**
    * Show a refused submission as a plain sentence. Beacon only the failures
    * nobody else can see or that mean a crash: a non-JSON response (platform
-   * error page, 413) or an explicit server_error, plus an error code with no
-   * copy, which means the route grew a rejection nobody wrote a sentence for.
+   * error page, 413), an explicit server_error or form_unavailable (the form
+   * could not be read), plus an error code with no copy, which means the
+   * route grew a rejection nobody wrote a sentence for.
    * Validation and rate-limit responses are the system working, not a
    * merchant being lost.
    */
@@ -867,8 +873,8 @@ export function FormPublicClient({
     /** The step the failed request was for, when not the one on screen (a held step). */
     stepIndex = currentStep,
   ) {
-    if (!data || data.error === "server_error") {
-      reportSubmitFailure(data ? "server_error" : `non_json_http_${res.status}`, payload, stepIndex);
+    if (!data || data.error === "server_error" || data.error === "form_unavailable") {
+      reportSubmitFailure(data ? data.error ?? "server_error" : `non_json_http_${res.status}`, payload, stepIndex);
     }
     if (data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
       reportSubmitFailure(`unmapped_submit_error:${data.error}`, payload, stepIndex);

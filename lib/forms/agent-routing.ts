@@ -90,6 +90,7 @@ function leadBusinessName(data: Record<string, unknown> | null): string {
  * routes into their EXISTING file instead of spawning a duplicate lead. Email
  * is matched lowercased (new leads are stored lowercased); phone exact. Returns
  * the most-recent match, or null when nothing matches (caller creates fresh).
+ * THROWS when a lookup fails: a read that failed is not "nothing matches".
  *
  * `business`, when given, does two jobs: it refuses a PHONE match on a lead
  * that names a different business, and (unless `matchOnBusinessName: false`)
@@ -142,7 +143,13 @@ export async function findExistingLead(
       .eq(`data->>${field}`, value)
       .order("created_at", { ascending: false })
       .limit(STRONG_KEY_SCAN);
-    if (q.error || !Array.isArray(q.data)) continue;
+    // A failed read is not "no such lead". Answering null made a duplicate
+    // lead, and on the Instagram setter a second booking for someone already
+    // booked (2026-10-19 audit). Callers fail closed on the throw (the submit
+    // route's capture and retry, the booking agent's 503) or chose their own
+    // fallback (operator-email ingest, dropped applications).
+    if (q.error) throw new Error(`lead lookup failed: ${q.error.message}`);
+    if (!Array.isArray(q.data)) continue;
     const rows = q.data as Array<{ id: string; data: Record<string, unknown> | null; created_at: string | null }>;
     const row = rows.find((r) => {
       if (field !== "phone" || !business) return true;
@@ -189,7 +196,8 @@ export async function findExistingLead(
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
-      if (!q.error && q.data) {
+      if (q.error) throw new Error(`lead lookup failed: ${q.error.message}`);
+      if (q.data) {
         candidates.push(q.data as { id: string; data: Record<string, unknown> | null; created_at: string | null });
       }
     }

@@ -67,7 +67,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       // switched off; only the click log is lost. An explicit ?form/?t that
       // does not resolve stays a 404 (a stale link to someone else's offer).
       const fallback = bare ? communityUrlForTenant(AI_AUDIT_TENANT_ID) : null;
-      return fallback ? NextResponse.redirect(fallback, 302) : NOT_FOUND();
+      if (fallback) return NextResponse.redirect(fallback, 302);
+      // A read that failed is not a stale link: say "try again", never 404
+      // (2026-10-19 audit).
+      if (resolved.reason === "unavailable") {
+        console.error("[go.community] form read failed", { error: resolved.error });
+        return new NextResponse("This link could not be opened just now. Please try again in a moment.", {
+          status: 503,
+          headers: { "retry-after": "30" },
+        });
+      }
+      return NOT_FOUND();
     }
 
     // Resolved from server config, by tenant_id — never from the query string.

@@ -207,6 +207,11 @@ async function loadForm(params: RouteParams, opts: { includeDisabled?: boolean }
   const db = getServiceSupabase();
   const resolved = await resolvePublicForm(db, params.tenant_slug, params.form_slug, opts);
   if (!resolved.ok) {
+    // A read that failed is not a dead link. Thrown, it draws the app's error
+    // page (app/error.tsx: a retry, no OASIS contact on a prospect's page, and a
+    // report to the Worker's logs); notFound() told the visitor the link was
+    // gone (2026-10-19 audit). Next redacts the message from the browser.
+    if (resolved.reason === "unavailable") throw new Error(`public form unavailable: ${resolved.error}`);
     return { ok: false, reason: "not_found" };
   }
   // A form that is off exists only for its owner's preview. Decided BEFORE the
