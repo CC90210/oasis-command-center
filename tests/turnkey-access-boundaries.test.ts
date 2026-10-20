@@ -28,7 +28,6 @@ for (const path of [
   "app/api/esign/envelopes/[id]/route.ts",
   "app/api/esign/envelopes/[id]/send/route.ts",
   "app/api/esign/envelopes/[id]/remind/route.ts",
-  "app/api/notify/telegram-identity/route.ts",
   "app/api/integrations/keys/route.ts",
   "app/api/integrations/keys/test/route.ts",
   "app/api/integrations/constant-contact/status/route.ts",
@@ -47,6 +46,12 @@ includesAll("app/api/devices/route.ts", [
   "session.isAdmin ? rows : rows.filter((r) => r.user_id === session.userId)",
   'if (!session.isAdmin) return bad(403, "not_your_computer")',
 ]);
+
+// OASIS's alert bots and chats belong to no client workspace, so the diagnostic
+// that names them is platform-operator only (2026-10-19 audit). The shared
+// rule it used to use admits every role of every non-OASIS workspace. Refusals
+// are proven in tests/admin-surfaces-operator-only.test.ts.
+includesAll("app/api/notify/telegram-identity/route.ts", ["resolvePlatformOperator", "if (!op.operator)"]);
 
 // Resolving an alert card is narrower than a shared resource: the workspace's
 // owners and admins only, the audience Needs you shows a card to (2026-10-08;
