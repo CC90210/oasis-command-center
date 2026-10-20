@@ -63,10 +63,14 @@ export const listAgents = cache(async (filter: AgentListFilter = {}): Promise<Ag
     ? SEED_AGENTS.filter((a) => a.category === filter.category)
     : SEED_AGENTS;
 
-  // DB rows win on slug collision — Phase 3.1 promotion path overwrites seeds.
-  const dbSlugs = new Set(dbRows.map((r) => r.slug));
+  // A DB row wins a slug collision with a seed only when OASIS manages it
+  // (the Phase 3.1 promotion path); a workspace's row under a built-in slug is
+  // dropped, the same rule as getAgentBySlug (2026-10-19 audit).
+  const seedSlugs = new Set(SEED_AGENTS.map((a) => a.slug));
+  const rows = dbRows.filter((r) => !seedSlugs.has(r.slug) || isOasisManaged(r));
+  const dbSlugs = new Set(rows.map((r) => r.slug));
   const merged: AgentLibraryEntry[] = [
-    ...dbRows,
+    ...rows,
     ...seedFiltered.filter((s) => !dbSlugs.has(s.slug)),
   ];
 
@@ -103,9 +107,20 @@ export const getAgentBySlug = cache(async (slug: string, tenantId?: string | nul
     })(),
     null as AgentRow | null
   );
-  if (fromDb) return fromDb;
-  return getSeedAgent(key);
+  const seed = getSeedAgent(key);
+  // A built-in agent's slug belongs to OASIS. A database row stands in for it
+  // only when OASIS manages that row; otherwise a workspace's public row under
+  // "sdr" would replace the Sales agent in every workspace (2026-10-19 audit).
+  // The persistence layer now refuses such slugs; this holds for any row
+  // written before it did, or written around it.
+  if (fromDb && (!seed || isOasisManaged(fromDb))) return fromDb;
+  return seed;
 });
+
+function isOasisManaged(row: AgentRow): boolean {
+  const v = (row as { is_oasis_managed?: unknown }).is_oasis_managed;
+  return v === true || v === 1 || v === "1" || v === "true";
+}
 
 /** Cheap existence check — used by routes that need to 404 unknown slugs. */
 export async function agentExists(slug: string, tenantId?: string | null): Promise<boolean> {

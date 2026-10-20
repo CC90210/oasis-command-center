@@ -11,6 +11,7 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isHouseAgentSlug } from "@/lib/agents";
+import { getSeedAgent } from "./library";
 import type {
   AgentCategory,
   AgentLibraryEntry,
@@ -38,8 +39,20 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,62}$/;
  * taken too: outside OASIS's own workspace no surface shows a teammate under
  * one (lib/os/teammates.ts, lib/os/agent-names.ts), so a teammate a client
  * built on it would vanish the moment it was saved.
+ *
+ * And every built-in library agent's slug (lib/agents/library.ts SEED_AGENTS:
+ * sdr, customer-support, qa-reviewer, research-analyst, ...). The loader reads
+ * the database before the seeds, so a row under "sdr" stood in for the Sales
+ * agent; published, in every workspace, running that workspace's department
+ * turns on a prompt one admin wrote (2026-10-19 audit; no such row existed).
  */
 export const RESERVED_AGENT_SLUGS: ReadonlySet<string> = new Set(["new"]);
+
+/** A slug no custom agent may take: reserved, a house agent, or a built-in library agent. */
+export function isReservedAgentSlug(slug: string): boolean {
+  const key = slug.trim().toLowerCase();
+  return RESERVED_AGENT_SLUGS.has(key) || isHouseAgentSlug(key) || getSeedAgent(key) !== null;
+}
 
 const ALLOWED_CATEGORIES = new Set<AgentCategory>([
   "ceo", "cfo", "cmo", "coo", "operations", "sales", "support",
@@ -68,7 +81,7 @@ function validateAgentInput(input: CreateAgentInput): void {
   if (!SLUG_RE.test(slug)) {
     throw new AgentPersistenceError("validation", "slug must match /^[a-z0-9][a-z0-9-]{1,62}$/");
   }
-  if (RESERVED_AGENT_SLUGS.has(slug) || isHouseAgentSlug(slug)) {
+  if (isReservedAgentSlug(slug)) {
     throw new AgentPersistenceError("validation", `slug "${slug}" is reserved; choose another URL slug`);
   }
   if (!input.name.trim()) {

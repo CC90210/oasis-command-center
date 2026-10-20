@@ -29,6 +29,7 @@ import {
 } from "@/lib/agents/persistence";
 import { resolveAgentKey } from "@/lib/agents";
 import { changeAgentLineup } from "@/lib/manifest/agent-bindings";
+import { isPlatformOperator } from "@/lib/role-surfaces-session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -101,6 +102,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Publishing puts the agent in EVERY workspace's library (the loader reads
+  // public rows for all tenants), so it is OASIS's call, not a workspace
+  // admin's (2026-10-19 audit).
+  if (body.is_public === true && !(await isPlatformOperator())) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", reason: "Only OASIS can publish an agent to every workspace." },
+      { status: 403 },
+    );
+  }
+
   try {
     const created = await createCustomAgent({
       slug: body.slug as string,
@@ -112,7 +123,7 @@ export async function POST(req: NextRequest) {
       required_tools: body.required_tools,
       suggested_model: body.suggested_model,
       pricing: body.pricing,
-      is_public: body.is_public ?? false,
+      is_public: body.is_public === true,
       created_by: user.id,
       tenant_id: profile.tenant_id,
     });

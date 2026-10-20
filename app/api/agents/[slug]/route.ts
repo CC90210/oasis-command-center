@@ -11,6 +11,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getAgentBySlug } from "@/lib/agents/loader";
+import { isPlatformOperator } from "@/lib/role-surfaces-session";
 import {
   AgentPersistenceError,
   deleteCustomAgent,
@@ -76,6 +77,14 @@ export async function PATCH(
     body = (await req.json()) as Partial<UpdateAgentInput>;
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
+  // Same rule as creating: publishing to every workspace is OASIS's call.
+  // Unpublishing your own agent stays open.
+  if (body.is_public === true && !(await isPlatformOperator())) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", reason: "Only OASIS can publish an agent to every workspace." },
+      { status: 403 },
+    );
   }
 
   try {
