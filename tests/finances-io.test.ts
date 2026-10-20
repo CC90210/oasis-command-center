@@ -528,7 +528,7 @@ async function main() {
     assert.match(real.reminders[0].reason, /No OASIS mailbox is configured/);
   });
 
-  await check("a purchase on the public checkout tells the sales desk once, in escaped words; any other payment tells no one", async () => {
+  await check("a purchase on the public checkout tells the sales desk once per event, in escaped words, whichever event booked the payment; any other payment, and a test-mode one, tells no one", async () => {
     // 2026-10-19 audit: a buyer could pay on oasisai.work/pricing and the team
     // was never told (lib/checkout/paid-alert.ts).
     const { cad: formatCad } = await import("../lib/checkout/catalog");
@@ -563,6 +563,23 @@ async function main() {
 
       await deliver("payment_intent.succeeded", { ...sale, id: "pi_plain_1", latest_charge: charge({ id: "ch_plain_1", amount: 1000, pi: "pi_plain_1" }), metadata: {} });
       assert.equal(telegramSent.length, 1, "a payment the public checkout did not start tells no one");
+
+      // Stripe sends charge.succeeded and payment_intent.succeeded in either
+      // order. When the charge books the payment first, the intent's event
+      // only matches it, and the sales desk is still told.
+      const second = { ...sale, id: "pi_sale_2", latest_charge: charge({ id: "ch_sale_2", amount: 150000, pi: "pi_sale_2" }), metadata: { ...sale.metadata, oasis_order_id: "ord_sale_2" } };
+      const booked = await deliver("charge.succeeded", second.latest_charge, { id: "evt_sale_2_charge" });
+      assert.match(String((booked.body as { detail?: string }).detail), /^payment recorded /, JSON.stringify(booked.body));
+      assert.equal(telegramSent.length, 1, "the charge's own event tells no one");
+      const matched = await deliver("payment_intent.succeeded", second, { id: "evt_sale_2" });
+      assert.match(String((matched.body as { detail?: string }).detail), /^payment matched /, JSON.stringify(matched.body));
+      assert.equal(telegramSent.length, 2, "the intent's event tells the sales desk though the payment was already booked");
+      assert.ok(telegramSent[1].text.includes("Order ord_sale_2"));
+
+      // A test-mode purchase never reaches the alert: the webhook ignores
+      // test-mode events before dispatch.
+      await deliver("payment_intent.succeeded", { ...sale, id: "pi_test_1", livemode: false, latest_charge: { ...charge({ id: "ch_test_1", amount: 1000, pi: "pi_test_1" }), livemode: false } }, { id: "evt_sale_test", livemode: false });
+      assert.equal(telegramSent.length, 2, "a test-mode purchase tells no one");
     } finally {
       telegramSent = null;
       delete process.env.OASIS_SALES_TELEGRAM_BOT_TOKEN;
@@ -570,13 +587,13 @@ async function main() {
     }
   });
 
-  await check("the purchase alert's words: a test-mode sale says so, an unknown offer says so, and a failed send never throws", async () => {
+  await check("the purchase alert's words: an unknown offer says so, and a failed send never throws", async () => {
     const { paidAlertText, alertPublicCheckoutPaid, publicCheckoutSale } = await import("../lib/checkout/paid-alert");
     assert.equal(publicCheckoutSale({ metadata: { oasis_checkout: "something_else" } }), null);
     assert.equal(publicCheckoutSale(null), null);
-    const base = { sale: { orderId: "o1", offerId: "nope", optionId: "x" }, amountCents: 12345, currency: "usd", customerName: "", customerEmail: "", livemode: false };
+    const base = { sale: { orderId: "o1", offerId: "nope", optionId: "x" }, amountCents: 12345, currency: "usd", customerName: "", customerEmail: "" };
     const text = paidAlertText(base);
-    assert.match(text, /^Test purchase on oasisai\.work\/pricing \(Stripe test mode\)/);
+    assert.match(text, /^New purchase on oasisai\.work\/pricing\n/);
     assert.ok(text.includes("nope / x (not in the catalog)"));
     assert.ok(text.includes("123.45 USD paid"));
     assert.ok(text.includes("Buyer: no name or email on the payment; see Stripe"));

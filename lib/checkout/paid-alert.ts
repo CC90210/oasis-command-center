@@ -5,10 +5,15 @@
  * WHY (2026-10-19 audit). A buyer could pay CAD 1,500 to 15,000 on
  * oasisai.work/pricing and nobody on the team was told: the payment went into
  * the books (lib/founders-finances/stripe-ingest.ts) and Stripe sent its
- * receipt, and that was all. Now the payment_intent.succeeded branch, which
- * runs once per payment (the webhook claims each event once), tells the sales
- * desk (CC and Adon) through the one alert resolver, as the funnel's lead
- * alerts do, so someone books the kickoff.
+ * receipt, and that was all. Now the payment_intent.succeeded branch tells the
+ * sales desk (CC and Adon) through the one alert resolver, as the funnel's
+ * lead alerts do, so someone books the kickoff.
+ *
+ * At least once, not exactly once. The webhook claims each event once, so a
+ * redelivery tells no one; but if marking the event processed fails after the
+ * alert went out, Stripe's retry sends it again. That is deliberate: a second
+ * ping costs less than a missed sale. Test-mode events never get this far
+ * (handleStripeEvent ignores them before dispatch).
  *
  * Best-effort: a failed alert is logged, never thrown, so it can never make
  * Stripe retry the booking of the payment. The buyer's own kickoff email is a
@@ -37,7 +42,6 @@ export type PaidAlertInput = {
   currency: string;
   customerName: string;
   customerEmail: string;
-  livemode: boolean;
 };
 
 /**
@@ -56,7 +60,7 @@ export function paidAlertText(input: PaidAlertInput): string {
     .filter(Boolean)
     .join(" ");
   return [
-    input.livemode ? "New purchase on oasisai.work/pricing" : "Test purchase on oasisai.work/pricing (Stripe test mode)",
+    "New purchase on oasisai.work/pricing",
     what,
     `${amount} paid`,
     `Buyer: ${buyer || "no name or email on the payment; see Stripe"}`,

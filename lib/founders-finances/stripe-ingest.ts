@@ -1383,10 +1383,13 @@ async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promis
       charge.paymentIntentId = charge.paymentIntentId || pi.paymentIntentId;
       if (!charge.metadata.finInvoiceId && pi.metadata.finInvoiceId) charge.metadata = pi.metadata;
       const r = await recordStripeCharge(charge, { fetchFees: true });
-      // A purchase on the public checkout (/pricing) tells the sales desk, once:
-      // this event is claimed once (claimEvent), and only the intent carries the
-      // checkout's marker. After the booking, so a retried event never alerts
-      // twice; the alert itself never throws (lib/checkout/paid-alert.ts).
+      // A purchase on the public checkout (/pricing) tells the sales desk. Only
+      // the intent carries the checkout's marker. Not gated on r.created:
+      // charge.succeeded may have booked the payment first. A redelivery of
+      // this event is a duplicate (claimEvent) and tells no one; a retry after
+      // the processed mark failed can repeat the alert, deliberately (a second
+      // ping costs less than a missed sale). It never throws
+      // (lib/checkout/paid-alert.ts).
       const sale = publicCheckoutSale(env.object);
       if (sale) {
         await alertPublicCheckoutPaid({
@@ -1395,7 +1398,6 @@ async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promis
           currency: pi.currency,
           customerName: charge.customerName,
           customerEmail: charge.customerEmail,
-          livemode: pi.livemode,
         });
       }
       return r.paymentId ? `payment ${r.created ? "recorded" : "matched"} ${r.paymentId}` : `ignored: ${r.reason}`;
