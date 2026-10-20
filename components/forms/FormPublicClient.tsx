@@ -816,8 +816,11 @@ export function FormPublicClient({
     } = {},
   ) {
     sendSubmitFailureBeacon({
-      tenantSlug: anonymousInit?.tenant_slug,
-      formSlug: anonymousInit?.form_slug,
+      // A signed link's page has no anonymousInit, only these props. Without
+      // them the beacon named no form, so its loss paged nobody (CodeRabbit
+      // on #714).
+      tenantSlug: anonymousInit?.tenant_slug ?? tenantSlug,
+      formSlug: anonymousInit?.form_slug ?? formSlug,
       stepIndex,
       error,
       payload: payload ?? values,

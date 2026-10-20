@@ -1083,6 +1083,10 @@ async function main() {
     assert.match(client, /reportSubmitFailure\(data \? data\.error \?\? "server_error" : `non_json_http_\$\{res\.status\}`, payload, stepIndex, \{\s*nothingToRecover,\s*consentLedger,\s*\}\);/);
     assert.match(client, /reportSubmitFailure\(`unmapped_submit_error:\$\{data\.error\}`, payload, stepIndex, \{ nothingToRecover, consentLedger \}\);/);
     assert.match(client, /payload: payload \?\? values,\s*nothingToRecover,\s*consentLedger,\s*\}\);/, "reportSubmitFailure forwards both to the beacon");
+    // A signed link's page passes the slugs as props, not anonymousInit: the
+    // beacon must still name the form, or its loss pages nobody (CodeRabbit on #714).
+    assert.match(client, /tenantSlug: anonymousInit\?\.tenant_slug \?\? tenantSlug,\s*formSlug: anonymousInit\?\.form_slug \?\? formSlug,/);
+    assert.match(read("app/f/[tenant_slug]/[form_slug]/[lead_token]/page.tsx"), /tenantSlug=\{result\.tenant_slug\}\s*formSlug=\{result\.form\.slug\}/, "and the signed-link page passes them");
     assert.match(client, /showSubmitFailure\(res, data, built\.payload, currentStep, \{ consentLedger: ledger \}\);/, "a step's consent boxes go with its failure");
     assert.match(client, /showSubmitFailure\(res, data, \{ \.\.\.payload, \.\.\.\(contact \?\? \{\}\) \}, i, \{ consentLedger: ledger \}\);/, "and a held step's");
     // The router: a dead connection counts, and is never filed as a real loss;
