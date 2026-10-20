@@ -16,6 +16,10 @@
  *
  * Returns a per-event result array so the UI can render a checklist of
  * which events registered successfully.
+ *
+ * A business id another workspace already holds is refused (409), and this
+ * workspace is linked to its id only after Kixie accepted a registration for
+ * it (2026-10-19 audit; see the stamp below).
  */
 
 import { NextResponse } from "next/server";
@@ -25,6 +29,51 @@ import { resolveSessionContext } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * Does ANOTHER workspace hold this business id? Read exactly as the receiver
+ * reads it (custom_fields->>kixie_business_id), so "held" means "its events
+ * route there". A failed read is "unknown", never "none".
+ */
+async function businessIdHolder(
+  db: ReturnType<typeof getServiceSupabase>,
+  tenantId: string,
+  businessId: string,
+): Promise<"none" | "other" | "unknown"> {
+  const r = await db
+    .from("tenants")
+    .select("id")
+    .eq("custom_fields->>kixie_business_id", String(businessId))
+    .neq("id", tenantId)
+    .limit(1);
+  if (r.error) {
+    console.error("[kixie.sync-webhooks] business id lookup failed", r.error.message);
+    return "unknown";
+  }
+  return (r.data || []).length > 0 ? "other" : "none";
+}
+
+function businessIdRefusal(holder: "other" | "unknown"): NextResponse {
+  return holder === "other"
+    ? NextResponse.json(
+        {
+          ok: false,
+          error: "business_id_in_use",
+          message:
+            "Another workspace is already connected to this Kixie business ID, so this workspace was not linked to it. Check the business ID in Settings → Integrations; if that Kixie account is yours, contact support.",
+        },
+        { status: 409 },
+      )
+    : NextResponse.json(
+        {
+          ok: false,
+          error: "business_id_check_failed",
+          message:
+            "We couldn't check whether another workspace already uses this Kixie business ID, so this workspace was not linked to it. Try again in a moment.",
+        },
+        { status: 503 },
+      );
+}
 
 export async function POST() {
   const session = await resolveSessionContext();
@@ -64,25 +113,16 @@ export async function POST() {
   // Activation glue: the Kixie receiver (app/api/webhooks/kixie) resolves the
   // inbound event to a tenant via `tenants.custom_fields.kixie_business_id`
   // (the tenants table's jsonb config column — there is no `metadata` column).
-  // Nothing else writes it, so stamp it here from the saved credentials — key +
-  // business ID + this one click = fully wired. Merge (don't clobber) the rest
-  // of custom_fields; a failure here doesn't block registration but is surfaced.
-  let businessIdLinked = false;
-  try {
-    const t = await db.from("tenants").select("custom_fields").eq("id", tenantId).maybeSingle();
-    const cf = ((t.data as { custom_fields?: Record<string, unknown> } | null)?.custom_fields) || {};
-    if (cf.kixie_business_id !== creds.businessId) {
-      const { error } = await db
-        .from("tenants")
-        .update({ custom_fields: { ...cf, kixie_business_id: creds.businessId } })
-        .eq("id", tenantId);
-      businessIdLinked = !error;
-    } else {
-      businessIdLinked = true;
-    }
-  } catch {
-    businessIdLinked = false;
-  }
+  // Nothing else writes it, so it is stamped below from the saved credentials —
+  // key + business ID + this one click = fully wired.
+  //
+  // 2026-10-19 audit: the id used to be stamped BEFORE Kixie had accepted
+  // anything, and nothing asked who already held it. A workspace that typed in
+  // another business's id received that business's call and SMS events, and
+  // once two workspaces held one id the receiver answered every event 503. So
+  // an id another workspace holds is refused before Kixie is called.
+  const holder = await businessIdHolder(db, tenantId, creds.businessId);
+  if (holder !== "none") return businessIdRefusal(holder);
 
   // Webhook destination — uses the dashboard's public URL.
   const baseUrl =
@@ -108,6 +148,32 @@ export async function POST() {
 
   const results = await registerAllWebhooks(creds, webhookUrl, { headersJson });
   const successCount = results.filter((r) => r.ok).length;
+
+  // Stamp the id only once Kixie accepted a registration for it with this key,
+  // which shows the key controls that business, and only if no other
+  // workspace took the id while the registrations ran. Merge (don't clobber)
+  // the rest of custom_fields; a failed stamp is surfaced, not fatal.
+  let businessIdLinked = false;
+  if (successCount > 0) {
+    const holderNow = await businessIdHolder(db, tenantId, creds.businessId);
+    if (holderNow !== "none") return businessIdRefusal(holderNow);
+    try {
+      const t = await db.from("tenants").select("custom_fields").eq("id", tenantId).maybeSingle();
+      const cf = ((t.data as { custom_fields?: Record<string, unknown> } | null)?.custom_fields) || {};
+      if (cf.kixie_business_id !== creds.businessId) {
+        const { error } = await db
+          .from("tenants")
+          .update({ custom_fields: { ...cf, kixie_business_id: creds.businessId } })
+          .eq("id", tenantId);
+        businessIdLinked = !error;
+      } else {
+        businessIdLinked = true;
+      }
+    } catch {
+      businessIdLinked = false;
+    }
+  }
+
   return NextResponse.json({
     ok: successCount > 0,
     webhook_url: webhookUrl,

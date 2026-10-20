@@ -23,6 +23,7 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
 import { insertChunkSalvagingDuplicates } from "@/lib/api-helpers";
+import { sessionMayWriteCrm } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,6 +81,14 @@ export async function POST(
   const context = await resolveContext(user.id, slug);
   if (!context.ok) {
     return NextResponse.json({ ok: false, error: context.error }, { status: context.status });
+  }
+  // Belonging to the workspace is not permission to write in it (2026-10-19
+  // audit): a read_only seat passed the check above and could import 5,000 rows.
+  if (!(await sessionMayWriteCrm(context.tenantId))) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role in this workspace can't import into cold lists. Ask a workspace admin." },
+      { status: 403 },
+    );
   }
 
   const db = getServiceSupabase();

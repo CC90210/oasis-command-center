@@ -5,7 +5,8 @@
  * it can never send from the primary sunbizfunding.com domain.
  *
  * Body: { subject, body, recipients: string[] }   (recipients = plain email addrs)
- * Auth: signed-in ADMIN, or Bearer SCAN_TRIGGER_SECRET + { tenantId } (automation).
+ * Auth: signed-in ADMIN, or Bearer SCAN_TRIGGER_SECRET + { tenantId } (automation),
+ * the latter only for OASIS's own workspaces (2026-10-19 audit).
  *
  * Fail-closed: if the cold pool is empty/exhausted, the whole blast is refused up
  * front with a clear message ("add a cold domain first") rather than leaking onto
@@ -17,6 +18,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { pickColdMailbox, sendColdEmail } from "@/lib/integrations/cold-sending";
+import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,6 +45,16 @@ export async function POST(req: NextRequest) {
   let tenantId: string;
   if (bearerOk(req)) {
     if (!body.tenantId) return NextResponse.json({ ok: false, error: "seed_needs_tenant" }, { status: 400 });
+    // 2026-10-19 audit: the scan key is a platform automation key and the
+    // workspace came from the body, so it could blast through ANY workspace's
+    // cold pool. It acts only in OASIS's own workspaces, by exact id: the rule
+    // that keeps OASIS's env credentials out of client workspaces.
+    if (!tenantMayUseEnvFallback(body.tenantId)) {
+      return NextResponse.json(
+        { ok: false, error: "key_not_allowed_for_workspace", message: "The automation key only works in OASIS's own workspaces. A workspace admin can run this signed in." },
+        { status: 403 },
+      );
+    }
     tenantId = body.tenantId;
   } else {
     const s = await resolveSessionContext();

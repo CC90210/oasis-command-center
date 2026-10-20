@@ -6,7 +6,8 @@
  *
  * Two auth modes:
  *   - self-serve: the signed-in operator connects their OWN mailbox (session)
- *   - admin seed: Bearer SCAN_TRIGGER_SECRET + { tenantId, userId } in the body
+ *   - admin seed: Bearer SCAN_TRIGGER_SECRET + { tenantId, userId } in the body,
+ *     for OASIS's own workspaces only (2026-10-19 audit)
  *
  * Stored per-user in user_integration_credentials (gmail_imap / gmail_imap_personal),
  * encrypted with BRAVO_FIELD_ENCRYPTION_KEY. Read path: imap-read.ts.
@@ -16,6 +17,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { setUserIntegrationBundle } from "@/lib/user-integration-store";
+import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -84,6 +86,15 @@ export async function POST(req: NextRequest) {
   if (bearerOk(req)) {
     if (!body.tenantId || !body.userId) {
       return NextResponse.json({ ok: false, error: "seed_needs_ids" }, { status: 400 });
+    }
+    // 2026-10-19 audit: both ids come from the body, so the scan key could
+    // store a mailbox login under any user of any workspace. It acts only in
+    // OASIS's own workspaces, by exact id.
+    if (!tenantMayUseEnvFallback(body.tenantId)) {
+      return NextResponse.json(
+        { ok: false, error: "key_not_allowed_for_workspace", message: "The automation key only works in OASIS's own workspaces. Connect the mailbox signed in instead." },
+        { status: 403 },
+      );
     }
     tenantId = body.tenantId;
     userId = body.userId;

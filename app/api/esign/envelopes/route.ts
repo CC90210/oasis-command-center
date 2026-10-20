@@ -21,6 +21,7 @@ import { uploadEsignSourcePdf, loadExistingLeadDocumentAsSource } from "@/lib/es
 import { createEnvelope, createSigners, listEnvelopes, logEvent } from "@/lib/esign/db";
 import { mintSigningToken } from "@/lib/esign/tokens";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { canWriteCrm } from "@/lib/role-gates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,6 +46,15 @@ export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   if (!(await canAccessSharedTenantResource(sess))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  // 2026-10-19 audit: the shared-resource rule above admits every role of a
+  // client workspace, so a read_only seat could put a document in front of a
+  // client. E-sign is a CRM write: a CRM writer or an admin.
+  if (!sess.isAdmin && !canWriteCrm(sess.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role can't create signature requests. Ask a workspace admin." },
+      { status: 403 },
+    );
+  }
 
   let body: {
     title?: unknown;
