@@ -45,6 +45,7 @@ import { publishAgentEvent } from "@/lib/manifest/events";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
+import { sessionMayWriteCrm } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -155,6 +156,15 @@ export async function POST(
   const context = await resolveContext(user.id, slug);
   if (!context.ok) {
     return NextResponse.json({ ok: false, error: context.error }, { status: context.status });
+  }
+  // Belonging to the workspace is not permission to write in it (2026-10-19
+  // audit): a read_only seat passed the check above and could queue a campaign
+  // of up to 5,000 sends a day.
+  if (!(await sessionMayWriteCrm(context.tenantId))) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role in this workspace can't start outreach campaigns. Ask a workspace admin." },
+      { status: 403 },
+    );
   }
 
   let body: {

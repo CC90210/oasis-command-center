@@ -153,7 +153,10 @@ export function EsignConsole({ tenantId }: { tenantSlug: string; tenantId: strin
       });
       const createData = await createRes.json();
       if (!createRes.ok || !createData.ok) {
-        setCreateError(createData?.error || "Couldn't create the envelope.");
+        // The route's sentence first: a refusal names the problem ("Your role
+        // can't create signature requests. Ask a workspace admin."); the code
+        // alone ("forbidden_role") told a person nothing (review of #716).
+        setCreateError(createData?.message || createData?.error || "Couldn't create the envelope.");
         return;
       }
       const envelopeId = createData.envelope.id as string;
@@ -180,7 +183,14 @@ export function EsignConsole({ tenantId }: { tenantSlug: string; tenantId: strin
   async function remind(id: string) {
     setActionBusy(true);
     try {
-      await fetch(`/api/esign/envelopes/${id}/remind`, { method: "POST" });
+      const res = await fetch(`/api/esign/envelopes/${id}/remind`, { method: "POST" });
+      // The route answers 200 with ok:false when every email failed, so the
+      // body decides, not the status alone (CodeRabbit on #716).
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; message?: string; error?: string } | null;
+      if (!res.ok || !data?.ok) {
+        // A refused or failed reminder used to look like a sent one.
+        window.alert(data?.message || data?.error || "Couldn't send the reminder.");
+      }
       await openDetail(id);
       await load();
     } finally {

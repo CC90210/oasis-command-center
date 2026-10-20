@@ -22,6 +22,7 @@
 import { getSessionUser } from "./supabase-server";
 import { resolveActiveProfileForUser } from "./active-profile-resolver";
 import { dbBool } from "./db-bool";
+import { canWriteCrm } from "./role-gates";
 
 /**
  * Resolve the active tenant_id from the request's session cookie.
@@ -114,4 +115,22 @@ export async function resolveSessionContext(): Promise<SessionContext> {
     isTrueAdmin,
     adminAccess,
   };
+}
+
+/**
+ * May the signed-in caller write CRM data in `tenantId`? (2026-10-19 audit)
+ *
+ * The manifest routes take their workspace from the URL slug and checked only
+ * that the caller belongs to it, never the caller's role there, so a read_only
+ * seat could import and archive cold lists, queue a campaign, accept an offer
+ * and change saved views. Call this AFTER the route's own workspace check. It
+ * is true only when `tenantId` is the session's ACTIVE workspace and the
+ * caller's role in it passes canWriteCrm (an allowlist: read_only and unknown
+ * roles are refused) or the caller is that workspace's admin or owner. A failed
+ * profile read throws, as resolveSessionContext does, rather than answering no.
+ */
+export async function sessionMayWriteCrm(tenantId: string): Promise<boolean> {
+  const sess = await resolveSessionContext();
+  if (!sess.ok || !tenantId || sess.tenantId !== tenantId) return false;
+  return sess.isAdmin || canWriteCrm(sess.teamRole);
 }

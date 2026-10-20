@@ -10,7 +10,8 @@
  *   DELETE → deactivate { id }
  *
  * Auth: signed-in ADMIN, OR Bearer SCAN_TRIGGER_SECRET + { tenantId } in the body
- * (so cold domains can be seeded programmatically as Adon buys them).
+ * (so cold domains can be seeded programmatically as Adon buys them). The key
+ * works only for OASIS's own workspaces (2026-10-19 audit).
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -18,6 +19,7 @@ import { timingSafeEqual } from "crypto";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { registerColdMailbox, listColdMailboxes } from "@/lib/integrations/cold-sending";
+import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,9 +39,20 @@ function bearerOk(req: NextRequest): boolean {
 async function resolveActor(
   req: NextRequest,
   body: { tenantId?: string },
-): Promise<{ ok: true; tenantId: string } | { ok: false; status: number; error: string }> {
+): Promise<{ ok: true; tenantId: string } | { ok: false; status: number; error: string; message?: string }> {
   if (bearerOk(req)) {
     if (!body.tenantId) return { ok: false, status: 400, error: "seed_needs_tenant" };
+    // 2026-10-19 audit: the workspace comes from the body, so the scan key
+    // could add, change and switch off any workspace's sending mailboxes. It
+    // acts only in OASIS's own workspaces, by exact id.
+    if (!tenantMayUseEnvFallback(body.tenantId)) {
+      return {
+        ok: false,
+        status: 403,
+        error: "key_not_allowed_for_workspace",
+        message: "The automation key only works in OASIS's own workspaces. A workspace admin can do this signed in.",
+      };
+    }
     return { ok: true, tenantId: body.tenantId };
   }
   const s = await resolveSessionContext();
@@ -70,7 +83,7 @@ export async function POST(req: NextRequest) {
   try { body = (await req.json()) as typeof body; } catch { return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 }); }
 
   const actor = await resolveActor(req, body);
-  if (!actor.ok) return NextResponse.json({ ok: false, error: actor.error }, { status: actor.status });
+  if (!actor.ok) return NextResponse.json({ ok: false, error: actor.error, message: actor.message }, { status: actor.status });
 
   const domain = (body.domain || "").trim();
   const address = (body.address || "").trim();
@@ -95,7 +108,7 @@ export async function PATCH(req: NextRequest) {
   let body: { tenantId?: string; id?: string; warmup_status?: string; active?: boolean; daily_cap?: number };
   try { body = (await req.json()) as typeof body; } catch { return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 }); }
   const actor = await resolveActor(req, body);
-  if (!actor.ok) return NextResponse.json({ ok: false, error: actor.error }, { status: actor.status });
+  if (!actor.ok) return NextResponse.json({ ok: false, error: actor.error, message: actor.message }, { status: actor.status });
   if (!body.id) return NextResponse.json({ ok: false, error: "missing_id" }, { status: 400 });
 
   const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -113,7 +126,7 @@ export async function DELETE(req: NextRequest) {
   let body: { tenantId?: string; id?: string };
   try { body = (await req.json()) as typeof body; } catch { return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 }); }
   const actor = await resolveActor(req, body);
-  if (!actor.ok) return NextResponse.json({ ok: false, error: actor.error }, { status: actor.status });
+  if (!actor.ok) return NextResponse.json({ ok: false, error: actor.error, message: actor.message }, { status: actor.status });
   if (!body.id) return NextResponse.json({ ok: false, error: "missing_id" }, { status: 400 });
   const db = getServiceSupabase();
   // Soft-disable (keep the row for audit) rather than hard delete.

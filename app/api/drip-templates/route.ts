@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { canWriteCrm } from "@/lib/role-gates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +29,15 @@ export async function POST(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!(await canAccessSharedTenantResource(session))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  // Belonging to the workspace is not permission to write in it (review of
+  // #716): a read_only seat created drip email templates. A CRM writer or an
+  // admin may, as gmail-templates already requires.
+  if (!session.isAdmin && !canWriteCrm(session.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role in this workspace can't create email templates. Ask a workspace admin." },
+      { status: 403 },
+    );
+  }
   let body: { name?: string; category?: string; subject?: string; preheader?: string; html?: string } = {};
   try { body = await req.json(); } catch { /* validated below */ }
   const name = String(body.name || "").trim();

@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
+import { sessionMayWriteCrm } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,6 +57,14 @@ export async function DELETE(
   if (!dataTenantId) {
     return NextResponse.json(
       { ok: false, error: "preview_mode_no_writes" },
+      { status: 403 },
+    );
+  }
+  // Belonging to the workspace is not permission to write in it (2026-10-19
+  // audit): a read_only seat passed the check above and could archive lists.
+  if (!(await sessionMayWriteCrm(dataTenantId))) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role in this workspace can't archive cold lists. Ask a workspace admin." },
       { status: 403 },
     );
   }

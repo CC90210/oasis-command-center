@@ -1,6 +1,9 @@
 /**
- * Operator Email Agent — monitor tick. Driven by the JARVIS scheduler (Bearer
- * SCAN_TRIGGER_SECRET), like scan-lender-replies. For each active agent
+ * Operator Email Agent — monitor tick. Driven by the oasis-cc-cron Worker
+ * (config/cron-registry.json) and authenticated by checkCronAuth like every
+ * other cron route: CRON_SECRET plus the platform proof. Until the 2026-10-19
+ * audit it took SCAN_TRIGGER_SECRET, a platform automation key, or CRON_SECRET
+ * on its own as the only credential. For each active agent
  * (agent_email_settings.mode != off), poll each enabled+ready mailbox
  * (work/personal), ingest deal-matched email into lead_interactions, advance the
  * cursor. Phase 1 = MONITOR only (read + ingest); draft/semi/full send paths are
@@ -12,7 +15,7 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { timingSafeEqual } from "crypto";
+import { checkCronAuth } from "@/lib/cron-auth";
 import { listActiveAgents, markProcessed, type AgentEmailSettings } from "@/lib/agents/operator-email/settings";
 import { readMailbox } from "@/lib/agents/operator-email/read-dispatch";
 import { ingestMessages, type IngestResult } from "@/lib/agents/operator-email/ingest";
@@ -21,21 +24,6 @@ import { writeSnapshot } from "@/lib/agents/operator-email/snapshots";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-function checkTrigger(req: NextRequest): NextResponse | null {
-  const auth = req.headers.get("authorization") || "";
-  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  for (const secret of [process.env.SCAN_TRIGGER_SECRET, process.env.CRON_SECRET]) {
-    if (!secret) continue;
-    const a = Buffer.from(bearer);
-    const b = Buffer.from(secret);
-    if (a.length === b.length && timingSafeEqual(a, b)) return null;
-  }
-  if (!process.env.SCAN_TRIGGER_SECRET && !process.env.CRON_SECRET) {
-    return NextResponse.json({ ok: false, error: "trigger_not_configured" }, { status: 500 });
-  }
-  return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-}
 
 /** How many of the newest messages after the cursor one read lists, per mailbox. */
 const READ_WINDOW = 40;
@@ -140,7 +128,7 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
 }
 
 async function handle(req: NextRequest) {
-  const denied = checkTrigger(req);
+  const denied = checkCronAuth(req);
   if (denied) return denied;
   const write = req.nextUrl.searchParams.get("write") === "1";
 
