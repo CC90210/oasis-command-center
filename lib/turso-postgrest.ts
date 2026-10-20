@@ -320,7 +320,14 @@ function compileOp(col: string, op: string, value: unknown): Cond {
   if (op === "like" || op === "ilike") v = String(value).replace(/\*/g, "%");
   const colExpr = op === "ilike" ? `lower(${q(col)})` : q(col);
   const valExpr = op === "ilike" ? String(v).toLowerCase() : v;
-  return { sql: `${colExpr} ${sqlOp} ?`, args: [toSql(valExpr)] };
+  // Postgres LIKE treats a backslash as the escape character by default, and
+  // callers escape that way: "first_last@x.com" is sent as "first\_last@x.com"
+  // so the underscore matches only itself. SQLite has no default escape, so
+  // without this clause the backslash was a literal and the pattern could
+  // never match its own address: every opt-out lookup (checkEmailSuppressed
+  // and the inline copies) missed any address with "_" or "%" in it.
+  const escape = op === "like" || op === "ilike" ? " ESCAPE '\\'" : "";
+  return { sql: `${colExpr} ${sqlOp} ?${escape}`, args: [toSql(valExpr)] };
 }
 
 /**
