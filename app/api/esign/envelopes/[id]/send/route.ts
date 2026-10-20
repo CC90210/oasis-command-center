@@ -15,6 +15,7 @@ import { getEnvelopeById, getPendingSigners, rotateSignerToken, updateEnvelopeSt
 import { mintSigningToken } from "@/lib/esign/tokens";
 import { sendSigningLinkEmail } from "@/lib/esign/email";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { canWriteCrm } from "@/lib/role-gates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,6 +34,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   if (!(await canAccessSharedTenantResource(sess))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  // 2026-10-19 audit: a read_only seat could email signing links to clients.
+  // Sending is a CRM write: a CRM writer or an admin, checked before any lookup.
+  if (!sess.isAdmin && !canWriteCrm(sess.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role can't send signature requests. Ask a workspace admin." },
+      { status: 403 },
+    );
+  }
 
   const envRes = await getEnvelopeById(sess.tenantId, id);
   if (!envRes.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });

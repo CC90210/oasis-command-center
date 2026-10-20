@@ -12,6 +12,7 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
 import { loadView } from "@/lib/views/loader";
+import { sessionMayWriteCrm } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,6 +77,15 @@ export async function DELETE(
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const context = await resolveContext(user.id, slug);
   if (!context.ok) return NextResponse.json({ ok: false, error: context.error }, { status: context.status });
+  // Belonging to the workspace is not permission to write in it (2026-10-19
+  // audit): a read_only seat passed the check above and could delete the
+  // workspace's shared views.
+  if (!(await sessionMayWriteCrm(context.tenantId))) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role in this workspace can't delete saved views. Ask a workspace admin." },
+      { status: 403 },
+    );
+  }
 
   // Load first to enforce private-view gate before mutating.
   const view = await loadView(id);

@@ -283,6 +283,26 @@ export const KIXIE_WEBHOOK_EVENTS = [
 
 export type KixieWebhookEvent = typeof KIXIE_WEBHOOK_EVENTS[number];
 
+/**
+ * Kixie positively accepted the call: `success: true`, or a real webhook id
+ * came back (a non-empty string, or a number). Kixie takes the API key and the
+ * business id together on every call, so an accepted registration is the
+ * evidence that this key may act for that business. That rests on Kixie
+ * refusing a key for a business it does not belong to, which only a test with
+ * two Kixie accounts can prove (a known limit of #716).
+ *
+ * Anything else is not evidence: a 200 that says neither is not refused
+ * (assertKixieSuccess only refuses success:false), and an empty id is no id.
+ * Neither links a workspace to a business id (2026-10-19 audit, reviews of
+ * #716).
+ */
+export function kixieConfirmed(parsed: unknown): boolean {
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const p = parsed as { success?: unknown; webhookid?: unknown; data?: { webhookid?: unknown } | null };
+  const realId = (id: unknown) => (typeof id === "string" ? id.trim() !== "" : typeof id === "number" && Number.isFinite(id));
+  return p.success === true || realId(p.webhookid) || realId(p.data?.webhookid);
+}
+
 /** Kixie replies HTTP 200 with {success:false, error|msg} on failures — surface it. */
 function assertKixieSuccess(parsed: unknown, context: string): unknown {
   if (
@@ -354,16 +374,16 @@ export async function registerAllWebhooks(
   creds: KixieCredentials,
   location: string,
   opts?: { headersJson?: string },
-): Promise<Array<{ event: KixieWebhookEvent; ok: boolean; error?: string }>> {
-  const results: Array<{ event: KixieWebhookEvent; ok: boolean; error?: string }> = [];
+): Promise<Array<{ event: KixieWebhookEvent; ok: boolean; confirmed?: boolean; error?: string }>> {
+  const results: Array<{ event: KixieWebhookEvent; ok: boolean; confirmed?: boolean; error?: string }> = [];
   for (const event of KIXIE_WEBHOOK_EVENTS) {
     try {
-      await registerWebhook(creds, {
+      const answer = await registerWebhook(creds, {
         eventName: event,
         location,
         headersJson: opts?.headersJson,
       });
-      results.push({ event, ok: true });
+      results.push({ event, ok: true, confirmed: kixieConfirmed(answer) });
     } catch (err) {
       results.push({
         event,

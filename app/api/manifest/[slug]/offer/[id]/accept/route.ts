@@ -32,6 +32,7 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getRecord, updateRecord, createRecord, RecordsError } from "@/lib/manifest/data";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
+import { sessionMayWriteCrm } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,6 +64,14 @@ export async function POST(
   const dataTenantId = await resolveDataTenant(slug, userTenantId);
   if (!dataTenantId) {
     return NextResponse.json({ ok: false, error: "preview_mode_no_writes" }, { status: 403 });
+  }
+  // Owning the shell is not permission to fund a deal (2026-10-19 audit): a
+  // read_only seat passed the check above, and accepting fires the deal's drips.
+  if (!(await sessionMayWriteCrm(dataTenantId))) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role in this workspace can't accept offers. Ask a workspace admin." },
+      { status: 403 },
+    );
   }
 
   // Sanity-check that the manifest actually declares an offer entity

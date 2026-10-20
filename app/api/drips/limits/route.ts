@@ -15,7 +15,7 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { resolveSessionContext, resolveTenantId } from "@/lib/api-auth";
 import { getChannelLimits, saveChannelLimits } from "@/lib/drips/channel-limits";
 import { LIMIT_MAX, LIMIT_KEYS, LIMIT_LABEL } from "@/lib/drips/channel-limits-core";
 
@@ -32,8 +32,19 @@ export async function GET() {
 }
 
 export async function PATCH(req: NextRequest) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const sess = await resolveSessionContext();
+  if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  // 2026-10-19 audit: any member, read_only included, could raise these. They
+  // set how much the whole workspace sends, an automation setting, and that
+  // tier is owner/admin only. The form shows `error` as written, so it is a
+  // sentence here.
+  if (!sess.isAdmin) {
+    return NextResponse.json(
+      { ok: false, error: "Only a workspace owner or admin can change the sending limits" },
+      { status: 403 },
+    );
+  }
+  const tenantId = sess.tenantId;
 
   let body: Record<string, unknown>;
   try {
