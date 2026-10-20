@@ -1,5 +1,5 @@
 /** Regression: importing the delivery harness must not leak its local test DB. */
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
@@ -8,6 +8,11 @@ function deliveryTempDirs(): Set<string> {
 }
 
 async function main(): Promise<void> {
+  const harnessSource = readFileSync("tests/_delivery-harness.ts", "utf8");
+  if (!harnessSource.includes('stdio: "ignore"') || !harnessSource.includes("cleanup-error.log")) {
+    throw new Error("cleanup helper must detach from captured stderr and persist terminal failures");
+  }
+
   const before = deliveryTempDirs();
   const child = spawnSync(
     process.execPath,

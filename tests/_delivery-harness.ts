@@ -34,7 +34,8 @@ const cleanupHelper = spawn(
   process.execPath,
   [
     "--eval",
-    `const { rmSync } = require("node:fs");
+    `const { rmSync, writeFileSync } = require("node:fs");
+     const { join } = require("node:path");
      const [dir, rawPid] = process.argv.slice(1);
      const parentPid = Number(rawPid);
      function removeAfterUnlock(attempt = 0) {
@@ -45,7 +46,7 @@ const cleanupHelper = spawn(
            setTimeout(() => removeAfterUnlock(attempt + 1), 500);
            return;
          }
-         console.error("[delivery-harness.cleanup] failed to remove " + dir, error);
+         writeFileSync(join(dir, "cleanup-error.log"), String(error?.stack ?? error), "utf8");
          process.exitCode = 1;
        }
      }
@@ -59,7 +60,7 @@ const cleanupHelper = spawn(
     dbDir,
     String(process.pid),
   ],
-  { detached: true, stdio: ["ignore", "ignore", "inherit"], windowsHide: true },
+  { detached: true, stdio: "ignore", windowsHide: true },
 );
 cleanupHelper.unref();
 process.once("exit", closeTestClients);
