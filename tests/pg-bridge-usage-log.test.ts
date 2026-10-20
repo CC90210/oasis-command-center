@@ -44,7 +44,7 @@ async function check(name: string, fn: () => Promise<void> | void) {
   }
 }
 
-type Usage = { event: string; credential: string | null; method: string; target: string; status: number; tenantFilter: boolean };
+type Usage = { event: string; credential: string | null; method: string; target: string; status: number; tenantFilter: boolean | null };
 
 /** Run one call with console.log recorded; returns the response (or the error) and the usage lines. */
 async function recorded(call: () => Promise<Response>): Promise<{ res?: Response; error?: unknown; lines: unknown[][]; usage: Usage[] }> {
@@ -131,13 +131,14 @@ async function main() {
     assert.equal(usage[0].status, 404);
   });
 
-  await check("an RPC is logged as rpc:<name>; its body is never read into the log", async () => {
+  await check("an RPC is logged as rpc:<name> with its tenant unknown; its body is never read into the log", async () => {
     const { res, usage, lines } = await recorded(() =>
       route.POST(request("rpc/no_such_function", { method: "POST", token: TT, body: { p_email: PRIVATE_EMAIL } }), params(["rpc", "no_such_function"])),
     );
     assert.equal(res?.status, 501);
     assert.equal(usage.length, 1);
-    assert.deepEqual(usage[0], { event: "pg_bridge_usage", credential: "tt", method: "POST", target: "rpc:no_such_function", status: 501, tenantFilter: false });
+    // null, not false: an RPC's tenant argument is in the body, so "unscoped" would be a guess.
+    assert.deepEqual(usage[0], { event: "pg_bridge_usage", credential: "tt", method: "POST", target: "rpc:no_such_function", status: 501, tenantFilter: null });
     assert.deepEqual(leaks(lines), []);
   });
 

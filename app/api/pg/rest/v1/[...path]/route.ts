@@ -185,7 +185,8 @@ function authorised(req: NextRequest): Credential | null {
 
 /**
  * One line per call in the Worker's logs: which credential, which table or RPC,
- * the response status, and whether the call named a tenant.
+ * the response status, and whether the call named a tenant (null for an RPC,
+ * whose arguments are in a body this never reads).
  *
  * Every table except the denylist is reachable with either bearer and nothing
  * forces a tenant filter (2026-10-19 audit, P0-2). The fix is a per-credential
@@ -199,7 +200,7 @@ function logUsage(entry: {
   method: string;
   target: string;
   status: number;
-  tenantFilter: boolean;
+  tenantFilter: boolean | null;
 }): void {
   console.log({ event: "pg_bridge_usage", ...entry });
 }
@@ -334,8 +335,9 @@ async function serve(req: NextRequest, segments: string[], method: "GET" | "POST
       method,
       target,
       status,
-      // An RPC's arguments are in its body, which is not read here.
-      tenantFilter: isRpc ? false : req.nextUrl.searchParams.has("tenant_id"),
+      // Unknown for an RPC: its arguments are in its body, which is not read
+      // here, and "false" would read as unscoped when allowlists are drawn.
+      tenantFilter: isRpc ? null : req.nextUrl.searchParams.has("tenant_id"),
     });
   }
 }
