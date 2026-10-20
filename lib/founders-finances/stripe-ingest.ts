@@ -103,6 +103,8 @@ import { rateLookupFor, usdCadRate } from "./fx-io";
 import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement } from "./invoice-store";
 import { financeTenantId, getStripeClient, listAll, pinnedStripeAccount, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
 import { recordStripePayout, retryUnbookedPayouts, unbookedPayouts } from "./stripe-payouts-io";
+import { alertPublicCheckoutPaid, inLateAlertWindow, publicCheckoutSale } from "@/lib/checkout/paid-alert";
+import { keepAlive } from "@/lib/os/runs/keepalive";
 
 const ACTOR = "stripe";
 const E = BUSINESS_ENTITY_ID;
@@ -1186,6 +1188,9 @@ export async function upsertSubscription(facts: SubscriptionFacts, sourceCreated
 
 export type EventOutcome = { status: "processed" | "ignored" | "duplicate" | "in_flight"; detail: string };
 
+/** Work an event's branch leaves for after its processed mark (the purchase alert): dispatch collects it, handleStripeEvent starts it. */
+type AfterMark = Array<() => Promise<unknown>>;
+
 async function claimEvent(env: StripeEventEnvelope): Promise<"claimed" | "duplicate" | "in_flight"> {
   const ins = await finDb().execute({
     sql: `INSERT OR IGNORE INTO fin_stripe_events (event_id, type, livemode, event_created, status) VALUES (?, ?, ?, ?, 'processing')`,
@@ -1263,9 +1268,15 @@ export async function handleStripeEvent(raw: unknown): Promise<EventOutcome> {
       return { status: "ignored", detail: `ignored: ${origin.reason} — never enters the OASIS books` };
     }
     const ledger: InStatement[] = [];
-    const detail = await dispatch(env, ledger);
+    const afterMark: AfterMark = [];
+    const detail = await dispatch(env, ledger, afterMark);
     const ignored = detail.startsWith("ignored");
     await finishEvent(env.id, ignored ? "ignored" : "processed", ignored ? detail : null, ledger);
+    // The event is marked, so a retry of it is now a duplicate (claimEvent):
+    // work that must not run twice starts here, kept alive past the answer to
+    // Stripe. Each job is an async function and keepAlive never throws, so
+    // nothing here reaches the catch below and marks a booked event failed.
+    for (const job of afterMark) await keepAlive(job(), `stripe-finance.${env.type}:${env.id}`);
     return { status: ignored ? "ignored" : "processed", detail };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -1285,8 +1296,12 @@ function subscriptionInterval(f: SubscriptionFacts): "day" | "week" | "month" | 
  * handleStripeEvent commits them with the processed mark. Facts that belong
  * to a write (a payment, a refund, a subscription, an invoice's payment) are
  * emitted with that write instead.
+ *
+ * `afterMark` collects work that must wait until the event is marked done (the
+ * purchase alert). handleStripeEvent starts it once the mark is written, kept
+ * alive past the answer to Stripe (review of #718).
  */
-async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promise<string> {
+async function dispatch(env: StripeEventEnvelope, ledger: InStatement[], afterMark: AfterMark): Promise<string> {
   switch (env.type) {
     case "charge.failed": {
       const c = chargeFacts(env.object);
@@ -1382,6 +1397,27 @@ async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promis
       charge.paymentIntentId = charge.paymentIntentId || pi.paymentIntentId;
       if (!charge.metadata.finInvoiceId && pi.metadata.finInvoiceId) charge.metadata = pi.metadata;
       const r = await recordStripeCharge(charge, { fetchFees: true });
+      // A purchase on the public checkout (/pricing) tells the sales desk. Only
+      // the intent carries the checkout's marker. Not gated on r.created:
+      // charge.succeeded may have booked the payment first. The alert waits for
+      // the processed mark (afterMark): sent here it held the webhook for 16
+      // seconds when Telegram did not answer, and an event whose mark failed
+      // would alert again on every retry (review of #718). A redelivery of a
+      // marked event is a duplicate (claimEvent) and tells no one. The alert
+      // never throws, and leaves a card when it cannot be sent
+      // (lib/checkout/paid-alert.ts).
+      const sale = publicCheckoutSale(env.object);
+      if (sale) {
+        const purchase = {
+          sale,
+          paymentIntentId: pi.paymentIntentId,
+          amountCents: pi.amountReceivedCents,
+          currency: pi.currency,
+          customerName: charge.customerName,
+          customerEmail: charge.customerEmail,
+        };
+        afterMark.push(() => alertPublicCheckoutPaid(purchase));
+      }
       return r.paymentId ? `payment ${r.created ? "recorded" : "matched"} ${r.paymentId}` : `ignored: ${r.reason}`;
     }
     case "charge.refunded": {
@@ -1500,6 +1536,35 @@ export type ReconcileSummary = {
 /** How far back every reconcile looks for payouts, whatever its `days` (the most the reconcile itself accepts). */
 const PAYOUT_LOOKBACK_DAYS = 400;
 
+/**
+ * A public-checkout purchase the reconcile itself booked reached the books by no
+ * webhook, so nobody was told: tell the sales desk LATE (review of #718). Only
+ * when the charge's payment intent (expanded on the charge list) carries the
+ * checkout's marker and is in the late-alert window (inLateAlertWindow: more
+ * than 30 minutes old, so no webhook is still in flight; less than 48 hours, so
+ * the first run after a deploy announces no history). Awaited: the reconcile is
+ * a cron. Best-effort: the alert never throws and leaves a card when it cannot
+ * be sent, and nothing here changes what the reconcile books.
+ *
+ * Known duplicate, accepted: if the webhook failed and Stripe retries it AFTER
+ * the reconcile booked and alerted, the intent's event alerts a second time (it
+ * does not gate on a new booking). A second ping costs less than a missed sale.
+ */
+async function announceLateCheckoutPurchase(rawIntent: unknown, charge: ChargeFacts): Promise<void> {
+  const sale = publicCheckoutSale(rawIntent);
+  const pi = sale ? paymentIntentFacts(rawIntent) : null;
+  if (!sale || !pi || !inLateAlertWindow(pi.created, Date.now())) return;
+  await alertPublicCheckoutPaid({
+    sale,
+    paymentIntentId: pi.paymentIntentId,
+    amountCents: pi.amountReceivedCents,
+    currency: pi.currency,
+    customerName: charge.customerName,
+    customerEmail: charge.customerEmail,
+    late: true,
+  });
+}
+
 /** Backfill the last N days from the Stripe API. Requires the pinned account. */
 export async function reconcileStripe(args: { days: number }): Promise<ReconcileSummary> {
   const days = Math.max(1, Math.min(400, Math.trunc(args.days || 30)));
@@ -1530,7 +1595,10 @@ export async function reconcileStripe(args: { days: number }): Promise<Reconcile
       if (piMeta.finInvoiceId) c.metadata = piMeta;
     }
     const r = await recordStripeCharge(c, { fetchFees: false });
-    if (r.created) summary.payments_recorded += 1;
+    if (r.created) {
+      summary.payments_recorded += 1;
+      await announceLateCheckoutPurchase(raw.payment_intent, c);
+    }
   }
 
   const refunds = await listAll(key, "/v1/refunds", { "created[gte]": since }, { expand: ["data.balance_transaction", "data.charge"] });
