@@ -94,9 +94,10 @@ export const CLIENT_B_CUSTOMER = "customer-client-b-own";
 
 export const USERS = {
   cc: { id: "0d000000-0000-4000-8000-000000000001", email: "conaugh@oasisai.work" },
-  adon: { id: "0d000000-0000-4000-8000-000000000002", email: "adon@oasisai.work" },
+  builder: { id: "0d000000-0000-4000-8000-000000000002", email: "builder@oasis.test" },
   rep: { id: "0d000000-0000-4000-8000-000000000003", email: "david@oasisai.work" },
   gone: { id: "0d000000-0000-4000-8000-000000000004", email: "former@oasisai.work" },
+  admin: { id: "0d000000-0000-4000-8000-000000000005", email: "admin@oasis.test" },
   clientA: { id: "0d000000-0000-4000-8000-00000000000a", email: "owner@client-a.test" },
   clientB: { id: "0d000000-0000-4000-8000-00000000000b", email: "owner@client-b.test" },
 } as const;
@@ -187,9 +188,10 @@ export async function setupDatabase(): Promise<Client> {
   await db.batch(
     [
       ...profile(USERS.cc, OASIS, "owner", 1, "Conaugh McKenna"),
-      ...profile(USERS.adon, OASIS, "admin", 0, "Adon"),
+      ...profile(USERS.builder, OASIS, "opener", 0, "Builder"),
       ...profile(USERS.rep, OASIS, "opener", 0, "David"),
       ...profile(USERS.gone, OASIS, "closer", 0, "Former Rep", "2026-09-20T00:00:00Z"),
+      ...profile(USERS.admin, OASIS, "admin", 0, "Operations Admin"),
       ...profile(USERS.clientA, CLIENT_A, "owner", 1, "Alice Client"),
       ...profile(USERS.clientB, CLIENT_B, "owner", 1, "Bob Client"),
     ],

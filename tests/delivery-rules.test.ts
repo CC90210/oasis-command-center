@@ -124,12 +124,12 @@ check("resolve stamps resolved_at; close keeps it; reopen clears both", () => {
 // ── assignment ─────────────────────────────────────────────────────────────
 const roster = [
   { auth_user_id: "u-cc", full_name: "CC" },
-  { auth_user_id: "U-Adon ", full_name: "Adon" },
+  { auth_user_id: "U-Builder ", full_name: "Builder" },
   { auth_user_id: "u-gone", full_name: "Gone", deactivated_at: "2026-09-20T00:00:00Z" },
 ];
 check("roster members are assignable, trimmed and lowercased", () => {
   assert.deepEqual(validateAssignee("u-cc", roster), { ok: true, value: "u-cc" });
-  assert.deepEqual(validateAssignee(" U-ADON", roster), { ok: true, value: "u-adon" });
+  assert.deepEqual(validateAssignee(" U-BUILDER", roster), { ok: true, value: "u-builder" });
 });
 check("unassign is always allowed", () => {
   assert.deepEqual(validateAssignee(null, roster), { ok: true, value: null });

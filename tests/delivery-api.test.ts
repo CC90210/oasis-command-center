@@ -64,7 +64,7 @@ async function main() {
   await login(USERS.cc);
   const pa = await call(projects.POST(req("POST", "/api/projects", {
     title: "Client A website", client_name: "Alice", client_email: "OWNER@client-a.test",
-    customer_id: OASIS_CUSTOMER_A, stage: "building", assigned_to: USERS.adon.id,
+    customer_id: OASIS_CUSTOMER_A, stage: "building", assigned_to: USERS.builder.id,
   })));
   const pb = await call(projects.POST(req("POST", "/api/projects", {
     title: "Client B automation", client_tenant_id: CLIENT_B, customer_id: OASIS_CUSTOMER_B, stage: "discovery",
@@ -76,7 +76,7 @@ async function main() {
     assert.equal(pa.status, 201, JSON.stringify(pa.body));
     assert.equal(pb.status, 201, JSON.stringify(pb.body));
     const p = pa.body.project as Json;
-    assert.equal(p.assigned_to, USERS.adon.id);
+    assert.equal(p.assigned_to, USERS.builder.id);
     assert.equal(p.client_tenant_id, CLIENT_A, "the client record's linked workspace is authoritative");
     assert.equal(p.client_email, "owner@client-a.test");
     assert.ok(p.started_at, "a project created in Building has started");
@@ -293,7 +293,7 @@ async function main() {
   });
 
   // ── assignee validation, everywhere ─────────────────────────────────────
-  await login(USERS.adon);
+  await login(USERS.cc);
   await check("assigning a DEACTIVATED teammate is refused on tickets, projects and tasks", async () => {
     const t = await call(ticket.PATCH(req("PATCH", `/api/tickets/${ticketA}`, { assigned_to: USERS.gone.id }), params({ id: ticketA })));
     assert.equal(t.status, 400, JSON.stringify(t.body));
