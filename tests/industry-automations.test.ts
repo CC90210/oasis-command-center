@@ -53,7 +53,8 @@ assert.ok(
 );
 
 const guide = read("components/playbook/IndustryAutomationGuide.tsx");
-assert.ok(guide.includes("CC or Adon confirms feasibility"), "custom ideas are discovery paths, never rep promises");
+assert.ok(guide.includes("CC confirms feasibility"), "custom ideas are discovery paths, never rep promises");
+assert.doesNotMatch(guide, /CC or Adon/, "the retired co-owner gate returned to the call guide");
 assert.doesNotMatch(guide, /dangerouslySetInnerHTML/, "catalog copy is rendered as text");
 
 console.log("industry-automations ok");
