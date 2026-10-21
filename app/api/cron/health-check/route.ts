@@ -11,23 +11,19 @@
  * both failures happened. Backtested against 40 days of production, these
  * checks would have fired on 2026-07-24 for SMS and 2026-07-18 for email.
  *
- * It also carries the reverse dead-man's switch: this runs on Cloudflare, a
- * different machine and failure domain from the local fleet, and reports when
- * the local monitor's heartbeat goes stale. A watchdog that cannot report its
- * own death is decorative (2026-06-30 audit, finding #3).
+ * The former APEX fleet heartbeat was retired with APEX on 2026-10-21. Local
+ * CC-owned fleet supervision is reported by the harness and system-health jobs.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
-import { getServiceSupabase } from "@/lib/supabase-server";
 import {
   runHealthChecks,
-  checkFleetHeartbeat,
   OASIS_GLOBAL_CHECKS,
   ESTATE_WIDE_CHECKS,
 } from "@/lib/health/runner";
 import { brokenSummary, runDepartmentChatHealth } from "@/lib/health/department-chat-run";
-import { worstVerdict, type CheckResult } from "@/lib/health/checks-core";
+import { worstVerdict } from "@/lib/health/checks-core";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 
 export const runtime = "nodejs";
@@ -71,7 +67,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         failedPieces.push(piece);
         return broken(`${piece} threw: ${err instanceof Error ? err.message : String(err)}`);
       });
-    const [calendarSummary, estateSummary, heartbeat, departmentRuns] = await Promise.all([
+    const [calendarSummary, estateSummary, departmentRuns] = await Promise.all([
       guard(
         "calendar",
         runHealthChecks(WEBDEV_TENANT_ID, {
@@ -87,11 +83,6 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           checks: ESTATE_WIDE_CHECKS,
         }),
         (reason) => brokenSummary("health.estate_run", reason),
-      ),
-      guard(
-        "fleet_heartbeat",
-        checkFleetHeartbeat(getServiceSupabase()),
-        (reason): CheckResult => ({ id: "fleet.heartbeat", verdict: "check_broken", observed: NaN, baseline: null, reason }),
       ),
       // Department chat: once per workspace with department turns, bounded and
       // isolated per workspace (lib/health/department-chat-run.ts).
@@ -119,7 +110,6 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         ...calendarSummary.recovered,
         ...departmentRuns.flatMap((d) => d.summary.recovered.map((id) => tag(d.tenantId, id))),
       ],
-      fleet_heartbeat: { verdict: heartbeat.verdict, reason: heartbeat.reason },
       results: results.map((r) => ({
         id: r.id, verdict: r.verdict, observed: r.observed, baseline: r.baseline, reason: r.reason,
       })),

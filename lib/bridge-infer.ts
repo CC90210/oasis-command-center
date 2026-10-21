@@ -10,12 +10,12 @@
  *
  * 2026-07-22 — SUBSCRIPTION-EXCLUSIVE: the paid-API fallback is REMOVED (the
  * paid account ran dry on 2026-07-21, silently killing every feature that
- * leaned on it; Adon's standing directive is CLI-subscription only, no raw
+ * leaned on it; the standing directive is CLI-subscription only, no raw
  * tokens). The fallback chain is now:
  *   1. VPS bridge `infer` exec-tool (when the tenant has a bridge target and
  *      Bravo has deployed the tool)
  *   2. queueInfer() — insert an `inference_jobs` row (migration 120) that the
- *      APEX machine's infer-consumer daemon (JARVIS services/infer-consumer)
+ *      legacy inference queue consumer
  *      executes via the authenticated `claude` CLI on the Max plan, then poll
  *      for the result.
  *   3. Throw an ACTIONABLE error (never a silent generic failure).
@@ -54,7 +54,7 @@ const QUEUE_TIER_RE = /^(fast|smart|max)$/;
 
 /**
  * Subscription-CLI inference via the `inference_jobs` queue (migration 120):
- * insert a job, poll until the APEX machine's infer-consumer daemon completes
+ * insert a job, poll until a configured CC-owned infer-consumer daemon completes
  * it on the authenticated `claude` CLI. No tokens, no paid API.
  *
  * A timeout leaves the job in place — the daemon may still finish it (the
@@ -270,6 +270,6 @@ export async function inferTextWithFallback(args: {
   );
   if (q.ok) return q.text;
   throw new Error(
-    `subscription_inference_unavailable: ${q.error} — is the infer-consumer daemon running and 'claude login' valid on the APEX PC?`,
+    `subscription_inference_unavailable: ${q.error} — no CC-owned infer-consumer completed the job`,
   );
 }

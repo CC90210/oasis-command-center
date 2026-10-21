@@ -6,7 +6,7 @@
  * oasisai.work/pricing and nobody on the team was told: the payment went into
  * the books (lib/founders-finances/stripe-ingest.ts) and Stripe sent its
  * receipt, and that was all. Now the payment_intent.succeeded branch tells the
- * sales desk (CC and Adon) through the one alert resolver, as the funnel's
+ * sales desk (CC) through the one alert resolver, as the funnel's
  * lead alerts do, so someone books the kickoff.
  *
  * WHEN IT GOES OUT (review of #718). After the books have the payment AND the
@@ -19,12 +19,10 @@
  * Test-mode events never get this far (handleStripeEvent ignores them before
  * dispatch).
  *
- * WHEN THE SEND FAILS (review of #718). Telegram refusing the sales group and
- * the DM behind it (the bot removed from the group, say) used to leave two log
- * lines and nothing else, for a sale of up to CAD 15,000. It now leaves an
+ * WHEN THE SEND FAILS (review of #718). Telegram refusing CC's owner alert
+ * used to leave log lines and nothing else, for a sale of up to CAD 15,000. It now leaves an
  * urgent card in the OASIS workspace's Needs you list that names the order, the
- * buyer and the amount, and pages the operator chat too, which can work when
- * the sales group does not. The funnel's lead alerts leave their trace on the
+ * buyer and the amount, and pages the owner chat again. The funnel's lead alerts leave their trace on the
  * lead's timeline (lib/forms/alert-failure.ts); a purchase has no lead, so the
  * card is its trace.
  *

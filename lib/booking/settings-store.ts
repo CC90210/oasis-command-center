@@ -93,8 +93,7 @@ function defaultSettings(roster: MemberRow[]): BookingSettings {
   const byEmail = new Map(roster.map((m) => [m.email.trim().toLowerCase(), m.auth_user_id?.trim() || ""]));
   const organizer = byEmail.get(OASIS_PIPELINE_ASSIGNMENT_EMAILS[0]) || "";
   if (!organizer) throw new BookingSettingsError("public_booking_founders_unavailable");
-  const attendee = byEmail.get(OASIS_PIPELINE_ASSIGNMENT_EMAILS[1]) || null;
-  return defaultOasisBookingSettings({ organizerUserId: organizer, attendeeUserId: attendee });
+  return defaultOasisBookingSettings({ organizerUserId: organizer, attendeeUserId: null });
 }
 
 export async function loadBookingSettings(tenantId: string, deps: BookingSettingsDeps = {}): Promise<LoadedBookingSettings> {

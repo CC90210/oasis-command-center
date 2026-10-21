@@ -335,7 +335,7 @@ export async function notifyAiAuditStarted(input: {
     `<a href="${pipelineLeadUrl(leadId)}">Open the lead in Command Center →</a>`,
   ].filter(Boolean);
 
-  // The sales desk: a lead submitted on oasisai.work is for CC AND Adon. The
+  // The sales desk: a lead submitted on oasisai.work is for CC. The
   // audience is chosen from the workspace (lib/notify/alert-route.ts), not here.
   const r = await pushWorkspaceAlert(tenantId, lines.join("\n"), { desk: "sales" });
   if (!r.delivered) {
@@ -490,7 +490,7 @@ export async function notifyAiAuditSubmission(
     leadUrl: pipelineLeadUrl(leadId),
   });
 
-  // The sales desk (CC + Adon), chosen from the workspace in alert-route.ts.
+  // CC's sales desk, chosen from the workspace in alert-route.ts.
   // pushWorkspaceAlert never throws, so there is no catch to forget here.
   const tg = await pushWorkspaceAlert(tenantId, alert, { desk: "sales" });
 

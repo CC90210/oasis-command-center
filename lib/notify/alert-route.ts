@@ -68,8 +68,7 @@ export function oasisLaneOutcome(sent: LaneResult, token?: string | null): strin
 
 /**
  * What an alert is about, for OASIS's own workspaces only. A new lead on
- * oasisai.work is the sales desk's (CC and Adon, who split every inbound lead),
- * not just the operator's: it goes to the sales group. A client workspace has
+ * oasisai.work is CC's sales desk, so it goes to the owner lane. A client workspace has
  * no desks of OASIS's: it always reaches its own bot, whatever it asks for.
  */
 export type AlertDesk = "sales";

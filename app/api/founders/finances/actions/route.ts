@@ -2,7 +2,7 @@
  * POST /api/founders/finances/actions — every Finances write from the UI.
  *
  * Body: { action: "<name>", ...fields }. One route, one gate: the caller must
- * resolve as a finance owner (CC or Adon by auth user id) or it is a 404, and
+ * resolve as the finance owner (CC by auth user id) or it is a 404, and
  * every handler below re-checks the entity the row belongs to
  * (access-io.requireEntity / requireRowEntity) — so a personal book is
  * refused even to a signed-in owner who is not its owner. Validation is the

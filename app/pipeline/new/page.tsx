@@ -118,7 +118,7 @@ export default async function PipelineNewLeadPage({
   if (roster === null) {
     return (
       <Unavailable
-        subtitle="The CC + Adon assignment roster could not be verified."
+        subtitle="The OASIS assignment roster could not be verified."
         detail="Refresh and try again. No lead was saved without a verified owner."
       />
     );
@@ -126,7 +126,7 @@ export default async function PipelineNewLeadPage({
   if (session.isAdmin && roster.length === 0) {
     return (
       <Unavailable
-        subtitle="CC and Adon are not both available in this workspace."
+        subtitle="CC is not available in this workspace."
         detail="Every Pipeline lead in this cycle needs one of those named owners."
       />
     );

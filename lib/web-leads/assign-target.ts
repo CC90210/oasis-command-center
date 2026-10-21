@@ -18,7 +18,7 @@
  * name someone else; a sheet is admin or manager only) and stays with each
  * route. Neither exempts a self-claim from the roster: the claim route runs
  * every claim, a rep's own included, through resolveAssignableTarget against
- * getOasisPipelineAssignmentRoster (CC, Adon and ACTIVE reps), so a
+ * getOasisPipelineAssignmentRoster (CC and ACTIVE reps), so a
  * deactivated rep cannot take a lead for themselves either. This answers
  * membership only.
  */

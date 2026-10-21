@@ -2,14 +2,12 @@
  * Who takes booked calls, and when: the rules behind every public booking.
  *
  * CC, 2026-10-15/16: warm inbound leads book straight onto our Schedule, only
- * when the team is free. Calls run 10:00 to 21:00 Toronto time. Adon is off on
- * Friday and Saturday and CC takes those calls alone; on the other days both
- * founders are on the call.
+ * when the proprietor is free. Calls run 10:00 to 21:00 Toronto time and CC
+ * takes every call.
  *
  * THE RULE. A host is ON DUTY for a slot when their weekly hours cover the
  * whole slot. A slot is offered when an organizer is on duty and EVERY host on
- * duty is free (with the buffer either side). Everyone on duty is invited. So
- * "both founders" and "CC alone on Friday" are one rule, not two code paths.
+ * duty is free (with the buffer either side). Everyone on duty is invited.
  * An attendee who has not connected their calendar is not on duty at all
  * (HostBusy "absent"), so their days book with the organizer alone.
  *
@@ -59,8 +57,7 @@ export type BusyInterval = { start: number; end: number };
 /**
  * A host whose calendar could not be read is never treated as free.
  * "absent" is narrower: an ATTENDEE who has not connected the calendar we would
- * read (CC, 2026-10-16: until Adon connects his work Google account, his days
- * book with CC alone). That host leaves the slot entirely, neither required to
+ * read. That host leaves the slot entirely, neither required to
  * be free nor invited, and is back on it as soon as the calendar reads. An
  * organizer is never left off: an absent organizer closes every slot.
  */
@@ -184,9 +181,9 @@ const TEN_AM = 10 * 60;
 const NINE_PM = 21 * 60;
 
 /**
- * OASIS before anyone saves settings (CC, 2026-10-16): CC organizes every day
- * 10:00-21:00; Adon joins Sunday to Thursday 10:00-21:00. Bookings land on each
- * founder's default calendar until a target calendar is chosen.
+ * OASIS before anyone saves settings: CC organizes every day 10:00-21:00.
+ * The legacy attendeeUserId input is ignored so older callers cannot silently
+ * restore a former collaborator to the live booking roster.
  */
 export function defaultOasisBookingSettings(ids: { organizerUserId: string; attendeeUserId: string | null }): BookingSettings {
   const hosts: BookingHost[] = [
@@ -197,14 +194,6 @@ export function defaultOasisBookingSettings(ids: { organizerUserId: string; atte
       targetCalendarId: null,
     },
   ];
-  if (ids.attendeeUserId) {
-    hosts.push({
-      userId: ids.attendeeUserId,
-      role: "attendee",
-      weeklyHours: weeklyHoursOn([0, 1, 2, 3, 4], TEN_AM, NINE_PM),
-      targetCalendarId: null,
-    });
-  }
   return {
     timeZone: DEFAULT_BOOKING_TIME_ZONE,
     stepMinutes: 30,

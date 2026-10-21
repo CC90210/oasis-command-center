@@ -287,7 +287,7 @@ export async function RepToday({
               {callList.length === 0 ? (
                 queueRead.ok && rows.length === 0 ? (
                   <EmptyState
-                    message="No leads are assigned to you yet. That is normal on day one — CC and Adon assign researched leads into your queue, and they appear here the moment they do. Nothing is expected of you until then except reading the call guide."
+                    message="No leads are assigned to you yet. That is normal on day one — CC assigns researched leads into your queue, and they appear here the moment he does. Nothing is expected of you until then except reading the call guide."
                     cta={
                       <Link
                         href="/playbook/script"

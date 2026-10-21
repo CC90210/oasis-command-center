@@ -62,9 +62,8 @@ export const ATTENTION_LIST_LIMIT = 50;
 
 /**
  * O2 (2026-10-11): who is asking. House (cron_jobs) failures, workers down
- * and untenanted agent events are CC's alone — Adon is a verified platform
- * operator (PR #576) but is not CCPC's owner, so counting them for him would
- * repeat the exact leak O2 closes on the Automations tab itself. A workspace
+ * and untenanted agent events are CC's alone. The former platform operator
+ * was revoked on 2026-10-21; the per-viewer boundary remains defense in depth. A workspace
  * automation's (tenant_cron_jobs) failure counts for ITS OWNER, same
  * grandfather rule GET /api/cron-jobs uses: a legacy row with no recorded
  * owner is everyone's to see, same as before O2.
@@ -109,9 +108,9 @@ export type PairedMachine = { label: string; lastSeenAt: string | null; state: M
  * not its owner would hide nothing it was ever scoped to, while showing it
  * keeps CC's operator view of CCPC exactly as it is today (O3b rule 6) with
  * no dependency on workspace_agents_owner being populated. Two EXPLICITLY
- * owned pairings (CC's daemon, Adon's connector) are still kept apart: the
+ * owned pairings (CC's daemon and any historical connector) are still kept apart: the
  * bug this fixes is /health describing whichever pairing is newest in the
- * shared OASIS workspace, never CC's and Adon's own computers to each other
+ * shared OASIS workspace, never one person's computer to another person
  * (Codex, O3b -- the same bug class O2 already fixed for Automations).
  */
 export async function loadMachines(db: AdminDb, tenantId: string, now: number, viewer?: AttentionViewer): Promise<PairedMachine[]> {

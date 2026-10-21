@@ -56,7 +56,7 @@ const a = (
 /**
  * The rep-facing automation menu. This is intentionally fixed, reviewed copy:
  * the battle card must never invent a capability or promise feasibility on a
- * live call. Reps discover the leak; CC or Adon confirms scope and price.
+ * live call. Reps discover the leak; CC confirms scope and price.
  */
 export const INDUSTRY_AUTOMATIONS: readonly IndustryAutomationGroup[] = [
   {

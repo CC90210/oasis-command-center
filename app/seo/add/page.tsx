@@ -7,7 +7,7 @@ import { AddSiteForm } from "@/components/seo/AddSiteForm";
 export const dynamic = "force-dynamic";
 
 export default async function SeoAddPage() {
-  // GATE: requireSeoOwner() as the FIRST statement (CC and Adon only). The data is never fetched for anyone else.
+  // GATE: requireSeoOwner() as the FIRST statement (CC only). The data is never fetched for anyone else.
   await requireSeoOwner();
   return (
     <PageFrame

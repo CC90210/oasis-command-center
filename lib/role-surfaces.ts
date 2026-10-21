@@ -58,7 +58,7 @@ import {
  * screen, and a persona list that mirrors the role enum would put the mapping
  * decision back at every call site, which is the thing this module removes.
  *
- *   founder  — CC / Adon. The whole business: money, all pipeline, clients,
+ *   founder  — CC, the sole proprietor. The whole business: money, all pipeline, clients,
  *              content, the agent fleet.
  *   sales    — outside commission-only contractor (team_role='agent'). Their
  *              own queue, their own commission, and nothing else.

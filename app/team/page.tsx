@@ -14,6 +14,7 @@ import { invitableRoleOptionsForActor } from "@/lib/role-surfaces";
 import { teamRoleLabel } from "@/lib/team-roles";
 import { dbBool } from "@/lib/db-bool";
 import { computeSeatWarning } from "@/lib/seat-warning";
+import { LEGAL_OWNER_NAME } from "@/lib/legal/constants";
 import {
   TeamInviteActions,
   RemoveMemberClientButton,
@@ -58,6 +59,15 @@ export default async function TeamPage() {
             : "Members on this tenant."
         }
       />
+
+      {tenantSlug === "oasis-ai-cc" && (
+        <Card title="Company ownership" subtitle="OASIS AI Solutions">
+          <p className="text-sm text-fg-muted">
+            <span className="font-semibold text-fg">Sole proprietor:</span>{" "}
+            {LEGAL_OWNER_NAME} (CC), the sole owner and operator of OASIS AI Solutions.
+          </p>
+        </Card>
+      )}
 
       {canManage && seatWarning && seatWarning.status !== "ok" && (
         <div

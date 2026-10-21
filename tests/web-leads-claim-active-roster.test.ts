@@ -5,7 +5,7 @@
  * THE CHANGE (2026-09-24). The OASIS sales team was retired. CC kept Schneur
  * (builder) and David (opener) as working reps and asked that the Leads page
  * assign to them as well as to the founders, so getOasisPipelineAssignmentRoster
- * widened from "CC + Adon" to "CC + Adon + ACTIVE reps". The claim route
+ * now resolves to CC plus ACTIVE reps. The claim route
  * validates every claim -- a self-claim included -- against that roster, so the
  * widening is an authorization change on this route, not only a menu change:
  *
@@ -200,7 +200,7 @@ async function main() {
     assert.equal(res.body.error, "target_not_on_sales_roster", label);
     assert.equal(res.body.ok, false, label);
     // The copy states the current rule, as a sentence, and not the retired one.
-    assert.match(res.body.message ?? "", /CC, Adon or an active sales rep/, `${label}: refusal copy`);
+    assert.match(res.body.message ?? "", /CC or an active sales rep/, `${label}: refusal copy`);
     assert.match(res.body.message ?? "", /deactivated/i, `${label}: refusal copy`);
     assert.doesNotMatch(res.body.message ?? "", /only to CC or Adon/, `${label}: pre-2026-09-24 copy`);
   };
@@ -217,7 +217,7 @@ async function main() {
   assert.equal(rosterIds.includes(RETIRED), false, "a deactivated rep is on the assignment roster");
   assert.equal(resolveAssignableTarget(roster, RETIRED), null);
   assert.equal(resolveAssignableTarget(roster, ` ${DAVID.toUpperCase()} `), DAVID);
-  run("the assignment roster is CC, Adon and the active reps -- never the deactivated one");
+  run("the assignment roster is CC and the active reps -- never the deactivated one");
 
   // ── an ACTIVE rep self-claims from the pool ──────────────────────────────
   await login(DAVID);

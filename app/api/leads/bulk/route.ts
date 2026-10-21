@@ -207,7 +207,7 @@ export async function POST(req: NextRequest) {
       );
     }
     // Validate the assignee once before touching a record. OASIS destinations
-    // are limited to the current CC + Adon assignment roster for admins too; legacy
+    // are limited to the current OASIS assignment roster for admins too; legacy
     // workspaces retain their broader tenant-member assignment model, minus
     // deactivated teammates (2026-09-24, same rule as single /assign).
     const raw = body.assigned_to;
@@ -222,7 +222,7 @@ export async function POST(req: NextRequest) {
     }
     if (isOasisBulkWorkspace && !nextAssignedTo) {
       return NextResponse.json(
-        { ok: false, error: "assignee_required", message: "Choose CC or Adon for these leads." },
+        { ok: false, error: "assignee_required", message: "Choose CC or an active sales rep for these leads." },
         { status: 422 },
       );
     }
@@ -236,14 +236,14 @@ export async function POST(req: NextRequest) {
           error: error instanceof Error ? error.message : String(error),
         });
         return NextResponse.json(
-          { ok: false, error: "sales_roster_unavailable", message: "The CC + Adon assignment roster could not be verified." },
+          { ok: false, error: "sales_roster_unavailable", message: "The OASIS assignment roster could not be verified." },
           { status: 503 },
         );
       }
       const resolved = resolveAssignableTarget(roster, nextAssignedTo);
       if (!resolved) {
         return NextResponse.json(
-          { ok: false, error: "target_not_on_sales_roster", message: "Choose CC or Adon for this pipeline cycle." },
+          { ok: false, error: "target_not_on_sales_roster", message: "Choose CC or an active sales rep for this pipeline cycle." },
           { status: 422 },
         );
       }
@@ -796,7 +796,7 @@ export async function POST(req: NextRequest) {
     );
   }
   // OASIS ownership and stage are one lifecycle transition. A raw bulk stage
-  // patch cannot choose/verify CC or Adon, stamp the revenue cycle, or retain
+  // patch cannot choose/verify an active OASIS assignee, stamp the revenue cycle, or retain
   // claim provenance, so even researched -> assigned must use the canonical
   // Leads claim flow. SunBiz keeps its existing bulk-stage behavior.
   if (isOasisBulkLead) {

@@ -46,11 +46,11 @@ assert.match(
 
 assert.deepEqual(
   OASIS_PIPELINE_ASSIGNMENT_EMAILS,
-  ["conaugh@oasisai.work", "adon@oasisai.work"],
-  "the assignment roster is a separate founder-only boundary seeded to CC and Adon",
+  ["conaugh@oasisai.work"],
+  "the assignment roster has CC as its sole standing owner",
 );
 assert.equal(isOasisPipelineAssignmentMember({ email: " CONAUGH@OASISAI.WORK " }), true);
-assert.equal(isOasisPipelineAssignmentMember({ email: "adon@oasisai.work" }), true);
+assert.equal(isOasisPipelineAssignmentMember({ email: "adon@oasisai.work" }), false);
 assert.equal(isOasisPipelineAssignmentMember({ email: "rep@oasisai.work" }), false);
 
 const cycle = CURRENT_OASIS_PIPELINE_CYCLE;

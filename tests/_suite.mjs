@@ -18,6 +18,9 @@
 import { spawnSync } from "node:child_process";
 
 const TESTS = [
+  // Company-control invariant: OASIS is CC's sole proprietorship and former
+  // owner/APEX authority cannot creep back into live surfaces or workers.
+  "tests/sole-proprietor-contract.test.ts",
   "tests/address-autocomplete-contract.test.ts",
   "tests/address-field-turnkey.test.ts",
   "tests/alert-decay.test.ts",

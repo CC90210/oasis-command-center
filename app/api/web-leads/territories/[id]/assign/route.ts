@@ -65,7 +65,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // who may assign and then accepted any non-empty string as the destination,
   // so a whole city+industry sheet could be parked on:
   //
-  //   - anyone outside the separate CC+Adon assignment roster, or
+  //   - anyone outside the separate active OASIS assignment roster, or
   //   - an id belonging to no profile at all. That is the bad one: the write
   //     SUCCEEDS, the sheet's leads propagate to an owner who does not exist,
   //     and they are then out of the pool and invisible to every rep. Nothing

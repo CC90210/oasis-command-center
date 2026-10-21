@@ -381,32 +381,29 @@ t("invoice totals, quantities and numbering", () => {
 // ── privacy ─────────────────────────────────────────────────────────────
 t("personal books: owner only; machines never", () => {
   const cc = { kind: "founder" as const, ownerKey: "cc" as const, email: "conaugh@oasisai.work", userId: "u-cc" };
-  const adon = { kind: "founder" as const, ownerKey: "adon" as const, email: "adon@oasisai.work", userId: "u-adon" };
   const atlas = { kind: "agent" as const, name: "atlas" as const };
   const business = { kind: "business" as const, owner_key: null };
   const ccBook = { kind: "personal" as const, owner_key: "cc" };
   const adonBook = { kind: "personal" as const, owner_key: "adon" };
   assert.equal(canAccessEntity(business, cc), true);
-  assert.equal(canAccessEntity(business, adon), true);
   assert.equal(canAccessEntity(business, atlas), true);
   assert.equal(canAccessEntity(ccBook, cc), true);
-  assert.equal(canAccessEntity(ccBook, adon), false, "Adon cannot see CC's personal book");
   assert.equal(canAccessEntity(adonBook, cc), false, "CC cannot see Adon's personal book");
-  assert.equal(canAccessEntity(adonBook, adon), true);
   assert.equal(canAccessEntity(ccBook, atlas), false, "Atlas never reads a personal book");
   assert.equal(canAccessEntity(business, null), false);
-  assert.equal(canAccessEntity({ kind: "business", owner_key: "cc" }, adon), false, "a malformed business row fails closed");
+  assert.equal(canAccessEntity({ kind: "business", owner_key: "cc" }, cc), false, "a malformed business row fails closed");
   const rows = [
     { email: "conaugh@oasisai.work", auth_user_id: "u-cc" },
     { email: "adon@oasisai.work", auth_user_id: "u-adon" },
     { email: "schneur@oasisai.work", auth_user_id: "u-mkt" },
   ];
   assert.equal(ownerKeyForUser("u-cc", rows), "cc");
-  assert.equal(ownerKeyForUser("u-adon", rows), "adon");
+  assert.equal(ownerKeyForUser("u-adon", rows), null, "a former owner cannot resolve as a live finance owner");
   assert.equal(ownerKeyForUser("u-mkt", rows), null, "the marketing hire is a founder-portal user but not a finance owner");
   assert.equal(ownerKeyForUser("", rows), null);
-  assert.equal(ownerKeyForUser("u-x", [{ email: "conaugh@oasisai.work", auth_user_id: "u-x" }, { email: "adon@oasisai.work", auth_user_id: "u-x" }]), null, "ambiguous id resolves to nobody");
+  assert.equal(ownerKeyForUser("u-x", [{ email: "conaugh@oasisai.work", auth_user_id: "u-x" }, { email: "adon@oasisai.work", auth_user_id: "u-x" }]), "cc", "a former-owner row cannot make CC's identity ambiguous");
   assert.equal(ownerKeyForEmail(" Conaugh@OASISAI.work "), "cc");
+  assert.equal(ownerKeyForEmail("adon@oasisai.work"), null);
   assert.equal(isFinanceOwnerEmail("schneur@oasisai.work"), false);
 });
 

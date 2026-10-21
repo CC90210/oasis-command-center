@@ -51,7 +51,7 @@ export class FinanceInputError extends Error {
   }
 }
 
-/** user_profiles rows for the two owner emails: { email, auth_user_id }. */
+/** user_profiles rows for the sole active owner email: { email, auth_user_id }. */
 export async function loadOwnerProfiles(): Promise<Array<{ email: string | null; auth_user_id: string | null }>> {
   const emails = Object.values(FINANCE_OWNER_EMAILS);
   const r = await getServiceSupabase().from("user_profiles").select("email, auth_user_id").in("email", emails);

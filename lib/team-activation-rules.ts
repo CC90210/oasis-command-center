@@ -13,7 +13,7 @@
  *   board  — connected, qualified, founder_meeting_booked, demo_completed,
  *            proposal_sent: a live conversation. It stays on the pipeline board,
  *            unassigned and stamped into the current cycle so the cycle
- *            boundary keeps showing it, for CC or Adon to pick up.
+ *            boundary keeps showing it, for CC to pick up.
  *   keep   — won, lost, onboarding, in_build, client_review, launched: the
  *            owner is history (and commission attribution), not live work.
  *

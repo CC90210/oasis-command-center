@@ -1,6 +1,6 @@
 # OASIS OS — rebuild the Command Center into one AI business operating system
 
-**Product.** OASIS AI's own product (OASIS AI Solutions, co-owned by CC and Adon). The working name is **OASIS OS**. CC withdrew the separate-brand idea on 2026-09-28 ("keep it as oasis"). It lives in the OASIS Command Center repo (`C:\Users\User\APPS\oasis-command-center`), on OASIS's infrastructure, with OASIS's own workspace as the first user.
+**Product.** OASIS AI's own product. OASIS AI Solutions is solely owned and operated by CC as of 2026-10-21. The working name is **OASIS OS**. CC withdrew the separate-brand idea on 2026-09-28 ("keep it as oasis"). It lives in the OASIS Command Center repo (`C:\Users\User\APPS\oasis-command-center`), on OASIS's infrastructure, with OASIS's own workspace as the first user.
 
 **Sources behind this plan**
 - **Research workflow `wf_1a8b11dd-e1a`**, 20 agents:
@@ -494,7 +494,7 @@ Seat counts and AI budgets are placeholders until Atlas validates them. The plan
 
 ## Needs from CC (the recommended default applies unless CC overrides)
 1. **Day 0:** approving this plan = go for the reversible SunBiz freeze and the security lockdowns above.
-2. **SunBiz end-of-mandate** (confirm with Adon as co-owner): the effective end date; export handed to the former client, then OASIS's copies deleted (**default**); their two websites transferred to them (**default**); whether to scrub the SunBiz name from code (default: no).
+2. **SunBiz end-of-mandate** (historical transition item; CC decides as sole owner): record the effective end date; export handed to the former client, then OASIS's copies deleted (**default**); their two websites transferred to them (**default**); whether to scrub the SunBiz name from code (default: no).
 3. **Re-add the SSH key** in hPanel → srv1723601, so the VPS daemons can be torn down. Until then the freeze and key rotation neutralize the box.
 4. **oasisai.work**: confirm renewal and card, because Meta and Google verification need it.
 5. **Accounts and documents for the day-1 applications:** Meta Business Verification documents, Anthropic DPA + workspace, Twilio ISV, Intuit/Xero/Plaid/Recall signups.
