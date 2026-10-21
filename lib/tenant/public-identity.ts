@@ -111,9 +111,9 @@ export function publicMarkForTenant(ref: TenantRef): string | null {
 /**
  * Which ops lane owns an incident on this tenant's surface.
  *
- * null means we could not tell, and an unknown tenant must reach BOTH lanes
- * rather than defaulting to one — a blocked submission nobody is paged about
- * is worse than one two teams see. See notifyLanesForTenant().
+ * null means we could not tell. Unknown incidents route to CC's operator lane
+ * only; former external operators must never receive an OASIS fallback alert.
+ * See notifyLanesForTenant().
  */
 export function companyForTenant(ref: TenantRef): Company | null {
   return publicIdentityForTenant(ref)?.company ?? null;
@@ -123,8 +123,8 @@ export function companyForTenant(ref: TenantRef): Company | null {
  * company -> the Telegram lane that owns it.
  *
  * lib/notify/telegram.ts names lanes by AUDIENCE. The former external SunBiz
- * lane is disabled; OASIS routes to CC's operator lane.
- * stay within a lane. This is the one place the company->audience mapping is
+ * lane is disabled; OASIS routes to CC's operator lane. Known client incidents
+ * stay within their active lane. This is the one place the company->audience mapping is
  * written down, so a caller cannot quietly pick the other team's lane.
  */
 const COMPANY_LANE: Readonly<Record<Company, TelegramLane>> = {
