@@ -61,11 +61,6 @@ export const OASIS_WORKERS: OasisWorker[] = [
     purpose: "Bridges Telegram messages to the chat backbone. Windows-default, Mac cold-standby.",
   },
   {
-    service: "pm2.bravo-coord",
-    label: "OASIS coordination bridge",
-    purpose: "Group-scoped Telegram bridge for the shared OASIS boardroom (CC + Adon + Bravo + APEX). Separate bot token from the DM bridge.",
-  },
-  {
     service: "pm2.claude-bridge",
     label: "Local chat bridge",
     purpose: "localhost:9100 chat HTTP server — warm-pool Claude Code subprocess + tool proxy.",

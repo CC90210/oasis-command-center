@@ -119,7 +119,7 @@ function priceBookMarkdown(): string {
     "",
     ...addOns,
     "",
-    "Anything not on this list is off the approved menu: route it to CC or Adon.",
+    "Anything not on this list is off the approved menu: route it to CC.",
     "",
   ].join("\n");
 }

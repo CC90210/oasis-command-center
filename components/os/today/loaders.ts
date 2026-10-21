@@ -538,7 +538,7 @@ export function loadTodayCalendar(owner: { tenantId: string; userId: string }, d
  * The Finances Overview reader, for the two finance owners only.
  *
  * Returns null — not a failure — when this viewer is not a finance owner
- * (resolveFinanceViewer: CC and Adon, by auth user). The plan asks for this
+ * (resolveFinanceViewer: CC, by auth user). The plan asks for this
  * block only when company financials are already allowed, so null is the
  * narrower owner gate saying no, and the block is simply absent.
  *

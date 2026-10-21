@@ -565,7 +565,7 @@ export function ImportWizard({
                   className="w-full bg-bg-elev border border-bg-border rounded px-2 py-1.5 text-sm text-fg disabled:opacity-50"
                   required
                 >
-                  <option value="">Choose CC or Adon</option>
+                  <option value="">Choose CC or an active sales rep</option>
                   {leadAssignmentOptions.map((option) => (
                     <option key={option.id} value={option.id}>{option.name}</option>
                   ))}
@@ -574,7 +574,7 @@ export function ImportWizard({
               <p className="mt-2 text-xs text-fg-muted">
                 {leadAssignmentOptions.length > 0
                   ? "The owner and active revenue cycle are stamped on every lead in this batch."
-                  : "The CC + Adon assignment roster is unavailable. Import is paused until it can be verified."}
+                  : "The OASIS assignment roster is unavailable. Import is paused until it can be verified."}
               </p>
             </div>
           )}

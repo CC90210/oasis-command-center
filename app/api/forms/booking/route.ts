@@ -238,12 +238,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     try {
       // The hosts this booking was made with (stored on the lead), so a replay
       // repairs the same Schedule copies the first request wrote. A booking
-      // made before hosts were stored was always both founders, so it
-      // replays with both (Codex review of #628), never the organizer alone.
+      // made before hosts were stored replays with the current proprietor.
       const storedHostIds = stringList(context.lead.public_booking_host_ids);
       const hosts = await publicBookingHostsById(
         context.tenantId,
-        storedHostIds.length ? storedHostIds : [founders.host.auth_user_id, founders.opener.auth_user_id],
+        storedHostIds.length ? storedHostIds : [founders.host.auth_user_id],
       );
       await mirrorPublicBookingToSchedules({
         db,
@@ -293,8 +292,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const slot = available.find((item) => item.start === startsAt);
   // The hosts on duty for THIS slot (lib/booking/hours.ts): the organizer owns
-  // the Google event; an on-duty attendee (Adon, Sunday to Thursday) is invited.
-  // On Friday and Saturday the organizer is on duty alone and nobody else is.
+  // the Google event; OASIS currently has only its proprietor on duty.
   const organizer = slot?.hosts.find((host) => host.role === "organizer");
   if (!slot || !organizer) {
     return NextResponse.json({ ok: false, error: "slot_unavailable" }, { status: 409 });
@@ -414,7 +412,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     collaborators: [
       ...slot.hosts.map((host) => host.userId),
       founders.host.auth_user_id,
-      founders.opener.auth_user_id,
     ],
   });
   const leadPatch = {
@@ -517,7 +514,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       });
       if (!salesEvent.ok) console.error("[public-booking.sales-event]", salesEvent.error);
     }
-    // The sales desk (CC + Adon). Which chat that is comes from the workspace in
+    // CC's sales desk. Which chat that is comes from the workspace in
     // lib/notify/alert-route.ts; a call booked is the alert they most need fast.
     const sent = await pushWorkspaceAlert(
       context.tenantId,

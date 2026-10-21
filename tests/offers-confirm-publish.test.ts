@@ -311,7 +311,7 @@ async function main() {
   });
 
   await step("an owner and an admin get the screen with every offer page; the Offers screen links to it", async () => {
-    for (const user of [USERS.cc, USERS.adon]) {
+    for (const user of [USERS.cc, USERS.admin]) {
       await login(user);
       const screen = await outcome(() => publishPage());
       assert.ok(typeof screen === "object", String(screen));

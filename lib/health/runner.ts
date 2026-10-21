@@ -43,7 +43,6 @@ import { computeCoverage } from "./coverage";
 export function allChecks() {
   return [...tenantOutcomeChecks(), ...OASIS_GLOBAL_CHECKS, ...DEPARTMENT_CHAT_CHECKS];
 }
-
 export { DEPARTMENT_CHAT_CHECKS };
 
 /**
@@ -412,48 +411,4 @@ export async function reportCoverageGap(
     ).catch(() => undefined);
   }
   return { uncovered: cov.uncovered, crons: cov.crons.length };
-}
-
-/**
- * The dead-man's switch, from the OTHER side.
- *
- * The 2026-06-30 audit's finding #3: apex-health-monitor is not in its own watch
- * list and has no external switch, so its death silences every alert with no
- * notice. This runs on Vercel — a different machine, a different failure domain
- * — and reports if the local fleet's heartbeat goes stale.
- *
- * A watchdog that cannot report its own death is decorative.
- */
-export async function checkFleetHeartbeat(
-  db: Db,
-  opts: { maxStaleMin?: number; nowMs?: number } = {},
-): Promise<CheckResult> {
-  const nowMs = opts.nowMs ?? Date.now();
-  const maxStale = (opts.maxStaleMin ?? 30) * 60_000;
-  try {
-    const r = await db
-      .from("agent_activity")
-      .select("created_at")
-      .eq("agent", "apex-health-monitor")
-      .order("created_at", { ascending: false })
-      .limit(1);
-    if (r.error) {
-      return { id: "fleet.heartbeat", verdict: "check_broken", observed: NaN, baseline: null,
-        reason: `could not read fleet heartbeat: ${r.error.message}`.slice(0, 200) };
-    }
-    const last = r.data?.[0]?.created_at ? Date.parse(r.data[0].created_at) : NaN;
-    if (!Number.isFinite(last)) {
-      return { id: "fleet.heartbeat", verdict: "failing", observed: 0, baseline: null,
-        reason: "the local health monitor has never reported in" };
-    }
-    const staleMin = Math.round((nowMs - last) / 60_000);
-    return nowMs - last > maxStale
-      ? { id: "fleet.heartbeat", verdict: "failing", observed: staleMin, baseline: opts.maxStaleMin ?? 30,
-          reason: `the local health monitor last reported ${staleMin} min ago — alerting for the whole JARVIS fleet may be dead` }
-      : { id: "fleet.heartbeat", verdict: "ok", observed: staleMin, baseline: opts.maxStaleMin ?? 30,
-          reason: `local monitor reported ${staleMin} min ago` };
-  } catch (err) {
-    return { id: "fleet.heartbeat", verdict: "check_broken", observed: NaN, baseline: null,
-      reason: `heartbeat check threw: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200) };
-  }
 }

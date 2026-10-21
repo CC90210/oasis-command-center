@@ -36,7 +36,7 @@ export type FounderContext = {
   /**
    * The founder's email, for provenance.
    *
-   * Two people use this portal — CC and Adon — and a display name is not an
+   * The proprietor uses this portal, and a display name is not an
    * identity you can argue with later ("adon" vs "Adon Bousseau" vs null).
    * Every row either of them creates is stamped with this.
    */
@@ -59,7 +59,7 @@ export async function resolveFounder(): Promise<FounderContext | null> {
   // us: OASIS is now onboarding OUTSIDE commission-only sales contractors
   // (team_role='agent') INTO OASIS'S OWN WORKSPACE. A tenant-only gate lets
   // every one of them into the founders portal, because they are, by tenant,
-  // standing exactly where CC and Adon stand.
+  // standing exactly where the owner stands.
   //
   // So the gate is now tenant AND persona — the same composition the rest of
   // the dashboard uses (lib/role-surfaces.ts). Persona resolution is an

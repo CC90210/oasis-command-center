@@ -31,7 +31,7 @@ export async function notifyOasisFunnelSubmission(
 ): Promise<void> {
   const { db, tenantId, leadId, answers } = input;
   await Promise.allSettled([
-    // The sales desk (CC + Adon): a lead on oasisai.work. The audience is chosen
+    // CC's sales desk: a lead on oasisai.work. The audience is chosen
     // from the workspace in lib/notify/alert-route.ts, never named here.
     pushWorkspaceAlert(tenantId, buildOasisFunnelAlert(answers), { desk: "sales" }).then(async (r) => {
       if (r.delivered) return;

@@ -44,7 +44,7 @@ export const dynamic = "force-dynamic";
 /**
  * The desk's assignment roster for "New ticket". A failure does not hide the
  * form: it renders with no assignee choices and a notice says why (OASIS's
- * roster needs both founders active, lib/team.ts).
+ * roster needs the OASIS proprietor active, lib/team.ts).
  */
 async function deskRoster(viewer: ClientsViewer): Promise<{ rows: MemberRow[]; notice: string | null } | null> {
   if (!viewer.desk) return null;
@@ -56,7 +56,7 @@ async function deskRoster(viewer: ClientsViewer): Promise<{ rows: MemberRow[]; n
     return {
       rows: [],
       notice: msg.includes("oasis_pipeline_assignment_roster_incomplete")
-        ? "New projects and tickets can't be assigned from here right now: the assignment roster needs both founders as active members."
+        ? "New projects and tickets can't be assigned from here right now: the assignment roster needs the OASIS proprietor as an active member."
         : "The assignee list couldn't be loaded, so new projects and tickets start unassigned. The error has been logged.",
     };
   }

@@ -248,8 +248,8 @@ export default async function AssetDetailPage({
     // goes to as many as six places.
     ["Posted to", parsePlatforms(asset.platforms).map(platformLabel).join(" · ") || null],
     ["Slides", asset.asset_type === "carousel" ? `${slideUrls.length} of ${asset.slide_count}` : null],
-    // Named, not addressed — two founders contribute here and "Adon" is a
-    // person you recognise where adon@oasisai.work is a string you parse.
+    // Named, not addressed. Historical former-collaborator records keep their
+    // author label; new OASIS activity belongs to CC.
     ["Added by", authorName(asset.author_email)],
     ["Format", asset.format],
     ["Aspect", asset.aspect],

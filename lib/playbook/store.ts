@@ -18,8 +18,8 @@
  *
  * WRITES ARE ONE BATCH EACH. A document change and its version row commit or
  * roll back together, and every change is conditioned on the version the
- * writer read, so two founders editing at once cannot silently overwrite each
- * other: the second gets `conflict`.
+ * writer read, so two authorized editors acting at once cannot silently
+ * overwrite each other: the second gets `conflict`.
  */
 
 import { createHash, randomUUID } from "node:crypto";

@@ -75,7 +75,7 @@ async function main() {
       sent.push(`mail:${m.subject}`);
       return emailOk ? { ok: true } : { ok: false, reason: "smtp down" };
     },
-    founderEmails: ["conaugh@oasisai.work", "adon@oasisai.work"],
+    founderEmails: ["conaugh@oasisai.work"],
     appOrigin: "https://app.test",
   };
   const at = (iso: string) => new Date(iso);

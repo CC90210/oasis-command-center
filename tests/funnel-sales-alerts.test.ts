@@ -1,16 +1,13 @@
 /**
- * tests/funnel-sales-alerts.test.ts - a new lead reaches the sales desk, and the
- * desk can never be silenced by a missing group.
+ * tests/funnel-sales-alerts.test.ts - a new lead reaches CC's sales desk.
  *
- * Until 2026-10-15 every funnel alert went to CC's DM, so Adon, who splits the
- * leads with him, never saw one. The "sales" lane sends to a group both read
- * (OASIS_SALES_TELEGRAM_CHAT_ID). These pin what makes that safe:
+ * OASIS became CC's sole proprietorship on 2026-10-21. The former shared-sales
+ * group credentials must be ignored even if a stale deployment still has them.
+ * These pin what makes that safe:
  *
- *   1. with the group id UNSET the lane still delivers, to CC's chat, exactly as
- *      before: deploying the code can never lose an alert;
- *   2. the operator lane is untouched even once the group is configured;
- *   3. a group the bot was removed from falls back to CC's DM in the SAME lane,
- *      says what to fix, and still counts as delivered;
+ *   1. sales and operator alerts both deliver to CC;
+ *   2. stale group credentials never change the destination;
+ *   3. a failure of CC's lane is reported honestly;
  *   4. the booked-call alert escapes and caps everything a stranger typed, shows
  *      Toronto time, and only links a real Google Meet URL.
  */
@@ -50,7 +47,7 @@ function stubFetch(failing: Set<string>): { sent: Sent[]; restore: () => void } 
 async function main(): Promise<void> {
   const { pushWorkspaceAlert } = await import("../lib/notify/alert-route");
 
-  // 1. Group id unset: the sales lane delivers to CC's chat, as before.
+  // 1. The sales lane delivers to CC's chat.
   {
     const { sent, restore } = stubFetch(new Set());
     const r = await pushWorkspaceAlert(OASIS, "new lead", { desk: "sales" });
@@ -60,36 +57,36 @@ async function main(): Promise<void> {
     assert.equal(sent[0].chatId, CC_DM, "with no group configured the alert must still reach CC");
     assert.equal(sent[0].token, "cc-token");
   }
-  console.log("  ok - sales lane with no group id still reaches CC's chat");
+  console.log("  ok - sales reaches CC's chat");
 
-  // 2. Group configured: sales goes to the group, the operator lane does not move.
+  // 2. Stale former-group config is ignored; both lanes remain CC-only.
   process.env.OASIS_SALES_TELEGRAM_CHAT_ID = GROUP;
+  process.env.OASIS_SALES_TELEGRAM_BOT_TOKEN = "retired-group-token";
   {
     const { sent, restore } = stubFetch(new Set());
     const sales = await pushWorkspaceAlert(OASIS, "new lead", { desk: "sales" });
     const operator = await pushWorkspaceAlert(OASIS, "cron failed");
     restore();
     assert.equal(sales.delivered && operator.delivered, true);
-    assert.deepEqual(sent.map((s) => s.chatId), [GROUP, CC_DM], "sales -> group, operator -> CC, never swapped");
+    assert.deepEqual(sent.map((s) => s.chatId), [CC_DM, CC_DM], "both OASIS lanes stay with CC");
+    assert.ok(sent.every((s) => s.token === "cc-token"), "retired group token was not used");
   }
-  console.log("  ok - sales goes to the group; the operator lane is untouched");
+  console.log("  ok - stale former-group credentials are ignored");
 
-  // 3. Bot removed from the group: same-lane fallback to CC's DM, with the fix named.
+  // 3. Failure of the retired group address is irrelevant to CC's lane.
   {
     const { sent, restore } = stubFetch(new Set([GROUP]));
     const r = await pushWorkspaceAlert(OASIS, "Dana Lead booked", { desk: "sales" });
     restore();
-    assert.equal(r.delivered, true, "a human was reached, so the lead alert is delivered");
-    assert.match(r.outcome, /backup/i, "...and the outcome says the main chat refused it");
-    assert.deepEqual(sent.map((s) => s.chatId), [GROUP, CC_DM]);
-    assert.match(sent[1].text, /Dana Lead booked/, "the alert survives the wrapper");
-    assert.match(sent[1].text, /sales group needs the bot re-added/, "it names the sales group, not the ops group");
+    assert.equal(r.delivered, true);
+    assert.deepEqual(sent.map((s) => s.chatId), [CC_DM]);
+    assert.match(sent[0].text, /Dana Lead booked/);
   }
-  console.log("  ok - a removed bot falls back to CC's DM and says what to fix");
+  console.log("  ok - retired group availability cannot affect CC alerts");
 
   // 4. Everything down: an honest failure, so the funnel records a marker.
   {
-    const { restore } = stubFetch(new Set([GROUP, CC_DM]));
+    const { restore } = stubFetch(new Set([CC_DM]));
     const r = await pushWorkspaceAlert(OASIS, "x", { desk: "sales" });
     restore();
     assert.equal(r.delivered, false);

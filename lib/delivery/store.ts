@@ -2008,7 +2008,7 @@ export async function matchClientByEmail(
   if (projects.length > 1 && projectTenants.length === 1) {
     return { client_tenant_id: projectTenants[0], project_id: null, client_match: "email_project" };
   }
-  // An OASIS teammate is not a client. CC and Adon also hold profiles in client
+  // An OASIS teammate is not a client. Historical collaborators could also hold profiles in client
   // workspaces they operate, so without this a founder testing the form would
   // file a ticket into that client's portal.
   const teammate = await db.execute({

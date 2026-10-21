@@ -792,10 +792,10 @@ async function main() {
       reporter_user_id: null, assigned_to: null,
     }, T0);
   const CC_AUTHOR = { userId: USERS.cc.id, name: "CC" };
-  const ADON_AUTHOR = { userId: USERS.adon.id, name: "Adon" };
+  const BUILDER_AUTHOR = { userId: USERS.builder.id, name: "Builder" };
   await check("two founders resolving one ticket at once resolve it once: one ledger row, one thread line, and the late one is told (409)", async () => {
     const id = (await newTicket("Resolved twice at once")).ticket.id;
-    const raced = racing(/FROM support_tickets WHERE tenant_id = \? AND id = \?/, () => deliveryStore.updateTicket(db, OASIS, id, { status: "resolved" }, ADON_AUTHOR, T0));
+    const raced = racing(/FROM support_tickets WHERE tenant_id = \? AND id = \?/, () => deliveryStore.updateTicket(db, OASIS, id, { status: "resolved" }, BUILDER_AUTHOR, T0));
     const late = await deliveryStore.updateTicket(raced, OASIS, id, { status: "resolved" }, CC_AUTHOR, T0);
     assert.deepEqual(late, { ok: false, status: 409, error: "invalid_transition" });
     assert.equal(await count("SELECT COUNT(*) AS n FROM outcome_events WHERE event_key = 'ticket.resolved' AND subject_id = ?", [id]), 1);
@@ -803,7 +803,7 @@ async function main() {
   });
   await check("a status move read from a stale status never lands: 'waiting on client' on a ticket closed meanwhile is refused, and it stays closed", async () => {
     const id = (await newTicket("Closed under a stale edit")).ticket.id;
-    const raced = racing(/FROM support_tickets WHERE tenant_id = \? AND id = \?/, () => deliveryStore.updateTicket(db, OASIS, id, { status: "closed" }, ADON_AUTHOR, T0));
+    const raced = racing(/FROM support_tickets WHERE tenant_id = \? AND id = \?/, () => deliveryStore.updateTicket(db, OASIS, id, { status: "closed" }, BUILDER_AUTHOR, T0));
     const late = await deliveryStore.updateTicket(raced, OASIS, id, { status: "waiting_on_client", assigned_to: USERS.cc.id }, CC_AUTHOR, T0);
     assert.deepEqual(late, { ok: false, status: 409, error: "invalid_transition" });
     const row = (await db.execute({ sql: "SELECT status, assigned_to FROM support_tickets WHERE id = ?", args: [id] })).rows[0];
@@ -1003,7 +1003,7 @@ async function main() {
   const linkWorkspace = (id: string, body: unknown) =>
     call(linkRoute.POST(req("POST", `/api/clients/${id}/link-workspace`, body), params({ id })));
   await check("Link workspace: operator only, OASIS only, one record per workspace", async () => {
-    await login(USERS.adon);
+    await login(USERS.admin);
     const notOperator = await linkWorkspace(X.id, { client_tenant_id: CLIENT_A, confirmed: true });
     assert.equal(notOperator.status, 403);
     assert.equal(notOperator.body.error, "operator_only");
@@ -1256,7 +1256,7 @@ async function main() {
     });
     // A founder links the record by hand between the import's plan and its write.
     const raced = racing(/SELECT id, primary_email, stripe_customer_id FROM customers/, () =>
-      store.updateCustomer(db, OASIS, rec.customer.id, { stripe_customer_id: "cus_BY_HAND" }, T0, USERS.adon.id),
+      store.updateCustomer(db, OASIS, rec.customer.id, { stripe_customer_id: "cus_BY_HAND" }, T0, USERS.builder.id),
     );
     const r = await sync.runStripeImport(raced, OASIS, USERS.cc.id, T0, new Map([["cus_IMPORTED", "link"]]));
     assert.ok(!r.linked.includes(rec.customer.id), JSON.stringify(r));
@@ -1382,19 +1382,19 @@ async function main() {
   const TicketsPage = (await import("../app/tickets/page")).default;
   const ProjectsPage = (await import("../app/projects/page")).default;
   const Portal = (await import("../app/client-portal/page")).default;
-  await check("/tickets and /projects render with an incomplete sales roster, and say why assignment controls are empty", async () => {
-    await db.execute({ sql: "UPDATE user_profiles SET deactivated_at = ? WHERE auth_user_id = ?", args: [ago(1), USERS.adon.id] });
+  await check("/tickets and /projects render with an incomplete proprietor roster, and say why assignment controls are empty", async () => {
+    await login(USERS.cc);
+    await db.execute({ sql: "UPDATE user_profiles SET email = ? WHERE auth_user_id = ?", args: ["missing-proprietor@oasis.test", USERS.cc.id] });
     try {
-      await login(USERS.cc);
       const desk = await page(TicketsPage({ searchParams: Promise.resolve({ status: "all" }) }));
       assert.match(desk, /Portal login broken/, "the desk still lists its tickets");
       assert.doesNotMatch(desk, /Could not load/);
-      assert.match(desk, /can't be assigned from here right now: the assignment roster needs both founders/);
+      assert.match(desk, /can't be assigned from here right now: the assignment roster needs CC as an active member/);
       const board = await page(ProjectsPage({ searchParams: Promise.resolve({}) }));
       assert.doesNotMatch(board, /Could not load/);
-      assert.match(board, /The assignee filter needs both founders as active members/);
+      assert.match(board, /The assignee filter needs CC as an active member/);
     } finally {
-      await db.execute({ sql: "UPDATE user_profiles SET deactivated_at = NULL WHERE auth_user_id = ?", args: [USERS.adon.id] });
+      await db.execute({ sql: "UPDATE user_profiles SET email = ? WHERE auth_user_id = ?", args: [USERS.cc.email, USERS.cc.id] });
     }
   });
   await check("client emails from the desk end with OASIS's support link", async () => {

@@ -1287,7 +1287,7 @@ export async function createFounderMeetingCalendarEvent(
  * booking. We intentionally use events.list instead of Google's freeBusy RPC:
  * the existing work connection grants calendar.events (the scope used for
  * verified Meet creation), while freeBusy requires a separate read scope and
- * would force both founders through a new OAuth consent screen. This produces
+ * would force the owner through a new OAuth consent screen. This produces
  * the same availability result from the canonical calendar without widening
  * access.
  */

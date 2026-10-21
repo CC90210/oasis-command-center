@@ -111,9 +111,9 @@ export function publicMarkForTenant(ref: TenantRef): string | null {
 /**
  * Which ops lane owns an incident on this tenant's surface.
  *
- * null means we could not tell, and an unknown tenant must reach BOTH lanes
- * rather than defaulting to one — a blocked submission nobody is paged about
- * is worse than one two teams see. See notifyLanesForTenant().
+ * null means we could not tell. Unknown incidents route to CC's operator lane
+ * only; former external operators must never receive an OASIS fallback alert.
+ * See notifyLanesForTenant().
  */
 export function companyForTenant(ref: TenantRef): Company | null {
   return publicIdentityForTenant(ref)?.company ?? null;
@@ -122,9 +122,9 @@ export function companyForTenant(ref: TenantRef): Company | null {
 /**
  * company -> the Telegram lane that owns it.
  *
- * lib/notify/telegram.ts names lanes by AUDIENCE ("operator" = CC, "sunbiz-ops"
- * = Adon/APEX) rather than by credential, and its fallback chains deliberately
- * stay within a lane. This is the one place the company->audience mapping is
+ * lib/notify/telegram.ts names lanes by AUDIENCE. The former external SunBiz
+ * lane is disabled; OASIS routes to CC's operator lane. Known client incidents
+ * stay within their active lane. This is the one place the company->audience mapping is
  * written down, so a caller cannot quietly pick the other team's lane.
  */
 const COMPANY_LANE: Readonly<Record<Company, TelegramLane>> = {
@@ -136,17 +136,15 @@ const COMPANY_LANE: Readonly<Record<Company, TelegramLane>> = {
  * The ops lane(s) to page for an incident on this tenant's surface.
  *
  * Deliberately returns an ARRAY. A blocked form submission on an unmapped
- * tenant used to page SunBiz ops unconditionally: Adon saw failures for
- * merchants he does not own and could not action, while CC — who could have
- * recovered the prospect from the dead-letter payload in minutes — was never
- * told. Fanning an unknown tenant to BOTH lanes is noisy for one team and
- * silent for nobody, which is the right way round for a lost submission. An
+ * tenant used to page a former external operator unconditionally, while CC —
+ * who could have recovered the prospect from the dead-letter payload in minutes
+ * — was never told. Unknown incidents now go only to CC. An
  * unknown tenant is common enough to matter: two dead-letter rows in production
  * carry tenant_slug NULL because the client beacon never sent one.
  */
 export function notifyLanesForTenant(ref: TenantRef): TelegramLane[] {
   const company = companyForTenant(ref);
-  return company ? [COMPANY_LANE[company]] : ["operator", "sunbiz-ops"];
+  return company ? [COMPANY_LANE[company]] : ["operator"];
 }
 
 /**

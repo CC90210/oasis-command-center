@@ -2,9 +2,9 @@
  * POST /api/web-leads/claim    — take leads into the caller's own book
  * POST /api/web-leads/claim?release=1 — put them back in the pool
  *
- * WHO MAY RECEIVE A CLAIM (2026-09-24): CC, Adon, and every ACTIVE sales rep --
+ * WHO MAY RECEIVE A CLAIM (2026-10-21): CC and every ACTIVE sales rep --
  * exactly getOasisPipelineAssignmentRoster(), the same list the Assign picker
- * reads. Until that day it was CC + Adon only. When the sales team was retired
+ * reads. Historical rosters also included the former co-owner. When the sales team was retired
  * CC kept Schneur (builder) and David (opener) as working reps, so an active rep
  * may now self-claim from the pool and a founder may assign a pool lead to one.
  * A deactivated teammate (user_profiles.deactivated_at set) is off that roster
@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
   //   - only an admin or a manager may send assignTo, whoever it names (the
   //     caller's own id included). A rep must not be able to push work onto a
   //     colleague, or quietly take a lead off one; a rep claims by omitting it.
-  //   - the target must be on the server-resolved assignment roster (CC, Adon
+  //   - the target must be on the server-resolved assignment roster (CC
   //     and active reps), so this cannot park a lead on an arbitrary id someone
   //     typed, or on a rep who has been deactivated.
   const assignToRaw = (body as { assignTo?: unknown })?.assignTo;
@@ -135,8 +135,8 @@ export async function POST(req: NextRequest) {
   }
 
   // Every claim, a self-claim included, must land on the assignment roster:
-  // CC, Adon and ACTIVE reps. This is separate from the manager read roster
-  // (getOasisSalesRepRoster): adding founders to that one would widen cross-rep
+  // CC and ACTIVE reps. This is separate from the manager read roster
+  // (getOasisSalesRepRoster): adding the proprietor to that one would widen cross-rep
   // visibility. Skipping this check would let an admin who is neither a founder
   // nor a rep take new work, and would leave a deactivated rep whose session
   // still resolves (see the header) with nothing between them and the pool. A
@@ -157,7 +157,7 @@ export async function POST(req: NextRequest) {
       {
         ok: false,
         error: "target_not_on_sales_roster",
-        message: "Only CC, Adon or an active sales rep can receive these leads. A deactivated teammate cannot take new work.",
+        message: "Only CC or an active sales rep can receive these leads. A deactivated teammate cannot take new work.",
       },
       { status: 400 },
     );

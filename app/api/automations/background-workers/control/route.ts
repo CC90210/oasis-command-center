@@ -119,6 +119,12 @@ export async function POST(req: Request) {
   if (!worker) {
     return NextResponse.json({ ok: false, error: "unknown_worker" }, { status: 400 });
   }
+  if (worker.archived_on) {
+    return NextResponse.json(
+      { ok: false, error: "worker_retired", retired_on: worker.archived_on },
+      { status: 409 },
+    );
+  }
 
   // B4 (2026-07-23) — worker-owner segregation gate. See the file-header
   // doc comment above for the full rationale. Every cross-owner touch

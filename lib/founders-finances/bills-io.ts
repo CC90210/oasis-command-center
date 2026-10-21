@@ -8,12 +8,12 @@
  * When the business is NOT registered, sales tax paid is part of the cost —
  * it is debited to the expense, never to a receivable it cannot claim.
  *
- * PAID BY AN OWNER PERSONALLY (2026-09-30). A business cost CC or Adon paid
+ * PAID BY AN OWNER PERSONALLY (2026-09-30). A business cost an owner paid
  * with their own card is money they put into the business: the credit goes to
  * that owner's contribution equity, 3000 "Owner equity — CC" or 3010 "Owner
  * equity — Adon" (chart.ts SYS.equityCc / SYS.equityAdon, the accounts
  * recordEquityEvent credits for a contribution), never to a bank account the
- * money did not leave. The owners' 50/50 view (equitySummary) counts it as
+ * money did not leave. The historical owner ledger (equitySummary) counts it as
  * that owner's contribution. Business book only.
  *
  * RECURRING (the materializer, recordRecurringNow). A recurring cost becomes a
@@ -106,7 +106,10 @@ export function ownerOfEquityAccount(entityId: string, accountIdValue: string | 
  */
 export async function resolvePaidFrom(entity: EntityRow, ref: string): Promise<{ accountId: string; owner: "cc" | "adon" | null }> {
   const value = ref.trim();
-  const ownerKey = value === PAID_BY_OWNER.cc ? "cc" : value === PAID_BY_OWNER.adon ? "adon" : null;
+  if (value === PAID_BY_OWNER.adon) {
+    throw new FinanceInputError("the former owner cannot be selected for new OASIS transactions");
+  }
+  const ownerKey = value === PAID_BY_OWNER.cc ? "cc" : null;
   if (ownerKey) {
     if (entity.kind !== "business") throw new FinanceInputError("only the business book records a cost an owner paid personally");
     const acct = await requireAccountOf(entity.id, accountId(entity.id, ownerEquityCode(ownerKey)));
@@ -114,6 +117,9 @@ export async function resolvePaidFrom(entity: EntityRow, ref: string): Promise<{
   }
   const acct = await requireAccountOf(entity.id, value);
   const owner = ownerOfEquityAccount(entity.id, acct.id);
+  if (owner === "adon") {
+    throw new FinanceInputError("the former owner's historical equity account cannot receive new OASIS transactions");
+  }
   if (owner) return { accountId: acct.id, owner };
   if (!REGISTER_SUBTYPES.has(acct.subtype)) throw new FinanceInputError("paid-from must be a bank, cash or card account, or an owner who paid personally");
   return { accountId: acct.id, owner: null };
@@ -299,9 +305,8 @@ export async function recordEquityEvent(viewer: FinanceViewer, entityRef: string
 }
 
 /**
- * The owners' draws and contributions, and the 50/50 view. A cost an owner
- * paid personally (an expense, or a bill paid, from "Paid by CC/Adon
- * personally") is that owner's contribution: it is listed and counted with
+ * Owner draws and contributions, including historical former-owner entries.
+ * A cost the active owner paid personally is that owner's contribution: it is listed and counted with
  * the recorded contributions, read from the bill itself (no second row is
  * written anywhere), and drops out when the bill is voided.
  */

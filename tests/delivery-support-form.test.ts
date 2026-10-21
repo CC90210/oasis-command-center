@@ -99,7 +99,7 @@ async function main() {
       sent.push({ kind: "email", to: m.to, subject: m.subject, body: m.body });
       return { ok: true };
     },
-    founderEmails: ["conaugh@oasisai.work", "adon@oasisai.work"],
+    founderEmails: ["conaugh@oasisai.work"],
     appOrigin: "https://app.test",
   };
   const uploads: Array<{ path: string; bytes: number; type: string }> = [];

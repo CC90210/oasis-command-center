@@ -656,7 +656,7 @@ async function main() {
     const fake = {
       telegram: async (t: string) => (sent.push(`tg:${t.slice(0, 20)}`), { ok: true }),
       email: async (m: { to: string }) => (sent.push(`mail:${m.to}`), { ok: true }),
-      founderEmails: ["conaugh@oasisai.work", "adon@oasisai.work"],
+      founderEmails: ["conaugh@oasisai.work"],
       appOrigin: "https://app.test",
     };
     const scheduled: Array<() => Promise<void>> = [];

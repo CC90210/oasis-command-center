@@ -126,7 +126,7 @@ export async function POST(req: Request) {
       source_url: a.url,
       state: "queued",
       // The EMAIL, not a display name. Two people use this tab, and the old
-      // fallback hardcoded "adon" — so any drop by a profile with no display
+      // fallback hardcoded to the current owner, so a profile with no display
       // name set was attributed to the wrong person, permanently and silently.
       // With neither on the profile, the profile id: a real handle for who
       // dropped it. It used to write an invented "unknown@" address on our own
@@ -215,7 +215,7 @@ export async function POST(req: Request) {
     .from("marketing_event")
     .insert({
       tenant_id: founder.tenantId,
-      actor: founder.displayName || "adon",
+      actor: founder.displayName || "cc",
       verb: "ingested",
       detail: `${queued.length} link(s) queued as ${label}${duplicates ? `, ${duplicates} already in flight` : ""}`,
     })

@@ -7,7 +7,7 @@ import { SitesActions } from "@/components/seo/SitesActions";
 export const dynamic = "force-dynamic";
 
 export default async function SeoSitesPage({ searchParams }: { searchParams: Promise<{ test?: string }> }) {
-  // GATE: requireSeoOwner() as the FIRST statement (CC and Adon only). The data is never fetched for anyone else.
+  // GATE: requireSeoOwner() as the FIRST statement (CC only). The data is never fetched for anyone else.
   await requireSeoOwner();
   const includeTest = (await searchParams).test === "1";
   const loaded = await settle(async () => (await seoClient()).listSites({ includeTest }));

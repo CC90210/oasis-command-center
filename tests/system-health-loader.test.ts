@@ -185,7 +185,6 @@ async function main() {
       exec_guard: { mode: "enforce", blocked_24h: 9, would_block_24h: 0, last_block_at: ago(2 * H), categories_24h: { "hard-blocklist": 9 } },
       secret_guard: { mode: "enforce", blocked_24h: 123, would_block_24h: 0, last_block_at: ago(10 * MIN) },
       state_guard: { mode: "enforce", blocked_24h: 0, would_block_24h: 0, last_block_at: null },
-      coord_guard: { mode: "enforce", blocked_24h: 0, would_block_24h: 0, last_block_at: null },
       subprocess_guard: { mode: "enforce", blocked_24h: 0, would_block_24h: 0, last_block_at: null },
     },
   };
@@ -277,10 +276,10 @@ async function main() {
   console.log("system-health-loader:");
 
   // ── Pure rules ──────────────────────────────────────────────────────────
-  await check("guards: no report is 'Not reported yet' for all five, never off", () => {
+  await check("guards: no report is 'Not reported yet' for all four, never off", () => {
     const r = sh.describeGuards(null, NOW);
     assert.equal(r.freshness, "missing");
-    assert.deepEqual(r.guards.map((g) => g.key), ["exec_guard", "secret_guard", "state_guard", "coord_guard", "subprocess_guard"]);
+    assert.deepEqual(r.guards.map((g) => g.key), ["exec_guard", "secret_guard", "state_guard", "subprocess_guard"]);
     for (const g of r.guards) {
       assert.equal(g.state, "not_reported");
       assert.equal(g.label, "Not reported yet");
@@ -301,13 +300,12 @@ async function main() {
         exec_guard: { mode: "enforce", blocked_24h: 9, would_block_24h: 1, last_block_at: ago(2 * H) },
         secret_guard: { mode: "enforce", blocked_24h: "123" },
         state_guard: { mode: "enforce" },
-        coord_guard: { mode: "report", blocked_24h: 0 },
         subprocess_guard: { mode: "off" },
       },
     };
     const r = sh.describeGuards({ status: "healthy", last_ping_at: ago(40 * S), metadata: meta }, NOW);
     assert.equal(r.freshness, "fresh");
-    assert.deepEqual(r.guards.map((g) => g.label), ["On", "On", "On", "Watching only", "Off"]);
+    assert.deepEqual(r.guards.map((g) => g.label), ["On", "On", "On", "Off"]);
     assert.equal(r.guards[0].blocked24h, 9);
     assert.equal(r.guards[0].wouldBlock24h, 1);
     assert.equal(r.guards[1].blocked24h, 123, "a numeric string is a count");
@@ -315,7 +313,7 @@ async function main() {
   });
   await check("guards: a fresh report missing one guard says that one is not reported; a failing report verifies none", () => {
     const partial = sh.describeGuards({ status: "healthy", last_ping_at: ago(40 * S), metadata: { guards: { exec_guard: { mode: "enforce" } } } }, NOW);
-    assert.deepEqual(partial.guards.map((g) => g.state), ["on", "not_reported", "not_reported", "not_reported", "not_reported"]);
+    assert.deepEqual(partial.guards.map((g) => g.state), ["on", "not_reported", "not_reported", "not_reported"]);
     const failing = sh.describeGuards({ status: "down", last_ping_at: ago(40 * S), metadata: allOn }, NOW);
     assert.equal(failing.freshness, "failing");
     assert.ok(failing.guards.every((g) => g.state === "failing"));
@@ -338,14 +336,14 @@ async function main() {
     assert.equal(missing.tone, "unknown");
     assert.match(missing.text, /^Your guards aren't reported here yet: they run on your computer/);
     assert.match(missing.text, /CCPC \(Windows\) checked in just now\.$/);
-    const meta = { guards: { ...allOn.guards, coord_guard: { mode: "report" }, subprocess_guard: { mode: "off" } } };
+    const meta = { guards: { ...allOn.guards, subprocess_guard: { mode: "off" } } };
     const partly = sh.describeVerdict({
       machines: pc(40 * S),
       guards: sh.describeGuards({ status: "healthy", last_ping_at: ago(40 * S), metadata: meta }, NOW),
       now: NOW,
     });
     assert.equal(partly.tone, "warn");
-    assert.match(partly.text, /^3 of 5 guards are on\. Not fully on: shared-file guard \(watching only\), pop-up guard \(off\)\./);
+    assert.match(partly.text, /^3 of 4 guards are on\. Not fully on: pop-up guard \(off\)\./);
   });
   await check("verdict: an unreadable computer, none paired, and an offline one", () => {
     assert.match(sh.describeVerdict({ machines: null, guards: null, now: NOW }).text, /^Couldn't check your computer/);

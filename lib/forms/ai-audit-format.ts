@@ -404,7 +404,7 @@ export function composeAiAuditWelcome(
         ? `You said you want this moving soon. I read every one of these myself — the fastest way to a real answer is a call: ${bookingUrl}`
         : `You said you want this moving soon. I read every one of these myself — the fastest way to a real answer is a call: reply with two times that work and I'll send the invite.`
       : bookingUrl
-        ? `I read every one of these myself. If talking is easier, pick a time that works for both founders here: ${bookingUrl}`
+        ? `I read every one of these myself. If talking is easier, pick a time with me here: ${bookingUrl}`
         : `I read every one of these myself. If talking is easier, reply with two times that work and I'll send the invite.`;
   // Booked: one sentence, no link to book again (copy by Maven, 2026-10-16; "your video call link", 2026-10-18: the
   // room is an Oasis Meet room, and "Meet link" beside "Google Calendar" read as Google Meet). No recording notice

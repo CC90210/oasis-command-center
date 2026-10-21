@@ -386,11 +386,11 @@ export async function endMeetRoom(db: Client, room: Pick<MeetRoom, "tenantId" | 
 
 /**
  * A live room ends on its own (host_left) once its hosts have all been gone for MEET_HOST_GRACE_MS AND a call
- * happened in it: two different people were in the room at the same time, one of them a host. Two hosts count (CC
- * and Adon, both owners, are both hosts of every room); one signed-in person in two tabs does not. A host who
+ * happened in it: two different people were in the room at the same time, one of them an authorized host. Two host
+ * sessions count; one signed-in person in two tabs does not. A host who
  * opened the room alone (to test their camera, or early) leaves it waiting for its meeting, so the first guest to
  * arrive is never shown "ended". For a meeting made for a time, the call must reach that time (less
- * MEET_EARLY_START_MIN, for a meeting that starts a little early): CC and Adon trying tomorrow's room out together
+ * MEET_EARLY_START_MIN, for a meeting that starts a little early): authorized hosts trying tomorrow's room out
  * today is not its call, and must never end the link its client was sent. A test that ended before the time falls
  * to the backstop below. `?` is the cutoff (now - MEET_HOST_GRACE_MS). A host's last sighting is their last poll;
  * with none, the start. Times compare as text: every one is written by toISOString, and strftime's format matches it.

@@ -471,7 +471,7 @@ async function main() {
   });
 
   await step("a confirmation the browser sends is replaced by the saving owner's", async () => {
-    await login(USERS.adon);
+    await login(USERS.admin);
     const withResult = {
       ...draft,
       sections: [{ key: "results", items: [{ kind: "quote", quote: "Worth it.", who: "Dana", evidence: { permission: true, confirmed: { by: USERS.cc.id, at: OK.at } } }] }],
@@ -481,7 +481,7 @@ async function main() {
     assert.equal(saved.status, 200, JSON.stringify(saved.body));
     const row = await db.execute({ sql: "SELECT draft FROM form_offer_pages WHERE form_id = ?", args: [FORM] });
     const stored = JSON.parse(String(row.rows[0].draft)) as { sections: Array<{ items: Array<{ evidence: { confirmed: { by: string } } }> }> };
-    assert.equal(stored.sections[0].items[0].evidence.confirmed.by, USERS.adon.id, "a browser cannot put CC's name on a claim Adon added");
+    assert.equal(stored.sections[0].items[0].evidence.confirmed.by, USERS.admin.id, "a browser cannot put CC's name on a claim the admin added");
   });
 
   await step("the builder saving the same page again (its 'pending' echo) keeps the stamp, and a live page stays Live", async () => {

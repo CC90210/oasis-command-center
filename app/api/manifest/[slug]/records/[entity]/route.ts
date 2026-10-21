@@ -265,7 +265,7 @@ export async function POST(
    *
    * Deliberately NARROW. This first gate admits only roles that already work
    * the OASIS pipeline; the assignment-roster gate below then limits owners
-   * to CC, Adon and active reps. Every other entity and workspace still
+   * to CC and active reps. Every other entity and workspace still
    * requires an admin because this is the generic record endpoint.
    */
   const repMayCreateOwnLead = isOasisSalesLead && mayWorkWebsiteSalesLifecycle(r.team_role);
@@ -300,7 +300,7 @@ export async function POST(
    * starts in Assigned, lifecycle fields remain server-owned, and the planner
    * stamps the motion/program/ownership fields both boards read. Every owner is
    * resolved against the assignment roster (getOasisPipelineAssignmentRoster:
-   * CC, Adon and ACTIVE reps) before planning; a deactivated teammate is refused.
+   * CC and ACTIVE reps) before planning; a deactivated teammate is refused.
    *
    * Before 2026-09-10 this route accepted only `researched` -- a stage the board
    * had stopped drawing -- and stamped nothing on an admin's lead, so CC's leads
@@ -363,8 +363,8 @@ export async function POST(
           ok: false,
           error: "target_not_on_sales_roster",
           message: r.is_admin
-            ? "Choose CC, Adon or an active sales rep. A deactivated teammate cannot take new work."
-            : "New OASIS leads go only to CC, Adon or an active sales rep. A deactivated teammate cannot take new work.",
+            ? "Choose CC or an active sales rep. A deactivated teammate cannot take new work."
+            : "New OASIS leads go only to CC or an active sales rep. A deactivated teammate cannot take new work.",
           ...(r.is_admin ? { fields: ["assigned_to"] } : {}),
         },
         { status: r.is_admin ? 422 : 403 },

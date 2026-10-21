@@ -1097,7 +1097,7 @@ async function main() {
     const taxOk = tpl.renderTemplate({ slug: "quebec-tax-calendar" }, ctxOk);
     assert.ok(taxOk.includes("TP-1") && taxOk.includes("TP-80") && taxOk.includes("T2125") && taxOk.includes("Not registered for GST or QST"));
     const fa = tpl.renderTemplate({ slug: "founders-agreement" }, ctxOk);
-    assert.ok(fa.includes("[[CC to confirm: the ownership split") && fa.includes("[[CC to confirm: Adon's full legal name"), "no invented split or name");
+    assert.ok(fa.includes("sole proprietor and sole owner") && !fa.includes("Adon") && !fa.includes("ownership split"), "the ownership record stays sole-proprietor only");
   });
   await check("live renderers: sub-processors table, price book, contracts with blanks, GST/QST from Finances", async () => {
     const live = await import("../lib/playbook/live-sources");
