@@ -98,6 +98,7 @@ export const USERS = {
   rep: { id: "0d000000-0000-4000-8000-000000000003", email: "david@oasisai.work" },
   gone: { id: "0d000000-0000-4000-8000-000000000004", email: "former@oasisai.work" },
   admin: { id: "0d000000-0000-4000-8000-000000000005", email: "admin@oasis.test" },
+  formerOperator: { id: "0d000000-0000-4000-8000-000000000006", email: "adon@oasisai.work" },
   clientA: { id: "0d000000-0000-4000-8000-00000000000a", email: "owner@client-a.test" },
   clientB: { id: "0d000000-0000-4000-8000-00000000000b", email: "owner@client-b.test" },
 } as const;
@@ -192,6 +193,7 @@ export async function setupDatabase(): Promise<Client> {
       ...profile(USERS.rep, OASIS, "opener", 0, "David"),
       ...profile(USERS.gone, OASIS, "closer", 0, "Former Rep", "2026-09-20T00:00:00Z"),
       ...profile(USERS.admin, OASIS, "admin", 0, "Operations Admin"),
+      ...profile(USERS.formerOperator, OASIS, "admin", 0, "Former Operator", "2026-10-21T00:00:00Z"),
       ...profile(USERS.clientA, CLIENT_A, "owner", 1, "Alice Client"),
       ...profile(USERS.clientB, CLIENT_B, "owner", 1, "Bob Client"),
     ],

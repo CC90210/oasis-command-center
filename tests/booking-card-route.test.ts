@@ -206,10 +206,10 @@ async function main() {
   });
 
   await check("a former operator's saved Google connection cannot put them back on the booking card or calendar", async () => {
-    const saved = await setUserIntegrationBundle(OASIS, USERS.adon.id, "gmail_oauth", {
+    const saved = await setUserIntegrationBundle(OASIS, USERS.formerOperator.id, "gmail_oauth", {
       refresh_token: "adon-refresh-token",
       scope: "https://www.googleapis.com/auth/calendar.events",
-      gmail_address: USERS.adon.email,
+      gmail_address: USERS.formerOperator.email,
     });
     assert.ok(saved.ok);
     const { hosts } = await cardHosts();
@@ -223,7 +223,7 @@ async function main() {
     const offered = await book();
     assert.equal(offered.error, null);
     assert.ok(hostIds(offered.slots).every((ids) => ids.length === 1 && ids[0] === USERS.cc.id), "the former operator stays absent");
-    assert.equal(offered.reads.has(USERS.adon.id), false, "the former operator's calendar is not read");
+    assert.equal(offered.reads.has(USERS.formerOperator.id), false, "the former operator's calendar is not read");
     agree(hosts, offered.reads);
   });
 
@@ -266,7 +266,7 @@ async function main() {
   await check("a former operator's unreadable saved Google value is ignored by the sole-owner booking route", async () => {
     workspaceToken = "ok";
     // A value the field encryption cannot open (a rotated key, say), in place of his real tokens.
-    await db.execute({ sql: "UPDATE user_integration_credentials SET encrypted_value = 'not-a-ciphertext' WHERE tenant_id = ? AND user_id = ?", args: [OASIS, USERS.adon.id] });
+    await db.execute({ sql: "UPDATE user_integration_credentials SET encrypted_value = 'not-a-ciphertext' WHERE tenant_id = ? AND user_id = ?", args: [OASIS, USERS.formerOperator.id] });
     const { hosts, logs } = await cardHosts();
     assert.deepEqual(
       hosts.map((h) => h.calendar),
@@ -278,7 +278,7 @@ async function main() {
     const ours = logs.filter((l) => l[0] === "[calendar.booking.host-status]");
     assert.equal(ours.length, 0, "the former operator is not read by the card");
     const offered = await book();
-    assert.equal(offered.reads.has(USERS.adon.id), false, "/book never reads the former operator");
+    assert.equal(offered.reads.has(USERS.formerOperator.id), false, "/book never reads the former operator");
     assert.ok(hostIds(offered.slots).every((ids) => ids.length === 1 && ids[0] === USERS.cc.id), "CC remains the sole host");
     agree(hosts, offered.reads);
   });
