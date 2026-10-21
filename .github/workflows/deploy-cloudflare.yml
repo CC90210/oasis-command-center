@@ -196,7 +196,10 @@ jobs:
           fi
 
       - name: Build (OpenNext -> Cloudflare Worker)
-        run: npx opennextjs-cloudflare build
+        # Keep this identical to CI. Next 15 is still Maintenance LTS and the
+        # latest 15.5 patch is supported by OpenNext; the adapter's anniversary
+        # check nevertheless requires this until the Next 16 migration lands.
+        run: npx opennextjs-cloudflare build --dangerouslyUseUnsupportedNextVersion
         env:
           NODE_OPTIONS: "--max-old-space-size=4096 --use-system-ca"
           CF_MIGRATION_BUILD: "1"

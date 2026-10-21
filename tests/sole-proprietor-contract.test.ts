@@ -86,6 +86,23 @@ assert.match(revocation, /UPDATE booking_settings/i);
 assert.match(revocation, /json_each\(booking_settings\.doc, '\$\.hosts'\)/i);
 assert.doesNotMatch(revocation, /\$\.hosts\[\d+\]/, "booking-host removal must not depend on array position");
 
+const pairingRevocation = readFileSync(
+  "database/turso/bravo__236_close_former_oasis_access.sql",
+  "utf8",
+);
+assert.match(pairingRevocation, /UPDATE _supabase_auth_users/i);
+assert.match(pairingRevocation, /session_version\s*=\s*session_version\s*\+\s*1/i);
+assert.match(pairingRevocation, /UPDATE bridge_pairings/i);
+assert.match(pairingRevocation, /tenant_id\s*=\s*'ef8d389e-3f15-43f2-ae00-3660f69a1452'/i);
+assert.match(pairingRevocation, /user_id\s*=\s*'67036c9a-de2e-47cd-89bd-af19004585b1'/i);
+assert.match(pairingRevocation, /revoked_at\s+IS\s+NULL/i);
+assert.match(pairingRevocation, /claim_enabled_at\s*=\s*NULL/i);
+assert.match(pairingRevocation, /claim_capacity\s*=\s*0/i);
+assert.match(pairingRevocation, /UPDATE bridge_pair_codes/i);
+assert.match(pairingRevocation, /UPDATE tenant_invites/i);
+assert.match(pairingRevocation, /UPDATE agent_model_config/i);
+assert.match(pairingRevocation, /encrypted_api_key\s*=\s*NULL/i);
+
 for (const path of [
   "app/api/import/[entity]/route.ts",
   "app/api/leads/import/route.ts",

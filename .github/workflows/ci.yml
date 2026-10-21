@@ -207,7 +207,10 @@ jobs:
           BRAVO_SUPABASE_URL: https://placeholder.supabase.co
           BRAVO_SUPABASE_SERVICE_ROLE_KEY: placeholder
           BRAVO_SUPABASE_ANON_KEY: placeholder
-        run: npx opennextjs-cloudflare build
+        # Next 15 remains Maintenance LTS and OpenNext supports its latest
+        # minor, but the adapter's two-year date check trips on the release
+        # anniversary. Keep this explicit until the planned Next 16 migration.
+        run: npx opennextjs-cloudflare build --dangerouslyUseUnsupportedNextVersion
       # Hand the OpenNext output to wrangler the way the deploy's
       # `wrangler deploy` does, without uploading: it bundles .open-next/worker.js
       # against wrangler.jsonc and prints the upload size. A Worker that
