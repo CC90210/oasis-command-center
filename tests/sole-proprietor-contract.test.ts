@@ -68,6 +68,12 @@ assert.doesNotMatch(
   /APEX_PG_BRIDGE_TOKEN/,
   "the retired APEX credential must not authorize the production bridge",
 );
+const deployWorkflow = readFileSync(".github/workflows/deploy-cloudflare.yml", "utf8");
+assert.doesNotMatch(
+  deployWorkflow,
+  /APEX_PG_BRIDGE_TOKEN|OASIS_SALES_TELEGRAM_(?:BOT_TOKEN|CHAT_ID)/,
+  "deployment must not re-inject retired bridge or shared-sales credentials",
+);
 
 const revocation = readFileSync(
   "database/turso/bravo__235_revoke_former_oasis_operator.sql",
