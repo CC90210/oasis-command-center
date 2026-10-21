@@ -414,6 +414,17 @@ export const OASIS_PIPELINE_ASSIGNMENT_EMAILS = [
   "conaugh@oasisai.work",
 ] as const;
 
+const FORMER_OASIS_OPERATOR_AUTH_USER_IDS = new Set([
+  "67036c9a-de2e-47cd-89bd-af19004585b1",
+]);
+const FORMER_OASIS_OPERATOR_EMAILS = new Set(["adon@oasisai.work"]);
+
+function isFormerOasisOperator(member: Pick<MemberRow, "auth_user_id" | "email">): boolean {
+  const authUserId = (member.auth_user_id || "").trim().toLowerCase();
+  const email = (member.email || "").trim().toLowerCase();
+  return FORMER_OASIS_OPERATOR_AUTH_USER_IDS.has(authUserId) || FORMER_OASIS_OPERATOR_EMAILS.has(email);
+}
+
 export function isOasisPipelineAssignmentMember(member: { email?: string | null }): boolean {
   const email = (member.email || "").trim().toLowerCase();
   return (OASIS_PIPELINE_ASSIGNMENT_EMAILS as readonly string[]).includes(email);
@@ -456,6 +467,7 @@ export async function getOasisPipelineAssignmentRoster(tenantId: string): Promis
   const reps = members.filter(
     (member) =>
       !isOasisPipelineAssignmentMember(member) &&
+      !isFormerOasisOperator(member) &&
       !dbBool(member.is_owner) &&
       isOasisPipelineRepRole(member.team_role),
   );

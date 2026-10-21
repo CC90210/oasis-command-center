@@ -15,9 +15,21 @@ UPDATE platform_operators
 -- retaining every other setting CC selected. This is deliberately conditional
 -- on the exact tenant and auth user id and is safe to re-run.
 UPDATE booking_settings
-   SET doc = json_remove(doc, '$.hosts[1]'),
+   SET doc = json_set(
+         doc,
+         '$.hosts',
+         json((
+           SELECT json_group_array(json(host.value))
+             FROM json_each(booking_settings.doc, '$.hosts') AS host
+            WHERE COALESCE(json_extract(host.value, '$.userId'), '') <> '67036c9a-de2e-47cd-89bd-af19004585b1'
+         ))
+       ),
        version = version + 1,
        updated_at = '2026-10-21T18:15:00Z',
        updated_by = 'migration bravo__235'
  WHERE tenant_id = 'ef8d389e-3f15-43f2-ae00-3660f69a1452'
-   AND json_extract(doc, '$.hosts[1].userId') = '67036c9a-de2e-47cd-89bd-af19004585b1';
+   AND EXISTS (
+         SELECT 1
+           FROM json_each(booking_settings.doc, '$.hosts') AS host
+          WHERE json_extract(host.value, '$.userId') = '67036c9a-de2e-47cd-89bd-af19004585b1'
+       );

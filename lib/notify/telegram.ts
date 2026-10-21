@@ -120,9 +120,10 @@ const LANES: Record<TelegramLane, LaneSpec> = {
   },
   sales: {
     // OASIS is a sole proprietorship. Ignore the former shared-sales secrets
-    // even if they remain configured in a deployment; leads go to CC's lane.
-    tokenKeys: ["OASIS_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"],
-    chatKeys: ["OASIS_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"],
+    // and generic credentials even if they remain configured in a deployment;
+    // sales fails closed unless CC's dedicated OASIS pair is present.
+    tokenKeys: ["OASIS_TELEGRAM_BOT_TOKEN"],
+    chatKeys: ["OASIS_TELEGRAM_CHAT_ID"],
     audience: "CC (OASIS owner and sales desk)",
   },
 };

@@ -56,6 +56,11 @@ assert.match(workerControl, /if \(worker\.archived_on\)/, "retired former-operat
 
 const telegram = readFileSync("lib/notify/telegram.ts", "utf8");
 assert.doesNotMatch(telegram, /OASIS_SALES_TELEGRAM_(?:BOT_TOKEN|CHAT_ID)/);
+assert.match(
+  telegram,
+  /sales:\s*\{[\s\S]*?tokenKeys:\s*\["OASIS_TELEGRAM_BOT_TOKEN"\][\s\S]*?chatKeys:\s*\["OASIS_TELEGRAM_CHAT_ID"\]/,
+  "sales alerts must fail closed on CC's dedicated OASIS Telegram credentials",
+);
 
 const pgBridge = readFileSync("app/api/pg/rest/v1/[...path]/route.ts", "utf8");
 assert.doesNotMatch(
@@ -72,7 +77,8 @@ assert.match(revocation, /UPDATE platform_operators/i);
 assert.match(revocation, /67036c9a-de2e-47cd-89bd-af19004585b1/);
 assert.match(revocation, /revoked_at\s+IS\s+NULL/i);
 assert.match(revocation, /UPDATE booking_settings/i);
-assert.match(revocation, /json_remove\(doc, '\$\.hosts\[1\]'\)/i);
+assert.match(revocation, /json_each\(booking_settings\.doc, '\$\.hosts'\)/i);
+assert.doesNotMatch(revocation, /\$\.hosts\[\d+\]/, "booking-host removal must not depend on array position");
 
 for (const path of [
   "app/api/import/[entity]/route.ts",

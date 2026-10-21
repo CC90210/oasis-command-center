@@ -67,7 +67,7 @@ require.cache[headersPath] = {
 } as unknown as NodeModule;
 
 const CC = "1a1a1a1a-0000-4000-8000-000000000001";
-const ADON = "1a1a1a1a-0000-4000-8000-000000000002";
+const ADON = "67036c9a-de2e-47cd-89bd-af19004585b1";
 const DAVID = "1a1a1a1a-0000-4000-8000-000000000003"; // active opener
 const SCHNEUR = "1a1a1a1a-0000-4000-8000-000000000004"; // active builder
 const RETIRED = "1a1a1a1a-0000-4000-8000-000000000005"; // deactivated opener
@@ -208,16 +208,18 @@ async function main() {
   console.log("web-leads-claim-active-roster:");
 
   // ── the roster the route composes ────────────────────────────────────────
-  // Read the way the route reads it: founders first, then active reps; the
-  // deactivated opener is absent, and resolveAssignableTarget agrees.
+  // Read the way the route reads it: CC first, then active reps. The former
+  // operator and deactivated opener are absent, and resolveAssignableTarget agrees.
   const roster = await getOasisPipelineAssignmentRoster(WEBDEV_TENANT_ID);
   const rosterIds = roster.map((m) => m.auth_user_id);
-  assert.deepEqual(rosterIds.slice(0, 2), [CC, ADON], "the founders lead the roster");
-  assert.deepEqual([...rosterIds.slice(2)].sort(), [DAVID, SCHNEUR].sort(), "the active reps follow them");
+  assert.equal(rosterIds[0], CC, "CC does not lead the sole-owner roster");
+  assert.deepEqual([...rosterIds.slice(1)].sort(), [DAVID, SCHNEUR].sort(), "the active reps do not follow CC");
+  assert.equal(rosterIds.includes(ADON), false, "the former operator re-entered through an active sales role");
+  assert.equal(resolveAssignableTarget(roster, ADON), null);
   assert.equal(rosterIds.includes(RETIRED), false, "a deactivated rep is on the assignment roster");
   assert.equal(resolveAssignableTarget(roster, RETIRED), null);
   assert.equal(resolveAssignableTarget(roster, ` ${DAVID.toUpperCase()} `), DAVID);
-  run("the assignment roster is CC and the active reps -- never the deactivated one");
+  run("the assignment roster is CC and active reps -- never the former operator or a deactivated rep");
 
   // ── an ACTIVE rep self-claims from the pool ──────────────────────────────
   await login(DAVID);
