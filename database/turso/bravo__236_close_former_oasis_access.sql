@@ -11,7 +11,6 @@ UPDATE _supabase_auth_users
        session_version = session_version + 1,
        updated_at = '2026-10-21T21:32:00Z'
  WHERE id = '67036c9a-de2e-47cd-89bd-af19004585b1'
-   AND lower(email) = 'adon@oasisai.work'
    AND (banned_until IS NULL OR banned_until <> '9999-12-31T23:59:59Z');
 
 -- A reset token must not provide a route around the login ban.

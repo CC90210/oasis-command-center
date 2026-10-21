@@ -92,6 +92,13 @@ const pairingRevocation = readFileSync(
 );
 assert.match(pairingRevocation, /UPDATE _supabase_auth_users/i);
 assert.match(pairingRevocation, /session_version\s*=\s*session_version\s*\+\s*1/i);
+const authRevocation = pairingRevocation.split("-- A reset token")[0];
+assert.match(authRevocation, /WHERE id\s*=\s*'67036c9a-de2e-47cd-89bd-af19004585b1'/i);
+assert.doesNotMatch(
+  authRevocation,
+  /lower\(email\)/i,
+  "the auth ban must follow the immutable identity ID even if its email changes",
+);
 assert.match(pairingRevocation, /UPDATE bridge_pairings/i);
 assert.match(pairingRevocation, /tenant_id\s*=\s*'ef8d389e-3f15-43f2-ae00-3660f69a1452'/i);
 assert.match(pairingRevocation, /user_id\s*=\s*'67036c9a-de2e-47cd-89bd-af19004585b1'/i);
