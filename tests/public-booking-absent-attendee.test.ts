@@ -16,13 +16,26 @@ for (const key of Object.keys(process.env)) {
 
 const CC = "owner-cc";
 const FORMER_OPERATOR = "former-operator";
-const settings: BookingSettings = defaultOasisBookingSettings({
+const currentDefault = defaultOasisBookingSettings({
   organizerUserId: CC,
   attendeeUserId: FORMER_OPERATOR,
 });
+// Model the stale document as it existed before the cutoff. The current
+// default intentionally ignores attendeeUserId, so relying on that argument
+// would make this test pass without ever exercising a persisted former host.
+const settings: BookingSettings = {
+  ...currentDefault,
+  hosts: [
+    currentDefault.hosts[0],
+    {
+      ...currentDefault.hosts[0],
+      userId: FORMER_OPERATOR,
+      role: "attendee",
+    },
+  ],
+};
 const roster = [
   { auth_user_id: CC, email: "cc@example.com", full_name: "CC", display_name: null },
-  { auth_user_id: FORMER_OPERATOR, email: "former@example.com", full_name: "Former operator", display_name: null },
 ];
 
 async function main(): Promise<void> {

@@ -524,13 +524,13 @@ export async function loadPublicBookingAvailability(
       busyByHost.set(configured.userId, busy);
     } catch (error) {
       if (configured.role === "organizer") throw error;
-      // An attendee who has not connected their work calendar (none, revoked,
-      // another account, or no calendar permission) is left off the call: CC
-      // chose (2026-10-16) that Adon's days book with CC alone until Adon
-      // connects, and they include him again on the first read that works.
+      // An attendee who is no longer on the live roster, or has not connected
+      // their work calendar (none, revoked, another account, or no calendar
+      // permission), is left off the call. This makes stale saved settings
+      // harmless after an offboarding while the proprietor stays bookable.
       // Any other failure (Google down, a cut-off read) closes this attendee's
       // on-duty slots only; the organizer's solo hours stay bookable.
-      const absent = isUnconnectedCalendar(error);
+      const absent = !host || isUnconnectedCalendar(error);
       console.error(absent ? "[public-booking.attendee-calendar-not-connected]" : "[public-booking.attendee-busy-unavailable]", {
         userId: configured.userId,
         error: error instanceof Error ? error.message : String(error),
