@@ -14,7 +14,7 @@ import {
   snap,
   weekdayShort,
 } from "@/lib/calendar/dates";
-import { layoutDay, layoutSpans } from "@/lib/calendar/layout";
+import { chipBox, layoutDay, layoutSpans } from "@/lib/calendar/layout";
 import { shabbatWindows, sunTimes } from "@/lib/calendar/sun";
 import type { CalendarPrefs, CalendarRecord, Occurrence } from "@/lib/calendar/types";
 import { anchorOf, hueOf, type Anchor } from "./ui";
@@ -377,7 +377,8 @@ type BlockProps = {
 
 function EventBlock({ occ, hue, top, height, left, width, now, selected, dragging, ghost, resizable, onOpen, onGrab }: BlockProps) {
   const title = occ.event.title || "(No title)";
-  const compact = height < 34;
+  const box = chipBox(height);
+  const tier = box.tier;
   const time = formatTimeRange(occ.start, occ.end);
   const label = `${title}, ${time}${occ.event.location ? `, ${occ.event.location}` : ""}${occ.master ? ", repeating" : ""}`;
   return (
@@ -391,8 +392,9 @@ function EventBlock({ occ, hue, top, height, left, width, now, selected, draggin
       data-dragging-source={dragging}
       data-free={!occ.event.busy}
       data-past={occ.end < now}
-      className={`chip absolute overflow-hidden px-1.5 text-left ${ghost ? "pointer-events-none" : "cursor-pointer"}`}
-      style={{ top: top + 1, height: Math.max(18, height - 2), left: `calc(${left * 100}% + 2px)`, width: `calc(${width * 100}% - ${width < 1 ? 3 : 6}px)` }}
+      data-size={tier}
+      className={`chip absolute min-w-0 overflow-hidden px-1.5 text-left ${ghost ? "pointer-events-none" : "cursor-pointer"}`}
+      style={{ top: top + 1, height: box.height, left: `calc(${left * 100}% + 2px)`, width: `calc(${width * 100}% - ${width < 1 ? 3 : 6}px)` }}
       onPointerDown={(e) => onGrab?.(e, "move")}
       onClick={(e) => {
         if (!ghost) onOpen?.(occ, e.currentTarget);
@@ -404,7 +406,13 @@ function EventBlock({ occ, hue, top, height, left, width, now, selected, draggin
         }
       }}
     >
-      {compact ? (
+      {tier === "micro" ? (
+        // A 15-minute block: one line that fits its own 12px slot.
+        <div className="truncate text-[10px] leading-[11px]">
+          <span className="font-semibold">{title}</span>
+          <span className="text-fg-muted">, {formatTime(occ.start)}</span>
+        </div>
+      ) : tier === "compact" ? (
         <div className="truncate text-[11px] leading-4 pt-px">
           <span className="font-semibold">{title}</span>
           <span className="text-fg-muted">, {formatTime(occ.start)}</span>
@@ -412,11 +420,11 @@ function EventBlock({ occ, hue, top, height, left, width, now, selected, draggin
       ) : (
         <div className="pt-0.5">
           <div className="flex items-start gap-1">
-            <span className="line-clamp-2 text-[12px] font-semibold leading-4">{title}</span>
+            <span className={`${tier === "regular" ? "line-clamp-1" : "line-clamp-2"} break-words text-[12px] font-semibold leading-[14px]`}>{title}</span>
             {occ.master && <Repeat2 className="mt-0.5 h-3 w-3 shrink-0 opacity-60" aria-hidden />}
           </div>
-          <div className="truncate text-[11px] leading-4 text-fg-muted">{time}</div>
-          {occ.event.location && height > 64 && <div className="truncate text-[11px] leading-4 text-fg-muted">{occ.event.location}</div>}
+          <div className="truncate text-[11px] leading-[14px] text-fg-muted">{time}</div>
+          {occ.event.location && height > 64 && <div className="truncate text-[11px] leading-[14px] text-fg-muted">{occ.event.location}</div>}
         </div>
       )}
       {resizable && onGrab && (

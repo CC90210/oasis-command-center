@@ -94,6 +94,11 @@
 .cal .chip[data-past="true"]:not([data-free="true"]) {
   background: color-mix(in oklch, var(--ev) 12%, rgb(var(--c-bg-panel)));
 }
+/* A 15-minute block: one line and a lighter edge, so a run of them reads as a list. */
+.cal .chip[data-size="micro"] {
+  border-radius: 3px;
+  border-left-width: 2px;
+}
 /* The lifted copy while dragging: it floats, so it gets the elevation shadow. */
 .cal .chip[data-ghost="true"] {
   box-shadow: var(--cal-lift);
