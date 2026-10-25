@@ -406,14 +406,9 @@ function EventBlock({ occ, hue, top, height, left, width, now, selected, draggin
         }
       }}
     >
-      {tier === "micro" ? (
-        // A 15-minute block: one line that fits its own 12px slot.
-        <div className="truncate text-[10px] leading-[11px]">
-          <span className="font-semibold">{title}</span>
-          <span className="text-fg-muted">, {formatTime(occ.start)}</span>
-        </div>
-      ) : tier === "compact" ? (
-        <div className="truncate text-[11px] leading-4 pt-px">
+      {tier === "micro" || tier === "compact" ? (
+        // One line: "Title, 8:30am". A 15-minute (micro) block is a 12px slot, so its line is smaller.
+        <div className={`truncate ${tier === "micro" ? "text-[10px] leading-[11px]" : "pt-px text-[11px] leading-4"}`}>
           <span className="font-semibold">{title}</span>
           <span className="text-fg-muted">, {formatTime(occ.start)}</span>
         </div>
