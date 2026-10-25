@@ -47,7 +47,7 @@ export function ScheduleView({ occurrences, calendars, now, selectedKey, onOpen,
               const day = new Date(k);
               const today = sameDay(day, now);
               return (
-                <li key={k} className="grid grid-cols-[88px_minmax(0,1fr)] gap-4 py-3 sm:grid-cols-[120px_minmax(0,1fr)]">
+                <li key={k} className="grid grid-cols-1 gap-2 py-3 sm:grid-cols-[120px_minmax(0,1fr)] sm:gap-4">
                   <button type="button" onClick={() => onPickDay(day)} className="flex items-start gap-2 self-start rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-accent">
                     <span className="daynum text-base" data-today={today}>{day.getDate()}</span>
                     <span className={`pt-1.5 text-[11px] font-medium ${today ? "text-accent" : "text-fg-dim"}`}>
@@ -64,13 +64,13 @@ export function ScheduleView({ occurrences, calendars, now, selectedKey, onOpen,
                             data-hue={hueOf(o, calendars)}
                             data-selected={selectedKey === o.key}
                             onClick={(e) => onOpen(o, e.currentTarget)}
-                            className={`dotline grid w-full grid-cols-[12px_128px_minmax(0,1fr)] items-center gap-3 px-2 py-1.5 text-left text-[13px] ${o.end < now ? "text-fg-muted" : "text-fg"}`}
+                            className={`dotline grid w-full grid-cols-[12px_minmax(0,1fr)] items-start gap-x-3 gap-y-0.5 px-2 py-2 text-left text-[13px] sm:grid-cols-[12px_128px_minmax(0,1fr)] sm:items-center sm:gap-3 sm:py-1.5 ${o.end < now ? "text-fg-muted" : "text-fg"}`}
                           >
-                            <span className="swatch h-2.5 w-2.5 rounded-full" aria-hidden />
-                            <span className="truncate text-fg-muted">{o.allDay || !sameDay(o.start, new Date(o.end.getTime() - 1)) ? spanLabel(o, day) : formatTimeRange(o.start, o.end)}</span>
-                            <span className="flex min-w-0 items-center gap-2">
-                              <span className="truncate font-medium">{title}</span>
-                              {o.master && <Repeat2 className="h-3.5 w-3.5 shrink-0 text-fg-dim" aria-label="Repeats" />}
+                            <span className="swatch col-start-1 row-start-1 mt-1 h-2.5 w-2.5 rounded-full sm:mt-0" aria-hidden />
+                            <span className="col-start-2 row-start-2 truncate text-[12px] text-fg-muted sm:row-start-1 sm:text-[13px]">{o.allDay || !sameDay(o.start, new Date(o.end.getTime() - 1)) ? spanLabel(o, day) : formatTimeRange(o.start, o.end)}</span>
+                            <span className="col-start-2 row-start-1 flex min-w-0 items-start gap-2 sm:col-start-3 sm:items-center">
+                              <span className="min-w-0 break-words font-medium sm:truncate">{title}</span>
+                              {o.master && <Repeat2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-dim sm:mt-0" aria-label="Repeats" />}
                               {o.event.location && (
                                 <span className="hidden min-w-0 items-center gap-1 truncate text-[12px] text-fg-muted md:flex">
                                   <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden />
