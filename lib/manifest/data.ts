@@ -38,11 +38,21 @@ import { publicFormOrigin } from "@/lib/forms/public-origin";
 // file until 2026-08-11, which is exactly how the drip engine came to be
 // selecting an audience the board does not show. See lib/leads/board-visibility.ts.
 import { applyLeadsBoardFilter, detectBoardExit } from "@/lib/leads/board-visibility";
+// A person who said "stop" stays that way: the rule and the record of an
+// authorised lift. See the CONSENT FLAGS STAY SET block in updateRecord.
+import {
+  CONSENT_FLAG_LOCKED,
+  CONSENT_FLAG_LOCKED_MESSAGE,
+  CONSENT_LIFT_NOT_RECORDED_MESSAGE,
+} from "@/lib/consent/lead-consent-flags";
+import { guardConsentLift, type ConsentLifter } from "@/lib/consent/consent-lift";
 
 export class RecordsError extends Error {
   constructor(
-    public code: "validation" | "not_found" | "forbidden" | "db" | "conflict",
-    message: string
+    public code: "validation" | "not_found" | "forbidden" | "db" | "conflict" | "consent_flag_locked",
+    message: string,
+    /** consent_flag_locked only: the keys the refused write would have lifted. */
+    public fields?: readonly string[]
   ) {
     super(message);
     this.name = "RecordsError";
@@ -620,6 +630,19 @@ export type UpdateRecordInput = {
    *  stage AND current owner). Kept separate from `ifMatch` so existing call
    *  sites and their single-condition contract remain unchanged. */
   ifMatchAll?: readonly { field: string; value: string | null }[];
+  /**
+   * CONSENT LIFT. A write that would clear a do-not-contact marker on a lead
+   * (dnc, opted_out, sms_opt_out, email_opt_out, sms_opt_out_at) or move it out
+   * of the opted_out stage/status is refused with RecordsError
+   * "consent_flag_locked" unless this is set. Pass it ONLY from a route whose
+   * signed-in caller is a workspace owner or admin by BASE ROLE
+   * (session.isTrueAdmin, not the admin_access grant), with that person's auth
+   * user id. updateRecord writes the lead_interactions row that records the lift
+   * before it makes it. Never from an AI action, the bridge, a bulk edit, an
+   * import or quick-add. Rule: lib/consent/lead-consent-flags.ts; decision and
+   * record: lib/consent/consent-lift.ts.
+   */
+  allowConsentLift?: ConsentLifter;
 };
 
 export async function updateRecord(input: UpdateRecordInput): Promise<TenantRecord> {
@@ -654,6 +677,35 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
     input.patch.stage_entered_at === undefined
   ) {
     merged.stage_entered_at = new Date().toISOString();
+  }
+
+  // CONSENT FLAGS STAY SET (2026-10-20). Every generic writer funnels through
+  // here, and several hand it keys a client or an agent chose: the manifest
+  // PATCH, the bridge, the AI's update_record (and the cloud chat tool that runs
+  // it), bulk stage moves. None of them may take back a "do not call me" or a
+  // "stop": the dnc / opted_out / sms_opt_out / email_opt_out flags, the
+  // sms_opt_out_at stamp, or a stage or status of opted_out. The caller who may
+  // is a workspace owner or admin by base role, via allowConsentLift, and the
+  // lift is recorded BEFORE it is made, so there is no lift without a record
+  // (guardConsentLift: lib/consent/consent-lift.ts).
+  //
+  // This reads the row fetched at the top of the function, like the merge
+  // above, so it shares that read-merge-write window: a flag stamped by a
+  // concurrent writer between the read and the write is not seen by this check
+  // and is overwritten by the merged document. Closing that takes the same
+  // optimistic-concurrency pin `ifMatch` uses and is a separate change.
+  const consent = await guardConsentLift({
+    tenantId: input.tenant_id,
+    entity: input.entity,
+    recordId: input.id,
+    before: existing.data,
+    patch: input.patch,
+    lifter: input.allowConsentLift ?? null,
+  });
+  if (!consent.ok) {
+    throw consent.reason === "locked"
+      ? new RecordsError(CONSENT_FLAG_LOCKED, CONSENT_FLAG_LOCKED_MESSAGE, consent.lifted)
+      : new RecordsError("db", CONSENT_LIFT_NOT_RECORDED_MESSAGE);
   }
 
   const db = getServiceSupabase();

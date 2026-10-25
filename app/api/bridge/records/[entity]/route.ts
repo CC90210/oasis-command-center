@@ -220,12 +220,22 @@ export async function PATCH(
     return NextResponse.json({ ok: true, record });
   } catch (err) {
     const code = err instanceof RecordsError ? err.code : "unknown";
+    // A daemon never takes back a "stop": updateRecord refuses a patch that
+    // clears a consent flag or leaves opted_out, and this route never asks it
+    // to let a lift through. The daemon is told which keys, so it can stop
+    // sending them.
     const status =
       code === "not_found" ? 404
         : code === "validation" ? 400
-          : 500;
+          : code === "consent_flag_locked" ? 409
+            : 500;
     return NextResponse.json(
-      { ok: false, error: code, message: err instanceof Error ? err.message : "update_failed" },
+      {
+        ok: false,
+        error: code,
+        message: err instanceof Error ? err.message : "update_failed",
+        ...(err instanceof RecordsError && err.fields ? { fields: err.fields } : {}),
+      },
       { status },
     );
   }

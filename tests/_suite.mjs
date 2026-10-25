@@ -567,6 +567,11 @@ const TESTS = [
   // handed: the post-turn tail is one job given to keepAlive BEFORE the stream closes (cloud chat tail;
   // 2026-10-20 audit). Real handlers, and a platform that dies with the response as workerd does.
   "tests/cloud-chat-persists-after-close.test.ts",
+  // A person who said "do not call me" or "stop" stays that way: no rep, read-only
+  // seat, AI action, bridge write, bulk move, import or quick-add can clear a consent
+  // flag or take a lead out of opted_out. Only a workspace owner or admin by base
+  // role can, and the lift is recorded (2026-10-20). Real routes, real SQL.
+  "tests/consent-flags-stay-set.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

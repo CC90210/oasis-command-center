@@ -810,6 +810,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const consentLocked: string[] = [];
   for (const id of ids) {
     const existing = await db
       .from("tenant_records")
@@ -843,6 +844,15 @@ export async function POST(req: NextRequest) {
         patch: { [field]: stage, last_contacted_at: occurredAt },
       });
     } catch (err) {
+      // A lead that said "stop" stays in opted_out: a bulk move never takes it
+      // back (updateRecord refuses, and this route never asks it to let a lift
+      // through). That is a deliberate skip, not a failure, and the caller is
+      // told which.
+      if (err instanceof RecordsError && err.code === "consent_flag_locked") {
+        out.skipped += 1;
+        consentLocked.push(id);
+        continue;
+      }
       void (err instanceof RecordsError ? err.code : "unknown");
       out.failed += 1;
       continue;
@@ -872,5 +882,11 @@ export async function POST(req: NextRequest) {
     });
     if (interaction.error) out.trackingFailed += 1;
   }
-  return NextResponse.json({ ok: true, op, ...out });
+  return NextResponse.json({
+    ok: true,
+    op,
+    ...out,
+    // Only when something was left in opted_out, so every other answer is unchanged.
+    ...(consentLocked.length > 0 ? { consent_locked: consentLocked } : {}),
+  });
 }
