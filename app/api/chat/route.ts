@@ -1041,7 +1041,9 @@ export async function POST(req: NextRequest) {
         // we already fetched for the streaming redactor — one DB round-trip
         // per turn covers both the live stream scrub AND the persist scrub.
         const latencyMs = Date.now() - startedAt;
-        await persistAssistantTurn({
+        // False when the row was not written (persistAssistantTurn logs why);
+        // the inbox marks below wait on it.
+        const replySaved = await persistAssistantTurn({
           sessionId,
           tenantId,
           content: assistantText,
@@ -1078,27 +1080,45 @@ export async function POST(req: NextRequest) {
             cfgScope === "user"
               ? lastUsedUpdate.eq("user_id", user.id)
               : lastUsedUpdate.is("user_id", null);
-          await lastUsedUpdate;
+          const lastUsed = await lastUsedUpdate;
+          if (lastUsed.error) {
+            console.error("[chat.last_used] the agent's last-used time was not stamped", {
+              tenantId,
+              agentKey,
+              error: lastUsed.error.message,
+            });
+          }
         }
 
         // ---- Mark injected inbox messages read ----------------------------
         // The "INBOX FOR YOU" block in the system prompt was assembled by
-        // composeDashboardContextV2; it returned the IDs it consumed. We
-        // mark them read NOW (after the assistant successfully responded
-        // and was persisted) so they don't repeat on the next turn. If
-        // the stream errored above, streamError is non-null but we still
-        // mark read — the agent saw the message; "delivered" is the right
-        // semantic. If the route never got here at all (caller disconnect,
-        // crash before persist), the messages stay unread for retry.
-        if (injectedInboxIds.length > 0 && !streamError) {
+        // composeDashboardContextV2; it returned the IDs it consumed. They
+        // are marked read only when the turn answered them: the stream did
+        // not error AND the reply was saved. Otherwise they stay unread and
+        // are offered again next turn, rather than vanishing along with a
+        // reply that was never kept (2026-10-20 review of #722). A mark that
+        // fails is logged; markReadDb reports a failed update instead of
+        // throwing.
+        if (injectedInboxIds.length > 0 && !streamError && replySaved) {
           await Promise.all(
-            injectedInboxIds.map((id) =>
-              markReadDb(tenantId, id).catch(() => null)
-            )
+            injectedInboxIds.map(async (id) => {
+              const marked = await markReadDb(tenantId, id).catch((err: unknown) => ({
+                ok: false,
+                error: err instanceof Error ? err.message : String(err),
+              }));
+              if (!marked.ok) {
+                console.error("[chat.inbox] an answered inbox message was not marked read; it will be offered again", {
+                  tenantId,
+                  id,
+                  error: marked.error,
+                });
+              }
+            }),
           );
         }
       })();
-      await keepAlive(postTurn, "chat.post-turn");
+      // The session id names the turn whose reply a failed step concerns.
+      await keepAlive(postTurn, `chat.post-turn:${sessionId}`);
 
       send("done", {});
       controller.close();
