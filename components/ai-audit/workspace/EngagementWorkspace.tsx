@@ -10,6 +10,7 @@
  */
 import { useState } from "react";
 import Link from "next/link";
+import { PageFrame } from "@/components/os/PageFrame";
 import { useRouter } from "next/navigation";
 import type { EngagementView } from "@/lib/ai-audit/view";
 import {
@@ -81,23 +82,21 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
   const cur = view.proposal?.currency ?? view.settings.default_currency;
 
   return (
-    <div className="grid gap-5">
-      <header className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div className="min-w-0">
-          <div className="text-[13px] text-fg-muted">
-            <Link href="/ai-audit" className="hover:underline">
-              AI audits
-            </Link>{" "}
-            / {view.row.stage_number ? `${view.row.stage_number}. ` : ""}
-            {view.row.stage_label}
-          </div>
-          <h1 className="mt-1 text-xl font-semibold leading-7 tracking-[-0.01em] text-fg">{e.business_name || "Unnamed business"}</h1>
-          <div className="mt-1 text-[13px] text-fg-muted">
-            Next: <span className="text-fg">{view.row.next_action}</span>
-            {e.health !== "ok" ? <span className="ml-2 text-status-warm">{e.health_reason}</span> : null}
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-2">
+    <PageFrame
+      title={e.business_name || "Unnamed business"}
+      subtitle={
+        <>
+          <Link href="/ai-audit" className="hover:underline">
+            AI audits
+          </Link>
+          {" / "}
+          {view.row.stage_number ? `${view.row.stage_number}. ` : ""}
+          {view.row.stage_label}. Next: <span className="text-fg">{view.row.next_action}</span>
+          {e.health !== "ok" ? <span className="ml-2 text-status-warm">{e.health_reason}</span> : null}
+        </>
+      }
+      actions={
+        <>
           <Link href={`/pipeline/${e.lead_id}`} className="btn-secondary">
             Lead record
           </Link>
@@ -106,8 +105,10 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               {s === "declined" ? "Mark declined" : s === "cancelled" ? "Cancel engagement" : `Move to ${AI_AUDIT_STAGE_LABELS[s as AiAuditStage]}`}
             </button>
           ))}
-        </div>
-      </header>
+        </>
+      }
+    >
+    <div className="grid gap-5">
 
       {message ? (
         <div className="rounded-lg border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-fg">
@@ -259,8 +260,8 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               {view.deliveryApproval?.message ? <div className="text-[13px] text-status-warm">{view.deliveryApproval.message}</div> : null}
             </div>
             {view.deliveryApproval?.status === "pending" ? (
-              <Link href="/approvals" className="btn-primary justify-self-start">
-                Open the approval
+              <Link href="/feed" className="btn-primary justify-self-start">
+                Open it in Needs you
               </Link>
             ) : null}
             <div className="mt-2 text-fg-muted">
@@ -330,5 +331,6 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
         </section>
       ) : null}
     </div>
+    </PageFrame>
   );
 }

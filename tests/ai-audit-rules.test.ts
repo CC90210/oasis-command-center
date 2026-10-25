@@ -119,6 +119,23 @@ async function main() {
     assert.equal(rules.STAGE_MOVES.declined.length + rules.STAGE_MOVES.cancelled.length + rules.STAGE_MOVES.active_client.length, 0);
     for (const s of rules.MANUAL_STAGE_TARGETS) assert.ok(!["delivered", "payment_confirmed", "onboarding", "active_client"].includes(s), `${s} must never be set by hand`);
   });
+  await check("stalls: never opened, opened but unpaid, and a checkout started then abandoned all alert", () => {
+    const now = new Date("2026-10-25T12:00:00Z");
+    const daysAgo = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOString();
+    const link = (created: number, viewed: number | null) => ({ created_at: daysAgo(created), first_viewed_at: viewed === null ? null : daysAgo(viewed) });
+    assert.match(rules.stallReason({ stage: "delivered", payment_status: "none" }, link(4, null), now) ?? "", /Not opened/);
+    assert.equal(rules.stallReason({ stage: "delivered", payment_status: "none" }, link(2, null), now), null);
+    assert.match(rules.stallReason({ stage: "proposal_review", payment_status: "none" }, link(9, 8), now) ?? "", /no payment/);
+    assert.equal(rules.stallReason({ stage: "proposal_review", payment_status: "none" }, link(9, 6), now), null);
+    // Pressed Pay ten days ago, never paid: the session expired, the stage stayed.
+    assert.match(rules.stallReason({ stage: "payment_pending", payment_status: "pending" }, link(11, 10), now) ?? "", /Started checkout/);
+    assert.equal(rules.stallReason({ stage: "payment_pending", payment_status: "pending" }, link(3, 2), now), null);
+    // Paid, refunded or disputed engagements are other alerts, never a stall.
+    for (const ps of ["paid", "refunded", "disputed", "overpaid_review"] as const) {
+      assert.equal(rules.stallReason({ stage: "payment_pending", payment_status: ps }, link(30, 29), now), null);
+    }
+    assert.equal(rules.stallReason({ stage: "onboarding", payment_status: "none" }, link(30, 29), now), null);
+  });
   await check("every engagement stage maps to a real pipeline stage or none", () => {
     const pipeline = new Set(["researched", "assigned", "attempting_contact", "connected", "qualified", "founder_meeting_booked", "demo_completed", "proposal_sent", "won", "lost", "onboarding", "in_build", "client_review", "launched"]);
     for (const s of rules.AI_AUDIT_STAGES) {

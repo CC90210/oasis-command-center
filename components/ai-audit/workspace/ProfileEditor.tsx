@@ -75,6 +75,12 @@ export function ProfileEditor({ engagementId, fields, frozen }: { engagementId: 
     if (!draft) return;
     const def = PROFILE_FIELDS.find((d) => d.key === draft.key);
     if (!def) return;
+    // An empty answer is never saved as a value: an empty number would become 0
+    // (an invented figure) and an untouched yes/no would become No.
+    if ((def.type === "boolean" || def.type === "number" || def.type === "money") && !draft.value.trim()) {
+      setError(def.type === "boolean" ? "Choose Yes or No first." : "Enter the figure first, or cancel to leave it as a gap.");
+      return;
+    }
     let value: unknown = draft.value;
     if (def.type === "number" || def.type === "money") value = Number(draft.value.replace(/[$,\s]/g, ""));
     if (def.type === "boolean") value = draft.value.trim().toLowerCase().startsWith("y");
@@ -159,7 +165,10 @@ export function ProfileEditor({ engagementId, fields, frozen }: { engagementId: 
                         {def.type === "text" || def.type === "list" || def.type === "rows" ? (
                           <textarea id={`v-${def.key}`} className="textarea" value={draft.value} onChange={(e) => setDraft({ ...draft, value: e.target.value })} />
                         ) : def.type === "boolean" ? (
-                          <select id={`v-${def.key}`} className="select" value={draft.value || "yes"} onChange={(e) => setDraft({ ...draft, value: e.target.value })}>
+                          <select id={`v-${def.key}`} className="select" value={draft.value} onChange={(e) => setDraft({ ...draft, value: e.target.value })}>
+                            <option value="" disabled>
+                              Choose
+                            </option>
                             <option value="yes">Yes</option>
                             <option value="no">No</option>
                           </select>

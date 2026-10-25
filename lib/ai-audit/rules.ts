@@ -216,6 +216,37 @@ export const CHECKOUT_TTL_HOURS = 24;
 
 export const STALL_NO_VIEW_DAYS = 3;
 export const STALL_NO_PAYMENT_DAYS = 7;
+const DAY_MS = 86_400_000;
+
+/** The stages where the next move is the client's. */
+export const WAITING_ON_CLIENT_STAGES: readonly AiAuditStage[] = ["delivered", "proposal_review", "payment_pending"];
+
+/**
+ * Why an engagement that waits on the client is stalled, or null.
+ *
+ * Never opened: counted from delivery. Opened but unpaid: counted from the
+ * first view. A client who pressed Pay and walked away is still unpaid: their
+ * Checkout Session expires after a day, the stage stays Payment Pending and the
+ * payment status stays pending, so this rule must cover them too (Codex review
+ * of PR #732: they were excluded and never alerted).
+ */
+export function stallReason(
+  e: { stage: AiAuditStage; payment_status: PaymentStatus },
+  link: { created_at: string; first_viewed_at: string | null },
+  now: Date,
+): string | null {
+  if (!WAITING_ON_CLIENT_STAGES.includes(e.stage)) return null;
+  if (e.payment_status !== "none" && e.payment_status !== "pending") return null;
+  const t = now.getTime();
+  if (e.stage === "payment_pending") {
+    const since = Date.parse(link.first_viewed_at ?? link.created_at);
+    return t - since > STALL_NO_PAYMENT_DAYS * DAY_MS ? `Started checkout, but no payment ${STALL_NO_PAYMENT_DAYS} days after opening the audit.` : null;
+  }
+  if (!link.first_viewed_at) {
+    return t - Date.parse(link.created_at) > STALL_NO_VIEW_DAYS * DAY_MS ? `Not opened ${STALL_NO_VIEW_DAYS} days after delivery.` : null;
+  }
+  return t - Date.parse(link.first_viewed_at) > STALL_NO_PAYMENT_DAYS * DAY_MS ? `Opened, but no payment ${STALL_NO_PAYMENT_DAYS} days later.` : null;
+}
 
 export function isOneOf<T extends string>(list: readonly T[], v: unknown): v is T {
   return typeof v === "string" && (list as readonly string[]).includes(v);

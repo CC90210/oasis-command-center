@@ -58,6 +58,34 @@ function lines(s: string): string[] {
   return s.split("\n").map((x) => x.trim()).filter(Boolean);
 }
 
+function commaList(s: string): string[] {
+  return s.split(",").map((d) => d.trim()).filter(Boolean);
+}
+
+/**
+ * A comma-separated list in one line. The raw text is kept while CC types, so
+ * "f1, " keeps its comma and "Google " keeps its space; the parsed list goes up
+ * on every keystroke. When the list changes from outside (a row above was
+ * removed, the draft was reloaded) the field shows the new list, not stale text.
+ */
+function ListInput({ value, onChange, disabled, placeholder, parse = parseIds }: { value: string[]; onChange: (ids: string[]) => void; disabled: boolean; placeholder?: string; parse?: (s: string) => string[] }) {
+  const [text, setText] = useState(value.join(", "));
+  const parsed = parse(text);
+  const shown = parsed.length === value.length && parsed.every((x, i) => x === value[i]) ? text : value.join(", ");
+  return (
+    <input
+      className="input"
+      disabled={disabled}
+      value={shown}
+      placeholder={placeholder}
+      onChange={(e) => {
+        setText(e.target.value);
+        onChange(parse(e.target.value));
+      }}
+    />
+  );
+}
+
 const LABEL_OPTIONS: EvidenceLabel[] = ["verified", "client_reported", "hypothesis"];
 
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
@@ -93,7 +121,7 @@ function Paragraphs({ value, onChange, disabled }: { value: DocParagraph[]; onCh
         <Box key={i} title={`Paragraph ${i + 1}`} onRemove={disabled ? undefined : () => onChange(value.filter((_, j) => j !== i))}>
           <textarea className="textarea" disabled={disabled} value={p.text} onChange={(e) => onChange(value.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)))} />
           <Field label="Cites (finding, estimate or source ids)" hint="Required whenever the paragraph states a figure. Example: f1, s2">
-            <input className="input" disabled={disabled} value={p.cites.join(", ")} onChange={(e) => onChange(value.map((x, j) => (j === i ? { ...x, cites: parseIds(e.target.value) } : x)))} />
+            <ListInput disabled={disabled} value={p.cites} onChange={(ids) => onChange(value.map((x, j) => (j === i ? { ...x, cites: ids } : x)))} />
           </Field>
         </Box>
       ))}
@@ -111,7 +139,7 @@ function OptionalParagraph({ value, onChange, disabled, label }: { value: DocPar
     <Box title={label}>
       <textarea className="textarea" disabled={disabled} value={value?.text ?? ""} onChange={(e) => onChange(e.target.value ? { text: e.target.value, cites: value?.cites ?? [] } : undefined)} />
       <Field label="Cites">
-        <input className="input" disabled={disabled} value={(value?.cites ?? []).join(", ")} onChange={(e) => onChange({ text: value?.text ?? "", cites: parseIds(e.target.value) })} />
+        <ListInput disabled={disabled} value={value?.cites ?? []} onChange={(ids) => onChange({ text: value?.text ?? "", cites: ids })} />
       </Field>
     </Box>
   );
@@ -169,7 +197,7 @@ function RoadmapBucket({ title, items, opportunities, onChange, disabled }: { ti
             <input className="input" disabled={disabled} value={r.urgency} onChange={(e) => onChange(items.map((x, j) => (j === i ? { ...x, urgency: e.target.value } : x)))} />
           </Field>
           <Field label="Depends on (comma separated)">
-            <input className="input" disabled={disabled} value={r.dependencies.join(", ")} onChange={(e) => onChange(items.map((x, j) => (j === i ? { ...x, dependencies: e.target.value.split(",").map((d) => d.trim()).filter(Boolean) } : x)))} />
+            <ListInput disabled={disabled} value={r.dependencies} parse={commaList} onChange={(ids) => onChange(items.map((x, j) => (j === i ? { ...x, dependencies: ids } : x)))} />
           </Field>
         </Box>
       ))}
@@ -376,7 +404,7 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
                 <input className="input" disabled={disabled || !f.metric} value={f.metric?.unit ?? ""} onChange={(e) => update((d) => void (d.findings[i].metric && (d.findings[i].metric!.unit = e.target.value)))} />
               </Field>
               <Field label="Sources (ids)">
-                <input className="input" disabled={disabled} value={f.source_ids.join(", ")} onChange={(e) => update((d) => void (d.findings[i].source_ids = parseIds(e.target.value)))} />
+                <ListInput disabled={disabled} value={f.source_ids} onChange={(ids) => update((d) => void (d.findings[i].source_ids = ids))} />
               </Field>
             </div>
             {f.label === "hypothesis" ? (
@@ -494,7 +522,7 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
                 ))}
               </select>
             </div>
-            <input className="input" disabled={disabled} value={s.cites.join(", ")} placeholder="cites" onChange={(e) => update((d) => void (d.sections.current_assessment.systems[i].cites = parseIds(e.target.value)))} />
+            <ListInput disabled={disabled} value={s.cites} placeholder="cites" onChange={(ids) => update((d) => void (d.sections.current_assessment.systems[i].cites = ids))} />
           </Box>
         ))}
         {!disabled ? (
@@ -508,7 +536,7 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
         <h3 className="text-sm font-semibold text-fg">03 {SECTION_TITLES[2]}</h3>
         <OptionalParagraph label="Introduction (optional)" disabled={disabled} value={doc.sections.key_findings.intro} onChange={(v) => update((d) => void (d.sections.key_findings.intro = v))} />
         <Field label="Findings shown, in order (ids)" hint="New findings are added here automatically.">
-          <input className="input" disabled={disabled} value={doc.sections.key_findings.finding_ids.join(", ")} onChange={(e) => update((d) => void (d.sections.key_findings.finding_ids = parseIds(e.target.value)))} />
+          <ListInput disabled={disabled} value={doc.sections.key_findings.finding_ids} onChange={(ids) => update((d) => void (d.sections.key_findings.finding_ids = ids))} />
         </Field>
         <div className="label">What we could not verify</div>
         {doc.gaps.map((g, i) => (
@@ -535,16 +563,16 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
               <textarea className="textarea" disabled={disabled} value={it.why_it_matters.text} onChange={(e) => update((d) => void (d.sections.inefficiencies.items[i].why_it_matters.text = e.target.value))} />
             </Field>
             <Field label="Cites for why it matters">
-              <input className="input" disabled={disabled} value={it.why_it_matters.cites.join(", ")} onChange={(e) => update((d) => void (d.sections.inefficiencies.items[i].why_it_matters.cites = parseIds(e.target.value)))} />
+              <ListInput disabled={disabled} value={it.why_it_matters.cites} onChange={(ids) => update((d) => void (d.sections.inefficiencies.items[i].why_it_matters.cites = ids))} />
             </Field>
             <Field label="If nothing changes">
               <textarea className="textarea" disabled={disabled} value={it.consequence.text} onChange={(e) => update((d) => void (d.sections.inefficiencies.items[i].consequence.text = e.target.value))} />
             </Field>
             <Field label="Cites for the consequence">
-              <input className="input" disabled={disabled} value={it.consequence.cites.join(", ")} onChange={(e) => update((d) => void (d.sections.inefficiencies.items[i].consequence.cites = parseIds(e.target.value)))} />
+              <ListInput disabled={disabled} value={it.consequence.cites} onChange={(ids) => update((d) => void (d.sections.inefficiencies.items[i].consequence.cites = ids))} />
             </Field>
             <Field label="Related findings (ids)">
-              <input className="input" disabled={disabled} value={it.finding_ids.join(", ")} onChange={(e) => update((d) => void (d.sections.inefficiencies.items[i].finding_ids = parseIds(e.target.value)))} />
+              <ListInput disabled={disabled} value={it.finding_ids} onChange={(ids) => update((d) => void (d.sections.inefficiencies.items[i].finding_ids = ids))} />
             </Field>
           </Box>
         ))}
@@ -574,20 +602,20 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
               </Field>
             ))}
             <Field label="Systems involved (comma separated)">
-              <input className="input" disabled={disabled} value={o.integrations.join(", ")} onChange={(e) => update((d) => void (d.sections.opportunities.items[i].integrations = e.target.value.split(",").map((x) => x.trim()).filter(Boolean)))} />
+              <ListInput disabled={disabled} value={o.integrations} parse={commaList} onChange={(ids) => update((d) => void (d.sections.opportunities.items[i].integrations = ids))} />
             </Field>
             <Field label="What could improve (cite the estimate)">
               <textarea className="textarea" disabled={disabled} value={o.expected_improvement.text} onChange={(e) => update((d) => void (d.sections.opportunities.items[i].expected_improvement.text = e.target.value))} />
             </Field>
             <div className="grid gap-3 md:grid-cols-3">
               <Field label="Cites">
-                <input className="input" disabled={disabled} value={o.expected_improvement.cites.join(", ")} onChange={(e) => update((d) => void (d.sections.opportunities.items[i].expected_improvement.cites = parseIds(e.target.value)))} />
+                <ListInput disabled={disabled} value={o.expected_improvement.cites} onChange={(ids) => update((d) => void (d.sections.opportunities.items[i].expected_improvement.cites = ids))} />
               </Field>
               <Field label="Findings it answers">
-                <input className="input" disabled={disabled} value={o.finding_ids.join(", ")} onChange={(e) => update((d) => void (d.sections.opportunities.items[i].finding_ids = parseIds(e.target.value)))} />
+                <ListInput disabled={disabled} value={o.finding_ids} onChange={(ids) => update((d) => void (d.sections.opportunities.items[i].finding_ids = ids))} />
               </Field>
               <Field label="Estimates">
-                <input className="input" disabled={disabled} value={o.estimate_ids.join(", ")} onChange={(e) => update((d) => void (d.sections.opportunities.items[i].estimate_ids = parseIds(e.target.value)))} />
+                <ListInput disabled={disabled} value={o.estimate_ids} onChange={(ids) => update((d) => void (d.sections.opportunities.items[i].estimate_ids = ids))} />
               </Field>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
@@ -620,7 +648,7 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
         <h3 className="text-sm font-semibold text-fg">07 {SECTION_TITLES[6]}</h3>
         <OptionalParagraph label="Introduction (optional)" disabled={disabled} value={doc.sections.impact.intro} onChange={(v) => update((d) => void (d.sections.impact.intro = v))} />
         <Field label="Estimates shown, in order (ids)" hint="New estimates are added here automatically.">
-          <input className="input" disabled={disabled} value={doc.sections.impact.estimate_ids.join(", ")} onChange={(e) => update((d) => void (d.sections.impact.estimate_ids = parseIds(e.target.value)))} />
+          <ListInput disabled={disabled} value={doc.sections.impact.estimate_ids} onChange={(ids) => update((d) => void (d.sections.impact.estimate_ids = ids))} />
         </Field>
         <Lines label="Limits of these estimates" disabled={disabled} value={doc.sections.impact.limitations} onChange={(v) => update((d) => void (d.sections.impact.limitations = v))} />
       </section>

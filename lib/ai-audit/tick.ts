@@ -17,7 +17,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { isRetiredTenant } from "@/lib/tenant/retired";
-import { STALL_NO_PAYMENT_DAYS, STALL_NO_VIEW_DAYS } from "@/lib/ai-audit/rules";
+import { WAITING_ON_CLIENT_STAGES, stallReason } from "@/lib/ai-audit/rules";
 import { listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { queuePdfJob } from "@/lib/ai-audit/pdf";
@@ -138,18 +138,12 @@ export async function runAiAuditTick(
     });
 
     // 7. Stalls: flagged once (health ok → stalled), with one alert.
-    for (const e of open.filter((x) => (x.stage === "delivered" || x.stage === "proposal_review") && x.health === "ok" && x.share_link_id)) {
+    for (const e of open.filter((x) => WAITING_ON_CLIENT_STAGES.includes(x.stage) && x.health === "ok" && x.share_link_id)) {
       if (over()) break;
       await guard("stall", e.id, async () => {
         const link = await getShareLink(db, tenantId, e.share_link_id as string);
         if (!link) return;
-        const t = now().getTime();
-        const reason =
-          !link.first_viewed_at && t - Date.parse(link.created_at) > STALL_NO_VIEW_DAYS * DAY
-            ? `Not opened ${STALL_NO_VIEW_DAYS} days after delivery.`
-            : link.first_viewed_at && t - Date.parse(link.first_viewed_at) > STALL_NO_PAYMENT_DAYS * DAY && e.payment_status === "none"
-              ? `Opened, but no payment ${STALL_NO_PAYMENT_DAYS} days later.`
-              : null;
+        const reason = stallReason(e, link, now());
         if (!reason) return;
         const r = await patchEngagement(db, { tenantId, id: e.id, expectedRowVersion: e.row_version, patch: { health: "stalled", health_reason: reason }, event: "stalled", actor: { type: "system", id: null }, now: now() });
         if (!r.ok) return;

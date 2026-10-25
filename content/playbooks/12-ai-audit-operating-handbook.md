@@ -81,7 +81,7 @@ Decision point: if the business is not a fit, mark the engagement **declined** w
 ## Submitting and Gate 2
 
 - Press **Submit for final approval**. The audit and proposal freeze, and the Mac prints the PDF (the Mac must be on).
-- When the PDF is ready, an **AI audit delivery** card appears in your approvals. Open the PDF, read the email, and approve only if every word is right.
+- When the PDF is ready, an **AI audit delivery** card appears in **Feed, under Needs you**. Open the PDF from the engagement's Delivery tab, read the email on the card, and approve only if every word is right.
 - Changed your mind? **Reopen for edits** before you approve. The frozen versions are kept, and new drafts open.
 - Only the workspace owner can approve. An admin's approval is refused and nothing is sent.
 

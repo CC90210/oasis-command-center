@@ -5,7 +5,9 @@
  * replaced by a note. Founders only.
  */
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
+import { PageFrame } from "@/components/os/PageFrame";
 import { aiAuditPageSession } from "@/lib/ai-audit/access";
 import { getEngagement, getSettings } from "@/lib/ai-audit/store";
 import { getAuditVersion, getProposalVersion } from "@/lib/ai-audit/versions";
@@ -32,8 +34,18 @@ export default async function AuditPreviewPage({ params }: Props) {
     proposalVersion?.content ??
     emptyProposal({ currency: settings.default_currency, tax: settings.tax, to: e.contact_email ?? "", businessName: e.business_name ?? "", contactName: e.contact_name ?? "", validUntil: new Date().toISOString().slice(0, 10) });
   return (
-    <div className={offerFontVariables}>
-      <AuditDocument doc={audit.doc} proposal={proposal} totals={proposalTotals(proposal)} mode="preview" notice={`Preview of version ${audit.version_no} (${audit.status.replace(/_/g, " ")}). The client sees the same page with a Pay button.`} />
-    </div>
+    <PageFrame
+      title="Audit preview"
+      subtitle={`${e.business_name || "Unnamed business"}, version ${audit.version_no} (${audit.status.replace(/_/g, " ")}). The client sees this page with a Pay button.`}
+      actions={
+        <Link href={`/ai-audit/${e.id}`} className="btn-secondary">
+          Back to the engagement
+        </Link>
+      }
+    >
+      <div className={offerFontVariables}>
+        <AuditDocument doc={audit.doc} proposal={proposal} totals={proposalTotals(proposal)} mode="preview" notice={`Preview of version ${audit.version_no} (${audit.status.replace(/_/g, " ")}). The client sees the same page with a Pay button.`} />
+      </div>
+    </PageFrame>
   );
 }
