@@ -107,7 +107,11 @@ check("every public path prefix has something behind it: a route, a rewrite or r
     const segs = prefix.split("/").filter(Boolean);
     if (FRAMEWORK.has(prefix.replace(/\/$/, ""))) return true;
     if (segs.length > 0 && PUBLIC_ASSET_DIRS.includes(segs[0])) return true;
-    if (nextConfig.includes(`"${prefix.replace(/\/$/, "")}`)) return true;
+    // Match the prefix as a whole quoted path or a path that continues it, never a longer
+    // name that merely starts the same ("/api/pg" must not match "/api/pgx").
+    const bare = prefix.replace(/\/$/, "");
+    const escaped = bare.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`["'\`]${escaped}(?=["'\`/:(]|$)`).test(nextConfig)) return true;
     return routes.some((r) => {
       const n = Math.min(segs.length, r.length);
       for (let i = 0; i < n; i++) if (!r[i].startsWith("[") && r[i] !== segs[i]) return false;
