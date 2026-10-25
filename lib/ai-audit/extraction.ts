@@ -128,6 +128,9 @@ async function permittedWindow(db: Client, tenantId: string, ref: WindowRef & { 
   if (!engagement || !PROFILE_EDIT_STAGES.includes(engagement.stage)) return { ok: false, code: "not_permitted" };
   const transcript = await getTranscript(db, tenantId, ref.transcript_id, true);
   if (!transcript || transcript.engagement_id !== engagement.id || transcript.status !== "active" || !transcript.consent_ai) return { ok: false, code: "not_permitted" };
+  // The profile's own consent answer is read again too: a "declined" recorded after the run began stops it.
+  const fields = engagement.current_profile_version_id ? await listProfileFields(db, tenantId, engagement.current_profile_version_id) : [];
+  if (!aiConsent([transcript], fields)) return { ok: false, code: "not_permitted" };
   const lines = transcript.lines ?? [];
   const inWindow = lines.filter((l) => l.n >= ref.from && l.n <= ref.to);
   if (!inWindow.length) return { ok: false, code: "gone" };
