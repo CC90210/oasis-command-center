@@ -104,6 +104,7 @@ import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement } fr
 import { financeTenantId, getStripeClient, listAll, pinnedStripeAccount, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
 import { recordStripePayout, retryUnbookedPayouts, unbookedPayouts } from "./stripe-payouts-io";
 import { alertPublicCheckoutPaid, inLateAlertWindow, publicCheckoutSale } from "@/lib/checkout/paid-alert";
+import { aiAuditHintFromPaymentIntent, verifyAiAuditFromHint } from "@/lib/ai-audit/payment-hint";
 import { keepAlive } from "@/lib/os/runs/keepalive";
 
 const ACTOR = "stripe";
@@ -1418,6 +1419,12 @@ async function dispatch(env: StripeEventEnvelope, ledger: InStatement[], afterMa
         };
         afterMark.push(() => alertPublicCheckoutPaid(purchase));
       }
+      // A Free AI Audit payment is checked with Stripe now rather than at the
+      // next tick. Only a hint: verifyAiAuditFromHint re-reads the Checkout
+      // Session (lib/ai-audit/payment.ts); this event's word counts for
+      // nothing on its own. After the mark, like the alert above, and it never throws.
+      const auditHint = aiAuditHintFromPaymentIntent(env.object);
+      if (auditHint) afterMark.push(() => verifyAiAuditFromHint(auditHint));
       return r.paymentId ? `payment ${r.created ? "recorded" : "matched"} ${r.paymentId}` : `ignored: ${r.reason}`;
     }
     case "charge.refunded": {

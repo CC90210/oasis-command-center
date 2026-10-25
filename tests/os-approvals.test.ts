@@ -898,7 +898,9 @@ async function main() {
     assert.equal(sent.length, before);
     // reply_ticket (2026-10-01): an approved support@ reply, posted on its ticket
     // and emailed through the desk's reply path (tests/support-inbox-drafts.test.ts).
-    assert.deepEqual(Object.keys(executors.EXECUTORS).sort(), ["publish_post", "reply_ticket", "send_email", "send_slack_message"], "only kinds with a sanctioned send path");
+    // deliver_ai_audit (2026-10-25): CC's final approval of a Free AI Audit, sent through the
+    // same OASIS mailbox as send_email after re-checking every hash (tests/ai-audit-flow.test.ts).
+    assert.deepEqual(Object.keys(executors.EXECUTORS).sort(), ["deliver_ai_audit", "publish_post", "reply_ticket", "send_email", "send_slack_message"], "only kinds with a sanctioned send path");
   });
 
   await check("readiness: an email from a client workspace has no sender here and fails loudly when approved", async () => {
@@ -1086,6 +1088,23 @@ async function main() {
     assert.equal(res2.status, 404);
     assert.equal(await statusOf(byDept.marketing.id), "pending");
     assert.equal(await statusOf(byDept.sales.id), "pending");
+  });
+
+  await check("POST approve: an owner-only card refuses a non-owner admin BEFORE deciding, so it stays pending for the owner", async () => {
+    const payload = {
+      engagement_id: "eng-owner-only", lead_id: "lead-owner-only", business_name: "Owner Only Co",
+      audit_version_id: "aud-1", audit_sha256: "a".repeat(64), proposal_version_id: "prop-1", proposal_sha256: "b".repeat(64), pdf_sha256: "c".repeat(64),
+      to: "client@owner-only.test", subject: "Your audit", body: "Hi\n\n{{audit_link}}", currency: "CAD", total_cents: 100, due_now_cents: 100,
+    };
+    const made = await store.createApproval(raw, { tenantId: OASIS, departmentKey: null, requestedBy: { type: "routine", id: "ai-audit" }, actionKind: "deliver_ai_audit", title: "OWNER-ONLY-MARKER", payload, riskLevel: "spend", idempotencyKey: "owner-only-1" }, new Date());
+    assert.ok(made.ok);
+    const a = made.ok ? made.approval : (null as never);
+    await login("adon");
+    const res = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
+    assert.equal(res.status, 403);
+    assert.equal(((await res.json()) as Body).error, "owner_only");
+    assert.equal(await statusOf(a.id), "pending", "the card is not used up");
+    await raw.execute({ sql: "UPDATE approvals SET status = 'cancelled' WHERE id = ?", args: [a.id] });
   });
 
   await check("POST approve: wrong hash 409 payload_mismatch; bad JSON 400", async () => {

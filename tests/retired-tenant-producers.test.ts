@@ -560,6 +560,9 @@ async function main() {
       // touches workspaces with meet_transcripts rows, and only OASIS's own workspaces can record
       // (lib/meet/recording.ts meetRecordingServed), so a retired tenant has nothing it could reach.
       "meet-relay",
+      // The Free AI Audit's upkeep (2026-10-25): it iterates OASIS_INTERNAL_TENANT_IDS only and
+      // drops any retired one (lib/ai-audit/tick.ts), so SunBiz is never in reach.
+      "ai-audit-tick",
     ].map((r) => `/api/cron/${r}`);
     assert.deepEqual([...new Set(CRON_TABLE.map((c) => base(c.path)))].sort(), [...KEPT].sort());
   });

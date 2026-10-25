@@ -50,6 +50,11 @@ export const RUNNER_ERROR_LINES: Readonly<Record<string, string>> = {
   transcode_failed: RUNNER_FAILED,
   transcribe_failed: RUNNER_FAILED,
   unsafe_path: RUNNER_FAILED,
+  // The Free AI Audit's PDF printer (BEA scripts/ai_audit/runner.py). Never on a
+  // Tools card; the engagement page says the PDF is waiting.
+  render_failed: RUNNER_FAILED,
+  pdf_too_large: RUNNER_FAILED,
+  unsafe_url: RUNNER_FAILED,
 };
 
 /** Codes only the Command Center writes (its sweeps). A runner cannot send these. */

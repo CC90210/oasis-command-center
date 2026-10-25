@@ -36,10 +36,11 @@ async function main() {
   await check("every worker tool has an executor, and every executor is a worker tool in the registry", () => {
     const workerKeys = TOOL_REGISTRY.filter((t) => t.runsOn === "worker").map((t) => t.key).sort();
     assert.deepEqual(Object.keys(WORKER_EXECUTORS).sort(), workerKeys);
-    // The one runner tool a person runs is the video downloader; the other two are Oasis Meet's system
-    // jobs, claimable by a runner but never a card, never queued or listed through the session routes.
-    assert.deepEqual(runnerToolKeys(), ["video_download", "meet_transcribe", "meet_delete_local"]);
-    for (const k of ["meet_transcribe", "meet_delete_local"]) {
+    // The one runner tool a person runs is the video downloader; the others are system jobs (Oasis
+    // Meet's two, and the Free AI Audit's PDF print), claimable by a runner but never a card, never
+    // queued or listed through the session routes.
+    assert.deepEqual(runnerToolKeys(), ["video_download", "meet_transcribe", "meet_delete_local", "ai_audit_pdf"]);
+    for (const k of ["meet_transcribe", "meet_delete_local", "ai_audit_pdf"]) {
       assert.equal(toolByKey(k), null, `${k} is not a person's tool`);
       assert.ok(!TOOL_REGISTRY.some((t) => t.key === k), `${k} is not in the catalog's registry`);
     }
