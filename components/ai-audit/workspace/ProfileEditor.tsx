@@ -135,8 +135,10 @@ export function ProfileEditor({ engagementId, fields, frozen }: { engagementId: 
                           {show(def, f.value)}
                           <span className="ml-2 text-[12px] text-fg-dim">
                             {EVIDENCE_LABEL_NAMES[f.label]}, {SOURCE_WORDS[f.source_type] ?? f.source_type}
+                            {f.source_type === "transcript" && typeof f.source_ref.from === "number" ? `, lines ${f.source_ref.from}${f.source_ref.to !== f.source_ref.from ? `-${String(f.source_ref.to)}` : ""}` : ""}
                             {f.owner_corrected ? ", corrected by CC" : ""}
                           </span>
+                          {f.evidence_quote ? <div className="mt-0.5 text-[12px] italic text-fg-dim">&ldquo;{f.evidence_quote}&rdquo;</div> : null}
                         </div>
                       ) : (
                         <div className="mt-0.5 text-sm text-fg-dim">Not captured</div>

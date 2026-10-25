@@ -87,6 +87,8 @@ import {
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
+import { checkWindowAnswer, finishMacExtractionIfComplete, modelJobInput, type FinishDeps } from "@/lib/ai-audit/extraction";
+import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import {
   LEASE_GUARD,
   claimNextJob,
@@ -125,6 +127,8 @@ export type RunnerDeps = {
   aiAuditLinkSecret?: string | null;
   /** The canonical origin the render address is built on. */
   aiAuditBaseUrl?: string;
+  /** CC's alert when an extraction run finishes (lib/notify/agent-alert.ts); absent: the real one. */
+  aiAuditAlert?: FinishDeps["alert"];
 };
 
 /** The workspaces each producer's runner serves. OASIS's own, for now. */
@@ -276,6 +280,22 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
         },
         hold,
       );
+    }
+    if (job.toolKey === "ai_audit_model") {
+      // The prompt is built now, from the database, and handed over once: the
+      // job row holds ids only. Consent and the stage are checked again here.
+      const built = await modelJobInput(deps.db, job);
+      if (built.ok) return answer(built.input, hold);
+      const at = deps.now.toISOString();
+      const code = built.code === "gone" ? "ai_audit_gone" : "ai_audit_not_permitted";
+      await deps.db.execute({
+        sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = ?, error_message = ?, finished_at = ?, updated_at = ?
+              WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ident.tenantIds.length)})`,
+        args: [code, toolErrorLine(code, "runner"), at, at, job.id, ident.runnerKey, leaseId, ...ident.tenantIds],
+      });
+      const stepId = typeof job.input.step_id === "string" ? job.input.step_id : "";
+      if (stepId) await finishMacExtractionIfComplete(deps.db, job.tenantId, stepId, deps.now, { alert: deps.aiAuditAlert ?? writeAgentAlert });
+      return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
     }
     // meet_transcribe: the segments are fixed now, at the claim (lib/meet/recording.ts).
     const meet = await meetTranscribeClaim(deps.db, job, ident.tenantIds, deps.now);
@@ -602,6 +622,7 @@ async function completeSystemJob(
   const ref = leaseRef(producer, b);
   if ("field" in ref) return invalid(ref.field);
   if (toolKey === "ai_audit_pdf") return completeAuditPdf(ref, b, deps);
+  if (toolKey === "ai_audit_model") return completeAuditModel(ref, b, deps);
   const transcript = toolKey === "meet_transcribe" ? parseTranscriptReport(b) : null;
   const deleted = toolKey === "meet_delete_local" ? parseDeleteLocalReport(b) : null;
   if (transcript && !transcript.ok) return invalid(transcript.field);
@@ -671,6 +692,35 @@ async function completeAuditPdf(ref: LeaseRef, b: Record<string, unknown>, deps:
   });
   if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_pdf");
   return toolsJson(200, { ok: true, duplicate: false, stored: stored.ok });
+}
+
+/** The Mac's answer to one extraction window: checked, kept on the job as facts only, and the run finished when it was the last. */
+const MODEL_TEXT_MAX_CHARS = 200_000;
+async function completeAuditModel(ref: LeaseRef, b: Record<string, unknown>, deps: RunnerDeps): Promise<Response> {
+  if (typeof b.text !== "string" || b.text.length > MODEL_TEXT_MAX_CHARS) return invalid("text");
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return systemRepeatOrLost(deps.db, ref, "ai_audit_model");
+  if (job.toolKey !== "ai_audit_model") return invalid("tool_key");
+  const checked = await checkWindowAnswer(deps.db, job.tenantId, job.input, b.text);
+  const at = deps.now.toISOString();
+  const resultJson = checked.ok ? JSON.stringify({ window: checked.result }) : JSON.stringify({ discarded: checked.code });
+  const rs = await deps.db.execute({
+    sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
+    args: [resultJson, at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
+  });
+  if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_model");
+  const stepId = typeof job.input.step_id === "string" ? job.input.step_id : "";
+  if (stepId) {
+    try {
+      await finishMacExtractionIfComplete(deps.db, job.tenantId, stepId, deps.now, { alert: deps.aiAuditAlert ?? writeAgentAlert });
+    } catch (err) {
+      // The window is stored; the tick's sweep finishes the run.
+      console.error("[tools.complete] finishing the extraction failed; the tick will retry", { jobId: job.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return toolsJson(200, { ok: true, duplicate: false, kept: checked.ok ? checked.result.kept.length : 0 });
 }
 
 async function systemRepeatOrLost(db: Client, ref: LeaseRef, toolKey: SystemRunnerToolKey): Promise<Response> {

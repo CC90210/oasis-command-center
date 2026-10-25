@@ -21,6 +21,7 @@
  * Run: node --conditions=react-server --import tsx tests/ai-audit-discovery.test.ts
  */
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Client } from "@libsql/client";
@@ -29,6 +30,19 @@ import { OASIS, USERS, check, finish, login, setupDatabase, setupProjectCustomer
 for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
 
 const LEAD = "7b000000-0000-4000-8000-000000000001";
+const MAC_SECRET = "mac-runner-discovery-test-secret-0123456789abcdef";
+
+/** A request signed as the Mac's runner (lib/tools/runner-auth.ts): HMAC-SHA256 over "<ts>.<body>". */
+function macRequest(route: string, body: Record<string, unknown>, now: Date): Request {
+  const raw = JSON.stringify({ runner_id: "oasis-mac-audit", ...body });
+  const ts = Math.floor(now.getTime() / 1000);
+  const sig = createHmac("sha256", MAC_SECRET).update(`${ts}.${raw}`).digest("hex");
+  return new Request(`https://oasisai.work/api/internal/tools/${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-tools-producer": "mac", "x-tools-timestamp": String(ts), "x-tools-signature": sig },
+    body: raw,
+  });
+}
 const NOW = () => new Date();
 
 /** scripts/apply_turso_migration.py split_statements: a trigger body stays one statement. */
@@ -86,6 +100,8 @@ async function main() {
   const approvals = await import("../lib/os/approvals/store");
   const rules = await import("../lib/ai-audit/rules");
   const payloads = await import("../lib/ai-audit/authorize-payload");
+  const extraction = await import("../lib/ai-audit/extraction");
+  const runner = await import("../lib/tools/runner-handlers");
 
   const cc = { type: "user" as const, id: USERS.cc.id };
   const opened = await store.openEngagement(db, { tenantId: OASIS, leadId: LEAD, actor: cc, now: NOW(), isFixture: true });
@@ -134,6 +150,86 @@ async function main() {
     assert.ok(s.ok && s.engagement.call_started_at && !s.engagement.call_ended_at);
     const e = await notes.markCall(db, { tenantId: OASIS, engagementId: id, what: "end", actor: cc, now: NOW() });
     assert.ok(e.ok && e.engagement.call_ended_at);
+  });
+
+  console.log("extraction");
+  const alerts: Array<Record<string, unknown>> = [];
+  const runnerDeps = (now: Date) => ({ db, env: { TOOLS_RUNNER_SECRET_MAC: MAC_SECRET }, now, storage: null, aiAuditAlert: async (a: Record<string, unknown>) => void alerts.push(a) });
+  await check("drafting the profile queues one Mac job per part of the call; the jobs hold ids, never the call's words", async () => {
+    // CC typed 35 leads a month on the call; the transcript says about 40: a disagreement for CC, never an overwrite.
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: id, field: { field_key: "sales.leads_per_month", value: 35, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok && r.created && r.windows === 1, !r.ok ? r.error : "");
+    const again = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(again.ok && !again.created, "a second press while it runs is the same run");
+    const jobs = await db.execute({ sql: "SELECT input_json FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model'", args: [OASIS] });
+    assert.equal(jobs.rows.length, 1);
+    assert.ok(!String(jobs.rows[0].input_json).includes("calls a week"), "no transcript text on the job row");
+  });
+  await check("the Mac is handed the prompt at claim time, with the call fenced as data", async () => {
+    const res = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    const body = (await res.json()) as { ok: boolean; job: { job_id: string; lease_id: string; tool_key: string; input: Record<string, unknown> } | null };
+    assert.equal(res.status, 200);
+    assert.ok(body.job, "a job was handed out");
+    const job = body.job!;
+    assert.equal(job.tool_key, "ai_audit_model");
+    assert.match(String(job.input.prompt), /UNTRUSTED_INPUT_BEGIN[\s\S]*about 40 calls a week/);
+    assert.match(String(job.input.system), /INPUT BOUNDARY RULES/);
+    // The Mac answers: one good fact, one invented figure, one quote that is not on its line.
+    const answer = JSON.stringify({
+      facts: [
+        { key: "sales.leads_per_month", value: 40, from: 1, to: 1, quote: "about 40 calls a week" },
+        { key: "sales.avg_job_value", value: 2000, from: 3, to: 3, quote: "The phone log, roughly." },
+        { key: "business.description", value: "Plumbing", from: 2, to: 2, quote: "We fix pipes" },
+      ],
+      summary: { goals: [], problems: ["Missed calls"], commitments: [], open_questions: ["How many calls go unanswered?"] },
+    });
+    const done = await runner.handleToolsComplete(macRequest("complete", { job_id: job.job_id, lease_id: job.lease_id, tool_key: "ai_audit_model", text: answer }, NOW()), runnerDeps(NOW()) as never);
+    assert.equal(done.status, 200, await done.clone().text());
+    const status = await extraction.latestExtraction(db, OASIS, id);
+    assert.equal(status?.status, "done");
+    const leftover = await db.execute({ sql: "SELECT result_json FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model'", args: [OASIS] });
+    assert.equal(String(leftover.rows[0].result_json), '{"stored":true}', "the facts left the job row once written");
+  });
+  await check("the run writes nothing it could not check, and lists the disagreement and the drops for CC", async () => {
+    const e = (await store.getEngagement(db, OASIS, id))!;
+    const fields = await versions.listProfileFields(db, OASIS, e.current_profile_version_id!);
+    const leads = fields.find((f) => f.field_key === "sales.leads_per_month")!;
+    assert.equal(leads.value, 35, "CC's own figure stands");
+    assert.ok(!fields.some((f) => f.field_key === "sales.avg_job_value"), "an invented figure is never written");
+    assert.ok(!fields.some((f) => f.field_key === "business.description" && f.source_type === "transcript"), "a quote that is not there is never written");
+    const v = (await versions.getProfileVersion(db, OASIS, e.current_profile_version_id!))!;
+    const report = (v.summary as { extraction?: { contradictions: Array<{ key: string }>; dropped: Array<{ key: string; reason: string }> } }).extraction!;
+    assert.equal(report.contradictions[0]?.key, "sales.leads_per_month");
+    assert.ok(report.dropped.some((d) => d.key === "sales.avg_job_value" && /figure/.test(d.reason)));
+    assert.ok(report.dropped.some((d) => d.key === "business.description" && /not on the lines/.test(d.reason)));
+    assert.equal(alerts.at(-1)?.alertType, "ai_audit_profile_drafted");
+  });
+  await check("the cloud path reads the call through the metered model and writes what it can check", async () => {
+    // A fresh value for a field CC never set: written, from the transcript, with its lines and quote.
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "cloud_workspace", actor: cc, now: NOW() });
+    assert.ok(r.ok && r.created, !r.ok ? r.error : "");
+    const calls: Array<{ surface: string }> = [];
+    const model = async (call: { surface: string }) => {
+      calls.push(call);
+      return { ok: true as const, provider: "test", model: "test", text: JSON.stringify({ facts: [{ key: "sales.lead_handling", value: "They check the phone log", from: 3, to: 3, quote: "The phone log, roughly." }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } }) };
+    };
+    const out = await extraction.advanceCloudExtraction(db, { tenantId: OASIS, stepId: r.ok ? r.stepId : "", now: NOW(), deps: { model: model as never, alert: async () => undefined } });
+    assert.equal(out, "finished");
+    assert.deepEqual(calls.map((c) => c.surface), ["ai_audit.extract"], "one metered call per part of the call");
+    const e = (await store.getEngagement(db, OASIS, id))!;
+    const f = (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).find((x) => x.field_key === "sales.lead_handling")!;
+    assert.equal(f.source_type, "transcript");
+    assert.equal(f.label, "client_reported");
+    assert.equal(f.evidence_quote, "The phone log, roughly.");
+    assert.equal((f.source_ref as { from?: number }).from, 3);
+  });
+  await check("without the client's AI consent nothing is read", async () => {
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: id, field: { field_key: "consent.ai_processing", value: false, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.deepEqual(r, { ok: false, error: "no_ai_consent" });
+    // The tests below need the profile's consent back.
+    await db.execute({ sql: "DELETE FROM ai_audit_profile_fields WHERE field_key = 'consent.ai_processing'", args: [] });
   });
 
   console.log("Gate 1");
@@ -251,6 +347,18 @@ async function main() {
     assert.equal(await authorize.authorizedProfile(db, OASIS, back.ok ? back.engagement : e), null);
     const fwd = await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'generating', row_version = row_version + 1 WHERE id = ?", args: [id] });
     assert.equal(fwd.rowsAffected, 1);
+  });
+  await check("after Gate 1 no extraction starts, and a leftover Mac job is refused at claim time", async () => {
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.deepEqual(r, { ok: false, error: "stage_closed" });
+    // A job queued before the authorization (a run in flight when CC approved): the claim re-checks and ends it.
+    await db.execute({ sql: "INSERT INTO ai_audit_steps (id, tenant_id, engagement_id, step_key, run_no, runs_on, status, idempotency_key, created_at, updated_at) VALUES ('late-step', ?, ?, 'extract', 9, 'mac', 'waiting_runner', 'late', ?, ?)", args: [OASIS, id, new Date().toISOString(), new Date().toISOString()] });
+    await db.execute({ sql: "INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, created_at, updated_at) VALUES ('late-job', ?, 'ai_audit_model', 'runner', 'queued', ?, 'h', ?, ?)", args: [OASIS, JSON.stringify({ step_id: "late-step", engagement_id: id, transcript_id: transcriptId, from: 1, to: 3 }), new Date().toISOString(), new Date().toISOString()] });
+    const res = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    const body = (await res.json()) as { job: unknown };
+    assert.equal(body.job, null, "no prompt is handed out");
+    const job = (await db.execute("SELECT status, error_code FROM tool_jobs WHERE id = 'late-job'")).rows[0];
+    assert.deepEqual([String(job.status), String(job.error_code)], ["failed", "ai_audit_not_permitted"]);
   });
   await check("after Gate 1 the profile, the notes and the transcripts cannot change", async () => {
     await assert.rejects(field("sales.leads_per_month", 400), /frozen/);

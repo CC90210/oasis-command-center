@@ -22,6 +22,7 @@
  *   start_call / end_call                                 the call's clock
  *   delete_transcript  { transcript_id }                  wipe a transcript's lines (and the quotes taken from it); owner only
  *   request_authorization { engine? }                     file Gate 1 for the current profile (only the owner approves it)
+ *   extract_profile    { engine? }                         draft profile facts from the consented transcripts (before Gate 1)
  * (Adding a transcript has its own route, ./transcript, for its larger body.)
  *
  * Nothing here sends anything to the client: delivery happens only when the
@@ -49,6 +50,7 @@ import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { markCall, saveCallNote } from "@/lib/ai-audit/call-notes";
 import { deleteTranscript } from "@/lib/ai-audit/transcripts";
 import { requestAuthorization, withdrawAuthorization, withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
+import { startExtraction } from "@/lib/ai-audit/extraction";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
@@ -284,6 +286,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error });
       await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
       return json(200, { ok: true });
+    }
+    case "extract_profile": {
+      const engine = body.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude";
+      const r = await startExtraction(s.db, { tenantId: s.tenantId, engagementId, engine, actor, now });
+      if (!r.ok) return json(409, { ok: false, error: r.error });
+      return json(200, { ok: true, step_id: r.stepId, windows: r.windows, created: r.created });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });

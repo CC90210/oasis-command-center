@@ -55,6 +55,9 @@ export const RUNNER_ERROR_LINES: Readonly<Record<string, string>> = {
   render_failed: RUNNER_FAILED,
   pdf_too_large: RUNNER_FAILED,
   unsafe_url: RUNNER_FAILED,
+  // Its model calls (ai_audit_model): the Claude CLI failed, or ran out of time.
+  model_failed: RUNNER_FAILED,
+  model_timeout: RUNNER_FAILED,
 };
 
 /** Codes only the Command Center writes (its sweeps). A runner cannot send these. */
@@ -65,6 +68,9 @@ export const SWEEP_ERROR_LINES: Readonly<Record<string, string>> = {
   meeting_gone: "The meeting's recording was no longer waiting, so this was not run.",
   meeting_deleted: "The recording was deleted, so this was stopped.",
   relay_expired: "The computer did not take this recording within 30 days, so its audio was deleted.",
+  // The Free AI Audit (lib/ai-audit/extraction.ts): the transcript may no longer be read.
+  ai_audit_not_permitted: "The transcript can no longer be read for the audit (consent changed, or the profile was authorized), so this was not run.",
+  ai_audit_gone: "The audit step this belonged to was finished or replaced, so this was not run.",
 };
 
 /** Codes a tool that runs inside the request writes. */

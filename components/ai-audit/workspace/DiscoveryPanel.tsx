@@ -279,6 +279,81 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
         )}
       </section>
 
+      {open && view.transcripts.length ? (
+        <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
+          <h2 className="text-sm font-semibold text-fg">Draft the profile from the transcript</h2>
+          <p className="text-fg-muted">
+            A model reads the transcript and proposes facts for the profile. Each is kept only if its quote is really on the lines it names; a figure the client never said is dropped. Your own entries are never overwritten.
+          </p>
+          {view.consentAi ? (
+            <div className="flex flex-wrap items-end gap-2">
+              <div>
+                <div className="label">Read by</div>
+                <select className="select" value={engine} onChange={(ev) => setEngine(ev.target.value as AiEngine)}>
+                  {(["mac_claude", "cloud_workspace"] as const).map((k) => (
+                    <option key={k} value={k}>
+                      {AI_ENGINE_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy || (view.extraction ? ["queued", "running", "waiting_runner"].includes(view.extraction.status) : false)}
+                onClick={() => act("extract_profile", { engine }, engine === "mac_claude" ? "Queued for the Mac. It reads the call within a few minutes if the Mac is on." : "Queued. The cloud model reads one part of the call every few minutes.")}
+              >
+                Draft the profile
+              </button>
+            </div>
+          ) : (
+            <div className="text-fg-muted">The client did not agree to AI analysis, so the profile is filled by hand.</div>
+          )}
+          {view.extraction ? (
+            <div className="text-fg-muted">
+              Last run: <span className="text-fg">{view.extraction.status.replace(/_/g, " ")}</span>
+              {view.extraction.windows ? `, ${view.extraction.done} of ${view.extraction.windows} part${view.extraction.windows === 1 ? "" : "s"} read` : ""}
+              {view.extraction.failed ? <span className="text-status-warm">, {view.extraction.failed} failed</span> : null}
+              {view.extraction.status === "waiting_runner" ? ", waiting for the Mac" : ""}.
+            </div>
+          ) : null}
+          {view.extractionReport ? (
+            <div className="grid gap-2">
+              <div className="text-fg">
+                {view.extractionReport.written.length} fact{view.extractionReport.written.length === 1 ? "" : "s"} added to the profile.
+              </div>
+              {view.extractionReport.contradictions.length ? (
+                <div>
+                  <div className="text-status-warm">These disagree; settle them in the profile:</div>
+                  <ul className="mt-1 grid gap-0.5 text-[13px] text-fg-muted">
+                    {view.extractionReport.contradictions.map((c) => (
+                      <li key={c.key}>
+                        {c.key}: {c.values.map((v) => `${JSON.stringify(v.value)} (${v.source === "profile" ? "yours" : `lines ${v.from}-${v.to}`})`).join(" vs ")}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {view.extractionReport.dropped.length ? (
+                <details className="text-[13px] text-fg-muted">
+                  <summary>{view.extractionReport.dropped.length} not kept, and why</summary>
+                  <ul className="mt-1 grid gap-0.5">
+                    {view.extractionReport.dropped.slice(0, 30).map((d, i) => (
+                      <li key={`${d.key}-${i}`}>
+                        {d.key}: {d.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+              {view.extractionReport.summary.open_questions.length ? (
+                <div className="text-[13px] text-fg-muted">Still unclear from the call: {view.extractionReport.summary.open_questions.join("; ")}</div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
       <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
         <h2 className="text-sm font-semibold text-fg">Gate 1: authorize the client&apos;s information</h2>
         <p className="text-fg-muted">
