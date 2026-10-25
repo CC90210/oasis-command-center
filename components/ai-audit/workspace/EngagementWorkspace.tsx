@@ -210,8 +210,27 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
                   Reopen for edits
                 </button>
               ) : null}
+              {submitted && view.deliveryApproval?.status === "failed" && view.deliveryApproval.reason === "delivery_unknown" && isOwner ? (
+                <>
+                  <button type="button" className="btn-primary" disabled={busy} onClick={() => act("confirm_delivery_sent", {}, "Recorded as delivered.")}>
+                    It was sent
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      if (!window.confirm("Only if the email is NOT in the Sent folder. Its link stops working and a new final approval card is filed. Continue?")) return;
+                      void act("retry_delivery", { confirm_not_sent: true }, "A new final approval card is waiting in Needs you.");
+                    }}
+                  >
+                    It was not sent: send again
+                  </button>
+                </>
+              ) : null}
               {submitted &&
               view.deliveryApproval &&
+              view.deliveryApproval.reason !== "delivery_unknown" &&
               (["failed", "expired", "sent_back", "cancelled"].includes(view.deliveryApproval.status) || (view.deliveryApproval.status === "executed" && view.deliveryApproval.outcome === "dry_run")) &&
               isOwner ? (
                 <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("retry_delivery", {}, "A new final approval card is waiting in Needs you.")}>

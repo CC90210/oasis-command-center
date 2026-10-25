@@ -31,7 +31,7 @@ import { aiAuditBaseUrl } from "@/lib/ai-audit/env";
 import { CHECKOUT_TTL_HOURS, type InstallmentKind } from "@/lib/ai-audit/rules";
 import { getProposalVersion } from "@/lib/ai-audit/versions";
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
-import { getEngagement, int, patchEngagement, requireTenant, text, type Engagement } from "@/lib/ai-audit/store";
+import { casWrite, engagementUpdateStatement, eventStatement, getEngagement, int, patchEngagement, requireTenant, text, type Engagement } from "@/lib/ai-audit/store";
 import type { ShareLink } from "@/lib/ai-audit/link";
 
 export const CHECKOUT_MARKER = "ai_audit_v1";
@@ -147,6 +147,10 @@ export async function createOrReuseCheckout(
       args: [t, proposal.id, kind],
     })
   ).rows[0];
+  // The payment switch is checked before an open session is reused too: turning
+  // LIVE_SEND_STRIPE_CHECKOUT off (or BRAVO_FORCE_DRY_RUN on) must stop the
+  // Pay button handing out a live session (Codex review of PR #732).
+  if (deps.isDryRun(DRY_RUN_CHANNEL)) return { ok: false, error: "dry_run" };
   if (open) {
     const c = mapCheckout(open);
     const fresh = c.expires_at ? Date.parse(c.expires_at) - input.now.getTime() > 30 * 60_000 : false;
@@ -160,7 +164,6 @@ export async function createOrReuseCheckout(
     });
   }
 
-  if (deps.isDryRun(DRY_RUN_CHANNEL)) return { ok: false, error: "dry_run" };
   const secret = await deps.stripeSecret(t);
   if (!secret) return { ok: false, error: "stripe_not_connected" };
 
@@ -671,17 +674,37 @@ export async function listReceipts(db: Client, tenantId: string, engagementId: s
   }));
 }
 
+type ReceiptStatus = "verified" | "refunded" | "partially_refunded" | "disputed";
+
+/**
+ * The engagement's payment status, from all its receipts for one installment:
+ * one verified receipt is paid (two or more, a duplicate to refund); with none
+ * left, the worst of what happened to them (disputed, then refunded, then
+ * partly refunded). Refunding the duplicate of two payments therefore leaves
+ * the engagement paid, and onboarding goes on (Codex review of PR #732).
+ */
+export function aggregatePaymentStatus(statuses: readonly string[]): "paid" | "overpaid_review" | "disputed" | "refunded" | "partially_refunded" | "none" {
+  const verified = statuses.filter((x) => x === "verified").length;
+  if (verified >= 2) return "overpaid_review";
+  if (verified === 1) return "paid";
+  if (statuses.includes("disputed")) return "disputed";
+  if (statuses.includes("refunded")) return "refunded";
+  if (statuses.includes("partially_refunded")) return "partially_refunded";
+  return "none";
+}
+
 /**
  * Re-read each recent verified receipt from Stripe, at most hourly. A refund or
- * a dispute updates the receipt and the engagement and alerts CC; nothing else
- * changes and nothing is deleted (CC decides what happens to the project).
+ * a dispute updates the receipt AND the engagement in one write (the receipt
+ * stays "verified", and is re-checked next time, unless both land), and alerts
+ * CC. Nothing is deleted: CC decides what happens to the project.
  */
 export async function reconcileReceipts(db: Client, tenantId: string, now: Date, deps: PaymentDeps = defaultPaymentDeps(), limit = 20): Promise<{ checked: number; changed: number }> {
   const t = requireTenant(tenantId);
   const due = new Date(now.getTime() - 60 * 60_000).toISOString();
   const since = new Date(now.getTime() - 120 * 86_400_000).toISOString();
   const rs = await db.execute({
-    sql: `SELECT r.id, r.engagement_id, r.provider_reference, r.amount_cents, r.currency, r.proposal_version_id, c.payment_token, e.lead_id
+    sql: `SELECT r.id, r.engagement_id, r.provider_reference, r.amount_cents, r.currency, r.proposal_version_id, r.installment_kind, c.payment_token, e.lead_id
           FROM ai_audit_payment_receipts r
           JOIN ai_audit_checkouts c ON c.tenant_id = r.tenant_id AND c.id = r.checkout_id
           JOIN ai_audit_engagements e ON e.tenant_id = r.tenant_id AND e.id = r.engagement_id
@@ -695,7 +718,8 @@ export async function reconcileReceipts(db: Client, tenantId: string, now: Date,
   let changed = 0;
   for (const r of rs.rows) {
     const at = now.toISOString();
-    let next: "verified" | "refunded" | "partially_refunded" | "disputed" = "verified";
+    const receiptId = String(r.id);
+    let next: ReceiptStatus = "verified";
     let error: string | null = null;
     try {
       await verifyStripeWebsitePayment({
@@ -716,26 +740,51 @@ export async function reconcileReceipts(db: Client, tenantId: string, now: Date,
       else if (code === "payment_disputed") next = "disputed";
       else error = code;
     }
-    await db.execute({
-      sql: `UPDATE ai_audit_payment_receipts SET status = ?, last_reconciled_at = ?, reconciliation_attempts = reconciliation_attempts + 1,
-              last_reconciliation_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ?`,
-      args: [next, at, error, at, t, String(r.id)],
-    });
-    if (next === "verified") continue;
-    changed += 1;
-    const engagement = await getEngagement(db, t, String(r.engagement_id));
-    if (!engagement) continue;
+    if (next === "verified") {
+      await db.execute({
+        sql: `UPDATE ai_audit_payment_receipts SET last_reconciled_at = ?, reconciliation_attempts = reconciliation_attempts + 1,
+                last_reconciliation_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ?`,
+        args: [at, error, at, t, receiptId],
+      });
+      continue;
+    }
     const words = next === "refunded" ? "was refunded" : next === "partially_refunded" ? "was partly refunded" : "is disputed";
-    await patchEngagement(db, {
-      tenantId: t,
-      id: engagement.id,
-      expectedRowVersion: engagement.row_version,
-      patch: { payment_status: next, health: "attention", health_reason: `The payment ${words} in Stripe.` },
-      event: `payment_${next}`,
-      actor: { type: "stripe", id: String(r.provider_reference) },
-      now,
-      meta: { receipt_id: String(r.id) },
-    });
+    let landed = false;
+    let engagement: Engagement | null = null;
+    for (let attempt = 0; attempt < 4 && !landed; attempt++) {
+      engagement = await getEngagement(db, t, String(r.engagement_id));
+      if (!engagement) break;
+      const others = (
+        await db.execute({
+          sql: "SELECT status FROM ai_audit_payment_receipts WHERE tenant_id = ? AND engagement_id = ? AND installment_kind = ? AND id <> ?",
+          args: [t, engagement.id, String(r.installment_kind), receiptId],
+        })
+      ).rows.map((x) => String(x.status));
+      const status = aggregatePaymentStatus([...others, next]);
+      const stillPaid = status === "paid" || status === "overpaid_review";
+      landed = await casWrite(
+        db,
+        engagementUpdateStatement(t, engagement.id, engagement.row_version, {
+          payment_status: status,
+          health: "attention",
+          health_reason: stillPaid ? `A duplicate payment ${words} in Stripe; the proposal is still paid.` : `The payment ${words} in Stripe.`,
+        }, at),
+        [
+          {
+            sql: `UPDATE ai_audit_payment_receipts SET status = ?, last_reconciled_at = ?, reconciliation_attempts = reconciliation_attempts + 1,
+                    last_reconciliation_error = NULL, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'verified'`,
+            args: [next, at, at, t, receiptId],
+          },
+          eventStatement({ tenantId: t, engagementId: engagement.id, event: `payment_${next}`, actor: { type: "stripe", id: String(r.provider_reference) }, at, meta: { receipt_id: receiptId, engagement_payment_status: status } }),
+        ],
+      );
+    }
+    if (!landed || !engagement) {
+      // Left verified: the next run checks it again rather than losing the refund.
+      console.error("[ai-audit.payment] a refund or dispute could not be recorded; it is re-checked next run", { receiptId, engagementId: String(r.engagement_id), next });
+      continue;
+    }
+    changed += 1;
     await deps.alert({
       tenantId: t,
       alertType: `ai_audit_payment_${next}`,

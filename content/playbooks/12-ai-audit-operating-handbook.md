@@ -110,10 +110,11 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 | What you see | What to do |
 |---|---|
 | "Needs you: payment check" | Stripe's amount or binding did not match. Open Stripe, compare, and contact the client before anything else. |
-| "Payment was refunded" or "disputed" | Nothing was deleted. Decide whether to pause the project; respond to a dispute in Stripe. |
+| "Payment was refunded" or "disputed" | Nothing was deleted. Decide whether to pause the project; respond to a dispute in Stripe. Refunding the duplicate of two payments leaves the proposal paid, and onboarding carries on. |
 | "Second payment for the same proposal" | Refund one in Stripe. Onboarding ran only once. |
 | "Delivery failed" | Read the reason on the approval, fix it, then **Retry delivery**. |
 | "Audit sent, but not yet recorded" | The client has the email. Do **not** retry: that would send a second one. The next tick finishes the record within five minutes. |
+| "Audit email may have been sent" | The mail server stopped answering after taking the email. Look in the Sent folder. If it is there, press **It was sent**. If not, press **It was not sent: send again**, which stops the old link first. |
 | "Payment received for a declined (or cancelled) audit" | The money is real and nothing was onboarded. Refund it in Stripe, or talk to the client and start a new engagement. |
 | "PDF not printed" | The Mac failed three times. Check that it is on and online, then press **Retry PDF**. |
 | The PDF never arrives | The Mac runner is off or offline. Turn the Mac on; the job is picked up within a minute. |

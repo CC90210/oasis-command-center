@@ -79,7 +79,7 @@ export type EngagementView = {
   proposalVersions: Array<Pick<ProposalVersion, "id" | "version_no" | "status" | "total_cents" | "currency" | "created_at">>;
   proposalBlockers: string[];
   totals: ProposalTotals | null;
-  deliveryApproval: { id: string; status: string; outcome: string | null; message: string | null } | null;
+  deliveryApproval: { id: string; status: string; outcome: string | null; reason: string | null; message: string | null } | null;
   link: ShareLink | null;
   checkouts: Checkout[];
   receipts: Receipt[];
@@ -124,6 +124,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
           id: approval.id,
           status: approval.status,
           outcome: (approval.execution_result as { outcome?: string } | null)?.outcome ?? null,
+          reason: (approval.execution_result as { reason?: string } | null)?.reason ?? null,
           message: (approval.execution_result as { message?: string } | null)?.message ?? null,
         }
       : null,

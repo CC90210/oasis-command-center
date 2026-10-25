@@ -19,13 +19,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Client } from "@libsql/client";
-import { OASIS, USERS, check, finish, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
+import { CLIENT_A, OASIS, USERS, check, finish, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
 
 for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
 process.env.AI_AUDIT_LINK_SECRET = "ai-audit-flow-test-link-secret-000000000000001";
 
 const LEAD = "7a000000-0000-4000-8000-000000000001";
 const LEAD_B = "7a000000-0000-4000-8000-000000000002";
+const LEAD_C = "7a000000-0000-4000-8000-000000000003";
+const LEAD_D = "7a000000-0000-4000-8000-000000000004";
 const NOW = () => new Date();
 
 /** scripts/apply_turso_migration.py split_statements: a trigger body stays one statement. */
@@ -161,6 +163,8 @@ async function main() {
   for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql"]) await apply(db, f);
   await seedLead(db, LEAD, "qualified", "owner@fixture.test");
   await seedLead(db, LEAD_B, "qualified", "second@fixture.test");
+  await seedLead(db, LEAD_C, "qualified", "third@fixture.test");
+  await seedLead(db, LEAD_D, "won", "fourth@fixture.test");
 
   const store = await import("../lib/ai-audit/store");
   const versions = await import("../lib/ai-audit/versions");
@@ -395,9 +399,28 @@ async function main() {
     assert.equal(sent.length, 0);
     assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "final_review");
   });
-  await check("Gate 2 refuses when the approved PDF is missing from storage: nothing is minted or sent", async () => {
+  await check("an uncertain send keeps its link and offers no second send until CC checks the Sent folder", async () => {
     const retry = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
     approvalId = retry.ok ? retry.approvalId : "";
+    await approve();
+    const unsure = { ...deps(), sendEmail: async () => ({ ok: false as const, provider: "oasis_shared_gmail" as const, reason: "delivery_unknown" as const, error: "the server stopped answering" }) };
+    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, unsure as never);
+    assert.equal(r.ok && (r.approval.execution_result as { reason?: string } | null)?.reason, "delivery_unknown");
+    const live = await link.linkForApproval(db, OASIS, approvalId);
+    assert.ok(live && !live.revoked_at, "the link the email may carry still works");
+    assert.equal(deliveryAlerts.at(-1)?.alertType, "ai_audit_delivery_unknown");
+    const blind = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
+    assert.deepEqual(blind, { ok: false, error: "delivery_unknown_check_sent" }, "no plain retry");
+    deliveryAlerts.length = 0;
+  });
+  await check("CC says it was not sent: the old link dies and a fresh card is filed", async () => {
+    const oldApproval = approvalId;
+    const retry = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true, confirmNotSent: true });
+    assert.ok(retry.ok && retry.created);
+    approvalId = retry.ok ? retry.approvalId : "";
+    assert.ok((await link.linkForApproval(db, OASIS, oldApproval))?.revoked_at, "the uncertain email's link is revoked");
+  });
+  await check("Gate 2 refuses when the approved PDF is missing from storage: nothing is minted or sent", async () => {
     await approve();
     const saved = [...stored.entries()];
     stored.clear();
@@ -440,7 +463,7 @@ async function main() {
     assert.equal(e.stage, "delivered");
     assert.equal((await versions.getAuditVersion(db, OASIS, e.current_audit_version_id!))!.status, "delivered");
     assert.equal(await leadStage(db, LEAD), "proposal_sent");
-    const stored2 = await db.execute({ sql: "SELECT token_sha256 FROM ai_audit_share_links WHERE tenant_id = ?", args: [OASIS] });
+    const stored2 = await db.execute({ sql: "SELECT token_sha256 FROM ai_audit_share_links WHERE tenant_id = ? AND approval_id = ?", args: [OASIS, approvalId] });
     assert.equal(String(stored2.rows[0].token_sha256), link.tokenHash(token));
     assert.ok(!JSON.stringify(stored2.rows).includes(token), "the token itself is never stored");
     // Pressing approve again runs nothing a second time.
@@ -499,6 +522,12 @@ async function main() {
     const e = (await store.getEngagement(db, OASIS, engagementId))!;
     assert.equal(e.stage, "payment_pending");
     assert.equal(e.payment_status, "pending");
+  });
+  await check("the payment switch stops even an open live session being handed out (Codex review of PR #732)", async () => {
+    const p = (await pub.loadPublicAudit(db, token, NOW()))!;
+    assert.equal((await payment.listCheckouts(db, OASIS, engagementId)).filter((c) => c.status === "open").length, 1, "a live session is open");
+    const r = await payment.createOrReuseCheckout(db, { link: p.link, now: NOW(), deps: { ...payDeps, isDryRun: () => true } });
+    assert.ok(!r.ok && r.error === "dry_run", "switched off: no URL, not even the open one");
   });
   await check("in dry run the Pay button makes no payment request at all", async () => {
     const p = (await pub.loadPublicAudit(db, token, NOW()))!;
@@ -563,6 +592,14 @@ async function main() {
   await check("a later refund is caught by the re-check, flagged, and deletes nothing", async () => {
     const c = (await payment.listCheckouts(db, OASIS, engagementId))[0];
     stripe.sessions.get(c.stripe_session_id!)!.refunded = true;
+    await db.execute({ sql: "UPDATE ai_audit_payment_receipts SET last_reconciled_at = '2000-01-01T00:00:00Z' WHERE tenant_id = ?", args: [OASIS] });
+    // The engagement's write fails once (Codex review of PR #732): the receipt must stay verified and be checked again.
+    await db.execute("CREATE TRIGGER fail_refund_event BEFORE INSERT ON ai_audit_events WHEN NEW.event = 'payment_refunded' BEGIN SELECT RAISE(ABORT, 'injected_failure'); END");
+    const failed = await payment.reconcileReceipts(db, OASIS, NOW(), payDeps).catch((err: unknown) => err);
+    await db.execute("DROP TRIGGER fail_refund_event");
+    assert.ok(!(failed instanceof Error) || /injected_failure/.test(failed.message), String(failed));
+    assert.equal(String((await db.execute({ sql: "SELECT status FROM ai_audit_payment_receipts WHERE tenant_id = ?", args: [OASIS] })).rows[0].status), "verified", "not lost");
+    assert.equal((await store.getEngagement(db, OASIS, engagementId))!.payment_status, "paid");
     await db.execute({ sql: "UPDATE ai_audit_payment_receipts SET last_reconciled_at = '2000-01-01T00:00:00Z' WHERE tenant_id = ?", args: [OASIS] });
     const alerts: unknown[] = [];
     const r = await payment.reconcileReceipts(db, OASIS, NOW(), { ...payDeps, alert: async (a) => void alerts.push(a) });
@@ -657,6 +694,56 @@ async function main() {
     assert.ok(f.count >= pdf.PDF_MAX_FAILURES);
     assert.equal(await pdf.clearPdfFailures(db, OASIS, "v-print"), 3);
     assert.equal((await pdf.pdfFailures(db, OASIS, "v-print")).count, 0);
+  });
+  await check("payment status comes from every receipt: refunding the duplicate of two leaves the proposal paid", async () => {
+    assert.equal(payment.aggregatePaymentStatus(["verified", "refunded"]), "paid");
+    assert.equal(payment.aggregatePaymentStatus(["verified", "verified"]), "overpaid_review");
+    assert.equal(payment.aggregatePaymentStatus(["refunded"]), "refunded");
+    assert.equal(payment.aggregatePaymentStatus(["refunded", "disputed"]), "disputed");
+    assert.equal(payment.aggregatePaymentStatus(["partially_refunded"]), "partially_refunded");
+  });
+  await check("onboarding an existing customer keeps the client workspace it already has (Codex review of PR #732)", async () => {
+    // A customer already linked to this lead, with its own client workspace.
+    await db.execute({ sql: "UPDATE customers SET source_lead_id = ? WHERE id = 'customer-oasis-client-a'", args: [LEAD_D] });
+    const opened = await store.openEngagement(db, { tenantId: OASIS, leadId: LEAD_D, actor: cc, now: NOW(), isFixture: true });
+    assert.ok(opened.ok);
+    const id = opened.ok ? opened.engagement.id : "";
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'payment_confirmed', payment_status = 'paid' WHERE id = ?", args: [id] });
+    const r = await onboarding.runOnboarding(db, { tenantId: OASIS, engagementId: id, now: NOW(), deps: { alert: async () => undefined, baseUrl: () => "https://oasisai.work" } });
+    assert.ok(r.ok, !r.ok ? r.error : "");
+    const project = (await db.execute({ sql: "SELECT client_tenant_id, customer_id FROM delivery_projects WHERE lead_id = ?", args: [LEAD_D] })).rows[0];
+    assert.equal(String(project.customer_id), "customer-oasis-client-a");
+    assert.equal(String(project.client_tenant_id), CLIENT_A);
+  });
+  await check("after an uncertain send CC can record that it went: delivered with the link that email carries, nothing sent", async () => {
+    const opened = await store.openEngagement(db, { tenantId: OASIS, leadId: LEAD_C, actor: cc, now: NOW(), isFixture: true });
+    assert.ok(opened.ok);
+    const id = opened.ok ? opened.engagement.id : "";
+    const at = new Date().toISOString();
+    await db.batch([
+      { sql: "INSERT INTO ai_audit_versions (id, tenant_id, engagement_id, version_no, status, content, content_sha256, created_at, updated_at) VALUES ('ver-c', ?, ?, 1, 'awaiting_approval', '{}', ?, ?, ?)", args: [OASIS, id, "a".repeat(64), at, at] },
+      { sql: "INSERT INTO ai_audit_proposal_versions (id, tenant_id, engagement_id, version_no, status, currency, content, content_sha256, created_at, updated_at) VALUES ('prop-c', ?, ?, 1, 'awaiting_approval', 'CAD', '{}', ?, ?, ?)", args: [OASIS, id, "b".repeat(64), at, at] },
+    ]);
+    const payload = { engagement_id: id, lead_id: LEAD_C, business_name: "C Co", audit_version_id: "ver-c", audit_sha256: "a".repeat(64), proposal_version_id: "prop-c", proposal_sha256: "b".repeat(64), pdf_sha256: "c".repeat(64), to: "third@fixture.test", subject: "Your audit", body: "Hi\n\n{{audit_link}}", currency: "CAD", total_cents: 100, due_now_cents: 100 };
+    const made = await approvalsStore.createApproval(db, { tenantId: OASIS, departmentKey: null, requestedBy: { type: "routine", id: "ai-audit" }, actionKind: "deliver_ai_audit", title: "C", payload, riskLevel: "spend", idempotencyKey: "uncertain-c" }, NOW());
+    assert.ok(made.ok);
+    const aId = made.ok ? made.approval.id : "";
+    await db.execute({ sql: "UPDATE approvals SET status = 'failed', execution_result = ? WHERE id = ?", args: [JSON.stringify({ outcome: "failed", reason: "delivery_unknown", message: "maybe", provider: "oasis_shared_gmail" }), aId] });
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'final_review', delivery_approval_id = ?, current_audit_version_id = 'ver-c', current_proposal_version_id = 'prop-c' WHERE id = ?", args: [aId, id] });
+    await link.createShareLink(db, { tenantId: OASIS, engagementId: id, auditVersionId: "ver-c", proposalVersionId: "prop-c", approvalId: aId, token: link.mintLinkToken(process.env.AI_AUDIT_LINK_SECRET!, "uncertain-c"), now: NOW() });
+    const before = sent.length;
+    const ok = await delivery.confirmUncertainDelivery(db, { tenantId: OASIS, engagementId: id, actor: cc });
+    assert.deepEqual(ok, { ok: true });
+    const e = (await store.getEngagement(db, OASIS, id))!;
+    assert.equal(e.stage, "delivered");
+    assert.ok(e.share_link_id);
+    assert.equal(sent.length, before, "nothing was sent");
+    assert.deepEqual(await delivery.confirmUncertainDelivery(db, { tenantId: OASIS, engagementId: id, actor: cc }), { ok: false, error: "nothing_uncertain" }, "only once");
+  });
+  await check("a submitted audit leaves final review only by Reopen, decline or cancel (Codex review of PR #732)", async () => {
+    const rules = await import("../lib/ai-audit/rules");
+    assert.equal(rules.mayMoveStage("final_review", "transcript_review"), false);
+    assert.equal(rules.mayMoveStage("final_review", "generating"), true);
   });
   await check("the tick runs every step without contacting anyone and reports cleanly", async () => {
     const r = await tick.runAiAuditTick(db, { budgetMs: 30_000, deps: { payment: { ...payDeps, alert: async () => undefined }, onboarding: { alert: async () => undefined, baseUrl: () => "https://oasisai.work" } } });

@@ -13,6 +13,9 @@ const ERROR_WORDS: Record<string, string> = {
   only_before_delivery: "This can only be done before the audit is delivered.",
   nothing_submitted: "Nothing has been submitted yet.",
   not_submittable_at_this_stage: "The audit can be submitted once the discovery profile is in review.",
+  delivery_unknown_check_sent: "The last send may have gone. Check the Sent folder first, then choose It was sent, or It was not sent.",
+  nothing_uncertain: "There is no uncertain delivery to confirm.",
+  link_gone: "That email's link was revoked, so it cannot be recorded as delivered. Send again instead.",
 };
 
 export function describeError(r: ActionResult): string {

@@ -197,7 +197,7 @@ export function deliveryPayloadFor(engagement: Engagement, audit: AuditVersion, 
  */
 export async function requestDeliveryApproval(
   db: Client,
-  input: { tenantId: string; engagementId: string; now: Date; retry?: boolean },
+  input: { tenantId: string; engagementId: string; now: Date; retry?: boolean; confirmNotSent?: boolean },
 ): Promise<{ ok: true; approvalId: string; created: boolean } | { ok: false; error: string }> {
   const t = requireTenant(input.tenantId);
   const engagement = await getEngagement(db, t, input.engagementId);
@@ -210,8 +210,18 @@ export async function requestDeliveryApproval(
     if (prior && !dryRun && ["pending", "approved", "executing", "executed"].includes(prior.status)) {
       return { ok: true, approvalId: prior.id, created: false };
     }
+    const priorReason = (prior?.execution_result as { reason?: unknown } | null)?.reason;
+    const uncertain = !!prior && prior.status === "failed" && priorReason === "delivery_unknown";
+    if (uncertain && input.retry && !input.confirmNotSent) return { ok: false, error: "delivery_unknown_check_sent" };
+    if (uncertain && input.retry && input.confirmNotSent) {
+      // CC checked the Sent folder and it did not go: the old link dies before a new one is made.
+      const old = await linkForApproval(db, t, prior.id);
+      if (old && !old.revoked_at) await revokeShareLink(db, t, old.id, "not_sent_confirmed", input.now);
+    }
     if (prior && !input.retry) {
-      const why = dryRun
+      const why = uncertain
+        ? "The email may have been sent (the mail server stopped answering). Check the Sent folder, then choose It was sent, or It was not sent: send again."
+        : dryRun
         ? "Approved while audit delivery is in dry run, so nothing was sent. Turn on LIVE_SEND_AI_AUDIT, then retry delivery."
         : prior.status === "failed"
           ? `Delivery failed: ${String((prior.execution_result as { message?: unknown } | null)?.message ?? "see the approval").slice(0, 160)}`
@@ -377,6 +387,30 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
     idempotencyKey: ctx.approval.idempotency_key,
     purpose: "sales",
   });
+  if (!sent.ok && sent.reason === "delivery_unknown") {
+    // The mail server took the message and then stopped answering: it may have
+    // arrived. The link keeps working, and nothing here offers a second send
+    // until CC has checked the Sent folder (Codex review of PR #732).
+    await ctx.db.execute(
+      eventStatement({ tenantId: t, engagementId: engagement.id, event: "delivery_unknown", actor: { type: "user", id: approverId }, at: new Date().toISOString(), refType: "approval", refId: ctx.approval.id, meta: { share_link_id: link.id, to: p.to } }),
+    );
+    await deps
+      .alert({
+        tenantId: t,
+        alertType: "ai_audit_delivery_unknown",
+        severity: "urgent",
+        title: `Audit email may have been sent: ${engagement.business_name || "an AI audit"}`,
+        body: "The mail server stopped answering after taking the message. Check the Sent folder, then on the engagement choose It was sent, or It was not sent: send again.",
+        subjectType: "ai_audit_engagement",
+        subjectId: engagement.id,
+        telegramOncePerOpen: true,
+      })
+      .catch((alertErr: unknown) => console.error("[ai-audit.delivery] the alert failed", alertErr instanceof Error ? alertErr.message : alertErr));
+    return {
+      ok: false,
+      result: { outcome: "failed", reason: "delivery_unknown", message: "The email may have been sent: the mail server stopped answering after taking it. Check the Sent folder before doing anything else.", provider: sent.provider },
+    };
+  }
   if (!sent.ok) {
     await revokeShareLink(ctx.db, t, link.id, "send_failed", new Date());
     return {
@@ -502,6 +536,43 @@ export async function repairUnrecordedDelivery(db: Client, tenantId: string, eng
     messageId: typeof result.message_id === "string" ? result.message_id : null,
     to: v.value.to,
   });
+}
+
+/**
+ * CC checked the Sent folder after an uncertain send and the email DID go:
+ * record the delivery exactly as a confirmed send would have, with the link
+ * that email carries. Nothing is sent.
+ */
+export async function confirmUncertainDelivery(db: Client, input: { tenantId: string; engagementId: string; actor: Actor }): Promise<{ ok: true } | { ok: false; error: string }> {
+  const t = requireTenant(input.tenantId);
+  const engagement = await getEngagement(db, t, input.engagementId);
+  if (!engagement || engagement.stage !== "final_review" || !engagement.delivery_approval_id) return { ok: false, error: "nothing_uncertain" };
+  const approval = await getApprovalInTenant(db, t, engagement.delivery_approval_id);
+  const reason = (approval?.execution_result as { reason?: unknown } | null)?.reason;
+  if (!approval || approval.status !== "failed" || reason !== "delivery_unknown") return { ok: false, error: "nothing_uncertain" };
+  let payload: Record<string, unknown>;
+  try {
+    payload = parsePayload(approval);
+  } catch {
+    return { ok: false, error: "payload_unreadable" };
+  }
+  const v = validateDeliverAiAuditPayload(payload);
+  if (!v.ok) return { ok: false, error: "payload_unreadable" };
+  const link = await linkForApproval(db, t, approval.id);
+  if (!link || link.revoked_at) return { ok: false, error: "link_gone" };
+  await db.execute(eventStatement({ tenantId: t, engagementId: engagement.id, event: "delivery_confirmed_by_owner", actor: input.actor, at: new Date().toISOString(), refType: "approval", refId: approval.id }));
+  const recorded = await recordDelivery(db, {
+    tenantId: t,
+    engagementId: engagement.id,
+    auditVersionId: v.value.audit_version_id,
+    proposalVersionId: v.value.proposal_version_id,
+    approvalId: approval.id,
+    linkId: link.id,
+    actor: input.actor,
+    messageId: null,
+    to: v.value.to,
+  });
+  return recorded ? { ok: true } : { ok: false, error: "stage_moved" };
 }
 
 export const deliverAiAuditExecutor: Executor = {

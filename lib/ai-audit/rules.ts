@@ -97,7 +97,10 @@ export const STAGE_MOVES: Readonly<Record<AiAuditStage, readonly AiAuditStage[]>
   // wrote the profile and the audit himself, so nothing is generated.
   transcript_review: ["generating", "final_review", "declined", "cancelled"],
   generating: ["final_review", "transcript_review", "declined", "cancelled"],
-  final_review: ["delivered", "generating", "transcript_review", "declined", "cancelled"],
+  // Out of final review only by delivery, Reopen (to generating, which withdraws
+  // the frozen versions and opens drafts), decline or cancel. A bare move back
+  // left the versions frozen and every editor locked (Codex review of PR #732).
+  final_review: ["delivered", "generating", "declined", "cancelled"],
   delivered: ["proposal_review", "payment_pending", "payment_confirmed", "final_review", "declined", "cancelled"],
   proposal_review: ["payment_pending", "payment_confirmed", "final_review", "declined", "cancelled"],
   payment_pending: ["payment_confirmed", "proposal_review", "final_review", "declined", "cancelled"],

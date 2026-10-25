@@ -20,7 +20,7 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { convertLeadToCustomer } from "@/lib/os/customers/store";
+import { convertLeadToCustomer, getCustomer } from "@/lib/os/customers/store";
 import { createProject, createTask } from "@/lib/delivery/store";
 import { createApproval } from "@/lib/os/approvals/store";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
@@ -129,6 +129,9 @@ export async function runOnboarding(
   const proposal = engagement.current_proposal_version_id ? await getProposalVersion(db, t, engagement.current_proposal_version_id) : null;
   const lines = proposal?.content?.lines.filter((l) => !l.optional) ?? [];
   if (!engagement.delivery_project_id) {
+    // An existing customer may already have its own client workspace; the
+    // project must name the same one, or createProject refuses it (Codex review of PR #732).
+    const customer = await getCustomer(db, t, customerId);
     const description = [
       "From the approved Free AI Audit proposal.",
       ...lines.map((l) => `- ${l.name}${l.quantity > 1 ? ` x${l.quantity}` : ""}`),
@@ -141,7 +144,7 @@ export async function runOnboarding(
           id: projectId,
           title: `${engagement.business_name || "Client"}: AI implementation`.slice(0, 200),
           description,
-          client_tenant_id: null,
+          client_tenant_id: customer?.client_tenant_id ?? null,
           client_name: engagement.business_name,
           client_email: engagement.contact_email,
           lead_id: engagement.lead_id,

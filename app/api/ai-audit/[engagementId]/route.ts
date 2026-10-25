@@ -12,7 +12,8 @@
  *   save_proposal      { content, expected_row_version }  the priced proposal draft
  *   submit             { expected_row_version }          check, freeze, print the PDF (nothing is sent)
  *   reopen             { expected_row_version }          take a submission back for edits
- *   retry_delivery                                        file a fresh final approval after a failed one
+ *   retry_delivery     { confirm_not_sent? }              file a fresh final approval after a failed one (after an uncertain send, only with confirm_not_sent)
+ *   confirm_delivery_sent                                 after an uncertain send: CC saw it in the Sent folder, record the delivery
  *   recheck_payment                                       ask Stripe about every open checkout
  *   revoke_link                                           the client's link stops working
  *   retry_onboarding                                      run the onboarding steps again (idempotent)
@@ -35,7 +36,7 @@ import { validateProfileField } from "@/lib/ai-audit/profile";
 import { getEngagement, getSettings, patchEngagement, recordEvent, type Actor } from "@/lib/ai-audit/store";
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
 import { deleteProfileField, saveAuditDraft, saveProfileField, saveProposalDraft } from "@/lib/ai-audit/versions";
-import { reopenForEdits, requestDeliveryApproval, submitForFinalApproval } from "@/lib/ai-audit/delivery";
+import { confirmUncertainDelivery, reopenForEdits, requestDeliveryApproval, submitForFinalApproval } from "@/lib/ai-audit/delivery";
 import { expireOpenCheckouts, listCheckouts, verifyCheckout } from "@/lib/ai-audit/payment";
 import { clearPdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
@@ -182,9 +183,15 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     }
     case "retry_delivery": {
       if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
-      const r = await requestDeliveryApproval(s.db, { tenantId: s.tenantId, engagementId, now, retry: true });
+      const r = await requestDeliveryApproval(s.db, { tenantId: s.tenantId, engagementId, now, retry: true, confirmNotSent: body.confirm_not_sent === true });
       if (!r.ok) return json(409, { ok: false, error: r.error });
       return json(200, { ok: true, approval_id: r.approvalId, created: r.created });
+    }
+    case "confirm_delivery_sent": {
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const r = await confirmUncertainDelivery(s.db, { tenantId: s.tenantId, engagementId, actor });
+      if (!r.ok) return json(409, { ok: false, error: r.error });
+      return json(200, { ok: true });
     }
     case "recheck_payment": {
       const checkouts = (await listCheckouts(s.db, s.tenantId, engagementId)).filter((c) => (c.status === "open" || c.status === "expired" || c.status === "paid") && c.stripe_session_id);
