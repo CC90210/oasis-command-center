@@ -11,7 +11,7 @@ export default async function SeoSitePage({ params, searchParams }: {
   params: Promise<{ site: string }>;
   searchParams: Promise<{ range?: string }>;
 }) {
-  // GATE: requireSeoOwner() as the FIRST statement (CC and Adon only). The data is never fetched for anyone else.
+  // GATE: requireSeoOwner() as the FIRST statement (CC only). The data is never fetched for anyone else.
   await requireSeoOwner();
   const { site } = await params;
   const range = parseRange((await searchParams).range);

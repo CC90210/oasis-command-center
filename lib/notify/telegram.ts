@@ -7,10 +7,9 @@
  * -----------------------
  * There used to be one, and it caused a cross-tenant notification leak.
  *
- * This app serves two different audiences out of one codebase: CC, who owns
- * OASIS and wants his own funnel leads, and Adon/APEX, who run SunBiz
- * operations and need alerts about scrapers, bounces and dialer compliance.
- * Until 2026-08-02 both audiences shared one credential pair — sendTelegram()
+ * Historically this app served two different audiences out of one codebase:
+ * CC for OASIS and an external SunBiz operator. Until 2026-08-02 both audiences
+ * shared one credential pair — sendTelegram()
  * fell back to OASIS_TELEGRAM_BOT_TOKEN / OASIS_TELEGRAM_CHAT_ID, and those
  * were the ONLY Telegram variables set in Vercel production. Nine call sites
  * across funnel alerts, cron watchdogs and agent alerts all relied on that
@@ -19,12 +18,12 @@
  * So the credential pair had exactly one correct value and two audiences, and
  * whichever audience it pointed at, the other was misrouted:
  *
- *   - pointing at @KnutRPEbot (Adon): SunBiz ops alerts landed correctly, and
+ *   - pointing at the former SunBiz bot: those alerts landed correctly, and
  *     CC's own lead notifications went silently into a partner's private chat
  *     for 34 days, every send returning ok:true.
  *   - repointing it at CC (2026-08-02 01:22) fixed the funnel and immediately
  *     redirected TPS backlog, bounce-reader and Kixie compliance alerts into
- *     CC's DM, while Adon — the only person who can action them — went blind.
+ *     CC's DM, while the external operator went blind.
  *
  * Both states were broken, because the defect was never the value. It was that
  * one implicit default served two audiences, so any change to it silently
@@ -74,9 +73,9 @@ export { escapeTelegramHtml } from "./telegram-format";
 export type TelegramLane =
   /** CC — OASIS funnel leads, his own business alerts. */
   | "operator"
-  /** Adon / APEX — SunBiz operational alerts (scrapers, bounces, dialer). */
+  /** Retired external SunBiz lane. Kept only so old callers fail closed. */
   | "sunbiz-ops"
-  /** CC and Adon together — new inbound leads on oasisai.work, the people who answer them. */
+  /** CC — new inbound leads on oasisai.work. */
   | "sales";
 
 type LaneSpec = {
@@ -90,7 +89,7 @@ type LaneSpec = {
    *
    * NOT a cross-lane fallback — that is the exact leak this module exists to
    * prevent. This is another address for the SAME audience: for sunbiz-ops the
-   * primary is the ops GROUP and the fallback is Adon's own DM, and Adon is the
+   * primary is the ops GROUP and the fallback is the operator's DM, and that person is the
    * sunbiz-ops audience either way.
    *
    * WHY IT EXISTS. On 2026-08-12 @KnutRPEbot's membership of the ops group read
@@ -113,27 +112,19 @@ const LANES: Record<TelegramLane, LaneSpec> = {
     audience: "CC (OASIS operator)",
   },
   "sunbiz-ops": {
-    // Deliberately does NOT list OASIS_* or bare TELEGRAM_*. If this lane is
-    // unset the send fails loudly instead of quietly becoming CC's problem.
-    tokenKeys: ["SUNBIZ_OPS_TELEGRAM_BOT_TOKEN", "SUNBIZ_TELEGRAM_BOT_TOKEN"],
-    chatKeys: ["SUNBIZ_OPS_TELEGRAM_CHAT_ID"],
-    // Adon's own DM. Same audience as the ops group, different address.
-    fallbackChatKeys: ["SUNBIZ_OPS_TELEGRAM_FALLBACK_CHAT_ID"],
-    audience: "SunBiz operations (Adon / APEX)",
+    // Retired 2026-10-21. Real former-lane secret names are intentionally not
+    // accepted, so leaving an old deployment secret behind grants no delivery.
+    tokenKeys: ["RETIRED_SUNBIZ_TELEGRAM_DISABLED"],
+    chatKeys: ["RETIRED_SUNBIZ_CHAT_DISABLED"],
+    audience: "Retired external SunBiz lane (disabled)",
   },
   sales: {
-    // The sales desk is CC AND Adon, so a lead lands in a group both of them
-    // read (OASIS_SALES_TELEGRAM_CHAT_ID) instead of one person's DM, where the
-    // other never saw it. CC is a member of that audience, so his DM is the SAME
-    // lane's second address, not another lane's: it is what the group falls back
-    // to when the bot is not in it, and what the lane uses outright until the
-    // group id is set. Either way a lead alert is delivered, never silenced.
-    // The bot is CC's own, unless a dedicated one is configured.
-    tokenKeys: ["OASIS_SALES_TELEGRAM_BOT_TOKEN", "OASIS_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"],
-    chatKeys: ["OASIS_SALES_TELEGRAM_CHAT_ID", "OASIS_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"],
-    fallbackChatKeys: ["OASIS_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"],
-    groupLabel: "sales group",
-    audience: "OASIS sales desk (CC + Adon)",
+    // OASIS is a sole proprietorship. Ignore the former shared-sales secrets
+    // and generic credentials even if they remain configured in a deployment;
+    // sales fails closed unless CC's dedicated OASIS pair is present.
+    tokenKeys: ["OASIS_TELEGRAM_BOT_TOKEN"],
+    chatKeys: ["OASIS_TELEGRAM_CHAT_ID"],
+    audience: "CC (OASIS owner and sales desk)",
   },
 };
 

@@ -2,8 +2,8 @@
  * tests/booking-hours.test.ts - who takes booked calls, and when
  * (lib/booking/hours.ts, lib/booking/schedule-busy.ts).
  *
- * CC, 2026-10-16: calls 10:00-21:00 Toronto; Adon is off Friday and Saturday and
- * CC takes those calls alone; on the other days both founders are on the call.
+ * OASIS defaults to its sole proprietor. The generic engine still supports a
+ * configured attendee for client workspaces, so both paths stay covered.
  * The Schedule's own events count as busy, the weekly routine never does.
  */
 import assert from "node:assert/strict";
@@ -29,7 +29,19 @@ console.log("booking hours");
 
 const CC = "user-cc";
 const ADON = "user-adon";
-const settings = defaultOasisBookingSettings({ organizerUserId: CC, attendeeUserId: ADON });
+const soleSettings = defaultOasisBookingSettings({ organizerUserId: CC, attendeeUserId: ADON });
+const settings: BookingSettings = {
+  ...soleSettings,
+  hosts: [
+    soleSettings.hosts[0],
+    {
+      userId: ADON,
+      role: "attendee",
+      weeklyHours: weeklyHoursOn([0, 1, 2, 3, 4], 600, 1260),
+      targetCalendarId: null,
+    },
+  ],
+};
 // Thursday 2026-10-15 10:00 EDT.
 const NOW = Date.parse("2026-10-15T14:00:00.000Z");
 const free = (): Map<string, HostBusy> => new Map<string, HostBusy>([[CC, []], [ADON, []]]);
@@ -39,14 +51,13 @@ const starts = (list: { start: string }[]) => list.map((x) => x.start);
 const weekdayIn = (iso: string, tz = "America/Toronto") =>
   new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(new Date(iso));
 
-check("the default is CC every day and Adon Sunday to Thursday, 10:00 to 21:00 Toronto", () => {
-  assert.equal(settings.timeZone, "America/Toronto");
-  assert.deepEqual(settings.hosts.map((h) => [h.userId, h.role]), [[CC, "organizer"], [ADON, "attendee"]]);
-  assert.deepEqual(settings.hosts[0].weeklyHours, weeklyHoursOn([0, 1, 2, 3, 4, 5, 6], 600, 1260));
-  assert.deepEqual(settings.hosts[1].weeklyHours, weeklyHoursOn([0, 1, 2, 3, 4], 600, 1260));
-  assert.equal(settings.minNoticeMinutes, 120);
-  assert.equal(settings.maxDaysAhead, 14);
-  assert.equal(settings.bufferMinutes, 0, "back-to-back calls stay possible, as before");
+check("the OASIS default is CC alone every day, 10:00 to 21:00 Toronto", () => {
+  assert.equal(soleSettings.timeZone, "America/Toronto");
+  assert.deepEqual(soleSettings.hosts.map((h) => [h.userId, h.role]), [[CC, "organizer"]]);
+  assert.deepEqual(soleSettings.hosts[0].weeklyHours, weeklyHoursOn([0, 1, 2, 3, 4, 5, 6], 600, 1260));
+  assert.equal(soleSettings.minNoticeMinutes, 120);
+  assert.equal(soleSettings.maxDaysAhead, 14);
+  assert.equal(soleSettings.bufferMinutes, 0, "back-to-back calls stay possible, as before");
 });
 
 check("both founders are on duty Sunday to Thursday; CC alone on Friday and Saturday", () => {

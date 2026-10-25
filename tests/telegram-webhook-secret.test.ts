@@ -35,12 +35,12 @@ async function main() {
   const expires = new Date(Date.now() + 10 * 60_000).toISOString();
   await db.execute({
     sql: "UPDATE user_profiles SET custom_fields = ? WHERE auth_user_id = ?",
-    args: [JSON.stringify({ telegram_link: { code: CODE, expires_at: expires } }), USERS.adon.id],
+    args: [JSON.stringify({ telegram_link: { code: CODE, expires_at: expires } }), USERS.builder.id],
   });
   const { POST } = await import("../app/api/telegram/webhook/route");
 
   const fields = async () => {
-    const r = await db.execute({ sql: "SELECT custom_fields FROM user_profiles WHERE auth_user_id = ?", args: [USERS.adon.id] });
+    const r = await db.execute({ sql: "SELECT custom_fields FROM user_profiles WHERE auth_user_id = ?", args: [USERS.builder.id] });
     return JSON.parse(String(r.rows[0].custom_fields)) as Record<string, unknown>;
   };
   const unlinked = async (why: string) => {

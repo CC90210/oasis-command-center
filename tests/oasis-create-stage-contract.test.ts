@@ -459,7 +459,7 @@ async function main() {
       })),
       profile("p-owner", OWNER, "conaugh@oasisai.work", WEBDEV_TENANT_ID, "owner", 1),
       profile("p-opener", OPENER, "opener@oasis.test", WEBDEV_TENANT_ID, "opener"),
-      profile("p-closer", OTHER_REP, "adon@oasisai.work", WEBDEV_TENANT_ID, "closer"),
+      profile("p-closer", OTHER_REP, "closer@oasis.test", WEBDEV_TENANT_ID, "closer"),
       profile("p-member", MEMBER, "member@oasis.test", WEBDEV_TENANT_ID, "member"),
       profile("p-sun", SUN_AGENT, "agent@sun.test", SUN_TENANT, "agent"),
       profile("p-readonly", READ_ONLY, "readonly@oasis.test", WEBDEV_TENANT_ID, "read_only"),
@@ -693,10 +693,11 @@ async function main() {
   login(OWNER, "conaugh@oasisai.work");
   const created: Record<string, string> = {};
 
-  // A partial founder roster is an availability failure, not an uncaught 500.
-  // Exercise both routes against the real roster query by removing Adon for
+  // A missing sole-owner roster is an availability failure, not an uncaught 500.
+  // Exercise both routes against the real roster query by removing CC's
+  // canonical owner-email match (the signed-in profile itself remains) for
   // exactly these requests, then restore the fixture before pipeline writes.
-  await seed.execute({ sql: "DELETE FROM user_profiles WHERE id = ?", args: ["p-closer"] });
+  await seed.execute({ sql: "UPDATE user_profiles SET email = ? WHERE id = ?", args: ["former-owner@test.invalid", "p-owner"] });
   const unavailableReps = await assignableReps.GET();
   assert.equal(unavailableReps.status, 503);
   assert.equal((await unavailableReps.json() as ApiBody).error, "sales_roster_unavailable");
@@ -710,8 +711,8 @@ async function main() {
   );
   assert.equal(unavailableTerritory.status, 503);
   assert.equal((await unavailableTerritory.json() as ApiBody).error, "sales_roster_unavailable");
-  await seed.execute(profile("p-closer", OTHER_REP, "adon@oasisai.work", WEBDEV_TENANT_ID, "closer"));
-  run("(c) assignment surfaces report an unavailable CC+Adon roster explicitly");
+  await seed.execute({ sql: "UPDATE user_profiles SET email = ? WHERE id = ?", args: ["conaugh@oasisai.work", "p-owner"] });
+  run("(c) assignment surfaces report an unavailable CC-only roster explicitly");
 
   const beforeColdPromotion = await leadCount();
   const ownerlessColdPromotion = await postColdPromotion({});
@@ -739,7 +740,7 @@ async function main() {
     sql: "UPDATE cold_leads SET stage = 'imported', promoted_lead_id = NULL WHERE id = ?",
     args: [COLD_LEAD_ID],
   });
-  run("(c)/(d) OASIS cold promotion requires CC/Adon and CRM-write authority");
+  run("(c)/(d) OASIS cold promotion requires the active sales roster and CRM-write authority");
 
   const beforeImport = await leadCount();
   const unownedImport = await postImport([
@@ -785,7 +786,7 @@ async function main() {
       .includes(String(imported.rows[0].id)),
     "the accepted legacy import does not satisfy the actual Pipeline query",
   );
-  run("(c) OASIS imports require CC/Adon and land visibly in the current cycle");
+  run("(c) OASIS imports require the active sales roster and land visibly in the current cycle");
   await seed.execute({
     sql: "DELETE FROM tenant_records WHERE id = ?",
     args: [String(imported.rows[0].id)],
@@ -848,11 +849,11 @@ async function main() {
     sql: "DELETE FROM tenant_records WHERE id = ?",
     args: [String(genericStored.rows[0].id)],
   });
-  run("(c)/(d) generic OASIS imports require CC/Adon and satisfy the live board predicate");
+  run("(c)/(d) generic OASIS imports require the active sales roster and satisfy the live board predicate");
 
   const chatImport = await importLeadsForTenant({
     tenantId: WEBDEV_TENANT_ID,
-    assignee: "adon@oasisai.work",
+    assignee: "closer@oasis.test",
     rows: [{
       business_name: "Accepted chat import",
       email: "accepted-chat@example.test",
@@ -885,7 +886,7 @@ async function main() {
     sql: "DELETE FROM tenant_records WHERE id = ?",
     args: [String(chatStored.rows[0].id)],
   });
-  run("(c) chat attachment imports default/resolve CC+Adon and remain OASIS leads");
+  run("(c) chat attachment imports resolve the active sales roster and remain OASIS leads");
 
   login(SUN_AGENT, "agent@sun.test");
   const legacyAssignedImport = await postImport([
@@ -1088,7 +1089,7 @@ async function main() {
   assert.deepEqual(forged.body.fields, ["assigned_to"]);
   assertReadable(forged.body, "target_not_on_sales_roster");
 
-  // 2026-09-24: the roster is CC+Adon plus ACTIVE reps. A deactivated rep is
+  // The roster is CC plus ACTIVE reps. A deactivated rep is
   // off it — still signed in here (no ban), so this proves the roster itself refuses.
   await seed.execute({
     sql: "UPDATE user_profiles SET deactivated_at = '2026-09-24T00:00:00Z' WHERE auth_user_id = ?",
@@ -1118,7 +1119,7 @@ async function main() {
   run("(d) researched, missing/invalid region, forged owner, deactivated rep, member and a SunBiz profile are all refused");
 
   // A rep's own lead: Assigned, theirs, on their pipeline and in their book.
-  login(OTHER_REP, "adon@oasisai.work");
+  login(OTHER_REP, "closer@oasis.test");
   const repLead = await postRecord("oasis-ai-cc", { name: "Rep Sourced", state: "ON", stage: "assigned" });
   assert.equal(repLead.status, 200, repLead.body.message);
   const repStored = await storedLead(repLead.body.record!.id);
@@ -1128,7 +1129,7 @@ async function main() {
   assert.equal(repStored.data.sourced_by_user_id, OTHER_REP);
   assert.equal(typeof repStored.data.claimed_at, "string");
   const repBoard = await pipelineRows({ userId: OTHER_REP, teamRole: "closer", isOwner: false }, "assigned");
-  assert.ok(repBoard.includes(repLead.body.record!.id), "Adon's own lead is missing from their pipeline");
+  assert.ok(repBoard.includes(repLead.body.record!.id), "the closer's own lead is missing from their pipeline");
   assert.ok((await mineIds(closerViewer)).has(repLead.body.record!.id));
   assert.equal((await mineIds(openerViewer)).has(repLead.body.record!.id), false);
   assert.deepEqual(
@@ -1142,7 +1143,7 @@ async function main() {
   assert.equal(activeRepLead.status, 200, activeRepLead.body.message);
   assert.equal((await storedLead(activeRepLead.body.record!.id)).data.assigned_to, OPENER);
   assert.ok((await mineIds(openerViewer)).has(activeRepLead.body.record!.id), "an active rep's own lead is missing from their book");
-  run("(c) CC+Adon and active reps create into Assigned; a deactivated rep is refused");
+  run("(c) CC and active reps create into Assigned; a deactivated rep is refused");
 
   // Bulk assignment is useful for pre-handoff sales work, but it must use the
   // same roster and lifecycle boundary as the single-lead handoff.

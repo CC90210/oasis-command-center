@@ -9,7 +9,7 @@ import { overlapsShabbat, type ShabbatWindow } from "./sun";
 import { isTimeZone } from "./zone";
 import {
   CALENDAR_COLORS,
-  DEFAULT_PREFS,
+  NEUTRAL_PREFS,
   type CalendarColor,
   type CalendarPrefs,
   type EventInput,
@@ -197,10 +197,26 @@ export function validateOps(v: unknown): Result<EventOp[]> {
 
 /**
  * Validates preferences. Keys the value leaves out come from `base`: the
- * viewer's own workspace defaults (types.ts defaultPrefsFor), so a partial or
- * older stored row never gains another workspace's city or Shabbat lock.
+ * viewer's own workspace defaults (types.ts defaultPrefsFor, neutral since
+ * 2026-10-25), so a partial or older stored row never gains a city or the
+ * Shabbat lock it did not ask for.
  */
-export function validatePrefs(v: unknown, base: CalendarPrefs = DEFAULT_PREFS): Result<CalendarPrefs> {
+/**
+ * The keys of a stored row that still validate, one at a time over `base`. Keys are tried
+ * in CalendarPrefs order, so the place is restored before the Shabbat lock that needs it:
+ * an opted-in lock never fails open because some unrelated key went bad.
+ */
+export function salvagePrefs(raw: Record<string, unknown>, base: CalendarPrefs = NEUTRAL_PREFS): CalendarPrefs {
+  let acc = base;
+  for (const key of Object.keys(base) as (keyof CalendarPrefs)[]) {
+    if (!(key in raw)) continue;
+    const trial = validatePrefs({ ...acc, [key]: raw[key] }, acc);
+    if (trial.ok) acc = trial.value;
+  }
+  return acc;
+}
+
+export function validatePrefs(v: unknown, base: CalendarPrefs = NEUTRAL_PREFS): Result<CalendarPrefs> {
   if (!v || typeof v !== "object") return fail("prefs_invalid");
   const p = { ...base, ...(v as Partial<CalendarPrefs>) };
   if (![0, 1, 6].includes(p.weekStartsOn)) return fail("week_start_invalid");

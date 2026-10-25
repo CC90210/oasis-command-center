@@ -139,7 +139,7 @@ test("the no-call email promises only what is cleared: it never says it will com
   const noLink = composeAiAuditWelcome({ ...COLD, timeframe: "exploring", wants_call: "no" }).body;
   assert.match(noLink, /reply with two times that work and I'll send the invite\./, "no link: ask for two times (lib/booking-link.ts's rule)");
   const withLink = composeAiAuditWelcome({ ...COLD, timeframe: "exploring", wants_call: "no" }, { bookingUrl: "https://x.test/b" }).body;
-  assert.ok(withLink.includes("pick a time that works for both founders here: https://x.test/b"));
+  assert.ok(withLink.includes("pick a time with me here: https://x.test/b"));
 });
 
 // ── book sooner: the call can be booked before the questions are finished ──

@@ -4,7 +4,7 @@
  * on every Finances page: the founders portal banner does not render here
  * (components/founders/FoundersPortalBanner.tsx).
  *
- * Gate: stricter than the founders portal. Only CC and Adon, resolved by auth
+ * Gate: stricter than the founders portal. Only CC, resolved by auth
  * user id (lib/founders-finances/access-io.ts). Everyone else — including the
  * marketing hire the portal admits — gets a 404 here, and every page and API
  * route re-checks on its own. resolveFinanceViewer is memoised per request,

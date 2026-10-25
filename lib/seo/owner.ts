@@ -1,5 +1,5 @@
 /**
- * Who may use the SEO screen: CC and Adon only (Adon 2026-10-08). Same wall as Money:
+ * Who may use the SEO screen: CC only. Same wall as Money:
  * inside the founders portal (tenant + capability) AND the session's auth user id is the
  * one behind an owner email. The operator list was the old gate; it admits CC's admin
  * aliases and not Adon, which is why the tab was invisible to him.

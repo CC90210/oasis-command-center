@@ -150,7 +150,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
   let failure: string | null = null;
   let roster: Awaited<ReturnType<typeof loadAssignmentRoster>> = [];
   let directory: Awaited<ReturnType<typeof loadMemberDirectory>> = [];
-  // The assignee menu's roster fails on its own (OASIS's needs both founders
+  // The assignee menu's roster fails on its own (OASIS needs its proprietor
   // active: lib/team.ts getOasisPipelineAssignmentRoster throws otherwise).
   // The board still renders; only the menu degrades, with a notice.
   let rosterNotice: string | null = null;
@@ -166,7 +166,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
         console.error("[projects.page.roster]", err);
         const msg = err instanceof Error ? err.message : String(err);
         rosterNotice = msg.includes("oasis_pipeline_assignment_roster_incomplete")
-          ? "The assignee filter needs both founders as active members of this workspace, and one is missing. Everything else on the board works."
+          ? "The assignee filter needs CC as an active member of this workspace. Everything else on the board works."
           : "The assignee filter couldn't be loaded. The error has been logged; everything else on the board works.";
         return [] as Awaited<ReturnType<typeof loadAssignmentRoster>>;
       }),

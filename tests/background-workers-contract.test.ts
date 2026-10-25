@@ -58,7 +58,6 @@ assert.deepEqual(
     "pm2.bravo-scheduler",
     "pm2.bravo-ig-dm",
     "pm2.bravo-telegram",
-    "pm2.bravo-coord",
     "pm2.claude-bridge",
     "pm2.claude-bridge-ping",
     "pm2.event-router",

@@ -2276,7 +2276,7 @@ function readableError(code: string): string {
     calendar_organizer_mismatch: "The selected host connected a different Google account. Reconnect with their OASIS work email before booking.",
     google_meet_link_missing: "Google created the event but has not returned its video call link yet. Retry this booking; it will reconcile the same event.",
     calendar_create_failed: "Google Calendar could not verify this booking. Nothing moved; retry after checking the host connection.",
-    // The public booking page reads both founders' calendars for open times
+    // The public booking page reads the configured host calendars for open times
     // (lib/integrations/google-calendar.ts listGoogleCalendarBusy). A rep never
     // books through that read, but the code lives in the same union, so it needs
     // its words here like every other one.

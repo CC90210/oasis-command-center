@@ -219,7 +219,6 @@ const NOT_MOVED_YET: Record<string, string> = {
   "components/sunbiz/SunBizDashboard.tsx": OWN_TIME_AGO["components/sunbiz/SunBizDashboard.tsx"],
   "components/underwriting/ApplicationUnderwritingReport.tsx": "'Started N minutes ago' on an underwriting run",
   "lib/founders-performance-core.ts": "'Last posted N days ago', a whole-day count",
-  "lib/health/runner.ts": "health reasons say 'N min ago': the same minute words, but never hours or days",
   "lib/skills/view.ts": "'Last checked in N days ago' marks a stale skill by whole days",
   "lib/web-leads/trust.ts": "'Measured N months ago', a month count on a lead's site evidence",
 };

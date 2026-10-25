@@ -308,9 +308,10 @@ async function main() {
   const turn = (text: string, extra: Record<string, unknown> = {}) =>
     chatRoute.POST(post("/api/chat", { agent_key: "bravo", cloud_tools: "off", messages: [{ role: "user", content: text }], ...extra }));
   /**
-   * The route persists AFTER it closes the stream, so reading the body is not
-   * the end of the turn. Its last write for a workspace-key turn stamps the key's
-   * last_used_at (after chat_sessions), so a turn is over once that is set again.
+   * The route persists in a job it starts before it closes the stream and does
+   * not wait for, so reading the body is not the end of the turn. Its last write
+   * for a workspace-key turn stamps the key's last_used_at (after chat_sessions),
+   * so a turn is over once that is set again.
    */
   const settledTurn = async (configId: string, text: string, extra: Record<string, unknown> = {}) => {
     await db.execute({ sql: "UPDATE agent_model_config SET last_used_at = NULL WHERE id = ?", args: [configId] });

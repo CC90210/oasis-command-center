@@ -117,7 +117,7 @@ function isPipelineWork(row: PipelineCycleRow): boolean {
 /**
  * Build a restoration-grade archive manifest without changing a row. The ids
  * outside the founder roster are called out separately; the planner never
- * guesses whether CC or Adon should own them.
+ * guesses whether CC or an active sales rep should own them.
  */
 export function planPipelineCycleArchive(
   rows: readonly PipelineCycleRow[],

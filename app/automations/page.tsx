@@ -23,7 +23,7 @@ export default async function AutomationsPage() {
   // exactly as it is.
   await requireOperator();
   // requireOperator() above 404s everyone but a verified platform operator —
-  // both CC and Adon, since PR #576. Creation is tighter still (O2):
+  // former platform operators too, before their grants were revoked. Creation is tighter still (O2):
   // resolveScriptAutomationAccess is the SAME agents-owner-or-fallback verdict
   // gateScriptAutomationCreate enforces, in the same order (the viewer's
   // ACTIVE seat must manage this workspace, THEN the agents-owner question).

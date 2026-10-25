@@ -23,22 +23,21 @@ function gstLine(ctx: TemplateContext): string {
 
 export const foundersAgreement: DocTemplate = (ctx) =>
   doc(
-    header("Founders' agreement", ctx, `How the founders own and run ${ctx.legal.entity}.`),
-    section("Parties", `- ${ctx.legal.privacyOfficer.name} ("CC").`, `- ${confirm("Adon's full legal name and address")} ("Adon").`),
+    header("Sole proprietor ownership and continuity record", ctx, `How CC owns, controls and continues ${ctx.legal.entity}.`),
+    section("Owner", `- Conaugh McKenna ("CC") is the sole proprietor and sole owner of ${ctx.legal.entity} as of 2026-10-21.`),
     section(
-      "Ownership",
-      `- Split: ${confirm("the ownership split (CC said 50/50 on 2026-08-24; both Drive drafts, v2 and v3.0 of 2026-07-24, say 60/40)")}`,
-      `- Vesting and cliff: ${confirm("whether ownership vests, over how long, and the cliff")}`,
+      "Registration",
+      `- Legal form and registration details: ${confirm("the accountant-confirmed sole-proprietorship registration, business-number and NEQ details")}`,
+      "- No former owner, contractor or agent has ownership authority by virtue of historical access, work or records.",
     ),
-    section("Roles", `- ${confirm("what each founder owns day to day (for example CC: product and operations; Adon: sales)")}`),
     section(
-      "Decisions",
-      `- Decisions that need both founders: ${confirm("the list (for example taking on debt, hiring, selling the business, changing ownership)")}`,
-      `- Deadlock: ${confirm("how a deadlock is broken")}`,
+      "Owner-reserved decisions",
+      "- CC alone may take on debt, hire or dismiss people, sell the business, grant equity, change ownership, or authorize access to company systems.",
+      `- Delegations: ${confirm("any written delegation CC wants recorded, including its scope and expiry")}`,
     ),
-    section("Money", `- Owner draws and reinvestment: see the capital allocation policy. ${confirm("anything specific to the founders")}`),
-    section("Leaving", `- ${confirm("what happens to a founder's share if they leave, are unable to work, or die (buy-back price and terms)")}`),
-    section("Intellectual property", "- Each founder assigns OASIS work to the business (see the IP assignment)."),
+    section("Money", `- Owner draws and reinvestment: see the capital allocation policy. ${confirm("any owner-specific draw or reinvestment rule")}`),
+    section("Continuity", `- ${confirm("who may act if CC is temporarily unable to work, where the authority is documented, and how it expires")}`, `- ${confirm("the succession or estate plan if CC dies or permanently cannot operate the business")}`),
+    section("Intellectual property", "- CC records and assigns business IP to the operating business or its future successor entity (see the IP assignment)."),
     section("Governing law", `- ${confirm("the governing law (the business is in Montreal, Quebec; both Drive drafts say Ontario)")}`),
   );
 
@@ -100,24 +99,24 @@ export const quebecTaxCalendar: DocTemplate = (ctx) =>
     header(
       "Tax calendar (Quebec and federal)",
       ctx,
-      `Every filing and payment date for ${ctx.legal.entity} and its founders. OASIS is in ${ctx.legal.principalPlace}: the founders file with Revenu Quebec and the CRA.`,
+      `Every filing and payment date for ${ctx.legal.entity} and its owner. OASIS is in ${ctx.legal.principalPlace}: CC files with Revenu Quebec and the CRA.`,
     ),
     section(
       "Filing position",
-      `- Structure: ${confirm("partnership of CC and Adon, sole proprietorship, or corporation; the accountant's confirmation")}`,
+      `- Structure: ${confirm("sole proprietorship owned by Conaugh McKenna; the accountant's confirmation and registration details")}`,
       `- Partnership information returns (federal and Quebec): ${confirm("whether they apply to OASIS this year")}`,
     ),
     section(
-      "Each founder, every year (self-employed individuals)",
-      "- Quebec: TP-1 return with form TP-80 (business or professional income) for their share of OASIS income.",
-      "- Federal: T1 return with form T2125 (statement of business or professional activities) for the same share.",
+      "Owner, every year (self-employed individual)",
+      "- Quebec: TP-1 return with form TP-80 (business or professional income) for OASIS income.",
+      "- Federal: T1 return with form T2125 (statement of business or professional activities) for the same income.",
       "- Filing deadline: June 15. Any balance owing is due April 30.",
       "- Quebec Pension Plan contributions and QPIP premiums on self-employment income are calculated on the TP-1.",
     ),
     section(
       "Instalments",
       "- When required, instalments are due March 15, June 15, September 15 and December 15, to both Revenu Quebec and the CRA.",
-      `- Whether each founder must pay instalments this year: ${confirm("the accountant's answer, from the prior years' tax owing")}`,
+      `- Whether CC must pay instalments this year: ${confirm("the accountant's answer, from prior years' tax owing")}`,
     ),
     section(
       "GST/QST",
@@ -134,7 +133,7 @@ export const accountantEngagement: DocTemplate = (ctx) =>
     section("Scope", `- ${confirm("which returns they prepare (TP-1, T1, partnership returns, GST/QST) and the fee")}`),
     section(
       "What OASIS sends each year",
-      "- The business ledger export from Finances, receipts, the GST/QST status, and each founder's share of income.",
+      "- The business ledger export from Finances, receipts, the GST/QST status, and the owner's business income.",
       `- By: ${confirm("the date the accountant needs it")}`,
     ),
   );
@@ -145,7 +144,7 @@ export const capitalAllocationPolicy: DocTemplate = (ctx) =>
     section("Tax reserve", `- ${confirm("the share of revenue set aside for tax, from the accountant")}`),
     section("Operating reserve", `- ${confirm("how many months of costs are kept in reserve")}`),
     section("Reinvestment", `- ${confirm("the share reinvested, and in what")}`),
-    section("Owner draws", `- ${confirm("when and how the founders draw, and in what split")}`),
+    section("Owner draws", `- ${confirm("when and how CC takes owner draws")}`),
     section(
       "Current goal",
       ctx.goal.ok
@@ -303,7 +302,7 @@ export const salesEnablementGuide: DocTemplate = (ctx) =>
       "- Commission terms: each rep's contractor agreement.",
     ),
     section("Qualification", `- ${confirm("the questions that qualify a lead and the answers that disqualify one")}`),
-    section("Founder handoff", `- ${confirm("when a rep hands a deal to CC or Adon, and what they send with it")}`),
+    section("Owner handoff", `- ${confirm("when a rep hands a deal to CC, and what they send with it")}`),
   );
 
 export const deliveryChecklist: DocTemplate = (ctx) =>

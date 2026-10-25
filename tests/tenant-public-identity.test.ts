@@ -76,12 +76,11 @@ assert.notEqual(
 assert.deepEqual(notifyLanesForTenant({ tenantSlug: "oasis-ai-cc" }), ["operator"]);
 assert.deepEqual(notifyLanesForTenant({ tenantSlug: "submissions" }), ["sunbiz-ops"]);
 
-// Unknown fans to BOTH rather than defaulting to one. A lost submission nobody
-// is paged about is worse than one two teams see; two production dead-letter
-// rows carry tenant_slug NULL, so this path is real, not theoretical.
+// Unknown incidents route to CC only. Two production dead-letter rows carry
+// tenant_slug NULL, so this path is real; it must never revive a former
+// external operator's notification lane.
 const unknownLanes = notifyLanesForTenant(UNKNOWN);
-assert.equal(unknownLanes.length, 2, "an unknown tenant defaulted to a single lane");
-assert.ok(unknownLanes.includes("operator") && unknownLanes.includes("sunbiz-ops"));
+assert.deepEqual(unknownLanes, ["operator"], "an unknown tenant escaped CC's sole operator lane");
 
 // ── an untrusted click lands on ITS OWN tenant's page ──────────────────────
 

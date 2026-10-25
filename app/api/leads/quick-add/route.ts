@@ -17,7 +17,7 @@
  *
  * Auth: any non-read-only tenant member (canWriteCrm), with OASIS creates
  * further restricted to the assignment roster (getOasisPipelineAssignmentRoster:
- * CC, Adon and ACTIVE reps; a deactivated teammate is refused). Fail closed.
+ * CC and ACTIVE reps; a deactivated teammate is refused). Fail closed.
  * Audited to lead_interactions.
  */
 
@@ -144,7 +144,7 @@ export async function POST(req: NextRequest) {
         {
           ok: false,
           error: "target_not_on_sales_roster",
-          message: "New OASIS leads go only to CC, Adon or an active sales rep. A deactivated teammate cannot take new work.",
+          message: "New OASIS leads go only to CC or an active sales rep. A deactivated teammate cannot take new work.",
         },
         { status: 403 },
       );

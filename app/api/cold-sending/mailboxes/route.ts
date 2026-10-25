@@ -9,6 +9,10 @@
  *   PATCH  → update { id, warmup_status?, active?, daily_cap? }
  *   DELETE → deactivate { id }
  *
+ * POST answers 410 for every workspace since 2026-10-20: cold sending can only send
+ * as a retired client (COLD_SENDING_ENABLED in lib/integrations/cold-sending.ts).
+ * GET, PATCH and DELETE still work, so an existing mailbox can be paused or removed.
+ *
  * Auth: signed-in ADMIN, OR Bearer SCAN_TRIGGER_SECRET + { tenantId } in the body
  * (so cold domains can be seeded programmatically as Adon buys them). The key
  * works only for OASIS's own workspaces (2026-10-19 audit).
@@ -18,7 +22,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { registerColdMailbox, listColdMailboxes } from "@/lib/integrations/cold-sending";
+import { COLD_SENDING_ENABLED, COLD_SENDING_OFF, registerColdMailbox, listColdMailboxes } from "@/lib/integrations/cold-sending";
 import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 
 export const runtime = "nodejs";
@@ -84,6 +88,10 @@ export async function POST(req: NextRequest) {
 
   const actor = await resolveActor(req, body);
   if (!actor.ok) return NextResponse.json({ ok: false, error: actor.error, message: actor.message }, { status: actor.status });
+
+  // Off for every workspace, before any SMTP login is tried: it can only send as a
+  // retired client (lib/integrations/cold-sending.ts). Pausing and removing still work.
+  if (!COLD_SENDING_ENABLED) return NextResponse.json({ ok: false, ...COLD_SENDING_OFF }, { status: 410 });
 
   const domain = (body.domain || "").trim();
   const address = (body.address || "").trim();

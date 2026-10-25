@@ -201,7 +201,7 @@ function audienceAllows(audience: OsAudience, ctx: VisibilityContext): boolean {
     case "founders_content":
       return ctx.founders.content && ctx.oasis;
     case "finance_owner":
-      // Money is for owners. The layout only sets `finances` for CC or Adon,
+      // Money is for the owner. The layout only sets `finances` for CC,
       // who are founders; requiring the persona too means a caller that sets
       // the flag wrongly still cannot put Money on a worker's rail.
       return ctx.founders.finances && ctx.founders.content && ctx.oasis && ctx.persona === "founder";

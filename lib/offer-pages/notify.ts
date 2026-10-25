@@ -117,7 +117,7 @@ export async function notifyOfferLead(input: {
   if (!(await isFirstSubmissionForLead({ db, tenantId, formId, leadId, submissionId }))) return "repeat";
 
   const push = input.push ?? pushWorkspaceAlert;
-  // A new lead on an offer page is the sales desk's (CC + Adon). A client
+  // A new lead on an offer page is CC's sales desk. A client
   // workspace has no such desk and keeps reaching its own bot.
   const sent = await push(tenantId, buildOfferLeadAlert(input.formName, input.answers, pipelineLeadUrl(leadId)), { desk: "sales" }).catch(
     (err: unknown): AlertPush => ({ delivered: false, outcome: `Not sent: ${err instanceof Error ? err.message : "error"}` }),

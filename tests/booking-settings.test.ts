@@ -21,7 +21,6 @@ const ADON = "user-adon";
 const roster = async () =>
   [
     { auth_user_id: CC, email: "conaugh@oasisai.work", full_name: "CC", display_name: null },
-    { auth_user_id: ADON, email: "adon@oasisai.work", full_name: "Adon", display_name: null },
   ] as never;
 
 async function freshDb() {
@@ -90,11 +89,18 @@ async function main(): Promise<void> {
       err instanceof BookingSettingsError && err.code === "booking_settings_invalid");
   });
 
+  const sole = defaultOasisBookingSettings({ organizerUserId: CC, attendeeUserId: ADON });
   const current = {
-    ...defaultOasisBookingSettings({ organizerUserId: CC, attendeeUserId: ADON }),
-    hosts: defaultOasisBookingSettings({ organizerUserId: CC, attendeeUserId: ADON }).hosts.map((h) =>
-      h.userId === ADON ? { ...h, targetCalendarId: "adon-cal" } : h,
-    ),
+    ...sole,
+    hosts: [
+      sole.hosts[0],
+      {
+        userId: ADON,
+        role: "attendee" as const,
+        weeklyHours: weeklyHoursOn([0, 1, 2, 3, 4], 600, 1260),
+        targetCalendarId: "adon-cal",
+      },
+    ],
   };
   const edit = (callerUserId: string, submitted: unknown, callerCalendarIds: string[] = []) =>
     applyBookingSettingsEdit({

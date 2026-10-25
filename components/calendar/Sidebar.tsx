@@ -83,7 +83,7 @@ export function Sidebar(p: Props) {
             </>
           )}
         </dl>
-        {!upcoming.computed && <p className="mt-2 text-[11px] text-fg-dim">No sunset here this week; a wide protected window is used.</p>}
+        {p.prefs.shabbatProtection && !upcoming.computed && <p className="mt-2 text-[11px] text-fg-dim">No sunset here this week; a wide protected window is used.</p>}
       </section>
       )}
 
@@ -146,7 +146,7 @@ export function Sidebar(p: Props) {
         )}
       </section>
 
-      <BookingLinkCard />
+      <BookingLinkCard calendars={p.calendars} />
     </nav>
   );
 }

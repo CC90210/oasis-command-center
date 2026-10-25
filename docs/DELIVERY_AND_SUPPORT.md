@@ -52,7 +52,7 @@ Decided in one place, `lib/delivery/access.ts`, and applied as SQL by `lib/deliv
 
 | Viewer | Gets |
 |---|---|
-| Founder (persona `founder` in the OASIS workspace: CC, Adon) | Everything in the workspace, every action. |
+| Owner (the `founder` persona retained as a compatibility name in the OASIS workspace: CC) | Everything in the workspace, every action. |
 | Anyone signed in to another workspace | Only rows whose `client_tenant_id` is their workspace. Client-safe fields only (an allowlist), public comments only, client-visible updates only, no tasks. They can file a ticket for their own workspace and reply on their own tickets. Another client's ticket or project is a 404. |
 | OASIS non-founders (reps, builders, marketing) | Refused (the pages 404, the API returns 403). |
 

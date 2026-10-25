@@ -18,6 +18,9 @@
 import { spawnSync } from "node:child_process";
 
 const TESTS = [
+  // Company-control invariant: OASIS is CC's sole proprietorship and former
+  // owner/APEX authority cannot creep back into live surfaces or workers.
+  "tests/sole-proprietor-contract.test.ts",
   "tests/address-autocomplete-contract.test.ts",
   "tests/address-field-turnkey.test.ts",
   "tests/alert-decay.test.ts",
@@ -323,6 +326,7 @@ const TESTS = [
   "tests/shopout-sender-locality.test.ts",
   "tests/sequence-volume.test.ts",
   "tests/pg-bridge-operators.test.ts",
+  "tests/cold-sending-retired.test.ts",
   "tests/middleware-public-files.test.ts",
   "tests/or-filter-dotted-values.test.ts",
   "tests/form-submit-failure-capture.test.ts",
@@ -526,6 +530,9 @@ const TESTS = [
   // acknowledgement, reply drafts and their approval, and the reader's
   // heartbeat. Registered here, not in package.json's test:delivery, because
   // package.json was held by three other build tracks when this landed.
+  // The cleanup regression runs first: every harness consumer used to leave a
+  // multi-megabyte SQLite database in %TEMP% after its process exited.
+  "tests/delivery-harness-cleanup.test.ts",
   "tests/support-inbox-wire.test.ts",
   "tests/support-inbox-ingest.test.ts",
   "tests/support-inbox-drafts.test.ts",
@@ -557,6 +564,10 @@ const TESTS = [
   // the stream ends only after it has landed (bridge chat saved no replies; 2026-10-20 audit),
   // and the route's disconnect cancel is handed to the platform too. Real tee, real route.
   "tests/bridge-chat-persistence.test.ts",
+  // Cloud chat (/api/chat and /api/chat/resume) keeps its reply when the platform cancels what it was not
+  // handed: the post-turn tail is one job given to keepAlive BEFORE the stream closes (cloud chat tail;
+  // 2026-10-20 audit). Real handlers, and a platform that dies with the response as workerd does.
+  "tests/cloud-chat-persists-after-close.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

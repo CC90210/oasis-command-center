@@ -134,7 +134,7 @@ async function loadDesk(
   let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
   let customers: CustomerOptions = { state: "not_set_up" };
   let form: DeskFormState | null = null;
-  // The assignee menu's roster fails on its own (OASIS's needs both founders
+  // The assignee menu's roster fails on its own (OASIS needs its proprietor
   // active: lib/team.ts getOasisPipelineAssignmentRoster throws otherwise).
   // The desk still renders; only the menu degrades, with a notice saying why.
   let rosterNotice: string | null = null;
@@ -233,13 +233,13 @@ function SupportInboxLine({ inbox }: { inbox: InboxHealth }) {
 
 /**
  * Why the assignee menu is empty, in words. The incomplete-roster case is
- * OASIS's own (its roster names both founders) and says what to fix; anything
+ * OASIS's own (its roster names the proprietor) and says what to fix; anything
  * else says it failed and was logged.
  */
 function rosterFailureNotice(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes("oasis_pipeline_assignment_roster_incomplete")) {
-    return "Tickets can't be assigned from here right now: the assignment roster needs both founders as active members of this workspace, and one is missing. Everything else on the desk works.";
+    return "Tickets can't be assigned from here right now: the assignment roster needs CC as an active member of this workspace. Everything else on the desk works.";
   }
   return "The assignee list couldn't be loaded, so tickets can't be assigned from here right now. The error has been logged; everything else on the desk works.";
 }

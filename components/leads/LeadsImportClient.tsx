@@ -341,7 +341,7 @@ export function LeadsImportClient({
                   className="w-full rounded-lg border border-bg-border bg-bg-deep px-3 py-1.5 text-sm text-fg disabled:opacity-50"
                   required
                 >
-                  <option value="">Choose CC or Adon</option>
+                  <option value="">Choose CC or an active sales rep</option>
                   {assignmentOptions.map((option) => (
                     <option key={option.id} value={option.id}>{option.name}</option>
                   ))}
@@ -350,7 +350,7 @@ export function LeadsImportClient({
               <p className="mt-2 text-xs text-fg-muted">
                 {assignmentOptions.length > 0
                   ? "The owner and active revenue cycle are stamped on every lead in this batch."
-                  : "The CC + Adon assignment roster is unavailable. Import is paused until it can be verified."}
+                  : "The OASIS assignment roster is unavailable. Import is paused until it can be verified."}
               </p>
             </div>
           )}

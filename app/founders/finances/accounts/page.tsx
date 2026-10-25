@@ -1,6 +1,7 @@
 /**
  * /founders/finances/accounts — the business's chart of accounts with
- * balances, new accounts, and owner draws / contributions with the 50/50 view.
+ * balances, new accounts, and proprietor draws / contributions. Historical
+ * former-owner ledger entries remain visible but cannot receive new activity.
  *
  * Balances are ledger totals. While the book is incomplete the page says so
  * first (BooksCoverageBanner), and a bank account that is below zero only
@@ -114,26 +115,14 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
       </div>
 
       {equity && (
-        <Card id="owner-draws" title="Owner draws & contributions" subtitle="CC and Adon own OASIS 50/50. Net withdrawn = draws minus money put in.">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            {(["cc", "adon"] as const).map((k) => (
-              <div key={k} className="rounded-lg border border-bg-border bg-bg-elev p-4">
-                <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">{OWNER_LABEL[k]}</div>
-                <div className="mt-1 text-xl font-semibold tabular-nums">{formatCents(equity.parity[k].netWithdrawnCents, "CAD")}</div>
-                <div className="mt-1 text-[11px] text-fg-dim">
-                  drew {formatCents(equity.parity[k].drawsCents, "CAD")} · put in {formatCents(equity.parity[k].contributionsCents, "CAD")}
-                </div>
-              </div>
-            ))}
+        <Card id="owner-draws" title="Owner draws & contributions" subtitle="CC is the sole proprietor of OASIS. Net withdrawn = draws minus money put in.">
+          <div className="grid grid-cols-1 gap-3 sm:max-w-md">
             <div className="rounded-lg border border-bg-border bg-bg-elev p-4">
-              <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Parity</div>
-              {equity.parity.behind ? (
-                <p className="mt-1 text-sm">
-                  {OWNER_LABEL[equity.parity.behind]} is behind by <span className="font-semibold tabular-nums">{formatCents(equity.parity.equalizingCents, "CAD")}</span>. A draw of that amount (or the other contributing it back) restores 50/50.
-                </p>
-              ) : (
-                <p className="mt-1 text-sm text-status-engaged">Even.</p>
-              )}
+              <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">{OWNER_LABEL.cc}</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums">{formatCents(equity.parity.cc.netWithdrawnCents, "CAD")}</div>
+              <div className="mt-1 text-[11px] text-fg-dim">
+                drew {formatCents(equity.parity.cc.drawsCents, "CAD")} · put in {formatCents(equity.parity.cc.contributionsCents, "CAD")}
+              </div>
             </div>
           </div>
           <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -143,7 +132,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
               submitLabel="Record"
               columns={2}
               fields={[
-                { name: "owner_key", label: "Owner", type: "select", options: [{ value: "cc", label: "CC" }, { value: "adon", label: "Adon" }], defaultValue: viewer.ownerKey },
+                { name: "owner_key", label: "Owner", type: "select", options: [{ value: "cc", label: "CC" }], defaultValue: viewer.ownerKey },
                 { name: "kind", label: "Type", type: "select", options: [{ value: "draw", label: "Draw (money out to owner)" }, { value: "contribution", label: "Contribution (money in)" }] },
                 { name: "amount", label: "Amount", type: "money", required: true },
                 { name: "currency", label: "Currency", type: "select", options: [{ value: "CAD", label: "CAD" }, { value: "USD", label: "USD" }] },
@@ -157,7 +146,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
               {equity.events.slice(0, 15).map((e) => (
                 <li key={e.id} className="flex justify-between gap-3 py-2">
                   <span>
-                    <span className="tabular-nums text-fg-muted">{e.event_date}</span> · {OWNER_LABEL[e.owner_key]} {e.kind}
+                    <span className="tabular-nums text-fg-muted">{e.event_date}</span> · {OWNER_LABEL[e.owner_key]}{e.owner_key === "adon" ? " (historical)" : ""} {e.kind}
                     {e.memo && <span className="text-fg-dim"> · {e.memo}</span>}
                   </span>
                   <span className={`tabular-nums ${e.kind === "draw" ? "text-fg" : "text-status-engaged"}`}>{formatCents(e.amount_cents, e.currency)}</span>

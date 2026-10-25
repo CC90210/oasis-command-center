@@ -405,15 +405,25 @@ export async function getOasisSalesRepRoster(
 }
 
 /**
- * The founders — the two people who must always be assignable. Owners/admins
+ * The proprietor — the person who must always be assignable. Owners/admins
  * are excluded from getOasisSalesRepRoster because that function is a manager
  * authorization boundary, so they are named here rather than smuggled into it
  * through a role exception.
  */
 export const OASIS_PIPELINE_ASSIGNMENT_EMAILS = [
   "conaugh@oasisai.work",
-  "adon@oasisai.work",
 ] as const;
+
+const FORMER_OASIS_OPERATOR_AUTH_USER_IDS = new Set([
+  "67036c9a-de2e-47cd-89bd-af19004585b1",
+]);
+const FORMER_OASIS_OPERATOR_EMAILS = new Set(["adon@oasisai.work"]);
+
+function isFormerOasisOperator(member: Pick<MemberRow, "auth_user_id" | "email">): boolean {
+  const authUserId = (member.auth_user_id || "").trim().toLowerCase();
+  const email = (member.email || "").trim().toLowerCase();
+  return FORMER_OASIS_OPERATOR_AUTH_USER_IDS.has(authUserId) || FORMER_OASIS_OPERATOR_EMAILS.has(email);
+}
 
 export function isOasisPipelineAssignmentMember(member: { email?: string | null }): boolean {
   const email = (member.email || "").trim().toLowerCase();
@@ -421,9 +431,9 @@ export function isOasisPipelineAssignmentMember(member: { email?: string | null 
 }
 
 /**
- * Everyone a lead may be assigned to: the founders first, then every ACTIVE
- * rep (2026-09-24). CC and Adon run sales; Schneur (builder) and David (opener)
- * are the reps who stay. This one list feeds the assign menus AND the server
+ * Everyone a lead may be assigned to: the proprietor first, then every ACTIVE
+ * rep (2026-09-24). CC owns the desk; active sales reps may receive work. This
+ * one list feeds the assign menus AND the server
  * checks behind them, so the menu can never offer a person the API refuses —
  * and deactivating a rep removes them from both at once.
  *
@@ -447,20 +457,21 @@ export async function getOasisPipelineAssignmentRoster(tenantId: string): Promis
       .filter((member) => isOasisPipelineAssignmentMember(member))
       .map((member) => [member.email.trim().toLowerCase(), member]),
   );
-  const founders = OASIS_PIPELINE_ASSIGNMENT_EMAILS.flatMap((email) => {
+  const standingOwners = OASIS_PIPELINE_ASSIGNMENT_EMAILS.flatMap((email) => {
     const member = byEmail.get(email);
     return member ? [member] : [];
   });
-  if (founders.length !== OASIS_PIPELINE_ASSIGNMENT_EMAILS.length) {
+  if (standingOwners.length !== OASIS_PIPELINE_ASSIGNMENT_EMAILS.length) {
     throw new Error("oasis_pipeline_assignment_roster_incomplete");
   }
   const reps = members.filter(
     (member) =>
       !isOasisPipelineAssignmentMember(member) &&
+      !isFormerOasisOperator(member) &&
       !dbBool(member.is_owner) &&
       isOasisPipelineRepRole(member.team_role),
   );
-  return [...founders, ...reps];
+  return [...standingOwners, ...reps];
 }
 
 export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> {

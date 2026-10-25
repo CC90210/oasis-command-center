@@ -40,11 +40,9 @@ export const OASIS_OPERATOR_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 /**
  * The durable P0-7 half (2026-10-10): a founder whose email is not an alias is
  * an operator when his AUTH USER ID is listed in platform_operators
- * (database/turso/bravo__208_platform_operators.sql) and not revoked. Adon, an
- * equal owner of OASIS, held an admin seat but no alias, so he had no operator
- * console at all; adding him to a Worker secret meant a deploy-side change for
- * every new founder, and an email list is the squattable shape this module
- * exists to retire.
+ * (database/turso/bravo__208_platform_operators.sql) and not revoked. The table
+ * exists so grants and revocations are durable rather than hidden in Worker
+ * secrets. The former collaborator's grant is revoked by bravo__235.
  *
  * Only an account on this domain is ever looked up. That is a COST rule, not a
  * trust rule: the root layout asks this question on every page, and every

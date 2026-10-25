@@ -2,15 +2,15 @@
  * Who may see which book. PURE — the one predicate every read and write in
  * lib/founders-finances goes through (via access-io.ts requireEntity).
  *
- *   OASIS AI Solutions (business)  -> CC and Adon, Atlas (internal API),
+ *   OASIS AI Solutions (business)  -> CC, Atlas (internal API),
  *                                     the Stripe webhook / reconcile
  *   CC personal                    -> CC only
- *   Adon personal                  -> Adon only
+ *   Former-owner personal history  -> no live product access
  *
  * The founders portal gate (lib/founders/gate.ts) admits the marketing hire
  * and builders too, because their job is the marketing studio. That is NOT
  * enough for money: Finances additionally requires the caller's auth user id
- * to be the one behind conaugh@oasisai.work or adon@oasisai.work, resolved at
+ * to be the one behind conaugh@oasisai.work, resolved at
  * runtime from user_profiles.auth_user_id — never a hard-coded uuid.
  *
  * Machine callers (Atlas, Stripe) reach the BUSINESS book only. A personal
@@ -19,24 +19,31 @@
 
 export type OwnerKey = "cc" | "adon";
 
-export const FINANCE_OWNER_EMAILS: Readonly<Record<OwnerKey, string>> = {
+/** Historical ledger keys remain readable; only CC can resolve as a live owner. */
+export type FinanceOwnerKey = "cc";
+
+export const HISTORICAL_OWNER_EMAILS: Readonly<Record<OwnerKey, string>> = {
   cc: "conaugh@oasisai.work",
   adon: "adon@oasisai.work",
+};
+
+export const FINANCE_OWNER_EMAILS: Readonly<Record<FinanceOwnerKey, string>> = {
+  cc: HISTORICAL_OWNER_EMAILS.cc,
 };
 
 export const OWNER_LABEL: Readonly<Record<OwnerKey, string>> = { cc: "CC", adon: "Adon" };
 
 export type FinanceViewer =
-  | { kind: "founder"; ownerKey: OwnerKey; email: string; userId: string }
+  | { kind: "founder"; ownerKey: FinanceOwnerKey; email: string; userId: string }
   | { kind: "agent"; name: "atlas" }
   | { kind: "system"; name: "stripe" | "reconcile" };
 
 export type EntityAccessShape = { kind: "business" | "personal"; owner_key: string | null };
 
-export function ownerKeyForEmail(email: string | null | undefined): OwnerKey | null {
+export function ownerKeyForEmail(email: string | null | undefined): FinanceOwnerKey | null {
   const e = String(email || "").trim().toLowerCase();
   if (!e) return null;
-  for (const key of Object.keys(FINANCE_OWNER_EMAILS) as OwnerKey[]) {
+  for (const key of Object.keys(FINANCE_OWNER_EMAILS) as FinanceOwnerKey[]) {
     if (FINANCE_OWNER_EMAILS[key] === e) return key;
   }
   return null;
@@ -56,10 +63,10 @@ export function isFinanceOwnerEmail(email: string | null | undefined): boolean {
 export function ownerKeyForUser(
   userId: string | null | undefined,
   ownerRows: ReadonlyArray<{ email: string | null; auth_user_id: string | null }>,
-): OwnerKey | null {
+): FinanceOwnerKey | null {
   const uid = String(userId || "").trim();
   if (!uid) return null;
-  const hits = new Set<OwnerKey>();
+  const hits = new Set<FinanceOwnerKey>();
   for (const row of ownerRows) {
     const key = ownerKeyForEmail(row.email);
     if (key && row.auth_user_id && row.auth_user_id.trim() === uid) hits.add(key);
