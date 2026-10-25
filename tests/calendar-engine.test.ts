@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { addDays, fromDateKey, toDateKey } from "../lib/calendar/dates";
-import { layoutDay, layoutSpans } from "../lib/calendar/layout";
+import { chipBox, layoutDay, layoutSpans } from "../lib/calendar/layout";
 import { describeRecurrence, expandOccurrences, planCalendarRemoval, planDelete, planEdit, seriesStarts } from "../lib/calendar/recurrence";
 import { shabbatForWeekOf, sunTimes } from "../lib/calendar/sun";
 import { DEFAULT_PREFS, type EventRecord } from "../lib/calendar/types";
@@ -329,6 +329,33 @@ const take = <T>(g: Generator<T>, n: number) => {
   const spans = layoutSpans(week, expandOccurrences([multi, single], week[0], addDays(week[6], 1)), false);
   assert.equal(spans.find((s) => s.occ.event.id === multi.id)!.span, 3);
   assert.equal(spans.find((s) => s.occ.event.id === single.id)!.row, 1);
+}
+
+// ── Layout: true minutes, so abutting blocks never split a column ─────────
+
+{
+  const day = local("2026-10-26T00:00");
+  const replies = ev({ start: local("2026-10-26T08:30").toISOString(), end: local("2026-10-26T08:45").toISOString() });
+  const applications = ev({ start: local("2026-10-26T08:45").toISOString(), end: local("2026-10-26T10:15").toISOString() });
+  const brk = ev({ start: local("2026-10-26T10:15").toISOString(), end: local("2026-10-26T10:30").toISOString() });
+  const followUps = ev({ start: local("2026-10-26T10:30").toISOString(), end: local("2026-10-26T11:30").toISOString() });
+  const overlap = ev({ start: local("2026-10-26T14:30").toISOString(), end: local("2026-10-26T14:45").toISOString() });
+  const overlapped = ev({ start: local("2026-10-26T14:40").toISOString(), end: local("2026-10-26T15:00").toISOString() });
+  const occs = expandOccurrences([replies, applications, brk, followUps, overlap, overlapped], day, addDays(day, 1));
+  const laid = layoutDay(day, occs);
+  const by = (e: EventRecord) => laid.find((p) => p.occ.event.id === e.id)!;
+  assert.equal(by(replies).bottom, 525, "a 15-minute block keeps its true end");
+  assert.deepEqual([by(replies).width, by(applications).width, by(applications).left], [1, 1, 0], "abutting blocks never split the column");
+  assert.deepEqual([by(brk).width, by(followUps).width], [1, 1], "a 15-minute break before an hour block: both full width");
+  assert.deepEqual([by(overlap).width, by(overlapped).left], [0.5, 0.5], "a true overlap still splits");
+
+  // The drawn box keeps a short chip clickable without painting over its neighbour.
+  assert.deepEqual(chipBox(12), { height: 11, tier: "micro" }, "15 minutes at 48px/hour");
+  assert.deepEqual(chipBox(16), { height: 15, tier: "micro" }, "20 minutes");
+  assert.deepEqual(chipBox(24), { height: 22, tier: "compact" }, "30 minutes");
+  assert.deepEqual(chipBox(36), { height: 34, tier: "regular" }, "45 minutes");
+  assert.deepEqual(chipBox(48), { height: 46, tier: "tall" }, "60 minutes");
+  assert.deepEqual(chipBox(4), { height: 10, tier: "micro" }, "5 minutes: the one sanctioned spill");
 }
 
 // ── Sun and Shabbat ───────────────────────────────────────────────────────

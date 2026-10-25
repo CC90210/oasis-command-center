@@ -637,7 +637,9 @@ export async function mirrorPublicBookingToSchedules(input: {
       exdates: "[]",
       recurring_event_id: null,
       original_start: null,
-      color: "tide",
+      // No colour of its own: the chip takes the hue of the calendar it lands on
+      // (Meetings), so booked calls stay distinct from the host's own blocks.
+      color: null,
       reminders: "[10]",
       guests: JSON.stringify(guests),
       busy: 1,
