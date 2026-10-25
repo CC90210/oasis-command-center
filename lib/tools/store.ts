@@ -471,12 +471,13 @@ export async function claimNextJob(
            WHERE id = (SELECT id FROM tool_jobs
                         WHERE runs_on = 'runner' AND tenant_id IN (${placeholders(args.tenantIds.length)})
                           AND tool_key IN (${placeholders(args.toolKeys.length)}) AND attempts < ? AND ${CLAIMABLE}
+                          AND (target_runner IS NULL OR target_runner = ?)
                         ORDER BY created_at ASC, id ASC LIMIT 1)
              AND attempts < ? AND ${CLAIMABLE}
            RETURNING id, tenant_id, tool_key, input_json, attempts, created_at`,
     args: [
       args.runnerKey, args.leaseId, at, at, expires, at,
-      ...args.tenantIds, ...args.toolKeys, MAX_ATTEMPTS, at,
+      ...args.tenantIds, ...args.toolKeys, MAX_ATTEMPTS, at, args.runnerKey,
       MAX_ATTEMPTS, at,
     ],
   });

@@ -103,6 +103,8 @@ export async function setupToolsDatabase(): Promise<Client> {
   await db.executeMultiple(LIBRARY_TABLES);
   await db.executeMultiple(readFileSync(AI_USAGE_MIGRATION, "utf8"));
   await db.executeMultiple(readFileSync(TOOLS_MIGRATION_PATH, "utf8"));
+  // Targeted jobs and Meet's per-computer copies (bravo__240), which the claim reads.
+  await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__240_meet_local_copies.sql"), "utf8"));
   return db;
 }
 

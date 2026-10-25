@@ -623,6 +623,7 @@ export async function meetTranscribeClaim(
   job: { id: string; tenantId: string; input: Record<string, unknown> },
   tenantIds: readonly string[],
   now: Date,
+  runnerKey: string,
 ): Promise<MeetClaim | null> {
   const roomId = typeof job.input.room_id === "string" ? job.input.room_id : "";
   const room = roomId ? await readMeetRoom(db, { tenantId: job.tenantId, roomId }) : null;
@@ -649,6 +650,12 @@ export async function meetTranscribeClaim(
     ],
   });
   if (up.rowsAffected !== 1) return null;
+  // This runner may now hold the audio: "Delete meeting" must reach it (bravo__240).
+  await db.execute({
+    sql: `INSERT INTO meet_local_copies (tenant_id, room_id, runner_key, first_claimed_at) VALUES (?, ?, ?, ?)
+          ON CONFLICT (tenant_id, room_id, runner_key) DO NOTHING`,
+    args: [room.tenantId, room.id, runnerKey, at],
+  });
   const queued = await db.execute({
     sql: `SELECT COUNT(*) AS n FROM tool_jobs
           WHERE tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND tool_key = 'meet_transcribe' AND status = 'queued'`,
@@ -817,7 +824,12 @@ export function parseDeleteLocalReport(b: Record<string, unknown>): Parsed<Delet
   return { ok: true, value: { removed, alreadyGone: b.already_gone, deviceLabel: device } };
 }
 
-/** The device's deletion stamped on the transcript row, and the job's "done" (the commit signal, last). */
+/**
+ * This device's copy marked deleted; the transcript row stamped deleted on the
+ * device side only once EVERY tracked copy is gone (bravo__240); then the
+ * job's "done" (the commit signal, last). A room transcribed before copies
+ * were tracked has none, and is stamped by its one delete, as before.
+ */
 export function meetDeleteLocalCompleteStatements(
   job: { id: string; tenantId: string },
   roomId: string,
@@ -829,9 +841,15 @@ export function meetDeleteLocalCompleteStatements(
   const holds = leaseHolds(job.id, lease);
   return [
     {
+      sql: `UPDATE meet_local_copies SET deleted_at = ?, device_label = ?
+             WHERE tenant_id = ? AND room_id = ? AND runner_key = ? AND deleted_at IS NULL AND ${holds.sql}`,
+      args: [at, r.deviceLabel, job.tenantId, roomId, lease.runnerKey, ...holds.args],
+    },
+    {
       sql: `UPDATE meet_transcripts SET local_deleted_at = ?, device_label = ?, updated_at = ?
-             WHERE tenant_id = ? AND room_id = ? AND ${holds.sql}`,
-      args: [at, r.deviceLabel, at, job.tenantId, roomId, ...holds.args],
+             WHERE tenant_id = ? AND room_id = ? AND ${holds.sql}
+               AND NOT EXISTS (SELECT 1 FROM meet_local_copies c WHERE c.tenant_id = ? AND c.room_id = ? AND c.deleted_at IS NULL)`,
+      args: [at, r.deviceLabel, at, job.tenantId, roomId, ...holds.args, job.tenantId, roomId],
     },
     {
       sql: `UPDATE tool_jobs
@@ -977,11 +995,9 @@ export async function expireRelay(db: Client, tenantIds: readonly string[], now:
   );
   const rows = results[1].rows;
   // A PC that claimed one of these and then vanished may hold a partial copy: tell it to delete that too
-  // (only where a transcription was ever claimed; deviceDeleteStatement checks).
+  // (only where a transcription was ever claimed; deviceDeleteStatements checks).
   for (const r of rows) {
-    await db.execute(
-      deviceDeleteStatement({ tenantId: String(r.tenant_id), roomId: String(r.room_id), title: null, localFolder: str(r.local_folder) }, null, now),
-    );
+    await db.batch(await deviceDeleteStatements(db, { tenantId: String(r.tenant_id), roomId: String(r.room_id), title: null, localFolder: str(r.local_folder) }, null, now), "write");
   }
   if (rows.length) console.warn("[meet.relay] recordings expired before the PC took them", { count: rows.length });
   return rows.length;
@@ -1181,6 +1197,7 @@ export async function meetRelaySweeps(
   await expireRelay(db, tenantIds, now);
   await finalizeDueRooms(db, tenantIds, now);
   await removeRelayChunks(db, storage, { tenantIds }, RELAY_CLEANUP_BATCH, now);
+  await queueMissingLocalDeletes(db, tenantIds, now);
 }
 
 /**
@@ -1239,27 +1256,77 @@ export type DeleteOutcome = { relayRemaining: number; deviceDeleteQueued: boolea
  * vanished mid-way, so a partial copy may sit in its Meetings folder: Codex on
  * #685, fourth pass). The PC finds the folder by `local_folder`, else by room.
  */
-function deviceDeleteStatement(
+async function deviceDeleteStatements(
+  db: Client,
   rec: { tenantId: string; roomId: string; title: string | null; localFolder: string | null },
   actorUserId: string | null,
   now: Date,
-): InStatement {
+): Promise<InStatement[]> {
   const at = now.toISOString();
   const transcribeKey = `meet_transcribe:${rec.roomId}`;
   const deleteKey = `meet_delete_local:${rec.roomId}`;
   const input = { room_id: rec.roomId, title: rec.title, local_folder: rec.localFolder };
-  return {
+  const inputJson = JSON.stringify(input);
+  const inputHash = inputHashOf("meet_delete_local", input);
+  // One delete per computer that may hold the audio (bravo__240), each claimable only by that computer.
+  const copies = await db.execute({
+    sql: "SELECT runner_key FROM meet_local_copies WHERE tenant_id = ? AND room_id = ? AND deleted_at IS NULL",
+    args: [rec.tenantId, rec.roomId],
+  });
+  const stmts: InStatement[] = copies.rows.map((row) => {
+    const runner = String(row.runner_key);
+    const key = `${deleteKey}:${runner}`;
+    return {
+      sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, idempotency_key,
+                                   dedupe_key, target_runner, created_by, created_by_email, created_at, updated_at)
+            SELECT ?, ?, 'meet_delete_local', 'runner', 'queued', ?, ?, NULL, ?, ?, ?, NULL, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running'))
+              AND EXISTS (SELECT 1 FROM meet_local_copies WHERE tenant_id = ? AND room_id = ? AND runner_key = ? AND deleted_at IS NULL)`,
+      args: [randomUUID(), rec.tenantId, inputJson, inputHash, key, runner, actorUserId, at, at, rec.tenantId, key, rec.tenantId, rec.roomId, runner],
+    };
+  });
+  // A room transcribed before copies were tracked: the one untargeted delete, as before.
+  stmts.push({
     sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, idempotency_key,
                                  dedupe_key, created_by, created_by_email, created_at, updated_at)
           SELECT ?, ?, 'meet_delete_local', 'runner', 'queued', ?, ?, NULL, ?, ?, NULL, ?, ?
           WHERE EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND attempts > 0)
             AND NOT EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running'))
-            AND NOT EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND local_deleted_at IS NOT NULL)`,
+            AND NOT EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND local_deleted_at IS NOT NULL)
+            AND NOT EXISTS (SELECT 1 FROM meet_local_copies WHERE tenant_id = ? AND room_id = ?)`,
     args: [
-      randomUUID(), rec.tenantId, JSON.stringify(input), inputHashOf("meet_delete_local", input), deleteKey, actorUserId, at, at,
-      rec.tenantId, transcribeKey, rec.tenantId, deleteKey, rec.tenantId, rec.roomId,
+      randomUUID(), rec.tenantId, inputJson, inputHash, deleteKey, actorUserId, at, at,
+      rec.tenantId, transcribeKey, rec.tenantId, deleteKey, rec.tenantId, rec.roomId, rec.tenantId, rec.roomId,
     ],
-  };
+  });
+  return stmts;
+}
+
+/**
+ * Deleted recordings whose copies on a computer still have no delete in
+ * flight (a transcription claimed in the same moment as "Delete meeting", or
+ * a delete that failed three times): queue the missing ones. Run with the
+ * relay sweeps, so a copy is never forgotten.
+ */
+export async function queueMissingLocalDeletes(db: Client, tenantIds: readonly string[], now: Date, limit = 10): Promise<number> {
+  if (!tenantIds.length) return 0;
+  const tin = sqlPlaceholders(tenantIds.length);
+  const rs = await db.execute({
+    sql: `SELECT DISTINCT c.tenant_id, c.room_id, t.local_folder FROM meet_local_copies c
+          JOIN meet_transcripts t ON t.tenant_id = c.tenant_id AND t.room_id = c.room_id
+          WHERE c.tenant_id IN (${tin}) AND c.deleted_at IS NULL AND t.status = 'deleted'
+            AND NOT EXISTS (SELECT 1 FROM tool_jobs j WHERE j.tenant_id = c.tenant_id AND j.dedupe_key = 'meet_delete_local:' || c.room_id || ':' || c.runner_key
+                            AND j.status IN ('queued', 'claimed', 'running'))
+          LIMIT ?`,
+    args: [...tenantIds, limit],
+  });
+  let queued = 0;
+  for (const r of rs.rows) {
+    const stmts = await deviceDeleteStatements(db, { tenantId: String(r.tenant_id), roomId: String(r.room_id), title: null, localFolder: str(r.local_folder) }, null, now);
+    const results = await db.batch(stmts, "write");
+    queued += results.reduce((n, x) => n + x.rowsAffected, 0);
+  }
+  return queued;
 }
 
 /**
@@ -1296,7 +1363,7 @@ export async function deleteMeetRecording(
                WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running')`,
         args: [toolErrorLine("meeting_deleted", "runner"), at, at, room.tenantId, transcribeKey],
       },
-      deviceDeleteStatement({ tenantId: room.tenantId, roomId: room.id, title: room.title, localFolder: t?.localFolder ?? null }, actorUserId, now),
+      ...(await deviceDeleteStatements(db, { tenantId: room.tenantId, roomId: room.id, title: room.title, localFolder: t?.localFolder ?? null }, actorUserId, now)),
     ],
     "write",
   );
@@ -1305,8 +1372,8 @@ export async function deleteMeetRecording(
   await removeRelayChunks(db, storage, { tenantIds: [room.tenantId], roomId: room.id }, RELAY_DELETE_BATCH, now);
   const left = await relayTotals(db, room.tenantId, room.id);
   const queued = await db.execute({
-    sql: "SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running') LIMIT 1",
-    args: [room.tenantId, deleteKey],
+    sql: "SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND (dedupe_key = ? OR dedupe_key LIKE ?) AND status IN ('queued', 'claimed', 'running') LIMIT 1",
+    args: [room.tenantId, deleteKey, `${deleteKey}:%`],
   });
   return { relayRemaining: left.chunks, deviceDeleteQueued: queued.rows.length > 0 };
 }
@@ -1419,16 +1486,23 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
 
 async function deviceDeleteState(db: Client, room: MeetRoom, t: MeetTranscript): Promise<NonNullable<MeetRecordingView["deviceDelete"]>> {
   if (t.localDeletedAt) return { status: "done", errorCode: null, doneAt: t.localDeletedAt };
+  // One delete per computer that may hold the audio (bravo__240), or the one untargeted delete of a room
+  // transcribed before copies were tracked. The latest job for each computer decides.
+  const key = `meet_delete_local:${room.id}`;
   const rs = await db.execute({
-    sql: `SELECT status, error_code FROM tool_jobs
-          WHERE tenant_id = ? AND tool_key = 'meet_delete_local' AND dedupe_key = ?
-          ORDER BY created_at DESC, id DESC LIMIT 1`,
-    args: [room.tenantId, `meet_delete_local:${room.id}`],
+    sql: `SELECT dedupe_key, status, error_code FROM tool_jobs
+          WHERE tenant_id = ? AND tool_key = 'meet_delete_local' AND (dedupe_key = ? OR dedupe_key LIKE ?)
+          ORDER BY created_at DESC, id DESC`,
+    args: [room.tenantId, key, `${key}:%`],
   });
-  const job = rs.rows[0];
-  if (!job) return { status: "not_needed", errorCode: null, doneAt: null };
-  const status = String(job.status);
-  if (status === "failed") return { status: "failed", errorCode: str(job.error_code), doneAt: null };
-  // "done" with no stamp cannot happen (the stamp and the done commit together); read it as still waiting.
+  const latest = new Map<string, { status: string; errorCode: string | null }>();
+  for (const r of rs.rows) {
+    const k = String(r.dedupe_key);
+    if (!latest.has(k)) latest.set(k, { status: String(r.status), errorCode: str(r.error_code) });
+  }
+  if (!latest.size) return { status: "not_needed", errorCode: null, doneAt: null };
+  const failedOne = [...latest.values()].find((j) => j.status === "failed");
+  if (failedOne) return { status: "failed", errorCode: failedOne.errorCode, doneAt: null };
+  // Waiting: a computer has not reported yet ("done" on every job without the stamp means a copy still has no job; the sweep queues it).
   return { status: "waiting", errorCode: null, doneAt: null };
 }

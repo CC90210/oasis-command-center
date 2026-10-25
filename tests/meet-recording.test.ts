@@ -769,9 +769,9 @@ async function main() {
       deviceDelete: { status: string } | null;
     };
     assert.equal(confirmed.deviceDelete?.status, "done");
-    // A second delete does not tell the PC again.
+    // A second delete does not tell the PC again (its one delete, addressed to it: bravo__240).
     await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(now, 3000)));
-    assert.equal(await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key = ?", [`meet_delete_local:${roomId}`]), 1);
+    assert.equal(await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ?", [`meet_delete_local:${roomId}%`]), 1);
   });
 
   await check("delete of a recording the PC never took: no job for the PC, and the room can never be handed over again", async () => {
@@ -1040,6 +1040,58 @@ async function main() {
     return { room: r, participant: p, code };
   }
 
+  await check("two computers took the audio: Delete reaches each one, only it can take its delete, and done means both (bravo__240)", async () => {
+    const MAC_SECRET = "mac-meet-runner-test-secret-0123456789abcdefgh";
+    const at = later(T0, minutes(104_000));
+    const { room, code } = await endedRecording(at, "Two computers");
+    const pc = await claimTranscription(later(at, minutes(3)), room.id);
+    assert.equal(pc.input.room_id, room.id);
+    // The PC goes quiet; its lease lapses, and the Mac takes the transcription over.
+    await db.execute({ sql: "UPDATE tool_jobs SET lease_expires_at = ? WHERE id = ?", args: [later(at, minutes(4)).toISOString(), pc.job_id] });
+    const macAt = later(at, minutes(30));
+    const macDeps = { ...runnerDeps(macAt), env: { ...ENV, TOOLS_RUNNER_SECRET_MAC: MAC_SECRET } };
+    const macClaim = async (when: Date) =>
+      (await answerOf(await h.handleToolsClaim(signedRequest("claim", { runner_id: "oasis-mac-meet", label: "CC's Mac", version: "1.0.0", tools: MEET_TOOLS }, when, { producer: "mac", secret: MAC_SECRET }), { ...macDeps, now: when }))).body.job as Claimed | null;
+    let macJob: Claimed | null = null;
+    for (let i = 0; i < 10 && !(macJob && macJob.tool_key === "meet_transcribe" && macJob.input.room_id === room.id); i += 1) macJob = await macClaim(macAt);
+    assert.ok(macJob && macJob.tool_key === "meet_transcribe" && macJob.input.room_id === room.id, "the Mac took the transcription over");
+    assert.equal(await count("SELECT COUNT(*) FROM meet_local_copies WHERE tenant_id = ? AND room_id = ?", [OASIS, room.id]), 2, "both computers may hold the audio");
+
+    const delAt = later(macAt, minutes(1));
+    await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(delAt));
+    const targets = (await db.execute({ sql: "SELECT target_runner FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ? AND status = 'queued' ORDER BY target_runner", args: [`meet_delete_local:${room.id}:%`] })).rows.map((r) => String(r.target_runner));
+    assert.deepEqual(targets, [`bea:${RUNNER}`, "mac:oasis-mac-meet"], "one delete for each computer");
+
+    // The Mac takes its own delete, never the PC's, and deleting only its copy is not "deleted".
+    const macDelete = await macClaim(later(delAt, 1000));
+    assert.ok(macDelete && macDelete.tool_key === "meet_delete_local" && macDelete.input.room_id === room.id);
+    const macDone = await answerOf(
+      await h.handleToolsComplete(
+        signedRequest("complete", { runner_id: "oasis-mac-meet", job_id: macDelete!.job_id, lease_id: macDelete!.lease_id, tool_key: "meet_delete_local", removed: ["/Users/x"], already_gone: false, device_label: "CC's Mac" }, later(delAt, 2000), { producer: "mac", secret: MAC_SECRET }),
+        { ...macDeps, now: later(delAt, 2000) },
+      ),
+    );
+    assert.equal(macDone.status, 200, JSON.stringify(macDone.body));
+    assert.equal(await macClaim(later(delAt, 2500)), null, "the PC's delete is not the Mac's to take");
+    assert.equal((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, null, "the PC still holds its copy");
+    const half = (await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(delAt, 3000))))).recording as { deviceDelete: { status: string } | null };
+    assert.equal(half.deviceDelete?.status, "waiting");
+
+    // The PC deletes its copy: now it is done.
+    const pcDelete = (await claim(later(delAt, 4000))).body.job as Claimed;
+    assert.deepEqual([pcDelete.tool_key, pcDelete.input.room_id], ["meet_delete_local", room.id]);
+    const pcDone = await answerOf(
+      await h.handleToolsComplete(
+        signedRequest("complete", { ...ref(pcDelete), tool_key: "meet_delete_local", removed: ["C:\\x"], already_gone: false, device_label: "CCPC (Windows)" }, later(delAt, 5000)),
+        runnerDeps(later(delAt, 5000)),
+      ),
+    );
+    assert.equal(pcDone.status, 200, JSON.stringify(pcDone.body));
+    assert.ok((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, "every copy is gone");
+    const all = (await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(delAt, 6000))))).recording as { deviceDelete: { status: string } | null };
+    assert.equal(all.deviceDelete?.status, "done");
+  });
+
   await check("a chunk that lands while the PC's claim reads the recording is either declared to the PC or refused, never kept and lost", async () => {
     const at = later(T0, minutes(95_000));
     const { room, participant: p } = await endedRecording(at, "Racer");
@@ -1170,8 +1222,9 @@ async function main() {
     assert.equal(await rec.removeRelayChunks(db, store.storage, { tenantIds: [OASIS], roomId: room.id }, 300, late), 1);
     // That PC took the audio before it vanished, so it may hold a copy: it is told to delete it, and the panel
     // says it is waiting for that, never that the audio is simply gone (Codex on #685, fourth pass).
+    // The delete goes to THAT computer: claimable only by the runner that took the audio (bravo__240).
     assert.equal(
-      await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key = ? AND status = 'queued'", [`meet_delete_local:${room.id}`]),
+      await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ? AND target_runner IS NOT NULL AND status = 'queued'", [`meet_delete_local:${room.id}:%`]),
       1,
       "an expired recording the PC had claimed left its copy on the PC",
     );

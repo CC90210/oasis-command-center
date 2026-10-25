@@ -278,7 +278,7 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
       );
     }
     // meet_transcribe: the segments are fixed now, at the claim (lib/meet/recording.ts).
-    const meet = await meetTranscribeClaim(deps.db, job, ident.tenantIds, deps.now);
+    const meet = await meetTranscribeClaim(deps.db, job, ident.tenantIds, deps.now, ident.runnerKey);
     if (meet) return answer(meet.input, { ...hold, queue_depth: meet.queueDepth });
     // The recording is no longer waiting on this job (deleted, or replaced by a newer one): end it. The runner
     // takes the next job on its next run.
