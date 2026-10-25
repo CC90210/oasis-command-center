@@ -11,6 +11,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getWritableLead } from "@/lib/lead-access";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
+import { consentLockedBody } from "@/lib/consent/lead-consent-flags";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import {
@@ -123,8 +124,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           ? { last_handoff_note: transitionNote, last_handoff_note_at: occurredAt }
           : {}),
       },
+      // Moving a lead OUT of opted_out takes back a "stop": only a workspace
+      // owner or admin by base role may, and updateRecord records it.
+      allowConsentLift: sess.isTrueAdmin
+        ? { actorUserId: sess.userId, via: "dashboard_set_stage" }
+        : undefined,
     });
   } catch (error) {
+    if (error instanceof RecordsError && error.code === "consent_flag_locked") {
+      return NextResponse.json(consentLockedBody(error.fields ?? []), { status: 409 });
+    }
     const code = error instanceof RecordsError ? error.code : "unknown";
     return NextResponse.json({ ok: false, error: "update_failed", code }, { status: 500 });
   }

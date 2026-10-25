@@ -18,6 +18,12 @@
  * Auth: shared CRM writers on legacy records; on OASIS, only admins or an
  * authorized sales operator who owns/collaborates on the lead.
  * Writes via the atomic patch_tenant_record_data RPC (no read-modify-write race).
+ *
+ * Consent markers (dnc, opted_out, sms_opt_out, email_opt_out, sms_opt_out_at)
+ * can be SET by anyone who may edit the lead but CLEARED only by a workspace
+ * owner or admin by base role: anyone else gets 409 consent_flag_locked, and a
+ * lift is recorded in lead_interactions before it is made. See
+ * lib/consent/lead-consent-flags.ts.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -35,6 +41,12 @@ import {
   rejectedOasisGenericPatchKeys,
   roleMayOperateOasisSalesLead,
 } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  CONSENT_LIFT_NOT_RECORDED,
+  CONSENT_LIFT_NOT_RECORDED_MESSAGE,
+  consentLockedBody,
+} from "@/lib/consent/lead-consent-flags";
+import { guardConsentLift } from "@/lib/consent/consent-lift";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -195,6 +207,33 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     }
   }
 
+  // CONSENT FLAGS STAY SET (2026-10-20). Any lowercase key is settable here, so
+  // this is the door a rep used to clear dnc / opted_out / sms_opt_out /
+  // email_opt_out / sms_opt_out_at with one field edit. Setting one is fine;
+  // taking one back is for a workspace owner or admin by BASE ROLE (isTrueAdmin,
+  // not the admin_access grant) and is recorded first, in its own row, so there
+  // is no lift without a record. The same decision guards updateRecord
+  // (guardConsentLift); this route writes through an RPC, so it asks it itself.
+  // Reads the row fetched above, so a flag stamped in the instant before the
+  // write is not seen.
+  const consent = await guardConsentLift({
+    tenantId,
+    entity: recEntity,
+    recordId,
+    before: recData,
+    patch: { [key]: value },
+    lifter: sess.isTrueAdmin ? { actorUserId: sess.userId, via: "dashboard_set_field" } : null,
+  });
+  if (!consent.ok) {
+    return consent.reason === "locked"
+      ? NextResponse.json(consentLockedBody(consent.lifted), { status: 409 })
+      : NextResponse.json(
+          { ok: false, error: CONSENT_LIFT_NOT_RECORDED, message: CONSENT_LIFT_NOT_RECORDED_MESSAGE },
+          { status: 500 },
+        );
+  }
+  const lifted = consent.lifted;
+
   const upd = await db.rpc("patch_tenant_record_data", {
     p_id: recordId,
     p_tenant_id: tenantId,
@@ -236,24 +275,33 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   // Audit — best-effort; a logging failure never fails the edit. PII values are
-  // NOT written into the note (only the key name).
-  try {
-    const note = value === null ? `Cleared field "${key}".` : `Set field "${key}".`;
-    await db.from("lead_interactions").insert({
-      tenant_id: tenantId,
-      lead_id: recordId,
-      type: "lead_field_edited",
-      channel: "system",
-      direction: "outbound",
-      agent_source: "dashboard_set_field",
-      subject: "Lead field edited",
-      content: note,
-      content_preview: note,
-      metadata: { key, changed_by: sess.userId, mirrored_to_application: mirroredToApplication },
-    });
-  } catch {
-    /* best-effort audit */
+  // NOT written into the note (only the key name). A consent lift was already
+  // recorded, in its own row, before the write, so it is not logged twice.
+  if (lifted.length === 0) {
+    try {
+      const note = value === null ? `Cleared field "${key}".` : `Set field "${key}".`;
+      await db.from("lead_interactions").insert({
+        tenant_id: tenantId,
+        lead_id: recordId,
+        type: "lead_field_edited",
+        channel: "system",
+        direction: "outbound",
+        agent_source: "dashboard_set_field",
+        subject: "Lead field edited",
+        content: note,
+        content_preview: note,
+        metadata: { key, changed_by: sess.userId, mirrored_to_application: mirroredToApplication },
+      });
+    } catch {
+      /* best-effort audit */
+    }
   }
 
-  return NextResponse.json({ ok: true, key, value, mirrored_to_application: mirroredToApplication });
+  return NextResponse.json({
+    ok: true,
+    key,
+    value,
+    mirrored_to_application: mirroredToApplication,
+    ...(lifted.length > 0 ? { consent_lifted: lifted } : {}),
+  });
 }

@@ -29,7 +29,7 @@ import {
   updateRecord,
   getRecord,
 } from "@/lib/manifest/data";
-import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES, isAdminProfile } from "@/lib/lead-scope";
+import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES, isAdminProfile, isTrueAdmin } from "@/lib/lead-scope";
 import {
   ownsOasisSalesRecord,
   rejectedOasisGenericPatchKeys,
@@ -56,7 +56,7 @@ async function resolveContext(
   slug: string,
   entity: string
 ): Promise<
-  | { ok: true; tenant_id: string; is_admin: boolean; team_role: string }
+  | { ok: true; tenant_id: string; is_admin: boolean; team_role: string; is_true_admin: boolean }
   | { ok: false; status: number; error: string; message: string }
 > {
   if (!SLUG_RE.test(slug))
@@ -108,6 +108,9 @@ async function resolveContext(
     tenant_id: dataTenant,
     is_admin: isAdminProfile(profile),
     team_role: profile.team_role || "read_only",
+    // Owner or admin by BASE ROLE: unlike is_admin, not the admin_access grant.
+    // The only caller here allowed to take back a "stop" (consent flags).
+    is_true_admin: isTrueAdmin(profile),
   };
 }
 
@@ -187,8 +190,12 @@ function handleRecordsError(err: unknown): NextResponse {
       err.code === "not_found" ? 404 :
       err.code === "forbidden" ? 403 :
       err.code === "validation" ? 422 :
+      err.code === "consent_flag_locked" ? 409 :
       500;
-    return NextResponse.json({ ok: false, error: err.code, message: err.message }, { status });
+    return NextResponse.json(
+      { ok: false, error: err.code, message: err.message, ...(err.fields ? { fields: err.fields } : {}) },
+      { status },
+    );
   }
   throw err;
 }
@@ -521,6 +528,12 @@ export async function PATCH(
       entity: entity.toLowerCase(),
       id,
       patch: body.patch,
+      // Taking back a "stop" (a consent flag, or a stage of opted_out) is for a
+      // workspace owner or admin by base role, not the admin_access grant;
+      // updateRecord refuses everyone else and records the lift.
+      allowConsentLift: r.is_true_admin
+        ? { actorUserId: user.id, via: "dashboard_manifest_edit" }
+        : undefined,
     });
     // Editing an application's fields (e.g. swapping in a phone once it's found)
     // must regenerate the branded application PDF so the filed document always

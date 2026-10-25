@@ -13,6 +13,8 @@
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { CONSENT_FLAG_LOCKED, CONSENT_FLAG_LOCKED_MESSAGE } from "@/lib/consent/lead-consent-flags";
+import { guardConsentLift } from "@/lib/consent/consent-lift";
 import type { StepContext, StepResult, WorkflowStep } from "./types";
 
 type RecordCrudInput = {
@@ -62,7 +64,7 @@ const handler: WorkflowStep = {
          because tenant_records is operator-mutated, not heavy concurrent. */
       const current = await db
         .from("tenant_records")
-        .select("data")
+        .select("data, entity_type")
         .eq("id", input.record_id)
         .eq("tenant_id", ctx.tenant_id)
         .maybeSingle();
@@ -70,10 +72,31 @@ const handler: WorkflowStep = {
         return { status: "failed", error: `read_for_merge_failed: ${current.error.message}` };
       }
       if (!current.data) return { status: "failed", error: "record_not_found" };
+      const row = current.data as { data?: Record<string, unknown>; entity_type?: string };
       const merged = {
-        ...((current.data as { data?: Record<string, unknown> }).data ?? {}),
+        ...(row.data ?? {}),
         ...input.data,
       };
+      // CONSENT FLAGS STAY SET (2026-10-20). An automation is never the owner or
+      // admin who may take back a "stop": it cannot clear dnc / opted_out /
+      // sms_opt_out / email_opt_out / sms_opt_out_at or leave opted_out. Judged by
+      // the entity type STORED on the row, not the one the workflow names: this
+      // update is keyed by record id alone, so a workflow could otherwise name a
+      // different type and walk past the check.
+      const consent = await guardConsentLift({
+        tenantId: ctx.tenant_id,
+        entity: String(row.entity_type ?? ""),
+        recordId: input.record_id,
+        before: row.data,
+        patch: input.data,
+        lifter: null,
+      });
+      if (!consent.ok) {
+        return {
+          status: "failed",
+          error: `${CONSENT_FLAG_LOCKED}: ${CONSENT_FLAG_LOCKED_MESSAGE} (${consent.lifted.join(", ")})`,
+        };
+      }
       const update = await db
         .from("tenant_records")
         .update({ data: merged })
