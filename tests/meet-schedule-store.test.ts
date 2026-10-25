@@ -67,6 +67,10 @@ async function main() {
   });
 
   await check("Saturday afternoon is refused by OASIS's Shabbat lock, and nothing is written", async () => {
+    // Since 2026-10-25 no workspace starts with the lock; this host opts in, as Settings would.
+    const { savePrefs } = await import("../lib/calendar/store");
+    const { DEFAULT_PREFS } = await import("../lib/calendar/types");
+    await savePrefs(owner, DEFAULT_PREFS);
     const before = (await listEvents(owner)).events.length;
     const out = await addMeetingToSchedule(owner, room(OASIS, "2026-10-24T20:00:00.000Z"), { timeZone: "America/Toronto" });
     assert.deepEqual(out, { ok: false, reason: "shabbat_protected" });

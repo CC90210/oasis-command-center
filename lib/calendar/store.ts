@@ -419,10 +419,10 @@ export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPref
 const prefsId = (owner: Owner) => `${owner.tenantId}:${owner.userId}`;
 
 /**
- * The owner's preferences. With no saved row, the defaults of the owner's OWN
- * workspace (types.ts defaultPrefsFor): Montréal and the Shabbat lock for
- * OASIS, and neither anywhere else until the user sets them. A saved row
- * always wins; keys it lacks come from those same workspace defaults.
+ * The owner's preferences. With no saved row, the workspace defaults
+ * (types.ts defaultPrefsFor): neutral everywhere, no location and no Shabbat
+ * lock until the user sets them. A saved row always wins; keys it lacks come
+ * from those same defaults.
  */
 export async function getPrefs(owner: Owner): Promise<CalendarPrefs> {
   const base = defaultPrefsFor(owner.tenantId);
@@ -437,9 +437,8 @@ export async function getPrefs(owner: Owner): Promise<CalendarPrefs> {
   if (!data) return base;
   const parsed = validatePrefs(json<unknown>((data as Record<string, unknown>).prefs, {}), base);
   if (parsed.ok) return parsed.value;
-  // A stored value that no longer validates must not silently disable the
-  // Shabbat lock where the workspace has it on: fall back to the workspace's
-  // defaults, which for OASIS are the protective ones. Logged, not hidden.
+  // A stored value that no longer validates falls back to the workspace
+  // defaults (neutral). Logged, not hidden, so a broken row gets noticed.
   console.error("[calendar.prefs] stored preferences no longer validate; using workspace defaults", parsed.error);
   return base;
 }

@@ -17,6 +17,7 @@ type Props = {
 };
 
 const PLACES = [
+  { label: "Collingwood", lat: 44.5014, lon: -80.24071 },
   { label: "Montréal", lat: 45.5017, lon: -73.5673 },
   { label: "Toronto", lat: 43.6532, lon: -79.3832 },
   { label: "New York", lat: 40.7128, lon: -74.006 },
@@ -87,8 +88,8 @@ export function SettingsDialog({ prefs, now, notifications, onEnableNotification
           </fieldset>
 
           <fieldset className="space-y-3">
-            <legend className="mb-2 font-semibold">Sky and Shabbat</legend>
-            <p className="text-fg-muted">Sunrise, sunset and Shabbat are computed for this place. Use your community&rsquo;s published times for the offsets.</p>
+            <legend className="mb-2 font-semibold">Location</legend>
+            <p className="text-fg-muted">Sunrise and sunset are computed for this place. Shabbat protection is optional and stays off unless you turn it on.</p>
             <label className="flex items-center justify-between gap-4">
               Location
               <select
@@ -125,6 +126,8 @@ export function SettingsDialog({ prefs, now, notifications, onEnableNotification
               <input type="checkbox" className="h-4 w-4" disabled={!place} checked={p.shabbatProtection} onChange={(e) => setP({ ...p, shabbatProtection: e.target.checked })} />
             </label>
             {!place && <p className="text-fg-dim">Choose a location first: Shabbat times come from its sunset.</p>}
+            {p.shabbatProtection && (
+              <>
             <label className="flex items-center justify-between gap-4">
               Candle lighting, minutes before sunset
               <input className="input h-8 w-20" type="number" min={0} max={120} value={p.candleMinutesBeforeSunset} onChange={(e) => setP({ ...p, candleMinutesBeforeSunset: num(e.target.value, 0, 120) })} />
@@ -137,6 +140,8 @@ export function SettingsDialog({ prefs, now, notifications, onEnableNotification
               <p className="rounded-md border border-hairline bg-bg-panel px-3 py-2 text-fg-muted">
                 This week: candles Friday {formatTime(preview.start)}, ends Saturday {formatTime(preview.end)}.
               </p>
+            )}
+              </>
             )}
           </fieldset>
 

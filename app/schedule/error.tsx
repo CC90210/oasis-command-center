@@ -12,11 +12,7 @@ const fallback = `# Weekly schedule
 - 10:00 AM–5:00 PM Work
   - Client fulfillment
   - Internal systems
-  - Agent training / R&D
-
-## Shabbat · immutable
-- Friday: sundown placeholder (6:00 PM) onward
-- Saturday: through sundown placeholder (7:00 PM)`;
+  - Agent training / R&D`;
 
 export default function ScheduleError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
   return (

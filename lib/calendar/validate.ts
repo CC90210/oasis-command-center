@@ -9,7 +9,7 @@ import { overlapsShabbat, type ShabbatWindow } from "./sun";
 import { isTimeZone } from "./zone";
 import {
   CALENDAR_COLORS,
-  DEFAULT_PREFS,
+  NEUTRAL_PREFS,
   type CalendarColor,
   type CalendarPrefs,
   type EventInput,
@@ -197,10 +197,11 @@ export function validateOps(v: unknown): Result<EventOp[]> {
 
 /**
  * Validates preferences. Keys the value leaves out come from `base`: the
- * viewer's own workspace defaults (types.ts defaultPrefsFor), so a partial or
- * older stored row never gains another workspace's city or Shabbat lock.
+ * viewer's own workspace defaults (types.ts defaultPrefsFor, neutral since
+ * 2026-10-25), so a partial or older stored row never gains a city or the
+ * Shabbat lock it did not ask for.
  */
-export function validatePrefs(v: unknown, base: CalendarPrefs = DEFAULT_PREFS): Result<CalendarPrefs> {
+export function validatePrefs(v: unknown, base: CalendarPrefs = NEUTRAL_PREFS): Result<CalendarPrefs> {
   if (!v || typeof v !== "object") return fail("prefs_invalid");
   const p = { ...base, ...(v as Partial<CalendarPrefs>) };
   if (![0, 1, 6].includes(p.weekStartsOn)) return fail("week_start_invalid");

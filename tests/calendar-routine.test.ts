@@ -269,11 +269,11 @@ async function main() {
   });
 
   // ── 4. Defaults ──────────────────────────────────────────────────────────
-  await check("Defaults: OASIS keeps Montréal + the lock; any other workspace has neither; the lock needs a place", async () => {
+  await check("Defaults: every workspace starts neutral (no place, no lock); the lock is an opt-in that needs a place", async () => {
     const { OASIS_OPERATOR_TENANT_ID } = await import("../lib/platform-operator");
     assert.equal(OASIS_HOME_TENANT_ID, OASIS_OPERATOR_TENANT_ID, "one OASIS workspace id");
-    assert.equal(defaultPrefsFor(OASIS).shabbatProtection, true);
-    assert.equal(defaultPrefsFor(OASIS).location?.label, "Montréal");
+    assert.equal(defaultPrefsFor(OASIS).shabbatProtection, false, "OASIS no longer starts with the lock (CC, 2026-10-25)");
+    assert.equal(defaultPrefsFor(OASIS).location, null, "OASIS no longer starts with Montréal");
     assert.equal(defaultPrefsFor(CLIENT).shabbatProtection, false);
     assert.equal(defaultPrefsFor(CLIENT).location, null);
     assert.equal((validatePrefs({ ...NEUTRAL_PREFS, shabbatProtection: true }) as { error: string }).error, "shabbat_needs_location");
@@ -393,7 +393,8 @@ async function main() {
     const [a, b] = await Promise.all([route.POST(post({})), route.POST(post({}))]);
     const statuses = [(await a.json()).status, (await b.json()).status].sort();
     assert.deepEqual(statuses, ["already_restored", "restored"]);
-    const expected = routine.buildRoutineSeries(routine.routineBlocks(), { calendarId: "x", prefs: DEFAULT_PREFS, from: new Date() });
+    // adon has no saved row, so the restore planned with the neutral defaults (no Shabbat trimming).
+    const expected = routine.buildRoutineSeries(routine.routineBlocks(), { calendarId: "x", prefs: NEUTRAL_PREFS, from: new Date() });
     assert.equal(await countEvents(USERS.adon.id), expected.series.length + expected.singles.length);
   });
 
@@ -406,11 +407,11 @@ async function main() {
     assert.equal((await store.listEvents(owner)).events.find((e) => e.id === rnd.id)?.title, "R&D");
   });
 
-  await check("Prefs: OASIS gets Montréal + the lock, a client gets neither, and a saved row wins", async () => {
+  await check("Prefs: every workspace starts neutral, and a saved row wins", async () => {
     await login("cc");
     const ccData = await (await calendarRoute.GET()).json();
-    assert.equal(ccData.prefs.shabbatProtection, true);
-    assert.equal(ccData.prefs.location.label, "Montréal");
+    assert.equal(ccData.prefs.shabbatProtection, false, "OASIS no longer starts with the lock");
+    assert.equal(ccData.prefs.location, null, "OASIS no longer starts with Montréal");
     await login("clientOwner");
     const clientData = await (await calendarRoute.GET()).json();
     assert.equal(clientData.prefs.shabbatProtection, false, "a client is not defaulted to the Shabbat lock");
@@ -442,7 +443,7 @@ async function main() {
     assert.deepEqual([saved.weekStartsOn, saved.location, saved.shabbatProtection], [1, null, false], "a client is never handed OASIS's city or lock");
   });
 
-  await check("Prefs: a saved row that no longer validates falls back to the workspace's defaults, loudly; OASIS keeps the lock", async () => {
+  await check("Prefs: a saved row that no longer validates falls back to the workspace's defaults, loudly", async () => {
     const stale = JSON.stringify({ weekStartsOn: 9 });
     const at = new Date().toISOString();
     await raw.batch(
@@ -463,7 +464,7 @@ async function main() {
     } finally {
       console.error = orig;
     }
-    assert.deepEqual([oasis.shabbatProtection, oasis.location?.label], [true, "Montréal"], "an OASIS member's lock is never silently turned off");
+    assert.deepEqual([oasis.shabbatProtection, oasis.location], [false, null], "a stale OASIS row falls back to the neutral defaults");
     assert.deepEqual([client.shabbatProtection, client.location], [false, null], "a client is never handed OASIS's city");
     assert.equal(logged.filter((a) => String(a[0]).startsWith("[calendar.prefs]")).length, 2, "each fallback is logged");
   });

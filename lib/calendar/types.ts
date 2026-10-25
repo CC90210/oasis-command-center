@@ -116,14 +116,18 @@ export type CalendarPrefs = {
 };
 
 /**
- * The OASIS home workspace (slug `oasis-ai-cc`). Its members get the
- * Montréal + Shabbat defaults below. Declared here rather than imported from
+ * The OASIS home workspace (slug `oasis-ai-cc`). Kept for the routine route
+ * and its tests; since 2026-10-25 it starts from the same neutral preferences
+ * as every other workspace. Declared here rather than imported from
  * lib/platform-operator.ts because this file ships to the browser and that one
  * reads the database; tests/calendar-routine.test.ts asserts the two agree.
  */
 export const OASIS_HOME_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
-/** Defaults for the OASIS workspace: Montréal, Shabbat protected. */
+/**
+ * The opt-in Shabbat preset: Montréal and the lock. No workspace starts from
+ * it; a user turns the lock on in Settings after choosing a place.
+ */
 export const DEFAULT_PREFS: CalendarPrefs = {
   weekStartsOn: 0,
   showWeekends: true,
@@ -139,9 +143,9 @@ export const DEFAULT_PREFS: CalendarPrefs = {
 };
 
 /**
- * Defaults for every other workspace: no location and no Shabbat lock until
- * the user sets them. The offsets are kept so that turning protection on
- * later starts from the same common customs.
+ * Defaults for every workspace: no location and no Shabbat lock until the
+ * user sets them. The offsets are kept so that turning protection on later
+ * starts from the same common customs.
  */
 export const NEUTRAL_PREFS: CalendarPrefs = {
   ...DEFAULT_PREFS,
@@ -149,9 +153,15 @@ export const NEUTRAL_PREFS: CalendarPrefs = {
   shabbatProtection: false,
 };
 
-/** The preferences a user has before saving any: OASIS's for OASIS, neutral elsewhere. */
-export function defaultPrefsFor(tenantId: string): CalendarPrefs {
-  return tenantId === OASIS_HOME_TENANT_ID ? DEFAULT_PREFS : NEUTRAL_PREFS;
+/**
+ * The preferences a user has before saving any: neutral for every workspace.
+ * (CC, 2026-10-25: the OASIS workspace is his alone and he does not observe
+ * Shabbat, so OASIS no longer starts with Montréal and the lock.) The
+ * parameter stays so callers and tests keep one signature; a saved row always
+ * wins and keys it lacks come from this same neutral base.
+ */
+export function defaultPrefsFor(_tenantId: string): CalendarPrefs {
+  return NEUTRAL_PREFS;
 }
 
 /** One rendered instance of an event on the calendar. */
