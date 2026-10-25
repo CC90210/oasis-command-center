@@ -72,7 +72,6 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/cron-jobs/poll",   // local-bridge cron poll — Bearer bridge_pairings token gated + rate-limited INSIDE the route (resolveBridge), no session. MUST be public or the bridge's cron poll 401s before its bearer-auth runs (the `/api/cron` entry can't cover it — matchesPathPrefix needs prefix+"/", and it's `cron-jobs`). This is what blocks all cron automations from firing. Only `/poll` is public; the session-authed `/api/cron-jobs` CRUD stays gated.
   "/api/integrations/registry",  // canonical service+env_key list — used by the bridge to decide what to ping; non-sensitive (names only, no values), 5min Cache-Control
   "/api/integrations/constant-contact/callback",  // OAuth return leg from Constant Contact. The provider's cross-site redirect may not carry the app session cookie, so the middleware must NOT 401 it before the handler runs (verified failure mode 2026-07: the callback returned {ok:false,error:unauthorized} and the token exchange never fired). The route self-authenticates via a signed state (HMAC + 15-min replay window) + the PKCE verifier cookie — see app/api/integrations/constant-contact/callback/route.ts. Only /callback is public; /authorize + /status stay session-gated.
-  "/api/exec-override",    // POST = external HMAC fallback for override approvals; GET is now session-gated inside the route (Codex pass 4, 2026-05-18).
   "/api/outbound/log",     // outbound logging from local backend (HMAC auth inside)
   "/api/internal/apply-extraction", // VPS extraction daemon → applies extracted fields. HMAC (OASIS_OUTBOUND_HMAC_SECRET) gated INSIDE the route, no session — MUST be public or the daemon's callback 401s here before its signature check ever runs, and no dropped application ever applies. The companion poll route /api/extraction-jobs/[job_id] stays session-gated (operator-facing).
   "/api/internal/live-subs/promote", // VPS scrubber bridge (ezra-telegram-bridge) → promotes an approved live-sub lead into a shoppable application. HMAC (OASIS_OUTBOUND_HMAC_SECRET) gated INSIDE the route, no session — same rule as apply-extraction: MUST be public or the bridge's promote call 401s here before its signature check runs, and no live sub ever becomes an application. Only this exact path is public.
@@ -128,9 +127,8 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/cron",
   "/api/agents/operator-email/connect-imap", // operator mailbox connect (app-password). Self-authenticates INSIDE the route: Bearer SCAN_TRIGGER_SECRET (admin seed) OR the operator's own session. MUST be public or the admin-seed bearer path 401s here before its own auth runs (verified 2026-07: returned {ok:false,error:unauthorized}). Session self-serve still works either way. Runs IMAP+SMTP verify before storing; password never returned.
   "/api/cold-sending/",    // COLD/marketing sending pool (separate domains). Both sub-routes (/mailboxes, /blast) self-authenticate INSIDE: Bearer SCAN_TRIGGER_SECRET (admin/automation seed) OR a signed-in ADMIN session. MUST be public or the bearer-seed path 401s before its own auth runs (same failure mode as connect-imap). Trailing slash → covers every /api/cold-sending/* sub-path.
-  "/api/webhook",          // public webhooks for clients (HMAC/Bearer gated inside)
   "/api/ingest/",          // machine ingest for n8n client automations — the Turso repoint target for automation_logs. Self-authenticates with a timing-safe X-Ingest-Secret compare INSIDE the route (no session exists for an n8n HTTP node), so the prefix must be public or every client-automation log write 401s before reaching its own check.
-  "/api/webhooks/",        // inbound provider webhooks — Kixie / TextTorrent / Twilio (and future). Each route self-authenticates via a timing-safe HMAC signature check INSIDE the route, so the prefix is public. Trailing slash → matchesPathPrefix covers every /api/webhooks/* sub-path. MUST be public or registered Kixie/TT/Twilio callbacks 401 before their signature verification runs — the singular "/api/webhook" entry can't cover the plural "/api/webhooks/" (matchesPathPrefix needs prefix+"/").
+  "/api/webhooks/",        // inbound provider webhooks — Kixie / TextTorrent / Twilio (and future). Each route self-authenticates via a timing-safe HMAC signature check INSIDE the route, so the prefix is public. Trailing slash → matchesPathPrefix covers every /api/webhooks/* sub-path. MUST be public or registered Kixie/TT/Twilio callbacks 401 before their signature verification runs. (A singular "/api/webhook" entry sat beside this with no route under it; removed 2026-10-20, as anything added there later would have been public by default.)
   "/api/ledger/ingest",    // Business Ledger ingest for the Python harnesses (BEA, Maven, Atlas). Self-authenticates INSIDE the route with a per-producer HMAC over "<timestamp>.<raw body>" and a 5-minute window (lib/ledger/ingest.ts); no harness holds a session cookie, so without this entry every producer 401s here before its signature is checked. Exact path only: any future /api/ledger/* read route stays session-gated.
   "/api/skills/checkin/", // Skills Training machine check-in (poll/skills/changes/report). The PC holds a per-computer key (skc_<id>_<secret>), not a session cookie; each route authenticates INSIDE itself (lib/skills/machine-auth.ts, constant-time hash compare) before reading the body. Trailing slash so only the check-in sub-path is public — /api/skills/computers, /api/skills/changes (admin create) and /api/skills/overview stay session-gated for Adon.
   "/api/mcp",              // The OASIS MCP server (lib/mcp/server.ts): department agents running as CLIs on the operator's PC call it with a 60-minute signed bearer (omcp1.*), never a session cookie. The route refuses any request with a browser Origin header, requires and verifies the bearer, and re-checks the member's seat on every tools call. MUST be public or the cookie gate answers the CLI with a login redirect before the bearer is read. Nothing else lives under /api/mcp.
@@ -156,6 +154,24 @@ const PUBLIC_FILE_EXTENSIONS = [
   ".txt", ".webmanifest", ".xml", ".json",    // robots / manifests
   ".woff", ".woff2", ".ttf",                  // fonts
 ];
+
+/**
+ * The folders under public/. An extension makes a path public only at the root
+ * (/robots.txt, /sitemap.xml, /favicon.ico; app/ has no root-level dynamic route
+ * an extension could reach) or inside one of these. Until 2026-10-20 any path
+ * with one of those endings skipped the session gate, /api/** included, so a
+ * future /api/leads/[id] reached as /api/leads/x.json would have answered with
+ * no session (2026-10-19 audit; every route checked its own session, so nothing
+ * leaked). tests/middleware-public-files.test.ts keeps this list equal to the
+ * real folders and proves every file under public/ is still served.
+ */
+export const PUBLIC_ASSET_DIRS: readonly string[] = ["brand", "connectors", "oasis-loop"];
+
+function isPublicFile(lowerPath: string): boolean {
+  if (!PUBLIC_FILE_EXTENSIONS.some((ext) => lowerPath.endsWith(ext))) return false;
+  const segments = lowerPath.split("/").filter(Boolean);
+  return segments.length === 1 || PUBLIC_ASSET_DIRS.includes(segments[0]);
+}
 
 /**
  * Match `pathname` against the prefix set.
@@ -212,8 +228,7 @@ export function isPublic(pathname: string): boolean {
   if (PUBLIC_PATH_PREFIXES.some((p) => matchesPathPrefix(pathname, p))) return true;
   if (METADATA_IMAGE_ROUTE.test(pathname)) return true;
   if (RUN_PRODUCER_ROUTE.test(pathname)) return true;
-  const lower = pathname.toLowerCase();
-  return PUBLIC_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  return isPublicFile(pathname.toLowerCase());
 }
 
 export async function middleware(req: NextRequest) {
