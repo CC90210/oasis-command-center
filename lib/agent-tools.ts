@@ -146,7 +146,7 @@ const HANDLERS: Record<string, ToolHandler> = {
     // COLLECTED in a period — the same loader Today and /analytics read. Company
     // money is founder-only there, so a rep's chat gets no figure at all.
     if (isOasisSurfaceTenant(await tenantSlugFor(ctx.tenantId))) {
-      if (!ctx.isAdmin) return { withheld: "Company revenue is visible to CC and Adon only." };
+      if (!ctx.isAdmin) return { withheld: "Company revenue is visible to CC only." };
       const m = await loadOasisMoney(ctx.tenantId, "agent.mrr_today");
       // "Connected" is said with a time, like every other surface: when the
       // books last heard from Stripe (stripe-sync-status.ts), never a bare

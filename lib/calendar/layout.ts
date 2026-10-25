@@ -22,9 +22,6 @@ export type PositionedEvent = {
   continuesAfter: boolean;
 };
 
-/** Minimum visual height, so a 5-minute event is still clickable. */
-const MIN_SPAN = 20;
-
 export function layoutDay(day: Date, occurrences: Occurrence[]): PositionedEvent[] {
   const dayStart = startOfDay(day);
   const dayEnd = addDays(dayStart, 1);
@@ -36,7 +33,10 @@ export function layoutDay(day: Date, occurrences: Occurrence[]): PositionedEvent
       return {
         occ,
         top,
-        bottom: Math.max(bottom, Math.min(DAY_MINUTES, top + MIN_SPAN)),
+        // True minutes: an event that ends when the next begins shares no
+        // column with it. Only a zero-length event is given one minute so the
+        // packing below stays well ordered.
+        bottom: Math.max(bottom, top + 1),
         left: 0,
         width: 1,
         continuesBefore: occ.start < dayStart,
@@ -91,6 +91,22 @@ export function layoutDay(day: Date, occurrences: Occurrence[]): PositionedEvent
   }
   flush();
   return out;
+}
+
+export type ChipTier = "micro" | "compact" | "regular" | "tall";
+
+/**
+ * The drawn box for a chip whose slot is `slotPx` tall. Packing above uses true
+ * minutes, so this is the only place a short event is kept clickable: every
+ * tier ends 2px before its slot (micro 1px), so a chip never paints over the
+ * one that starts when it ends. Only a slot under 11px (a 5-minute event at
+ * 48px per hour is 4px) is allowed to spill.
+ */
+export function chipBox(slotPx: number): { height: number; tier: ChipTier } {
+  if (slotPx < 20) return { height: Math.max(10, slotPx - 1), tier: "micro" };
+  if (slotPx < 34) return { height: slotPx - 2, tier: "compact" };
+  if (slotPx < 48) return { height: slotPx - 2, tier: "regular" };
+  return { height: slotPx - 2, tier: "tall" };
 }
 
 export type SpanSegment = {

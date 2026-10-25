@@ -190,14 +190,14 @@ export const mutualNda: DocTemplate = (ctx) =>
 
 export const ipAssignment: DocTemplate = (ctx) =>
   doc(
-    header("IP assignment to OASIS", ctx, `The founders assign to the business what they create for ${ctx.legal.entity}.`),
-    section("Parties", `- ${ctx.legal.privacyOfficer.name}.`, `- ${confirm("Adon's full legal name")}`, `- The receiving entity: ${confirm("which entity receives the IP until the business is incorporated")}`),
+    header("IP assignment to OASIS", ctx, `CC records as business property what he creates for ${ctx.legal.entity}.`),
+    section("Owner and receiving business", `- Owner: ${ctx.legal.privacyOfficer.name}.`, `- The receiving business or future successor entity: ${confirm("which legal entity holds the IP until the business is incorporated")}`),
     section(
       "What is assigned",
       "- Code, prompts, agent configurations, documents, designs and content created for OASIS, from the start of the business.",
       `- Start date: ${confirm("the date from which work counts as OASIS work")}`,
     ),
-    section("What is not assigned", `- ${confirm("pre-existing work each founder keeps, listed")}`),
+    section("What is not assigned", `- ${confirm("CC's pre-existing work that remains personal, listed")}`),
     section("Governing law", `- The laws of the ${ctx.legal.jurisdiction}.`),
   );
 

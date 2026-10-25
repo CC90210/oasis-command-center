@@ -152,7 +152,7 @@ export function validateBillInput(raw: unknown): Result<BillInput> {
 }
 
 export type EquityInput = {
-  ownerKey: "cc" | "adon";
+  ownerKey: "cc";
   kind: "draw" | "contribution";
   amountCents: number;
   currency: Currency;
@@ -164,8 +164,8 @@ export type EquityInput = {
 export function validateEquityInput(raw: unknown): Result<EquityInput> {
   if (!raw || typeof raw !== "object") return { ok: false, error: "equity event must be an object" };
   const r = raw as Record<string, unknown>;
-  const ownerKey = r.owner_key === "cc" || r.owner_key === "adon" ? r.owner_key : null;
-  if (!ownerKey) return { ok: false, error: "owner must be cc or adon" };
+  const ownerKey = r.owner_key === "cc" ? r.owner_key : null;
+  if (!ownerKey) return { ok: false, error: "owner must be cc" };
   const kind = r.kind === "draw" || r.kind === "contribution" ? r.kind : null;
   if (!kind) return { ok: false, error: "kind must be draw or contribution" };
   const amountCents = parseMoneyToCents(r.amount as string | number | undefined);

@@ -87,6 +87,7 @@ import {
 } from "@/lib/ai/usage";
 import { sseErrorFrame } from "@/lib/ai/usage-codes";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
+import { keepAlive } from "@/lib/os/runs/keepalive";
 import { meterWithFallbackReason } from "@/lib/ai/model-registry";
 import {
   canonicalCloudDispatchError,
@@ -1020,72 +1021,107 @@ export async function POST(req: NextRequest) {
         });
       }
 
+      // ---- The post-turn tail --------------------------------------------
+      // Persist the reply, add the session's totals, stamp the key's
+      // last_used_at, mark the inbox read: ONE job, handed to keepAlive BEFORE
+      // the stream closes, while the request is still live. On Cloudflare
+      // Workers the request is cancelled once the response has ended, and work
+      // nobody gave to ctx.waitUntil dies with it. Run after the close, as this
+      // used to, the first write was aborted in flight and the other three were
+      // never sent, so a reply was never saved (cloud chat tail; 2026-10-20
+      // audit, confirmed in workerd). Registering is a few microtasks, never a
+      // database round trip, and `done` follows at once, so the person waits for
+      // nothing. The steps and their error handling are unchanged; keepAlive
+      // also logs a step that throws, which was silent before.
+      const postTurn = (async () => {
+        // ---- Persist assistant turn ----------------------------------------
+        // Shared writer in lib/chat-persistence — same helper /api/chat/resume
+        // uses. Centralizes redaction + chat_messages row shape so schema
+        // changes only need to land in one place. Reuses the vault secrets
+        // we already fetched for the streaming redactor — one DB round-trip
+        // per turn covers both the live stream scrub AND the persist scrub.
+        const latencyMs = Date.now() - startedAt;
+        // False when the row was not written (persistAssistantTurn logs why);
+        // the inbox marks below wait on it.
+        const replySaved = await persistAssistantTurn({
+          sessionId,
+          tenantId,
+          content: assistantText,
+          inputTokens: usageIn,
+          outputTokens: usageOut,
+          latencyMs,
+          error: streamError,
+          vaultSecrets: vaultSecretsForRedaction,
+        });
+        // chat_sessions running totals. The turn's cost is what the ledger
+        // recorded for its model calls (ai_usage_events by session_id is the
+        // record). estimated_cost_usd is NOT NULL DEFAULT 0 and cannot say
+        // "unknown", so the turn's tokens and cost are ADDED together, in one SQL
+        // increment shared with /api/chat/resume, and only when the turn has a
+        // token count and every call's cost is known (a local call is a known
+        // $0). Anything else adds nothing and only stamps updated_at: never this
+        // turn's tokens beside an older cost, never a $0 over the last known pair.
+        try {
+          await addToSessionTotals({ sessionId, tenantId, delta: sessionTotalsDelta({ end: turnTokens, meter }) });
+        } catch (err) {
+          console.error("[chat.session_totals] the session's running totals were not updated", {
+            tenantId,
+            sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (cfgScope) {
+          let lastUsedUpdate = service
+            .from("agent_model_config")
+            .update({ last_used_at: new Date().toISOString() })
+            .eq("tenant_id", tenantId)
+            .eq("agent_key", agentKey);
+          lastUsedUpdate =
+            cfgScope === "user"
+              ? lastUsedUpdate.eq("user_id", user.id)
+              : lastUsedUpdate.is("user_id", null);
+          const lastUsed = await lastUsedUpdate;
+          if (lastUsed.error) {
+            console.error("[chat.last_used] the agent's last-used time was not stamped", {
+              tenantId,
+              agentKey,
+              error: lastUsed.error.message,
+            });
+          }
+        }
+
+        // ---- Mark injected inbox messages read ----------------------------
+        // The "INBOX FOR YOU" block in the system prompt was assembled by
+        // composeDashboardContextV2; it returned the IDs it consumed. They
+        // are marked read only when the turn answered them: the stream did
+        // not error AND the reply was saved. Otherwise they stay unread and
+        // are offered again next turn, rather than vanishing along with a
+        // reply that was never kept (2026-10-20 review of #722). A mark that
+        // fails is logged; markReadDb reports a failed update instead of
+        // throwing.
+        if (injectedInboxIds.length > 0 && !streamError && replySaved) {
+          await Promise.all(
+            injectedInboxIds.map(async (id) => {
+              const marked = await markReadDb(tenantId, id).catch((err: unknown) => ({
+                ok: false,
+                error: err instanceof Error ? err.message : String(err),
+              }));
+              if (!marked.ok) {
+                console.error("[chat.inbox] an answered inbox message was not marked read; it will be offered again", {
+                  tenantId,
+                  id,
+                  error: marked.error,
+                });
+              }
+            }),
+          );
+        }
+      })();
+      // The session id names the turn whose reply a failed step concerns.
+      await keepAlive(postTurn, `chat.post-turn:${sessionId}`);
+
       send("done", {});
       controller.close();
-
-      // ---- Persist assistant turn ----------------------------------------
-      // Shared writer in lib/chat-persistence — same helper /api/chat/resume
-      // uses. Centralizes redaction + chat_messages row shape so schema
-      // changes only need to land in one place. Reuses the vault secrets
-      // we already fetched for the streaming redactor — one DB round-trip
-      // per turn covers both the live stream scrub AND the persist scrub.
-      const latencyMs = Date.now() - startedAt;
-      await persistAssistantTurn({
-        sessionId,
-        tenantId,
-        content: assistantText,
-        inputTokens: usageIn,
-        outputTokens: usageOut,
-        latencyMs,
-        error: streamError,
-        vaultSecrets: vaultSecretsForRedaction,
-      });
-      // chat_sessions running totals. The turn's cost is what the ledger
-      // recorded for its model calls (ai_usage_events by session_id is the
-      // record). estimated_cost_usd is NOT NULL DEFAULT 0 and cannot say
-      // "unknown", so the turn's tokens and cost are ADDED together, in one SQL
-      // increment shared with /api/chat/resume, and only when the turn has a
-      // token count and every call's cost is known (a local call is a known
-      // $0). Anything else adds nothing and only stamps updated_at: never this
-      // turn's tokens beside an older cost, never a $0 over the last known pair.
-      try {
-        await addToSessionTotals({ sessionId, tenantId, delta: sessionTotalsDelta({ end: turnTokens, meter }) });
-      } catch (err) {
-        console.error("[chat.session_totals] the session's running totals were not updated", {
-          tenantId,
-          sessionId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      if (cfgScope) {
-        let lastUsedUpdate = service
-          .from("agent_model_config")
-          .update({ last_used_at: new Date().toISOString() })
-          .eq("tenant_id", tenantId)
-          .eq("agent_key", agentKey);
-        lastUsedUpdate =
-          cfgScope === "user"
-            ? lastUsedUpdate.eq("user_id", user.id)
-            : lastUsedUpdate.is("user_id", null);
-        await lastUsedUpdate;
-      }
-
-      // ---- Mark injected inbox messages read ----------------------------
-      // The "INBOX FOR YOU" block in the system prompt was assembled by
-      // composeDashboardContextV2; it returned the IDs it consumed. We
-      // mark them read NOW (after the assistant successfully responded
-      // and was persisted) so they don't repeat on the next turn. If
-      // the stream errored above, streamError is non-null but we still
-      // mark read — the agent saw the message; "delivered" is the right
-      // semantic. If the route never got here at all (caller disconnect,
-      // crash before persist), the messages stay unread for retry.
-      if (injectedInboxIds.length > 0 && !streamError) {
-        await Promise.all(
-          injectedInboxIds.map((id) =>
-            markReadDb(tenantId, id).catch(() => null)
-          )
-        );
-      }
     },
   });
 

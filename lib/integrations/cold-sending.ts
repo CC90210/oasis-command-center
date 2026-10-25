@@ -48,6 +48,26 @@ const COLD_FOOTER =
   "\n\n---\nSunBiz Funding LLC\n1 East Broward Blvd, Suite 700, Fort Lauderdale, FL 33301\n\n" +
   "You received this because we believe it may be relevant to your business. Reply STOP or UNSUBSCRIBE to opt out and you won't hear from us again.";
 
+/**
+ * Cold sending is OFF for every workspace (2026-10-20 audit). This module can only
+ * send as SunBiz, and SunBiz is retired (lib/tenant/retired.ts):
+ * - COLD_FOOTER carries SunBiz Funding LLC's name and Florida address;
+ * - the tracked HTML and the List-Unsubscribe link file every opt-out under
+ *   "SunBiz", not under the workspace that sent.
+ * Any workspace admin could still register a mailbox and blast up to 500 people
+ * under a retired client's legal identity. OASIS's own cold outreach goes through
+ * Bravo's send gateway, not through here, and production holds no cold mailbox.
+ * It stays off until a workspace can send cold email under its own legal name and
+ * address. Pausing and removing an existing mailbox still work.
+ */
+export const COLD_SENDING_ENABLED: boolean = false;
+export const COLD_SENDING_OFF = {
+  error: "cold_sending_retired",
+  message:
+    "Cold email here was built for a retired client and goes out under that company's name and address. " +
+    "It is switched off until each workspace can send under its own identity.",
+} as const;
+
 const todayStr = (): string => new Date().toISOString().slice(0, 10);
 const capUsed = (m: ColdMailboxRow): number => (m.sends_date === todayStr() ? m.sends_today : 0);
 
@@ -97,7 +117,7 @@ export type ColdSendResult =
   | { ok: true; provider: "cold_apppassword"; from_address: string; mailbox_id: string; message_id: string }
   | {
       ok: false;
-      reason: "no_cold_infra" | "suppressed" | "suppression_error" | "unsafe" | "send_failed" | "not_supported";
+      reason: "retired" | "no_cold_infra" | "suppressed" | "suppression_error" | "unsafe" | "send_failed" | "not_supported";
       error: string;
     };
 
@@ -125,6 +145,7 @@ export async function sendColdEmail(args: {
   /** Campaign label → agent_source 'cold:<campaign>' so the Metrics tab buckets it. */
   campaign?: string;
 }): Promise<ColdSendResult> {
+  if (!COLD_SENDING_ENABLED) return { ok: false, reason: "retired", error: COLD_SENDING_OFF.message };
   const mb = await pickColdMailbox(args.tenantId);
   if (!mb) {
     return { ok: false, reason: "no_cold_infra", error: "no ready cold mailbox — cold send blocked (never falls back to the primary domain)" };
@@ -210,6 +231,7 @@ export async function registerColdMailbox(args: {
   dailyCap?: number;
   warmupStatus?: "warming" | "ready" | "paused";
 }): Promise<{ ok: boolean; id?: string; error?: string }> {
+  if (!COLD_SENDING_ENABLED) return { ok: false, error: COLD_SENDING_OFF.error };
   const db = getServiceSupabase();
   const now = new Date().toISOString();
   const { data, error } = await db

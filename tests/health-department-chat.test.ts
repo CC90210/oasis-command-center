@@ -177,7 +177,8 @@ async function main() {
     // Another workspace's chat is graded and recorded, never paged into OASIS's operator chat.
     assert.match(runModule, /notify: opts\.notify && alertAudienceFor\(tenantId\) === "oasis_operator"/);
     // One piece throwing must not drop the others' summaries: each is guarded, and the route still answers 500.
-    for (const piece of ["calendar", "estate", "fleet_heartbeat"]) assert.match(route, new RegExp(`guard\\(\\s*"${piece}"`), `${piece} is not guarded`);
+    for (const piece of ["calendar", "estate"]) assert.match(route, new RegExp(`guard\\(\\s*"${piece}"`), `${piece} is not guarded`);
+    assert.doesNotMatch(route, /apex-health-monitor|fleet_heartbeat/, "retired APEX health must not keep the route red");
     assert.match(route, /status: failedPieces\.length \? 500 : 200/);
   });
 

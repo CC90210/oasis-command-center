@@ -127,7 +127,7 @@ async function main() {
     return { hosts: value, logs: calls };
   }
 
-  // Monday 12:00 in Toronto: both founders are on duty from the first slot.
+  // Monday 12:00 in Toronto: the proprietor is on duty from the first slot.
   const NOW = Date.parse("2026-10-19T16:00:00.000Z");
   /** /book's availability, with the REAL Google read, recording how each host's read ended. */
   async function book() {
@@ -157,7 +157,7 @@ async function main() {
   }
   /** The rule: the card says ready exactly when the read /book makes for that host worked. */
   function agree(hosts: CardHost[], reads: Map<string, string>) {
-    assert.equal(hosts.length, 2, "both founders are hosts");
+    assert.equal(hosts.length, 1, "only the proprietor is an OASIS host");
     for (const host of hosts) {
       assert.equal(host.calendar.ready, reads.get(host.userId) === "ok", `${host.role}: card says "${host.calendar.label}", /book's read ended "${reads.get(host.userId)}"`);
     }
@@ -166,19 +166,18 @@ async function main() {
 
   console.log("booking card, through the real route");
 
-  await check("CC's case: no personal Google, the workspace credential is his account. The card says ready, through the workspace; Adon is truly Not connected; /book agrees", async () => {
+  await check("CC's case: the workspace credential is his account and he is the only live OASIS booking host", async () => {
     googleCalls.length = 0;
     const { hosts, logs } = await cardHosts();
     assert.deepEqual(
       hosts.map((h) => [h.role, h.calendar]),
       [
         ["organizer", { ready: true, kind: "workspace", label: `Connected through the workspace calendar (${USERS.cc.email})` }],
-        ["attendee", { ready: false, kind: "needs_connection", label: "Not connected" }],
       ],
       `the card says ${JSON.stringify(hosts.map((h) => [h.role, h.calendar]))}`,
     );
     assert.deepEqual(logs, [], "a working read and a host who has not connected are not faults");
-    // One token and one events read, for CC only: Adon never reaches Google.
+    // One token and one events read, for CC only.
     assert.deepEqual(googleCalls.map((c) => c.kind), ["token", "events"]);
     assert.deepEqual(googleCalls[0], { kind: "token", refreshToken: WORKSPACE_REFRESH });
     assert.deepEqual(googleCalls[1], { kind: "events", bearer: `Bearer access-${WORKSPACE_REFRESH}`, calendar: "primary", minutes: 15 });
@@ -186,7 +185,7 @@ async function main() {
     const offered = await book();
     assert.equal(offered.error, null, "/book offers times");
     assert.ok(offered.slots.length > 0);
-    assert.ok(hostIds(offered.slots).every((ids) => ids.length === 1 && ids[0] === USERS.cc.id), "CC alone: Adon is left off");
+    assert.ok(hostIds(offered.slots).every((ids) => ids.length === 1 && ids[0] === USERS.cc.id), "CC is the sole host");
     agree(hosts, offered.reads);
   });
 
@@ -206,11 +205,11 @@ async function main() {
     assert.equal(googleCalls.length, spent + 2, "after the answer is forgotten the next load reads again");
   });
 
-  await check("Adon connects his own Google: his card turns ready with his own label, CC's stays through the workspace, and /book offers both", async () => {
-    const saved = await setUserIntegrationBundle(OASIS, USERS.adon.id, "gmail_oauth", {
+  await check("a former operator's saved Google connection cannot put them back on the booking card or calendar", async () => {
+    const saved = await setUserIntegrationBundle(OASIS, USERS.formerOperator.id, "gmail_oauth", {
       refresh_token: "adon-refresh-token",
       scope: "https://www.googleapis.com/auth/calendar.events",
-      gmail_address: USERS.adon.email,
+      gmail_address: USERS.formerOperator.email,
     });
     assert.ok(saved.ok);
     const { hosts } = await cardHosts();
@@ -218,24 +217,23 @@ async function main() {
       hosts.map((h) => h.calendar),
       [
         { ready: true, kind: "workspace", label: `Connected through the workspace calendar (${USERS.cc.email})` },
-        { ready: true, kind: "connected", label: "Connected" },
       ],
       `the card says ${JSON.stringify(hosts.map((h) => h.calendar))}`,
     );
     const offered = await book();
     assert.equal(offered.error, null);
-    assert.ok(hostIds(offered.slots).some((ids) => ids.length === 2), "slots with both founders are offered");
+    assert.ok(hostIds(offered.slots).every((ids) => ids.length === 1 && ids[0] === USERS.cc.id), "the former operator stays absent");
+    assert.equal(offered.reads.has(USERS.formerOperator.id), false, "the former operator's calendar is not read");
     agree(hosts, offered.reads);
   });
 
-  await check("The workspace credential is refused for good: CC's card says Sign-in expired and is logged, /book fails for the organizer, Adon stays ready", async () => {
+  await check("The workspace credential is refused for good: CC's card says Sign-in expired and /book fails closed", async () => {
     workspaceToken = "dead";
     const { hosts, logs } = await cardHosts();
     assert.deepEqual(
       hosts.map((h) => h.calendar),
       [
         { ready: false, kind: "needs_connection", label: "Sign-in expired" },
-        { ready: true, kind: "connected", label: "Connected" },
       ],
       `the card says ${JSON.stringify(hosts.map((h) => h.calendar))}`,
     );
@@ -255,7 +253,6 @@ async function main() {
       hosts.map((h) => h.calendar),
       [
         { ready: false, kind: "unavailable", label: "Status unavailable" },
-        { ready: true, kind: "connected", label: "Connected" },
       ],
       `the card says ${JSON.stringify(hosts.map((h) => h.calendar))}`,
     );
@@ -266,25 +263,23 @@ async function main() {
     agree(hosts, offered.reads);
   });
 
-  await check("Adon's saved Google value will not decrypt: /book leaves him off as not connected, but the card says Status unavailable instead of telling him to connect", async () => {
+  await check("a former operator's unreadable saved Google value is ignored by the sole-owner booking route", async () => {
     workspaceToken = "ok";
     // A value the field encryption cannot open (a rotated key, say), in place of his real tokens.
-    await db.execute({ sql: "UPDATE user_integration_credentials SET encrypted_value = 'not-a-ciphertext' WHERE tenant_id = ? AND user_id = ?", args: [OASIS, USERS.adon.id] });
+    await db.execute({ sql: "UPDATE user_integration_credentials SET encrypted_value = 'not-a-ciphertext' WHERE tenant_id = ? AND user_id = ?", args: [OASIS, USERS.formerOperator.id] });
     const { hosts, logs } = await cardHosts();
     assert.deepEqual(
       hosts.map((h) => h.calendar),
       [
         { ready: true, kind: "workspace", label: `Connected through the workspace calendar (${USERS.cc.email})` },
-        { ready: false, kind: "unavailable", label: "Status unavailable" },
       ],
       `the card says ${JSON.stringify(hosts.map((h) => h.calendar))}`,
     );
     const ours = logs.filter((l) => l[0] === "[calendar.booking.host-status]");
-    assert.equal(ours.length, 1, "the status reader's refusal is logged by the card");
-    assert.match(JSON.stringify(ours[0][1]), /personal_integration_decrypt_failed/);
+    assert.equal(ours.length, 0, "the former operator is not read by the card");
     const offered = await book();
-    assert.equal(offered.reads.get(USERS.adon.id), "google_calendar_not_connected", "/book's own reader sees an empty bundle and treats him as not connected");
-    assert.ok(hostIds(offered.slots).every((ids) => ids.length === 1 && ids[0] === USERS.cc.id), "CC alone: Adon is left off");
+    assert.equal(offered.reads.has(USERS.formerOperator.id), false, "/book never reads the former operator");
+    assert.ok(hostIds(offered.slots).every((ids) => ids.length === 1 && ids[0] === USERS.cc.id), "CC remains the sole host");
     agree(hosts, offered.reads);
   });
 

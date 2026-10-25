@@ -205,8 +205,9 @@ async function main() {
   const chatRoute = await import("../app/api/chat/route");
   const { NextRequest } = await import("next/server");
   /**
-   * One /api/chat turn with the native tool loop. The route persists AFTER it
-   * closes the stream; its last write stamps the key's last_used_at.
+   * One /api/chat turn with the native tool loop. The route persists in a job it
+   * starts before it closes the stream and does not wait for; its last write
+   * stamps the key's last_used_at.
    */
   const turn = async (configId: string, text: string) => {
     await db.execute({ sql: "UPDATE agent_model_config SET last_used_at = NULL WHERE id = ?", args: [configId] });

@@ -203,7 +203,7 @@ export async function importLeadsForTenant(input: {
       return {
         ok: false,
         error: "assignment_roster_unavailable",
-        detail: error instanceof Error ? error.message : "Unable to load the CC + Adon assignment roster",
+        detail: error instanceof Error ? error.message : "Unable to load the OASIS assignment roster",
       };
     }
   }
@@ -288,7 +288,7 @@ export async function importLeadsForTenant(input: {
         return {
           ok: false,
           error: "assignee_required",
-          message: `Row ${i + 1} needs CC or Adon as owner. No rows were imported.`,
+          message: `Row ${i + 1} needs CC or an active sales rep as owner. No rows were imported.`,
         };
       }
       const resolved =
@@ -301,7 +301,7 @@ export async function importLeadsForTenant(input: {
         return {
           ok: false,
           error: "target_not_on_sales_roster",
-          message: `Row ${i + 1} names an owner outside the CC + Adon assignment roster. No rows were imported.`,
+          message: `Row ${i + 1} names an owner outside the active OASIS assignment roster. No rows were imported.`,
         };
       }
       assignmentFacts = pipelineCycleAssignmentFacts(resolved, importedAt);

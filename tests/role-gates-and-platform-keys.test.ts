@@ -661,14 +661,17 @@ async function main() {
   });
   await check("scan key, cold-sending/blast: accepted for OASIS's own workspace; a signed-in admin is unchanged", async () => {
     await login(null);
+    mails.length = 0;
     const oasis = await call(blast.POST, request("/api/cold-sending/blast", "POST", blastBody(OASIS), scanKey));
-    // Past the key check, OASIS's (empty) cold pool is what answers.
-    assert.equal(oasis.status, 409, JSON.stringify(oasis.body));
-    assert.equal(oasis.body.error, "no_cold_infra");
+    // Past the key check, cold sending itself answers: it is off for every
+    // workspace, because it can only send as a retired client (2026-10-20).
+    assert.equal(oasis.status, 410, JSON.stringify(oasis.body));
+    assert.equal(oasis.body.error, "cold_sending_retired");
     await login(USERS.clientA);
     const signedIn = await call(blast.POST, request("/api/cold-sending/blast", "POST", { ...blastBody(CLIENT_B), tenantId: undefined }));
-    assert.equal(signedIn.status, 200, JSON.stringify(signedIn.body));
-    assert.equal(signedIn.body.requested, 1);
+    assert.equal(signedIn.status, 410, JSON.stringify(signedIn.body));
+    assert.equal(signedIn.body.error, "cold_sending_retired");
+    assert.equal(mails.length, 0, "a cold email went out");
   });
   await check("scan key, cold-sending/mailboxes: POST, PATCH and DELETE refused (403) for a client workspace; its pool is untouched", async () => {
     await login(null);
@@ -691,8 +694,10 @@ async function main() {
       mailboxes.POST,
       request("/api/cold-sending/mailboxes", "POST", { tenantId: OASIS, domain: "oasis-cold.test", address: "hi@oasis-cold.test", app_password: "abcd efgh ijkl mnop" }, scanKey),
     );
-    assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.equal(await n("SELECT COUNT(*) AS n FROM cold_sending_mailboxes WHERE tenant_id = ?", [OASIS]), 1);
+    // Past the key check, cold sending answers that it is off (2026-10-20).
+    assert.equal(r.status, 410, JSON.stringify(r.body));
+    assert.equal(r.body.error, "cold_sending_retired");
+    assert.equal(await n("SELECT COUNT(*) AS n FROM cold_sending_mailboxes WHERE tenant_id = ?", [OASIS]), 0);
   });
   const imapBody = (tenantId: string | undefined, userId: string | undefined) => ({ tenantId, userId, address: "inbox@gmail.test", app_password: "abcd efgh ijkl mnop" });
   const loginsStoredFor = (tenantId: string, userId: string) =>

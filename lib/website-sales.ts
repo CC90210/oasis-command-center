@@ -93,7 +93,7 @@ export const WEBSITE_PACKAGES: Record<WebsitePackageId, WebsitePackage> = {
  * on a client's credentials. NOTHING on this menu answers a phone call — OASIS
  * does not sell AI voice agents, and "missed-call recovery" means an instant
  * SMS text-back, never a voice bot. A rep who cannot point at the line below
- * has left the approved menu and must route the ask to CC or Adon.
+ * has left the approved menu and must route the ask to CC.
  */
 export const AUTOMATION_ADD_ONS: AutomationAddOn[] = [
   {
@@ -153,7 +153,7 @@ export const RETIRED_AUTOMATION_ADD_ONS: AutomationAddOn[] = [
     id: "document_generation",
     name: "Document generation (retired)",
     diagnostic: "Which invoices, estimates, or documents are repetitive?",
-    delivers: "Retired from the menu — quote as custom scope through CC or Adon.",
+    delivers: "Retired from the menu — quote as custom scope through CC.",
   },
   {
     id: "local_seo",

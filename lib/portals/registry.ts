@@ -51,7 +51,7 @@ export type PortalSection = {
 };
 
 /**
- * `audience: "finance_owners"` — shown only to the two owners (CC, Adon).
+ * `audience: "finance_owners"` — legacy audience key; active OASIS access is CC only.
  * The founders portal gate also admits the marketing hire and builders, whose
  * job is the studio; the money is not theirs to see. The row is hidden for
  * them AND the pages 404 for them (lib/founders-finances/access-io.ts) —
@@ -127,14 +127,14 @@ export type Portal = {
  * unclickable chip (see PortalSection.enabled and app/founders/layout.tsx). That
  * is still a second visible tab reading "Marketing", so it would not actually
  * have answered CC's complaint. The route itself stays reachable by direct URL
- * and still fails closed for non-founders, so APEX keeps their preview surface.
+ * and still fails closed for non-owners.
  *
  * WHY HERE and not lib/founders/growth-shell.ts, where the constant was born:
  * this file is SHARED infrastructure, and shared code may not import a portal
  * (isImportAllowed, enforced by tests/portal-boundaries.test.ts). The nav is the
  * consumer and the nav lives here, so the switch lives here. growth-shell.ts
  * re-exports it — founders → shared is legal — so every existing import, and
- * APEX's own test, keep working unchanged.
+ * existing tests keep working unchanged.
  */
 export const MARKETING_SHELL_ACTIVE = false as const;
 

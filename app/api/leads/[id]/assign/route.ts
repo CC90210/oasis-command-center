@@ -20,7 +20,7 @@
  * Closer and builder ownership is workflow-only after that point.
  *
  * Target: a LIVE destination, so a deactivated teammate is refused on every
- * tenant (2026-09-24). OASIS checks the assignment roster (CC, Adon and active
+ * tenant (2026-09-24). OASIS checks the assignment roster (CC and active
  * reps); other tenants check membership and then refuse a deactivated member,
  * except as the lead's current owner — re-saving a deal they already hold is
  * not handing them new work. null (unassign) needs no target check.
@@ -117,7 +117,7 @@ export async function POST(
   const isOasisWorkspace = isWebsiteSalesTenantSlug(tenantSlug);
 
   // Verify the candidate against the authoritative destination set. OASIS is
-  // sales-roster-only for admins and reps alike (CC, Adon and active reps; the
+  // sales-roster-only for admins and reps alike (CC and active reps; the
   // roster already leaves deactivated teammates out); legacy workspaces retain
   // the broader tenant-member assignment rule.
   let targetDeactivated = false;
@@ -142,7 +142,7 @@ export async function POST(
           {
             ok: false,
             error: "target_not_on_sales_roster",
-            message: "Choose CC, Adon or an active sales rep. A deactivated teammate cannot take new work.",
+            message: "Choose CC or an active sales rep. A deactivated teammate cannot take new work.",
           },
           { status: 422 },
         );
@@ -207,7 +207,7 @@ export async function POST(
       {
         ok: false,
         error: "assignee_required",
-        message: "OASIS leads need an owner: CC, Adon or an active sales rep. Use Leads and its Release action to return work to the shared pool.",
+        message: "OASIS leads need an owner: CC or an active sales rep. Use Leads and its Release action to return work to the shared pool.",
       },
       { status: 422 },
     );

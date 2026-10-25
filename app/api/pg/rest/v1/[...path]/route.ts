@@ -129,30 +129,18 @@ const FORBIDDEN_TABLES = new Set([
 
   // DELIBERATELY NOT DENIED: merchant_background_checks. It carries ein_last4
   // and ssn_last4, but those are tokenised at ingest (last4 + salted hash, never
-  // the full number) and the LIVE apex-bg-check worker reads and writes this
-  // table through this route. Denying it would break a running production
-  // service to hide data that is already truncated. Revisit if that worker moves
-  // to a direct connection.
+  // the full number). The retired external worker no longer has a credential;
+  // retain the table compatibility for historical records and any future
+  // CC-owned worker that uses the primary bridge token.
 ]);
 
 /**
- * Constant-time bearer check against any accepted bridge secret.
- *
- * Two credentials rather than one, added 2026-08-09 for the APEX/JARVIS fleet.
- * The obvious move was to hand JARVIS the existing TT_PG_BRIDGE_TOKEN, but its
- * value cannot be read back out of Vercel (sensitive type), and rotating it to
- * a value we DO know would silently lock out any holder we cannot see from this
- * repo — there is no client for this route anywhere in the tree, so the caller
- * it was built for lives somewhere else. Issuing a second, independently
- * revocable credential breaks nobody and lets each fleet be cut off on its own.
- *
- * Both are compared; the check still fails closed when neither is configured.
+ * Constant-time bearer check against the CC-owned bridge secret. The former
+ * APEX/JARVIS credential was removed on 2026-10-21 with that collaborator's
+ * company access; a configured legacy secret must no longer authorize calls.
  */
 function authorised(req: NextRequest): boolean {
-  const accepted = [
-    process.env.TT_PG_BRIDGE_TOKEN || "",
-    process.env.APEX_PG_BRIDGE_TOKEN || "",
-  ].filter(Boolean);
+  const accepted = [process.env.TT_PG_BRIDGE_TOKEN || ""].filter(Boolean);
   if (!accepted.length) return false; // fail closed when unconfigured
 
   const header = req.headers.get("authorization") || "";
@@ -166,9 +154,8 @@ function authorised(req: NextRequest): boolean {
   // the presented value's length (it throws on a length mismatch, which would
   // itself leak length).
   //
-  // Every candidate is compared even after a match, so the work done does not
-  // depend on WHICH credential was presented — a short-circuit would leak, by
-  // timing, which fleet a caller belongs to.
+  // Keep the loop shape so adding another CC-owned token later still compares
+  // all candidates without leaking which token matched.
   const a = createHash("sha256").update(presented).digest();
   let ok = false;
   for (const candidate of accepted) {
@@ -179,10 +166,10 @@ function authorised(req: NextRequest): boolean {
 }
 
 /**
- * Range and inequality operators added 2026-08-09 for the APEX/JARVIS fleet.
+ * Range and inequality operators added 2026-08-09 for the external bridge.
  *
  * The bridge previously accepted only eq/is/in and 501'd on everything else.
- * That refusal is the right default and it did its job — it rejected APEX's
+ * That refusal is the right default and it did its job — it rejected the
  * cursor read loudly instead of quietly returning the wrong rows. But a
  * cursor-based reader fundamentally needs `created_at=gte.<cursor>`, and
  * without it the agent coordination channel cannot page at all.

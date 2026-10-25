@@ -159,7 +159,7 @@ export async function POST(req: NextRequest) {
         error: error instanceof Error ? error.message : String(error),
       });
       return NextResponse.json(
-        { ok: false, error: "sales_roster_unavailable", message: "The CC + Adon assignment roster could not be verified." },
+        { ok: false, error: "sales_roster_unavailable", message: "The OASIS assignment roster could not be verified." },
         { status: 503 },
       );
     }
@@ -366,7 +366,7 @@ export async function POST(req: NextRequest) {
           {
             ok: false,
             error: "assignee_required",
-            message: `Row ${i + 1} needs CC or Adon as owner. No rows were imported.`,
+            message: `Row ${i + 1} needs CC or an active sales rep as owner. No rows were imported.`,
           },
           { status: 422 },
         );
@@ -377,7 +377,7 @@ export async function POST(req: NextRequest) {
           {
             ok: false,
             error: "target_not_on_sales_roster",
-            message: `Row ${i + 1} names an owner outside the CC + Adon assignment roster. No rows were imported.`,
+            message: `Row ${i + 1} names an owner outside the active OASIS assignment roster. No rows were imported.`,
           },
           { status: 422 },
         );

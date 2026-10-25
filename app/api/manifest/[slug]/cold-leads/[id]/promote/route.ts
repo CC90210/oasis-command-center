@@ -10,7 +10,7 @@
  * NULL), the existing promoted_lead_id is returned without double-creating.
  *
  * Body: { assignee_user_id?: string } (required for an OASIS promotion; must
- * resolve to the current CC + Adon assignment roster. Elsewhere optional, but
+ * resolve to the current OASIS assignment roster. Elsewhere optional, but
  * when given it must be an ACTIVE member of the tenant: a promoted lead is new
  * work, so a deactivated teammate is refused.)
  *
@@ -116,7 +116,7 @@ export async function POST(
   const isOasisPromotion = isWebsiteSalesTenantSlug(slug);
   if (isOasisPromotion && !assigneeUserId) {
     return NextResponse.json(
-      { ok: false, error: "assignee_required", message: "Choose CC or Adon before promoting this lead." },
+      { ok: false, error: "assignee_required", message: "Choose CC or an active sales rep before promoting this lead." },
       { status: 422 },
     );
   }
@@ -137,7 +137,7 @@ export async function POST(
     assigneeUserId = resolveAssignableTarget(roster, assigneeUserId);
     if (!assigneeUserId) {
       return NextResponse.json(
-        { ok: false, error: "target_not_on_sales_roster", message: "Choose CC or Adon for this pipeline cycle." },
+        { ok: false, error: "target_not_on_sales_roster", message: "Choose CC or an active sales rep for this pipeline cycle." },
         { status: 422 },
       );
     }

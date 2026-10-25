@@ -408,9 +408,11 @@ async function main() {
     assert.equal(byLabel.get("Owed to you")?.status, "live", "invoices are native: no invoice is a real zero");
     assert.ok(afterCalls.length > 0, "the deferred overdue sweep is scheduled after the response");
   });
-  await check("/money: Adon (the other owner) gets the page", async () => {
+  await check("/money: the former owner gets a 404 and no finance read", async () => {
     await login("adon");
-    assert.equal(await is404(() => MoneyPage()), false);
+    const run = await recording(() => MoneyPage());
+    assert.ok(run.result instanceof Error && /404/.test(run.result.message), `expected 404, got ${String(run.result)}`);
+    assert.deepEqual(touchesFin(run.sql), [], "a fin_* read ran before the former owner was refused");
   });
   await check("/money: a recorded payment turns Collected live with its real figure", async () => {
     const { BUSINESS_ENTITY_ID } = await import("../lib/founders-finances/chart");

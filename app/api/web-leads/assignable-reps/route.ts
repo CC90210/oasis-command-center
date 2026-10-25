@@ -4,7 +4,7 @@
  * EXISTS BECAUSE THE PICKER AND THE SERVER DISAGREED. The Assign tab built its
  * rep dropdown from /api/team/members, which returns every profile on the
  * tenant. The current cycle deliberately uses a separate assignment roster:
- * CC and Adon only. The manager read roster remains role-based and unchanged,
+ * CC only. The manager read roster remains role-based and unchanged,
  * so assignment policy cannot accidentally widen cross-rep visibility.
  *
  * The dropdown and every assignment write now resolve through that same

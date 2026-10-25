@@ -40,6 +40,9 @@
  */
 
 export const LEGAL_ENTITY = "OASIS AI Solutions";
+/** Public ownership facts. Keep About, Team, and legal copy on this source. */
+export const LEGAL_OWNER_NAME = "Conaugh McKenna";
+export const LEGAL_OWNERSHIP_STRUCTURE = "sole proprietorship";
 export const LEGAL_JURISDICTION = "Province of Quebec, Canada";
 export const LEGAL_PRINCIPAL_PLACE = "Montreal, Quebec, Canada";
 

@@ -100,8 +100,7 @@ export function briefPlanFor(viewer: BriefViewer, navInput: BuildOsNavInput): { 
  * carrying the OASIS workspace id)? Only for the platform operator standing in
  * OASIS: the verified check GET /api/cron-jobs lists those rows behind, so
  * every Empire failure counted for a viewer can be looked up in Automations.
- * The co-owner is not the operator and has no page that lists them, so for
- * them the count stays the workspace's own lane.
+ * Non-operator workspace members see only their workspace lane.
  *
  * `isOperator` is asked only for an owner in OASIS (it costs a profile read).
  * A check that could not be made is "unknown", never "no" (routine-rules.ts

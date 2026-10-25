@@ -313,7 +313,16 @@ async function main(): Promise<void> {
     { auth_user_id: CC.userId, email: CC.email, full_name: "CC", display_name: null },
     { auth_user_id: ADON.userId, email: ADON.email, full_name: "Adon", display_name: null },
   ] as never;
-  const settings = defaultOasisBookingSettings({ organizerUserId: CC.userId, attendeeUserId: ADON.userId });
+  const ownerSettings = defaultOasisBookingSettings({ organizerUserId: CC.userId, attendeeUserId: null });
+  // This suite also exercises the generic two-host status machinery. Build that
+  // fixture explicitly; OASIS's production default remains proprietor-only.
+  const settings = {
+    ...ownerSettings,
+    hosts: [
+      ownerSettings.hosts[0],
+      { ...ownerSettings.hosts[0], userId: ADON.userId, role: "attendee" as const },
+    ],
+  };
   const { hostIdentities } = await import("../lib/booking/settings-store");
   const { loadPublicBookingAvailability } = await import("../lib/forms/public-booking");
 

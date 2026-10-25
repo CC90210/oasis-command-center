@@ -30,7 +30,7 @@ const SECTIONS: PlaybookSection[] = [
   {
     href: "/playbook/script",
     title: "Sales Rep Script",
-    subtitle: "Simple talk track - qualify - book CC or Adon",
+    subtitle: "Simple talk track - qualify - book CC",
     body:
       "A plain-language call guide for new appointment setters: 60-second preparation, a word-for-word opener, five qualification questions, easy objection responses, voicemail, booking, and the exact founder handoff.",
   },

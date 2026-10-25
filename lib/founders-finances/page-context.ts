@@ -5,7 +5,7 @@
  * business"). Every page shows the OASIS AI Solutions book; ?entity= is
  * ignored. The personal books and their data are untouched — they are simply
  * not surfaced here. The gate is unchanged: resolveFinanceViewer() (CC and
- * Adon only), then requireBusinessEntity(), which still runs canAccessEntity.
+ * active OASIS owner only), then requireBusinessEntity(), which still runs canAccessEntity.
  *
  * LOADERS. Each page's reads live in one function here so the independent
  * ones run together (Promise.all) and tests/finances-roundtrips.test.ts can pin an

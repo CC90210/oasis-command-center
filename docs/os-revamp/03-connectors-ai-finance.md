@@ -391,7 +391,7 @@ Add a `departments[]` block to the manifest:
 - A `FinanceScope {tenantId, entityId}` is threaded through every `*-io.ts` file. `BUSINESS_ENTITY_ID` has 26 references in 9 files.
 - `stripeSecretKey()` / `financeTenantId()` (`stripe-io.ts:53-62`) become `stripeClientFor(scope)`.
 - The account cache is keyed by (tenant, key hash).
-- Access: the founder email map (`access.ts:22-25`) becomes a per-tenant `finance.view` capability (owner plus explicit grants) in `lib/role-surfaces.ts`. `canAccessEntity` (`:70-76`) stays for personal books, so CC and Adon see their own personal books inside the OASIS tenant.
+- Access: the owner email map (`access.ts`) becomes a per-tenant `finance.view` capability (owner plus explicit grants) in `lib/role-surfaces.ts`. `canAccessEntity` stays for personal books; CC has live access, while former-owner personal rows remain historical and inaccessible through the product.
 - **OASIS's books become the OASIS tenant's owner-only Finance department**, and the Founders portal route redirects there.
 
 ### e.2 Two book modes (decision for CC; I recommend both, A first)

@@ -57,7 +57,7 @@ const ROOT = join(__dirname, "..");
 const ORIGIN = "https://oasisai.work";
 const OTHER = "cccccccc-0000-4000-8000-00000000000c";
 const CC = USERS.cc.id;
-const ADON = USERS.adon.id;
+const ADMIN_USER = USERS.admin.id;
 const T0 = new Date("2026-10-17T15:00:00.000Z");
 const RUNNER = "ccpc-meet";
 const MEET_TOOLS = ["meet_delete_local", "meet_transcribe"];
@@ -305,7 +305,7 @@ async function main() {
   // the recording changes hands through the real lib/meet/participants.ts claimRecorder.
   const tokenSecret = process.env[MEET_TOKEN_SECRET_ENV];
   process.env[MEET_TOKEN_SECRET_ENV] = "a-test-only-secret-that-is-long-enough-1234";
-  const ADMIN_ADON = as(ADON, { admin: true });
+  const ADMIN_SESSION = as(ADMIN_USER, { admin: true });
   /** A browser's poll: it is heard from at `at`, which is what claimRecorder reads. */
   const seenAt = (id: string, at: Date) => db.execute({ sql: "UPDATE meet_participants SET last_seen_at = ? WHERE id = ?", args: [at.toISOString(), id] });
   const goneAt = (id: string, column: "left_at" | "removed_at", at: Date) =>
@@ -331,17 +331,17 @@ async function main() {
     try {
       const send = sendFrom(room, await participant(room, "Jordan"));
       const cc = await participant(room, "Conaugh", CC);
-      const adon = await participant(room, "Adon", ADON, true, "host");
+      const admin = await participant(room, "Operations Admin", ADMIN_USER, true, "host");
       const phone = await participant(room, "Conaugh", CC);
       const at = later(T0, minutes(2));
-      for (const id of [cc, adon, phone]) await seenAt(id, at);
+      for (const id of [cc, admin, phone]) await seenAt(id, at);
       assert.equal((await claimRecorder(db, room, { id: cc }, at, true)).mine, true);
-      assert.equal((await claimRecorder(db, room, { id: adon }, at, true)).mine, false, "CC's browser is there: it keeps the recording");
+      assert.equal((await claimRecorder(db, room, { id: admin }, at, true)).mine, false, "CC's browser is there: it keeps the recording");
       assert.equal(await send(cc, as(CC), at), 201, "the room's recorder");
-      assert.equal(await send(adon, ADMIN_ADON, at), "423 another_recorder", "another host's browser, still in the call");
+      assert.equal(await send(admin, ADMIN_SESSION, at), "423 another_recorder", "another host's browser, still in the call");
       assert.equal(await send(phone, as(CC), at), "423 another_recorder", "the same host on a second device: one browser, not one person");
       assert.equal(await send(null, as(CC), at), "423 another_recorder", "a chunk that names no browser, while one records");
-      assert.equal(await send(cc, ADMIN_ADON, at), "423 another_recorder", "a cookie naming someone else's row names no one");
+      assert.equal(await send(cc, ADMIN_SESSION, at), "423 another_recorder", "a cookie naming someone else's row names no one");
     } finally {
       await dropRoom(room);
     }
@@ -352,18 +352,18 @@ async function main() {
     try {
       const send = sendFrom(room, await participant(room, "Jordan"));
       const cc = await participant(room, "Conaugh", CC);
-      const adon = await participant(room, "Adon", ADON, true, "host");
+      const admin = await participant(room, "Operations Admin", ADMIN_USER, true, "host");
       const at = later(T0, minutes(2));
       await seenAt(cc, at);
       assert.equal((await claimRecorder(db, room, { id: cc }, at, true)).mine, true);
-      // CC's laptop goes quiet past MEET_PRESENCE_MS without leaving (a bad network), and Adon's poll takes over.
+      // CC's laptop goes quiet past MEET_PRESENCE_MS without leaving (a bad network), and the admin's poll takes over.
       const taken = later(at, MEET_PRESENCE_MS + 1_000);
-      await seenAt(adon, taken);
-      assert.equal((await claimRecorder(db, room, { id: adon }, taken, true)).mine, true);
+      await seenAt(admin, taken);
+      assert.equal((await claimRecorder(db, room, { id: admin }, taken, true)).mine, true);
       const row = (await db.execute({ sql: "SELECT recorder_previous_id AS p, recorder_changed_at AS c FROM meet_rooms WHERE id = ?", args: [room.id] })).rows[0];
       assert.deepEqual([row.p, row.c], [cc, taken.toISOString()], "the room notes whose recording it took, and when");
       assert.equal(await send(cc, as(CC), later(taken, 5_000)), 201, "CC's browser, back and stopping: its last chunks are kept");
-      assert.equal(await send(adon, ADMIN_ADON, later(taken, 5_000)), 201, "the new recorder's too");
+      assert.equal(await send(admin, ADMIN_SESSION, later(taken, 5_000)), 201, "the new recorder's too");
       assert.equal(await send(cc, as(CC), later(taken, rec.LATE_CHUNK_MS + 1_000)), "423 another_recorder", "but only for LATE_CHUNK_MS after the change");
     } finally {
       await dropRoom(room);
@@ -375,18 +375,18 @@ async function main() {
     try {
       const send = sendFrom(room, await participant(room, "Jordan"));
       const cc = await participant(room, "Conaugh", CC);
-      const adon = await participant(room, "Adon", ADON, true, "host");
+      const admin = await participant(room, "Operations Admin", ADMIN_USER, true, "host");
       const phone = await participant(room, "Conaugh", CC);
       const tablet = await participant(room, "Conaugh", CC);
       const at = later(T0, minutes(2));
-      for (const id of [cc, adon, phone, tablet]) await seenAt(id, at);
+      for (const id of [cc, admin, phone, tablet]) await seenAt(id, at);
       await claimRecorder(db, room, { id: cc }, at, true);
-      // CC leaves and Adon's browser takes over; Adon leaves and CC's phone takes over. CC's browser is no longer the
+      // CC leaves and the admin's browser takes over; the admin leaves and CC's phone takes over. CC's browser is no longer the
       // one taken over: only having left keeps its last chunks.
       await goneAt(cc, "left_at", at);
-      assert.equal((await claimRecorder(db, room, { id: adon }, at, true)).mine, true);
+      assert.equal((await claimRecorder(db, room, { id: admin }, at, true)).mine, true);
       const next = later(at, 1_000);
-      await goneAt(adon, "left_at", next);
+      await goneAt(admin, "left_at", next);
       await seenAt(phone, next);
       assert.equal((await claimRecorder(db, room, { id: phone }, next, true)).mine, true);
       await goneAt(tablet, "removed_at", next);
@@ -405,7 +405,7 @@ async function main() {
     try {
       const guest = await participant(room, "Jordan");
       const cc = await participant(room, "Conaugh", CC);
-      const adon = await participant(room, "Adon", ADON, true, "host");
+      const admin = await participant(room, "Operations Admin", ADMIN_USER, true, "host");
       const code = displayMeetCode(room.code);
       const segment = crypto.randomUUID();
       const at = later(T0, minutes(3));
@@ -417,7 +417,7 @@ async function main() {
           return async (stmt: InStatement) => {
             if (!taken && /INSERT INTO meet_recording_chunks/.test(typeof stmt === "string" ? stmt : stmt.sql)) {
               taken = true;
-              assert.equal((await claimRecorder(target, room, { id: adon }, at, true)).mine, true, "Adon's browser takes the recording");
+              assert.equal((await claimRecorder(target, room, { id: admin }, at, true)).mine, true, "the admin's browser takes the recording");
             }
             return target.execute(stmt);
           };
@@ -1370,14 +1370,14 @@ async function main() {
   });
 
   await check("the claim's sweep leaves tomorrow's meeting alone after two hosts try it out today", async () => {
-    // #687 third review, HIGH: CC and Adon are both hosts, so two of them in a room counts as a call. Without the
+    // #687 third review, HIGH: CC and an admin are both hosts, so two of them in a room counts as a call. Without the
     // start guard, a try-out today ended tomorrow's room and killed the link its guest already had.
     const today = later(T0, minutes(100_000));
     const r = await liveRoom({ at: today });
     await db.execute({ sql: "UPDATE meet_rooms SET starts_at = ? WHERE id = ?", args: [later(today, minutes(24 * 60)).toISOString(), r.id] });
     await participant(r, "Conaugh", CC);
-    const adon = await participant(r, "Adon", ADON);
-    await db.execute({ sql: "UPDATE meet_participants SET role = 'host' WHERE id = ?", args: [adon] });
+    const admin = await participant(r, "Operations Admin", ADMIN_USER);
+    await db.execute({ sql: "UPDATE meet_participants SET role = 'host' WHERE id = ?", args: [admin] });
     await db.execute({
       sql: "UPDATE meet_participants SET joined_at = ?, last_seen_at = ? WHERE room_id = ?",
       args: [today.toISOString(), later(today, minutes(5)).toISOString(), r.id],

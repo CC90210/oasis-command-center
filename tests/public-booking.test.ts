@@ -369,8 +369,8 @@ await check("books only a slot live availability returns, hosted by that slot's 
   assert.match(bookingRoute, /publicBookingHostsById\(/, "a replay rebuilds the same hosts");
   assert.match(
     bookingRoute,
-    /storedHostIds\.length \? storedHostIds : \[founders\.host\.auth_user_id, founders\.opener\.auth_user_id\]/,
-    "a booking made before hosts were stored replays with both founders (Codex review of #628)",
+    /storedHostIds\.length \? storedHostIds : \[founders\.host\.auth_user_id\]/,
+    "a booking made before hosts were stored replays with the current proprietor",
   );
   const bookPage = readFileSync("components/booking/BookingPage.tsx", "utf8");
   assert.match(

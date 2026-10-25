@@ -26,7 +26,7 @@
  *
  * GUARD REPORT CONTRACT (service "guard_substrate", metadata):
  *   { contract: 1,
- *     guards: { <exec_guard|secret_guard|state_guard|coord_guard|subprocess_guard>:
+ *     guards: { <exec_guard|secret_guard|state_guard|subprocess_guard>:
  *       { mode: "enforce"|"report"|"off", blocked_24h: int, would_block_24h: int,
  *         last_block_at: ISO|null, categories_24h: { <category>: int } } } }
  * Counts, modes, times and category names only. Command text and file paths
@@ -138,11 +138,6 @@ export const GUARDS: ReadonlyArray<{ key: string; name: string; plain: string }>
     key: "state_guard",
     name: "Session-log guard",
     plain: "Stops hand edits to the auto-generated session log, so the record of what happened stays honest.",
-  },
-  {
-    key: "coord_guard",
-    name: "Shared-file guard",
-    plain: "Stops Bravo editing a file while Adon's agent (APEX) holds it.",
   },
   {
     key: "subprocess_guard",
@@ -300,8 +295,8 @@ export type SystemHealthDeps = {
    * O3b: who is looking. Omitted, this is the pre-O3b behaviour -- every
    * pairing in the tenant answers the machine card and verdict, and the
    * fleet reporter/workers show for everyone. Passed, the machine card and
-   * verdict describe THIS PERSON's own computer only (CC sees CCPC, Adon
-   * sees his own), and the fleet reporter + background workers -- CC's House
+   * verdict describe THIS PERSON's own computer only (CC sees CCPC; historical
+   * pairings stay isolated), and the fleet reporter + background workers -- CC's House
    * agents' own process table -- show only for the agents owner, same rule
    * O2 already applies to the Automations tab.
    */
