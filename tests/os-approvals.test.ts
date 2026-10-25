@@ -1090,6 +1090,23 @@ async function main() {
     assert.equal(await statusOf(byDept.sales.id), "pending");
   });
 
+  await check("POST approve: an owner-only card refuses a non-owner admin BEFORE deciding, so it stays pending for the owner", async () => {
+    const payload = {
+      engagement_id: "eng-owner-only", lead_id: "lead-owner-only", business_name: "Owner Only Co",
+      audit_version_id: "aud-1", audit_sha256: "a".repeat(64), proposal_version_id: "prop-1", proposal_sha256: "b".repeat(64), pdf_sha256: "c".repeat(64),
+      to: "client@owner-only.test", subject: "Your audit", body: "Hi\n\n{{audit_link}}", currency: "CAD", total_cents: 100, due_now_cents: 100,
+    };
+    const made = await store.createApproval(raw, { tenantId: OASIS, departmentKey: null, requestedBy: { type: "routine", id: "ai-audit" }, actionKind: "deliver_ai_audit", title: "OWNER-ONLY-MARKER", payload, riskLevel: "spend", idempotencyKey: "owner-only-1" }, new Date());
+    assert.ok(made.ok);
+    const a = made.ok ? made.approval : (null as never);
+    await login("adon");
+    const res = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
+    assert.equal(res.status, 403);
+    assert.equal(((await res.json()) as Body).error, "owner_only");
+    assert.equal(await statusOf(a.id), "pending", "the card is not used up");
+    await raw.execute({ sql: "UPDATE approvals SET status = 'cancelled' WHERE id = ?", args: [a.id] });
+  });
+
   await check("POST approve: wrong hash 409 payload_mismatch; bad JSON 400", async () => {
     await login("cc");
     const res = await approveRoute.POST(req("http://t.test", { payload_hash: sha("stale") }) as never, ctx(byDept.sales.id));

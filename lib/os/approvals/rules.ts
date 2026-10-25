@@ -106,6 +106,13 @@ export const ACTION_KIND_LABELS: Record<ApprovalActionKind, string> = {
   deliver_ai_audit: "AI audit delivery",
 };
 
+/**
+ * Kinds only the workspace OWNER may approve. Their executors refuse anyone
+ * else, but a refused run used the card up; the approve route checks first, so
+ * an admin's click leaves the card waiting for the owner (review of PR #732).
+ */
+export const OWNER_ONLY_ACTION_KINDS: ReadonlySet<ApprovalActionKind> = new Set<ApprovalActionKind>(["deliver_ai_audit"]);
+
 export const REQUESTER_TYPES = ["agent", "routine", "human"] as const;
 export type RequesterType = (typeof REQUESTER_TYPES)[number];
 

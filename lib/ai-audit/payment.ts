@@ -173,8 +173,10 @@ export async function createOrReuseCheckout(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?)`,
       args: [id, t, engagement.id, proposal.id, token, kind, proposal.due_now_cents, proposal.currency, at, at],
     });
-  } catch {
-    return { ok: false, error: "busy" };
+  } catch (err) {
+    // The one-open-session index refusing means another click is opening it right now.
+    if (/UNIQUE|constraint/i.test(err instanceof Error ? err.message : String(err))) return { ok: false, error: "busy" };
+    throw err;
   }
   const base = deps.baseUrl();
   let session: { reference: string; url: string };
@@ -210,8 +212,9 @@ export async function createOrReuseCheckout(
           WHERE tenant_id = ? AND id = ? AND status = 'creating'`,
     args: [session.reference, session.url, expires, input.now.toISOString(), t, id],
   });
+  let marked: { ok: boolean; error?: string };
   if (engagement.stage !== "payment_pending") {
-    await advanceEngagement(db, {
+    marked = await advanceEngagement(db, {
       tenantId: t,
       engagementId: engagement.id,
       to: "payment_pending",
@@ -222,7 +225,7 @@ export async function createOrReuseCheckout(
       meta: { checkout_id: id, amount_cents: proposal.due_now_cents, currency: proposal.currency, installment_kind: kind },
     });
   } else {
-    await patchEngagement(db, {
+    marked = await patchEngagement(db, {
       tenantId: t,
       id: engagement.id,
       expectedRowVersion: engagement.row_version,
@@ -233,6 +236,8 @@ export async function createOrReuseCheckout(
       meta: { checkout_id: id, amount_cents: proposal.due_now_cents },
     });
   }
+  // Only the board's "checkout started" flag depends on this; the session and its polling do not.
+  if (!marked.ok) console.warn("[ai-audit.payment] checkout opened, but the engagement was not marked pending", { engagementId: engagement.id, error: marked.error });
   return { ok: true, url: session.url, reused: false };
 }
 
@@ -300,69 +305,273 @@ export async function verifyCheckout(
   }
 
   const receiptId = newId();
-  const insert = await db.execute({
-    sql: `INSERT INTO ai_audit_payment_receipts (id, tenant_id, engagement_id, lead_id, proposal_version_id, checkout_id, provider, provider_reference, status,
-            amount_cents, currency, installment_kind, provider_status, verification_source, verified_at, summary, last_reconciled_at, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'stripe', ?, 'verified', ?, ?, ?, ?, 'stripe_api', ?, ?, ?, ?, ?)
-          ON CONFLICT (tenant_id, provider, provider_reference) DO NOTHING`,
-    args: [
-      receiptId, t, engagement.id, engagement.lead_id, checkout.proposal_version_id, checkout.id, verified.reference,
-      verified.amountCents, verified.currency, checkout.installment_kind, verified.providerStatus, at,
-      JSON.stringify({ ...verified.summary, trigger: input.trigger }), at, at, at,
+  // The receipt and the checkout's "paid" are one write: never one without the other.
+  const [insert] = await db.batch(
+    [
+      {
+        sql: `INSERT INTO ai_audit_payment_receipts (id, tenant_id, engagement_id, lead_id, proposal_version_id, checkout_id, provider, provider_reference, status,
+                amount_cents, currency, installment_kind, provider_status, verification_source, verified_at, summary, last_reconciled_at, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, 'stripe', ?, 'verified', ?, ?, ?, ?, 'stripe_api', ?, ?, ?, ?, ?)
+              ON CONFLICT (tenant_id, provider, provider_reference) DO NOTHING`,
+        args: [
+          receiptId, t, engagement.id, engagement.lead_id, checkout.proposal_version_id, checkout.id, verified.reference,
+          verified.amountCents, verified.currency, checkout.installment_kind, verified.providerStatus, at,
+          JSON.stringify({ ...verified.summary, trigger: input.trigger }), at, at, at,
+        ],
+      },
+      {
+        sql: "UPDATE ai_audit_checkouts SET status = 'paid', paid_at = COALESCE(paid_at, ?), last_error = NULL, updated_at = ? WHERE tenant_id = ? AND id = ?",
+        args: [at, at, t, checkout.id],
+      },
     ],
-  });
-  await db.execute({
-    sql: "UPDATE ai_audit_checkouts SET status = 'paid', paid_at = COALESCE(paid_at, ?), last_error = NULL, updated_at = ? WHERE tenant_id = ? AND id = ?",
-    args: [at, at, t, checkout.id],
-  });
-  if (insert.rowsAffected !== 1) {
+    "write",
+  );
+  let id = receiptId;
+  const duplicate = insert.rowsAffected !== 1;
+  if (duplicate) {
     const existing = (await db.execute({ sql: "SELECT id FROM ai_audit_payment_receipts WHERE tenant_id = ? AND provider = 'stripe' AND provider_reference = ? LIMIT 1", args: [t, verified.reference] })).rows[0];
-    return { status: "paid", receiptId: existing ? String(existing.id) : receiptId, duplicate: true };
+    if (existing) id = String(existing.id);
   }
+  // A duplicate still settles: a run that wrote the receipt and then failed
+  // before moving the engagement is finished here (and by the tick).
+  await settlePayment(db, {
+    tenantId: t,
+    engagementId: engagement.id,
+    checkout,
+    receiptId: id,
+    reference: verified.reference,
+    amountCents: verified.amountCents,
+    currency: verified.currency,
+    trigger: input.trigger,
+    now: input.now,
+    deps,
+  });
+  return { status: "paid", receiptId: id, duplicate };
+}
 
-  // A second paid session for the same proposal is kept and flagged, never onboarded twice.
+/** Stages from which a verified payment moves the engagement to Payment Confirmed. */
+const SETTLE_FROM = new Set(["delivered", "proposal_review", "payment_pending"]);
+/** Stages a settled payment has already moved past. */
+const SETTLED = new Set(["payment_confirmed", "onboarding", "active_client"]);
+
+/**
+ * Put a verified payment where it belongs. Idempotent: called after every
+ * verification, duplicate or not, and by the tick for any verified receipt
+ * whose engagement has not caught up.
+ *
+ *   - a second paid session for the same proposal: kept, flagged, never onboarded twice;
+ *   - a payable engagement: moves to Payment Confirmed (retried on a concurrent write);
+ *   - anything else (declined, cancelled, reopened): the money is real but has
+ *     nowhere to go, so the engagement is flagged FAILED and CC gets an urgent
+ *     alert. Nothing is refunded automatically.
+ */
+export async function settlePayment(
+  db: Client,
+  input: {
+    tenantId: string;
+    engagementId: string;
+    checkout: Pick<Checkout, "id" | "proposal_version_id" | "installment_kind">;
+    receiptId: string;
+    reference: string;
+    amountCents: number;
+    currency: string;
+    trigger: string;
+    now: Date;
+    deps: PaymentDeps;
+  },
+): Promise<"settled" | "already" | "overpaid" | "unplaced"> {
+  const t = requireTenant(input.tenantId);
   const paidForProposal = int(
     (await db.execute({
       sql: "SELECT COUNT(*) AS n FROM ai_audit_payment_receipts WHERE tenant_id = ? AND proposal_version_id = ? AND status = 'verified' AND installment_kind = ?",
-      args: [t, checkout.proposal_version_id, checkout.installment_kind],
+      args: [t, input.checkout.proposal_version_id, input.checkout.installment_kind],
     })).rows[0]?.n,
   );
-  const fresh = await getEngagement(db, t, engagement.id);
-  if (!fresh) return { status: "paid", receiptId, duplicate: false };
-  if (paidForProposal > 1) {
-    await patchEngagement(db, {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const e = await getEngagement(db, t, input.engagementId);
+    if (!e) return "unplaced";
+    if (paidForProposal > 1) {
+      if (e.payment_status === "overpaid_review") return "overpaid";
+      const r = await patchEngagement(db, {
+        tenantId: t,
+        id: e.id,
+        expectedRowVersion: e.row_version,
+        patch: { payment_status: "overpaid_review", health: "attention", health_reason: "A second payment arrived for the same proposal. Refund one in Stripe." },
+        event: "payment_overpaid",
+        actor: { type: "stripe", id: input.reference },
+        now: input.now,
+        meta: { receipt_id: input.receiptId },
+      });
+      if (!r.ok && r.error === "conflict") continue;
+      await input.deps.alert({
+        tenantId: t,
+        alertType: "ai_audit_overpaid",
+        severity: "urgent",
+        title: `Second payment for ${e.business_name || "an AI audit proposal"}`,
+        body: "Stripe confirmed two payments for the same proposal. Nothing was onboarded twice. Refund one in Stripe.",
+        subjectType: "ai_audit_engagement",
+        subjectId: e.id,
+        telegramOncePerOpen: true,
+      });
+      return "overpaid";
+    }
+    if (SETTLED.has(e.stage)) return "already";
+    if (SETTLE_FROM.has(e.stage)) {
+      const moved = await advanceEngagement(db, {
+        tenantId: t,
+        engagementId: e.id,
+        to: "payment_confirmed",
+        actor: { type: "stripe", id: input.reference },
+        now: input.now,
+        expectedRowVersion: e.row_version,
+        patch: { payment_status: "paid", health: "ok", health_reason: null },
+        event: "payment_verified",
+        meta: { receipt_id: input.receiptId, amount_cents: input.amountCents, currency: input.currency, trigger: input.trigger },
+      });
+      if (moved.ok) return "settled";
+      if (moved.error === "conflict") continue;
+    }
+    // Paid, but the engagement cannot take it (declined, cancelled, reopened).
+    const reason = `Stripe confirmed a payment, but the engagement is ${e.stage.replace(/_/g, " ")}. Decide whether to refund it in Stripe or reopen the engagement.`;
+    if (e.health === "failed" && e.health_reason === reason && e.payment_status === "paid") return "unplaced";
+    const flagged = await patchEngagement(db, {
       tenantId: t,
-      id: fresh.id,
-      expectedRowVersion: fresh.row_version,
-      patch: { payment_status: "overpaid_review", health: "attention", health_reason: "A second payment arrived for the same proposal. Refund one in Stripe." },
-      event: "payment_overpaid",
-      actor: { type: "stripe", id: verified.reference },
+      id: e.id,
+      expectedRowVersion: e.row_version,
+      patch: { payment_status: "paid", health: "failed", health_reason: reason },
+      event: "payment_unplaced",
+      actor: { type: "stripe", id: input.reference },
       now: input.now,
-      meta: { receipt_id: receiptId },
+      meta: { receipt_id: input.receiptId, stage: e.stage },
     });
-    await deps.alert({
+    if (!flagged.ok && flagged.error === "conflict") continue;
+    console.error("[ai-audit.payment] a verified payment has no engagement to settle into", { engagementId: e.id, stage: e.stage, receiptId: input.receiptId });
+    await input.deps.alert({
       tenantId: t,
-      alertType: "ai_audit_overpaid",
+      alertType: "ai_audit_payment_unplaced",
       severity: "urgent",
-      title: `Second payment for ${fresh.business_name || "an AI audit proposal"}`,
-      body: "Stripe confirmed two payments for the same proposal. Nothing was onboarded twice. Refund one in Stripe.",
+      title: `Payment received for a ${e.stage.replace(/_/g, " ")} audit: ${e.business_name || "a client"}`,
+      body: reason,
       subjectType: "ai_audit_engagement",
-      subjectId: fresh.id,
+      subjectId: e.id,
       telegramOncePerOpen: true,
     });
-    return { status: "paid", receiptId, duplicate: false };
+    return "unplaced";
   }
-  await advanceEngagement(db, {
-    tenantId: t,
-    engagementId: fresh.id,
-    to: "payment_confirmed",
-    actor: { type: "stripe", id: verified.reference },
-    now: input.now,
-    patch: { payment_status: "paid", health: "ok", health_reason: null },
-    event: "payment_verified",
-    meta: { receipt_id: receiptId, amount_cents: verified.amountCents, currency: verified.currency, trigger: input.trigger },
+  console.error("[ai-audit.payment] could not settle a verified payment after retries (concurrent writes)", { engagementId: input.engagementId, receiptId: input.receiptId });
+  return "unplaced";
+}
+
+/**
+ * The tick's repair: every verified receipt whose engagement has not caught
+ * up (still payable, or closed without the payment being flagged) is settled.
+ */
+export async function settleVerifiedReceipts(db: Client, tenantId: string, now: Date, deps: PaymentDeps = defaultPaymentDeps(), limit = 10): Promise<number> {
+  const t = requireTenant(tenantId);
+  const rs = await db.execute({
+    sql: `SELECT r.id, r.engagement_id, r.provider_reference, r.amount_cents, r.currency, r.checkout_id, r.proposal_version_id, r.installment_kind
+          FROM ai_audit_payment_receipts r
+          JOIN ai_audit_engagements e ON e.tenant_id = r.tenant_id AND e.id = r.engagement_id
+          WHERE r.tenant_id = ? AND r.status = 'verified'
+            AND (e.stage IN ('delivered', 'proposal_review', 'payment_pending')
+                 OR (e.stage IN ('declined', 'cancelled', 'final_review', 'generating') AND e.health <> 'failed'))
+          ORDER BY r.verified_at ASC LIMIT ?`,
+    args: [t, limit],
   });
-  return { status: "paid", receiptId, duplicate: false };
+  let n = 0;
+  for (const r of rs.rows) {
+    await settlePayment(db, {
+      tenantId: t,
+      engagementId: String(r.engagement_id),
+      checkout: { id: String(r.checkout_id), proposal_version_id: String(r.proposal_version_id), installment_kind: String(r.installment_kind) === "deposit" ? "deposit" : String(r.installment_kind) === "balance" ? "balance" : "full" },
+      receiptId: String(r.id),
+      reference: String(r.provider_reference),
+      amountCents: int(r.amount_cents),
+      currency: String(r.currency),
+      trigger: "tick_repair",
+      now,
+      deps,
+    });
+    n += 1;
+  }
+  return n;
+}
+
+/**
+ * Stop a declined or cancelled engagement's open Checkout Sessions being paid:
+ * each is expired at Stripe (POST /v1/checkout/sessions/:id/expire), then
+ * marked expired here. A session Stripe says is already complete is verified
+ * instead, so a payment that beat the decline is caught and flagged.
+ */
+export async function expireOpenCheckouts(db: Client, tenantId: string, engagementId: string, now: Date, deps: PaymentDeps = defaultPaymentDeps()): Promise<{ expired: number; failed: number }> {
+  const t = requireTenant(tenantId);
+  const rs = await db.execute({
+    sql: `SELECT ${CHECKOUT_COLUMNS} FROM ai_audit_checkouts WHERE tenant_id = ? AND engagement_id = ? AND status IN ('creating', 'open') AND stripe_session_id IS NOT NULL`,
+    args: [t, engagementId],
+  });
+  if (!rs.rows.length) return { expired: 0, failed: 0 };
+  const secret = await deps.stripeSecret(t);
+  let expired = 0;
+  let failed = 0;
+  const f = deps.fetchImpl ?? fetch;
+  for (const row of rs.rows) {
+    const c = mapCheckout(row);
+    const sessionId = c.stripe_session_id as string;
+    const at = now.toISOString();
+    let state: string | null = null;
+    if (secret) {
+      try {
+        const res = await f(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${secret}`, Accept: "application/json" },
+          cache: "no-store",
+        });
+        const body = (await res.json().catch(() => null)) as { status?: unknown } | null;
+        state = res.ok && typeof body?.status === "string" ? body.status : null;
+        // Refused (already complete or already expired): ask Stripe what the session is now.
+        if (state !== "expired") state = await stripeSessionState(f, secret, sessionId);
+      } catch (err) {
+        console.error("[ai-audit.payment] could not expire a checkout session", { checkoutId: c.id, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    if (state === "expired") {
+      await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'expired', updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('creating', 'open')", args: [at, t, c.id] });
+      expired += 1;
+    } else if (state === "complete") {
+      // Paid before the decline landed: record it, and settlePayment flags it for CC.
+      const v = await verifyCheckout(db, { tenantId: t, checkoutId: c.id, now, trigger: "tick", deps });
+      // Complete but not a payment we can count (a mismatch was flagged once): stop retrying it.
+      if (v.status === "problem") {
+        await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'failed', last_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('creating', 'open')", args: [`complete_unverified:${v.code}`.slice(0, 200), at, t, c.id] });
+      }
+    } else {
+      failed += 1;
+      await db.execute({ sql: "UPDATE ai_audit_checkouts SET last_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ?", args: [secret ? "expire_failed" : "stripe_not_connected", at, t, c.id] });
+    }
+  }
+  return { expired, failed };
+}
+
+async function stripeSessionState(f: typeof fetch, secret: string, sessionId: string): Promise<string | null> {
+  const res = await f(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${secret}`, Accept: "application/json" },
+    cache: "no-store",
+  });
+  const body = (await res.json().catch(() => null)) as { status?: unknown } | null;
+  return res.ok && typeof body?.status === "string" ? body.status : null;
+}
+
+/** Closed engagements whose sessions are still open (a failed expire, or a decline before this existed). */
+export async function closedEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10): Promise<string[]> {
+  const rs = await db.execute({
+    sql: `SELECT DISTINCT c.engagement_id FROM ai_audit_checkouts c
+          JOIN ai_audit_engagements e ON e.tenant_id = c.tenant_id AND e.id = c.engagement_id
+          WHERE c.tenant_id = ? AND c.status IN ('creating', 'open') AND c.stripe_session_id IS NOT NULL AND e.stage IN ('declined', 'cancelled')
+          LIMIT ?`,
+    args: [requireTenant(tenantId), limit],
+  });
+  return rs.rows.map((r) => String(r.engagement_id));
 }
 
 async function flagPaymentProblem(db: Client, engagement: Engagement, code: string, now: Date, deps: PaymentDeps): Promise<void> {
@@ -374,6 +583,11 @@ async function flagPaymentProblem(db: Client, engagement: Engagement, code: stri
         : code === "stripe_test_payment_not_accepted"
           ? "A test-mode Stripe payment was used; only live payments count."
           : `Payment check failed (${code}).`;
+  // Each problem is said once, and a payment that already failed is never
+  // downgraded to "needs attention" by a later, lesser problem: the tick
+  // re-checks every few minutes, and a flag that flips back and forth alerts
+  // CC again each time.
+  if (engagement.health === "failed" || (engagement.health === "attention" && engagement.health_reason === reason)) return;
   await patchEngagement(db, {
     tenantId: engagement.tenant_id,
     id: engagement.id,
@@ -396,15 +610,22 @@ async function flagPaymentProblem(db: Client, engagement: Engagement, code: stri
   });
 }
 
-/** Every checkout of this tenant that is still open and due a check. */
+/**
+ * Every checkout of this tenant due a check: the open ones, and the ones this
+ * side marked expired before Stripe's own expiry (Pay replaces a session in
+ * its last half hour) until two hours after it, because the client may still
+ * be finishing the old one.
+ */
 export async function dueOpenCheckouts(db: Client, tenantId: string, now: Date, limit = 20): Promise<Checkout[]> {
   const cutoff = new Date(now.getTime() - 4 * 60_000).toISOString();
+  const lateWindow = new Date(now.getTime() - 2 * 3_600_000).toISOString();
   const rs = await db.execute({
     sql: `SELECT ${CHECKOUT_COLUMNS} FROM ai_audit_checkouts
-          WHERE tenant_id = ? AND status = 'open' AND stripe_session_id IS NOT NULL
+          WHERE tenant_id = ? AND stripe_session_id IS NOT NULL
+            AND (status = 'open' OR (status = 'expired' AND expires_at IS NOT NULL AND expires_at > ?))
             AND (last_checked_at IS NULL OR last_checked_at <= ?)
           ORDER BY COALESCE(last_checked_at, created_at) ASC LIMIT ?`,
-    args: [requireTenant(tenantId), cutoff, limit],
+    args: [requireTenant(tenantId), lateWindow, cutoff, limit],
   });
   return rs.rows.map(mapCheckout);
 }

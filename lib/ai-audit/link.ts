@@ -116,6 +116,12 @@ export async function findLiveLink(db: Client, token: unknown, now: Date): Promi
   return link;
 }
 
+/** The link a delivery approval made (one per approval, bravo__238). */
+export async function linkForApproval(db: Client, tenantId: string, approvalId: string): Promise<ShareLink | null> {
+  const row = (await db.execute({ sql: `SELECT ${COLUMNS} FROM ai_audit_share_links WHERE tenant_id = ? AND approval_id = ? LIMIT 1`, args: [requireTenant(tenantId), approvalId] })).rows[0];
+  return row ? mapLink(row) : null;
+}
+
 export async function getShareLink(db: Client, tenantId: string, id: string): Promise<ShareLink | null> {
   const row = (await db.execute({ sql: `SELECT ${COLUMNS} FROM ai_audit_share_links WHERE tenant_id = ? AND id = ? LIMIT 1`, args: [requireTenant(tenantId), id] })).rows[0];
   return row ? mapLink(row) : null;

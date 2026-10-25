@@ -68,9 +68,11 @@ export function defaultOnboardingDeps(): OnboardingDeps {
   return { alert: (i) => writeAgentAlert(i), baseUrl: aiAuditBaseUrl };
 }
 
+/** Only a UNIQUE index refusing means "it already exists"; any other constraint is a real failure. */
 function isUniqueViolation(err: unknown): boolean {
   const m = err instanceof Error ? err.message : String(err);
-  return /UNIQUE constraint failed|SQLITE_CONSTRAINT/i.test(m);
+  const code = (err as { code?: unknown; extendedCode?: unknown } | null) ?? null;
+  return /UNIQUE constraint failed/i.test(m) || code?.extendedCode === "SQLITE_CONSTRAINT_UNIQUE" || code?.extendedCode === "SQLITE_CONSTRAINT_PRIMARYKEY";
 }
 
 export type OnboardingResult = { ok: true; engagement: Engagement; done: string[] } | { ok: false; error: string; done: string[] };

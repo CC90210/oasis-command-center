@@ -249,7 +249,10 @@ export function validateProposalContent(raw: unknown): V<ProposalContent> {
       const sku = typeof x.sku === "string" ? x.sku.trim() : "";
       const version = Number(x.item_version);
       const price = Number.isSafeInteger(Number(x.unit_price_cents)) ? Number(x.unit_price_cents) : 0;
-      lines.push({ ...base, kind: "catalogue", sku, item_id: itemId, item_version: Number.isInteger(version) ? version : 0, unit_price_cents: price, currency });
+      // The line's own currency is kept (the server set it from the catalogue item); rewriting it to
+      // the proposal's on every read hid a mismatch and broke the hash Gate 2 binds (review of PR #732).
+      const lineCurrency = x.currency === "CAD" || x.currency === "USD" ? x.currency : currency;
+      lines.push({ ...base, kind: "catalogue", sku, item_id: itemId, item_version: Number.isInteger(version) ? version : 0, unit_price_cents: price, currency: lineCurrency });
     } else if (x.kind === "owner_set") {
       const price = cents(x.unit_price_cents, `${f}.unit_price_cents`);
       if (!price.ok) return price;

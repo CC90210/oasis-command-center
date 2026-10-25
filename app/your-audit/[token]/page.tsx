@@ -4,8 +4,9 @@
  * The token is the client's only credential (lib/ai-audit/link.ts). This page
  * shows the exact audit and proposal CC approved and delivered, drawn by the
  * same component the PDF is printed from. A missing, expired or revoked link
- * gets one neutral page. Never indexed, never cached, no referrer
- * (next.config.js); public in middleware.ts; full-bleed in lib/os/full-bleed.ts.
+ * gets one neutral page. Never indexed, never cached, and no referrer to any
+ * other site (next.config.js: same-origin, so the Pay form's POST keeps its
+ * Origin); public in middleware.ts; full-bleed in lib/os/full-bleed.ts.
  */
 import type { Metadata } from "next";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
@@ -21,7 +22,7 @@ export const revalidate = 0;
 export const metadata: Metadata = {
   title: "Your Free AI Audit | OASIS AI",
   robots: { index: false, follow: false, nocache: true },
-  referrer: "no-referrer",
+  referrer: "same-origin",
 };
 
 type Props = { params: Promise<{ token: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> };

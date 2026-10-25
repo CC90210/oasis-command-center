@@ -63,12 +63,21 @@ const CHANNEL_LIVE_ENV: Record<string, string> = {
 };
 
 /**
+ * Channels that go live ONLY by their own flag. The global DASHBOARD_LIVE_SEND
+ * never turns them on: a Free AI Audit's delivery email and its live Stripe
+ * Checkout Session each need CC to set their own switch on purpose (review of
+ * PR #732: with the global on, both went live without anyone choosing it).
+ */
+const OWN_FLAG_ONLY: ReadonlySet<string> = new Set(["ai_audit_delivery", "stripe_checkout"]);
+
+/**
  * True when the dashboard must NOT issue a live outbound request.
  *
  * Precedence (fail-safe → dry-run by default):
  *   1. BRAVO_FORCE_DRY_RUN=1 — hard kill-switch, always clamps to dry-run.
  *   2. Per-channel LIVE_SEND_<CHANNEL> — "1" = live, "0" = dry, for that channel.
- *   3. Global DASHBOARD_LIVE_SEND=1 — live for any channel without its own flag.
+ *   3. Global DASHBOARD_LIVE_SEND=1 — live for any channel without its own
+ *      flag, except the OWN_FLAG_ONLY channels, which stay dry.
  *   4. Otherwise dry-run.
  *
  * `channel` is optional so legacy callers (no channel) keep the global behavior.
@@ -76,10 +85,12 @@ const CHANNEL_LIVE_ENV: Record<string, string> = {
 export function isDryRun(channel?: string): boolean {
   if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") return true;
   if (channel) {
-    const envKey = CHANNEL_LIVE_ENV[channel.toLowerCase()];
+    const key = channel.toLowerCase();
+    const envKey = CHANNEL_LIVE_ENV[key];
     const v = envKey ? (process.env[envKey] || "").trim() : "";
     if (v === "1") return false; // channel explicitly live
     if (v === "0") return true; // channel explicitly clamped to dry-run
+    if (OWN_FLAG_ONLY.has(key)) return true;
   }
   return (process.env.DASHBOARD_LIVE_SEND || "").trim() !== "1";
 }

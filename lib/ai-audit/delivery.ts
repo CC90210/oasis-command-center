@@ -17,13 +17,13 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { contentHash } from "@/lib/ai-audit/hash";
+import { contentHash, sha256Hex } from "@/lib/ai-audit/hash";
 import { blockingIssues } from "@/lib/ai-audit/doc";
 import { proposalBlockers, proposalTotals, AUDIT_LINK_PLACEHOLDER } from "@/lib/ai-audit/proposal";
 import { DELIVER_AI_AUDIT_KIND, validateDeliverAiAuditPayload, type DeliverAiAuditPayload } from "@/lib/ai-audit/delivery-payload";
-import { createShareLink, mintLinkToken, revokeShareLink } from "@/lib/ai-audit/link";
+import { createShareLink, linkForApproval, mintLinkToken, revokeShareLink } from "@/lib/ai-audit/link";
 import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
-import { queuePdfJob } from "@/lib/ai-audit/pdf";
+import { queuePdfJob, r2PdfStorage } from "@/lib/ai-audit/pdf";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { getSettings } from "@/lib/ai-audit/store";
 import {
@@ -45,8 +45,9 @@ import {
   type Actor,
   type Engagement,
 } from "@/lib/ai-audit/store";
-import { cancelPendingApproval, createApproval, getApprovalInTenant } from "@/lib/os/approvals/store";
+import { cancelPendingApproval, createApproval, getApprovalInTenant, parsePayload } from "@/lib/os/approvals/store";
 import { getTenantIntegrationValue } from "@/lib/tenant-integration-store";
+import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { dbBool } from "@/lib/db-bool";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import type { Executor, ExecutorContext, ExecutorOutcome } from "@/lib/os/approvals/executors";
@@ -276,6 +277,9 @@ export type AiAuditExecutorDeps = {
   baseUrl: () => string;
   stripeConnected: (tenantId: string) => Promise<boolean>;
   isOwner: (db: Client, tenantId: string, userId: string) => Promise<boolean>;
+  /** The stored PDF's bytes, to prove the file the client will download is the one approved. */
+  readPdf: (path: string) => Promise<Uint8Array | null>;
+  alert: (input: Parameters<typeof writeAgentAlert>[0]) => Promise<unknown>;
 };
 
 export function defaultAiAuditExecutorDeps(): AiAuditExecutorDeps {
@@ -287,6 +291,11 @@ export function defaultAiAuditExecutorDeps(): AiAuditExecutorDeps {
       const row = (await db.execute({ sql: "SELECT is_owner FROM user_profiles WHERE tenant_id = ? AND auth_user_id = ? LIMIT 1", args: [tenantId, userId] })).rows[0];
       return !!row && dbBool(row.is_owner);
     },
+    readPdf: async (path) => {
+      const store = r2PdfStorage();
+      return store ? store.download(path) : null;
+    },
+    alert: (input) => writeAgentAlert(input),
   };
 }
 
@@ -319,6 +328,12 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
   if (contentHash(audit.doc) !== p.audit_sha256 || audit.content_sha256 !== p.audit_sha256) return failed("payload_changed", "The audit changed after it was approved, so nothing was sent.");
   if (contentHash(proposal.content) !== p.proposal_sha256 || proposal.content_sha256 !== p.proposal_sha256) return failed("payload_changed", "The proposal changed after it was approved, so nothing was sent.");
   if (audit.pdf_sha256 !== p.pdf_sha256) return failed("payload_changed", "The PDF changed after it was approved, so nothing was sent.");
+  // The file itself, not just its recorded hash: a missing or altered object
+  // would give the client a broken or different download.
+  const stored = audit.pdf_path ? await deps.readPdf(audit.pdf_path).catch(() => null) : null;
+  if (!stored || sha256Hex(stored) !== p.pdf_sha256) {
+    return failed("pdf_missing", "The approved PDF is missing from storage or no longer matches, so nothing was sent. Reopen the audit and submit it again to print a fresh PDF.");
+  }
   const totals = proposalTotals(proposal.content);
   if (totals.total_cents !== p.total_cents || totals.due_now_cents !== p.due_now_cents || proposal.currency !== p.currency) {
     return failed("payload_changed", "The proposal's totals no longer match what was approved, so nothing was sent.");
@@ -370,30 +385,72 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
     };
   }
 
-  // The email is out. Record the delivery; a concurrent small write (the tick
-  // flagging health) only means re-reading and trying again.
+  // The email is out. From here on nothing may report a failure: a "failed"
+  // approval invites a retry, and a retry would send a second email with a
+  // second link (review of PR #732). A recording problem is logged and
+  // alerted, and the tick finishes the record (repairUnrecordedDelivery).
+  try {
+    await recordDelivery(ctx.db, {
+      tenantId: t,
+      engagementId: engagement.id,
+      auditVersionId: audit.id,
+      proposalVersionId: proposal.id,
+      approvalId: ctx.approval.id,
+      linkId: link.id,
+      actor: { type: "user", id: approverId },
+      messageId: sent.gmail_message_id || null,
+      to: p.to,
+    });
+  } catch (err) {
+    console.error("[ai-audit.delivery] the email was sent, but recording the delivery failed", { engagementId: engagement.id, approvalId: ctx.approval.id, error: err instanceof Error ? err.stack : String(err) });
+    await deps
+      .alert({
+        tenantId: t,
+        alertType: "ai_audit_delivery_unrecorded",
+        severity: "urgent",
+        title: `Audit sent, but not yet recorded: ${engagement.business_name || "an AI audit"}`,
+        body: "The client has the email and its link. The engagement has not moved to Audit Delivered yet; the next tick finishes the record. Do not retry delivery: that would send a second email.",
+        subjectType: "ai_audit_engagement",
+        subjectId: engagement.id,
+        telegramOncePerOpen: true,
+      })
+      .catch((alertErr: unknown) => console.error("[ai-audit.delivery] the alert failed too", alertErr instanceof Error ? alertErr.message : alertErr));
+  }
+  return { ok: true, result: { outcome: "sent", provider: sent.provider, message_id: sent.gmail_message_id || null, from: sent.from_address } };
+}
+
+/**
+ * Mark a sent delivery delivered: the versions, the engagement's stage, link
+ * and approval, and the trail, in one compare-and-swap (retried on a
+ * concurrent small write such as the tick flagging health). Then the lead.
+ */
+async function recordDelivery(
+  db: Client,
+  input: { tenantId: string; engagementId: string; auditVersionId: string; proposalVersionId: string; approvalId: string; linkId: string; actor: Actor; messageId: string | null; to: string },
+): Promise<boolean> {
+  const t = input.tenantId;
   let recorded = false;
   for (let attempt = 0; attempt < 4 && !recorded; attempt++) {
-    const current = await getEngagement(ctx.db, t, engagement.id);
+    const current = await getEngagement(db, t, input.engagementId);
     if (!current || current.stage !== "final_review") break;
     const at = new Date().toISOString();
     recorded = await casWrite(
-      ctx.db,
-      engagementUpdateStatement(t, current.id, current.row_version, { share_link_id: link.id, delivery_approval_id: ctx.approval.id, health: "ok", health_reason: null }, at, "delivered"),
+      db,
+      engagementUpdateStatement(t, current.id, current.row_version, { share_link_id: input.linkId, delivery_approval_id: input.approvalId, health: "ok", health_reason: null }, at, "delivered"),
       [
-        { sql: "UPDATE ai_audit_versions SET status = 'delivered', approved_at = COALESCE(approved_at, ?), delivered_at = ?, approval_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, at, ctx.approval.id, at, t, audit.id] },
-        { sql: "UPDATE ai_audit_proposal_versions SET status = 'delivered', approved_at = COALESCE(approved_at, ?), delivered_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, at, at, t, proposal.id] },
+        { sql: "UPDATE ai_audit_versions SET status = 'delivered', approved_at = COALESCE(approved_at, ?), delivered_at = ?, approval_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, at, input.approvalId, at, t, input.auditVersionId] },
+        { sql: "UPDATE ai_audit_proposal_versions SET status = 'delivered', approved_at = COALESCE(approved_at, ?), delivered_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, at, at, t, input.proposalVersionId] },
         eventStatement({
           tenantId: t,
           engagementId: current.id,
           event: "delivered",
-          actor: { type: "user", id: approverId },
+          actor: input.actor,
           at,
           fromStage: "final_review",
           toStage: "delivered",
           refType: "approval",
-          refId: ctx.approval.id,
-          meta: { share_link_id: link.id, message_id: sent.gmail_message_id || null, to: p.to },
+          refId: input.approvalId,
+          meta: { share_link_id: input.linkId, message_id: input.messageId, to: input.to },
         }),
       ],
     );
@@ -401,15 +458,50 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
   if (!recorded) {
     // Sent, but the engagement moved on underneath (cancelled while sending).
     // Say so loudly; the approval still records "sent" with the message id.
-    console.error("[ai-audit.delivery] sent, but the engagement is no longer in final review; delivery recorded as an event only", { engagementId: engagement.id });
-    await ctx.db.execute(
-      eventStatement({ tenantId: t, engagementId: engagement.id, event: "delivered_while_moved", actor: { type: "system", id: null }, at: new Date().toISOString(), refType: "approval", refId: ctx.approval.id, meta: { share_link_id: link.id } }),
+    console.error("[ai-audit.delivery] sent, but the engagement is no longer in final review; delivery recorded as an event only", { engagementId: input.engagementId });
+    await db.execute(
+      eventStatement({ tenantId: t, engagementId: input.engagementId, event: "delivered_while_moved", actor: { type: "system", id: null }, at: new Date().toISOString(), refType: "approval", refId: input.approvalId, meta: { share_link_id: input.linkId } }),
     );
-  } else {
-    const after = await getEngagement(ctx.db, t, engagement.id);
-    if (after) await syncLeadStage(ctx.db, after, { type: "user", id: approverId }, new Date());
+    return false;
   }
-  return { ok: true, result: { outcome: "sent", provider: sent.provider, message_id: sent.gmail_message_id || null, from: sent.from_address } };
+  const after = await getEngagement(db, t, input.engagementId);
+  if (after) await syncLeadStage(db, after, input.actor, new Date());
+  return true;
+}
+
+/**
+ * The tick's repair for a delivery that was SENT but never recorded (the
+ * write after the send failed): the approval says "sent" and its link exists,
+ * yet the engagement still waits in final review. Finish the record; never
+ * send again.
+ */
+export async function repairUnrecordedDelivery(db: Client, tenantId: string, engagement: Engagement): Promise<boolean> {
+  const t = requireTenant(tenantId);
+  if (engagement.stage !== "final_review" || !engagement.delivery_approval_id) return false;
+  const approval = await getApprovalInTenant(db, t, engagement.delivery_approval_id);
+  const result = approval?.execution_result as { outcome?: unknown; message_id?: unknown } | null;
+  if (!approval || approval.status !== "executed" || result?.outcome !== "sent") return false;
+  let payload: Record<string, unknown>;
+  try {
+    payload = parsePayload(approval);
+  } catch {
+    return false;
+  }
+  const v = validateDeliverAiAuditPayload(payload);
+  if (!v.ok || v.value.engagement_id !== engagement.id) return false;
+  const link = await linkForApproval(db, t, approval.id);
+  if (!link) return false;
+  return recordDelivery(db, {
+    tenantId: t,
+    engagementId: engagement.id,
+    auditVersionId: v.value.audit_version_id,
+    proposalVersionId: v.value.proposal_version_id,
+    approvalId: approval.id,
+    linkId: link.id,
+    actor: { type: "system", id: null },
+    messageId: typeof result.message_id === "string" ? result.message_id : null,
+    to: v.value.to,
+  });
 }
 
 export const deliverAiAuditExecutor: Executor = {

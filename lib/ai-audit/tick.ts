@@ -20,9 +20,18 @@ import { isRetiredTenant } from "@/lib/tenant/retired";
 import { WAITING_ON_CLIENT_STAGES, stallReason } from "@/lib/ai-audit/rules";
 import { listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
-import { queuePdfJob } from "@/lib/ai-audit/pdf";
-import { requestDeliveryApproval } from "@/lib/ai-audit/delivery";
-import { defaultPaymentDeps, dueOpenCheckouts, reconcileReceipts, verifyCheckout, type PaymentDeps } from "@/lib/ai-audit/payment";
+import { PDF_MAX_FAILURES, pdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
+import { repairUnrecordedDelivery, requestDeliveryApproval } from "@/lib/ai-audit/delivery";
+import {
+  closedEngagementsWithOpenCheckouts,
+  defaultPaymentDeps,
+  dueOpenCheckouts,
+  expireOpenCheckouts,
+  reconcileReceipts,
+  settleVerifiedReceipts,
+  verifyCheckout,
+  type PaymentDeps,
+} from "@/lib/ai-audit/payment";
 import { completeOnboardingIfDone, defaultOnboardingDeps, runOnboarding, type OnboardingDeps } from "@/lib/ai-audit/onboarding";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { getShareLink } from "@/lib/ai-audit/link";
@@ -38,6 +47,10 @@ export type TickReport = {
   onboardingRuns: number;
   activated: number;
   receiptsChecked: number;
+  paymentsSettled: number;
+  checkoutsExpired: number;
+  deliveriesRepaired: number;
+  pdfsGivenUp: number;
   stallsFlagged: number;
   leadsRepaired: number;
   errors: Array<{ tenantId: string; step: string; engagementId?: string; error: string }>;
@@ -63,6 +76,10 @@ export async function runAiAuditTick(
     onboardingRuns: 0,
     activated: 0,
     receiptsChecked: 0,
+    paymentsSettled: 0,
+    checkoutsExpired: 0,
+    deliveriesRepaired: 0,
+    pdfsGivenUp: 0,
     stallsFlagged: 0,
     leadsRepaired: 0,
     errors: [],
@@ -97,9 +114,36 @@ export async function runAiAuditTick(
     for (const e of open.filter((x) => x.stage === "final_review")) {
       if (over()) break;
       await guard("final_review", e.id, async () => {
+        // Sent but never recorded (the write after the send failed): finish the record, never send again.
+        if (await repairUnrecordedDelivery(db, tenantId, e)) {
+          report.deliveriesRepaired += 1;
+          return;
+        }
         const audit = e.current_audit_version_id ? await getAuditVersion(db, tenantId, e.current_audit_version_id) : null;
         if (!audit || audit.status !== "awaiting_approval") return;
         if (!audit.pdf_sha256) {
+          // A Mac that keeps failing the print gets three tries, then CC is asked, once.
+          const failures = await pdfFailures(db, tenantId, audit.id);
+          if (failures.count >= PDF_MAX_FAILURES) {
+            if (e.health === "ok") {
+              const reason = `The Mac could not print the PDF (${failures.count} tries${failures.lastError ? `; last: ${failures.lastError}` : ""}). Fix it, then press Retry PDF.`;
+              const r = await patchEngagement(db, { tenantId, id: e.id, expectedRowVersion: e.row_version, patch: { health: "attention", health_reason: reason }, event: "pdf_failed", actor: { type: "system", id: null }, now: now() });
+              if (r.ok) {
+                report.pdfsGivenUp += 1;
+                await deps.payment.alert({
+                  tenantId,
+                  alertType: "ai_audit_pdf_failed",
+                  severity: "warn",
+                  title: `PDF not printed: ${e.business_name || "an AI audit"}`,
+                  body: reason,
+                  subjectType: "ai_audit_engagement",
+                  subjectId: e.id,
+                  telegramOncePerOpen: true,
+                });
+              }
+            }
+            return;
+          }
           if (await queuePdfJob(db, { tenantId, engagementId: e.id, auditVersionId: audit.id, contentSha256: audit.content_sha256, now: now() })) report.pdfsQueued += 1;
           return;
         }
@@ -115,6 +159,17 @@ export async function runAiAuditTick(
         report.checkoutsChecked += 1;
         const v = await verifyCheckout(db, { tenantId, checkoutId: c.id, now: now(), trigger: "tick", deps: deps.payment });
         if (v.status === "paid" && !v.duplicate) report.paymentsVerified += 1;
+      }
+    });
+
+    // 3b. Verified payments whose engagement has not caught up, and sessions still open on closed engagements.
+    await guard("settle", undefined, async () => {
+      report.paymentsSettled += await settleVerifiedReceipts(db, tenantId, now(), deps.payment, 10);
+    });
+    await guard("expire_closed", undefined, async () => {
+      for (const id of await closedEngagementsWithOpenCheckouts(db, tenantId, 5)) {
+        if (over()) break;
+        report.checkoutsExpired += (await expireOpenCheckouts(db, tenantId, id, now(), deps.payment)).expired;
       }
     });
 

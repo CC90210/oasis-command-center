@@ -473,7 +473,9 @@ export async function moveStage(
   if (current.stage === input.to) return { ok: true, engagement: current };
   if (!mayMoveStage(current.stage, input.to)) return { ok: false, error: "move_not_allowed", engagement: current };
   const at = input.now.toISOString();
-  const closing: EngagementPatch = input.to === "declined" || input.to === "cancelled" ? { closed_at: at, closed_reason: input.to } : {};
+  // Active Client ends the audit cycle too: the delivery project carries the client from here, and
+  // the lead is free for other deals (an open engagement holds website sales off it, ownership.ts).
+  const closing: EngagementPatch = input.to === "declined" || input.to === "cancelled" || input.to === "active_client" ? { closed_at: at, closed_reason: input.to } : {};
   const update = engagementUpdateStatement(tenantId, current.id, current.row_version, { ...(input.patch ?? {}), ...closing }, at, input.to);
   const ev = eventStatement({
     tenantId,

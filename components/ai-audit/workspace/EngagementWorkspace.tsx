@@ -101,7 +101,17 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
             Lead record
           </Link>
           {manualMoves.map((s) => (
-            <button key={s} type="button" className={s === "declined" || s === "cancelled" ? "btn-danger" : "btn-secondary"} disabled={busy} onClick={() => act("set_stage", { to: s }, `Moved to ${AI_AUDIT_STAGE_LABELS[s]}.`)}>
+            <button
+              key={s}
+              type="button"
+              className={s === "declined" || s === "cancelled" ? "btn-danger" : "btn-secondary"}
+              disabled={busy}
+              onClick={() => {
+                // Declining or cancelling ends the engagement for good and stops any open payment link.
+                if ((s === "declined" || s === "cancelled") && !window.confirm(s === "declined" ? "Mark this engagement declined? It cannot be reopened, and any open payment link stops working." : "Cancel this engagement? It cannot be reopened, and any open payment link stops working.")) return;
+                void act("set_stage", { to: s }, `Moved to ${AI_AUDIT_STAGE_LABELS[s]}.`);
+              }}
+            >
               {s === "declined" ? "Mark declined" : s === "cancelled" ? "Cancel engagement" : `Move to ${AI_AUDIT_STAGE_LABELS[s as AiAuditStage]}`}
             </button>
           ))}
@@ -200,8 +210,11 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
                   Reopen for edits
                 </button>
               ) : null}
-              {submitted && view.deliveryApproval && ["failed", "expired", "sent_back", "cancelled"].includes(view.deliveryApproval.status) && isOwner ? (
-                <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("retry_delivery", {}, "A new final approval card is waiting in your approvals.")}>
+              {submitted &&
+              view.deliveryApproval &&
+              (["failed", "expired", "sent_back", "cancelled"].includes(view.deliveryApproval.status) || (view.deliveryApproval.status === "executed" && view.deliveryApproval.outcome === "dry_run")) &&
+              isOwner ? (
+                <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("retry_delivery", {}, "A new final approval card is waiting in Needs you.")}>
                   Retry delivery
                 </button>
               ) : null}
@@ -210,10 +223,15 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
         </div>
       ) : null}
 
-      {tab === "profile" ? <ProfileEditor engagementId={e.id} fields={view.profile?.fields ?? []} frozen={view.profile?.version.status === "frozen"} /> : null}
+      {/* The three editors stay mounted, hidden, so a draft survives a switch of tab.
+          Each re-seeds from the server when its saved content changes (the key). */}
+      <div hidden={tab !== "profile"}>
+        <ProfileEditor engagementId={e.id} fields={view.profile?.fields ?? []} frozen={view.profile?.version.status === "frozen"} />
+      </div>
 
-      {tab === "audit" ? (
+      <div hidden={tab !== "audit"}>
         <AuditEditor
+          key={`audit:${view.audit?.id ?? "new"}:${view.audit?.content_sha256 ?? ""}`}
           engagementId={e.id}
           initialDoc={view.audit?.doc ?? null}
           rowVersion={e.row_version}
@@ -226,10 +244,11 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
             location: view.lead?.city ?? "",
           }}
         />
-      ) : null}
+      </div>
 
-      {tab === "proposal" ? (
+      <div hidden={tab !== "proposal"}>
         <ProposalEditor
+          key={`proposal:${view.proposal?.id ?? "new"}:${view.proposal?.content_sha256 ?? ""}`}
           engagementId={e.id}
           initial={view.proposal?.content ?? null}
           rowVersion={e.row_version}
@@ -237,8 +256,9 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
           catalogue={view.catalogue}
           settings={{ tax: view.settings.tax, default_currency: view.settings.default_currency, deposit_bps: view.settings.deposit_bps }}
           defaults={{ to: e.contact_email ?? "", businessName: e.business_name ?? "", contactName: e.contact_name ?? "" }}
+          isOwner={isOwner}
         />
-      ) : null}
+      </div>
 
       {tab === "delivery" ? (
         <div className="grid gap-5 lg:grid-cols-2">
@@ -255,6 +275,11 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
                 </a>
               ) : null}
             </div>
+            {submitted && !view.audit?.pdf_sha256 && e.health === "attention" ? (
+              <button type="button" className="btn-secondary justify-self-start" disabled={busy} onClick={() => act("retry_pdf", {}, "Printing again. The Mac picks it up within a minute.")}>
+                Retry PDF
+              </button>
+            ) : null}
             <div className="text-fg-muted">
               Final approval: <span className="text-fg">{view.deliveryApproval ? view.deliveryApproval.status.replace(/_/g, " ") : "not filed yet"}</span>
               {view.deliveryApproval?.message ? <div className="text-[13px] text-status-warm">{view.deliveryApproval.message}</div> : null}

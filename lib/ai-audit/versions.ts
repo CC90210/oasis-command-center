@@ -461,29 +461,31 @@ export async function normalizeProposal(
   actorId: string,
   tax: TaxRule | null,
   now: Date,
-  opts: { allowFixtureItems: boolean },
+  opts: { allowFixtureItems: boolean; ownerMayPrice?: boolean },
 ): Promise<ProposalContent> {
   const lines: ProposalLine[] = [];
+  const unpriced = (l: ProposalLine, suggestedSku?: string): ProposalLine => ({
+    kind: "needs_owner_price",
+    line_id: l.line_id,
+    name: l.name,
+    description: l.description,
+    category: l.category,
+    unit: l.unit,
+    ...(l.unit_label ? { unit_label: l.unit_label } : {}),
+    quantity: l.quantity,
+    optional: l.optional,
+    deliverables: l.deliverables,
+    onboarding_requirements: l.onboarding_requirements,
+    ...(suggestedSku ? { suggested_sku: suggestedSku } : {}),
+  });
   for (const l of content.lines) {
     if (l.kind === "catalogue") {
       const found = await confirmedCatalogueItem(db, tenantId, l.item_id);
-      // The test prospect's canary item never prices a real client's proposal.
-      const item = found && (!found.is_fixture || opts.allowFixtureItems) ? found : null;
+      // The test prospect's canary item never prices a real client's proposal,
+      // and an item priced in another currency never prices this one.
+      const item = found && (!found.is_fixture || opts.allowFixtureItems) && found.currency === content.currency ? found : null;
       if (!item) {
-        lines.push({
-          kind: "needs_owner_price",
-          line_id: l.line_id,
-          name: l.name,
-          description: l.description,
-          category: l.category,
-          unit: l.unit,
-          ...(l.unit_label ? { unit_label: l.unit_label } : {}),
-          quantity: l.quantity,
-          optional: l.optional,
-          deliverables: l.deliverables,
-          onboarding_requirements: l.onboarding_requirements,
-          ...(l.sku ? { suggested_sku: l.sku } : {}),
-        });
+        lines.push(unpriced(l, l.sku || undefined));
         continue;
       }
       lines.push({
@@ -507,6 +509,13 @@ export async function normalizeProposal(
     } else if (l.kind === "owner_set") {
       const prior = previous?.lines.find((p) => p.line_id === l.line_id);
       const unchanged = prior && prior.kind === "owner_set" && prior.unit_price_cents === l.unit_price_cents && prior.set_by;
+      // Only the workspace owner types a price. Anyone else's new or changed
+      // price waits for the owner (CC's brief: no fee outside the approved
+      // rules without his say); a price he set earlier is kept as it was.
+      if (!unchanged && !opts.ownerMayPrice) {
+        lines.push(unpriced(l));
+        continue;
+      }
       lines.push({
         ...l,
         set_by: unchanged ? (prior as { set_by: string }).set_by : actorId,
@@ -521,7 +530,7 @@ export async function normalizeProposal(
 
 export async function saveProposalDraft(
   db: Client,
-  input: { tenantId: string; engagementId: string; content: ProposalContent; actor: Actor; now: Date; expectedRowVersion: number; tax: TaxRule | null },
+  input: { tenantId: string; engagementId: string; content: ProposalContent; actor: Actor; now: Date; expectedRowVersion: number; tax: TaxRule | null; ownerMayPrice?: boolean },
 ): Promise<SaveDraftResult<ProposalVersion>> {
   const t = requireTenant(input.tenantId);
   const engagement = await getEngagement(db, t, input.engagementId);
@@ -530,6 +539,7 @@ export async function saveProposalDraft(
   const current = engagement.current_proposal_version_id ? await getProposalVersion(db, t, engagement.current_proposal_version_id) : null;
   const content = await normalizeProposal(db, t, input.content, current?.content ?? null, input.actor.id ?? "", input.tax, input.now, {
     allowFixtureItems: engagement.is_fixture,
+    ownerMayPrice: input.ownerMayPrice === true,
   });
   const totals = proposalTotals(content);
   const json = JSON.stringify(content);

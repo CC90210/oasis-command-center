@@ -161,6 +161,25 @@ async function main() {
     assert.equal(doc.statesFigure("Founded in 2014 and still growing."), false);
     assert.equal(doc.statesFigure("About 12 calls a week."), true);
   });
+  await check("a year is exempt only as a year; other scripts' digits and fractions are figures", () => {
+    for (const t of ["Founded in 2014.", "Open since 2019.", "Reviewed October 2024.", "Planned for FY 2026."]) assert.equal(doc.statesFigure(t), false, t);
+    for (const t of ["Costs $2000.", "2000 hours a year.", "٤٠ calls a week", "About ½ of them", "2023-2025 growth"]) assert.equal(doc.statesFigure(t), true, t);
+  });
+  await check("a figure anywhere the page shows it is caught, not only in paragraphs (review of PR #732)", () => {
+    const d = goodDoc();
+    d.findings[0] = { ...d.findings[0], title: "Losing $50,000 a year", source_ids: [] } as never;
+    d.sections.next_steps.steps = ["Pay the $4,000 deposit", "Then $12,500 on launch"];
+    d.sections.roadmap.now[0].urgency = "Start within 2 weeks";
+    d.sections.impact.limitations = ["Assumes 4 weeks a month"];
+    d.gaps = [{ topic: "Call volume", why: "They said 40 calls but we could not check" }];
+    d.sections.current_assessment.systems = [{ name: "Jobber", role: "scheduling", note: "costs $49 a month", label: "client_reported", cites: [] }];
+    const v = doc.validateAuditDoc(d);
+    assert.ok(v.ok, !v.ok ? `${v.path} ${v.message}` : "");
+    const paths = doc.blockingIssues(v.ok ? v.doc : (null as never)).map((i) => i.path).join(" | ");
+    for (const want of [/Finding "Losing/, /Next Steps, step 1/, /Next Steps, step 2/, /Roadmap \(now\), urgency/, /limitation 1/, /Information gap 1/, /System Jobber/]) {
+      assert.match(paths, want);
+    }
+  });
   await check("Verified needs a source; Client-reported needs a client source", () => {
     const d = goodDoc();
     d.findings[0] = { ...d.findings[0], label: "verified", source_ids: [] };
@@ -330,6 +349,29 @@ async function main() {
     assert.equal(hash.deterministicUuid("project:e1"), hash.deterministicUuid("project:e1"));
   });
 
+  await check("Pay and the view beacon accept the client's own page, including a browser that sends Origin: null with Sec-Fetch-Site", async () => {
+    const pub = await import("../lib/ai-audit/public");
+    const post = (headers: Record<string, string>) => new Request("https://oasisai.work/api/your-audit/t/pay", { method: "POST", headers: { host: "oasisai.work", ...headers } });
+    assert.equal(pub.fromOwnAuditPage(post({ origin: "https://oasisai.work" })), true);
+    assert.equal(pub.fromOwnAuditPage(post({ origin: "null", "sec-fetch-site": "same-origin" })), true, "a no-referrer browser's form post");
+    assert.equal(pub.fromOwnAuditPage(post({ origin: "null" })), false);
+    assert.equal(pub.fromOwnAuditPage(post({ origin: "null", "sec-fetch-site": "cross-site" })), false);
+    assert.equal(pub.fromOwnAuditPage(post({ origin: "https://evil.example" })), false);
+    assert.equal(pub.fromOwnAuditPage(post({})), false);
+  });
+  await check("the client's pages send no referrer off the site but keep their Origin; the API sends none at all", async () => {
+    const config = (await import("../next.config.js")) as unknown as { default?: { headers: () => Promise<Array<{ source: string; headers: Array<{ key: string; value: string }> }>> }; headers?: () => Promise<Array<{ source: string; headers: Array<{ key: string; value: string }> }>> };
+    const headersFn = config.headers ?? config.default?.headers;
+    assert.ok(headersFn, "next.config.js exports headers()");
+    const rules = await headersFn!();
+    const policy = (source: string) => rules.filter((r) => r.source === source).flatMap((r) => r.headers).filter((h) => h.key === "Referrer-Policy").map((h) => h.value).pop();
+    assert.equal(policy("/your-audit/:path*"), "same-origin", "no-referrer would make the Pay form send Origin: null");
+    assert.equal(policy("/audit-print/:path*"), "same-origin");
+    assert.equal(policy("/api/your-audit/:path*"), "no-referrer", "the 303 to Stripe carries no address");
+    const page = readFileSync(join(ROOT, "app/your-audit/[token]/page.tsx"), "utf8");
+    assert.match(page, /referrer: "same-origin"/, "the page's own meta tag agrees with the header");
+  });
+
   console.log("send switches");
   await check("audit delivery and Stripe checkout are dry runs until their own switch is on", () => {
     assert.equal(sendMode.isDryRun("ai_audit_delivery"), true);
@@ -341,6 +383,21 @@ async function main() {
     assert.equal(sendMode.isDryRun("ai_audit_delivery"), true, "the kill switch still wins");
     delete process.env.BRAVO_FORCE_DRY_RUN;
     delete process.env.LIVE_SEND_AI_AUDIT;
+  });
+  await check("the global live switch never turns on audit delivery or a live checkout", () => {
+    const before = process.env.DASHBOARD_LIVE_SEND;
+    process.env.DASHBOARD_LIVE_SEND = "1";
+    try {
+      assert.equal(sendMode.isDryRun("ai_audit_delivery"), true);
+      assert.equal(sendMode.isDryRun("stripe_checkout"), true);
+      assert.equal(sendMode.isDryRun("email"), false, "other channels still follow the global switch");
+      process.env.LIVE_SEND_STRIPE_CHECKOUT = "1";
+      assert.equal(sendMode.isDryRun("stripe_checkout"), false, "only its own flag turns checkout live");
+    } finally {
+      if (before === undefined) delete process.env.DASHBOARD_LIVE_SEND;
+      else process.env.DASHBOARD_LIVE_SEND = before;
+      delete process.env.LIVE_SEND_STRIPE_CHECKOUT;
+    }
   });
 
   console.log("stripe requests");

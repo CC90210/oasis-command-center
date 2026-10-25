@@ -48,6 +48,34 @@ export function r2PdfStorage(): PdfStorage | null {
 }
 
 /** Queue the print of one awaiting-approval version, once (the dedupe key holds while it is in flight). */
+/** Print attempts the Mac may fail before the tick stops queuing and asks CC. */
+export const PDF_MAX_FAILURES = 3;
+
+/** How many prints of this version failed (since CC last asked for a retry), and the last reason. */
+export async function pdfFailures(db: Client, tenantId: string, auditVersionId: string): Promise<{ count: number; lastError: string | null }> {
+  const t = requireTenant(tenantId);
+  const rs = await db.execute({
+    sql: `SELECT COUNT(*) AS n,
+            (SELECT COALESCE(error_code, '') || CASE WHEN error_message IS NOT NULL THEN ': ' || error_message ELSE '' END
+               FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status = 'failed' ORDER BY updated_at DESC LIMIT 1) AS last_error
+          FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status = 'failed'`,
+    args: [t, `${PDF_TOOL_KEY}:${auditVersionId}`, t, `${PDF_TOOL_KEY}:${auditVersionId}`],
+  });
+  const row = rs.rows[0];
+  return { count: Number(row?.n ?? 0), lastError: row?.last_error ? String(row.last_error).slice(0, 200) : null };
+}
+
+/** CC's "Retry PDF": earlier failures stop counting (kept, under another key). */
+export async function clearPdfFailures(db: Client, tenantId: string, auditVersionId: string): Promise<number> {
+  const t = requireTenant(tenantId);
+  const key = `${PDF_TOOL_KEY}:${auditVersionId}`;
+  const r = await db.execute({
+    sql: "UPDATE tool_jobs SET dedupe_key = dedupe_key || ':cleared:' || id WHERE tenant_id = ? AND dedupe_key = ? AND status = 'failed'",
+    args: [t, key],
+  });
+  return r.rowsAffected;
+}
+
 export async function queuePdfJob(
   db: Client,
   input: { tenantId: string; engagementId: string; auditVersionId: string; contentSha256: string; now: Date },

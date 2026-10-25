@@ -16,6 +16,7 @@
  *   recheck_payment                                       ask Stripe about every open checkout
  *   revoke_link                                           the client's link stops working
  *   retry_onboarding                                      run the onboarding steps again (idempotent)
+ *   retry_pdf                                             after three failed prints: forget them and print again
  *
  * Nothing here sends anything to the client: delivery happens only when the
  * owner approves the deliver_ai_audit approval (lib/ai-audit/delivery.ts).
@@ -35,7 +36,9 @@ import { getEngagement, getSettings, patchEngagement, recordEvent, type Actor } 
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
 import { deleteProfileField, saveAuditDraft, saveProfileField, saveProposalDraft } from "@/lib/ai-audit/versions";
 import { reopenForEdits, requestDeliveryApproval, submitForFinalApproval } from "@/lib/ai-audit/delivery";
-import { listCheckouts, verifyCheckout } from "@/lib/ai-audit/payment";
+import { expireOpenCheckouts, listCheckouts, verifyCheckout } from "@/lib/ai-audit/payment";
+import { clearPdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
+import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
@@ -92,7 +95,17 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (!rv) return json(400, { ok: false, error: "expected_row_version_required" });
       const r = await advanceEngagement(s.db, { tenantId: s.tenantId, engagementId, to, actor, now, expectedRowVersion: rv, event: "stage_set_by_owner" });
       if (!r.ok) return casError(r.error);
-      return json(200, { ok: true, row_version: r.engagement.row_version, stage: r.engagement.stage, lead: r.lead ?? null });
+      // A declined or cancelled engagement's payment link must stop working at Stripe too.
+      // A failure here is retried by the tick (closedEngagementsWithOpenCheckouts).
+      let checkouts: { expired: number; failed: number } | null = null;
+      if (to === "declined" || to === "cancelled") {
+        try {
+          checkouts = await expireOpenCheckouts(s.db, s.tenantId, engagementId, now);
+        } catch (err) {
+          console.error("[ai-audit.route] could not expire checkouts after closing", { engagementId, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      return json(200, { ok: true, row_version: r.engagement.row_version, stage: r.engagement.stage, lead: r.lead ?? null, checkouts });
     }
     case "save_details": {
       const rv = rowVersion(body);
@@ -122,7 +135,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         const saved = await saveProfileField(s.db, { tenantId: s.tenantId, engagementId, field: field.value, actor, now });
         return json(200, { ok: true, field: saved });
       } catch (err) {
-        return json(409, { ok: false, error: err instanceof Error && /frozen/.test(err.message) ? "profile_frozen" : "save_failed" });
+        if (err instanceof Error && /frozen/.test(err.message)) return json(409, { ok: false, error: "profile_frozen" });
+        console.error("[ai-audit.route] save_profile_field failed", { engagementId, error: err instanceof Error ? err.stack : String(err) });
+        return json(500, { ok: false, error: "save_failed" });
       }
     }
     case "delete_profile_field": {
@@ -146,7 +161,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const content = validateProposalContent(body.content);
       if (!content.ok) return json(400, { ok: false, error: "proposal_invalid", field: content.field, detail: content.error });
       const { settings } = await getSettings(s.db, s.tenantId);
-      const r = await saveProposalDraft(s.db, { tenantId: s.tenantId, engagementId, content: content.value, actor, now, expectedRowVersion: rv, tax: settings.tax });
+      const r = await saveProposalDraft(s.db, { tenantId: s.tenantId, engagementId, content: content.value, actor, now, expectedRowVersion: rv, tax: settings.tax, ownerMayPrice: s.isOwner });
       if (!r.ok) return casError(r.error);
       const after = await getEngagement(s.db, s.tenantId, engagementId);
       return json(200, { ok: true, version_id: r.version.id, created: r.created, row_version: after?.row_version ?? null });
@@ -188,6 +203,19 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     case "retry_onboarding": {
       const r = await runOnboarding(s.db, { tenantId: s.tenantId, engagementId, now });
       return json(r.ok ? 200 : 409, { ok: r.ok, done: r.done, ...(r.ok ? {} : { error: r.error }) });
+    }
+    case "retry_pdf": {
+      if (engagement.stage !== "final_review") return json(409, { ok: false, error: "not_in_final_review" });
+      const audit = engagement.current_audit_version_id ? await getAuditVersion(s.db, s.tenantId, engagement.current_audit_version_id) : null;
+      if (!audit || audit.status !== "awaiting_approval" || audit.pdf_sha256) return json(409, { ok: false, error: "no_pdf_to_retry" });
+      const cleared = await clearPdfFailures(s.db, s.tenantId, audit.id);
+      const queued = await queuePdfJob(s.db, { tenantId: s.tenantId, engagementId, auditVersionId: audit.id, contentSha256: audit.content_sha256, now });
+      if (engagement.health !== "ok") {
+        await patchEngagement(s.db, { tenantId: s.tenantId, id: engagementId, expectedRowVersion: engagement.row_version, patch: { health: "ok", health_reason: null }, event: "pdf_retry", actor, now, meta: { cleared } });
+      } else {
+        await recordEvent(s.db, { tenantId: s.tenantId, engagementId, event: "pdf_retry", actor, now, meta: { cleared } });
+      }
+      return json(200, { ok: true, queued, cleared });
     }
     default:
       return json(400, { ok: false, error: "unknown_action" });

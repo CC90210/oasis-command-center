@@ -7,7 +7,7 @@
  * computed, never typed. The delivery email lives here too, because CC's final
  * approval binds to it with the proposal.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AUDIT_LINK_PLACEHOLDER,
@@ -21,6 +21,7 @@ import {
 import { formatMoney, type CatalogueItem } from "@/lib/ai-audit/catalogue";
 import { CATALOGUE_CATEGORIES, CATALOGUE_UNITS, type CatalogueCategory, type CatalogueUnit, type Currency } from "@/lib/ai-audit/rules";
 import { describeError, postAction } from "./api";
+import { NumberInput } from "./inputs";
 
 type Props = {
   engagementId: string;
@@ -30,6 +31,8 @@ type Props = {
   catalogue: CatalogueItem[];
   settings: { tax: TaxRule | null; default_currency: Currency; deposit_bps: number | null };
   defaults: { to: string; businessName: string; contactName: string };
+  /** Only the workspace owner types a custom price (the server enforces it too). */
+  isOwner: boolean;
 };
 
 function clone<T>(v: T): T {
@@ -46,7 +49,7 @@ function inDays(days: number): string {
   return new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
 }
 
-export function ProposalEditor({ engagementId, initial, rowVersion, editable, catalogue, settings, defaults }: Props) {
+export function ProposalEditor({ engagementId, initial, rowVersion, editable, catalogue, settings, defaults, isOwner }: Props) {
   const router = useRouter();
   const [p, setP] = useState<ProposalContent>(
     () =>
@@ -61,6 +64,8 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
       }),
   );
   const [rv, setRv] = useState(rowVersion);
+  // Stays mounted across tabs: follow the engagement's row version (this draft is kept).
+  useEffect(() => setRv(rowVersion), [rowVersion]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -190,24 +195,35 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
                     {l.kind === "catalogue" ? `Catalogue (${l.sku} v${l.item_version})` : l.kind === "owner_set" ? "Your price" : "Needs your price"}
                   </td>
                   <td className="py-2 pr-3 text-right">
-                    <input className="input w-20 text-right tabular-nums" inputMode="numeric" disabled={disabled || (l.kind === "catalogue" && l.unit !== "per_unit")} value={String(l.quantity)} onChange={(e) => update((d) => void (d.lines[i].quantity = Math.max(1, Math.round(Number(e.target.value) || 1))))} />
+                    <NumberInput
+                      className="input w-20 text-right tabular-nums"
+                      aria-label="Quantity"
+                      disabled={disabled || (l.kind === "catalogue" && l.unit !== "per_unit")}
+                      value={l.quantity}
+                      emptyValue={1}
+                      toValue={(n) => (Number.isInteger(n) && n >= 1 && n <= 1000 ? n : null)}
+                      onChange={(n) => update((d) => void (d.lines[i].quantity = n ?? 1))}
+                    />
                   </td>
                   <td className="py-2 pr-3 text-right tabular-nums">
                     {l.kind === "catalogue" ? (
                       money(l.unit_price_cents)
                     ) : (
-                      <input
+                      <NumberInput
                         className="input w-32 text-right tabular-nums"
-                        inputMode="decimal"
-                        disabled={disabled}
-                        placeholder="price"
-                        value={l.kind === "owner_set" ? String(l.unit_price_cents / 100) : ""}
-                        onChange={(e) =>
+                        aria-label="Unit price"
+                        disabled={disabled || !isOwner}
+                        placeholder={isOwner ? "price" : "owner sets it"}
+                        value={l.kind === "owner_set" ? l.unit_price_cents : null}
+                        format={(c) => String(c / 100)}
+                        toValue={(dollars) => {
+                          const cents = Math.round(dollars * 100);
+                          return cents > 0 && cents <= 100_000_000 ? cents : null;
+                        }}
+                        onChange={(cents) =>
                           update((d) => {
-                            const raw = e.target.value.replace(/[$,\s]/g, "");
-                            const cents = Math.round(Number(raw) * 100);
                             const base = d.lines[i];
-                            if (!raw || !Number.isFinite(cents) || cents <= 0) {
+                            if (cents === null) {
                               d.lines[i] = { ...base, kind: "needs_owner_price" } as ProposalLine;
                             } else {
                               d.lines[i] = { ...base, kind: "owner_set", unit_price_cents: cents, set_by: "", set_at: "" } as ProposalLine;
@@ -276,7 +292,7 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
           </div>
         ) : null}
         <p className="text-[12px] text-fg-dim">
-          Custom line categories: {CATALOGUE_CATEGORIES.join(", ")}. Units: {CATALOGUE_UNITS.join(", ")}. A custom line stays &quot;needs your price&quot; until you type one.
+          Custom line categories: {CATALOGUE_CATEGORIES.join(", ")}. Units: {CATALOGUE_UNITS.join(", ")}. A custom line stays &quot;needs your price&quot; until {isOwner ? "you type one" : "the owner types one"}.
         </p>
       </section>
 

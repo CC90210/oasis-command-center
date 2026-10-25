@@ -100,7 +100,7 @@ function fixtureDoc() {
   };
 }
 
-type FakeSession = { id: string; amount: number; currency: string; metadata: Record<string, string>; client_reference_id: string; paid: boolean; refunded: boolean; disputed: boolean };
+type FakeSession = { id: string; amount: number; currency: string; metadata: Record<string, string>; client_reference_id: string; paid: boolean; refunded: boolean; disputed: boolean; expired?: boolean };
 
 function fakeStripe() {
   const sessions = new Map<string, FakeSession>();
@@ -121,6 +121,15 @@ function fakeStripe() {
       sessions.set(id, { id, amount: Number(body.get("line_items[0][price_data][unit_amount]")), currency: String(body.get("line_items[0][price_data][currency]")), metadata: md, client_reference_id: String(body.get("client_reference_id")), paid: false, refunded: false, disputed: false });
       return new Response(JSON.stringify({ id, url: `https://checkout.stripe.com/c/pay/${id}`, livemode: true }), { status: 200 });
     }
+    const x = /^https:\/\/api\.stripe\.com\/v1\/checkout\/sessions\/(cs_live_[A-Za-z0-9_]+)\/expire$/.exec(u);
+    if (x && init?.method === "POST") {
+      const s = sessions.get(x[1]);
+      if (!s) return new Response(JSON.stringify({ error: { message: "No such session" } }), { status: 404 });
+      // Stripe refuses to expire a completed session.
+      if (s.paid) return new Response(JSON.stringify({ error: { message: "Only Checkout Sessions with a status of open can be expired." } }), { status: 400 });
+      s.expired = true;
+      return new Response(JSON.stringify({ id: s.id, status: "expired" }), { status: 200 });
+    }
     const m = /^https:\/\/api\.stripe\.com\/v1\/checkout\/sessions\/(cs_live_[A-Za-z0-9_]+)/.exec(u);
     if (m) {
       const s = sessions.get(m[1]);
@@ -130,7 +139,7 @@ function fakeStripe() {
           id: s.id,
           object: "checkout.session",
           livemode: true,
-          status: s.paid ? "complete" : "open",
+          status: s.paid ? "complete" : s.expired ? "expired" : "open",
           payment_status: s.paid ? "paid" : "unpaid",
           amount_total: s.amount,
           currency: s.currency,
@@ -268,6 +277,36 @@ async function main() {
     const rp = await versions.saveProposalDraft(db, { tenantId: OASIS, engagementId: real.ok ? real.engagement.id : "", content: content as never, actor: cc, now: NOW(), expectedRowVersion: real.ok ? real.engagement.row_version : 0, tax: settings.tax });
     assert.equal(rp.ok && rp.version.content?.lines[0].kind, "needs_owner_price");
   });
+  await check("only the owner types a price; a price the owner set survives anyone's later save (review of PR #732)", async () => {
+    const realId = (await store.getOpenEngagementForLead(db, OASIS, LEAD_B))!.id;
+    const { settings } = await store.getSettings(db, OASIS);
+    const custom = async (price: number, setBy = "") => ({
+      ...(await versions.getProposalVersion(db, OASIS, (await store.getEngagement(db, OASIS, realId))!.current_proposal_version_id!))!.content!,
+      lines: [{ kind: "owner_set", line_id: "c1", name: "Custom build", description: "", category: "implementation", unit: "fixed", quantity: 1, optional: false, unit_price_cents: price, set_by: setBy, set_at: setBy ? "2026-10-25T00:00:00Z" : "", deliverables: [], onboarding_requirements: [] }],
+    });
+    const rv = async () => (await store.getEngagement(db, OASIS, realId))!.row_version;
+    const byAdmin = await versions.saveProposalDraft(db, { tenantId: OASIS, engagementId: realId, content: (await custom(250_000)) as never, actor: { type: "user", id: USERS.admin.id }, now: NOW(), expectedRowVersion: await rv(), tax: settings.tax, ownerMayPrice: false });
+    assert.equal(byAdmin.ok && byAdmin.version.content?.lines[0].kind, "needs_owner_price", "an admin's typed price waits for the owner");
+    const byOwner = await versions.saveProposalDraft(db, { tenantId: OASIS, engagementId: realId, content: (await custom(250_000)) as never, actor: cc, now: NOW(), expectedRowVersion: await rv(), tax: settings.tax, ownerMayPrice: true });
+    const line = byOwner.ok ? byOwner.version.content?.lines[0] : null;
+    assert.equal(line?.kind, "owner_set");
+    assert.equal((line as { set_by?: string } | null)?.set_by, USERS.cc.id, "stamped with who set it");
+    const ownerContent = byOwner.ok ? byOwner.version.content! : (null as never);
+    const keep = await versions.saveProposalDraft(db, { tenantId: OASIS, engagementId: realId, content: ownerContent as never, actor: { type: "user", id: USERS.admin.id }, now: NOW(), expectedRowVersion: await rv(), tax: settings.tax, ownerMayPrice: false });
+    assert.equal(keep.ok && keep.version.content?.lines[0].kind, "owner_set", "the owner's unchanged price is kept");
+    const fixtureItem = (await catStore.listCatalogue(db, OASIS, { includeFixture: true })).find((i) => i.is_fixture && i.status === "confirmed")!;
+    const usd = await versions.normalizeProposal(
+      db,
+      OASIS,
+      { ...ownerContent, currency: "USD", lines: [{ kind: "catalogue", line_id: "x1", sku: fixtureItem.sku, item_id: fixtureItem.id, item_version: fixtureItem.item_version, name: fixtureItem.name, description: "", category: fixtureItem.category, unit: fixtureItem.unit, quantity: 1, optional: false, unit_price_cents: 1, currency: "USD", deliverables: [], onboarding_requirements: [] }] } as never,
+      null,
+      USERS.cc.id,
+      settings.tax,
+      NOW(),
+      { allowFixtureItems: true, ownerMayPrice: true },
+    );
+    assert.equal(usd.lines[0].kind, "needs_owner_price", "a CAD catalogue item never prices a USD proposal");
+  });
 
   console.log("submit and the PDF");
   await check("submission refuses an unready engagement, then freezes both versions and queues the print", async () => {
@@ -318,6 +357,7 @@ async function main() {
   });
 
   const sent: Array<Record<string, unknown>> = [];
+  const deliveryAlerts: Array<Record<string, unknown>> = [];
   const deps = (opts: { live: boolean; owner?: boolean } = { live: true }) => ({
     ...executors.defaultExecutorDeps(),
     isDryRun: (ch?: string) => (ch === "ai_audit_delivery" ? !opts.live : true),
@@ -332,6 +372,8 @@ async function main() {
       baseUrl: () => "https://oasisai.work",
       stripeConnected: async () => true,
       isOwner: delivery.defaultAiAuditExecutorDeps().isOwner,
+      readPdf: async (path: string) => stored.get(path) ?? null,
+      alert: async (a: Record<string, unknown>) => void deliveryAlerts.push(a),
     },
   });
   const approve = async () => db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ? AND status IN ('pending', 'failed')", args: [USERS.cc.id, new Date().toISOString(), approvalId] });
@@ -353,14 +395,41 @@ async function main() {
     assert.equal(sent.length, 0);
     assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "final_review");
   });
+  await check("Gate 2 refuses when the approved PDF is missing from storage: nothing is minted or sent", async () => {
+    const retry = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
+    approvalId = retry.ok ? retry.approvalId : "";
+    await approve();
+    const saved = [...stored.entries()];
+    stored.clear();
+    try {
+      const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+      assert.equal(r.ok && r.approval.status, "failed");
+      assert.equal(r.ok && (r.approval.execution_result as { reason?: string } | null)?.reason, "pdf_missing");
+      assert.equal(sent.length, 0);
+    } finally {
+      for (const [k, v] of saved) stored.set(k, v);
+    }
+  });
   let token = "";
   await check("the owner's approval mints the private link, sends ONE email, and delivers", async () => {
     const retry = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
     approvalId = retry.ok ? retry.approvalId : "";
     await approve();
+    // The write after the send fails (review of PR #732): the outcome must still be "sent",
+    // so nobody retries into a second email, and the tick finishes the record.
+    await db.execute("CREATE TRIGGER fail_delivered_event BEFORE INSERT ON ai_audit_events WHEN NEW.event = 'delivered' BEGIN SELECT RAISE(ABORT, 'injected_failure'); END");
     const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+    await db.execute("DROP TRIGGER fail_delivered_event");
     assert.equal(r.ok && (r.approval.execution_result as { outcome?: string } | null)?.outcome, "sent");
     assert.equal(sent.length, 1);
+    assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "final_review", "not yet recorded");
+    assert.equal(deliveryAlerts.length, 1);
+    assert.equal(deliveryAlerts[0].alertType, "ai_audit_delivery_unrecorded");
+    const notAgain = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW() });
+    assert.ok(notAgain.ok && !notAgain.created && notAgain.approvalId === approvalId, "a sent approval is never re-filed");
+    const repaired = await tick.runAiAuditTick(db, { budgetMs: 30_000, deps: { payment: { stripeSecret: async () => null, isDryRun: () => true, alert: async () => undefined, baseUrl: () => "https://oasisai.work" }, onboarding: { alert: async () => undefined, baseUrl: () => "https://oasisai.work" } } });
+    assert.equal(repaired.deliveriesRepaired, 1);
+    assert.equal(sent.length, 1, "the repair sends nothing");
     const body = String(sent[0].body);
     const m = /\/your-audit\/([A-Za-z0-9_-]{43})/.exec(body);
     assert.ok(m, "the email carries the private link");
@@ -394,6 +463,23 @@ async function main() {
     assert.equal(await link.recordLinkView(db, p.link, NOW()), true);
     const p2 = (await pub.loadPublicAudit(db, token, NOW()))!;
     assert.equal(await link.recordLinkView(db, p2.link, NOW()), false);
+  });
+
+  await check("route level: the client's own page may press Pay, another site may not; in dry run no session is made", async () => {
+    const { NextRequest } = await import("next/server");
+    const payRoute = await import("../app/api/your-audit/[token]/pay/route");
+    const params = { params: Promise.resolve({ token }) };
+    const post = (headers: Record<string, string>) =>
+      new NextRequest(`https://oasisai.work/api/your-audit/${token}/pay`, { method: "POST", headers: { host: "oasisai.work", ...headers } });
+    const evil = await payRoute.POST(post({ origin: "https://evil.example" }), params);
+    assert.equal(evil.status, 403);
+    // What Chromium sends from a no-referrer page (seen 2026-10-25): Origin null, Sec-Fetch-Site same-origin.
+    const own = await payRoute.POST(post({ origin: "null", "sec-fetch-site": "same-origin" }), params);
+    assert.equal(own.status, 303);
+    assert.match(own.headers.get("location") ?? "", /\/your-audit\/[A-Za-z0-9_-]{43}\?pay=unavailable$/, "dry run: back to the page with a plain message");
+    const fromPage = await payRoute.POST(post({ origin: "https://oasisai.work" }), params);
+    assert.equal(fromPage.status, 303);
+    assert.equal((await payment.listCheckouts(db, OASIS, engagementId)).length, 0, "no session was made");
   });
 
   console.log("payment");
@@ -467,7 +553,11 @@ async function main() {
     assert.equal(await onboarding.completeOnboardingIfDone(db, { tenantId: OASIS, engagementId, now: NOW() }), false);
     await db.execute({ sql: "UPDATE delivery_tasks SET status = 'done' WHERE tenant_id = ?", args: [OASIS] });
     assert.equal(await onboarding.completeOnboardingIfDone(db, { tenantId: OASIS, engagementId, now: NOW() }), true);
-    assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "active_client");
+    const done = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(done.stage, "active_client");
+    assert.equal(done.closed_reason, "active_client");
+    assert.ok(done.closed_at, "the audit cycle is closed");
+    assert.equal(await ownership.aiAuditOwnsLead(OASIS, LEAD), false, "website sales may work the lead again");
     assert.equal(await leadStage(db, LEAD), "in_build");
   });
   await check("a later refund is caught by the re-check, flagged, and deletes nothing", async () => {
@@ -503,6 +593,70 @@ async function main() {
     const real = (await store.getOpenEngagementForLead(db, OASIS, LEAD_B))!;
     await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: real.id, to: "cancelled", actor: cc, now: NOW() });
     assert.equal(await ownership.aiAuditOwnsLead(OASIS, LEAD_B), false);
+  });
+  const closedId = (await store.listEngagementsForLead(db, OASIS, LEAD_B))[0].id;
+  await check("a payment that lands on a cancelled engagement is kept, flagged failed and alerted, never onboarded", async () => {
+    const tokenLate = "44444444-4444-4444-8444-444444444444";
+    await db.execute({
+      sql: `INSERT INTO ai_audit_checkouts (id, tenant_id, engagement_id, proposal_version_id, payment_token, installment_kind, amount_cents, currency, stripe_session_id, status, created_at, updated_at)
+            VALUES ('co-late', ?, ?, 'pv-late', ?, 'full', 7000, 'CAD', 'cs_live_late', 'open', ?, ?)`,
+      args: [OASIS, closedId, tokenLate, new Date().toISOString(), new Date().toISOString()],
+    });
+    stripe.sessions.set("cs_live_late", { id: "cs_live_late", amount: 7000, currency: "cad", metadata: { oasis_tenant_id: OASIS, oasis_lead_id: LEAD_B, oasis_payment_token: tokenLate, oasis_payment_plan_id: "pv-late" }, client_reference_id: LEAD_B, paid: true, refunded: false, disputed: false });
+    const alerts: Array<Record<string, unknown>> = [];
+    const v = await payment.verifyCheckout(db, { tenantId: OASIS, checkoutId: "co-late", now: NOW(), trigger: "webhook", deps: { ...payDeps, alert: async (a) => void alerts.push(a as Record<string, unknown>) } });
+    assert.equal(v.status, "paid");
+    const e = (await store.getEngagement(db, OASIS, closedId))!;
+    assert.equal(e.stage, "cancelled");
+    assert.equal(e.health, "failed");
+    assert.equal(e.payment_status, "paid");
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].alertType, "ai_audit_payment_unplaced");
+    assert.equal(await payment.settleVerifiedReceipts(db, OASIS, NOW(), payDeps), 0, "already flagged: the tick does not alert again");
+    assert.equal(e.delivery_project_id, null, "nothing was onboarded");
+  });
+  await check("a declined or cancelled engagement's open payment links are expired at Stripe", async () => {
+    await db.execute({
+      sql: `INSERT INTO ai_audit_checkouts (id, tenant_id, engagement_id, proposal_version_id, payment_token, installment_kind, amount_cents, currency, stripe_session_id, status, created_at, updated_at)
+            VALUES ('co-open2', ?, ?, 'pv-open2', '55555555-5555-4555-8555-555555555555', 'full', 7000, 'CAD', 'cs_live_open2', 'open', ?, ?)`,
+      args: [OASIS, closedId, new Date().toISOString(), new Date().toISOString()],
+    });
+    stripe.sessions.set("cs_live_open2", { id: "cs_live_open2", amount: 7000, currency: "cad", metadata: {}, client_reference_id: LEAD_B, paid: false, refunded: false, disputed: false });
+    assert.ok((await payment.closedEngagementsWithOpenCheckouts(db, OASIS)).includes(closedId));
+    const r = await payment.expireOpenCheckouts(db, OASIS, closedId, NOW(), payDeps);
+    assert.ok(r.expired >= 1);
+    assert.equal(stripe.sessions.get("cs_live_open2")!.expired, true, "expired at Stripe");
+    const row = await db.execute({ sql: "SELECT status FROM ai_audit_checkouts WHERE id = 'co-open2'", args: [] });
+    assert.equal(String(row.rows[0].status), "expired");
+  });
+  await check("a session marked expired here early is still polled until Stripe's own expiry has passed", async () => {
+    const soon = new Date(Date.now() + 10 * 60_000).toISOString();
+    const long = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    for (const [id, exp] of [["co-x-recent", soon], ["co-x-old", long]] as const) {
+      await db.execute({
+        sql: `INSERT INTO ai_audit_checkouts (id, tenant_id, engagement_id, proposal_version_id, payment_token, installment_kind, amount_cents, currency, stripe_session_id, status, created_at, updated_at, expires_at)
+              VALUES (?, ?, ?, ?, ?, 'full', 7000, 'CAD', ?, 'expired', ?, ?, ?)`,
+        args: [id, OASIS, closedId, `pv-${id}`, `66666666-6666-4666-8666-${id === "co-x-old" ? "000000000001" : "000000000002"}`, `cs_live_${id.replace(/-/g, "_")}`, new Date().toISOString(), new Date().toISOString(), exp],
+      });
+    }
+    const due = (await payment.dueOpenCheckouts(db, OASIS, new Date(), 50)).map((c) => c.id);
+    assert.ok(due.includes("co-x-recent"));
+    assert.ok(!due.includes("co-x-old"));
+    await db.execute("DELETE FROM ai_audit_checkouts WHERE id IN ('co-x-recent', 'co-x-old')");
+  });
+  await check("three failed prints stop the queue and ask CC; Retry clears them", async () => {
+    for (let i = 0; i < 3; i++) {
+      await db.execute({
+        sql: "INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, dedupe_key, error_code, error_message, created_at, updated_at) VALUES (?, ?, 'ai_audit_pdf', 'runner', 'failed', '{}', 'h', 'ai_audit_pdf:v-print', 'render_failed', 'chromium crashed', ?, ?)",
+        args: [`job-print-${i}`, OASIS, new Date(Date.now() + i).toISOString(), new Date(Date.now() + i).toISOString()],
+      });
+    }
+    const f = await pdf.pdfFailures(db, OASIS, "v-print");
+    assert.equal(f.count, 3);
+    assert.match(f.lastError ?? "", /render_failed: chromium crashed/);
+    assert.ok(f.count >= pdf.PDF_MAX_FAILURES);
+    assert.equal(await pdf.clearPdfFailures(db, OASIS, "v-print"), 3);
+    assert.equal((await pdf.pdfFailures(db, OASIS, "v-print")).count, 0);
   });
   await check("the tick runs every step without contacting anyone and reports cleanly", async () => {
     const r = await tick.runAiAuditTick(db, { budgetMs: 30_000, deps: { payment: { ...payDeps, alert: async () => undefined }, onboarding: { alert: async () => undefined, baseUrl: () => "https://oasisai.work" } } });

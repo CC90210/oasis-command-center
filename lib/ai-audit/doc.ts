@@ -647,14 +647,21 @@ export function validateAuditDoc(raw: unknown): { ok: true; doc: AuditDoc } | { 
 // Evidence rules (the brief's labels and "never invent a figure")
 // ---------------------------------------------------------------------------
 
+const MONTHS = "january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec";
+/** A year said as a year: "in 2025", "since 2019", "October 2024", "FY 2026". */
+const YEAR_IN_CONTEXT = new RegExp(`\\b(?:in|since|from|by|until|till|through|before|after|during|of|year|fiscal|fy|${MONTHS})\\s+(?:19|20)\\d{2}\\b`, "gi");
+/** Any digit in any script, and the vulgar fractions. */
+const FIGURE_CHAR = /[\p{Nd}\u00BC-\u00BE\u2150-\u215E]/u;
+
 /**
- * True when the text states a figure: any digit, except a bare four-digit year
- * (1900-2099). Spelled-out quantities are left to the phase-4 claim linter
- * (lib/offer-pages/claims.ts); this check is the one a person can see live.
+ * True when the text states a figure: any digit in any script, or a fraction
+ * like "\u00BD", except a year said as a year ("in 2025"). A bare "2000" is a
+ * figure: "$2000" and "2000 hours" are claims (review of PR #732). Spelled-out
+ * quantities are left to the phase-4 claim linter (lib/offer-pages/claims.ts);
+ * this check is the one a person can see live.
  */
 export function statesFigure(text: string): boolean {
-  const withoutYears = text.replace(/\b(19|20)\d{2}\b/g, "");
-  return /\d/.test(withoutYears);
+  return FIGURE_CHAR.test(text.replace(YEAR_IN_CONTEXT, ""));
 }
 
 /** Every rule the document breaks. "block" stops submission; "warn" is shown only. */
@@ -677,10 +684,16 @@ export function auditDocIssues(doc: AuditDoc): DocIssue[] {
     }
   };
 
+  // Text the page shows that has no way to cite: a figure there is a figure nobody can check.
+  const uncited = (text: string | undefined, path: string, where = "Move it into a cited paragraph or finding, or remove it") => {
+    if (text && statesFigure(text)) issues.push({ severity: "block", path, message: `states a figure in a part of the audit that cannot cite one. ${where}` });
+  };
+
   doc.sections.executive_overview.paragraphs.forEach((p, i) => checkParagraph(p, `Executive Overview, paragraph ${i + 1}`));
   doc.sections.current_assessment.paragraphs.forEach((p, i) => checkParagraph(p, `Current Business Assessment, paragraph ${i + 1}`));
   checkParagraph(doc.sections.key_findings.intro, "Key Findings, introduction");
   doc.sections.inefficiencies.items.forEach((it, i) => {
+    uncited(it.title, `Inefficiency ${i + 1}, title`);
     checkParagraph(it.why_it_matters, `Inefficiency ${i + 1}, why it matters`);
     checkParagraph(it.consequence, `Inefficiency ${i + 1}, consequence`);
     for (const f of it.finding_ids) if (!findingIds.has(f)) issues.push({ severity: "block", path: `Inefficiency ${i + 1}`, message: `names finding "${f}", which does not exist` });
@@ -688,16 +701,26 @@ export function auditDocIssues(doc: AuditDoc): DocIssue[] {
   doc.sections.opportunities.items.forEach((o, i) => {
     const where = `Opportunity ${i + 1} (${o.title})`;
     checkParagraph(o.expected_improvement, `${where}, expected improvement`);
-    for (const t of [o.what_it_does, o.problem, o.how_it_works]) {
+    for (const t of [o.title, o.what_it_does, o.problem, o.how_it_works]) {
       if (statesFigure(t)) issues.push({ severity: "block", path: where, message: "states a figure outside its cited 'expected improvement'" });
     }
+    for (const step of [...(o.workflow?.before ?? []), ...(o.workflow?.after ?? [])]) uncited(step, `${where}, workflow`);
     for (const f of o.finding_ids) if (!findingIds.has(f)) issues.push({ severity: "block", path: where, message: `names finding "${f}", which does not exist` });
     for (const e of o.estimate_ids) if (!estimateIds.has(e)) issues.push({ severity: "block", path: where, message: `names estimate "${e}", which does not exist` });
   });
   checkParagraph(doc.sections.impact.intro, "Estimated Business Impact, introduction");
+  doc.sections.impact.limitations.forEach((l, i) => uncited(l, `Estimated Business Impact, limitation ${i + 1}`, "A figure an estimate rests on belongs in that estimate's assumptions"));
+  doc.sections.next_steps.steps.forEach((step, i) => uncited(step, `Secure Payment & Next Steps, step ${i + 1}`, "Prices and amounts appear only in the proposal"));
+  doc.gaps.forEach((g, i) => {
+    uncited(g.topic, `Information gap ${i + 1}`, "A gap names what is unknown, not a figure");
+    uncited(g.why, `Information gap ${i + 1}`, "A gap names what is unknown, not a figure");
+  });
 
   for (const sys of doc.sections.current_assessment.systems) {
     for (const c of sys.cites) if (!anyCite(c)) issues.push({ severity: "block", path: `System ${sys.name}`, message: `cites "${c}", which does not exist` });
+    if ((statesFigure(sys.role) || statesFigure(sys.note ?? "")) && sys.cites.length === 0) {
+      issues.push({ severity: "block", path: `System ${sys.name}`, message: "states a figure without citing where it comes from" });
+    }
     if (sys.label === "verified" && sys.cites.length === 0) {
       issues.push({ severity: "block", path: `System ${sys.name}`, message: "is marked Verified but cites nothing" });
     }
@@ -711,6 +734,8 @@ export function auditDocIssues(doc: AuditDoc): DocIssue[] {
   }
   for (const [bucket, items] of Object.entries(doc.sections.roadmap)) {
     for (const r of items) {
+      uncited(r.urgency, `Roadmap (${bucket}), urgency`);
+      for (const d of r.dependencies) uncited(d, `Roadmap (${bucket}), dependency`);
       if (!opportunityIds.has(r.opportunity_id)) {
         issues.push({ severity: "block", path: `Roadmap (${bucket})`, message: `names opportunity "${r.opportunity_id}", which does not exist` });
       }
@@ -736,6 +761,9 @@ export function auditDocIssues(doc: AuditDoc): DocIssue[] {
     }
     if (f.label !== "hypothesis" && statesFigure(f.statement) && f.source_ids.length === 0) {
       issues.push({ severity: "block", path: where, message: "states a figure without a source" });
+    }
+    if (statesFigure(f.title) && (f.label === "hypothesis" || f.source_ids.length === 0)) {
+      issues.push({ severity: "block", path: where, message: f.label === "hypothesis" ? "is a Hypothesis but its title contains a figure" : "has a figure in its title but no source" });
     }
   }
 

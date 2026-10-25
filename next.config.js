@@ -436,13 +436,23 @@ const nextConfig = {
       },
       // A client's private Free AI Audit (app/your-audit/[token]), its PDF print
       // view (app/audit-print) and their API: never indexed, never cached, and
-      // the token in the address is never sent on as a referrer to anything the
-      // page links to. Later rules win for the same key (see /meet above).
-      ...["/your-audit/:path*", "/audit-print/:path*", "/api/your-audit/:path*"].map((source) => ({
+      // the token in the address never leaves this site as a referrer. Later
+      // rules win for the same key (see /meet above).
+      //
+      // The pages say "same-origin", NOT "no-referrer": under no-referrer a
+      // browser sends `Origin: null` on the Pay form's POST, and the pay route's
+      // same-origin check refuses every real client (review of PR #732, seen in
+      // Chromium). same-origin still sends nothing to any other site. The API
+      // keeps no-referrer, so the 303 from Pay to Stripe carries no address.
+      ...[
+        ["/your-audit/:path*", "same-origin"],
+        ["/audit-print/:path*", "same-origin"],
+        ["/api/your-audit/:path*", "no-referrer"],
+      ].map(([source, referrer]) => ({
         source,
         headers: [
           { key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" },
-          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "Referrer-Policy", value: referrer },
           { key: "Cache-Control", value: "no-store, max-age=0" },
         ],
       })),

@@ -11,8 +11,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { sameOrigin } from "@/lib/offer-pages/public-http";
-import { loadPublicAudit, payUnavailableReason, publicLimited } from "@/lib/ai-audit/public";
+import { fromOwnAuditPage, loadPublicAudit, payUnavailableReason, publicLimited } from "@/lib/ai-audit/public";
 import { createOrReuseCheckout } from "@/lib/ai-audit/payment";
 import { isPlausibleToken } from "@/lib/ai-audit/link";
 
@@ -31,7 +30,7 @@ function back(req: NextRequest, token: string, code: string) {
 export async function POST(req: NextRequest, ctx: Ctx) {
   const { token } = await ctx.params;
   if (!isPlausibleToken(token)) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-  if (!sameOrigin(req)) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  if (!fromOwnAuditPage(req)) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   if (publicLimited(req, "pay")) return back(req, token, "busy");
   if (!tursoConfigured()) return back(req, token, "unavailable");
   const db = getTursoClient();

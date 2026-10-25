@@ -73,19 +73,21 @@ Decision point: if the business is not a fit, mark the engagement **declined** w
 ## Pricing
 
 - Prices come from the **Price catalogue** only after you confirm them there. Until then an item is "proposed" and cannot be used.
-- For custom work, add a custom line and type the price yourself. The system records that you set it.
+- For custom work, add a custom line and type the price yourself. The system records that you set it. Only the workspace owner can type a price: anyone else's line waits as "needs your price".
 - A line with no price blocks submission. That is on purpose: no proposal goes out with a guessed fee.
+- Catalogue items only price a proposal in their own currency. Switch a proposal's currency and its items wait for a price again.
 - Set the tax rule once in **AI audit settings** before the first real proposal.
 - Monthly fees are shown beside the total and start after launch. Optional add-ons are listed outside the total.
 
 ## Submitting and Gate 2
 
-- Press **Submit for final approval**. The audit and proposal freeze, and the Mac prints the PDF (the Mac must be on).
+- Press **Submit for final approval**. The audit and proposal freeze, and the Mac prints the PDF (the Mac must be on). If the Mac fails to print three times, the engagement is flagged and you get one alert. Fix the Mac, then press **Retry PDF**.
 - When the PDF is ready, an **AI audit delivery** card appears in **Feed, under Needs you**. Open the PDF from the engagement's Delivery tab, read the email on the card, and approve only if every word is right.
 - Changed your mind? **Reopen for edits** before you approve. The frozen versions are kept, and new drafts open.
-- Only the workspace owner can approve. An admin's approval is refused and nothing is sent.
+- Only the workspace owner can approve. An admin who presses Approve is told so, and the card stays waiting for you.
+- Approving checks the stored PDF file itself, not just its record. If the file is missing or altered, nothing is sent: reopen the audit and submit it again.
 
-Decision point: if the card says it ran in **dry run**, nothing was sent. Audit delivery has its own live switch (LIVE_SEND_AI_AUDIT). Turn it on deliberately, then use **Retry delivery**.
+Decision point: if the card says it ran in **dry run**, nothing was sent. Audit delivery has its own live switch (LIVE_SEND_AI_AUDIT), and the client's Pay button has another (LIVE_SEND_STRIPE_CHECKOUT). The general live-send switch turns on neither. Turn them on deliberately, then use **Retry delivery**, which appears after a dry run.
 
 ## After delivery
 
@@ -97,8 +99,9 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 ## Payment and onboarding
 
 - The client pays on Stripe's page. The engagement moves to **Payment Confirmed** only when the server has re-read the session from Stripe and the amount, currency and proposal all match.
+- Marking an engagement **declined** or **cancelled** also stops its open payment link at Stripe. If a payment still lands (the client paid moments before), it is kept, the engagement is flagged, and you get an urgent alert. Nothing is refunded automatically: you decide.
 - Onboarding then runs by itself: client record, delivery project, checklist, and a welcome email for your one-tap approval (it links the onboarding form and the kickoff booking page).
-- When every checklist task is done, the engagement becomes **Active Client** and the lead moves into the build.
+- When every checklist task is done, the engagement becomes **Active Client** and the lead moves into the build. That closes the audit cycle: the delivery project carries the client from there.
 
 ---
 
@@ -110,6 +113,9 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 | "Payment was refunded" or "disputed" | Nothing was deleted. Decide whether to pause the project; respond to a dispute in Stripe. |
 | "Second payment for the same proposal" | Refund one in Stripe. Onboarding ran only once. |
 | "Delivery failed" | Read the reason on the approval, fix it, then **Retry delivery**. |
+| "Audit sent, but not yet recorded" | The client has the email. Do **not** retry: that would send a second one. The next tick finishes the record within five minutes. |
+| "Payment received for a declined (or cancelled) audit" | The money is real and nothing was onboarded. Refund it in Stripe, or talk to the client and start a new engagement. |
+| "PDF not printed" | The Mac failed three times. Check that it is on and online, then press **Retry PDF**. |
 | The PDF never arrives | The Mac runner is off or offline. Turn the Mac on; the job is picked up within a minute. |
 | The client asks for changes before paying | Reopen is only possible before delivery. After delivery, a revision is a new version and a new link (coming in a later phase; until then, answer by email). |
 | The client asks you to delete their data | Write it down and tell CC's operations process; the data purge arrives in a later phase. |

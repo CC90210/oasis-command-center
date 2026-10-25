@@ -8,7 +8,7 @@
  * carries no figure and says how to test it, an estimate shows its inputs,
  * assumptions and a range. Prices are not here: they live in the proposal.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   SECTION_TITLES,
@@ -25,6 +25,7 @@ import {
 } from "@/lib/ai-audit/doc";
 import { BUSINESS_TYPES, BUSINESS_TYPE_LABELS, EVIDENCE_LABEL_NAMES, type BusinessType, type EvidenceLabel } from "@/lib/ai-audit/rules";
 import { describeError, postAction } from "./api";
+import { NumberInput } from "./inputs";
 
 type Props = {
   engagementId: string;
@@ -225,6 +226,9 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
       }),
   );
   const [rv, setRv] = useState(rowVersion);
+  // The editor stays mounted while CC works in other tabs; their saves move the
+  // engagement's row version, and this editor follows (its own draft is kept).
+  useEffect(() => setRv(rowVersion), [rowVersion]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -386,16 +390,13 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
             </Field>
             <div className="grid gap-3 md:grid-cols-3">
               <Field label="Figure (optional)">
-                <input
-                  className="input"
-                  inputMode="decimal"
+                <NumberInput
                   disabled={disabled}
-                  value={f.metric ? String(f.metric.value) : ""}
-                  onChange={(e) =>
+                  value={f.metric ? f.metric.value : null}
+                  onChange={(n) =>
                     update((d) => {
-                      const raw = e.target.value.trim();
-                      if (!raw) delete d.findings[i].metric;
-                      else d.findings[i].metric = { value: Number(raw), unit: d.findings[i].metric?.unit ?? "" };
+                      if (n === null) delete d.findings[i].metric;
+                      else d.findings[i].metric = { value: n, unit: d.findings[i].metric?.unit ?? "" };
                     })
                   }
                 />
@@ -446,10 +447,10 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
             </div>
             <div className="grid gap-3 md:grid-cols-4">
               <Field label="Low">
-                <input className="input" inputMode="decimal" disabled={disabled} value={String(e.low)} onChange={(ev) => update((d) => void (d.estimates[i].low = Number(ev.target.value) || 0))} />
+                <NumberInput disabled={disabled} value={e.low} emptyValue={0} onChange={(n) => update((d) => void (d.estimates[i].low = n ?? 0))} />
               </Field>
               <Field label="High">
-                <input className="input" inputMode="decimal" disabled={disabled} value={String(e.high)} onChange={(ev) => update((d) => void (d.estimates[i].high = Number(ev.target.value) || 0))} />
+                <NumberInput disabled={disabled} value={e.high} emptyValue={0} onChange={(n) => update((d) => void (d.estimates[i].high = n ?? 0))} />
               </Field>
               <Field label="Unit">
                 <input className="input" disabled={disabled} value={e.unit} onChange={(ev) => update((d) => void (d.estimates[i].unit = ev.target.value))} />
@@ -463,7 +464,7 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
               {e.inputs.map((inp, k) => (
                 <div key={k} className="grid gap-2 md:grid-cols-5">
                   <input className="input md:col-span-2" disabled={disabled} value={inp.name} placeholder="name" onChange={(ev) => update((d) => void (d.estimates[i].inputs[k].name = ev.target.value))} />
-                  <input className="input" inputMode="decimal" disabled={disabled} value={String(inp.value)} placeholder="value" onChange={(ev) => update((d) => void (d.estimates[i].inputs[k].value = Number(ev.target.value) || 0))} />
+                  <NumberInput disabled={disabled} value={inp.value} emptyValue={0} placeholder="value" onChange={(n) => update((d) => void (d.estimates[i].inputs[k].value = n ?? 0))} />
                   <select className="select" disabled={disabled} value={inp.label} onChange={(ev) => update((d) => void (d.estimates[i].inputs[k].label = ev.target.value as EvidenceLabel))}>
                     {(["client_reported", "verified", "hypothesis"] as EvidenceLabel[]).map((l) => (
                       <option key={l} value={l}>

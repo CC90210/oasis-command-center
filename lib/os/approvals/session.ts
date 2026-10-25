@@ -14,6 +14,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 import type { Client } from "@libsql/client";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { dbBool } from "@/lib/db-bool";
 import { resolveOsViewer } from "@/components/os/department/viewer";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import type { ApprovalScope, ApprovalStatus } from "@/lib/os/approvals/rules";
@@ -42,7 +43,14 @@ export async function resolveApprovalSession(): Promise<ApprovalSession> {
   };
 }
 
+/** Is this user the workspace owner (user_profiles.is_owner)? For the owner-only approval kinds. */
+export async function isWorkspaceOwnerForApprovals(db: Client, tenantId: string, userId: string): Promise<boolean> {
+  const row = (await db.execute({ sql: "SELECT is_owner FROM user_profiles WHERE tenant_id = ? AND auth_user_id = ? LIMIT 1", args: [tenantId, userId] })).rows[0];
+  return !!row && dbBool(row.is_owner);
+}
+
 const MESSAGES: Record<string, string> = {
+  owner_only: "Only the workspace owner can approve this. It is still waiting for them.",
   not_signed_in: "Sign in to see approvals.",
   workspace_unresolved: "We could not confirm which workspace you are in. Refresh to try again.",
   database_not_configured: "The database is not configured on this deployment.",

@@ -24,7 +24,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { decideApproval, getApproval } from "@/lib/os/approvals/store";
-import { mayDecideApproval } from "@/lib/os/approvals/rules";
+import { OWNER_ONLY_ACTION_KINDS, mayDecideApproval } from "@/lib/os/approvals/rules";
 import { executeApproval } from "@/lib/os/approvals/execute";
 import { viewApproval } from "@/lib/os/approvals/view";
 import {
@@ -32,6 +32,7 @@ import {
   decisionError,
   readJsonObject,
   approvalError,
+  isWorkspaceOwnerForApprovals,
   resolveApprovalSession,
 } from "@/lib/os/approvals/session";
 
@@ -51,6 +52,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     if (!parsed.ok) return approvalError(400, parsed.error);
 
     const payloadHash = String(parsed.body.payload_hash ?? "");
+    // An owner-only card is refused BEFORE the decision, so a non-owner's click
+    // leaves it pending for the owner instead of failing it.
+    const row = await getApproval(session.db, session.scope, id);
+    if (row && OWNER_ONLY_ACTION_KINDS.has(row.action_kind) && !(await isWorkspaceOwnerForApprovals(session.db, session.scope.tenantId, session.scope.userId))) {
+      return approvalError(403, "owner_only");
+    }
     const decided = await decideApproval(session.db, session.scope, id, { kind: "approve", payloadHash }, new Date());
     if (!decided.ok) {
       // RESUME, not re-approve: a row that is `approved` but was never claimed
