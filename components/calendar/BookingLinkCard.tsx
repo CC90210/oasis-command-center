@@ -32,7 +32,7 @@ type BookingInfo = {
     /** lib/booking/host-calendar-status.ts HostCalendarStatus: `kind` is what the card acts on, `label` the words. */
     calendar: { ready: boolean; kind: "connected" | "workspace" | "needs_connection" | "unavailable"; label: string };
   }[];
-  calendars: { id: string; name: string; isDefault: boolean }[];
+  calendars: { id: string; name: string; isDefault: boolean; visible?: boolean }[];
 };
 
 type Load =
@@ -128,11 +128,12 @@ export function BookingLinkCard() {
   const origin = typeof window === "undefined" ? "" : window.location.origin;
   const url = `${origin}${info.path}`;
   const mine = info.settings.hosts.find((h) => h.userId === info.you);
-  const landsOn = mine
-    ? info.calendars.find((c) => c.id === mine.targetCalendarId)?.name ??
-      info.calendars.find((c) => c.isDefault)?.name ??
-      "Main calendar"
-    : null;
+  const landsOnCalendar = mine
+    ? info.calendars.find((c) => c.id === mine.targetCalendarId) ?? info.calendars.find((c) => c.isDefault)
+    : undefined;
+  const landsOn = mine ? landsOnCalendar?.name ?? "Main calendar" : null;
+  // A booked call on a calendar that is unticked under My calendars is saved but never seen.
+  const landsOnHidden = landsOnCalendar?.visible === false;
 
   return (
     <section aria-labelledby="cal-booking-h" className="break-words rounded-lg border border-hairline bg-bg-panel p-3 text-[12px]">
@@ -182,6 +183,7 @@ export function BookingLinkCard() {
       {landsOn ? (
         <p className="mt-2 text-fg-muted">
           Your booked calls land on <span className="text-fg">{landsOn}</span>.
+          {landsOnHidden ? " It is hidden on your Schedule; tick it under My calendars to see booked calls." : null}
         </p>
       ) : null}
       <ul className="mt-2 space-y-1.5 text-fg-muted">
@@ -361,8 +363,8 @@ function BookingSettingsDialog({
           </button>
         </div>
         <p className="mt-1 text-fg-muted">
-          Times are {s.timeZone.replace("_", " ")}. A time is offered only when everyone on duty is free. Your weekly
-          routine never blocks a booking; anything else on your Schedule or Google Calendar does.
+          Times are {s.timeZone.replace("_", " ")}. A time is offered only when everyone on duty is free. Anything shown
+          as Busy on your Schedule or Google Calendar closes a time; anything shown as Free does not.
         </p>
 
         <label className="mt-4 block font-medium text-fg" htmlFor="booking-target">
