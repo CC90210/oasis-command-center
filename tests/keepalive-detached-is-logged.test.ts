@@ -69,7 +69,7 @@ async function main() {
     withoutContext();
     const { result, errors } = await errorsDuring(() => keepAlive(Promise.resolve(), "probe-quiet"));
     assert.equal(result, "detached");
-    assert.deepEqual(detachedLines(errors), []);
+    assert.deepEqual(errors, [], "nothing at all is logged here");
   });
 
   await check("on Cloudflare a detached registration is logged with the caller's label, every time", async () => {
@@ -100,7 +100,7 @@ async function main() {
     withoutContext();
     const { result, errors } = await errorsDuring(() => keepAlive(Promise.resolve(), "probe-vercel"));
     assert.equal(result, "detached");
-    assert.deepEqual(detachedLines(errors), []);
+    assert.deepEqual(errors, [], "nothing at all is logged here");
   });
 
   platform("unknown");
