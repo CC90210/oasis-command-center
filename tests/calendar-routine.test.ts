@@ -429,7 +429,7 @@ async function main() {
     assert.equal((await store.getPrefs({ tenantId: OASIS, userId: USERS.adon.id })).shabbatProtection, false, "an OASIS member's saved row wins too");
   });
 
-  await check("Prefs: a PUT that leaves keys out fills them from the viewer's OWN workspace defaults", async () => {
+  await check("Prefs: a PUT that leaves keys out keeps their saved values (a partial PUT is a patch)", async () => {
     await login("clientOwner");
     const res = await prefsRoute.PUT(
       new Request(`${ORIGIN}/api/calendar/prefs`, {
@@ -440,7 +440,8 @@ async function main() {
     );
     assert.equal(res.status, 200);
     const saved = await store.getPrefs({ tenantId: CLIENT, userId: USERS.clientOwner.id });
-    assert.deepEqual([saved.weekStartsOn, saved.location, saved.shabbatProtection], [1, null, false], "a client is never handed OASIS's city or lock");
+    // This user saved Toronto with the lock on above: a partial PUT must neither reset the place nor switch the lock off.
+    assert.deepEqual([saved.weekStartsOn, saved.location?.label, saved.shabbatProtection], [1, "Toronto", true], "omitted keys keep their saved values");
   });
 
   await check("Prefs: a saved row that no longer validates falls back to the workspace's defaults, loudly", async () => {

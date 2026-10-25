@@ -22,7 +22,7 @@ import {
 } from "./types";
 import { planCalendarRemoval } from "./recurrence";
 import { ROUTINE_ID_PREFIX, buildRoutineSeries, type RoutineAdjustment, type RoutineBlock } from "./routine";
-import { LIMITS, addsTime, shabbatConflict, validateEventInput, validatePrefs } from "./validate";
+import { LIMITS, addsTime, salvagePrefs, shabbatConflict, validateEventInput, validatePrefs } from "./validate";
 
 export class CalendarStoreError extends Error {
   constructor(readonly code: string, readonly status = 500, detail?: string) {
@@ -435,12 +435,20 @@ export async function getPrefs(owner: Owner): Promise<CalendarPrefs> {
     .maybeSingle();
   if (error) storageError(error, "prefs_read_failed");
   if (!data) return base;
-  const parsed = validatePrefs(json<unknown>((data as Record<string, unknown>).prefs, {}), base);
+  const stored = (data as Record<string, unknown>).prefs;
+  const raw = json<unknown>(stored, undefined);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    // Unreadable JSON used to parse as {} and pass silently. Say so.
+    if (stored !== null && stored !== undefined && stored !== "")
+      console.error("[calendar.prefs] stored preferences are not readable; using workspace defaults");
+    return base;
+  }
+  const parsed = validatePrefs(raw, base);
   if (parsed.ok) return parsed.value;
-  // A stored value that no longer validates falls back to the workspace
-  // defaults (neutral). Logged, not hidden, so a broken row gets noticed.
-  console.error("[calendar.prefs] stored preferences no longer validate; using workspace defaults", parsed.error);
-  return base;
+  // A stored value that no longer validates keeps every key that still does, so an
+  // opted-in Shabbat lock never fails open over an unrelated bad key. Logged, not hidden.
+  console.error("[calendar.prefs] stored preferences no longer validate; keeping the keys that still do", parsed.error);
+  return salvagePrefs(raw as Record<string, unknown>, base);
 }
 
 export async function savePrefs(owner: Owner, prefs: CalendarPrefs): Promise<void> {

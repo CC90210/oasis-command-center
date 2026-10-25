@@ -201,6 +201,21 @@ export function validateOps(v: unknown): Result<EventOp[]> {
  * 2026-10-25), so a partial or older stored row never gains a city or the
  * Shabbat lock it did not ask for.
  */
+/**
+ * The keys of a stored row that still validate, one at a time over `base`. Keys are tried
+ * in CalendarPrefs order, so the place is restored before the Shabbat lock that needs it:
+ * an opted-in lock never fails open because some unrelated key went bad.
+ */
+export function salvagePrefs(raw: Record<string, unknown>, base: CalendarPrefs = NEUTRAL_PREFS): CalendarPrefs {
+  let acc = base;
+  for (const key of Object.keys(base) as (keyof CalendarPrefs)[]) {
+    if (!(key in raw)) continue;
+    const trial = validatePrefs({ ...acc, [key]: raw[key] }, acc);
+    if (trial.ok) acc = trial.value;
+  }
+  return acc;
+}
+
 export function validatePrefs(v: unknown, base: CalendarPrefs = NEUTRAL_PREFS): Result<CalendarPrefs> {
   if (!v || typeof v !== "object") return fail("prefs_invalid");
   const p = { ...base, ...(v as Partial<CalendarPrefs>) };

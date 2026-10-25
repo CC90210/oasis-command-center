@@ -66,6 +66,12 @@ async function main() {
     assert.equal((await listEvents({ tenantId: OASIS, userId: "someone-else" })).events.length, 0, "nobody else's Schedule shows it");
   });
 
+  await check("with no saved settings an OASIS host's Saturday meeting lands: no workspace starts with the lock", async () => {
+    const fresh = { tenantId: OASIS, userId: "fresh-oasis-host" };
+    const out = await addMeetingToSchedule(fresh, room(OASIS, "2026-10-24T20:00:00.000Z"), { timeZone: "America/Toronto" });
+    assert.equal(out.ok, true, JSON.stringify(out));
+  });
+
   await check("Saturday afternoon is refused by OASIS's Shabbat lock, and nothing is written", async () => {
     // Since 2026-10-25 no workspace starts with the lock; this host opts in, as Settings would.
     const { savePrefs } = await import("../lib/calendar/store");

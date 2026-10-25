@@ -125,8 +125,9 @@ export type CalendarPrefs = {
 export const OASIS_HOME_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
 /**
- * The opt-in Shabbat preset: Montréal and the lock. No workspace starts from
- * it; a user turns the lock on in Settings after choosing a place.
+ * Montréal with the Shabbat lock on: the values the OASIS workspace used to start
+ * from. No workspace starts from them now (see defaultPrefsFor); they remain the
+ * reference values the lock's tests run against.
  */
 export const DEFAULT_PREFS: CalendarPrefs = {
   weekStartsOn: 0,

@@ -16,8 +16,10 @@ type Props = {
   onClose: () => void;
 };
 
-const PLACES = [
-  { label: "Collingwood", lat: 44.5014, lon: -80.24071 },
+// Coordinates are stored at up to 4 decimals (about 11 m); the inputs accept any precision
+// (step="any") so a pasted or previously saved 5-6 decimal value can never block Save.
+export const PLACES = [
+  { label: "Collingwood", lat: 44.5014, lon: -80.2407 },
   { label: "Montréal", lat: 45.5017, lon: -73.5673 },
   { label: "Toronto", lat: 43.6532, lon: -79.3832 },
   { label: "New York", lat: 40.7128, lon: -74.006 },
@@ -113,11 +115,11 @@ export function SettingsDialog({ prefs, now, notifications, onEnableNotification
               <div className="grid grid-cols-2 gap-3">
                 <label>
                   <span className="label">Latitude</span>
-                  <input className="input h-8" type="number" step="0.0001" min={-90} max={90} value={place.lat} onChange={(e) => setP({ ...p, location: { label: "Custom", lat: Number(e.target.value), lon: place.lon } })} />
+                  <input className="input h-8" type="number" step="any" min={-90} max={90} value={place.lat} onChange={(e) => setP({ ...p, location: { label: "Custom", lat: Number(e.target.value), lon: place.lon } })} />
                 </label>
                 <label>
                   <span className="label">Longitude</span>
-                  <input className="input h-8" type="number" step="0.0001" min={-180} max={180} value={place.lon} onChange={(e) => setP({ ...p, location: { label: "Custom", lat: place.lat, lon: Number(e.target.value) } })} />
+                  <input className="input h-8" type="number" step="any" min={-180} max={180} value={place.lon} onChange={(e) => setP({ ...p, location: { label: "Custom", lat: place.lat, lon: Number(e.target.value) } })} />
                 </label>
               </div>
             )}
@@ -128,19 +130,19 @@ export function SettingsDialog({ prefs, now, notifications, onEnableNotification
             {!place && <p className="text-fg-dim">Choose a location first: Shabbat times come from its sunset.</p>}
             {p.shabbatProtection && (
               <>
-            <label className="flex items-center justify-between gap-4">
-              Candle lighting, minutes before sunset
-              <input className="input h-8 w-20" type="number" min={0} max={120} value={p.candleMinutesBeforeSunset} onChange={(e) => setP({ ...p, candleMinutesBeforeSunset: num(e.target.value, 0, 120) })} />
-            </label>
-            <label className="flex items-center justify-between gap-4">
-              Shabbat ends, minutes after sunset
-              <input className="input h-8 w-20" type="number" min={0} max={120} value={p.havdalahMinutesAfterSunset} onChange={(e) => setP({ ...p, havdalahMinutesAfterSunset: num(e.target.value, 0, 120) })} />
-            </label>
-            {preview && (
-              <p className="rounded-md border border-hairline bg-bg-panel px-3 py-2 text-fg-muted">
-                This week: candles Friday {formatTime(preview.start)}, ends Saturday {formatTime(preview.end)}.
-              </p>
-            )}
+                <label className="flex items-center justify-between gap-4">
+                  Candle lighting, minutes before sunset
+                  <input className="input h-8 w-20" type="number" min={0} max={120} value={p.candleMinutesBeforeSunset} onChange={(e) => setP({ ...p, candleMinutesBeforeSunset: num(e.target.value, 0, 120) })} />
+                </label>
+                <label className="flex items-center justify-between gap-4">
+                  Shabbat ends, minutes after sunset
+                  <input className="input h-8 w-20" type="number" min={0} max={120} value={p.havdalahMinutesAfterSunset} onChange={(e) => setP({ ...p, havdalahMinutesAfterSunset: num(e.target.value, 0, 120) })} />
+                </label>
+                {preview && (
+                  <p className="rounded-md border border-hairline bg-bg-panel px-3 py-2 text-fg-muted">
+                    This week: candles Friday {formatTime(preview.start)}, ends Saturday {formatTime(preview.end)}.
+                  </p>
+                )}
               </>
             )}
           </fieldset>

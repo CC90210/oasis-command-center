@@ -92,7 +92,7 @@ export async function GET(): Promise<NextResponse> {
           calendar: statuses[index],
         })),
         roster: [...identities.values()].map((person) => ({ userId: person.userId, name: person.displayName })),
-        calendars: calendars.map((calendar) => ({ id: calendar.id, name: calendar.name, isDefault: calendar.isDefault, visible: calendar.visible })),
+        calendars: calendars.map((calendar) => ({ id: calendar.id, name: calendar.name, isDefault: calendar.isDefault })),
       },
       { headers: { "cache-control": "no-store" } },
     );

@@ -318,7 +318,7 @@ export function TimeGrid({ days, occurrences, calendars, prefs, now, selectedKey
                       occ={{ ...moving.occ, start: preview.start, end: preview.end }}
                       hue={hueOf(moving.occ, calendars)}
                       top={((preview.start > day ? minutesIntoDay(preview.start) : 0) / 60) * HOUR}
-                      height={Math.max(20, (((preview.end < addDays(day, 1) ? minutesIntoDay(preview.end) || DAY_MINUTES : DAY_MINUTES) - (preview.start > day ? minutesIntoDay(preview.start) : 0)) / 60) * HOUR)}
+                      height={(((preview.end < addDays(day, 1) ? minutesIntoDay(preview.end) || DAY_MINUTES : DAY_MINUTES) - (preview.start > day ? minutesIntoDay(preview.start) : 0)) / 60) * HOUR}
                       left={0}
                       width={1}
                       now={now}
@@ -408,7 +408,7 @@ function EventBlock({ occ, hue, top, height, left, width, now, selected, draggin
     >
       {tier === "micro" || tier === "compact" ? (
         // One line: "Title, 8:30am". A 15-minute (micro) block is a 12px slot, so its line is smaller.
-        <div className={`truncate ${tier === "micro" ? "text-[10px] leading-[11px]" : "pt-px text-[11px] leading-4"}`}>
+        <div className={`truncate ${tier === "micro" ? "text-[10px] leading-[10px]" : "text-[11px] leading-4"}`}>
           <span className="font-semibold">{title}</span>
           <span className="text-fg-muted">, {formatTime(occ.start)}</span>
         </div>
@@ -425,7 +425,7 @@ function EventBlock({ occ, hue, top, height, left, width, now, selected, draggin
       {resizable && onGrab && (
         <div
           aria-hidden
-          className="absolute inset-x-0 bottom-0 h-2 cursor-ns-resize"
+          className={`absolute inset-x-0 bottom-0 ${tier === "micro" ? "h-[3px]" : "h-2"} cursor-ns-resize`}
           onPointerDown={(e) => onGrab(e, "resize")}
         />
       )}
