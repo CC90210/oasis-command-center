@@ -91,6 +91,8 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
 
   // ── GROWTH › Sales ──────────────────────────────────────────────────────
   { id: "pipeline", href: "/pipeline", label: "Pipeline", icon: "GitBranch", section: "growth", group: "Sales", audience: "everyone" },
+  // The Free AI Audit board (2026-10-25): discovery to onboarding, with CC's two gates. Founders only.
+  { id: "ai-audits", href: "/ai-audit", label: "AI audits", icon: "ClipboardCheck", section: "growth", group: "Sales", oasisOnly: true, audience: "manage" },
   { id: "prospects", href: "/web-leads", label: "Prospects", icon: "Users", section: "growth", group: "Sales", module: "prospects", oasisOnly: true, audience: "everyone" },
   { id: "enablement", href: "/training", label: "Enablement", icon: "GraduationCap", section: "growth", group: "Sales", module: "enablement", oasisOnly: true, audience: "everyone" },
   // Its own row until Enablement grows Training · Objections tabs. Reps open

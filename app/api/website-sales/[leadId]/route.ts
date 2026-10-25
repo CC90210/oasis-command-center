@@ -26,6 +26,7 @@ import {
   type RepDisposition,
 } from "@/lib/website-sales-workflow";
 import { runStageTransitionHooks } from "@/lib/portals/stage-hooks";
+import { aiAuditOwnsLead } from "@/lib/ai-audit/ownership";
 import { getTenantIntegrationValue } from "@/lib/tenant-integration-store";
 import {
   normalizeWebsiteBuildBrief,
@@ -278,6 +279,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   const repMayRunDeal = mayQuoteAndClose(session.teamRole) && actorHoldsDealSeat;
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
+  // One deal, one price, one payment request: while a Free AI Audit is open on
+  // this lead, its proposal and Stripe checkout own the money
+  // (lib/ai-audit/ownership.ts), and a website quote or payment link here would
+  // be a second, conflicting request to the same client.
+  if (["proposal","create_payment_link","record_payment","complete_audit"].includes(body.action) && await aiAuditOwnsLead(session.tenantId, leadId)) {
+    return NextResponse.json({ok:false,error:"ai_audit_owns_deal"},{status:409});
+  }
   const trackedAction = ["advance","disposition","qualify","book_founder","founder_meeting_sms_consent","complete_audit","set_stage","proposal","create_payment_link","deal_outcome","record_payment"].includes(body.action);
   const requestId = typeof body.requestId === "string" && UUID.test(body.requestId) ? body.requestId : null;
   if (trackedAction && !requestId) return NextResponse.json({ok:false,error:"request_id_required"},{status:400});

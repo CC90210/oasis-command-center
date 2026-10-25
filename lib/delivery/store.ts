@@ -786,6 +786,12 @@ export type NewProject = {
   due_date: string | null;
   /** The current client record this delivery belongs to (migration bravo__188). */
   customer_id: string;
+  /**
+   * A fixed id from a caller that must never create the project twice (the
+   * Free AI Audit's onboarding derives it from the engagement). A second
+   * create with the same id fails on the primary key instead of duplicating.
+   */
+  id?: string;
 };
 
 const STARTED_STAGES: readonly ProjectStage[] = ["building", "review", "live", "maintenance"];
@@ -820,7 +826,7 @@ export async function createProject(
   if (input.client_tenant_id !== customer.client_tenant_id) {
     throw new Error("delivery.store: project customer/client workspace mismatch");
   }
-  const id = randomUUID();
+  const id = input.id ?? randomUUID();
   const at = now.toISOString();
   const cols = [
     "id", "tenant_id", "title", "description", "client_tenant_id", "client_name", "client_email", "lead_id",
@@ -1027,11 +1033,13 @@ export async function createTask(
   db: Client,
   tenantId: string,
   projectId: string,
-  input: { title: string; notes: string | null; due_date: string | null; assigned_to: string | null },
+  input: { title: string; notes: string | null; due_date: string | null; assigned_to: string | null; id?: string },
   now: Date,
 ): Promise<string | null> {
   if (!(await projectExists(db, tenantId, projectId))) return null;
-  const id = randomUUID();
+  // A fixed id (the AI audit onboarding checklist) makes a retried create fail
+  // on the primary key instead of adding the same task twice.
+  const id = input.id ?? randomUUID();
   const at = now.toISOString();
   await db.batch(
     [

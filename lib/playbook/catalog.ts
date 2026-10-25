@@ -244,6 +244,11 @@ export const CATALOG: readonly CatalogDoc[] = [
     required: true, requiredBy: null, owner: "ops", source: { kind: "bundled", playbookSlug: "07-new-client-onboarding" }, reviewEveryDays: QUARTER, legal: false, needsFromCc: null,
   },
   {
+    slug: "ai-audit-operating-handbook", title: "Free AI Audit operating handbook", kind: "runbook", category: "sales_delivery", visibility: "founders",
+    summary: "How a Free AI Audit runs from the first call to an onboarded client: the two approvals, the four evidence labels, pricing, payment and onboarding.",
+    required: true, requiredBy: null, owner: "ops", source: { kind: "bundled", playbookSlug: "12-ai-audit-operating-handbook" }, reviewEveryDays: QUARTER, legal: false, needsFromCc: null,
+  },
+  {
     slug: "oasis-loop", title: "The OASIS Loop", kind: "runbook", category: "sales_delivery", visibility: "team",
     summary: "The closed-loop method for getting production-grade output from an AI system: prime, translate, execute, reflect.",
     required: false, requiredBy: null, owner: "ops", source: { kind: "bundled", playbookSlug: "10-oasis-loop" }, reviewEveryDays: YEAR, legal: false, needsFromCc: null,

@@ -27,6 +27,7 @@ import { visibleToViewer } from "@/lib/web-leads/data";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
 import { DeleteLeadButton } from "./DeleteLeadButton";
 import { ClientRecordCard } from "@/components/os/landings/clients-record-card";
+import { AiAuditLeadCard } from "@/components/ai-audit/AiAuditLeadCard";
 import { resolveSessionContext } from "@/lib/api-auth";
 import {
   canMutateOasisSalesRecord,
@@ -317,6 +318,9 @@ export default async function PipelineLeadDetailPage({
       {/* Won deals only: "Convert to client" / the client record it became.
           Draws nothing on any other stage, and changes nothing about the deal. */}
       <ClientRecordCard tenantId={tenantId} leadId={id} stage={metrics.stageKey} />
+
+      {/* The lead's Free AI Audit (OASIS workspaces, founders only). */}
+      <AiAuditLeadCard tenantId={tenantId} leadId={id} canWork={session.ok && session.isTrueAdmin} />
 
       {canWorkLifecycle || managerCoachingView ? (
         <LeadLifecycleActions

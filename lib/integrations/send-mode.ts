@@ -53,6 +53,13 @@ const CHANNEL_LIVE_ENV: Record<string, string> = {
   smartlead: "LIVE_SEND_SMARTLEAD",
   // An approved department reply in a Slack thread (send_slack_message).
   slack: "LIVE_SEND_SLACK",
+  // CC's approved Free AI Audit delivery email (lib/ai-audit/delivery.ts). Its
+  // own flag, so audits can go live without every other approved email.
+  ai_audit_delivery: "LIVE_SEND_AI_AUDIT",
+  // A client pressing Pay on an approved Free AI Audit opens a live Stripe
+  // Checkout Session (lib/ai-audit/payment.ts). Its own flag, so payment
+  // requests can be held while email stays live, or the other way round.
+  stripe_checkout: "LIVE_SEND_STRIPE_CHECKOUT",
 };
 
 /**

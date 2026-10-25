@@ -82,6 +82,7 @@ test("a Vercel-identical minute fires the exact due set", () => {
   const d = at("2026-08-31T13:40:00Z");
   const due = CRON_TABLE.filter((e) => cronMatches(e.schedule, d)).map((e) => e.path).sort();
   assert.deepEqual(due, [
+    "/api/cron/ai-audit-tick",
     "/api/cron/dispatch-automations",
     "/api/cron/dispatch-engine-fallbacks",
     "/api/cron/dispatch-drips",

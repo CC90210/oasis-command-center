@@ -30,7 +30,10 @@ import { verifyStripeSignature } from "@/lib/founders-finances/stripe-signature"
 import { readBodyCapped } from "@/lib/ledger/ingest";
 import { RUNNER_BODY_MAX_BYTES, SIGNATURE_WINDOW_SECONDS } from "@/lib/tools/limits";
 
-export const TOOLS_PRODUCERS = ["bea"] as const;
+// `bea` is the PC's runners; `mac` is CC's Mac (Oasis Meet transcription and
+// the Free AI Audit's PDF, 2026-10-25). Each signs with its own secret, so one
+// machine's key can be rotated or revoked without touching the other's.
+export const TOOLS_PRODUCERS = ["bea", "mac"] as const;
 export type ToolsProducer = (typeof TOOLS_PRODUCERS)[number];
 
 export const TOOLS_SECRET_MIN_LENGTH = 32;
@@ -38,7 +41,7 @@ export const HEADER_PRODUCER = "x-tools-producer";
 export const HEADER_TIMESTAMP = "x-tools-timestamp";
 export const HEADER_SIGNATURE = "x-tools-signature";
 
-/** The Worker secret a producer signs with: TOOLS_RUNNER_SECRET_BEA. */
+/** The Worker secret a producer signs with: TOOLS_RUNNER_SECRET_BEA, TOOLS_RUNNER_SECRET_MAC. */
 export function toolsSecretEnvName(producer: ToolsProducer): string {
   return `TOOLS_RUNNER_SECRET_${producer.toUpperCase()}`;
 }

@@ -80,13 +80,16 @@ function validateAbsoluteUrl(value: string, field: string): string {
   return url.toString();
 }
 
-/**
- * Create the one Stripe object this workflow knows how to verify: a Checkout
- * Session whose amount and identity are frozen to this lead. Reusing the
- * payment token as Stripe's idempotency key makes a network retry return the
- * same session instead of creating a second live link.
- */
-export async function createStripeWebsiteCheckout(input: {
+/** The bindings the verifier checks. Extra metadata may never overwrite them. */
+const RESERVED_METADATA: Readonly<Record<string, true>> = {
+  oasis_tenant_id: true,
+  oasis_lead_id: true,
+  oasis_payment_token: true,
+  oasis_payment_plan_id: true,
+  oasis_installment_kind: true,
+};
+
+export type StripeLeadCheckoutInput = {
   secretKey: string;
   tenantId: string;
   leadId: string;
@@ -100,7 +103,30 @@ export async function createStripeWebsiteCheckout(input: {
   successUrl: string;
   cancelUrl: string;
   fetchImpl?: StripeFetch;
-}): Promise<StripeWebsiteCheckout> {
+};
+
+/**
+ * Create the one Stripe object this workflow knows how to verify: a Checkout
+ * Session whose amount and identity are frozen to this lead. Reusing the
+ * payment token as Stripe's idempotency key makes a network retry return the
+ * same session instead of creating a second live link.
+ */
+export async function createStripeWebsiteCheckout(input: StripeLeadCheckoutInput): Promise<StripeWebsiteCheckout> {
+  return createStripeLeadCheckout({ ...input, idempotencyPrefix: "oasis-website-" });
+}
+
+/**
+ * The same frozen Checkout Session for another program (the Free AI Audit,
+ * lib/ai-audit/payment.ts): its own idempotency prefix, and extra metadata
+ * that names the program. Every binding verifyStripeWebsitePayment checks
+ * (tenant, lead, payment token, payment plan) is set exactly as for a website
+ * sale, so one verifier serves both. createStripeWebsiteCheckout passes no
+ * extra metadata, so its request to Stripe is unchanged byte for byte.
+ */
+export async function createStripeLeadCheckout(
+  input: StripeLeadCheckoutInput & { idempotencyPrefix: string; extraMetadata?: Readonly<Record<string, string>> },
+): Promise<StripeWebsiteCheckout> {
+  if (!/^[a-z0-9-]{3,40}$/.test(input.idempotencyPrefix)) throw new Error("invalid_idempotency_prefix");
   if (!input.secretKey.trim()) throw new Error("stripe_not_connected");
   if (
     !input.tenantId.trim() ||
@@ -133,6 +159,13 @@ export async function createStripeWebsiteCheckout(input: {
     "payment_intent_data[metadata][oasis_payment_plan_id]": input.paymentPlanId,
     "payment_intent_data[metadata][oasis_installment_kind]": input.installmentKind,
   });
+  for (const [key, value] of Object.entries(input.extraMetadata ?? {})) {
+    if (!/^oasis_[a-z_]{1,36}$/.test(key) || key in RESERVED_METADATA || typeof value !== "string" || value.length > 200) {
+      throw new Error("invalid_checkout_metadata");
+    }
+    params.set(`metadata[${key}]`, value);
+    params.set(`payment_intent_data[metadata][${key}]`, value);
+  }
   if (input.customerEmail?.trim()) params.set("customer_email", input.customerEmail.trim());
   const response = await (input.fetchImpl ?? fetch)("https://api.stripe.com/v1/checkout/sessions", {
     method: "POST",
@@ -140,7 +173,7 @@ export async function createStripeWebsiteCheckout(input: {
       Authorization: `Bearer ${input.secretKey}`,
       Accept: "application/json",
       "Content-Type": "application/x-www-form-urlencoded",
-      "Idempotency-Key": `oasis-website-${input.paymentToken}`,
+      "Idempotency-Key": `${input.idempotencyPrefix}${input.paymentToken}`,
     },
     body: params.toString(),
     cache: "no-store",

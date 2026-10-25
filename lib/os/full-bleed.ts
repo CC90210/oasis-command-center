@@ -54,6 +54,8 @@ export const FULL_BLEED_PREFIXES: readonly string[] = [
   "/meet", // an Oasis Meet room (/meet/<code>): a guest with no account opens the host's link and joins the call
   "/invite/", // pre-signup invite landing
   "/sign/", // public e-signature page: the signer may never have an account
+  "/your-audit/", // a client's private Free AI Audit and its thank-you page: the client has no account
+  "/audit-print/", // the print view the Mac turns into the audit PDF: a headless browser with no session
   "/unsubscribe", // email opt-out landing: the recipient may be another company's customer
   "/link-expired", // where an unverifiable tracking click lands; belongs to no company
   "/desktop-link", // signed in, but it draws its own Desktop Connect header (U1-16)

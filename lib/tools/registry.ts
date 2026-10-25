@@ -310,7 +310,7 @@ export function toolByKey(k: unknown): ToolDef | null {
  * in flight (a meeting is never refused because downloads are busy, and the
  * reverse).
  */
-export type SystemRunnerToolKey = "meet_transcribe" | "meet_delete_local";
+export type SystemRunnerToolKey = "meet_transcribe" | "meet_delete_local" | "ai_audit_pdf";
 export type RunnerToolKey = ToolKey | SystemRunnerToolKey;
 
 export type RunnerRules = {
@@ -325,6 +325,9 @@ const DOWNLOAD_RULES: RunnerRules = { stages: ["downloading", "uploading"], maxH
 export const SYSTEM_RUNNER_TOOLS: Readonly<Record<SystemRunnerToolKey, RunnerRules>> = {
   meet_transcribe: { stages: ["downloading", "transcribing", "finishing"], maxHoldSeconds: MEET_TRANSCRIBE_MAX_HOLD_SECONDS },
   meet_delete_local: { stages: ["downloading", "finishing"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS },
+  // The Free AI Audit's PDF, printed on the Mac from a signed render address
+  // (lib/ai-audit/pdf.ts). A few seconds of work; the lease is the usual one.
+  ai_audit_pdf: { stages: ["rendering", "uploading"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS },
 };
 
 export const SYSTEM_RUNNER_TOOL_KEYS = Object.keys(SYSTEM_RUNNER_TOOLS) as SystemRunnerToolKey[];

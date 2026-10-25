@@ -1,0 +1,519 @@
+/**
+ * ai-audit-flow.test.ts — the Free AI Audit end to end, on a real libSQL file
+ * with the real migrations, against the permanent test prospect.
+ *
+ * lead → engagement → catalogue confirmed → profile → audit + proposal drafts
+ * → submit (frozen) → PDF stored → Gate 2 filed → approved by the OWNER →
+ * private link + one email → client view → Pay (one Stripe session, reused)
+ * → Stripe confirms (and only then) → onboarding, twice, creating one of
+ * everything → Active Client → a later refund is caught and flagged.
+ *
+ * Plus the refusals that matter: a non-owner approver, a dry run, a stale
+ * write, a frozen version, a fixture price on a real proposal, a mismatched
+ * payment, a bad link. Only the mailbox and Stripe are fakes (they record and
+ * never send); everything else is the production code path.
+ *
+ * Run: node --conditions=react-server --import tsx tests/ai-audit-flow.test.ts
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Client } from "@libsql/client";
+import { OASIS, USERS, check, finish, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
+
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
+process.env.AI_AUDIT_LINK_SECRET = "ai-audit-flow-test-link-secret-000000000000001";
+
+const LEAD = "7a000000-0000-4000-8000-000000000001";
+const LEAD_B = "7a000000-0000-4000-8000-000000000002";
+const NOW = () => new Date();
+
+/** scripts/apply_turso_migration.py split_statements: a trigger body stays one statement. */
+function splitStatements(sql: string): string[] {
+  const out: string[] = [];
+  let buf: string[] = [];
+  let depth = 0;
+  for (const line of sql.split(/\r?\n/)) {
+    const stripped = line.trim();
+    if (!stripped || stripped.startsWith("--")) continue;
+    buf.push(line);
+    const upper = stripped.toUpperCase();
+    if (/\bBEGIN\b/.test(upper)) depth += 1;
+    if (/\bEND\s*;/.test(upper)) {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) {
+        out.push(buf.join("\n").trim().replace(/;$/, "").trim());
+        buf = [];
+        continue;
+      }
+    }
+    if (depth === 0 && stripped.endsWith(";")) {
+      out.push(buf.join("\n").trim().replace(/;$/, "").trim());
+      buf = [];
+    }
+  }
+  const tail = buf.join("\n").trim().replace(/;$/, "").trim();
+  if (tail) out.push(tail);
+  return out.filter(Boolean);
+}
+
+async function apply(db: Client, file: string) {
+  for (const stmt of splitStatements(readFileSync(join(process.cwd(), "database", "turso", file), "utf8"))) await db.execute(stmt);
+}
+
+async function seedLead(db: Client, id: string, stage: string, email: string) {
+  await db.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+    args: [id, OASIS, JSON.stringify({ stage, company: "[TEST] OASIS Audit Fixture Co", name: "Test Owner", email, website: "https://oasisai.work/fixtures/audit-fixture-co.html", business_city: "Collingwood" })],
+  });
+}
+
+async function leadStage(db: Client, id: string): Promise<string> {
+  const r = await db.execute({ sql: "SELECT json_extract(data, '$.stage') AS s FROM tenant_records WHERE id = ?", args: [id] });
+  return String(r.rows[0]?.s ?? "");
+}
+
+function fixtureDoc() {
+  return {
+    schema: "ai_audit_doc/v1",
+    business: { name: "[TEST] OASIS Audit Fixture Co", type: "local_service", location: "Collingwood, ON" },
+    prepared_for: { name: "Test Owner" },
+    prepared_on: "2026-10-25",
+    sections: {
+      executive_overview: { paragraphs: [{ text: "Most enquiries wait until the next morning for a reply.", cites: ["f1"] }] },
+      current_assessment: { paragraphs: [{ text: "Jobs are booked by phone and email.", cites: [] }], systems: [] },
+      key_findings: { finding_ids: ["f1"] },
+      inefficiencies: { items: [] },
+      opportunities: {
+        items: [
+          { id: "o1", title: "Instant reply", what_it_does: "Replies at once with booking times.", problem: "Slow replies.", how_it_works: "A form triggers a reply.", integrations: ["Gmail"], expected_improvement: { text: "Saves 5 to 8 hours a month.", cites: ["e1"] }, finding_ids: ["f1"], estimate_ids: ["e1"] },
+        ],
+      },
+      roadmap: { now: [{ opportunity_id: "o1", impact: "high", effort: "low", dependencies: [], urgency: "" }], next: [], later: [] },
+      impact: { estimate_ids: ["e1"], limitations: ["Depends on lead volume."] },
+      next_steps: { steps: ["Approve", "Kickoff"] },
+    },
+    findings: [{ id: "f1", title: "Replies take a day", statement: "The owner said replies go out the next morning.", label: "client_reported", source_ids: ["s1"] }],
+    estimates: [{ id: "e1", title: "Time saved", formula: "enquiries x minutes", low: 5, high: 8, unit: "hours", period: "a month", inputs: [{ name: "Enquiries", value: 30, label: "client_reported", basis: "s1" }], assumptions: ["Ten minutes each."] }],
+    sources: [{ id: "s1", kind: "client", title: "Discovery call" }],
+    gaps: [],
+  };
+}
+
+type FakeSession = { id: string; amount: number; currency: string; metadata: Record<string, string>; client_reference_id: string; paid: boolean; refunded: boolean; disputed: boolean };
+
+function fakeStripe() {
+  const sessions = new Map<string, FakeSession>();
+  const created: Array<{ body: URLSearchParams; headers: Record<string, string> }> = [];
+  let n = 0;
+  const impl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    if (u === "https://api.stripe.com/v1/checkout/sessions" && init?.method === "POST") {
+      const body = new URLSearchParams(String(init.body));
+      created.push({ body, headers: init.headers as Record<string, string> });
+      n += 1;
+      const id = `cs_live_fixture${n}`;
+      const md: Record<string, string> = {};
+      for (const [k, v] of body.entries()) {
+        const m = /^metadata\[(.+)\]$/.exec(k);
+        if (m) md[m[1]] = v;
+      }
+      sessions.set(id, { id, amount: Number(body.get("line_items[0][price_data][unit_amount]")), currency: String(body.get("line_items[0][price_data][currency]")), metadata: md, client_reference_id: String(body.get("client_reference_id")), paid: false, refunded: false, disputed: false });
+      return new Response(JSON.stringify({ id, url: `https://checkout.stripe.com/c/pay/${id}`, livemode: true }), { status: 200 });
+    }
+    const m = /^https:\/\/api\.stripe\.com\/v1\/checkout\/sessions\/(cs_live_[A-Za-z0-9_]+)/.exec(u);
+    if (m) {
+      const s = sessions.get(m[1]);
+      if (!s) return new Response(JSON.stringify({ error: { message: "No such session" } }), { status: 404 });
+      return new Response(
+        JSON.stringify({
+          id: s.id,
+          object: "checkout.session",
+          livemode: true,
+          status: s.paid ? "complete" : "open",
+          payment_status: s.paid ? "paid" : "unpaid",
+          amount_total: s.amount,
+          currency: s.currency,
+          client_reference_id: s.client_reference_id,
+          metadata: s.metadata,
+          payment_intent: s.paid ? { latest_charge: { refunded: s.refunded, amount_refunded: s.refunded ? s.amount : 0, disputed: s.disputed } } : null,
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+  return { impl, sessions, created };
+}
+
+async function main() {
+  const db = await setupDatabase();
+  await setupProjectCustomers(db);
+  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql"]) await apply(db, f);
+  await seedLead(db, LEAD, "qualified", "owner@fixture.test");
+  await seedLead(db, LEAD_B, "qualified", "second@fixture.test");
+
+  const store = await import("../lib/ai-audit/store");
+  const versions = await import("../lib/ai-audit/versions");
+  const catStore = await import("../lib/ai-audit/catalogue-store");
+  const lifecycle = await import("../lib/ai-audit/lifecycle");
+  const delivery = await import("../lib/ai-audit/delivery");
+  const pdf = await import("../lib/ai-audit/pdf");
+  const link = await import("../lib/ai-audit/link");
+  const pub = await import("../lib/ai-audit/public");
+  const payment = await import("../lib/ai-audit/payment");
+  const onboarding = await import("../lib/ai-audit/onboarding");
+  const ownership = await import("../lib/ai-audit/ownership");
+  const tick = await import("../lib/ai-audit/tick");
+  const hash = await import("../lib/ai-audit/hash");
+  const execute = await import("../lib/os/approvals/execute");
+  const executors = await import("../lib/os/approvals/executors");
+  const approvalsStore = await import("../lib/os/approvals/store");
+
+  const cc = { type: "user" as const, id: USERS.cc.id };
+  let engagementId = "";
+
+  console.log("engagement");
+  await check("opening an engagement is idempotent and moves nothing on the lead yet", async () => {
+    const a = await store.openEngagement(db, { tenantId: OASIS, leadId: LEAD, actor: cc, now: NOW(), isFixture: true });
+    assert.ok(a.ok && a.created);
+    const b = await store.openEngagement(db, { tenantId: OASIS, leadId: LEAD, actor: cc, now: NOW() });
+    assert.ok(b.ok && !b.created && a.ok && b.engagement.id === a.engagement.id);
+    engagementId = a.ok ? a.engagement.id : "";
+    assert.equal(a.ok && a.engagement.stage, "new_lead");
+    assert.equal(await leadStage(db, LEAD), "qualified");
+  });
+  await check("a stage move updates the lead forward, and never backward", async () => {
+    const m = await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId, to: "call_scheduled", actor: cc, now: NOW() });
+    assert.ok(m.ok);
+    assert.equal(await leadStage(db, LEAD), "founder_meeting_booked");
+    const back = await lifecycle.moveLeadForward(db, { tenantId: OASIS, leadId: LEAD, target: "qualified", requestId: "test-back", actorUserId: USERS.cc.id, note: "x", now: NOW() });
+    assert.equal(back.moved, false);
+    assert.equal(back.reason, "lead_already_further");
+  });
+  await check("a stale row version writes nothing, the event included", async () => {
+    const e = await store.getEngagement(db, OASIS, engagementId);
+    const before = (await store.listEvents(db, OASIS, engagementId)).length;
+    const r = await store.patchEngagement(db, { tenantId: OASIS, id: engagementId, expectedRowVersion: (e?.row_version ?? 0) - 1, patch: { contact_name: "Someone" }, event: "details_saved", actor: cc, now: NOW() });
+    assert.equal(r.ok, false);
+    assert.equal((await store.listEvents(db, OASIS, engagementId)).length, before);
+  });
+  await check("the audit trail refuses to be rewritten", async () => {
+    await assert.rejects(db.execute({ sql: "UPDATE ai_audit_events SET event = 'tampered' WHERE tenant_id = ?", args: [OASIS] }), /append_only/);
+  });
+
+  console.log("catalogue and settings");
+  let fixtureItemId = "";
+  await check("the seed is proposed only; a confirmed price is final; confirming a new version retires the old", async () => {
+    const seeded = await catStore.seedCatalogue(db, OASIS, USERS.cc.id, NOW(), { includeFixture: true });
+    assert.ok(seeded.inserted > 10);
+    assert.equal((await catStore.seedCatalogue(db, OASIS, USERS.cc.id, NOW(), { includeFixture: true })).inserted, 0, "seeding twice adds nothing");
+    const all = await catStore.listCatalogue(db, OASIS, { includeFixture: true });
+    assert.ok(all.every((i) => i.status === "proposed"));
+    const fixture = all.find((i) => i.sku === "fixture-canary-item");
+    assert.ok(fixture);
+    fixtureItemId = fixture!.id;
+    assert.ok((await catStore.confirmCatalogueItem(db, OASIS, fixtureItemId, USERS.cc.id, NOW())).ok);
+    await assert.rejects(db.execute({ sql: "UPDATE ai_service_catalogue_items SET price_cents = 1 WHERE id = ?", args: [fixtureItemId] }), /final/);
+    const real = all.find((i) => i.sku === "website-growth")!;
+    assert.ok((await catStore.confirmCatalogueItem(db, OASIS, real.id, USERS.cc.id, NOW())).ok);
+    const v2 = await catStore.proposeCatalogueVersion(db, OASIS, { ...real, price_cents: 520_000 }, USERS.cc.id, NOW());
+    assert.equal(v2.item_version, 2);
+    assert.ok((await catStore.confirmCatalogueItem(db, OASIS, v2.id, USERS.cc.id, NOW())).ok);
+    const after = (await catStore.listCatalogue(db, OASIS)).filter((i) => i.sku === "website-growth");
+    assert.deepEqual(after.map((i) => [i.item_version, i.status]), [[2, "confirmed"], [1, "retired"]]);
+  });
+  await check("settings: the tax rule starts unset and saves with a row version", async () => {
+    const s = await store.getSettings(db, OASIS);
+    assert.equal(s.settings.tax, null);
+    const saved = await store.saveSettings(db, { tenantId: OASIS, settings: { ...s.settings, tax: { mode: "not_registered" } }, expectedRowVersion: 0, actorId: USERS.cc.id, now: NOW() });
+    assert.ok(saved.ok);
+    assert.equal((await store.saveSettings(db, { tenantId: OASIS, settings: s.settings, expectedRowVersion: 0, actorId: USERS.cc.id, now: NOW() })).ok, false);
+  });
+
+  console.log("drafts");
+  await check("profile fields save on a draft, and a change to a transcript value is recorded as a correction", async () => {
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId, field: { field_key: "sales.leads_per_month", value: 30, label: "client_reported", source_type: "transcript" }, actor: cc, now: NOW() });
+    const f = await versions.saveProfileField(db, { tenantId: OASIS, engagementId, field: { field_key: "sales.leads_per_month", value: 35, label: "client_reported", source_type: "owner" }, actor: cc, now: NOW() });
+    assert.equal(f.owner_corrected, true);
+    assert.equal(f.source_type, "transcript");
+    assert.equal(f.corrected_from, 30);
+  });
+  await check("the proposal takes the catalogue's confirmed price, whatever the browser sent; a fixture item never prices a real client", async () => {
+    let e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const a = await versions.saveAuditDraft(db, { tenantId: OASIS, engagementId, doc: fixtureDoc() as never, actor: cc, now: NOW(), expectedRowVersion: e.row_version });
+    assert.ok(a.ok);
+    e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const content = {
+      schema: "ai_audit_proposal/v1",
+      currency: "CAD",
+      lines: [{ kind: "catalogue", line_id: "l1", sku: "fixture-canary-item", item_id: fixtureItemId, item_version: 1, name: "tampered", description: "", category: "implementation", unit: "fixed", quantity: 1, optional: false, unit_price_cents: 999_999, currency: "CAD", deliverables: [], onboarding_requirements: [] }],
+      phases: [],
+      payment_terms: { kind: "full" },
+      tax: null,
+      exclusions: [],
+      terms: [],
+      valid_until: "2099-01-01",
+      delivery_email: { to: "owner@fixture.test", subject: "Your free AI audit", body: "Hi,\n\n{{audit_link}}\n\nThanks." },
+    };
+    const { settings } = await store.getSettings(db, OASIS);
+    const p = await versions.saveProposalDraft(db, { tenantId: OASIS, engagementId, content: content as never, actor: cc, now: NOW(), expectedRowVersion: e.row_version, tax: settings.tax });
+    assert.ok(p.ok);
+    assert.equal(p.ok && p.version.content?.lines[0].kind, "catalogue");
+    assert.equal(p.ok && (p.version.content?.lines[0] as { unit_price_cents: number }).unit_price_cents, 100, "the confirmed price, not the browser's");
+    assert.equal(p.ok && p.version.total_cents, 100);
+    // The same fixture item on a real client's engagement becomes "needs your price".
+    const real = await store.openEngagement(db, { tenantId: OASIS, leadId: LEAD_B, actor: cc, now: NOW() });
+    assert.ok(real.ok);
+    const rp = await versions.saveProposalDraft(db, { tenantId: OASIS, engagementId: real.ok ? real.engagement.id : "", content: content as never, actor: cc, now: NOW(), expectedRowVersion: real.ok ? real.engagement.row_version : 0, tax: settings.tax });
+    assert.equal(rp.ok && rp.version.content?.lines[0].kind, "needs_owner_price");
+  });
+
+  console.log("submit and the PDF");
+  await check("submission refuses an unready engagement, then freezes both versions and queues the print", async () => {
+    let e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const early = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
+    assert.equal(early.ok, false, "call_scheduled is too early");
+    for (const to of ["call_completed", "transcript_review"] as const) assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId, to, actor: cc, now: NOW() })).ok);
+    e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const r = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
+    assert.ok(r.ok, !r.ok ? `${r.error} ${(r.problems ?? []).join("; ")}` : "");
+    assert.equal(r.ok && r.audit.status, "awaiting_approval");
+    await assert.rejects(db.execute({ sql: "UPDATE ai_audit_versions SET content = '{}' WHERE id = ?", args: [r.ok ? r.audit.id : ""] }), /frozen/);
+    const jobs = await db.execute({ sql: "SELECT tool_key, status, input_json FROM tool_jobs WHERE tenant_id = ?", args: [OASIS] });
+    assert.equal(jobs.rows.length, 1);
+    assert.equal(String(jobs.rows[0].tool_key), "ai_audit_pdf");
+    assert.ok(!String(jobs.rows[0].input_json).includes("sig="), "the job holds no usable address");
+    assert.equal(await leadStage(db, LEAD), "demo_completed");
+  });
+  const stored = new Map<string, Uint8Array>();
+  const memStorage = { upload: async (p: string, b: Uint8Array) => (stored.set(p, b), { ok: true as const }), download: async (p: string) => stored.get(p) ?? null };
+  await check("a printed PDF is stored only if it is a PDF, matches its hash, and is still the version printed", async () => {
+    const e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const audit = (await versions.getAuditVersion(db, OASIS, e.current_audit_version_id!))!;
+    const bytes = Buffer.from("%PDF-1.4\n" + "x".repeat(400) + "\n%%EOF");
+    const report = { pdfBase64: bytes.toString("base64"), sha256: hash.sha256Hex(bytes), bytes: bytes.length, pages: 6 };
+    const jobInput = { audit_version_id: audit.id, content_sha256: audit.content_sha256 };
+    const bad = await pdf.storePdf(db, memStorage, { tenantId: OASIS, jobInput, report: { ...report, sha256: "0".repeat(64) }, now: NOW() });
+    assert.equal(bad.ok, false);
+    const wrongVersion = await pdf.storePdf(db, memStorage, { tenantId: OASIS, jobInput: { ...jobInput, content_sha256: "f".repeat(64) }, report, now: NOW() });
+    assert.equal(wrongVersion.ok, false);
+    const good = await pdf.storePdf(db, memStorage, { tenantId: OASIS, jobInput, report, now: NOW() });
+    assert.ok(good.ok);
+    assert.equal((await versions.getAuditVersion(db, OASIS, audit.id))!.pdf_sha256, report.sha256);
+  });
+
+  console.log("Gate 2: final approval");
+  let approvalId = "";
+  await check("Gate 2 is filed once the PDF exists, bound to every hash, and only once", async () => {
+    const r = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW() });
+    assert.ok(r.ok && r.created);
+    approvalId = r.ok ? r.approvalId : "";
+    const again = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW() });
+    assert.ok(again.ok && !again.created && again.approvalId === approvalId);
+    const a = (await approvalsStore.getApprovalInTenant(db, OASIS, approvalId))!;
+    assert.equal(a.action_kind, "deliver_ai_audit");
+    assert.equal(a.department_key, null, "only owners and admins see it");
+    assert.equal(a.risk_level, "spend");
+  });
+
+  const sent: Array<Record<string, unknown>> = [];
+  const deps = (opts: { live: boolean; owner?: boolean } = { live: true }) => ({
+    ...executors.defaultExecutorDeps(),
+    isDryRun: (ch?: string) => (ch === "ai_audit_delivery" ? !opts.live : true),
+    sendEmail: async (args: Record<string, unknown>) => {
+      sent.push(args);
+      return { ok: true as const, provider: "oasis_shared_gmail" as const, gmail_message_id: `m${sent.length}`, from_address: "submissions@oasisai.work" };
+    },
+    signerFor: () => null,
+    publishEvent: async () => undefined,
+    aiAudit: {
+      linkSecret: () => process.env.AI_AUDIT_LINK_SECRET ?? null,
+      baseUrl: () => "https://oasisai.work",
+      stripeConnected: async () => true,
+      isOwner: delivery.defaultAiAuditExecutorDeps().isOwner,
+    },
+  });
+  const approve = async () => db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ? AND status IN ('pending', 'failed')", args: [USERS.cc.id, new Date().toISOString(), approvalId] });
+  await check("an admin who is not the owner cannot pass Gate 2: nothing is sent", async () => {
+    await approve();
+    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.admin.id, email: USERS.admin.email } }, deps() as never);
+    assert.ok(r.ok);
+    assert.equal(r.ok && r.approval.status, "failed");
+    assert.equal(sent.length, 0);
+    assert.equal(await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_share_links", args: [] }).then((x) => Number(x.rows[0].n)), 0);
+  });
+  await check("a retry files a fresh card; in dry run nothing is minted or sent", async () => {
+    const retry = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
+    assert.ok(retry.ok && retry.created);
+    approvalId = retry.ok ? retry.approvalId : "";
+    await approve();
+    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps({ live: false }) as never);
+    assert.equal(r.ok && (r.approval.execution_result as { outcome?: string } | null)?.outcome, "dry_run");
+    assert.equal(sent.length, 0);
+    assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "final_review");
+  });
+  let token = "";
+  await check("the owner's approval mints the private link, sends ONE email, and delivers", async () => {
+    const retry = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
+    approvalId = retry.ok ? retry.approvalId : "";
+    await approve();
+    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+    assert.equal(r.ok && (r.approval.execution_result as { outcome?: string } | null)?.outcome, "sent");
+    assert.equal(sent.length, 1);
+    const body = String(sent[0].body);
+    const m = /\/your-audit\/([A-Za-z0-9_-]{43})/.exec(body);
+    assert.ok(m, "the email carries the private link");
+    token = m![1];
+    assert.ok(!body.includes("{{audit_link}}"));
+    assert.equal(sent[0].to, "owner@fixture.test");
+    const e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "delivered");
+    assert.equal((await versions.getAuditVersion(db, OASIS, e.current_audit_version_id!))!.status, "delivered");
+    assert.equal(await leadStage(db, LEAD), "proposal_sent");
+    const stored2 = await db.execute({ sql: "SELECT token_sha256 FROM ai_audit_share_links WHERE tenant_id = ?", args: [OASIS] });
+    assert.equal(String(stored2.rows[0].token_sha256), link.tokenHash(token));
+    assert.ok(!JSON.stringify(stored2.rows).includes(token), "the token itself is never stored");
+    // Pressing approve again runs nothing a second time.
+    const again = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+    assert.equal(again.ok, false);
+    assert.equal(sent.length, 1);
+  });
+
+  console.log("the client's link");
+  await check("the link opens the delivered audit; a bad, revoked or expired link opens nothing", async () => {
+    const p = await pub.loadPublicAudit(db, token, NOW());
+    assert.ok(p);
+    assert.equal(p!.audit.doc.business.name, "[TEST] OASIS Audit Fixture Co");
+    assert.equal(await pub.loadPublicAudit(db, "x".repeat(43), NOW()), null);
+    assert.equal(await pub.loadPublicAudit(db, `${token}a`, NOW()), null);
+    assert.equal(await pub.loadPublicAudit(db, token, new Date(Date.now() + 40 * 86_400_000)), null, "expired after 30 days");
+  });
+  await check("the first counted view is recorded once", async () => {
+    const p = (await pub.loadPublicAudit(db, token, NOW()))!;
+    assert.equal(await link.recordLinkView(db, p.link, NOW()), true);
+    const p2 = (await pub.loadPublicAudit(db, token, NOW()))!;
+    assert.equal(await link.recordLinkView(db, p2.link, NOW()), false);
+  });
+
+  console.log("payment");
+  const stripe = fakeStripe();
+  const payDeps = { stripeSecret: async () => "sk_live_fake", fetchImpl: stripe.impl, isDryRun: () => false, alert: async () => undefined, baseUrl: () => "https://oasisai.work" };
+  await check("Pay opens one Stripe session for the approved amount and reuses it; pressing Pay is not paying", async () => {
+    const p = (await pub.loadPublicAudit(db, token, NOW()))!;
+    const first = await payment.createOrReuseCheckout(db, { link: p.link, now: NOW(), deps: payDeps });
+    assert.ok(first.ok && !first.reused);
+    const second = await payment.createOrReuseCheckout(db, { link: p.link, now: NOW(), deps: payDeps });
+    assert.ok(second.ok && second.reused);
+    assert.equal(stripe.created.length, 1, "one payment request");
+    const body = stripe.created[0].body;
+    assert.equal(body.get("line_items[0][price_data][unit_amount]"), "100");
+    assert.equal(body.get("metadata[oasis_checkout]"), "ai_audit_v1");
+    assert.match(stripe.created[0].headers["Idempotency-Key"], /^oasis-ai-audit-/);
+    const e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "payment_pending");
+    assert.equal(e.payment_status, "pending");
+  });
+  await check("in dry run the Pay button makes no payment request at all", async () => {
+    const p = (await pub.loadPublicAudit(db, token, NOW()))!;
+    const before = stripe.created.length;
+    await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'expired' WHERE tenant_id = ?", args: [OASIS] });
+    const r = await payment.createOrReuseCheckout(db, { link: p.link, now: NOW(), deps: { ...payDeps, isDryRun: () => true } });
+    assert.ok(!r.ok && r.error === "dry_run");
+    assert.equal(stripe.created.length, before);
+    await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'open' WHERE tenant_id = ?", args: [OASIS] });
+  });
+  let checkoutId = "";
+  await check("an unpaid session confirms nothing; Stripe's paid session does, exactly once", async () => {
+    const c = (await payment.listCheckouts(db, OASIS, engagementId))[0];
+    checkoutId = c.id;
+    const unpaid = await payment.verifyCheckout(db, { tenantId: OASIS, checkoutId, now: NOW(), trigger: "tick", deps: payDeps });
+    assert.equal(unpaid.status, "unpaid");
+    assert.equal((await store.getEngagement(db, OASIS, engagementId))!.payment_status, "pending");
+    stripe.sessions.get(c.stripe_session_id!)!.paid = true;
+    const paid = await payment.verifyCheckout(db, { tenantId: OASIS, checkoutId, now: NOW(), trigger: "webhook", deps: payDeps });
+    assert.ok(paid.status === "paid" && !paid.duplicate);
+    const dup = await payment.verifyCheckout(db, { tenantId: OASIS, checkoutId, now: NOW(), trigger: "owner", deps: payDeps });
+    assert.ok(dup.status === "paid" && dup.duplicate);
+    const e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "payment_confirmed");
+    assert.equal(e.payment_status, "paid");
+    assert.equal(await leadStage(db, LEAD), "won");
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_payment_receipts", args: [] })).rows[0].n), 1);
+  });
+
+  console.log("onboarding");
+  await check("onboarding creates one client, one project, its checklist and one welcome-email approval, however often it runs", async () => {
+    const alerts: unknown[] = [];
+    const od = { alert: async (a: unknown) => void alerts.push(a), baseUrl: () => "https://oasisai.work" };
+    const r1 = await onboarding.runOnboarding(db, { tenantId: OASIS, engagementId, now: NOW(), deps: od });
+    assert.ok(r1.ok, !r1.ok ? r1.error : "");
+    const r2 = await onboarding.runOnboarding(db, { tenantId: OASIS, engagementId, now: NOW(), deps: od });
+    assert.ok(r2.ok);
+    const count = async (sql: string) => Number((await db.execute({ sql, args: [OASIS] })).rows[0].n);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM customers WHERE tenant_id = ? AND primary_email = 'owner@fixture.test'"), 1);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM delivery_projects WHERE tenant_id = ? AND lead_id IS NOT NULL"), 1);
+    const tasks = await count("SELECT COUNT(*) AS n FROM delivery_tasks WHERE tenant_id = ?");
+    assert.equal(tasks, onboarding.STANDARD_CHECKLIST.length + 1, "the standard steps plus the fixture item's requirement");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND action_kind = 'send_email' AND idempotency_key LIKE 'ai-audit-welcome:%'"), 1);
+    assert.equal(alerts.length, 1, "one alert to CC");
+    const e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "onboarding");
+    assert.equal(await leadStage(db, LEAD), "onboarding");
+    const welcome = await db.execute({ sql: "SELECT payload_json FROM approvals WHERE tenant_id = ? AND action_kind = 'send_email'", args: [OASIS] });
+    assert.match(String(welcome.rows[0].payload_json), /never send passwords/i);
+  });
+  await check("the checklist done makes an Active Client and moves the lead into the build", async () => {
+    assert.equal(await onboarding.completeOnboardingIfDone(db, { tenantId: OASIS, engagementId, now: NOW() }), false);
+    await db.execute({ sql: "UPDATE delivery_tasks SET status = 'done' WHERE tenant_id = ?", args: [OASIS] });
+    assert.equal(await onboarding.completeOnboardingIfDone(db, { tenantId: OASIS, engagementId, now: NOW() }), true);
+    assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "active_client");
+    assert.equal(await leadStage(db, LEAD), "in_build");
+  });
+  await check("a later refund is caught by the re-check, flagged, and deletes nothing", async () => {
+    const c = (await payment.listCheckouts(db, OASIS, engagementId))[0];
+    stripe.sessions.get(c.stripe_session_id!)!.refunded = true;
+    await db.execute({ sql: "UPDATE ai_audit_payment_receipts SET last_reconciled_at = '2000-01-01T00:00:00Z' WHERE tenant_id = ?", args: [OASIS] });
+    const alerts: unknown[] = [];
+    const r = await payment.reconcileReceipts(db, OASIS, NOW(), { ...payDeps, alert: async (a) => void alerts.push(a) });
+    assert.equal(r.changed, 1);
+    const e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.payment_status, "refunded");
+    assert.equal(e.health, "attention");
+    assert.equal(alerts.length, 1);
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM delivery_projects WHERE tenant_id = ? AND lead_id IS NOT NULL", args: [OASIS] })).rows[0].n), 1, "the project is kept");
+  });
+
+  console.log("guards");
+  await check("a mismatched payment is refused and flagged, not counted", async () => {
+    const real = (await store.getOpenEngagementForLead(db, OASIS, LEAD_B))!;
+    await db.execute({
+      sql: `INSERT INTO ai_audit_checkouts (id, tenant_id, engagement_id, proposal_version_id, payment_token, installment_kind, amount_cents, currency, stripe_session_id, status, created_at, updated_at)
+            VALUES ('co-mismatch', ?, ?, 'pv-x', '33333333-3333-4333-8333-333333333333', 'full', 5000, 'CAD', 'cs_live_mismatch', 'open', ?, ?)`,
+      args: [OASIS, real.id, new Date().toISOString(), new Date().toISOString()],
+    });
+    stripe.sessions.set("cs_live_mismatch", { id: "cs_live_mismatch", amount: 4000, currency: "cad", metadata: { oasis_tenant_id: OASIS, oasis_lead_id: LEAD_B, oasis_payment_token: "33333333-3333-4333-8333-333333333333", oasis_payment_plan_id: "pv-x" }, client_reference_id: LEAD_B, paid: true, refunded: false, disputed: false });
+    const v = await payment.verifyCheckout(db, { tenantId: OASIS, checkoutId: "co-mismatch", now: NOW(), trigger: "tick", deps: payDeps });
+    assert.ok(v.status === "problem" && v.code === "payment_does_not_match_proposal");
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_payment_receipts WHERE engagement_id = ?", args: [real.id] })).rows[0].n), 0);
+    assert.equal((await store.getEngagement(db, OASIS, real.id))!.health, "attention");
+  });
+  await check("while an audit is open on a lead, website sales may not issue a second price", async () => {
+    assert.equal(await ownership.aiAuditOwnsLead(OASIS, LEAD_B), true);
+    const real = (await store.getOpenEngagementForLead(db, OASIS, LEAD_B))!;
+    await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: real.id, to: "cancelled", actor: cc, now: NOW() });
+    assert.equal(await ownership.aiAuditOwnsLead(OASIS, LEAD_B), false);
+  });
+  await check("the tick runs every step without contacting anyone and reports cleanly", async () => {
+    const r = await tick.runAiAuditTick(db, { budgetMs: 30_000, deps: { payment: { ...payDeps, alert: async () => undefined }, onboarding: { alert: async () => undefined, baseUrl: () => "https://oasisai.work" } } });
+    assert.deepEqual(r.errors, []);
+    assert.equal(sent.length, 1, "still exactly one email ever sent");
+  });
+
+  finish("ai-audit-flow");
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

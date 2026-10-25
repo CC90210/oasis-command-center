@@ -434,6 +434,18 @@ const nextConfig = {
         source: "/meet/:path*",
         headers: [{ key: "Permissions-Policy", value: permissionsPolicy({ camera: "(self)", microphone: "(self)" }) }],
       },
+      // A client's private Free AI Audit (app/your-audit/[token]), its PDF print
+      // view (app/audit-print) and their API: never indexed, never cached, and
+      // the token in the address is never sent on as a referrer to anything the
+      // page links to. Later rules win for the same key (see /meet above).
+      ...["/your-audit/:path*", "/audit-print/:path*", "/api/your-audit/:path*"].map((source) => ({
+        source,
+        headers: [
+          { key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" },
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "Cache-Control", value: "no-store, max-age=0" },
+        ],
+      })),
     ];
   },
 };

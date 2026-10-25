@@ -21,6 +21,7 @@ import type { DepartmentKey } from "@/lib/os/types";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { PUBLISH_CHANNELS } from "@/lib/founders/publish-targets";
 import { parseSlideUrls } from "@/lib/founders-marketing-core";
+import { deliverAiAuditPreview, validateDeliverAiAuditPayload } from "@/lib/ai-audit/delivery-payload";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -86,6 +87,9 @@ export const APPROVAL_ACTION_KINDS = [
   "share_deliverable",
   "send_slack_message",
   "reply_ticket",
+  // CC's final approval of a Free AI Audit (lib/ai-audit/delivery.ts): the
+  // exact audit, PDF, proposal and email, bound by their hashes.
+  "deliver_ai_audit",
 ] as const;
 export type ApprovalActionKind = (typeof APPROVAL_ACTION_KINDS)[number];
 
@@ -99,6 +103,7 @@ export const ACTION_KIND_LABELS: Record<ApprovalActionKind, string> = {
   share_deliverable: "Deliverable",
   send_slack_message: "Slack reply",
   reply_ticket: "Ticket reply",
+  deliver_ai_audit: "AI audit delivery",
 };
 
 export const REQUESTER_TYPES = ["agent", "routine", "human"] as const;
@@ -118,6 +123,8 @@ export const DEFAULT_RISK: Record<ApprovalActionKind, RiskLevel> = {
   share_deliverable: "data",
   send_slack_message: "outbound",
   reply_ticket: "outbound",
+  // It sends the client a payment request: money, not just mail.
+  deliver_ai_audit: "spend",
 };
 
 /** Where a decision was made. v1 decides in the app only. */
@@ -493,6 +500,8 @@ export function validatePayload(kind: ApprovalActionKind, raw: unknown): Valid<R
       return validatePublishPostPayload(raw) as Valid<Record<string, unknown>>;
     case "reply_ticket":
       return validateReplyTicketPayload(raw) as Valid<Record<string, unknown>>;
+    case "deliver_ai_audit":
+      return validateDeliverAiAuditPayload(raw) as Valid<Record<string, unknown>>;
     default:
       return validateGenericPayload(raw);
   }
@@ -514,6 +523,7 @@ export function previewFor(kind: ApprovalActionKind, payload: Record<string, unk
     const note = typeof payload.note === "string" && payload.note ? ` — ${payload.note}` : "";
     return `Post to ${labels.join(", ")}${note}`;
   }
+  if (kind === "deliver_ai_audit") return deliverAiAuditPreview(payload);
   return "";
 }
 

@@ -10,6 +10,7 @@
 import { r2MeetStorage } from "@/lib/meet/recording";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { handleToolsComplete, r2ToolStorage } from "@/lib/tools/runner-handlers";
+import { r2PdfStorage } from "@/lib/ai-audit/pdf";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +26,7 @@ export async function POST(req: Request): Promise<Response> {
       now: new Date(),
       storage: await r2ToolStorage(),
       meetStorage: r2MeetStorage(),
+      aiAuditPdfStorage: r2PdfStorage(),
     });
   } catch (err) {
     console.error("[tools.complete] failed", err instanceof Error ? err.stack : err);

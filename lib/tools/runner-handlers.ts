@@ -85,6 +85,8 @@ import {
   type SystemRunnerToolKey,
 } from "@/lib/tools/registry";
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
+import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
+import { signRenderPath } from "@/lib/ai-audit/link";
 import {
   LEASE_GUARD,
   claimNextJob,
@@ -117,11 +119,18 @@ export type RunnerDeps = {
   meetStorage?: MeetStorage | null;
   /** Oasis Meet's SFU (lib/meet/recording.ts meetSfuIfConfigured), to cut what ended rooms still hold; absent or null: none set. */
   meetSfu?: SfuClient | null;
+  /** The Free AI Audit's private PDF store (lib/ai-audit/pdf.ts r2PdfStorage); absent or null: not configured. */
+  aiAuditPdfStorage?: PdfStorage | null;
+  /** Signs the PDF render address handed to the runner at claim time (AI_AUDIT_LINK_SECRET); absent or null: not configured. */
+  aiAuditLinkSecret?: string | null;
+  /** The canonical origin the render address is built on. */
+  aiAuditBaseUrl?: string;
 };
 
 /** The workspaces each producer's runner serves. OASIS's own, for now. */
 export const PRODUCER_TENANTS: Readonly<Record<ToolsProducer, readonly string[]>> = {
   bea: [...OASIS_INTERNAL_TENANT_IDS],
+  mac: [...OASIS_INTERNAL_TENANT_IDS],
 };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -216,7 +225,7 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
   // recordings expire, ended ones nobody handed over are handed over, and the
   // next batch of relay copies the PC already has is deleted. Logged, never the
   // answer: a sweep that fails must not stop the claim (it runs again next minute).
-  if (tools.some(isSystemRunnerTool)) {
+  if (tools.some((k) => k === "meet_transcribe" || k === "meet_delete_local")) {
     try {
       if (await meetRecordingTablesInstalled(deps.db)) await meetRelaySweeps(deps.db, deps.meetStorage ?? null, ident.tenantIds, deps.now, deps.meetSfu ?? null);
     } catch (err) {
@@ -244,6 +253,29 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
     const hold = { max_hold_seconds: runnerRules(job.toolKey).maxHoldSeconds };
     if (job.toolKey === "meet_delete_local") {
       return answer({ room_id: job.input.room_id, title: job.input.title, local_folder: job.input.local_folder ?? null }, hold);
+    }
+    if (job.toolKey === "ai_audit_pdf") {
+      // The render address is signed now, for fifteen minutes, so the job row
+      // never holds a usable URL. Without the secret nothing can be printed.
+      const versionId = typeof job.input.audit_version_id === "string" ? job.input.audit_version_id : "";
+      const secret = deps.aiAuditLinkSecret ?? null;
+      if (!secret || !versionId || !deps.aiAuditBaseUrl) {
+        const at = deps.now.toISOString();
+        await deps.db.execute({
+          sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'not_configured', error_message = ?, finished_at = ?, updated_at = ?
+                WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ident.tenantIds.length)})`,
+          args: ["The PDF could not be printed: AI_AUDIT_LINK_SECRET is not set on this deployment.", at, at, job.id, ident.runnerKey, leaseId, ...ident.tenantIds],
+        });
+        return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
+      }
+      return answer(
+        {
+          audit_version_id: versionId,
+          content_sha256: job.input.content_sha256 ?? null,
+          render_url: `${deps.aiAuditBaseUrl}${signRenderPath(secret, job.tenantId, versionId, deps.now)}`,
+        },
+        hold,
+      );
     }
     // meet_transcribe: the segments are fixed now, at the claim (lib/meet/recording.ts).
     const meet = await meetTranscribeClaim(deps.db, job, ident.tenantIds, deps.now);
@@ -569,6 +601,7 @@ async function completeSystemJob(
 ): Promise<Response> {
   const ref = leaseRef(producer, b);
   if ("field" in ref) return invalid(ref.field);
+  if (toolKey === "ai_audit_pdf") return completeAuditPdf(ref, b, deps);
   const transcript = toolKey === "meet_transcribe" ? parseTranscriptReport(b) : null;
   const deleted = toolKey === "meet_delete_local" ? parseDeleteLocalReport(b) : null;
   if (transcript && !transcript.ok) return invalid(transcript.field);
@@ -604,6 +637,40 @@ async function completeSystemJob(
     }
   }
   return toolsJson(200, { ok: true, duplicate: false });
+}
+
+/**
+ * The Mac's printed PDF of a Free AI Audit version (lib/ai-audit/pdf.ts). The
+ * bytes arrive in this body (COMPLETE_BODY_MAX_BYTES), are checked against the
+ * reported hash and size, stored privately, and stamped on the version only if
+ * it is still the version printed. A version that moved on (CC reopened it)
+ * finishes the job without storing anything. A storage outage answers 503 so
+ * the runner tries again on its next run.
+ */
+async function completeAuditPdf(ref: LeaseRef, b: Record<string, unknown>, deps: RunnerDeps): Promise<Response> {
+  const report = parsePdfReport(b);
+  if (!report.ok) return invalid(report.field);
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return systemRepeatOrLost(deps.db, ref, "ai_audit_pdf");
+  if (job.toolKey !== "ai_audit_pdf") return invalid("tool_key");
+  const stored = await storePdf(deps.db, deps.aiAuditPdfStorage ?? null, { tenantId: job.tenantId, jobInput: job.input, report: report.value, now: deps.now });
+  if (!stored.ok && (stored.error === "storage_not_configured" || stored.error.startsWith("storage:"))) {
+    console.error("[tools.complete] the audit PDF could not be stored; the runner will retry", { jobId: job.id, error: stored.error });
+    return toolsRefuse(503, "storage_unavailable");
+  }
+  if (!stored.ok && (stored.error === "pdf_hash_mismatch" || stored.error === "pdf_size_mismatch" || stored.error === "not_a_pdf")) {
+    return toolsRefuse(422, "pdf_rejected", { detail: stored.error });
+  }
+  const at = deps.now.toISOString();
+  const result = stored.ok ? { stored: true, pages: report.value.pages, bytes: report.value.bytes } : { stored: false, reason: stored.error };
+  const rs = await deps.db.execute({
+    sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
+    args: [JSON.stringify(result), at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
+  });
+  if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_pdf");
+  return toolsJson(200, { ok: true, duplicate: false, stored: stored.ok });
 }
 
 async function systemRepeatOrLost(db: Client, ref: LeaseRef, toolKey: SystemRunnerToolKey): Promise<Response> {

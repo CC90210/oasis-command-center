@@ -118,6 +118,7 @@ jobs:
                       /api/cron/dispatch-automations" ;;
             "*/5 * * * *")
               ROUTES="/api/cron/meet-relay
+                      /api/cron/ai-audit-tick
                       /api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders

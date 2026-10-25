@@ -9,6 +9,7 @@
 import { meetSfuIfConfigured, r2MeetStorage } from "@/lib/meet/recording";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { handleToolsClaim, r2ToolStorage } from "@/lib/tools/runner-handlers";
+import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +26,8 @@ export async function POST(req: Request): Promise<Response> {
       storage: await r2ToolStorage(),
       meetStorage: r2MeetStorage(),
       meetSfu: meetSfuIfConfigured(),
+      aiAuditLinkSecret: aiAuditLinkSecret(),
+      aiAuditBaseUrl: aiAuditBaseUrl(),
     });
   } catch (err) {
     console.error("[tools.claim] failed", err instanceof Error ? err.stack : err);
