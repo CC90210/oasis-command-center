@@ -220,7 +220,7 @@ export function WebLeadsBrowser({
   // route validates the target against getOasisSalesRepRoster, which excludes
   // owners, admin_access holders and non-rep roles -- so the members list
   // offered names the server then refused with target_not_on_sales_roster. On
-  // the live tenant that was 8 names for 6 valid targets: picking CC or Adon
+  // the live tenant once had more names than valid assignment targets: picking a proprietor or rep
   // failed, on a name the picker had just presented as a choice.
   //
   // /api/web-leads/assignable-reps serves the SAME roster function the claim

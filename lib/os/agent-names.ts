@@ -14,7 +14,7 @@
  * owner or a sales rep; the crawl of main on 2026-10-08 still found 50.
  *
  * THE RULE
- *   - Internal names are for OASIS's founders: a founder persona (CC, Adon, an
+ *   - Internal names are for OASIS's owner: the founder persona (CC, or an
  *     owner-granted admin) standing in an OASIS workspace, known by its slug AND
  *     its tenant id (the Playbook's rule, lib/playbook-access.ts). The verified
  *     operator is one of them. A client of any role never is, and neither is

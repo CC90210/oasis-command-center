@@ -596,7 +596,7 @@ async function main() {
     const ok = await setFieldAs(USERS.rep, L.oasis, "notes", "asked us not to call");
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     await wipeInteractions();
-    const lifted = await setFieldAs(USERS.adon, L.oasis, "dnc", false);
+    const lifted = await setFieldAs(USERS.admin, L.oasis, "dnc", false);
     assert.equal(lifted.status, 200, JSON.stringify(lifted.body));
     assert.equal((await stored(L.oasis)).dnc, false);
     assert.equal((await interactions(L.oasis, "consent_flag_lifted")).length, 1);

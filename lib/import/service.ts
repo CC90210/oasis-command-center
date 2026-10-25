@@ -375,7 +375,7 @@ export async function importRowsForTenant(input: {
    * every caller that hasn't been taught to pass it.
    */
   tenantSlug?: string | null;
-  /** Canonical auth user id, already resolved against the CC + Adon roster. */
+  /** Canonical auth user id, already resolved against the active OASIS roster. */
   oasisAssigneeUserId?: string | null;
 }): Promise<ImportResult | ImportFailure> {
   const {
@@ -409,7 +409,7 @@ export async function importRowsForTenant(input: {
     return {
       ok: false,
       error: "assignee_required",
-      message: "Choose CC or Adon before importing OASIS leads.",
+      message: "Choose CC or an active sales rep before importing OASIS leads.",
     };
   }
   const importedAt = new Date().toISOString();

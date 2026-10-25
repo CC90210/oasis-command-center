@@ -9,7 +9,7 @@
  */
 
 import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
-import { FINANCE_OWNER_EMAILS, type OwnerKey } from "./access";
+import { HISTORICAL_OWNER_EMAILS, type OwnerKey } from "./access";
 import { GST_RATE_PPM, QST_RATE_PPM } from "./tax";
 import type { AccountType } from "./ledger";
 
@@ -182,7 +182,7 @@ export function seedStatements(): SeedStatement[] {
     out.push({
       sql: `INSERT OR IGNORE INTO fin_entities (id, slug, name, kind, owner_key, owner_email, base_currency)
             VALUES (?, ?, ?, ?, ?, ?, 'CAD')`,
-      args: [e.id, e.slug, e.name, e.kind, e.ownerKey, e.ownerKey ? FINANCE_OWNER_EMAILS[e.ownerKey] : null],
+      args: [e.id, e.slug, e.name, e.kind, e.ownerKey, e.ownerKey ? HISTORICAL_OWNER_EMAILS[e.ownerKey] : null],
     });
     const business = e.kind === "business";
     // contact_email is the seller contact printed on client invoices
@@ -196,7 +196,7 @@ export function seedStatements(): SeedStatement[] {
             VALUES (?, ?, ?, ?, ?, ?, 'Canada', ?, 0, ?, 1, 14)`,
       args: business
         ? [e.id, "OASIS AI Solutions", "6993 Decarie Blvd", "Montreal", "QC", "H3W 0B5", OASIS_SUPPORT_EMAIL, "OASIS"]
-        : [e.id, e.name, "", "", "", "", e.ownerKey ? FINANCE_OWNER_EMAILS[e.ownerKey] : "", "INV"],
+        : [e.id, e.name, "", "", "", "", e.ownerKey ? HISTORICAL_OWNER_EMAILS[e.ownerKey] : "", "INV"],
     });
     for (const a of chartFor(e.kind)) {
       out.push({

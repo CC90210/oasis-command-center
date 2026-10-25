@@ -333,12 +333,13 @@ export const parseSlideUrls = parseStringArray;
  * Who added an asset, as a person rather than a mailbox.
  *
  * CC, 2026-08-16: *"When I mentioned Adon, you have to remember he's our
- * co-founder for OASIS AI, so Adon will contribute to this. We need to make sure
+ * was built for collaborative founder input. OASIS is now solely owned by CC;
+ * former-collaborator records remain historical and read-only. We need to make sure
  * that he's getting listed in the metadata in terms of what it says and whose it
  * added by."*
  *
  * The detail page rendered `author_email` raw, so provenance on a co-founded
- * library read as an address. Both founders are named here; anything else falls
+ * library read as an address. Historical authors remain named; anything else falls
  * back to the local part, and an unknown address is still shown rather than
  * hidden — provenance you cannot read beats provenance you cannot see.
  *

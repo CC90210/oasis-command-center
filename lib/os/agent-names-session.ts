@@ -3,7 +3,7 @@
  * viewer half of lib/os/agent-names.ts (which says what a name becomes for
  * everyone else).
  *
- * THE RULE: an OASIS founder. A founder persona (CC, Adon, an owner-granted
+ * THE RULE: the OASIS owner. The founder persona (CC, or an owner-granted
  * admin) standing in an OASIS workspace, known by its slug AND its tenant id,
  * the same two tests the Playbook's gate makes (lib/playbook-access.ts
  * isOasisPlaybookWorkspace). The verified operator is one of them. A client of

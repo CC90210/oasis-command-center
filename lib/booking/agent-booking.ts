@@ -97,7 +97,7 @@ export type AgentBookingDeps = {
   }) => Promise<void>;
   activate: (tenantId: string, appointmentId: string) => Promise<void>;
   callRecorded: (tenantId: string, meetUrl: string) => Promise<boolean>;
-  /** The sales-desk alert (CC + Adon) for a booked call; resolves whether it was delivered. */
+  /** The sales-desk alert (CC) for a booked call; resolves whether it was delivered. */
   alert: (input: {
     tenantId: string;
     leadId: string;

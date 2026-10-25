@@ -114,7 +114,7 @@ const DDL = `
   CREATE TABLE marketing_review (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL,
     decision TEXT NOT NULL CHECK (decision IN ('approve','approve_with_changes','request_changes','reject','comment')),
-    note TEXT, reviewer TEXT NOT NULL DEFAULT 'adon', reviewer_agent TEXT,
+    note TEXT, reviewer TEXT NOT NULL DEFAULT 'conaugh', reviewer_agent TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), acted_on_at TEXT,
     CONSTRAINT marketing_review_reason_required CHECK (decision IN ('approve','comment') OR COALESCE(trim(note), '') <> '')
   );
@@ -778,7 +778,7 @@ async function main() {
 
   await check("every seat the founders portal admits sees the same comparison and tiles - no role switch on the page; an unknown or junk filter value is handled", async () => {
     const seen: string[][] = [];
-    for (const user of [USERS.cc, USERS.adon, MKT]) {
+    for (const user of [USERS.cc, USERS.admin, MKT]) {
       await login(user);
       const p = await render({ pack: PACK_A });
       assert.equal(p.compare.length, 1, user.email);
@@ -862,7 +862,7 @@ async function main() {
   await check("Request changes is gated exactly like Approve, Archive and Delete: the same callers are let in and the same are 404, for every seat", async () => {
     const before = await counts();
     const outcomes: Record<string, [number, number]> = {};
-    for (const [name, user] of [["signed out", null], ["sales seat", USERS.rep], ["member", MEMBER], ["marketing seat", MKT], ["builder seat", BUILDER], ["admin", USERS.adon], ["owner", USERS.cc]] as const) {
+    for (const [name, user] of [["signed out", null], ["sales seat", USERS.rep], ["member", MEMBER], ["marketing seat", MKT], ["builder seat", BUILDER], ["admin", USERS.admin], ["owner", USERS.cc]] as const) {
       await login(user);
       // Each call is refused for its BODY if the caller gets past the gate (400), so nothing is written either way.
       const sibling = await post("ar-r3", { status: "not-a-status" }, "asset", "PATCH");
@@ -922,7 +922,7 @@ async function main() {
   });
 
   await check("an owner and an admin send an asset back: the note is recorded for the marketing agent, the asset goes to draft, nothing else moves", async () => {
-    for (const [user, id, name] of [[USERS.cc, "ar-r1", "Conaugh McKenna"], [USERS.adon, "ar-r2", "Adon"]] as const) {
+    for (const [user, id, name] of [[USERS.cc, "ar-r1", "Conaugh McKenna"], [USERS.admin, "ar-r2", "Operations Admin"]] as const) {
       await login(user);
       const before = await counts();
       const asset = (await rowOf(id))!;

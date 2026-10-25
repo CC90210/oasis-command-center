@@ -213,7 +213,7 @@ async function main(): Promise<void> {
     assert.deepEqual(plan.archive.map((row) => row.id), ["prior-oasis-lead"]);
     assert.deepEqual(
       plan.assignmentRoster.map((member) => member.userId),
-      [CC_ID, ADON_ID],
+      [CC_ID],
     );
     assert.doesNotMatch(result.stdout, /cross-tenant-decoy|same-tenant-non-lead-decoy/);
 

@@ -100,7 +100,7 @@ async function rejectUnsafeOasisLeadWrite(
       ok: false,
       error: "canonical_sales_workflow_required",
       message:
-        "Raw bridge writes cannot mutate OASIS leads. Use the claim, import, assignment, or lifecycle workflow so CC/Adon ownership and the active cycle remain intact.",
+        "Raw bridge writes cannot mutate OASIS leads. Use the claim, import, assignment, or lifecycle workflow so active ownership and the current cycle remain intact.",
     },
     { status: 409 },
   );

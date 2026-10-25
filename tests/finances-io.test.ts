@@ -279,16 +279,13 @@ async function main() {
       stripeCharges = null;
     }
   }
-  const SALES_ENV = ["OASIS_SALES_TELEGRAM_BOT_TOKEN", "OASIS_SALES_TELEGRAM_CHAT_ID", "OASIS_TELEGRAM_BOT_TOKEN", "OASIS_TELEGRAM_CHAT_ID"];
+  const SALES_ENV = ["OASIS_TELEGRAM_BOT_TOKEN", "OASIS_TELEGRAM_CHAT_ID"];
   /**
-   * The sales group (-100777, its own bot), CC's chat (4242, his bot) and a
-   * recording Telegram, for a check that expects messages. `sent` is what
-   * Telegram took.
+   * CC's chat (4242, his bot) and a recording Telegram, for a check that
+   * expects messages. `sent` is what Telegram took.
    */
   async function withTelegram(fn: (sent: Array<{ chat: string; text: string }>) => Promise<void>) {
     Object.assign(process.env, {
-      OASIS_SALES_TELEGRAM_BOT_TOKEN: "123456:sales-test-token",
-      OASIS_SALES_TELEGRAM_CHAT_ID: "-100777",
       OASIS_TELEGRAM_BOT_TOKEN: "999:operator-test-token",
       OASIS_TELEGRAM_CHAT_ID: "4242",
     });
@@ -713,7 +710,7 @@ async function main() {
       await settled();
       assert.equal(sent.length, 1, "one message to the sales desk");
       const msg = sent[0];
-      assert.equal(msg.chat, "-100777", "the sales group, not another lane");
+      assert.equal(msg.chat, "4242", "CC's owner lane, not a former group");
       assert.match(msg.text, /^New purchase on oasisai\.work\/pricing\n/);
       assert.ok(msg.text.includes(`${formatCad(750000)} paid`), msg.text);
       assert.ok(msg.text.includes("Ann &lt;Smith&gt; &amp; Co &lt;ann@buyer.test&gt;"), `the buyer, escaped: ${msg.text}`);
@@ -778,7 +775,7 @@ async function main() {
       }
       await settled();
       assert.equal(sent.length, 1, "the alert went out once Telegram answered");
-      assert.equal(sent[0].chat, "-100777");
+      assert.equal(sent[0].chat, "4242");
     });
   });
 
@@ -818,8 +815,7 @@ async function main() {
   });
 
   await check("a purchase alert Telegram refuses leaves a card in Needs you naming the order, the buyer and the amount, and never fails the booking", async () => {
-    // The bot removed from the sales group, its DM to CC refusing too: two log
-    // lines and nothing else, for a sale of up to CAD 15,000 (review of #718).
+    // A refused owner alert still leaves a durable card and pages CC again.
     const { cad: formatCad } = await import("../lib/checkout/catalog");
     const { OASIS_OPERATOR_TENANT_ID } = await import("../lib/platform-operator");
     const { alertPublicCheckoutPaid } = await import("../lib/checkout/paid-alert");
@@ -827,8 +823,8 @@ async function main() {
       (await raw.execute({ sql: `SELECT * FROM agent_alerts WHERE alert_type = 'checkout_purchase_alert_failed' AND subject_id = ? AND resolved_at IS NULL`, args: [order] })).rows;
     const telegramOutcome = (card: { payload: unknown }) => (JSON.parse(String(card.payload)) as { telegram?: string }).telegram;
     await withTelegram(async (sent) => {
-      // The sales bot is refused in every chat; CC's own bot still works.
-      telegramRefuses = ({ token }) => (token.startsWith("123456:") ? "Forbidden: bot was kicked from the supergroup chat" : null);
+      // Refuse the first alert only; the card's follow-up page reaches CC.
+      telegramRefuses = () => (telegramCalls === 1 ? "Forbidden: owner bot refused the alert" : null);
       const one = await logged(async () => {
         const res = await deliver("payment_intent.succeeded", checkoutSale("fail_1", { name: "Ann <Smith> & Co", email: "ann@buyer.test" }), { id: "evt_fail_1" });
         await settled();
@@ -841,14 +837,14 @@ async function main() {
       const cards = await cardsFor("ord_fail_1");
       assert.equal(cards.length, 1, "one card for the order");
       const card = cards[0];
-      assert.equal(card.tenant_id, OASIS_OPERATOR_TENANT_ID, "in the OASIS workspace, where CC and Adon read Needs you");
+      assert.equal(card.tenant_id, OASIS_OPERATOR_TENANT_ID, "in CC's OASIS workspace");
       assert.equal(card.severity, "urgent");
       assert.equal(card.subject_type, "checkout_order");
       assert.match(String(card.title), /the sales desk was not told/);
-      for (const part of [formatCad(750000), "Ann <Smith> & Co <ann@buyer.test>", "Order ord_fail_1", "Stripe pi_fail_1", "bot was kicked from the supergroup chat"]) {
+      for (const part of [formatCad(750000), "Ann <Smith> & Co <ann@buyer.test>", "Order ord_fail_1", "Stripe pi_fail_1", "owner bot refused the alert"]) {
         assert.ok(String(card.body).includes(part), `the card names ${part}: ${card.body}`);
       }
-      assert.equal(telegramCalls, 3, "the sales group, then CC's DM, both refused; then the card paged CC's own bot");
+      assert.equal(telegramCalls, 2, "the owner alert was refused, then the card paged CC's bot");
       assert.equal(sent.length, 1);
       assert.equal(sent[0].chat, "4242");
       assert.ok(sent[0].text.includes("the sales desk was not told") && sent[0].text.includes("Ann &lt;Smith&gt; &amp; Co"), sent[0].text);
@@ -910,7 +906,7 @@ async function main() {
     // When the alert is refused, the card pages CC with the same buyer text, and
     // with the reason the send failed: both are cut too.
     await withTelegram(async (sent) => {
-      telegramRefuses = ({ token }) => (token.startsWith("123456:") ? "Forbidden: bot was kicked from the supergroup chat" : null);
+      telegramRefuses = () => (telegramCalls === 1 ? "Forbidden: owner bot refused the alert" : null);
       await logged(async () => {
         await deliver("payment_intent.succeeded", checkoutSale("noisy_2", { name, email: `${name}@buyer.test` }), { id: "evt_noisy_2" });
         await settled();
@@ -918,7 +914,7 @@ async function main() {
           throw new Error(name);
         });
       });
-      assert.equal(sent.length, 2, "CC's chat took both pages");
+      assert.equal(sent.length, 2, "CC's chat took both card pages");
       for (const page of sent) {
         assert.ok(wholeTelegramHtml(page.text), `${page.text.length} characters, ending ${page.text.slice(-60)}`);
         assert.ok(page.text.includes("resolve this card."), "nothing after the cut text was lost");
@@ -999,7 +995,7 @@ async function main() {
       assert.deepEqual(sent.map((m) => /Order (ord_\w+)/.exec(m.text)?.[1]).sort(), toldAbout, "exactly the in-window checkout purchases are announced, once each");
       assert.equal(telegramCalls, toldAbout.length, "and nothing else reached Telegram");
       for (const m of sent) {
-        assert.equal(m.chat, "-100777", "the sales group");
+        assert.equal(m.chat, "4242", "CC's owner lane");
         assert.match(m.text, /^Late: a purchase on oasisai\.work\/pricing the webhook never reported\n/);
         assert.ok(m.text.includes(`${formatCad(750000)} paid`), m.text);
         assert.ok(m.text.includes("Buyer: Lia Late &lt;lia@buyer.test&gt;"), m.text);
@@ -1034,8 +1030,8 @@ async function main() {
   await check("a late alert Telegram refuses leaves the same card, and the reconcile still books the payment", async () => {
     const { OASIS_OPERATOR_TENANT_ID } = await import("../lib/platform-operator");
     await withTelegram(async (sent) => {
-      // The sales bot is refused in every chat; CC's own bot still works.
-      telegramRefuses = ({ token }) => (token.startsWith("123456:") ? "Forbidden: bot was kicked from the supergroup chat" : null);
+      // Refuse the alert itself; the card's follow-up page reaches CC.
+      telegramRefuses = () => (telegramCalls === 1 ? "Forbidden: owner bot refused the alert" : null);
       const run = await logged(() => reconcile([listedCharge("late_refused", { ageSec: 2 * 3600 })]));
       assert.equal(run.result.payments_recorded, 1, "the reconcile finished and booked the payment");
       assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = 'ch_late_refused'`), 1);
@@ -1045,7 +1041,7 @@ async function main() {
       assert.equal(cards[0].tenant_id, OASIS_OPERATOR_TENANT_ID);
       assert.equal(cards[0].severity, "urgent");
       assert.match(String(cards[0].title), /the sales desk was not told/);
-      for (const part of ["Order ord_late_refused", "Stripe pi_late_refused", "Lia Late <lia@buyer.test>", "bot was kicked from the supergroup chat"]) {
+      for (const part of ["Order ord_late_refused", "Stripe pi_late_refused", "Lia Late <lia@buyer.test>", "owner bot refused the alert"]) {
         assert.ok(String(cards[0].body).includes(part), `the card names ${part}: ${cards[0].body}`);
       }
       assert.equal(sent.length, 1, "only the card's page reached CC");

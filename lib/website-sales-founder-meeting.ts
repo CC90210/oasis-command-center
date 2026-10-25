@@ -1427,7 +1427,7 @@ async function syncScheduleMirrors(
 }
 
 /**
- * The OASIS workspace books two founders on one calendar, and bravo__223's
+ * The OASIS workspace books its proprietor on one calendar, and bravo__223's
  * triggers refuse to write a founder_audit appointment that overlaps another.
  * That refusal happens at the FINAL database write, which a reschedule reaches
  * only after Google has already moved the event: a reschedule into an occupied

@@ -240,8 +240,10 @@ async function main() {
     assert.equal(providers.openaiReasons("gpt-4-turbo"), false);
     assert.equal(providers.openaiReasons("gpt-3.5-turbo"), false);
     assert.equal(providers.openaiReasons("gpt-5.1"), false, "gpt-5.1 defaults to no reasoning");
+    // A non-reasoning model that still answers. (This used gpt-4-turbo, which the registry ended on
+    // 2026-10-23 and now swaps for gpt-5.6-terra, a reasoning model: the test failed on that date.)
     play(sse([[null, { choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }], [null, "[DONE]"]]));
-    await chat("openai", "gpt-4-turbo");
+    await chat("openai", "gpt-5.1");
     assert.equal((JSON.parse(sent[0].body) as { max_completion_tokens: number }).max_completion_tokens, 4096);
     play(sse([[null, { choices: [{ delta: {}, finish_reason: "content_filter" }] }], [null, "[DONE]"]]));
     assert.deepEqual(await chat("openrouter", "anthropic/claude-sonnet-5.5"), [{ type: "error", message: "empty_reply:blocked" }]);

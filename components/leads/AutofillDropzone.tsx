@@ -125,7 +125,7 @@ function explainUploadFailure(
       (mode === "existing"
         ? "Check the lead's Documents tab before dropping the file again, so you don't file two copies. "
         : "No new lead was created. ") +
-      `Enter the deal manually, and tell APEX if it keeps happening. (${code})`
+      `Enter the deal manually, and tell CC if it keeps happening. (${code})`
     );
   }
   return `Couldn't start reading this application. Try again, or enter the deal manually. (${code})`;

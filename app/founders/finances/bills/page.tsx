@@ -2,8 +2,8 @@
  * /founders/finances/bills — the business's bills (owed, paid later) and
  * expenses (already paid), receipts, and recurring expenses.
  *
- * Paid from: a bank, cash or card account, or "Paid by CC personally" /
- * "Paid by Adon personally" (that owner's contribution equity, bills-io.ts
+ * Paid from: a bank, cash or card account, or "Paid by CC personally"
+ * (the proprietor's contribution equity, bills-io.ts
  * resolvePaidFrom). Marking a bill paid asks which one; nothing defaults to
  * chequing. A recurring cost is recorded as a bill due on its date unless a
  * founder has confirmed which account pays it (bills-io.ts recordRecurringNow).
@@ -32,7 +32,6 @@ export default async function BillsPage({ searchParams }: { searchParams: Search
     ...(entity.kind === "business"
       ? [
           { value: PAID_BY_OWNER.cc, label: PAID_BY_OWNER_LABEL.cc },
-          { value: PAID_BY_OWNER.adon, label: PAID_BY_OWNER_LABEL.adon },
         ]
       : []),
   ];

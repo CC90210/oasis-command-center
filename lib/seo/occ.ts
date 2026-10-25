@@ -25,7 +25,7 @@ export async function seoClient(): Promise<SeoClient> {
 }
 
 /**
- * The signed-in owner's email (CC or Adon), or null. The Money tab's rule: founders portal
+ * The signed-in owner's email (CC), or null. The Money tab's rule: the finance-owner gate
  * AND the auth user id behind an owner email (lib/founders-finances/access.ts). Route
  * handlers need the identity, not just a yes. Fails closed (lib/seo/owner.ts).
  */
@@ -43,7 +43,7 @@ export async function seoOwnerEmail(): Promise<string | null> {
   });
 }
 
-/** Page gate: 404 for anyone but CC and Adon, so the screen's existence is not confirmed. */
+/** Page gate: 404 for anyone but CC, so the screen's existence is not confirmed. */
 export async function requireSeoOwner(): Promise<void> {
   if (!(await seoOwnerEmail())) notFound();
 }

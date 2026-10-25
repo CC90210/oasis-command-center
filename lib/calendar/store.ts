@@ -22,7 +22,7 @@ import {
 } from "./types";
 import { planCalendarRemoval } from "./recurrence";
 import { ROUTINE_ID_PREFIX, buildRoutineSeries, type RoutineAdjustment, type RoutineBlock } from "./routine";
-import { LIMITS, addsTime, shabbatConflict, validateEventInput, validatePrefs } from "./validate";
+import { LIMITS, addsTime, salvagePrefs, shabbatConflict, validateEventInput, validatePrefs } from "./validate";
 
 export class CalendarStoreError extends Error {
   constructor(readonly code: string, readonly status = 500, detail?: string) {
@@ -419,10 +419,10 @@ export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPref
 const prefsId = (owner: Owner) => `${owner.tenantId}:${owner.userId}`;
 
 /**
- * The owner's preferences. With no saved row, the defaults of the owner's OWN
- * workspace (types.ts defaultPrefsFor): Montréal and the Shabbat lock for
- * OASIS, and neither anywhere else until the user sets them. A saved row
- * always wins; keys it lacks come from those same workspace defaults.
+ * The owner's preferences. With no saved row, the workspace defaults
+ * (types.ts defaultPrefsFor): neutral everywhere, no location and no Shabbat
+ * lock until the user sets them. A saved row always wins; keys it lacks come
+ * from those same defaults.
  */
 export async function getPrefs(owner: Owner): Promise<CalendarPrefs> {
   const base = defaultPrefsFor(owner.tenantId);
@@ -435,13 +435,20 @@ export async function getPrefs(owner: Owner): Promise<CalendarPrefs> {
     .maybeSingle();
   if (error) storageError(error, "prefs_read_failed");
   if (!data) return base;
-  const parsed = validatePrefs(json<unknown>((data as Record<string, unknown>).prefs, {}), base);
+  const stored = (data as Record<string, unknown>).prefs;
+  const raw = json<unknown>(stored, undefined);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    // Unreadable JSON used to parse as {} and pass silently. Say so.
+    if (stored !== null && stored !== undefined && stored !== "")
+      console.error("[calendar.prefs] stored preferences are not readable; using workspace defaults");
+    return base;
+  }
+  const parsed = validatePrefs(raw, base);
   if (parsed.ok) return parsed.value;
-  // A stored value that no longer validates must not silently disable the
-  // Shabbat lock where the workspace has it on: fall back to the workspace's
-  // defaults, which for OASIS are the protective ones. Logged, not hidden.
-  console.error("[calendar.prefs] stored preferences no longer validate; using workspace defaults", parsed.error);
-  return base;
+  // A stored value that no longer validates keeps every key that still does, so an
+  // opted-in Shabbat lock never fails open over an unrelated bad key. Logged, not hidden.
+  console.error("[calendar.prefs] stored preferences no longer validate; keeping the keys that still do", parsed.error);
+  return salvagePrefs(raw as Record<string, unknown>, base);
 }
 
 export async function savePrefs(owner: Owner, prefs: CalendarPrefs): Promise<void> {

@@ -28,10 +28,9 @@ for (const key of Object.keys(process.env)) {
 const calls: Call[] = [];
 let events: Busy[] = [];
 
-const settings: BookingSettings = defaultOasisBookingSettings({ organizerUserId: "founder-cc", attendeeUserId: "founder-adon" });
+const settings: BookingSettings = defaultOasisBookingSettings({ organizerUserId: "owner-cc", attendeeUserId: null });
 const roster = [
-  { auth_user_id: "founder-cc", email: "cc@example.com", full_name: "CC", display_name: null },
-  { auth_user_id: "founder-adon", email: "adon@example.com", full_name: "Adon", display_name: null },
+  { auth_user_id: "owner-cc", email: "cc@example.com", full_name: "CC", display_name: null },
 ];
 
 const deps = {
@@ -52,7 +51,7 @@ async function main(): Promise<void> {
     (await loadPublicBookingAvailability({ tenantId: "t", durationMinutes, now: NOW }, deps)).map((s) => s.start);
 
   // Thursday 14:00 Toronto (EDT). Fourteen days on is Thursday 2026-10-29 14:00 EDT:
-  // a slot start both founders are on duty for, and the edge of the horizon.
+  // a slot start CC is on duty for, and the edge of the horizon.
   const NOW = Date.parse("2026-10-15T18:00:00.000Z");
   const lastStart = "2026-10-29T18:00:00.000Z";
 
@@ -60,7 +59,7 @@ async function main(): Promise<void> {
     calls.length = 0;
     events = [];
     await starts(durationMinutes);
-    assert.equal(calls.length, 2, "both hosts' calendars are read");
+    assert.equal(calls.length, 1, "the proprietor's calendar is read");
     const wantMax = new Date(NOW + 14 * 24 * 60 * 60_000 + durationMinutes * 60_000).toISOString();
     for (const call of calls) {
       assert.equal(call.timeMax, wantMax, `the window ends one ${durationMinutes}-minute meeting past the last start`);

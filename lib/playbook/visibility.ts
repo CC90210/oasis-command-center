@@ -4,7 +4,7 @@
  * PURE: no session, no database. The session half is lib/playbook/viewer.ts.
  *
  * THE RULE (T2 spec, 2026-09-30):
- *   founder persona (CC, Adon, and anyone an owner granted admin access)
+ *   founder persona (CC, and anyone CC granted admin access)
  *       every document.
  *   every other OASIS persona (manager, sales, marketing, builder, and the
  *   worker / read-only roles)

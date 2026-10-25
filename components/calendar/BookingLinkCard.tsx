@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CalendarClock, Copy, ExternalLink, Settings2, X } from "lucide-react";
 import type { BookingSettings, WeeklyHours } from "@/lib/booking/hours";
+import type { CalendarRecord } from "@/lib/calendar/types";
 import { setupHref } from "@/lib/setup-links";
 
 type BookingInfo = {
@@ -81,7 +82,8 @@ function summarize(week: WeeklyHours): string {
   return parts.length ? parts.join(", ") : "No hours";
 }
 
-export function BookingLinkCard() {
+/** `calendars` is the Schedule's live list, so the hidden-calendar note follows a tick at once. */
+export function BookingLinkCard({ calendars }: { calendars?: CalendarRecord[] } = {}) {
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const [editing, setEditing] = useState(false);
   // Shown after a save lost a version race: the card has re-read the settings,
@@ -128,11 +130,12 @@ export function BookingLinkCard() {
   const origin = typeof window === "undefined" ? "" : window.location.origin;
   const url = `${origin}${info.path}`;
   const mine = info.settings.hosts.find((h) => h.userId === info.you);
-  const landsOn = mine
-    ? info.calendars.find((c) => c.id === mine.targetCalendarId)?.name ??
-      info.calendars.find((c) => c.isDefault)?.name ??
-      "Main calendar"
-    : null;
+  const landsOnCalendar = mine
+    ? info.calendars.find((c) => c.id === mine.targetCalendarId) ?? info.calendars.find((c) => c.isDefault)
+    : undefined;
+  const landsOn = mine ? landsOnCalendar?.name ?? "Main calendar" : null;
+  // A booked call on a calendar that is unticked under My calendars is saved but never seen.
+  const landsOnHidden = landsOnCalendar ? calendars?.find((c) => c.id === landsOnCalendar.id)?.visible === false : false;
 
   return (
     <section aria-labelledby="cal-booking-h" className="break-words rounded-lg border border-hairline bg-bg-panel p-3 text-[12px]">
@@ -182,6 +185,7 @@ export function BookingLinkCard() {
       {landsOn ? (
         <p className="mt-2 text-fg-muted">
           Your booked calls land on <span className="text-fg">{landsOn}</span>.
+          {landsOnHidden ? " It is hidden on your Schedule; tick it under My calendars to see booked calls." : null}
         </p>
       ) : null}
       <ul className="mt-2 space-y-1.5 text-fg-muted">
@@ -361,8 +365,9 @@ function BookingSettingsDialog({
           </button>
         </div>
         <p className="mt-1 text-fg-muted">
-          Times are {s.timeZone.replace("_", " ")}. A time is offered only when everyone on duty is free. Your weekly
-          routine never blocks a booking; anything else on your Schedule or Google Calendar does.
+          Times are {s.timeZone.replace("_", " ")}. A time is offered only when everyone on duty is free. Anything shown
+          as Busy on your Schedule (hidden calendars included) or Google Calendar closes a time, except blocks added by
+          Restore my weekly routine; anything shown as Free does not.
         </p>
 
         <label className="mt-4 block font-medium text-fg" htmlFor="booking-target">

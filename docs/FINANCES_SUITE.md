@@ -12,11 +12,11 @@ Double-entry books for three entities:
 
 | Entity | Slug | Who can see it |
 |---|---|---|
-| OASIS AI Solutions (business) | `oasis` | CC and Adon; Atlas (internal API); the Stripe webhook |
+| OASIS AI Solutions (business) | `oasis` | CC; Atlas (internal API); the Stripe webhook |
 | CC personal | `cc-personal` | CC only |
-| Adon personal | `adon-personal` | Adon only |
+| Former-owner personal history | `adon-personal` | No live product access; retained as historical ledger data only |
 
-Owners are resolved at runtime: `user_profiles.auth_user_id` for `conaugh@oasisai.work` (CC) and `adon@oasisai.work` (Adon), compared with the session's auth user id. No uuid is hard-coded. The founders portal gate also admits the marketing hire and builders; Finances does **not** — its sidebar row and header chip are hidden for them, and every page and route 404s for them independently (`lib/founders-finances/access-io.ts`, predicate `access.ts canAccessEntity`, tested).
+The sole live finance owner is resolved at runtime: `user_profiles.auth_user_id` for `conaugh@oasisai.work` (CC), compared with the session's auth user id. No uuid is hard-coded. Historical former-owner ledger rows remain for accounting provenance but cannot resolve to a live viewer. The founders portal gate also admits the marketing hire and builders; Finances does **not** — its sidebar row and header chip are hidden for them, and every page and route 404s for them independently (`lib/founders-finances/access-io.ts`, predicate `access.ts canAccessEntity`, tested).
 
 Tabs: **Overview · Transactions · Invoices · Bills & Expenses · Accounts · Reports · Taxes · Settings**, with a book switcher (`?entity=`) on every tab.
 

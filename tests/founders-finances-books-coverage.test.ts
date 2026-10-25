@@ -650,14 +650,13 @@ async function main() {
     const eq = await bills.equitySummary(cc, B);
     assert.equal(eq.parity.cc.contributionsCents, 2800, "CC's contribution");
     assert.ok(eq.events.some((e) => e.memo === "Paid ChatGPT personally" && e.owner_key === "cc" && e.kind === "contribution"));
-    // Adon pays an open bill personally: 3010.
+    // A former owner's historical equity remains readable, but no new payment
+    // can be attributed to them after the sole-proprietor cutoff.
     const open = await bills.createBill(cc, B, { kind: "bill", vendor_name: "Notion", bill_date: "2026-09-20", due_date: "2026-09-30", subtotal: "12.00", currency: "CAD", category_id: categoryId(B, "5100") });
-    await bills.payBill(cc, open, { account_id: bills.PAID_BY_OWNER.adon, date: "2026-09-21" });
-    const paid = (await raw.execute({ sql: `SELECT status, paid_from_account_id FROM fin_bills WHERE id = ?`, args: [open] })).rows[0];
-    assert.deepEqual([paid.status, paid.paid_from_account_id], ["paid", accountId(B, SYS.equityAdon)]);
-    assert.equal((await bills.equitySummary(cc, B)).parity.adon.contributionsCents, 1200);
-    // Voided: the contribution drops out.
-    await bills.voidBill(cc, open);
+    await assert.rejects(
+      bills.payBill(cc, open, { account_id: bills.PAID_BY_OWNER.adon, date: "2026-09-21" }),
+      /former owner cannot be selected/,
+    );
     assert.equal((await bills.equitySummary(cc, B)).parity.adon.contributionsCents, 0);
     // Anything but a bank, cash or card account, or an owner, is refused as a paid-from.
     await assert.rejects(bills.payBill(cc, await bills.createBill(cc, B, { kind: "bill", vendor_name: "X", bill_date: "2026-09-20", subtotal: "1.00", currency: "CAD", category_id: categoryId(B, "5100") }), { account_id: accountId(B, "4000") }), /paid-from must be/);

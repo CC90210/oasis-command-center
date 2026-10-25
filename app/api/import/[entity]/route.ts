@@ -105,7 +105,7 @@ export async function POST(
         {
           ok: false,
           error: "assignee_required",
-          message: "Choose CC or Adon before importing OASIS leads.",
+          message: "Choose CC or an active sales rep before importing OASIS leads.",
         },
         { status: 422 },
       );
@@ -123,7 +123,7 @@ export async function POST(
         {
           ok: false,
           error: "sales_roster_unavailable",
-          message: "The CC + Adon assignment roster could not be verified.",
+          message: "The OASIS assignment roster could not be verified.",
         },
         { status: 503 },
       );
@@ -133,7 +133,7 @@ export async function POST(
         {
           ok: false,
           error: "target_not_on_sales_roster",
-          message: "OASIS leads can only be assigned to CC or Adon this cycle.",
+          message: "OASIS leads can only be assigned to CC or an active sales rep this cycle.",
         },
         { status: 422 },
       );

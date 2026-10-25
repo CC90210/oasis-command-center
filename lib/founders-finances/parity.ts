@@ -1,11 +1,10 @@
 /**
- * 50/50 owner parity view. PURE.
+ * Historical two-owner parity calculation. PURE.
  *
- * CC and Adon own OASIS equally. Parity is about what each has TAKEN OUT net
- * of what each has PUT IN: net withdrawn = draws - contributions. The owner
- * who has withdrawn less is "behind" by the difference, and taking that much
- * (or the other contributing it back) restores 50/50. Amounts are CAD
- * equivalents at each event's own-day rate.
+ * Preserved only to interpret entries recorded before OASIS became CC's sole
+ * proprietorship on 2026-10-21. It is not current ownership truth and must not
+ * drive authorization or new-entry choices. Amounts are CAD equivalents at
+ * each event's own-day rate.
  */
 
 import type { OwnerKey } from "./access";

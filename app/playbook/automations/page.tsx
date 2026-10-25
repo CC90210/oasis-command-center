@@ -21,7 +21,7 @@ export default async function IndustryAutomationPlaybookPage() {
         <ol className="grid gap-3 text-sm text-fg-muted md:grid-cols-3">
           <li><b className="text-fg">1. Pick the closest industry.</b> The catalog is organized around common operating patterns, not rigid labels.</li>
           <li><b className="text-fg">2. Ask one question.</b> Stay with the owner&apos;s answer and quantify the missed calls, time, bookings, or follow-up.</li>
-          <li><b className="text-fg">3. Book the scope.</b> Explain the outcome; CC or Adon confirms the exact build, integrations, compliance, and price.</li>
+          <li><b className="text-fg">3. Book the scope.</b> Explain the outcome; CC confirms the exact build, integrations, compliance, and price.</li>
         </ol>
       </Card>
       <Card title="Automation opportunities by industry" subtitle="Website features, workflows attached to the website, and standalone custom builds.">

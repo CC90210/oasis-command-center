@@ -146,7 +146,7 @@ export function IndustryAutomationGuide({ initialIndustry }: { initialIndustry?:
         </div>
       )}
       <p className="text-xs leading-relaxed text-fg-muted">
-        Use these as discovery paths, not promises. Confirm the current process and business impact; CC or Adon confirms feasibility, integrations, scope, compliance, and price.
+        Use these as discovery paths, not promises. Confirm the current process and business impact; CC confirms feasibility, integrations, scope, compliance, and price.
       </p>
     </div>
   );

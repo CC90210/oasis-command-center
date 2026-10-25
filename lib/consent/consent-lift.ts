@@ -70,7 +70,9 @@ async function recordLift(
   keys: readonly string[],
   lifter: ConsentLifter,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const content = `Consent flag lifted by a workspace owner or admin: ${keys.join(", ")}.`;
+  // Written BEFORE the record write, which can still fail: the row records the authorisation,
+  // not a completed lift (review, #728). The type stays consent_flag_lifted for its readers.
+  const content = `Consent flag lift authorised by a workspace owner or admin: ${keys.join(", ")}.`;
   try {
     const res = await getServiceSupabase()
       .from("lead_interactions")
@@ -82,10 +84,10 @@ async function recordLift(
         direction: "internal",
         agent_source: lifter.via,
         actor_user_id: lifter.actorUserId,
-        subject: "Consent flag lifted",
+        subject: "Consent flag lift authorised",
         content,
         content_preview: content,
-        metadata: { keys: [...keys], lifted_by: lifter.actorUserId, via: lifter.via },
+        metadata: { keys: [...keys], lifted_by: lifter.actorUserId, via: lifter.via, stage: "authorised" },
       });
     if (res.error) return { ok: false, error: res.error.message };
     return { ok: true };

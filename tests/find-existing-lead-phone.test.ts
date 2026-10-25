@@ -116,12 +116,12 @@ async function main() {
     [
       ...[
         [OWNER, "conaugh@oasisai.work"],
-        [OPENER, "adon@oasisai.work"],
+        [OPENER, "opener@oasis.test"],
         [SUN_ADMIN, "admin@sun.test"],
         [SUN_AGENT, "agent@sun.test"],
       ].map(([id, email]) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [id, email] })),
       profile("p-owner", OWNER, "conaugh@oasisai.work", WEBDEV_TENANT_ID, "owner", 1),
-      profile("p-opener", OPENER, "adon@oasisai.work", WEBDEV_TENANT_ID, "opener"),
+      profile("p-opener", OPENER, "opener@oasis.test", WEBDEV_TENANT_ID, "opener"),
       // SunBiz production runs owner / admin / member today; `agent` is the
       // ownership-scoped role the gate treats narrowly, so both are driven.
       profile("p-sun-admin", SUN_ADMIN, "admin@sun.test", SUN, "admin"),
@@ -271,8 +271,8 @@ async function main() {
     assert.equal(await stageOf("m-owner-biz1"), "signed_application");
   });
 
-  login(OPENER, "adon@oasisai.work");
-  await check("OASIS Adon, email of an unassigned pool lead: 409 with a sentence", async () => {
+  login(OPENER, "opener@oasis.test");
+  await check("OASIS opener, email of an unassigned pool lead: 409 with a sentence", async () => {
     const r = await post({ business_name: "Pool Two", email: "pool2@oasis.test", state: "ON" });
     assert.equal(r.status, 409, JSON.stringify(r.body));
     assert.equal(r.body.error, "lead_exists_not_yours");

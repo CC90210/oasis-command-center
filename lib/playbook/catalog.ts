@@ -156,20 +156,20 @@ export const CATALOG: readonly CatalogDoc[] = [
 
   // Corporate -----------------------------------------------------------------
   {
-    slug: "founders-agreement", title: "Founders' agreement", kind: "agreement", category: "corporate", visibility: "founders",
-    summary: "How CC and Adon own and run OASIS AI Solutions: ownership split, decisions, vesting, exit and disputes.",
+    slug: "founders-agreement", title: "Sole proprietor ownership and continuity record", kind: "agreement", category: "corporate", visibility: "founders",
+    summary: "How CC owns and runs OASIS AI Solutions as its sole proprietor: authority, continuity, succession, and risk.",
     required: true, requiredBy: null, owner: "ceo", source: STORED, reviewEveryDays: YEAR, legal: true,
-    needsFromCc: "The ownership split (you said 50/50 on 2026-08-24; both Drive drafts say 60/40 and Ontario), Adon's full legal name, and the governing law.",
+    needsFromCc: "The accountant-confirmed registration details, governing law, succession plan, and any future incorporation decision.",
   },
   {
     slug: "enterprise-registration", title: "Enterprise registration (NEQ)", kind: "record", category: "corporate", visibility: "founders",
     summary: "Whether OASIS AI Solutions is registered with the Registraire des entreprises du Quebec, its NEQ, and when the annual update is due.",
     required: true, requiredBy: "Quebec: Act respecting the legal publicity of enterprises", owner: "ceo",
-    source: STORED, reviewEveryDays: YEAR, legal: true, needsFromCc: "Is the business registered, and under which form (partnership or incorporation)?",
+    source: STORED, reviewEveryDays: YEAR, legal: true, needsFromCc: "Confirm the sole-proprietorship registration details and whether future incorporation is planned.",
   },
   {
     slug: "ip-assignment", title: "IP assignment to OASIS", kind: "agreement", category: "corporate", visibility: "founders",
-    summary: "The founders assign what they build for OASIS (code, prompts, content) to the business.",
+    summary: "CC records business IP (code, prompts and content) as property of OASIS or its future successor entity.",
     required: true, requiredBy: null, owner: "legal", source: STORED, reviewEveryDays: YEAR, legal: true,
     needsFromCc: "Which entity receives the IP until the business is incorporated.",
   },

@@ -4,7 +4,11 @@ import { ArrowRight } from "lucide-react";
 import { CtaLink, CTA_INLINE } from "@/components/marketing/Cta";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
-import { LEGAL_ENTITY } from "@/lib/legal/constants";
+import {
+  LEGAL_ENTITY,
+  LEGAL_OWNER_NAME,
+  LEGAL_OWNERSHIP_STRUCTURE,
+} from "@/lib/legal/constants";
 
 /**
  * /about — who this is and how they work.
@@ -61,6 +65,10 @@ export default function AboutPage() {
               clients wherever they are. The agents on this site aren&rsquo;t
               a product roadmap; they&rsquo;re the staff that runs the studio,
               which is the only honest reason to sell them to anyone else.
+            </p>
+            <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-fg-dim">
+              {LEGAL_ENTITY} is a {LEGAL_OWNERSHIP_STRUCTURE} owned and operated
+              by {LEGAL_OWNER_NAME}.
             </p>
           </Reveal>
         </div>
