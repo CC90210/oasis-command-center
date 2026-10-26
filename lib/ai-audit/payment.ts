@@ -599,7 +599,7 @@ async function stripeSessionState(f: typeof fetch, secret: string, sessionId: st
  * this existed, or a session Stripe opened while a revision landed (review of
  * phase 5, finding 1).
  */
-export async function closedEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10): Promise<string[]> {
+export async function unpayableEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10): Promise<string[]> {
   // A session the client finished but has not paid yet is left to the regular payment check (dueOpenCheckouts):
   // Stripe will not expire it. Every other open one is asked again on each tick until it closes.
   const rs = await db.execute({

@@ -128,7 +128,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       // A Gate 1 card still waiting no longer describes an engagement that moved away from it.
       if (to !== "transcript_review") await withdrawAuthorization(s.db, s.tenantId, r.engagement, actor, now, "stage_moved");
       // A declined or cancelled engagement's payment link must stop working at Stripe too.
-      // A failure here is retried by the tick (closedEngagementsWithOpenCheckouts).
+      // A failure here is retried by the tick (unpayableEngagementsWithOpenCheckouts).
       let checkouts: { expired: number; failed: number } | null = null;
       if (to === "declined" || to === "cancelled") {
         try {

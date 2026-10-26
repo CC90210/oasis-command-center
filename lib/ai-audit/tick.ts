@@ -33,7 +33,7 @@ import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { PDF_MAX_FAILURES, pdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
 import { repairUnrecordedDelivery, requestDeliveryApproval } from "@/lib/ai-audit/delivery";
 import {
-  closedEngagementsWithOpenCheckouts,
+  unpayableEngagementsWithOpenCheckouts,
   defaultPaymentDeps,
   dueOpenCheckouts,
   expireOpenCheckouts,
@@ -214,12 +214,12 @@ export async function runAiAuditTick(
     });
 
     // 3b. Verified payments whose engagement has not caught up, and sessions still open that the client must not pay
-    // (closed, being revised, past payment, or for a replaced proposal: closedEngagementsWithOpenCheckouts).
+    // (closed, being revised, past payment, or for a replaced proposal: unpayableEngagementsWithOpenCheckouts).
     await guard("settle", undefined, async () => {
       report.paymentsSettled += await settleVerifiedReceipts(db, tenantId, now(), deps.payment, 10);
     });
     await guard("expire_closed", undefined, async () => {
-      for (const id of await closedEngagementsWithOpenCheckouts(db, tenantId, 5)) {
+      for (const id of await unpayableEngagementsWithOpenCheckouts(db, tenantId, 5)) {
         if (over()) break;
         report.checkoutsExpired += (await expireOpenCheckouts(db, tenantId, id, now(), deps.payment)).expired;
       }
