@@ -476,8 +476,27 @@ async function main() {
     // The write after the send fails (review of PR #732): the outcome must still be "sent",
     // so nobody retries into a second email, and the tick finishes the record.
     await db.execute("CREATE TRIGGER fail_delivered_event BEFORE INSERT ON ai_audit_events WHEN NEW.event = 'delivered' BEGIN SELECT RAISE(ABORT, 'injected_failure'); END");
-    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+    // While the send runs (the approval is executing), Reopen and a stage move by hand wait their turn:
+    // the send already checked the versions and the authorization they would change (Codex review of phase 2, second pass).
+    const during: string[] = [];
+    const base = deps();
+    const inFlight = {
+      ...base,
+      aiAudit: {
+        ...base.aiAudit,
+        readPdf: async (path: string) => {
+          const e = (await store.getEngagement(db, OASIS, engagementId))!;
+          const reopened = await delivery.reopenForEdits(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
+          during.push(reopened.ok ? "reopened" : reopened.error);
+          const moved = await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId, to: "cancelled", actor: cc, now: NOW(), expectedRowVersion: e.row_version, event: "stage_set_by_owner", unlessDeliveryInFlight: true });
+          during.push(moved.ok ? "moved" : moved.error);
+          return stored.get(path) ?? null;
+        },
+      },
+    };
+    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, inFlight as never);
     await db.execute("DROP TRIGGER fail_delivered_event");
+    assert.deepEqual(during, ["delivery_in_progress", "delivery_in_progress"]);
     assert.equal(r.ok && (r.approval.execution_result as { outcome?: string } | null)?.outcome, "sent");
     assert.equal(sent.length, 1);
     assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "final_review", "not yet recorded");

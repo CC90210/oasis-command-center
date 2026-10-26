@@ -80,7 +80,11 @@ export const CREDENTIAL_MARKER = "[removed: possible password or account detail]
  *   social      "social" alone: only after a joiner ("my social is 078-05-1120"),
  *               never "social 12000 followers";
  *   token       a mixed token of 8+ characters, or 8+ digits: API key, client secret;
- *   pass        a mixed token only ("the pass is hunter2", never "the pass rate").
+ *   pass        a mixed token only ("the pass is hunter2", "the key is hunter2hunter2",
+ *               never "the pass rate" or "the key is consistency").
+ *
+ * A number that counts or prices something is never a value, whatever the label
+ * ("our biggest account is 150,000 a year", "the pass is $500 a month").
  */
 type ValueKind = "passphrase" | "answer" | "password" | "code" | "codeword" | "number" | "account" | "social" | "token" | "pass";
 const KINDS: readonly ValueKind[] = ["passphrase", "answer", "password", "code", "codeword", "number", "account", "social", "token", "pass"];
@@ -88,24 +92,30 @@ const KINDS: readonly ValueKind[] = ["passphrase", "answer", "password", "code",
 /** The labels, one capture group per kind, in KINDS order (earlier groups win at the same place). */
 const LABEL = new RegExp(
   [
-    String.raw`(\bpass[ \t]?phrases?\b)`,
-    String.raw`(\bsecurity[ \t]+(?:question[ \t]+)?answers?\b|\banswer[ \t]+to[ \t]+(?:the|my|our)[ \t]+security[ \t]+question\b)`,
-    String.raw`(\bpass[ \t]?(?:word|code)s?\b|\bpasswd\b|\bpwd\b|\bpw\b)`,
-    String.raw`(\bpin(?:[ \t]+(?:numbers?|codes?))?\b|\bpins\b|\bcv[vc]2?\b|\bcsc\b|\bsecurity[ \t]+(?:codes?|questions?)\b|\b(?:one[ \t-]?time|verification|confirmation|2fa|two[ \t-]factor|mfa|recovery|backup|door|alarm|gate|lock|safe|garage|entry|access)[ \t]+codes?\b|\botp\b|\bcombinations?\b)`,
+    String.raw`(\bpass[ \t]?phrases?\b|\b(?:recovery|seed|secret|mnemonic)[ \t]+phrases?\b|\bmnemonics?\b)`,
+    String.raw`(\bsecurity[ \t]+(?:question[ \t]+)?answers?\b|\banswer[ \t]+to[ \t]+(?:the|my|our)[ \t]+security[ \t]+question\b|\bmaiden[ \t]+names?\b)`,
+    String.raw`(\bpass[ \t]?(?:word|code)s?\b|\bpasswd\b|\bpasswrds?\b|\bpswds?\b|\bpwd\b|\bpw\b|\bp\/w\b)`,
+    String.raw`(\bpin(?:[ \t]+(?:numbers?|codes?))?\b|\bpins\b|\bcv[vc]2?\b|\bcsc\b|\bsecurity[ \t]+(?:codes?|questions?)\b|\b(?:one[ \t-]?time|verification|confirmation|activation|unlock|2fa|two[ \t-]factor|mfa|recovery|backup|door|alarm|gate|lock|safe|garage|entry|access)[ \t]+codes?\b|\botp\b|\bcombinations?\b)`,
     String.raw`((?<!\b(?:zip|postal|area|promo|discount|coupon|tax|source|dress|country|error|status|qr|bar|reference|tracking|product|style|morse|post|colour|color|ethics|building)[ \t])\bcodes?\b)`,
-    String.raw`(\b(?:credit[ \t]+|debit[ \t]+)?card[ \t]+numbers?\b|\bcard\b|\baccount[ \t]+(?:numbers?\b|no\b\.?|#)|\bacct[ \t]*(?:numbers?\b|no\b\.?|#)|\b(?:routing|transit|institution|sort)[ \t]+(?:numbers?|codes?)\b|\bbank[ \t]+account(?:[ \t]+numbers?)?\b|\bsin(?:[ \t]+numbers?)?\b|\bsocial[ \t]+(?:insurance|security)(?:[ \t]+numbers?)?\b|\bssn\b|\biban\b)`,
+    String.raw`(\b(?:credit[ \t]+|debit[ \t]+)?card[ \t]+numbers?\b|\bcard\b|\baccount[ \t]+(?:numbers?\b|no\b\.?|#)|\bacct[ \t]*(?:numbers?\b|no\b\.?|#)|\b(?:routing|transit|institution|sort)[ \t]+(?:numbers?|codes?)\b|\brouting\b|\baba(?:[ \t]+(?:routing[ \t]+)?numbers?)?\b|\bbank[ \t]+account(?:[ \t]+numbers?)?\b|\bsin(?:[ \t]+numbers?)?\b|\bsocial[ \t]+(?:insurance|security)(?:[ \t]+numbers?)?\b|\bssn\b|\biban\b)`,
     String.raw`(\baccount\b)`,
     String.raw`(\bsocial\b)`,
-    String.raw`(\b(?:auth(?:entication|orization)?|access|refresh|bearer|api|session|bot|app|integration|personal[ \t]+access)[ \t]+tokens?\b|\btokens?\b|\bapi[ \t_-]?keys?\b|\bapikeys?\b|\b(?:secret|private|license|licence)[ \t_-]?keys?\b|\bclient[ \t_-]?secrets?\b|\bsecrets?\b)`,
-    String.raw`(\bpass\b)`,
+    String.raw`(\b(?:auth(?:entication|orization)?|access|refresh|bearer|api|session|bot|app|integration|personal[ \t]+access)[ \t]+tokens?\b|\btokens?\b|\bapi[ \t_-]?keys?\b|\bapikeys?\b|\b(?:secret|private|license|licence)[ \t_-]?keys?\b|\b(?:product|activation|encryption|vault|wpa2?|wep|network|wi-?fi|recovery|master)[ \t]+keys?\b|\bclient[ \t_-]?secrets?\b|\bsecrets?\b)`,
+    String.raw`(\bpass\b|\bkeys?\b)`,
   ].join("|"),
   "gi",
 );
 
 /** What joins a label to its value: "is", "was", "'s", ":", "=", " - ", a dash, "would be". Bounded, so long runs of spaces cost nothing. */
-const JOINER = /[ \t]{0,8}(?:['\u2019]s\b[ \t]{0,3}:?|=|:|-(?=\s)|[\u2013\u2014]|(?:is|was|are|were)\b(?:[ \t]{1,4}(?:just|actually|still|now|basically|simply|literally|currently)\b)?[ \t]{0,3}[:-]?|(?:would|will|should)[ \t]{1,4}be\b)[ \t]{0,8}/iy;
+const JOINER =
+  /[ \t]{0,8}(?:,[ \t]{0,3}(?:which|that)[ \t]{1,3}(?:is|was)\b|['\u2019]s\b[ \t]{0,3}:?|=>|->|=|:|-(?=\s)|[\u2013\u2014]|(?:is|was|has[ \t]{1,4}been|got)[ \t]{1,4}(?:set|changed|reset|updated|switched)[ \t]{1,4}to\b|(?:is|was|are|were)\b(?:[ \t]{1,4}(?:just|actually|still|now|basically|simply|literally|currently)\b)?[ \t]{0,3}[:-]?|(?:would|will|should)[ \t]{1,4}be\b|equals\b|reads\b|goes[ \t]{1,4}like\b)[ \t]{0,8}/iy;
+/** "We changed the password TO hunter2": after a verb of changing, "to" joins the label to its value. */
+const CHANGED_BEFORE = /\b(?:change|changed|changing|set|setting|reset|resetting|update|updated|updating|switch|switched)[ \t]{1,4}(?:(?:the|my|our|your|their|his|her)[ \t]{1,4})?(?:[A-Za-z]{1,20}[ \t]{1,4})?$/i;
+const TO_JOINER = /[ \t]{1,4}to[ \t]{1,4}/iy;
+/** Markdown emphasis around a label: "the **password** is ...". */
+const EMPHASIS = /[*_~]{1,3}/y;
 /** A word between the label and its joiner: "the password FOR THE PORTAL is ...". Letters only, so it never swallows the value or crosses punctuation. */
-const FILLER = /[ \t]{1,8}([A-Za-z][A-Za-z'\u2019]{0,30})(?=[ \t:=]|$)/y;
+const FILLER = /[ \t]{1,8}([A-Za-z][A-Za-z'\u2019]{0,30})(?=[ \t:=,]|$)/y;
 const MAX_FILLER = 6;
 /**
  * A filler must start like "for the portal", "on the back", "we use
@@ -132,7 +142,8 @@ const COMMON = new Set(
     "unique separate individual centralized wait hold stop sorry hmm well one two three four five six seven eight nine ten " +
     "incorrect correct wrong invalid valid chaos mess messy overdue due unclear compromised leaked stolen guessable obvious predictable permanent " +
     "universal nowhere rubbish awful horrible alright gone changing stale ancient outdated inconsistent consistent problem problems issue issues " +
-    "disaster nightmare joke fine-ish everywhere unmanaged scattered excel spreadsheet paper"
+    "disaster nightmare joke fine-ish everywhere unmanaged scattered excel spreadsheet paper whatever whichever whoever anyone someone " +
+    "everyone nobody somebody manual automatic automated job territory responsibility concern department decision choice fault"
   ).split(" "),
 );
 /** Nouns that follow "password" as a compound, never as the password: "password manager", "password reset". */
@@ -140,7 +151,9 @@ const PASSWORD_COMPOUNDS = new Set(
   (
     "reset resets manager managers policy policies protected protection change changes rotation field box prompt hint hints strength length expiry " +
     "expiration sharing vault list lists sheet spreadsheet file document doc notebook book sticky note notes reuse recovery requirements rules complexity " +
-    "hygiene issues problems problem issue fatigue emails email link links screen page form request requests approach system tool tools app"
+    "hygiene issues problems problem issue fatigue emails email link links screen page form request requests approach system tool tools app " +
+    "management situation habits habit storage reminders reminder security process processes training audits audit complaints workflow " +
+    "schedule practices practice culture standards standard setup strategy situation"
   ).split(" "),
 );
 /** A word ending like a description, not a password: "unmanaged", "inconsistent", "Excel-based", "Dana's". */
@@ -148,7 +161,9 @@ const DESCRIPTIVE_ENDING = /(?:ed|ing|ent|ant|ous|ive|ful|less|able|ible|ical|ar
 /** Words that end a spoken passphrase or a value: "my password is blue falcon AND ...". */
 const STOP = new Set(["and", "but", "so", "or", "then", "okay", "ok", "right", "which", "because", "if", "for", "to", "um", "uh", "yeah", "alright", "please", "thanks", "that", "i", "we", "you", "it", "is", "was", "are"]);
 
-const SPOKEN_DIGIT = "(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)";
+const SPOKEN_DIGIT =
+  "(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|double|triple)";
+const SPOKEN_DIGIT_RE = new RegExp(`^${SPOKEN_DIGIT}$`, "i");
 const SPOKEN_LETTER = "(?:alpha|alfa|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliett?|kilo|lima|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor|whiske?y|x-?ray|yankee|zulu)";
 const SPOKEN_WORD = `(?:${SPOKEN_DIGIT}|${SPOKEN_LETTER})`;
 const SPOKEN_RUN = new RegExp(`${SPOKEN_WORD}(?:[ \\t,.-]{1,4}${SPOKEN_WORD}){0,40}\\b`, "iy");
@@ -156,12 +171,42 @@ const SPOKEN_RUN = new RegExp(`${SPOKEN_WORD}(?:[ \\t,.-]{1,4}${SPOKEN_WORD}){0,
 const DIGIT_RUN = /\d(?:(?:[ \t]{0,2}[,.\/-][ \t]{0,2}|[ \t]{1,2})?\d){0,60}/y;
 const TOKEN = /[^\s]{1,400}/y;
 const TRAILING_PUNCT = /[.,;:!?)"'\u2019\u201D]+$/;
+/** What may follow a run of digits in the same word for the digits alone to be the value: the sentence's own punctuation. "2024!Summer" is one token. */
+const WORD_END_PUNCT = /^[.,;:!?)\]}"'\u2019\u201D\u2026-]{0,8}$/;
+/** "12,000" or "1,250,000.50": thousands, never a PIN or an account number. */
+const THOUSANDS = /^\d{1,3}(?:,\d{3}){1,6}(?:\.\d{1,4})?$/;
+/** Words after a number that make it a count or a price: "12,000 a year", "150 employees", "100 miles", "15000000 per month". */
+const QUANTITY_AFTER = new RegExp(
+  String.raw`^[ \t]{0,3}(?:%|percent\b|per\b|each\b|every\b|annually\b|yearly\b|monthly\b|weekly\b|daily\b|dollars?\b|bucks\b|cents?\b|euros?\b|pounds\b|usd\b|cad\b|grand\b|k\b|strong\b|outstanding\b|overdue\b|` +
+    String.raw`a[ \t]{1,3}(?:year|month|week|day|night|visit|job|head|piece|unit|seat|user|call|lead|customer|client|sale|order)\b|` +
+    String.raw`in[ \t]{1,3}(?:revenue|sales|arrears|total|debt|savings|profit|fees|value|spend)\b|` +
+    String.raw`(?:lines?|miles?|km|kilomet(?:er|re)s?|posts?|followers?|subscribers?|fans?|orders?|customers?|clients?|users?|people|staff|employees?|leads?|calls?|jobs?|visits?|sales|units?|items?|hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|times|` +
+    String.raw`locations?|stores?|trucks?|vans?|rooms?|beds?|tables?|seats?|members?|students?|patients?|accounts|projects?|invoices?|reviews?|stars?|views?|clicks?|visitors?|emails?|messages?|texts?|tickets?|bookings?|appointments?|installs?|downloads?|sign-?ups?|deals?|sq|square|feet|ft)\b)`,
+  "i",
+);
+/** A price, a percentage or a count written short: "$500", "$1,200", "150k", "12.5%". Not a secret, though it has a symbol. */
+const AMOUNT = /^(?:[$\u20AC\u00A3\u00A5]\d[\d,]{0,15}(?:\.\d{1,2})?[kKmMbB]?|\d{1,3}(?:,\d{3}){1,6}(?:\.\d{1,4})?|\d{1,9}(?:\.\d{1,4})?(?:[kKmMbB]|%))$/;
+/** Next to "code" alone, what makes it a credential: "the code for the SAFE is 4421". Never "the billing code is 99213". */
+const SECURITY_NOUN =
+  /\b(?:safe|gate|doors?|alarm|wi-?fi|locks?|lockbox|keypad|padlock|vault|garage|entry|access|building|unlock|log[ \t]?in|phone|laptop|computer|tablet|ipad|iphone|security|bank|card|portal|admin|server|router|network|office|front|back|side|account)\b/i;
+/**
+ * The value said before its label: "4421 is the PIN", "hunter2 is the password",
+ * "a text with 482913 as the verification code", "it's hunter2, that's the password".
+ */
+const VALUE_THEN_LABEL = new RegExp(
+  String.raw`(?<![\p{L}\p{N}])([\p{L}\p{N}][^\s,;]{0,63})(?:[ \t]{1,4}(?:is|was|as)|,[ \t]{0,3}(?:that['\u2019]s|that[ \t]{1,3}is|which[ \t]{1,3}is))[ \t]{1,4}` +
+    String.raw`(?:(?:the|my|our|your|his|her|their)[ \t]{1,4})?(?:(?:new|current|old|temporary|real)[ \t]{1,4})?` +
+    String.raw`(?:pass[ \t]?(?:word|code|phrase)|pin(?:[ \t]{1,4}(?:number|code))?|(?:verification|security|confirmation|access|door|alarm|gate|safe|one[ \t-]?time|2fa|mfa|login)[ \t]{1,4}code|otp|combination)\b`,
+  "giu",
+);
 
 function minDigits(kind: ValueKind, plural: boolean): number {
   switch (kind) {
     case "number":
       return plural ? 8 : 5;
     case "account":
+      // "account" alone: a bank account number, 7 or more digits. "Account 10234 is overdue" names a customer's account.
+      return 7;
     case "social":
       return 5;
     case "token":
@@ -175,15 +220,23 @@ function minDigits(kind: ValueKind, plural: boolean): number {
 
 /** A token that is not a word: letters with digits ("hunter2"), letters or digits with symbols ("p@ss!"), or one long run ("8f3a9c1d..."). */
 function looksSecret(tok: string): boolean {
+  if (AMOUNT.test(tok)) return false;
   if (/\d/.test(tok) && /\p{L}/u.test(tok)) return true;
   if (/[!@#$%^&*_+=~|<>{}[\]\\/]/.test(tok) && /[\p{L}\d]/u.test(tok)) return true;
   return tok.length >= 16 && /^[A-Za-z0-9_\-+/=.]+$/.test(tok);
 }
 
-type Carry = { kind: ValueKind; plural: boolean; needJoiner: boolean; digitsOnly: boolean; lines: number };
+/** `question`: the label ended a question about the thing ("Who has the password?"), so a plain word that follows is an answer, never the value. */
+type Carry = { kind: ValueKind; plural: boolean; needJoiner: boolean; digitsOnly: boolean; lines: number; question?: boolean };
 
-/** After a label: its joiner (skipping a few filler words), or where a value would follow it directly. */
-function afterLabel(s: string, at: number): { at: number; joined: boolean } {
+/** After a label: its joiner (skipping a few filler words), or where a value would follow it directly. `labelStart` lets "changed the password to X" join. */
+function afterLabel(s: string, at: number, labelStart?: number): { at: number; joined: boolean } {
+  EMPHASIS.lastIndex = at;
+  if (EMPHASIS.exec(s)) at = EMPHASIS.lastIndex;
+  if (labelStart !== undefined && CHANGED_BEFORE.test(s.slice(Math.max(0, labelStart - 60), labelStart))) {
+    TO_JOINER.lastIndex = at;
+    if (TO_JOINER.exec(s)) return { at: TO_JOINER.lastIndex, joined: true };
+  }
   let pos = at;
   for (let i = 0; i <= MAX_FILLER; i++) {
     JOINER.lastIndex = pos;
@@ -207,7 +260,8 @@ function skipTalk(s: string, at: number): number {
     if (PUNCT_AND_SPACE.exec(s)) i = PUNCT_AND_SPACE.lastIndex;
     INTERJECTION.lastIndex = i;
     const m = INTERJECTION.exec(s);
-    if (!m) break;
+    // "The password is IT's job": IT the team, not "it's".
+    if (!m || /^IT['\u2019]s$/.test(m[0])) break;
     i = INTERJECTION.lastIndex;
   }
   PUNCT_AND_SPACE.lastIndex = i;
@@ -222,27 +276,58 @@ function restIsEmpty(s: string, at: number): boolean {
 
 type Value = { start: number; end: number; digitsToEnd: boolean };
 
-/** The value a label introduces, "end" when the line ends first (the value is on the next line), or null when what follows is no secret. */
-function readValue(s: string, at: number, kind: ValueKind, joined: boolean, plural: boolean): Value | "end" | null {
+/** The word after `at`, lower case, or null at the end of the line. A marker counts as a word, so a second scrub reads the line as the first did. */
+function nextWord(s: string, at: number): string | null {
+  return /^[ \t]{1,4}(\p{L}[\p{L}'\u2019-]{0,40}|\u0001)/u.exec(s.slice(at, at + 50))?.[1]?.toLowerCase() ?? null;
+}
+
+/** After a word that would only describe ("correct"), three or more plain words that end the line are a phrase read out. */
+function phraseReadOut(s: string, from: number): number | null {
+  let last = from;
+  let words = 0;
+  for (let n = 0; n < 24; n++) {
+    const m = /^[ \t]{1,4}([\p{L}\p{N}'\u2019-]{1,40})/u.exec(s.slice(last, last + 60));
+    if (!m) break;
+    const w = m[1].toLowerCase();
+    if (STOP.has(w) || COMMON.has(w)) return null;
+    last += m[0].length;
+    words += 1;
+  }
+  return words >= 3 && restIsEmpty(s, last) ? last : null;
+}
+
+/**
+ * The value a label introduces, "end" when the line ends first (the value is on
+ * the next line), or null when what follows is no secret. `plain` false: a plain
+ * word is never the value (after a question about the thing: "Who has the
+ * password?" / "Mike, our IT guy.").
+ */
+function readValue(s: string, at: number, kind: ValueKind, joined: boolean, plural: boolean, plain = true): Value | "end" | null {
   const i = skipTalk(s, at);
   if (i >= s.length || restIsEmpty(s, i)) return "end";
   const start = i;
   const needsJoiner = kind === "codeword" || kind === "social";
   if (needsJoiner && !joined) return null;
 
-  // Digits.
+  // Digits, when they are the whole word ("4421", "4421.", "4 4 2 1"). "2024!Summer" is one token, read below.
   DIGIT_RUN.lastIndex = i;
   const d = DIGIT_RUN.exec(s);
-  if (d && !/\p{L}/u.test(s[DIGIT_RUN.lastIndex] ?? "")) {
-    if (d[0].replace(/\D/g, "").length < minDigits(kind, plural)) return null;
-    return { start, end: DIGIT_RUN.lastIndex, digitsToEnd: restIsEmpty(s, DIGIT_RUN.lastIndex) };
+  if (d) {
+    const dEnd = DIGIT_RUN.lastIndex;
+    const rest = /^[^\s]{0,400}/.exec(s.slice(dEnd, dEnd + 400))?.[0] ?? "";
+    if (WORD_END_PUNCT.test(rest)) {
+      // A count or a price is no secret: "12,000 a year", "150 employees", "100 miles", "15000000 per month".
+      if (THOUSANDS.test(d[0]) || QUANTITY_AFTER.test(s.slice(dEnd, dEnd + 60))) return null;
+      if (d[0].replace(/\D/g, "").length < minDigits(kind, plural)) return null;
+      return { start, end: dEnd, digitsToEnd: restIsEmpty(s, dEnd) };
+    }
   }
   // Spoken digits, or letters in the phonetic alphabet ("echo romeo two").
   SPOKEN_RUN.lastIndex = i;
   const w = SPOKEN_RUN.exec(s);
   if (w) {
     const words = w[0].split(/[^a-z-]+/i).filter(Boolean);
-    const digits = words.filter((x) => new RegExp(`^${SPOKEN_DIGIT}$`, "i").test(x)).length;
+    const digits = words.filter((x) => SPOKEN_DIGIT_RE.test(x)).length;
     const enough =
       kind === "password" || kind === "passphrase" || kind === "answer"
         ? words.length >= 2
@@ -273,36 +358,53 @@ function readValue(s: string, at: number, kind: ValueKind, joined: boolean, plur
     return { start, end, digitsToEnd: false };
   }
   if (kind !== "password" && kind !== "passphrase" && kind !== "answer") return null;
+  if (!plain) return null;
   // Plain words. A plural label ("passwords are ...") describes, it never gives one.
   if (plural && kind !== "answer") return null;
   const plainWord = (x: string) => /^[\p{L}\p{N}'\u2019-]+$/u.test(x);
   if (!plainWord(tok)) return null;
   const lower = tok.toLowerCase();
-  const describes = COMMON.has(lower) || DESCRIPTIVE_ENDING.test(tok);
+  const next = nextWord(s, end);
+  // An adverb before a participle ("is rarely changed"), or a team's initials before more words ("is HR territory"): the sentence describes.
+  const adverb = /ly$/i.test(tok) && next !== null && (COMMON.has(next) || /ed$/.test(next));
+  const initials = /^[A-Z]{2,5}$/.test(tok) && next !== null;
+  const describes = COMMON.has(lower) || DESCRIPTIVE_ENDING.test(tok) || adverb || initials;
   if (kind === "password") {
-    if (describes) return null;
     if (!joined) {
-      // "password swordfish": only a word that ends the thought, never "password manager".
-      if (PASSWORD_COMPOUNDS.has(lower)) return null;
-      const after = s.slice(end, end + 40).match(/^[ \t]*([\p{L}]+)?/u)?.[1]?.toLowerCase();
-      if (!restIsEmpty(s, end) && !(after && STOP.has(after)) && !/^[ \t]*[.,;:!?]/.test(s.slice(end, end + 5))) return null;
+      // "Wifi password swordfish" in a note: only a word that ends a short line.
+      // "Our password habits are poor" and "the password situation for ServiceTitan?" are about passwords.
+      if (describes || PASSWORD_COMPOUNDS.has(lower)) return null;
+      if (!restIsEmpty(s, end)) return null;
+    } else if (describes) {
+      // "The password is correct horse battery staple": a phrase read out after a word that would only describe.
+      const phrase = phraseReadOut(s, end);
+      return phrase === null ? null : { start, end: phrase, digitsToEnd: false };
     }
   } else if (kind === "answer") {
     if (!joined || describes) return null;
   } else if (!joined) return null;
-  // ... and the words after it: a passphrase read out loud ("blue falcon river", "the quick brown fox").
-  const maxWords = kind === "passphrase" ? 6 : 4;
+  // ... and the words after it: a passphrase read out loud ("blue falcon river", "the quick brown fox", a 12-word recovery phrase).
+  const maxWords = kind === "passphrase" ? 24 : 4;
   let last = end;
   let words = 1;
   let stopped = !!trail;
   while (words < maxWords && !stopped) {
-    const m = /^[ \t]{1,4}([\p{L}\p{N}'\u2019-]{1,40})([.,;:!?)"'\u2019\u201D]*)/u.exec(s.slice(last, last + 120));
+    const m = /^([ \t]{1,4})([^\s]{1,64})/.exec(s.slice(last, last + 80));
     if (!m) break;
-    const nxt = m[1].toLowerCase();
-    if (STOP.has(nxt) || (COMMON.has(nxt) && !new RegExp(`^${SPOKEN_DIGIT}$`, "i").test(nxt))) break;
-    last += m[0].length - m[2].length;
+    const tp = m[2].match(TRAILING_PUNCT);
+    const core = tp ? m[2].slice(0, -tp[0].length) : m[2];
+    if (!core) break;
+    if (looksSecret(core)) {
+      // "blue falcon Pa$$w0rd": the whole token goes, never a tail of it.
+      last += m[1].length + core.length;
+      break;
+    }
+    if (!plainWord(core)) break;
+    const nxt = core.toLowerCase();
+    if (STOP.has(nxt) || (COMMON.has(nxt) && !SPOKEN_DIGIT_RE.test(nxt))) break;
+    last += m[1].length + core.length;
     words += 1;
-    stopped = !!m[2];
+    stopped = !!tp;
   }
   return { start, end: last, digitsToEnd: false };
 }
@@ -327,6 +429,21 @@ const SHAPES: RegExp[] = [
 ];
 /** A user name and password inside an address: https://admin:hunter2@router.local (the "admin:hunter2" part goes). */
 const URL_CREDENTIALS = /\b[a-z][a-z0-9+.-]{1,20}:\/\/([^\s/@:]{1,64}:[^\s/@]{1,128})@/gi;
+/** A user name and password before a host, with no scheme: jane:hunter2@files.example.com (the "jane:hunter2" part goes). */
+const USERINFO = /(?<![\w@\/:.-])[\w.+-]{1,64}:[^\s\/@:]{1,128}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,10}/g;
+/** curl's -u user:password. */
+const CURL_USER = /(?:^|[ \t])-u[ \t]{1,4}([^\s:]{1,64}:\S{1,128})/g;
+/**
+ * Invisible and look-alike characters people paste: zero-width marks go, odd
+ * spaces become spaces, full-width letters and digits become plain ones, so
+ * "pass[zero-width]word" and "my pin is [full-width 4421]" are read as typed.
+ */
+function plainChars(s: string): string {
+  return s
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, "")
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, " ")
+    .replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+}
 /** An IBAN, mod-97 checked: GB82 WEST 1234 5698 7654 32. */
 const IBAN = /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g;
 const BASE64_LINE = /^[A-Za-z0-9+/=]{20,}$/;
@@ -429,7 +546,7 @@ const INERT = "\u0001";
 
 /** One line. `carry` is a label the previous line left open, still waiting for its value. */
 function scrubLine(raw: string, carry: Carry | null): { text: string; hits: number; pending: Carry | null; pemOpen: boolean } {
-  const s = raw.split(CREDENTIAL_MARKER).join(INERT);
+  const s = plainChars(raw.split(CREDENTIAL_MARKER).join(INERT));
   const cuts: Array<[number, number]> = [];
   let pending: Carry | null = null;
 
@@ -449,11 +566,12 @@ function scrubLine(raw: string, carry: Carry | null): { text: string; hits: numb
       const next = d ? s.slice(DIGIT_RUN.lastIndex, DIGIT_RUN.lastIndex + 40).match(/^[ \t]*([\p{L}]+)?/u)?.[1]?.toLowerCase() : undefined;
       if (d && d[0].replace(/\D/g, "").length >= 4 && (restIsEmpty(s, DIGIT_RUN.lastIndex) || (next !== undefined && STOP.has(next)))) cuts.push([d.index, DIGIT_RUN.lastIndex]);
     } else {
-      const v = readValue(s, at, carry.kind, joined, carry.plural);
+      const v = readValue(s, at, carry.kind, joined, carry.plural, !carry.question);
       if (v && v !== "end") {
         cuts.push([v.start, v.end]);
         if (v.digitsToEnd) pending = { kind: carry.kind, plural: carry.plural, needJoiner: false, digitsOnly: true, lines: 0 };
-      } else if (v === null && carry.lines < 1 && (s.split(/\s+/).length <= 10 || /\?\s*$/.test(s))) {
+      } else if (v === null && carry.lines < 1 && !s.includes(INERT) && (s.split(/\s+/).length <= 10 || /\?\s*$/.test(s))) {
+        // (A line holding a marker is a value already taken out: the label is answered, nothing carries past it.)
         // An interruption ("sorry, say again?"): the value may come on the line after.
         pending = { ...carry, lines: carry.lines + 1 };
       }
@@ -466,10 +584,14 @@ function scrubLine(raw: string, carry: Carry | null): { text: string; hits: numb
     const kind = KINDS[group] ?? "password";
     const plural = /s$/i.test(m[0]) && kind !== "pass" && kind !== "social" && !/\bpass$/i.test(m[0]);
     const labelEnd = m.index + m[0].length;
-    const after = afterLabel(s, labelEnd);
+    const after = afterLabel(s, labelEnd, m.index);
+    // "code" alone is a credential only next to what it opens: "the code for the safe is 4421", never "the billing code is 99213".
+    if (kind === "codeword" && !SECURITY_NOUN.test(s.slice(Math.max(0, m.index - 40), after.at))) continue;
     const v = readValue(s, after.at, kind, after.joined, plural);
     if (v === "end") {
-      pending = { kind, plural, needJoiner: !after.joined, digitsOnly: false, lines: 0 };
+      // A question about the thing ("Who has the password?") is answered by a person or a place; "What's the password?" asks for it.
+      const question = /\?[\s"'\u2019\u201D)]*$/.test(s) && !/\bwhat\b/i.test(s);
+      pending = { kind, plural, needJoiner: !after.joined, digitsOnly: false, lines: 0, question };
       continue;
     }
     if (v) {
@@ -478,9 +600,19 @@ function scrubLine(raw: string, carry: Carry | null): { text: string; hits: numb
       LABEL.lastIndex = Math.max(LABEL.lastIndex, v.end);
     }
   }
+  for (const m of s.matchAll(VALUE_THEN_LABEL)) {
+    const core = m[1].replace(TRAILING_PUNCT, "");
+    const digitsOnly = /^\d[\d .\/-]{0,40}$/.test(core);
+    if ((digitsOnly && core.replace(/\D/g, "").length >= 3) || (!digitsOnly && looksSecret(core))) cuts.push([m.index ?? 0, (m.index ?? 0) + core.length]);
+  }
   for (const re of SHAPES) {
     re.lastIndex = 0;
     for (const m of s.matchAll(re)) cuts.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  }
+  for (const m of s.matchAll(USERINFO)) cuts.push([m.index ?? 0, (m.index ?? 0) + m[0].indexOf("@")]);
+  for (const m of s.matchAll(CURL_USER)) {
+    const at = (m.index ?? 0) + m[0].indexOf(m[1]);
+    cuts.push([at, at + m[1].length]);
   }
   for (const m of s.matchAll(URL_CREDENTIALS)) {
     const at = (m.index ?? 0) + m[0].indexOf(m[1]);
@@ -578,7 +710,8 @@ export function formatFor(filename: string | null | undefined, text: string): Tr
   }
   const head = text.replace(/^\uFEFF/, "").trimStart();
   if (/^WEBVTT\b/.test(head)) return "vtt";
-  if (/^\d+\s*(?:\r\n|\r|\n)\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->/.test(head)) return "srt";
+  // Bounded, and no run of \s that a newline can also match: "1" then thousands of newlines was quadratic (review of phase 2).
+  if (/^\d{1,9}(?:[ \t]*(?:\r\n|\r|\n)){1,3}[ \t]*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}[ \t]*-->/.test(head)) return "srt";
   return "txt";
 }
 
@@ -722,6 +855,15 @@ function parseTxt(text: string): RawLine[] {
   let otter = headAt.length >= 2 && headAt.every((i) => i + 1 < rows.length && !heads[i + 1]);
   for (let k = 1; otter && k < headAt.length; k++) if ((heads[headAt[k]] as { at: string }).at < (heads[headAt[k - 1]] as { at: string }).at) otter = false;
 
+  // "0:05" alone on a line, then what was said (a YouTube or Descript copy): such lines are stamps only
+  // when the file is laid out that way: two or more, each followed by words, the first near the
+  // recording's start, never going back. Otherwise the line is kept as text, said by no one, so
+  // it is never "Dana: 0:12" (review of phase 2, third pass). "9:00" read as nine minutes starts too late.
+  const bare = rows.map((r) => (/^\d{1,2}:\d{2}$/.test(r) ? clock(r) : null));
+  const bareAt = bare.flatMap((b, i) => (b ? [i] : []));
+  let stamps = !otter && bareAt.length >= 2 && (bare[bareAt[0]] as string) <= "00:05:00" && bareAt.every((i) => i + 1 < rows.length && !bare[i + 1]);
+  for (let k = 1; stamps && k < bareAt.length; k++) if ((bare[bareAt[k]] as string) < (bare[bareAt[k - 1]] as string)) stamps = false;
+
   // Labels that come back on other lines ("cc:" three times) may be lower case.
   const seen = new Map<string, number>();
   const countRef: ClockBase = { base: null };
@@ -740,6 +882,15 @@ function parseTxt(text: string): RawLine[] {
     if (head) {
       speaker = head.who;
       held = head.at;
+      return;
+    }
+    const at = bare[i];
+    if (at) {
+      if (stamps) held = at;
+      else {
+        out.push({ t: null, speaker: null, text: raw });
+        held = null;
+      }
       return;
     }
     let line = raw;
@@ -765,14 +916,58 @@ function parseTxt(text: string): RawLine[] {
   return out;
 }
 
-/** Strip caption markup: {\an8}, <v Name>, <c.color>, <00:00:01.000>, <b>, &amp; and friends. */
+/**
+ * Every `open ... close` span, left to right, as the regex /open[^close]*close/g would find
+ * them, in one forward pass: once no `close` follows a position, none can follow a later one,
+ * so the scan stops. A regex here was quadratic on unclosed `<` or `{\` and exponential on
+ * `<v.a.a.a...` (review, Oct 25): an upload is untrusted input.
+ */
+function markupSpans(s: string, open: string, close: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let at = s.indexOf(open);
+  while (at !== -1) {
+    const end = s.indexOf(close, at + open.length);
+    if (end === -1) break;
+    out.push([at, end + close.length]);
+    at = s.indexOf(open, end + close.length);
+  }
+  return out;
+}
+
+function withoutSpans(s: string, spans: Array<[number, number]>): string {
+  if (!spans.length) return s;
+  let out = "";
+  let at = 0;
+  for (const [a, b] of spans) {
+    out += s.slice(at, a);
+    at = b;
+  }
+  return out + s.slice(at);
+}
+
+/** The speaker of the first voice tag, `<v Name>` or `<v.class Name>`; null when there is none. */
+function voiceOf(s: string, tags: Array<[number, number]>): string | null {
+  for (const [a, b] of tags) {
+    let inner = s.slice(a + 1, b - 1);
+    // A tag cannot hold another `<`: `<c <v Name>` is the voice tag `<v Name>` after junk.
+    const lt = inner.lastIndexOf("<");
+    if (lt !== -1) inner = inner.slice(lt + 1);
+    if (inner[0] !== "v") continue;
+    const ws = inner.search(/\s/);
+    if (ws === -1) continue;
+    const classes = inner.slice(1, ws);
+    if (classes && (classes[0] !== "." || classes.length < 2)) continue;
+    const who = inner.slice(ws).trim();
+    if (who) return who;
+  }
+  return null;
+}
+
+/** Strip caption markup: {\an8}, <v Name>, <c.color>, <00:00:01.000>, <b>, &amp; and friends. Linear time. */
 function stripCueMarkup(s: string): { text: string; speaker: string | null } {
-  let speaker: string | null = null;
-  const voice = s.match(/<v(?:\.[^\s>]+)*\s+([^>]+)>/);
-  if (voice) speaker = voice[1];
-  const text = s
-    .replace(/\{\\[^}]*\}/g, "")
-    .replace(/<[^>]*>/g, "")
+  const speaker = voiceOf(s, markupSpans(s, "<", ">"));
+  const noBraces = withoutSpans(s, markupSpans(s, "{\\", "}"));
+  const text = withoutSpans(noBraces, markupSpans(noBraces, "<", ">"))
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -857,7 +1052,8 @@ function finish(format: TranscriptFormat, raw: RawLine[]): { ok: true; value: Pa
     const sp = raw[i].speaker ? scrubCredentials(raw[i].speaker as string) : null;
     if (sp) redactions += sp.hits;
     for (const piece of splitLong({ ...raw[i], text: scrubbed.texts[i] })) {
-      lines.push({ n: lines.length + 1, t: piece.t, speaker: sp ? sp.text : null, text: piece.text });
+      // A speaker label that held a secret and grew past the cap with the marker is dropped, not cut mid-marker.
+      lines.push({ n: lines.length + 1, t: piece.t, speaker: sp ? (sp.text.length > SPEAKER_MAX_CHARS ? null : sp.text) : null, text: piece.text });
       if (lines.length > TRANSCRIPT_MAX_LINES) return { ok: false, error: "too_many_lines" };
     }
   }

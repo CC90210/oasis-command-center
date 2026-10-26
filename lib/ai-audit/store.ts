@@ -390,6 +390,37 @@ export type EngagementPatch = Partial<Record<
  * Returned, not run: casWrite runs it first, and the rest only when it changed
  * exactly one row.
  */
+/**
+ * How long a delivery's `executing` mark holds changes off. Far longer than a
+ * send takes; the mark of a run that crashed lapses after it (execute.ts never
+ * re-runs an `executing` approval, so nothing is waiting on it).
+ */
+export const DELIVERY_IN_FLIGHT_MS = 15 * 60_000;
+
+/**
+ * SQL that is true while no final-approval email for this engagement is being
+ * sent: no deliver_ai_audit approval for it is `executing` (claimed in the last
+ * DELIVERY_IN_FLIGHT_MS). Placed inside the UPDATE of a change that would void
+ * what the delivery checked (a transcript deleted, a stage moved, a reopen), it
+ * makes the two take turns: if the change commits first, the delivery's checks
+ * after its claim see it and send nothing; if the claim commits first, the
+ * change is refused until the send is over (Codex review of phase 2, second pass).
+ */
+export function noDeliveryInFlight(tenantId: string, engagementId: string, now: Date): { sql: string; args: string[] } {
+  return {
+    sql: `NOT EXISTS (SELECT 1 FROM approvals a WHERE a.tenant_id = ? AND a.action_kind = 'deliver_ai_audit' AND a.status = 'executing'
+            AND a.executing_at > ? AND json_extract(a.payload_json, '$.engagement_id') = ?)`,
+    args: [tenantId, new Date(now.getTime() - DELIVERY_IN_FLIGHT_MS).toISOString(), engagementId],
+  };
+}
+
+/** Whether a final-approval email for this engagement is being sent right now (see noDeliveryInFlight). */
+export async function deliveryInFlight(db: Client, tenantId: string, engagementId: string, now: Date): Promise<boolean> {
+  const guard = noDeliveryInFlight(requireTenant(tenantId), engagementId, now);
+  const rs = await db.execute({ sql: `SELECT ${guard.sql} AS clear`, args: guard.args });
+  return Number(rs.rows[0]?.clear ?? 1) === 0;
+}
+
 export function engagementUpdateStatement(
   tenantId: string,
   id: string,
@@ -399,6 +430,8 @@ export function engagementUpdateStatement(
   stage?: AiAuditStage,
   /** Write only while the engagement is in one of these stages (a check that cannot go stale between read and write). */
   onlyInStages?: readonly AiAuditStage[],
+  /** One more condition the write needs, checked inside it (noDeliveryInFlight). */
+  guard?: { sql: string; args: Array<string | number> },
 ): InStatement {
   const sets: string[] = [];
   const args: Array<string | number | null> = [];
@@ -414,13 +447,16 @@ export function engagementUpdateStatement(
   sets.push("row_version = row_version + 1", "updated_at = ?");
   args.push(at);
   const inStages = onlyInStages?.length ? ` AND stage IN (${onlyInStages.map(() => "?").join(", ")})` : "";
+  const extra = guard ? ` AND ${guard.sql}` : "";
   return {
-    sql: `UPDATE ai_audit_engagements SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND row_version = ?${inStages}`,
-    args: [...args, tenantId, id, expectedRowVersion, ...(onlyInStages ?? [])],
+    sql: `UPDATE ai_audit_engagements SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND row_version = ?${inStages}${extra}`,
+    args: [...args, tenantId, id, expectedRowVersion, ...(onlyInStages ?? []), ...(guard?.args ?? [])],
   };
 }
 
-export type CasResult = { ok: true; engagement: Engagement } | { ok: false; error: "conflict" | "not_found" | "move_not_allowed"; engagement: Engagement | null };
+export type CasResult =
+  | { ok: true; engagement: Engagement }
+  | { ok: false; error: "conflict" | "not_found" | "move_not_allowed" | "delivery_in_progress"; engagement: Engagement | null };
 
 /**
  * Patch an engagement (no stage change) with its event. `expectedRowVersion`
@@ -474,6 +510,8 @@ export async function moveStage(
     meta?: Record<string, unknown>;
     event?: string;
     extra?: InStatement[];
+    /** Refuse while a final-approval email for this engagement is being sent (a move by hand). */
+    unlessDeliveryInFlight?: boolean;
   },
 ): Promise<CasResult> {
   const tenantId = requireTenant(input.tenantId);
@@ -488,7 +526,8 @@ export async function moveStage(
   // Active Client ends the audit cycle too: the delivery project carries the client from here, and
   // the lead is free for other deals (an open engagement holds website sales off it, ownership.ts).
   const closing: EngagementPatch = input.to === "declined" || input.to === "cancelled" || input.to === "active_client" ? { closed_at: at, closed_reason: input.to } : {};
-  const update = engagementUpdateStatement(tenantId, current.id, current.row_version, { ...(input.patch ?? {}), ...closing }, at, input.to);
+  const guard = input.unlessDeliveryInFlight ? noDeliveryInFlight(tenantId, current.id, input.now) : undefined;
+  const update = engagementUpdateStatement(tenantId, current.id, current.row_version, { ...(input.patch ?? {}), ...closing }, at, input.to, undefined, guard);
   const ev = eventStatement({
     tenantId,
     engagementId: current.id,
@@ -501,6 +540,9 @@ export async function moveStage(
   });
   const applied = await casWrite(db, update, [ev, ...(input.extra ?? [])]);
   const after = await getEngagement(db, tenantId, current.id);
+  if (!applied && after && guard && after.row_version === current.row_version && (await deliveryInFlight(db, tenantId, current.id, input.now))) {
+    return { ok: false, error: "delivery_in_progress", engagement: after };
+  }
   if (!applied) return { ok: false, error: after ? "conflict" : "not_found", engagement: after };
   if (!after) return { ok: false, error: "not_found", engagement: null };
   return { ok: true, engagement: after };

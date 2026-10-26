@@ -53,7 +53,7 @@ import {
 } from "@/lib/ai-audit/store";
 import { cancelPendingApproval, createApproval, getApprovalInTenant, parsePayload } from "@/lib/os/approvals/store";
 import { effectiveStatus } from "@/lib/os/approvals/rules";
-import { PROFILE_EDIT_STAGES, TERMINAL_STAGES } from "@/lib/ai-audit/rules";
+import { PROFILE_EDIT_STAGES, TERMINAL_STAGES, shortName } from "@/lib/ai-audit/rules";
 import { dbBool } from "@/lib/db-bool";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import type { Executor, ExecutorContext, ExecutorOutcome } from "@/lib/os/approvals/executors";
@@ -241,7 +241,7 @@ export async function requestAuthorization(
       departmentKey: null,
       requestedBy: { type: "human", id: input.actor.id },
       actionKind: AUTHORIZE_AI_AUDIT_KIND,
-      title: `Authorize ${payload.business_name}'s information for their Free AI Audit`,
+      title: `Authorize ${shortName(payload.business_name, "the business")}'s information for their Free AI Audit`,
       targetRef: `lead:${payload.lead_id}`,
       payload: payload as unknown as Record<string, unknown>,
       riskLevel: "data",

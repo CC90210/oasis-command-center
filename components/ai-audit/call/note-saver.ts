@@ -156,13 +156,18 @@ export function createNoteSaver(o: {
  * of phase 2: enter 20, put 10 back before the first save answered, and the
  * profile kept 20 while the box showed 10). Clearing the box removes the figure.
  */
-export type FigureSend = (value: number | null) => Promise<{ ok: true } | { ok: false; message: string }>;
+export type FigureSend<T = number> = (value: T | null) => Promise<{ ok: true } | { ok: false; message: string }>;
 
-export function createFigureSaver(o: {
-  initial: number | null;
-  send: FigureSend;
-  onResult: (r: { ok: true; value: number | null } | { ok: false; message: string }) => void;
-}): { set(value: number | null): Promise<void>; saved(): number | null } {
+/**
+ * One stored value (a figure, or a consent answer): one save at a time, and the
+ * last value asked for wins, so a quick correction is never dropped behind a
+ * save still in flight (Codex review of phase 2).
+ */
+export function createFigureSaver<T = number>(o: {
+  initial: T | null;
+  send: FigureSend<T>;
+  onResult: (r: { ok: true; value: T | null } | { ok: false; message: string }) => void;
+}): { set(value: T | null): Promise<void>; saved(): T | null } {
   let saved = o.initial;
   let wanted = o.initial;
   let inFlight = false;

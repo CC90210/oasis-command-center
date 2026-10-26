@@ -29,6 +29,7 @@ import { deterministicUuid } from "@/lib/ai-audit/hash";
 import { aiAuditBaseUrl } from "@/lib/ai-audit/env";
 import { advanceEngagement, moveLeadForward, leadRequestId } from "@/lib/ai-audit/lifecycle";
 import { getProposalVersion } from "@/lib/ai-audit/versions";
+import { shortName } from "@/lib/ai-audit/rules";
 import { getEngagement, int, patchEngagement, requireTenant, type Actor, type Engagement } from "@/lib/ai-audit/store";
 
 export const STANDARD_CHECKLIST: ReadonlyArray<{ key: string; title: string; notes: string }> = [
@@ -193,7 +194,7 @@ export async function runOnboarding(
         departmentKey: null,
         requestedBy: { type: "routine", id: "ai-audit" },
         actionKind: "send_email",
-        title: `Welcome email for ${engagement.business_name || "the new client"}`,
+        title: `Welcome email for ${shortName(engagement.business_name, "the new client")}`,
         targetRef: `customer:${customerId}`,
         payload: {
           to: engagement.contact_email,
@@ -220,7 +221,7 @@ export async function runOnboarding(
         tenantId: t,
         alertType: "ai_audit_paid",
         severity: "info",
-        title: `Paid: ${engagement.business_name || "an AI audit client"}`,
+        title: `Paid: ${shortName(engagement.business_name, "an AI audit client")}`,
         body: "Stripe confirmed the payment. The client record, project and checklist are ready, and the welcome email is waiting for your approval.",
         subjectType: "ai_audit_engagement",
         subjectId: engagement.id,

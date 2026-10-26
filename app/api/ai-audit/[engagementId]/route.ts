@@ -103,7 +103,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const rv = rowVersion(body);
       if (!isAiAuditStage(to) || !MANUAL_STAGE_TARGETS.includes(to)) return json(400, { ok: false, error: "stage_not_settable_by_hand" });
       if (!rv) return json(400, { ok: false, error: "expected_row_version_required" });
-      const r = await advanceEngagement(s.db, { tenantId: s.tenantId, engagementId, to, actor, now, expectedRowVersion: rv, event: "stage_set_by_owner" });
+      // Not while the audit email is going out: the send already checked the stage and the authorization.
+      const r = await advanceEngagement(s.db, { tenantId: s.tenantId, engagementId, to, actor, now, expectedRowVersion: rv, event: "stage_set_by_owner", unlessDeliveryInFlight: true });
       if (!r.ok) return casError(r.error);
       // A Gate 1 card still waiting no longer describes an engagement that moved away from it.
       if (to !== "transcript_review") await withdrawAuthorization(s.db, s.tenantId, r.engagement, actor, now, "stage_moved");
@@ -280,7 +281,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
       const id = typeof body.transcript_id === "string" ? body.transcript_id : "";
       const r = await deleteTranscript(s.db, { tenantId: s.tenantId, engagementId, id, actor, now });
-      if (!r.ok) return json(404, { ok: false, error: r.error });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error });
       await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
       return json(200, { ok: true });
     }

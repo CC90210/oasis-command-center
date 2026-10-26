@@ -312,3 +312,14 @@ export function nextActionFor(e: {
       return "Closed";
   }
 }
+
+/**
+ * A business's name for a title: approvals and alerts cap their titles, and a
+ * name may be 200 characters (review of phase 2: a long name made Gate 1 fail
+ * with title_too_long).
+ */
+export function shortName(name: string | null | undefined, fallback: string, max = 80): string {
+  const n = (name ?? "").trim();
+  if (!n) return fallback;
+  return n.length > max ? `${n.slice(0, max - 3).trimEnd()}...` : n;
+}

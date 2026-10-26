@@ -34,6 +34,7 @@ const ERROR_WORDS: Record<string, string> = {
   delivery_unknown_check_sent: "The last send may have gone. Check the Sent folder first, then choose It was sent, or It was not sent.",
   nothing_uncertain: "There is no uncertain delivery to confirm.",
   link_gone: "That email's link was revoked, so it cannot be recorded as delivered. Send again instead.",
+  delivery_in_progress: "The audit email is being sent right now. Wait a minute, then try again.",
   too_many_transcripts: "This engagement already has 20 transcripts. Delete one you no longer need first.",
   details_frozen: "The business's name and type were authorized at Gate 1, so they can no longer change here. The contact can still change. To change the business, move the engagement back to Transcript Awaiting Approval.",
   unknown_question: "That question is not in the discovery framework.",

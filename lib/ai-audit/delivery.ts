@@ -26,6 +26,7 @@ import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
 import { queuePdfJob, r2PdfStorage } from "@/lib/ai-audit/pdf";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
+import { shortName } from "@/lib/ai-audit/rules";
 import { getSettings } from "@/lib/ai-audit/store";
 import {
   getAuditVersion,
@@ -38,9 +39,11 @@ import {
 } from "@/lib/ai-audit/versions";
 import {
   casWrite,
+  deliveryInFlight,
   engagementUpdateStatement,
   eventStatement,
   getEngagement,
+  noDeliveryInFlight,
   patchEngagement,
   requireTenant,
   type Actor,
@@ -144,12 +147,14 @@ export async function reopenForEdits(
     await cancelPendingApproval(db, t, engagement.delivery_approval_id, { type: "user", id: input.actor.id }, { reason: "reopened_for_edits" }, input.now);
   }
   const at = input.now.toISOString();
-  const ok = await casWrite(db, engagementUpdateStatement(t, engagement.id, engagement.row_version, { delivery_approval_id: null }, at, "generating"), [
+  // Not while the approved email is going out: it was checked against the versions this withdraws.
+  const guard = noDeliveryInFlight(t, engagement.id, input.now);
+  const ok = await casWrite(db, engagementUpdateStatement(t, engagement.id, engagement.row_version, { delivery_approval_id: null }, at, "generating", undefined, guard), [
     { sql: "UPDATE ai_audit_versions SET status = 'withdrawn', updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, t, audit.id] },
     { sql: "UPDATE ai_audit_proposal_versions SET status = 'withdrawn', updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, t, proposal.id] },
     eventStatement({ tenantId: t, engagementId: engagement.id, event: "reopened_for_edits", actor: input.actor, at, fromStage: "final_review", toStage: "generating" }),
   ]);
-  if (!ok) return { ok: false, error: "conflict" };
+  if (!ok) return { ok: false, error: (await deliveryInFlight(db, t, engagement.id, input.now)) ? "delivery_in_progress" : "conflict" };
   let current = await getEngagement(db, t, engagement.id);
   if (!current) return { ok: false, error: "not_found" };
   const a = await saveAuditDraft(db, { tenantId: t, engagementId: current.id, doc: audit.doc, actor: input.actor, now: input.now, expectedRowVersion: current.row_version });
@@ -270,7 +275,7 @@ export async function requestDeliveryApproval(
       departmentKey: null,
       requestedBy: { type: "routine", id: "ai-audit" },
       actionKind: DELIVER_AI_AUDIT_KIND,
-      title: `Send ${payload.business_name} their Free AI Audit and proposal`,
+      title: `Send ${shortName(payload.business_name, "the client")} their Free AI Audit and proposal`,
       targetRef: `lead:${engagement.lead_id}`,
       payload: valid.value as unknown as Record<string, unknown>,
       riskLevel: "spend",
@@ -416,7 +421,7 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
         tenantId: t,
         alertType: "ai_audit_delivery_unknown",
         severity: "urgent",
-        title: `Audit email may have been sent: ${engagement.business_name || "an AI audit"}`,
+        title: `Audit email may have been sent: ${shortName(engagement.business_name, "an AI audit")}`,
         body: "The mail server stopped answering after taking the message. Check the Sent folder, then on the engagement choose It was sent, or It was not sent: send again.",
         subjectType: "ai_audit_engagement",
         subjectId: engagement.id,
@@ -459,7 +464,7 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
         tenantId: t,
         alertType: "ai_audit_delivery_unrecorded",
         severity: "urgent",
-        title: `Audit sent, but not yet recorded: ${engagement.business_name || "an AI audit"}`,
+        title: `Audit sent, but not yet recorded: ${shortName(engagement.business_name, "an AI audit")}`,
         body: "The client has the email and its link. The engagement has not moved to Audit Delivered yet; the next tick finishes the record. Do not retry delivery: that would send a second email.",
         subjectType: "ai_audit_engagement",
         subjectId: engagement.id,

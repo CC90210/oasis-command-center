@@ -21,7 +21,7 @@ import "server-only";
 import type { Client, Row } from "@libsql/client";
 import { contentHash, newId } from "@/lib/ai-audit/hash";
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
-import { casWrite, eventStatement, getEngagement, int, patchEngagement, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
+import { casWrite, deliveryInFlight, eventStatement, getEngagement, int, noDeliveryInFlight, patchEngagement, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
 import { TRANSCRIPT_FORMATS, isOneOfFormat, type ParsedTranscript, type TranscriptFormat, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES, TERMINAL_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { cancelPendingApproval } from "@/lib/os/approvals/store";
@@ -261,17 +261,19 @@ export async function addTranscript(
 export async function deleteTranscript(
   db: Client,
   input: { tenantId: string; engagementId: string; id: string; actor: Actor; now: Date },
-): Promise<{ ok: true } | { ok: false; error: "not_found" }> {
+): Promise<{ ok: true } | { ok: false; error: "not_found" | "delivery_in_progress" }> {
   const t = requireTenant(input.tenantId);
   const at = input.now.toISOString();
   const engagement = await getEngagement(db, t, input.engagementId);
+  // Not while the audit email is going out: the send already checked the authorization this voids.
+  const guard = noDeliveryInFlight(t, input.engagementId, input.now);
   const afterGate = !!engagement && !PROFILE_EDIT_STAGES.includes(engagement.stage) && !TERMINAL_STAGES.includes(engagement.stage) && !!engagement.authorization_approval_id;
   const ok = await casWrite(
     db,
     {
       sql: `UPDATE ai_audit_transcripts SET status = 'deleted', lines_json = '[]', filename = NULL, speakers_json = '[]', deleted_at = ?, deleted_by = ?
-             WHERE tenant_id = ? AND engagement_id = ? AND id = ? AND status = 'active'`,
-      args: [at, input.actor.id, t, input.engagementId, input.id],
+             WHERE tenant_id = ? AND engagement_id = ? AND id = ? AND status = 'active' AND ${guard.sql}`,
+      args: [at, input.actor.id, t, input.engagementId, input.id, ...guard.args],
     },
     [
       {
@@ -306,5 +308,6 @@ export async function deleteTranscript(
       });
     }
   }
+  if (!ok && (await deliveryInFlight(db, t, input.engagementId, input.now))) return { ok: false, error: "delivery_in_progress" };
   return ok ? { ok: true } : { ok: false, error: "not_found" };
 }

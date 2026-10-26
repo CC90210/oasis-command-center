@@ -174,6 +174,67 @@ function FigureBox({ engagementId, def, initial, disabled, onSaved }: { engageme
   );
 }
 
+type ConsentKey = "consent.recording" | "consent.ai_processing";
+
+/**
+ * One consent answer from the opening. It keeps its own choice and saves through
+ * the figure saver: one save at a time, the last choice wins. Comparing with the
+ * page's props instead dropped a quick correction, Agreed then Declined, while
+ * the first save was still out (Codex review of phase 2, second pass).
+ */
+function ConsentChoice({ engagementId, fieldKey, label, initial, disabled, onSaved }: { engagementId: string; fieldKey: ConsentKey; label: string; initial: boolean | null; disabled: boolean; onSaved: (key: ConsentKey) => void }) {
+  const [chosen, setChosen] = useState<boolean | null>(initial);
+  const [msg, setMsg] = useState<string | null>(null);
+  const stored = useRef<boolean | null>(initial);
+  const [saver] = useState(() =>
+    createFigureSaver<boolean>({
+      initial,
+      send: async (v) => {
+        if (v === null) return { ok: true as const };
+        const r = await postAction(engagementId, "save_profile_field", {
+          field: { field_key: fieldKey, value: v, label: "client_reported", source_type: "call_notes", source_note: "asked at the start of the call" },
+        });
+        if (!r.ok) return { ok: false as const, message: describeError(r) };
+        stored.current = v;
+        return { ok: true as const };
+      },
+      onResult: (r) => {
+        if (r.ok) {
+          setMsg(null);
+          onSaved(fieldKey);
+        } else {
+          // Show what is stored, not the choice that failed to save.
+          setChosen(stored.current);
+          setMsg(r.message);
+        }
+      },
+    }),
+  );
+  return (
+    <div className="grid gap-1">
+      <span className="text-[12px] text-fg-muted">{label}</span>
+      <div className="flex gap-2">
+        {[true, false].map((yes) => (
+          <button
+            key={String(yes)}
+            type="button"
+            disabled={disabled}
+            aria-pressed={chosen === yes}
+            className={chosen === yes ? "btn-primary" : "btn-secondary"}
+            onClick={() => {
+              setChosen(yes);
+              void saver.set(yes);
+            }}
+          >
+            {yes ? "Agreed" : "Declined"}
+          </button>
+        ))}
+      </div>
+      {msg ? <span className="text-[11px] text-fg-dim">{msg}</span> : null}
+    </div>
+  );
+}
+
 export function LiveCall({ engagementId, businessType, callStartedAt, callEndedAt, notes, fields, editable }: Props) {
   const router = useRouter();
   const questions = useMemo(() => questionsFor(businessType), [businessType]);
@@ -229,18 +290,6 @@ export function LiveCall({ engagementId, businessType, callStartedAt, callEndedA
       setMessage(describeError(r));
       return;
     }
-    router.refresh();
-  }
-
-  async function consent(key: "consent.recording" | "consent.ai_processing", yes: boolean) {
-    setMessage(null);
-    if (consentValue(key) === yes) return;
-    const r = await postAction(engagementId, "save_profile_field", { field: { field_key: key, value: yes, label: "client_reported", source_type: "call_notes", source_note: "asked at the start of the call" } });
-    if (!r.ok) {
-      setMessage(describeError(r));
-      return;
-    }
-    setCaptured((s) => new Set([...s, key]));
     router.refresh();
   }
 
@@ -311,23 +360,18 @@ export function LiveCall({ engagementId, businessType, callStartedAt, callEndedA
                     {q.id === "open-consent" ? (
                       <div className="grid gap-2 sm:grid-cols-2">
                         {(["consent.recording", "consent.ai_processing"] as const).map((key) => (
-                          <div key={key} className="grid gap-1">
-                            <span className="text-[12px] text-fg-muted">{key === "consent.recording" ? "Recording and transcription" : "AI analysis for the audit"}</span>
-                            <div className="flex gap-2">
-                              {[true, false].map((yes) => (
-                                <button
-                                  key={String(yes)}
-                                  type="button"
-                                  disabled={!editable}
-                                  aria-pressed={consentValue(key) === yes}
-                                  className={consentValue(key) === yes ? "btn-primary" : "btn-secondary"}
-                                  onClick={() => void consent(key, yes)}
-                                >
-                                  {yes ? "Agreed" : "Declined"}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
+                          <ConsentChoice
+                            key={key}
+                            engagementId={engagementId}
+                            fieldKey={key}
+                            label={key === "consent.recording" ? "Recording and transcription" : "AI analysis for the audit"}
+                            initial={consentValue(key)}
+                            disabled={!editable}
+                            onSaved={(k) => {
+                              setCaptured((s) => new Set([...s, k]));
+                              router.refresh();
+                            }}
+                          />
                         ))}
                       </div>
                     ) : null}

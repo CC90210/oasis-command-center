@@ -509,6 +509,37 @@ async function main() {
     assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
     assert.equal((await approvals.getApprovalInTenant(db, OASIS, card.ok ? card.approval.id : ""))!.status, "cancelled");
   });
+  await check("while the audit email is going out, a transcript delete and a stage move wait their turn; a send that never finished stops holding them after 15 minutes (Codex review of phase 2, second pass)", async () => {
+    const { eid, transcriptId: tid } = await freshEngagement("In Flight Co");
+    assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");
+    const e = await engagementOf(eid);
+    const payload = {
+      engagement_id: eid, lead_id: e.lead_id, business_name: "In Flight Co", audit_version_id: "ver-flight", audit_sha256: "a".repeat(64),
+      proposal_version_id: "prop-flight", proposal_sha256: "b".repeat(64), pdf_sha256: "c".repeat(64), to: "owner@fixture.test",
+      subject: "Your audit", body: "Hi\n\n{{audit_link}}", currency: "CAD", total_cents: 100, due_now_cents: 100,
+    };
+    const card = await approvals.createApproval(
+      db,
+      { tenantId: OASIS, departmentKey: null, requestedBy: { type: "routine", id: "ai-audit" }, actionKind: "deliver_ai_audit", title: "Deliver", payload, riskLevel: "spend", idempotencyKey: `in-flight:${eid}` },
+      NOW(),
+    );
+    assert.ok(card.ok, !card.ok ? card.error : "");
+    const cardId = card.ok ? card.approval.id : "";
+    // What the approvals executor's claim leaves while the send runs.
+    const claimedAt = new Date();
+    await db.execute({ sql: "UPDATE approvals SET status = 'executing', executing_at = ? WHERE tenant_id = ? AND id = ?", args: [claimedAt.toISOString(), OASIS, cardId] });
+    assert.equal(await store.deliveryInFlight(db, OASIS, eid, claimedAt), true);
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: claimedAt }), { ok: false, error: "delivery_in_progress" });
+    assert.ok(await authorize.authorizedProfile(db, OASIS, await engagementOf(eid)), "the authorization the send checked still holds");
+    const before = await engagementOf(eid);
+    const moved = await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: eid, to: "cancelled", actor: cc, now: claimedAt, expectedRowVersion: before.row_version, event: "stage_set_by_owner", unlessDeliveryInFlight: true });
+    assert.equal(moved.ok ? "moved" : moved.error, "delivery_in_progress");
+    assert.equal((await engagementOf(eid)).stage, before.stage);
+    // A send that crashed mid-way is never re-run (execute.ts); after 15 minutes its mark holds nothing back.
+    const later = new Date(claimedAt.getTime() + store.DELIVERY_IN_FLIGHT_MS + 60_000);
+    assert.equal(await store.deliveryInFlight(db, OASIS, eid, later), false);
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: later }), { ok: true });
+  });
   await check("a rename that read the engagement before Gate 1 cannot land after it; anything changed behind an authorization voids it (review of phase 2, second pass)", async () => {
     const { eid } = await freshEngagement("Late Rename Co");
     assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");
