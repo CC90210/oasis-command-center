@@ -89,6 +89,47 @@ async function main(): Promise<void> {
   assert.match(grid, /if \(!wasInFlight\.current\) return;/, "a mount with no run in flight announces nothing");
   console.log("  ok - a disabled Learn button says which field it is waiting for");
 
+  // The counts and the "newest N of M" footer never present a read's cap as a
+  // total, and the footer shows whenever the list is partial (2026-10-26, review of #739).
+  {
+    // tsconfig sets jsx:"preserve", so tsx compiles JSX with the classic runtime, which expects a global React.
+    const React = await import("react");
+    (globalThis as unknown as { React: typeof React }).React = React;
+    const { LearnedNotes, LEARNED_NOTES_READ } = await import("../components/tools/LearnedNotes");
+    type El = { props?: { children?: unknown } } | string | number | null | undefined | boolean | El[];
+    const text = (el: El): string => {
+      if (el === null || el === undefined || typeof el === "boolean") return "";
+      if (typeof el === "string" || typeof el === "number") return String(el);
+      if (Array.isArray(el)) return el.map(text).join("");
+      return text((el.props?.children ?? null) as El);
+    };
+    const note = (id: string, trains: string | null) => ({ id, kind: "link", label: "exemplar", title: id, source_url: null, state: "indexed", last_error: null, contributed_by: "cc", created_at: "2026-10-15T12:00:00.000Z", indexed_at: null, trains });
+    const draw = (stats: typeof base, rows: ReturnType<typeof note>[], agent: "sales" | null) =>
+      text(LearnedNotes({ stats, items: { rows, degraded: false }, agent }) as unknown as El);
+    const many = (n: number, trains: string | null) => Array.from({ length: n }, (_, i) => note(`n${i}`, trains));
+
+    // An agent's tab read in full: 10 of its notes among 200 rows may not be all of them.
+    const full = [...many(10, "sales"), ...many(LEARNED_NOTES_READ - 10, "finance")];
+    const salesFull = draw({ ...base, total: 400, indexed: 400 }, full, "sales");
+    assert.match(salesFull, /10\+ for Sales/, "a full read is a floor: N+");
+    assert.match(salesFull, /Showing the newest 10 of 10\+\./, "and the footer says the list may be partial even with fewer than 15 shown");
+    assert.match(salesFull, /Every agent's notes are on Training/);
+    // An agent's tab read short: the count is the whole of it, and 5 rows need no footer.
+    const salesShort = draw({ ...base, total: 5, indexed: 5 }, many(5, "sales"), "sales");
+    assert.match(salesShort, /5 for Sales/);
+    assert.doesNotMatch(salesShort, /Showing the newest/);
+    // The All tab counts against the true total.
+    const all = draw({ ...base, total: 30, indexed: 30 }, many(30, "all"), null);
+    assert.match(all, /Showing the newest 15 of 30\./);
+    assert.match(all, /Open Training/);
+    assert.doesNotMatch(all, /See all on Training/, "no promise of a full list the Training page does not keep");
+    assert.doesNotMatch(draw({ ...base, total: 10, indexed: 10 }, many(10, "all"), null), /Showing the newest/, "everything shown: no footer");
+    // The page's read size never exceeds what the reader returns, or a clamped read reads as a total.
+    const { TRAINING_ROWS_MAX } = await import("../lib/os/training-notes");
+    assert.ok(LEARNED_NOTES_READ <= TRAINING_ROWS_MAX, `LEARNED_NOTES_READ (${LEARNED_NOTES_READ}) must not exceed trainingRowsFor's cap (${TRAINING_ROWS_MAX})`);
+    console.log("  ok - counts never present a read's cap as a total, and the footer shows whenever the list is partial");
+  }
+
   console.log("learned-notes: all passed");
 }
 

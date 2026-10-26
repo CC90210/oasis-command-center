@@ -37,6 +37,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { PageFrame } from "@/components/os/PageFrame";
+import { DownloadFailureNotice } from "@/components/founders/DownloadFailureNotice";
 import { ExtractedVideoActions } from "@/components/founders/ExtractedVideoActions";
 import { LazyVideo } from "@/components/founders/LazyVideo";
 import { safe } from "@/lib/api-helpers";
@@ -134,7 +135,7 @@ function VideoCard({ t, pinned = false }: { t: LibraryTile; pinned?: boolean }) 
 export default async function ExtractedVideosPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string; video?: string }>;
+  searchParams: Promise<{ page?: string; video?: string; download?: string }>;
 }) {
   const founder = await resolveFounder();
   if (!founder) notFound();
@@ -175,6 +176,8 @@ export default async function ExtractedVideosPage({
       }
       className="space-y-6"
     >
+      {/* A Download pressed on this page that failed comes back here with ?download=<code>. */}
+      <DownloadFailureNotice code={sp.download} />
       {pinned && (
         <section aria-label="The video you opened" className="space-y-2">
           <p className="px-1 text-xs text-fg-muted">The video you opened</p>

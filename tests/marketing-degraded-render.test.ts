@@ -84,7 +84,7 @@ test("no metric tile renders a raw count", () => {
 
   // Every source of a count that could be zero-because-broken rather than
   // zero-because-empty. Reading one of these straight into `value=` is the bug.
-  const RAW_SOURCE = /value=\{\s*(summary\.by_track|summary\.by_status|summary\.total|facets\.brands)/;
+  const RAW_SOURCE = /value=\{\s*(summary\.by_track|summary\.by_status|summary\.total|facets\.brands|tabs\.counts|extracted\.count)/;
   const raw = tiles.filter((l) => RAW_SOURCE.test(l));
   assert.deepEqual(
     raw.map((l) => l.trim()),
@@ -145,5 +145,16 @@ test("no metric tile renders a raw count", () => {
       `${helper} must ask whether the read succeeded before returning a number; ` +
         `otherwise the em dash it exists to render never appears`,
     );
+  }
+
+  // brandCount reads two counts since #739: the brand tabs' and the extracted
+  // videos'. Each must ask its OWN read whether it succeeded, or a failed
+  // extracted count prints 0 behind a healthy tabs read (independent review of #739).
+  const brandAt = LINES.findIndex((l) => /const brandCount\s*=/.test(l));
+  const brandBody = LINES.slice(brandAt, brandAt + 10).join("\n");
+  for (const [source, flag] of [["extracted.count", "extracted.degraded"], ["tabs.counts", "tabs.degraded"]] as const) {
+    const read = brandBody.indexOf(source);
+    assert.ok(read >= 0, `brandCount reads ${source}`);
+    assert.ok(brandBody.lastIndexOf(flag, read) >= 0, `brandCount must ask ${flag} before it reads ${source}`);
   }
 });
