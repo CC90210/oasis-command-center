@@ -256,11 +256,13 @@ export async function saveProfileField(
                 source_ref = excluded.source_ref,
                 owner_corrected = CASE WHEN ? = 1 THEN 1 ELSE ai_audit_profile_fields.owner_corrected END,
                 corrected_from = CASE WHEN ? = 1 THEN ai_audit_profile_fields.value_json ELSE ai_audit_profile_fields.corrected_from END,
+                -- A corrected value no longer matches the quote that came with the old one (review of phase 2b, H2).
+                evidence_quote = CASE WHEN ? = 1 THEN NULL ELSE ai_audit_profile_fields.evidence_quote END,
                 verified_note = excluded.verified_note, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
         args: [
           newId(), t, version.id, input.field.field_key, valueJson, input.field.label, input.field.source_type, sourceRef,
           0, null, input.field.verified_note ?? null, input.actor.id, at,
-          correcting ? 1 : 0, correcting ? 1 : 0, correcting ? 1 : 0,
+          correcting ? 1 : 0, correcting ? 1 : 0, correcting ? 1 : 0, correcting ? 1 : 0,
         ],
       },
       eventStatement({

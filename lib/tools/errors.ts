@@ -71,6 +71,7 @@ export const SWEEP_ERROR_LINES: Readonly<Record<string, string>> = {
   // The Free AI Audit (lib/ai-audit/extraction.ts): the transcript may no longer be read.
   ai_audit_not_permitted: "The transcript can no longer be read for the audit (consent changed, or the profile was authorized), so this was not run.",
   ai_audit_gone: "The audit step this belonged to was finished or replaced, so this was not run.",
+  ai_audit_cancelled: "The profile draft this belonged to was called off (a transcript was deleted, or it was cancelled), so nothing it read was kept.",
 };
 
 /** Codes a tool that runs inside the request writes. */

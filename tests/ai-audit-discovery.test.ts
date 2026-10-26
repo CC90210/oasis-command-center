@@ -119,7 +119,7 @@ async function main() {
   console.log("transcripts");
   let transcriptId = "";
   await check("a transcript needs recording consent; the first one marks the call completed; the same text twice is one", async () => {
-    const t = parsed("Dana: We get about 40 calls a week.\nCC: How do you know?\nDana: The phone log, roughly.");
+    const t = parsed("Dana: We get about 40 calls a week.\nCC: How do you know?\nDana: The phone log, roughly.\nDana: There are six of us on the team.");
     const refused = await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: id, parsed: t, source: "paste", consent: { ...consent(true), recording: false }, actor: cc, now: NOW() });
     assert.deepEqual(refused, { ok: false, error: "no_recording_consent" });
     const a = await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: id, parsed: t, source: "paste", consent: consent(true), actor: cc, now: NOW() });
@@ -158,6 +158,7 @@ async function main() {
   await check("drafting the profile queues one Mac job per part of the call; the jobs hold ids, never the call's words", async () => {
     // CC typed 35 leads a month on the call; the transcript says about 40: a disagreement for CC, never an overwrite.
     await versions.saveProfileField(db, { tenantId: OASIS, engagementId: id, field: { field_key: "sales.leads_per_month", value: 35, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: id, field: { field_key: "business.team_size", value: 5, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
     const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "mac_claude", actor: cc, now: NOW() });
     assert.ok(r.ok && r.created && r.windows === 1, !r.ok ? r.error : "");
     const again = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "mac_claude", actor: cc, now: NOW() });
@@ -179,6 +180,7 @@ async function main() {
     const answer = JSON.stringify({
       facts: [
         { key: "sales.leads_per_month", value: 40, from: 1, to: 1, quote: "about 40 calls a week" },
+        { key: "business.team_size", value: 6, from: 4, to: 4, quote: "six of us on the team" },
         { key: "sales.avg_job_value", value: 2000, from: 3, to: 3, quote: "The phone log, roughly." },
         { key: "business.description", value: "Plumbing", from: 2, to: 2, quote: "We fix pipes" },
       ],
@@ -200,7 +202,8 @@ async function main() {
     assert.ok(!fields.some((f) => f.field_key === "business.description" && f.source_type === "transcript"), "a quote that is not there is never written");
     const v = (await versions.getProfileVersion(db, OASIS, e.current_profile_version_id!))!;
     const report = (v.summary as { extraction?: { contradictions: Array<{ key: string }>; dropped: Array<{ key: string; reason: string }> } }).extraction!;
-    assert.equal(report.contradictions[0]?.key, "sales.leads_per_month");
+    assert.equal(report.contradictions[0]?.key, "business.team_size", "CC typed 5; the call says six");
+    assert.ok(report.dropped.some((d) => d.key === "sales.leads_per_month" && /per week, not per month/.test(d.reason)), "40 calls a week is not 40 leads a month");
     assert.ok(report.dropped.some((d) => d.key === "sales.avg_job_value" && /figure/.test(d.reason)));
     assert.ok(report.dropped.some((d) => d.key === "business.description" && /not on the lines/.test(d.reason)));
     assert.equal(alerts.at(-1)?.alertType, "ai_audit_profile_drafted");
@@ -217,6 +220,7 @@ async function main() {
     const out = await extraction.advanceCloudExtraction(db, { tenantId: OASIS, stepId: r.ok ? r.stepId : "", now: NOW(), deps: { model: model as never, alert: async () => undefined } });
     assert.equal(out, "finished");
     assert.deepEqual(calls.map((c) => c.surface), ["ai_audit.extract"], "one metered call per part of the call");
+    assert.equal((calls[0] as { deadlineMs?: number }).deadlineMs, extraction.CLOUD_CALL_DEADLINE_MS, "a window may not take the whole tick");
     const e = (await store.getEngagement(db, OASIS, id))!;
     const f = (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).find((x) => x.field_key === "sales.lead_handling")!;
     assert.equal(f.source_type, "transcript");
@@ -756,6 +760,156 @@ async function main() {
     assert.equal(await store.aiAuditTablesInstalled(bare), true);
     assert.equal(await store.aiAuditTablesInstalled(db), true);
     bare.close();
+  });
+
+  console.log("review of phase 2b: the draft keeps only what it may");
+  const macJob = async (eid: string) => {
+    const res = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    const job = ((await res.json()) as { job: { job_id: string; lease_id: string; input: Record<string, unknown> } | null }).job;
+    assert.ok(job, "a window was handed out");
+    assert.equal(job!.input.purpose, "extract");
+    const stored = JSON.parse(String((await db.execute({ sql: "SELECT input_json FROM tool_jobs WHERE id = ?", args: [job!.job_id] })).rows[0].input_json)) as { engagement_id?: string };
+    assert.equal(stored.engagement_id, eid, "the window handed out is this engagement's");
+    return job!;
+  };
+  const macAnswer = (job: { job_id: string; lease_id: string }, facts: unknown[]) =>
+    runner.handleToolsComplete(
+      macRequest("complete", { job_id: job.job_id, lease_id: job.lease_id, tool_key: "ai_audit_model", text: JSON.stringify({ facts, summary: { goals: ["Grow"], problems: [], commitments: [], open_questions: [] } }) }, NOW()),
+      runnerDeps(NOW()) as never,
+    );
+  const jobsOf = async (stepId: string) =>
+    (await db.execute({ sql: "SELECT status, error_code, result_json FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.step_id') = ? ORDER BY created_at, id", args: [OASIS, stepId] })).rows.map((r) => [String(r.status), r.error_code === null ? null : String(r.error_code), r.result_json === null ? null : String(r.result_json)]);
+  const twoTranscripts = async (name: string) => {
+    const base = await freshEngagement(name);
+    const second = await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: base.eid, parsed: parsed("Dana: There are twelve of us in total."), source: "paste", consent: consent(true), actor: cc, now: NOW() });
+    assert.ok(second.ok);
+    return { ...base, second: second.ok ? second.transcript.id : "" };
+  };
+  const stepOf = async (stepId: string) => (await db.execute({ sql: "SELECT status, error_code, result_ref FROM ai_audit_steps WHERE id = ?", args: [stepId] })).rows[0];
+
+  await check("a transcript deleted mid-draft stops the draft: nothing it read is written, and every stored window is cleared (review of phase 2b, H1)", async () => {
+    const { eid, transcriptId: tid } = await twoTranscripts("Deleted Midway Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok && r.windows === 2, !r.ok ? r.error : "");
+    const stepId = r.ok ? r.stepId : "";
+    const a = await macJob(eid);
+    const done = await macAnswer(a, [{ key: "business.team_size", value: 12, from: 1, to: 1, quote: "There are twelve of us in total" }]);
+    assert.equal(done.status, 200);
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
+    const s = await stepOf(stepId);
+    assert.deepEqual([String(s.status), String(s.error_code), s.result_ref], ["cancelled", "transcript_deleted", null]);
+    const jobs = await jobsOf(stepId);
+    assert.ok(jobs.every(([status]) => status === "done" || status === "failed"), JSON.stringify(jobs));
+    assert.ok(jobs.every(([, , result]) => result === null || result === '{"stored":false}'), "no window's facts are kept on a job");
+    const e = await engagementOf(eid);
+    const fields = await versions.listProfileFields(db, OASIS, e.current_profile_version_id!);
+    assert.ok(!fields.some((f) => f.source_type === "transcript"), "nothing from the draft was written");
+  });
+  await check("after a draft finished, deleting its transcript takes the untouched facts and the run's notes out of the draft", async () => {
+    const { eid, transcriptId: tid } = await freshEngagement("Deleted After Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok);
+    const job = await macJob(eid);
+    assert.equal((await macAnswer(job, [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "gets about 40 calls a week" }])).status, 200);
+    const e = await engagementOf(eid);
+    let fields = await versions.listProfileFields(db, OASIS, e.current_profile_version_id!);
+    assert.ok(fields.some((f) => f.field_key === "sales.missed_calls_per_week" && f.source_type === "transcript"), "written");
+    assert.ok((((await versions.getProfileVersion(db, OASIS, e.current_profile_version_id!))!.summary as { extraction?: unknown }).extraction), "the run's report is on the draft");
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
+    fields = await versions.listProfileFields(db, OASIS, e.current_profile_version_id!);
+    assert.ok(!fields.some((f) => f.field_key === "sales.missed_calls_per_week"), "the fact it gave left with it");
+    assert.ok(fields.some((f) => f.field_key === "sales.leads_per_month"), "CC's own entries stay");
+    assert.equal((((await versions.getProfileVersion(db, OASIS, e.current_profile_version_id!))!.summary as { extraction?: unknown }).extraction), undefined, "and the run's notes went too");
+  });
+  await check("consent declined mid-draft: the window already read is not written either (review of phase 2b, H1)", async () => {
+    const { eid } = await twoTranscripts("Declined Midway Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok && r.windows === 2);
+    const stepId = r.ok ? r.stepId : "";
+    const a = await macJob(eid);
+    assert.equal((await macAnswer(a, [{ key: "business.team_size", value: 12, from: 1, to: 1, quote: "There are twelve of us in total" }])).status, 200);
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "consent.ai_processing", value: false, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    // The second window is refused at claim time; with every window in, the run finishes and writes nothing.
+    const res = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    assert.equal(((await res.json()) as { job: unknown }).job, null);
+    assert.equal(String((await stepOf(stepId)).status), "failed", "nothing could be read, and it says so");
+    const e = await engagementOf(eid);
+    assert.ok(!(await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).some((f) => f.source_type === "transcript"));
+    assert.equal(alerts.at(-1)?.alertType, "ai_audit_extraction_failed");
+  });
+  await check("two finishers: one writes, one alert, one trail line (review of phase 2b, M4)", async () => {
+    const { eid } = await freshEngagement("Two Finishers Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok);
+    const stepId = r.ok ? r.stepId : "";
+    const job = await macJob(eid);
+    // Store the window's result without finishing, as a complete whose finish failed would leave it.
+    const stored = JSON.parse(String((await db.execute({ sql: "SELECT input_json FROM tool_jobs WHERE id = ?", args: [job.job_id] })).rows[0].input_json)) as Record<string, unknown>;
+    const checked = await extraction.checkWindowAnswer(db, OASIS, stored, JSON.stringify({ facts: [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "gets about 40 calls a week" }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } }));
+    assert.ok(checked.ok);
+    await db.execute({ sql: "UPDATE tool_jobs SET status = 'done', result_json = ? WHERE id = ?", args: [JSON.stringify({ window: checked.ok ? checked.result : null }), job.job_id] });
+    const before = alerts.length;
+    // The finish reads the step again inside its write transaction, so of two finishers only one writes. SQLite (and
+    // Turso, per database) runs one write transaction at a time; the local test database refuses a second at once
+    // instead of waiting, so the two run back to back here.
+    const outs = [];
+    for (let i = 0; i < 2; i++) outs.push(await extraction.finishMacExtractionIfComplete(db, OASIS, stepId, NOW(), { alert: async (x: Record<string, unknown>) => void alerts.push(x) }));
+    assert.deepEqual(outs.filter(Boolean).length, 1);
+    assert.equal(alerts.length - before, 1);
+    assert.equal(await eventCount(eid, "extraction_done"), 1);
+  });
+  await check("a transcript without AI consent keeps the whole draft from starting, as Gate 1 would (review of phase 2b, M6)", async () => {
+    const { eid } = await freshEngagement("Mixed Consent Co");
+    const t = await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: eid, parsed: parsed("Dana: a second call, no AI please."), source: "paste", consent: consent(false), actor: cc, now: NOW() });
+    assert.ok(t.ok);
+    assert.deepEqual(await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() }), { ok: false, error: "no_ai_consent" });
+  });
+  await check("a Mac draft can be cancelled, and one no Mac takes for a day is called off and CC told, so another can start (review of phase 2b, M2)", async () => {
+    const { eid } = await freshEngagement("Cancelled Draft Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok);
+    const c = await extraction.cancelExtraction(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() });
+    assert.ok(c.ok);
+    assert.deepEqual((await jobsOf(r.ok ? r.stepId : ""))[0].slice(0, 2), ["failed", "ai_audit_cancelled"]);
+    const again = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(again.ok && again.created, "a new run may start");
+    const later = new Date(Date.now() + extraction.MAC_RUN_UNCLAIMED_MS + 60_000);
+    const told: Array<Record<string, unknown>> = [];
+    assert.equal(await extraction.sweepStaleExtractions(db, OASIS, later, { alert: async (x: Record<string, unknown>) => void told.push(x) }), 1);
+    assert.equal(String((await stepOf(again.ok ? again.stepId : "")).error_code), "runner_offline");
+    assert.match(String(told[0]?.body), /No Mac picked up the draft/);
+  });
+  await check("a re-run never overwrites a value CC verified; the report lists the disagreement, not a write (review of phase 2b, H2)", async () => {
+    const { eid, transcriptId: tid } = await freshEngagement("Verified Value Co");
+    const first = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(first.ok);
+    assert.equal((await macAnswer(await macJob(eid), [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "gets about 40 calls a week" }])).status, 200);
+    // CC verifies it against the phone system; the first call's transcript is then deleted (a verified fact stays).
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "sales.missed_calls_per_week", value: 40, label: "verified", source_type: "transcript", verified_note: "Phone system export shows 40" } as never, actor: cc, now: NOW() });
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
+    const t2 = await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: eid, parsed: parsed("Dana: We get about 45 calls a week now."), source: "paste", consent: consent(true), actor: cc, now: NOW() });
+    assert.ok(t2.ok);
+    const second = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(second.ok, !second.ok ? second.error : "");
+    assert.equal((await macAnswer(await macJob(eid), [{ key: "sales.missed_calls_per_week", value: 45, from: 1, to: 1, quote: "about 45 calls a week now" }])).status, 200);
+    const e = await engagementOf(eid);
+    const f = (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).find((x) => x.field_key === "sales.missed_calls_per_week")!;
+    assert.deepEqual([f.value, f.label, f.verified_note], [40, "verified", "Phone system export shows 40"], JSON.stringify(f));
+    const report = ((await versions.getProfileVersion(db, OASIS, e.current_profile_version_id!))!.summary as { extraction?: { written: string[]; contradictions: Array<{ key: string }> } }).extraction!;
+    assert.ok(!report.written.includes("sales.missed_calls_per_week"), "the report says nothing was written there");
+    assert.ok(report.contradictions.map((x) => x.key).includes("sales.missed_calls_per_week"), "and shows CC the disagreement");
+  });
+  await check("CC correcting a value drops the quote that came with the old one (review of phase 2b, H2)", async () => {
+    const { eid } = await freshEngagement("Corrected Value Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok);
+    assert.equal((await macAnswer(await macJob(eid), [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "gets about 40 calls a week" }])).status, 200);
+    const e = await engagementOf(eid);
+    const before = (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).find((x) => x.field_key === "sales.missed_calls_per_week")!;
+    assert.equal(before.evidence_quote, "gets about 40 calls a week");
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "sales.missed_calls_per_week", value: 38, label: "client_reported", source_type: "transcript" } as never, actor: cc, now: NOW() });
+    const after = (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).find((x) => x.field_key === "sales.missed_calls_per_week")!;
+    assert.deepEqual([after.value, after.owner_corrected, after.evidence_quote ?? null], [38, true, null]);
   });
 
   finish("ai-audit-discovery");

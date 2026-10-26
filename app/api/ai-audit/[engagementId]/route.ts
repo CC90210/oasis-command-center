@@ -50,7 +50,7 @@ import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { markCall, saveCallNote } from "@/lib/ai-audit/call-notes";
 import { deleteTranscript } from "@/lib/ai-audit/transcripts";
 import { requestAuthorization, withdrawAuthorization, withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
-import { startExtraction } from "@/lib/ai-audit/extraction";
+import { cancelExtraction, startExtraction } from "@/lib/ai-audit/extraction";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
@@ -288,10 +288,18 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       return json(200, { ok: true });
     }
     case "extract_profile": {
+      // Reading a client's call with a model is processing their data: the owner's press, as Gate 1 is (review of phase 2b, M1).
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
       const engine = body.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude";
       const r = await startExtraction(s.db, { tenantId: s.tenantId, engagementId, engine, actor, now });
       if (!r.ok) return json(409, { ok: false, error: r.error });
       return json(200, { ok: true, step_id: r.stepId, windows: r.windows, created: r.created });
+    }
+    case "cancel_extraction": {
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const r = await cancelExtraction(s.db, { tenantId: s.tenantId, engagementId, actor, now });
+      if (!r.ok) return json(409, { ok: false, error: r.error });
+      return json(200, { ok: true, step_id: r.stepId });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });

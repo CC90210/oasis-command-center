@@ -462,7 +462,10 @@ async function runAuthorization(ctx: ExecutorContext): Promise<ExecutorOutcome> 
     }
     await tx.batch([
       {
-        sql: `UPDATE ai_audit_profile_versions SET status = 'frozen', profile_sha256 = ?, transcript_sha256 = ?, frozen_at = ?, updated_at = ?
+        // The draft's run report (the model's summary of the call) is a working note, not part of what is
+        // authorized: a frozen profile never holds one, so nothing a later delete must reach stays frozen (review of phase 2b, H1).
+        sql: `UPDATE ai_audit_profile_versions SET status = 'frozen', profile_sha256 = ?, transcript_sha256 = ?, frozen_at = ?, updated_at = ?,
+                summary = json_remove(COALESCE(summary, '{}'), '$.extraction')
                WHERE tenant_id = ? AND id = ? AND status = 'draft'`,
         args: [p.profile_sha256, p.transcripts_sha256, at, at, t, p.profile_version_id],
       },

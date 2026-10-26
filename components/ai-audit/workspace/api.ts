@@ -7,6 +7,7 @@ const ERROR_WORDS: Record<string, string> = {
   changed_elsewhere_refresh: "Someone else changed this engagement. Reload to see the latest, then try again.",
   not_ready: "Not ready yet. Fix the items listed.",
   owner_only: "Only the workspace owner can do this.",
+  nothing_running: "No draft of the profile is running.",
   stage_not_settable_by_hand: "That stage is set by the work itself, not by hand.",
   profile_frozen: "This profile version is frozen. Reopen it to edit.",
   move_not_allowed: "That move is not allowed from the current stage.",

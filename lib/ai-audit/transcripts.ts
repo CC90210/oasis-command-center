@@ -276,6 +276,35 @@ export async function deleteTranscript(
       args: [at, input.actor.id, t, input.engagementId, input.id, ...guard.args],
     },
     [
+      // What a draft read from it goes with it (review of phase 2b, H1): a run still reading is called off and
+      // keeps nothing; facts it wrote that nobody verified or corrected leave the draft; its report leaves the
+      // draft too (a frozen profile never holds one: Gate 1 drops it).
+      {
+        sql: `UPDATE ai_audit_steps SET status = 'cancelled', error_code = 'transcript_deleted', result_ref = NULL, finished_at = ?, updated_at = ?
+               WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract' AND status IN ('queued', 'running', 'waiting_runner')`,
+        args: [at, at, t, input.engagementId],
+      },
+      {
+        sql: `UPDATE tool_jobs SET
+                status = CASE WHEN status IN ('queued', 'claimed', 'running') THEN 'failed' ELSE status END,
+                error_code = CASE WHEN status IN ('queued', 'claimed', 'running') THEN 'ai_audit_cancelled' ELSE error_code END,
+                finished_at = CASE WHEN status IN ('queued', 'claimed', 'running') THEN ? ELSE finished_at END,
+                result_json = CASE WHEN result_json IS NULL THEN NULL ELSE '{"stored":false}' END, updated_at = ?
+               WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?`,
+        args: [at, at, t, input.engagementId],
+      },
+      {
+        sql: `DELETE FROM ai_audit_profile_fields
+               WHERE tenant_id = ? AND source_type = 'transcript' AND owner_corrected = 0 AND label = 'client_reported' AND COALESCE(verified_note, '') = ''
+                 AND json_extract(source_ref, '$.transcript_id') = ?
+                 AND profile_version_id IN (SELECT id FROM ai_audit_profile_versions WHERE tenant_id = ? AND engagement_id = ? AND status = 'draft')`,
+        args: [t, input.id, t, input.engagementId],
+      },
+      {
+        sql: `UPDATE ai_audit_profile_versions SET summary = json_remove(COALESCE(summary, '{}'), '$.extraction'), updated_at = ?
+               WHERE tenant_id = ? AND engagement_id = ? AND status = 'draft' AND json_extract(summary, '$.extraction') IS NOT NULL`,
+        args: [at, t, input.engagementId],
+      },
       {
         sql: `UPDATE ai_audit_profile_fields SET evidence_quote = NULL
                WHERE tenant_id = ? AND evidence_quote IS NOT NULL AND json_extract(source_ref, '$.transcript_id') = ?`,

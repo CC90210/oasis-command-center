@@ -34,7 +34,7 @@ import {
 } from "@/lib/ai-audit/payment";
 import { completeOnboardingIfDone, defaultOnboardingDeps, runOnboarding, type OnboardingDeps } from "@/lib/ai-audit/onboarding";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
-import { advanceCloudExtraction, defaultCloudModel, dueExtractions, finishMacExtractionIfComplete, type CloudDeps } from "@/lib/ai-audit/extraction";
+import { advanceCloudExtraction, defaultCloudModel, dueExtractions, finishMacExtractionIfComplete, sweepStaleExtractions, type CloudDeps } from "@/lib/ai-audit/extraction";
 import { getShareLink } from "@/lib/ai-audit/link";
 
 export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps };
@@ -233,6 +233,7 @@ export async function runAiAuditTick(
         if (over()) break;
         if (await finishMacExtractionIfComplete(db, tenantId, stepId, now(), extraction)) report.extractionsAdvanced += 1;
       }
+      if (!over()) await sweepStaleExtractions(db, tenantId, now(), extraction);
     });
 
     // 8. Leads that fell behind (recently active engagements only).

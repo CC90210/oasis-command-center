@@ -105,9 +105,12 @@ export type EngagementView = {
   /** The last finished draft's report, from the profile version (lib/ai-audit/extraction.ts finishExtraction). */
   extractionReport: {
     written: string[];
-    contradictions: Array<{ key: string; values: Array<{ value: unknown; from: number; to: number; source: string }> }>;
+    contradictions: Array<{ key: string; values: Array<{ value: unknown; from: number; to: number; source: string; quote?: string | null; transcript_id?: string | null }> }>;
     dropped: Array<{ key: string; reason: string }>;
+    /** All the drops; `dropped` lists the first 100. */
+    dropped_total?: number;
     failed_windows: number;
+    read_windows?: number;
     summary: { goals: string[]; problems: string[]; commitments: string[]; open_questions: string[] };
   } | null;
 };
