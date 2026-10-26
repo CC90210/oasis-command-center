@@ -29,6 +29,7 @@ import {
   EVIDENCE_LABELS,
   PROFILE_EDIT_STAGES,
   VERSION_STATUSES,
+  WAITING_ON_CLIENT_STAGES,
   isOneOf,
   type EvidenceLabel,
   type VersionStatus,
@@ -459,7 +460,7 @@ export type SaveDraftResult<T> = { ok: true; version: T; created: boolean } | { 
  * and in Research & Audit Generation after a revision moved it back
  * (lib/ai-audit/delivery.ts reviseAfterDelivery, phase 5).
  */
-const REVISION_STAGES: readonly string[] = ["delivered", "proposal_review", "payment_pending", "generating"];
+const REVISION_STAGES: readonly string[] = [...WAITING_ON_CLIENT_STAGES, "generating"];
 
 /**
  * Save the audit document on the engagement's draft version. When the current

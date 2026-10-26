@@ -527,6 +527,8 @@ const DELETE_GUARDS: ReadonlyArray<readonly [table: string, where: string, live:
   ["customers", "source_lead_id = ?", true],
   ["delivery_projects", "lead_id = ?", true],
   ["client_automation_profiles", "lead_id = ?", true],
+  // A Free AI Audit's history points at its lead (phase 5); guarded when the table exists.
+  ["ai_audit_engagements", "lead_id = ?", false],
 ];
 
 /**

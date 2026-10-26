@@ -27,7 +27,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { isRetiredTenant } from "@/lib/tenant/retired";
-import { WAITING_ON_CLIENT_STAGES, stallReason } from "@/lib/ai-audit/rules";
+import { WAITING_ON_CLIENT_STAGES, shortName, stallReason } from "@/lib/ai-audit/rules";
 import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { PDF_MAX_FAILURES, pdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
@@ -53,7 +53,7 @@ import { advanceResearch, defaultPageSpeedDeps, dueResearch, noteResearchFailure
 import { purgeVoidedResearch } from "@/lib/ai-audit/research-purge";
 import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
 import { advanceCloudWriting, callOffStaleWriting, defaultWriteModel, dueWriting, startWriting, type WriteDeps } from "@/lib/ai-audit/writing";
-import { fileFollowUp } from "@/lib/ai-audit/follow-up";
+import { fileFollowUp, withdrawStaleFollowUps } from "@/lib/ai-audit/follow-up";
 
 export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps; writing?: WriteDeps };
 
@@ -71,8 +71,9 @@ export type TickReport = {
   deliveriesRepaired: number;
   pdfsGivenUp: number;
   stallsFlagged: number;
-  /** Follow-up emails filed for CC's approval when a stall was flagged. */
+  /** Follow-up emails filed for CC's approval when a stall was flagged; and cards withdrawn that no longer fit. */
   followUpsFiled: number;
+  followUpsWithdrawn: number;
   leadsRepaired: number;
   extractionsAdvanced: number;
   briefsBuilt: number;
@@ -117,6 +118,7 @@ export async function runAiAuditTick(
     pdfsGivenUp: 0,
     stallsFlagged: 0,
     followUpsFiled: 0,
+    followUpsWithdrawn: 0,
     leadsRepaired: 0,
     extractionsAdvanced: 0,
     briefsBuilt: 0,
@@ -252,14 +254,20 @@ export async function runAiAuditTick(
         const r = await patchEngagement(db, { tenantId, id: e.id, expectedRowVersion: e.row_version, patch: { health: "stalled", health_reason: reason }, event: "stalled", actor: { type: "system", id: null }, now: now() });
         if (!r.ok) return;
         report.stallsFlagged += 1;
-        // A follow-up email waits for CC's one tap (phase 5): never sent from here.
-        const filed = await fileFollowUp(db, { tenantId, engagement: e, link, reason: link.first_viewed_at ? "not_paid" : "not_opened", base: deps.onboarding.baseUrl(), now: now() });
+        // A follow-up email waits for CC's one tap (phase 5): never sent from here. A card that cannot be filed never
+        // swallows the alert (review of phase 5).
+        let filed = false;
+        try {
+          filed = await fileFollowUp(db, { tenantId, engagement: e, link, reason: link.first_viewed_at ? "not_paid" : "not_opened", base: deps.onboarding.baseUrl(), now: now() });
+        } catch (err) {
+          console.error("[ai-audit.tick] the follow-up card was not filed", { engagementId: e.id, error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
+        }
         if (filed) report.followUpsFiled += 1;
         await deps.payment.alert({
           tenantId,
           alertType: "ai_audit_stalled",
           severity: "info",
-          title: `Stalled: ${e.business_name || "an AI audit"}`,
+          title: `Stalled: ${shortName(e.business_name, "an AI audit")}`,
           body: filed ? `${reason} A follow-up email is waiting for your approval in Needs you.` : `${reason} A follow-up is your call.`,
           subjectType: "ai_audit_engagement",
           subjectId: e.id,
@@ -267,6 +275,11 @@ export async function runAiAuditTick(
         });
       });
     }
+
+    // 7a. Follow-up cards still waiting that no longer fit (paid, declined, a new link, opened): withdrawn.
+    await guard("follow_ups", undefined, async () => {
+      report.followUpsWithdrawn += await withdrawStaleFollowUps(db, tenantId, now());
+    });
 
     // 7b. Drafting profiles from transcripts: cloud runs one window per tick; Mac runs
     // whose windows are all in but were never finished are finished here.

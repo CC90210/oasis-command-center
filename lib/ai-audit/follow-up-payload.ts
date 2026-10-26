@@ -12,6 +12,8 @@
  * PURE: lib/os/approvals/rules.ts validates payloads with it, and that module
  * is shared with the browser.
  */
+import { EMAIL_RE } from "@/lib/ai-audit/delivery-payload";
+
 export const FOLLOW_UP_AI_AUDIT_KIND = "follow_up_ai_audit" as const;
 export const FOLLOW_UP_REASONS = ["not_opened", "not_paid"] as const;
 export type FollowUpReason = (typeof FOLLOW_UP_REASONS)[number];
@@ -31,7 +33,6 @@ export type FollowUpAiAuditPayload = {
 type Valid<T> = { ok: true; value: T } | { ok: false; error: string; field?: string };
 
 const ID_RE = /^[A-Za-z0-9-]{1,64}$/;
-const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 
 export function validateFollowUpAiAuditPayload(raw: unknown): Valid<FollowUpAiAuditPayload> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "payload_invalid" };

@@ -21,12 +21,12 @@ import { contentHash, sha256Hex } from "@/lib/ai-audit/hash";
 import { blockingIssues } from "@/lib/ai-audit/doc";
 import { proposalBlockers, proposalTotals, AUDIT_LINK_PLACEHOLDER } from "@/lib/ai-audit/proposal";
 import { DELIVER_AI_AUDIT_KIND, validateDeliverAiAuditPayload, type DeliverAiAuditPayload } from "@/lib/ai-audit/delivery-payload";
-import { createShareLink, linkForApproval, mintLinkToken, revokeShareLink } from "@/lib/ai-audit/link";
+import { createShareLink, linkForApproval, mintLinkToken, revokeShareLinkRestoringReplaced } from "@/lib/ai-audit/link";
 import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
 import { queuePdfJob, r2PdfStorage } from "@/lib/ai-audit/pdf";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
-import { AUTHORIZATION_VOIDED_REASONS, shortName, type AiAuditStage } from "@/lib/ai-audit/rules";
+import { AUTHORIZATION_VOIDED_REASONS, WAITING_ON_CLIENT_STAGES, shortName, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { defaultPaymentDeps, expireOpenCheckouts, type PaymentDeps } from "@/lib/ai-audit/payment";
 import { getSettings } from "@/lib/ai-audit/store";
 import {
@@ -44,6 +44,7 @@ import {
   engagementUpdateStatement,
   eventStatement,
   getEngagement,
+  int,
   noDeliveryInFlight,
   patchEngagement,
   requireTenant,
@@ -169,8 +170,10 @@ export async function reopenForEdits(
   return after ? { ok: true, engagement: after } : { ok: false, error: "not_found" };
 }
 
-/** Where a delivered audit may be revised from: delivered, and not paid (phase 5). */
-export const REVISABLE_STAGES: readonly AiAuditStage[] = ["delivered", "proposal_review", "payment_pending"];
+/** Where a delivered audit may be revised from: while it waits on the client, unpaid (phase 5). */
+export const REVISABLE_STAGES: readonly AiAuditStage[] = WAITING_ON_CLIENT_STAGES;
+/** A Pay press younger than this may still be opening its Stripe page: a revision waits for it. */
+const CHECKOUT_OPENING_MS = 120_000;
 
 /** The email for a revised audit: the same private-link placeholder, saying it replaces the last one. */
 export function revisionEmail(input: { contactName: string | null; businessName: string }): { subject: string; body: string } {
@@ -190,14 +193,18 @@ export function revisionEmail(input: { contactName: string | null; businessName:
 }
 
 /**
- * Revise an audit after it was delivered, before it is paid (phase 5). The
- * client's payment pages close first (Stripe is told each open session is
- * over), so nothing is paid for a version being replaced; a follow-up still
- * waiting for CC is withdrawn. The engagement goes back to Research & Audit
- * Generation with drafts copied from what the client has, the email worded
- * as an update. The client's link keeps opening the delivered version until
- * the new one is approved and sent: that delivery supersedes it and stops the
- * old link (recordDelivery).
+ * Revise an audit after it was delivered, before it is paid (phase 5). It
+ * waits while money moved or is moving for what the client has: a payment
+ * Stripe confirmed, a checkout the client completed (a bank payment can take
+ * days to clear), a Pay press still opening its page (review of phase 5,
+ * finding 1). The client's payment pages close first (Stripe is told each open
+ * session is over), and again after the move, so nothing is paid for a version
+ * being replaced; a follow-up still waiting for CC is withdrawn. The
+ * engagement goes back to Research & Audit Generation with drafts copied from
+ * what the client has, the email worded as an update; if the drafts cannot be
+ * made it goes back to where it was. The client's link keeps opening the
+ * delivered version until the new one is approved and sent: that delivery
+ * supersedes it and stops the old link (recordDelivery).
  */
 export async function reviseAfterDelivery(
   db: Client,
@@ -212,33 +219,94 @@ export async function reviseAfterDelivery(
   const audit = engagement.current_audit_version_id ? await getAuditVersion(db, t, engagement.current_audit_version_id) : null;
   const proposal = engagement.current_proposal_version_id ? await getProposalVersion(db, t, engagement.current_proposal_version_id) : null;
   if (!audit || audit.status !== "delivered" || !audit.doc || !proposal || proposal.status !== "delivered" || !proposal.content) return { ok: false, error: "nothing_delivered" };
-  // Payment pages first: a session Stripe could not close would let the client pay for a version being replaced.
-  const closed = await expireOpenCheckouts(db, t, engagement.id, input.now, input.payment ?? defaultPaymentDeps());
+  // Money that moved, or is moving, for what the client has: never revised from under it.
+  const received = int((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_payment_receipts WHERE tenant_id = ? AND engagement_id = ?", args: [t, engagement.id] })).rows[0]?.n);
+  if (received) return { ok: false, error: "payment_received" };
+  const opening = int(
+    (
+      await db.execute({
+        sql: "SELECT COUNT(*) AS n FROM ai_audit_checkouts WHERE tenant_id = ? AND engagement_id = ? AND status = 'creating' AND created_at > ?",
+        args: [t, engagement.id, new Date(input.now.getTime() - CHECKOUT_OPENING_MS).toISOString()],
+      })
+    ).rows[0]?.n,
+  );
+  if (opening) return { ok: false, error: "checkout_opening" };
+  const payment = input.payment ?? defaultPaymentDeps();
+  // Payment pages next: a session Stripe could not close would let the client pay for a version being replaced,
+  // and one the client completed is money on its way.
+  const closed = await expireOpenCheckouts(db, t, engagement.id, input.now, payment);
+  if (closed.complete) return { ok: false, error: "checkout_complete" };
   if (closed.failed) return { ok: false, error: "checkout_still_open" };
   const at = input.now.toISOString();
   const moved = await casWrite(db, engagementUpdateStatement(t, engagement.id, engagement.row_version, { delivery_approval_id: null, health: "ok", health_reason: null }, at, "generating", undefined, noDeliveryInFlight(t, engagement.id, input.now)), [
     eventStatement({ tenantId: t, engagementId: engagement.id, event: "revised_after_delivery", actor: input.actor, at, fromStage: engagement.stage, toStage: "generating", meta: { audit_version_id: audit.id, proposal_version_id: proposal.id, checkouts_expired: closed.expired } }),
   ]);
   if (!moved) return { ok: false, error: "conflict" };
+  // A session the Pay button opened between the close above and the move is closed too. One the client completed in
+  // that instant is verified there and, having nowhere to go, flagged for CC (settlePayment).
+  await expireOpenCheckouts(db, t, engagement.id, input.now, payment);
   // A follow-up still waiting points at the link this revision will replace.
   const waiting = await db.execute({
     sql: "SELECT id FROM approvals WHERE tenant_id = ? AND action_kind = 'follow_up_ai_audit' AND status = 'pending' AND json_extract(payload_json, '$.engagement_id') = ?",
     args: [t, engagement.id],
   });
   for (const row of waiting.rows) await cancelPendingApproval(db, t, String(row.id), { type: "user", id: input.actor.id }, { reason: "revised_after_delivery" }, input.now);
-  let current = await getEngagement(db, t, engagement.id);
-  if (!current) return { ok: false, error: "not_found" };
-  const a = await saveAuditDraft(db, { tenantId: t, engagementId: current.id, doc: audit.doc, actor: input.actor, now: input.now, expectedRowVersion: current.row_version });
+  const copied = await revisionDrafts(db, t, engagement.id, audit, proposal, input).catch((err: unknown) => {
+    console.error("[ai-audit.delivery] the revision's drafts could not be made", err instanceof Error ? (err.stack ?? err.message) : String(err));
+    return { ok: false as const, error: "draft_copy_failed" };
+  });
+  if (copied.ok) return copied;
+  // The drafts could not be made: back to what the client has, so Revise can be pressed again (review of phase 5:
+  // a half-done revision left Research & Audit Generation with nothing copied and no button).
+  await rollBackRevision(db, t, engagement, audit.id, proposal.id, input);
+  return copied;
+}
+
+/** A revision's drafts: the audit as the client has it, the proposal with its email worded as an update. */
+async function revisionDrafts(
+  db: Client,
+  t: string,
+  engagementId: string,
+  audit: AuditVersion,
+  proposal: ProposalVersion,
+  input: { actor: Actor; now: Date },
+): Promise<{ ok: true; engagement: Engagement } | { ok: false; error: string }> {
+  let current = await getEngagement(db, t, engagementId);
+  if (!current || !audit.doc || !proposal.content) return { ok: false, error: "not_found" };
+  const a = await saveAuditDraft(db, { tenantId: t, engagementId, doc: audit.doc, actor: input.actor, now: input.now, expectedRowVersion: current.row_version });
   if (!a.ok) return { ok: false, error: `audit_${a.error}` };
-  current = await getEngagement(db, t, engagement.id);
+  current = await getEngagement(db, t, engagementId);
   if (!current) return { ok: false, error: "not_found" };
   const { settings } = await getSettings(db, t);
   const email = revisionEmail({ contactName: current.contact_name, businessName: current.business_name || "" });
   const content = { ...proposal.content, delivery_email: { ...proposal.content.delivery_email, ...email } };
-  const p = await saveProposalDraft(db, { tenantId: t, engagementId: current.id, content, actor: input.actor, now: input.now, expectedRowVersion: current.row_version, tax: settings.tax });
+  const p = await saveProposalDraft(db, { tenantId: t, engagementId, content, actor: input.actor, now: input.now, expectedRowVersion: current.row_version, tax: settings.tax });
   if (!p.ok) return { ok: false, error: `proposal_${p.error}` };
-  const after = await getEngagement(db, t, engagement.id);
+  const after = await getEngagement(db, t, engagementId);
   return after ? { ok: true, engagement: after } : { ok: false, error: "not_found" };
+}
+
+/** A revision whose drafts could not be made goes back to the stage, versions, delivery and flags it came from. */
+async function rollBackRevision(db: Client, t: string, before: Engagement, auditId: string, proposalId: string, input: { actor: Actor; now: Date }): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const now = await getEngagement(db, t, before.id);
+    if (!now || now.stage !== "generating") return;
+    const at = input.now.toISOString();
+    const back = await casWrite(
+      db,
+      engagementUpdateStatement(
+        t,
+        now.id,
+        now.row_version,
+        { delivery_approval_id: before.delivery_approval_id, health: before.health, health_reason: before.health_reason, current_audit_version_id: auditId, current_proposal_version_id: proposalId },
+        at,
+        before.stage,
+      ),
+      [eventStatement({ tenantId: t, engagementId: now.id, event: "revision_rolled_back", actor: input.actor, at, fromStage: "generating", toStage: before.stage, meta: { audit_version_id: auditId, proposal_version_id: proposalId } })],
+    );
+    if (back) return;
+  }
+  console.error("[ai-audit.delivery] a revision whose drafts failed could not be rolled back", { engagementId: before.id });
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +375,8 @@ export async function requestDeliveryApproval(
     if (uncertain && input.retry && input.confirmNotSent) {
       // CC checked the Sent folder and it did not go: the old link dies before a new one is made.
       const old = await linkForApproval(db, t, prior.id);
-      if (old && !old.revoked_at) await revokeShareLink(db, t, old.id, "not_sent_confirmed", input.now);
+      // The link that email would have replaced works again (review of phase 5, finding 2).
+      if (old && !old.revoked_at) await revokeShareLinkRestoringReplaced(db, t, old, "not_sent_confirmed", input.now);
     }
     if (prior && !input.retry) {
       const why = uncertain
@@ -400,11 +469,12 @@ export function defaultAiAuditExecutorDeps(): AiAuditExecutorDeps {
   };
 }
 
-function failed(reason: string, message: string): ExecutorOutcome {
+/** An executor's refusal: nothing was sent. Shared with the follow-up's executor. */
+export function failed(reason: string, message: string): ExecutorOutcome {
   return { ok: false, result: { outcome: "failed", reason, message, provider: null } };
 }
 
-const EMAIL_PROVIDER = "oasis_shared_gmail";
+export const EMAIL_PROVIDER = "oasis_shared_gmail";
 
 async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
   const deps = ctx.deps.aiAudit ?? defaultAiAuditExecutorDeps();
@@ -507,7 +577,8 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
     };
   }
   if (!sent.ok) {
-    await revokeShareLink(ctx.db, t, link.id, "send_failed", new Date());
+    // The client keeps the link from the last email that reached them (review of phase 5, finding 2).
+    await revokeShareLinkRestoringReplaced(ctx.db, t, link, "send_failed", new Date());
     return {
       ok: false,
       result: { outcome: "failed", reason: sent.reason, message: `The email was not sent (${sent.reason}): ${sent.error}`.slice(0, 500), provider: sent.provider },

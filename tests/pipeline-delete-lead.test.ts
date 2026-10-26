@@ -440,7 +440,12 @@ async function main(): Promise<void> {
   ], "write");
   assert.equal(await guardedDeleteLead(TENANT, GUARDED), null, "the guarded delete removed a lead with an active document");
   assert.equal(await count(seed, "tenant_records", "id = ?", [GUARDED]), 1);
+  // A Free AI Audit created in between blocks the guarded delete too (review of phase 5).
   await seed.execute({ sql: "UPDATE lead_documents SET metadata = ? WHERE id = 'race-document'", args: [JSON.stringify({ deleted_at: "2026-10-18T12:00:00.000Z" })] });
+  await seed.execute({ sql: "INSERT INTO ai_audit_engagements VALUES ('race-engagement', ?, ?, 'delivered')", args: [TENANT, GUARDED] });
+  assert.equal(await guardedDeleteLead(TENANT, GUARDED), null, "the guarded delete removed a lead with an audit");
+  assert.equal(await count(seed, "tenant_records", "id = ?", [GUARDED]), 1);
+  await seed.execute({ sql: "DELETE FROM ai_audit_engagements WHERE id = 'race-engagement'", args: [] });
   assert.equal(await guardedDeleteLead(TENANT, GUARDED), 0, "a soft-deleted document still blocked the lead");
   assert.equal(await count(seed, "lead_documents", "id = 'foreign-race-document'", []), 1, "another tenant's document was touched");
   pass("the parent delete atomically re-checks cascading rows and active documents");

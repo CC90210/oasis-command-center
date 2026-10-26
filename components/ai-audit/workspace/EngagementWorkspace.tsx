@@ -20,6 +20,7 @@ import {
   MANUAL_STAGE_TARGETS,
   PROFILE_EDIT_STAGES,
   STAGE_MOVES,
+  WAITING_ON_CLIENT_STAGES,
   type AiAuditStage,
   type BusinessType,
 } from "@/lib/ai-audit/rules";
@@ -222,7 +223,7 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
                   Reopen for edits
                 </button>
               ) : null}
-              {isOwner && ["delivered", "proposal_review", "payment_pending"].includes(e.stage) && (e.payment_status === "none" || e.payment_status === "pending") ? (
+              {isOwner && WAITING_ON_CLIENT_STAGES.includes(e.stage) && (e.payment_status === "none" || e.payment_status === "pending") ? (
                 <button
                   type="button"
                   className="btn-secondary"

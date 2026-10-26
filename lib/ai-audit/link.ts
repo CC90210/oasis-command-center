@@ -75,7 +75,9 @@ function mapLink(r: Row): ShareLink {
 /**
  * The link for an approval, created once. A second call for the same approval
  * (a retried delivery) returns the row the first one made. Revokes any other
- * live link of the engagement first, so the newest delivery is the only link.
+ * live link of the engagement first (one live link per engagement, bravo__238),
+ * at the new link's own time, so a send that fails can give that one back
+ * (revokeShareLinkRestoringReplaced).
  */
 export async function createShareLink(
   db: Client,
@@ -133,6 +135,35 @@ export async function revokeShareLink(db: Client, tenantId: string, id: string, 
     args: [now.toISOString(), reason.slice(0, 64), requireTenant(tenantId), id],
   });
   return r.rowsAffected === 1;
+}
+
+/**
+ * Revoke a link a delivery made, and give back the link it replaced: the
+ * client keeps the link from the last email that reached them (review of
+ * phase 5, finding 2). The earlier one was revoked at this link's creation
+ * time (createShareLink); it comes back only when no other link is live.
+ */
+export async function revokeShareLinkRestoringReplaced(
+  db: Client,
+  tenantId: string,
+  link: Pick<ShareLink, "id" | "engagement_id" | "created_at">,
+  reason: string,
+  now: Date,
+): Promise<boolean> {
+  const t = requireTenant(tenantId);
+  const [revoked] = await db.batch(
+    [
+      { sql: "UPDATE ai_audit_share_links SET revoked_at = ?, revoked_reason = ? WHERE tenant_id = ? AND id = ? AND revoked_at IS NULL", args: [now.toISOString(), reason.slice(0, 64), t, link.id] },
+      {
+        sql: `UPDATE ai_audit_share_links SET revoked_at = NULL, revoked_reason = NULL
+              WHERE tenant_id = ? AND engagement_id = ? AND id <> ? AND revoked_reason = 'replaced' AND revoked_at = ?
+                AND NOT EXISTS (SELECT 1 FROM ai_audit_share_links l WHERE l.tenant_id = ? AND l.engagement_id = ? AND l.revoked_at IS NULL)`,
+        args: [t, link.engagement_id, link.id, link.created_at, t, link.engagement_id],
+      },
+    ],
+    "write",
+  );
+  return revoked.rowsAffected === 1;
 }
 
 /** A counted view (from the page's own visibility signal). True the first time. */
