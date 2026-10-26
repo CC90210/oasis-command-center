@@ -65,6 +65,7 @@ export const SWEEP_ERROR_LINES: Readonly<Record<string, string>> = {
   meeting_gone: "The meeting's recording was no longer waiting, so this was not run.",
   meeting_deleted: "The recording was deleted, so this was stopped.",
   relay_expired: "The computer did not take this recording within 30 days, so its audio was deleted.",
+  runner_gone: "The computer that holds this copy has not checked in for 30 days, so its copy was not deleted.",
 };
 
 /** Codes a tool that runs inside the request writes. */

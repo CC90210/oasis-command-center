@@ -92,7 +92,8 @@ export function isMissingToolTables(err: unknown): boolean {
  */
 export async function toolTablesInstalled(db: Client): Promise<boolean> {
   try {
-    await db.execute("SELECT (SELECT COUNT(*) FROM tool_jobs WHERE 0) AS j, (SELECT COUNT(*) FROM tool_runners WHERE 0) AS r");
+    // target_runner (bravo__240) is read by every claim: without it, claims fail with a retryable "not set up", never a 500.
+    await db.execute("SELECT (SELECT COUNT(*) FROM tool_jobs WHERE 0) AS j, (SELECT COUNT(*) FROM tool_runners WHERE 0) AS r, (SELECT target_runner FROM tool_jobs WHERE 0) AS t");
     return true;
   } catch (err) {
     if (isMissingToolTables(err)) return false;

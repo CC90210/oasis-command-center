@@ -26,7 +26,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient, type Client } from "@libsql/client";
-import { CLIENT_A, OASIS, setupDatabase } from "./_delivery-harness";
+import { CLIENT_A, OASIS, setupDatabase, splitSql } from "./_delivery-harness";
 import type { ToolStorage } from "../lib/tools/runner-handlers";
 
 export * from "./_delivery-harness";
@@ -103,8 +103,13 @@ export async function setupToolsDatabase(): Promise<Client> {
   await db.executeMultiple(LIBRARY_TABLES);
   await db.executeMultiple(readFileSync(AI_USAGE_MIGRATION, "utf8"));
   await db.executeMultiple(readFileSync(TOOLS_MIGRATION_PATH, "utf8"));
-  // Targeted jobs and Meet's per-computer copies (bravo__240), which the claim reads.
-  await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__240_meet_local_copies.sql"), "utf8"));
+  // Targeted jobs and Meet's per-computer copies (bravo__240), which the claim reads. Its backfill
+  // reads Meet's own tables (bravo__231); a database without them has nothing to backfill.
+  const hasMeet = (await db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meet_transcripts'")).rows.length > 0;
+  for (const stmt of splitSql(readFileSync(join(ROOT, "database", "turso", "bravo__240_meet_local_copies.sql"), "utf8"))) {
+    if (!hasMeet && /\bmeet_transcripts\b/.test(stmt)) continue;
+    await db.execute(stmt);
+  }
   return db;
 }
 
