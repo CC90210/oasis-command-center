@@ -2003,6 +2003,110 @@ async function toolTextTorrentUnblock(input: Record<string, unknown>, ctx: ToolC
 // HTTP tools — open-web access with safety rails
 // ----------------------------------------------------------------------------
 
+/** The four octets of a dotted IPv4 address, or null. */
+function parseIpv4(s: string): number[] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  return parts.every((n) => n <= 255) ? parts : null;
+}
+
+/**
+ * Every IPv4 range an agent's web read must never reach: "this host" (0/8),
+ * loopback (127/8, not only .0.0.1), RFC 1918, carrier-grade NAT (100.64/10,
+ * RFC 6598: the range a cloud's own network sits in), link-local (169.254/16,
+ * where every cloud's metadata endpoint lives), the IETF and benchmarking
+ * blocks, multicast, reserved and broadcast.
+ */
+function forbiddenIpv4([a, b, c]: number[]): boolean {
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+/** The eight 16-bit groups of an IPv6 address (a dotted IPv4 tail allowed), or null when it is not one. */
+function parseIpv6(s: string): number[] | null {
+  if (!s.includes(":") || /[^0-9a-f:.]/i.test(s)) return null;
+  let text = s;
+  const dotted = /^(.*:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(text);
+  if (dotted) {
+    const v4 = parseIpv4(dotted[2]);
+    if (!v4) return null;
+    text = `${dotted[1]}${((v4[0] << 8) | v4[1]).toString(16)}:${((v4[2] << 8) | v4[3]).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string) => (part === "" ? [] : part.split(":").map((g) => (/^[0-9a-f]{1,4}$/i.test(g) ? parseInt(g, 16) : NaN)));
+  const head = groups(halves[0]);
+  const tail = halves.length === 2 ? groups(halves[1]) : [];
+  if ([...head, ...tail].some(Number.isNaN)) return null;
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  return [...head, ...new Array<number>(halves.length === 2 ? missing : 0).fill(0), ...tail];
+}
+
+/**
+ * The IPv6 ranges that are inside the network, and the three forms that carry an
+ * IPv4 address inside an IPv6 one (mapped ::ffff:a.b.c.d, compatible ::a.b.c.d,
+ * NAT64 64:ff9b::a.b.c.d), judged by the IPv4 table.
+ */
+function forbiddenIpv6(g: number[]): boolean {
+  const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
+  const tailV4 = [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff];
+  if (zero(0, 5) && g[5] === 0xffff) return forbiddenIpv4(tailV4);
+  if (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) return forbiddenIpv4(tailV4);
+  if (zero(0, 7) && g[7] <= 1) return true; // :: (unspecified) and ::1 (loopback)
+  if (zero(0, 6)) return forbiddenIpv4(tailV4); // the deprecated IPv4-compatible form
+  const top = g[0];
+  return (
+    (top & 0xfe00) === 0xfc00 || // fc00::/7 unique local
+    (top & 0xffc0) === 0xfe80 || // fe80::/10 link-local
+    (top & 0xffc0) === 0xfec0 || // fec0::/10 site-local (deprecated, still routed in-house)
+    (top & 0xff00) === 0xff00 // ff00::/8 multicast
+  );
+}
+
+/** `host` with the brackets an IPv6 literal carries in a URL, and a zone id, taken off. */
+function bareAddress(host: string): string {
+  let a = host.trim().toLowerCase();
+  if (a.startsWith("[") && a.endsWith("]")) a = a.slice(1, -1);
+  const zone = a.indexOf("%");
+  return zone >= 0 ? a.slice(0, zone) : a;
+}
+
+/** True when `host` is an IP address literal (IPv4, or IPv6 with or without brackets). */
+export function isIpLiteral(host: string): boolean {
+  const a = bareAddress(host);
+  return parseIpv4(a) !== null || parseIpv6(a) !== null;
+}
+
+/**
+ * True when `ip` is an address an agent's web read must never reach, in one
+ * table both guards below use. Anything that is not an address is "false":
+ * the table says nothing about names.
+ *
+ * 2026-10-26 (a sibling session's review): the old checks matched a few exact
+ * strings and prefixes, so [::1] (bracketed, as every URL spells it), 127.0.0.2,
+ * all of 100.64.0.0/10 and an IPv4 address carried inside an IPv6 one went
+ * through. tests/cloud-tool-runner-ssrf.test.ts holds every spelling.
+ */
+export function isForbiddenIp(ip: string): boolean {
+  const a = bareAddress(ip);
+  const v4 = parseIpv4(a);
+  if (v4) return forbiddenIpv4(v4);
+  const v6 = parseIpv6(a);
+  return v6 ? forbiddenIpv6(v6) : false;
+}
+
 export function assertSafeUrl(url: string): URL {
   let parsed: URL;
   try {
@@ -2015,15 +2119,19 @@ export function assertSafeUrl(url: string): URL {
   }
   // Block obvious SSRF targets — agents on the public dashboard should never
   // need to hit our own internal infra. Cloud-tool calls are explicitly
-  // for public web reads.
-  const host = parsed.hostname.toLowerCase();
+  // for public web reads. The URL parser has already turned every numeric
+  // spelling of an address (127.1, 2130706433, 0x7f000001) into dotted form
+  // and keeps IPv6 in brackets; a trailing dot names the same host.
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
   const blocked = [
     "localhost",
     "127.0.0.1",
     "0.0.0.0",
     "::1",
+    "[::1]",
     "169.254.169.254", // AWS/Azure/GCP IMDS v1 + v2
-    "fd00:ec2::254",   // AWS IMDS v6
+    "fd00:ec2::254", // AWS IMDS v6
+    "[fd00:ec2::254]",
     "metadata.google.internal",
     "metadata.azure.com",
   ];
@@ -2031,21 +2139,80 @@ export function assertSafeUrl(url: string): URL {
   if (host.endsWith(".internal") || host.endsWith(".local") || host.endsWith(".localhost")) {
     throw new Error("blocked_host");
   }
-  // Private IP ranges (IPv4) — quick string check, not exhaustive but
-  // covers 10/8, 172.16/12, 192.168/16, 169.254/16 link-local.
-  if (
-    /^10\./.test(host) ||
-    /^192\.168\./.test(host) ||
-    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host) ||
-    /^169\.254\./.test(host)
-  ) {
-    throw new Error("blocked_private_ip");
-  }
-  // IPv6 unique-local / loopback / link-local
-  if (/^(::ffff:0?7f\.|fc|fd|fe[89ab]|::1$)/i.test(host)) {
-    throw new Error("blocked_private_ip");
-  }
+  // Every address inside the network, by the one table (isForbiddenIp).
+  if (isForbiddenIp(host)) throw new Error("blocked_private_ip");
   return parsed;
+}
+
+export type ResolvedAddress = { address: string; family?: number };
+export type AddressResolver = (host: string) => Promise<ResolvedAddress[]>;
+
+/**
+ * Every A and AAAA answer for `host` from Cloudflare's resolver over
+ * DNS-over-HTTPS, CNAMEs followed as the resolver follows them. [] when the
+ * name does not exist (Status 3, no answers). Throws dns_check_failed when the
+ * resolver cannot be asked: a guard that cannot look is a failed check, never a
+ * pass. This is how the Worker resolves, where Node's dns is not there.
+ */
+export async function resolveViaDoh(host: string, fetchImpl: typeof fetch = fetch): Promise<ResolvedAddress[]> {
+  const ask = async (type: "A" | "AAAA"): Promise<ResolvedAddress[]> => {
+    const res = await fetchImpl(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=${type}`, {
+      headers: { accept: "application/dns-json" },
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`doh_${res.status}`);
+    const body = (await res.json()) as { Answer?: Array<{ type?: number; data?: string }> };
+    const want = type === "A" ? 1 : 28;
+    return (body.Answer ?? [])
+      .filter((a) => a.type === want && typeof a.data === "string")
+      .map((a) => ({ address: a.data as string, family: type === "A" ? 4 : 6 }));
+  };
+  try {
+    const [a, aaaa] = await Promise.all([ask("A"), ask("AAAA")]);
+    return [...a, ...aaaa];
+  } catch (err) {
+    console.warn("[cloud-tools] DNS-over-HTTPS check failed", { host, error: err instanceof Error ? err.message : String(err) });
+    throw new Error("dns_check_failed");
+  }
+}
+
+/** Lookup errors that mean "no such name": the fetch that follows surfaces them. Anything else means the resolver could not answer. */
+const NAME_NOT_FOUND = new Set(["ENOTFOUND", "ENODATA", "EAI_NODATA", "EAI_NONAME"]);
+
+type NodeLookup = (host: string, opts: { all: true }) => Promise<ResolvedAddress[]>;
+
+/**
+ * Every address `host` resolves to: Node's lookup where it exists (the routes
+ * declare runtime nodejs), DNS-over-HTTPS where it does not or cannot answer
+ * (the Worker, whose node:dns is a stub), and dns_check_failed when neither
+ * can. `deps.lookup` null means "no Node resolver"; undefined means "find it".
+ *
+ * 2026-10-26: the old guard returned as if the host were fine whenever the dns
+ * module was missing or threw, which on the Worker was every request.
+ */
+export async function resolveAddresses(
+  host: string,
+  deps: { lookup?: NodeLookup | null; fetchImpl?: typeof fetch } = {},
+): Promise<ResolvedAddress[]> {
+  let lookup = deps.lookup;
+  if (lookup === undefined) {
+    try {
+      const dns = await import("dns/promises");
+      lookup = (h, o) => dns.lookup(h, o);
+    } catch {
+      lookup = null;
+    }
+  }
+  if (lookup) {
+    try {
+      return (await lookup(host, { all: true })).map((a) => ({ address: a.address, family: a.family }));
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code && NAME_NOT_FOUND.has(code)) return [];
+      // Not an answer but a resolver that could not give one: ask over HTTPS instead.
+    }
+  }
+  return resolveViaDoh(host, deps.fetchImpl ?? fetch);
 }
 
 /**
@@ -2053,49 +2220,25 @@ export function assertSafeUrl(url: string): URL {
  * literal hostnames + IPs but a public hostname like `evil.com` that
  * resolves to 127.0.0.1 or 169.254.169.254 would slip through.
  *
- * Resolves the hostname via Node's dns.lookup and rejects when any
- * resolved address falls in a private / loopback / IMDS range. Called
- * from fetchWithCap right before issuing the request so the resolved
- * IP we check IS the IP fetch will connect to (modulo TOCTOU — rare in
- * practice for this use case; Codex flagged DNS rebinding as a
- * theoretical risk but the cost of full pin-and-connect is too high
- * for a chat tool's latency budget).
+ * Resolves the hostname (resolveAddresses) and rejects when any resolved
+ * address is in the one forbidden table (isForbiddenIp). A literal address is
+ * judged as it is, with nothing to resolve. Called from fetchWithCap right
+ * before issuing the request so the resolved IP we check IS the IP fetch will
+ * connect to (modulo TOCTOU — rare in practice for this use case; Codex
+ * flagged DNS rebinding as a theoretical risk but the cost of full
+ * pin-and-connect is too high for a chat tool's latency budget).
  *
- * 2026-05-16 Codex review finding #6 hardening.
+ * 2026-05-16 Codex review finding #6 hardening; 2026-10-26 the table, the
+ * literal check and the Worker's resolver.
  */
-export async function assertResolvedIpIsPublic(host: string): Promise<void> {
-  // Skip when the host is already a literal IP — assertSafeUrl above
-  // handled it.
-  if (/^[0-9.]+$/.test(host) || /^\[?[0-9a-f:]+\]?$/i.test(host)) return;
-  let lookup: typeof import("dns/promises").lookup;
-  try {
-    ({ lookup } = await import("dns/promises"));
-  } catch {
-    // dns module unavailable (edge runtime, etc.) — fall back to
-    // hostname-only check. This route declares runtime='nodejs' so
-    // we expect the import to succeed in production.
+export async function assertResolvedIpIsPublic(host: string, resolver: AddressResolver = resolveAddresses): Promise<void> {
+  const bare = bareAddress(host);
+  if (isIpLiteral(bare)) {
+    if (isForbiddenIp(bare)) throw new Error("blocked_private_ip");
     return;
   }
-  let addrs: Array<{ address: string; family: number }>;
-  try {
-    addrs = await lookup(host, { all: true });
-  } catch {
-    // DNS failed — let fetch surface the network error rather than
-    // pretending we know something about the host.
-    return;
-  }
-  for (const a of addrs) {
-    const ip = a.address.toLowerCase();
-    if (
-      ip === "127.0.0.1" || ip === "::1" || ip === "0.0.0.0" ||
-      /^10\./.test(ip) ||
-      /^192\.168\./.test(ip) ||
-      /^172\.(1[6-9]|2[0-9]|3[01])\./.test(ip) ||
-      /^169\.254\./.test(ip) ||
-      /^(fc|fd|fe[89ab]|::1)/i.test(ip)
-    ) {
-      throw new Error("blocked_resolved_private_ip");
-    }
+  for (const a of await resolver(bare)) {
+    if (isForbiddenIp(a.address)) throw new Error("blocked_resolved_private_ip");
   }
 }
 
