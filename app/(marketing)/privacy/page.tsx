@@ -378,9 +378,10 @@ export default function PrivacyPage() {
           email before taking effect.
         </p>
         <LegalCallout>
-          This policy describes current engineering reality as verified on{" "}
-          {PRIVACY_LAST_UPDATED}, including gaps that are still open. It has not
-          yet been reviewed by counsel and is not a substitute for legal advice.
+          This policy describes current engineering reality, including gaps that
+          are still open, as of its last update on {PRIVACY_LAST_UPDATED}. It has
+          not yet been reviewed by counsel and is not a substitute for legal
+          advice.
         </LegalCallout>
       </LegalSection>
     </LegalPage>

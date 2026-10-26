@@ -152,7 +152,7 @@
     },
     {
       "name": "Quo",
-      "role": "SMS messaging (formerly OpenPhone)",
+      "role": "SMS messaging (formerly OpenPhone); also holds the replies recipients send to the Quo number",
       "region": "United States",
       "dpaInPlace": false,
       "openIssue": "No data processing agreement with Quo is confirmed yet."

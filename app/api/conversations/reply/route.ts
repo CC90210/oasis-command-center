@@ -45,9 +45,11 @@ import {
   quoFailureHttpStatus,
   sendQuoSms,
   QuoError,
+  QUO_SWITCHED_OFF_REASON,
   type QuoCredentials,
 } from "@/lib/integrations/quo";
 import { chooseSmsProvider, smsMayUseQuo, type DashboardSmsProvider } from "@/lib/routing/outbound-routing";
+import { providerSwitchedOn } from "@/lib/routing/provider-availability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -233,6 +235,16 @@ export async function POST(req: NextRequest) {
     }
   }
   const provider = chooseSmsProvider({ requested, tenantId, quoReady: quo !== null });
+  // Quo's own switch, PROVIDER_QUO_ENABLED (lib/routing/provider-availability.ts,
+  // the switch routing reads for every provider): at 0 no text goes out through
+  // Quo, a dry run does not say one would, and nothing switches to another
+  // provider instead.
+  if (provider === "quo" && !providerSwitchedOn("quo")) {
+    return NextResponse.json(
+      { ok: false, error: "quo_switched_off", message: QUO_SWITCHED_OFF_REASON },
+      { status: 409 },
+    );
+  }
 
   // DRY-RUN: short-circuit before network and tracking writes.
   // Per-channel: TextTorrent / Kixie / Quo can be live independently.
@@ -260,7 +272,8 @@ export async function POST(req: NextRequest) {
     if (provider === "quo") {
       // `quo` is null only when the request named Quo and it is not set up:
       // getQuoCredentials then throws missing_credentials, answered 400 below.
-      // sendQuoSms re-checks the live switch and STOP itself, failing closed.
+      // sendQuoSms re-checks the switches and the workspace's STOP list itself,
+      // failing closed.
       const result = await sendQuoSms(quo ?? (await getQuoCredentials(tenantId)), { to: toPhone, text: message });
       if (!result.ok) {
         return NextResponse.json(

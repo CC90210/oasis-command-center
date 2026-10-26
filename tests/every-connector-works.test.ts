@@ -788,7 +788,7 @@ async function main() {
       word: (w) => ({ access_token: `EAAB-alpha-${w}-system-user-0001` }),
     },
     {
-      slug: "quo", service: "quo", secretField: "api_key", pass: /\+1 365 360 3976: Canada yes, US waiting on registration, international off/,
+      slug: "quo", service: "quo", secretField: "api_key", pass: /\+1 365 360 3976: Canada yes, US restricted, international restricted/,
       good: { api_key: "quo-alpha-workspace-key-0001", from_number: "+13653603976" },
       word: (w) => ({ api_key: `quo-alpha-${w}-workspace-key-0001` }),
     },
@@ -962,7 +962,9 @@ async function main() {
       const t = await runTest(app.service);
       assert.equal(t.body.ok, false, `${app.slug}: Bravo's Test passed with Alpha's key`);
       assert.match(String(t.body.error), /^missing_fields/);
-      assert.equal((await card(BRAVO_CO, app.slug)).kind, "not_connected", app.slug);
+      // A card not offered to client workspaces (Quo) says so to a client that saved nothing.
+      const expected = connectors.connectorBySlug(app.slug)!.clientsUnavailable ? "coming_soon" : "not_connected";
+      assert.equal((await card(BRAVO_CO, app.slug)).kind, expected, app.slug);
     }
     assert.equal(calls.length, 0, "a call was made for a workspace that saved nothing");
   });

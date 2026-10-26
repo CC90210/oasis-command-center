@@ -875,10 +875,11 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: [
       "Checks the key with Quo when you press Test, and sends nothing",
       "In OASIS's own workspaces, texts you write in Conversations or in a lead's SMS box go out through Quo once the key is saved here, from the From number or the workspace's only Quo number",
-      "Other workspaces keep the texting provider they use today",
-      "Sends only while live texting is switched on, and never to someone who replied STOP. When Quo refuses a text (a US number before registration, an ended subscription), the send fails with Quo's reason",
+      "Not offered to client workspaces yet: they keep the texting provider they use today",
+      "Sends only while live texting is switched on, and checks the workspace's STOP list before each text",
+      "Replies to your Quo number, STOP included, are not read by OASIS yet: that is not built. Until it is, a STOP someone texts to the Quo number does not reach the STOP list OASIS checks",
+      "When Quo refuses a text (US carrier registration not approved, an ended subscription, a daily limit), the send fails with Quo's reason",
       "Scheduled texts do not go out through Quo yet: that is not built",
-      "Replies sent to your Quo number do not reach Conversations yet: that is not built",
     ],
     keywords: ["openphone", "sms", "text"],
     live: {
@@ -892,6 +893,11 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       },
       connect: { kind: "keys", label: "Connect Quo", service: "quo" },
     },
+    // Only OASIS's own workspaces send through Quo (chooseSmsProvider), and no
+    // Conversations picker offers it, so a client workspace that has not
+    // connected is told it is not available here instead of a key form that
+    // would turn green and do nothing.
+    clientsUnavailable: true,
     docs: { href: "https://www.quo.com/docs/mdx/api-reference/messages/send-a-text-message", label: "Quo's guide to sending a text" },
   },
   {

@@ -4,13 +4,18 @@
  * WHY. CC, 2026-10-26: Twilio broke; he signed up for Quo and wants to set it
  * up in Settings > Connections and send texts from OASIS. The failures that
  * matter are quiet ones:
- *   - a text Quo refused (a US number before registration, an ended
- *     subscription, a daily limit) reported as sent;
+ *   - a text Quo refused (US carrier registration not approved, an ended
+ *     subscription, a daily limit), or a 2xx that does not name the message,
+ *     reported as sent;
  *   - the key sent as a Bearer token, or anywhere but api.quo.com, or shown
  *     in an answer or a log line;
- *   - a text sent while live texting is off, or to someone who replied STOP;
- *   - a client workspace texting through OASIS's Quo account, or an OASIS
- *     text going out through another provider while Quo is set up.
+ *   - a text sent while live texting is off, while PROVIDER_QUO_ENABLED is 0,
+ *     or to a number on the workspace's STOP list. These checks prove the list
+ *     is read before each send. They do not prove a STOP texted to the Quo
+ *     number reaches that list: replies to Quo are not read by OASIS yet;
+ *   - a client workspace texting through OASIS's Quo account, or offered a
+ *     Quo form that would do nothing, or an OASIS text going out through
+ *     another provider while Quo is set up.
  *
  * Real store and encryption on a local libSQL file, and the real reply route
  * (app/api/conversations/reply) with a stand-in session. Quo is mocked at the
@@ -20,6 +25,7 @@
  * Run: node --conditions=react-server --import tsx tests/quo-connector.test.ts
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -454,7 +460,7 @@ async function main() {
     }
   });
 
-  await check("nothing reaches Quo while live texting is off, for a retired workspace, for someone who replied STOP, or for a bad number or an empty text", async () => {
+  await check("nothing reaches Quo while live texting is off, while PROVIDER_QUO_ENABLED is 0, for a retired workspace, for a number on the STOP list (the check, not a feed from Quo), or for a bad number or an empty text", async () => {
     const creds = { tenantId: OASIS, apiKey: OASIS_KEY, fromNumber: QUO_NUMBER };
     const codeOf = async (c: typeof creds, input: { to: string; text: string }) => {
       const r = await quoLib.sendQuoSms(c, input);
@@ -464,6 +470,14 @@ async function main() {
     calls.length = 0;
     try {
       assert.equal(await codeOf(creds, { to: TO, text: "Hello" }), "live_send_disabled", "the dashboard starts in dry-run");
+      // Quo's own switch, the one routing reads for every provider, wins over live texting.
+      process.env.LIVE_SEND_QUO = "1";
+      process.env.PROVIDER_QUO_ENABLED = "0";
+      const off = await quoLib.sendQuoSms(creds, { to: TO, text: "Hello" });
+      assert.deepEqual(off, { ok: false, code: "quo_switched_off", reason: quoLib.QUO_SWITCHED_OFF_REASON });
+      assert.equal(quoLib.quoFailureHttpStatus(off as never), 409);
+      delete process.env.PROVIDER_QUO_ENABLED;
+      delete process.env.LIVE_SEND_QUO;
       process.env.LIVE_SEND_QUO = "1";
       process.env.BRAVO_FORCE_DRY_RUN = "1";
       assert.equal(await codeOf(creds, { to: TO, text: "Hello" }), "live_send_disabled", "the kill switch wins over LIVE_SEND_QUO");
@@ -485,6 +499,9 @@ async function main() {
       for (const text of ["", "   ", "x".repeat(1601)]) {
         assert.equal(await codeOf(creds, { to: TO, text }), "invalid_text", `${text.length} characters`);
       }
+      // The STOP list OASIS holds is read before each send. This proves that
+      // check only: a STOP texted to the Quo number is not read by OASIS yet,
+      // so nothing here (or in the app) puts one on the list.
       await db.execute({ sql: "INSERT INTO sunbiz_phone_suppressions (tenant_id, phone_last10) VALUES (?, ?)", args: [OASIS, "4165550199"] });
       assert.equal(await codeOf(creds, { to: TO, text: "Hello" }), "recipient_opted_out");
       await db.execute({ sql: "DELETE FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
@@ -501,6 +518,35 @@ async function main() {
       liveQuo(false);
       delete process.env.BRAVO_FORCE_DRY_RUN;
       delete process.env.DASHBOARD_LIVE_SEND;
+      delete process.env.PROVIDER_QUO_ENABLED;
+    }
+  });
+
+  await check("a 2xx that does not name the message is not a success: 200 with HTML, {}, [] and 204 each say the text may have gone out", async () => {
+    liveQuo(true);
+    try {
+      const creds = { tenantId: OASIS, apiKey: OASIS_KEY, fromNumber: QUO_NUMBER };
+      const replies: Array<[string, () => Response, number]> = [
+        ["200 with an HTML body", () => new Response("<html><body>OK</body></html>", { status: 200, headers: { "content-type": "text/html" } }), 200],
+        ["202 with {}", () => json(202, {}), 202],
+        ["202 with []", () => json(202, []), 202],
+        ["202 with data but no id", () => json(202, { data: { status: "queued", conversationId: "CNconv0001" } }), 202],
+        ["204 with no body", () => new Response(null, { status: 204 }), 204],
+      ];
+      for (const [label, answer, status] of replies) {
+        calls.length = 0;
+        quo = answer;
+        const r = await quoLib.sendQuoSms(creds, { to: TO, text: "Hello" });
+        assert.equal(r.ok, false, `${label} must never read as sent`);
+        if (r.ok) continue;
+        assert.equal(r.code, "quo_unexpected", label);
+        assert.equal(r.status, status, label);
+        assert.match(r.reason, /cannot tell whether the text went out\. Check the conversation in Quo before sending it again\./, label);
+        assert.equal(quoLib.quoFailureHttpStatus(r), 502, label);
+        assert.equal(calls.length, 1, `${label}: one request, never retried`);
+      }
+    } finally {
+      liveQuo(false);
     }
   });
 
@@ -514,7 +560,7 @@ async function main() {
     quo = quoWith([numberRow(QUO_NUMBER)]);
     assert.deepEqual(await probes.runKeyProbe("quo", { api_key: OASIS_KEY }), {
       ok: true,
-      detail: "+1 365 360 3976: Canada yes, US waiting on registration, international off",
+      detail: "+1 365 360 3976: Canada yes, US restricted, international restricted",
     });
     assert.deepEqual(calls.map((c) => `${c.method} ${c.url.href}`), ["GET https://api.quo.com/v1/phone-numbers"]);
     assert.equal(calls[0].headers.get("authorization"), OASIS_KEY);
@@ -584,13 +630,55 @@ async function main() {
     const row = (over: Record<string, unknown> = {}) => ({
       service: "quo", field_key: "api_key", has_value: true, last_tested_at: null, last_test_ok: null, last_test_error: null, ...over,
     });
-    const status = (keyRows: unknown[]) => connectors.resolveConnectorStatus(def!, { keyRows, connections: [] } as never, now);
-    assert.equal(status([]).kind, "not_connected");
-    assert.equal(status([row()]).kind, "configured", "a saved key nothing has tested is never green");
-    assert.equal(status([row({ last_test_ok: true, last_tested_at: minuteAgo })]).kind, "connected");
-    const failed = status([row({ last_test_ok: false, last_tested_at: minuteAgo, last_test_error: "needs_number" })]);
+    const status = (keyRows: unknown[], oasisWorkspace?: boolean) =>
+      connectors.resolveConnectorStatus(def!, { keyRows, connections: [], oasisWorkspace } as never, now);
+    assert.equal(status([], true).kind, "not_connected");
+    assert.equal(status([row()], true).kind, "configured", "a saved key nothing has tested is never green");
+    assert.equal(status([row({ last_test_ok: true, last_tested_at: minuteAgo })], true).kind, "connected");
+    const failed = status([row({ last_test_ok: false, last_tested_at: minuteAgo, last_test_error: "needs_number" })], true);
     assert.equal(failed.kind, "attention");
     assert.equal(failed.label, "Choose the number to text from");
+
+    // Not offered to client workspaces: only OASIS's own send through Quo, and no
+    // Conversations picker offers it, so a client that has not connected is told so.
+    assert.equal(def!.clientsUnavailable, true);
+    assert.deepEqual([status([], false).kind, status([], false).label], ["coming_soon", "Not available on this workspace yet"]);
+    assert.equal(status([row()], false).kind, "configured", "a client that already saved a key still sees its own key's state");
+
+    // The card says what is true about STOP: the list is checked, replies to Quo are not read.
+    const does = def!.does.join(" ");
+    assert.match(does, /checks the workspace's STOP list before each text/);
+    assert.match(does, /Replies to your Quo number, STOP included, are not read by OASIS yet/);
+    assert.doesNotMatch(does, /never to someone who replied STOP/);
+    assert.doesNotMatch(`${does} ${def!.reads.join(" ")}`, /waiting on registration/);
+  });
+
+  await check("a client's Quo drawer says it is not available and draws no key form; OASIS's own draws the form", () => {
+    const def = connectors.connectorBySlug("quo")!;
+    const client = connectors.resolveConnectorStatus(def, { keyRows: [], connections: [], oasisWorkspace: false } as never, Date.now());
+    const oasis = connectors.resolveConnectorStatus(def, { keyRows: [], connections: [], oasisWorkspace: true } as never, Date.now());
+    // The drawer is a client component: it renders in a child process without
+    // the react-server condition (tests/connections-everywhere.render.ts).
+    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/connections-everywhere.render.ts"], {
+      cwd: join(__dirname, ".."),
+      input: JSON.stringify({
+        cases: [
+          { id: "client", kind: "drawer", slug: "quo", status: client },
+          { id: "oasis", kind: "drawer", slug: "quo", status: oasis },
+        ],
+        clicks: [],
+      }),
+      encoding: "utf8",
+      env: { ...process.env, NODE_OPTIONS: "" },
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    assert.equal(r.status, 0, `render failed: ${r.stderr}`);
+    const markup = (JSON.parse(r.stdout) as { markup: Record<string, string> }).markup;
+    const words = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, " ");
+    const clientText = words(markup.client);
+    assert.match(clientText, /Not available on this workspace yet/);
+    assert.doesNotMatch(clientText, /Connect Quo|Quo's guide to API keys/, "a client is offered no key form");
+    assert.match(words(markup.oasis), /Connect Quo/, "OASIS's own workspace gets the key form");
   });
 
   // ===========================================================================================
@@ -675,7 +763,7 @@ async function main() {
     }
   });
 
-  await check("reply route: dry-run names Quo and sends nothing; STOP is refused before Quo; a Quo refusal is a failed send in Quo's words", async () => {
+  await check("reply route: dry-run names Quo and sends nothing; a number on the STOP list is refused before Quo (the check, not a feed from Quo); a refusal or a 2xx without a message id is a failed send", async () => {
     process.env.QUO_API_KEY = OASIS_KEY;
     try {
       calls.length = 0;
@@ -685,6 +773,8 @@ async function main() {
       assert.deepEqual([dry.body.ok, dry.body.dry_run, dry.body.provider], [true, true, "quo"]);
 
       liveQuo(true);
+      // The STOP list OASIS holds, read before the send. A STOP texted to the
+      // Quo number is not read by OASIS yet, so this proves the check only.
       await db.execute({ sql: "INSERT INTO sunbiz_phone_suppressions (tenant_id, phone_last10) VALUES (?, ?)", args: [OASIS, "4165550199"] });
       const stopped = await reply(OASIS, { to_phone: TO, message: "Hello", provider: "texttorrent" });
       await db.execute({ sql: "DELETE FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
@@ -703,8 +793,47 @@ async function main() {
       assert.equal(refused.body.error, "quo_refused");
       assert.match(String(refused.body.message), /A2P Registration Not Approved/);
       assert.equal((await quoRows(OASIS)).length, before, "a refused text is not on the timeline as sent");
+
+      quo = (call) => (call.method === "GET" ? json(200, { data: [numberRow(QUO_NUMBER)] }) : new Response(null, { status: 204 }));
+      const unknown = await reply(OASIS, { to_phone: TO, message: "Hello", provider: "texttorrent" });
+      assert.equal(unknown.status, 502);
+      assert.equal(unknown.body.error, "quo_unexpected");
+      assert.match(String(unknown.body.message), /cannot tell whether the text went out/);
+      assert.equal((await quoRows(OASIS)).length, before, "a send nobody can confirm is not on the timeline as sent");
     } finally {
       liveQuo(false);
+      delete process.env.QUO_API_KEY;
+    }
+  });
+
+  await check("reply route: PROVIDER_QUO_ENABLED=0 refuses an OASIS text in plain words, live or dry-run, sends nothing, and never switches provider", async () => {
+    process.env.QUO_API_KEY = OASIS_KEY;
+    process.env.PROVIDER_QUO_ENABLED = "0";
+    try {
+      quo = quoWith([numberRow(QUO_NUMBER)]);
+      calls.length = 0;
+      const before = (await quoRows(OASIS)).length;
+      for (const liveOn of [true, false]) {
+        liveQuo(liveOn);
+        for (const asked of ["texttorrent", "kixie", "quo"]) {
+          const r = await reply(OASIS, { to_phone: TO, message: "Hello", provider: asked });
+          assert.equal(r.status, 409, `${asked}, live ${liveOn}: ${JSON.stringify(r.body)}`);
+          assert.deepEqual([r.body.ok, r.body.error, r.body.message], [false, "quo_switched_off", quoLib.QUO_SWITCHED_OFF_REASON]);
+        }
+      }
+      assert.equal(calls.length, 0, "nothing reached Quo");
+      assert.equal((await quoRows(OASIS)).length, before, "nothing is on the timeline as sent");
+      // Quo's switch decides nothing for a client's own provider.
+      const client = await reply(CLIENT, { to_phone: TO, message: "Hello", provider: "texttorrent" });
+      assert.deepEqual([client.status, client.body.provider], [200, "texttorrent"]);
+      // Control: switched back on, the same text goes out through Quo.
+      process.env.PROVIDER_QUO_ENABLED = "1";
+      liveQuo(true);
+      const on = await reply(OASIS, { to_phone: TO, message: "Hello", provider: "texttorrent" });
+      assert.deepEqual([on.status, on.body.provider, on.body.dry_run], [200, "quo", false]);
+    } finally {
+      liveQuo(false);
+      delete process.env.PROVIDER_QUO_ENABLED;
       delete process.env.QUO_API_KEY;
     }
   });

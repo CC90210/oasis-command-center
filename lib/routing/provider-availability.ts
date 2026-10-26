@@ -86,9 +86,11 @@ const DEFAULT_ENABLED: Record<ProviderId, boolean> = {
   gws_bluerise: true,
   texttorrent: true,
   twilio: false,
-  // Quo itself refuses a destination its number may not text yet (a US number
-  // before carrier registration) instead of sending it, so a saved key is
-  // enough. PROVIDER_QUO_ENABLED=0 still switches it off.
+  // Quo refuses a text to a destination its number may not text (its number
+  // list marks that region "restricted") instead of sending it, so a saved key
+  // is enough. PROVIDER_QUO_ENABLED=0 switches it off: routing reads `enabled`
+  // below, and every Quo send reads providerSwitchedOn (lib/integrations/quo.ts,
+  // app/api/conversations/reply).
   quo: true,
 };
 
@@ -96,6 +98,16 @@ function envEnabled(p: ProviderId): boolean {
   const raw = process.env[ENABLE_ENV[p]];
   if (raw === undefined || raw === "") return DEFAULT_ENABLED[p];
   return raw === "1" || raw.toLowerCase() === "true";
+}
+
+/**
+ * A provider's switch alone (PROVIDER_<NAME>_ENABLED, else DEFAULT_ENABLED):
+ * the same value loadProviderAvailability folds into `enabled`. For a send
+ * path that already holds the provider's credentials and must still honor the
+ * switch (a Quo text from the dashboard).
+ */
+export function providerSwitchedOn(p: ProviderId): boolean {
+  return envEnabled(p);
 }
 
 /**

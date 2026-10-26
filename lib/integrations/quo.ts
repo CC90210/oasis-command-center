@@ -22,9 +22,10 @@
  *     {"error": {"message", "key": "Unauthorized"}}.
  *   - There is no idempotency key, so a send is never retried here.
  *
- * NEVER A FAKE SUCCESS. A refusal, a timeout or an answer OASIS cannot read is
- * a failed send carrying Quo's own words. A send Quo did not answer says the
- * text may still have gone out, because a second try could send it twice.
+ * NEVER A FAKE SUCCESS. Only a 2xx answer that carries the message id Quo gave
+ * the text counts as sent. A refusal is a failed send in Quo's own words. No
+ * answer, or a 2xx without that id, is a failed send that says the text may
+ * still have gone out, because a second try could send it twice.
  *
  * The key never appears in a result, a reason or a log line.
  *
@@ -38,6 +39,7 @@ import "server-only";
 import { getTenantIntegrationBundle, readTenantCredentialStrict } from "@/lib/tenant-integration-store";
 import { checkPhoneOptOut } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
+import { providerSwitchedOn } from "@/lib/routing/provider-availability";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export const QUO_API_BASE = "https://api.quo.com/v1";
@@ -115,6 +117,7 @@ export async function quoCredentialsOrNull(tenantId: string): Promise<QuoCredent
 
 export type QuoFailureCode =
   | "tenant_retired"
+  | "quo_switched_off"
   | "live_send_disabled"
   | "invalid_recipient"
   | "invalid_text"
@@ -126,16 +129,20 @@ export type QuoFailureCode =
   | "quo_unexpected";
 
 /**
- * Nothing was sent (for quo_unreachable on a send: Quo did not answer, so the
- * text may have gone out). `status` is Quo's HTTP status, when Quo answered.
+ * The text was not sent, or (quo_unreachable and quo_unexpected on a send)
+ * Quo got the request and OASIS cannot tell whether it went out. `status` is
+ * Quo's HTTP status, when Quo answered.
  */
 export type QuoFailure = { ok: false; code: QuoFailureCode; status?: number; reason: string };
+
+/** The plain reason for a send refused because PROVIDER_QUO_ENABLED is 0. */
+export const QUO_SWITCHED_OFF_REASON = "Texting through Quo is switched off on this deployment, so nothing was sent.";
 
 export type QuoSendResult =
   | {
       ok: true;
-      /** Quo's message id (AC...). Null only when Quo accepted the text but its answer left the id out. */
-      id: string | null;
+      /** Quo's message id (AC...): a send counts only when Quo's answer names it. */
+      id: string;
       /** Quo's word for the message ("queued", "sent", ...), or "accepted" when its answer gave none. */
       status: string;
       conversationId: string | null;
@@ -158,6 +165,7 @@ export function quoFailureHttpStatus(failure: QuoFailure): number {
       return 400;
     case "recipient_opted_out":
     case "live_send_disabled":
+    case "quo_switched_off":
       return 409;
     case "tenant_retired":
       return 410;
@@ -289,19 +297,17 @@ export function formatQuoNumber(number: string): string {
   return m ? `+1 ${m[1]} ${m[2]} ${m[3]}` : number;
 }
 
-const REGION_WORDS: Readonly<Record<QuoRegion, { name: string; restricted: string }>> = {
-  CA: { name: "Canada", restricted: "off" },
-  // Quo holds US texting until the workspace's US carrier registration (A2P 10DLC) is approved.
-  US: { name: "US", restricted: "waiting on registration" },
-  Intl: { name: "international", restricted: "off" },
-};
+const REGION_NAMES: Readonly<Record<QuoRegion, string>> = { CA: "Canada", US: "US", Intl: "international" };
 
-/** "+1 365 360 3976: Canada yes, US waiting on registration, international off". */
+/**
+ * "+1 365 360 3976: Canada yes, US restricted, international restricted".
+ * Quo's answer says only "unrestricted" or "restricted" for each region, never
+ * why, so the words say no more than that.
+ */
 export function describeQuoNumber(n: QuoNumber): string {
   const where = REGIONS.filter((region) => n.messaging?.[region]).map((region) => {
     const value = n.messaging![region];
-    const words = REGION_WORDS[region];
-    return `${words.name} ${value === "unrestricted" ? "yes" : value === "restricted" ? words.restricted : "unknown"}`;
+    return `${REGION_NAMES[region]} ${value === "unrestricted" ? "yes" : value === "restricted" ? "restricted" : "unknown"}`;
   });
   const number = formatQuoNumber(n.number);
   return where.length > 0 ? `${number}: ${where.join(", ")}` : `${number}: Quo did not say where it may text`;
@@ -373,13 +379,19 @@ export async function quoSender(
  *
  * In order, before anything reaches Quo:
  *   - a retired workspace sends nothing (lib/tenant/retired.ts);
+ *   - Quo's own switch, PROVIDER_QUO_ENABLED (providerSwitchedOn in
+ *     lib/routing/provider-availability.ts, the switch routing reads for
+ *     every provider): at 0, nothing goes out through Quo;
  *   - the live-send switch, here at the send itself as Twilio's direct send
  *     does it (LIVE_SEND_QUO, lib/integrations/send-mode.ts): callers check it
  *     first, and one that forgets still sends nothing;
  *   - the number must be E.164 and the text 1 to 1600 characters;
- *   - someone who replied STOP is never texted. A Quo text is a direct send
- *     that never passes send_gateway's do-not-text list, so the check runs
- *     here and fails closed when it cannot be read (CASL / TCPA).
+ *   - the workspace's STOP list (checkPhoneOptOut). A Quo text never passes
+ *     send_gateway's do-not-text list, so the check runs here, and a list that
+ *     cannot be read stops the send (CASL / TCPA). The list holds the STOPs
+ *     that reached OASIS (the TextTorrent and Twilio webhooks,
+ *     lib/sms-opt-out.ts). Replies to the Quo number, STOP included, are not
+ *     read by OASIS yet, so a STOP texted to the Quo number is not on it.
  */
 export async function sendQuoSms(
   creds: QuoCredentials,
@@ -388,6 +400,9 @@ export async function sendQuoSms(
 ): Promise<QuoSendResult> {
   if (isRetiredTenant(creds.tenantId)) {
     return { ok: false, code: "tenant_retired", reason: "This workspace is retired, so OASIS sends no texts for it." };
+  }
+  if (!providerSwitchedOn("quo")) {
+    return { ok: false, code: "quo_switched_off", reason: QUO_SWITCHED_OFF_REASON };
   }
   if (isDryRun("quo")) {
     return { ok: false, code: "live_send_disabled", reason: "Live texting through Quo is switched off, so nothing was sent." };
@@ -403,13 +418,13 @@ export async function sendQuoSms(
   }
   const optOut = await checkPhoneOptOut(creds.tenantId, to);
   if (optOut.optedOut) {
-    return { ok: false, code: "recipient_opted_out", reason: "This person replied STOP, so OASIS will not text them." };
+    return { ok: false, code: "recipient_opted_out", reason: "This number is on the workspace's STOP list, so OASIS will not text it." };
   }
   if (optOut.checkFailed) {
     return {
       ok: false,
       code: "opt_out_check_failed",
-      reason: "OASIS could not check whether this person replied STOP, so nothing was sent. Try again in a minute.",
+      reason: "OASIS could not read the workspace's STOP list, so nothing was sent. Try again in a minute.",
     };
   }
 
@@ -436,9 +451,22 @@ export async function sendQuoSms(
   }
   const data = (await jsonOf(r.res))?.data;
   const sent = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+  const id = text(sent?.id, 128);
+  if (!id) {
+    // A 2xx that does not name the message it made (an empty body, HTML, {},
+    // []) proves nothing: Quo may or may not have sent it.
+    console.error("[quo.send] answered without a message id", r.res.status);
+    return {
+      ok: false,
+      code: "quo_unexpected",
+      status: r.res.status,
+      reason:
+        "Quo answered without naming the text it sent, so OASIS cannot tell whether the text went out. Check the conversation in Quo before sending it again.",
+    };
+  }
   return {
     ok: true,
-    id: text(sent?.id, 128),
+    id,
     status: text(sent?.status, 40) ?? "accepted",
     conversationId: text(sent?.conversationId, 128),
     from: sender.number,

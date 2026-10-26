@@ -245,7 +245,7 @@ export const SUBPROCESSORS: Subprocessor[] = [
   {
     name: "Quo",
     role: "SMS messaging",
-    dataReceived: "Recipient phone numbers and message content",
+    dataReceived: "Recipient phone numbers and message content. Quo also holds the replies recipients send to the Quo number.",
     region: "United States",
     dpaInPlace: false,
     note: "Quo was formerly called OpenPhone. No data processing agreement with Quo is confirmed yet.",
