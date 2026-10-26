@@ -526,6 +526,52 @@ async function main() {
     assert.equal(sent.length, 1);
   });
 
+
+  console.log("a stalled audit's follow-up (phase 5)");
+  await check("a stall files one follow-up for CC's approval; nothing is sent until the owner approves, and it resends the same link", async () => {
+    const followUp = await import("../lib/ai-audit/follow-up");
+    const later = new Date(Date.now() + 4 * 86_400_000);
+    const tickDeps = { payment: { stripeSecret: async () => null, isDryRun: () => true, alert: async () => undefined, baseUrl: () => "https://oasisai.work" }, onboarding: { alert: async () => undefined, baseUrl: () => "https://oasisai.work" } };
+    const rep = await tick.runAiAuditTick(db, { budgetMs: 30_000, now: () => later, deps: tickDeps as never });
+    assert.equal(rep.stallsFlagged, 1, JSON.stringify(rep.errors));
+    assert.equal(rep.followUpsFiled, 1);
+    const card = (await db.execute({ sql: "SELECT id, status, risk_level, payload_json FROM approvals WHERE tenant_id = ? AND action_kind = 'follow_up_ai_audit'", args: [OASIS] })).rows;
+    assert.equal(card.length, 1, "one card");
+    assert.equal(String(card[0].risk_level), "outbound");
+    const payload = JSON.parse(String(card[0].payload_json)) as Record<string, unknown>;
+    assert.equal(payload.reason, "not_opened");
+    assert.ok(String(payload.body).includes("{{audit_link}}") && !String(payload.body).includes(token), "the link is never stored, only its place");
+    assert.equal(sent.length, 1, "nothing sent by the tick");
+    const e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const link0 = (await link.getShareLink(db, OASIS, e.share_link_id!))!;
+    assert.equal(await followUp.fileFollowUp(db, { tenantId: OASIS, engagement: e, link: link0, reason: "not_opened", base: "https://oasisai.work", now: later }), false, "filed once per link and reason");
+    const cardId = String(card[0].id);
+    const approveCard = () => db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ? AND status IN ('pending', 'failed')", args: [USERS.cc.id, new Date().toISOString(), cardId] });
+    await approveCard();
+    const byAdmin = await execute.executeApproval(db, { tenantId: OASIS, approvalId: cardId, approver: { userId: USERS.admin.id, email: USERS.admin.email } }, deps() as never);
+    assert.equal(byAdmin.ok && (byAdmin.approval.execution_result as { reason?: string } | null)?.reason, "owner_only");
+    await approveCard();
+    const dry = await execute.executeApproval(db, { tenantId: OASIS, approvalId: cardId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps({ live: false }) as never);
+    assert.equal(dry.ok && (dry.approval.execution_result as { outcome?: string } | null)?.outcome, "dry_run");
+    assert.equal(sent.length, 1, "a dry run sends nothing");
+    // The card ran once (dry run); a fresh one under a new reason goes out live.
+    const fresh = await followUp.fileFollowUp(db, { tenantId: OASIS, engagement: e, link: link0, reason: "not_paid", base: "https://oasisai.work", now: later });
+    assert.equal(fresh, true);
+    const freshId = String((await db.execute({ sql: "SELECT id FROM approvals WHERE tenant_id = ? AND action_kind = 'follow_up_ai_audit' AND status = 'pending' LIMIT 1", args: [OASIS] })).rows[0].id);
+    await db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", args: [USERS.cc.id, new Date().toISOString(), freshId] });
+    const live = await execute.executeApproval(db, { tenantId: OASIS, approvalId: freshId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+    assert.equal(live.ok && (live.approval.execution_result as { outcome?: string } | null)?.outcome, "sent", JSON.stringify(live.ok ? live.approval.execution_result : live));
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].to, "owner@fixture.test");
+    assert.ok(String(sent[1].body).includes(`/your-audit/${token}`), "the same link the client already has");
+    assert.ok(!String(sent[1].body).includes("{{audit_link}}"));
+    // The trail, and the engagement left as the next checks expect it.
+    const ev = await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_events WHERE engagement_id = ? AND event = 'follow_up_sent'", args: [engagementId] });
+    assert.equal(Number(ev.rows[0].n), 1);
+    const now2 = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.ok((await store.patchEngagement(db, { tenantId: OASIS, id: engagementId, expectedRowVersion: now2.row_version, patch: { health: "ok", health_reason: null }, event: "health_cleared", actor: cc, now: NOW() })).ok);
+  });
+
   console.log("the client's link");
   await check("the link opens the delivered audit; a bad, revoked or expired link opens nothing", async () => {
     const p = await pub.loadPublicAudit(db, token, NOW());
@@ -800,9 +846,12 @@ async function main() {
     assert.equal(rules.mayMoveStage("final_review", "generating"), true);
   });
   await check("the tick runs every step without contacting anyone and reports cleanly", async () => {
+    const before = sent.length;
     const r = await tick.runAiAuditTick(db, { budgetMs: 30_000, deps: { payment: { ...payDeps, alert: async () => undefined }, onboarding: { alert: async () => undefined, baseUrl: () => "https://oasisai.work" } } });
     assert.deepEqual(r.errors, []);
-    assert.equal(sent.length, 1, "still exactly one email ever sent");
+    // The delivery, and the one follow-up CC approved: the tick itself sends nothing.
+    assert.equal(sent.length, before, "the tick sends no email");
+    assert.equal(sent.length, 2, "two emails ever sent: the delivery and the approved follow-up");
   });
 
   finish("ai-audit-flow");

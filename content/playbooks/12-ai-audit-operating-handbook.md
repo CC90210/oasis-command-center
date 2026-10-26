@@ -130,7 +130,7 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 ## After delivery
 
 - The board shows when the client first opened it. Opening counts only when the page has been visible for a few seconds, so a mail scanner does not count.
-- If it is **stalled** (not opened in 3 days, or opened and unpaid for 7), follow up in your own words. The system flags; it never chases the client by itself.
+- If it is **stalled** (not opened in 3 days, or opened and unpaid for 7), a short follow-up email waits for your approval in **Needs you**: one for each kind of stall, never more. It resends the same private link the client already has. Read it, edit it if you like, and approve it; only the workspace owner can. It goes out only if the client still has not paid and the link still works, and nothing is ever sent by itself. If you would rather write your own, decline the card and reply from your inbox.
 - Present the audit on a short call if they want one. Walk through the findings first and the price last.
 - Objections: answer with the evidence in the audit, not with pressure. "Not now" is a valid answer; note when to check back.
 
@@ -161,7 +161,7 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 | The client asks for changes before paying | Reopen is only possible before delivery. After delivery, a revision is a new version and a new link (coming in a later phase; until then, answer by email). |
 | "Call transcript waiting" | An Oasis Meet transcript was not attached by itself; the alert says why. If the client's answer about AI analysis is missing, record it on the live-call screen and the next run attaches it. Otherwise open **Call and transcripts**, check that it is this audit's call, and attach it by hand. A guest who did not agree to the recording means it cannot be used; one over 500 KB is never cut: paste the part that matters instead. |
 | The client asks you to delete a recorded call | Deleting the recording in Oasis Meet does not delete the copy attached to the audit. Delete the transcript under **Call and transcripts** too (only you can). |
-| The client asks you to delete their data | Write it down and tell CC's operations process; the data purge arrives in a later phase. |
+| The client asks you to delete their data | Delete each transcript on the engagement (that wipes the call's words and voids the authorization), and the meeting in Oasis Meet if there was one. The lead itself cannot be deleted while it has an audit: the audit's history points at it. Write the request down for CC's operations process; the full data purge arrives in a later phase. |
 
 ## Testing safely
 

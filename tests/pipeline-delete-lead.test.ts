@@ -59,6 +59,8 @@ const DIRECT_ATTEMPT = "40000000-0000-4000-8000-000000000016";
 const LATE_DEAL = "40000000-0000-4000-8000-000000000017";
 // Codex on #674, second pass: a live application handed to the lead delete.
 const APPLICATION = "40000000-0000-4000-8000-000000000018";
+// Phase 5 of the Free AI Audit: a lead with an audit engagement stays.
+const AUDITED = "40000000-0000-4000-8000-000000000019";
 
 const TABLES = [
   "tenant_records",
@@ -162,6 +164,9 @@ async function main(): Promise<void> {
     CREATE TABLE meet_rooms (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT
     );
+    CREATE TABLE ai_audit_engagements (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT NOT NULL, stage TEXT NOT NULL
+    );
     CREATE TABLE drip_runs (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT NOT NULL, status TEXT NOT NULL
     );
@@ -235,6 +240,7 @@ async function main(): Promise<void> {
     lead(GUARDED),
     lead(DIRECT_ATTEMPT),
     lead(LATE_DEAL),
+    lead(AUDITED),
     {
       sql: "INSERT INTO lead_interactions (id, tenant_id, lead_id, metadata) VALUES ('direct-attempting', ?, ?, ?)",
       args: [TENANT, DIRECT_ATTEMPT, JSON.stringify({ status: "direct_attempting" })],
@@ -325,6 +331,7 @@ async function main(): Promise<void> {
       args: [TENANT, APPOINTMENT, "2099-01-02T15:00:00.000Z"],
     },
     { sql: "INSERT INTO website_deals VALUES ('protected-deal', ?, ?)", args: [TENANT, DEAL] },
+    { sql: "INSERT INTO ai_audit_engagements VALUES ('audited-engagement', ?, ?, 'cancelled')", args: [TENANT, AUDITED] },
     {
       sql: "INSERT INTO website_sales_payment_receipts VALUES ('protected-receipt', ?, ?)",
       args: [TENANT, RECEIPT],
@@ -373,6 +380,8 @@ async function main(): Promise<void> {
   await assertBlocked(DEAL, /website deal/i);
   await assertBlocked(RECEIPT, /payment receipt/i);
   await assertBlocked(WON, /won stage/i);
+  // Even a cancelled audit keeps its lead: its call, profile and any payment point at it.
+  await assertBlocked(AUDITED, /Free AI Audit/);
   await assertBlocked(DOCUMENT, /documents/i);
   await assertBlocked(INFLIGHT, /being sent right now/i);
   await assertBlocked(OVERDUE_CALL, /booked call.*cancel the call first/i);
