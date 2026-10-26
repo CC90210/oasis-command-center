@@ -562,6 +562,21 @@ async function main() {
     assert.equal((await engagementOf(eid)).authorization_approval_id, again.ok ? again.approvalId : "", "and the engagement points at it now");
     assert.equal(resultOf(await approveAs(again.ok ? again.approvalId : "", USERS.cc))?.outcome, "authorized", "and it can be approved");
   });
+  await check("a card whose link loses three writes in a row is reported as a conflict, and the next request links it (Codex review of phase 2, fourth pass)", async () => {
+    const { eid } = await freshEngagement("Lost Link Co");
+    // Every write that would point the engagement at a card is skipped, as three concurrent writers would make it.
+    await db.execute("CREATE TRIGGER skip_card_link BEFORE UPDATE OF authorization_approval_id ON ai_audit_engagements BEGIN SELECT RAISE(IGNORE); END");
+    let lost: Awaited<ReturnType<typeof authorize.requestAuthorization>>;
+    try {
+      lost = await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), engine: "mac_claude" });
+    } finally {
+      await db.execute("DROP TRIGGER skip_card_link");
+    }
+    assert.deepEqual(lost, { ok: false, error: "changed_elsewhere_refresh" });
+    const again = await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), engine: "mac_claude" });
+    assert.ok(again.ok && !again.created, !again.ok ? again.error : "the card already filed");
+    assert.equal((await engagementOf(eid)).authorization_approval_id, again.ok ? again.approvalId : "");
+  });
   await check("a rename that read the engagement before Gate 1 cannot land after it; anything changed behind an authorization voids it (review of phase 2, second pass)", async () => {
     const { eid } = await freshEngagement("Late Rename Co");
     assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");
@@ -589,6 +604,13 @@ async function main() {
     assert.equal(v.authorization?.status, "voided");
     assert.match(String(v.authorization?.message), /no longer holds/);
     assert.equal(v.engagement.health, "attention");
+    // Moved back, a new call's transcript added and authorized again: the warning is answered and goes (Codex review, fourth pass).
+    const e = await engagementOf(eid);
+    assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: eid, to: "transcript_review", actor: cc, now: NOW(), expectedRowVersion: e.row_version })).ok);
+    assert.ok((await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: eid, parsed: parsed("Dana: Void View Co gets about 40 calls a week."), source: "paste", consent: consent(true), actor: cc, now: NOW() })).ok);
+    assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");
+    const w = (await view.engagementView(db, OASIS, eid, NOW()))!;
+    assert.deepEqual([w.engagement.health, w.engagement.health_reason], ["ok", null]);
   });
   await check("note edits leave a line in the audit trail, one per note per ten minutes of typing (review F10)", async () => {
     const { eid } = await freshEngagement("Note Trail Co");

@@ -684,6 +684,35 @@ async function main() {
     await saver.set(null);
     assert.equal(pending.length, 0, "the same value again sends nothing");
   });
+  await check("a note save that is out counts as unsaved until it answers, so a closing flush sends it again with keepalive (Codex review of phase 2, fourth pass)", async () => {
+    const { createNoteSaver } = await import("../components/ai-audit/call/note-saver");
+    const box = { text: "" };
+    const sent: Array<{ text: string; keepalive: boolean; afterText: string | null }> = [];
+    let answerFirst: (() => void) | null = null;
+    const saver = createNoteSaver({
+      text: "",
+      version: 0,
+      read: () => box.text,
+      send: (text, version, opts) => {
+        sent.push({ text, keepalive: opts.keepalive, afterText: opts.afterText });
+        if (!opts.keepalive) return new Promise((resolve) => (answerFirst = () => resolve({ kind: "saved" as const, version: version + 1, notes: text })));
+        return Promise.resolve({ kind: "saved" as const, version: version + 1, notes: text });
+      },
+      onState: () => undefined,
+    });
+    box.text = "the client runs two vans";
+    saver.typed();
+    const out = saver.save();
+    assert.equal(saver.wantsSave(), true, "nothing typed since, but the save is still out");
+    await saver.flush();
+    assert.deepEqual(sent.map((x) => [x.text, x.keepalive, x.afterText]), [
+      ["the client runs two vans", false, null],
+      ["the client runs two vans", true, "the client runs two vans"],
+    ]);
+    answerFirst!();
+    await out;
+    assert.equal(saver.wantsSave(), false);
+  });
   await check("a consent answer corrected while its first save is out is stored as the last choice, never the first (Codex review of phase 2, second pass)", async () => {
     const { createFigureSaver } = await import("../components/ai-audit/call/note-saver");
     const tick = () => new Promise((r) => setImmediate(r));

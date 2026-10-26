@@ -148,6 +148,16 @@ export type OnboardingStatus = (typeof ONBOARDING_STATUSES)[number];
 // Evidence labels (brief section 5)
 // ---------------------------------------------------------------------------
 
+/**
+ * The warnings that say an earlier Gate 1 no longer holds. A new authorization
+ * clears these, and only these (Codex review of phase 2, fourth pass).
+ */
+export const AUTHORIZATION_VOIDED_REASONS = {
+  transcriptDeleted: "A transcript the authorization covered was deleted, so the authorization no longer holds. Move the engagement back to Transcript Awaiting Approval and authorize again.",
+  notAuthorized:
+    "The client's information is no longer authorized (Gate 1), for example because a transcript it covered was deleted. Move the engagement back to Transcript Awaiting Approval, authorize it again, then submit again.",
+} as const;
+
 export const EVIDENCE_LABELS = ["verified", "client_reported", "estimate", "hypothesis"] as const;
 export type EvidenceLabel = (typeof EVIDENCE_LABELS)[number];
 

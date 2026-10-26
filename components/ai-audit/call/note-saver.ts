@@ -78,13 +78,14 @@ export function createNoteSaver(o: {
       saved = a.notes;
     }
   };
-  // With a save out, what counts is whether the box still says what that save
-  // carries: typing the old text back while a draft is out must be saved too,
-  // or the draft lands as the note (Codex review of phase 2).
+  // A save that is out is not saved until it answers: if the page goes now, its
+  // request may be cancelled with it, so a closing flush sends the box again with
+  // keepalive, naming the save that is out (Codex review of phase 2, fourth pass).
+  // That covers typing the old text back while a draft is out, too (first pass).
   const unsaved = () => {
     if (state === "conflict" || state === "closed") return false;
-    const box = o.read();
-    return inFlight && sending !== null ? box !== sending : box !== saved;
+    if (inFlight && sending !== null) return true;
+    return o.read() !== saved;
   };
 
   async function run(keepalive: boolean): Promise<void> {

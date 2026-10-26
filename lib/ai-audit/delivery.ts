@@ -26,7 +26,7 @@ import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
 import { queuePdfJob, r2PdfStorage } from "@/lib/ai-audit/pdf";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
-import { shortName } from "@/lib/ai-audit/rules";
+import { AUTHORIZATION_VOIDED_REASONS, shortName } from "@/lib/ai-audit/rules";
 import { getSettings } from "@/lib/ai-audit/store";
 import {
   getAuditVersion,
@@ -214,7 +214,7 @@ export async function requestDeliveryApproval(
   // Gate 1 must still hold when Gate 2 is filed: a transcript deleted after
   // submission voids it (Codex review of phase 2).
   if (!(await authorizedProfile(db, t, engagement))) {
-    const why = "The client's information is no longer authorized (Gate 1), for example because a transcript it covered was deleted. Move the engagement back to Transcript Awaiting Approval, authorize it again, then submit again.";
+    const why = AUTHORIZATION_VOIDED_REASONS.notAuthorized;
     if (engagement.health !== "attention" || engagement.health_reason !== why) {
       await patchEngagement(db, { tenantId: t, id: engagement.id, expectedRowVersion: engagement.row_version, patch: { health: "attention", health_reason: why }, event: "authorization_voided", actor: { type: "system", id: null }, now: input.now });
     }

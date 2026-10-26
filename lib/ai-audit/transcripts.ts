@@ -23,7 +23,7 @@ import { contentHash, newId } from "@/lib/ai-audit/hash";
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
 import { casWrite, deliveryInFlight, eventStatement, getEngagement, int, noDeliveryInFlight, patchEngagement, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
 import { TRANSCRIPT_FORMATS, isOneOfFormat, type ParsedTranscript, type TranscriptFormat, type TranscriptLine } from "@/lib/ai-audit/transcript";
-import { PROFILE_EDIT_STAGES, TERMINAL_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
+import { AUTHORIZATION_VOIDED_REASONS, PROFILE_EDIT_STAGES, TERMINAL_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { cancelPendingApproval } from "@/lib/os/approvals/store";
 
 export const TRANSCRIPT_SOURCES = ["paste", "upload", "meet"] as const;
@@ -301,7 +301,7 @@ export async function deleteTranscript(
         tenantId: t,
         id: now.id,
         expectedRowVersion: now.row_version,
-        patch: { health: "attention", health_reason: "A transcript the authorization covered was deleted, so the authorization no longer holds. Move the engagement back to Transcript Awaiting Approval and authorize again." },
+        patch: { health: "attention", health_reason: AUTHORIZATION_VOIDED_REASONS.transcriptDeleted },
         event: "authorization_voided_flagged",
         actor: input.actor,
         now: input.now,
