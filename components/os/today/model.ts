@@ -651,6 +651,9 @@ export type ConnectionAttention = {
 /** The note that says a push did not go out because no bot was connected (lib/notify/workspace-telegram.ts). */
 const NO_BOT_NOTE = "Not sent: no Telegram bot connected";
 
+/** What an alert's push said about its email, after the Telegram part: "Emailed to <address> instead", or why it was not. */
+const ALERT_EMAIL_PART = /\. ((?:Emailed to \S+ instead|Not emailed\b|The email fallback failed too\b).*)$/;
+
 /**
  * An alert row's Telegram note. What happened to the push is the alert's own
  * record; whether the workspace's bot works NOW is the Telegram card's answer
@@ -664,6 +667,15 @@ export function alertTelegramNote(
   card: { kind: string; label: string } | null,
 ): { text: string; fix: boolean } {
   if (push === null) return { text: "Shown here only", fix: false };
+  // An OASIS alert Telegram refused says what became of its email after the
+  // Telegram part (lib/notify/alert-route.ts). The row keeps that, whatever the
+  // card says about the bot now (independent review of #738).
+  const email = ALERT_EMAIL_PART.exec(push);
+  const note = telegramPushNote(email ? push.slice(0, email.index) : push, card);
+  return email ? { text: `${note.text}. ${email[1]}`, fix: note.fix } : note;
+}
+
+function telegramPushNote(push: string, card: { kind: string; label: string } | null): { text: string; fix: boolean } {
   const noBot = push === NO_BOT_NOTE;
   if (!card || card.kind === "unknown" || card.kind === "coming_soon" || !push.startsWith("Not sent")) return { text: push, fix: noBot };
   if (card.kind === "not_connected") return { text: NO_BOT_NOTE, fix: true };

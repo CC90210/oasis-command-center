@@ -34,6 +34,12 @@
  * BRAVO_FORCE_DRY_RUN=1 stops it; the dashboard's customer send mode does not,
  * as it does not stop the support desk's founder alerts (lib/delivery/notify.ts):
  * this mail is to OASIS's founder, never to a customer.
+ *
+ * AT MOST TEN AN HOUR PER LANE (independent review of #738). A burst of
+ * different alerts is a different text each time, so the hourly key alone
+ * would send every one of them from the shared mailbox. Past the cap
+ * (ALERT_EMAILS_PER_LANE_PER_HOUR) one more email says the rest are held, and
+ * every later alert that hour stays in the app, where its caller records it.
  */
 import "server-only";
 import { createHash } from "node:crypto";
@@ -41,6 +47,7 @@ import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
 import { laneCredentials, sendTelegram } from "@/lib/notify/telegram";
 import { sendWorkspaceTelegram, workspaceTelegramOutcome } from "@/lib/notify/workspace-telegram";
+import { claimCappedSlot, type CappedSlot } from "@/lib/pair-rate-limit";
 import { OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
@@ -163,15 +170,100 @@ export function founderAlertMessage(
 }
 
 /**
+ * Alert emails one OASIS lane may send in any hour. Past it, one more email an
+ * hour says the rest are held and carries the alert that crossed the line;
+ * every later alert that hour stays in the app, where its caller records it (a
+ * lead's alert on the lead's timeline, an agent's on its Needs you card).
+ * Counted in pair_attempts through claimCappedSlot, so the cap holds across
+ * every Worker isolate without a table of its own, and fails open: a limiter
+ * that cannot count never costs CC an alert.
+ */
+export const ALERT_EMAILS_PER_LANE_PER_HOUR = 10;
+const HOUR_SECONDS = 3600;
+
+/** Take a place in a capped allowance (lib/pair-rate-limit.ts claimCappedSlot). `slot` replaces it in tests. */
+export type AlertEmailSlot = (key: string, windowSeconds: number, cap: number) => Promise<CappedSlot>;
+
+const claimAlertEmailSlot: AlertEmailSlot = (key, windowSeconds, cap) => claimCappedSlot(key, null, windowSeconds, cap);
+
+/**
+ * The one email an hour that stands in for every alert past the cap: it says
+ * where the rest are and carries the alert that crossed the line. Exported for tests.
+ */
+export function founderHeldAlertMessage(
+  text: string,
+  lane: string,
+  telegramOutcome: string,
+  now: Date,
+): { to: string; subject: string; body: string; idempotencyKey: string } {
+  const one = founderAlertMessage(text, lane, telegramOutcome, now);
+  return {
+    to: one.to,
+    subject: `OASIS alerts: more than ${ALERT_EMAILS_PER_LANE_PER_HOUR} in an hour, the rest are in the app`,
+    body:
+      `More OASIS alerts arrived on the ${lane} lane in the last hour than email carries ` +
+      `(${ALERT_EMAILS_PER_LANE_PER_HOUR} an hour). Until the hour has passed, the rest stay in the Command Center: ` +
+      "a lead's alert on that lead's timeline, an agent's under Needs you on Today.\n\n" +
+      `The alert that crossed the line:\n\n${one.body}`,
+    idempotencyKey: `alert-email-held:${lane}:${now.toISOString().slice(0, 13)}`,
+  };
+}
+
+type FallbackOptions = { email?: FounderAlertEmail; slot?: AlertEmailSlot; now?: Date };
+
+/**
+ * Email the founder an alert OASIS's lane refused, inside the hourly cap. A
+ * held alert gives its place back, so the cap counts the emails that went. A
+ * send that fails keeps its place: while the mailbox is down, the cap also
+ * bounds how often its login is tried.
+ */
+async function emailFounderInstead(
+  tenantId: string,
+  text: string,
+  lane: string,
+  outcome: string,
+  opts: FallbackOptions,
+): Promise<AlertPush> {
+  const now = opts.now ?? new Date();
+  const claim = opts.slot ?? claimAlertEmailSlot;
+  let message = founderAlertMessage(text, lane, outcome, now);
+  const place = await claim(`alert-email:${lane}`, HOUR_SECONDS, ALERT_EMAILS_PER_LANE_PER_HOUR);
+  if (!place.allowed) {
+    await place.release();
+    const notice = await claim(`alert-email-held:${lane}`, HOUR_SECONDS, 1);
+    if (!notice.allowed) {
+      await notice.release();
+      return {
+        delivered: false,
+        outcome: `${outcome}. Not emailed: ${ALERT_EMAILS_PER_LANE_PER_HOUR} alert emails already went out in the last hour, so this one is only in the app`,
+      };
+    }
+    message = founderHeldAlertMessage(text, lane, outcome, now);
+  }
+  const mailed = await (opts.email ?? sendFounderAlertEmail)({ tenantId, ...message }).catch((err: unknown) => ({
+    ok: false,
+    error: err instanceof Error ? err.message : "email_error",
+  }));
+  if (mailed.ok) return { delivered: true, outcome: `${outcome}. Emailed to ${message.to} instead` };
+  console.error("[alert-route] Telegram refused an OASIS alert and the email fallback failed too", {
+    tenantId,
+    lane,
+    telegram: outcome,
+    email: (mailed.error || "unknown").slice(0, 200),
+  });
+  return { delivered: false, outcome: `${outcome}. The email fallback failed too (${(mailed.error || "unknown").slice(0, 120)})` };
+}
+
+/**
  * Push one alert (Telegram HTML, already escaped) to this workspace's own
  * audience. Never throws, never reaches another workspace's chat. For OASIS's
  * own workspaces a refused Telegram push is emailed to the founder instead
- * (see the header); `email` replaces that sender in tests.
+ * (see the header); `email` and `slot` replace the sender and the cap in tests.
  */
 export async function pushWorkspaceAlert(
   tenantId: string,
   text: string,
-  opts?: { desk?: AlertDesk; email?: FounderAlertEmail; now?: Date },
+  opts?: { desk?: AlertDesk } & FallbackOptions,
 ): Promise<AlertPush> {
   const audience = alertAudienceFor(tenantId);
   if (audience === "card_only") return { delivered: false, outcome: "Not sent: this workspace is retired" };
@@ -183,22 +275,18 @@ export async function pushWorkspaceAlert(
     }));
     const outcome = oasisLaneOutcome(sent, laneCredentials(lane)?.token);
     if (sent.ok) return { delivered: true, outcome };
+    // Every refusal is logged, emailed or not: an outage email covers is still an outage.
+    console.warn("[alert-route] OASIS's Telegram lane refused an alert", { tenantId, lane, telegram: outcome });
     if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") {
       return { delivered: false, outcome: `${outcome}. Not emailed either: sending is switched off (dry run)` };
     }
-    const message = founderAlertMessage(text, lane, outcome, opts?.now ?? new Date());
-    const mailed = await (opts?.email ?? sendFounderAlertEmail)({ tenantId, ...message }).catch((err: unknown) => ({
-      ok: false,
-      error: err instanceof Error ? err.message : "email_error",
-    }));
-    if (mailed.ok) return { delivered: true, outcome: `${outcome}. Emailed to ${message.to} instead` };
-    console.error("[alert-route] Telegram refused an OASIS alert and the email fallback failed too", {
-      tenantId,
-      lane,
-      telegram: outcome,
-      email: (mailed.error || "unknown").slice(0, 200),
-    });
-    return { delivered: false, outcome: `${outcome}. The email fallback failed too (${(mailed.error || "unknown").slice(0, 120)})` };
+    try {
+      return await emailFounderInstead(tenantId, text, lane, outcome, opts ?? {});
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      console.error("[alert-route] the email fallback threw", { tenantId, lane, error: error.slice(0, 200) });
+      return { delivered: false, outcome: `${outcome}. The email fallback failed too (${error.slice(0, 120)})` };
+    }
   }
   const result = await sendWorkspaceTelegram(tenantId, text);
   return { delivered: result.ok, outcome: workspaceTelegramOutcome(result) };

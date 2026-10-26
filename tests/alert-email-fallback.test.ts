@@ -20,6 +20,17 @@
  *      when nothing else is configured, and its brand guard still refuses a
  *      mailbox outside oasisai.work. Nothing here reaches the network.
  *
+ * Independent review of #738 (2026-10-26):
+ *   8. At most ten emails an hour per lane. The eleventh alert is one notice
+ *      that carries it and says where the rest are; every later one that hour
+ *      is not emailed (delivered = false, so its caller records it in the app).
+ *      A held alert gives its place back; a failed send keeps it.
+ *   9. Never throws, even when the sender or the cap throws.
+ *  10. Every refusal is logged, even when the email reaches CC: an outage the
+ *      email covers is still an outage.
+ * The cap is an in-memory stand-in for claimCappedSlot here (the real one
+ * counts in pair_attempts and is pinned by its own tests).
+ *
  * Run: node --conditions=react-server --import tsx tests/alert-email-fallback.test.ts
  */
 import assert from "node:assert/strict";
@@ -59,6 +70,27 @@ function stubTelegram(status: number, description = "Unauthorized"): () => void 
 
 type Mail = { tenantId: string; to: string; subject: string; body: string; idempotencyKey: string };
 
+/** claimCappedSlot in memory: every claim takes a place until it is released. */
+function slotStore() {
+  const live = new Map<string, number>();
+  const slot = async (key: string, _windowSeconds: number, cap: number) => {
+    const n = (live.get(key) ?? 0) + 1;
+    live.set(key, n);
+    let released = false;
+    return {
+      allowed: n <= cap,
+      release: async () => {
+        if (released) return;
+        released = true;
+        live.set(key, (live.get(key) ?? 1) - 1);
+      },
+    };
+  };
+  return { slot, live };
+}
+/** A cap that always has room. */
+const open = async () => ({ allowed: true, release: async () => undefined });
+
 async function quietly<T>(fn: () => Promise<T>): Promise<T> {
   const err = console.error;
   const warn = console.warn;
@@ -74,14 +106,14 @@ async function quietly<T>(fn: () => Promise<T>): Promise<T> {
 
 async function main() {
   console.log("alert email fallback:");
-  const { pushWorkspaceAlert, alertPlainText, founderAlertMessage } = await import("../lib/notify/alert-route");
+  const { pushWorkspaceAlert, alertPlainText, founderAlertMessage, ALERT_EMAILS_PER_LANE_PER_HOUR } = await import("../lib/notify/alert-route");
   const at = new Date("2026-10-26T18:20:00.000Z");
   const ALERT = '📅 <b>Dana Lead</b> booked an AI audit &amp; paid\n<a href="https://oasisai.work/pipeline/1?x=1&amp;y=2">Open the lead</a>';
 
   await check("Telegram refuses: one email to CC, plain text, and the outcome says both what Telegram said and that it was emailed", async () => {
     const sent: Mail[] = [];
     const restore = stubTelegram(401);
-    const r = await pushWorkspaceAlert(OASIS, ALERT, { desk: "sales", now: at, email: async (m) => (sent.push(m), { ok: true }) });
+    const r = await quietly(() => pushWorkspaceAlert(OASIS, ALERT, { desk: "sales", now: at, slot: open, email: async (m) => (sent.push(m), { ok: true }) }));
     restore();
     assert.equal(r.delivered, true, r.outcome);
     assert.equal(r.outcome, `Not sent: Telegram said: Unauthorized. Emailed to ${CC} instead`);
@@ -98,7 +130,7 @@ async function main() {
   await check("Telegram delivers: no email", async () => {
     let called = 0;
     const restore = stubTelegram(200);
-    const r = await pushWorkspaceAlert(OASIS, ALERT, { desk: "sales", now: at, email: async () => (called++, { ok: true }) });
+    const r = await pushWorkspaceAlert(OASIS, ALERT, { desk: "sales", now: at, slot: open, email: async () => (called++, { ok: true }) });
     restore();
     assert.deepEqual(r, { delivered: true, outcome: "Sent to Telegram" });
     assert.equal(called, 0);
@@ -119,10 +151,10 @@ async function main() {
   await check("Telegram refuses and the email fails too: not delivered, and the outcome says both", async () => {
     const restore = stubTelegram(401);
     const r = await quietly(() =>
-      pushWorkspaceAlert(OASIS, ALERT, { desk: "sales", now: at, email: async () => ({ ok: false, error: "not_configured: no mailbox" }) }),
+      pushWorkspaceAlert(OASIS, ALERT, { desk: "sales", now: at, slot: open, email: async () => ({ ok: false, error: "not_configured: no mailbox" }) }),
     );
     const thrown = await quietly(() =>
-      pushWorkspaceAlert(OASIS, ALERT, { now: at, email: async () => { throw new Error("smtp down"); } }),
+      pushWorkspaceAlert(OASIS, ALERT, { now: at, slot: open, email: async () => { throw new Error("smtp down"); } }),
     );
     restore();
     assert.equal(r.delivered, false);
@@ -135,7 +167,7 @@ async function main() {
     process.env.BRAVO_FORCE_DRY_RUN = "1";
     let called = 0;
     const restore = stubTelegram(401);
-    const r = await pushWorkspaceAlert(OASIS, ALERT, { now: at, email: async () => (called++, { ok: true }) });
+    const r = await quietly(() => pushWorkspaceAlert(OASIS, ALERT, { now: at, slot: open, email: async () => (called++, { ok: true }) }));
     restore();
     delete process.env.BRAVO_FORCE_DRY_RUN;
     assert.equal(called, 0);
@@ -147,11 +179,98 @@ async function main() {
     const src = readFileSync(join(__dirname, "..", "lib", "notify", "alert-route.ts"), "utf8");
     const body = src.slice(src.indexOf("export async function pushWorkspaceAlert("));
     const operatorBranch = body.indexOf('audience === "oasis_operator"');
-    const fallback = body.indexOf("sendFounderAlertEmail)(");
+    const fallback = body.indexOf("emailFounderInstead(tenantId");
     const workspaceBot = body.indexOf("sendWorkspaceTelegram(tenantId");
     assert.ok(operatorBranch > -1 && fallback > operatorBranch && fallback < workspaceBot, "a client workspace's alert is never emailed to OASIS");
+    const helper = src.slice(src.indexOf("async function emailFounderInstead("), src.indexOf("export async function pushWorkspaceAlert("));
+    assert.match(helper, /\(opts\.email \?\? sendFounderAlertEmail\)\(/, "the founder's mailbox is reached from the fallback");
+    assert.equal(src.split("sendFounderAlertEmail)(").length, 2, "and from nowhere else");
     assert.equal(alertPlainText("<i>a</i> &lt;b&gt; &amp;lt;"), "a <b> &lt;", "entities decode once");
     assert.equal(alertPlainText('<a href="https://x.test/">https://x.test/</a>'), "https://x.test/");
+  });
+
+  await check("at most ten an hour per lane: the eleventh is one notice that carries it, every later one stays in the app", async () => {
+    const store = slotStore();
+    const sent: Mail[] = [];
+    const email = async (m: Mail) => (sent.push(m), { ok: true });
+    const restore = stubTelegram(401);
+    const sales = await quietly(async () => {
+      const out = [];
+      for (let i = 1; i <= 13; i += 1) out.push(await pushWorkspaceAlert(OASIS, `${ALERT} #${i}`, { desk: "sales", now: at, slot: store.slot, email }));
+      return out;
+    });
+    const operator = await quietly(() => pushWorkspaceAlert(OASIS, "Cron failed", { now: at, slot: store.slot, email }));
+    restore();
+    assert.equal(ALERT_EMAILS_PER_LANE_PER_HOUR, 10);
+    assert.deepEqual(sales.slice(0, 11).map((r) => r.outcome), Array(11).fill(`Not sent: Telegram said: Unauthorized. Emailed to ${CC} instead`), "ten alerts, then the notice that carries the eleventh");
+    assert.equal(sent.slice(0, 10).filter((m) => m.subject === "OASIS alert: 📅 Dana Lead booked an AI audit & paid").length, 10);
+    const notice = sent[10];
+    assert.equal(notice.to, CC);
+    assert.equal(notice.subject, "OASIS alerts: more than 10 in an hour, the rest are in the app");
+    assert.match(notice.body, /^More OASIS alerts arrived on the sales lane in the last hour than email carries \(10 an hour\)\. /);
+    assert.match(notice.body, /a lead's alert on that lead's timeline, an agent's under Needs you on Today\./);
+    assert.match(notice.body, /The alert that crossed the line:\n\n📅 Dana Lead booked an AI audit & paid\nOpen the lead \(https:\/\/oasisai\.work\/pipeline\/1\?x=1&y=2\) #11\n\n/);
+    assert.match(notice.body, /This came by email because Telegram refused it \(Telegram said: Unauthorized\)\./);
+    assert.equal(notice.idempotencyKey, "alert-email-held:sales:2026-10-26T18");
+    for (const r of sales.slice(11)) {
+      assert.deepEqual(r, {
+        delivered: false,
+        outcome: "Not sent: Telegram said: Unauthorized. Not emailed: 10 alert emails already went out in the last hour, so this one is only in the app",
+      }, "not delivered, so its caller records it in the app");
+    }
+    assert.equal(operator.delivered, true, "each lane has its own ten");
+    assert.equal(sent.length, 12, "ten, the notice, and the operator lane's own");
+    assert.equal(store.live.get("alert-email:sales"), 10, "a held alert gives its place back: the cap counts the emails that went");
+    assert.equal(store.live.get("alert-email-held:sales"), 1, "one notice");
+    assert.equal(store.live.get("alert-email:operator"), 1);
+  });
+
+  await check("a failed send keeps its place, so a broken mailbox is tried at most ten times and one notice an hour", async () => {
+    const store = slotStore();
+    let tried = 0;
+    const restore = stubTelegram(401);
+    const results = await quietly(async () => {
+      const out = [];
+      for (let i = 1; i <= 14; i += 1) out.push(await pushWorkspaceAlert(OASIS, `${ALERT} #${i}`, { desk: "sales", now: at, slot: store.slot, email: async () => (tried++, { ok: false, error: "auth: 535" }) }));
+      return out;
+    });
+    restore();
+    assert.equal(tried, 11);
+    assert.ok(results.slice(0, 11).every((r) => !r.delivered && r.outcome.endsWith("The email fallback failed too (auth: 535)")));
+    assert.ok(results.slice(11).every((r) => !r.delivered && / Not emailed: 10 alert emails already went out in the last hour, so this one is only in the app$/.test(r.outcome)));
+  });
+
+  await check("never throws: a sender or a cap that throws is a failed email, not an exception", async () => {
+    const restore = stubTelegram(401);
+    const syncThrow = await quietly(() =>
+      pushWorkspaceAlert(OASIS, ALERT, { now: at, slot: open, email: () => { throw new Error("sync boom"); } }),
+    );
+    const capThrows = await quietly(() =>
+      pushWorkspaceAlert(OASIS, ALERT, { now: at, slot: async () => { throw new Error("db down"); }, email: async () => ({ ok: true }) }),
+    );
+    restore();
+    assert.deepEqual(syncThrow, { delivered: false, outcome: "Not sent: Telegram said: Unauthorized. The email fallback failed too (sync boom)" });
+    assert.deepEqual(capThrows, { delivered: false, outcome: "Not sent: Telegram said: Unauthorized. The email fallback failed too (db down)" });
+  });
+
+  await check("every refusal is logged, even when the email reaches CC, and never with the bot token", async () => {
+    const warned: unknown[][] = [];
+    const real = console.warn;
+    console.warn = (...args: unknown[]) => void warned.push(args);
+    const restore = stubTelegram(401);
+    try {
+      const r = await pushWorkspaceAlert(OASIS, ALERT, { desk: "sales", now: at, slot: open, email: async () => ({ ok: true }) });
+      assert.equal(r.delivered, true);
+      await pushWorkspaceAlert(OASIS, ALERT, { now: at, slot: open, email: async () => ({ ok: true }) });
+    } finally {
+      restore();
+      console.warn = real;
+    }
+    assert.equal(warned.length, 2, "one line per refusal");
+    assert.match(String(warned[0][0]), /OASIS's Telegram lane refused an alert/);
+    assert.deepEqual(warned[0][1], { tenantId: OASIS, lane: "sales", telegram: "Not sent: Telegram said: Unauthorized" });
+    assert.deepEqual(warned[1][1], { tenantId: OASIS, lane: "operator", telegram: "Not sent: Telegram said: Unauthorized" });
+    assert.doesNotMatch(JSON.stringify(warned), /cc-token/);
   });
 
   await check("the shared mailbox: an internal alert falls back to the Worker's Gmail login, and the brand guard still refuses a mailbox outside oasisai.work", async () => {

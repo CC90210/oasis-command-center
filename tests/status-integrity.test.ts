@@ -879,6 +879,26 @@ async function main() {
       ["Not sent to Telegram. The Telegram card says: Bot token not accepted", setup],
       "a rejected token is said in the card's words",
     );
+    // An OASIS alert Telegram refused says what became of its email, and the row keeps it
+    // whatever the card says now (lib/notify/alert-route.ts; independent review of #738).
+    const emailed = "Not sent: Telegram said: Unauthorized. Emailed to conaugh@oasisai.work instead";
+    assert.deepEqual(
+      noteFor(emailed, clientBCard.value),
+      ["Not sent to Telegram. The Telegram card says: Bot token not accepted. Emailed to conaugh@oasisai.work instead", setup],
+    );
+    assert.deepEqual(noteFor(emailed, { kind: "connected", label: "Connected · verified 2 min ago" }), [emailed, model.FEED_NEEDS_HREF]);
+    assert.deepEqual(noteFor(emailed, null), [emailed, model.FEED_NEEDS_HREF]);
+    for (const email of [
+      "Not emailed either: sending is switched off (dry run)",
+      "Not emailed: 10 alert emails already went out in the last hour, so this one is only in the app",
+      "The email fallback failed too (auth: 535)",
+    ]) {
+      assert.deepEqual(
+        noteFor(`Not sent: Telegram said: Unauthorized. ${email}`, clientBCard.value),
+        [`Not sent to Telegram. The Telegram card says: Bot token not accepted. ${email}`, setup],
+        email,
+      );
+    }
     assert.deepEqual(noteFor("Sent to Telegram", clientBCard.value), ["Sent to Telegram", model.FEED_NEEDS_HREF]);
     assert.deepEqual(noteFor(null, clientBCard.value), ["Shown here only", model.FEED_NEEDS_HREF]);
     // Today reads the Telegram card beside the alerts, for the same viewers, and
