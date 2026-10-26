@@ -23,6 +23,10 @@ import { BUSINESS_TYPE_LABELS, type BusinessType } from "@/lib/ai-audit/rules";
 export const SEARCH_SCHEMA = "ai_audit_search/v1" as const;
 export const SEARCH_MAX_RESULTS = 12;
 export const SEARCH_MAX_CLAIMS = 6;
+/** Twelve results of six claims fit in far less: a longer answer is not read at all (its JSON scan grows with the square of its length). */
+export const SEARCH_ANSWER_MAX_CHARS = 40_000;
+const REFUSED_MAX = 20;
+const HOST_MAX_CHARS = 120;
 export const SEARCH_RESULT_KINDS = ["listing", "review", "social", "competitor", "industry"] as const;
 export type SearchResultKind = (typeof SEARCH_RESULT_KINDS)[number];
 
@@ -74,12 +78,16 @@ function claimOf(v: unknown): SearchClaim | null {
  * only with a public web address, a known kind, and no duplicate address.
  */
 export function parseSearchAnswer(text: string): { ok: true; results: SearchResult[]; refused: string[] } | { ok: false; error: "unreadable" } {
+  if (text.length > SEARCH_ANSWER_MAX_CHARS) return { ok: false, error: "unreadable" };
   const raw = safeJsonExtract(text);
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "unreadable" };
   const list = (raw as { results?: unknown }).results;
   if (!Array.isArray(list)) return { ok: false, error: "unreadable" };
   const results: SearchResult[] = [];
-  const refused: string[] = [];
+  const refusals: string[] = [];
+  // At most twenty, each naming a host of at most 120 characters (review of phase 3, F9: one was 190 KB).
+  const refused = { push: (why: string) => void (refusals.length < REFUSED_MAX && refusals.push(why)) };
+  const host = (u: URL) => u.hostname.slice(0, HOST_MAX_CHARS);
   const seen = new Set<string>();
   for (const item of list.slice(0, 40)) {
     if (results.length >= SEARCH_MAX_RESULTS) break;
@@ -93,11 +101,11 @@ export function parseSearchAnswer(text: string): { ok: true; results: SearchResu
       continue;
     }
     if (u.protocol !== "https:" && u.protocol !== "http:") {
-      refused.push(`${u.protocol} is not a web address`);
+      refused.push(`${u.protocol.slice(0, 20)} is not a web address`);
       continue;
     }
     if (!isFetchableUrl(u)) {
-      refused.push(`${u.hostname} is not a public web address`);
+      refused.push(`${host(u)} is not a public web address`);
       continue;
     }
     u.hash = "";
@@ -106,12 +114,12 @@ export function parseSearchAnswer(text: string): { ok: true; results: SearchResu
     seen.add(key);
     const kind = (SEARCH_RESULT_KINDS as readonly string[]).includes(String(o.kind)) ? (o.kind as SearchResultKind) : null;
     if (!kind) {
-      refused.push(`${u.hostname}: no kind of page given`);
+      refused.push(`${host(u)}: no kind of page given`);
       continue;
     }
     const title = typeof o.title === "string" ? scrubCredentials(o.title.replace(/\s+/g, " ").trim()).text.slice(0, 200) : u.hostname;
     const claims = (Array.isArray(o.claims) ? o.claims : []).map(claimOf).filter((c): c is SearchClaim => !!c).slice(0, SEARCH_MAX_CLAIMS);
     results.push({ url: key.slice(0, 500), title: title || u.hostname, kind, claims });
   }
-  return { ok: true, results, refused };
+  return { ok: true, results, refused: refusals };
 }

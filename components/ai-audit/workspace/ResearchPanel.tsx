@@ -33,6 +33,7 @@ const PHASE_WORDS: Readonly<Record<string, string>> = {
 
 const STOP_WORDS: Readonly<Record<string, string>> = {
   stage_closed: "It stopped because the engagement left Research & Audit Generation.",
+  research_failed: "A step failed three times, so it stopped. Press Research again to start a new run.",
   not_authorized: "It stopped because the authorization no longer holds. Authorize the profile again first.",
 };
 
@@ -42,6 +43,9 @@ const LABEL_WORDS: Readonly<Record<DocFinding["label"], string>> = {
   estimate: "Reasonable estimate",
   hypothesis: "Hypothesis",
 };
+
+/** How far a page can be trusted, as the evidence rules weigh it: a benchmark needs high or medium. */
+const RELIABILITY_WORDS: Readonly<Record<string, string>> = { high: "a public body", medium: "a named research firm", low: "not a reliable source for figures" };
 
 const MODULE_WORDS: Readonly<Record<string, string>> = { profile: "Discovery profile", site: "Website", pagespeed: "Google PageSpeed", search: "Web search" };
 const STATUS_WORDS: Readonly<Record<string, string>> = { done: "Done", partial: "Partly done", skipped: "Skipped", failed: "Failed" };
@@ -79,6 +83,9 @@ function Cites({ ids, numbers }: { ids: readonly string[]; numbers: ReadonlyMap<
   );
 }
 
+/** A page's claim shows the page it came from: a competitor's figures are never read as the client's (review of phase 3, F1). */
+const fromAPage = (f: DocFinding) => f.id.startsWith("f-web-");
+
 function FindingList({ title, items, numbers }: { title: string; items: readonly DocFinding[]; numbers: ReadonlyMap<string, number> }) {
   if (!items.length) return null;
   return (
@@ -86,10 +93,13 @@ function FindingList({ title, items, numbers }: { title: string; items: readonly
       <h3 className="text-[13px] font-semibold text-fg">{title}</h3>
       <ul className="grid gap-1.5">
         {items.map((f) => (
-          <li key={f.id} className="grid gap-0.5">
+          <li key={f.id} className="grid min-w-0 gap-0.5">
             <div className="flex items-start gap-2">
               <Label kind={f.label} />
-              <span className="min-w-0 break-words text-fg">{f.statement}</span>
+              <span className="min-w-0 break-words text-fg">
+                {fromAPage(f) ? <span className="block text-[12px] text-fg-muted">{f.title}</span> : null}
+                {f.statement}
+              </span>
               <Cites ids={f.source_ids} numbers={numbers} />
             </div>
             {f.how_to_test ? <div className="pl-1 text-[12px] text-fg-muted">Test it: {f.how_to_test}</div> : null}
@@ -151,6 +161,11 @@ function AssumptionsForm({ engagementId, saved, editable }: { engagementId: stri
   async function save() {
     const overrides: Record<string, { low: number; high: number }> = {};
     for (const k of ASSUMPTION_KEYS) {
+      // An emptied box is not 0% (review of phase 3, F9): Number("") is 0.
+      if (!String(ranges[k].low).trim() || !String(ranges[k].high).trim()) {
+        setMessage(`${DEFAULT_ASSUMPTIONS[k].label}: give both a low and a high.`);
+        return;
+      }
       const low = Number(ranges[k].low) / 100;
       const high = Number(ranges[k].high) / 100;
       if (!Number.isFinite(low) || !Number.isFinite(high) || low < 0 || high > 1 || low > high) {
@@ -191,6 +206,7 @@ function AssumptionsForm({ engagementId, saved, editable }: { engagementId: stri
                   max={100}
                   step={1}
                   className="w-20 rounded border border-hairline bg-transparent px-2 py-1 tabular-nums text-fg"
+                  aria-label={`${DEFAULT_ASSUMPTIONS[k].label}: low, in percent`}
                   value={ranges[k].low}
                   disabled={!editable || busy}
                   onChange={(ev) => setRanges({ ...ranges, [k]: { ...ranges[k], low: ev.target.value } })}
@@ -206,6 +222,7 @@ function AssumptionsForm({ engagementId, saved, editable }: { engagementId: stri
                   max={100}
                   step={1}
                   className="w-20 rounded border border-hairline bg-transparent px-2 py-1 tabular-nums text-fg"
+                  aria-label={`${DEFAULT_ASSUMPTIONS[k].label}: high, in percent`}
                   value={ranges[k].high}
                   disabled={!editable || busy}
                   onChange={(ev) => setRanges({ ...ranges, [k]: { ...ranges[k], high: ev.target.value } })}
@@ -226,7 +243,9 @@ function AssumptionsForm({ engagementId, saved, editable }: { engagementId: stri
       ) : (
         <div className="text-[12px] text-fg-muted">Only the workspace owner changes the assumptions.</div>
       )}
-      {message ? <div className="rounded-lg border border-hairline px-3 py-2 text-fg">{message}</div> : null}
+      <div role="status" aria-live="polite">
+        {message ? <div className="rounded-lg border border-hairline px-3 py-2 text-fg">{message}</div> : null}
+      </div>
     </div>
   );
 }
@@ -257,7 +276,7 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
       setMessage(describeError(res));
       return;
     }
-    setMessage(res.created ? "Research started. It moves one step a minute; the web search waits for CC's Mac." : "A research run is already going.");
+    setMessage(res.created ? "Research started. It moves one step every five minutes; the web search waits for CC's Mac." : "A research run is already going.");
     router.refresh();
   }
 
@@ -297,7 +316,9 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
           </button>
         ) : null}
       </div>
-      {message ? <div className="rounded-lg border border-hairline px-3 py-2 text-fg">{message}</div> : null}
+      <div role="status" aria-live="polite">
+        {message ? <div className="rounded-lg border border-hairline px-3 py-2 text-fg">{message}</div> : null}
+      </div>
 
       {pack ? (
         <>
@@ -349,12 +370,15 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
               <summary className="cursor-pointer text-fg">What the evidence rules took out ({pack.evidence_changes.length + pack.search_refused.length})</summary>
               <ul className="mt-1 grid list-disc gap-0.5 pl-5">
                 {pack.evidence_changes.map((c) => (
-                  <li key={`${c.finding_id}:${c.action}`}>
-                    {c.action === "dropped" ? "Dropped" : "Downgraded to a hypothesis"}: {c.reason}.
+                  <li key={`${c.finding_id}:${c.action}`} className="min-w-0 break-words">
+                    {c.action === "dropped" ? "Dropped" : "Downgraded to a hypothesis"}
+                    {c.title ? <span className="text-fg"> {c.title}</span> : null}: {c.reason}.
                   </li>
                 ))}
                 {pack.search_refused.map((x, i) => (
-                  <li key={`refused:${i}`}>Search result refused: {x}.</li>
+                  <li key={`refused:${i}`} className="min-w-0 break-words">
+                    Search result refused: {x}.
+                  </li>
                 ))}
               </ul>
             </details>
@@ -365,7 +389,7 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
               <h3 className="text-[13px] font-semibold text-fg">Sources</h3>
               <ol className="grid gap-1">
                 {pack.sources.map((s, i) => (
-                  <li key={s.id} id={`research-source-${i + 1}`} className="grid gap-0.5">
+                  <li key={s.id} id={`research-source-${i + 1}`} className="grid min-w-0 gap-0.5">
                     <div className="flex items-start gap-2">
                       <span className="w-7 shrink-0 tabular-nums text-fg-dim">[{i + 1}]</span>
                       <span className="min-w-0 break-words">
@@ -380,13 +404,14 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
                           {" "}
                           read {when(s.retrieved_at)}
                           {s.published_at ? `, published ${when(s.published_at)}` : ""}
+                          {RELIABILITY_WORDS[s.reliability] ? `, ${RELIABILITY_WORDS[s.reliability]}` : ""}
                         </span>
                       </span>
                     </div>
                     {s.excerpt ? (
-                      <details className="pl-9 text-[12px] text-fg-muted">
+                      <details className="min-w-0 pl-9 text-[12px] text-fg-muted">
                         <summary className="cursor-pointer">What was stored</summary>
-                        <p className="mt-1 whitespace-pre-wrap break-words">{s.excerpt}</p>
+                        <p className="mt-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{s.excerpt}</p>
                       </details>
                     ) : null}
                   </li>

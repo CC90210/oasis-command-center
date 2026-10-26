@@ -75,21 +75,22 @@ Run it from the **live-call screen** (Call and transcripts, Open the live-call s
 
 ## Research
 
-Research starts by itself within a few minutes of your approval at Gate 1, on the engagement's **Research** tab, and moves one step a minute:
+Research starts by itself within a few minutes of your approval at Gate 1, on the engagement's **Research** tab, and moves one step every five minutes:
 
 1. It reads the client's website again, obeying its robots.txt, and checks it. That is our own measurement, so it is Verified.
 2. It runs Google PageSpeed for the home page, as a phone sees it. Also our own measurement.
-3. Your Mac searches the web with the business's public facts only: its name, website, city and kind of business. Nothing the client said on the call goes into the search.
+3. Your Mac searches the web with the business's public facts only: its name, website, city and kind of business. Nothing the client said on the call goes into the search. The search is Claude on your Mac, so it runs only when that is the engine you authorized at Gate 1; with the cloud model or no AI engine, research goes on without it and says so under Gaps.
 4. The Command Center reads each page the search found itself, under that site's own robots.txt, and stores the text around each claim. A page behind a login (Instagram, Facebook, LinkedIn) is listed as a gap and never read.
-5. The evidence rules decide every label. A page's claim counts as Verified only when the stored text states it: every figure in it, and most of its words. A published benchmark needs a reliable source dated in the last three years. Anything that fails is downgraded or dropped, never upgraded, and the panel lists what was taken out and why.
+5. The evidence rules decide every label. A page's claim counts as Verified only when one sentence of the page states it: every figure in it, most of its words, and the same yes or no (a page that says "not available" never proves "available"). A page that answered with an error, or a listing that does not name the business, proves nothing. A published benchmark needs a public body or a named research firm, and a date in the last three years; any other site is not a reliable source for figures. Anything that fails is downgraded or dropped, never upgraded, and the panel lists what was taken out and why. A figure you marked as a hypothesis in the profile is not used in an estimate: the estimate is listed under Gaps until you confirm the figure.
 
 The tab then shows what was measured and confirmed, what the client said (from the profile you authorized), the likely problems to test, the estimates with their inputs and assumptions, every gap, and every source with what was stored from it.
 
 - **Estimates are ranges.** Each rests on the client's own figures and on assumptions shown as ranges. If you know better for this business, change a range under **Assumptions**: the estimates on the page follow at once, and the stored run keeps the ranges it was built with. Only the owner changes them.
 - **The web search waits for your Mac.** If no Mac runs it within six hours, research carries on without it and says so under Gaps. Turn the Mac on and press **Research again** for a full run.
 - **Research again** builds a new version. Earlier versions stay exactly as they were.
-- Research stops by itself when the authorization stops holding (a transcript deleted, or the engagement moved back). Authorize again to run it.
-- A stored run never holds the call's own words, so deleting a transcript still removes them everywhere.
+- Research stops by itself when the authorization stops holding (a transcript deleted, the engagement moved back, declined or cancelled), and the stored research is deleted: at once when a transcript is deleted, otherwise within a few minutes. Authorize again and it runs again.
+- A stored run holds the profile's answers as you authorized them, never quotes or line numbers from the call.
+- A step that fails is tried again after 1, 5 and 30 minutes. After the third failure the run stops and you get an alert: press **Research again**.
 
 ## Writing the audit
 

@@ -184,7 +184,9 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
       latestResearchStep(db, tenantId, engagement.id),
       assumptionOverrides(db, tenantId, engagement.id),
     ]);
-    research = { latest, step, assumptions, estimates: latest ? estimateImpact(latest.content.impact_inputs, assumptions).estimates : [] };
+    // A run built on an authorization that stopped holding is not shown; the tick deletes it (lib/ai-audit/research-purge.ts).
+    const shown = authVoided || PROFILE_EDIT_STAGES.includes(engagement.stage) || TERMINAL_STAGES.includes(engagement.stage) ? null : latest;
+    research = { latest: shown, step, assumptions, estimates: shown ? estimateImpact(shown.content.impact_inputs, assumptions).estimates : [] };
   }
   return {
     engagement,

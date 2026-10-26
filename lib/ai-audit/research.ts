@@ -14,7 +14,9 @@
  *                 (lib/ai-audit/pagespeed.ts): our own measurement;
  *   3. search     web search on CC's Mac with public facts only
  *                 (lib/ai-audit/search.ts; system runner tool ai_audit_search),
- *                 skipped with a gap if no Mac takes it within six hours;
+ *                 only when Claude on the Mac is the engine CC authorized at
+ *                 Gate 1; skipped with a gap otherwise, or if no Mac takes it
+ *                 within six hours;
  *   4. fetch      each page it found, read by the Command Center itself, its
  *                 excerpt stored (pages behind a login are gaps);
  *   5. assemble   the profile's figures (Client-reported, as authorized), the
@@ -25,7 +27,9 @@
  *                 rules (lib/ai-audit/evidence.ts) decide each label, and the
  *                 run is stored, frozen (ai_audit_research, bravo__243).
  * Nothing contacts the client. No figure is made up: what could not be
- * measured or read is a gap, named.
+ * measured or read is a gap, named. A phase that fails is retried after 1, 5
+ * and 30 minutes, then the run fails and CC is told. When the authorization
+ * stops holding, the stored runs are deleted (lib/ai-audit/research-purge.ts).
  */
 import "server-only";
 import type { Client } from "@libsql/client";
@@ -38,7 +42,8 @@ import { CHECK_TITLES, visibleText, type CheckKey, type SiteCheck } from "@/lib/
 import { siteTarget, type SiteTarget } from "@/lib/ai-audit/site-url";
 import { runPageSpeed, type PageSpeedFetch, type PageSpeedResult } from "@/lib/ai-audit/pagespeed";
 import { loginWalled, parseSearchAnswer, searchPrompt, type SearchResult } from "@/lib/ai-audit/search";
-import { enforceEvidence, type EvidenceChange, type EvidenceSource } from "@/lib/ai-audit/evidence";
+import { enforceEvidence, namesBusiness, sentenceStating, type EvidenceChange, type EvidenceSource } from "@/lib/ai-audit/evidence";
+import { researchTablesInstalled } from "@/lib/ai-audit/research-purge";
 import { estimateImpact, validateOverrides, type AssumptionOverrides, type ImpactInputs } from "@/lib/ai-audit/impact";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
 import { listProfileFields } from "@/lib/ai-audit/versions";
@@ -56,8 +61,15 @@ export const RESEARCH_STAGES: readonly AiAuditStage[] = ["generating"];
 export const MAC_SEARCH_WAIT_MS = 6 * 3_600_000;
 /** All the found pages together, read within this long. */
 export const FETCH_BUDGET_MS = 25_000;
-/** What one source keeps of its page: the text around each claim's figure, and the start. */
+/** What one source keeps of its page: the sentence that states each claim, and the start. */
 export const EXCERPT_MAX_CHARS = 1_500;
+/** The longest one phase takes (PageSpeed waits up to a minute): the tick starts one only with this much budget left. */
+export const RESEARCH_PHASE_MS = 65_000;
+/** A run's gaps, at most; the rest are counted in a last line. */
+const GAPS_MAX = 30;
+/** What the search's refusals keep: at most this many, each this long. */
+const REFUSED_MAX = 20;
+const REFUSED_MAX_CHARS = 200;
 
 const IN_FLIGHT = ["queued", "running", "waiting_runner"];
 
@@ -74,6 +86,8 @@ export type ResearchSource = {
   reliability: NonNullable<EvidenceSource["reliability"]>;
   published_at: string | null;
   confirmed_note: string | null;
+  /** A listing or review page of the business: whether it names the business (a page that does not speaks for no one). */
+  about_business?: boolean | null;
 };
 
 export type ResearchModule = { module: "profile" | "site" | "pagespeed" | "search"; status: "done" | "partial" | "skipped" | "failed"; detail: string };
@@ -114,15 +128,7 @@ export function defaultPageSpeedDeps(): ResearchDeps["pagespeed"] {
   return { fetch: (url, init) => fetch(url, init), key: (process.env.PAGESPEED_API_KEY || "").trim() || null };
 }
 
-export async function researchTablesInstalled(db: Client): Promise<boolean> {
-  try {
-    await db.execute("SELECT (SELECT COUNT(*) FROM ai_audit_research WHERE 0) AS r, (SELECT COUNT(*) FROM ai_audit_assumptions WHERE 0) AS a");
-    return true;
-  } catch (err) {
-    if (/no such table|no such column/i.test(err instanceof Error ? err.message : String(err))) return false;
-    throw err;
-  }
-}
+export { researchTablesInstalled };
 
 function parsePack(raw: unknown): ResearchPack | null {
   try {
@@ -231,10 +237,26 @@ export async function searchJobInput(db: Client, job: { tenantId: string; input:
   const step = (await db.execute({ sql: "SELECT status FROM ai_audit_steps WHERE tenant_id = ? AND id = ? AND engagement_id = ? LIMIT 1", args: [t, stepId, engagementId] })).rows[0];
   if (!step || !IN_FLIGHT.includes(String(step.status))) return { ok: false, code: "gone" };
   const e = await getEngagement(db, t, engagementId);
-  if (!e || !RESEARCH_STAGES.includes(e.stage) || !(await authorizedProfile(db, t, e))) return { ok: false, code: "not_permitted" };
+  const auth = e && RESEARCH_STAGES.includes(e.stage) ? await authorizedProfile(db, t, e) : null;
+  // The search runs on Claude on CC's Mac: only when that is the engine CC authorized at Gate 1.
+  if (!e || !auth || auth.engine !== "mac_claude") return { ok: false, code: "not_permitted" };
   const lead = await readLead(db, t, e.lead_id);
-  const p = searchPrompt({ businessName: e.business_name || lead?.businessName || "", website: lead?.website ?? null, city: lead?.city ?? null, businessType: e.business_type });
+  const p = searchPrompt({ businessName: e.business_name || lead?.businessName || "", ...publicFacts(lead), businessType: e.business_type });
   return { ok: true, input: { purpose: "search", system: p.system, prompt: p.prompt, model: "sonnet", max_turns: 12 } };
+}
+
+/**
+ * The business's web address and city as the search may be given them: the
+ * address as the site reader checked it (a website, or a social page), and a
+ * city only when it reads as a place name. A lead's own text in either field
+ * ("we miss 20 calls a week, call me on ...") never reaches the model (review
+ * of phase 3, F5).
+ */
+export function publicFacts(lead: { website: string | null; city: string | null } | null): { website: string | null; city: string | null } {
+  const target = siteTarget(lead?.website ?? null);
+  const website = target.kind === "site" ? target.start : target.kind === "social" ? target.url : null;
+  const city = (lead?.city ?? "").replace(/\s+/g, " ").trim();
+  return { website, city: /^\p{L}[\p{L}\p{M} .,'-]{0,58}$/u.test(city) && !/[.,'-]{2}/.test(city) ? city : null };
 }
 
 /** The Mac's answer, checked: what the job keeps (public pages and claims only). */
@@ -247,9 +269,11 @@ export function checkSearchAnswer(text: string): { results: SearchResult[]; refu
 // One phase per call
 // ---------------------------------------------------------------------------
 
-const RELIABLE_HOSTS = /(\.gov|\.gov\.[a-z]{2}|\.gc\.ca|\.edu|\.ac\.[a-z]{2}|(^|\.)statcan\.gc\.ca|(^|\.)bls\.gov|(^|\.)census\.gov|(^|\.)oecd\.org)$/i;
-const MEDIUM_HOSTS = /(\.org|(^|\.)statista\.com|(^|\.)ibisworld\.com|(^|\.)pewresearch\.org|(^|\.)hbr\.org)$/i;
-function reliabilityOf(u: URL): ResearchSource["reliability"] {
+// Named public bodies and research firms only: a page's own domain says nothing of its reliability (any
+// .org or .edu page can be anyone's), so the rest are low, and a low benchmark is never Verified (review of phase 3, F1).
+const RELIABLE_HOSTS = /(\.gov|\.gov\.[a-z]{2}|\.gc\.ca|(^|\.)canada\.ca|(^|\.)oecd\.org)$/i;
+const MEDIUM_HOSTS = /(^|\.)(?:statista\.com|ibisworld\.com|pewresearch\.org|hbr\.org)$/i;
+export function reliabilityOf(u: URL): ResearchSource["reliability"] {
   if (RELIABLE_HOSTS.test(u.hostname)) return "high";
   if (MEDIUM_HOSTS.test(u.hostname)) return "medium";
   return "low";
@@ -265,14 +289,12 @@ function publishedAt(html: string): string | null {
   return Number.isFinite(at) ? new Date(at).toISOString() : null;
 }
 
-/** The page's text around each claim's figure, and its first lines: what the evidence rules check claims against. */
+/** The page's first lines, and the one sentence that states each claim: what the evidence rules check claims against. */
 function excerptFor(text: string, claims: SearchResult["claims"]): string {
-  const parts: string[] = [text.slice(0, 400)];
+  const parts: string[] = [text.replace(/\s+/g, " ").slice(0, 400)];
   for (const c of claims) {
-    if (c.value === null) continue;
-    const needle = String(c.value);
-    const at = text.indexOf(needle);
-    if (at >= 0) parts.push(text.slice(Math.max(0, at - 150), at + needle.length + 150));
+    const sentence = sentenceStating(c.text, text);
+    if (sentence && !parts.includes(sentence)) parts.push(sentence);
   }
   return parts.join(" ... ").replace(/\s+/g, " ").slice(0, EXCERPT_MAX_CHARS);
 }
@@ -289,10 +311,13 @@ async function failStep(db: Client, t: string, stepId: string, code: string, now
   });
 }
 
-async function saveState(db: Client, t: string, stepId: string, state: State, status: "running" | "waiting_runner", now: Date): Promise<boolean> {
+/** The step is still at `from`: two advances at once (an overlapping tick) never both move it (review of phase 3, F8). */
+const AT_PHASE = "COALESCE(CASE WHEN json_valid(result_ref) THEN json_extract(result_ref, '$.phase') END, 'site') = ?";
+
+async function saveState(db: Client, t: string, stepId: string, from: State["phase"], state: State, status: "running" | "waiting_runner", now: Date): Promise<boolean> {
   const r = await db.execute({
-    sql: "UPDATE ai_audit_steps SET status = ?, result_ref = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running', 'waiting_runner')",
-    args: [status, JSON.stringify(state), now.toISOString(), t, stepId],
+    sql: `UPDATE ai_audit_steps SET status = ?, result_ref = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running', 'waiting_runner') AND ${AT_PHASE}`,
+    args: [status, JSON.stringify(state), now.toISOString(), t, stepId, from],
   });
   return r.rowsAffected === 1;
 }
@@ -309,7 +334,8 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
     await failStep(db, t, input.stepId, "stage_closed", input.now);
     return "failed";
   }
-  if (!(await authorizedProfile(db, t, e))) {
+  const auth = await authorizedProfile(db, t, e);
+  if (!auth) {
     await failStep(db, t, input.stepId, "not_authorized", input.now);
     return "failed";
   }
@@ -320,6 +346,7 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
   } catch {
     state = { phase: "site" };
   }
+  const from = state.phase;
   const lead = await readLead(db, t, e.lead_id);
   const target = siteTarget(lead?.website ?? null);
 
@@ -350,35 +377,47 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
       state.site = { target, checks: report.checks, pagesRead, notes: report.notes, unread: report.unread, sources };
     }
     state.phase = "pagespeed";
-    return (await saveState(db, t, input.stepId, state, "running", input.now)) ? "advanced" : "idle";
+    return (await saveState(db, t, input.stepId, from, state, "running", input.now)) ? "advanced" : "idle";
   }
 
   if (state.phase === "pagespeed") {
     const home = state.site && "target" in state.site && state.site.target.kind === "site" && state.site.pagesRead > 0 ? state.site.target.start : null;
     state.pagespeed = home ? await runPageSpeed(home, { fetch: input.deps.pagespeed.fetch, key: input.deps.pagespeed.key, now: () => input.now }) : { skipped: "No page of the website was read, so PageSpeed was not run." };
     state.phase = "search";
-    return (await saveState(db, t, input.stepId, state, "running", input.now)) ? "advanced" : "idle";
+    return (await saveState(db, t, input.stepId, from, state, "running", input.now)) ? "advanced" : "idle";
   }
 
   if (state.phase === "search") {
+    if (auth.engine !== "mac_claude") {
+      // The search is Claude on CC's Mac: it runs only when that is the engine CC authorized for this client.
+      state.search = {
+        job_id: null,
+        queued_at: null,
+        results: [],
+        note:
+          auth.engine === "none"
+            ? "No web search was run: no AI engine was authorized for this audit."
+            : "No web search was run: it runs on Claude on CC's Mac, and this audit was authorized for the workspace's cloud model.",
+      };
+      state.phase = "fetch";
+      return (await saveState(db, t, input.stepId, from, state, "running", input.now)) ? "advanced" : "idle";
+    }
     const jobId = newId();
     const at = input.now.toISOString();
     const jobInput = { step_id: input.stepId, engagement_id: e.id };
     state.search = { job_id: jobId, queued_at: at };
     state.phase = "waiting_search";
-    await db.batch(
-      [
-        {
-          sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, dedupe_key, created_at, updated_at) VALUES (?, ?, ?, 'runner', 'queued', ?, ?, ?, ?, ?)`,
-          args: [jobId, t, SEARCH_TOOL_KEY, JSON.stringify(jobInput), inputHashOf(SEARCH_TOOL_KEY, jobInput), `${SEARCH_TOOL_KEY}:${input.stepId}`, at, at],
-        },
-        {
-          sql: "UPDATE ai_audit_steps SET status = 'waiting_runner', result_ref = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running')",
-          args: [JSON.stringify(state), at, t, input.stepId],
-        },
-      ],
-      "write",
-    );
+    // The step moves first, from this phase only, and only the advance that moved it queues the job. No
+    // transaction: an overlapping tick's advance finds the phase moved and does nothing (review of phase 3, F8).
+    const moved = await db.execute({
+      sql: `UPDATE ai_audit_steps SET status = 'waiting_runner', result_ref = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running') AND ${AT_PHASE}`,
+      args: [JSON.stringify(state), at, t, input.stepId, from],
+    });
+    if (moved.rowsAffected !== 1) return "idle";
+    await db.execute({
+      sql: `INSERT OR IGNORE INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, dedupe_key, created_at, updated_at) VALUES (?, ?, ?, 'runner', 'queued', ?, ?, ?, ?, ?)`,
+      args: [jobId, t, SEARCH_TOOL_KEY, JSON.stringify(jobInput), inputHashOf(SEARCH_TOOL_KEY, jobInput), `${SEARCH_TOOL_KEY}:${input.stepId}`, at, at],
+    });
     return "advanced";
   }
 
@@ -396,19 +435,19 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
       state.search = { ...state.search!, results: parsed.search?.results ?? [], refused: parsed.search?.refused ?? [], note: parsed.search?.unreadable ? "The web search's answer could not be read." : undefined };
     } else if (job && String(job.status) === "failed") {
       state.search = { ...state.search!, results: [], note: `The web search on the Mac failed (${String(job.error_code ?? "error")}).` };
-    } else if (!job || input.now.getTime() - Date.parse(String(job.created_at)) > MAC_SEARCH_WAIT_MS) {
-      if (job) {
-        await db.execute({
-          sql: "UPDATE tool_jobs SET status = 'failed', error_code = 'runner_offline', finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'queued'",
-          args: [input.now.toISOString(), input.now.toISOString(), t, state.search!.job_id],
-        });
-      }
+    } else if (!job) {
+      state.search = { ...(state.search ?? { job_id: null, queued_at: null }), results: [], note: "The web search was never handed to the Mac, so the research has no web search." };
+    } else if (input.now.getTime() - Date.parse(String(job.created_at)) > MAC_SEARCH_WAIT_MS) {
+      await db.execute({
+        sql: "UPDATE tool_jobs SET status = 'failed', error_code = 'runner_offline', finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'queued'",
+        args: [input.now.toISOString(), input.now.toISOString(), t, state.search!.job_id],
+      });
       state.search = { ...(state.search ?? { job_id: null, queued_at: null }), results: [], note: "No Mac ran the web search within six hours, so the research has no web search." };
     } else {
       return "waiting";
     }
     state.phase = "fetch";
-    return (await saveState(db, t, input.stepId, state, "running", input.now)) ? "advanced" : "idle";
+    return (await saveState(db, t, input.stepId, from, state, "running", input.now)) ? "advanced" : "idle";
   }
 
   if (state.phase === "fetch") {
@@ -445,6 +484,10 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
         fetched.push({ index, source: null, gap: why });
         continue;
       }
+      if (read.page.status < 200 || read.page.status >= 300) {
+        fetched.push({ index, source: null, gap: `${u.hostname.replace(/^www\./, "")} answered HTTP ${read.page.status}, so its page was not used.` });
+        continue;
+      }
       const text = visibleText(read.page.html);
       fetched.push({
         index,
@@ -461,12 +504,14 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
           reliability: r.kind === "industry" ? reliabilityOf(new URL(read.page.finalUrl)) : "low",
           published_at: publishedAt(read.page.html),
           confirmed_note: null,
+          // The business's own listing or reviews must name it; a competitor's page speaks for the competitor (its title says so).
+          about_business: r.kind === "listing" || r.kind === "review" ? namesBusiness(text, e.business_name || "") : null,
         },
       });
     }
     state.fetched = fetched;
     state.phase = "assemble";
-    return (await saveState(db, t, input.stepId, state, "running", input.now)) ? "advanced" : "idle";
+    return (await saveState(db, t, input.stepId, from, state, "running", input.now)) ? "advanced" : "idle";
   }
 
   // assemble
@@ -476,21 +521,27 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
   const at = input.now.toISOString();
   const partial = pack.plan.some((m) => m.status !== "done");
   const system: Actor = { type: "system", id: null };
+  // The run is stored first, then the step ends from this phase only; never a done step without its run (review of
+  // phase 3, F9). Two advances at once (an overlapping tick, F8): one loses on the version number, or finds the step
+  // ended and takes its own run back. No transaction, so neither waits on the other's lock.
+  try {
+    await db.execute({
+      sql: "INSERT INTO ai_audit_research (id, tenant_id, engagement_id, version_no, status, content, content_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+      args: [id, t, e.id, versionNo, partial ? "partial" : "ready", JSON.stringify(pack), contentHash(pack), at],
+    });
+  } catch (err) {
+    if (err instanceof Error && /UNIQUE|constraint/i.test(err.message)) return "idle";
+    throw err;
+  }
   const done = await db.execute({
-    sql: "UPDATE ai_audit_steps SET status = 'done', result_ref = ?, finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running', 'waiting_runner')",
-    args: [JSON.stringify({ research_id: id, findings: pack.findings.length, sources: pack.sources.length, gaps: pack.gaps.length }), at, at, t, input.stepId],
+    sql: `UPDATE ai_audit_steps SET status = 'done', result_ref = ?, finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running', 'waiting_runner') AND ${AT_PHASE}`,
+    args: [JSON.stringify({ research_id: id, findings: pack.findings.length, sources: pack.sources.length, gaps: pack.gaps.length }), at, at, t, input.stepId, from],
   });
-  if (done.rowsAffected !== 1) return "idle";
-  await db.batch(
-    [
-      {
-        sql: "INSERT INTO ai_audit_research (id, tenant_id, engagement_id, version_no, status, content, content_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)",
-        args: [id, t, e.id, versionNo, partial ? "partial" : "ready", JSON.stringify(pack), contentHash(pack), at],
-      },
-      eventStatement({ tenantId: t, engagementId: e.id, event: "research_done", actor: system, at, refType: "research", refId: id, meta: { version_no: versionNo, findings: pack.findings.length, gaps: pack.gaps.length } }),
-    ],
-    "write",
-  );
+  if (done.rowsAffected !== 1) {
+    await db.execute({ sql: "DELETE FROM ai_audit_research WHERE tenant_id = ? AND id = ?", args: [t, id] });
+    return "idle";
+  }
+  await db.execute(eventStatement({ tenantId: t, engagementId: e.id, event: "research_done", actor: system, at, refType: "research", refId: id, meta: { version_no: versionNo, findings: pack.findings.length, gaps: pack.gaps.length } }));
   await input.deps.alert({
     tenantId: t,
     alertType: "ai_audit_research_ready",
@@ -555,16 +606,18 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
       confirmed_note: f.label === "verified" ? (f.verified_note ?? null) : null,
     });
     const isFigure = (def.type === "number" || def.type === "money") && typeof f.value === "number";
+    const said = def.type === "money" && typeof f.value === "number" ? `$${f.value.toLocaleString("en-CA")}` : valueWords(f.value);
     findings.push({
       id: fid("f", f.field_key),
       title: def.label,
-      statement: `${def.label}: ${valueWords(f.value)}${def.unit && isFigure ? ` ${def.unit}` : ""}.`,
+      statement: `${def.label}: ${said}${def.unit && isFigure && def.type !== "money" ? ` ${def.unit}` : ""}.`,
       label: f.label === "verified" ? "verified" : f.label === "hypothesis" ? "hypothesis" : "client_reported",
       ...(isFigure ? { metric: { value: f.value as number, unit: def.type === "money" ? "$" : (def.unit ?? "") } } : {}),
       source_ids: [sourceId],
       ...(f.label === "hypothesis" ? { how_to_test: "Check it with the client before it is used." } : {}),
     });
-    if (isFigure && f.field_key in IMPACT_KEYS) {
+    // A figure CC marked a hypothesis is a figure to confirm, never an estimate's input: the estimate becomes a named gap (review of phase 3, F3).
+    if (isFigure && IMPACT_KEYS.has(f.field_key) && f.label !== "hypothesis") {
       impactInputs[f.field_key as keyof ImpactInputs] = { value: f.value as number, label: f.label === "verified" ? "verified" : "client_reported", sourceId };
     }
   }
@@ -603,7 +656,7 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
   const ps = state.pagespeed;
   if (ps && "ok" in ps && ps.ok) {
     const sid = "s-pagespeed";
-    sources.push({ id: sid, kind: "measurement", title: "Google PageSpeed Insights, phone view", url: ps.final_url ?? ps.url, retrieved_at: ps.fetched_at, http_status: 200, content_sha256: null, excerpt: JSON.stringify({ scores: ps.scores, timings: ps.timings }).slice(0, EXCERPT_MAX_CHARS), reliability: "own_measurement", published_at: null, confirmed_note: null });
+    sources.push({ id: sid, kind: "measurement", title: "Google PageSpeed Insights, phone view", url: ps.final_url ?? ps.url, retrieved_at: ps.fetched_at, http_status: 200, content_sha256: null, excerpt: pageSpeedWords(ps).slice(0, EXCERPT_MAX_CHARS), reliability: "own_measurement", published_at: null, confirmed_note: null });
     const score = (key: keyof typeof ps.scores, title: string) => {
       const v = ps.scores[key];
       if (v !== null) findings.push({ id: fid("f-ps", key), title, statement: `Google PageSpeed scores the home page ${v} out of 100 for ${title.toLowerCase()} on a phone.`, label: "verified", metric: { value: v, unit: "/100" }, source_ids: [sid] });
@@ -613,7 +666,7 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
     score("seo", "Search basics");
     if (ps.timings.lcp_ms !== null) {
       const s = Math.round(ps.timings.lcp_ms / 100) / 10;
-      findings.push({ id: "f-ps-lcp", title: "Time to the main content", statement: `On a phone, the home page's main content takes ${s} seconds to appear.`, label: "verified", metric: { value: s, unit: "seconds" }, source_ids: [sid] });
+      findings.push({ id: "f-ps-lcp", title: "Time to the main content", statement: `In Google's lab test of a phone, the home page's main content took ${s} seconds to appear.`, label: "verified", metric: { value: s, unit: "seconds" }, source_ids: [sid] });
     }
     plan.push({ module: "pagespeed", status: "done", detail: "Google PageSpeed was run for the home page." });
   } else {
@@ -652,12 +705,14 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
   // 5. The evidence rules decide every label; then the estimates.
   const evidence = enforceEvidence(
     findings,
-    sources.map((s) => ({ id: s.id, kind: s.kind, text: s.excerpt, reliability: s.reliability, published_at: s.published_at, confirmed_note: s.confirmed_note })),
+    sources.map((s) => ({ id: s.id, kind: s.kind, text: s.excerpt, reliability: s.reliability, published_at: s.published_at, confirmed_note: s.confirmed_note, http_status: s.http_status, about_business: s.about_business ?? null })),
     now,
   );
   const overrides = await assumptionOverrides(db, t, e.id);
   const impact = estimateImpact(impactInputs, overrides);
-  gaps.push(...impact.gaps);
+  // What the estimates still need comes first; past the cap, the rest are counted, never dropped unsaid.
+  const allGaps = [...impact.gaps, ...gaps];
+  const shownGaps = allGaps.length > GAPS_MAX ? [...allGaps.slice(0, GAPS_MAX - 1), { topic: "More gaps", why: `${allGaps.length - (GAPS_MAX - 1)} more were found and are not listed here.` }] : allGaps;
   return {
     schema: RESEARCH_SCHEMA,
     built_at: at,
@@ -667,43 +722,119 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
     findings: evidence.findings,
     impact_inputs: impactInputs,
     estimates: impact.estimates,
-    gaps: gaps.slice(0, 30),
+    gaps: shownGaps,
     evidence_changes: evidence.changes,
-    search_refused: state.search?.refused ?? [],
+    search_refused: (state.search?.refused ?? []).slice(0, REFUSED_MAX).map((x) => x.slice(0, REFUSED_MAX_CHARS)),
   };
 }
 
-const IMPACT_KEYS: Readonly<Record<keyof ImpactInputs, true>> = {
-  "sales.missed_calls_per_week": true,
-  "sales.close_rate_pct": true,
-  "sales.avg_job_value": true,
-  "ops.admin_hours_per_week": true,
-  "finance.staff_hourly_cost": true,
-  "sales.leads_per_month": true,
-  "sales.response_time_hours": true,
-};
+/** PageSpeed's run as the panel shows what was stored: one sentence, never raw JSON. */
+function pageSpeedWords(ps: Extract<PageSpeedResult, { ok: true }>): string {
+  const scores = (
+    [
+      ["speed", ps.scores.performance],
+      ["accessibility", ps.scores.accessibility],
+      ["search basics", ps.scores.seo],
+      ["best practice", ps.scores.best_practices],
+    ] as const
+  )
+    .filter(([, v]) => v !== null)
+    .map(([k, v]) => `${k} ${v}`);
+  const lcp = ps.timings.lcp_ms !== null ? ` In Google's lab test, the main content took ${Math.round(ps.timings.lcp_ms / 100) / 10} seconds to appear.` : "";
+  return `${scores.length ? `Scores out of 100 on a phone: ${scores.join(", ")}.` : "No scores were given."}${lcp}`;
+}
+
+// A Set, never an object lookup: "constructor" is in every object (review of phase 2b).
+const IMPACT_KEYS: ReadonlySet<string> = new Set<keyof ImpactInputs>([
+  "sales.missed_calls_per_week",
+  "sales.close_rate_pct",
+  "sales.avg_job_value",
+  "ops.admin_hours_per_week",
+  "finance.staff_hourly_cost",
+  "sales.leads_per_month",
+  "sales.response_time_hours",
+]);
 
 // ---------------------------------------------------------------------------
 // The tick
 // ---------------------------------------------------------------------------
 
-/** Engagements in research with no run yet (to start), and runs in flight (to advance). */
-export async function dueResearch(db: Client, tenantId: string): Promise<{ start: string[]; advance: string[] }> {
+/**
+ * Engagements in research with no run yet (to start), and runs with work to do
+ * (to advance). An engagement whose authorization no longer holds waits for CC
+ * and never takes a start slot; a run waiting on the Mac takes an advance slot
+ * only once its answer is in or its wait is over; a run that failed waits out
+ * its back-off (review of phase 3, F6).
+ */
+export async function dueResearch(db: Client, tenantId: string, now = new Date()): Promise<{ start: string[]; advance: string[] }> {
   const t = requireTenant(tenantId);
   if (!(await researchTablesInstalled(db))) return { start: [], advance: [] };
-  const start = await db.execute({
+  const at = now.toISOString();
+  const candidates = await db.execute({
     sql: `SELECT e.id FROM ai_audit_engagements e WHERE e.tenant_id = ? AND e.stage IN (${RESEARCH_STAGES.map(() => "?").join(", ")})
             AND NOT EXISTS (SELECT 1 FROM ai_audit_research r WHERE r.tenant_id = e.tenant_id AND r.engagement_id = e.id)
             AND NOT EXISTS (SELECT 1 FROM ai_audit_steps s WHERE s.tenant_id = e.tenant_id AND s.engagement_id = e.id AND s.step_key = ? AND (s.status IN ('queued', 'running', 'waiting_runner') OR s.created_at > ?))
-          ORDER BY e.updated_at LIMIT 2`,
+          ORDER BY e.updated_at LIMIT 10`,
     // A run that ended in the last hour is not started again by the tick (CC can press Research again).
-    args: [t, ...RESEARCH_STAGES, RESEARCH_STEP, new Date(Date.now() - 3_600_000).toISOString()],
+    args: [t, ...RESEARCH_STAGES, RESEARCH_STEP, new Date(now.getTime() - 3_600_000).toISOString()],
   });
-  const advance = await db.execute({
-    sql: "SELECT id FROM ai_audit_steps WHERE tenant_id = ? AND step_key = ? AND status IN ('queued', 'running', 'waiting_runner') ORDER BY updated_at LIMIT 3",
-    args: [t, RESEARCH_STEP],
+  const start: string[] = [];
+  for (const r of candidates.rows) {
+    if (start.length >= 2) break;
+    const e = await getEngagement(db, t, String(r.id));
+    if (e && (await authorizedProfile(db, t, e))) start.push(e.id);
+  }
+  const active = await db.execute({
+    sql: "SELECT id FROM ai_audit_steps WHERE tenant_id = ? AND step_key = ? AND status IN ('queued', 'running') AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY updated_at LIMIT 3",
+    args: [t, RESEARCH_STEP, at],
   });
-  return { start: start.rows.map((r) => String(r.id)), advance: advance.rows.map((r) => String(r.id)) };
+  const waiting = await db.execute({
+    sql: `SELECT s.id FROM ai_audit_steps s
+            LEFT JOIN tool_jobs j ON j.tenant_id = s.tenant_id AND j.id = CASE WHEN json_valid(s.result_ref) THEN json_extract(s.result_ref, '$.search.job_id') END
+           WHERE s.tenant_id = ? AND s.step_key = ? AND s.status = 'waiting_runner' AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= ?)
+             AND (j.id IS NULL OR j.status NOT IN ('queued', 'claimed', 'running') OR j.created_at < ?)
+           ORDER BY s.updated_at LIMIT 3`,
+    args: [t, RESEARCH_STEP, at, new Date(now.getTime() - MAC_SEARCH_WAIT_MS).toISOString()],
+  });
+  return { start, advance: [...active.rows, ...waiting.rows].map((r) => String(r.id)) };
+}
+
+/**
+ * A phase that threw: counted, and tried again after 1, 5 then 30 minutes;
+ * after the third, the run fails (its search job with it) and CC is told,
+ * so "Research again" starts a new one (review of phase 3, F6).
+ */
+export async function noteResearchFailure(db: Client, input: { tenantId: string; stepId: string; now: Date; alert: ResearchDeps["alert"] }): Promise<void> {
+  const t = requireTenant(input.tenantId);
+  const row = (
+    await db.execute({ sql: "SELECT engagement_id, attempts, max_attempts FROM ai_audit_steps WHERE tenant_id = ? AND id = ? AND step_key = ? AND status IN ('queued', 'running', 'waiting_runner') LIMIT 1", args: [t, input.stepId, RESEARCH_STEP] })
+  ).rows[0];
+  if (!row) return;
+  const attempts = int(row.attempts) + 1;
+  const giveUp = attempts >= int(row.max_attempts, 3);
+  const at = input.now.toISOString();
+  const next = giveUp ? null : new Date(input.now.getTime() + [60_000, 300_000, 1_800_000][Math.min(attempts - 1, 2)]).toISOString();
+  await db.execute({
+    sql: `UPDATE ai_audit_steps SET attempts = ?, error_code = 'research_failed', next_attempt_at = ?, status = CASE WHEN ? = 1 THEN 'failed' ELSE status END,
+                 finished_at = CASE WHEN ? = 1 THEN ? ELSE finished_at END, updated_at = ?
+           WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running', 'waiting_runner')`,
+    args: [attempts, next, giveUp ? 1 : 0, giveUp ? 1 : 0, at, at, t, input.stepId],
+  });
+  if (!giveUp) return;
+  await db.execute({
+    sql: "UPDATE tool_jobs SET status = 'failed', error_code = 'ai_audit_gone', finished_at = ?, updated_at = ? WHERE tenant_id = ? AND tool_key = ? AND json_extract(input_json, '$.step_id') = ? AND status IN ('queued', 'claimed', 'running')",
+    args: [at, at, t, SEARCH_TOOL_KEY, input.stepId],
+  });
+  const e = await getEngagement(db, t, String(row.engagement_id));
+  await input.alert({
+    tenantId: t,
+    alertType: "ai_audit_research_failed",
+    severity: "warn",
+    title: `Research stopped: ${shortName(e?.business_name ?? "", "an AI audit")}`,
+    body: "A step of the research failed three times, so the run was stopped. Press Research again on the engagement to start a new run.",
+    subjectType: "ai_audit_engagement",
+    subjectId: String(row.engagement_id),
+  });
 }
 
 /** The latest run's status, for the engagement page. */

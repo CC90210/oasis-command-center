@@ -47,7 +47,8 @@ import { getShareLink } from "@/lib/ai-audit/link";
 import { BRIEF_ATTEMPT_EVENT, briefTablesInstalled, buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
 import type { SiteReadDeps } from "@/lib/ai-audit/site-fetch";
 import { autoAttachMeetTranscripts } from "@/lib/ai-audit/meet-link";
-import { advanceResearch, defaultPageSpeedDeps, dueResearch, researchTablesInstalled, startResearch, type ResearchDeps } from "@/lib/ai-audit/research";
+import { advanceResearch, defaultPageSpeedDeps, dueResearch, noteResearchFailure, researchTablesInstalled, RESEARCH_PHASE_MS, startResearch, type ResearchDeps } from "@/lib/ai-audit/research";
+import { purgeVoidedResearch } from "@/lib/ai-audit/research-purge";
 
 export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps };
 
@@ -86,7 +87,8 @@ export async function runAiAuditTick(
 ): Promise<TickReport> {
   const now = opts.now ?? (() => new Date());
   const started = Date.now();
-  const budget = opts.budgetMs ?? 200_000;
+  // Under the cron forwarder's 120-second wait (workers/oasis-cc-cron), so a slow tick is never retried while it runs.
+  const budget = opts.budgetMs ?? 100_000;
   const deps: TickDeps = opts.deps ?? { payment: defaultPaymentDeps(), onboarding: defaultOnboardingDeps() };
   const report: TickReport = {
     tenants: 0,
@@ -308,7 +310,9 @@ export async function runAiAuditTick(
         if (open.some((x) => x.stage === "generating")) throw new Error("the research tables are missing: apply database/turso/bravo__243_ai_audit_research.sql");
         return;
       }
-      research = await dueResearch(db, tenantId);
+      // Runs whose authorization ended (moved back, declined, cancelled) go first (review of phase 3, F4).
+      await purgeVoidedResearch(db, tenantId);
+      research = await dueResearch(db, tenantId, now());
     });
     const researchDeps: ResearchDeps = deps.research ?? { site: deps.site ?? defaultSiteDeps(), pagespeed: defaultPageSpeedDeps(), alert: deps.payment.alert };
     for (const id of research.start) {
@@ -319,10 +323,17 @@ export async function runAiAuditTick(
       });
     }
     for (const stepId of research.advance) {
-      if (over()) break;
+      // A phase may take a minute (PageSpeed): it starts only with that much of the budget left (review of phase 3, F8).
+      if (over() || budget - (Date.now() - started) < RESEARCH_PHASE_MS) break;
       await guard("research", undefined, async () => {
-        const r = await advanceResearch(db, { tenantId, stepId, now: now(), deps: researchDeps });
-        if (r === "advanced" || r === "finished") report.researchAdvanced += 1;
+        try {
+          const r = await advanceResearch(db, { tenantId, stepId, now: now(), deps: researchDeps });
+          if (r === "advanced" || r === "finished") report.researchAdvanced += 1;
+        } catch (err) {
+          // Counted and backed off, so one failing run never holds the queue (review of phase 3, F6).
+          await noteResearchFailure(db, { tenantId, stepId, now: now(), alert: researchDeps.alert });
+          throw err;
+        }
       });
     }
 

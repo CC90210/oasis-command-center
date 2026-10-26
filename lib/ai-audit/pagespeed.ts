@@ -41,10 +41,12 @@ export function parsePageSpeed(url: string, body: unknown, fetchedAt: string): P
   const cats = (lh.categories ?? {}) as Record<string, { score?: unknown }>;
   const audits = (lh.audits ?? {}) as Record<string, { numericValue?: unknown }>;
   const cls = audits["cumulative-layout-shift"]?.numericValue;
+  // The panel links to it: only an http(s) address is kept (review of phase 3, F9: "javascript:..." was stored).
+  const reported = typeof lh.finalDisplayedUrl === "string" ? lh.finalDisplayedUrl : typeof lh.finalUrl === "string" ? lh.finalUrl : null;
   return {
     ok: true,
     url,
-    final_url: typeof lh.finalDisplayedUrl === "string" ? lh.finalDisplayedUrl : typeof lh.finalUrl === "string" ? lh.finalUrl : null,
+    final_url: reported && /^https?:\/\//i.test(reported) ? reported.slice(0, 500) : null,
     strategy: "mobile",
     scores: {
       performance: score(cats.performance?.score),
