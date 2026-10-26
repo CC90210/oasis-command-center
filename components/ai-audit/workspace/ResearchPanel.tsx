@@ -250,6 +250,58 @@ function AssumptionsForm({ engagementId, saved, editable }: { engagementId: stri
   );
 }
 
+/** The next step after research: the audit's first draft, then its proposal's. The owner's press only. */
+function DraftBox({ view }: { view: EngagementView }) {
+  const router = useRouter();
+  const e = view.engagement;
+  const [busy, setBusy] = useState<"" | "audit" | "proposal">("");
+  const [message, setMessage] = useState<string | null>(null);
+  const auditDraft = view.audit?.status === "draft";
+  const proposalDraft = view.proposal?.status === "draft";
+
+  async function draft(what: "audit" | "proposal") {
+    const exists = what === "audit" ? auditDraft : proposalDraft;
+    const ask =
+      what === "audit"
+        ? "Replace what the audit draft says with a fresh draft from this research? Your edits to the draft will be lost."
+        : "Replace the proposal draft with a fresh one from the audit's opportunities? Prices you typed on it will be lost.";
+    if (exists && !window.confirm(ask)) return;
+    setBusy(what);
+    setMessage(null);
+    const r = await postAction(e.id, what === "audit" ? "draft_audit" : "draft_proposal", { replace: exists });
+    setBusy("");
+    if (!r.ok) {
+      setMessage(describeError(r));
+      return;
+    }
+    const blocking = typeof r.blocking === "number" ? r.blocking : 0;
+    setMessage(
+      what === "audit"
+        ? `Audit drafted. Read and edit it on the Audit tab${blocking ? `; ${blocking} thing${blocking === 1 ? "" : "s"} must be fixed before it can be submitted` : ""}.`
+        : "Proposal drafted. On the Proposal tab, price every line marked as needing your price before you submit.",
+    );
+    router.refresh();
+  }
+
+  return (
+    <div className="grid gap-2 rounded-lg border border-hairline px-3 py-3">
+      <h3 className="text-[13px] font-semibold text-fg">Next: the audit and the proposal</h3>
+      <p className="text-[12px] text-fg-muted">
+        The audit is drafted from this research: its findings, estimates and gaps as they stand, the opportunities they point to, and a roadmap. The proposal starts from the catalogue items those opportunities need; a price comes only from a confirmed catalogue item or from you.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className={view.audit ? "btn-secondary" : "btn-primary"} disabled={!!busy} onClick={() => void draft("audit")}>
+          {busy === "audit" ? "Drafting" : view.audit ? "Draft the audit again" : "Draft the audit"}
+        </button>
+        <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft} onClick={() => void draft("proposal")}>
+          {busy === "proposal" ? "Drafting" : view.proposal ? "Draft the proposal again" : "Draft the proposal"}
+        </button>
+      </div>
+      {message ? <div className="rounded-lg border border-hairline px-3 py-2 text-fg">{message}</div> : null}
+    </div>
+  );
+}
+
 export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner: boolean }) {
   const router = useRouter();
   const e = view.engagement;
@@ -351,6 +403,8 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
           </div>
 
           <AssumptionsForm key={JSON.stringify(r.assumptions)} engagementId={e.id} saved={r.assumptions} editable={isOwner} />
+
+          {isOwner && e.stage === "generating" ? <DraftBox view={view} /> : null}
 
           {pack.gaps.length ? (
             <div className="grid gap-1">

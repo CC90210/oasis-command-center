@@ -13,7 +13,7 @@ updated: 2026-10-26
 
 1. A lead asks for the free audit, or you start one from their lead page (**Start AI audit**).
 2. You run the discovery call and capture what the client tells you.
-3. **Gate 1: you authorize** the client's information for processing: an approval card, in Needs you, that names the exact profile, transcripts and call notes. Nothing is researched or written, and nothing can be submitted, before you approve it. Research then runs by itself (see Research, below). Automated writing arrives in a later phase; until then you write the audit yourself, from the research.
+3. **Gate 1: you authorize** the client's information for processing: an approval card, in Needs you, that names the exact profile, transcripts and call notes. Nothing is researched or written, and nothing can be submitted, before you approve it. Research then runs by itself, and the audit and its proposal are drafted from it (see Research and Writing the audit, below). You read and edit every word.
 4. The audit is drafted: nine sections, every finding labelled.
 5. You price it from the confirmed catalogue, or type a price for custom work.
 6. You submit it. The Mac prints the PDF.
@@ -93,6 +93,15 @@ The tab then shows what was measured and confirmed, what the client said (from t
 - A step that fails is tried again after 1 minute, then after 5. A third failure stops the run and you get an alert: press **Research again**.
 
 ## Writing the audit
+
+When the first research run finishes, the audit and the proposal are drafted for you. You can draft them again from the **Research** tab (**Next: the audit and the proposal**); that replaces what the draft says, and the page asks first.
+
+- **What the draft holds.** The research's findings, sources, estimates and gaps as they stand, with the labels the evidence rules gave them. The opportunities come from fixed rules over those findings, each citing what it rests on; the roadmap puts the quick wins first. The wording is fixed and plain. A figure appears only where it cites the finding or estimate that holds it.
+- **What it leaves out.** Nothing internal reaches the client: no line numbers, no quotes from the call, none of your notes, no budget, and none of the questions written for you. The client's own sources show as "our discovery call with you", "your answers on the audit form" and "confirmed with you".
+- **The proposal draft.** One line for each catalogue item the opportunities need. A line is priced only from a confirmed catalogue item; every other line is marked as needing your price, and the proposal cannot be submitted until you price it.
+- **Read it as the client will.** Personalise the wording, remove anything that does not fit, and check every figure against what it cites.
+
+When you write or change a part yourself:
 
 - **Sources first**, then **findings** (each with a label), then **estimates** (each with inputs, assumptions and a range).
 - Then the nine sections. Every figure cites something. The editor checks this as you type, and the list at the top must be empty before you can submit.

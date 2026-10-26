@@ -29,6 +29,8 @@
  *                                                         about AI analysis, said by hand) is the owner's only
  *   start_research                                        run the research again (after Gate 1); owner only
  *   save_assumptions   { overrides }                       CC's own ranges for the impact calculator; owner only
+ *   draft_audit        { replace? }                        draft the audit from the latest research; owner only
+ *   draft_proposal     { replace? }                        draft the proposal from the audit's opportunities; owner only
  * (Adding a transcript has its own route, ./transcript, for its larger body.)
  *
  * Nothing here sends anything to the client: delivery happens only when the
@@ -63,6 +65,7 @@ import { meetMediaReady } from "@/lib/meet/handlers";
 import { liveMeetDeps } from "@/lib/meet/live-deps";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { saveAssumptions, startResearch } from "@/lib/ai-audit/research";
+import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
 
@@ -356,6 +359,17 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const r = await saveAssumptions(s.db, { tenantId: s.tenantId, engagementId, overrides: body.overrides, actor, now });
       if (!r.ok) return json(400, { ok: false, error: r.error });
       return json(200, { ok: true, overrides: r.overrides });
+    }
+    case "draft_audit":
+    case "draft_proposal": {
+      // A draft replaces what is there only on the owner's explicit press (the page asks first).
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const replace = body.replace === true;
+      const r = body.action === "draft_audit"
+        ? await draftAuditFromResearch(s.db, { tenantId: s.tenantId, engagementId, actor, now, replace })
+        : await draftProposalFromAudit(s.db, { tenantId: s.tenantId, engagementId, actor, now, replace });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : r.error === "invalid" ? 500 : 409, { ok: false, error: r.error === "invalid" ? "draft_invalid" : r.error });
+      return json(200, { ok: true, version_id: r.versionId, created: r.created, blocking: r.issues.filter((i) => i.severity === "block").length, opportunities: r.opportunities });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });
