@@ -22,6 +22,8 @@
  *   start_call / end_call                                 the call's clock
  *   delete_transcript  { transcript_id }                  wipe a transcript's lines (and the quotes taken from it); owner only
  *   request_authorization { engine? }                     file Gate 1 for the current profile (only the owner approves it)
+ *   build_brief                                           build a new version of the pre-call brief (reads the client's public website)
+ *   extract_profile    { engine? }                         draft profile facts from the consented transcripts (before Gate 1)
  * (Adding a transcript has its own route, ./transcript, for its larger body.)
  *
  * Nothing here sends anything to the client: delivery happens only when the
@@ -49,6 +51,8 @@ import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { markCall, saveCallNote } from "@/lib/ai-audit/call-notes";
 import { deleteTranscript } from "@/lib/ai-audit/transcripts";
 import { requestAuthorization, withdrawAuthorization, withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
+import { cancelExtraction, startExtraction } from "@/lib/ai-audit/extraction";
+import { buildBrief, defaultSiteDeps } from "@/lib/ai-audit/briefs";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
@@ -284,6 +288,25 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error });
       await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
       return json(200, { ok: true });
+    }
+    case "extract_profile": {
+      // Reading a client's call with a model is processing their data: the owner's press, as Gate 1 is (review of phase 2b, M1).
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const engine = body.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude";
+      const r = await startExtraction(s.db, { tenantId: s.tenantId, engagementId, engine, actor, now });
+      if (!r.ok) return json(409, { ok: false, error: r.error });
+      return json(200, { ok: true, step_id: r.stepId, windows: r.windows, created: r.created });
+    }
+    case "cancel_extraction": {
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const r = await cancelExtraction(s.db, { tenantId: s.tenantId, engagementId, actor, now });
+      if (!r.ok) return json(409, { ok: false, error: r.error });
+      return json(200, { ok: true, step_id: r.stepId });
+    }
+    case "build_brief": {
+      const r = await buildBrief(s.db, { tenantId: s.tenantId, engagementId, actor, now, deps: defaultSiteDeps() });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : r.error === "not_installed" ? 503 : 409, { ok: false, error: r.error === "not_found" ? r.error : `brief_${r.error}` });
+      return json(200, { ok: true, brief_id: r.brief.id, version_no: r.brief.version_no, status: r.brief.status });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });

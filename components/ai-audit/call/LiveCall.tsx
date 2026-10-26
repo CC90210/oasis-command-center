@@ -27,7 +27,15 @@ import { createFigureSaver, createNoteSaver, type NoteAnswer, type NoteState } f
 type Note = { question_id: string; notes: string; row_version: number };
 type Field = { field_key: string; value: unknown; label: string };
 
+/** What the live-call screen shows from the pre-call brief (lib/ai-audit/brief.ts). */
+export type CallBrief = {
+  hypotheses: Array<{ id: string; statement: string; test: string; questions: string[] }>;
+  confirm: Array<{ statement: string; question_id: string }>;
+  weight: Array<{ question_id: string; why: string }>;
+};
+
 type Props = {
+  brief: CallBrief | null;
   engagementId: string;
   businessType: BusinessType | null;
   callStartedAt: string | null;
@@ -235,7 +243,13 @@ function ConsentChoice({ engagementId, fieldKey, label, initial, disabled, onSav
   );
 }
 
-export function LiveCall({ engagementId, businessType, callStartedAt, callEndedAt, notes, fields, editable }: Props) {
+export function LiveCall({ brief, engagementId, businessType, callStartedAt, callEndedAt, notes, fields, editable }: Props) {
+  const weighted = useMemo(() => new Map((brief?.weight ?? []).map((w) => [w.question_id, w.why])), [brief]);
+  const toConfirm = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const c of brief?.confirm ?? []) m.set(c.question_id, [...(m.get(c.question_id) ?? []), c.statement]);
+    return m;
+  }, [brief]);
   const router = useRouter();
   const questions = useMemo(() => questionsFor(businessType), [businessType]);
   const [active, setActive] = useState(0);
@@ -342,6 +356,9 @@ export function LiveCall({ engagementId, businessType, callStartedAt, callEndedA
                     onFocus={() => setActive(i)}
                     className={`grid gap-2 rounded-xl border bg-bg-panel p-4 ${i === active ? "border-accent" : "border-hairline"}`}
                   >
+                    {weighted.has(q.id) ? (
+                      <div className="text-[12px] font-medium text-accent">Spend time here: {weighted.get(q.id)}</div>
+                    ) : null}
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <p className="text-[15px] font-medium leading-6 text-fg">{q.ask}</p>
                       <span className={`shrink-0 text-[11px] ${q.essential ? "text-fg" : "text-fg-dim"}`}>
@@ -349,6 +366,11 @@ export function LiveCall({ engagementId, businessType, callStartedAt, callEndedA
                         {answered ? ", answered" : ""}
                       </span>
                     </div>
+                    {toConfirm.has(q.id) ? (
+                      <div className="text-[12px] text-fg-muted">
+                        On the form they said: {toConfirm.get(q.id)!.join("; ")}. Confirm it in their words.
+                      </div>
+                    ) : null}
                     <p className="text-[13px] text-fg-muted">{q.why}</p>
                     {q.follow_ups.length ? (
                       <ul className="grid gap-0.5 text-[13px] text-fg-muted">
@@ -410,6 +432,20 @@ export function LiveCall({ engagementId, businessType, callStartedAt, callEndedA
           <h2 className="text-sm font-semibold text-fg">The call</h2>
           {controls}
         </section>
+        {brief && brief.hypotheses.length ? (
+          <section className="grid gap-2 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
+            <h2 className="text-sm font-semibold text-fg">From the pre-call brief</h2>
+            <p className="text-[12px] text-fg-muted">Likely problems, not facts: test them in the client&apos;s own words.</p>
+            <ul className="grid gap-2">
+              {brief.hypotheses.map((h) => (
+                <li key={h.id} className="grid gap-0.5">
+                  <span className="text-fg">{h.statement}</span>
+                  <span className="text-[12px] text-fg-muted">Test it: {h.test}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
         <section className="grid gap-2 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
           <h2 className="text-sm font-semibold text-fg">What the audit still needs</h2>
           {gaps.length ? (

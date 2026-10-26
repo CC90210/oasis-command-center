@@ -25,6 +25,7 @@ import { casWrite, deliveryInFlight, eventStatement, getEngagement, int, noDeliv
 import { TRANSCRIPT_FORMATS, isOneOfFormat, type ParsedTranscript, type TranscriptFormat, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { AUTHORIZATION_VOIDED_REASONS, PROFILE_EDIT_STAGES, TERMINAL_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { cancelPendingApproval } from "@/lib/os/approvals/store";
+import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 
 export const TRANSCRIPT_SOURCES = ["paste", "upload", "meet"] as const;
 export type TranscriptSource = (typeof TRANSCRIPT_SOURCES)[number];
@@ -225,6 +226,8 @@ export async function addTranscript(
         refId: id,
         meta: { source: input.source, format: input.parsed.format, lines: input.parsed.lines.length, redactions: input.parsed.redactions, consent_ai: input.consent.ai, consent_basis: input.consent.basis },
       }),
+      // A call the client did not agree to have analysed by AI stops any draft still running (review of phase 2b, F5).
+      ...(input.consent.ai ? [] : stopEngagementRunsStatements(t, engagement.id, "no_ai_consent", at)),
     ]);
     await tx.commit();
   } catch (err) {
@@ -276,10 +279,36 @@ export async function deleteTranscript(
       args: [at, input.actor.id, t, input.engagementId, input.id, ...guard.args],
     },
     [
+      // What a draft read from it goes with it (review of phase 2b, H1): a run still reading is called off and
+      // keeps nothing; facts it wrote that nobody verified or corrected leave the draft; its report leaves the
+      // draft too (a frozen profile never holds one: Gate 1 drops it).
+      ...stopEngagementRunsStatements(t, input.engagementId, "transcript_deleted", at),
+      {
+        sql: `DELETE FROM ai_audit_profile_fields
+               WHERE tenant_id = ? AND source_type = 'transcript' AND owner_corrected = 0 AND label = 'client_reported' AND COALESCE(verified_note, '') = ''
+                 AND (json_extract(source_ref, '$.transcript_id') = ? OR EXISTS (SELECT 1 FROM json_each(ai_audit_profile_fields.source_ref, '$.transcript_ids') WHERE value = ?))
+                 AND profile_version_id IN (SELECT id FROM ai_audit_profile_versions WHERE tenant_id = ? AND engagement_id = ? AND status = 'draft')`,
+        args: [t, input.id, input.id, t, input.engagementId],
+      },
+      {
+        sql: `UPDATE ai_audit_profile_versions SET summary = json_remove(COALESCE(summary, '{}'), '$.extraction'), updated_at = ?
+               WHERE tenant_id = ? AND engagement_id = ? AND status = 'draft' AND json_extract(summary, '$.extraction') IS NOT NULL`,
+        args: [at, t, input.engagementId],
+      },
       {
         sql: `UPDATE ai_audit_profile_fields SET evidence_quote = NULL
-               WHERE tenant_id = ? AND evidence_quote IS NOT NULL AND json_extract(source_ref, '$.transcript_id') = ?`,
-        args: [t, input.id],
+               WHERE tenant_id = ? AND evidence_quote IS NOT NULL
+                 AND (json_extract(source_ref, '$.transcript_id') = ? OR EXISTS (SELECT 1 FROM json_each(ai_audit_profile_fields.source_ref, '$.transcript_ids') WHERE value = ?))`,
+        args: [t, input.id, input.id],
+      },
+      {
+        // Who said it goes with the call, on a draft (review of phase 2b, LOW). A frozen field's reference
+        // cannot change (bravo__237); the client's name is on the lead in any case.
+        sql: `UPDATE ai_audit_profile_fields SET source_ref = json_remove(source_ref, '$.speakers')
+               WHERE tenant_id = ? AND json_extract(source_ref, '$.speakers') IS NOT NULL
+                 AND (json_extract(source_ref, '$.transcript_id') = ? OR EXISTS (SELECT 1 FROM json_each(ai_audit_profile_fields.source_ref, '$.transcript_ids') WHERE value = ?))
+                 AND profile_version_id IN (SELECT id FROM ai_audit_profile_versions WHERE tenant_id = ? AND engagement_id = ? AND status = 'draft')`,
+        args: [t, input.id, input.id, t, input.engagementId],
       },
       eventStatement({ tenantId: t, engagementId: input.engagementId, event: "transcript_deleted", actor: input.actor, at, refType: "transcript", refId: input.id }),
       ...(afterGate
